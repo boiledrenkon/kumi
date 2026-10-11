@@ -415,6 +415,10 @@ pub trait Integration {
     async fn settled(&self) {}
     /// The producer's words came into the answer under way (a steer): what it changes from here may be theirs.
     fn steered(&self) {}
+    /// The conversation the turns from here belong to: what's kept for a conversation (the devices it made) is this one's.
+    fn conversation(&self, id: &str) {
+        let _ = id;
+    }
     fn has_undo(&self) -> bool {
         false
     }

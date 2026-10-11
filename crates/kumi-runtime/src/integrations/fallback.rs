@@ -52,6 +52,9 @@ impl Integration for FallbackIntegration {
     fn steered(&self) {
         self.current().steered()
     }
+    fn conversation(&self, id: &str) {
+        self.current().conversation(id)
+    }
     fn has_undo(&self) -> bool {
         true
     }

@@ -1249,6 +1249,15 @@ impl Session {
         }
         self.ensure_kernel(op, &snapshot).await?;
         self.assert_current(op)?;
+        // The conversation is settled once its kernel is: what the integration keeps for one (the devices it made) is
+        // kept for this one.
+        let (integration, conversation) = {
+            let s = self.0.state.borrow();
+            (s.integration.clone(), s.conversation_id.clone())
+        };
+        if let Some(integration) = integration {
+            integration.conversation(&conversation);
+        }
         if let (Some(tracks), Some(l)) = (&snapshot.tracks, &self.0.learned) {
             l.drafts.observed(tracks);
         }

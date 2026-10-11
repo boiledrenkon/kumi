@@ -3,6 +3,7 @@
 //! objects in Kumi's notation, which Kumi frames, lays out and checks. What doesn't fit is made the nearest way it can
 //! be, and said beside the device.
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use kumi_common::js::json::stringify;
@@ -14,7 +15,8 @@ use serde_json::{Map, Value};
 
 use super::amxd::DeviceType;
 use super::findings::Findings;
-use super::gen::{check_gen_code, param_name, param_problem, MAX_VOICES};
+use super::gen::{check_gen_code, names, param_name, param_problem, MAX_VOICES};
+use super::patch::code::{clean, syntax_problem};
 
 /// A knob, a menu or a switch on the device: an ordinary Live parameter, automatable and mappable.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -322,6 +324,7 @@ pub const DEVICE_KINDS: [DeviceKind; 3] = [DeviceType::MidiEffect, DeviceType::A
 /// only keep its file one Live loads. Past eight, the face shows its controls in up to three rows.
 pub const MAX_CONTROLS: usize = 128;
 pub const MAX_OPTIONS: usize = 128;
+/// The most JavaScript Kumi reads through to see it's one function's body, in characters.
 pub const MAX_CODE: usize = 100_000;
 pub const MAX_TESTS: usize = 32;
 const MAX_TEST_EVENTS: usize = 256;
@@ -329,7 +332,13 @@ static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z
 static CONTROL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9 ._()&'+/#%-]{0,31}$").unwrap());
 static DEVICE_ON: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^device on$").unwrap());
 static MIX_OR_OUTPUT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(mix|output)$").unwrap());
-static MIDI_FUNCTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)function\s+midi\s*\(").unwrap());
+/// A midi the frame finds: it takes whatever `midi` is a function (`function midi(event)`, `const midi = (event) => …`).
+static MIDI_FUNCTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?-u:\b)(function\s*\*?\s*midi\s*\(|(const|let|var)\s+midi\s*=)").unwrap());
+/// What the frame can't hide: a module (import, export) runs outside every name it hides.
+static MODULES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?-u:\b)import\s*[({"'`A-Za-z0-9_*]|(?-u:\b)export\s+"#).unwrap());
+/// Where Live reads `-->` as a comment: at a line's start, after only spaces and block comments.
+static HTML_CLOSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^(\s|/\*.*?\*/)*-->|\*/(\s|/\*.*?\*/)*-->").unwrap());
 static COMMENTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"//[^\n]*|/\*[\s\S]*?\*/").unwrap());
 
 /// The source text of a function, by the intrinsic captured before anything else runs, in a context where no code is
@@ -349,11 +358,16 @@ const SOURCE_OF: &str = r#"(() => {
 /// Whether the code is one whole function body, as the frame needs: the frame puts it inside a function of its own,
 /// within the scope that hides Max and Live, so code that closed that function early (opening another for the frame's
 /// tail) would run outside every name the frame hides. Read alone inside a strict function, in a context of its own,
-/// the function has to come back holding all of it. HTML-like comments are found first: Live's V8 reads `<!--` and
-/// `-->` as comments in a script and QuickJS doesn't, so the two could read the braces differently.
+/// the function has to come back holding all of it. HTML-like comments are found first: Live's V8 reads `<!--`
+/// anywhere, and `-->` at a line's start, as comments in a script and QuickJS doesn't, so the two could read the braces
+/// differently.
 fn whole_body(code: &str) -> Option<String> {
-    if code.contains("<!--") || code.contains("-->") {
-        return Some("code: \"<!--\" and \"-->\" aren't allowed: Live reads them as comments, which can change what the code is (for x--, then >, write \"x-- > 0\").".into());
+    let length = utf16_len(code);
+    if length > MAX_CODE {
+        return Some(format!("code: it's {length} characters, past the {MAX_CODE} Kumi reads through to see it's one function's body."));
+    }
+    if code.contains("<!--") || HTML_CLOSE.is_match(code) {
+        return Some("code: Live reads \"<!--\" anywhere, and \"-->\" at the start of a line, as a comment, which can change what the code is: write them another way (\"x-- > 0\").".into());
     }
     let wrapped = format!("function(){{\"use strict\";\n{code}\n}}");
     let read = (|| -> rquickjs::Result<Option<String>> {
@@ -376,10 +390,38 @@ fn whole_body(code: &str) -> Option<String> {
     match read {
         Ok(Some(text)) if text == wrapped => None,
         Ok(_) => Some("code: it has to be one function's body: a } in it closes the device's function early.".into()),
-        Err(_) => {
-            Some("code: it doesn't read as one function's body (a brace, quote or bracket that isn't closed, or one too many).".into())
+        Err(_) if !paired(code) => Some(
+            "code: a brace, bracket or quote in it isn't closed, or one is closed twice, so it doesn't read as one function's body.".into(),
+        ),
+        Err(_) => Some(match syntax_problem(code) {
+            Some((line, message)) if !message.contains("interrupted") && !message.contains("out of memory") => {
+                format!("code: line {line}: {message}.")
+            }
+            Some(_) => "code: Kumi couldn't read it through in time to see it's one function's body.".into(),
+            None => "code: it doesn't read as one function's body in strict mode, where the device's code runs.".into(),
+        }),
+    }
+}
+
+/// Whether the code's braces, brackets and parentheses pair up, its strings and comments aside.
+fn paired(code: &str) -> bool {
+    let mut open: Vec<char> = Vec::new();
+    for c in clean(code).chars() {
+        let opens = match c {
+            ')' => '(',
+            ']' => '[',
+            '}' => '{',
+            '(' | '[' | '{' => {
+                open.push(c);
+                continue;
+            }
+            _ => continue,
+        };
+        if open.pop() != Some(opens) {
+            return false;
         }
     }
+    open.is_empty()
 }
 
 /// What the device's code may not reach: files, the network, the rest of Max and Live, and the
@@ -391,7 +433,6 @@ static FORBIDDEN: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
             Regex::new(r"(?-u:\b)(File|Folder|XMLHttpRequest|fetch|SQLite|Dict|Buffer|Global|LiveAPI|messnamed|globalThis|require|patcher)(?-u:\b)|(?-u:\b)max\s*\.\s*[a-z]").unwrap(),
             "files, the network and the rest of Max and Live are out of reach",
         ),
-        (Regex::new(r#"(?-u:\b)import\s*[({"'`A-Za-z0-9_*]|(?-u:\b)export\s+"#).unwrap(), "modules aren't available"),
         (
             Regex::new(r#"(?-u:\b)eval\s*\(|(?-u:\b)Function\s*\(|\.\s*constructor(?-u:\b)|\[\s*["'`]constructor|__proto__"#).unwrap(),
             "code can't make code",
@@ -508,13 +549,20 @@ fn kind_like(given: &Value) -> DeviceType {
     }
 }
 
-/// A MIDI effect's code kept in the device where it doesn't run: the frame finds no midi() in it, so the device passes
-/// MIDI on as it comes, and the producer can read the code in the box.
-fn kept_unrun(code: &str) -> String {
-    format!(
-        "// Kumi kept this code without running it: it isn't one function's body. Fix it and make the device again.\nconst unrun = {};",
-        stringify(&Value::String(code.to_string()))
-    )
+/// A MIDI effect's code kept in the device where it doesn't run, each of its lines a comment (split at every line
+/// break JavaScript has, so none runs on): the frame finds no midi() in it, so the device passes MIDI on as it comes,
+/// and the producer can read the code in the box. A control character is written as its escape.
+pub fn kept_unrun(code: &str, why: &str) -> String {
+    let lines: Vec<String> = code
+        .split("\r\n")
+        .flat_map(|line| line.split(['\n', '\r', '\u{2028}', '\u{2029}']))
+        .map(|line| {
+            let line: String =
+                line.chars().map(|c| if c.is_control() && c != '\t' { format!("\\u{{{:x}}}", c as u32) } else { c.to_string() }).collect();
+            format!("// {line}")
+        })
+        .collect();
+    format!("// Kumi kept this code without running it: {why}. Fix it and make the device again.\n{}", lines.join("\n"))
 }
 
 /// A device from the model's input, always: what doesn't fit is made the nearest way it can be, and every such
@@ -536,8 +584,21 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
             }
         },
     };
-    // A device given as a patch of Max's objects has no code of its own: its controls are wired in the patch.
-    let patched = input.get("patch").is_some_and(|patch| !patch.is_null());
+    // A device given as a patch of Max's objects has no code of its own: its controls are wired in the patch. A patch is
+    // the notation's lines, as text or a list of them; a blank one (a field a model leaves empty) is none.
+    let patch = match input.get("patch") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(lines)) => lines.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"),
+        Some(other @ (Value::Object(_) | Value::Number(_) | Value::Bool(true))) => {
+            found.changed.push(format!(
+                "patch {}: a patch is lines of Kumi's notation, as text, so this one was left out.",
+                head(&stringify(other), 40)
+            ));
+            String::new()
+        }
+        _ => String::new(),
+    };
+    let patched = !trim(&patch).is_empty();
     let sound = matches!(kind, DeviceType::AudioEffect | DeviceType::Instrument);
     let gen = sound && !patched;
     let given_name = trimmed_string(input.get("name"));
@@ -557,10 +618,13 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
         found.changed.push("about: none given, so the device's description is its name.".to_string());
         name.clone()
     } else if utf16_len(&about) > 400 {
-        let mut cut = head(&about, 400);
-        if let Some((kept, _)) = cut.rsplit_once(' ') {
-            cut = format!("{}…", kept.trim_end_matches([',', ';', ':']));
-        }
+        // Cut at a word near the end, or else where it reaches 400.
+        let cut = head(&about, 399);
+        let kept = match cut.rfind(' ') {
+            Some(at) if utf16_len(&cut[..at]) >= 300 => &cut[..at],
+            _ => cut.as_str(),
+        };
+        let cut = format!("{}…", kept.trim_end_matches([',', ';', ':']));
         found.changed.push(format!("about: {} characters, cut to the first {} (up to 400).", utf16_len(&about), utf16_len(&cut)));
         cut
     } else {
@@ -568,49 +632,117 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
     };
     let controls: Vec<Value> = match input.get("controls") {
         Some(Value::Array(items)) => items.clone(),
-        _ => Vec::new(),
+        Some(Value::Object(named)) => {
+            found.changed.push(
+                "controls: given by name, so they were read as a list in that order, each named by its key where it has no name.".into(),
+            );
+            named
+                .iter()
+                .map(|(key, control)| {
+                    let mut control = control.clone();
+                    if let Value::Object(fields) = &mut control {
+                        fields.entry("name").or_insert_with(|| Value::String(key.clone()));
+                    }
+                    control
+                })
+                .collect()
+        }
+        None | Some(Value::Null | Value::Bool(false)) => Vec::new(),
+        Some(Value::String(text)) if trim(text).is_empty() => Vec::new(),
+        Some(other) => {
+            found.changed.push(format!(
+                "controls {}: controls are a list, each with its name and type, so none was made from this.",
+                head(&stringify(other), 40)
+            ));
+            Vec::new()
+        }
     };
     if controls.len() > MAX_CONTROLS {
         found
             .changed
             .push(format!("controls: the first {MAX_CONTROLS} were made, and {} more were left out.", controls.len() - MAX_CONTROLS));
     }
+    let allowed = |c: char| c.is_ascii_alphanumeric() || " ._()&'+/#%-".contains(c);
+    // Each control's name as asked for, fitted: a name Kumi changes keeps clear of the names the controls after it ask for.
+    let asked: Vec<String> = controls
+        .iter()
+        .take(MAX_CONTROLS)
+        .enumerate()
+        .map(|(index, raw)| {
+            let given = trimmed_string(object_of(raw).get("name"));
+            if CONTROL.is_match(&given) {
+                given
+            } else {
+                fitted(&given, allowed, |c| c.is_ascii_alphabetic(), &format!("Control {}", index + 1))
+            }
+        })
+        .collect();
     let mut checked: Vec<Control> = Vec::new();
+    // For a control whose Param Kumi changed: the Param it was asked as, and why that one couldn't be its.
+    let mut renamed: HashMap<String, (String, String)> = HashMap::new();
+    // The Mix and Output controls left out of a device Kumi gives its own.
+    let mut left_out: Vec<String> = Vec::new();
     for (index, raw) in controls.iter().take(MAX_CONTROLS).enumerate() {
         let control = object_of(raw);
         let label = format!("controls[{index}]");
         let given = trimmed_string(control.get("name"));
-        let allowed = |c: char| c.is_ascii_alphanumeric() || " ._()&'+/#%-".contains(c);
-        let mut control_name = if CONTROL.is_match(&given) {
-            given.clone()
-        } else {
-            fitted(&given, allowed, |c| c.is_ascii_alphabetic(), &format!("Control {}", index + 1))
-        };
-        if sound && MIX_OR_OUTPUT.is_match(&control_name) {
+        let wanted = asked[index].clone();
+        if sound && MIX_OR_OUTPUT.is_match(&wanted) {
             let what = if kind == DeviceType::AudioEffect { "audio effect" } else { "instrument" };
-            found
-                .changed
-                .push(format!("{label} ({control_name}): Kumi adds {control_name} to every {what} itself, so this one was left out."));
+            found.changed.push(format!("{label} ({wanted}): Kumi adds {wanted} to every {what} itself, so this one was left out."));
+            left_out.push(wanted);
             continue;
         }
-        // In GenExpr a control is its Param: a name gen~ or Kumi uses, or one two controls would share, is renamed.
-        if gen && param_problem(&control_name).is_some() {
-            let amount = fitted(&format!("{control_name} Amount"), allowed, |c| c.is_ascii_alphabetic(), "");
-            control_name = if !amount.is_empty() && param_problem(&amount).is_none() { amount } else { format!("Control {}", index + 1) };
+        let mut why: Vec<String> = Vec::new();
+        if wanted != given {
+            why.push("1–32 letters, digits, spaces and . _ ( ) & ' + / # % -, starting with a letter".into());
         }
-        let taken = |candidate: &str| {
-            DEVICE_ON.is_match(candidate)
-                || checked
-                    .iter()
-                    .any(|other| other.name().eq_ignore_ascii_case(candidate) || (gen && param_name(other.name()) == param_name(candidate)))
+        // Whose a name is already (Live's, or another control's, by its name or its Param), if anyone's; `later` counts
+        // the names the controls after this one ask for.
+        let clash = |candidate: &str, later: bool| -> Option<String> {
+            if DEVICE_ON.is_match(candidate) {
+                return Some("Device On is Live's own switch".into());
+            }
+            let same = |other: &str| other.eq_ignore_ascii_case(candidate) || (gen && param_name(other) == param_name(candidate));
+            let earlier = checked.iter().map(Control::name).find(|other| same(other));
+            let after = if later { asked[index + 1..].iter().map(String::as_str).find(|other| same(other)) } else { None };
+            earlier.or(after).map(|other| {
+                if gen {
+                    format!("{} is the \"{other}\" control's Param", param_name(candidate))
+                } else {
+                    format!("\"{other}\" is another control's name")
+                }
+            })
         };
-        control_name = unique(&control_name, taken);
+        // In GenExpr a control is its Param: a name gen~ or Kumi uses is renamed, clear of every other control's.
+        let control_name = if gen && param_problem(&wanted).is_some() {
+            let id = param_name(&wanted);
+            why.push(if id.starts_with("kumi_") {
+                format!("{id} is kept for Kumi's own Params")
+            } else if ["note", "velocity", "strike", "bend", "mod_wheel"].contains(&id.as_str()) {
+                format!("{id} is kept for an instrument's voices")
+            } else {
+                format!("{id} is gen~'s own")
+            });
+            let amount = fitted(&format!("{wanted} Amount"), allowed, |c| c.is_ascii_alphabetic(), "");
+            let amount = if !amount.is_empty() && param_problem(&amount).is_none() { amount } else { format!("Control {}", index + 1) };
+            unique(&amount, |candidate| clash(candidate, true).is_some())
+        } else {
+            if let Some(whose) = clash(&wanted, false) {
+                why.push(whose);
+            }
+            unique(&wanted, |candidate| clash(candidate, false).is_some())
+        };
         if control_name != given {
+            let param = if gen { format!(", whose Param in the code is {}", param_name(&control_name)) } else { String::new() };
             found.changed.push(format!(
-                "{label}.name {}: made as \"{control_name}\" (1–32 letters, digits, spaces and . _ ( ) & ' + / # % -, starting with a letter, one name per control{}).",
-                stringify(&Value::String(given)),
-                if gen { ", each its own Param in the code" } else { "" }
+                "{label}.name {}: made as \"{control_name}\"{param}: {}.",
+                stringify(&Value::String(given.clone())),
+                why.join("; ")
             ));
+            if gen && param_name(&control_name) != param_name(&wanted) {
+                renamed.insert(control_name.clone(), (param_name(&wanted), why.last().cloned().unwrap_or_default()));
+            }
         }
         let label = format!("{label} ({control_name})");
         let given_type = control.get("type").and_then(Value::as_str).unwrap_or("");
@@ -652,7 +784,11 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
                 said.push("an integer control's min, max and default are whole numbers".into());
             }
             if min == max {
-                max = min + 1.0;
+                // One more, or past 2^53, where one more is the same number, the next number there is.
+                max = if min + 1.0 > min { min + 1.0 } else { min.next_up() };
+                if !max.is_finite() {
+                    (min, max) = (min.next_down(), min);
+                }
                 said.push("min and max were the same".into());
             }
             if fallback < min || fallback > max {
@@ -661,23 +797,24 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
             }
             let unit = match control.get("unit") {
                 None | Some(Value::Null) => Unit::None,
-                Some(given) => {
-                    let text = given.as_str().unwrap_or("");
-                    match unit_like(text) {
-                        Some(unit) => {
-                            if unit.as_str() != text {
-                                said.push(format!("unit {} is \"{unit}\"", stringify(given)));
-                            }
-                            unit
+                Some(given) => match given.as_str().map(|text| (text, unit_like(text))) {
+                    Some((text, Some(unit))) => {
+                        if unit.as_str() != text {
+                            said.push(format!("unit {} is \"{unit}\"", stringify(given)));
                         }
-                        None => {
-                            let units =
-                                UNITS.iter().filter(|unit| **unit != Unit::None).map(|unit| unit.as_str()).collect::<Vec<_>>().join(", ");
-                            said.push(format!("unit {} isn't one of {units}, so it shows none", stringify(given)));
-                            Unit::None
-                        }
+                        unit
                     }
-                }
+                    Some((_, None)) => {
+                        let units =
+                            UNITS.iter().filter(|unit| **unit != Unit::None).map(|unit| unit.as_str()).collect::<Vec<_>>().join(", ");
+                        said.push(format!("unit {} isn't one of {units}, so it shows none", stringify(given)));
+                        Unit::None
+                    }
+                    None => {
+                        said.push(format!("unit {} isn't text, so it shows none", stringify(given)));
+                        Unit::None
+                    }
+                },
             };
             if !said.is_empty() {
                 found.changed.push(format!(
@@ -696,40 +833,54 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
                 _ => Vec::new(),
             };
             let mut said: Vec<String> = Vec::new();
-            let mut options: Vec<String> = Vec::new();
-            for option in &given_options {
-                let text = match option {
-                    Value::String(text) => trim(text).to_string(),
-                    Value::Number(number) => number.to_string(),
-                    _ => String::new(),
-                };
-                if text.is_empty() {
-                    said.push(format!("option {} was left out", stringify(option)));
-                } else if utf16_len(&text) > 32 {
-                    said.push(format!("option \"{text}\" was cut to 32 characters"));
-                    options.push(head(&text, 32));
-                } else {
-                    options.push(text);
-                }
-            }
+            // Each option as it's made, in the order given (None for one left out).
+            let made: Vec<Option<String>> = given_options
+                .iter()
+                .map(|option| {
+                    let text = match option {
+                        Value::String(text) => trim(text).to_string(),
+                        Value::Number(number) => number.to_string(),
+                        _ => String::new(),
+                    };
+                    if text.is_empty() {
+                        said.push(format!("option {} was left out", stringify(option)));
+                        None
+                    } else if utf16_len(&text) > 32 {
+                        said.push(format!("option \"{text}\" was cut to 32 characters"));
+                        Some(head(&text, 32))
+                    } else {
+                        Some(text)
+                    }
+                })
+                .collect();
+            let mut options: Vec<String> = made.iter().flatten().cloned().collect();
             if options.len() > MAX_OPTIONS {
                 said.push(format!("only the first {MAX_OPTIONS} options were kept"));
                 options.truncate(MAX_OPTIONS);
+            }
+            if kind == DeviceType::MidiEffect && !patched && given_options.iter().any(Value::is_number) {
+                said.push(
+                    "its options were numbers, made as text: the code gets an option's text (\"4\"), which Number(…) makes a number".into(),
+                );
             }
             if options.is_empty() {
                 said.push("it had no options".into());
                 options.push(control_name.clone());
             }
-            let default = match control.get("default") {
-                Some(Value::String(text)) if options.iter().any(|option| option == trim(text)) => trim(text).to_string(),
-                Some(Value::Number(number)) if number.as_u64().is_some_and(|at| (at as usize) < options.len()) => {
-                    options[number.as_u64().unwrap_or(0) as usize].clone()
+            // An option's text; a number is the option it's the text of, else the one it counts to from 0, as given.
+            let given_default = control.get("default");
+            let default = match given_default {
+                Some(Value::String(text)) if options.iter().any(|option| option == trim(text)) => Some(trim(text).to_string()),
+                Some(Value::Number(number)) if options.contains(&number.to_string()) => Some(number.to_string()),
+                Some(Value::Number(number)) => {
+                    number.as_u64().and_then(|at| made.get(at as usize).cloned().flatten()).filter(|option| options.contains(option))
                 }
-                given => {
-                    said.push(format!("its default {} isn't one of its options", given.map_or("(none)".to_string(), stringify)));
-                    options[0].clone()
-                }
+                _ => None,
             };
+            let default = default.unwrap_or_else(|| {
+                said.push(format!("its default {} isn't one of its options", given_default.map_or("(none)".to_string(), stringify)));
+                options[0].clone()
+            });
             if !said.is_empty() {
                 found.changed.push(format!(
                     "{label}: {}; made with {}, starting at \"{default}\".",
@@ -759,7 +910,6 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
         }
     }
     let mut code = input.get("code").and_then(Value::as_str).unwrap_or("").to_string();
-    let patch = input.get("patch").and_then(Value::as_str).unwrap_or("").to_string();
     let mut runs = true;
     if patched {
         if !trim(&code).is_empty() {
@@ -768,9 +918,6 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
                     .to_string(),
             );
             code.clear();
-        }
-        if trim(&patch).is_empty() {
-            found.wrong.push("patch: it's empty, so the device is only its controls: give it its patch of Max's objects.".to_string());
         }
     } else if trim(&code).is_empty() {
         let (does, give) = match kind {
@@ -785,10 +932,19 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
             DeviceType::Instrument => "out1 = 0;\nout2 = 0;".to_string(),
         };
     } else if gen {
-        found.append(check_gen_code(&code, kind, &checked));
+        found.append(check_gen_code(&code, kind, &checked, &renamed));
+        let read = names(&code).read;
+        for left in &left_out {
+            let id = param_name(left);
+            if read.contains(&id) {
+                found.wrong.push(format!(
+                    "code: it reads {id}, the {left} control's Param, but that control was left out (Kumi's own {left} comes after the code): call the control something else, or take {id} out of the code."
+                ));
+            }
+        }
     } else {
         if !MIDI_FUNCTION.is_match(&code) {
-            found.wrong.push("code: it defines no function midi(event), so the device passes MIDI on as it comes: define midi(event), called for each MIDI event that arrives.".to_string());
+            found.wrong.push("code: it defines no midi(event), so the device passes MIDI on as it comes: define function midi(event), called for each MIDI event that arrives.".to_string());
         }
         // Matched without comments, and as written too: the comment stripper doesn't know strings, so a "//" or "/*"
         // inside one could hide the rest of a line (an `import(…)`, which the frame can't shadow) from the first.
@@ -803,13 +959,24 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
                 ));
             }
         }
-        // Code that isn't one whole function body could run outside every name the frame hides: it's kept in the
-        // device without running.
-        if let Some(problem) = whole_body(&code) {
+        // A module runs outside every name the frame hides, and code that isn't one whole function body could too: either
+        // is kept in the device without running. A module is found as written as well (see above).
+        let module = MODULES
+            .find(&bare)
+            .map(|module| (module.as_str().to_string(), ""))
+            .or_else(|| MODULES.find(&code).map(|module| (module.as_str().to_string(), ", even in a comment or a string")));
+        let unrun = match module {
+            Some((text, written)) => Some(format!(
+                "code: \"{}\" doesn't work in the device{written}: modules aren't available, and one would run outside every name the frame hides.",
+                trim(&text)
+            )),
+            None => whole_body(&code),
+        };
+        if let Some(problem) = unrun {
             found
                 .wrong
                 .push(format!("{problem} Kumi kept the code in the device without running it, so the device passes MIDI on as it comes."));
-            code = kept_unrun(&code);
+            code = kept_unrun(&code, problem.trim_start_matches("code: ").trim_end_matches('.'));
             runs = false;
         }
     }
@@ -817,6 +984,13 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
     let tests: Vec<Value> = match input.get("tests") {
         Some(Value::Array(items)) if patched && !items.is_empty() => {
             found.changed.push("tests: they run a MIDI effect's code, and a patch is heard in Live, so they weren't run.".to_string());
+            Vec::new()
+        }
+        Some(Value::Array(items)) if gen && !items.is_empty() => {
+            found.changed.push(
+                "tests: they run a MIDI effect's code, and an audio effect or instrument is heard with audition once it's loaded, so they weren't run."
+                    .to_string(),
+            );
             Vec::new()
         }
         Some(Value::Array(items)) if !gen && !runs && !items.is_empty() => {

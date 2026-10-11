@@ -199,7 +199,7 @@ mod tests {
         Control::Number(NumericControl { name: name.into(), min, max, default: min.max(0.0).min(max), unit })
     }
 
-    /// What Max says of the objects these patches use.
+    /// What Max says of the objects these patches use, as its help shows them bare and with up to two arguments.
     fn reference() -> Reference {
         let mut reference = Reference::default();
         for (class, inlets, outlets, signal) in [
@@ -227,7 +227,8 @@ mod tests {
                     inlets: Count::Fixed { count: inlets },
                     outlets: Count::Fixed { count: outlets },
                     outlet_types: types,
-                    seen: 1,
+                    seen: 3,
+                    held: vec![0, 1, 2],
                     ..Object::default()
                 },
             );

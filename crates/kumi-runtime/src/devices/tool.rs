@@ -12,7 +12,6 @@ use super::{
 use crate::{
     core::{
         contracts::{JsonObject, KernelTool, ToolResult},
-        disk::{low_disk, MB},
         errors::RuntimeError,
     },
     system::windows_device_name,
@@ -25,13 +24,22 @@ use kumi_common::{
     time::now_ms,
 };
 use serde_json::{json, Value};
-use std::{path::Path, rc::Rc, sync::LazyLock, time::Duration};
+use std::{
+    cell::RefCell,
+    hash::{DefaultHasher, Hash, Hasher},
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::LazyLock,
+    time::Duration,
+};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 pub const MAKE_DEVICE_TOOL: &str = "make_device";
 /// How many objects one call can ask about.
 const MOST_OBJECTS: usize = 16;
+/// How many replaced devices' files are kept, the newest.
+const KEPT: usize = 50;
 static DATA: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!("tool-data.json")).expect("device tool data"));
 pub type BrowserSees = Rc<dyn Fn(String, Signal) -> LocalBoxFuture<'static, Result<bool, RuntimeError>>>;
 #[derive(Clone)]
@@ -39,6 +47,8 @@ pub struct DeviceToolOptions {
     pub user_library: String,
     pub browser_sees: BrowserSees,
     pub wait_ms: Option<u64>,
+    /// The devices this conversation made: the tool is made anew each turn, and these are kept for the conversation.
+    pub made: Rc<RefCell<Made>>,
 }
 struct DeviceTool {
     options: DeviceToolOptions,
@@ -47,19 +57,110 @@ pub fn device_tool(options: DeviceToolOptions) -> Rc<dyn KernelTool> {
     Rc::new(DeviceTool { options })
 }
 
-/// The device's file name: its own, so making a device again with the same name replaces it. On Windows a name it takes
-/// for a device ("Aux", "Con.Dist") can't be a file's, and its number goes right after that part ("Aux 2", "Con 2.Dist").
-fn file_name(name: &str, windows: bool) -> String {
-    let (stem, rest) = name.split_at(name.find('.').unwrap_or(name.len()));
-    if !windows || !(windows_device_name(stem) || windows_device_name(name)) {
-        return name.to_string();
-    }
-    let numbered = |number: &str| if windows_device_name(stem) { format!("{stem} {number}{rest}") } else { format!("{name} {number}") };
-    (2..1000)
-        .map(|index| numbered(&index.to_string()))
-        .find(|candidate| !windows_device_name(candidate))
-        .unwrap_or_else(|| numbered(&Uuid::new_v4().to_string()[..8]))
+/// The devices made in this conversation, each by the name it was asked for and the file it was made as. Making one
+/// again by either name replaces it while its file is as Kumi wrote it. Any other device in the folder keeps its file:
+/// Live keeps a Max for Live device in a Set as its file, so a saved Set may use it.
+#[derive(Debug, Default)]
+pub struct Made {
+    conversation: String,
+    devices: Vec<MadeDevice>,
+    /// Where a replaced device's file is kept, if anywhere.
+    kept: Option<PathBuf>,
 }
+
+#[derive(Debug, Clone)]
+struct MadeDevice {
+    asked: String,
+    file: String,
+    kind: DeviceType,
+    written: u64,
+}
+
+impl Made {
+    /// Made devices whose files are kept in `folder` when they're replaced.
+    pub fn keeping(folder: PathBuf) -> Made {
+        Made { kept: Some(folder), ..Made::default() }
+    }
+
+    /// The conversation from here on: the devices another made aren't this one's to replace.
+    pub fn conversation(&mut self, id: &str) {
+        if self.conversation != id {
+            self.conversation = id.to_string();
+            self.devices.clear();
+        }
+    }
+
+    /// The device this conversation made by the name asked for (or made as that name), while its file is as Kumi wrote it.
+    fn ours(&self, folder: &Path, asked: &str) -> Option<MadeDevice> {
+        let unchanged = |device: &&MadeDevice| {
+            std::fs::read(folder.join(format!("{}.amxd", device.file))).is_ok_and(|bytes| hashed(&bytes) == device.written)
+        };
+        let by_name = self.devices.iter().find(|device| device.asked == asked).filter(unchanged);
+        by_name.or_else(|| self.devices.iter().find(|device| device.file == asked).filter(unchanged)).cloned()
+    }
+
+    fn made(&mut self, device: MadeDevice) {
+        self.devices.retain(|kept| kept.file != device.file && kept.asked != device.asked);
+        self.devices.push(device);
+    }
+}
+
+fn hashed(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The device's file name: its own, numbered past a file the folder has ("Echo 2"). On Windows a name it takes for a
+/// device ("Aux", "Con.Dist") is taken as a file's would be, and its number goes right after that part ("Aux 2",
+/// "Con 2.Dist").
+fn free_name(folder: &Path, name: &str, windows: bool) -> String {
+    let (stem, rest) = name.split_at(name.find('.').unwrap_or(name.len()));
+    let numbered = |number: &str| {
+        if windows && windows_device_name(stem) {
+            format!("{stem} {number}{rest}")
+        } else {
+            format!("{name} {number}")
+        }
+    };
+    for index in 1..1000 {
+        let candidate = if index == 1 { name.into() } else { numbered(&index.to_string()) };
+        let taken = (windows && windows_device_name(&candidate)) || folder.join(format!("{candidate}.amxd")).exists();
+        if !taken {
+            return candidate;
+        }
+    }
+    numbered(&Uuid::new_v4().to_string()[..8])
+}
+
+/// A copy of a device's file before it's replaced, in `kept` (the newest [`KEPT`] stay): where it is, None when it
+/// couldn't be copied.
+async fn keep(file: &Path, name: &str, kept: &Path) -> Option<PathBuf> {
+    tokio::fs::create_dir_all(kept).await.ok()?;
+    let copy = kept.join(format!("{name} {}.amxd", now_ms()));
+    tokio::fs::copy(file, &copy).await.ok()?;
+    let mut copies: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(kept)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .filter(|(_, path)| path.extension().is_some_and(|extension| extension == "amxd"))
+        .collect();
+    copies.sort();
+    for (_, old) in copies.iter().rev().skip(KEPT) {
+        let _ = tokio::fs::remove_file(old).await;
+    }
+    Some(copy)
+}
+
+fn kind_name(kind: DeviceType) -> &'static str {
+    match kind {
+        DeviceType::MidiEffect => "MIDI effect",
+        DeviceType::AudioEffect => "audio effect",
+        DeviceType::Instrument => "instrument",
+    }
+}
+
 fn describe_control(control: &Control) -> String {
     match control {
         Control::Choice(c) => format!("{} ({}; {})", c.name, c.options.join(" / "), c.default),
@@ -74,6 +175,38 @@ fn describe_control(control: &Control) -> String {
         ),
     }
 }
+
+/// What this machine's Max says of the objects asked about, each as it's typed in a box.
+fn pages(texts: &[String]) -> String {
+    let mut pages = match (texts.is_empty(), reference::installed()) {
+        (true, _) => "objects: give one or more of Max's objects, each as it's typed in a box (\"makenote 60 100 250\").".to_string(),
+        (false, None) => page::NO_MAX.to_string(),
+        (false, Some(reference)) => page::describe_all(reference, &texts[..texts.len().min(MOST_OBJECTS)]),
+    };
+    if texts.len() > MOST_OBJECTS {
+        pages.push_str(&format!(
+            "\n\nOnly the first {MOST_OBJECTS} were looked up: ask for the other {} in another call.",
+            texts.len() - MOST_OBJECTS
+        ));
+    }
+    pages
+}
+
+/// Why a device's file couldn't be written.
+fn unwritable(folder: &Path, error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::StorageFull {
+        format!(
+            "Kumi couldn't write the device: the disk Live's User Library is on ({}) is full. Free some space, then call make_device again.",
+            folder.to_string_lossy()
+        )
+    } else {
+        format!(
+            "Kumi couldn't write the device to Live's User Library ({}): {error}. Make the folder writable, then call make_device again.",
+            folder.to_string_lossy()
+        )
+    }
+}
+
 fn io_error(error: std::io::Error) -> RuntimeError {
     RuntimeError::plain(error.to_string())
 }
@@ -97,34 +230,35 @@ impl KernelTool for DeviceTool {
                 ["midi_effect", "audio_effect", "instrument"].map(|k| DATA[k].as_str().unwrap()).join("\n\n")
             }
         });
-        // Max's objects, as this machine's Max describes them: no device is made.
-        if let Some(objects) = input.get("objects").filter(|objects| !objects.is_null()) {
-            let texts: Vec<String> = objects
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(str::to_string)
-                .collect();
-            let mut pages = match (texts.is_empty(), reference::installed()) {
-                (true, _) => {
-                    "objects: give one or more of Max's objects, each as it's typed in a box (\"makenote 60 100 250\").".to_string()
-                }
-                (false, None) => page::NO_MAX.to_string(),
-                (false, Some(reference)) => page::describe_all(reference, &texts[..texts.len().min(MOST_OBJECTS)]),
-            };
-            if texts.len() > MOST_OBJECTS {
-                pages.push_str(&format!(
-                    "\n\nOnly the first {MOST_OBJECTS} were looked up: ask for the other {} in another call.",
-                    texts.len() - MOST_OBJECTS
-                ));
-            }
-            return Ok(ToolResult::text(guide.map_or_else(|| pages.clone(), |guide| format!("{pages}\n\n{guide}"))));
+        // What's given, as a model leaves a field it doesn't use: null, false, "" or [] is nothing.
+        let given = |key: &str| match input.get(key) {
+            None | Some(Value::Null | Value::Bool(false)) => false,
+            Some(Value::String(text)) => !text.trim().is_empty(),
+            Some(Value::Array(items)) => !items.is_empty(),
+            Some(_) => true,
+        };
+        let objects = input.get("objects").filter(|objects| !matches!(objects, Value::Null | Value::Bool(false)));
+        let asked: Vec<String> = match objects {
+            Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+            Some(Value::String(text)) => vec![text.as_str()],
+            _ => Vec::new(),
         }
-        if let Some(guide) = guide {
-            return Ok(ToolResult::text(guide));
+        .into_iter()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .collect();
+        // Max's objects as this machine's Max describes them, or a guide, with no device given to make beside them.
+        if !given("code") && !given("patch") && (objects.is_some() || guide.is_some()) {
+            let mut said: Vec<String> = Vec::new();
+            if objects.is_some() {
+                said.push(pages(&asked));
+            }
+            said.extend(guide);
+            if ["name", "controls", "about", "tests"].iter().any(|key| given(key)) {
+                said.push("To make the device as well, give its code or its patch beside these.".to_string());
+            }
+            return Ok(ToolResult::text(said.join("\n\n")));
         }
         // The device is always made: what doesn't fit is made the nearest way it can be, and said beside it.
         let (spec, mut found) = check_spec(&input);
@@ -136,8 +270,13 @@ impl KernelTool for DeviceTool {
             DeviceSpec::MidiEffect(midi) => {
                 let verified = check_midi_device_isolated(midi, IsolatedOptions::default()).await;
                 found.wrong.extend(verified.problems);
-                let tests =
-                    if verified.of > 0 { format!("{} of {} of its tests passed", verified.passed, verified.of) } else { "It has no tests".into() };
+                let tests = if verified.of > 0 {
+                    format!("{} of {} of its tests passed", verified.passed, verified.of)
+                } else if given("tests") {
+                    "None of its tests ran (changed says why)".into()
+                } else {
+                    "It has no tests".into()
+                };
                 // What the spec's checks found counts too: the summary never says nothing's wrong beside a list that does.
                 if found.wrong.is_empty() {
                     let ran = if midi.runs_free { "no errors; it runs free" } else { "no errors, no hanging notes" };
@@ -150,25 +289,31 @@ impl KernelTool for DeviceTool {
         };
         signal.check()?;
         let folder = Path::new(&self.options.user_library).join("Kumi");
-        if let Some(full) = low_disk(&self.options.user_library, 100.0 * MB, "Live's User Library is on").await {
-            return Ok(ToolResult::error(format!("{full} Kumi couldn't write the device: free some space, then call make_device again.")));
-        }
-        let unwritable = |error: std::io::Error| {
-            Ok(ToolResult::error(format!(
-                "Kumi couldn't write the device to Live's User Library ({}): {error}. Make the folder writable, then call make_device again.",
-                folder.to_string_lossy()
-            )))
-        };
         let mut builder = tokio::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
         builder.mode(0o755);
         if let Err(error) = builder.create(&folder).await {
-            return unwritable(error);
+            return Ok(ToolResult::error(unwritable(&folder, &error)));
         }
-        let name = file_name(spec.name(), crate::system::platform() == "win32");
+        // A device this conversation made is replaced; any other keeps its file, and this one is numbered past it.
+        let asked_name = input.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let ours = self.options.made.borrow().ours(&folder, &asked_name);
+        let windows = crate::system::platform() == "win32";
+        let name = match &ours {
+            Some(device) => device.file.clone(),
+            None => free_name(&folder, spec.name(), windows),
+        };
+        if ours.is_none() && name != spec.name() {
+            let stem = spec.name().split('.').next().unwrap_or_default();
+            let why = if windows && (windows_device_name(stem) || windows_device_name(spec.name())) {
+                format!("Windows keeps the name {} for a device", spec.name())
+            } else {
+                format!("{} is another device in Live's User Library, and a saved Set may use it", spec.name())
+            };
+            found.changed.push(format!("name: made as \"{name}\": {why}."));
+        }
         let file = folder.join(format!("{name}.amxd"));
-        let replaces = file.exists();
         let temporary = folder.join(format!(".{}.amxd", Uuid::new_v4()));
         let patcher = match &spec {
             DeviceSpec::MidiEffect(s) => {
@@ -194,13 +339,19 @@ impl KernelTool for DeviceTool {
                 patcher
             }
         };
+        let bytes = encode_amxd(spec.kind(), &patcher);
+        let kept_in = self.options.made.borrow().kept.clone();
+        let kept = match (&ours, kept_in) {
+            (Some(_), Some(kept_in)) => keep(&file, &name, &kept_in).await,
+            _ => None,
+        };
         let written: Result<(), std::io::Error> = async {
             let mut options = tokio::fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);
             #[cfg(unix)]
             options.mode(0o644);
             let mut out = options.open(&temporary).await?;
-            out.write_all(&encode_amxd(spec.kind(), &patcher)).await?;
+            out.write_all(&bytes).await?;
             out.flush().await?;
             drop(out);
             tokio::fs::rename(&temporary, &file).await
@@ -213,8 +364,14 @@ impl KernelTool for DeviceTool {
             }
         }
         if let Err(error) = written {
-            return unwritable(error);
+            return Ok(ToolResult::error(unwritable(&folder, &error)));
         }
+        self.options.made.borrow_mut().made(MadeDevice {
+            asked: asked_name,
+            file: name.clone(),
+            kind: spec.kind(),
+            written: hashed(&bytes),
+        });
         let item_id = format!("user_library/Kumi/{name}");
         let deadline = now_ms().saturating_add(self.options.wait_ms.unwrap_or(20_000) as i64);
         let mut seen = false;
@@ -228,16 +385,21 @@ impl KernelTool for DeviceTool {
         // A silent render means the code didn't compile, or a patch passes no sound.
         let silent =
             if matches!(spec, DeviceSpec::Patch(_)) { "the patch passes no sound: fix it" } else { "the code didn't compile: fix it" };
-        let (kind,next,extra)=match spec.kind() {
-            DeviceType::MidiEffect => ("MIDI effect","load_device with this itemId on the MIDI track; Live puts a MIDI effect before the instrument.".to_string(),vec![]),
-            DeviceType::AudioEffect => ("audio effect",format!("load_device with this itemId on the track, then hear it with audition while audio plays through that track (a silent render means {silent} and make it again)."),vec![&*MIX,&*OUTPUT]),
-            DeviceType::Instrument => ("instrument",format!("load_device with this itemId on a MIDI track, write a short clip, and hear it with audition (a silent render means {silent} and make it again)."),vec![&*OUTPUT]),
+        let (next,extra)=match spec.kind() {
+            DeviceType::MidiEffect => ("load_device with this itemId on the MIDI track; Live puts a MIDI effect before the instrument.".to_string(),vec![]),
+            DeviceType::AudioEffect => (format!("load_device with this itemId on the track, then hear it with audition while audio plays through that track (a silent render means {silent} and make it again)."),vec![&*MIX,&*OUTPUT]),
+            DeviceType::Instrument => (format!("load_device with this itemId on a MIDI track, write a short clip, and hear it with audition (a silent render means {silent} and make it again)."),vec![&*OUTPUT]),
         };
         let controls: Vec<_> = spec.controls().iter().chain(extra).map(describe_control).collect();
-        let mut result = json!({"made":name,"type":kind,"itemId":item_id,"file":file.to_string_lossy(),"controls":controls});
+        let mut result =
+            json!({"made":name,"type":kind_name(spec.kind()),"itemId":item_id,"file":file.to_string_lossy(),"controls":controls});
         let fields = result.as_object_mut().unwrap();
-        if replaces {
-            fields.insert("replaced".into(), json!("a device by this name was in the folder: this one took its place"));
+        if let Some(device) = &ours {
+            let kept = kept.map_or(String::new(), |kept| format!("; the old one is kept at {}", kept.to_string_lossy()));
+            fields.insert(
+                "replaced".into(),
+                json!(format!("the {} this conversation made as {}{kept}", kind_name(device.kind), device.file)),
+            );
         }
         if let DeviceSpec::Instrument(s) = &spec {
             fields.insert("voices".into(), json!(s.voices));
@@ -249,31 +411,65 @@ impl KernelTool for DeviceTool {
             }
         }
         if !seen {
-            fields.insert("note".into(), json!("Live's Browser hasn't listed it yet; load it in a moment."));
+            fields.insert("browser".into(), json!("Live's Browser hasn't listed it yet; load it in a moment."));
         }
-        let again = "Calling make_device again with the same name replaces this device";
+        let again = format!("call make_device again in this conversation with the name \"{name}\", which replaces this device");
         let next = if found.wrong.is_empty() {
-            format!("{next} {again}.")
+            format!("{next} To change it, {again}.")
         } else {
-            format!(
-                "It's made, and it loads as it is, but Max will show what's under wrong: fix that and call make_device again with the same name, which replaces this device. Or {next}"
-            )
+            format!("It's made, and it loads as it is, but what's under wrong needs fixing: fix it and {again}. Or {next}")
         };
         fields.insert("next".into(), json!(next));
+        // What was asked beside the device: Max's objects, and the guide.
+        if !asked.is_empty() {
+            fields.insert("objects".into(), json!(pages(&asked)));
+        }
+        if let Some(guide) = guide {
+            fields.insert("guide".into(), json!(guide));
+        }
         Ok(ToolResult::text(stringify(&result)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::file_name;
+    use super::*;
 
     #[test]
-    fn the_same_name_replaces_a_device_and_a_name_windows_takes_for_a_device_is_numbered_there() {
-        assert_eq!(file_name("Bass", false), "Bass", "making it again replaces it");
-        assert_eq!((file_name("Aux", false), file_name("Aux", true)), ("Aux".into(), "Aux 2".into()));
-        assert_eq!(file_name("Con.Dist", true), "Con 2.Dist", "the part before the dot is what Windows reads");
-        assert_eq!(file_name("LPT1 ", true), "LPT1  2");
-        assert_eq!(file_name("Console", true), "Console");
+    fn a_name_another_device_has_is_numbered_and_a_name_windows_takes_for_a_device_too() {
+        let folder = tempfile::tempdir().unwrap();
+        assert_eq!(free_name(folder.path(), "Bass", false), "Bass");
+        std::fs::write(folder.path().join("Bass.amxd"), "").unwrap();
+        assert_eq!(free_name(folder.path(), "Bass", false), "Bass 2", "a file's name is taken everywhere");
+        assert_eq!((free_name(folder.path(), "Aux", false), free_name(folder.path(), "Aux", true)), ("Aux".into(), "Aux 2".into()));
+        assert_eq!(free_name(folder.path(), "Con.Dist", true), "Con 2.Dist", "the part before the dot is what Windows reads");
+        assert_eq!(free_name(folder.path(), "LPT1 ", true), "LPT1  2");
+        assert_eq!(free_name(folder.path(), "Console", true), "Console");
+    }
+
+    #[test]
+    fn only_a_device_this_conversation_made_and_kumi_wrote_is_ours_to_replace() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut made = Made::default();
+        made.conversation("first");
+        std::fs::write(folder.path().join("Echo 2.amxd"), b"written").unwrap();
+        made.made(MadeDevice { asked: "Echo".into(), file: "Echo 2".into(), kind: DeviceType::MidiEffect, written: hashed(b"written") });
+        assert_eq!(made.ours(folder.path(), "Echo").map(|device| device.file), Some("Echo 2".into()), "by the name asked for");
+        assert_eq!(made.ours(folder.path(), "Echo 2").map(|device| device.file), Some("Echo 2".into()), "by the name it was made as");
+        assert!(made.ours(folder.path(), "Delay").is_none());
+        std::fs::write(folder.path().join("Echo 2.amxd"), b"saved in Max").unwrap();
+        assert!(made.ours(folder.path(), "Echo").is_none(), "a file changed since is someone's own");
+        std::fs::write(folder.path().join("Echo 2.amxd"), b"written").unwrap();
+        made.conversation("second");
+        assert!(made.ours(folder.path(), "Echo").is_none(), "another conversation's");
+    }
+
+    #[test]
+    fn a_full_disk_and_an_unwritable_folder_say_what_to_do() {
+        let folder = Path::new("/Music/User Library/Kumi");
+        let full = unwritable(folder, &std::io::Error::from(std::io::ErrorKind::StorageFull));
+        assert!(full.contains("is full. Free some space, then call make_device again."), "{full}");
+        let denied = unwritable(folder, &std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(denied.contains("Make the folder writable, then call make_device again."), "{denied}");
     }
 }

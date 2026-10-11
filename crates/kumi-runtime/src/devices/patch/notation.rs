@@ -830,8 +830,10 @@ mod tests {
     use super::*;
     use crate::devices::patch::reference::{Count, Object};
 
+    /// An object Max's help shows bare and with up to two arguments, its counts the same each time.
     fn object(inlets: usize, outlets: usize) -> Object {
-        Object { inlets: Count::Fixed { count: inlets }, outlets: Count::Fixed { count: outlets }, seen: 1, ..Object::default() }
+        let (inlets, outlets) = (Count::Fixed { count: inlets }, Count::Fixed { count: outlets });
+        Object { inlets, outlets, seen: 3, held: vec![0, 1, 2], ..Object::default() }
     }
 
     #[test]

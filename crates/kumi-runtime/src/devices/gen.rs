@@ -14,7 +14,7 @@
 //! GenExpr's order is fixed: function definitions, then declarations (Param, History…), then
 //! statements. Kumi's Params go after the model's functions, ahead of the rest of its code.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use kumi_common::js::number::{round, to_string as num};
@@ -28,7 +28,8 @@ use super::midi::unit_style;
 use super::spec::{AudioEffectSpec, Control, InstrumentSpec, NumericControl, Unit};
 
 /// gen~'s operators, constants and keywords (as Max 9's gen~ names them), which a control's Param
-/// mustn't be (a Param named mix would hide the mix operator), and the names Kumi's own Params use.
+/// mustn't be (a Param named mix would hide the mix operator), and the names Kumi's own Params use. Kumi's output stage
+/// is a gen~ of its own, so its names (gain, wet) aren't among them.
 static RESERVED: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     concat!(
         "abs absdiff accum acos acosh add and asin asinh atan atan2 atanh atodb bool break buffer cartopol ceil change channels clamp clip ",
@@ -38,7 +39,7 @@ static RESERVED: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "mod mstosamps mtof mul mulequals nearest neg neq neqp noise not or out param pass peek phasewrap phasor phi pi plusequals poke poltocar pow r radians ",
         "radtodeg rate rdiv read receive return rmod round rsub s sah sample samplerate sampstoms scale selector send setparam sign sin sinh slide smoothstep ",
         "splat sqrt sqrt1_2 sqrt2 step sub switch t60 t60time tan tanh train triangle trunc twopi vectorsize voice voices wave while wrap write xor ",
-        "note velocity strike bend mod_wheel gain wet"
+        "note velocity strike bend mod_wheel"
     )
     .split(' ')
     .collect()
@@ -55,8 +56,7 @@ static OUTPUT_WRITTEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)o
 static OUT1: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)out1\s*=").unwrap());
 static OUT2: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)out2\s*=").unwrap());
 static OUT_MORE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)out[3-9](?-u:\b)").unwrap());
-static KUMI_PARAMS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?-u:\b)Param\s+(note|velocity|strike|bend|mod_wheel|kumi_[A-Za-z0-9_]*)(?-u:\b)").unwrap());
+static TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z_][A-Za-z0-9_]*|\S").unwrap());
 static NOTE_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)(note|velocity|strike|mod_wheel)(?-u:\b)").unwrap());
 static NOTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)note(?-u:\b)").unwrap());
 static LINE_ENDINGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\r?\n").unwrap());
@@ -141,16 +141,60 @@ pub fn inputs_read(code: &str) -> usize {
     INPUT_READ.captures_iter(&bare).map(|found| found[1].parse::<usize>().unwrap_or(0)).max().unwrap_or(0)
 }
 
-/// Whether the code declares `id` itself (a Param, a History, a Delay…): Kumi then doesn't declare it again, since
-/// gen~ refuses a name declared twice.
-fn declares(code: &str, id: &str) -> bool {
-    Regex::new(&format!(r"(?-u:\b)(?:Param|History|Delay|Data|Buffer)\s+{}(?-u:\b)", regex::escape(id)))
-        .is_ok_and(|declared| declared.is_match(&without_comments(code)))
+/// GenExpr's declarations, by the word each starts with.
+const DECLARATIONS: [&str; 5] = ["Param", "History", "Delay", "Data", "Buffer"];
+
+/// The Params Kumi gives each voice of an instrument.
+const VOICE_IDS: [&str; 5] = ["note", "velocity", "strike", "bend", "mod_wheel"];
+
+/// The names GenExpr code declares (each by its declaration's word: `History a(0), b(0);` declares both) and the names
+/// it reads as values (not called, and not the name a declaration gives).
+#[derive(Debug, Default)]
+pub struct Names {
+    pub declared: HashMap<String, &'static str>,
+    pub read: HashSet<String>,
+}
+
+pub fn names(code: &str) -> Names {
+    let bare = without_comments(code);
+    let tokens: Vec<&str> = TOKEN.find_iter(&bare).map(|token| token.as_str()).collect();
+    let mut names = Names::default();
+    // The declaration being read and how deep in its parentheses (its default and settings, `min=0`), and whether a
+    // statement starts here.
+    let (mut declaring, mut depth, mut start) = (None, 0usize, true);
+    for (at, token) in tokens.iter().copied().enumerate() {
+        match token {
+            ";" | "{" | "}" => {
+                (declaring, depth, start) = (None, 0, true);
+                continue;
+            }
+            "(" if declaring.is_some() => depth += 1,
+            ")" if declaring.is_some() => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        let statement = std::mem::replace(&mut start, false);
+        if !token.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            continue;
+        }
+        match declaring {
+            None if statement && DECLARATIONS.contains(&token) => declaring = DECLARATIONS.iter().copied().find(|word| *word == token),
+            Some(word) if depth == 0 => {
+                names.declared.entry(token.to_string()).or_insert(word);
+            }
+            Some(_) => {}
+            None if tokens.get(at + 1) == Some(&"(") => {}
+            None => {
+                names.read.insert(token.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// What Kumi finds in the model's GenExpr before building, said beside the device it makes (Max compiles the code when
-/// Live loads the device): what Max will show as wrong, and the declarations Kumi leaves to the code.
-pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Findings {
+/// Live loads the device): what's wrong, and the declarations Kumi leaves to the code. `renamed` gives, for a control
+/// whose name Kumi changed, the Param it was asked as and why that one couldn't be its.
+pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control], renamed: &HashMap<String, (String, String)>) -> Findings {
     let mut found = Findings::default();
     let problems = &mut found.wrong;
     let bare = without_comments(code);
@@ -180,23 +224,45 @@ pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Fin
         problems.push("code: its braces or parentheses don't pair up.".to_string());
     }
     // Kumi declares a voice's note, velocity, strike, bend and mod_wheel, and each control's Param from the control; one
-    // the code declares itself is left to the code, since gen~ refuses a name declared twice.
+    // the code declares itself is left to the code, since gen~ refuses a name declared twice. Only a Param takes the
+    // messages a control or a note sends.
+    let names = names(code);
     let mut left: Vec<String> = Vec::new();
     if kind == DeviceType::Instrument {
-        for found_param in KUMI_PARAMS.captures_iter(&bare).filter(|found_param| !found_param[1].starts_with("kumi_")) {
-            left.push(format!(
-                "code: it declares {}, which Kumi gives each voice, so Kumi used the code's declaration of it.",
-                &found_param[1]
-            ));
+        for id in VOICE_IDS {
+            match names.declared.get(id) {
+                Some(&"Param") => left.push(format!("code: it declares {id}, which Kumi gives each voice, so Kumi used the code's declaration of it.")),
+                Some(word) => problems.push(format!(
+                    "code: it declares {id} as a {word}, and Kumi gives each voice its {id} as a Param: only a Param takes what Kumi sends it, so call the {word} something else."
+                )),
+                None => {}
+            }
         }
     }
     for control in controls {
         let id = param_name(control.name());
-        if declares(code, &id) {
-            left.push(format!(
-                "code: it declares {id}, the {} control's Param, so Kumi used that declaration: the default and range come from the code, not the control.",
+        match names.declared.get(id.as_str()) {
+            Some(&"Param") => left.push(format!(
+                "code: it declares {id}, the \"{}\" control's Param, so Kumi didn't declare it again: what the control sends is its own range, and the code's min and max hold what reaches the code.",
                 control.name()
-            ));
+            )),
+            Some(word) => problems.push(format!(
+                "code: it declares {id} as a {word}, and {id} is the \"{}\" control's Param: only a Param takes the control's value, so call the {word} something else.",
+                control.name()
+            )),
+            None => {}
+        }
+        if !names.read.contains(&id) {
+            problems.push(match renamed.get(control.name()).filter(|(asked, _)| names.read.contains(asked)) {
+                Some((asked, why)) => format!(
+                    "code: it reads {asked}, but the \"{}\" control's Param is {id} ({why}), so the control changes nothing: read {id} where it should act.",
+                    control.name()
+                ),
+                None => format!(
+                    "code: nothing in it reads {id}, the \"{}\" control's Param, so the control changes nothing: read {id} where it should act.",
+                    control.name()
+                ),
+            });
         }
     }
     let inputs = inputs_read(code);
@@ -224,9 +290,10 @@ pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Fin
 
 /// The Param declarations for the model's controls, but for those its code declares itself.
 fn param_lines(controls: &[Control], code: &str) -> Vec<String> {
+    let declared = names(code).declared;
     controls
         .iter()
-        .filter(|control| !declares(code, &param_name(control.name())))
+        .filter(|control| !declared.contains_key(&param_name(control.name())))
         .map(|control| {
             let id = param_name(control.name());
             match control {
@@ -490,7 +557,8 @@ pub fn effect_code(spec: &GenSpec) -> String {
 
 /// One voice's code as each voice's gen~ holds it.
 pub fn voice_code(spec: &GenSpec) -> String {
-    let given = |line: &&str| line.split(['(', ' ']).nth(1).is_some_and(|id| declares(&spec.code, id));
+    let declared = names(&spec.code).declared;
+    let given = |line: &&str| line.split(['(', ' ']).nth(1).is_some_and(|id| declared.contains_key(id));
     let voice = VOICE_PARAMS.iter().filter(|line| !given(line)).map(|line| line.to_string());
     let lines: Vec<String> = voice.chain(param_lines(&spec.controls, &spec.code)).collect();
     with_params(&spec.code, &lines, &format!("Made by Kumi: {} (one voice)", spec.name))

@@ -166,7 +166,7 @@ fn script(files: &dyn Files, name: &str) -> Option<String> {
 
 /// Code without comments, and with each string's text blanked (its quotes kept), so braces and words in them don't
 /// count.
-fn clean(source: &str) -> String {
+pub(crate) fn clean(source: &str) -> String {
     strip(source, true)
 }
 

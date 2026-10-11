@@ -648,8 +648,8 @@ mod tests {
         let c74 = max_folder();
         let mut reference = learn(c74.path());
         let page = "docs/refpages/max-ref/pipe.maxref.xml".to_string();
-        let trigger =
-            Object { inlets: Count::Fixed { count: 1 }, outlets: Count::Arguments { plus: 0, bare: 2 }, page, ..Object::default() };
+        let (inlets, outlets) = (Count::Fixed { count: 1 }, Count::Arguments { plus: 0, bare: 2 });
+        let trigger = Object { inlets, outlets, page, seen: 4, held: vec![0, 1, 2, 3], ..Object::default() };
         reference.objects.insert("trigger".into(), trigger);
         reference.objects.insert("gen~".into(), Object { module: "msp".into(), digest: "Code for audio".into(), ..Object::default() });
         reference.objects.insert("pipes".into(), Object { module: "abstraction".into(), ..Object::default() });
