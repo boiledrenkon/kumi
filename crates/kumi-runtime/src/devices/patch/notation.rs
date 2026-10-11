@@ -175,9 +175,9 @@ fn block_end_within(chars: &[char], mut at: usize, reading: Language, nesting: u
         return None;
     }
     let (mut depth, mut lines) = (0usize, 0usize);
-    // A patch's last box on the line, for the block after it; JavaScript's last character and word, which say whether a
-    // / starts a regular expression or divides.
-    let (mut class, mut last, mut word) = (String::new(), None::<char>, String::new());
+    // A patch's last box on the line, for the block after it; JavaScript's last two characters and last word, which say
+    // whether a / starts a regular expression or divides.
+    let (mut class, mut last, mut prior, mut word) = (String::new(), None::<char>, None::<char>, String::new());
     let line_end = |at: usize| (at..chars.len()).find(|&end| chars[end] == '\n').unwrap_or(chars.len());
     while at < chars.len() {
         let c = chars[at];
@@ -238,7 +238,7 @@ fn block_end_within(chars: &[char], mut at: usize, reading: Language, nesting: u
                 (at, last) = (end + 1, Some(c));
                 continue;
             }
-            (Language::JavaScript, '/') if starts_regex(last, &word) => {
+            (Language::JavaScript, '/') if starts_regex(last, prior, &word) => {
                 if let Some(end) = regex_end(chars, at + 1) {
                     (at, last) = (end + 1, Some(c));
                     word.clear();
@@ -258,7 +258,7 @@ fn block_end_within(chars: &[char], mut at: usize, reading: Language, nesting: u
             if in_word(c) {
                 word.push(c);
             }
-            last = Some(c);
+            (prior, last) = (last, Some(c));
         }
         at += 1;
     }
@@ -308,10 +308,12 @@ fn template_end(chars: &[char], mut at: usize, nesting: usize) -> Option<(usize,
     None
 }
 
-/// Whether a / after `last` (ending `word`) starts a regular expression rather than dividing.
-fn starts_regex(last: Option<char>, word: &str) -> bool {
+/// Whether a / after `last` (and `prior` before it, ending `word`) starts a regular expression rather than dividing: a
+/// postfix ++ or -- divides.
+fn starts_regex(last: Option<char>, prior: Option<char>, word: &str) -> bool {
     match last {
         None => true,
+        Some(c @ ('+' | '-')) if prior == Some(c) => false,
         Some(c) if c.is_alphanumeric() || c == '_' || c == '$' => {
             matches!(
                 word,
@@ -591,8 +593,8 @@ impl Reader<'_> {
                         What::Js { text: made, code }
                     }
                     (Some(_), None) => {
-                        self.found.changed.push(format!(
-                            "line {line}: only [gen~], [gen], [v8], [v8ui] and [p] hold a {{ … }} block, so [{class}] was made without one."
+                        self.found.wrong.push(format!(
+                            "line {line}: only [gen~], [gen], [v8], [v8ui] and [p] hold a {{ … }} block, so [{class}] was made without what it was given: put that in one of them."
                         ));
                         What::Object(text)
                     }
@@ -1164,13 +1166,11 @@ mod tests {
                 "line 3: a box in the middle of a chain is entered at inlet 0 and left by outlet 0, so Kumi left the line out: write a cord to or from another of its ports on a line of its own.",
                 "line 5: [gen~] holds GenExpr, and it was given none, so it's empty: write it in a { … } block after the box.",
                 "line 6: out is the device's own (what it receives and sends), so the box was made without that name: name it something else.",
+                "line 7: only [gen~], [gen], [v8], [v8ui] and [p] hold a { … } block, so [print] was made without what it was given: put that in one of them.",
                 "line 8: \"?\" isn't part of the notation (a box is [object] or (message), a cord is ->), so Kumi left the line out.",
             ]
         );
-        assert_eq!(
-            found.changed,
-            ["line 7: only [gen~], [gen], [v8], [v8ui] and [p] hold a { … } block, so [print] was made without one."]
-        );
+        assert!(found.changed.is_empty(), "{found:?}");
         assert_eq!(
             found.notes,
             ["line 4: the box on this line has no name and no cords, so nothing reaches it (name = [object] names one; a -> b is a cord)."]
@@ -1204,12 +1204,13 @@ mod tests {
             "  const s = `don't ${ {a: 1}.a } {`;\n",
             "  const r = /don't[/}]/g;\n",
             "  function f(n) { if (n) { post(`it's`); } return n / 2; }\n",
+            "  function g(n) { if (n-- / 2 > 0) { n = n / 2; } return n++ / 2; }\n",
             "  const open = 'not closed\n",
             "}\n",
             "b = [metro 100]\n",
         ));
         assert!(found.is_empty(), "{found:?}");
-        assert_eq!(lines_of(&notation), [("a".to_string(), 1), ("b".to_string(), 11)]);
+        assert_eq!(lines_of(&notation), [("a".to_string(), 1), ("b".to_string(), 12)]);
         assert!(
             matches!(&notation.boxes[0].what, What::Js { code, .. } if code.contains("return this.#n++;") && code.contains("'not closed"))
         );

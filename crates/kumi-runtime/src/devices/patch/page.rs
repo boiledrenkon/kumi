@@ -74,6 +74,13 @@ pub fn read(text: &str) -> Option<Element> {
         rest = &rest[at..];
         if let Some(comment) = rest.strip_prefix("<!--") {
             rest = comment.find("-->").map_or("", |end| &comment[end + 3..]);
+        } else if let Some(cdata) = rest.strip_prefix("<![CDATA[") {
+            // Its text as it's written: nothing in it is markup.
+            let end = cdata.find("]]>").unwrap_or(cdata.len());
+            if let Some(element) = open.last_mut().filter(|_| end > 0) {
+                element.children.push(Node::Text(cdata[..end].to_string()));
+            }
+            rest = cdata.get(end + 3..).unwrap_or("");
         } else if rest.starts_with("<?") || rest.starts_with("<!") {
             rest = rest.find('>').map_or("", |end| &rest[end + 1..]);
         } else if let Some(closing) = rest.strip_prefix("</") {
@@ -202,9 +209,11 @@ fn unescape(text: &str) -> String {
     out
 }
 
-/// A word a page leaves for its writers to fill in (TEXT_HERE, OBJARG_NAME, INLET_TYPE).
+/// A word a page leaves for its writers to fill in (TEXT_HERE, OBJARG_NAME, INLET_TYPE, ARG_NAME_0).
 fn placeholder(value: &str) -> bool {
-    value.contains('_') && value.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+    value.contains('_')
+        && value.chars().any(|c| c.is_ascii_uppercase())
+        && value.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// What an attribute's own attributes say (its label, category, default…).
@@ -292,22 +301,36 @@ pub fn describe(reference: &Reference, text: &str) -> String {
         let names = near.iter().map(|name| format!("[{name}]")).collect::<Vec<_>>().join(", ");
         return if near.is_empty() { format!("No [{class}] in this Max.") } else { format!("No [{class}] in this Max. Nearest: {names}.") };
     };
-    let page = Some(&object.page)
+    // An object with modes ([zl lookup]) has a page for each that this Max writes as its own name (zl.lookup).
+    let mode = words
+        .get(1)
+        .map(|word| format!("{class}.{word}"))
+        .filter(|mode| reference.objects.get(mode).is_some_and(|mode| !mode.page.is_empty()));
+    let (shown, paged) = match &mode {
+        Some(mode) => (format!("{class} {}", words[1]), &reference.objects[mode]),
+        None => (class.clone(), object),
+    };
+    let page = Some(&paged.page)
         .filter(|path| !path.is_empty())
         .and_then(|path| std::fs::read_to_string(reference.root.join(path)).ok())
         .and_then(|text| read(&text));
-    let named = page.as_ref().and_then(|page| page.attribute("name")).unwrap_or(catalog().canonical(class));
-    let digest = page.as_ref().and_then(|page| page.child("digest")).map(Element::text).unwrap_or_else(|| object.digest.clone());
-    let mut lines = vec![match (named == class.as_str(), digest.is_empty()) {
-        (true, false) => format!("[{class}] {digest}"),
-        (true, true) => format!("[{class}]"),
-        (false, false) => format!("[{class}] is [{named}]: {digest}"),
-        (false, true) => format!("[{class}] is [{named}]"),
+    let named = match &mode {
+        Some(mode) => page.as_ref().and_then(|page| page.attribute("name")).unwrap_or(mode),
+        None => page.as_ref().and_then(|page| page.attribute("name")).unwrap_or(catalog().canonical(class)),
+    };
+    let digest = page.as_ref().and_then(|page| page.child("digest")).map(Element::text).unwrap_or_else(|| paged.digest.clone());
+    let mut lines = vec![match (named == shown.as_str(), digest.is_empty()) {
+        (true, false) => format!("[{shown}] {digest}"),
+        (true, true) => format!("[{shown}]"),
+        (false, false) => format!("[{shown}] is [{named}]: {digest}"),
+        (false, true) => format!("[{shown}] is [{named}]"),
     }];
     let arguments = words[1..].iter().take_while(|word| !word.starts_with('@')).count();
-    lines.push(match reference.ports(text) {
+    let ports = reference.ports(text);
+    lines.push(match &ports {
         Some(ports) => format!("[{text}] has {} and {}.", count(ports.inlets, "inlet"), count(ports.outlets, "outlet")),
         None if catalog().ports_from_contents(class) => format!("[{text}]: its inlets and outlets come from what's inside it."),
+        None if object.seen == 0 && !object.listed() => format!("[{text}]: its page lists no inlets or outlets, so its cords decide them."),
         None if arguments == 0 => {
             format!("[{text}]: its cords decide its inlets and outlets; Max's help shows no count that holds for it bare.")
         }
@@ -317,7 +340,7 @@ pub fn describe(reference: &Reference, text: &str) -> String {
         ),
     });
     match &page {
-        Some(page) => tell(page, named, &mut lines),
+        Some(page) => tell(page, named, ports.as_ref().map(|ports| (ports.inlets, ports.outlets)), &mut lines),
         None if object.module == "abstraction" => lines.push("An abstraction Max ships: it has no reference page.".into()),
         None if object.page.is_empty() => lines.push("Max has no reference page for it: its help patchers show it.".into()),
         None => lines.push("Its reference page couldn't be read.".into()),
@@ -326,8 +349,9 @@ pub fn describe(reference: &Reference, text: &str) -> String {
 }
 
 /// What a page says of its object, after its name and ports: its arguments, inlets, outlets, messages, attributes and
-/// what to see also.
-fn tell(page: &Element, named: &str, lines: &mut Vec<String>) {
+/// what to see also. `ports` is the box's inlets and outlets, where they're known: a page lists them for the object
+/// bare, so a box whose count differs, or isn't known, is told the list is the page's.
+fn tell(page: &Element, named: &str, ports: Option<(usize, usize)>, lines: &mut Vec<String>) {
     let arguments: Vec<String> = page
         .child("objarglist")
         .into_iter()
@@ -348,13 +372,18 @@ fn tell(page: &Element, named: &str, lines: &mut Vec<String>) {
         lines.push("Arguments:".into());
         lines.extend(arguments);
     }
-    for (kind, title) in [("inlet", "Inlets:"), ("outlet", "Outlets:")] {
-        let ports = ports(page, kind);
-        if ports.is_empty() {
+    for (kind, title) in [("inlet", "Inlets"), ("outlet", "Outlets")] {
+        let listed = self::ports(page, kind);
+        if listed.is_empty() {
             continue;
         }
-        lines.push(title.into());
-        for (at, port) in ports.iter().enumerate() {
+        let has = ports.map(|(inlets, outlets)| if kind == "inlet" { inlets } else { outlets });
+        lines.push(match has {
+            Some(has) if has == listed.len() => format!("{title}:"),
+            Some(has) => format!("{title}, as its page lists them for [{named}] bare (this box has {has}):"),
+            None => format!("{title}, as its page lists them for [{named}] bare:"),
+        });
+        for (at, port) in listed.iter().enumerate() {
             let signal = if port.kind.contains("signal") { format!(" ({})", port.kind) } else { String::new() };
             let digest = brief(&port.digest, BRIEF);
             lines.push(format!("- {at}{signal}{}", if digest.is_empty() { String::new() } else { format!(": {digest}") }));
@@ -385,7 +414,7 @@ fn tell(page: &Element, named: &str, lines: &mut Vec<String>) {
             lines.push(format!("- {}{}", said.join(" "), if digest.is_empty() { String::new() } else { format!(": {digest}") }));
         }
         if !rest.is_empty() {
-            lines.push(format!("Also: {}.", rest.join(", ")));
+            lines.push(format!("Also: {}.", named_up_to(rest)));
         }
     }
     let (mut full, mut rest, mut looks) = (Vec::new(), Vec::new(), Vec::new());
@@ -407,12 +436,27 @@ fn tell(page: &Element, named: &str, lines: &mut Vec<String>) {
         lines.append(&mut full);
     }
     if !rest.is_empty() {
-        lines.push(format!("Also: {}.", rest.join(", ")));
+        lines.push(format!("Also: {}.", named_up_to(rest)));
     }
     if !looks.is_empty() {
-        let more = looks.len().saturating_sub(NAMED);
-        looks.truncate(NAMED);
-        lines.push(format!("Looks: {}{}.", looks.join(", "), if more > 0 { format!(" and {more} more") } else { String::new() }));
+        lines.push(format!("Looks: {}.", named_up_to(looks)));
+    }
+    // What an MC object takes for every channel, and a Jitter object's own attributes, each in a list of its own.
+    let listed = |list: &str, item: &str, prefix: &str| -> Vec<String> {
+        page.children(list)
+            .flat_map(|list| list.children(item))
+            .filter_map(|item| real(item.attribute("name")))
+            .map(|name| format!("{prefix}{name}"))
+            .collect()
+    };
+    for (said, names) in [
+        ("MC attributes, for each channel", listed("mcwrapper", "mcwrapperattr", "@")),
+        ("MC messages, for each channel", listed("mcwrapper", "mcwrappermethod", "")),
+        ("Jitter attributes", listed("jitterattributelist", "jitterattribute", "@")),
+    ] {
+        if !names.is_empty() {
+            lines.push(format!("{said}: {}.", named_up_to(names)));
+        }
     }
     let mut also: Vec<String> = Vec::new();
     for seen in page.child("seealsolist").into_iter().flat_map(|list| list.children("seealso")) {
@@ -423,8 +467,18 @@ fn tell(page: &Element, named: &str, lines: &mut Vec<String>) {
         }
     }
     if !also.is_empty() {
-        also.truncate(NAMED);
-        lines.push(format!("See also: {}.", also.iter().map(|name| format!("[{name}]")).collect::<Vec<_>>().join(", ")));
+        lines.push(format!("See also: {}.", named_up_to(also.iter().map(|name| format!("[{name}]")).collect())));
+    }
+}
+
+/// Names in a line, the first [`NAMED`] of them, then how many more there are.
+fn named_up_to(names: Vec<String>) -> String {
+    let more = names.len().saturating_sub(NAMED);
+    let shown = names.into_iter().take(NAMED).collect::<Vec<_>>().join(", ");
+    if more > 0 {
+        format!("{shown} and {more} more")
+    } else {
+        shown
     }
 }
 
@@ -469,11 +523,16 @@ fn attribute_line(attribute: &Element, name: &str) -> String {
         .flat_map(|meta| meta.children("enumlist").flat_map(|list| list.children("enum")))
         .filter_map(|value| value.attribute("name"))
         .collect();
-    if !values.is_empty() {
+    if values.iter().any(|value| !value.trim().is_empty()) {
+        // Numbered as Max numbers them, an empty one counted but not said.
         let numbered = kind == "int" || meta(attribute, "style") == Some("enumindex");
-        let values: Vec<String> =
-            values.iter().enumerate().map(|(at, value)| if numbered { format!("{at} = {value}") } else { value.to_string() }).collect();
-        about.push(format!("values {}", values.join(", ")));
+        let values: Vec<String> = values
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| !value.trim().is_empty())
+            .map(|(at, value)| if numbered { format!("{at} = {value}") } else { value.to_string() })
+            .collect();
+        about.push(format!("values {}", named_up_to(values)));
     }
     let digest = brief(&attribute.child("digest").map(Element::text).unwrap_or_default(), BRIEF);
     format!("- @{name} ({}){}", about.join(", "), if digest.is_empty() { String::new() } else { format!(": {digest}") })
@@ -537,6 +596,8 @@ mod tests {
             "a closing tag nothing opened"
         );
         assert_eq!(read("no element"), None);
+        let cdata = read("<a>x <![CDATA[1 < 2 > 0 & y]]> z</a>").unwrap();
+        assert_eq!(cdata.text(), "x 1 < 2 > 0 & y z", "a CDATA section is its text as written");
     }
 
     /// A page written for these tests (not Max's): an object that holds numbers back, its attributes' own attributes
@@ -555,8 +616,8 @@ mod tests {
   </objarglist>
   <methodlist>
     <method name="int"><arglist><arg name="value" optional="0" type="int" /></arglist><digest>Hold it back</digest></method>
-    <method name="flush"><arglist /><digest>Send everything held, now</digest></method>
-    <method name="setcell"><arglist><arg name="position" type="list" />
+    <method name="flush"><arglist /><digest><![CDATA[Send everything held, now]]></digest></method>
+    <method name="setcell"><arglist><arg name="position" type="list" /><arg name="ARG_NAME_0" optional="0" type="int" />
       <arggroup optional="1"><arg name="plane" type="literal" /><arg name="number" type="int" /></arggroup></arglist>
       <attributelist><attribute name="introduced" get="1" set="1" type="symbol" size="1" value="9" /></attributelist>
       <digest>Set a cell</digest></method>
@@ -587,6 +648,7 @@ mod tests {
     </attribute>
   </attributelist>
   <seealsolist><seealso name="delay" /><seealso name="pipe" /><seealso name="timing" type="userguide" /></seealsolist>
+  <mcwrapper><mcwrapperattr name="chans" /><mcwrappermethod name="deviate" /></mcwrapper>
 </c74object>"#;
 
     /// A C74 folder with the page and a help patcher whose instances say how many ports [pipe] has.
@@ -623,24 +685,61 @@ mod tests {
             "- @hold (int, 0 or 1): Hold every number",
             "Looks: @color.",
             "See also: [delay].",
+            "MC attributes, for each channel: @chans.",
+            "MC messages, for each channel: deviate.",
+            "Inlets:",
         ] {
             assert!(lines.contains(&line), "{line:?} in:\n{page}");
         }
-        for unsaid in ["OBJARG", "(mouse)", "@label", "@default", "@enumvals", "@introduced", "@old", "timing"] {
+        for unsaid in ["OBJARG", "ARG_NAME", "(mouse)", "@label", "@default", "@enumvals", "@introduced", "@old", "timing"] {
             assert!(!page.contains(unsaid), "{unsaid:?} isn't in:\n{page}");
         }
+        let unheld = describe(&reference, "pipe 0 0 1 250");
         assert!(
-            describe(&reference, "pipe 0 0 1 250").contains(
+            unheld.contains(
                 "[pipe 0 0 1 250]: its cords decide its inlets and outlets; Max's help shows no count that holds for it with 4 arguments."
             ),
             "help instances with three arguments disagree with two inlets"
         );
+        assert!(unheld.contains("\nInlets, as its page lists them for [pipe] bare:\n"), "the page's list isn't this box's: {unheld}");
         // Read when it's asked for: a page Max changes says what it says now.
         let file = c74.path().join("docs").join("refpages").join("max-ref").join("pipe.maxref.xml");
         std::fs::write(&file, PAGE.replace("Hold numbers back", "Delay numbers")).unwrap();
         assert!(describe(&reference, "pipe 100").starts_with("[pipe] Delay numbers for a time\n[pipe 100] has 2 inlets and 1 outlet."));
         std::fs::remove_file(&file).unwrap();
         assert!(describe(&reference, "pipe").ends_with("Its reference page couldn't be read."));
+    }
+
+    #[test]
+    fn an_object_with_modes_is_told_from_its_modes_page_and_long_lists_are_named_up_to_twenty() {
+        let c74 = max_folder();
+        let pages = c74.path().join("docs").join("refpages").join("max-ref");
+        let page = |name: &str, digest: &str, inlet: &str, more: &str| {
+            format!(
+                r#"<c74object name="{name}" module="max"><digest>{digest}</digest><inletlist><inlet id="0"><digest>{inlet}</digest></inlet></inletlist>{more}</c74object>"#
+            )
+        };
+        let methods: String = (1..=30).map(|at| format!(r#"<method name="m{at}"><digest>Do {at}</digest></method>"#)).collect();
+        let shapes: String = std::iter::once(String::new())
+            .chain((1..=24).map(|at| format!("s{at}")))
+            .map(|name| format!(r#"<enum name="{name}" />"#))
+            .collect();
+        let more = format!(
+            r#"<methodlist>{methods}</methodlist><attributelist><attribute name="shape" type="int"><digest>Its shape</digest><attributelist><attribute name="enumvals"><enumlist>{shapes}</enumlist></attribute></attributelist></attribute></attributelist>"#
+        );
+        std::fs::write(pages.join("pick.maxref.xml"), page("pick", "Pick from a list", "(inactive)", &more)).unwrap();
+        std::fs::write(pages.join("pick.first.maxref.xml"), page("pick.first", "The first of a list", "A list", "")).unwrap();
+        let reference = learn(c74.path());
+        let told = describe(&reference, "pick first");
+        assert!(told.starts_with("[pick first] is [pick.first]: The first of a list\n"), "{told}");
+        assert!(told.contains("- 0: A list") && !told.contains("(inactive)"), "{told}");
+        let bare = describe(&reference, "pick 3");
+        assert!(bare.starts_with("[pick] Pick from a list"), "an argument that names no mode: {bare}");
+        assert!(bare.contains("Also: m17, m18, m19, m20, m21, m22, m23, m24, m25, m26, m27, m28, m29, m30."), "{bare}");
+        assert!(
+            bare.contains("values 1 = s1, 2 = s2,") && bare.contains("20 = s20 and 4 more"),
+            "an empty value counted, not said: {bare}"
+        );
     }
 
     #[test]

@@ -2,8 +2,8 @@
 //! changes: each object's inlets and outlets for the arguments it's given, fitted to the instances saved in Max's own
 //! help patchers, what the object and each inlet and outlet are for (its reference page's digests), and the messages
 //! that only set something in it (its attributes, and the methods its page says send nothing). Max's bundled packages
-//! count (not Gen's or RNBO's pages, whose operators share names with Max's objects), and so do the abstractions Max
-//! ships. It's learned once for each Max and kept in Kumi's folder with where each object's page is, so the page is
+//! count, their pages wherever their docs folder keeps them (not Gen's or RNBO's, whose operators share names with
+//! Max's objects), and so do the abstractions Max ships. It's learned once for each Max and kept in Kumi's folder with where each object's page is, so the page is
 //! read when it's asked for ([`super::page`]); none of Max's files are carried in Kumi.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -154,6 +154,13 @@ pub struct Ports {
     pub outlet_types: Vec<String>,
 }
 
+impl Object {
+    /// Whether its page lists its inlets or outlets.
+    pub fn listed(&self) -> bool {
+        !self.inlet_digests.is_empty() || !self.outlet_digests.is_empty()
+    }
+}
+
 impl Reference {
     /// An object by its class, or the class an alias stands for ("t" is trigger).
     pub fn object(&self, class: &str) -> Option<&Object> {
@@ -181,8 +188,9 @@ impl Reference {
             if !matches!(count, Count::Fixed { .. }) || object.module == "abstraction" {
                 return true;
             }
+            // A page that lists no inlets or outlets doesn't say it has none.
             if object.seen == 0 {
-                return n == 0;
+                return n == 0 && object.listed();
             }
             if let Some(only) = &object.only {
                 return *only == args;
@@ -309,6 +317,12 @@ fn quiet_messages(page: &Element) -> (BTreeSet<String>, BTreeSet<String>) {
         quiet.insert(name.to_string());
         if page::meta(attribute, "category").is_some_and(|category| LOOKS.contains(&category)) {
             looks.insert(name.to_string());
+        }
+    }
+    // An MC object's attributes for each channel, and a Jitter object's own, each listed apart.
+    for (list, item) in [("mcwrapper", "mcwrapperattr"), ("jitterattributelist", "jitterattribute")] {
+        for attribute in page.children(list).flat_map(|list| list.children(item)) {
+            quiet.extend(attribute.attribute("name").map(str::to_string));
         }
     }
     for method in page.child("methodlist").into_iter().flat_map(|list| list.children("method")) {
@@ -469,7 +483,7 @@ fn files(folder: &Path, extension: &str, found: &mut Vec<PathBuf>) {
 }
 
 /// Packages whose reference pages describe their own operators (gen's, RNBO's), not Max's objects.
-const OTHER_LANGUAGES: [&str; 3] = ["Gen", "RNBO", "ableton-dsp"];
+const OTHER_LANGUAGES: [&str; 2] = ["Gen", "RNBO"];
 
 /// What the reference is learned from in a Max's C74 folder: its reference pages, help patchers and abstractions, and
 /// those of its bundled packages.
@@ -484,10 +498,13 @@ fn sources(c74: &Path) -> Sources {
     let mut packages: Vec<PathBuf> =
         std::fs::read_dir(c74.join("packages")).into_iter().flatten().flatten().map(|entry| entry.path()).collect();
     packages.sort();
+    // Max's own pages are in docs/refpages; a package keeps its pages anywhere in its docs folder.
+    files(&c74.join("docs").join("refpages"), ".maxref.xml", &mut found.pages);
     for root in std::iter::once(c74.to_path_buf()).chain(packages) {
+        let package = root != c74;
         let other = root.file_name().is_some_and(|name| OTHER_LANGUAGES.iter().any(|other| name == *other));
-        if !other {
-            files(&root.join("docs").join("refpages"), ".maxref.xml", &mut found.pages);
+        if package && !other {
+            files(&root.join("docs"), ".maxref.xml", &mut found.pages);
         }
         files(&root.join("help"), ".maxhelp", &mut found.help);
         files(&root.join("patchers"), ".maxpat", &mut found.abstractions);
@@ -496,7 +513,7 @@ fn sources(c74: &Path) -> Sources {
 }
 
 /// How Kumi learns the reference: a new way is learned anew, as a new Max is.
-const LEARNER: u32 = 9;
+const LEARNER: u32 = 10;
 
 /// What the reference is learned from in a Max's C74 folder, and how, as one line: a new Max reads differently.
 pub fn fingerprint(c74: &Path) -> String {
@@ -531,15 +548,34 @@ fn unpaged(module: &str, inlets: usize, outlets: usize) -> Object {
     }
 }
 
+/// The object a page's file is named for ("pipe" for pipe.maxref.xml).
+fn page_stem(file: &Path) -> String {
+    file.file_name().map(|file| file.to_string_lossy().trim_end_matches(".maxref.xml").to_string()).unwrap_or_default()
+}
+
 /// The reference learned from a Max's C74 folder: its reference pages, its help patchers' saved instances, then the
 /// abstractions it ships (their inlets and outlets are their inlet and outlet objects).
 pub fn learn(c74: &Path) -> Reference {
     let found = sources(c74);
     let mut objects: BTreeMap<String, Object> = BTreeMap::new();
+    // A page whose file is named for another object than the one it names ([fswap]'s, named swap) is that object's,
+    // when Max's help shows it and no page names it. (An operator's page is named for its sign: bitand's is [&].)
+    let mut misnamed: Vec<(String, Object)> = Vec::new();
     for file in &found.pages {
         if let Some((name, mut object)) = std::fs::read_to_string(file).ok().as_deref().and_then(read_page) {
             object.page = file.strip_prefix(c74).unwrap_or(file).to_string_lossy().into_owned();
-            objects.entry(name).or_insert(object);
+            let stem = page_stem(file);
+            // Of two pages that name an object, the one whose file is named for it.
+            let own = stem == name;
+            match objects.get(&name) {
+                Some(kept) if !own || page_stem(Path::new(&kept.page)) == name => {}
+                _ => {
+                    objects.insert(name.clone(), object.clone());
+                }
+            }
+            if !own && !stem.is_empty() {
+                misnamed.push((stem, object));
+            }
         }
     }
     let mut seen: HashMap<String, Vec<Instance>> = HashMap::new();
@@ -570,6 +606,16 @@ pub fn learn(c74: &Path) -> Reference {
         }
         object.seen = instances.len();
         (object.held, object.unheld, object.only) = evidence(&instances, object.inlets, object.outlets);
+    }
+    for (stem, page) in misnamed {
+        if let Some(object) = objects.get_mut(&stem).filter(|object| object.page.is_empty()) {
+            let counts =
+                (object.inlets, object.outlets, object.outlet_types.clone(), object.seen, object.held.clone(), object.unheld.clone());
+            let only = object.only.clone();
+            *object = page;
+            (object.inlets, object.outlets, object.outlet_types, object.seen, object.held, object.unheld) = counts;
+            object.only = only;
+        }
     }
     for file in &found.abstractions {
         let Some(name) = file.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else { continue };
@@ -855,9 +901,9 @@ mod tests {
             reference.objects.insert(class.into(), Object { inlet_digests, outlet_digests, ..object });
         }
         reference.objects.insert("zl".into(), fitted(&[instance(&["group"], 2, 2), instance(&["slice", "2", "x"], 2, 2)], (2, 2)));
-        reference
-            .objects
-            .insert("cverb~".into(), Object { inlets: Count::Fixed { count: 2 }, outlets: Count::Fixed { count: 2 }, ..Object::default() });
+        let (inlet_digests, outlet_digests) = (vec![String::new(); 2], vec![String::new(); 2]);
+        let (inlets, outlets) = (Count::Fixed { count: 2 }, Count::Fixed { count: 2 });
+        reference.objects.insert("cverb~".into(), Object { inlets, outlets, inlet_digests, outlet_digests, ..Object::default() });
         let fixed = |inlets: usize, outlets: usize| (Count::Fixed { count: inlets }, Count::Fixed { count: outlets });
         let (inlets, outlets) = fixed(1, 2);
         reference.objects.insert("two.ways".into(), Object { module: "abstraction".into(), inlets, outlets, ..Object::default() });
@@ -884,6 +930,42 @@ mod tests {
         assert_eq!(ports("two.ways 1 2 3"), Some((1, 2)), "an abstraction's ports are its inlet and outlet objects");
         let (name, _) = read_page(r#"<c74object name="&gt;=" module="max"><digest>Compare</digest></c74object>"#).unwrap();
         assert_eq!(name, ">=", "named as it's typed in Max, so its page and its help instances meet");
+    }
+
+    #[test]
+    fn a_packages_pages_are_read_wherever_its_docs_keep_them_and_a_page_is_named_for_its_file() {
+        let c74 = tempfile::tempdir().unwrap();
+        let write = |folder: &[&str], file: &str, name: &str| {
+            let folder = folder.iter().fold(c74.path().to_path_buf(), |path, part| path.join(part));
+            std::fs::create_dir_all(&folder).unwrap();
+            let page = format!(r#"<c74object name="{name}" module="max"><digest>{name} from {file}</digest></c74object>"#);
+            std::fs::write(folder.join(format!("{file}.maxref.xml")), page).unwrap();
+        };
+        write(&["docs", "refpages", "max-ref"], "thing", "thing");
+        // A page whose file is named for one object but which names another: the second's own page wins it, and the
+        // first gets it, as Max's help shows the first. An operator's page, named for its sign, makes no object.
+        write(&["docs", "refpages", "max-ref"], "fthing", "thing");
+        write(&["docs", "refpages", "max-ref"], "bitand", "&");
+        std::fs::create_dir_all(c74.path().join("help")).unwrap();
+        let help =
+            json!({ "patcher": { "boxes": [{ "box": { "maxclass": "newobj", "text": "fthing 1", "numinlets": 2, "numoutlets": 2 } }] } });
+        std::fs::write(c74.path().join("help").join("fthing.maxhelp"), help.to_string()).unwrap();
+        write(&["packages", "Elements", "docs"], "live.thing~", "live.thing~");
+        write(&["packages", "dsp", "docs"], "abl.thing~", "abl.thing~");
+        write(&["packages", "Gen", "docs", "refpages1"], "gen_cycle", "cycle");
+        write(&["packages", "RNBO", "docs", "refpages"], "rnbo_mix", "mix");
+        let reference = learn(c74.path());
+        let names: Vec<&str> = reference.objects.keys().map(String::as_str).collect();
+        assert_eq!(names, ["&", "abl.thing~", "fthing", "live.thing~", "thing"], "Gen's and RNBO's operators aren't Max's objects");
+        assert_eq!(reference.objects["thing"].digest, "thing from thing");
+        let fthing = &reference.objects["fthing"];
+        assert_eq!(
+            (fthing.digest.as_str(), fthing.inlets, fthing.seen),
+            ("thing from fthing", Count::Fixed { count: 2 }, 1),
+            "its page, its help's counts"
+        );
+        // A page that lists no ports says nothing of how many there are: the cords decide.
+        assert_eq!(reference.ports("live.thing~"), None);
     }
 
     #[test]
