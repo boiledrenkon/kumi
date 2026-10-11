@@ -5,7 +5,7 @@ use super::{
     gen::{audio_effect_patcher, instrument_patcher, GenSpec, MIX, OUTPUT},
     harness::{check_midi_device_isolated, IsolatedOptions},
     midi::midi_device_patcher,
-    patch::reference,
+    patch::{page, reference},
     patched::patched_device,
     spec::{check_spec, Control, DeviceSpec},
 };
@@ -30,6 +30,8 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 pub const MAKE_DEVICE_TOOL: &str = "make_device";
+/// How many objects one call can ask about.
+const MOST_OBJECTS: usize = 16;
 static DATA: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!("tool-data.json")).expect("device tool data"));
 pub type BrowserSees = Rc<dyn Fn(String, Signal) -> LocalBoxFuture<'static, Result<bool, RuntimeError>>>;
 #[derive(Clone)]
@@ -93,13 +95,28 @@ impl KernelTool for DeviceTool {
         DATA["schema"].as_object().unwrap().clone()
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        if input.get("guide").and_then(Value::as_bool) == Some(true) {
+        let guide = (input.get("guide").and_then(Value::as_bool) == Some(true)).then(|| {
             let kind = input.get("type").and_then(Value::as_str).unwrap_or("");
-            return Ok(ToolResult::text(if matches!(kind, "midi_effect" | "audio_effect" | "instrument") {
-                DATA[kind].as_str().unwrap().into()
+            if matches!(kind, "midi_effect" | "audio_effect" | "instrument") {
+                DATA[kind].as_str().unwrap().to_string()
             } else {
                 ["midi_effect", "audio_effect", "instrument"].map(|k| DATA[k].as_str().unwrap()).join("\n\n")
-            }));
+            }
+        });
+        // Max's objects, as this machine's Max describes them: no device is made.
+        if let Some(objects) = input.get("objects").filter(|objects| !objects.is_null()) {
+            let items = objects.as_array().cloned().unwrap_or_default();
+            let texts: Vec<String> =
+                items.iter().filter_map(Value::as_str).map(str::trim).filter(|text| !text.is_empty()).map(str::to_string).collect();
+            if texts.is_empty() || texts.len() != items.len() || texts.len() > MOST_OBJECTS {
+                let problem = format!("objects: 1 to {MOST_OBJECTS} objects, each as it's typed in a box (\"makenote 60 100 250\").");
+                return Ok(ToolResult::error(stringify(&json!({"problems": [problem], "next": "Fix it and call make_device again."}))));
+            }
+            let pages = reference::installed().map_or_else(|| page::NO_MAX.to_string(), |reference| page::describe_all(reference, &texts));
+            return Ok(ToolResult::text(guide.map_or_else(|| pages.clone(), |guide| format!("{pages}\n\n{guide}"))));
+        }
+        if let Some(guide) = guide {
+            return Ok(ToolResult::text(guide));
         }
         let spec = match check_spec(&input) {
             Ok(spec) => spec,

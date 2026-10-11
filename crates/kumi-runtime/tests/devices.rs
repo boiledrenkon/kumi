@@ -706,6 +706,34 @@ async fn make_device_reads_guide_makes_a_device_and_waits_for_live_browser() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn make_device_answers_what_maxs_objects_take_and_send_and_makes_nothing() {
+    use futures::FutureExt;
+    use kumi_common::abort::Signal;
+    use kumi_runtime::devices::{
+        patch::page::NO_MAX,
+        tool::{device_tool, DeviceToolOptions},
+    };
+    let folder = tempfile::tempdir().unwrap();
+    let library = folder.path().join("library");
+    let tool = device_tool(DeviceToolOptions {
+        user_library: library.to_string_lossy().into(),
+        wait_ms: Some(0),
+        browser_sees: Rc::new(|_, _| async { Ok(true) }.boxed_local()),
+    });
+    let ask = |input: Value| input.as_object().unwrap().clone();
+    let answer = tool.execute(ask(json!({"objects": ["metro 16n", "no.such.object"]})), Signal::new()).await.unwrap();
+    assert!(!answer.is_error, "{}", answer.text);
+    // With Max on this machine, a page for each object; without it, Kumi says so.
+    let paged = answer.text.starts_with("[metro] ") && answer.text.contains("\n\nNo [no.such.object] in this Max.");
+    assert!(answer.text == NO_MAX || paged, "{}", answer.text);
+    let both = tool.execute(ask(json!({"objects": ["metro"], "guide": true, "type": "midi_effect"})), Signal::new()).await.unwrap();
+    assert!(both.text.contains("\n\nMaking a MIDI effect") && both.text.contains("make_device with objects"));
+    let wrong = tool.execute(ask(json!({"objects": []})), Signal::new()).await.unwrap();
+    assert!(wrong.is_error && wrong.text.contains("objects: 1 to 16 objects"), "{}", wrong.text);
+    assert!(!library.exists(), "nothing is made");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn make_device_makes_audio_effect_and_instrument_with_kumis_knobs() {
     use futures::FutureExt;
     use kumi_common::abort::Signal;

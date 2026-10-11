@@ -3,7 +3,8 @@
 //! help patchers, what the object and each inlet and outlet are for (its reference page's digests), and the messages
 //! that only set something in it (its attributes, and the methods its page says send nothing). Max's bundled packages
 //! count (not Gen's or RNBO's pages, whose operators share names with Max's objects), and so do the abstractions Max
-//! ships. It's learned once for each Max and kept in Kumi's folder; none of Max's files are carried in Kumi.
+//! ships. It's learned once for each Max and kept in Kumi's folder with where each object's page is, so the page is
+//! read when it's asked for ([`super::page`]); none of Max's files are carried in Kumi.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::catalog::catalog;
+use super::page::{self, Element, LOOKS};
 
 /// How many of an object's inlets or outlets there are, for the arguments it's given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +117,9 @@ pub struct Object {
     /// it sends depends on them.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub looks: BTreeSet<String>,
+    /// Its reference page, from the C74 folder ("docs/refpages/max-ref/pipe.maxref.xml"); empty for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub page: String,
 }
 
 /// The page of the attributes every box has (hidden, presentation_rect, varname…).
@@ -125,6 +130,9 @@ pub struct Reference {
     /// What it was learned from, so a different Max is learned anew.
     pub fingerprint: String,
     pub objects: BTreeMap<String, Object>,
+    /// The C74 folder its objects' pages are in: where Max is now, so it isn't kept.
+    #[serde(skip)]
+    pub root: PathBuf,
 }
 
 /// An object's inlets and outlets for the arguments it's given.
@@ -258,19 +266,6 @@ fn newest(instances: Vec<Instance>) -> Vec<Instance> {
         .collect()
 }
 
-static OBJECT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"<c74object\s+name="([^"]+)"([^>]*)>"#).unwrap());
-static MODULE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"module="([^"]*)""#).unwrap());
-static DIGEST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<digest>(.*?)</digest>").unwrap());
-static INLETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<inletlist>(.*?)</inletlist>").unwrap());
-static OUTLETS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<outletlist>(.*?)</outletlist>").unwrap());
-static PORT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?s)<(?:inlet|outlet)\s+id="(\d+)"(?:\s+type="([^"]*)")?[^>]*>\s*<digest>(.*?)</digest>"#).unwrap());
-static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
-static METHOD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?s)<method\s+name="([^"]+)"[^>]*>(.*?)</method>"#).unwrap());
-/// An attribute's opening tag (self-closing for one without parts) or its closing tag: an attribute's own attributes
-/// (its label, its category) are written inside it.
-static ATTRIBUTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"<attribute\s+name="([^"]+)"([^>]*?)(/?)>|</attribute>"#).unwrap());
-static VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\bvalue="([^"]*)""#).unwrap());
 /// How a page says a method sends nothing: "with no output", "without triggering output", "do not output".
 static SENDS_NOTHING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(without|no|not)\b[^.]*\boutput").unwrap());
 /// How a page says a method sends: "Output the value", "Set the value and cause output", "Set both values, output…".
@@ -284,37 +279,24 @@ static SETS: LazyLock<Regex> = LazyLock::new(|| {
 /// The messages that carry what an object works on: whatever their page says, they're its reason to send.
 const DATA: [&str; 6] = ["bang", "int", "float", "list", "anything", "symbol"];
 
-/// The categories of attributes that only change how a box looks or is described, never what it sends.
-const LOOKS: [&str; 10] = ["Appearance", "Color", "Description", "Font", "Image", "Name", "Pictures", "Ruler", "Shadow", "View"];
-
-/// The messages a page says only set something (its attributes, not an attribute's own, and its methods that send
-/// nothing; a method that sends, by an attribute's name, isn't quiet), and of those the attributes that only change
-/// how the box looks (filed under Appearance, Color, Font…).
-fn quiet_messages(text: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+/// The messages a page says only set something (its own attributes, not an attribute's or a method's, and its methods
+/// that send nothing; a method that sends, by an attribute's name, isn't quiet), and of those the attributes that only
+/// change how the box looks (filed under Appearance, Color, Font…).
+fn quiet_messages(page: &Element) -> (BTreeSet<String>, BTreeSet<String>) {
     let (mut quiet, mut looks) = (BTreeSet::new(), BTreeSet::new());
-    let mut depth = 0usize;
-    let mut attribute = String::new();
-    for tag in ATTRIBUTE.captures_iter(text) {
-        let Some(name) = tag.get(1) else {
-            depth = depth.saturating_sub(1);
-            continue;
-        };
-        if depth == 0 {
-            attribute = name.as_str().to_string();
-            quiet.insert(attribute.clone());
-        } else if depth == 1 && name.as_str() == "category" && VALUE.captures(&tag[2]).is_some_and(|value| LOOKS.contains(&&value[1])) {
-            looks.insert(attribute.clone());
-        }
-        if &tag[3] != "/" {
-            depth += 1;
+    for attribute in page.child("attributelist").into_iter().flat_map(|list| list.children("attribute")) {
+        let Some(name) = attribute.attribute("name") else { continue };
+        quiet.insert(name.to_string());
+        if page::meta(attribute, "category").is_some_and(|category| LOOKS.contains(&category)) {
+            looks.insert(name.to_string());
         }
     }
-    for method in METHOD.captures_iter(text) {
-        let name = &method[1];
+    for method in page.child("methodlist").into_iter().flat_map(|list| list.children("method")) {
+        let Some(name) = method.attribute("name") else { continue };
         if name.starts_with('(') || DATA.contains(&name) {
             continue;
         }
-        let digest = DIGEST.captures(&method[2]).map(|found| plain(&found[1])).unwrap_or_default();
+        let digest = method.child("digest").map(Element::text).unwrap_or_default();
         if SENDS_NOTHING.is_match(&digest) || (!SENDS.is_match(&digest) && SETS.is_match(&digest)) {
             quiet.insert(name.to_string());
         } else {
@@ -326,51 +308,29 @@ fn quiet_messages(text: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     (quiet, looks)
 }
 
-/// A reference page's text as plain words: tags out, entities read, spaces collapsed.
-fn plain(text: &str) -> String {
-    let text = TAG.replace_all(text, "");
-    let text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&");
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// An object from its reference page (a .maxref.xml): its class and what the page says of it.
+/// An object from its reference page (a .maxref.xml): its class and what the page says of it. A page of what a group
+/// of objects share (box="0": "Snapshot Messages") is no object's.
 fn read_page(text: &str) -> Option<(String, Object)> {
-    let head = OBJECT.captures(text)?;
+    let page = page::read(text).filter(|page| page.tag == "c74object" && page.attribute("box") != Some("0"))?;
     // As it's typed in Max: the page escapes it ("&gt;" is [>]).
-    let name = plain(&head[1]);
-    let module = MODULE.captures(&head[2]).map(|found| found[1].to_string()).unwrap_or_default();
-    let digest = DIGEST.captures(text).map(|found| plain(&found[1])).unwrap_or_default();
-    let ports = |list: &Regex| -> Vec<(String, String)> {
-        list.captures(text)
-            .map(|found| {
-                PORT.captures_iter(&found[1])
-                    .map(|port| {
-                        let kind = port.get(2).map_or("", |kind| kind.as_str());
-                        // A page's placeholder (INLET_TYPE) says nothing about what the port takes.
-                        let kind = if kind.contains("_TYPE") { "" } else { kind };
-                        (kind.to_string(), plain(&port[3]))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let (inlets, outlets) = (ports(&INLETS), ports(&OUTLETS));
-    let (quiet, looks) = quiet_messages(text);
-    let outlet_types =
-        outlets.iter().map(|(kind, _)| if kind.starts_with("signal") { "signal".to_string() } else { String::new() }).collect();
+    let name = page.attribute("name").filter(|name| !name.is_empty())?.to_string();
+    let (inlets, outlets) = (page::ports(&page, "inlet"), page::ports(&page, "outlet"));
+    let (quiet, looks) = quiet_messages(&page);
+    let outlet_types = outlets.iter().map(|port| if port.kind.starts_with("signal") { "signal" } else { "" }.to_string()).collect();
     let object = Object {
-        module,
-        digest,
+        module: page.attribute("module").unwrap_or_default().to_string(),
+        digest: page.child("digest").map(Element::text).unwrap_or_default(),
         inlets: Count::Fixed { count: inlets.len() },
         outlets: Count::Fixed { count: outlets.len() },
         outlet_types,
-        inlet_digests: inlets.into_iter().map(|(_, digest)| digest).collect(),
-        outlet_digests: outlets.into_iter().map(|(_, digest)| digest).collect(),
+        inlet_digests: inlets.into_iter().map(|port| port.digest).collect(),
+        outlet_digests: outlets.into_iter().map(|port| port.digest).collect(),
         seen: 0,
         held: Vec::new(),
         unheld: Vec::new(),
         quiet,
         looks,
+        page: String::new(),
     };
     Some((name, object))
 }
@@ -507,7 +467,7 @@ fn sources(c74: &Path) -> Sources {
 }
 
 /// How Kumi learns the reference: a new way is learned anew, as a new Max is.
-const LEARNER: u32 = 7;
+const LEARNER: u32 = 8;
 
 /// What the reference is learned from in a Max's C74 folder, and how, as one line: a new Max reads differently.
 pub fn fingerprint(c74: &Path) -> String {
@@ -537,6 +497,7 @@ fn unpaged(module: &str, inlets: usize, outlets: usize) -> Object {
         unheld: Vec::new(),
         quiet: BTreeSet::new(),
         looks: BTreeSet::new(),
+        page: String::new(),
     }
 }
 
@@ -545,8 +506,9 @@ fn unpaged(module: &str, inlets: usize, outlets: usize) -> Object {
 pub fn learn(c74: &Path) -> Reference {
     let found = sources(c74);
     let mut objects: BTreeMap<String, Object> = BTreeMap::new();
-    for page in &found.pages {
-        if let Some((name, object)) = std::fs::read_to_string(page).ok().as_deref().and_then(read_page) {
+    for file in &found.pages {
+        if let Some((name, mut object)) = std::fs::read_to_string(file).ok().as_deref().and_then(read_page) {
+            object.page = file.strip_prefix(c74).unwrap_or(file).to_string_lossy().into_owned();
             objects.entry(name).or_insert(object);
         }
     }
@@ -589,7 +551,7 @@ pub fn learn(c74: &Path) -> Reference {
         let count = |maxclass: &str| boxes.iter().filter(|entry| entry["box"]["maxclass"] == maxclass).count();
         objects.insert(name, unpaged("abstraction", count("inlet"), count("outlet")));
     }
-    Reference { fingerprint: fingerprint(c74), objects }
+    Reference { fingerprint: fingerprint(c74), objects, root: c74.to_path_buf() }
 }
 
 /// The installed Max's C74 folder: Live's own Max (the newest Live first), or a Max installed by itself.
@@ -640,8 +602,9 @@ static INSTALLED: LazyLock<Option<Reference>> = LazyLock::new(|| {
     let folder =
         std::env::var("KUMI_HOME").map(PathBuf::from).unwrap_or_else(|_| home::home_dir().unwrap_or_default().join(".kumi")).join("max");
     let file = folder.join("reference.json");
-    if let Some(kept) = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice::<Reference>(&bytes).ok()) {
+    if let Some(mut kept) = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice::<Reference>(&bytes).ok()) {
         if kept.fingerprint == print {
+            kept.root = c74;
             return Some(kept);
         }
     }
@@ -866,5 +829,27 @@ mod tests {
         assert_eq!(ports("cverb~ 0.5 0.2 0.9"), Some((2, 2)), "a page alone is taken at its word");
         let (name, _) = read_page(r#"<c74object name="&gt;=" module="max"><digest>Compare</digest></c74object>"#).unwrap();
         assert_eq!(name, ">=", "named as it's typed in Max, so its page and its help instances meet");
+    }
+
+    #[test]
+    fn a_page_is_read_whatever_order_and_quotes_its_attributes_take() {
+        // A Live API object's page (written for this test): its name last, single quotes, its ports in a list of
+        // their own with descriptions, and an attribute inside a method's own list.
+        let page = r#"<c74object category='Live API Objects' module='m4l' name='live.thing'>
+            <digest> Watch a thing in Live </digest><inletlist/><outletlist/>
+            <apiinletlist><inlet name='Left inlet' id='0'><description> Takes <m>bang</m>. Then more. </description></inlet>
+              <inlet name='Right inlet' id='1'><description>Takes an id</description></inlet></apiinletlist>
+            <apioutletlist><outlet name='Left outlet' id='0'><description>Sends the value.</description></outlet></apioutletlist>
+            <methodlist><method name='go'><arglist/><attributelist><attribute name='introduced' get='1' set='1' type='symbol' size='1' value='9'/></attributelist>
+              <digest>Output the value</digest></method></methodlist>
+            <attributelist><attribute name='slot' get='1' set='1' type='int' size='1'><digest>Which slot</digest></attribute></attributelist>
+            </c74object>"#;
+        let (name, object) = read_page(page).unwrap();
+        assert_eq!((name.as_str(), object.module.as_str(), object.digest.as_str()), ("live.thing", "m4l", "Watch a thing in Live"));
+        assert_eq!((object.inlets, object.outlets), (Count::Fixed { count: 2 }, Count::Fixed { count: 1 }));
+        assert_eq!(object.inlet_digests, ["Takes bang.", "Takes an id"], "a description's first sentence");
+        assert_eq!(object.quiet.iter().map(String::as_str).collect::<Vec<_>>(), ["slot"], "a method's own attributes aren't the object's");
+        let group = r#"<c74object box="0" name="Shared Messages" module="msp"><digest>What a group shares</digest></c74object>"#;
+        assert_eq!(read_page(group), None, "a page of what a group of objects shares is no object's");
     }
 }
