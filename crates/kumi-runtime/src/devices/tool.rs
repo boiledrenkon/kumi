@@ -91,7 +91,11 @@ impl Made {
     }
 
     /// The device this conversation made by the name asked for (or made as that name), while its file is as Kumi wrote it.
+    /// No name asked for is no device's.
     fn ours(&self, folder: &Path, asked: &str) -> Option<MadeDevice> {
+        if asked.is_empty() {
+            return None;
+        }
         let unchanged = |device: &&MadeDevice| {
             std::fs::read(folder.join(format!("{}.amxd", device.file))).is_ok_and(|bytes| hashed(&bytes) == device.written)
         };
@@ -457,6 +461,9 @@ mod tests {
         assert_eq!(made.ours(folder.path(), "Echo").map(|device| device.file), Some("Echo 2".into()), "by the name asked for");
         assert_eq!(made.ours(folder.path(), "Echo 2").map(|device| device.file), Some("Echo 2".into()), "by the name it was made as");
         assert!(made.ours(folder.path(), "Delay").is_none());
+        made.made(MadeDevice { asked: "".into(), file: "Echo 3".into(), kind: DeviceType::MidiEffect, written: hashed(b"written") });
+        std::fs::write(folder.path().join("Echo 3.amxd"), b"written").unwrap();
+        assert!(made.ours(folder.path(), "").is_none(), "two devices made without a name are two");
         std::fs::write(folder.path().join("Echo 2.amxd"), b"saved in Max").unwrap();
         assert!(made.ours(folder.path(), "Echo").is_none(), "a file changed since is someone's own");
         std::fs::write(folder.path().join("Echo 2.amxd"), b"written").unwrap();

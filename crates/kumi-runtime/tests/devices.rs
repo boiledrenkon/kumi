@@ -275,6 +275,21 @@ fn the_devices_code_cant_reach_files_the_network_or_max_and_live_the_frame_hides
         &unrun("const url = \"https://x.y/\"; import(\"data:text/javascript,0\");\nfunction midi(event) { pass(event); }"),
         "doesn't work in the device, even in a comment or a string: modules aren't available"
     ));
+    // Only import(…) is a module a function's body can hold: a word that starts with import, or a comment that says
+    // export, is code that runs; a static import isn't one function's body, and QuickJS says why.
+    for code in [
+        "const importance = (event) => event.velocity / 127;\nfunction midi(event) { pass(event); }",
+        "// important: keep notes in order\nfunction midi(event) { pass(event); }",
+        "// export the note to outlet 0\nconst importFrom = (a) => a;\nfunction midi(event) { pass(event); }",
+    ] {
+        assert!(findings_of(check_spec(&with(lowest(), json!({ "code": code })))).is_empty(), "{code}");
+    }
+    assert!(matches(&unrun("import x from \"y\";\nfunction midi(event) { pass(event); }"), "^code: line 1: "));
+    // A line break in what's quoted can't break the kept code: the frame still reads it and passes MIDI through.
+    assert!(matches(
+        &unrun("async function f() { await import\n(\"x\"); }\nfunction midi(event) { pass(event); }"),
+        "\"import \\(\" doesn't work"
+    ));
     // The frame takes whatever midi is a function.
     for code in ["const midi = (event) => pass(event);", "let midi = function (event) { pass(event); };"] {
         assert!(findings_of(check_spec(&with(lowest(), json!({ "code": code })))).is_empty(), "{code}");
@@ -1003,9 +1018,11 @@ async fn make_device_replaces_only_a_device_this_conversation_made_and_keeps_wha
     // Names Kumi fits to the same file name are two devices, not one replacing the other.
     let (chord, keys) = (run(device("和音")).await, run(device("🎹")).await);
     assert_eq!((chord["made"].as_str(), keys["made"].as_str()), (Some("Device"), Some("Device 2")), "{keys}");
+    let (first, second) = (run(device("")).await, run(device("")).await);
+    assert_eq!((first["made"].as_str(), second["made"].as_str()), (Some("Device 3"), Some("Device 4")), "no name is no device's");
     // Edited since (saved in Max), or made in another conversation, it's someone's own.
     std::fs::write(folder.path().join("Kumi/Device.amxd"), "edited in Max").unwrap();
-    assert_eq!(run(device("和音")).await["made"], "Device 3");
+    assert_eq!(run(device("和音")).await["made"], "Device 5");
     made.borrow_mut().conversation("second");
     assert_eq!(run(device("Echo")).await["made"], "Echo 3");
     // A folder Kumi can't write leaves no device, and says what to do.

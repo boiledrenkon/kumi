@@ -39,8 +39,15 @@ impl Default for Count {
     }
 }
 
+/// The most inlets or outlets Kumi gives a box, whatever its arguments or code say.
+pub const MOST_PORTS: usize = 512;
+
 impl Count {
     pub fn of(&self, args: &[String]) -> usize {
+        self.uncapped(args).min(MOST_PORTS)
+    }
+
+    fn uncapped(&self, args: &[String]) -> usize {
         match *self {
             Count::Fixed { count } => count,
             Count::Arguments { plus, bare } => {
@@ -52,7 +59,7 @@ impl Count {
             }
             // A count of none ([gate 0]) is Max's default.
             Count::FirstArgument { plus, bare } => match args.first().and_then(|arg| arg.parse::<f64>().ok()) {
-                Some(value) if value >= 1.0 && value.fract() == 0.0 && value <= 512.0 => value as usize + plus,
+                Some(value) if value >= 1.0 && value.fract() == 0.0 && value <= MOST_PORTS as f64 => value as usize + plus,
                 _ => bare,
             },
             Count::Formats { bare } => Some(formats(args)).filter(|count| *count > 0).unwrap_or(bare),
@@ -166,25 +173,23 @@ impl Reference {
         let args: Vec<String> = rest.iter().take_while(|word| !word.starts_with('@')).cloned().collect();
         // A fixed count holds as far as Max's help shows it: where it does, and for a number of arguments the help never
         // shows only when it held at every number shown, up to two or more (one more argument can add a port). Seen in
-        // one text, it holds for that text, or for any when that text has arguments and the page's own count (for the
-        // object bare) is the same; seen in none, a page's count holds for the box bare. An abstraction's inlet and
-        // outlet objects are its count, whatever its arguments.
+        // one text, it holds for that text; seen in none, a page's count holds for the box bare. An abstraction's inlet
+        // and outlet objects are its count, whatever its arguments. A count not known to hold leaves the ports to the
+        // cords, which keeps a correct cord; a wrong count would drop it.
         let n = args.len();
-        let listed = !object.inlet_digests.is_empty() || !object.outlet_digests.is_empty();
-        let holds = |count: &Count, page: usize| {
-            let Count::Fixed { count } = *count else { return true };
-            if object.module == "abstraction" {
+        let holds = |count: &Count| {
+            if !matches!(count, Count::Fixed { .. }) || object.module == "abstraction" {
                 return true;
             }
             if object.seen == 0 {
                 return n == 0;
             }
             if let Some(only) = &object.only {
-                return *only == args || (!only.is_empty() && listed && count == page);
+                return *only == args;
             }
             object.held.contains(&n) || (object.unheld.is_empty() && object.held.last().is_some_and(|&most| n <= most || most >= 2))
         };
-        if !holds(&object.inlets, object.inlet_digests.len()) || !holds(&object.outlets, object.outlet_digests.len()) {
+        if !holds(&object.inlets) || !holds(&object.outlets) {
             return None;
         }
         let (inlets, outlets) = (object.inlets.of(&args), object.outlets.of(&args));
@@ -835,20 +840,20 @@ mod tests {
         reference.objects.insert("notein".into(), notein);
         reference.objects.insert("*".into(), times);
         reference.objects.insert("metro".into(), fitted(&[instance(&["100"], 2, 1), instance(&["250"], 2, 1)], (2, 1)));
-        // [bangbang] in Max's help is only ever [bangbang 3]: its three outlets may be fixed or its argument's. Its page,
-        // for it bare, has two.
+        // Seen in one text each, whatever the page lists for the object bare: [bangbang 3]'s three outlets may be fixed
+        // or its argument's; a variable's name leaves out the count of outlets a second argument sets; a fifth argument
+        // at its default leaves out the outlets it sets; and a bare box leaves out a channel, which takes an outlet away.
         let page = |inlets: usize, outlets: usize| (vec![String::new(); inlets], vec![String::new(); outlets]);
-        let (inlet_digests, outlet_digests) = page(1, 2);
-        let bangbang = fitted(&[instance(&["3"], 1, 3)], (1, 2));
-        reference.objects.insert("bangbang".into(), Object { inlet_digests, outlet_digests, ..bangbang });
-        // [split] is only [split 0 10] in Max's help, and its page agrees: arguments don't change its ports. [bendin] is
-        // only ever bare, and its page agrees, but both are the box bare: a channel takes an outlet away.
-        let (inlet_digests, outlet_digests) = page(3, 2);
-        let split = fitted(&[instance(&["0", "10"], 3, 2)], (3, 2));
-        reference.objects.insert("split".into(), Object { inlet_digests, outlet_digests, ..split });
-        let (inlet_digests, outlet_digests) = page(1, 2);
-        let bendin = fitted(&[instance(&[], 1, 2)], (1, 2));
-        reference.objects.insert("bendin".into(), Object { inlet_digests, outlet_digests, ..bendin });
+        for (class, text, ports) in [
+            ("bangbang", vec!["3"], (1, 3)),
+            ("variable", vec!["name"], (1, 1)),
+            ("stutters~", vec!["22050", "11025", "-1", "10", "1"], (3, 1)),
+            ("bendin", vec![], (1, 2)),
+        ] {
+            let (inlet_digests, outlet_digests) = page(ports.0, ports.1);
+            let object = fitted(&[instance(&text, ports.0, ports.1)], ports);
+            reference.objects.insert(class.into(), Object { inlet_digests, outlet_digests, ..object });
+        }
         reference.objects.insert("zl".into(), fitted(&[instance(&["group"], 2, 2), instance(&["slice", "2", "x"], 2, 2)], (2, 2)));
         reference
             .objects
@@ -869,8 +874,12 @@ mod tests {
         );
         assert_eq!(ports("zl group 4 @zlmaxsize 512"), Some((2, 2)), "held up to three arguments, and none disagrees: it stays");
         assert_eq!((ports("bangbang 3"), ports("bangbang"), ports("bangbang 5")), (Some((1, 3)), None, None), "one text holds for itself");
-        assert_eq!(ports("split 5 6"), Some((3, 2)), "one text with arguments, and its page agrees");
-        assert_eq!((ports("bendin"), ports("bendin 1")), (Some((1, 2)), None), "help and page alike show it bare");
+        assert_eq!(
+            (ports("variable x 3"), ports("stutters~ 44100 22050 -1 10 2"), ports("bendin 1")),
+            (None, None, None),
+            "and for no other, though the page agrees with it"
+        );
+        assert_eq!(ports("bendin"), Some((1, 2)));
         assert_eq!((ports("cverb~"), ports("cverb~ 0.5 0.2 0.9")), (Some((2, 2)), None), "a page alone holds for the box bare");
         assert_eq!(ports("two.ways 1 2 3"), Some((1, 2)), "an abstraction's ports are its inlet and outlet objects");
         let (name, _) = read_page(r#"<c74object name="&gt;=" module="max"><digest>Compare</digest></c74object>"#).unwrap();

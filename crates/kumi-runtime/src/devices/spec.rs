@@ -335,8 +335,9 @@ static MIX_OR_OUTPUT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(mix|
 /// A midi the frame finds: it takes whatever `midi` is a function (`function midi(event)`, `const midi = (event) => …`).
 static MIDI_FUNCTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?-u:\b)(function\s*\*?\s*midi\s*\(|(const|let|var)\s+midi\s*=)").unwrap());
-/// What the frame can't hide: a module (import, export) runs outside every name it hides.
-static MODULES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?-u:\b)import\s*[({"'`A-Za-z0-9_*]|(?-u:\b)export\s+"#).unwrap());
+/// What the frame can't hide: a module, which runs outside every name it hides. In a function's body only `import(…)`
+/// reads; a static import or an export doesn't, so it's caught as code that isn't one function's body.
+static MODULES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)import\s*\(").unwrap());
 /// Where Live reads `-->` as a comment: at a line's start, after only spaces and block comments.
 static HTML_CLOSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^(\s|/\*.*?\*/)*-->|\*/(\s|/\*.*?\*/)*-->").unwrap());
 static COMMENTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"//[^\n]*|/\*[\s\S]*?\*/").unwrap());
@@ -549,20 +550,25 @@ fn kind_like(given: &Value) -> DeviceType {
     }
 }
 
-/// A MIDI effect's code kept in the device where it doesn't run, each of its lines a comment (split at every line
-/// break JavaScript has, so none runs on): the frame finds no midi() in it, so the device passes MIDI on as it comes,
+/// A MIDI effect's code kept in the device where it doesn't run, with why: each line a comment (split at every line
+/// break JavaScript has, so none runs on), so the frame finds no midi() in it, the device passes MIDI on as it comes,
 /// and the producer can read the code in the box. A control character is written as its escape.
 pub fn kept_unrun(code: &str, why: &str) -> String {
-    let lines: Vec<String> = code
-        .split("\r\n")
-        .flat_map(|line| line.split(['\n', '\r', '\u{2028}', '\u{2029}']))
-        .map(|line| {
-            let line: String =
-                line.chars().map(|c| if c.is_control() && c != '\t' { format!("\\u{{{:x}}}", c as u32) } else { c.to_string() }).collect();
-            format!("// {line}")
-        })
-        .collect();
-    format!("// Kumi kept this code without running it: {why}. Fix it and make the device again.\n{}", lines.join("\n"))
+    let commented = |text: &str| -> Vec<String> {
+        text.split("\r\n")
+            .flat_map(|line| line.split(['\n', '\r', '\u{2028}', '\u{2029}']))
+            .map(|line| {
+                let line: String = line
+                    .chars()
+                    .map(|c| if c.is_control() && c != '\t' { format!("\\u{{{:x}}}", c as u32) } else { c.to_string() })
+                    .collect();
+                format!("// {line}")
+            })
+            .collect()
+    };
+    let mut lines = commented(&format!("Kumi kept this code without running it: {why}. Fix it and make the device again."));
+    lines.extend(commented(code));
+    lines.join("\n")
 }
 
 /// A device from the model's input, always: what doesn't fit is made the nearest way it can be, and every such
@@ -968,7 +974,7 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
         let unrun = match module {
             Some((text, written)) => Some(format!(
                 "code: \"{}\" doesn't work in the device{written}: modules aren't available, and one would run outside every name the frame hides.",
-                trim(&text)
+                text.split_whitespace().collect::<Vec<_>>().join(" ")
             )),
             None => whole_body(&code),
         };

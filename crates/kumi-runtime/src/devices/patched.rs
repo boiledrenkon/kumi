@@ -15,7 +15,7 @@ use super::amxd::{device_patcher, DevicePatcherOptions, DeviceType, Line, PatchB
 use super::findings::Findings;
 use super::gen::{gen_box, Face, MIX, OUTPUT, OUTPUT_STAGE_EFFECT, OUTPUT_STAGE_INSTRUMENT};
 use super::patch::check::check_with;
-use super::patch::notation::{expand, parse, End, Outside};
+use super::patch::notation::{expand, parse, ports_had, Outside};
 use super::patch::reference::Reference;
 use super::patch::standard::{standard, Level};
 use super::patch::{NoFiles, Patcher};
@@ -97,37 +97,6 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
         x += VIEW[0] + 8.0;
         width = width.max(x);
     }
-    // A control nothing takes from does nothing; an out nothing reaches is a device that's silent.
-    for control in &spec.controls {
-        let wired = notation
-            .cords
-            .iter()
-            .any(|link| [&link.from, &link.to].iter().any(|end| matches!(end, End::Control(name) if name == control.name())));
-        if !wired {
-            found.wrong.push(format!(
-                "patch: \"{}\" isn't wired, so it changes nothing: take its value from \"{}\" -> … (or leave the control out).",
-                control.name(),
-                control.name()
-            ));
-        }
-    }
-    let reached =
-        |inlet: usize| notation.cords.iter().any(|link| matches!(&link.to, End::Outside(name) if name == "out") && link.inlet == inlet);
-    match spec.kind {
-        DeviceType::MidiEffect if !reached(0) => {
-            found.wrong.push("patch: nothing reaches out, so the device sends no MIDI: end the patch -> out.".into());
-        }
-        DeviceType::AudioEffect | DeviceType::Instrument => {
-            for (inlet, side) in [(0, "left"), (1, "right")] {
-                if !reached(inlet) {
-                    found.wrong.push(format!(
-                        "patch: nothing reaches out.{inlet}, the {side} channel, so it's silent: send it sound (the same as the other side, for mono)."
-                    ));
-                }
-            }
-        }
-        _ => {}
-    }
     // The ports of Kumi's own boxes (in, out, the face's controls), for the cords that reach them, and what the patch
     // calls each.
     let mut own: HashMap<String, (usize, usize, String)> = HashMap::new();
@@ -159,14 +128,49 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
         };
         let ((from, outlet), (to, inlet)) = (end("source"), end("destination"));
         if let Some((_, outs, called)) = own.get(&from).filter(|(_, outs, _)| outlet as usize >= *outs) {
-            found.wrong.push(format!("line {line}: a cord leaves outlet {outlet} of {called}, which has {outs} (counted from 0), so Kumi left it out, as Max would."));
+            let has = ports_had("outlet", *outs);
+            found.wrong.push(format!(
+                "line {line}: a cord leaves outlet {outlet} of {called}, which has {has}, so Kumi left it out, as Max would."
+            ));
             continue;
         }
         if let Some((ins, _, called)) = own.get(&to).filter(|(ins, _, _)| inlet as usize >= *ins) {
-            found.wrong.push(format!("line {line}: a cord enters inlet {inlet} of {called}, which has {ins} (counted from 0), so Kumi left it out, as Max would."));
+            let has = ports_had("inlet", *ins);
+            found
+                .wrong
+                .push(format!("line {line}: a cord enters inlet {inlet} of {called}, which has {has}, so Kumi left it out, as Max would."));
             continue;
         }
         lines.push(Line::new(&from, outlet, &to, inlet));
+    }
+    // A control nothing takes from does nothing, and an out nothing reaches is a device that's silent: read from the cords
+    // as they're made, so a cord left out reaches nothing.
+    for control in &spec.controls {
+        let id = outside.controls.get(control.name()).map(String::as_str).unwrap_or_default();
+        let wired = lines.iter().any(|line| line.patchline.source.0 == id || line.patchline.destination.0 == id);
+        if !wired {
+            found.wrong.push(format!(
+                "patch: \"{}\" isn't wired, so it changes nothing: take its value from \"{}\" -> … (or leave the control out).",
+                control.name(),
+                control.name()
+            ));
+        }
+    }
+    let reached = |inlet: u32| lines.iter().any(|line| line.patchline.destination.0 == "obj-out" && line.patchline.destination.1 == inlet);
+    match spec.kind {
+        DeviceType::MidiEffect if !reached(0) => {
+            found.wrong.push("patch: nothing reaches out, so the device sends no MIDI: end the patch -> out.".into());
+        }
+        DeviceType::AudioEffect | DeviceType::Instrument => {
+            for (inlet, side) in [(0, "left"), (1, "right")] {
+                if !reached(inlet) {
+                    found.wrong.push(format!(
+                        "patch: nothing reaches out.{inlet}, the {side} channel, so it's silent: send it sound (the same as the other side, for mono)."
+                    ));
+                }
+            }
+        }
+        _ => {}
     }
     boxes.extend(face.boxes);
     lines.extend(face.lines);
@@ -356,7 +360,9 @@ mod tests {
         // The device is made every time (with Kumi's own boxes, in, out and the face), and what's wrong is said by line.
         let made = |kind: DeviceType, controls: Vec<Control>, patch: &str| {
             let (document, found) = patched_device(&spec(kind, controls, patch), Some(&reference));
-            assert!(Patcher::read(&document, &NoFiles).boxes.iter().any(|item| item.id() == "obj-out"), "a device");
+            let patched = |id: &str| id.strip_prefix("obj-").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
+            let made = Patcher::read(&document, &NoFiles).boxes.iter().filter(|item| patched(item.id())).count();
+            assert_eq!(made, parse(patch).0.boxes.len(), "every box the patch's readable lines make is in the device");
             found
         };
         let unread = made(DeviceType::AudioEffect, vec![], "in.0 -> [*~ 1.] -> out.0 =\nin.1 -> [*~ 1.] -> out.1\n");
@@ -406,8 +412,23 @@ mod tests {
         assert_eq!(
             ports.wrong,
             [
-                "patch line 2: a cord leaves outlet 1 of in, which has 1 (counted from 0), so Kumi left it out, as Max would.",
-                "patch line 3: a cord enters inlet 2 of [+ 0], which has 2 (counted from 0), so Kumi left it out, as Max would.",
+                "patch line 2: a cord leaves outlet 1 of in, which has only outlet 0, so Kumi left it out, as Max would.",
+                "patch line 3: a cord enters inlet 2 of [+ 0], which has inlets 0 to 1, so Kumi left it out, as Max would.",
+            ]
+        );
+        // What's said of the cords is of those made: one left out reaches nothing.
+        let unreached = made(
+            DeviceType::MidiEffect,
+            vec![knob("Amount", 0.0, 10.0, Unit::None)],
+            "add = [+ 0]\nin -> add\nadd.1 -> out\n\"Amount\" -> add.3\n",
+        );
+        assert_eq!(
+            unreached.wrong,
+            [
+                "patch line 3: a cord leaves outlet 1 of [+ 0], which has only outlet 0, so Kumi left it out, as Max would.",
+                "patch line 4: a cord enters inlet 3 of [+ 0], which has inlets 0 to 1, so Kumi left it out, as Max would.",
+                "patch: \"Amount\" isn't wired, so it changes nothing: take its value from \"Amount\" -> … (or leave the control out).",
+                "patch: nothing reaches out, so the device sends no MIDI: end the patch -> out.",
             ]
         );
     }

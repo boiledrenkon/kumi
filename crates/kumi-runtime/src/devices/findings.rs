@@ -1,15 +1,16 @@
 //! What make_device says beside a device it made. A device is made whenever its file can be written, the way Max opens
-//! any patcher: what Max will show as wrong in it comes back first, each with its line where it has one, then what
-//! Kumi made differently from what was asked so it could make it, then what's worth a look. A rule's level in Kumi's
+//! any patcher: what needs fixing in it comes back first, each with its line where it has one, then what Kumi made
+//! differently from what was asked so it could make it, then what's worth a look. A rule's level in Kumi's
 //! standard decides which of these a broken rule is, never whether the device is made.
 
 use super::patch::standard::Level;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Findings {
-    /// What Max will show as wrong in the device, or what it lacks.
+    /// What needs fixing: what Max will show as wrong, what the device lacks (a line Kumi couldn't read and left out, a
+    /// cord to a port that isn't there), and what Kumi's checks and the device's tests found.
     pub wrong: Vec<String>,
-    /// What Kumi made differently from what was asked: the nearest valid value, a name made unique, a line left out.
+    /// What Kumi made differently from what was asked: the nearest valid value, a name made unique.
     pub changed: Vec<String>,
     /// What's worth a look, though nothing's broken.
     pub notes: Vec<String>,
@@ -26,8 +27,8 @@ impl Findings {
         self.notes.extend(other.notes);
     }
 
-    /// A broken rule of Kumi's standard, where its level puts it: an error is what Max will show as wrong, a warning
-    /// is worth a look, and advice is kept for when a patcher is looked over.
+    /// A broken rule of Kumi's standard, where its level puts it: an error needs fixing, a warning is worth a look, and
+    /// advice is kept for when a patcher is looked over.
     pub fn rule(&mut self, level: Level, says: String) {
         match level {
             Level::Error => self.wrong.push(says),

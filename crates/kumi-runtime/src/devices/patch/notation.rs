@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{json, Value};
 
 use super::code::{declared_ports, syntax_problem};
-use super::reference::{atoms, Reference};
+use super::reference::{atoms, Reference, MOST_PORTS};
 use crate::devices::findings::Findings;
 use crate::devices::gen::{gen_patcher, inputs_read, outputs_written};
 
@@ -116,12 +116,13 @@ fn describe(token: Option<&Token>) -> String {
     }
 }
 
-/// Where a run of text closes, from `at`: the first `close` outside quotes and nested `nests`, on the same line.
+/// Where a run of text closes, from `at`: the first `close` outside quotes and nested `nests`, on the same line. A
+/// backslash escapes the character after it, but never the line's end.
 fn closing(chars: &[char], mut at: usize, close: char, nests: Option<char>) -> Option<usize> {
     let (mut quoted, mut depth) = (false, 0usize);
     while at < chars.len() && chars[at] != '\n' {
         let c = chars[at];
-        if c == '\\' {
+        if c == '\\' && chars.get(at + 1).is_some_and(|next| *next != '\n') {
             at += 2;
             continue;
         }
@@ -140,38 +141,196 @@ fn closing(chars: &[char], mut at: usize, close: char, nests: Option<char>) -> O
     None
 }
 
-/// Where a block's closing brace is, from just inside it, and how many lines it passes; comments and quotes skipped.
-fn block_end(chars: &[char], mut at: usize) -> Option<(usize, usize)> {
+/// What a block holds, which says how it's read for where it ends.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Language {
+    /// A patch: # and // comments, and each box's text and control's name on its line.
+    Notation,
+    /// GenExpr: comments, and a buffer's name in quotes.
+    GenExpr,
+    /// JavaScript: comments, strings, template literals (and the code in their ${…}) and regular expressions.
+    JavaScript,
+}
+
+/// What a block after a box of `class` holds.
+fn language(class: &str) -> Language {
+    match class {
+        "gen~" | "gen" => Language::GenExpr,
+        "p" | "patcher" => Language::Notation,
+        _ => Language::JavaScript,
+    }
+}
+
+/// How deep blocks are read inside one another: deeper is read as not closed.
+const NESTING: usize = 64;
+
+/// Where a block's closing brace is, from just inside it, and how many lines it passes, read as `reading` reads it: a
+/// brace in a comment, a string or a box's text is only text, and a block inside a patch is read as what it holds.
+fn block_end(chars: &[char], at: usize, reading: Language) -> Option<(usize, usize)> {
+    block_end_within(chars, at, reading, 0)
+}
+
+fn block_end_within(chars: &[char], mut at: usize, reading: Language, nesting: usize) -> Option<(usize, usize)> {
+    if nesting > NESTING {
+        return None;
+    }
     let (mut depth, mut lines) = (0usize, 0usize);
-    let to_line_end = |at: &mut usize| {
-        while *at + 1 < chars.len() && chars[*at + 1] != '\n' {
-            *at += 1;
-        }
-    };
+    // A patch's last box on the line, for the block after it; JavaScript's last character and word, which say whether a
+    // / starts a regular expression or divides.
+    let (mut class, mut last, mut word) = (String::new(), None::<char>, String::new());
+    let line_end = |at: usize| (at..chars.len()).find(|&end| chars[end] == '\n').unwrap_or(chars.len());
     while at < chars.len() {
         let c = chars[at];
         let next = chars.get(at + 1).copied();
-        match c {
-            '\n' => lines += 1,
-            '"' | '\'' => {
-                at += 1;
-                while at < chars.len() && chars[at] != c && chars[at] != '\n' {
-                    at += if chars[at] == '\\' { 2 } else { 1 };
+        if c == '\n' {
+            lines += 1;
+            class.clear();
+            at += 1;
+            continue;
+        }
+        if (c == '/' && next == Some('/')) || (reading == Language::Notation && c == '#') {
+            at = line_end(at);
+            continue;
+        }
+        if c == '/' && next == Some('*') {
+            let stop = (at + 2..chars.len().saturating_sub(1))
+                .find(|&end| chars[end] == '*' && chars[end + 1] == '/')
+                .map_or(chars.len(), |end| end + 2);
+            lines += chars[at..stop].iter().filter(|c| **c == '\n').count();
+            at = stop;
+            continue;
+        }
+        match (reading, c) {
+            (Language::Notation | Language::GenExpr, '"') => {
+                at = quoted_end(chars, at, '"', false).0;
+                continue;
+            }
+            (Language::Notation, '(') => {
+                at = closing(chars, at + 1, ')', Some('(')).map_or_else(|| line_end(at), |end| end + 1);
+                continue;
+            }
+            (Language::Notation, '[') => {
+                match closing(chars, at + 1, ']', None) {
+                    Some(end) => {
+                        class = atoms(&chars[at + 1..end].iter().collect::<String>()).into_iter().next().unwrap_or_default();
+                        at = end + 1;
+                    }
+                    None => at = line_end(at),
+                }
+                continue;
+            }
+            (Language::Notation, '{') => {
+                let (end, inner) = block_end_within(chars, at + 1, language(&class), nesting + 1)?;
+                lines += inner;
+                at = end + 1;
+                continue;
+            }
+            (Language::Notation, '}') => return Some((at, lines)),
+            (Language::JavaScript, '"' | '\'') => {
+                let (end, inner) = quoted_end(chars, at, c, true);
+                lines += inner;
+                (at, last) = (end, Some(c));
+                continue;
+            }
+            (Language::JavaScript, '`') => {
+                let (end, inner) = template_end(chars, at + 1, nesting)?;
+                lines += inner;
+                (at, last) = (end + 1, Some(c));
+                continue;
+            }
+            (Language::JavaScript, '/') if starts_regex(last, &word) => {
+                if let Some(end) = regex_end(chars, at + 1) {
+                    (at, last) = (end + 1, Some(c));
+                    word.clear();
+                    continue;
                 }
             }
-            '#' => to_line_end(&mut at),
-            '/' if next == Some('/') => to_line_end(&mut at),
-            '/' if next == Some('*') => {
+            (Language::GenExpr | Language::JavaScript, '{') => depth += 1,
+            (Language::GenExpr | Language::JavaScript, '}') if depth == 0 => return Some((at, lines)),
+            (Language::GenExpr | Language::JavaScript, '}') => depth -= 1,
+            _ => {}
+        }
+        if reading == Language::JavaScript && !c.is_whitespace() {
+            let in_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+            if !in_word(c) || !last.is_some_and(in_word) {
+                word.clear();
+            }
+            if in_word(c) {
+                word.push(c);
+            }
+            last = Some(c);
+        }
+        at += 1;
+    }
+    None
+}
+
+/// Past a string from its opening quote at `at`: just past its closing quote, or at the end of its line when it isn't
+/// closed there, and the lines it passes. In JavaScript a backslash at a line's end carries the string on (`carries`).
+fn quoted_end(chars: &[char], at: usize, quote: char, carries: bool) -> (usize, usize) {
+    let (mut at, mut lines) = (at + 1, 0);
+    while at < chars.len() && chars[at] != '\n' {
+        if chars[at] == '\\' && at + 1 < chars.len() && (chars[at + 1] != '\n' || carries) {
+            lines += usize::from(chars[at + 1] == '\n');
+            at += 2;
+            continue;
+        }
+        if chars[at] == quote {
+            return (at + 1, lines);
+        }
+        at += 1;
+    }
+    (at, lines)
+}
+
+/// Where a template literal's closing backtick is, from just inside it, and the lines it passes: its ${…} is code.
+fn template_end(chars: &[char], mut at: usize, nesting: usize) -> Option<(usize, usize)> {
+    let mut lines = 0;
+    while at < chars.len() {
+        match chars[at] {
+            '\\' => {
+                lines += usize::from(chars.get(at + 1) == Some(&'\n'));
                 at += 2;
-                while at + 1 < chars.len() && !(chars[at] == '*' && chars[at + 1] == '/') {
-                    lines += usize::from(chars[at] == '\n');
-                    at += 1;
-                }
-                at += 1;
+                continue;
             }
-            '{' => depth += 1,
-            '}' if depth == 0 => return Some((at, lines)),
-            '}' => depth -= 1,
+            '\n' => lines += 1,
+            '`' => return Some((at, lines)),
+            '$' if chars.get(at + 1) == Some(&'{') => {
+                let (end, inner) = block_end_within(chars, at + 2, Language::JavaScript, nesting + 1)?;
+                lines += inner;
+                at = end + 1;
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+/// Whether a / after `last` (ending `word`) starts a regular expression rather than dividing.
+fn starts_regex(last: Option<char>, word: &str) -> bool {
+    match last {
+        None => true,
+        Some(c) if c.is_alphanumeric() || c == '_' || c == '$' => {
+            matches!(
+                word,
+                "return" | "typeof" | "case" | "do" | "else" | "in" | "of" | "new" | "delete" | "void" | "throw" | "yield" | "await"
+            )
+        }
+        Some(c) => !matches!(c, ')' | ']' | '}' | '"' | '\'' | '`'),
+    }
+}
+
+/// Where a regular expression's closing / is, from just after its opening one, on the same line ([/] is in a class).
+fn regex_end(chars: &[char], mut at: usize) -> Option<usize> {
+    let mut class = false;
+    while at < chars.len() && chars[at] != '\n' {
+        match chars[at] {
+            '\\' if chars.get(at + 1).is_some_and(|next| *next != '\n') => at += 1,
+            '[' => class = true,
+            ']' => class = false,
+            '/' if !class => return Some(at),
             _ => {}
         }
         at += 1;
@@ -180,13 +339,26 @@ fn block_end(chars: &[char], mut at: usize) -> Option<(usize, usize)> {
 }
 
 /// A line the tokens can't be read from is left out: what was read of its statement goes (a block that opened on a line
-/// before it too), and reading goes on from the next line.
-fn leave_out(out: &mut Vec<(Token, usize)>, chars: &[char], at: &mut usize) {
+/// before it too), and reading goes on from the next line. The line its statement starts on.
+fn leave_out(out: &mut Vec<(Token, usize)>, chars: &[char], at: &mut usize, line: usize) -> usize {
+    let mut first = line;
     while out.last().is_some_and(|(token, _)| *token != Token::End) {
-        out.pop();
+        if let Some((_, from)) = out.pop() {
+            first = first.min(from);
+        }
     }
     while *at < chars.len() && chars[*at] != '\n' {
         *at += 1;
+    }
+    first
+}
+
+/// What's said of a statement left out: the line where it went wrong, and the lines it covered when it's more than one.
+fn left_out(at: usize, first: usize, last: usize, reason: &str, hint: &str) -> String {
+    if first == last {
+        format!("line {at}: {reason}, so Kumi left the line out{hint}.")
+    } else {
+        format!("line {at}: {reason}, so Kumi left out lines {first}–{last}, the statement it's part of{hint}.")
     }
 }
 
@@ -225,8 +397,8 @@ fn tokens(text: &str, first_line: usize) -> (Vec<(Token, usize)>, Vec<String>) {
                     at = end + 1;
                 }
                 None => {
-                    unread.push(format!("line {line}: a [ isn't closed on its line, so Kumi left the line out."));
-                    leave_out(&mut out, &chars, &mut at);
+                    let first = leave_out(&mut out, &chars, &mut at, line);
+                    unread.push(left_out(line, first, line, "a [ isn't closed on its line", ""));
                 }
             },
             '(' => match closing(&chars, at + 1, ')', Some('(')) {
@@ -235,8 +407,8 @@ fn tokens(text: &str, first_line: usize) -> (Vec<(Token, usize)>, Vec<String>) {
                     at = end + 1;
                 }
                 None => {
-                    unread.push(format!("line {line}: a ( isn't closed on its line, so Kumi left the line out."));
-                    leave_out(&mut out, &chars, &mut at);
+                    let first = leave_out(&mut out, &chars, &mut at, line);
+                    unread.push(left_out(line, first, line, "a ( isn't closed on its line", ""));
                 }
             },
             '"' => {
@@ -252,22 +424,37 @@ fn tokens(text: &str, first_line: usize) -> (Vec<(Token, usize)>, Vec<String>) {
                         at = end + 1;
                     }
                     None => {
-                        unread.push(format!("line {line}: a \" isn't closed on its line, so Kumi left the line out."));
-                        leave_out(&mut out, &chars, &mut at);
+                        let first = leave_out(&mut out, &chars, &mut at, line);
+                        unread.push(left_out(line, first, line, "a \" isn't closed on its line", ""));
                     }
                 }
             }
-            '{' => match block_end(&chars, at + 1) {
-                Some((end, lines)) => {
-                    out.push((Token::Block(text_of(at + 1, end), line), line));
-                    line += lines;
-                    at = end + 1;
+            '{' => {
+                // A block holds what the box before it holds, and it's read that way for where it ends.
+                let class = match out.last() {
+                    Some((Token::Object(text), _)) => atoms(text).into_iter().next().unwrap_or_default(),
+                    _ => String::new(),
+                };
+                match block_end(&chars, at + 1, language(&class)) {
+                    Some((end, lines)) => {
+                        out.push((Token::Block(text_of(at + 1, end), line), line));
+                        line += lines;
+                        at = end + 1;
+                    }
+                    None => {
+                        // Not closed, it holds the rest of the patch: said, so it's closed where it ends.
+                        let rest = text_of(at + 1, chars.len());
+                        let to = line + rest.trim_end().matches('\n').count();
+                        unread.push(format!(
+                            "line {line}: a {{ isn't closed, so Kumi took the rest of the patch (to line {to}) as its block: close it with }} where it ends."
+                        ));
+                        let lines = rest.matches('\n').count();
+                        out.push((Token::Block(rest, line), line));
+                        line += lines;
+                        at = chars.len();
+                    }
                 }
-                None => {
-                    unread.push(format!("line {line}: a {{ isn't closed, so Kumi left the line out and read on from the next one."));
-                    leave_out(&mut out, &chars, &mut at);
-                }
-            },
+            }
             '-' if next == Some('>') => {
                 out.push((Token::Arrow, line));
                 at += 2;
@@ -286,8 +473,8 @@ fn tokens(text: &str, first_line: usize) -> (Vec<(Token, usize)>, Vec<String>) {
                 match digits.parse() {
                     Ok(port) => out.push((Token::Port(port), line)),
                     Err(_) => {
-                        unread.push(format!("line {line}: .{digits} isn't a port, so Kumi left the line out."));
-                        leave_out(&mut out, &chars, &mut at);
+                        let first = leave_out(&mut out, &chars, &mut at, line);
+                        unread.push(left_out(line, first, line, &format!(".{digits} isn't a port"), ""));
                     }
                 }
             }
@@ -297,10 +484,9 @@ fn tokens(text: &str, first_line: usize) -> (Vec<(Token, usize)>, Vec<String>) {
                 out.push((Token::Name(name), line));
             }
             other => {
-                unread.push(format!(
-                    "line {line}: \"{other}\" isn't part of the notation (a box is [object] or (message), a cord is ->), so Kumi left the line out."
-                ));
-                leave_out(&mut out, &chars, &mut at);
+                let first = leave_out(&mut out, &chars, &mut at, line);
+                let reason = format!("\"{other}\" isn't part of the notation (a box is [object] or (message), a cord is ->)");
+                unread.push(left_out(line, first, line, &reason, ""));
             }
         }
     }
@@ -330,7 +516,7 @@ enum Ref {
 /// A patch written in the notation, read the nearest way it can be, and what was found reading it: each line that
 /// can't be read is left out, and said with its number.
 pub fn parse(text: &str) -> (Notation, Findings) {
-    parse_from(text, 1, true)
+    parse_from(text, 1, true, 0)
 }
 
 /// Reads a patch's lines: `first_line` is its first line in the whole notation; `top` is the device's own patch,
@@ -342,24 +528,37 @@ struct Reader<'a> {
     names: HashMap<String, (usize, usize)>,
     hops: Vec<(Ref, usize, Ref, usize, usize)>,
     found: Findings,
+    /// How many subpatchers this patch is inside.
+    depth: usize,
 }
+
+/// Why a statement is left out: what went wrong, the line it went wrong on, and what to write instead (said after it).
+struct Failure {
+    reason: String,
+    at: usize,
+    hint: &'static str,
+}
+
+/// How many subpatchers deep a patch is read: one deeper is made empty.
+const DEPTH: usize = 16;
 
 impl Reader<'_> {
     fn token(&self) -> Option<&Token> {
         self.tokens.get(self.at).map(|(token, _)| token)
     }
 
-    /// The box whose object or message starts here, with the block after it, made the nearest way it can be: None
-    /// for one that can't be made, whose line is left out.
-    fn boxed(&mut self, line: usize) -> Option<What> {
-        let what = match self.token()?.clone() {
-            Token::Object(text) => {
+    /// A statement left out for `reason` at the token here.
+    fn failure(&self, reason: String, hint: &'static str) -> Failure {
+        Failure { reason, at: self.tokens.get(self.at).map_or(0, |(_, line)| *line), hint }
+    }
+
+    /// The box whose object or message starts here, with the block after it, made the nearest way it can be.
+    fn boxed(&mut self, line: usize) -> Result<What, Failure> {
+        let what = match self.token().cloned() {
+            Some(Token::Object(text)) => {
                 let class = atoms(&text).into_iter().next().unwrap_or_default();
                 if class.is_empty() {
-                    self.found.wrong.push(format!(
-                        "line {line}: [] is empty, so Kumi left the line out: write the object in it, as it's typed in Max."
-                    ));
-                    return None;
+                    return Err(self.failure("[] is empty".into(), ": write the object in it, as it's typed in Max"));
                 }
                 self.at += 1;
                 let block = match self.token() {
@@ -372,8 +571,14 @@ impl Reader<'_> {
                 match (block, holds(&class)) {
                     (Some((code, _)), Some("GenExpr")) => What::Gen { text, code },
                     (Some((code, _)), Some("JavaScript")) => What::Js { text, code },
+                    (Some(_), Some(_)) if self.depth >= DEPTH => {
+                        self.found.wrong.push(format!(
+                            "line {line}: [{text}] is inside {DEPTH} subpatchers, so Kumi made it empty: put what's in it in one less deep."
+                        ));
+                        What::Patcher { text, inner: Notation::default() }
+                    }
                     (Some((inner, from)), Some(_)) => {
-                        let (inner, found) = parse_from(&inner, from, false);
+                        let (inner, found) = parse_from(&inner, from, false, self.depth + 1);
                         self.found.append(found);
                         What::Patcher { text, inner }
                     }
@@ -404,7 +609,7 @@ impl Reader<'_> {
                     (None, None) => What::Object(text),
                 }
             }
-            Token::Message(text) => {
+            Some(Token::Message(text)) => {
                 self.at += 1;
                 if matches!(self.token(), Some(Token::Block(..))) {
                     self.at += 1;
@@ -414,9 +619,9 @@ impl Reader<'_> {
                 }
                 What::Message(text)
             }
-            _ => return None,
+            other => return Err(self.failure(format!("expected a box, not {}", describe(other.as_ref())), "")),
         };
-        Some(what)
+        Ok(what)
     }
 
     /// A box for the patch, by name or not. A name that can't be its own (the device's in or out, or one already
@@ -443,7 +648,7 @@ impl Reader<'_> {
     }
 
     /// One element of a chain: a box (named, by name, or written in place) or a control, and its port.
-    fn element(&mut self, line: usize) -> Option<(Ref, Option<usize>)> {
+    fn element(&mut self, line: usize) -> Result<(Ref, Option<usize>), Failure> {
         let found = match self.token().cloned() {
             Some(Token::Name(name)) => {
                 self.at += 1;
@@ -451,10 +656,7 @@ impl Reader<'_> {
                     self.at += 1;
                     if !matches!(self.token(), Some(Token::Object(_) | Token::Message(_))) {
                         let after = describe(self.token());
-                        self.found.wrong.push(format!(
-                            "line {line}: {name} = needs a box after it, [object] or (message), not {after}, so Kumi left the line out."
-                        ));
-                        return None;
+                        return Err(self.failure(format!("{name} = needs a box after it, [object] or (message), not {after}"), ""));
                     }
                     let what = self.boxed(line)?;
                     self.add(Some(name), what, line)
@@ -470,13 +672,7 @@ impl Reader<'_> {
                 self.at += 1;
                 Ref::Control(name)
             }
-            other => {
-                self.found.wrong.push(format!(
-                    "line {line}: expected a box, a name or a control, not {}, so Kumi left the line out.",
-                    describe(other.as_ref())
-                ));
-                return None;
-            }
+            other => return Err(self.failure(format!("expected a box, a name or a control, not {}", describe(other.as_ref())), "")),
         };
         let port = match self.token() {
             Some(Token::Port(port)) => {
@@ -486,69 +682,79 @@ impl Reader<'_> {
             }
             _ => None,
         };
-        Some((found, port))
+        Ok((found, port))
     }
 
-    /// One line: a box, or a chain of cords. A line that can't be read is left out whole, its boxes too.
+    /// One statement: a box, or a chain of cords, on a line or carried over several by a block. One that can't be read is
+    /// left out whole, its boxes and what was said reading it too.
     fn statement(&mut self) {
         let line = self.tokens[self.at].1;
         let first_box = self.notation.boxes.len();
+        let said = (self.found.wrong.len(), self.found.changed.len(), self.found.notes.len());
         // A line that names a box (name = [object]) is the box, whether or not the name could be kept.
         let names = matches!(self.tokens.get(self.at), Some((Token::Name(_), _)))
             && matches!(self.tokens.get(self.at + 1), Some((Token::Equals, _)));
         let mut chain: Vec<(Ref, Option<usize>)> = Vec::new();
-        let mut read = loop {
-            let Some(element) = self.element(line) else { break false };
-            chain.push(element);
+        let mut failure = loop {
+            match self.element(line) {
+                Ok(element) => chain.push(element),
+                Err(failure) => break Some(failure),
+            }
             match self.token() {
                 Some(Token::Arrow) => self.at += 1,
-                Some(Token::End) | None => break true,
+                Some(Token::End) | None => break None,
                 other => {
                     let other = describe(other);
-                    self.found.wrong.push(format!(
-                        "line {line}: expected -> or the end of the line after a box, not {other}, so Kumi left the line out."
-                    ));
-                    break false;
+                    break Some(self.failure(format!("expected -> or the end of the line after a box, not {other}"), ""));
                 }
             }
         };
-        // On to the next line, past whatever's left of this one.
+        // On to the next line, past whatever's left of the statement: the line it ends on.
         while self.at < self.tokens.len() && self.tokens[self.at].0 != Token::End {
             self.at += 1;
         }
-        let last = chain.len().saturating_sub(1);
-        if read && chain.iter().enumerate().any(|(at, (_, port))| port.is_some() && at != 0 && at != last) {
-            self.found.wrong.push(format!(
-                "line {line}: a box in the middle of a chain is entered at inlet 0 and left by outlet 0, so Kumi left the line out: write a cord to or from another of its ports on a line of its own."
-            ));
-            read = false;
+        let last = self.tokens.get(self.at).map_or(line, |(_, end)| *end);
+        let end = chain.len().saturating_sub(1);
+        if failure.is_none() && chain.iter().enumerate().any(|(at, (_, port))| port.is_some() && at != 0 && at != end) {
+            failure = Some(Failure {
+                reason: "a box in the middle of a chain is entered at inlet 0 and left by outlet 0".into(),
+                at: line,
+                hint: ": write a cord to or from another of its ports on a line of its own",
+            });
         }
-        if !read {
+        if failure.is_none() && chain.len() == 1 && !matches!(chain[0].0, Ref::Box(_)) {
+            failure = Some(Failure {
+                reason: "a name or a control alone makes nothing".into(),
+                at: line,
+                hint: " (a line is a box, name = [object], or cords, a -> b)",
+            });
+        }
+        if let Some(Failure { reason, at, hint }) = failure {
+            self.found.wrong.truncate(said.0);
+            self.found.changed.truncate(said.1);
+            self.found.notes.truncate(said.2);
             self.notation.boxes.truncate(first_box);
             self.names.retain(|_, (at, _)| *at < first_box);
+            self.found.wrong.push(left_out(at, line, last, &reason, hint));
             return;
         }
         if chain.len() == 1 {
-            match &chain[0].0 {
-                Ref::Box(_) if names => {}
-                Ref::Box(_) => self.found.notes.push(format!(
+            if !names {
+                self.found.notes.push(format!(
                     "line {line}: the box on this line has no name and no cords, so nothing reaches it (name = [object] names one; a -> b is a cord)."
-                )),
-                _ => self.found.wrong.push(format!(
-                    "line {line}: a name or a control alone makes nothing, so Kumi left the line out (a line is a box, name = [object], or cords, a -> b)."
-                )),
+                ));
             }
             return;
         }
-        for hop in 0..last {
+        for hop in 0..end {
             let outlet = if hop == 0 { chain[0].1.unwrap_or(0) } else { 0 };
-            let inlet = if hop + 1 == last { chain[last].1.unwrap_or(0) } else { 0 };
+            let inlet = if hop + 1 == end { chain[end].1.unwrap_or(0) } else { 0 };
             self.hops.push((chain[hop].0.clone(), outlet, chain[hop + 1].0.clone(), inlet, line));
         }
     }
 }
 
-fn parse_from(text: &str, first_line: usize, top: bool) -> (Notation, Findings) {
+fn parse_from(text: &str, first_line: usize, top: bool, depth: usize) -> (Notation, Findings) {
     let (tokens, unread) = tokens(text, first_line);
     let mut reader = Reader {
         tokens: &tokens,
@@ -557,6 +763,7 @@ fn parse_from(text: &str, first_line: usize, top: bool) -> (Notation, Findings) 
         names: HashMap::new(),
         hops: Vec::new(),
         found: Findings::default(),
+        depth,
     };
     reader.found.wrong.extend(unread);
     while reader.at < tokens.len() {
@@ -586,6 +793,13 @@ fn parse_from(text: &str, first_line: usize, top: bool) -> (Notation, Findings) 
         }
     };
     for (from, outlet, to, inlet, line) in hops {
+        // A port past the most a box gets is left out with its cord, before anything is made for it.
+        if let Some((which, port)) = [("outlet", outlet), ("inlet", inlet)].into_iter().find(|(_, port)| *port >= MOST_PORTS) {
+            found.wrong.push(format!(
+                "line {line}: a cord at {which} {port} is past the {MOST_PORTS} inlets and outlets Kumi gives a box, so Kumi left it out."
+            ));
+            continue;
+        }
         if let (Some(from), Some(to)) = (end(from, line, &mut found), end(to, line, &mut found)) {
             notation.cords.push(Link { from, outlet, to, inlet, line });
         }
@@ -626,12 +840,21 @@ pub fn expand(notation: &Notation, outside: &Outside) -> Expanded {
 /// A cord left out because a box hasn't the port it uses, said with its line; code that gives its own ports says how
 /// to give it more.
 fn missing_port(line: usize, label: &str, which: &str, port: usize, has: usize, code: bool) -> String {
-    let side = if which == "outlet" { ("leaves", "outlets") } else { ("enters", "inlets") };
-    let more = if code { format!(": set {} = {}; in its code to give it more", side.1, port + 1) } else { String::new() };
+    let side = if which == "outlet" { "leaves" } else { "enters" };
+    let more = if code { format!(": set {which}s = {}; in its code to give it more", port + 1) } else { String::new() };
     format!(
-        "line {line}: a cord {} {which} {port} of {label}, which has {has} (counted from 0), so Kumi left it out, as Max would{more}.",
-        side.0
+        "line {line}: a cord {side} {which} {port} of {label}, which has {}, so Kumi left it out, as Max would{more}.",
+        ports_had(which, has)
     )
+}
+
+/// A box's inlets or outlets as they're numbered, from 0: "only outlet 0", "outlets 0 to 3", "no outlets".
+pub(crate) fn ports_had(which: &str, has: usize) -> String {
+    match has {
+        0 => format!("no {which}s"),
+        1 => format!("only {which} 0"),
+        _ => format!("{which}s 0 to {}", has - 1),
+    }
 }
 
 fn expand_within(notation: &Notation, outside: &Outside, top: bool) -> Expanded {
@@ -721,6 +944,13 @@ fn expand_within(notation: &Notation, outside: &Outside, top: bool) -> Expanded 
                 }
                 let (ins, outs) = declared_ports(code);
                 let (ins, outs) = (ins.unwrap_or(1), outs.unwrap_or(1));
+                if ins.max(outs) > MOST_PORTS {
+                    found.wrong.push(format!(
+                        "line {}: [{text}]'s code sets more than {MOST_PORTS} inlets or outlets, so Kumi made it {MOST_PORTS}.",
+                        item.line
+                    ));
+                }
+                let (ins, outs) = (ins.min(MOST_PORTS), outs.min(MOST_PORTS));
                 // As Max saves embedded code: the box opens it, and no file is needed.
                 let embedded =
                     |file: &str, flags: u8| json!({ "text": code, "filename": file, "flags": flags, "embed": 1, "autowatch": 1 });
@@ -956,6 +1186,104 @@ mod tests {
         assert!(matches!(&notation.boxes[0].what, What::Js { text, code } if text == "v8" && code.contains("bang")));
     }
 
+    /// The line each box of a patch is on, by its name.
+    fn lines_of(notation: &Notation) -> Vec<(String, usize)> {
+        notation.boxes.iter().map(|item| (item.name.clone().unwrap_or_default(), item.line)).collect()
+    }
+
+    #[test]
+    fn a_block_is_read_as_what_it_holds_for_where_it_ends_and_the_lines_after_it_count_on() {
+        // JavaScript: a # is a private member's, a quote in a template literal or a regular expression is only text,
+        // and a ${…} is code with braces of its own.
+        let (notation, found) = parse(concat!(
+            "a = [v8] {\n",
+            "  class Step {\n",
+            "    #n = 0;\n",
+            "    next() { if (this.#n > 3) { this.#n = 0; } return this.#n++; }\n",
+            "  }\n",
+            "  const s = `don't ${ {a: 1}.a } {`;\n",
+            "  const r = /don't[/}]/g;\n",
+            "  function f(n) { if (n) { post(`it's`); } return n / 2; }\n",
+            "  const open = 'not closed\n",
+            "}\n",
+            "b = [metro 100]\n",
+        ));
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(lines_of(&notation), [("a".to_string(), 1), ("b".to_string(), 11)]);
+        assert!(
+            matches!(&notation.boxes[0].what, What::Js { code, .. } if code.contains("return this.#n++;") && code.contains("'not closed"))
+        );
+        // GenExpr: only comments; a patch: # and // comments, and a box's text or a control's name on its line, with a
+        // block inside it read as what that holds.
+        let (notation, found) = parse(concat!(
+            "fx = [gen~] {\n",
+            "  // it's \"fine\" {\n",
+            "  out1 = in1; out2 = in2;\n",
+            "}\n",
+            "v = [p v] {\n",
+            "  [inlet] -> [print don't] -> [outlet]\n",
+            "  (it's) -> [outlet]\n",
+            "  # a } in a comment\n",
+            "  s = [v8] { const t = \"}\"; }\n",
+            "  [inlet] -> s\n",
+            "}\n",
+            "b = [metro 100]\n",
+        ));
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(lines_of(&notation), [("fx".to_string(), 1), ("v".to_string(), 5), ("b".to_string(), 12)]);
+        assert!(matches!(&notation.boxes[1].what, What::Patcher { inner, .. } if inner.boxes.len() == 7), "{:?}", notation.boxes[1]);
+        // A backslash at a line's end escapes nothing: the line after it is its own.
+        let (notation, found) = parse("a = [print C:\\\nb = [metro 100]\n");
+        assert_eq!(found.wrong, ["line 1: a [ isn't closed on its line, so Kumi left the line out."]);
+        assert_eq!(lines_of(&notation), [("b".to_string(), 2)]);
+    }
+
+    #[test]
+    fn a_statement_left_out_names_every_line_it_covers_and_what_was_said_reading_it_goes_with_it() {
+        // A { that isn't closed holds the rest of the patch: none of its code is made into boxes.
+        let (notation, found) = parse("a = [v8] {\nnotes = [60, 64, 67]\nfunction bang() {}\n");
+        assert_eq!(
+            found.wrong,
+            ["line 1: a { isn't closed, so Kumi took the rest of the patch (to line 3) as its block: close it with } where it ends."]
+        );
+        assert!(matches!(&notation.boxes[..], [Item { what: What::Js { code, .. }, .. }] if code.contains("notes = [60, 64, 67]")));
+        // A statement a block carries over several lines is left out whole, and said with its lines.
+        let (notation, found) = parse("a = [v8] {\n  function bang() {}\n} ?\nb = [metro 100]\n");
+        assert_eq!(
+            found.wrong,
+            ["line 3: \"?\" isn't part of the notation (a box is [object] or (message), a cord is ->), so Kumi left out lines 1–3, the statement it's part of."]
+        );
+        assert_eq!(lines_of(&notation), [("b".to_string(), 4)]);
+        let (_, found) = parse("a = [v8] {\n  function bang() {}\n} =\n");
+        assert_eq!(
+            found.wrong,
+            ["line 3: expected -> or the end of the line after a box, not =, so Kumi left out lines 1–3, the statement it's part of."]
+        );
+        // What a statement said before it was left out goes with it.
+        let (notation, found) = parse("fx = [gen~] -> a.1 -> out\n");
+        assert_eq!(
+            found.wrong,
+            ["line 1: a box in the middle of a chain is entered at inlet 0 and left by outlet 0, so Kumi left the line out: write a cord to or from another of its ports on a line of its own."]
+        );
+        assert!(notation.boxes.is_empty());
+        // A port past the most a box gets is left out with its cord, before anything is made for it.
+        let (notation, found) = parse("x = [foo]\nx.4000000000 -> out\n");
+        assert_eq!(
+            found.wrong,
+            ["line 2: a cord at outlet 4000000000 is past the 512 inlets and outlets Kumi gives a box, so Kumi left it out."]
+        );
+        assert!(notation.cords.is_empty());
+        let wide = parse("w = [v8] { outlets = 4000000000; }\nw -> out\n").0;
+        let made = expand(&wide, &Outside { boxes: HashMap::from([("out".to_string(), "obj-out".to_string())]), ..Outside::default() });
+        assert_eq!(made.found.wrong, ["line 1: [v8]'s code sets more than 512 inlets or outlets, so Kumi made it 512."]);
+        assert_eq!(made.boxes[0]["box"]["numoutlets"], json!(512));
+        let many = parse("g = [gen~] { out4000000000 = 0; out1 = 0; }\n").0;
+        assert_eq!(expand(&many, &Outside::default()).boxes[0]["box"]["numoutlets"], json!(1), "gen~'s outN goes to 99 at most");
+        // Subpatchers nest 16 deep at most.
+        let deep = format!("{}{}", "[p x] {\n".repeat(20), "}\n".repeat(20));
+        assert!(parse(&deep).1.wrong.iter().any(|said| said.contains("is inside 16 subpatchers, so Kumi made it empty")));
+    }
+
     #[test]
     fn javascript_is_embedded_in_its_box_with_the_ports_its_code_gives() {
         let notation = parse(concat!(
@@ -1004,7 +1332,7 @@ mod tests {
             made.found.wrong,
             [
                 "line 3: [v8]'s JavaScript doesn't parse: Unexpected token ';'. Kumi made the box with the code as written; Max will say so in its console.",
-                "line 7: a cord leaves outlet 1 of [v8], which has 1 (counted from 0), so Kumi left it out, as Max would: set outlets = 2; in its code to give it more.",
+                "line 7: a cord leaves outlet 1 of [v8], which has only outlet 0, so Kumi left it out, as Max would: set outlets = 2; in its code to give it more.",
             ]
         );
         assert_eq!(
@@ -1074,6 +1402,11 @@ mod tests {
             expand(&inside, &outside).found.wrong,
             ["line 2: \"Rate\" is a control on the device's face, so the cord was left out: bring its value into the [p] through an [inlet]."]
         );
+        // An object Max doesn't have is made with the ports its cords use, and its cords are kept, as Max keeps them on a
+        // broken box.
+        let unknown = expand(&parse("m = [mystery]\nin -> m.1\nm.2 -> out\n").0, &outside);
+        assert_eq!((unknown.boxes[0]["box"]["numinlets"].clone(), unknown.boxes[0]["box"]["numoutlets"].clone()), (json!(2), json!(3)));
+        assert_eq!(unknown.lines.len(), 1, "the cord from in is left out (this outside has no in); the one to out is kept");
         let loose = expand(&parse("[inlet] -> out\n").0, &outside);
         assert_eq!(
             loose.found.wrong,
