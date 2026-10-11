@@ -98,14 +98,11 @@ fn use_built_harness() {
     ONCE.call_once(|| std::env::set_var("KUMI_HARNESS_BIN", env!("CARGO_BIN_EXE_kumi-harness")));
 }
 
-/// Kumi's folder for the tests that make devices with the tool: what's learned of this machine's Max is kept there, not in
-/// the developer's own.
+/// Kumi's folder for the tests that make devices with the tool: what's learned of this machine's Max is kept there, one
+/// folder under the build's own for every run, not in the developer's own.
 fn use_own_kumi_folder() {
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let folder = tempfile::tempdir().unwrap().keep();
-        std::env::set_var("KUMI_HOME", folder);
-    });
+    ONCE.call_once(|| std::env::set_var("KUMI_HOME", std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("devices-kumi-home")));
 }
 
 /// The tool, making devices in `library` for a conversation of its own.

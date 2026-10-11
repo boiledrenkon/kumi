@@ -554,13 +554,18 @@ fn attribute_line(attribute: &Element, name: &str) -> String {
 /// The names this Max has nearest to one it doesn't: a letter or two off, or one starting the other.
 pub fn nearest<'a>(reference: &'a Reference, class: &str) -> Vec<&'a str> {
     let wanted = class.to_lowercase();
-    let most = (wanted.chars().count() / 3).max(2);
+    let length = wanted.chars().count();
+    let most = (length / 3).max(2);
     let mut found: Vec<(usize, &str)> = reference
         .objects
         .keys()
         .filter_map(|name| {
             let lower = name.to_lowercase();
             let starts = wanted.len() >= 3 && lower.len() >= 3 && (lower.starts_with(&wanted) || wanted.starts_with(&lower));
+            // Names further apart in length than that are further apart in letters too: they're never counted.
+            if !starts && lower.chars().count().abs_diff(length) > most {
+                return None;
+            }
             let distance = edits(&wanted, &lower);
             (distance <= most || starts).then_some((distance, name.as_str()))
         })
@@ -772,6 +777,9 @@ mod tests {
         reference.objects.insert("gen~".into(), Object { module: "msp".into(), digest: "Code for audio".into(), ..Object::default() });
         reference.objects.insert("pipes".into(), Object { module: "abstraction".into(), ..Object::default() });
         assert_eq!(describe(&reference, "pip 100"), "No [pip] in this Max. Nearest: [pipe], [pipes].");
+        let started = std::time::Instant::now();
+        assert_eq!(nearest(&reference, &"q".repeat(100_000)), Vec::<&str>::new());
+        assert!(started.elapsed().as_secs() < 2, "a long unknown name is quick: {:?}", started.elapsed());
         assert_eq!(describe(&reference, "makenote"), "No [makenote] in this Max.");
         let alias = describe(&reference, "t b i");
         assert!(alias.starts_with("[t] is [pipe]: Hold numbers back for a time\n[t b i] has 1 inlet and 2 outlets."), "{alias}");

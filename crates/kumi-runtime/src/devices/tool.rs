@@ -180,9 +180,19 @@ fn describe_control(control: &Control) -> String {
     }
 }
 
+/// Whether a call needs what Kumi learned of this machine's Max: objects to look up, or a patch to check.
+fn needs_reference(input: &JsonObject, asked: &[String]) -> bool {
+    let patch = match input.get("patch") {
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(lines)) => lines.iter().filter_map(Value::as_str).any(|line| !line.trim().is_empty()),
+        _ => false,
+    };
+    !asked.is_empty() || patch
+}
+
 /// What this machine's Max says of the objects asked about, each as it's typed in a box.
-fn pages(texts: &[String]) -> String {
-    let mut pages = match (texts.is_empty(), reference::installed()) {
+fn pages(texts: &[String], reference: Option<&reference::Reference>) -> String {
+    let mut pages = match (texts.is_empty(), reference) {
         (true, _) => "objects: give one or more of Max's objects, each as it's typed in a box (\"makenote 60 100 250\").".to_string(),
         (false, None) => page::NO_MAX.to_string(),
         (false, Some(reference)) => page::describe_all(reference, &texts[..texts.len().min(MOST_OBJECTS)]),
@@ -252,11 +262,15 @@ impl KernelTool for DeviceTool {
         .filter(|text| !text.is_empty())
         .map(str::to_string)
         .collect();
+        // What Kumi learned of this machine's Max, when the call needs it: learned (once for each Max, a second or more)
+        // off the thread the app runs on.
+        let reference =
+            if needs_reference(&input, &asked) { tokio::task::spawn_blocking(reference::installed).await.ok().flatten() } else { None };
         // Max's objects as this machine's Max describes them, or a guide, with no device given to make beside them.
         if !given("code") && !given("patch") && (objects.is_some() || guide.is_some()) {
             let mut said: Vec<String> = Vec::new();
             if objects.is_some() {
-                said.push(pages(&asked));
+                said.push(pages(&asked, reference));
             }
             said.extend(guide);
             if ["name", "controls", "about", "tests"].iter().any(|key| given(key)) {
@@ -267,7 +281,7 @@ impl KernelTool for DeviceTool {
         // The device is always made: what doesn't fit is made the nearest way it can be, and said beside it.
         let (spec, mut found) = check_spec(&input);
         let checked = match &spec {
-            DeviceSpec::Patch(_) if reference::installed().is_some() => {
+            DeviceSpec::Patch(_) if reference.is_some() => {
                 "Kumi checked every object against this machine's Max, every cord against the ports it meets, and the order its messages go in, and laid it out top to bottom".to_string()
             }
             DeviceSpec::Patch(_) => "Kumi checked the patch (Max wasn't found here, so its objects weren't checked against it) and laid it out top to bottom".to_string(),
@@ -338,7 +352,7 @@ impl KernelTool for DeviceTool {
             DeviceSpec::Patch(s) => {
                 let mut s = s.clone();
                 s.name = name.clone();
-                let (patcher, patched) = patched_device(&s, reference::installed());
+                let (patcher, patched) = patched_device(&s, reference);
                 found.append(patched);
                 patcher
             }
@@ -426,7 +440,7 @@ impl KernelTool for DeviceTool {
         fields.insert("next".into(), json!(next));
         // What was asked beside the device: Max's objects, and the guide.
         if !asked.is_empty() {
-            fields.insert("objects".into(), json!(pages(&asked)));
+            fields.insert("objects".into(), json!(pages(&asked, reference)));
         }
         if let Some(guide) = guide {
             fields.insert("guide".into(), json!(guide));
@@ -469,6 +483,16 @@ mod tests {
         std::fs::write(folder.path().join("Echo 2.amxd"), b"written").unwrap();
         made.conversation("second");
         assert!(made.ours(folder.path(), "Echo").is_none(), "another conversation's");
+    }
+
+    #[test]
+    fn only_a_lookup_or_a_patch_needs_what_kumi_learned_of_max() {
+        let input = |value: serde_json::Value| value.as_object().unwrap().clone();
+        assert!(!needs_reference(&input(json!({ "objects": [] })), &[]), "none to look up: nothing is learned");
+        assert!(pages(&[], None).starts_with("objects: give one or more of Max's objects"));
+        assert!(needs_reference(&input(json!({ "objects": ["metro"] })), &["metro".to_string()]));
+        assert!(needs_reference(&input(json!({ "patch": "in -> out" })), &[]));
+        assert!(!needs_reference(&input(json!({ "code": "function midi(event) { pass(event); }", "patch": " " })), &[]));
     }
 
     #[test]

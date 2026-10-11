@@ -54,12 +54,12 @@ impl Count {
                 if args.is_empty() {
                     bare
                 } else {
-                    args.len() + plus
+                    args.len().saturating_add(plus)
                 }
             }
             // A count of none ([gate 0]) is Max's default.
             Count::FirstArgument { plus, bare } => match args.first().and_then(|arg| arg.parse::<f64>().ok()) {
-                Some(value) if value >= 1.0 && value.fract() == 0.0 && value <= MOST_PORTS as f64 => value as usize + plus,
+                Some(value) if value >= 1.0 && value.fract() == 0.0 && value <= MOST_PORTS as f64 => (value as usize).saturating_add(plus),
                 _ => bare,
             },
             Count::Formats { bare } => Some(formats(args)).filter(|count| *count > 0).unwrap_or(bare),
@@ -471,15 +471,26 @@ fn evidence(instances: &[Instance], inlets: Count, outlets: Count) -> Evidence {
 
 /// Every file under a folder with one of the extensions, in order.
 fn files(folder: &Path, extension: &str, found: &mut Vec<PathBuf>) {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(folder).into_iter().flatten().flatten().map(|entry| entry.path()).collect();
-    entries.sort();
-    for entry in entries {
-        if entry.is_dir() {
+    for (entry, folder) in folders_first(folder) {
+        if folder {
             files(&entry, extension, found);
         } else if entry.to_string_lossy().ends_with(extension) {
             found.push(entry);
         }
     }
+}
+
+/// What's in a folder, in order, each with whether it's a folder: a link to one isn't, so a link that leads back up is
+/// never walked round.
+fn folders_first(folder: &Path) -> Vec<(PathBuf, bool)> {
+    let mut entries: Vec<(PathBuf, bool)> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| (entry.path(), entry.file_type().is_ok_and(|kind| kind.is_dir())))
+        .collect();
+    entries.sort();
+    entries
 }
 
 /// Packages whose reference pages describe their own operators (gen's, RNBO's), not Max's objects.
@@ -660,23 +671,26 @@ pub fn find_c74() -> Option<PathBuf> {
 
 /// A folder named C74 holding Max's reference pages, within `depth` folders of `root`.
 fn c74_within(root: &Path, depth: usize) -> Option<PathBuf> {
-    if root.file_name().is_some_and(|name| name == "C74") && root.join("docs").join("refpages").is_dir() {
+    // Max's folder of its own is C74 on a Mac; on Windows it's resources, beside Max.exe.
+    let named = root.file_name().is_some_and(|name| name == "C74" || name.eq_ignore_ascii_case("resources"));
+    if named && root.join("docs").join("refpages").is_dir() {
         return Some(root.to_path_buf());
     }
     if depth == 0 {
         return None;
     }
-    let mut entries: Vec<PathBuf> =
-        std::fs::read_dir(root).ok()?.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
-    entries.sort();
-    entries.into_iter().find_map(|entry| c74_within(&entry, depth - 1))
+    folders_first(root).into_iter().filter(|(_, folder)| *folder).find_map(|(entry, _)| c74_within(&entry, depth - 1))
 }
 
 static INSTALLED: LazyLock<Option<Reference>> = LazyLock::new(|| {
     let c74 = find_c74()?;
     let print = fingerprint(&c74);
-    let folder =
-        std::env::var("KUMI_HOME").map(PathBuf::from).unwrap_or_else(|_| home::home_dir().unwrap_or_default().join(".kumi")).join("max");
+    let folder = std::env::var("KUMI_HOME")
+        .ok()
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home::home_dir().unwrap_or_default().join(".kumi"))
+        .join("max");
     let file = folder.join("reference.json");
     if let Some(mut kept) = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice::<Reference>(&bytes).ok()) {
         if kept.fingerprint == print {
@@ -685,8 +699,14 @@ static INSTALLED: LazyLock<Option<Reference>> = LazyLock::new(|| {
         }
     }
     let learned = learn(&c74);
+    // Written beside it, then put in its place: another Kumi reading it, or one stopped writing it, never sees half.
     if std::fs::create_dir_all(&folder).is_ok() {
-        let _ = std::fs::write(&file, serde_json::to_vec(&learned).unwrap_or_default());
+        let temporary = folder.join(format!(".reference.{}.json", uuid::Uuid::new_v4()));
+        if std::fs::write(&temporary, serde_json::to_vec(&learned).unwrap_or_default()).is_err()
+            || std::fs::rename(&temporary, &file).is_err()
+        {
+            let _ = std::fs::remove_file(&temporary);
+        }
     }
     Some(learned)
 });
@@ -930,6 +950,33 @@ mod tests {
         assert_eq!(ports("two.ways 1 2 3"), Some((1, 2)), "an abstraction's ports are its inlet and outlet objects");
         let (name, _) = read_page(r#"<c74object name="&gt;=" module="max"><digest>Compare</digest></c74object>"#).unwrap();
         assert_eq!(name, ">=", "named as it's typed in Max, so its page and its help instances meet");
+    }
+
+    #[test]
+    fn maxs_own_folder_is_found_as_each_system_names_it_and_a_link_round_is_never_walked() {
+        let root = tempfile::tempdir().unwrap();
+        for (folder, found) in [
+            ("Max 9/resources", true),
+            ("Live/Resources/Max/resources", true),
+            ("Max.app/Contents/Resources/C74", true),
+            ("Other/docs", false),
+        ] {
+            let c74 = root.path().join(folder);
+            std::fs::create_dir_all(c74.join("docs").join("refpages")).unwrap();
+            let base = root.path().join(folder.split('/').next().unwrap());
+            assert_eq!(c74_within(&base, 4), found.then_some(c74), "{folder}");
+        }
+        #[cfg(unix)]
+        {
+            let help = root.path().join("Max 9/resources/help");
+            std::fs::create_dir_all(&help).unwrap();
+            std::os::unix::fs::symlink(&help, help.join("again")).unwrap();
+            let mut found = Vec::new();
+            files(&help, ".maxhelp", &mut found);
+            assert!(found.is_empty(), "the link is a file, not a folder walked again");
+        }
+        let overflowing = Count::Arguments { plus: usize::MAX - 2, bare: 1 };
+        assert_eq!(overflowing.of(&["a".into(), "b".into(), "c".into()]), MOST_PORTS, "a count from a broken help file can't overflow");
     }
 
     #[test]
