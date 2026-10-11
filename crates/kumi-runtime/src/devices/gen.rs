@@ -23,6 +23,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 
 use super::amxd::{device_patcher, face_layout, DevicePatcherOptions, DeviceType, FaceLayout, Line, PatchBox};
+use super::findings::Findings;
 use super::midi::unit_style;
 use super::spec::{AudioEffectSpec, Control, InstrumentSpec, NumericControl, Unit};
 
@@ -140,9 +141,18 @@ pub fn inputs_read(code: &str) -> usize {
     INPUT_READ.captures_iter(&bare).map(|found| found[1].parse::<usize>().unwrap_or(0)).max().unwrap_or(0)
 }
 
-/// What Kumi checks in the model's GenExpr before building (Max compiles it when Live loads the device).
-pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Vec<String> {
-    let mut problems: Vec<String> = Vec::new();
+/// Whether the code declares `id` itself (a Param, a History, a Delay…): Kumi then doesn't declare it again, since
+/// gen~ refuses a name declared twice.
+fn declares(code: &str, id: &str) -> bool {
+    Regex::new(&format!(r"(?-u:\b)(?:Param|History|Delay|Data|Buffer)\s+{}(?-u:\b)", regex::escape(id)))
+        .is_ok_and(|declared| declared.is_match(&without_comments(code)))
+}
+
+/// What Kumi finds in the model's GenExpr before building, said beside the device it makes (Max compiles the code when
+/// Live loads the device): what Max will show as wrong, and the declarations Kumi leaves to the code.
+pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Findings {
+    let mut found = Findings::default();
+    let problems = &mut found.wrong;
     let bare = without_comments(code);
     if !OUT1.is_match(&bare) || !OUT2.is_match(&bare) {
         problems.push("code: assign out1 (left) and out2 (right), every sample.".to_string());
@@ -169,17 +179,22 @@ pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Vec
     if broken || braces != 0 || parens != 0 {
         problems.push("code: its braces or parentheses don't pair up.".to_string());
     }
-    if KUMI_PARAMS.is_match(&bare) {
-        problems.push("code: note, velocity, strike, bend and mod_wheel are Kumi's; use them without declaring them.".to_string());
+    // Kumi declares a voice's note, velocity, strike, bend and mod_wheel, and each control's Param from the control; one
+    // the code declares itself is left to the code, since gen~ refuses a name declared twice.
+    let mut left: Vec<String> = Vec::new();
+    if kind == DeviceType::Instrument {
+        for found_param in KUMI_PARAMS.captures_iter(&bare).filter(|found_param| !found_param[1].starts_with("kumi_")) {
+            left.push(format!(
+                "code: it declares {}, which Kumi gives each voice, so Kumi used the code's declaration of it.",
+                &found_param[1]
+            ));
+        }
     }
-    // Kumi declares each control's Param (its default and range come from the control); declared again, gen~ refuses the code.
     for control in controls {
         let id = param_name(control.name());
-        let declared =
-            Regex::new(&format!(r"(?-u:\b)(?:Param|History|Delay|Data|Buffer)\s+{}(?-u:\b)", regex::escape(&id))).expect("a Param's name");
-        if declared.is_match(&bare) {
-            problems.push(format!(
-                "code: {id} is the {} control's Param, which Kumi declares from the control; use {id} without declaring it.",
+        if declares(code, &id) {
+            left.push(format!(
+                "code: it declares {id}, the {} control's Param, so Kumi used that declaration: the default and range come from the code, not the control.",
                 control.name()
             ));
         }
@@ -203,13 +218,15 @@ pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Vec
     if inputs > 2 {
         problems.push("code: the device has two inputs, in1 (left) and in2 (right).".to_string());
     }
-    problems
+    found.changed = left;
+    found
 }
 
-/// The Param declarations for the model's controls.
-fn param_lines(controls: &[Control]) -> Vec<String> {
+/// The Param declarations for the model's controls, but for those its code declares itself.
+fn param_lines(controls: &[Control], code: &str) -> Vec<String> {
     controls
         .iter()
+        .filter(|control| !declares(code, &param_name(control.name())))
         .map(|control| {
             let id = param_name(control.name());
             match control {
@@ -468,12 +485,14 @@ pub const MAX_VOICES: u32 = 32;
 
 /// The effect's code as its gen~ holds it.
 pub fn effect_code(spec: &GenSpec) -> String {
-    with_params(&spec.code, &param_lines(&spec.controls), &format!("Made by Kumi: {}", spec.name))
+    with_params(&spec.code, &param_lines(&spec.controls, &spec.code), &format!("Made by Kumi: {}", spec.name))
 }
 
 /// One voice's code as each voice's gen~ holds it.
 pub fn voice_code(spec: &GenSpec) -> String {
-    let lines: Vec<String> = VOICE_PARAMS.iter().map(|line| line.to_string()).chain(param_lines(&spec.controls)).collect();
+    let given = |line: &&str| line.split(['(', ' ']).nth(1).is_some_and(|id| declares(&spec.code, id));
+    let voice = VOICE_PARAMS.iter().filter(|line| !given(line)).map(|line| line.to_string());
+    let lines: Vec<String> = voice.chain(param_lines(&spec.controls, &spec.code)).collect();
     with_params(&spec.code, &lines, &format!("Made by Kumi: {} (one voice)", spec.name))
 }
 

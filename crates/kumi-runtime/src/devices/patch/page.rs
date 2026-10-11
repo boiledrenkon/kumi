@@ -480,7 +480,7 @@ fn attribute_line(attribute: &Element, name: &str) -> String {
 }
 
 /// The names this Max has nearest to one it doesn't: a letter or two off, or one starting the other.
-fn nearest<'a>(reference: &'a Reference, class: &str) -> Vec<&'a str> {
+pub fn nearest<'a>(reference: &'a Reference, class: &str) -> Vec<&'a str> {
     let wanted = class.to_lowercase();
     let most = (wanted.chars().count() / 3).max(2);
     let mut found: Vec<(usize, &str)> = reference

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use kumi_common::js::json::stringify;
 use kumi_runtime::devices::amxd::{decode_amxd, encode_amxd, DecodedAmxd, DeviceType};
+use kumi_runtime::devices::findings::Findings;
 use kumi_runtime::devices::gen::{
     after_functions, audio_effect_patcher, effect_code, inputs_read, instrument_patcher, param_name, voice_code, GenSpec,
 };
@@ -69,10 +70,10 @@ fn with(base: Map<String, Value>, overrides: Value) -> Map<String, Value> {
     input
 }
 
+/// A MIDI effect made from the overrides, which leave nothing to say.
 fn spec(overrides: Value) -> MidiSpec {
-    let checked = check_spec(&with(lowest(), overrides));
-    match checked {
-        Ok(DeviceSpec::MidiEffect(spec)) => spec,
+    match check_spec(&with(lowest(), overrides)) {
+        (DeviceSpec::MidiEffect(spec), found) if found.is_empty() => spec,
         other => panic!("{other:?}"),
     }
 }
@@ -81,11 +82,9 @@ fn matches(text: &str, pattern: &str) -> bool {
     Regex::new(pattern).unwrap().is_match(text)
 }
 
-fn problems_of(checked: Result<DeviceSpec, Vec<String>>) -> Vec<String> {
-    match checked {
-        Err(problems) => problems,
-        Ok(spec) => panic!("accepted: {spec:?}"),
-    }
+/// What's said beside a device made from a spec: what's wrong, then what Kumi changed, then what's worth a look.
+fn findings_of(checked: (DeviceSpec, Findings)) -> Vec<String> {
+    checked.1.all().cloned().collect()
 }
 
 fn boxes_of(patcher: &Value) -> Vec<&Map<String, Value>> {
@@ -189,40 +188,63 @@ fn the_devices_code_cant_reach_files_the_network_or_max_and_live_the_frame_hides
         sent
     });
     assert_eq!(sent, [0xB0 as f64, 1.0, 1.0]);
-    // Refused up front, saying why.
-    let refused = problems_of(check_spec(&with(
-        lowest(),
-        json!({ "code": "function midi(e) { const f = new File('/tmp/x'); XMLHttpRequest; outlet(0, 1); new Task(() => {}); eval('1'); }" }),
-    )));
-    assert_eq!(refused.len(), 3, "one line for each kind of reach");
-    assert!(matches(&refused.join(" "), "files, the network"));
-    assert!(matches(&refused.join(" "), "can't make code"));
+    // Said up front, beside the device, which is made with the code as written: the frame hides what it reaches for.
+    let reaching = "function midi(e) { const f = new File('/tmp/x'); XMLHttpRequest; outlet(0, 1); new Task(() => {}); eval('1'); }";
+    let (made, found) = check_spec(&with(lowest(), json!({ "code": reaching })));
+    assert!(matches!(&made, DeviceSpec::MidiEffect(spec) if spec.code == reaching));
+    assert_eq!(found.wrong.len(), 3, "one line for each kind of reach");
+    assert!(matches(&found.wrong.join(" "), "files, the network"));
+    assert!(matches(&found.wrong.join(" "), "can't make code"));
     // Ordinary names are fine: Math.max, a helper called parse, a class.
-    assert!(check_spec(&with(lowest(), json!({ "code": "class Voice { constructor(p) { this.p = p; } }\nconst parse = (x) => Math.max(0, x);\nfunction midi(event) { pass(event); }" }))).is_ok());
-    // The code is one function's body, as the frame needs: code that closes the device's function early, or leaves a
-    // brace open, is refused whatever names it uses, and so are HTML-like comments, which Live reads as comments.
-    let refused = |code: &str| problems_of(check_spec(&with(lowest(), json!({ "code": code })))).join(" ");
+    assert!(findings_of(check_spec(&with(lowest(), json!({ "code": "class Voice { constructor(p) { this.p = p; } }\nconst parse = (x) => Math.max(0, x);\nfunction midi(event) { pass(event); }" })))).is_empty());
+    // The code is one function's body, as the frame needs. Code that closes the device's function early, or leaves a
+    // brace open, whatever names it uses, and HTML-like comments, which Live reads as comments, could run outside what
+    // the frame hides: the device is made with the code kept in it unrun, and it passes MIDI on as it comes.
+    let unrun = |code: &str| {
+        let (made, found) = check_spec(&with(lowest(), json!({ "code": code })));
+        let DeviceSpec::MidiEffect(made) = made else { panic!("{made:?}") };
+        assert!(
+            made.code.starts_with("// Kumi kept this code without running it")
+                && made.code.ends_with(&format!("const unrun = {};", stringify(&json!(code)))),
+            "{}",
+            made.code
+        );
+        assert!(made.tests.is_empty(), "the code isn't run, nor its tests");
+        assert_eq!(
+            check_midi_device(&made).problems,
+            Vec::<String>::new(),
+            "the frame reads it, and the device passes MIDI on as it comes"
+        );
+        found.wrong.join(" ")
+    };
     assert!(matches(
-        &refused("function midi(event) { pass(event); }\n})();\nconst outside = 1;\n(function () {"),
+        &unrun("function midi(event) { pass(event); }\n})();\nconst outside = 1;\n(function () {"),
         "closes the device's function early"
     ));
-    assert!(matches(&refused("function midi(event) { pass(event);"), "doesn't read as one function's body"));
-    assert!(matches(&refused("function midi(event) { pass(event); }\n<!-- a note -->"), "Live reads them as comments"));
+    assert!(matches(&unrun("function midi(event) { pass(event);"), "doesn't read as one function's body"));
+    assert!(matches(&unrun("function midi(event) { pass(event); }\n<!-- a note -->"), "Live reads them as comments"));
     // A brace in a string or a comment is only text.
-    assert!(check_spec(&with(lowest(), json!({ "code": "const close = \"})();\"; // }\nfunction midi(event) { pass(event); }" }))).is_ok());
-    // A "//" in a string doesn't hide the rest of its line from the check: an import there is refused all the same.
+    assert!(findings_of(check_spec(&with(
+        lowest(),
+        json!({ "code": "const close = \"})();\"; // }\nfunction midi(event) { pass(event); }" })
+    )))
+    .is_empty());
+    // A "//" in a string doesn't hide the rest of its line from the check: an import there is said all the same.
     assert!(matches(
-        &refused("const url = \"https://x.y/\"; import(\"data:text/javascript,0\");\nfunction midi(event) { pass(event); }"),
-        "isn't allowed, even in a comment or a string: modules aren't available"
+        &findings_of(check_spec(&with(
+            lowest(),
+            json!({ "code": "const url = \"https://x.y/\"; import(\"data:text/javascript,0\");\nfunction midi(event) { pass(event); }" })
+        )))
+        .join(" "),
+        "doesn't work in the device, even in a comment or a string: modules aren't available"
     ));
 }
 
 #[test]
-fn a_spec_says_whats_wrong_with_it_each_so_it_can_be_fixed() {
-    assert!(matches(
-        &problems_of(check_spec(&with(lowest(), json!({ "type": "reverb" })))).join(" "),
-        "midi_effect, audio_effect or instrument"
-    ));
+fn a_spec_is_made_the_nearest_way_it_can_be_and_says_what_was_changed() {
+    let (made, found) = check_spec(&with(lowest(), json!({ "type": "reverb" })));
+    assert!(matches!(made, DeviceSpec::MidiEffect(_)));
+    assert_eq!(found.changed, ["type \"reverb\": made as midi_effect (midi_effect, audio_effect or instrument)."]);
     let checked = check_spec(
         json!({ "type": "midi_effect", "name": "", "about": "", "controls": [
             { "name": "Window", "type": "number", "min": 5, "max": 1, "default": 3 }, { "name": "Window", "type": "switch", "default": true }, { "name": "Mode", "type": "choice", "options": ["A"], "default": "A" },
@@ -230,20 +252,90 @@ fn a_spec_says_whats_wrong_with_it_each_so_it_can_be_fixed() {
         .as_object()
         .unwrap(),
     );
-    let text = problems_of(checked).join("\n");
+    let (made, found) = checked;
+    let DeviceSpec::MidiEffect(made) = made else { panic!("{made:?}") };
+    assert_eq!(made.name, "Device");
+    let controls: Vec<Value> = made.controls.iter().map(|control| json!([control.name(), control.default_value()])).collect();
+    assert_eq!(
+        controls,
+        [json!(["Window", 3.0]), json!(["Window 2", true]), json!(["Mode", "A"]), json!(["Level", 3.0]), json!(["Rate", 0.5])]
+    );
+    let text = found.all().cloned().collect::<Vec<_>>().join("\n");
     for expected in [
-        r"(?m)^name:",
-        r"(?m)^about:",
-        "min is below max",
-        "used twice",
-        "2–128 options",
-        "whole-number",
-        "unit is one of",
-        "define function midi",
-        r"(?m)^tests\[0\]",
+        r#"(?m)^name "": made as "Device""#,
+        r"(?m)^about: none given",
+        r"Window\): min was above max; made 1 to 5, starting at 3\.",
+        r#"controls\[1\]\.name "Window": made as "Window 2""#,
+        r"Level\): an integer control's min, max and default are whole numbers; made 0 to 10, starting at 3\.",
+        r#"unit "furlongs" isn't one of ms, s, Hz"#,
+        r"define midi\(event\)",
+        r"(?m)^tests\[0\] wasn't run",
     ] {
         assert!(matches(&text, expected), "{expected}: {text}");
     }
+    assert!(!matches(&text, "Mode"), "one option is a menu Live can show: {text}");
+}
+
+#[test]
+fn what_kumi_once_refused_is_made_the_nearest_way_it_can_be_and_said() {
+    // A long description is cut at a word, within 400 characters.
+    let long = "A delay that repeats every note it hears ".repeat(12);
+    let (made, found) = check_spec(&with(lowest(), json!({ "about": long })));
+    assert!(made.about().chars().count() <= 400 && made.about().ends_with('…'), "{}", made.about());
+    assert!(matches(&found.changed.join(" "), r"^about: \d+ characters, cut to the first \d+ \(up to 400\)\."), "{found:?}");
+    // Controls: a default past its range, a menu without options or with a default it hasn't got, a switch whose default
+    // isn't true or false, and a type Kumi doesn't know.
+    let (made, found) = check_spec(&with(
+        lowest(),
+        json!({ "controls": [
+            { "name": "Gain", "type": "number", "min": 0, "max": 10, "default": 99 },
+            { "name": "Shape", "type": "choice", "options": [], "default": "Sine" },
+            { "name": "Scale", "type": "choice", "options": ["Major", "", "Minor"], "default": 1 },
+            { "name": "Hold", "type": "switch", "default": "on" },
+            { "name": "Feel", "type": "knob", "min": 0, "max": 1, "default": 0.5 },
+        ] }),
+    ));
+    let controls: Vec<Value> =
+        made.controls().iter().map(|control| json!([control.name(), control.type_name(), control.default_value()])).collect();
+    assert_eq!(
+        controls,
+        [
+            json!(["Gain", "number", 10.0]),
+            json!(["Shape", "choice", "Shape"]),
+            json!(["Scale", "choice", "Minor"]),
+            json!(["Hold", "switch", true]),
+            json!(["Feel", "number", 0.5])
+        ]
+    );
+    let said = found.changed.join("\n");
+    for expected in [
+        r"Gain\): the default was outside min and max; made 0 to 10, starting at 10\.",
+        r#"Shape\): it had no options, its default "Sine" isn't one of its options; made with "Shape""#,
+        r#"Scale\): option "" was left out; made with "Major", "Minor", starting at "Minor"\."#,
+        r#"Hold\): a switch's default is true or false, not "on"; made on\."#,
+        r#"Feel\): type "knob": made as a number"#,
+    ] {
+        assert!(matches(&said, expected), "{expected}: {said}");
+    }
+    // Code and a patch together: the patch is made. No code at all: the device passes what it gets on, or is silent.
+    let (made, found) = check_spec(&with(grit(), json!({ "patch": "in.0 -> out.0\nin.1 -> out.1\n" })));
+    assert!(matches!(&made, DeviceSpec::Patch(_)) && found.changed[0].starts_with("code: the device was made from its patch"), "{found:?}");
+    for (base, made_code, says) in [
+        (lowest(), "function midi(event) { pass(event); }", "passes MIDI on as it comes"),
+        (grit(), "out1 = in1;\nout2 = in2;", "passes its input on as it comes"),
+        (pluck(), "out1 = 0;\nout2 = 0;", "makes no sound"),
+    ] {
+        let (made, found) = check_spec(&with(base, json!({ "code": "", "tests": [] })));
+        assert_eq!(made.code(), made_code);
+        assert!(found.wrong[0].contains(says), "{found:?}");
+    }
+    let (made, found) = check_spec(&with(grit(), json!({ "code": null, "patch": " " })));
+    assert!(matches!(made, DeviceSpec::Patch(_)) && found.wrong[0].starts_with("patch: it's empty"), "{found:?}");
+    // More tests than are run: the first 32.
+    let test = json!({ "name": "t", "input": [], "expect": [] });
+    let (DeviceSpec::MidiEffect(made), found) = check_spec(&with(lowest(), json!({ "tests": vec![test; 33] }))) else { panic!() };
+    assert_eq!(made.tests.len(), 32);
+    assert_eq!(found.changed, ["tests: the first 32 were run, and 1 more weren't."]);
 }
 
 #[test]
@@ -277,8 +369,8 @@ fn kumi_runs_the_devices_tests_and_its_own_checks_a_working_device_passes_a_brok
         "expect": [{ "type": "noteon", "pitch": 60, "at": 15 }, { "type": "noteoff", "pitch": 60, "at": 90 }] }] }),
     ));
     assert_eq!(zero.problems, Vec::<String>::new());
-    // Code that doesn't read is refused before it's run: it isn't one function's body.
-    let broken = problems_of(check_spec(&with(lowest(), json!({ "code": "function midi(event) { pass(event) ", "tests": [] }))));
+    // Code that doesn't read isn't run: it isn't one function's body, so the device is made with it kept unrun.
+    let broken = findings_of(check_spec(&with(lowest(), json!({ "code": "function midi(event) { pass(event) ", "tests": [] }))));
     assert!(matches(&broken.join(" "), "doesn't read as one function's body"), "{broken:?}");
     // In Kumi's own process too, where nothing else would end it.
     let flooded = check_midi_device(&spec(
@@ -376,9 +468,9 @@ out2 = out1;",
 }
 
 fn gen_spec(input: &Map<String, Value>) -> GenSpec {
-    match check_spec(input) {
-        Ok(DeviceSpec::AudioEffect(spec)) => GenSpec::from(&spec),
-        Ok(DeviceSpec::Instrument(spec)) => GenSpec::from(&spec),
+    match check_spec(input).0 {
+        DeviceSpec::AudioEffect(spec) => GenSpec::from(&spec),
+        DeviceSpec::Instrument(spec) => GenSpec::from(&spec),
         other => panic!("{other:?}"),
     }
 }
@@ -441,7 +533,7 @@ fn genexprs_order_holds_the_models_functions_first_then_kumis_params_for_the_con
 #[test]
 fn an_audio_effect_plugin_into_the_models_gen_kumis_fixed_output_stage_with_mix_and_output_plugout_each_control_a_live_parameter() {
     let checked = check_spec(&grit());
-    assert!(matches!(checked, Ok(DeviceSpec::AudioEffect(_))), "{checked:?}");
+    assert!(matches!(&checked, (DeviceSpec::AudioEffect(_), found) if found.is_empty()), "{checked:?}");
     let patcher = audio_effect_patcher(&gen_spec(&grit()));
     let effect = inner(&patcher, "obj-effect");
     assert_eq!(effect["text"], "gen~");
@@ -484,7 +576,7 @@ fn an_audio_effect_plugin_into_the_models_gen_kumis_fixed_output_stage_with_mix_
 fn an_instrument_notes_shared_out_by_poly_to_one_gen_per_voice_bend_exactly_0_at_rest_a_strike_per_note_every_voice_into_kumis_output_stage(
 ) {
     let checked = check_spec(&pluck());
-    assert!(matches!(&checked, Ok(DeviceSpec::Instrument(spec)) if spec.voices == 6), "{checked:?}");
+    assert!(matches!(&checked, (DeviceSpec::Instrument(spec), found) if spec.voices == 6 && found.is_empty()), "{checked:?}");
     let patcher = instrument_patcher(&gen_spec(&pluck()));
     assert_eq!(inner(&patcher, "obj-poly")["text"], "poly 6 1");
     assert_eq!(inner(&patcher, "obj-route")["text"], "route 1 2 3 4 5 6");
@@ -536,29 +628,29 @@ fn an_instrument_notes_shared_out_by_poly_to_one_gen_per_voice_bend_exactly_0_at
 }
 
 #[test]
-fn kumis_checks_for_an_audio_effect_or_an_instrument_say_whats_wrong_each_so_it_can_be_fixed() {
-    let problems = |input: Map<String, Value>| match check_spec(&input) {
-        Err(problems) => problems.join("\n"),
-        Ok(_) => String::new(),
-    };
+fn kumis_checks_for_an_audio_effect_or_an_instrument_say_whats_wrong_beside_the_device_each_so_it_can_be_fixed() {
+    let problems = |input: Map<String, Value>| findings_of(check_spec(&input)).join("\n");
     assert!(matches(
         &problems(with(grit(), json!({ "controls": [{ "name": "Mix", "type": "number", "min": 0, "max": 1, "default": 1 }] }))),
         "Kumi adds Mix"
     ));
     assert!(matches(
         &problems(with(grit(), json!({ "controls": [{ "name": "Delay", "type": "number", "min": 0, "max": 1, "default": 1 }] }))),
-        "Param delay, a name gen~ or Kumi already uses; call it something else"
+        r#"controls\[0\]\.name "Delay": made as "Delay Amount""#
     ));
     let knobs: Vec<Value> = (0..129)
         .map(|index| json!({ "name": format!("Knob {}", index + 1), "type": "number", "min": 0, "max": 1, "default": 0 }))
         .collect();
-    assert!(matches(&problems(with(grit(), json!({ "controls": knobs }))), r"controls: at most 128\."));
+    assert!(matches(
+        &problems(with(grit(), json!({ "controls": knobs }))),
+        r"controls: the first 128 were made, and 1 more were left out\."
+    ));
     assert!(matches(
         &problems(with(
             grit(),
             json!({ "controls": [{ "name": "Pre-Delay", "type": "number", "min": 0, "max": 1, "default": 0 }, { "name": "Pre Delay", "type": "number", "min": 0, "max": 1, "default": 0 }] })
         )),
-        r#""Pre Delay" and "Pre-Delay" would both be the Param pre_delay"#
+        r#"controls\[1\]\.name "Pre Delay": made as "Pre Delay 2""#
     ));
     assert!(matches(&problems(with(grit(), json!({ "code": "out1 = in1;" }))), r"assign out1 \(left\) and out2 \(right\)"));
     assert!(matches(&problems(with(grit(), json!({ "code": "out1 = in3; out2 = in1;" }))), "two inputs"));
@@ -567,16 +659,17 @@ fn kumis_checks_for_an_audio_effect_or_an_instrument_say_whats_wrong_each_so_it_
     assert!(matches(&problems(with(grit(), json!({ "code": "out1 = tanh(in1; out2 = in2;" }))), "don't pair up"));
     assert!(matches(&problems(with(pluck(), json!({ "code": "out1 = in1; out2 = in2;" }))), "no audio input"));
     assert!(matches(&problems(with(pluck(), json!({ "code": "out1 = cycle(440); out2 = out1;" }))), "plays the note it's given"));
-    assert!(matches(&problems(with(pluck(), json!({ "voices": 33 }))), r"1 \(mono\) to 32"));
+    assert!(matches(&problems(with(pluck(), json!({ "voices": 33 }))), r"voices 33: made 32 \(1, mono, to 32\)"));
+    // What the code declares itself, Kumi doesn't declare again (gen~ refuses a name declared twice): it uses the code's.
+    let declared = with(pluck(), json!({ "code": "Param note(60);\nout1 = cycle(mtof(note)); out2 = out1;" }));
     assert!(matches(
-        &problems(with(pluck(), json!({ "code": "Param note(60);\nout1 = cycle(mtof(note)); out2 = out1;" }))),
-        "Kumi's; use them without declaring"
+        &problems(declared.clone()),
+        "it declares note, which Kumi gives each voice, so Kumi used the code's declaration of it"
     ));
-    // A control's Param declared by the model too (as gen~ code usually is) would be declared twice.
-    assert!(matches(
-        &problems(with(grit(), json!({ "code": "Param drive(1, min=1, max=20);\nout1 = tanh(in1 * drive); out2 = tanh(in2 * drive);" }))),
-        "drive is the Drive control's Param, which Kumi declares"
-    ));
+    assert_eq!(voice_code(&gen_spec(&declared)).matches("Param note").count(), 1);
+    let drive = with(grit(), json!({ "code": "Param drive(1, min=1, max=20);\nout1 = tanh(in1 * drive); out2 = tanh(in2 * drive);" }));
+    assert!(matches(&problems(drive.clone()), "it declares drive, the Drive control's Param, so Kumi used that declaration"));
+    assert_eq!(effect_code(&gen_spec(&drive)).matches("Param drive").count(), 1);
     assert_eq!(
         problems(with(grit(), json!({ "tests": [{ "name": "ignored", "input": [], "expect": [] }] }))),
         "",
@@ -590,7 +683,7 @@ fn a_device_gets_what_it_needs_many_controls_in_rows_on_the_face_names_with_punc
         .map(|index| json!({ "name": format!("Size/Decay-{}", index + 1), "type": "number", "min": 0, "max": 1, "default": 0.5 }))
         .collect();
     let checked = check_spec(&with(grit(), json!({ "controls": knobs })));
-    assert!(matches!(&checked, Ok(DeviceSpec::AudioEffect(spec)) if spec.controls.len() == 20), "{checked:?}");
+    assert!(matches!(&checked, (DeviceSpec::AudioEffect(spec), found) if spec.controls.len() == 20 && found.is_empty()), "{checked:?}");
     let patcher = audio_effect_patcher(&gen_spec(&with(
         grit(),
         json!({ "controls": (0..20).map(|index| json!({ "name": format!("Size/Decay-{}", index + 1), "type": "number", "min": 0, "max": 1, "default": 0.5 })).collect::<Vec<_>>() }),
@@ -619,9 +712,9 @@ fn a_device_gets_what_it_needs_many_controls_in_rows_on_the_face_names_with_punc
         lowest(),
         json!({ "controls": [{ "name": "Scale", "type": "choice", "options": options, "default": "Mode 1" }] }),
     ));
-    assert!(menu.is_ok(), "{menu:?}");
+    assert!(menu.1.is_empty(), "{menu:?}");
     let wide = check_spec(&with(pluck(), json!({ "voices": 16 })));
-    assert!(matches!(&wide, Ok(DeviceSpec::Instrument(spec)) if spec.voices == 16));
+    assert!(matches!(&wide, (DeviceSpec::Instrument(spec), _) if spec.voices == 16));
     assert_eq!(inner(&instrument_patcher(&gen_spec(&with(pluck(), json!({ "voices": 16 })))), "obj-poly")["text"], "poly 16 1");
 }
 
@@ -636,7 +729,7 @@ async fn a_midi_effect_that_runs_free_an_lfo_a_clock_passes_with_runs_free_witho
     let held = check_midi_device(&spec(Value::Object(lfo.clone())));
     assert!(matches(&held.problems.join(" "), r"timers keep running[\s\S]*runs_free: true"), "{:?}", held.problems);
     let free = check_spec(&with(lfo.clone(), json!({ "runs_free": true })));
-    let Ok(DeviceSpec::MidiEffect(free)) = free else { panic!("{free:?}") };
+    let (DeviceSpec::MidiEffect(free), _) = free else { panic!("{free:?}") };
     assert!(free.runs_free);
     assert_eq!(check_midi_device_isolated(&free, IsolatedOptions::default()).await, Checked { passed: 0, of: 0, problems: vec![] });
     // Running free isn't sending without end.
@@ -645,7 +738,11 @@ async fn a_midi_effect_that_runs_free_an_lfo_a_clock_passes_with_runs_free_witho
         ..free.clone()
     });
     assert!(matches(&flood.problems.join(" "), "something sends without end"), "{:?}", flood.problems);
-    assert!(matches(&problems_of(check_spec(&with(lfo, json!({ "runs_free": "yes" })))).join(" "), "runs_free: true for a MIDI effect"));
+    let (DeviceSpec::MidiEffect(asked), found) = check_spec(&with(lfo, json!({ "runs_free": "yes" }))) else { panic!() };
+    assert!(
+        !asked.runs_free && matches(&found.changed.join(" "), r#"runs_free "yes": taken as false \(true for a MIDI effect"#),
+        "{found:?}"
+    );
 }
 
 // ported with devices/tool.rs: "make_device makes an audio effect and an instrument, with Kumi's own knobs, and says to hear them"
@@ -689,8 +786,9 @@ async fn make_device_reads_guide_makes_a_device_and_waits_for_live_browser() {
     assert_eq!(decoded.kind, DeviceType::MidiEffect);
     assert_eq!(decoded.patcher["patcher"]["title"], "Lowest Note");
     let again: Value = serde_json::from_str(&tool.execute(lowest(), Signal::new()).await.unwrap().text).unwrap();
-    assert_eq!(again["itemId"], "user_library/Kumi/Lowest Note 2");
-    let refused = tool
+    assert_eq!(again["itemId"], "user_library/Kumi/Lowest Note", "the same name replaces the device");
+    assert!(again["replaced"].is_string() && again.get("wrong").is_none(), "{again}");
+    let broken = tool
         .execute(
             with(
                 lowest(),
@@ -700,9 +798,15 @@ async fn make_device_reads_guide_makes_a_device_and_waits_for_live_browser() {
         )
         .await
         .unwrap();
-    assert!(refused.is_error);
-    assert!(refused.text.contains("leaves notes hanging"));
-    assert!(!folder.path().join("Kumi/Broken.amxd").exists());
+    assert!(!broken.is_error, "{}", broken.text);
+    let broken: Value = serde_json::from_str(&broken.text).unwrap();
+    assert!(broken["wrong"][0].as_str().unwrap().contains("leaves notes hanging"), "{broken}");
+    assert_eq!(
+        broken["checks"], "It has no tests; what Kumi found is under wrong",
+        "never \"nothing wrong\" beside a list that says otherwise"
+    );
+    assert!(broken["next"].as_str().unwrap().contains("call make_device again with the same name, which replaces this device"), "{broken}");
+    assert!(folder.path().join("Kumi/Broken.amxd").exists(), "made, with what's wrong beside it");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -728,8 +832,8 @@ async fn make_device_answers_what_maxs_objects_take_and_send_and_makes_nothing()
     assert!(answer.text == NO_MAX || paged, "{}", answer.text);
     let both = tool.execute(ask(json!({"objects": ["metro"], "guide": true, "type": "midi_effect"})), Signal::new()).await.unwrap();
     assert!(both.text.contains("\n\nMaking a MIDI effect") && both.text.contains("make_device with objects"));
-    let wrong = tool.execute(ask(json!({"objects": []})), Signal::new()).await.unwrap();
-    assert!(wrong.is_error && wrong.text.contains("objects: 1 to 16 objects"), "{}", wrong.text);
+    let none = tool.execute(ask(json!({"objects": []})), Signal::new()).await.unwrap();
+    assert!(!none.is_error && none.text.starts_with("objects: give one or more of Max's objects"), "{}", none.text);
     assert!(!library.exists(), "nothing is made");
 }
 
@@ -793,12 +897,12 @@ async fn make_device_makes_a_device_from_a_patch_of_max_objects_and_says_whats_w
     let mut unwired = gain.clone();
     unwired["patch"] = json!("in.0 -> [*~ 1.] -> out.0\nin.1 -> [*~ 1.] -> out.1\n");
     unwired["tests"] = json!([{ "name": "x", "input": [], "expect": [] }]);
-    let refused = tool.execute(unwired.as_object().unwrap().clone(), Signal::new()).await.unwrap();
-    assert!(refused.is_error);
-    assert!(refused.text.contains("tests: they run a MIDI effect's code"), "{}", refused.text);
-    unwired.as_object_mut().unwrap().remove("tests");
-    let refused = tool.execute(unwired.as_object().unwrap().clone(), Signal::new()).await.unwrap();
-    assert!(refused.is_error && refused.text.contains("\\\"Gain\\\" isn't wired"), "{}", refused.text);
+    let made = tool.execute(unwired.as_object().unwrap().clone(), Signal::new()).await.unwrap();
+    assert!(!made.is_error, "{}", made.text);
+    let made: Value = serde_json::from_str(&made.text).unwrap();
+    assert!(made["changed"][0].as_str().unwrap().contains("tests: they run a MIDI effect's code"), "{made}");
+    assert!(made["wrong"][0].as_str().unwrap().contains("\"Gain\" isn't wired"), "{made}");
+    assert_eq!(made["itemId"], "user_library/Kumi/Gain", "made again under its name, in place of the first");
 }
 
 #[test]

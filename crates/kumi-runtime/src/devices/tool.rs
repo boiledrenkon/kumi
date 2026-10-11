@@ -47,24 +47,18 @@ pub fn device_tool(options: DeviceToolOptions) -> Rc<dyn KernelTool> {
     Rc::new(DeviceTool { options })
 }
 
-/// The device's name, numbered past one a file in the folder has. On Windows a name it takes for a device ("Aux",
-/// "Con.Dist") is taken as a file's would be, and its number goes right after that part ("Aux 2", "Con 2.Dist").
-fn free_name(folder: &Path, name: &str, windows: bool) -> String {
+/// The device's file name: its own, so making a device again with the same name replaces it. On Windows a name it takes
+/// for a device ("Aux", "Con.Dist") can't be a file's, and its number goes right after that part ("Aux 2", "Con 2.Dist").
+fn file_name(name: &str, windows: bool) -> String {
     let (stem, rest) = name.split_at(name.find('.').unwrap_or(name.len()));
-    let numbered = |number: &str| {
-        if windows && windows_device_name(stem) {
-            format!("{stem} {number}{rest}")
-        } else {
-            format!("{name} {number}")
-        }
-    };
-    for index in 1..1000 {
-        let candidate = if index == 1 { name.into() } else { numbered(&index.to_string()) };
-        if !(windows && windows_device_name(&candidate)) && !folder.join(format!("{candidate}.amxd")).exists() {
-            return candidate;
-        }
+    if !windows || !(windows_device_name(stem) || windows_device_name(name)) {
+        return name.to_string();
     }
-    numbered(&Uuid::new_v4().to_string()[..8])
+    let numbered = |number: &str| if windows_device_name(stem) { format!("{stem} {number}{rest}") } else { format!("{name} {number}") };
+    (2..1000)
+        .map(|index| numbered(&index.to_string()))
+        .find(|candidate| !windows_device_name(candidate))
+        .unwrap_or_else(|| numbered(&Uuid::new_v4().to_string()[..8]))
 }
 fn describe_control(control: &Control) -> String {
     match control {
@@ -105,58 +99,76 @@ impl KernelTool for DeviceTool {
         });
         // Max's objects, as this machine's Max describes them: no device is made.
         if let Some(objects) = input.get("objects").filter(|objects| !objects.is_null()) {
-            let items = objects.as_array().cloned().unwrap_or_default();
-            let texts: Vec<String> =
-                items.iter().filter_map(Value::as_str).map(str::trim).filter(|text| !text.is_empty()).map(str::to_string).collect();
-            if texts.is_empty() || texts.len() != items.len() || texts.len() > MOST_OBJECTS {
-                let problem = format!("objects: 1 to {MOST_OBJECTS} objects, each as it's typed in a box (\"makenote 60 100 250\").");
-                return Ok(ToolResult::error(stringify(&json!({"problems": [problem], "next": "Fix it and call make_device again."}))));
+            let texts: Vec<String> = objects
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+                .collect();
+            let mut pages = match (texts.is_empty(), reference::installed()) {
+                (true, _) => {
+                    "objects: give one or more of Max's objects, each as it's typed in a box (\"makenote 60 100 250\").".to_string()
+                }
+                (false, None) => page::NO_MAX.to_string(),
+                (false, Some(reference)) => page::describe_all(reference, &texts[..texts.len().min(MOST_OBJECTS)]),
+            };
+            if texts.len() > MOST_OBJECTS {
+                pages.push_str(&format!(
+                    "\n\nOnly the first {MOST_OBJECTS} were looked up: ask for the other {} in another call.",
+                    texts.len() - MOST_OBJECTS
+                ));
             }
-            let pages = reference::installed().map_or_else(|| page::NO_MAX.to_string(), |reference| page::describe_all(reference, &texts));
             return Ok(ToolResult::text(guide.map_or_else(|| pages.clone(), |guide| format!("{pages}\n\n{guide}"))));
         }
         if let Some(guide) = guide {
             return Ok(ToolResult::text(guide));
         }
-        let spec = match check_spec(&input) {
-            Ok(spec) => spec,
-            Err(problems) => {
-                return Ok(ToolResult::error(stringify(&json!({"problems": problems, "next":"Fix these and call make_device again."}))))
+        // The device is always made: what doesn't fit is made the nearest way it can be, and said beside it.
+        let (spec, mut found) = check_spec(&input);
+        let checked = match &spec {
+            DeviceSpec::Patch(_) if reference::installed().is_some() => {
+                "Kumi checked every object against this machine's Max, every cord against the ports it meets, and the order its messages go in, and laid it out top to bottom".to_string()
             }
-        };
-        let tested = if let DeviceSpec::Patch(_) = &spec {
-            match reference::installed() {
-                Some(_) => "Kumi's checks passed: every object is one this machine's Max has, every cord meets a port, and no message's order is left to where its boxes sit; Kumi laid it out top to bottom".to_string(),
-                None => "Kumi's checks passed (Max wasn't found here, so its objects weren't checked against it); Kumi laid it out top to bottom".to_string(),
+            DeviceSpec::Patch(_) => "Kumi checked the patch (Max wasn't found here, so its objects weren't checked against it) and laid it out top to bottom".to_string(),
+            DeviceSpec::MidiEffect(midi) => {
+                let verified = check_midi_device_isolated(midi, IsolatedOptions::default()).await;
+                found.wrong.extend(verified.problems);
+                let tests =
+                    if verified.of > 0 { format!("{} of {} of its tests passed", verified.passed, verified.of) } else { "It has no tests".into() };
+                // What the spec's checks found counts too: the summary never says nothing's wrong beside a list that does.
+                if found.wrong.is_empty() {
+                    let ran = if midi.runs_free { "no errors; it runs free" } else { "no errors, no hanging notes" };
+                    format!("{tests}, and Kumi's checks found nothing wrong ({ran})")
+                } else {
+                    format!("{tests}; what Kumi found is under wrong")
+                }
             }
-        } else if let DeviceSpec::MidiEffect(midi) = &spec {
-            let verified = check_midi_device_isolated(midi, IsolatedOptions::default()).await;
-            if !verified.problems.is_empty() {
-                return Ok(ToolResult::error(stringify(
-                    &json!({"problems":verified.problems,"passed":format!("{} of {} of its tests", verified.passed, verified.of),"next":"Fix the code (or a test that's wrong) and call make_device again."}),
-                )));
-            }
-            format!(
-                "{} of {} of its tests passed, and Kumi's checks ({})",
-                verified.passed,
-                verified.of,
-                if midi.runs_free { "no errors; it runs free" } else { "no errors, no hanging notes" }
-            )
-        } else {
-            "Kumi's checks passed (its outputs, its inputs, its controls); Max compiles the code when Live loads it".into()
+            _ => "Kumi checked its outputs, inputs and controls; Max compiles the code when Live loads it".into(),
         };
         signal.check()?;
         let folder = Path::new(&self.options.user_library).join("Kumi");
         if let Some(full) = low_disk(&self.options.user_library, 100.0 * MB, "Live's User Library is on").await {
-            return Ok(ToolResult::error(format!("{full} No device was made.")));
+            return Ok(ToolResult::error(format!("{full} Kumi couldn't write the device: free some space, then call make_device again.")));
         }
+        let unwritable = |error: std::io::Error| {
+            Ok(ToolResult::error(format!(
+                "Kumi couldn't write the device to Live's User Library ({}): {error}. Make the folder writable, then call make_device again.",
+                folder.to_string_lossy()
+            )))
+        };
         let mut builder = tokio::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
         builder.mode(0o755);
-        builder.create(&folder).await.map_err(io_error)?;
-        let name = free_name(&folder, spec.name(), crate::system::platform() == "win32");
+        if let Err(error) = builder.create(&folder).await {
+            return unwritable(error);
+        }
+        let name = file_name(spec.name(), crate::system::platform() == "win32");
         let file = folder.join(format!("{name}.amxd"));
+        let replaces = file.exists();
         let temporary = folder.join(format!(".{}.amxd", Uuid::new_v4()));
         let patcher = match &spec {
             DeviceSpec::MidiEffect(s) => {
@@ -177,26 +189,21 @@ impl KernelTool for DeviceTool {
             DeviceSpec::Patch(s) => {
                 let mut s = s.clone();
                 s.name = name.clone();
-                match patched_device(&s, reference::installed()) {
-                    Ok(patcher) => patcher,
-                    Err(problems) => {
-                        return Ok(ToolResult::error(stringify(
-                            &json!({"problems": problems, "next":"Fix these and call make_device again."}),
-                        )))
-                    }
-                }
+                let (patcher, patched) = patched_device(&s, reference::installed());
+                found.append(patched);
+                patcher
             }
         };
-        let written: Result<(), RuntimeError> = async {
+        let written: Result<(), std::io::Error> = async {
             let mut options = tokio::fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);
             #[cfg(unix)]
             options.mode(0o644);
-            let mut out = options.open(&temporary).await.map_err(io_error)?;
-            out.write_all(&encode_amxd(spec.kind(), &patcher)).await.map_err(io_error)?;
-            out.flush().await.map_err(io_error)?;
+            let mut out = options.open(&temporary).await?;
+            out.write_all(&encode_amxd(spec.kind(), &patcher)).await?;
+            out.flush().await?;
             drop(out);
-            tokio::fs::rename(&temporary, &file).await.map_err(io_error)
+            tokio::fs::rename(&temporary, &file).await
         }
         .await;
         let removed = tokio::fs::remove_file(&temporary).await;
@@ -205,7 +212,9 @@ impl KernelTool for DeviceTool {
                 return Err(io_error(error));
             }
         }
-        written?;
+        if let Err(error) = written {
+            return unwritable(error);
+        }
         let item_id = format!("user_library/Kumi/{name}");
         let deadline = now_ms().saturating_add(self.options.wait_ms.unwrap_or(20_000) as i64);
         let mut seen = false;
@@ -227,13 +236,29 @@ impl KernelTool for DeviceTool {
         let controls: Vec<_> = spec.controls().iter().chain(extra).map(describe_control).collect();
         let mut result = json!({"made":name,"type":kind,"itemId":item_id,"file":file.to_string_lossy(),"controls":controls});
         let fields = result.as_object_mut().unwrap();
+        if replaces {
+            fields.insert("replaced".into(), json!("a device by this name was in the folder: this one took its place"));
+        }
         if let DeviceSpec::Instrument(s) = &spec {
             fields.insert("voices".into(), json!(s.voices));
         }
-        fields.insert("checks".into(), json!(tested));
+        fields.insert("checks".into(), json!(checked));
+        for (key, said) in [("wrong", &found.wrong), ("changed", &found.changed), ("notes", &found.notes)] {
+            if !said.is_empty() {
+                fields.insert(key.into(), json!(said));
+            }
+        }
         if !seen {
             fields.insert("note".into(), json!("Live's Browser hasn't listed it yet; load it in a moment."));
         }
+        let again = "Calling make_device again with the same name replaces this device";
+        let next = if found.wrong.is_empty() {
+            format!("{next} {again}.")
+        } else {
+            format!(
+                "It's made, and it loads as it is, but Max will show what's under wrong: fix that and call make_device again with the same name, which replaces this device. Or {next}"
+            )
+        };
         fields.insert("next".into(), json!(next));
         Ok(ToolResult::text(stringify(&result)))
     }
@@ -241,16 +266,14 @@ impl KernelTool for DeviceTool {
 
 #[cfg(test)]
 mod tests {
-    use super::free_name;
+    use super::file_name;
 
     #[test]
-    fn a_name_windows_takes_for_a_device_is_numbered_there() {
-        let folder = tempfile::tempdir().unwrap();
-        std::fs::write(folder.path().join("Bass.amxd"), b"").unwrap();
-        assert_eq!(free_name(folder.path(), "Bass", false), "Bass 2", "a file's name is taken everywhere");
-        assert_eq!((free_name(folder.path(), "Aux", false), free_name(folder.path(), "Aux", true)), ("Aux".into(), "Aux 2".into()));
-        assert_eq!(free_name(folder.path(), "Con.Dist", true), "Con 2.Dist", "the part before the dot is what Windows reads");
-        assert_eq!(free_name(folder.path(), "LPT1 ", true), "LPT1  2");
-        assert_eq!(free_name(folder.path(), "Console", true), "Console");
+    fn the_same_name_replaces_a_device_and_a_name_windows_takes_for_a_device_is_numbered_there() {
+        assert_eq!(file_name("Bass", false), "Bass", "making it again replaces it");
+        assert_eq!((file_name("Aux", false), file_name("Aux", true)), ("Aux".into(), "Aux 2".into()));
+        assert_eq!(file_name("Con.Dist", true), "Con 2.Dist", "the part before the dot is what Windows reads");
+        assert_eq!(file_name("LPT1 ", true), "LPT1  2");
+        assert_eq!(file_name("Console", true), "Console");
     }
 }

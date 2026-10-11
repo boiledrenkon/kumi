@@ -6,16 +6,16 @@ use std::sync::LazyLock;
 
 use serde_json::Value;
 
-/// How much a broken rule matters.
+/// How much a broken rule matters: how it's said beside a device, and in what order. No level stops a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
     /// Kumi says nothing.
     Off,
     /// Kumi mentions it when asked to look a patcher over.
     Advice,
-    /// Kumi says so.
+    /// Worth a look: said after what's wrong.
     Warn,
-    /// Kumi doesn't make a device that breaks it.
+    /// What Max will show as wrong: said first.
     Error,
 }
 

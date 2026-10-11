@@ -1,5 +1,5 @@
 {
-  "about": "Kumi's standard for Max for Live patchers. Each rule has a level (error: Kumi doesn't make a device that breaks it; warn: Kumi says so; advice: Kumi mentions it when asked; off) and what measuring well-made devices found: how many times it was broken (found) in how many of the things it looks at (of). Measurements are counts only, made by examples/max_patch_survey.rs on the machine the devices are on.",
+  "about": "Kumi's standard for Max for Live patchers. Each rule has a level (error: Max will show it as wrong, said first beside the device; warn: worth a look, said after; advice: Kumi mentions it when asked; off; no level stops a device) and what measuring well-made devices found: how many times it was broken (found) in how many of the things it looks at (of). Measurements are counts only, made by examples/max_patch_survey.rs on the machine the devices are on.",
   "rules": {
     "patch.unknown-object": { "level": "error", "looks_at": "objects", "measured": { "found": 0, "of": 4770 } },
     "patch.no-such-port": { "level": "error", "looks_at": "cords", "measured": { "found": 0, "of": 7727 } },

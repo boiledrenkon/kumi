@@ -1,20 +1,20 @@
-//! What the model asks for when it makes a device, and the checks it has to pass. The model names the device and its
-//! knobs, then gives its code (JavaScript or GenExpr, which Kumi builds a device around) or a patch of Max's own
-//! objects in Kumi's notation, which Kumi frames, lays out and checks.
+//! What the model asks for when it makes a device, and how Kumi makes it whatever it's given. The model names the device
+//! and its knobs, then gives its code (JavaScript or GenExpr, which Kumi builds a device around) or a patch of Max's own
+//! objects in Kumi's notation, which Kumi frames, lays out and checks. What doesn't fit is made the nearest way it can
+//! be, and said beside the device.
 
-use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use kumi_common::js::json::stringify;
+use kumi_common::js::number::to_string as number_to_string;
 use kumi_common::js::string::{head, trim, utf16_len};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::amxd::DeviceType;
+use super::findings::Findings;
 use super::gen::{check_gen_code, param_name, param_problem, MAX_VOICES};
-use super::patch::reference;
-use super::patched::patched_device;
 
 /// A knob, a menu or a switch on the device: an ordinary Live parameter, automatable and mappable.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -349,7 +349,7 @@ const SOURCE_OF: &str = r#"(() => {
 /// Whether the code is one whole function body, as the frame needs: the frame puts it inside a function of its own,
 /// within the scope that hides Max and Live, so code that closed that function early (opening another for the frame's
 /// tail) would run outside every name the frame hides. Read alone inside a strict function, in a context of its own,
-/// the function has to come back holding all of it. HTML-like comments are refused first: Live's V8 reads `<!--` and
+/// the function has to come back holding all of it. HTML-like comments are found first: Live's V8 reads `<!--` and
 /// `-->` as comments in a script and QuickJS doesn't, so the two could read the braces differently.
 fn whole_body(code: &str) -> Option<String> {
     if code.contains("<!--") || code.contains("-->") {
@@ -448,175 +448,386 @@ fn event_of(raw: &Value) -> Option<MidiEvent> {
     })
 }
 
-/// A spec from the model's input, or the problems with it, each said so the model can fix it.
-pub fn check_spec(input: &Map<String, Value>) -> Result<DeviceSpec, Vec<String>> {
-    let mut problems: Vec<String> = Vec::new();
-    let kind = match input.get("type") {
-        None | Some(Value::Null) => Some(DeviceType::MidiEffect),
-        Some(Value::String(text)) => DeviceType::parse(text),
-        Some(_) => None,
-    };
-    if kind.is_none() {
-        problems.push(format!("type {}: midi_effect, audio_effect or instrument.", stringify(input.get("type").unwrap_or(&Value::Null))));
+/// A name of up to 32 characters that `allowed` takes, starting with one `first` takes: what's left of `text` that
+/// fits, or `fallback`.
+fn fitted(text: &str, allowed: impl Fn(char) -> bool, first: impl Fn(char) -> bool, fallback: &str) -> String {
+    let kept: String = text.chars().map(|c| if allowed(c) { c } else { ' ' }).collect();
+    let kept = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    let kept: String = kept.trim_start_matches(|c: char| !first(c)).chars().take(32).collect();
+    let kept = kept.trim_end();
+    if kept.is_empty() {
+        fallback.to_string()
+    } else {
+        kept.to_string()
     }
+}
+
+/// `name`, numbered past the names `taken` already has ("Rate 2"), in up to 32 characters.
+fn unique(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut candidate = name.to_string();
+    let mut number = 1;
+    while taken(&candidate) {
+        number += 1;
+        let suffix = format!(" {number}");
+        let stem: String = name.chars().take(32 - suffix.chars().count()).collect();
+        candidate = format!("{}{suffix}", stem.trim_end());
+    }
+    candidate
+}
+
+/// The unit a control's unit is written as ("Seconds" is s, "semitones" st); None for one Kumi doesn't show.
+fn unit_like(text: &str) -> Option<Unit> {
+    let unit = match text.trim().to_lowercase().as_str() {
+        "" | "none" => Unit::None,
+        "ms" | "msec" | "millisecond" | "milliseconds" => Unit::Ms,
+        "s" | "sec" | "secs" | "second" | "seconds" => Unit::S,
+        "hz" | "hertz" => Unit::Hz,
+        "db" | "decibel" | "decibels" => Unit::Db,
+        "%" | "percent" | "pct" => Unit::Percent,
+        "st" | "semi" | "semis" | "semitone" | "semitones" => Unit::St,
+        "note" | "notes" => Unit::Note,
+        "pan" => Unit::Pan,
+        "beat" | "beats" => Unit::Beats,
+        "bpm" => Unit::Bpm,
+        "x" | "times" | "ratio" => Unit::X,
+        _ => return None,
+    };
+    Some(unit)
+}
+
+/// A device's type from what was given: one that names audio is an audio effect, one that names an instrument or a
+/// synth an instrument, anything else a MIDI effect.
+fn kind_like(given: &Value) -> DeviceType {
+    let text = given.as_str().unwrap_or("").to_lowercase();
+    if text.contains("audio") {
+        DeviceType::AudioEffect
+    } else if text.contains("instrument") || text.contains("synth") {
+        DeviceType::Instrument
+    } else {
+        DeviceType::MidiEffect
+    }
+}
+
+/// A MIDI effect's code kept in the device where it doesn't run: the frame finds no midi() in it, so the device passes
+/// MIDI on as it comes, and the producer can read the code in the box.
+fn kept_unrun(code: &str) -> String {
+    format!(
+        "// Kumi kept this code without running it: it isn't one function's body. Fix it and make the device again.\nconst unrun = {};",
+        stringify(&Value::String(code.to_string()))
+    )
+}
+
+/// A device from the model's input, always: what doesn't fit is made the nearest way it can be, and every such
+/// change and every problem with the code is said beside it, so the model can fix it on its next call.
+pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
+    let mut found = Findings::default();
+    let kind = match input.get("type") {
+        None | Some(Value::Null) => DeviceType::MidiEffect,
+        Some(given) => match given.as_str().and_then(DeviceType::parse) {
+            Some(kind) => kind,
+            None => {
+                let kind = kind_like(given);
+                found.changed.push(format!(
+                    "type {}: made as {} (midi_effect, audio_effect or instrument).",
+                    stringify(given),
+                    kind.as_str()
+                ));
+                kind
+            }
+        },
+    };
     // A device given as a patch of Max's objects has no code of its own: its controls are wired in the patch.
     let patched = input.get("patch").is_some_and(|patch| !patch.is_null());
-    let sound = matches!(kind, Some(DeviceType::AudioEffect) | Some(DeviceType::Instrument));
+    let sound = matches!(kind, DeviceType::AudioEffect | DeviceType::Instrument);
     let gen = sound && !patched;
-    let name = trimmed_string(input.get("name"));
-    if !NAME.is_match(&name) {
-        problems.push("name: 1–32 characters, letters, digits, spaces and . _ ( ) & ' + -, starting with a letter or digit.".to_string());
-    }
+    let given_name = trimmed_string(input.get("name"));
+    let name = if NAME.is_match(&given_name) {
+        given_name
+    } else {
+        let allowed = |c: char| c.is_ascii_alphanumeric() || " ._()&'+-".contains(c);
+        let name = fitted(&given_name, allowed, |c| c.is_ascii_alphanumeric(), "Device");
+        found.changed.push(format!(
+            "name {}: made as \"{name}\" (1–32 letters, digits, spaces and . _ ( ) & ' + -, starting with a letter or digit).",
+            stringify(&Value::String(given_name.clone()))
+        ));
+        name
+    };
     let about = trimmed_string(input.get("about"));
-    if about.is_empty() || utf16_len(&about) > 400 {
-        problems.push("about: what the device does, in a sentence or two (up to 400 characters).".to_string());
-    }
+    let about = if about.is_empty() {
+        found.changed.push("about: none given, so the device's description is its name.".to_string());
+        name.clone()
+    } else if utf16_len(&about) > 400 {
+        let mut cut = head(&about, 400);
+        if let Some((kept, _)) = cut.rsplit_once(' ') {
+            cut = format!("{}…", kept.trim_end_matches([',', ';', ':']));
+        }
+        found.changed.push(format!("about: {} characters, cut to the first {} (up to 400).", utf16_len(&about), utf16_len(&cut)));
+        cut
+    } else {
+        about
+    };
     let controls: Vec<Value> = match input.get("controls") {
         Some(Value::Array(items)) => items.clone(),
         _ => Vec::new(),
     };
     if controls.len() > MAX_CONTROLS {
-        problems.push(format!("controls: at most {MAX_CONTROLS}."));
+        found
+            .changed
+            .push(format!("controls: the first {MAX_CONTROLS} were made, and {} more were left out.", controls.len() - MAX_CONTROLS));
     }
-    let mut seen: HashSet<String> = HashSet::new();
     let mut checked: Vec<Control> = Vec::new();
     for (index, raw) in controls.iter().take(MAX_CONTROLS).enumerate() {
         let control = object_of(raw);
         let label = format!("controls[{index}]");
-        let control_name = trimmed_string(control.get("name"));
-        if !CONTROL.is_match(&control_name) || DEVICE_ON.is_match(&control_name) {
-            problems.push(format!("{label}.name: 1–32 letters, digits, spaces and . _ ( ) & ' + / # % -, starting with a letter."));
-            continue;
-        }
-        if seen.contains(&control_name.to_lowercase()) {
-            problems.push(format!("{label}.name: \"{control_name}\" is used twice."));
-            continue;
-        }
-        // In GenExpr a control is its Param: "Pre-Delay" and "Pre Delay" would both be pre_delay.
-        let twin = if gen { checked.iter().find(|other| param_name(other.name()) == param_name(&control_name)) } else { None };
-        if let Some(twin) = twin {
-            problems.push(format!(
-                "{label}.name: \"{control_name}\" and \"{}\" would both be the Param {}; name them apart.",
-                twin.name(),
-                param_name(&control_name)
-            ));
-            continue;
-        }
+        let given = trimmed_string(control.get("name"));
+        let allowed = |c: char| c.is_ascii_alphanumeric() || " ._()&'+/#%-".contains(c);
+        let mut control_name = if CONTROL.is_match(&given) {
+            given.clone()
+        } else {
+            fitted(&given, allowed, |c| c.is_ascii_alphabetic(), &format!("Control {}", index + 1))
+        };
         if sound && MIX_OR_OUTPUT.is_match(&control_name) {
-            let what = if kind == Some(DeviceType::AudioEffect) { "audio effect" } else { "instrument" };
-            problems.push(format!("{label}.name: Kumi adds {control_name} to every {what} itself; leave it out."));
+            let what = if kind == DeviceType::AudioEffect { "audio effect" } else { "instrument" };
+            found
+                .changed
+                .push(format!("{label} ({control_name}): Kumi adds {control_name} to every {what} itself, so this one was left out."));
             continue;
         }
-        let as_param = if gen { param_problem(&control_name) } else { None };
-        if let Some(as_param) = as_param {
-            problems.push(format!("{label}.name: {as_param}."));
-            continue;
+        // In GenExpr a control is its Param: a name gen~ or Kumi uses, or one two controls would share, is renamed.
+        if gen && param_problem(&control_name).is_some() {
+            let amount = fitted(&format!("{control_name} Amount"), allowed, |c| c.is_ascii_alphabetic(), "");
+            control_name = if !amount.is_empty() && param_problem(&amount).is_none() { amount } else { format!("Control {}", index + 1) };
         }
-        seen.insert(control_name.to_lowercase());
-        let control_type = control.get("type").and_then(Value::as_str).unwrap_or("");
+        let taken = |candidate: &str| {
+            DEVICE_ON.is_match(candidate)
+                || checked
+                    .iter()
+                    .any(|other| other.name().eq_ignore_ascii_case(candidate) || (gen && param_name(other.name()) == param_name(candidate)))
+        };
+        control_name = unique(&control_name, taken);
+        if control_name != given {
+            found.changed.push(format!(
+                "{label}.name {}: made as \"{control_name}\" (1–32 letters, digits, spaces and . _ ( ) & ' + / # % -, starting with a letter, one name per control{}).",
+                stringify(&Value::String(given)),
+                if gen { ", each its own Param in the code" } else { "" }
+            ));
+        }
+        let label = format!("{label} ({control_name})");
+        let given_type = control.get("type").and_then(Value::as_str).unwrap_or("");
+        let control_type = match given_type {
+            "number" | "integer" | "choice" | "switch" => given_type,
+            _ => {
+                let made = if control.get("options").is_some_and(Value::is_array) {
+                    "choice"
+                } else if control.get("default").is_some_and(Value::is_boolean) {
+                    "switch"
+                } else {
+                    "number"
+                };
+                found.changed.push(format!(
+                    "{label}: type {}: made as a {made} (number, integer, choice or switch).",
+                    stringify(&Value::String(given_type.into()))
+                ));
+                made
+            }
+        };
         if control_type == "number" || control_type == "integer" {
-            let min = control.get("min");
-            let max = control.get("max");
-            let fallback = control.get("default");
-            let finite = |value: Option<&Value>| value.and_then(Value::as_f64).filter(|value| value.is_finite());
-            let numbers = (finite(min), finite(max), finite(fallback));
-            let unit = match control.get("unit") {
-                None | Some(Value::Null) => Some(Unit::None),
-                Some(Value::String(text)) => Unit::parse(text),
-                Some(_) => None,
-            };
-            let (Some(min), Some(max), Some(fallback)) = numbers else {
-                problems.push(format!("{label} ({control_name}): min, max and default are numbers."));
-                continue;
-            };
-            if min >= max {
-                problems.push(format!("{label} ({control_name}): min is below max."));
-                continue;
+            let finite = |key: &str| control.get(key).and_then(Value::as_f64).filter(|value| value.is_finite());
+            let (given_min, given_max, given_default) = (finite("min"), finite("max"), finite("default"));
+            let mut said: Vec<String> = ["min", "max", "default"]
+                .iter()
+                .zip([given_min, given_max, given_default])
+                .filter(|(_, value)| value.is_none())
+                .map(|(key, _)| format!("{key} wasn't a number"))
+                .collect();
+            let mut min = given_min.unwrap_or(0.0);
+            let mut max = given_max.unwrap_or(if min < 1.0 { 1.0 } else { min + 1.0 });
+            if min > max {
+                std::mem::swap(&mut min, &mut max);
+                said.push("min was above max".into());
+            }
+            let mut fallback = given_default.unwrap_or(min);
+            if control_type == "integer" && ![min, max, fallback].iter().all(|value| value.fract() == 0.0) {
+                (min, max, fallback) = (min.floor(), max.ceil(), fallback.round());
+                said.push("an integer control's min, max and default are whole numbers".into());
+            }
+            if min == max {
+                max = min + 1.0;
+                said.push("min and max were the same".into());
             }
             if fallback < min || fallback > max {
-                problems.push(format!("{label} ({control_name}): the default, a value that sounds right on load, is between min and max."));
-                continue;
+                fallback = fallback.clamp(min, max);
+                said.push("the default was outside min and max".into());
             }
-            if control_type == "integer" && ![min, max, fallback].iter().all(|value| value.fract() == 0.0) {
-                problems.push(format!("{label} ({control_name}): an integer control has whole-number min, max and default."));
-                continue;
-            }
-            let Some(unit) = unit else {
-                let units = UNITS.iter().filter(|unit| **unit != Unit::None).map(|unit| unit.as_str()).collect::<Vec<_>>().join(", ");
-                problems.push(format!("{label} ({control_name}): unit is one of {units}, or \"\" for none."));
-                continue;
+            let unit = match control.get("unit") {
+                None | Some(Value::Null) => Unit::None,
+                Some(given) => {
+                    let text = given.as_str().unwrap_or("");
+                    match unit_like(text) {
+                        Some(unit) => {
+                            if unit.as_str() != text {
+                                said.push(format!("unit {} is \"{unit}\"", stringify(given)));
+                            }
+                            unit
+                        }
+                        None => {
+                            let units =
+                                UNITS.iter().filter(|unit| **unit != Unit::None).map(|unit| unit.as_str()).collect::<Vec<_>>().join(", ");
+                            said.push(format!("unit {} isn't one of {units}, so it shows none", stringify(given)));
+                            Unit::None
+                        }
+                    }
+                }
             };
+            if !said.is_empty() {
+                found.changed.push(format!(
+                    "{label}: {}; made {} to {}, starting at {}.",
+                    said.join(", "),
+                    number_to_string(min),
+                    number_to_string(max),
+                    number_to_string(fallback)
+                ));
+            }
             let numeric = NumericControl { name: control_name, min, max, default: fallback, unit };
             checked.push(if control_type == "integer" { Control::Integer(numeric) } else { Control::Number(numeric) });
         } else if control_type == "choice" {
-            let options: Vec<Value> = match control.get("options") {
+            let given_options: Vec<Value> = match control.get("options") {
                 Some(Value::Array(items)) => items.clone(),
                 _ => Vec::new(),
             };
-            let strings: Option<Vec<String>> = options
-                .iter()
-                .map(|option| option.as_str().filter(|text| !trim(text).is_empty() && utf16_len(text) <= 32).map(str::to_string))
-                .collect();
-            let Some(options) = strings.filter(|options| options.len() >= 2 && options.len() <= MAX_OPTIONS) else {
-                problems.push(format!("{label} ({control_name}): 2–{MAX_OPTIONS} options of up to 32 characters."));
-                continue;
+            let mut said: Vec<String> = Vec::new();
+            let mut options: Vec<String> = Vec::new();
+            for option in &given_options {
+                let text = match option {
+                    Value::String(text) => trim(text).to_string(),
+                    Value::Number(number) => number.to_string(),
+                    _ => String::new(),
+                };
+                if text.is_empty() {
+                    said.push(format!("option {} was left out", stringify(option)));
+                } else if utf16_len(&text) > 32 {
+                    said.push(format!("option \"{text}\" was cut to 32 characters"));
+                    options.push(head(&text, 32));
+                } else {
+                    options.push(text);
+                }
+            }
+            if options.len() > MAX_OPTIONS {
+                said.push(format!("only the first {MAX_OPTIONS} options were kept"));
+                options.truncate(MAX_OPTIONS);
+            }
+            if options.is_empty() {
+                said.push("it had no options".into());
+                options.push(control_name.clone());
+            }
+            let default = match control.get("default") {
+                Some(Value::String(text)) if options.iter().any(|option| option == trim(text)) => trim(text).to_string(),
+                Some(Value::Number(number)) if number.as_u64().is_some_and(|at| (at as usize) < options.len()) => {
+                    options[number.as_u64().unwrap_or(0) as usize].clone()
+                }
+                given => {
+                    said.push(format!("its default {} isn't one of its options", given.map_or("(none)".to_string(), stringify)));
+                    options[0].clone()
+                }
             };
-            let Some(default) = control.get("default").and_then(Value::as_str).filter(|text| options.iter().any(|option| option == text))
-            else {
-                problems.push(format!("{label} ({control_name}): the default is one of the options."));
-                continue;
-            };
-            checked.push(Control::Choice(ChoiceControl { name: control_name, options, default: default.to_string() }));
-        } else if control_type == "switch" {
-            let Some(default) = control.get("default").and_then(Value::as_bool) else {
-                problems.push(format!("{label} ({control_name}): a switch's default is true or false."));
-                continue;
+            if !said.is_empty() {
+                found.changed.push(format!(
+                    "{label}: {}; made with {}, starting at \"{default}\".",
+                    said.join(", "),
+                    options.iter().map(|option| format!("\"{option}\"")).collect::<Vec<_>>().join(", ")
+                ));
+            }
+            checked.push(Control::Choice(ChoiceControl { name: control_name, options, default }));
+        } else {
+            let default = match control.get("default") {
+                Some(Value::Bool(on)) => *on,
+                given => {
+                    let on = match given {
+                        Some(Value::Number(number)) => number.as_f64().is_some_and(|value| value != 0.0),
+                        Some(Value::String(text)) => matches!(text.trim().to_lowercase().as_str(), "on" | "true" | "yes" | "1"),
+                        _ => false,
+                    };
+                    found.changed.push(format!(
+                        "{label}: a switch's default is true or false, not {}; made {}.",
+                        given.map_or("(none)".to_string(), stringify),
+                        if on { "on" } else { "off" }
+                    ));
+                    on
+                }
             };
             checked.push(Control::Switch(SwitchControl { name: control_name, default }));
-        } else {
-            problems.push(format!("{label} ({control_name}): type is number, integer, choice or switch."));
         }
     }
-    let code = input.get("code").and_then(Value::as_str).unwrap_or("").to_string();
+    let mut code = input.get("code").and_then(Value::as_str).unwrap_or("").to_string();
     let patch = input.get("patch").and_then(Value::as_str).unwrap_or("").to_string();
+    let mut runs = true;
     if patched {
         if !trim(&code).is_empty() {
-            problems.push("code: give the device's code or its patch, not both (a gen~ in the patch holds its own code).".to_string());
+            found.changed.push(
+                "code: the device was made from its patch, so the code beside it was left out (a gen~ in the patch holds its own code)."
+                    .to_string(),
+            );
+            code.clear();
         }
-        if trim(&patch).is_empty() || utf16_len(&patch) > MAX_CODE {
-            problems.push("patch: the device as a patch of Max's objects in Kumi's notation, up to 100,000 characters.".to_string());
+        if trim(&patch).is_empty() {
+            found.wrong.push("patch: it's empty, so the device is only its controls: give it its patch of Max's objects.".to_string());
         }
-    } else if trim(&code).is_empty() || utf16_len(&code) > MAX_CODE {
-        problems.push(format!("code: the device's {}, up to 100,000 characters.", if gen { "GenExpr" } else { "JavaScript" }));
+    } else if trim(&code).is_empty() {
+        let (does, give) = match kind {
+            DeviceType::MidiEffect => ("passes MIDI on as it comes", "JavaScript"),
+            DeviceType::AudioEffect => ("passes its input on as it comes", "GenExpr"),
+            DeviceType::Instrument => ("makes no sound", "GenExpr for one voice"),
+        };
+        found.wrong.push(format!("code: none given, so the device {does}: give it its {give}."));
+        code = match kind {
+            DeviceType::MidiEffect => "function midi(event) { pass(event); }".to_string(),
+            DeviceType::AudioEffect => "out1 = in1;\nout2 = in2;".to_string(),
+            DeviceType::Instrument => "out1 = 0;\nout2 = 0;".to_string(),
+        };
     } else if gen {
-        problems.extend(check_gen_code(&code, kind.expect("a gen device has a type"), &checked));
+        found.append(check_gen_code(&code, kind, &checked));
     } else {
         if !MIDI_FUNCTION.is_match(&code) {
-            problems.push("code: define function midi(event), called for each MIDI event that arrives.".to_string());
+            found.wrong.push("code: it defines no function midi(event), so the device passes MIDI on as it comes: define midi(event), called for each MIDI event that arrives.".to_string());
         }
         // Matched without comments, and as written too: the comment stripper doesn't know strings, so a "//" or "/*"
         // inside one could hide the rest of a line (an `import(…)`, which the frame can't shadow) from the first.
         let bare = COMMENTS.replace_all(&code, "");
         for (pattern, why) in FORBIDDEN.iter() {
-            if let Some(found) = pattern.find(&bare) {
-                problems.push(format!("code: \"{}\" isn't allowed: {why}.", trim(found.as_str())));
-            } else if let Some(found) = pattern.find(&code) {
-                problems.push(format!("code: \"{}\" isn't allowed, even in a comment or a string: {why}.", trim(found.as_str())));
+            if let Some(found_text) = pattern.find(&bare) {
+                found.wrong.push(format!("code: \"{}\" doesn't work in the device: {why}.", trim(found_text.as_str())));
+            } else if let Some(found_text) = pattern.find(&code) {
+                found.wrong.push(format!(
+                    "code: \"{}\" doesn't work in the device, even in a comment or a string: {why}.",
+                    trim(found_text.as_str())
+                ));
             }
         }
-        problems.extend(whole_body(&code));
+        // Code that isn't one whole function body could run outside every name the frame hides: it's kept in the
+        // device without running.
+        if let Some(problem) = whole_body(&code) {
+            found
+                .wrong
+                .push(format!("{problem} Kumi kept the code in the device without running it, so the device passes MIDI on as it comes."));
+            code = kept_unrun(&code);
+            runs = false;
+        }
     }
     // Only a MIDI effect's code runs outside Live; an audio effect or instrument is heard with audition once loaded.
     let tests: Vec<Value> = match input.get("tests") {
         Some(Value::Array(items)) if patched && !items.is_empty() => {
-            problems.push("tests: they run a MIDI effect's code; a patch is heard in Live, so leave them out.".to_string());
+            found.changed.push("tests: they run a MIDI effect's code, and a patch is heard in Live, so they weren't run.".to_string());
+            Vec::new()
+        }
+        Some(Value::Array(items)) if !gen && !runs && !items.is_empty() => {
+            found.changed.push("tests: the code doesn't run, so they weren't run.".to_string());
             Vec::new()
         }
         Some(Value::Array(items)) if !gen => items.clone(),
         _ => Vec::new(),
     };
     if tests.len() > MAX_TESTS {
-        problems.push(format!("tests: at most {MAX_TESTS}."));
+        found.changed.push(format!("tests: the first {MAX_TESTS} were run, and {} more weren't.", tests.len() - MAX_TESTS));
     }
     let mut checked_tests: Vec<MidiTest> = Vec::new();
     for (index, raw) in tests.iter().take(MAX_TESTS).enumerate() {
@@ -633,8 +844,8 @@ pub fn check_spec(input: &Map<String, Value>) -> Result<DeviceSpec, Vec<String>>
         let name = test.get("name").and_then(Value::as_str).map(trim).filter(|name| !name.is_empty());
         let (Some(name), Some(input_events), Some(expected)) = (name, input_events, expected) else {
             let types = EVENT_TYPES.iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(", ");
-            problems.push(format!(
-                "{label}: a name, input and expect, each up to {MAX_TEST_EVENTS} events of type {types} (at: milliseconds)."
+            found.changed.push(format!(
+                "{label} wasn't run: a test has a name, input and expect, each up to {MAX_TEST_EVENTS} events of type {types} (at: milliseconds)."
             ));
             continue;
         };
@@ -642,48 +853,46 @@ pub fn check_spec(input: &Map<String, Value>) -> Result<DeviceSpec, Vec<String>>
             None => None,
             Some(Value::Object(set)) => Some(set.clone()),
             Some(_) => {
-                problems.push(format!("{label}: set names controls and their values."));
+                found.changed.push(format!("{label} wasn't run: set names controls and their values."));
                 continue;
             }
         };
         checked_tests.push(MidiTest { name: head(name, 80), set, input: input_events, expect: expected });
     }
     let mut voices: u32 = 8;
-    if kind == Some(DeviceType::Instrument) && !patched {
+    if kind == DeviceType::Instrument && !patched {
         if let Some(given) = input.get("voices") {
-            match given.as_f64().filter(|value| value.fract() == 0.0 && *value >= 1.0 && *value <= MAX_VOICES as f64) {
-                Some(given) => voices = given as u32,
-                None => problems.push(format!("voices: how many notes play at once, 1 (mono) to {MAX_VOICES}.")),
+            match given.as_f64().filter(|value| value.is_finite()) {
+                Some(value) if value.fract() == 0.0 && (1.0..=MAX_VOICES as f64).contains(&value) => voices = value as u32,
+                Some(value) => {
+                    voices = value.round().clamp(1.0, MAX_VOICES as f64) as u32;
+                    found.changed.push(format!("voices {}: made {voices} (1, mono, to {MAX_VOICES}).", stringify(given)));
+                }
+                None => found.changed.push(format!("voices {}: made 8 (1, mono, to {MAX_VOICES}).", stringify(given))),
             }
         }
     }
+    let mut runs_free = false;
     if !gen && !patched {
-        if let Some(runs_free) = input.get("runs_free") {
-            if !runs_free.is_boolean() {
-                problems
-                    .push("runs_free: true for a MIDI effect that keeps sending on its own (an LFO, a clock, a generator).".to_string());
-            }
+        match input.get("runs_free") {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(given)) => runs_free = *given,
+            Some(given) => found.changed.push(format!(
+                "runs_free {}: taken as false (true for a MIDI effect that keeps sending on its own: an LFO, a clock, a generator).",
+                stringify(given)
+            )),
         }
     }
-    if !problems.is_empty() {
-        return Err(problems);
-    }
-    if patched {
-        let spec = PatchSpec { kind: kind.unwrap_or(DeviceType::MidiEffect), name, about, controls: checked, patch };
-        // Built and checked now, so what's wrong with the patch comes back before anything is written.
-        patched_device(&spec, reference::installed())?;
-        return Ok(DeviceSpec::Patch(spec));
-    }
-    match kind {
-        Some(DeviceType::AudioEffect) => Ok(DeviceSpec::AudioEffect(AudioEffectSpec { name, about, controls: checked, code })),
-        Some(DeviceType::Instrument) => Ok(DeviceSpec::Instrument(InstrumentSpec { name, about, controls: checked, code, voices })),
-        _ => Ok(DeviceSpec::MidiEffect(MidiSpec {
-            name,
-            about,
-            controls: checked,
-            code,
-            tests: checked_tests,
-            runs_free: input.get("runs_free") == Some(&Value::Bool(true)),
-        })),
-    }
+    let spec = if patched {
+        DeviceSpec::Patch(PatchSpec { kind, name, about, controls: checked, patch })
+    } else {
+        match kind {
+            DeviceType::AudioEffect => DeviceSpec::AudioEffect(AudioEffectSpec { name, about, controls: checked, code }),
+            DeviceType::Instrument => DeviceSpec::Instrument(InstrumentSpec { name, about, controls: checked, code, voices }),
+            DeviceType::MidiEffect => {
+                DeviceSpec::MidiEffect(MidiSpec { name, about, controls: checked, code, tests: checked_tests, runs_free })
+            }
+        }
+    };
+    (spec, found)
 }
