@@ -4,7 +4,7 @@
 //! it's asked for; none is carried in Kumi.
 
 use super::catalog::catalog;
-use super::reference::{atoms, Reference};
+use super::reference::{atoms, Object, Reference};
 
 /// An element of a reference page: its tag, its attributes, and what's written inside it, in order.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -301,19 +301,32 @@ pub fn describe(reference: &Reference, text: &str) -> String {
         let names = near.iter().map(|name| format!("[{name}]")).collect::<Vec<_>>().join(", ");
         return if near.is_empty() { format!("No [{class}] in this Max.") } else { format!("No [{class}] in this Max. Nearest: {names}.") };
     };
-    // An object with modes ([zl lookup]) has a page for each that this Max writes as its own name (zl.lookup).
+    let read_page = |object: &Object| {
+        Some(&object.page)
+            .filter(|path| !path.is_empty())
+            .and_then(|path| std::fs::read_to_string(reference.root.join(path)).ok())
+            .and_then(|text| read(&text))
+    };
+    let own = read_page(object);
+    // An object with modes ([zl lookup]) has a page for each that this Max writes as its own name (zl.lookup): one whose
+    // page takes a mode message, or lists no argument. Where the first argument is a name ([dict view]), the word is
+    // that name.
+    let modes = own.as_ref().is_some_and(|page: &Element| {
+        let mut methods = page.child("methodlist").into_iter().flat_map(|list| list.children("method"));
+        let mut arguments = page.child("objarglist").into_iter().flat_map(|list| list.children("objarg"));
+        methods.any(|method| method.attribute("name") == Some("mode"))
+            || !arguments.any(|argument| real(argument.attribute("name")).is_some())
+    });
     let mode = words
         .get(1)
+        .filter(|_| modes)
         .map(|word| format!("{class}.{word}"))
         .filter(|mode| reference.objects.get(mode).is_some_and(|mode| !mode.page.is_empty()));
     let (shown, paged) = match &mode {
         Some(mode) => (format!("{class} {}", words[1]), &reference.objects[mode]),
         None => (class.clone(), object),
     };
-    let page = Some(&paged.page)
-        .filter(|path| !path.is_empty())
-        .and_then(|path| std::fs::read_to_string(reference.root.join(path)).ok())
-        .and_then(|text| read(&text));
+    let page = if mode.is_some() { read_page(paged) } else { own };
     let named = match &mode {
         Some(mode) => page.as_ref().and_then(|page| page.attribute("name")).unwrap_or(mode),
         None => page.as_ref().and_then(|page| page.attribute("name")).unwrap_or(catalog().canonical(class)),
@@ -735,6 +748,12 @@ mod tests {
         assert!(told.contains("- 0: A list") && !told.contains("(inactive)"), "{told}");
         let bare = describe(&reference, "pick 3");
         assert!(bare.starts_with("[pick] Pick from a list"), "an argument that names no mode: {bare}");
+        // An object whose first argument is a name: the word after it is that name, not a mode.
+        let named = r#"<objarglist><objarg name="name" optional="1" type="symbol"><digest>Its name</digest></objarg></objarglist>"#;
+        std::fs::write(pages.join("store.maxref.xml"), page("store", "Keep values by name", "Messages", named)).unwrap();
+        std::fs::write(pages.join("store.view.maxref.xml"), page("store.view", "Show what's kept", "A store", "")).unwrap();
+        let reference = learn(c74.path());
+        assert!(describe(&reference, "store view").starts_with("[store] Keep values by name\n"), "[dict view] is a dict named view");
         assert!(bare.contains("Also: m17, m18, m19, m20, m21, m22, m23, m24, m25, m26, m27, m28, m29, m30."), "{bare}");
         assert!(
             bare.contains("values 1 = s1, 2 = s2,") && bare.contains("20 = s20 and 4 more"),
