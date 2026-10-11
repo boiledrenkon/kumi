@@ -83,6 +83,7 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
         boxes: HashMap::from([("in".to_string(), "obj-in".to_string()), ("out".to_string(), "obj-out".to_string())]),
         controls,
         reference,
+        output_stage: spec.kind != DeviceType::MidiEffect,
     };
     let expanded = expand(&notation, &outside);
     found.append(expanded.found);
@@ -196,6 +197,7 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
 mod tests {
     use super::*;
     use crate::devices::patch::check::{check_with, Finding};
+    use crate::devices::patch::notation::SPEAKERS;
     use crate::devices::patch::reference::{Count, Object};
     use crate::devices::spec::{Control, NumericControl, Unit};
 
@@ -352,6 +354,70 @@ mod tests {
             patched_device(&spec(DeviceType::Instrument, vec![], synth), None).1.is_empty(),
             "without Max, as the cords use each object"
         );
+    }
+
+    #[test]
+    fn a_patchs_own_way_out_goes_through_kumis_output_stage_at_any_depth() {
+        let reference = reference();
+        // A runaway feedback loop sent to a plugout~ of its own, a dac~, and an ezdac~ inside a [p].
+        let patch = concat!(
+            "fb = [gen~] { History h(0); h = in1 + h * 1.5; out1 = h; out2 = h; }\n",
+            "in.0 -> fb\n",
+            "fb -> [plugout~ 1 2]\n",
+            "speakers = [dac~ 1 2]\n",
+            "fb.1 -> speakers.1\n",
+            "inner = [p inner] {\n",
+            "  [inlet] -> [ezdac~]\n",
+            "}\n",
+            "fb -> inner\n",
+        );
+        for kind in [DeviceType::AudioEffect, DeviceType::Instrument] {
+            let (device, found) = patched_device(&spec(kind, vec![], patch), Some(&reference));
+            assert_eq!(
+                found.changed,
+                [
+                    "patch line 3: [plugout~ 1 2] was made as out: Kumi's output stage, with its safety net, is the device's only way out.",
+                    "patch line 4: [dac~ 1 2] was made as out: Kumi's output stage, with its safety net, is the device's only way out.",
+                ]
+            );
+            assert_eq!(
+                found.wrong,
+                ["patch line 7: [ezdac~] in a [p] would send sound past Kumi's output stage, the device's only way out, so Kumi left it out: send the sound out of the [p] through an [outlet], then to out."]
+            );
+            // The one way out at any depth is Kumi's plugout~, and only its output stage reaches it.
+            fn ways_out(patcher: &Value, found: &mut Vec<String>) {
+                for entry in patcher["boxes"].as_array().into_iter().flatten() {
+                    let text = entry["box"]["text"].as_str().unwrap_or_default();
+                    if SPEAKERS.iter().any(|speaker| text.split(' ').next() == Some(*speaker)) {
+                        found.push(entry["box"]["id"].as_str().unwrap_or_default().to_string());
+                    }
+                    ways_out(&entry["box"]["patcher"], found);
+                }
+            }
+            let mut found = Vec::new();
+            ways_out(&device["patcher"], &mut found);
+            assert_eq!(found, ["obj-plugout"]);
+            let into_plugout: Vec<&str> = device["patcher"]["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|line| line["patchline"]["destination"][0] == "obj-plugout")
+                .map(|line| line["patchline"]["source"][0].as_str().unwrap())
+                .collect();
+            assert!(!into_plugout.is_empty() && into_plugout.iter().all(|source| *source == "obj-out"), "{into_plugout:?}");
+            let into_out: Vec<(String, u64)> = device["patcher"]["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|line| line["patchline"]["destination"][0] == "obj-out")
+                .map(|line| {
+                    (line["patchline"]["source"][0].as_str().unwrap().to_string(), line["patchline"]["destination"][1].as_u64().unwrap())
+                })
+                .collect();
+            let patched = |id: &str| id.strip_prefix("obj-").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
+            let fb = into_out.iter().filter(|(source, _)| patched(source)).map(|(_, inlet)| *inlet).collect::<Vec<_>>();
+            assert_eq!(fb, [0, 1], "the gen~ reaches out.0 and out.1 through what was its plugout~ and its dac~");
+        }
     }
 
     #[test]

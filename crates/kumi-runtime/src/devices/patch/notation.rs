@@ -16,7 +16,7 @@
 //!                                          # left, as they're written
 //! ```
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{json, Value};
 
@@ -87,6 +87,10 @@ pub struct Link {
 
 /// The names that are the device's own: what it receives and what it sends.
 pub const OUTSIDE: [&str; 2] = ["in", "out"];
+
+/// What sends sound out of a device by itself. Where Kumi's output stage makes a device's sound safe, that stage is the
+/// only way out.
+pub(crate) const SPEAKERS: [&str; 6] = ["plugout~", "mc.plugout~", "dac~", "mc.dac~", "ezdac~", "mc.ezdac~"];
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
@@ -817,6 +821,9 @@ pub struct Outside<'a> {
     pub controls: BTreeMap<String, String>,
     /// What Kumi learned of the installed Max, for each object's inlets and outlets.
     pub reference: Option<&'a Reference>,
+    /// Whether the device's sound goes out through Kumi's output stage (an audio effect's, an instrument's): a patch's
+    /// own plugout~ or dac~ is made as out, or inside a [p], where there's no out, left out.
+    pub output_stage: bool,
 }
 
 /// The version of Max Kumi writes patchers for.
@@ -876,12 +883,29 @@ fn expand_within(notation: &Notation, outside: &Outside, top: bool) -> Expanded 
     let mut boxes: Vec<Value> = Vec::new();
     // Each box's inlets and outlets, whether its code gives them, and how it's written; None for one left out.
     let mut made: Vec<Option<(usize, usize, bool, String)>> = vec![None; notation.boxes.len()];
+    // The patch's own ways out made as out.
+    let mut speakers: HashSet<usize> = HashSet::new();
     for (at, item) in notation.boxes.iter().enumerate() {
         let class = item.what.class();
         let label = match &item.what {
             What::Message(text) => format!("({text})"),
             What::Object(text) | What::Gen { text, .. } | What::Js { text, .. } | What::Patcher { text, .. } => format!("[{text}]"),
         };
+        if outside.output_stage && matches!(item.what, What::Object(_)) && SPEAKERS.contains(&class.as_str()) {
+            if top {
+                found.changed.push(format!(
+                    "line {}: {label} was made as out: Kumi's output stage, with its safety net, is the device's only way out.",
+                    item.line
+                ));
+                speakers.insert(at);
+            } else {
+                found.wrong.push(format!(
+                    "line {}: {label} in a [p] would send sound past Kumi's output stage, the device's only way out, so Kumi left it out: send the sound out of the [p] through an [outlet], then to out.",
+                    item.line
+                ));
+            }
+            continue;
+        }
         let mut fields = match &item.what {
             What::Object(_) if matches!(class.as_str(), "inlet" | "outlet") && top => {
                 found.wrong.push(format!(
@@ -968,7 +992,12 @@ fn expand_within(notation: &Notation, outside: &Outside, top: bool) -> Expanded 
                 }
             }
             What::Patcher { text, inner } => {
-                let within = Outside { boxes: HashMap::new(), controls: BTreeMap::new(), reference: outside.reference };
+                let within = Outside {
+                    boxes: HashMap::new(),
+                    controls: BTreeMap::new(),
+                    reference: outside.reference,
+                    output_stage: outside.output_stage,
+                };
                 let expanded = expand_within(inner, &within, false);
                 found.append(expanded.found);
                 let count = |which: &str| inner.boxes.iter().filter(|item| item.what.class() == which).count();
@@ -994,6 +1023,24 @@ fn expand_within(notation: &Notation, outside: &Outside, top: bool) -> Expanded 
     let controls = || outside.controls.keys().map(|name| format!("\"{name}\"")).collect::<Vec<_>>().join(", ");
     let mut lines: Vec<(Value, usize)> = Vec::new();
     for link in &notation.cords {
+        // A cord into a box made as out goes to out, on the side its inlet is (an MC box's one inlet, the left).
+        let remade;
+        let link = match &link.to {
+            End::Box(at) if speakers.contains(at) => {
+                let What::Object(text) = &notation.boxes[*at].what else { continue };
+                let inlet = if text.starts_with("mc.") { 0 } else { link.inlet };
+                if inlet >= 2 {
+                    found.wrong.push(format!(
+                        "line {}: a cord enters inlet {} of [{text}], made as out, which has only out.0 and out.1, so Kumi left it out.",
+                        link.line, link.inlet
+                    ));
+                    continue;
+                }
+                remade = Link { to: End::Outside("out".into()), inlet, ..link.clone() };
+                &remade
+            }
+            _ => link,
+        };
         // A cord to a box that was left out goes with it (that box's line says why).
         let gone = |end: &End| matches!(end, End::Box(at) if made[*at].is_none());
         if gone(&link.from) || gone(&link.to) {
@@ -1366,6 +1413,7 @@ mod tests {
             boxes: HashMap::from([("out".to_string(), "obj-out".to_string())]),
             controls: BTreeMap::from([("Rate".to_string(), "obj-control-1".to_string())]),
             reference: Some(&reference),
+            output_stage: false,
         };
         let Expanded { boxes, lines, found } = expand(&notation, &outside);
         assert_eq!(
