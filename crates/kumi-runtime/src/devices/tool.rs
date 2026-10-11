@@ -7,7 +7,7 @@ use super::{
     midi::midi_device_patcher,
     patch::{page, reference},
     patched::patched_device,
-    spec::{check_spec, Control, DeviceSpec},
+    spec::{check_spec, kept_unrun, Control, DeviceSpec},
 };
 use crate::{
     core::{
@@ -90,21 +90,27 @@ impl Made {
         }
     }
 
-    /// The device this conversation made by the name asked for (or made as that name), while its file is as Kumi wrote it.
-    /// No name asked for is no device's.
-    fn ours(&self, folder: &Path, asked: &str) -> Option<MadeDevice> {
+    /// The device of `kind` this conversation made by the name asked for (or made as that name), while its file is as
+    /// Kumi wrote it. No name asked for is no device's, and one of another kind isn't this one's to replace: a saved Set
+    /// expects the kind it has.
+    fn ours(&self, folder: &Path, asked: &str, kind: DeviceType) -> Option<MadeDevice> {
         if asked.is_empty() {
             return None;
         }
         let unchanged = |device: &&MadeDevice| {
             std::fs::read(folder.join(format!("{}.amxd", device.file))).is_ok_and(|bytes| hashed(&bytes) == device.written)
         };
-        let by_name = self.devices.iter().find(|device| device.asked == asked).filter(unchanged);
-        by_name.or_else(|| self.devices.iter().find(|device| device.file == asked).filter(unchanged)).cloned()
+        let by_name = self.devices.iter().find(|device| device.kind == kind && device.asked == asked).filter(unchanged);
+        by_name.or_else(|| self.devices.iter().find(|device| device.kind == kind && device.file == asked).filter(unchanged)).cloned()
+    }
+
+    /// The kind of the device this conversation made as `file`, if it made one.
+    fn kind_of(&self, file: &str) -> Option<DeviceType> {
+        self.devices.iter().find(|device| device.file == file).map(|device| device.kind)
     }
 
     fn made(&mut self, device: MadeDevice) {
-        self.devices.retain(|kept| kept.file != device.file && kept.asked != device.asked);
+        self.devices.retain(|kept| kept.file != device.file && !(kept.asked == device.asked && kept.kind == device.kind));
         self.devices.push(device);
     }
 }
@@ -279,7 +285,9 @@ impl KernelTool for DeviceTool {
             return Ok(ToolResult::text(said.join("\n\n")));
         }
         // The device is always made: what doesn't fit is made the nearest way it can be, and said beside it.
-        let (spec, mut found) = check_spec(&input);
+        let (mut spec, mut found) = check_spec(&input);
+        // Code Kumi's check found never stops would hold Max (and Live) up: it's kept in the device without running.
+        let mut runaway = false;
         let checked = match &spec {
             DeviceSpec::Patch(_) if reference.is_some() => {
                 "Kumi checked every object against this machine's Max, every cord against the ports it meets, and the order its messages go in, and laid it out top to bottom".to_string()
@@ -288,6 +296,7 @@ impl KernelTool for DeviceTool {
             DeviceSpec::MidiEffect(midi) => {
                 let verified = check_midi_device_isolated(midi, IsolatedOptions::default()).await;
                 found.wrong.extend(verified.problems);
+                runaway = verified.runaway;
                 let tests = if verified.of > 0 {
                     format!("{} of {} of its tests passed", verified.passed, verified.of)
                 } else if given("tests") {
@@ -296,7 +305,10 @@ impl KernelTool for DeviceTool {
                     "It has no tests".into()
                 };
                 // What the spec's checks found counts too: the summary never says nothing's wrong beside a list that does.
-                if found.wrong.is_empty() {
+                if runaway {
+                    "Kumi's check found the code never stops, so the device keeps it without running it; what Kumi found is under wrong"
+                        .to_string()
+                } else if found.wrong.is_empty() {
                     let ran = if midi.runs_free { "no errors; it runs free" } else { "no errors, no hanging notes" };
                     format!("{tests}, and Kumi's checks found nothing wrong ({ran})")
                 } else {
@@ -305,6 +317,14 @@ impl KernelTool for DeviceTool {
             }
             _ => "Kumi checked its outputs, inputs and controls; Max compiles the code when Live loads it".into(),
         };
+        if let (true, DeviceSpec::MidiEffect(midi)) = (runaway, &mut spec) {
+            found.wrong.push(
+                "Kumi kept the code in the device without running it, so the device passes MIDI on as it comes: code that never stops would hold Max, and Live with it, up."
+                    .to_string(),
+            );
+            midi.code = kept_unrun(&midi.code, "Kumi's check found it never stops, which would hold Max up");
+            midi.tests.clear();
+        }
         signal.check()?;
         let folder = Path::new(&self.options.user_library).join("Kumi");
         let mut builder = tokio::fs::DirBuilder::new();
@@ -316,7 +336,7 @@ impl KernelTool for DeviceTool {
         }
         // A device this conversation made is replaced; any other keeps its file, and this one is numbered past it.
         let asked_name = input.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let ours = self.options.made.borrow().ours(&folder, &asked_name);
+        let ours = self.options.made.borrow().ours(&folder, &asked_name, spec.kind());
         let windows = crate::system::platform() == "win32";
         let name = match &ours {
             Some(device) => device.file.clone(),
@@ -324,8 +344,11 @@ impl KernelTool for DeviceTool {
         };
         if ours.is_none() && name != spec.name() {
             let stem = spec.name().split('.').next().unwrap_or_default();
+            let mine = self.options.made.borrow().kind_of(spec.name());
             let why = if windows && (windows_device_name(stem) || windows_device_name(spec.name())) {
                 format!("Windows keeps the name {} for a device", spec.name())
+            } else if let Some(kind) = mine.filter(|kind| *kind != spec.kind()) {
+                format!("{} is the {} this conversation made, and a saved Set may use it as one", spec.name(), kind_name(kind))
             } else {
                 format!("{} is another device in Live's User Library, and a saved Set may use it", spec.name())
             };
@@ -472,17 +495,27 @@ mod tests {
         made.conversation("first");
         std::fs::write(folder.path().join("Echo 2.amxd"), b"written").unwrap();
         made.made(MadeDevice { asked: "Echo".into(), file: "Echo 2".into(), kind: DeviceType::MidiEffect, written: hashed(b"written") });
-        assert_eq!(made.ours(folder.path(), "Echo").map(|device| device.file), Some("Echo 2".into()), "by the name asked for");
-        assert_eq!(made.ours(folder.path(), "Echo 2").map(|device| device.file), Some("Echo 2".into()), "by the name it was made as");
-        assert!(made.ours(folder.path(), "Delay").is_none());
+        assert_eq!(
+            made.ours(folder.path(), "Echo", DeviceType::MidiEffect).map(|device| device.file),
+            Some("Echo 2".into()),
+            "by the name asked for"
+        );
+        assert_eq!(
+            made.ours(folder.path(), "Echo 2", DeviceType::MidiEffect).map(|device| device.file),
+            Some("Echo 2".into()),
+            "by the name it was made as"
+        );
+        assert!(made.ours(folder.path(), "Delay", DeviceType::MidiEffect).is_none());
+        assert!(made.ours(folder.path(), "Echo", DeviceType::AudioEffect).is_none(), "an audio effect doesn't replace a MIDI effect");
+        assert_eq!(made.kind_of("Echo 2"), Some(DeviceType::MidiEffect));
         made.made(MadeDevice { asked: "".into(), file: "Echo 3".into(), kind: DeviceType::MidiEffect, written: hashed(b"written") });
         std::fs::write(folder.path().join("Echo 3.amxd"), b"written").unwrap();
-        assert!(made.ours(folder.path(), "").is_none(), "two devices made without a name are two");
+        assert!(made.ours(folder.path(), "", DeviceType::MidiEffect).is_none(), "two devices made without a name are two");
         std::fs::write(folder.path().join("Echo 2.amxd"), b"saved in Max").unwrap();
-        assert!(made.ours(folder.path(), "Echo").is_none(), "a file changed since is someone's own");
+        assert!(made.ours(folder.path(), "Echo", DeviceType::MidiEffect).is_none(), "a file changed since is someone's own");
         std::fs::write(folder.path().join("Echo 2.amxd"), b"written").unwrap();
         made.conversation("second");
-        assert!(made.ours(folder.path(), "Echo").is_none(), "another conversation's");
+        assert!(made.ours(folder.path(), "Echo", DeviceType::MidiEffect).is_none(), "another conversation's");
     }
 
     #[test]

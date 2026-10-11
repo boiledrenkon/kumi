@@ -39,6 +39,8 @@ struct Run {
     pending: usize,
     /// It sent or said more than a run keeps, and its code was stopped there.
     full: bool,
+    /// Its top level ran past its deadline, and was stopped there.
+    timed_out: bool,
 }
 
 /// JavaScript's ToInt32, for its bit operations on numbers.
@@ -286,7 +288,13 @@ pub(crate) fn js_truthy(value: &Value) -> bool {
 fn run(controls: &[Control], code: &str, input: &[MidiEvent], set: Option<&Map<String, Value>>, settle: f64) -> Run {
     match try_run(controls, code, input, set, settle) {
         Ok(run) => run,
-        Err(error) => Run { output: Vec::new(), errors: vec![Some(format!("the code doesn't run: {error}"))], pending: 0, full: false },
+        Err(error) => Run {
+            output: Vec::new(),
+            errors: vec![Some(format!("the code doesn't run: {error}"))],
+            pending: 0,
+            full: false,
+            timed_out: false,
+        },
     }
 }
 
@@ -404,7 +412,13 @@ fn run_in<'js>(
             // Its top level sent or said without end: stopped there, it's checked on what it did.
             let _ = ctx.catch();
             let mut state = shared.borrow_mut();
-            return Ok(Run { output: events_of(&state.sent), errors: std::mem::take(&mut state.errors), pending: 0, full: true });
+            return Ok(Run {
+                output: events_of(&state.sent),
+                errors: std::mem::take(&mut state.errors),
+                pending: 0,
+                full: true,
+                timed_out: false,
+            });
         }
         // TS: Node's own words for a script stopped at its timeout.
         let message = if timed_out.get() { Some("Script execution timed out after 2000ms".to_string()) } else { message_of(&ctx, error) };
@@ -413,6 +427,7 @@ fn run_in<'js>(
             errors: vec![Some(format!("the code doesn't run: {}", message.unwrap_or_else(|| "undefined".to_string())))],
             pending: 0,
             full: false,
+            timed_out: timed_out.get(),
         });
     }
     for (name, value) in set.into_iter().flatten() {
@@ -452,7 +467,7 @@ fn run_in<'js>(
     let mut state = shared.borrow_mut();
     let pending = state.queue.len();
     state.queue.clear();
-    Ok(Run { output: events_of(&state.sent), errors: std::mem::take(&mut state.errors), pending, full: full.get() })
+    Ok(Run { output: events_of(&state.sent), errors: std::mem::take(&mut state.errors), pending, full: full.get(), timed_out: false })
 }
 
 fn describe(event: &MidiEvent) -> String {
@@ -544,11 +559,15 @@ static PROBE: LazyLock<Vec<MidiEvent>> = LazyLock::new(|| {
 });
 
 /// How a device's check went: its tests passed, of how many, and what's wrong.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct Checked {
     pub passed: usize,
     pub of: usize,
     pub problems: Vec<String>,
+    /// Its code never stopped: it ran past a deadline, or sent or said without end. In Max, whose JavaScript has no
+    /// deadline, it would hold Max (and Live) up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runaway: bool,
 }
 
 /// More events than this out of Kumi's probe (11 in, over about 4 s) is a runaway, not a busy device.
@@ -569,6 +588,7 @@ fn thrown(error: &Option<String>, joined: bool) -> String {
 pub fn check_midi_device(spec: &MidiSpec) -> Checked {
     let mut problems: Vec<String> = Vec::new();
     let probe = run(&spec.controls, &spec.code, &PROBE, None, 2_000.0);
+    let mut runaway = probe.timed_out || probe.full || probe.output.len() > FLOOD;
     if !probe.errors.is_empty() {
         let mut unique: Vec<&Option<String>> = Vec::new();
         for error in &probe.errors {
@@ -602,6 +622,7 @@ pub fn check_midi_device(spec: &MidiSpec) -> Checked {
     let mut passed = 0;
     for test in &spec.tests {
         let result = run(&spec.controls, &spec.code, &test.input, test.set.as_ref(), 2_000.0);
+        runaway |= result.timed_out || result.full;
         let ok = result.errors.is_empty()
             && result.output.len() == test.expect.len()
             && test.expect.iter().zip(&result.output).all(|(expected, actual)| matches(expected, actual));
@@ -619,7 +640,7 @@ pub fn check_midi_device(spec: &MidiSpec) -> Checked {
             if got.is_empty() { "nothing" } else { &got }
         ));
     }
-    Checked { passed, of: spec.tests.len(), problems }
+    Checked { passed, of: spec.tests.len(), problems, runaway }
 }
 
 /// How long a device's check may take before its process is stopped: code that loops forever says so, not hangs Kumi.
@@ -647,14 +668,19 @@ fn harness_binary() -> PathBuf {
 pub async fn check_midi_device_isolated(spec: &MidiSpec, options: IsolatedOptions) -> Checked {
     let of = spec.tests.len();
     let timeout_ms = options.timeout_ms.unwrap_or(CHECK_TIMEOUT_MS);
-    let failed = |problems: Vec<String>| Checked { passed: 0, of, problems };
+    // What stopped the check from saying how it went: code that never stops, whatever it did.
+    let failed = |problems: Vec<String>| Checked { passed: 0, of, problems, runaway: true };
     let mut command = Command::new(harness_binary());
     command.env_clear().stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
     let mut worker = match command.spawn() {
         Ok(worker) => worker,
-        Err(error) => return failed(vec![format!("Kumi's check couldn't start: {}", head(&error.to_string(), 200))]),
+        // Not the code's doing: it never ran.
+        Err(error) => {
+            let problems = vec![format!("Kumi's check couldn't start: {}", head(&error.to_string(), 200))];
+            return Checked { passed: 0, of, problems, runaway: false };
+        }
     };
     let input = stringify(&json!({ "controls": spec.controls, "code": spec.code, "tests": spec.tests, "runsFree": spec.runs_free }));
     let mut stdin = worker.stdin.take();
@@ -711,10 +737,11 @@ pub async fn check_midi_device_isolated(spec: &MidiSpec, options: IsolatedOption
                     Some(Value::Array(items)) => items.iter().take(20).map(js_string).collect(),
                     _ => Vec::new(),
                 };
-                Checked { passed: count(result.get("passed")), of: count(result.get("of")), problems }
+                let runaway = result.get("runaway") == Some(&Value::Bool(true));
+                Checked { passed: count(result.get("passed")), of: count(result.get("of")), problems, runaway }
             }
             Ok(Value::Null) | Err(_) => failed(vec!["Kumi's check: it stopped before saying how it went (the code may have ended its process).".to_string()]),
-            Ok(_) => Checked { passed: 0, of: 0, problems: Vec::new() },
+            Ok(_) => Checked::default(),
         },
     }
 }

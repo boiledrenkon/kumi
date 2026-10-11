@@ -430,7 +430,7 @@ fn what_kumi_once_refused_is_made_the_nearest_way_it_can_be_and_said() {
 
 #[test]
 fn kumi_runs_the_devices_tests_and_its_own_checks_a_working_device_passes_a_broken_one_is_told_what_went_wrong() {
-    assert_eq!(check_midi_device(&spec(json!({}))), Checked { passed: 4, of: 4, problems: vec![] });
+    assert_eq!(check_midi_device(&spec(json!({}))), Checked { passed: 4, of: 4, problems: vec![], runaway: false });
     let wrong_test = check_midi_device(&spec(
         json!({ "tests": [{ "name": "wrong", "input": [{ "type": "noteon", "pitch": 60, "at": 0 }, { "type": "noteoff", "pitch": 60, "at": 100 }], "expect": [{ "type": "noteon", "pitch": 61 }] }] }),
     ));
@@ -481,7 +481,7 @@ async fn a_devices_code_is_checked_in_a_process_of_its_own_it_cant_reach_kumi_ca
     // The same verdicts as in-process.
     assert_eq!(
         check_midi_device_isolated(&spec(json!({})), IsolatedOptions::default()).await,
-        Checked { passed: 4, of: 4, problems: vec![] }
+        Checked { passed: 4, of: 4, problems: vec![], runaway: false }
     );
     // An escape through a host function's constructor can't compile anything.
     let escape = check_midi_device_isolated(
@@ -498,6 +498,7 @@ async fn a_devices_code_is_checked_in_a_process_of_its_own_it_cant_reach_kumi_ca
     )
     .await;
     assert!(matches(&endless.problems.join(" "), "didn't finish within 2 s; something loops forever"), "{:?}", endless.problems);
+    assert!(endless.runaway, "code that never stops is said to run away, for the device to keep it unrun");
     assert!(started.elapsed().as_millis() < 5_000);
     // A loop that sends or says without end is stopped once a run has kept enough, and said so: before, what it sent
     // and said grew the check's process toward a gigabyte until the deadline.
@@ -511,6 +512,7 @@ async fn a_devices_code_is_checked_in_a_process_of_its_own_it_cant_reach_kumi_ca
         "{:?}",
         sending.problems
     );
+    assert!(sending.runaway);
     let saying = check_midi_device_isolated(
         &spec(json!({ "code": "function midi(event) { for (;;) post('Kumi device: again\\n'); pass(event); }", "tests": [] })),
         IsolatedOptions::default(),
@@ -518,6 +520,20 @@ async fn a_devices_code_is_checked_in_a_process_of_its_own_it_cant_reach_kumi_ca
     .await;
     assert!(matches(&saying.problems.join(" "), "Kumi's check: it threw: again"), "{:?}", saying.problems);
     assert!(!matches(&saying.problems.join(" "), "didn't finish"), "{:?}", saying.problems);
+    assert!(saying.runaway, "it says without end");
+    // A top level that never stops runs away too; code that throws, fails its tests or leaves notes hanging doesn't.
+    let looping = check_midi_device_isolated(
+        &spec(json!({ "code": "let i = 0; while (true) { i++; }\nfunction midi(event) { pass(event); }", "tests": [] })),
+        IsolatedOptions::default(),
+    )
+    .await;
+    assert!(looping.runaway && matches(&looping.problems.join(" "), "Script execution timed out after 2000ms"), "{looping:?}");
+    let throwing = check_midi_device_isolated(
+        &spec(json!({ "code": "function midi(event) { if (event.type === 'cc') missing(); if (event.type !== 'noteoff') pass(event); }", "tests": [] })),
+        IsolatedOptions::default(),
+    )
+    .await;
+    assert!(!throwing.runaway && throwing.problems.len() == 2, "{throwing:?}");
 }
 
 /// An audio effect a producer might ask for: a saturator with a tone control, its own function first.
@@ -860,7 +876,10 @@ async fn a_midi_effect_that_runs_free_an_lfo_a_clock_passes_with_runs_free_witho
     let free = check_spec(&with(lfo.clone(), json!({ "runs_free": true })));
     let (DeviceSpec::MidiEffect(free), _) = free else { panic!("{free:?}") };
     assert!(free.runs_free);
-    assert_eq!(check_midi_device_isolated(&free, IsolatedOptions::default()).await, Checked { passed: 0, of: 0, problems: vec![] });
+    assert_eq!(
+        check_midi_device_isolated(&free, IsolatedOptions::default()).await,
+        Checked { passed: 0, of: 0, problems: vec![], runaway: false }
+    );
     // Running free isn't sending without end.
     let flood = check_midi_device(&MidiSpec {
         code: "function tick() { for (let i = 0; i < 50; i++) send({ type: 'cc', controller: 1, value: i }); after(1, tick); }\ntick();\nfunction midi(event) { pass(event); }".into(),
@@ -946,6 +965,31 @@ async fn make_device_reads_guide_makes_a_device_and_waits_for_live_browser() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn make_device_keeps_code_that_never_stops_in_the_device_without_running_it() {
+    use kumi_common::abort::Signal;
+    use_built_harness();
+    let folder = tempfile::tempdir().unwrap();
+    let tool = tool_in(folder.path(), Default::default());
+    // In Max, whose JavaScript has no deadline, code that never stops would hold Max and Live up: the device is made, its
+    // code kept unrun (it passes MIDI on as it comes), and what Kumi's check found is said.
+    for (name, code, says) in [
+        ("Loops", "let i = 0; while (true) { i++; }\nfunction midi(event) { pass(event); }", "Script execution timed out"),
+        ("Floods", "function midi(event) { for (;;) send({ type: 'cc', controller: 1, value: 1 }); }", "something sends without end"),
+    ] {
+        let made = tool.execute(with(lowest(), json!({ "name": name, "code": code, "tests": [] })), Signal::new()).await.unwrap();
+        let made: Value = serde_json::from_str(&made.text).unwrap();
+        let wrong = made["wrong"].as_array().unwrap().iter().map(|said| said.as_str().unwrap()).collect::<Vec<_>>().join("\n");
+        assert!(wrong.contains(says) && wrong.contains("Kumi kept the code in the device without running it"), "{made}");
+        assert!(made["checks"].as_str().unwrap().starts_with("Kumi's check found the code never stops"), "{made}");
+        let file = std::fs::read(folder.path().join("Kumi").join(format!("{name}.amxd"))).unwrap();
+        let written = String::from_utf8_lossy(&file);
+        // As the file holds it: every line of the code is a comment.
+        let commented = written.match_indices("function midi").all(|(at, _)| written[..at].ends_with("// "));
+        assert!(written.contains("Kumi kept this code without running it") && commented, "kept as comments");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn make_device_answers_what_maxs_objects_take_and_send_and_makes_a_device_given_beside_them() {
     use kumi_common::abort::Signal;
     use kumi_runtime::devices::patch::page::NO_MAX;
@@ -1012,6 +1056,11 @@ async fn make_device_replaces_only_a_device_this_conversation_made_and_keeps_wha
         );
     }
     assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 2);
+    // A device of another kind by that name isn't replaced: a saved Set expects the kind it has.
+    let audio = run(with(grit(), json!({ "name": "Echo 2" }))).await;
+    assert_eq!(audio["made"], "Echo 2 2");
+    let renamed = "name: made as \"Echo 2 2\": Echo 2 is the MIDI effect this conversation made, and a saved Set may use it as one.";
+    assert!(audio["changed"].as_array().unwrap().iter().any(|said| said == renamed), "{audio}");
     // Names Kumi fits to the same file name are two devices, not one replacing the other.
     let (chord, keys) = (run(device("和音")).await, run(device("🎹")).await);
     assert_eq!((chord["made"].as_str(), keys["made"].as_str()), (Some("Device"), Some("Device 2")), "{keys}");
