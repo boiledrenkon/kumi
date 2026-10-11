@@ -391,6 +391,15 @@ fn what_kumi_once_refused_is_made_the_nearest_way_it_can_be_and_said() {
     assert!(matches!(made, DeviceSpec::AudioEffect(_)) && found.wrong[0].contains("passes its input on as it comes"), "{found:?}");
     let (made, _) = check_spec(&with(grit(), json!({ "code": null, "patch": ["in.0 -> out.0", "in.1 -> out.1"] })));
     assert!(matches!(&made, DeviceSpec::Patch(patch) if patch.patch == "in.0 -> out.0\nin.1 -> out.1"), "a patch's lines as a list");
+    // A patch past 100,000 characters is cut at a line's end, and that's said.
+    let long = "in.0 -> [*~ 1.] -> out.0\n".repeat(5_000);
+    let (made, found) = check_spec(&with(grit(), json!({ "patch": long })));
+    let DeviceSpec::Patch(cut) = made else { panic!() };
+    assert!(cut.patch.chars().count() <= 100_000 && cut.patch.ends_with("out.0"), "cut at a line's end");
+    assert_eq!(
+        found.wrong,
+        ["patch: it's 125000 characters, past the 100000 Kumi reads, so it was cut after line 4000, and what came after was left out."]
+    );
     // A menu of numbers: a number default is the option it's the text of, else the one it counts to from 0.
     let menu = |default: Value| {
         let checked = check_spec(&with(

@@ -326,6 +326,9 @@ pub const MAX_CONTROLS: usize = 128;
 pub const MAX_OPTIONS: usize = 128;
 /// The most JavaScript Kumi reads through to see it's one function's body, in characters.
 pub const MAX_CODE: usize = 100_000;
+/// The most of a patch Kumi reads, in characters, as its schema says: laying a patch out and checking it takes longer the
+/// more it holds.
+pub const MAX_PATCH: usize = 100_000;
 pub const MAX_TESTS: usize = 32;
 const MAX_TEST_EVENTS: usize = 256;
 static NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9 ._()&'+-]{0,31}$").unwrap());
@@ -603,6 +606,19 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
             String::new()
         }
         _ => String::new(),
+    };
+    // Past MAX_PATCH it's cut at a line's end, and what came after is said to be left out.
+    let patch = if utf16_len(&patch) > MAX_PATCH {
+        let cut = head(&patch, MAX_PATCH);
+        let kept = cut.rfind('\n').map_or(cut.as_str(), |at| &cut[..at]);
+        let line = kept.matches('\n').count() + 1;
+        found.wrong.push(format!(
+            "patch: it's {} characters, past the {MAX_PATCH} Kumi reads, so it was cut after line {line}, and what came after was left out.",
+            utf16_len(&patch)
+        ));
+        kept.to_string()
+    } else {
+        patch
     };
     let patched = !trim(&patch).is_empty();
     let sound = matches!(kind, DeviceType::AudioEffect | DeviceType::Instrument);

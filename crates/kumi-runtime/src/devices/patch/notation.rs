@@ -548,6 +548,10 @@ struct Failure {
 /// How many subpatchers deep a patch is read: one deeper is made empty.
 const DEPTH: usize = 16;
 
+/// The most boxes one patcher is made with: laying a patcher out and checking it takes longer the more boxes it has, and
+/// a well-made device has a few dozen in each.
+pub const MOST_BOXES: usize = 2_000;
+
 impl Reader<'_> {
     fn token(&self) -> Option<&Token> {
         self.tokens.get(self.at).map(|(token, _)| token)
@@ -809,6 +813,14 @@ fn parse_from(text: &str, first_line: usize, top: bool, depth: usize) -> (Notati
         if let (Some(from), Some(to)) = (end(from, line, &mut found), end(to, line, &mut found)) {
             notation.cords.push(Link { from, outlet, to, inlet, line });
         }
+    }
+    if notation.boxes.len() > MOST_BOXES {
+        let from = notation.boxes[MOST_BOXES].line;
+        notation.boxes.truncate(MOST_BOXES);
+        notation.cords.retain(|link| [&link.from, &link.to].iter().all(|end| !matches!(end, End::Box(at) if *at >= MOST_BOXES)));
+        found.wrong.push(format!(
+            "line {from}: a patcher holds {MOST_BOXES} boxes at most, so Kumi left out the boxes from this line on, and their cords: put some of them in a [p]."
+        ));
     }
     found.by_line();
     (notation, found)
@@ -1327,6 +1339,23 @@ mod tests {
         assert_eq!(made.boxes[0]["box"]["numoutlets"], json!(512));
         let many = parse("g = [gen~] { out4000000000 = 0; out1 = 0; }\n").0;
         assert_eq!(expand(&many, &Outside::default()).boxes[0]["box"]["numoutlets"], json!(1), "gen~'s outN goes to 99 at most");
+        // A patcher holds so many boxes at most: those after are left out, with their cords, and said once.
+        let many = format!(
+            "{}\n{}\n",
+            (0..MOST_BOXES + 5).map(|at| format!("b{at} = [t b]")).collect::<Vec<_>>().join("\n"),
+            "b0 -> b2004\nb0 -> b1"
+        );
+        let (notation, found) = parse(&many);
+        assert_eq!(notation.boxes.len(), MOST_BOXES);
+        assert_eq!(
+            notation.cords.iter().map(|link| link.to.clone()).collect::<Vec<_>>(),
+            [End::Box(1)],
+            "the cord to a box left out goes with it"
+        );
+        assert_eq!(
+            found.wrong,
+            ["line 2001: a patcher holds 2000 boxes at most, so Kumi left out the boxes from this line on, and their cords: put some of them in a [p]."]
+        );
         // Subpatchers nest 16 deep at most.
         let deep = format!("{}{}", "[p x] {\n".repeat(20), "}\n".repeat(20));
         assert!(parse(&deep).1.wrong.iter().any(|said| said.contains("is inside 16 subpatchers, so Kumi made it empty")));

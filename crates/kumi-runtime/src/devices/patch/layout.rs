@@ -32,6 +32,10 @@ pub struct Spacing {
 /// between boxes side by side.
 pub const SPACING: Spacing = Spacing { row_gap: 30.0, column_gap: 24.0, lane: 8.0, margin: 24.0 };
 
+/// The most points long cords pass rows through in one patcher's layout (a well-made device's patchers have a few
+/// dozen): past it, long cords run straight, so a patcher of thousands of cords is laid out in a moment.
+const MOST_POINTS: usize = 20_000;
+
 /// Lays out a patcher and the patchers embedded in it.
 pub fn arrange(patcher: &mut Patcher) {
     arrange_with(patcher, &SPACING);
@@ -232,14 +236,19 @@ fn draw(patcher: &Patcher, spacing: &Spacing, members: &[usize], wires: &[&Wire]
     let loops = loop_edges(count, &edges);
     let forward: Vec<usize> = (0..edges.len()).filter(|&e| !loops[e]).collect();
     layer(&mut nodes, &edges, &forward);
-    // Each forward cord, row by row: a long one passes each row between through a point of its own.
+    // Each forward cord, row by row: a long one passes each row between through a point of its own, while the points
+    // are few enough to lay out at once (ordering the rows takes as long as rows times points). Past that, a long cord
+    // runs straight: a patcher that big is laid out, not tidied.
+    let points: usize =
+        forward.iter().map(|&e| nodes[edges[e].1.to].layer.saturating_sub(nodes[edges[e].1.from].layer + 1)).fold(0, usize::saturating_add);
+    let tidy = points <= MOST_POINTS;
     let mut chains: Vec<(usize, Vec<Link>)> = Vec::new();
     for &e in &forward {
         let (cord, link) = edges[e];
         let (top, bottom) = (nodes[link.from].layer, nodes[link.to].layer);
         let mut links = Vec::new();
         let mut from = (link.from, link.outlet);
-        for layer in top + 1..bottom {
+        for layer in (top + 1..bottom).filter(|_| tidy) {
             nodes.push(Node { item: None, w: 0.0, h: 0.0, inlets: 1, outlets: 1, layer, x: 0.0, pin: Pin::Free });
             let point = nodes.len() - 1;
             links.push(Link { from: from.0, outlet: from.1, to: point, inlet: 0, weight: link.weight });
@@ -727,6 +736,19 @@ mod tests {
         let mut patcher = Patcher::read(&value, &NoFiles);
         arrange(&mut patcher);
         patcher
+    }
+
+    #[test]
+    fn a_patcher_of_thousands_of_long_cords_is_laid_out_in_a_moment() {
+        // A chain of 600 rows with 2,000 cords each passing 300 of them: far past the points a tidy layout takes.
+        let boxes: Vec<Value> = (0..600).map(|at| newobj(&format!("b{at}"), "t b", 40.0, 1, 1)).collect();
+        let mut lines: Vec<Value> = (0..599).map(|at| cord(&format!("b{at}"), 0, &format!("b{}", at + 1), 0)).collect();
+        lines.extend((0..2_000).map(|at| cord(&format!("b{}", at % 300), 0, &format!("b{}", at % 300 + 300), 0)));
+        let started = std::time::Instant::now();
+        let patcher = laid_out(json!({ "boxes": boxes, "lines": lines }));
+        assert!(started.elapsed().as_secs() < 15, "laid out in {:?}", started.elapsed());
+        let tops: Vec<f64> = (0..600).map(|at| rect(&patcher, &format!("b{at}")).y).collect();
+        assert!(tops.windows(2).all(|pair| pair[0] < pair[1]), "still a row each, top to bottom");
     }
 
     fn rect(patcher: &Patcher, id: &str) -> Rect {
