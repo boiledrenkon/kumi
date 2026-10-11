@@ -26,7 +26,7 @@ use crate::{
         errors::{FailureKind, KumiError, RuntimeError},
         timing,
     },
-    devices::tool::{device_tool, DeviceToolOptions},
+    devices::tool::{device_tool, DeviceToolOptions, Made},
     mcp::allowed_tools::CallOptions,
 };
 use async_trait::async_trait;
@@ -64,9 +64,22 @@ pub struct Ableton {
     watch: Watch,
     options: Rc<AbletonOptions>,
     closing: RefCell<Option<Closing>>,
+    /// The devices this conversation made, which making one again by its name replaces.
+    made: Rc<RefCell<Made>>,
 }
 pub fn create_ableton_integration(options: AbletonOptions) -> Rc<dyn Integration> {
     Ableton::new(options)
+}
+/// Where a device Kumi made is kept when making it again replaces it: in Kumi's own folder (KUMI_HOME, or ~/.kumi), out
+/// of Live's Browser.
+fn replaced_devices() -> std::path::PathBuf {
+    std::env::var("KUMI_HOME")
+        .ok()
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home::home_dir().unwrap_or_default().join(".kumi"))
+        .join("devices")
+        .join("replaced")
 }
 impl Ableton {
     pub fn new(options: AbletonOptions) -> Rc<Self> {
@@ -151,6 +164,7 @@ impl Ableton {
                 watch,
                 options,
                 closing: RefCell::new(None),
+                made: Rc::new(RefCell::new(Made::keeping(replaced_devices()))),
             }
         })
     }
@@ -659,6 +673,7 @@ impl ObservationHost for Ableton {
             offered.push(device_tool(DeviceToolOptions {
                 user_library: self.options.user_library.clone().unwrap_or_else(|| samples::user_library(None, None)),
                 wait_ms: None,
+                made: self.made.clone(),
                 browser_sees: Rc::new(move |item, signal| {
                     let owner = owner.clone();
                     async move {
@@ -759,6 +774,9 @@ impl Integration for Ableton {
     }
     fn steered(&self) {
         self.rendering.steered();
+    }
+    fn conversation(&self, id: &str) {
+        self.made.borrow_mut().conversation(id);
     }
     async fn observe(&self, signal: Signal, hints: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
         self.observer.observe(self, signal, hints).await

@@ -1,8 +1,11 @@
 pub mod amxd;
 pub mod face;
+pub mod findings;
 pub mod gen;
 pub mod harness;
 pub mod harness_child;
 pub mod midi;
+pub mod patch;
+pub mod patched;
 pub mod spec;
 pub mod tool;

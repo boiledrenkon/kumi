@@ -2,8 +2,8 @@
 //! builds the device around it.
 //!
 //! - An audio effect: plugin~ → gen~ (the model's code) → Kumi's output stage → plugout~.
-//! - An instrument: notein → poly (voice allocation) → one gen~ per voice (the model's voice) →
-//!   Kumi's output stage → plugout~.
+//! - An instrument: notein → poly (voice allocation) → one [p voice n] per voice, each holding a gen~ with the
+//!   model's voice → Kumi's output stage → plugout~.
 //!
 //! Kumi's output stage is fixed and always there: the model's own output has NaN, denormals and DC
 //! taken out and is held under +6 dBFS (a runaway feedback patch is caught); on an effect a Mix knob
@@ -14,7 +14,7 @@
 //! GenExpr's order is fixed: function definitions, then declarations (Param, History…), then
 //! statements. Kumi's Params go after the model's functions, ahead of the rest of its code.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use kumi_common::js::number::{round, to_string as num};
@@ -23,11 +23,13 @@ use regex::Regex;
 use serde_json::{json, Value};
 
 use super::amxd::{device_patcher, face_layout, DevicePatcherOptions, DeviceType, FaceLayout, Line, PatchBox};
+use super::findings::Findings;
 use super::midi::unit_style;
 use super::spec::{AudioEffectSpec, Control, InstrumentSpec, NumericControl, Unit};
 
 /// gen~'s operators, constants and keywords (as Max 9's gen~ names them), which a control's Param
-/// mustn't be (a Param named mix would hide the mix operator), and the names Kumi's own Params use.
+/// mustn't be (a Param named mix would hide the mix operator), and the names Kumi's own Params use. Kumi's output stage
+/// is a gen~ of its own, so its names (gain, wet) aren't among them.
 static RESERVED: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     concat!(
         "abs absdiff accum acos acosh add and asin asinh atan atan2 atanh atodb bool break buffer cartopol ceil change channels clamp clip ",
@@ -37,7 +39,7 @@ static RESERVED: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "mod mstosamps mtof mul mulequals nearest neg neq neqp noise not or out param pass peek phasewrap phasor phi pi plusequals poke poltocar pow r radians ",
         "radtodeg rate rdiv read receive return rmod round rsub s sah sample samplerate sampstoms scale selector send setparam sign sin sinh slide smoothstep ",
         "splat sqrt sqrt1_2 sqrt2 step sub switch t60 t60time tan tanh train triangle trunc twopi vectorsize voice voices wave while wrap write xor ",
-        "note velocity strike bend mod_wheel gain wet"
+        "note velocity strike bend mod_wheel"
     )
     .split(' ')
     .collect()
@@ -50,11 +52,11 @@ static COMMENTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"//[^\n]*|/\*[\s
 static FUNCTION_HEAD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(").unwrap());
 static OPEN_BRACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*\{").unwrap());
 static INPUT_READ: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)in([1-9])(?-u:\b)").unwrap());
+static OUTPUT_WRITTEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)out([1-9][0-9]?)\s*=[^=]").unwrap());
 static OUT1: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)out1\s*=").unwrap());
 static OUT2: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)out2\s*=").unwrap());
 static OUT_MORE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)out[3-9](?-u:\b)").unwrap());
-static KUMI_PARAMS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?-u:\b)Param\s+(note|velocity|strike|bend|mod_wheel|kumi_[A-Za-z0-9_]*)(?-u:\b)").unwrap());
+static TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z_][A-Za-z0-9_]*|\S").unwrap());
 static NOTE_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)(note|velocity|strike|mod_wheel)(?-u:\b)").unwrap());
 static NOTE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)note(?-u:\b)").unwrap());
 static LINE_ENDINGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\r?\n").unwrap());
@@ -139,9 +141,62 @@ pub fn inputs_read(code: &str) -> usize {
     INPUT_READ.captures_iter(&bare).map(|found| found[1].parse::<usize>().unwrap_or(0)).max().unwrap_or(0)
 }
 
-/// What Kumi checks in the model's GenExpr before building (Max compiles it when Live loads the device).
-pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Vec<String> {
-    let mut problems: Vec<String> = Vec::new();
+/// GenExpr's declarations, by the word each starts with.
+const DECLARATIONS: [&str; 5] = ["Param", "History", "Delay", "Data", "Buffer"];
+
+/// The Params Kumi gives each voice of an instrument.
+const VOICE_IDS: [&str; 5] = ["note", "velocity", "strike", "bend", "mod_wheel"];
+
+/// The names GenExpr code declares (each by its declaration's word: `History a(0), b(0);` declares both) and the names
+/// it reads as values (not called, and not the name a declaration gives).
+#[derive(Debug, Default)]
+pub struct Names {
+    pub declared: HashMap<String, &'static str>,
+    pub read: HashSet<String>,
+}
+
+pub fn names(code: &str) -> Names {
+    let bare = without_comments(code);
+    let tokens: Vec<&str> = TOKEN.find_iter(&bare).map(|token| token.as_str()).collect();
+    let mut names = Names::default();
+    // The declaration being read and how deep in its parentheses (its default and settings, `min=0`), and whether a
+    // statement starts here.
+    let (mut declaring, mut depth, mut start) = (None, 0usize, true);
+    for (at, token) in tokens.iter().copied().enumerate() {
+        match token {
+            ";" | "{" | "}" => {
+                (declaring, depth, start) = (None, 0, true);
+                continue;
+            }
+            "(" if declaring.is_some() => depth += 1,
+            ")" if declaring.is_some() => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        let statement = std::mem::replace(&mut start, false);
+        if !token.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+            continue;
+        }
+        match declaring {
+            None if statement && DECLARATIONS.contains(&token) => declaring = DECLARATIONS.iter().copied().find(|word| *word == token),
+            Some(word) if depth == 0 => {
+                names.declared.entry(token.to_string()).or_insert(word);
+            }
+            Some(_) => {}
+            None if tokens.get(at + 1) == Some(&"(") => {}
+            None => {
+                names.read.insert(token.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// What Kumi finds in the model's GenExpr before building, said beside the device it makes (Max compiles the code when
+/// Live loads the device): what's wrong, and the declarations Kumi leaves to the code. `renamed` gives, for a control
+/// whose name Kumi changed, the Param it was asked as and why that one couldn't be its.
+pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control], renamed: &HashMap<String, (String, String)>) -> Findings {
+    let mut found = Findings::default();
+    let problems = &mut found.wrong;
     let bare = without_comments(code);
     if !OUT1.is_match(&bare) || !OUT2.is_match(&bare) {
         problems.push("code: assign out1 (left) and out2 (right), every sample.".to_string());
@@ -168,19 +223,46 @@ pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Vec
     if broken || braces != 0 || parens != 0 {
         problems.push("code: its braces or parentheses don't pair up.".to_string());
     }
-    if KUMI_PARAMS.is_match(&bare) {
-        problems.push("code: note, velocity, strike, bend and mod_wheel are Kumi's; use them without declaring them.".to_string());
+    // Kumi declares a voice's note, velocity, strike, bend and mod_wheel, and each control's Param from the control; one
+    // the code declares itself is left to the code, since gen~ refuses a name declared twice. Only a Param takes the
+    // messages a control or a note sends.
+    let names = names(code);
+    let mut left: Vec<String> = Vec::new();
+    if kind == DeviceType::Instrument {
+        for id in VOICE_IDS {
+            match names.declared.get(id) {
+                Some(&"Param") => left.push(format!("code: it declares {id}, which Kumi gives each voice, so Kumi used the code's declaration of it.")),
+                Some(word) => problems.push(format!(
+                    "code: it declares {id} as a {word}, and Kumi gives each voice its {id} as a Param: only a Param takes what Kumi sends it, so call the {word} something else."
+                )),
+                None => {}
+            }
+        }
     }
-    // Kumi declares each control's Param (its default and range come from the control); declared again, gen~ refuses the code.
     for control in controls {
         let id = param_name(control.name());
-        let declared =
-            Regex::new(&format!(r"(?-u:\b)(?:Param|History|Delay|Data|Buffer)\s+{}(?-u:\b)", regex::escape(&id))).expect("a Param's name");
-        if declared.is_match(&bare) {
-            problems.push(format!(
-                "code: {id} is the {} control's Param, which Kumi declares from the control; use {id} without declaring it.",
+        match names.declared.get(id.as_str()) {
+            Some(&"Param") => left.push(format!(
+                "code: it declares {id}, the \"{}\" control's Param, so Kumi didn't declare it again: what the control sends is its own range, and the code's min and max hold what reaches the code.",
                 control.name()
-            ));
+            )),
+            Some(word) => problems.push(format!(
+                "code: it declares {id} as a {word}, and {id} is the \"{}\" control's Param: only a Param takes the control's value, so call the {word} something else.",
+                control.name()
+            )),
+            None => {}
+        }
+        if !names.read.contains(&id) {
+            problems.push(match renamed.get(control.name()).filter(|(asked, _)| names.read.contains(asked)) {
+                Some((asked, why)) => format!(
+                    "code: it reads {asked}, but the \"{}\" control's Param is {id} ({why}), so the control changes nothing: read {id} where it should act.",
+                    control.name()
+                ),
+                None => format!(
+                    "code: nothing in it reads {id}, the \"{}\" control's Param, so the control changes nothing: read {id} where it should act.",
+                    control.name()
+                ),
+            });
         }
     }
     let inputs = inputs_read(code);
@@ -202,13 +284,16 @@ pub fn check_gen_code(code: &str, kind: DeviceType, controls: &[Control]) -> Vec
     if inputs > 2 {
         problems.push("code: the device has two inputs, in1 (left) and in2 (right).".to_string());
     }
-    problems
+    found.changed = left;
+    found
 }
 
-/// The Param declarations for the model's controls.
-fn param_lines(controls: &[Control]) -> Vec<String> {
+/// The Param declarations for the model's controls, but for those its code declares itself.
+fn param_lines(controls: &[Control], code: &str) -> Vec<String> {
+    let declared = names(code).declared;
     controls
         .iter()
+        .filter(|control| !declared.contains_key(&param_name(control.name())))
         .map(|control| {
             let id = param_name(control.name());
             match control {
@@ -248,7 +333,7 @@ pub fn with_params(code: &str, lines: &[String], heading: &str) -> String {
     parts.join("\n")
 }
 
-const OUTPUT_STAGE_EFFECT: &str = concat!(
+pub(crate) const OUTPUT_STAGE_EFFECT: &str = concat!(
     "// Kumi's output stage (fixed): the effect's output made safe (NaN, denormals and DC out, held under +6 dBFS),\n",
     "// mixed with the dry signal, which passes untouched, then Output.\n",
     "Param kumi_mix(100, min=0, max=100);\n",
@@ -259,7 +344,7 @@ const OUTPUT_STAGE_EFFECT: &str = concat!(
     "out2 = mix(in4, clamp(dcblock(fixnan(fixdenorm(in2))), -2, 2), wet) * gain;"
 );
 
-const OUTPUT_STAGE_INSTRUMENT: &str = concat!(
+pub(crate) const OUTPUT_STAGE_INSTRUMENT: &str = concat!(
     "// Kumi's output stage (fixed): the voices made safe (NaN, denormals and DC out, held under +6 dBFS), then Output.\n",
     "Param kumi_output(0, min=-36, max=12);\n",
     "gain = dbtoa(kumi_output);\n",
@@ -283,62 +368,88 @@ fn max_lines(code: &str) -> String {
     LINE_ENDINGS.replace_all(code, "\r\n").into_owned()
 }
 
-/// A gen~ box holding one codebox, wired to as many inlets as the code reads and two outlets.
-fn gen_box(id: &str, code: &str, rect: [f64; 4]) -> PatchBox {
-    let ins = inputs_read(code);
+/// The highest outN the code assigns (0 when none): how many outlets its codebox has.
+pub fn outputs_written(code: &str) -> usize {
+    let bare = without_comments(code);
+    OUTPUT_WRITTEN.captures_iter(&bare).map(|found| found[1].parse::<usize>().unwrap_or(0)).max().unwrap_or(0)
+}
+
+/// A gen patcher (a gen~'s, or a gen's) holding one codebox, with an in for each of its `ins` and an out for each of
+/// its `outs`.
+pub(crate) fn gen_patcher(code: &str, ins: usize, outs: usize) -> Value {
     let mut inner: Vec<PatchBox> = Vec::new();
     let mut lines: Vec<Line> = Vec::new();
-    inner.push(PatchBox::new(json!({ "id": "obj-code", "maxclass": "codebox", "code": max_lines(code), "fontface": 0, "fontname": "<Monospaced>", "fontsize": 12.0, "numinlets": ins, "numoutlets": 2,
-        "outlettype": ["", ""], "patching_rect": [40.0, 80.0, 600.0, 400.0] })));
+    inner.push(PatchBox::new(json!({ "id": "obj-code", "maxclass": "codebox", "code": max_lines(code), "fontface": 0, "fontname": "<Monospaced>", "fontsize": 12.0, "numinlets": ins, "numoutlets": outs,
+        "outlettype": vec![""; outs], "patching_rect": [40.0, 80.0, 600.0, 400.0] })));
     for index in 1..=ins {
         inner.push(PatchBox::new(json!({ "id": format!("obj-in-{index}"), "maxclass": "newobj", "text": format!("in {index}"), "numinlets": 0, "numoutlets": 1, "outlettype": [""], "patching_rect": [40.0 + (index - 1) as f64 * 90.0, 20.0, 30.0, 22.0] })));
         lines.push(Line::new(&format!("obj-in-{index}"), 0, "obj-code", index as u32 - 1));
     }
-    for index in [1usize, 2] {
+    for index in 1..=outs {
         inner.push(PatchBox::new(json!({ "id": format!("obj-out-{index}"), "maxclass": "newobj", "text": format!("out {index}"), "numinlets": 1, "numoutlets": 0, "patching_rect": [40.0 + (index - 1) as f64 * 90.0, 510.0, 37.0, 22.0] })));
         lines.push(Line::new("obj-code", index as u32 - 1, &format!("obj-out-{index}"), 0));
     }
-    // gen~ has an inlet for each in, and always at least one, which also takes Param messages.
+    json!({ "fileversion": 1, "appversion": { "major": 9, "minor": 1, "revision": 5, "architecture": "x64", "modernui": 1 }, "classnamespace": "dsp.gen",
+        "rect": [100.0, 100.0, 720.0, 600.0], "gridsize": [15.0, 15.0], "boxes": inner, "lines": lines })
+}
+
+/// A gen~ box holding one codebox, wired to as many inlets as the code reads and two outlets.
+pub(crate) fn gen_box(id: &str, code: &str, rect: [f64; 4]) -> PatchBox {
+    let ins = inputs_read(code);
+    // gen~ has an inlet for each in, and always at least one, which also takes Param messages. It's as wide as its
+    // inlets need and no wider: Kumi's layout places it.
+    let rect = [rect[0], rect[1], (18 * ins.max(2)).max(46) as f64, rect[3]];
     PatchBox::new(
         json!({ "id": id, "maxclass": "newobj", "text": "gen~", "numinlets": ins.max(1), "numoutlets": 2, "outlettype": ["signal", "signal"], "patching_rect": rect,
-        "patcher": { "fileversion": 1, "appversion": { "major": 9, "minor": 1, "revision": 5, "architecture": "x64", "modernui": 1 }, "classnamespace": "dsp.gen",
-            "rect": [100.0, 100.0, 720.0, 600.0], "gridsize": [15.0, 15.0], "boxes": inner, "lines": lines } }),
+        "patcher": gen_patcher(code, ins, 2) }),
     )
 }
 
-/// Builds the face's `total` controls: each sends "<param> <value>" to its targets.
-struct Face {
-    boxes: Vec<PatchBox>,
-    lines: Vec<Line>,
+/// Builds the face's `total` controls: each sends "<param> <value>" to its targets, or (in a patch) its value alone.
+pub(crate) struct Face {
+    pub(crate) boxes: Vec<PatchBox>,
+    pub(crate) lines: Vec<Line>,
     count: usize,
     layout: FaceLayout,
 }
 
 impl Face {
-    fn new(total: usize) -> Face {
+    pub(crate) fn new(total: usize) -> Face {
         Face { boxes: Vec::new(), lines: Vec::new(), count: 0, layout: face_layout(total) }
     }
 
-    fn add(&mut self, control: &Control, param: &str, targets: &[&str]) {
+    pub(crate) fn add(&mut self, control: &Control, param: &str, targets: &[&str]) {
+        self.add_to(control, param, targets, 0);
+    }
+
+    /// A control whose "<param> <value>" goes into inlet `inlet` of each target.
+    fn add_to(&mut self, control: &Control, param: &str, targets: &[&str], inlet: u32) {
+        let index = self.count;
+        let id = self.add_alone(control);
+        let prepend = format!("obj-prepend-{}", index + 1);
+        self.boxes.push(PatchBox::new(json!({ "id": prepend, "maxclass": "newobj", "text": format!("prepend {param}"), "numinlets": 1, "numoutlets": 1, "outlettype": [""], "patching_rect": [760.0 + index as f64 * 90.0, 100.0, 80.0, 22.0] })));
+        self.lines.push(Line::new(&id, 0, &prepend, 0));
+        for target in targets {
+            self.lines.push(Line::new(&prepend, 0, target, inlet));
+        }
+    }
+
+    /// A control in its place on the face, alone: its box's id. A menu's first outlet is the chosen option's index; a
+    /// dial's and a toggle's is the value.
+    pub(crate) fn add_alone(&mut self, control: &Control) -> String {
         let index = self.count;
         self.count += 1;
         let id = format!("obj-control-{}", index + 1);
         let (x, y) = self.layout.at(index);
         let (item, valueof) = face_control(control, x, y);
-        // A menu's first outlet is the chosen option's index; a dial's and a toggle's is the value.
         let mut item_box = json!({ "id": id, "varname": control.name(), "parameter_enable": 1, "presentation": 1, "patching_rect": [760.0 + index as f64 * 90.0, 30.0, 44.0, 48.0] });
         extend(&mut item_box, item);
         extend(&mut item_box, json!({ "saved_attribute_attributes": { "valueof": valueof } }));
         self.boxes.push(PatchBox::new(item_box));
-        let prepend = format!("obj-prepend-{}", index + 1);
-        self.boxes.push(PatchBox::new(json!({ "id": prepend, "maxclass": "newobj", "text": format!("prepend {param}"), "numinlets": 1, "numoutlets": 1, "outlettype": [""], "patching_rect": [760.0 + index as f64 * 90.0, 100.0, 80.0, 22.0] })));
-        self.lines.push(Line::new(&id, 0, &prepend, 0));
-        for target in targets {
-            self.lines.push(Line::new(&prepend, 0, target, 0));
-        }
+        id
     }
 
-    fn width(&self) -> f64 {
+    pub(crate) fn width(&self) -> f64 {
         (16 + self.layout.columns * 52).max(140) as f64
     }
 }
@@ -441,12 +552,15 @@ pub const MAX_VOICES: u32 = 32;
 
 /// The effect's code as its gen~ holds it.
 pub fn effect_code(spec: &GenSpec) -> String {
-    with_params(&spec.code, &param_lines(&spec.controls), &format!("Made by Kumi: {}", spec.name))
+    with_params(&spec.code, &param_lines(&spec.controls, &spec.code), &format!("Made by Kumi: {}", spec.name))
 }
 
 /// One voice's code as each voice's gen~ holds it.
 pub fn voice_code(spec: &GenSpec) -> String {
-    let lines: Vec<String> = VOICE_PARAMS.iter().map(|line| line.to_string()).chain(param_lines(&spec.controls)).collect();
+    let declared = names(&spec.code).declared;
+    let given = |line: &&str| line.split(['(', ' ']).nth(1).is_some_and(|id| declared.contains_key(id));
+    let voice = VOICE_PARAMS.iter().filter(|line| !given(line)).map(|line| line.to_string());
+    let lines: Vec<String> = voice.chain(param_lines(&spec.controls, &spec.code)).collect();
     with_params(&spec.code, &lines, &format!("Made by Kumi: {} (one voice)", spec.name))
 }
 
@@ -483,19 +597,73 @@ pub fn audio_effect_patcher(spec: &GenSpec) -> Value {
     )
 }
 
-/// An instrument's patcher: `voices` copies of the model's voice, the notes shared out by poly.
+/// A newobj box (a Max object), with its in- and outlets and what each outlet sends ("" for anything, by default).
+fn obj(boxes: &mut Vec<PatchBox>, id: &str, text: &str, ins: usize, outs: usize, rect: [f64; 4], outlettype: Option<&[&str]>) {
+    let outlettype: Vec<&str> = outlettype.map(|types| types.to_vec()).unwrap_or_else(|| vec![""; outs]);
+    boxes.push(PatchBox::new(json!({ "id": id, "maxclass": "newobj", "text": text, "numinlets": ins, "numoutlets": outs, "outlettype": outlettype, "patching_rect": rect })));
+}
+
+fn wire(lines: &mut Vec<Line>, source: &str, outlet: u32, destination: &str, inlet: u32) {
+    lines.push(Line::new(source, outlet, destination, inlet));
+}
+
+/// A subpatcher's inlet or outlet object: Max numbers them from 1, left to right.
+fn port(boxes: &mut Vec<PatchBox>, id: &str, maxclass: &str, index: usize, comment: &str, x: f64, y: f64) {
+    let (ins, outs, outlettype) = if maxclass == "inlet" { (0, 1, vec![""]) } else { (1, 0, vec![]) };
+    boxes.push(PatchBox::new(json!({ "id": id, "maxclass": maxclass, "index": index, "comment": comment, "numinlets": ins, "numoutlets": outs, "outlettype": outlettype, "patching_rect": [x, y, 30.0, 30.0] })));
+}
+
+/// One voice, [p voice n]: its note in on the left inlet (pitch and velocity, from route), the device's Params, bend
+/// and mod wheel on the right, its sound out of the two outlets. Inside are the voice's gen~ and what turns a note into
+/// its Params.
+fn voice_box(n: usize, code: &str) -> PatchBox {
+    let mut boxes: Vec<PatchBox> = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
+    port(&mut boxes, "obj-notes", "inlet", 1, "note: pitch and velocity", 40.0, 20.0);
+    port(&mut boxes, "obj-params", "inlet", 2, "Params, bend and mod wheel", 400.0, 20.0);
+    // The note and velocity first, then the strike: trigger sends right to left.
+    obj(&mut boxes, "obj-order", "t l l", 1, 2, [40.0, 70.0, 40.0, 22.0], None);
+    obj(&mut boxes, "obj-unpack", "unpack 0 0", 1, 2, [40.0, 100.0, 70.0, 22.0], Some(&["int", "int"]));
+    obj(&mut boxes, "obj-note", "prepend note", 1, 1, [40.0, 130.0, 90.0, 22.0], None);
+    obj(&mut boxes, "obj-velocity", "prepend velocity", 1, 1, [40.0, 160.0, 100.0, 22.0], None);
+    // Every note played (a velocity above 0) counts one more strike, from 1: a bare counter's first count is 0, which
+    // left strike at 0 and every voice's first note unplayed.
+    obj(&mut boxes, "obj-heard", "unpack 0 0", 1, 2, [160.0, 100.0, 70.0, 22.0], Some(&["int", "int"]));
+    obj(&mut boxes, "obj-played", "sel 0", 2, 2, [160.0, 130.0, 40.0, 22.0], Some(&["bang", ""]));
+    obj(&mut boxes, "obj-bang", "t b", 1, 1, [160.0, 160.0, 30.0, 22.0], Some(&["bang"]));
+    obj(&mut boxes, "obj-count", "counter 1 1000000", 5, 4, [160.0, 190.0, 110.0, 22.0], Some(&["int", "", "", "int"]));
+    obj(&mut boxes, "obj-strike", "prepend strike", 1, 1, [160.0, 220.0, 90.0, 22.0], None);
+    boxes.push(gen_box("obj-voice", code, [40.0, 260.0, 100.0, 22.0]));
+    port(&mut boxes, "obj-left", "outlet", 1, "left", 40.0, 300.0);
+    port(&mut boxes, "obj-right", "outlet", 2, "right", 200.0, 300.0);
+    wire(&mut lines, "obj-notes", 0, "obj-order", 0);
+    wire(&mut lines, "obj-order", 1, "obj-unpack", 0);
+    wire(&mut lines, "obj-unpack", 0, "obj-note", 0);
+    wire(&mut lines, "obj-unpack", 1, "obj-velocity", 0);
+    wire(&mut lines, "obj-order", 0, "obj-heard", 0);
+    wire(&mut lines, "obj-heard", 1, "obj-played", 0);
+    wire(&mut lines, "obj-played", 1, "obj-bang", 0);
+    wire(&mut lines, "obj-bang", 0, "obj-count", 0);
+    wire(&mut lines, "obj-count", 0, "obj-strike", 0);
+    for param in ["obj-note", "obj-velocity", "obj-strike", "obj-params"] {
+        wire(&mut lines, param, 0, "obj-voice", 0);
+    }
+    wire(&mut lines, "obj-voice", 0, "obj-left", 0);
+    wire(&mut lines, "obj-voice", 1, "obj-right", 0);
+    PatchBox::new(
+        json!({ "id": format!("obj-voice-{n}"), "maxclass": "newobj", "text": format!("p voice {n}"), "numinlets": 2, "numoutlets": 2,
+        "outlettype": ["signal", "signal"], "patching_rect": [40.0 + (n - 1) as f64 * 90.0, 420.0, 70.0, 22.0],
+        "patcher": { "fileversion": 1, "appversion": { "major": 9, "minor": 1, "revision": 5, "architecture": "x64", "modernui": 1 }, "classnamespace": "box",
+            "rect": [100.0, 100.0, 640.0, 480.0], "gridsize": [8.0, 8.0], "boxes": boxes, "lines": lines } }),
+    )
+}
+
+/// An instrument's patcher: `voices` copies of the model's voice, each a [p voice n], the notes shared out by poly.
 pub fn instrument_patcher(spec: &GenSpec) -> Value {
     let voices = round(spec.voices.unwrap_or(8.0)).clamp(1.0, MAX_VOICES as f64) as usize;
     let mut boxes: Vec<PatchBox> = Vec::new();
     let mut lines: Vec<Line> = Vec::new();
     let mut face = Face::new(spec.controls.len() + 1);
-    fn obj(boxes: &mut Vec<PatchBox>, id: &str, text: &str, ins: usize, outs: usize, rect: [f64; 4], outlettype: Option<&[&str]>) {
-        let outlettype: Vec<&str> = outlettype.map(|types| types.to_vec()).unwrap_or_else(|| vec![""; outs]);
-        boxes.push(PatchBox::new(json!({ "id": id, "maxclass": "newobj", "text": text, "numinlets": ins, "numoutlets": outs, "outlettype": outlettype, "patching_rect": rect })));
-    }
-    fn wire(lines: &mut Vec<Line>, source: &str, outlet: u32, destination: &str, inlet: u32) {
-        lines.push(Line::new(source, outlet, destination, inlet));
-    }
     // The track's notes; poly shares them out to voices, taking the oldest when all are busy, and sends voice, pitch, velocity.
     obj(&mut boxes, "obj-notein", "notein", 1, 3, [40.0, 20.0, 60.0, 22.0], Some(&["int", "int", "int"]));
     obj(&mut boxes, "obj-poly", &format!("poly {voices} 1"), 2, 3, [40.0, 60.0, 80.0, 22.0], Some(&["int", "int", "int"]));
@@ -523,57 +691,24 @@ pub fn instrument_patcher(spec: &GenSpec) -> Value {
     wire(&mut lines, "obj-modscale", 0, "obj-mod", 0);
     let code = voice_code(spec);
     let mut voice_ids: Vec<String> = Vec::new();
-    boxes.push(gen_box("obj-output", OUTPUT_STAGE_INSTRUMENT, [40.0, 500.0, 300.0, 22.0]));
-    obj(&mut boxes, "obj-plugout", "plugout~ 1 2", 2, 0, [40.0, 560.0, 80.0, 22.0], Some(&[]));
-    for voice in 0..voices {
-        let n = voice + 1;
+    for n in 1..=voices {
         let id = format!("obj-voice-{n}");
-        let x = 40.0 + voice as f64 * 120.0;
-        voice_ids.push(id.clone());
-        // The voice's note and velocity first, then its strike: trigger sends right to left.
-        obj(&mut boxes, &format!("obj-order-{n}"), "t l l", 1, 2, [x, 180.0, 40.0, 22.0], None);
-        obj(&mut boxes, &format!("obj-unpack-{n}"), "unpack 0 0", 1, 2, [x, 210.0, 70.0, 22.0], Some(&["int", "int"]));
-        obj(&mut boxes, &format!("obj-note-{n}"), "prepend note", 1, 1, [x, 240.0, 90.0, 22.0], None);
-        obj(&mut boxes, &format!("obj-velocity-{n}"), "prepend velocity", 1, 1, [x, 270.0, 100.0, 22.0], None);
-        // Every note played (a velocity above 0) counts one more strike, from 1: a bare counter's first count
-        // is 0, which left strike at 0 and every voice's first note unplayed.
-        obj(&mut boxes, &format!("obj-heard-{n}"), "unpack 0 0", 1, 2, [x + 60.0, 280.0, 70.0, 22.0], Some(&["int", "int"]));
-        obj(&mut boxes, &format!("obj-played-{n}"), "sel 0", 2, 2, [x + 60.0, 305.0, 40.0, 22.0], Some(&["bang", ""]));
-        obj(&mut boxes, &format!("obj-bang-{n}"), "t b", 1, 1, [x + 60.0, 330.0, 30.0, 22.0], Some(&["bang"]));
-        obj(
-            &mut boxes,
-            &format!("obj-count-{n}"),
-            "counter 1 1000000",
-            5,
-            4,
-            [x + 60.0, 355.0, 110.0, 22.0],
-            Some(&["int", "", "", "int"]),
-        );
-        obj(&mut boxes, &format!("obj-strike-{n}"), "prepend strike", 1, 1, [x + 60.0, 380.0, 90.0, 22.0], None);
-        boxes.push(gen_box(&id, &code, [x, 420.0, 100.0, 22.0]));
-        wire(&mut lines, "obj-route", voice as u32, &format!("obj-order-{n}"), 0);
-        wire(&mut lines, &format!("obj-order-{n}"), 1, &format!("obj-unpack-{n}"), 0);
-        wire(&mut lines, &format!("obj-unpack-{n}"), 0, &format!("obj-note-{n}"), 0);
-        wire(&mut lines, &format!("obj-unpack-{n}"), 1, &format!("obj-velocity-{n}"), 0);
-        wire(&mut lines, &format!("obj-order-{n}"), 0, &format!("obj-heard-{n}"), 0);
-        wire(&mut lines, &format!("obj-heard-{n}"), 1, &format!("obj-played-{n}"), 0);
-        wire(&mut lines, &format!("obj-played-{n}"), 1, &format!("obj-bang-{n}"), 0);
-        wire(&mut lines, &format!("obj-bang-{n}"), 0, &format!("obj-count-{n}"), 0);
-        wire(&mut lines, &format!("obj-count-{n}"), 0, &format!("obj-strike-{n}"), 0);
-        wire(&mut lines, &format!("obj-note-{n}"), 0, &id, 0);
-        wire(&mut lines, &format!("obj-velocity-{n}"), 0, &id, 0);
-        wire(&mut lines, &format!("obj-strike-{n}"), 0, &id, 0);
-        wire(&mut lines, "obj-bend", 0, &id, 0);
-        wire(&mut lines, "obj-mod", 0, &id, 0);
+        boxes.push(voice_box(n, &code));
+        wire(&mut lines, "obj-route", n as u32 - 1, &id, 0);
+        wire(&mut lines, "obj-bend", 0, &id, 1);
+        wire(&mut lines, "obj-mod", 0, &id, 1);
         // Signals into one inlet add up: every voice into the output stage.
         wire(&mut lines, &id, 0, "obj-output", 0);
         wire(&mut lines, &id, 1, "obj-output", 1);
+        voice_ids.push(id);
     }
+    boxes.push(gen_box("obj-output", OUTPUT_STAGE_INSTRUMENT, [40.0, 500.0, 300.0, 22.0]));
+    obj(&mut boxes, "obj-plugout", "plugout~ 1 2", 2, 0, [40.0, 560.0, 80.0, 22.0], Some(&[]));
     wire(&mut lines, "obj-output", 0, "obj-plugout", 0);
     wire(&mut lines, "obj-output", 1, "obj-plugout", 1);
     let targets: Vec<&str> = voice_ids.iter().map(String::as_str).collect();
     for control in &spec.controls {
-        face.add(control, &param_name(control.name()), &targets);
+        face.add_to(control, &param_name(control.name()), &targets, 1);
     }
     face.add(&OUTPUT, "kumi_output", &["obj-output"]);
     let width = face.width();

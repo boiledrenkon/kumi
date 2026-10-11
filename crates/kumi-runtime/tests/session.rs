@@ -63,6 +63,8 @@ struct Record {
     settled: Cell<usize>,
     /// The integration comes wrapped in a fallback, as the app has it.
     wrapped: Cell<bool>,
+    /// The conversations the integration heard the turns belong to, in order.
+    conversations: RefCell<Vec<String>>,
 }
 struct TestKernel {
     record: Rc<Record>,
@@ -157,6 +159,9 @@ impl Integration for TestIntegration {
     }
     fn steered(&self) {
         self.record.live_steered.set(self.record.live_steered.get() + 1);
+    }
+    fn conversation(&self, id: &str) {
+        self.record.conversations.borrow_mut().push(id.into());
     }
     async fn close(&self) -> Result<(), RuntimeError> {
         self.record.integration_closes.set(self.record.integration_closes.get() + 1);
@@ -636,6 +641,23 @@ local_test!(new_conversation_keeps_bridge_and_resets_configured_limit, {
     assert_eq!(h.session.status().turns, 0);
     h.session.submit("two", None).await.unwrap();
     h.session.close().await.unwrap();
+});
+local_test!(the_integration_hears_which_conversation_the_turns_belong_to, {
+    // What it keeps for a conversation (the devices it made) is that one's: a new conversation is another.
+    for wrapped in [false, true] {
+        let h = harness(None, |_| {});
+        h.record.wrapped.set(wrapped);
+        h.session.start().await.unwrap();
+        h.session.submit("one", None).await.unwrap();
+        let first = h.record.created.borrow()[0].conversation.clone().unwrap();
+        assert_eq!(h.record.conversations.borrow().last(), Some(&first), "wrapped: {wrapped}");
+        h.session.new_conversation().await.unwrap();
+        h.session.submit("two", None).await.unwrap();
+        let second = h.record.created.borrow().last().unwrap().conversation.clone().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(h.record.conversations.borrow().last(), Some(&second), "wrapped: {wrapped}");
+        h.session.close().await.unwrap();
+    }
 });
 local_test!(default_session_has_no_turn_limit_and_validates_prompts, {
     let h = harness(None, |_| {});

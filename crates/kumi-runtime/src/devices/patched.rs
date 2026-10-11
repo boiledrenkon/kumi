@@ -1,0 +1,501 @@
+//! A device the model patches with Max's own objects, in Kumi's patch notation ([`super::patch::notation`]). Kumi adds
+//! the face (each control an ordinary Live parameter, named in the patch by its name), what the device receives and
+//! sends (`in` and `out`), and for sound its output stage; then it lays the patch out and checks it.
+//!
+//! - A MIDI effect: `in` is the MIDI it receives, as [midiin] sends it (bytes); `out` takes MIDI on to [midiout].
+//! - An audio effect: `in.0` and `in.1` are the input's left and right; `out.0` and `out.1` go to Kumi's output stage
+//!   (Mix against the dry input, then Output) and on to Live.
+//! - An instrument: `in` is the track's MIDI (bytes); `out.0` and `out.1` go to Kumi's output stage (Output).
+
+use std::collections::{BTreeMap, HashMap};
+
+use serde_json::{json, Value};
+
+use super::amxd::{device_patcher, DevicePatcherOptions, DeviceType, Line, PatchBox};
+use super::findings::Findings;
+use super::gen::{gen_box, Face, MIX, OUTPUT, OUTPUT_STAGE_EFFECT, OUTPUT_STAGE_INSTRUMENT};
+use super::patch::check::check_with;
+use super::patch::notation::{expand, parse, ports_had, Outside};
+use super::patch::reference::Reference;
+use super::patch::standard::{standard, Level};
+use super::patch::{NoFiles, Patcher};
+use super::spec::PatchSpec;
+
+/// What a patch's maker answers for: what's in it (its objects and cords, the order its messages go in, the names it
+/// shares). Its layout, its face and its parameters are Kumi's.
+const THE_PATCH_S: [&str; 3] = ["patch.", "order.", "names."];
+
+/// A [v8ui]'s size on the face: as tall as the face has room for.
+const VIEW: [f64; 2] = [160.0, 150.0];
+
+/// A newobj box of Kumi's own, with its in- and outlets and what each outlet sends.
+fn object(id: &str, text: &str, ins: usize, outs: usize, outlettype: &[&str]) -> PatchBox {
+    PatchBox::new(json!({ "id": id, "maxclass": "newobj", "text": text, "numinlets": ins, "numoutlets": outs, "outlettype": outlettype,
+        "patching_rect": [40.0, 40.0, 60.0, 22.0] }))
+}
+
+/// The device's patcher, built around the model's patch the nearest way it can be and checked, and what was found, each
+/// said so the model can fix it: a line that can't be read is left out, and a cord to a port a box hasn't got too, as
+/// Max leaves it. `reference` is what Kumi learned of the installed Max (each object's inlets and outlets, which objects
+/// there are); without it, the patch is checked for all but those.
+pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value, Findings) {
+    let (notation, mut found) = parse(&spec.patch);
+    let mut boxes: Vec<PatchBox> = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
+    let kumis = match spec.kind {
+        DeviceType::MidiEffect => vec![],
+        DeviceType::AudioEffect => vec![&*MIX, &*OUTPUT],
+        DeviceType::Instrument => vec![&*OUTPUT],
+    };
+    let on_face = spec.controls.len() + kumis.len();
+    let mut face = Face::new(on_face);
+    match spec.kind {
+        DeviceType::MidiEffect => {
+            boxes.push(object("obj-in", "midiin", 1, 1, &["int"]));
+            boxes.push(object("obj-out", "midiout", 1, 0, &[]));
+        }
+        DeviceType::AudioEffect => {
+            // Kumi's output stage takes the patch's sound on its first two inlets and the dry input on the other two.
+            boxes.push(object("obj-in", "plugin~ 1 2", 1, 2, &["signal", "signal"]));
+            boxes.push(gen_box("obj-out", OUTPUT_STAGE_EFFECT, [40.0, 300.0, 300.0, 22.0]));
+            boxes.push(object("obj-plugout", "plugout~ 1 2", 2, 0, &[]));
+            for channel in [0u32, 1] {
+                lines.push(Line::new("obj-in", channel, "obj-out", channel + 2));
+                lines.push(Line::new("obj-out", channel, "obj-plugout", channel));
+            }
+        }
+        DeviceType::Instrument => {
+            boxes.push(object("obj-in", "midiin", 1, 1, &["int"]));
+            boxes.push(gen_box("obj-out", OUTPUT_STAGE_INSTRUMENT, [40.0, 300.0, 300.0, 22.0]));
+            boxes.push(object("obj-plugout", "plugout~ 1 2", 2, 0, &[]));
+            for channel in [0u32, 1] {
+                lines.push(Line::new("obj-out", channel, "obj-plugout", channel));
+            }
+        }
+    }
+    let controls: BTreeMap<String, String> =
+        spec.controls.iter().map(|control| (control.name().to_string(), face.add_alone(control))).collect();
+    for control in kumis {
+        let param = if control.name() == "Mix" { "kumi_mix" } else { "kumi_output" };
+        face.add(control, param, &["obj-out"]);
+    }
+    let outside = Outside {
+        boxes: HashMap::from([("in".to_string(), "obj-in".to_string()), ("out".to_string(), "obj-out".to_string())]),
+        controls,
+        reference,
+        output_stage: spec.kind != DeviceType::MidiEffect,
+    };
+    let expanded = expand(&notation, &outside);
+    found.append(expanded.found);
+    let mut patch_boxes = expanded.boxes;
+    // What draws (a [v8ui]) is on the face too: beside the controls, each as tall as the face, the device as wide as
+    // they take.
+    let mut width = face.width();
+    let mut x = if on_face == 0 { 8.0 } else { width };
+    for entry in patch_boxes.iter_mut().filter(|entry| entry["box"]["maxclass"] == "v8ui") {
+        entry["box"]["presentation"] = json!(1);
+        entry["box"]["presentation_rect"] = json!([x, 8.0, VIEW[0], VIEW[1]]);
+        x += VIEW[0] + 8.0;
+        width = width.max(x);
+    }
+    // The ports of Kumi's own boxes (in, out, the face's controls), for the cords that reach them, and what the patch
+    // calls each.
+    let mut own: HashMap<String, (usize, usize, String)> = HashMap::new();
+    for item in boxes.iter().chain(&face.boxes) {
+        let (Some(id), Some(ins), Some(outs)) = (
+            item.item.get("id").and_then(Value::as_str),
+            item.item.get("numinlets").and_then(Value::as_u64),
+            item.item.get("numoutlets").and_then(Value::as_u64),
+        ) else {
+            continue;
+        };
+        let called = match id {
+            "obj-in" => "in".to_string(),
+            "obj-out" => "out".to_string(),
+            _ => outside
+                .controls
+                .iter()
+                .find(|(_, control)| control.as_str() == id)
+                .map_or(id.to_string(), |(name, _)| format!("\"{name}\"")),
+        };
+        own.insert(id.to_string(), (ins as usize, outs as usize, called));
+    }
+    for entry in patch_boxes {
+        boxes.push(PatchBox::new(entry["box"].clone()));
+    }
+    for (entry, line) in &expanded.lines {
+        let end = |key: &str| {
+            (entry["patchline"][key][0].as_str().unwrap_or("").to_string(), entry["patchline"][key][1].as_u64().unwrap_or(0) as u32)
+        };
+        let ((from, outlet), (to, inlet)) = (end("source"), end("destination"));
+        if let Some((_, outs, called)) = own.get(&from).filter(|(_, outs, _)| outlet as usize >= *outs) {
+            let has = ports_had("outlet", *outs);
+            found.wrong.push(format!(
+                "line {line}: a cord leaves outlet {outlet} of {called}, which has {has}, so Kumi left it out, as Max would."
+            ));
+            continue;
+        }
+        if let Some((ins, _, called)) = own.get(&to).filter(|(ins, _, _)| inlet as usize >= *ins) {
+            let has = ports_had("inlet", *ins);
+            found
+                .wrong
+                .push(format!("line {line}: a cord enters inlet {inlet} of {called}, which has {has}, so Kumi left it out, as Max would."));
+            continue;
+        }
+        lines.push(Line::new(&from, outlet, &to, inlet));
+    }
+    // A control nothing takes from does nothing, and an out nothing reaches is a device that's silent: read from the cords
+    // as they're made, so a cord left out reaches nothing.
+    for control in &spec.controls {
+        let id = outside.controls.get(control.name()).map(String::as_str).unwrap_or_default();
+        let wired = lines.iter().any(|line| line.patchline.source.0 == id || line.patchline.destination.0 == id);
+        if !wired {
+            found.wrong.push(format!(
+                "patch: \"{}\" isn't wired, so it changes nothing: take its value from \"{}\" -> … (or leave the control out).",
+                control.name(),
+                control.name()
+            ));
+        }
+    }
+    let reached = |inlet: u32| lines.iter().any(|line| line.patchline.destination.0 == "obj-out" && line.patchline.destination.1 == inlet);
+    match spec.kind {
+        DeviceType::MidiEffect if !reached(0) => {
+            found.wrong.push("patch: nothing reaches out, so the device sends no MIDI: end the patch -> out.".into());
+        }
+        DeviceType::AudioEffect | DeviceType::Instrument => {
+            for (inlet, side) in [(0, "left"), (1, "right")] {
+                if !reached(inlet) {
+                    found.wrong.push(format!(
+                        "patch: nothing reaches out.{inlet}, the {side} channel, so it's silent: send it sound (the same as the other side, for mono)."
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    boxes.extend(face.boxes);
+    lines.extend(face.lines);
+    let document =
+        device_patcher(spec.kind, DevicePatcherOptions { title: spec.name.clone(), description: spec.about.clone(), width, boxes, lines });
+    let report = check_with(&Patcher::read(&document, &NoFiles), standard(), reference);
+    for finding in report.at_least(Level::Warn) {
+        // An object Max doesn't have was said with its line as the patch was read.
+        let said = reference.is_some() && finding.rule == "patch.unknown-object";
+        if THE_PATCH_S.iter().any(|rule| finding.rule.starts_with(rule)) && !said {
+            found.rule(finding.level, format!("patch: {finding}"));
+        }
+    }
+    // In the order of the patch's lines, each said as the patch's ("patch line 4: …"), then what's said of all of it.
+    found.by_line();
+    for text in found.wrong.iter_mut().chain(&mut found.changed).chain(&mut found.notes).filter(|text| text.starts_with("line ")) {
+        text.insert_str(0, "patch ");
+    }
+    (document, found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::devices::patch::check::{check_with, Finding};
+    use crate::devices::patch::notation::SPEAKERS;
+    use crate::devices::patch::reference::{Count, Object};
+    use crate::devices::spec::{Control, NumericControl, Unit};
+
+    fn knob(name: &str, min: f64, max: f64, unit: Unit) -> Control {
+        Control::Number(NumericControl { name: name.into(), min, max, default: min.max(0.0).min(max), unit })
+    }
+
+    /// What Max says of the objects these patches use, as its help shows them bare and with up to two arguments.
+    fn reference() -> Reference {
+        let mut reference = Reference::default();
+        for (class, inlets, outlets, signal) in [
+            ("*~", 2, 1, true),
+            ("dbtoa", 1, 1, false),
+            ("t", 1, 2, false),
+            ("trigger", 1, 2, false),
+            ("midiparse", 1, 8, false),
+            ("midiformat", 7, 2, false),
+            ("unpack", 1, 2, false),
+            ("pack", 2, 1, false),
+            ("+", 2, 1, false),
+            ("prepend", 1, 1, false),
+            ("/", 2, 1, false),
+            ("midiin", 1, 1, false),
+            ("midiout", 1, 0, false),
+            ("plugin~", 1, 2, true),
+            ("plugout~", 2, 0, false),
+            ("gen~", 1, 2, true),
+        ] {
+            let types = vec![if signal { "signal".to_string() } else { String::new() }; outlets.max(1)];
+            reference.objects.insert(
+                class.into(),
+                Object {
+                    inlets: Count::Fixed { count: inlets },
+                    outlets: Count::Fixed { count: outlets },
+                    outlet_types: types,
+                    seen: 3,
+                    held: vec![0, 1, 2],
+                    ..Object::default()
+                },
+            );
+        }
+        // As Max's help shows [pipe]: a delay time alone holds two inlets and an outlet; several numbers delayed don't.
+        reference.objects.insert(
+            "pipe".into(),
+            Object {
+                inlets: Count::Fixed { count: 2 },
+                outlets: Count::Fixed { count: 1 },
+                seen: 13,
+                held: vec![0, 1, 2],
+                unheld: vec![3, 4, 13],
+                ..Object::default()
+            },
+        );
+        reference
+    }
+
+    fn spec(kind: DeviceType, controls: Vec<Control>, patch: &str) -> PatchSpec {
+        PatchSpec { kind, name: "Patched".into(), about: "A patch.".into(), controls, patch: patch.into() }
+    }
+
+    /// Every rule the checker finds broken in a device, at any level but advice.
+    fn broken(document: &Value, reference: &Reference) -> Vec<String> {
+        check_with(&Patcher::read(document, &NoFiles), standard(), Some(reference)).at_least(Level::Warn).map(Finding::to_string).collect()
+    }
+
+    const GAIN: &str = concat!(
+        "left = [*~ 1.]\n",
+        "right = [*~ 1.]\n",
+        "in.0 -> left -> out.0\n",
+        "in.1 -> right -> out.1\n",
+        "\"Gain\" -> [dbtoa] -> both\n",
+        "both = [t f f]\n",
+        "both.0 -> left.1\n",
+        "both.1 -> right.1\n",
+    );
+
+    #[test]
+    fn a_patch_becomes_a_device_with_its_face_its_in_and_out_and_kumis_output_stage() {
+        let reference = reference();
+        let (effect, found) =
+            patched_device(&spec(DeviceType::AudioEffect, vec![knob("Gain", -24.0, 24.0, Unit::Db)], GAIN), Some(&reference));
+        assert!(found.is_empty(), "{found:?}");
+        let patcher = Patcher::read(&effect, &NoFiles);
+        let texts: Vec<&str> = patcher.boxes.iter().map(|item| item.text()).filter(|text| !text.is_empty()).collect();
+        for text in ["plugin~ 1 2", "gen~", "plugout~ 1 2", "*~ 1.", "dbtoa", "t f f"] {
+            assert!(texts.contains(&text), "{text} in {texts:?}");
+        }
+        let gain =
+            patcher.boxes.iter().find(|item| item.maxclass() == "live.dial" && item.str("varname") == "Gain").expect("the Gain dial");
+        let dbtoa = patcher.boxes.iter().find(|item| item.text() == "dbtoa").unwrap();
+        assert!(patcher.cords.iter().any(|cord| cord.from == gain.id() && cord.to == dbtoa.id()), "the control's value, as the patch says");
+        assert!(
+            patcher.boxes.iter().any(|item| item.str("varname") == "Mix")
+                && patcher.boxes.iter().any(|item| item.str("varname") == "Output")
+        );
+        assert_eq!(broken(&effect, &reference), Vec::<String>::new(), "laid out and checked: nothing left broken");
+
+        let transposer = concat!(
+            "parse = [midiparse]\n",
+            "notes = [unpack 0 0]\n",
+            "shift = [+ 0]\n",
+            "pair = [pack 0 0]\n",
+            "in -> parse -> notes -> shift -> pair -> [midiformat] -> out\n",
+            "notes.1 -> pair.1\n",
+            "\"Semitones\" -> shift.1\n",
+        );
+        let (midi, found) =
+            patched_device(&spec(DeviceType::MidiEffect, vec![knob("Semitones", -24.0, 24.0, Unit::St)], transposer), Some(&reference));
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(broken(&midi, &reference), Vec::<String>::new());
+        // [pipe 0 0 125] delays pitch and velocity: an outlet and an inlet more than Max's help ever shows.
+        let echo = concat!(
+            "notes = [unpack 0 0]\n",
+            "later = [pipe 0 0 125]\n",
+            "pair = [pack 0 0]\n",
+            "in -> [midiparse] -> notes -> later\n",
+            "notes.1 -> later.1\n",
+            "later.1 -> pair.1\n",
+            "later -> pair -> [midiformat] -> out\n",
+        );
+        let (echo, found) = patched_device(&spec(DeviceType::MidiEffect, vec![], echo), Some(&reference));
+        assert!(found.is_empty(), "{found:?}");
+        let later = Patcher::read(&echo, &NoFiles).boxes.into_iter().find(|item| item.str("varname") == "later").unwrap();
+        assert_eq!((later.inlets(), later.outlets()), (2, 2), "as its cords use it");
+        // What a [v8ui] draws is on the face, beside the controls; the device is as wide as it takes.
+        let drawn = "view = [v8ui] { function msg_float(v) { mgraphics.redraw(); } }\n\"Semitones\" -> view\nin -> out\n";
+        let (drawn, found) =
+            patched_device(&spec(DeviceType::MidiEffect, vec![knob("Semitones", -24.0, 24.0, Unit::St)], drawn), Some(&reference));
+        assert!(found.is_empty(), "{found:?}");
+        let view = Patcher::read(&drawn, &NoFiles).boxes.into_iter().find(|item| item.maxclass() == "v8ui").unwrap();
+        assert!(view.shown());
+        assert_eq!(view.presentation_rect().map(|rect| (rect.x, rect.w)), Some((140.0, VIEW[0])));
+        assert_eq!(drawn["patcher"]["devicewidth"], json!(140.0 + VIEW[0] + 8.0));
+        assert_eq!(broken(&drawn, &reference), Vec::<String>::new());
+
+        let synth = concat!(
+            "voice = [gen~] {\n",
+            "  Param pitch(60); Param level(0);\n",
+            "  out1 = cycle(mtof(pitch)) * level * 0.2;\n",
+            "  out2 = out1;\n",
+            "}\n",
+            "notes = [unpack 0 0]\n",
+            "in -> [midiparse] -> notes -> [prepend pitch] -> voice\n",
+            "notes.1 -> [/ 127.] -> [prepend level] -> voice\n",
+            "voice.0 -> out.0\n",
+            "voice.1 -> out.1\n",
+        );
+        let (instrument, found) = patched_device(&spec(DeviceType::Instrument, vec![], synth), Some(&reference));
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(broken(&instrument, &reference), Vec::<String>::new());
+        let voice = Patcher::read(&instrument, &NoFiles).boxes.into_iter().find(|item| item.str("varname") == "voice").unwrap();
+        assert_eq!((voice.inlets(), voice.outlets()), (1, 2), "a gen~ with no inputs takes its Params on one inlet; two outputs");
+        assert!(
+            patched_device(&spec(DeviceType::Instrument, vec![], synth), None).1.is_empty(),
+            "without Max, as the cords use each object"
+        );
+    }
+
+    #[test]
+    fn a_patchs_own_way_out_goes_through_kumis_output_stage_at_any_depth() {
+        let reference = reference();
+        // A runaway feedback loop sent to a plugout~ of its own, a dac~, and an ezdac~ inside a [p].
+        let patch = concat!(
+            "fb = [gen~] { History h(0); h = in1 + h * 1.5; out1 = h; out2 = h; }\n",
+            "in.0 -> fb\n",
+            "fb -> [plugout~ 1 2]\n",
+            "speakers = [dac~ 1 2]\n",
+            "fb.1 -> speakers.1\n",
+            "inner = [p inner] {\n",
+            "  [inlet] -> [ezdac~]\n",
+            "}\n",
+            "fb -> inner\n",
+        );
+        for kind in [DeviceType::AudioEffect, DeviceType::Instrument] {
+            let (device, found) = patched_device(&spec(kind, vec![], patch), Some(&reference));
+            assert_eq!(
+                found.changed,
+                [
+                    "patch line 3: [plugout~ 1 2] was made as out: Kumi's output stage, with its safety net, is the device's only way out.",
+                    "patch line 4: [dac~ 1 2] was made as out: Kumi's output stage, with its safety net, is the device's only way out.",
+                ]
+            );
+            assert_eq!(
+                found.wrong,
+                ["patch line 7: [ezdac~] in a [p] would send sound past Kumi's output stage, the device's only way out, so Kumi left it out: send the sound out of the [p] through an [outlet], then to out."]
+            );
+            // The one way out at any depth is Kumi's plugout~, and only its output stage reaches it.
+            fn ways_out(patcher: &Value, found: &mut Vec<String>) {
+                for entry in patcher["boxes"].as_array().into_iter().flatten() {
+                    let text = entry["box"]["text"].as_str().unwrap_or_default();
+                    if SPEAKERS.iter().any(|speaker| text.split(' ').next() == Some(*speaker)) {
+                        found.push(entry["box"]["id"].as_str().unwrap_or_default().to_string());
+                    }
+                    ways_out(&entry["box"]["patcher"], found);
+                }
+            }
+            let mut found = Vec::new();
+            ways_out(&device["patcher"], &mut found);
+            assert_eq!(found, ["obj-plugout"]);
+            let into_plugout: Vec<&str> = device["patcher"]["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|line| line["patchline"]["destination"][0] == "obj-plugout")
+                .map(|line| line["patchline"]["source"][0].as_str().unwrap())
+                .collect();
+            assert!(!into_plugout.is_empty() && into_plugout.iter().all(|source| *source == "obj-out"), "{into_plugout:?}");
+            let into_out: Vec<(String, u64)> = device["patcher"]["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|line| line["patchline"]["destination"][0] == "obj-out")
+                .map(|line| {
+                    (line["patchline"]["source"][0].as_str().unwrap().to_string(), line["patchline"]["destination"][1].as_u64().unwrap())
+                })
+                .collect();
+            let patched = |id: &str| id.strip_prefix("obj-").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
+            let fb = into_out.iter().filter(|(source, _)| patched(source)).map(|(_, inlet)| *inlet).collect::<Vec<_>>();
+            assert_eq!(fb, [0, 1], "the gen~ reaches out.0 and out.1 through what was its plugout~ and its dac~");
+        }
+    }
+
+    #[test]
+    fn a_patch_is_always_made_and_whats_wrong_comes_back_beside_it() {
+        let reference = reference();
+        // The device is made every time (with Kumi's own boxes, in, out and the face), and what's wrong is said by line.
+        let made = |kind: DeviceType, controls: Vec<Control>, patch: &str| {
+            let (document, found) = patched_device(&spec(kind, controls, patch), Some(&reference));
+            let patched = |id: &str| id.strip_prefix("obj-").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()));
+            let made = Patcher::read(&document, &NoFiles).boxes.iter().filter(|item| patched(item.id())).count();
+            assert_eq!(made, parse(patch).0.boxes.len(), "every box the patch's readable lines make is in the device");
+            found
+        };
+        let unread = made(DeviceType::AudioEffect, vec![], "in.0 -> [*~ 1.] -> out.0 =\nin.1 -> [*~ 1.] -> out.1\n");
+        assert_eq!(
+            unread.wrong,
+            [
+                "patch line 1: expected -> or the end of the line after a box, not =, so Kumi left the line out.",
+                "patch: nothing reaches out.0, the left channel, so it's silent: send it sound (the same as the other side, for mono).",
+            ],
+            "what can't be read is left out and said first, with its line; the rest is made"
+        );
+        let said = made(
+            DeviceType::AudioEffect,
+            vec![knob("Drive", 0.0, 1.0, Unit::None)],
+            "in.0 -> [*~ 1.] -> out.0\nin.1 -> [mystery~] -> out.0\n",
+        );
+        assert_eq!(
+            said.wrong,
+            [
+                "patch line 2: [mystery~] isn't an object in this Max, so Max will show [mystery~] as a broken box: check its name (make_device with objects can look one up).",
+                "patch: \"Drive\" isn't wired, so it changes nothing: take its value from \"Drive\" -> … (or leave the control out).",
+                "patch: nothing reaches out.1, the right channel, so it's silent: send it sound (the same as the other side, for mono).",
+            ]
+        );
+        // One outlet into [+]'s cold inlet and, through [t], its hot one: which comes first is left to where boxes sit.
+        let order = made(
+            DeviceType::MidiEffect,
+            vec![knob("Amount", 0.0, 10.0, Unit::None)],
+            "add = [+ 0]\n\"Amount\" -> add.1\n\"Amount\" -> [t f] -> add\nadd -> out\nin -> [midiparse]\n",
+        );
+        assert_eq!(order.wrong.len(), 1, "{order:?}");
+        assert!(
+            order.wrong[0].starts_with("patch: order.fan-out-rejoins: outlet 0 of live.dial \"Amount\" reaches [+ 0] twice"),
+            "{}",
+            order.wrong[0]
+        );
+        assert_eq!(
+            made(DeviceType::MidiEffect, vec![], "in -> [midiparse]\n").wrong,
+            ["patch: nothing reaches out, so the device sends no MIDI: end the patch -> out."]
+        );
+        assert_eq!(
+            made(DeviceType::MidiEffect, vec![], "in -> [midiparse\nin -> out\n").wrong,
+            ["patch line 1: a [ isn't closed on its line, so Kumi left the line out."]
+        );
+        // A cord to a port a box hasn't got is left out, as Max leaves it: Kumi's own boxes and the patch's alike.
+        let ports = made(DeviceType::MidiEffect, vec![], "add = [+ 0]\nin.1 -> out\nin -> add.2\nin -> add -> out\n");
+        assert_eq!(
+            ports.wrong,
+            [
+                "patch line 2: a cord leaves outlet 1 of in, which has only outlet 0, so Kumi left it out, as Max would.",
+                "patch line 3: a cord enters inlet 2 of [+ 0], which has inlets 0 to 1, so Kumi left it out, as Max would.",
+            ]
+        );
+        // What's said of the cords is of those made: one left out reaches nothing.
+        let unreached = made(
+            DeviceType::MidiEffect,
+            vec![knob("Amount", 0.0, 10.0, Unit::None)],
+            "add = [+ 0]\nin -> add\nadd.1 -> out\n\"Amount\" -> add.3\n",
+        );
+        assert_eq!(
+            unreached.wrong,
+            [
+                "patch line 3: a cord leaves outlet 1 of [+ 0], which has only outlet 0, so Kumi left it out, as Max would.",
+                "patch line 4: a cord enters inlet 3 of [+ 0], which has inlets 0 to 1, so Kumi left it out, as Max would.",
+                "patch: \"Amount\" isn't wired, so it changes nothing: take its value from \"Amount\" -> … (or leave the control out).",
+                "patch: nothing reaches out, so the device sends no MIDI: end the patch -> out.",
+            ]
+        );
+    }
+}
