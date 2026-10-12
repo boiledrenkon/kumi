@@ -1071,6 +1071,13 @@ async fn make_device_replaces_only_a_device_this_conversation_made_and_keeps_wha
     assert_eq!((audio["made"].as_str(), audio["itemId"].as_str()), (Some("Echo 2"), Some("user_library/Kumi/Audio Effects/Echo 2")));
     assert!(audio.get("replaced").is_none() && audio.get("changed").is_none(), "{audio}");
     assert!(folder.path().join("Kumi/MIDI Effects/Echo 2.amxd").exists());
+    // Made again by that name, each replaces the device of its own kind: the audio effect didn't take the MIDI effect's
+    // place in what this conversation made.
+    let midi = run(device("Echo 2")).await;
+    assert_eq!((midi["made"].as_str(), midi["itemId"].as_str()), (Some("Echo 2"), Some("user_library/Kumi/MIDI Effects/Echo 2")));
+    assert!(midi["replaced"].as_str().unwrap().starts_with("the MIDI effect this conversation made as Echo 2"), "{midi}");
+    let audio = run(with(grit(), json!({ "name": "Echo 2" }))).await;
+    assert!(audio["replaced"].as_str().unwrap().starts_with("the audio effect this conversation made as Echo 2"), "{audio}");
     // Kumi Ears is kept beside the audio effects, and Kumi writes it again whenever it differs: an audio effect never
     // takes its name, even before it's there. A MIDI effect, in a folder of its own, may.
     let ears = run(with(grit(), json!({ "name": "Kumi Ears" }))).await;

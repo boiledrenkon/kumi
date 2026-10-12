@@ -105,8 +105,10 @@ impl Made {
         by_name.or_else(|| self.devices.iter().find(|device| device.kind == kind && device.file == asked).filter(unchanged)).cloned()
     }
 
+    /// A device made: it takes the place of the record of its own kind that had its file or its asked name. Each kind has
+    /// a folder of its own, so a device of another kind with the same file is another device.
     fn made(&mut self, device: MadeDevice) {
-        self.devices.retain(|kept| kept.file != device.file && !(kept.asked == device.asked && kept.kind == device.kind));
+        self.devices.retain(|kept| kept.kind != device.kind || (kept.file != device.file && kept.asked != device.asked));
         self.devices.push(device);
     }
 }
