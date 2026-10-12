@@ -12,7 +12,7 @@ use kumi_runtime::devices::gen::{
 use kumi_runtime::devices::harness::{check_midi_device, check_midi_device_isolated, Checked, IsolatedOptions};
 use kumi_runtime::devices::midi::{midi_device_code, midi_device_patcher};
 use kumi_runtime::devices::spec::{check_spec, kept_unrun, DeviceSpec, MidiSpec};
-use kumi_runtime::devices::tool::{device_tool, DeviceToolOptions, Made};
+use kumi_runtime::devices::tool::{device_tool, kind_folder, DeviceToolOptions, Made};
 use regex::Regex;
 use rquickjs::context::EvalOptions;
 use rquickjs::prelude::{Coerced, Rest};
@@ -934,17 +934,17 @@ async fn make_device_reads_guide_makes_a_device_and_waits_for_live_browser() {
     let made = tool.execute(lowest(), Signal::new()).await.unwrap();
     assert!(!made.is_error, "{}", made.text);
     let result: Value = serde_json::from_str(&made.text).unwrap();
-    assert_eq!(result["itemId"], "user_library/Kumi/Lowest Note");
-    assert_eq!(result["file"], folder.path().join("Kumi").join("Lowest Note.amxd").to_string_lossy().as_ref());
+    assert_eq!(result["itemId"], "user_library/Kumi/MIDI Effects/Lowest Note");
+    assert_eq!(result["file"], folder.path().join("Kumi").join("MIDI Effects").join("Lowest Note.amxd").to_string_lossy().as_ref());
     assert_eq!(result["controls"], json!(["Window (1–50 ms; 15)"]));
     assert!(result["checks"].as_str().unwrap().contains("4 of 4"));
     assert!(result.get("browser").is_none());
-    assert_eq!(*seen.borrow(), ["user_library/Kumi/Lowest Note", "user_library/Kumi/Lowest Note"]);
-    let decoded = decode_amxd(&std::fs::read(folder.path().join("Kumi/Lowest Note.amxd")).unwrap()).unwrap();
+    assert_eq!(*seen.borrow(), ["user_library/Kumi/MIDI Effects/Lowest Note", "user_library/Kumi/MIDI Effects/Lowest Note"]);
+    let decoded = decode_amxd(&std::fs::read(folder.path().join("Kumi/MIDI Effects/Lowest Note.amxd")).unwrap()).unwrap();
     assert_eq!(decoded.kind, DeviceType::MidiEffect);
     assert_eq!(decoded.patcher["patcher"]["title"], "Lowest Note");
     let again: Value = serde_json::from_str(&tool.execute(lowest(), Signal::new()).await.unwrap().text).unwrap();
-    assert_eq!(again["itemId"], "user_library/Kumi/Lowest Note", "the same name replaces the device this conversation made");
+    assert_eq!(again["itemId"], "user_library/Kumi/MIDI Effects/Lowest Note", "the same name replaces the device this conversation made");
     assert_eq!(again["replaced"], "the MIDI effect this conversation made as Lowest Note", "{again}");
     assert!(again.get("wrong").is_none(), "{again}");
     let broken = tool
@@ -970,7 +970,7 @@ async fn make_device_reads_guide_makes_a_device_and_waits_for_live_browser() {
         ),
         "{broken}"
     );
-    assert!(folder.path().join("Kumi/Broken.amxd").exists(), "made, with what's wrong beside it");
+    assert!(folder.path().join("Kumi/MIDI Effects/Broken.amxd").exists(), "made, with what's wrong beside it");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -990,7 +990,7 @@ async fn make_device_keeps_code_that_never_stops_in_the_device_without_running_i
         let wrong = made["wrong"].as_array().unwrap().iter().map(|said| said.as_str().unwrap()).collect::<Vec<_>>().join("\n");
         assert!(wrong.contains(says) && wrong.contains("Kumi kept the code in the device without running it"), "{made}");
         assert!(made["checks"].as_str().unwrap().starts_with("Kumi's check found the code never stops"), "{made}");
-        let file = std::fs::read(folder.path().join("Kumi").join(format!("{name}.amxd"))).unwrap();
+        let file = std::fs::read(folder.path().join("Kumi").join("MIDI Effects").join(format!("{name}.amxd"))).unwrap();
         let written = String::from_utf8_lossy(&file);
         // As the file holds it: every line of the code is a comment.
         let commented = written.match_indices("function midi").all(|(at, _)| written[..at].ends_with("// "));
@@ -1045,8 +1045,8 @@ async fn make_device_replaces_only_a_device_this_conversation_made_and_keeps_wha
         async move { serde_json::from_str::<Value>(&tool.execute(input, Signal::new()).await.unwrap().text).unwrap() }
     };
     // A device in the folder that this conversation didn't make may be in a saved Set: it keeps its file.
-    std::fs::create_dir_all(folder.path().join("Kumi")).unwrap();
-    std::fs::write(folder.path().join("Kumi/Echo.amxd"), "someone's").unwrap();
+    std::fs::create_dir_all(folder.path().join("Kumi/MIDI Effects")).unwrap();
+    std::fs::write(folder.path().join("Kumi/MIDI Effects/Echo.amxd"), "someone's").unwrap();
     let echo = run(device("Echo")).await;
     assert_eq!(echo["made"], "Echo 2");
     assert!(echo.get("replaced").is_none());
@@ -1054,7 +1054,7 @@ async fn make_device_replaces_only_a_device_this_conversation_made_and_keeps_wha
         echo["changed"][0] == "name: made as \"Echo 2\": Echo is another device in Live's User Library, and a saved Set may use it.",
         "{echo}"
     );
-    assert_eq!(std::fs::read_to_string(folder.path().join("Kumi/Echo.amxd")).unwrap(), "someone's");
+    assert_eq!(std::fs::read_to_string(folder.path().join("Kumi/MIDI Effects/Echo.amxd")).unwrap(), "someone's");
     // Made again by the name asked for, or the name it was made as, it's replaced, and the old one is kept.
     for name in ["Echo", "Echo 2"] {
         let again = run(device(name)).await;
@@ -1065,18 +1065,39 @@ async fn make_device_replaces_only_a_device_this_conversation_made_and_keeps_wha
         );
     }
     assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 2);
-    // A device of another kind by that name isn't replaced: a saved Set expects the kind it has.
+    // A device of another kind by that name isn't replaced (a saved Set expects the kind it has): it's made in its own
+    // kind's folder, beside it.
     let audio = run(with(grit(), json!({ "name": "Echo 2" }))).await;
-    assert_eq!(audio["made"], "Echo 2 2");
-    let renamed = "name: made as \"Echo 2 2\": Echo 2 is the MIDI effect this conversation made, and a saved Set may use it as one.";
-    assert!(audio["changed"].as_array().unwrap().iter().any(|said| said == renamed), "{audio}");
+    assert_eq!((audio["made"].as_str(), audio["itemId"].as_str()), (Some("Echo 2"), Some("user_library/Kumi/Audio Effects/Echo 2")));
+    assert!(audio.get("replaced").is_none() && audio.get("changed").is_none(), "{audio}");
+    assert!(folder.path().join("Kumi/MIDI Effects/Echo 2.amxd").exists());
+    // Made again by that name, each replaces the device of its own kind: the audio effect didn't take the MIDI effect's
+    // place in what this conversation made.
+    let midi = run(device("Echo 2")).await;
+    assert_eq!((midi["made"].as_str(), midi["itemId"].as_str()), (Some("Echo 2"), Some("user_library/Kumi/MIDI Effects/Echo 2")));
+    assert!(midi["replaced"].as_str().unwrap().starts_with("the MIDI effect this conversation made as Echo 2"), "{midi}");
+    let audio = run(with(grit(), json!({ "name": "Echo 2" }))).await;
+    assert!(audio["replaced"].as_str().unwrap().starts_with("the audio effect this conversation made as Echo 2"), "{audio}");
+    // Kumi Ears is kept beside the audio effects, and Kumi writes it again whenever it differs: an audio effect never
+    // takes its name, even before it's there. A MIDI effect, in a folder of its own, may.
+    let ears = run(with(grit(), json!({ "name": "Kumi Ears" }))).await;
+    assert_eq!(ears["made"], "Kumi Ears 2", "{ears}");
+    assert!(
+        ears["changed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|said| said == "name: made as \"Kumi Ears 2\": Kumi Ears is the name of Kumi's own listening device."),
+        "{ears}"
+    );
+    assert_eq!(run(device("Kumi Ears")).await["itemId"], "user_library/Kumi/MIDI Effects/Kumi Ears");
     // Names Kumi fits to the same file name are two devices, not one replacing the other.
     let (chord, keys) = (run(device("和音")).await, run(device("🎹")).await);
     assert_eq!((chord["made"].as_str(), keys["made"].as_str()), (Some("Device"), Some("Device 2")), "{keys}");
     let (first, second) = (run(device("")).await, run(device("")).await);
     assert_eq!((first["made"].as_str(), second["made"].as_str()), (Some("Device 3"), Some("Device 4")), "no name is no device's");
     // Edited since (saved in Max), or made in another conversation, it's someone's own.
-    std::fs::write(folder.path().join("Kumi/Device.amxd"), "edited in Max").unwrap();
+    std::fs::write(folder.path().join("Kumi/MIDI Effects/Device.amxd"), "edited in Max").unwrap();
     assert_eq!(run(device("和音")).await["made"], "Device 5");
     made.borrow_mut().conversation("second");
     assert_eq!(run(device("Echo")).await["made"], "Echo 3");
@@ -1089,6 +1110,27 @@ async fn make_device_replaces_only_a_device_this_conversation_made_and_keeps_wha
         "{}",
         unwritable.text
     );
+}
+
+#[test]
+fn each_kind_of_device_is_made_in_a_folder_the_bridge_reads_as_that_kind() {
+    // The bridge knows what a User Library item loads as only by a folder on its path named for its kind (as Live's own
+    // preset folders are), and loads an item that might be an instrument onto no track that has one: an effect made in
+    // a folder of no kind never went after an instrument. Read from the bridge's own table, so the two can't drift.
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../remote-script/ableton_mcp_remote_script.py");
+    let script = std::fs::read_to_string(script).unwrap();
+    let table = script.lines().find(|line| line.trim_start().starts_with("_PRESET_FOLDER_TYPES = ")).expect("the bridge's folder table");
+    let folders: Vec<(Regex, u64)> = Regex::new(r#"re\.compile\(r"([^"]+)", re\.I\), (\d)\)"#)
+        .unwrap()
+        .captures_iter(table)
+        .map(|found| (Regex::new(&format!("(?i)^(?:{})$", &found[1])).unwrap(), found[2].parse().unwrap()))
+        .collect();
+    assert_eq!(folders.len(), 3, "{table}");
+    // Live's device types: 1 an instrument, 2 an audio effect, 4 a MIDI effect.
+    for (kind, live) in [(DeviceType::Instrument, 1), (DeviceType::AudioEffect, 2), (DeviceType::MidiEffect, 4)] {
+        let read = folders.iter().find(|(pattern, _)| pattern.is_match(kind_folder(kind))).map(|(_, live)| *live);
+        assert_eq!(read, Some(live), "{}", kind_folder(kind));
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1113,17 +1155,24 @@ async fn make_device_makes_audio_effect_and_instrument_with_kumis_knobs() {
     }
     let effect: Value = serde_json::from_str(&tool.execute(grit(), Signal::new()).await.unwrap().text).unwrap();
     assert_eq!(effect["type"], "audio effect");
-    assert_eq!(effect["itemId"], "user_library/Kumi/Grit");
+    assert_eq!(effect["itemId"], "user_library/Kumi/Audio Effects/Grit");
     assert_eq!(
         effect["controls"],
         json!(["Drive (0–24 dB; 6)", "Tone (0–1; 0.5)", "Hard (on/off; off)", "Mix (0–100 %; 100)", "Output (-36–12 dB; 0)"])
     );
     assert!(effect["next"].as_str().unwrap().contains("audition"));
-    assert_eq!(decode_amxd(&std::fs::read(folder.path().join("Kumi/Grit.amxd")).unwrap()).unwrap().kind, DeviceType::AudioEffect);
+    assert_eq!(
+        decode_amxd(&std::fs::read(folder.path().join("Kumi/Audio Effects/Grit.amxd")).unwrap()).unwrap().kind,
+        DeviceType::AudioEffect
+    );
     let instrument: Value = serde_json::from_str(&tool.execute(pluck(), Signal::new()).await.unwrap().text).unwrap();
     assert_eq!(instrument["type"], "instrument");
     assert_eq!(instrument["voices"], 6);
-    assert_eq!(decode_amxd(&std::fs::read(folder.path().join("Kumi/Pluck.amxd")).unwrap()).unwrap().kind, DeviceType::Instrument);
+    assert_eq!(instrument["itemId"], "user_library/Kumi/Instruments/Pluck");
+    assert_eq!(
+        decode_amxd(&std::fs::read(folder.path().join("Kumi/Instruments/Pluck.amxd")).unwrap()).unwrap().kind,
+        DeviceType::Instrument
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1149,7 +1198,10 @@ async fn make_device_makes_a_device_from_a_patch_of_max_objects_and_says_whats_w
     assert_eq!(made["type"], "audio effect");
     assert_eq!(made["controls"], json!(["Gain (-24–24 dB; 0)", "Mix (0–100 %; 100)", "Output (-36–12 dB; 0)"]));
     assert!(made["checks"].as_str().unwrap().contains("laid it out top to bottom"), "{made}");
-    assert_eq!(decode_amxd(&std::fs::read(folder.path().join("Kumi/Gain.amxd")).unwrap()).unwrap().kind, DeviceType::AudioEffect);
+    assert_eq!(
+        decode_amxd(&std::fs::read(folder.path().join("Kumi/Audio Effects/Gain.amxd")).unwrap()).unwrap().kind,
+        DeviceType::AudioEffect
+    );
     let mut unwired = gain.clone();
     unwired["patch"] = json!("in.0 -> [*~ 1.] -> out.0\nin.1 -> [*~ 1.] -> out.1\n");
     unwired["tests"] = json!([{ "name": "x", "input": [], "expect": [] }]);
@@ -1158,7 +1210,7 @@ async fn make_device_makes_a_device_from_a_patch_of_max_objects_and_says_whats_w
     let made: Value = serde_json::from_str(&made.text).unwrap();
     assert!(made["changed"][0].as_str().unwrap().contains("tests: they run a MIDI effect's code"), "{made}");
     assert!(made["wrong"][0].as_str().unwrap().contains("\"Gain\" isn't wired"), "{made}");
-    assert_eq!(made["itemId"], "user_library/Kumi/Gain", "made again under its name, in place of the first");
+    assert_eq!(made["itemId"], "user_library/Kumi/Audio Effects/Gain", "made again under its name, in place of the first");
 }
 
 #[test]

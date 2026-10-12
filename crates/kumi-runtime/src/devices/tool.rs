@@ -14,6 +14,7 @@ use crate::{
         contracts::{JsonObject, KernelTool, ToolResult},
         errors::RuntimeError,
     },
+    ears::device::EARS_NAME,
     system::windows_device_name,
 };
 use async_trait::async_trait;
@@ -104,13 +105,10 @@ impl Made {
         by_name.or_else(|| self.devices.iter().find(|device| device.kind == kind && device.file == asked).filter(unchanged)).cloned()
     }
 
-    /// The kind of the device this conversation made as `file`, if it made one.
-    fn kind_of(&self, file: &str) -> Option<DeviceType> {
-        self.devices.iter().find(|device| device.file == file).map(|device| device.kind)
-    }
-
+    /// A device made: it takes the place of the record of its own kind that had its file or its asked name. Each kind has
+    /// a folder of its own, so a device of another kind with the same file is another device.
     fn made(&mut self, device: MadeDevice) {
-        self.devices.retain(|kept| kept.file != device.file && !(kept.asked == device.asked && kept.kind == device.kind));
+        self.devices.retain(|kept| kept.kind != device.kind || (kept.file != device.file && kept.asked != device.asked));
         self.devices.push(device);
     }
 }
@@ -121,10 +119,10 @@ fn hashed(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// The device's file name: its own, numbered past a file the folder has ("Echo 2"). On Windows a name it takes for a
-/// device ("Aux", "Con.Dist") is taken as a file's would be, and its number goes right after that part ("Aux 2",
-/// "Con 2.Dist").
-fn free_name(folder: &Path, name: &str, windows: bool) -> String {
+/// The device's file name: its own, numbered past a file the folder has ("Echo 2") and a name `reserved` keeps (in any
+/// case). On Windows a name it takes for a device ("Aux", "Con.Dist") is taken as a file's would be, and its number goes
+/// right after that part ("Aux 2", "Con 2.Dist").
+fn free_name(folder: &Path, name: &str, windows: bool, reserved: &[&str]) -> String {
     let (stem, rest) = name.split_at(name.find('.').unwrap_or(name.len()));
     let numbered = |number: &str| {
         if windows && windows_device_name(stem) {
@@ -135,7 +133,9 @@ fn free_name(folder: &Path, name: &str, windows: bool) -> String {
     };
     for index in 1..1000 {
         let candidate = if index == 1 { name.into() } else { numbered(&index.to_string()) };
-        let taken = (windows && windows_device_name(&candidate)) || folder.join(format!("{candidate}.amxd")).exists();
+        let taken = (windows && windows_device_name(&candidate))
+            || reserved.iter().any(|kept| kept.eq_ignore_ascii_case(&candidate))
+            || folder.join(format!("{candidate}.amxd")).exists();
         if !taken {
             return candidate;
         }
@@ -161,6 +161,18 @@ async fn keep(file: &Path, name: &str, kept: &Path) -> Option<PathBuf> {
         let _ = tokio::fs::remove_file(old).await;
     }
     Some(copy)
+}
+
+/// The folder in the User Library's Kumi folder that holds a device of `kind`, named for its kind as Live's own preset
+/// folders are. Live's Browser item says nothing else of what a device is, and the bridge loads an item that might be an
+/// instrument onto no track that has one (Live would replace it): an effect kept anywhere else never goes after an
+/// instrument.
+pub fn kind_folder(kind: DeviceType) -> &'static str {
+    match kind {
+        DeviceType::MidiEffect => "MIDI Effects",
+        DeviceType::AudioEffect => "Audio Effects",
+        DeviceType::Instrument => "Instruments",
+    }
 }
 
 fn kind_name(kind: DeviceType) -> &'static str {
@@ -326,7 +338,7 @@ impl KernelTool for DeviceTool {
             midi.tests.clear();
         }
         signal.check()?;
-        let folder = Path::new(&self.options.user_library).join("Kumi");
+        let folder = Path::new(&self.options.user_library).join("Kumi").join(kind_folder(spec.kind()));
         let mut builder = tokio::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
@@ -338,17 +350,18 @@ impl KernelTool for DeviceTool {
         let asked_name = input.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
         let ours = self.options.made.borrow().ours(&folder, &asked_name, spec.kind());
         let windows = crate::system::platform() == "win32";
+        // Kumi Ears is kept beside the audio effects, and Kumi writes it again whenever it differs: its name is its own.
+        let reserved: &[&str] = if spec.kind() == DeviceType::AudioEffect { &[EARS_NAME] } else { &[] };
         let name = match &ours {
             Some(device) => device.file.clone(),
-            None => free_name(&folder, spec.name(), windows),
+            None => free_name(&folder, spec.name(), windows, reserved),
         };
         if ours.is_none() && name != spec.name() {
             let stem = spec.name().split('.').next().unwrap_or_default();
-            let mine = self.options.made.borrow().kind_of(spec.name());
             let why = if windows && (windows_device_name(stem) || windows_device_name(spec.name())) {
                 format!("Windows keeps the name {} for a device", spec.name())
-            } else if let Some(kind) = mine.filter(|kind| *kind != spec.kind()) {
-                format!("{} is the {} this conversation made, and a saved Set may use it as one", spec.name(), kind_name(kind))
+            } else if reserved.iter().any(|kept| kept.eq_ignore_ascii_case(spec.name())) {
+                format!("{} is the name of Kumi's own listening device", spec.name())
             } else {
                 format!("{} is another device in Live's User Library, and a saved Set may use it", spec.name())
             };
@@ -413,7 +426,7 @@ impl KernelTool for DeviceTool {
             kind: spec.kind(),
             written: hashed(&bytes),
         });
-        let item_id = format!("user_library/Kumi/{name}");
+        let item_id = format!("user_library/Kumi/{}/{name}", kind_folder(spec.kind()));
         let deadline = now_ms().saturating_add(self.options.wait_ms.unwrap_or(20_000) as i64);
         let mut seen = false;
         while !seen && now_ms() < deadline {
@@ -479,13 +492,21 @@ mod tests {
     #[test]
     fn a_name_another_device_has_is_numbered_and_a_name_windows_takes_for_a_device_too() {
         let folder = tempfile::tempdir().unwrap();
-        assert_eq!(free_name(folder.path(), "Bass", false), "Bass");
+        assert_eq!(free_name(folder.path(), "Bass", false, &[]), "Bass");
         std::fs::write(folder.path().join("Bass.amxd"), "").unwrap();
-        assert_eq!(free_name(folder.path(), "Bass", false), "Bass 2", "a file's name is taken everywhere");
-        assert_eq!((free_name(folder.path(), "Aux", false), free_name(folder.path(), "Aux", true)), ("Aux".into(), "Aux 2".into()));
-        assert_eq!(free_name(folder.path(), "Con.Dist", true), "Con 2.Dist", "the part before the dot is what Windows reads");
-        assert_eq!(free_name(folder.path(), "LPT1 ", true), "LPT1  2");
-        assert_eq!(free_name(folder.path(), "Console", true), "Console");
+        assert_eq!(free_name(folder.path(), "Bass", false, &[]), "Bass 2", "a file's name is taken everywhere");
+        assert_eq!(
+            (free_name(folder.path(), "Aux", false, &[]), free_name(folder.path(), "Aux", true, &[])),
+            ("Aux".into(), "Aux 2".into())
+        );
+        assert_eq!(free_name(folder.path(), "Con.Dist", true, &[]), "Con 2.Dist", "the part before the dot is what Windows reads");
+        assert_eq!(free_name(folder.path(), "LPT1 ", true, &[]), "LPT1  2");
+        assert_eq!(free_name(folder.path(), "Console", true, &[]), "Console");
+        assert_eq!(
+            (free_name(folder.path(), "Kumi Ears", false, &["Kumi Ears"]), free_name(folder.path(), "kumi ears", false, &["Kumi Ears"])),
+            ("Kumi Ears 2".into(), "kumi ears 2".into()),
+            "a reserved name is taken, in any case, before its file is there"
+        );
     }
 
     #[test]
@@ -507,7 +528,6 @@ mod tests {
         );
         assert!(made.ours(folder.path(), "Delay", DeviceType::MidiEffect).is_none());
         assert!(made.ours(folder.path(), "Echo", DeviceType::AudioEffect).is_none(), "an audio effect doesn't replace a MIDI effect");
-        assert_eq!(made.kind_of("Echo 2"), Some(DeviceType::MidiEffect));
         made.made(MadeDevice { asked: "".into(), file: "Echo 3".into(), kind: DeviceType::MidiEffect, written: hashed(b"written") });
         std::fs::write(folder.path().join("Echo 3.amxd"), b"written").unwrap();
         assert!(made.ours(folder.path(), "", DeviceType::MidiEffect).is_none(), "two devices made without a name are two");

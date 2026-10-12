@@ -635,10 +635,11 @@ puts it on your track:
 
 Kumi decides the details you wouldn't spell out and tells you what it chose.
 When the device should work like one that exists, it first looks up how the
-original works. The device lands in your User Library's Kumi folder, where
-Live's Browser lists it like any other, with as many knobs as it needs (in up to
-three rows). They're ordinary Live parameters, so you can automate and map them.
-Loading it is a change in HISTORY with its undo.
+original works. The device lands in your User Library's Kumi folder, under
+Audio Effects, MIDI Effects or Instruments, where Live's Browser lists it like
+any other, with as many knobs as it needs (in up to three rows). They're
+ordinary Live parameters, so you can automate and map them. Loading it is a
+change in HISTORY with its undo.
 
 A MIDI effect is JavaScript. Before it's made, Kumi runs its code on your
 computer against the tests it wrote and its own checks (no errors, every note
