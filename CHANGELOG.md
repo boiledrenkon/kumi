@@ -3,6 +3,18 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.12.1 — 2026-10-12
+
+Ships with bridge 1.0.91, as 1.12.0 did.
+
+- Effects Kumi makes load after an instrument, so you hear them. Before, Kumi couldn't put a Max for
+  Live effect it made on a track with an instrument. Kumi now keeps each device it makes in your User
+  Library's Kumi folder, under Audio Effects, MIDI Effects or Instruments. A device made earlier stays
+  where it is; to put one after an instrument, have Kumi make it again.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.12.0 — 2026-10-11
 
 Ships with bridge 1.0.91, as 1.11.4 did.
