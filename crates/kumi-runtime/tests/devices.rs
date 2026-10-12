@@ -1071,6 +1071,19 @@ async fn make_device_replaces_only_a_device_this_conversation_made_and_keeps_wha
     assert_eq!((audio["made"].as_str(), audio["itemId"].as_str()), (Some("Echo 2"), Some("user_library/Kumi/Audio Effects/Echo 2")));
     assert!(audio.get("replaced").is_none() && audio.get("changed").is_none(), "{audio}");
     assert!(folder.path().join("Kumi/MIDI Effects/Echo 2.amxd").exists());
+    // Kumi Ears is kept beside the audio effects, and Kumi writes it again whenever it differs: an audio effect never
+    // takes its name, even before it's there. A MIDI effect, in a folder of its own, may.
+    let ears = run(with(grit(), json!({ "name": "Kumi Ears" }))).await;
+    assert_eq!(ears["made"], "Kumi Ears 2", "{ears}");
+    assert!(
+        ears["changed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|said| said == "name: made as \"Kumi Ears 2\": Kumi Ears is the name of Kumi's own listening device."),
+        "{ears}"
+    );
+    assert_eq!(run(device("Kumi Ears")).await["itemId"], "user_library/Kumi/MIDI Effects/Kumi Ears");
     // Names Kumi fits to the same file name are two devices, not one replacing the other.
     let (chord, keys) = (run(device("和音")).await, run(device("🎹")).await);
     assert_eq!((chord["made"].as_str(), keys["made"].as_str()), (Some("Device"), Some("Device 2")), "{keys}");

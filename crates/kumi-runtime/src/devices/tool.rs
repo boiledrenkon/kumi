@@ -14,6 +14,7 @@ use crate::{
         contracts::{JsonObject, KernelTool, ToolResult},
         errors::RuntimeError,
     },
+    ears::device::EARS_NAME,
     system::windows_device_name,
 };
 use async_trait::async_trait;
@@ -116,10 +117,10 @@ fn hashed(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// The device's file name: its own, numbered past a file the folder has ("Echo 2"). On Windows a name it takes for a
-/// device ("Aux", "Con.Dist") is taken as a file's would be, and its number goes right after that part ("Aux 2",
-/// "Con 2.Dist").
-fn free_name(folder: &Path, name: &str, windows: bool) -> String {
+/// The device's file name: its own, numbered past a file the folder has ("Echo 2") and a name `reserved` keeps (in any
+/// case). On Windows a name it takes for a device ("Aux", "Con.Dist") is taken as a file's would be, and its number goes
+/// right after that part ("Aux 2", "Con 2.Dist").
+fn free_name(folder: &Path, name: &str, windows: bool, reserved: &[&str]) -> String {
     let (stem, rest) = name.split_at(name.find('.').unwrap_or(name.len()));
     let numbered = |number: &str| {
         if windows && windows_device_name(stem) {
@@ -130,7 +131,9 @@ fn free_name(folder: &Path, name: &str, windows: bool) -> String {
     };
     for index in 1..1000 {
         let candidate = if index == 1 { name.into() } else { numbered(&index.to_string()) };
-        let taken = (windows && windows_device_name(&candidate)) || folder.join(format!("{candidate}.amxd")).exists();
+        let taken = (windows && windows_device_name(&candidate))
+            || reserved.iter().any(|kept| kept.eq_ignore_ascii_case(&candidate))
+            || folder.join(format!("{candidate}.amxd")).exists();
         if !taken {
             return candidate;
         }
@@ -345,14 +348,18 @@ impl KernelTool for DeviceTool {
         let asked_name = input.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
         let ours = self.options.made.borrow().ours(&folder, &asked_name, spec.kind());
         let windows = crate::system::platform() == "win32";
+        // Kumi Ears is kept beside the audio effects, and Kumi writes it again whenever it differs: its name is its own.
+        let reserved: &[&str] = if spec.kind() == DeviceType::AudioEffect { &[EARS_NAME] } else { &[] };
         let name = match &ours {
             Some(device) => device.file.clone(),
-            None => free_name(&folder, spec.name(), windows),
+            None => free_name(&folder, spec.name(), windows, reserved),
         };
         if ours.is_none() && name != spec.name() {
             let stem = spec.name().split('.').next().unwrap_or_default();
             let why = if windows && (windows_device_name(stem) || windows_device_name(spec.name())) {
                 format!("Windows keeps the name {} for a device", spec.name())
+            } else if reserved.iter().any(|kept| kept.eq_ignore_ascii_case(spec.name())) {
+                format!("{} is the name of Kumi's own listening device", spec.name())
             } else {
                 format!("{} is another device in Live's User Library, and a saved Set may use it", spec.name())
             };
@@ -483,13 +490,21 @@ mod tests {
     #[test]
     fn a_name_another_device_has_is_numbered_and_a_name_windows_takes_for_a_device_too() {
         let folder = tempfile::tempdir().unwrap();
-        assert_eq!(free_name(folder.path(), "Bass", false), "Bass");
+        assert_eq!(free_name(folder.path(), "Bass", false, &[]), "Bass");
         std::fs::write(folder.path().join("Bass.amxd"), "").unwrap();
-        assert_eq!(free_name(folder.path(), "Bass", false), "Bass 2", "a file's name is taken everywhere");
-        assert_eq!((free_name(folder.path(), "Aux", false), free_name(folder.path(), "Aux", true)), ("Aux".into(), "Aux 2".into()));
-        assert_eq!(free_name(folder.path(), "Con.Dist", true), "Con 2.Dist", "the part before the dot is what Windows reads");
-        assert_eq!(free_name(folder.path(), "LPT1 ", true), "LPT1  2");
-        assert_eq!(free_name(folder.path(), "Console", true), "Console");
+        assert_eq!(free_name(folder.path(), "Bass", false, &[]), "Bass 2", "a file's name is taken everywhere");
+        assert_eq!(
+            (free_name(folder.path(), "Aux", false, &[]), free_name(folder.path(), "Aux", true, &[])),
+            ("Aux".into(), "Aux 2".into())
+        );
+        assert_eq!(free_name(folder.path(), "Con.Dist", true, &[]), "Con 2.Dist", "the part before the dot is what Windows reads");
+        assert_eq!(free_name(folder.path(), "LPT1 ", true, &[]), "LPT1  2");
+        assert_eq!(free_name(folder.path(), "Console", true, &[]), "Console");
+        assert_eq!(
+            (free_name(folder.path(), "Kumi Ears", false, &["Kumi Ears"]), free_name(folder.path(), "kumi ears", false, &["Kumi Ears"])),
+            ("Kumi Ears 2".into(), "kumi ears 2".into()),
+            "a reserved name is taken, in any case, before its file is there"
+        );
     }
 
     #[test]
