@@ -104,11 +104,6 @@ impl Made {
         by_name.or_else(|| self.devices.iter().find(|device| device.kind == kind && device.file == asked).filter(unchanged)).cloned()
     }
 
-    /// The kind of the device this conversation made as `file`, if it made one.
-    fn kind_of(&self, file: &str) -> Option<DeviceType> {
-        self.devices.iter().find(|device| device.file == file).map(|device| device.kind)
-    }
-
     fn made(&mut self, device: MadeDevice) {
         self.devices.retain(|kept| kept.file != device.file && !(kept.asked == device.asked && kept.kind == device.kind));
         self.devices.push(device);
@@ -161,6 +156,18 @@ async fn keep(file: &Path, name: &str, kept: &Path) -> Option<PathBuf> {
         let _ = tokio::fs::remove_file(old).await;
     }
     Some(copy)
+}
+
+/// The folder in the User Library's Kumi folder that holds a device of `kind`, named for its kind as Live's own preset
+/// folders are. Live's Browser item says nothing else of what a device is, and the bridge loads an item that might be an
+/// instrument onto no track that has one (Live would replace it): an effect kept anywhere else never goes after an
+/// instrument.
+pub fn kind_folder(kind: DeviceType) -> &'static str {
+    match kind {
+        DeviceType::MidiEffect => "MIDI Effects",
+        DeviceType::AudioEffect => "Audio Effects",
+        DeviceType::Instrument => "Instruments",
+    }
 }
 
 fn kind_name(kind: DeviceType) -> &'static str {
@@ -326,7 +333,7 @@ impl KernelTool for DeviceTool {
             midi.tests.clear();
         }
         signal.check()?;
-        let folder = Path::new(&self.options.user_library).join("Kumi");
+        let folder = Path::new(&self.options.user_library).join("Kumi").join(kind_folder(spec.kind()));
         let mut builder = tokio::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
@@ -344,11 +351,8 @@ impl KernelTool for DeviceTool {
         };
         if ours.is_none() && name != spec.name() {
             let stem = spec.name().split('.').next().unwrap_or_default();
-            let mine = self.options.made.borrow().kind_of(spec.name());
             let why = if windows && (windows_device_name(stem) || windows_device_name(spec.name())) {
                 format!("Windows keeps the name {} for a device", spec.name())
-            } else if let Some(kind) = mine.filter(|kind| *kind != spec.kind()) {
-                format!("{} is the {} this conversation made, and a saved Set may use it as one", spec.name(), kind_name(kind))
             } else {
                 format!("{} is another device in Live's User Library, and a saved Set may use it", spec.name())
             };
@@ -413,7 +417,7 @@ impl KernelTool for DeviceTool {
             kind: spec.kind(),
             written: hashed(&bytes),
         });
-        let item_id = format!("user_library/Kumi/{name}");
+        let item_id = format!("user_library/Kumi/{}/{name}", kind_folder(spec.kind()));
         let deadline = now_ms().saturating_add(self.options.wait_ms.unwrap_or(20_000) as i64);
         let mut seen = false;
         while !seen && now_ms() < deadline {
@@ -507,7 +511,6 @@ mod tests {
         );
         assert!(made.ours(folder.path(), "Delay", DeviceType::MidiEffect).is_none());
         assert!(made.ours(folder.path(), "Echo", DeviceType::AudioEffect).is_none(), "an audio effect doesn't replace a MIDI effect");
-        assert_eq!(made.kind_of("Echo 2"), Some(DeviceType::MidiEffect));
         made.made(MadeDevice { asked: "".into(), file: "Echo 3".into(), kind: DeviceType::MidiEffect, written: hashed(b"written") });
         std::fs::write(folder.path().join("Echo 3.amxd"), b"written").unwrap();
         assert!(made.ours(folder.path(), "", DeviceType::MidiEffect).is_none(), "two devices made without a name are two");
