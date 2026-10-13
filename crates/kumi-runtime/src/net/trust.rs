@@ -515,24 +515,28 @@ mod tests {
         let (_, issuer) = authority("An office's inspecting proxy");
         let certificate = server("api.openai.com", &issuer);
         let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let slowly = Slowly { taking: Duration::from_millis(500), yes: true, asked: Arc::clone(&asked) };
-        let kept = Arc::new(Kept::new(Arc::new(slowly), Duration::from_millis(200)));
-        let started = Instant::now();
-        let connections: Vec<_> = (0..4)
-            .map(|_| {
-                let (kept, certificate) = (Arc::clone(&kept), certificate.clone());
-                std::thread::spawn(move || {
-                    let name = ServerName::try_from("api.openai.com").unwrap();
-                    kept.verify_server_cert(&certificate, &[], &name, &[], UnixTime::now())
-                })
+        let slowly = Slowly { taking: Duration::from_millis(1500), yes: true, asked: Arc::clone(&asked) };
+        let kept = Arc::new(Kept::new(Arc::new(slowly), Duration::from_millis(600)));
+        // Each connection: its verdict, and how long it was held.
+        let connect = || {
+            let (kept, certificate) = (Arc::clone(&kept), certificate.clone());
+            std::thread::spawn(move || {
+                let name = ServerName::try_from("api.openai.com").unwrap();
+                let started = Instant::now();
+                (kept.verify_server_cert(&certificate, &[], &name, &[], UnixTime::now()).err(), started.elapsed())
             })
-            .collect();
-        for connection in connections {
-            assert_eq!(connection.join().unwrap().err(), Some(slow()), "a timeout for now");
+        };
+        let first = connect();
+        std::thread::sleep(Duration::from_millis(300));
+        let later: Vec<_> = (0..3).map(|_| connect()).collect();
+        assert_eq!(first.join().unwrap().0, Some(slow()), "a timeout for now");
+        for connection in later {
+            let (verdict, held) = connection.join().unwrap();
+            assert_eq!(verdict, Some(slow()), "a timeout for now");
+            // What's left of the first's bound (300 ms), not a bound of its own (600 ms).
+            assert!(held < Duration::from_millis(500), "{held:?}");
         }
-        // One bound for them all, not one each.
-        assert!(started.elapsed() < Duration::from_millis(450), "{:?}", started.elapsed());
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(1400));
         assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "one check");
         let name = ServerName::try_from("api.openai.com").unwrap();
         assert!(kept.verify_server_cert(&certificate, &[], &name, &[], UnixTime::now()).is_ok(), "its verdict, kept");
