@@ -518,7 +518,7 @@ async fn installation_checks_room_live_its_user_library_and_the_bridges_ports() 
     io.installation.free = Some(Rc::new(|_| async { Some(120e6) }.boxed_local()));
     let low = find(&installation(&io).await, "free on the disk with").clone();
     assert_eq!((low.status, low.text.starts_with("Only 120 MB")), (CheckStatus::Fix, true));
-    assert!(low.next.unwrap().contains("200 MB"));
+    assert!(low.next.unwrap().contains("250 MB"));
     io.installation = quiet_installation();
     assert_eq!(find(&installation(&io).await, "Live installed").text, "Live installed: 12.4.15 (Ableton Live 12 Suite)");
     let eleven = InstalledLive {

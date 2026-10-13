@@ -39,10 +39,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path, process::Stdio, rc::Rc, time::Duration};
-/// What an update needs free: the download and the new Kumi unpacked beside it, until the download goes. Measured on
-/// 1.16.5's bundles: Windows x64, the biggest, downloads 48 MB and unpacks to 125 MB (173 MB side by side); macOS arm64
-/// 41 + 90 MB. 200 MB covers the biggest with room for a release or two of growth. The swap itself only renames.
-pub const UPDATE_SPACE: f64 = 200. * MB;
+/// What an update needs free: what it writes, the download and the new Kumi unpacked beside it. Kumi and the one kept
+/// for a rollback are only renamed, and the one before that goes after the swap, with the download. Measured on a real
+/// update (1.16.5 → 1.16.6, macOS arm64): free space fell by 131 MB (41 MB download + 90 MB unpacked). Windows x64's
+/// bundle is the biggest, 48 + 125 = 174 MB; 250 MB leaves room for the bundles' growth.
+pub const UPDATE_SPACE: f64 = 250. * MB;
 pub fn release_base(env: &Env) -> String {
     env.get("KUMI_RELEASES")
         .filter(|s| !s.is_empty())
@@ -730,7 +731,7 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     };
     if let Some(free) = free.filter(|free| *free < UPDATE_SPACE) {
         say(format!(
-            "Kumi needs about 200 MB free to update, and the disk with {} has {}. Free some space (empty the Trash or Recycle Bin, or move old bounces and videos off that disk), then try again. Nothing was changed.",
+            "Kumi needs about 250 MB free to update, and the disk with {} has {}. Free some space (empty the Trash or Recycle Bin, or move old bounces and videos off that disk), then try again. Nothing was changed.",
             tilde(&home),
             size(free)
         ));

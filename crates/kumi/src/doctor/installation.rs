@@ -148,7 +148,7 @@ fn space_check(free: Option<f64>, home: &str) -> Option<Check> {
     Some(if free < UPDATE_SPACE {
         Check::fix(
             format!("Only {} free on the disk with {}", size(free), tilde(home)),
-            Some("Free some space there: an update needs about 200 MB, and Kumi's conversations and notes need room too".into()),
+            Some("Free some space there: an update needs about 250 MB, and Kumi's conversations and notes need room too".into()),
         )
     } else {
         Check::ok(format!("{} free on the disk with {}", size(free), tilde(home)))
