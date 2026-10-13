@@ -2334,6 +2334,23 @@ impl SessionController for Session {
         }
         Ok(stopped)
     }
+    fn has_daw_message(&self) -> bool {
+        true
+    }
+    async fn daw_message(&self, text: &str) -> Result<bool, RuntimeError> {
+        let integration = self.0.state.borrow().integration.clone();
+        match integration.filter(|i| i.has_show_message()) {
+            Some(i) => i.show_message(text, abort::timeout(5_000)).await,
+            None => Ok(false),
+        }
+    }
+    async fn daw_recording(&self) -> Result<Option<bool>, RuntimeError> {
+        let integration = self.0.state.borrow().integration.clone();
+        match integration {
+            Some(i) => i.recording(abort::timeout(5_000)).await,
+            None => Ok(None),
+        }
+    }
     fn has_device_tree(&self) -> bool {
         true
     }

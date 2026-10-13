@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod alerts;
 pub mod app;
 pub mod attach;
 pub mod choices;

@@ -837,6 +837,43 @@ impl Integration for Ableton {
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
         Ok(self.history.stop_everything(self.combined(signal)).await)
     }
+    fn has_show_message(&self) -> bool {
+        true
+    }
+    /// Live's status bar, through the bridge's `live_message` (never its modal form); outside Live's undo, and
+    /// without Kumi's Live lock, so it never waits for a step under way.
+    async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {
+        let text = head(text.trim(), 1024);
+        if text.is_empty() || !self.connection.available() || !self.connection.has("live_message") {
+            return Ok(false);
+        }
+        let shown =
+            self.connection.call("live_message", views::object(json!({"text": text, "modal": false})), self.combined(signal)).await?;
+        Ok(shown.is_error != Some(true))
+    }
+    /// Live records only while it plays: stopped, as the transport Kumi follows says, it isn't; otherwise its
+    /// session-playback read says whether Session or Arrangement recording is on.
+    async fn recording(&self, signal: Signal) -> Result<Option<bool>, RuntimeError> {
+        if !self.connection.available() {
+            return Ok(None);
+        }
+        if self.connection.playing() == Some(false) {
+            return Ok(Some(false));
+        }
+        if !self.connection.has("live_discover") {
+            return Ok(None);
+        }
+        let read = payload(
+            &self
+                .connection
+                .call("live_discover", views::object(json!({"kind":"session-playback","limit":1})), self.combined(signal))
+                .await?,
+        )?;
+        let transport =
+            &read.get("items").and_then(|items| items.get(0)).and_then(|item| item.get("transport")).cloned().unwrap_or_default();
+        let on = |key: &str| transport.get(key) == Some(&Value::Bool(true));
+        Ok(Some(on("playing") && (on("sessionRecord") || on("arrangementRecord"))))
+    }
     fn has_device_tree(&self) -> bool {
         true
     }

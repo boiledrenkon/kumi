@@ -454,6 +454,20 @@ pub trait Integration {
         let _ = signal;
         Ok(false)
     }
+    fn has_show_message(&self) -> bool {
+        false
+    }
+    /// A short line in the DAW's own window (Live's status bar), never a dialog, for a producer working there; true
+    /// when it was shown. A DAW without such a place says false.
+    async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {
+        let _ = (text, signal);
+        Ok(false)
+    }
+    /// Whether the DAW is recording now; None when it can't say.
+    async fn recording(&self, signal: Signal) -> Result<Option<bool>, RuntimeError> {
+        let _ = signal;
+        Ok(None)
+    }
     fn has_device_tree(&self) -> bool {
         false
     }
@@ -1953,6 +1967,18 @@ pub trait SessionController {
     /// Stop Live (clips, the transport and recording), any time, even during a turn; false when it couldn't.
     async fn stop_live(&self) -> Result<bool, RuntimeError> {
         Ok(false)
+    }
+    fn has_daw_message(&self) -> bool {
+        false
+    }
+    /// A short line in the DAW's own window (Live's status bar), any time, even during a turn; false when it couldn't.
+    async fn daw_message(&self, text: &str) -> Result<bool, RuntimeError> {
+        let _ = text;
+        Ok(false)
+    }
+    /// Whether the DAW is recording now; None when it can't say (no DAW connected, or one that doesn't tell).
+    async fn daw_recording(&self) -> Result<Option<bool>, RuntimeError> {
+        Ok(None)
     }
     fn has_device_tree(&self) -> bool {
         false

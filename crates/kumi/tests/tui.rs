@@ -691,6 +691,7 @@ fn the_terminal_is_taken_over_and_always_given_back_even_twice() {
             move || resized.set(resized.get() + 1)
         }),
         mouse: true,
+        farewell: String::new(),
     });
     tty.start().unwrap();
     assert!(input.is_raw());

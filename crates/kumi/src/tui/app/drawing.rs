@@ -52,6 +52,7 @@ impl TuiApp {
         // A panic Kumi caught (a worker's) gave the terminal back: take it again, and draw all of it.
         if self.0.tty.recover() {
             self.0.renderer.borrow_mut().invalidate();
+            self.0.state.borrow_mut().status_sent = None;
         }
         if !self.0.tty.is_active() {
             return;
@@ -125,6 +126,10 @@ impl TuiApp {
         let frame = self.0.renderer.borrow_mut().frame(&screen, cursor);
         self.0.tty.write(&frame);
         *self.0.screen.borrow_mut() = Some(screen);
+        // Between frames, the terminal's status follows what was drawn.
+        if !self.0.state.borrow().closing {
+            self.show_status();
+        }
     }
     fn status_line(&self) -> (Style, &'static str) {
         let state = self.0.state.borrow();

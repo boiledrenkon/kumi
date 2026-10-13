@@ -1,10 +1,11 @@
 //! Session, terminal and background-library ownership from the CLI.
 use super::*;
 use crate::{
+    awake::KeepAwake,
     history::open_input_history,
     models::{create_model_control, ModelControlOptions},
     terminal::{create_terminal, Terminal, TerminalOptions},
-    tui::app::{create_tui, ConnectLive, LiveSetup, PanelTab, TuiOptions},
+    tui::app::{create_tui, AwaySettings, ConnectLive, LiveSetup, PanelTab, TuiOptions},
     voice::{create_voice_control, VoiceControlOptions},
     willington::{Willington, WillingtonControl},
 };
@@ -221,18 +222,27 @@ pub(super) async fn run_session(
             Credential::ApiKey { key } => secrets.push(key.clone()),
         }
     }
+    let settings_file = load_settings_file(&io.env)?;
+    let settings = read_settings(&settings_file);
+    let away = AwaySettings {
+        notifications: settings.notifications.as_deref() != Some("off"),
+        live_status_bar: settings.live_status_bar != Some(false),
+        answer_after: settings.answer_after.unwrap_or(AwaySettings::default().answer_after),
+    };
+    // The computer stays awake while Kumi works, whichever front end shows it.
+    let awake = Rc::new(KeepAwake::system(settings.keep_awake != Some(false)));
     let terminal: Rc<RefCell<Option<Weak<dyn Terminal>>>> = Rc::new(RefCell::new(None));
     let emit: Rc<dyn Fn(SessionEvent)> = {
         let terminal = terminal.clone();
+        let awake = awake.clone();
         Rc::new(move |event| {
+            awake.follow(&event);
             let terminal = terminal.borrow().as_ref().and_then(Weak::upgrade);
             if let Some(terminal) = terminal {
                 terminal.handle_event(event)
             }
         })
     };
-    let settings_file = load_settings_file(&io.env)?;
-    let settings = read_settings(&settings_file);
     // What's new since this home's Kumi last started. A home an earlier Kumi used (an update kept the app
     // before it, or Kumi's database is there) is updated, not new, the first time it has no version noted.
     let used_before = {
@@ -622,6 +632,7 @@ pub(super) async fn run_session(
         options.models = Some(models);
         options.startup_notice = if connect_why.is_some() { None } else { notice };
         options.whats_new = whats_new;
+        options.away = away;
         options.connect_live = live_possible.then(|| ConnectLive {
             why: connect_why,
             bridge: bundled.clone().unwrap_or_default(),

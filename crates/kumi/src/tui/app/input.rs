@@ -13,6 +13,11 @@ impl TuiApp {
         if self.0.state.borrow().closing {
             return;
         }
+        // Kumi's window came to the front or went behind another: whether to tell the producer what happens next.
+        if let InputEvent::Focus { focused } = event {
+            self.window_focus(focused);
+            return;
+        }
         if self.setup_active() {
             // A sign-in under way takes its own keys; its esc goes back to the setup's choices.
             let signing =

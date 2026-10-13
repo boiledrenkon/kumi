@@ -69,6 +69,9 @@ impl TuiApp {
                     let mut state = self.0.state.borrow_mut();
                     if matches!(get("state"), "running" | "cancelling") && state.busy_since == 0. {
                         state.busy_since = perf_now();
+                        // At work again: the status says so, not how the last answer ended.
+                        state.resting = None;
+                        state.run_told = false;
                     } else if get("state") == "idle" {
                         state.busy_since = 0.;
                     }
@@ -258,6 +261,13 @@ impl TuiApp {
                     let mut state = self.0.state.borrow_mut();
                     state.failed = true;
                     state.stream.discard();
+                }
+                let message = self.clean_line(get("message"), 300);
+                self.rest(ProgramState::Error, &message);
+                if get("kind") == "auth" {
+                    self.alert(&format!("Needs you: {message}"), "Kumi needs you · sign in, in Kumi");
+                } else {
+                    self.alert(&format!("Stopped: {message}"), &format!("Kumi · stopped · {message}"));
                 }
                 self.notice(get("message"), NoticeTone::Warn);
                 if !get("kind").is_empty() {
@@ -452,6 +462,13 @@ impl TuiApp {
                 self.insert_before(serde_json::from_value(entry).unwrap());
             }
             "goal" => {
+                let was = self.0.state.borrow().goal.as_ref().map(|goal| s(&goal["state"]).to_string());
+                if matches!(was.as_deref(), Some("running" | "starting")) && matches!(get("state"), "done" | "paused") {
+                    let best =
+                        value.get("best").map(|best| format!(" · best {}%", super::drawing::num(&best["score"]))).unwrap_or_default();
+                    let ended = if get("state") == "done" { "done" } else { "paused" };
+                    self.run_ended(&format!("Sound match {ended}{best}"), &format!("Kumi · sound match {ended}{best}"));
+                }
                 let show = self.0.state.borrow().goal.is_none() || get("state") == "starting";
                 if show {
                     self.0.tabs.show("goal");
@@ -472,6 +489,8 @@ impl TuiApp {
                     None
                 };
                 if get("state") == "done" && value.get("best").is_some() {
+                    let best = super::drawing::num(&value["best"]["score"]);
+                    self.run_ended(&format!("Matching done · best {best}%"), &format!("Kumi · matching done · {best}%"));
                     let score = value["best"]["score"].as_f64().unwrap_or(0.);
                     let first = value
                         .get("first")
@@ -497,6 +516,21 @@ impl TuiApp {
                 }
             }
             "objective" => {
+                let was = self.0.state.borrow().objective.as_ref().map(|goal| s(&goal["state"]).to_string());
+                if was.as_deref() == Some("running") && get("state") != "running" {
+                    let goal = self.clean_line(get("objective"), 80);
+                    let reason = self.clean_line(get("reason"), 120);
+                    let (body, live) = match (get("state"), get("verdict")) {
+                        ("done", "complete") => (format!("Goal met: {goal}"), format!("Kumi · goal met · {goal}")),
+                        (_, "blocked") => (format!("Goal blocked: {reason}"), "Kumi needs you · goal blocked".to_string()),
+                        (_, "stuck") => (format!("Goal stuck: {reason}"), "Kumi · goal stuck".to_string()),
+                        (_, "budget") => (format!("Goal stopped: its budget is spent ({goal})"), "Kumi · goal out of budget".to_string()),
+                        _ => {
+                            (format!("Goal paused: {}", if reason.is_empty() { &goal } else { &reason }), "Kumi · goal paused".to_string())
+                        }
+                    };
+                    self.run_ended(&body, &live);
+                }
                 let mut status = value.clone();
                 status["since"] = json!(perf_now() - n("elapsedMs"));
                 self.0.state.borrow_mut().objective = Some(status);
@@ -513,6 +547,8 @@ impl TuiApp {
                     None
                 };
                 if get("state") == "done" && n("rounds") > 0. {
+                    let (rounds, kept) = (n("rounds"), n("kept"));
+                    self.run_ended(&format!("Loop done: {rounds} rounds, {kept} kept"), &format!("Kumi · loop done · {kept} kept"));
                     let why = match value["stop"].as_str().unwrap_or("") {
                         "met" => "every item within tolerance",
                         "stalled" => "changes stopped helping",
@@ -737,6 +773,7 @@ impl TuiApp {
             "turn-complete" => {
                 let reason = s(&value["result"]["stopReason"]);
                 let mut offered = None;
+                let mut answer = String::new();
                 {
                     let mut state = self.0.state.borrow_mut();
                     if let Some(usage) = value["result"].get("usage") {
@@ -747,6 +784,8 @@ impl TuiApp {
                     }
                     state.last_stop = Some(reason.into());
                     let Some(entry) = state.current.take() else {
+                        drop(state);
+                        self.answer_ended(reason, n("elapsedMs"), "", None);
                         self.0.scheduler.request();
                         return;
                     };
@@ -766,10 +805,12 @@ impl TuiApp {
                         if reason == "completed" && state.held.is_empty() && state.editor.is_empty() && state.panel.is_none() {
                             offered = choices(text);
                         }
+                        answer = text.clone();
                     }
                     end_steps(&entry);
                     state.transcript.touch(&entry);
                 }
+                self.answer_ended(reason, n("elapsedMs"), &answer, offered.as_ref().map(|(_, choices)| choices.len()));
                 if let Some(offered) = offered {
                     self.open_answers(offered);
                 }

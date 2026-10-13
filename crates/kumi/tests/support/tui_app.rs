@@ -4,6 +4,7 @@ use kumi::{
     input::{ByteListener, TerminalInput},
     terminal::Terminal,
     tui::{
+        alerts::TerminalProfile,
         app::{TuiApp, TuiOptions},
         icons::IconStyle,
         style::ColorDepth,
@@ -344,6 +345,16 @@ impl SessionController for Control {
         }
         Ok(Some(note.clone()))
     }
+    fn has_daw_message(&self) -> bool {
+        true
+    }
+    async fn daw_message(&self, text: &str) -> Result<bool, RuntimeError> {
+        self.call(&format!("daw-message:{text}"));
+        Ok(true)
+    }
+    async fn daw_recording(&self) -> Result<Option<bool>, RuntimeError> {
+        Ok(self.get::<bool>("recording"))
+    }
     fn has_stop_live(&self) -> bool {
         self.stop.get()
     }
@@ -424,6 +435,8 @@ pub struct Harness {
     pub control: Rc<Control>,
     pub app: TuiApp,
     pub browsed: Rc<RefCell<Vec<String>>>,
+    /// The notification programs Kumi ran (osascript, notify-send), with their arguments.
+    pub notified: Rc<RefCell<Vec<(String, Vec<String>)>>>,
     vt: RefCell<vt::VirtualTerminal>,
     consumed: Cell<usize>,
 }
@@ -441,7 +454,12 @@ impl Harness {
             resize: RefCell::default(),
         });
         let browsed = Rc::new(RefCell::new(vec![]));
+        let notified = Rc::new(RefCell::new(vec![]));
         let mut opts = TuiOptions::new(control.clone(), input.clone(), output.clone(), "live");
+        // No status or notification unless a test asks: none of this machine's terminal.
+        opts.terminal = Some(TerminalProfile::quiet());
+        let n = notified.clone();
+        opts.run_notifier = Some(Rc::new(move |program, args| n.borrow_mut().push((program.into(), args))));
         opts.secrets = vec!["private-token".into()];
         opts.color_depth = Some(ColorDepth::Truecolor);
         opts.icons = Some(IconStyle::Glyphs);
@@ -453,7 +471,7 @@ impl Harness {
         let app = TuiApp::new(opts);
         let a = app.clone();
         *control.emit.borrow_mut() = Some(Rc::new(move |e| a.handle_event(e)));
-        Self { input, output, control, app, browsed, vt: RefCell::new(vt::VirtualTerminal::new(w, h)), consumed: Cell::new(0) }
+        Self { input, output, control, app, browsed, notified, vt: RefCell::new(vt::VirtualTerminal::new(w, h)), consumed: Cell::new(0) }
     }
     pub async fn start(&self) {
         let _done = self.app.run();

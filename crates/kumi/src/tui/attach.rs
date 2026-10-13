@@ -162,8 +162,9 @@ const PNG: &[u8] = b"\x89PNG";
 /// Clipboard pictures older than this are cleared away when another is pasted.
 const KEEP_DAYS: u64 = 7;
 
-/// A clipboard program's output, given up after 10 s; it's stopped if it's still running then.
-async fn bounded(program: &str, args: &[&str]) -> Result<std::process::Output, String> {
+/// A helper program's output (the clipboard's, a notification's), given up after 10 s; it's stopped if it's still
+/// running then.
+pub(crate) async fn bounded(program: &str, args: &[&str]) -> Result<std::process::Output, String> {
     let mut command = tokio::process::Command::new(program);
     command.args(args).kill_on_drop(true).stdin(std::process::Stdio::null());
     match tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await {
