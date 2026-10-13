@@ -688,16 +688,17 @@ impl ConversationStore for FileConversationStore {
     }
     async fn move_conversation(&self, id: &str, from: &str, to: &str) -> Result<(), RuntimeError> {
         let file = self.file(from, id)?;
-        let Some(value) = Self::read(&file).await else { return Ok(()) };
         self.file(to, id)?;
-        write_privately(&self.kept(to)?, &format!("{id}.json"), &stringify(&serde_json::to_value(value).map_err(error)?)).await?;
-        // Its name and pin go with it, and so does this Kumi's hold on it.
-        let meta = read_meta(&self.kept(from)?.join(format!("{id}.meta"))).await;
-        self.write_meta(to, id, &meta).await?;
+        // This Kumi's hold goes with it, kept yet or not (a Set saved before its first request).
         if self.held.borrow().contains_key(&(from.to_owned(), id.to_owned())) {
             self.release(from, id);
             self.claim(to, id);
         }
+        let Some(value) = Self::read(&file).await else { return Ok(()) };
+        write_privately(&self.kept(to)?, &format!("{id}.json"), &stringify(&serde_json::to_value(value).map_err(error)?)).await?;
+        // Its name and pin go with it.
+        let meta = read_meta(&self.kept(from)?.join(format!("{id}.meta"))).await;
+        self.write_meta(to, id, &meta).await?;
         write_privately(&self.folder(to)?, "current", id).await?;
         remove(&file).await?;
         remove(self.kept(from)?.join(format!("{id}.meta"))).await?;

@@ -3918,3 +3918,24 @@ local_test!(another_daws_words_are_its_own_in_what_kumi_says_about_another_place
     assert!(h.notice("Opening its project in the DAW; this conversation carries on once it's open."));
     h.session.close().await.unwrap();
 });
+local_test!(a_new_sets_conversation_stays_held_when_the_set_is_saved_before_its_first_request, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some("unsaved"));
+    h.session.start().await.unwrap();
+    let id = now(&h).await.id;
+    // Saved (Cmd-S) before anything is asked: the same Set, now with a project.
+    h.observation.borrow_mut().project = Some(ProjectRef { id: SET_A.into(), name: "Song A".into() });
+    h.session.refresh().await.unwrap();
+    let lock = dir.path().join(SET_A).join(format!("conversations/{id}.lock"));
+    for _ in 0..1000 {
+        if lock.exists() {
+            break;
+        }
+        delay(2).await;
+    }
+    // Another window on that Set can't take it: it carries on in its own copy instead.
+    assert_eq!(create_conversation_store(dir.path()).claim(SET_A, &id), Claim::Taken);
+    h.session.close().await.unwrap();
+});
