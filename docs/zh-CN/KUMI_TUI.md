@@ -79,6 +79,24 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 `/new`、`/reconnect`、`/refresh` 和 `/undo` 只在 Kumi 没有在回答时有效；在回答过程中使用时，Kumi 会说明这一点，并保持原状。
 
+## 即时短语
+
+如果一条消息正是下面的短语之一，Kumi 不调用模型，立即修改 Live。回答会说明改了什么并标上 "instant"，这项修改出现在 HISTORY 中，可以撤销。目前只支持英文。
+
+| 短语 | 作用 |
+| --- | --- |
+| `tempo 124`、`bpm 124`、`124 bpm` | 设置速度 |
+| `mute drums`、`unmute drums` | 静音或取消静音一条轨道 |
+| `solo bass`、`unsolo bass` | 独奏或取消独奏一条轨道 |
+| `arm vocals`、`disarm vocals` | 让一条轨道准备录音，或取消 |
+| `loop 9-16`、`loop bars 9 to 16`、`loop off` | 循环第 9 到 16 小节（含两端），或关闭循环 |
+| `metronome on`、`metronome off` | 打开或关闭节拍器 |
+
+- 轨道可以用名称指定（不区分大小写）；如果只有一条轨道的名称以你输入的内容开头，就是那条；也可以用位置指定：`mute track 3`。
+- 带有更多内容的消息（"mute the drums a bit"、"solo the bass?"），或者 Kumi 无法确定是哪条轨道时，会按原样发给模型。
+- 只有在 Kumi 没有回答时才会立即执行；回答过程中按 Enter，仍然像平时一样用于引导回答。
+- 在 `~/.kumi/settings.json` 中设置 `"instantPhrases": false` 即可关闭。
+
 ## 按键
 
 **输入与发送**

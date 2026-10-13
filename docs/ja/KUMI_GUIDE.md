@@ -369,6 +369,7 @@ Kumi はすべてを `~/.kumi` に保存します。`~/.kumi/settings.json` に�
 | `liveStatusBar` | `false`：Kumi が終えたときやあなたが必要なときに、Live のステータスバーに一行を出さない |
 | `keepAwake` | `false`：Kumi が作業している間もコンピューターはスリープできる |
 | `answerAfter` | 誰もいないときに Kumi がおすすめの答えを選ぶまでの秒数（60）。`0` は選ばない |
+| `instantPhrases` | `false` で、決まったフレーズ（"tempo 124"、"mute drums"）もほかのメッセージと同じくモデルに送る（[即時フレーズ](KUMI_TUI.md#即時フレーズ)） |
 | `modelServers` | OpenAI 互換のモデルサーバー：`[{ "name", "baseURL", "apiKey" }]`（[このコンピューター上のモデル](#このコンピューター上のモデル)） |
 | `libraryFolders` | Kumi がサウンド、プリセット、Set を学習する追加のフォルダー |
 | `voice` | 話しかける設定：`send`（止めたら送る）、`language`、`microphone`（`/voice`） |

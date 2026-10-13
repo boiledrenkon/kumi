@@ -369,6 +369,7 @@ Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
 | `liveStatusBar` | `false`：Kumi 完成或需要你时，不在 Live 的状态栏显示一行 |
 | `keepAwake` | `false`：Kumi 工作时允许电脑休眠 |
 | `answerAfter` | 没人在时 Kumi 选择推荐答案之前的秒数（60）；`0` 表示从不 |
+| `instantPhrases` | `false`：固定短语（"tempo 124"、"mute drums"）也像其他消息一样发给模型（[即时短语](KUMI_TUI.md#即时短语)） |
 | `modelServers` | 兼容 OpenAI 的模型服务器：`[{ "name", "baseURL", "apiKey" }]`（[你电脑上的模型](#你电脑上的模型)） |
 | `libraryFolders` | 供 Kumi 学习声音、预设和工程的其他文件夹 |
 | `voice` | 说话设置：`send`（停止后直接发送）、`language`、`microphone`（`/voice`） |
