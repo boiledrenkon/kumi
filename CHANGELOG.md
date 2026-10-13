@@ -3,6 +3,23 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.16.2 — 2026-10-13
+
+Ships with bridge 1.0.92, as 1.16.1 did.
+
+- The installer explains what went wrong and never loses a working Kumi. A version that doesn't exist
+  says so, with the releases page, instead of "check your internet connection". No connection names
+  DNS, TLS, a proxy or a timeout, and a Wi-Fi sign-in page in GitHub's place is named. Running the
+  installer again keeps the Kumi that `kumi update --rollback` goes back to, and Ctrl-C stops it with
+  nothing changed. It shows the download's progress and what changed ("1.15.0 → 1.16.1"). If Kumi's
+  app folder goes missing, `kumi` starts the Kumi before it, or says how to repair it. When the
+  installer starts Kumi in a window that doesn't have `kumi` yet, Kumi says on closing how to start it
+  next time. On Windows, a failed install sets the exit code, and Linux checks for glibc 2.35 (Ubuntu
+  22.04, Debian 12 or newer).
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.16.1 — 2026-10-12
 
 Ships with bridge 1.0.92, as 1.16.0 did.
