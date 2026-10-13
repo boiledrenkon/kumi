@@ -3,6 +3,19 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.16.6 — 2026-10-13
+
+Ships with bridge 1.0.92, as 1.16.5 did.
+
+- Behind a school or office proxy that inspects secure connections, set in your computer's settings
+  without its certificate installed, Kumi now tries directly, as it did before 1.16.5. It says to
+  install the proxy's certificate only when that fails too. While Kumi waits on a proxy that isn't
+  running, NOW says "proxy not answering" instead of "proxy refused", and the check before signing in
+  no longer suggests a password for it.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.16.5 — 2026-10-13
 
 Ships with bridge 1.0.92, as 1.16.4 did.
