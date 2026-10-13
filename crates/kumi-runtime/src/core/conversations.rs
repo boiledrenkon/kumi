@@ -213,13 +213,16 @@ struct Meta {
     /// It came from a file (kumi import), or was copied from one that did.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     imported: bool,
+    /// The Set a conversation from a file was about, as the file said: no place of its own names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    set: Option<String>,
     /// What a later Kumi keeps here, kept as it is when this one writes the file again.
     #[serde(flatten)]
     later: serde_json::Map<String, Value>,
 }
 impl Meta {
     fn is_empty(&self) -> bool {
-        self.name.is_none() && !self.pinned && self.forked_from.is_none() && !self.imported && self.later.is_empty()
+        self.name.is_none() && !self.pinned && self.forked_from.is_none() && !self.imported && self.set.is_none() && self.later.is_empty()
     }
 }
 /// A name as the producer gave it: one line, at most 60 characters; None when there's nothing left.
@@ -241,6 +244,7 @@ async fn read_meta(file: &Path) -> Meta {
         pinned: meta.pinned,
         forked_from: meta.forked_from.filter(|id| CONVERSATION.is_match(id)),
         imported: meta.imported,
+        set: meta.set.as_deref().and_then(clean_name),
         later: meta.later,
     }
 }
@@ -319,13 +323,18 @@ fn locked_elsewhere(file: &Path) -> bool {
 }
 
 /// The files of a conversation as last read: when `<id>.json` was written (ns) and its size, and when `<id>.meta` was (0
-/// without one). Anything else, and it's read again.
+/// without one), with what of them the entry holds ([`READS`]). Anything else, and it's read again.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Stamp {
     modified: u64,
     size: u64,
     meta: u64,
+    /// An entry an earlier Kumi wrote back has none (it doesn't know them), so it's read again.
+    #[serde(default)]
+    reads: u32,
 }
+/// What of a conversation's files an entry holds: 1 once it holds whether it came from a file, and that file's Set.
+const READS: u32 = 1;
 /// A kept conversation, as the index lists it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -342,6 +351,8 @@ struct Entry {
     forked_from: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     imported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    set: Option<String>,
     stamp: Stamp,
 }
 /// A place's Set name, as its baseline said when Kumi read it, with when the baseline was written.
@@ -562,6 +573,12 @@ impl FileConversationStore {
             }
         }
     }
+    /// Remembers the Set a conversation from a file was about, as the file said: listed and exported again with it. False
+    /// when it isn't kept.
+    pub async fn note_set(&self, place: &str, id: &str, set: &str) -> Result<bool, RuntimeError> {
+        let set = clean_name(set);
+        self.change_meta(place, id, |meta| meta.set = set).await
+    }
     /// Holds conversations as on a file system that can't lock (some network drives): for tests.
     #[doc(hidden)]
     pub fn without_file_locks(&self) {
@@ -584,7 +601,7 @@ impl FileConversationStore {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let Ok(metadata) = entry.metadata().await else { continue };
                 if let Some(id) = name.strip_suffix(".json").filter(|id| CONVERSATION.is_match(id)) {
-                    files.push((id.to_owned(), Stamp { modified: stamp_of(&metadata), size: metadata.len(), meta: 0 }));
+                    files.push((id.to_owned(), Stamp { modified: stamp_of(&metadata), size: metadata.len(), meta: 0, reads: READS }));
                 } else if let Some(id) = name.strip_suffix(".meta").filter(|id| CONVERSATION.is_match(id)) {
                     metas.insert(id.to_owned(), stamp_of(&metadata));
                 }
@@ -656,6 +673,7 @@ impl FileConversationStore {
                     pinned: meta.pinned,
                     forked_from: meta.forked_from,
                     imported: meta.imported,
+                    set: meta.set,
                     stamp: *stamp,
                 },
             );
@@ -706,7 +724,7 @@ impl FileConversationStore {
                 saved_at: entry.saved_at,
                 first: entry.first.clone(),
                 turns: entry.turns,
-                set: index.places.get(&place).and_then(|known| known.name.clone()),
+                set: index.places.get(&place).and_then(|known| known.name.clone()).or_else(|| entry.set.clone()),
                 place,
                 name: entry.name.clone(),
                 pinned: entry.pinned,

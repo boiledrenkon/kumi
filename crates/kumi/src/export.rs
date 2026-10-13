@@ -490,11 +490,17 @@ pub async fn import_command(file: &str, env: &Env, out: &dyn TtyOutput, err: &dy
         }
     };
     let store = kept(env)?;
-    let free = match &imported.id {
-        Some(id) => matches!(store.find(id).await?, ConversationMatch::None),
-        None => false,
+    // The file's id, unless a conversation here has it (or had it): then another, saying why.
+    let (taken, before) = match &imported.id {
+        Some(id) => match store.find(id).await? {
+            ConversationMatch::Gone => (true, false),
+            ConversationMatch::One(row) if row.id == *id => (true, row.place == IMPORTED),
+            ConversationMatch::Several(rows) if rows.iter().any(|row| row.id == *id) => (true, false),
+            _ => (false, false),
+        },
+        None => (false, false),
     };
-    let id = match imported.id.clone().filter(|_| free) {
+    let id = match imported.id.clone().filter(|_| !taken) {
         Some(id) => id,
         None => store.new_id().await,
     };
@@ -511,7 +517,15 @@ pub async fn import_command(file: &str, env: &Env, out: &dyn TtyOutput, err: &dy
         err.write(&format!("{why}\n"));
         return Ok(1);
     }
-    out.write(&format!("Imported “{}” as {id}. Carry it on: {command} -r {id}\n", imported.title));
+    if let Some(set) = &imported.place {
+        store.note_set(IMPORTED, &id, set).await?;
+    }
+    let why = match (&imported.id, taken, before) {
+        (Some(its), true, true) => format!(" ({its} is here already, imported before)"),
+        (Some(its), true, false) => format!(" (its own id, {its}, is taken here)"),
+        _ => String::new(),
+    };
+    out.write(&format!("Imported “{}” as {id}{why}. Carry it on: {command} -r {id}\n", imported.title));
     Ok(0)
 }
 

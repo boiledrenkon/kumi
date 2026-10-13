@@ -238,6 +238,15 @@ async fn kumi_export_saves_a_kept_conversation_and_kumi_import_keeps_it_to_carry
     assert_eq!(import_command(&files[0].display().to_string(), &there, &out, &err, "kumi").await.unwrap(), 0);
     let ids: Vec<String> = kept.all().await.unwrap().into_iter().map(|row| row.id).collect();
     assert_eq!(ids.len(), 2, "an id that's taken gets another: {ids:?}");
+    let again = ids.iter().find(|id| *id != "k3x9a1b2c4").unwrap();
+    assert!(
+        out.0.borrow().contains(&format!("as {again} (k3x9a1b2c4 is here already, imported before). Carry it on: kumi -r {again}")),
+        "{}",
+        out.0.borrow()
+    );
+    // Taken by a conversation of the producer's own.
+    assert_eq!(import_command(&files[0].display().to_string(), &here, &out, &err, "kumi").await.unwrap(), 0);
+    assert!(out.0.borrow().contains("(its own id, k3x9a1b2c4, is taken here)."), "{}", out.0.borrow());
     let not_kumis = home.path().join("other.json");
     fs::write(&not_kumis, "{}").unwrap();
     assert_eq!(import_command(&not_kumis.display().to_string(), &there, &out, &err, "kumi").await.unwrap(), 1);
@@ -320,4 +329,36 @@ async fn a_refused_import_leaves_nothing_behind() {
     let kept = home.path().join("kumi/projects").join(IMPORTED).join("conversations");
     let left: Vec<_> = fs::read_dir(&kept).map(|files| files.map(|file| file.unwrap().file_name()).collect()).unwrap_or_default();
     assert!(left.is_empty(), "a refused import left {left:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_import_keeps_the_set_its_file_names_for_resume_and_another_export() {
+    let home = tempfile::tempdir().unwrap();
+    let env = Env::from([("KUMI_HOME".to_string(), home.path().join("kumi").display().to_string())]);
+    let file = home.path().join("theirs.json");
+    let messages = json!([
+        {"role": "user", "content": [{"type": "text", "text": "Warmer pads"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "Warmed them."}]}
+    ]);
+    fs::write(&file, json!({"format": "kumi-conversation", "version": 1, "id": "t4e1r5s6", "title": "Warmer pads", "set": "Their Song", "messages": messages}).to_string())
+        .unwrap();
+    let (out, err) = (Out::default(), Out::default());
+    assert_eq!(import_command(&file.display().to_string(), &env, &out, &err, "kumi").await.unwrap(), 0);
+    let kept = create_conversation_store(home.path().join("kumi/projects"));
+    let rows = kept.all().await.unwrap();
+    assert_eq!((rows[0].id.as_str(), rows[0].set.as_deref()), ("t4e1r5s6", Some("Their Song")));
+    let folder = home.path().join("files");
+    fs::create_dir(&folder).unwrap();
+    let ask = ExportRequest {
+        conversation: Some("t4e1r5s6".into()),
+        format: Format::Markdown,
+        out: Some(folder.display().to_string()),
+        full: false,
+        raw: false,
+    };
+    assert_eq!(export_command(ask, &env, &out, &err, "kumi").await.unwrap(), 0, "{}", err.0.borrow());
+    let files: Vec<_> = fs::read_dir(&folder).unwrap().map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let page = fs::read_to_string(&files[0]).unwrap();
+    assert!(page.contains("- **Set:** Their Song\n"), "{page}");
 }
