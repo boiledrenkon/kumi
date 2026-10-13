@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::fs;
 
 use chrono::FixedOffset;
-use kumi::export::{export_command, import_command, picture_of, render, svg_of, write_new, ExportRequest};
+use kumi::export::{export_command, import_command, picture_of, redactor_maker, render, svg_of, write_new, ExportRequest};
 use kumi::report::redactor;
 use kumi::tui::tty::TtyOutput;
 use kumi_runtime::core::contracts::{ChangePicture, ChangeRecord, ConversationStore, KernelCheckpoint, SavedConversation, TranscriptRole};
@@ -361,4 +361,31 @@ async fn an_import_keeps_the_set_its_file_names_for_resume_and_another_export() 
     assert_eq!(files.len(), 1, "{files:?}");
     let page = fs::read_to_string(&files[0]).unwrap();
     assert!(page.contains("- **Set:** Their Song\n"), "{page}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn exports_take_out_every_key_kumi_knows_as_it_knows_them_then() {
+    let home = tempfile::tempdir().unwrap();
+    let kumi = home.path().join("kumi");
+    fs::create_dir_all(&kumi).unwrap();
+    let servers = |keys: &[&str]| {
+        let servers: Vec<Value> = keys
+            .iter()
+            .enumerate()
+            .map(|(n, key)| json!({"name": format!("studio{n}"), "baseURL": "http://studio.lan:1234/v1", "apiKey": key}))
+            .collect();
+        fs::write(kumi.join("settings.json"), json!({"modelServers": servers}).to_string()).unwrap();
+    };
+    servers(&["serverkey-first"]);
+    let env = Env::from([("KUMI_HOME".to_string(), kumi.display().to_string()), ("LM_API_TOKEN".to_string(), "lmtoken-words".to_string())]);
+    let secrets = kumi::report::known_secrets(&env).await;
+    assert!(secrets.iter().any(|s| s == "lmtoken-words") && secrets.iter().any(|s| s == "serverkey-first"), "{secrets:?}");
+    // Made as Kumi starts; a server's key added later is known at the next export.
+    let make = redactor_maker(&env);
+    servers(&["serverkey-first", "serverkey-added"]);
+    let redact = make().await;
+    let out = redact("keys: lmtoken-words serverkey-first serverkey-added");
+    for key in ["lmtoken-words", "serverkey-first", "serverkey-added"] {
+        assert!(!out.contains(key), "{key} survived: {out}");
+    }
 }

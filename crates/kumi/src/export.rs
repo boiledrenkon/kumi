@@ -8,6 +8,7 @@ use std::process::Stdio;
 use std::rc::Rc;
 
 use chrono::{FixedOffset, Local, Offset};
+use futures::future::{FutureExt, LocalBoxFuture};
 use kumi_common::js::string::head;
 use kumi_common::time::now_ms;
 use kumi_runtime::core::contracts::{
@@ -285,16 +286,29 @@ pub fn reveal(path: &Path) {
     }
 }
 
-/// The redactor for /export and /share: `kumi report`'s, as the session made it, else one taking out `secrets`, the home
-/// folder and the account name.
-pub fn redactor_or(made: Option<&Rc<dyn Fn(&str) -> String>>, secrets: &[String]) -> Rc<dyn Fn(&str) -> String> {
-    match made {
-        Some(redact) => redact.clone(),
+/// The redactor for /export and /share, made now: `kumi report`'s, from what this computer knows then, else one taking out
+/// `secrets`, the home folder and the account name.
+pub async fn redactor_now(make: Option<&MakeRedactor>, secrets: &[String]) -> Rc<dyn Fn(&str) -> String> {
+    match make {
+        Some(make) => make().await,
         None => {
             let home = home::home_dir().unwrap_or_default().display().to_string();
             Rc::new(redactor(secrets, &home, &username()))
         }
     }
+}
+
+/// Makes what an export takes out, when it's made: [`redactor_for`] then, so a key added since Kumi started (signed in
+/// with /login, say) is known.
+pub type MakeRedactor = Rc<dyn Fn() -> LocalBoxFuture<'static, Rc<dyn Fn(&str) -> String>>>;
+
+/// A [`MakeRedactor`] for these variables.
+pub fn redactor_maker(env: &Env) -> MakeRedactor {
+    let env = env.clone();
+    Rc::new(move || {
+        let env = env.clone();
+        async move { Rc::from(redactor_for(&env).await) }.boxed_local()
+    })
 }
 
 /// The conversation going on now as a file: its text, its name, and what it holds as a key (the same while nothing in

@@ -736,8 +736,8 @@ pub(super) async fn run_session(
     } else {
         None
     };
-    // What /export and /share take out: what `kumi report` takes out.
-    let redact: Rc<dyn Fn(&str) -> String> = Rc::from(crate::export::redactor_for(&io.env).await);
+    // What /export and /share take out: what `kumi report` takes out, as this computer knows it at each export.
+    let redact = crate::export::redactor_maker(&io.env);
     let ui: Rc<dyn Terminal> = if full_screen {
         let mut options = TuiOptions::new(session, io.input.clone(), io.out.clone(), mode);
         options.models = Some(models);

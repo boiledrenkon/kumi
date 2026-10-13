@@ -1,6 +1,6 @@
 //! `kumi report`, with native runtime version information.
 use crate::{
-    config::{load_auth_file, load_db_file, load_gaps_file, load_projects_dir, load_settings_file, load_timings_file},
+    config::{load_auth_file, load_db_file, load_gaps_file, load_projects_dir, load_settings_file, load_timings_file, read_settings},
     doctor::{doctor_checks, format_doctor, Check, DoctorIo},
     spinner::step,
     tui::style::os_release,
@@ -432,19 +432,26 @@ pub async fn known_secrets(env: &Env) -> Vec<String> {
             }
         }
     }
-    for name in [
-        "AI_GATEWAY_API_KEY",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "OPENCODE_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "KUMI_LISTENER_KEY",
-    ] {
+    for name in KEY_VARIABLES {
         secrets.push(env.get(name).cloned().unwrap_or_default())
+    }
+    // A model server's key, as settings give it.
+    if let Ok(file) = load_settings_file(env) {
+        secrets.extend(read_settings(&file).model_servers.into_iter().filter_map(|server| server.api_key));
     }
     secrets
 }
+/// The variables that hold a key or token Kumi uses.
+pub const KEY_VARIABLES: [&str; 8] = [
+    "AI_GATEWAY_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENCODE_API_KEY",
+    "LM_API_TOKEN",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "KUMI_LISTENER_KEY",
+];
 pub async fn write_report(io: ReportIo) -> Result<i32, RuntimeError> {
     let env = &io.doctor.env;
     let home = io.home.clone().unwrap_or_else(|| home::home_dir().unwrap_or_default().display().to_string());

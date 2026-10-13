@@ -62,9 +62,9 @@ pub struct TerminalOptions {
     pub next_time: Option<String>,
     /// The producer chooses a kept conversation as Kumi starts (`kumi -r`): the list, with these words, is said first.
     pub choose_conversation: Option<String>,
-    /// What /export and /share take out: `kumi report`'s redactor. None takes out what `secrets` holds, the home folder
-    /// and the account name.
-    pub redact: Option<Rc<dyn Fn(&str) -> String>>,
+    /// What /export and /share take out: `kumi report`'s redactor, made at each export. None takes out what `secrets`
+    /// holds, the home folder and the account name.
+    pub redact: Option<crate::export::MakeRedactor>,
     /// Where /export and /share save; None saves in the folder Kumi was started in.
     pub folder: Option<std::path::PathBuf>,
 }
@@ -734,7 +734,7 @@ impl PlainTerminal {
                 return;
             }
         };
-        let redact = crate::export::redactor_or(self.0.options.redact.as_ref(), &self.0.options.secrets);
+        let redact = crate::export::redactor_now(self.0.options.redact.as_ref(), &self.0.options.secrets).await;
         let exported = match crate::export::conversation_now(&*self.0.options.controller, format, &*redact).await {
             Ok(exported) => exported,
             Err(why) => {

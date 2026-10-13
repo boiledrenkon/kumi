@@ -117,9 +117,9 @@ pub struct TuiOptions {
     pub copy: Option<Rc<dyn Fn(&str)>>,
     /// The producer chooses a kept conversation as Kumi starts (`kumi -r`): the list opens with this typed in it.
     pub choose_conversation: Option<String>,
-    /// What /export and /share take out: `kumi report`'s redactor. None takes out what `secrets` holds, the home folder
-    /// and the account name.
-    pub redact: Option<Rc<dyn Fn(&str) -> String>>,
+    /// What /export and /share take out: `kumi report`'s redactor, made at each export. None takes out what `secrets`
+    /// holds, the home folder and the account name.
+    pub redact: Option<crate::export::MakeRedactor>,
     /// Shows a file in the system's file manager (/share); None shows nothing.
     pub reveal: Option<Rc<dyn Fn(&std::path::Path)>>,
     /// Where /export and /share save; None saves in the folder Kumi was started in.
