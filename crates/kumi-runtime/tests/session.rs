@@ -3619,7 +3619,7 @@ local_test!(an_imported_conversation_carries_on_here_in_a_copy_and_the_model_hea
         words: ("Live", "Set"),
         created: 1,
     };
-    let imported = import(&saved_for_kumi(&source, &options), 3).unwrap();
+    let imported = import(&saved_for_kumi(&source, &options), 3, "kumi").unwrap();
     store.create(IMPORTED, KEPT, &imported.conversation, Some("make the bass wider (imported)"), None).await.unwrap();
     let h = harness(None, |o| o.conversations = Some(store.clone()));
     live(&h, Some(SET_B));
@@ -3701,7 +3701,7 @@ async fn imported_here(store: &dyn ConversationStore) {
         words: ("Live", "Set"),
         created: 1,
     };
-    let imported = import(&saved_for_kumi(&source, &options), 3).unwrap();
+    let imported = import(&saved_for_kumi(&source, &options), 3, "kumi").unwrap();
     store.create(IMPORTED, KEPT, &imported.conversation, Some("make the bass wider (imported)"), None).await.unwrap();
 }
 /// `kumi -r <imported id>` (or `-c` when the import is the latest): the copy goes on, and Kumi asks nothing.

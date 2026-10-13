@@ -10,13 +10,14 @@ impl TuiApp {
     /// /export: copy this conversation as Markdown, or save it as Markdown, a web page or a file for Kumi.
     pub(super) fn open_export(&self) {
         let item = |label: &str, value: &str, detail: &str| PickerItem { detail: Some(detail.into()), ..PickerItem::new(label, value) };
+        let carried = format!("another Kumi carries it on: {} import", self.0.options.command);
         let here = self.0.options.folder.clone().or_else(|| std::env::current_dir().ok());
         let here = here.map(|folder| self.clean(&folder.display().to_string(), 120)).unwrap_or_default();
         let items = vec![
             item("Copy as Markdown", "copy", "to paste anywhere"),
             item("Save Markdown", "md", "a .md file"),
             item("Save web page", "html", "one page that opens anywhere"),
-            item("Save for Kumi", "json", "another Kumi carries it on: kumi import"),
+            item("Save for Kumi", "json", &carried),
         ];
         let title = if here.is_empty() {
             "Export this conversation".to_string()
@@ -132,7 +133,7 @@ impl TuiApp {
                 if format == Format::Html {
                     self.0.state.borrow_mut().shared = Some((exported.key, path.clone()));
                 }
-                self.notice(&saved_words(format, &path), NoticeTone::Info);
+                self.notice(&saved_words(format, &path, &self.0.options.command), NoticeTone::Info);
                 Some(path)
             }
             Err(why) => {

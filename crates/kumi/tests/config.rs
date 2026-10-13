@@ -364,7 +364,7 @@ fn export_and_import_take_a_conversation_a_format_and_a_file() {
     for wrong in [&["import"][..], &["import", "a.json", "b.json"], &["import", "--all"]] {
         assert_eq!(
             load_config(&args(wrong), &env).unwrap_err().to_string(),
-            "Use: import <file> (a conversation saved with: kumi export --json).",
+            "Use: import <file> (a conversation saved with: export --json).",
             "{wrong:?}"
         );
     }

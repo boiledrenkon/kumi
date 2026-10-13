@@ -1259,27 +1259,33 @@ pub struct Imported {
     pub conversation: SavedConversation,
 }
 
+/// What a file for `<command> import` is, said with the command the producer runs Kumi with.
+pub fn importable(command: &str) -> String {
+    format!("{command} import takes a conversation Kumi saved with: {command} export --json")
+}
+
 /// A Kumi JSON export, read as untrusted: only the shapes Kumi writes are kept (words, steps and their results, as text),
 /// with no reasoning, pictures or provider data, and every call paired with its result. The conversation carries on
-/// from these with any model. Err says what's wrong with the file, in plain words.
-pub fn import(text: &str, now: i64) -> Result<Imported, String> {
-    const HOW: &str = "kumi import takes a conversation Kumi saved with: kumi export --json";
+/// from these with any model. Err says what's wrong with the file, in plain words naming `command` (how the producer
+/// runs Kumi).
+pub fn import(text: &str, now: i64, command: &str) -> Result<Imported, String> {
+    let how = importable(command);
     if text.len() > IMPORT_MAX_BYTES {
-        return Err(format!("That file is too big for a Kumi conversation (16 MB at most). {HOW}"));
+        return Err(format!("That file is too big for a Kumi conversation (16 MB at most). {how}"));
     }
-    let value: Value = serde_json::from_str(text).map_err(|_| format!("That file isn't a Kumi conversation. {HOW}"))?;
+    let value: Value = serde_json::from_str(text).map_err(|_| format!("That file isn't a Kumi conversation. {how}"))?;
     if value.get("format").and_then(Value::as_str) != Some(FORMAT) {
-        return Err(format!("That file isn't a Kumi conversation. {HOW}"));
+        return Err(format!("That file isn't a Kumi conversation. {how}"));
     }
     match value.get("version").and_then(Value::as_u64) {
         Some(VERSION) => {}
         Some(newer) if newer > VERSION => {
             return Err(format!("That conversation is from a newer Kumi (format {newer}): update Kumi, then import it again."))
         }
-        _ => return Err(format!("That Kumi conversation has no format version this Kumi knows. {HOW}")),
+        _ => return Err(format!("That Kumi conversation has no format version this Kumi knows. {how}")),
     }
     let Some(listed) = value.get("messages").and_then(Value::as_array) else {
-        return Err(format!("That Kumi conversation has no messages. {HOW}"));
+        return Err(format!("That Kumi conversation has no messages. {how}"));
     };
     let mut messages = renumbered(
         listed

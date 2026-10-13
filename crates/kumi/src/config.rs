@@ -660,7 +660,7 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
     if first == Some("import") {
         return match &args[1..] {
             [file] if !file.is_empty() && !file.starts_with('-') && !controls(file, true) => Ok(AppConfig::Import { file: file.clone() }),
-            _ => Err(RuntimeError::plain("Use: import <file> (a conversation saved with: kumi export --json).")),
+            _ => Err(RuntimeError::plain("Use: import <file> (a conversation saved with: export --json).")),
         };
     }
     if first == Some("update") {

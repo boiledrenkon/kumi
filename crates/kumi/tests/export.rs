@@ -389,3 +389,21 @@ async fn exports_take_out_every_key_kumi_knows_as_it_knows_them_then() {
         assert!(!out.contains(key), "{key} survived: {out}");
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn words_about_importing_name_the_command_kumi_runs_with() {
+    let home = tempfile::tempdir().unwrap();
+    let env = Env::from([("KUMI_HOME".to_string(), home.path().join("kumi").display().to_string())]);
+    let (out, err) = (Out::default(), Out::default());
+    let binary = home.path().join("not-text.json");
+    fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+    let other = home.path().join("other.json");
+    fs::write(&other, "{}").unwrap();
+    for file in [&binary, &other] {
+        assert_eq!(import_command(&file.display().to_string(), &env, &out, &err, "cargo run -p kumi --").await.unwrap(), 1);
+    }
+    let how = "cargo run -p kumi -- import takes a conversation Kumi saved with: cargo run -p kumi -- export --json";
+    assert_eq!(err.0.borrow().matches(how).count(), 2, "{}", err.0.borrow());
+    let saved = kumi::export::saved_words(Format::Json, std::path::Path::new("k.json"), "cargo run -p kumi --");
+    assert!(saved.contains("Another Kumi carries it on after: cargo run -p kumi -- import <this file>."), "{saved}");
+}

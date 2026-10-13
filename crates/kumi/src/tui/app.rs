@@ -113,6 +113,8 @@ pub struct TuiOptions {
     pub reach: Option<Rc<dyn Fn() -> LocalBoxFuture<'static, Option<String>>>>,
     /// Kumi runs on another computer (over SSH), whose browser isn't the producer's: ChatGPT signs in with a code.
     pub remote: bool,
+    /// How the producer runs Kumi from a shell ("kumi"), where Kumi's words name one of its commands.
+    pub command: String,
     /// Puts text on this computer's clipboard with its own tool, for terminals that don't take the terminal's way.
     pub copy: Option<Rc<dyn Fn(&str)>>,
     /// The producer chooses a kept conversation as Kumi starts (`kumi -r`): the list opens with this typed in it.
@@ -168,6 +170,7 @@ impl TuiOptions {
             next_time: None,
             reach: None,
             remote: false,
+            command: "kumi".into(),
             copy: None,
             choose_conversation: None,
             redact: None,

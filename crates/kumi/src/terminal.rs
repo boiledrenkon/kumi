@@ -67,6 +67,8 @@ pub struct TerminalOptions {
     pub redact: Option<crate::export::MakeRedactor>,
     /// Where /export and /share save; None saves in the folder Kumi was started in.
     pub folder: Option<std::path::PathBuf>,
+    /// How the producer runs Kumi from a shell ("kumi"), where Kumi's words name one of its commands.
+    pub command: String,
 }
 impl TerminalOptions {
     pub fn new(
@@ -93,6 +95,7 @@ impl TerminalOptions {
             next_time: None,
             choose_conversation: None,
             redact: None,
+            command: "kumi".into(),
             folder: None,
         }
     }
@@ -755,7 +758,7 @@ impl PlainTerminal {
                 if format == Format::Html {
                     self.0.state.borrow_mut().shared = Some((exported.key, path.clone()));
                 }
-                self.notice(&format!("[export] {}", crate::export::saved_words(format, &path)));
+                self.notice(&format!("[export] {}", crate::export::saved_words(format, &path, &self.0.options.command)));
             }
             Err(why) => self.notice(&format!("[export] {why}")),
         }

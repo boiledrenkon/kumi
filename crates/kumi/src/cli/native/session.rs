@@ -742,6 +742,7 @@ pub(super) async fn run_session(
         let mut options = TuiOptions::new(session, io.input.clone(), io.out.clone(), mode);
         options.models = Some(models);
         options.redact = Some(redact);
+        options.command = io.command().to_string();
         options.reveal = Some(Rc::new(crate::export::reveal));
         options.startup_notice = if connect_why.is_some() { None } else { notice };
         options.choose_conversation = choose.clone();
@@ -805,6 +806,7 @@ pub(super) async fn run_session(
         let mut options = TerminalOptions::new(session, io.input.clone(), io.out.clone(), models, mode);
         options.startup_notice = notice;
         options.redact = Some(redact);
+        options.command = io.command().to_string();
         options.choose_conversation = choose.clone();
         options.whats_new = whats_new;
         options.instant = instant;

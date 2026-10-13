@@ -1174,11 +1174,13 @@ case!(export_copies_or_saves_this_conversation_and_share_offers_the_page, async 
     let h = Harness::with(140, 36, Rc::new(Control::default()), move |o| {
         o.folder = Some(into);
         o.reveal = Some(Rc::new(move |path: &std::path::Path| shown.borrow_mut().push(path.to_path_buf())));
+        o.command = "cargo run -p kumi --".into();
     });
     h.start().await;
     h.connect();
     h.type_text("/export\r").await;
     h.has("Export this conversation");
+    h.has("another Kumi carries it on: cargo run -p kumi --");
     h.type_text("\r").await;
     h.has("There's nothing to export yet");
     // Copied through the terminal, with what the session knows to be secret taken out.

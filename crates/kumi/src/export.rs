@@ -15,7 +15,9 @@ use kumi_runtime::core::contracts::{
     ChangePicture, ChangeRecord, ColorChange, ConversationMatch, ConversationStore, ConversationSummary, DevicePlacement, SessionController,
 };
 use kumi_runtime::core::conversations::FileConversationStore;
-use kumi_runtime::core::export::{file_name, html, html_text, import, json, markdown, Format, Options, Source, IMPORT_MAX_BYTES};
+use kumi_runtime::core::export::{
+    file_name, html, html_text, import, importable, json, markdown, Format, Options, Source, IMPORT_MAX_BYTES,
+};
 use kumi_runtime::system::{self, Env};
 use kumi_runtime::{create_conversation_store_keeping, gone_words, RuntimeError, IMPORTED, KUMI_VERSION};
 
@@ -356,12 +358,12 @@ pub fn save_in(folder: Option<&Path>, text: &str, name: &str) -> Result<PathBuf,
     write_new(&path, text).map_err(|error| format!("Kumi couldn't save {}: {error}.", path.display()))
 }
 
-/// What Kumi says once it saved this conversation in `format` at `path`.
-pub fn saved_words(format: Format, path: &Path) -> String {
+/// What Kumi says once it saved this conversation in `format` at `path`; `command` is how the producer runs Kumi.
+pub fn saved_words(format: Format, path: &Path, command: &str) -> String {
     let (what, after) = match format {
-        Format::Markdown => ("as Markdown", ""),
-        Format::Html => ("as a web page", ""),
-        Format::Json => ("for Kumi", " Another Kumi carries it on after: kumi import <this file>."),
+        Format::Markdown => ("as Markdown", String::new()),
+        Format::Html => ("as a web page", String::new()),
+        Format::Json => ("for Kumi", format!(" Another Kumi carries it on after: {command} import <this file>.")),
     };
     format!("Saved this conversation {what}: {}.{after} Secrets, your home folder and your account name are taken out.", path.display())
 }
@@ -489,14 +491,14 @@ fn several(word: &str, rows: &[ConversationSummary]) -> String {
 /// `kumi import`: a conversation saved with `kumi export --json`, kept with the others to carry on with `kumi -r` (in a
 /// copy, where the producer is). The file is read as untrusted, and keeps its id when no kept conversation has it.
 pub async fn import_command(file: &str, env: &Env, out: &dyn TtyOutput, err: &dyn TtyOutput, command: &str) -> Result<i32, RuntimeError> {
-    let text = match read_bounded(Path::new(file)) {
+    let text = match read_bounded(Path::new(file), command) {
         Ok(text) => text,
         Err(why) => {
             err.write(&format!("{why}\n"));
             return Ok(1);
         }
     };
-    let imported = match import(&text, now_ms()) {
+    let imported = match import(&text, now_ms(), command) {
         Ok(imported) => imported,
         Err(why) => {
             err.write(&format!("{why}\n"));
@@ -544,13 +546,12 @@ pub async fn import_command(file: &str, env: &Env, out: &dyn TtyOutput, err: &dy
 }
 
 /// A file's text, if it's at most [`IMPORT_MAX_BYTES`].
-fn read_bounded(path: &Path) -> Result<String, String> {
+fn read_bounded(path: &Path, command: &str) -> Result<String, String> {
     let shown = plain(&path.display().to_string());
     let size = std::fs::metadata(path).map_err(|error| format!("Kumi can't read {shown}: {error}."))?.len();
     if size > IMPORT_MAX_BYTES as u64 {
         return Err("That file is too big for a Kumi conversation (16 MB at most).".into());
     }
     let bytes = std::fs::read(path).map_err(|error| format!("Kumi can't read {shown}: {error}."))?;
-    String::from_utf8(bytes)
-        .map_err(|_| "That file isn't a Kumi conversation. kumi import takes a conversation Kumi saved with: kumi export --json".into())
+    String::from_utf8(bytes).map_err(|_| format!("That file isn't a Kumi conversation. {}", importable(command)))
 }
