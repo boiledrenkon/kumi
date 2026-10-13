@@ -359,6 +359,20 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/install_errors.ps1
+      - name: The install.ps1 to compare with, 1.16.1's (its glyphs as text, before the file went ASCII)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          git fetch --depth=1 origin refs/tags/v1.16.1:refs/tags/v1.16.1
+          git cat-file blob v1.16.1:install.ps1 > install-1.16.1.ps1
+      - name: install.ps1 prints what 1.16.1's did, byte for byte (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/install_output.ps1 -Reference install-1.16.1.ps1
+      - name: install.ps1 prints what 1.16.1's did, byte for byte (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tests/install_output.ps1 -Reference install-1.16.1.ps1
 
   migration:
     name: Existing installer transition / ${{ matrix.os }}

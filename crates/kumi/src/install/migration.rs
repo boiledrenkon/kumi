@@ -132,6 +132,15 @@ mod tests {
     }
 
     #[test]
+    fn what_windows_reads_is_ascii() {
+        // Windows PowerShell reads a script file without a byte order mark, and a download without a charset (a
+        // release asset), in another code page than UTF-8: install.ps1 builds its glyphs from [char]s. cmd reads
+        // kumi.cmd in the console's code page.
+        assert!(include_str!("../../../../install.ps1").is_ascii());
+        assert!(launcher(true).is_ascii());
+    }
+
+    #[test]
     fn a_cmd_still_running_the_launcher_before_goes_on_as_it_would_have() {
         let (before, now) = (PREVIOUS_WINDOWS_LAUNCHER, launcher(true));
         // Each line the one before has starts a line here too, the same one but for the Node line, whose bytes
