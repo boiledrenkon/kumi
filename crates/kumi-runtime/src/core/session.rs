@@ -1141,7 +1141,7 @@ impl Session {
         store.create(&here, &copy_id, &copy, name.as_deref(), Some(id)).await?;
         self.go_to(here, copy_id, copy, Some(format!("Carrying on a copy of an imported conversation here; the original stays as {id}.")))
             .await?;
-        let noun = self.0.state.borrow().integration.as_ref().map(|i| i.words().1).unwrap_or("Set");
+        let noun = self.0.state.borrow().integration.as_ref().map(|i| i.words().1).unwrap_or(DAW_WORDS.1);
         self.0.state.borrow_mut().next_note = Some(imported_note(noun));
         Ok(())
     }
@@ -2586,23 +2586,26 @@ impl SessionController for Session {
         Ok(store.load(&row.place, id).await?.map(|kept| transcript_of(&kept.checkpoint.messages)).unwrap_or_default())
     }
     async fn conversation_to_export(&self) -> Option<ConversationToExport> {
-        let going = self.conversation_now().await?;
         let saving = self.0.saving.borrow().clone();
         let _ = saving.await;
-        let (place, settled, first, turns, changes, set, words) = {
+        let (place, id, name, settled, first, turns, changes, set, words) = {
             let s = self.0.state.borrow();
             (
                 s.place.clone(),
+                s.conversation_id.clone(),
+                s.conversation_name.clone(),
                 s.settled.as_ref().map(|settled| settled.checkpoint.clone()),
                 s.conversation_first.clone().filter(|first| !first.is_empty()),
                 s.conversation_turns,
                 s.changes.clone(),
                 s.set_name.clone().filter(|_| s.project.is_some()),
-                s.integration.as_ref().map(|i| i.words()).unwrap_or(("Live", "Set")),
+                s.integration.as_ref().map(|i| i.words()).unwrap_or(DAW_WORDS),
             )
         };
+        // A kept one's row says what it's called, when it began and its Set; a chat that keeps none (without Live) has
+        // only what this session holds.
         let row = match (&self.0.options.conversations, &place) {
-            (Some(store), Some(place)) => match store.find(&going.id).await {
+            (Some(store), Some(place)) => match store.find(&id).await {
                 Ok(ConversationMatch::One(row)) if row.place == *place => Some(row),
                 _ => None,
             },
@@ -2615,17 +2618,24 @@ impl SessionController for Session {
                 saved_at: now(),
                 checkpoint,
                 changes: (!changes.is_empty()).then_some(changes),
-                first,
+                first: first.clone(),
                 turns: Some(turns),
             },
             None => {
                 let store = self.0.options.conversations.clone()?;
-                store.load(&place?, &going.id).await.ok()??
+                store.load(place.as_deref()?, &id).await.ok()??
             }
         };
-        (!conversation.checkpoint.messages.is_empty()).then(|| ConversationToExport {
-            id: going.id,
-            title: going.title,
+        if conversation.checkpoint.messages.is_empty() {
+            return None;
+        }
+        let title = match &row {
+            Some(row) if name.is_none() => row.title(),
+            _ => super::conversations::title(name.as_deref(), first.as_deref().or(conversation.first.as_deref()).unwrap_or("")),
+        };
+        Some(ConversationToExport {
+            id,
+            title,
             set: row.as_ref().and_then(|row| row.set.clone()).or(set),
             created: row.map_or(0, |row| row.created),
             conversation,

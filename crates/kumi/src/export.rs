@@ -14,7 +14,7 @@ use kumi_runtime::core::contracts::{ChangePicture, ConversationMatch, Conversati
 use kumi_runtime::core::conversations::FileConversationStore;
 use kumi_runtime::core::export::{file_name, html, import, json, markdown, Format, Options, Source, IMPORT_MAX_BYTES};
 use kumi_runtime::system::{self, Env};
-use kumi_runtime::{create_conversation_store_keeping, gone_words, RuntimeError, IMPORTED, KEEP_DAYS, KUMI_VERSION};
+use kumi_runtime::{create_conversation_store_keeping, gone_words, RuntimeError, IMPORTED, KUMI_VERSION};
 
 use crate::config::{load_projects_dir, load_settings_file, read_settings};
 use crate::report::{known_secrets, redactor, username};
@@ -257,11 +257,10 @@ pub struct ExportRequest {
     pub raw: bool,
 }
 
-/// The kept conversations, and how many days Kumi keeps them.
-fn kept(env: &Env) -> Result<(Rc<FileConversationStore>, u32), RuntimeError> {
+/// The kept conversations, kept as the settings say.
+fn kept(env: &Env) -> Result<Rc<FileConversationStore>, RuntimeError> {
     let settings = read_settings(&load_settings_file(env)?);
-    let keep_days = settings.conversations.as_ref().and_then(|c| c.keep_days).unwrap_or(KEEP_DAYS);
-    Ok((create_conversation_store_keeping(load_projects_dir(env)?, keep_days), keep_days))
+    Ok(create_conversation_store_keeping(load_projects_dir(env)?, settings.conversations.as_ref().and_then(|c| c.keep_days)))
 }
 
 /// Words from a file or the store, for the terminal: without control characters.
@@ -278,7 +277,7 @@ pub async fn export_command(
     err: &dyn TtyOutput,
     command: &str,
 ) -> Result<i32, RuntimeError> {
-    let (store, keep_days) = kept(env)?;
+    let store = kept(env)?;
     let row = match &request.conversation {
         Some(word) => match store.find(word).await? {
             ConversationMatch::One(row) => row,
@@ -287,7 +286,7 @@ pub async fn export_command(
                 return Ok(1);
             }
             ConversationMatch::Gone => {
-                err.write(&format!("{}\n", gone_words(keep_days)));
+                err.write(&format!("{}\n", gone_words(store.days_kept().await)));
                 return Ok(1);
             }
             ConversationMatch::None => {
@@ -307,7 +306,7 @@ pub async fn export_command(
         },
     };
     let Some(conversation) = store.load(&row.place, &row.id).await? else {
-        err.write(&format!("{}\n", gone_words(keep_days)));
+        err.write(&format!("{}\n", gone_words(store.days_kept().await)));
         return Ok(1);
     };
     let redact = if request.raw { None } else { Some(redactor_for(env).await) };
@@ -383,7 +382,7 @@ pub async fn import_command(file: &str, env: &Env, out: &dyn TtyOutput, err: &dy
             return Ok(1);
         }
     };
-    let (store, _) = kept(env)?;
+    let store = kept(env)?;
     let free = match &imported.id {
         Some(id) => matches!(store.find(id).await?, ConversationMatch::None),
         None => false,

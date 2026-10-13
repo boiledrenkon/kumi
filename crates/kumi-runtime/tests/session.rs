@@ -3646,6 +3646,20 @@ local_test!(an_imported_conversation_carries_on_here_in_a_copy_and_the_model_hea
     assert_eq!(row(&copy.id).title(), "make the bass wider (imported)");
     h.session.close().await.unwrap();
 });
+local_test!(a_chat_that_keeps_no_conversations_still_exports_what_was_said, {
+    // No store: a chat without Live, started without -c or -r.
+    let h = harness(None, |_| {});
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    assert!(h.session.conversation_to_export().await.is_none(), "nothing said yet");
+    h.session.submit("make the bass wider", None).await.unwrap();
+    let exported = h.session.conversation_to_export().await.unwrap();
+    assert_eq!((exported.title.as_str(), exported.created), ("make the bass wider", 0));
+    let said: Vec<String> = transcript_of(&exported.conversation.checkpoint.messages).into_iter().map(|line| line.text).collect();
+    assert_eq!(said, ["make the bass wider"]);
+    assert_eq!(exported.set.as_deref(), Some("Song b2"));
+    h.session.close().await.unwrap();
+});
 local_test!(open_its_set_asks_the_daw_and_the_conversation_goes_on_once_that_set_is_open, {
     let dir = tempfile::tempdir().unwrap();
     let store = create_conversation_store(dir.path());
