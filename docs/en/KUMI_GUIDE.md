@@ -1014,7 +1014,9 @@ own retention are separate.
 - **A network that inspects secure connections,** as schools and offices often
   have: Kumi trusts the certificates your computer trusts, so it works once the
   network's certificate is installed, as your browser needs. `SSL_CERT_FILE`
-  names a file of more certificates for Kumi to trust.
+  names a file of more certificates for Kumi to trust; as OpenSSL reads it, it
+  stands in for the computer's own list on Linux and for web search and
+  reading.
 - **Web search and reading** connect directly, never through a proxy. Kumi
   checks that each address is public before it connects, and a proxy would look
   the name up again where Kumi can't check it. On a network that lets only a

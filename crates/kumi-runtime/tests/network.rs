@@ -58,10 +58,16 @@ fn authority_folder() -> PathBuf {
 
 /// A server's TLS, with a certificate for `host` from `issuer`.
 fn server_tls(host: &str, issuer: &Issuer<'_, KeyPair>) -> Arc<rustls::ServerConfig> {
+    server_tls_with(host, issuer, Vec::new())
+}
+
+/// [`server_tls`], with more extensions in the certificate.
+fn server_tls_with(host: &str, issuer: &Issuer<'_, KeyPair>, extensions: Vec<rcgen::CustomExtension>) -> Arc<rustls::ServerConfig> {
     let mut params = CertificateParams::new(vec![host.to_string()]).unwrap();
     params.distinguished_name.push(DnType::CommonName, host);
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.custom_extensions = extensions;
     valid_for(&mut params, 7);
     let key = KeyPair::generate().unwrap();
     let certificate = params.signed_by(&key, issuer).unwrap();
@@ -257,6 +263,62 @@ async fn this_computer_is_reached_directly_and_socks_proxies_work() {
     assert_eq!(*asked.lock().unwrap(), ["kumi-socks.test"], "the proxy looked the name up");
 }
 
+/// Authority information access: where a certificate's issuer can be fetched, as one names it (caIssuers).
+fn issuer_at(url: &str) -> rcgen::CustomExtension {
+    let method = [0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x02];
+    let location = [&[0x86, url.len() as u8][..], url.as_bytes()].concat();
+    let description = [&[0x30, (method.len() + location.len()) as u8][..], &method, &location].concat();
+    let content = [&[0x30, description.len() as u8][..], &description].concat();
+    rcgen::CustomExtension::from_oid_content(&[1, 3, 6, 1, 5, 5, 7, 1, 1], content)
+}
+
+#[tokio::test]
+async fn the_web_tools_certificate_check_fetches_nothing_a_certificate_names() {
+    // Where a page's certificate says its issuer is: an address a page could choose (this computer, a router).
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let issuer_address = format!("http://{}/issuer.crt", listener.local_addr().unwrap());
+    let fetched = Arc::new(Mutex::new(Vec::new()));
+    let asked = Arc::clone(&fetched);
+    serve(listener, move |mut stream| {
+        if let Some(request) = head(&mut stream) {
+            asked.lock().unwrap().push(request.lines().next().unwrap_or("").to_string());
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        }
+    });
+    // A server whose certificate comes from an intermediate it doesn't send, and names that address for it.
+    let (_, root) = authority();
+    let mut intermediate = authority_params();
+    intermediate.distinguished_name = rcgen::DistinguishedName::new();
+    intermediate.distinguished_name.push(DnType::CommonName, "Kumi network test intermediate");
+    let key = KeyPair::generate().unwrap();
+    intermediate.signed_by(&key, &root).unwrap();
+    let tls = server_tls_with("localhost", &Issuer::new(intermediate, key), vec![issuer_at(&issuer_address)]);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("https://localhost:{}/", listener.local_addr().unwrap().port());
+    serve(listener, move |stream| {
+        let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(Arc::clone(&tls)).unwrap(), stream);
+        if head(&mut tls).is_some() {
+            answer(&mut tls, "read");
+        }
+    });
+    let web = get(net::direct(), &url).await.unwrap_err();
+    assert!(web.contains("invalid peer certificate: UnknownIssuer"), "{web}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(fetched.lock().unwrap().is_empty(), "the web tool's check fetched {:?}", fetched.lock().unwrap());
+    // Kumi's own requests ask the system's check, which fetches it on macOS: what the web tool's mustn't.
+    let own = get(net::client(), &url).await.unwrap_err();
+    println!("Kumi's own: {own}\nfetched: {:?}", fetched.lock().unwrap());
+    if cfg!(target_os = "macos") {
+        for _ in 0..50 {
+            if !fetched.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(*fetched.lock().unwrap(), ["GET /issuer.crt HTTP/1.1"]);
+    }
+}
+
 #[test]
 #[ignore = "the Network workflow's: makes the authority it installs"]
 fn make_test_authority() {
@@ -282,6 +344,8 @@ async fn the_systems_trust_store_is_trusted() {
     });
     let url = format!("https://localhost:{port}/");
     assert_eq!(get(net::client(), &url).await.as_deref(), Ok("trusted by the system"));
+    // The web tool, by the system's list of trusted roots.
+    assert_eq!(get(net::direct(), &url).await.as_deref(), Ok("trusted by the system"));
     let before = get(reqwest::Client::builder(), &url).await.unwrap_err();
     assert!(before.contains("invalid peer certificate: UnknownIssuer"), "{before}");
     println!("Kumi: trusted by the system\nbefore: {before}");

@@ -48,6 +48,7 @@ regex.workspace = true
 fancy-regex.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+rustls-native-certs.workspace = true
 rustls-platform-verifier.workspace = true
 ruzstd.workspace = true
 # Max for Live device code, run in a sandbox.

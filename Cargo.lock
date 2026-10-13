@@ -1281,6 +1281,7 @@ dependencies = [
  "reqwest",
  "rquickjs",
  "rustls",
+ "rustls-native-certs",
  "rustls-platform-verifier",
  "ruzstd",
  "serde",

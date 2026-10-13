@@ -21,15 +21,16 @@ pub fn client_through(settings: impl Fn() -> Arc<proxy::Settings> + Send + Sync 
         .proxy(reqwest::Proxy::custom(move |url| settings().proxy_for(url)))
 }
 
-/// A client's beginning that never goes through a proxy, Kumi's trust otherwise. The web tool looks each name up
-/// itself and connects only to public addresses: a proxy would look the name up again, where Kumi can't check it.
+/// A client's beginning that never goes through a proxy. The web tool looks each name up itself and connects only
+/// to public addresses: a proxy would look the name up again, where Kumi can't check it. Nor does its certificate check
+/// fetch anything (an issuer a certificate names could be any address): it reads the computer's list of trusted roots.
 pub fn direct() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().use_preconfigured_tls(trust::config(false)).no_proxy()
+    reqwest::Client::builder().use_preconfigured_tls(trust::guarded_config(false)).no_proxy()
 }
 
 /// [`direct`], speaking HTTP/1.1 only.
 pub fn direct_http1() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().use_preconfigured_tls(trust::config(true)).http1_only().no_proxy()
+    reqwest::Client::builder().use_preconfigured_tls(trust::guarded_config(true)).http1_only().no_proxy()
 }
 
 #[cfg(test)]
