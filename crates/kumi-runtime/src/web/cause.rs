@@ -188,19 +188,49 @@ pub fn unreachable(host: &str, cause: Option<NetCause>, env: &Env) -> String {
     unreachable_with(host, cause, env, &proxy::current())
 }
 
-/// [`unreachable`], with the system's proxy settings as `system` has them. A proxy in the way says how to get past
-/// it: its password in the variable, or no proxy at all.
+/// [`unreachable`], with the system's proxy settings as `system` has them.
 pub fn unreachable_with(host: &str, cause: Option<NetCause>, env: &Env, system: &proxy::Settings) -> String {
+    told(host, at(host).as_ref(), cause, false, env, system)
+}
+
+/// Why a call to `host`, at `url`, got no answer, from what Kumi's HTTP kept of it: as [`unreachable`], with a proxy
+/// that isn't answering told apart from one that turned Kumi away. None when it wasn't the network.
+pub fn unreachable_call(host: &str, url: &str, error: &LanguageModelError, env: &Env, system: &proxy::Settings) -> Option<String> {
+    let cause = NetCause::of_call(error)?;
+    let down = cause == NetCause::Proxy && proxy::not_answering(&said(error));
+    Some(told(host, url::Url::parse(url).ok().as_ref(), Some(cause), down, env, system))
+}
+
+/// The cause, its fix, then the proxy settings in force for `url`. A proxy in the way says how to get past it: started
+/// again when it isn't answering; with its password in the variable when it turned Kumi away; or not at all.
+fn told(host: &str, url: Option<&url::Url>, cause: Option<NetCause>, down: bool, env: &Env, system: &proxy::Settings) -> String {
     let what = match cause {
+        Some(NetCause::Proxy) if down => format!(
+            "Kumi couldn't reach {host}: the proxy isn't answering. Start it again, or take it out of the settings; NO_PROXY=* connects directly."
+        ),
         Some(cause) => format!("Kumi couldn't reach {host}: {}. {}", cause.words(), cause.fix()),
         None => format!("Kumi couldn't reach {host}. Check the connection, then try again."),
     };
-    let around = if cause == Some(NetCause::Proxy) {
+    let around = if cause == Some(NetCause::Proxy) && !down {
         " A proxy that wants a password takes HTTPS_PROXY=http://user:pass@host:port, and NO_PROXY=* connects directly."
     } else {
         ""
     };
-    format!("{what} {}{around}", proxy_words_with(env, system))
+    format!("{what} {}{around}", proxy_words_for(env, system, url))
+}
+
+/// What a failed call said, as [`NetCause::of_call`] reads it.
+fn said(error: &LanguageModelError) -> String {
+    match error {
+        LanguageModelError::ApiCall(call) => format!("{} {}", call.message, call.cause.as_deref().unwrap_or("")),
+        LanguageModelError::Other(message) => message.clone(),
+        _ => String::new(),
+    }
+}
+
+/// A host's own address, when it's a name with a dot (auth.openai.com), not a provider's (OpenAI).
+fn at(host: &str) -> Option<url::Url> {
+    (host.contains('.') && !host.contains(char::is_whitespace)).then(|| url::Url::parse(&format!("https://{host}/")).ok()).flatten()
 }
 
 /// The proxy settings Kumi goes through, in a sentence; with none set, where to set one.
@@ -211,21 +241,36 @@ pub fn proxy_words(env: &Env) -> String {
 /// [`proxy_words`], with the system's proxy settings as `system` has them: without the variables, Kumi goes through
 /// the system's proxy, and says when the system finds one with an auto-config file, which Kumi doesn't read.
 pub fn proxy_words_with(env: &Env, system: &proxy::Settings) -> String {
+    proxy_words_for(env, system, None)
+}
+
+/// [`proxy_words_with`] for a request to `url`: the system's proxy is named only when it's the one that request went
+/// through (not for an exception, a local or private address, NO_PROXY=*, or one passed by).
+fn proxy_words_for(env: &Env, system: &proxy::Settings, url: Option<&url::Url>) -> String {
     // NO_PROXY alone (Docker Desktop and many shells set it) names no proxy: the system's is the one in use.
     if proxy::Settings::from_env(env).is_some() {
         return format!("Kumi's proxy settings: {}.", proxy_variables(env).join(", "));
     }
-    match (&system.https, system.source) {
+    // Without an address, one on the internet that no exception names.
+    let somewhere = url::Url::parse("https://kumi.invalid/").expect("an address");
+    let through = system.proxy_for(url.unwrap_or(&somewhere));
+    match (&through, system.source) {
         (Some(through), proxy::Source::System) => {
             let port = through.port().map(|port| format!(":{port}")).unwrap_or_default();
             format!("Kumi went through this computer's proxy, {}://{}{port}.", through.scheme(), through.host_str().unwrap_or(""))
         }
-        (None, proxy::Source::System) if system.auto_config => {
-            "This computer finds its proxy with an auto-config (PAC) file, which Kumi doesn't read: set HTTPS_PROXY to the proxy's address."
-                .into()
-        }
+        (None, proxy::Source::System) if system.auto_config => AUTO_CONFIG.into(),
         _ => "Behind a proxy? Set HTTPS_PROXY to it.".into(),
     }
+}
+
+const AUTO_CONFIG: &str =
+    "This computer finds its proxy with an auto-config (PAC) file, which Kumi doesn't read: set HTTPS_PROXY to the proxy's address.";
+
+/// When this computer finds its proxy with an auto-config file and no variable names one, the sentence that says so:
+/// a network that lets nothing out directly needs HTTPS_PROXY set.
+pub fn auto_config_words(env: &Env, system: &proxy::Settings) -> Option<&'static str> {
+    (proxy::Settings::from_env(env).is_none() && system.source == proxy::Source::System && system.auto_config).then_some(AUTO_CONFIG)
 }
 
 /// The proxy variables set in `env`, as NAME=value with any user name and password left out.
@@ -398,6 +443,55 @@ mod tests {
         // A handshake cut short is still TLS's: a Wi-Fi sign-in page or a network inspecting connections does that.
         assert_eq!(NetCause::of_text("client error (Connect): tls handshake eof"), Some(NetCause::Tls));
         assert_eq!(NetCause::Offline.words(), "the connection failed");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_in_the_way_is_told_by_what_it_did_and_named_only_when_it_was_gone_through() {
+        let _turn = proxy::PASSING_BY.lock().await;
+        proxy::stop_passing_by();
+        let none = Env::new();
+        let system = proxy::Settings::system_for_tests(Some("http://127.0.0.1:7890"), false);
+        let call = |cause: &str| {
+            let mut call = crate::ai::error::ApiCallError::new(
+                "Cannot connect to API: error sending request",
+                "https://api.openai.com/v1/responses",
+                None,
+                None,
+            );
+            call.cause =
+                Some(format!("error sending request for url (https://api.openai.com/v1/responses): client error (Connect): {cause}"));
+            LanguageModelError::from(call)
+        };
+        let url = "https://api.openai.com/v1/responses";
+        // Not answering: start it again, or go without it; a password wouldn't help.
+        let down = call("tunnel error: failed to create underlying connection: tcp connect error: Connection refused (os error 61)");
+        let said = unreachable_call("OpenAI", url, &down, &none, &system).unwrap();
+        assert_eq!(
+            said,
+            "Kumi couldn't reach OpenAI: the proxy isn't answering. Start it again, or take it out of the settings; NO_PROXY=* connects directly. Kumi went through this computer's proxy, http://127.0.0.1:7890."
+        );
+        // Turned Kumi away: its password, or no proxy.
+        let said = unreachable_call("OpenAI", url, &call("tunnel error: proxy authorization required"), &none, &system).unwrap();
+        assert!(
+            said.starts_with("Kumi couldn't reach OpenAI: the proxy didn't let Kumi through.")
+                && said.contains("HTTPS_PROXY=http://user:pass@host:port"),
+            "{said}"
+        );
+        // Not the network at all.
+        assert_eq!(unreachable_call("OpenAI", url, &LanguageModelError::other("expected value at line 1"), &none, &system), None);
+        // The system's proxy is named only for a request that went through it.
+        let behind = "Behind a proxy? Set HTTPS_PROXY to it.";
+        for host in ["192.168.1.20", "studio.local", "127.0.0.1"] {
+            assert!(unreachable_with(host, Some(NetCause::Offline), &none, &system).ends_with(behind), "{host}");
+        }
+        assert!(proxy::pass_by(&system, &url::Url::parse(url).unwrap()));
+        assert!(unreachable_call("OpenAI", url, &down, &none, &system).unwrap().ends_with(behind), "passed by");
+        proxy::stop_passing_by();
+        // A system that finds its proxy with an auto-config file, and no variable naming one.
+        let pac = proxy::Settings::system_for_tests(None, true);
+        assert!(auto_config_words(&none, &pac).is_some_and(|words| words.contains("HTTPS_PROXY")));
+        assert_eq!(auto_config_words(&Env::from([("HTTPS_PROXY".to_string(), "http://proxy:80".to_string())]), &pac), None);
+        assert_eq!(auto_config_words(&none, &system), None);
     }
 
     /// A local server that does `answer` with each connection.

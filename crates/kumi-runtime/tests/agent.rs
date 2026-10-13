@@ -2551,6 +2551,15 @@ fn a_certificate_or_a_proxy_in_the_way_is_named_with_its_fix_not_said_as_offline
     let proxy = refused_on_the_way(PROXY_SIGN_IN);
     assert_eq!(retry_reason(&proxy, model), "ChatGPT couldn't be reached: the proxy didn't let Kumi through");
     assert!(describe_failure(&proxy, model).message.starts_with("Kumi couldn't reach ChatGPT: the proxy didn't let Kumi through. "));
+    // A proxy that isn't answering (a crashed one at 127.0.0.1:7890, an office's at home): start it, or go without it.
+    let down =
+        refused_on_the_way("tunnel error: failed to create underlying connection: tcp connect error: Connection refused (os error 61)");
+    assert_eq!(retry_reason(&down, model), "ChatGPT couldn't be reached: the proxy isn't answering");
+    let said = describe_failure(&down, model).message;
+    assert!(
+        said.starts_with("Kumi couldn't reach ChatGPT: the proxy isn't answering. Start it again") && !said.contains("user:pass"),
+        "{said}"
+    );
     // Offline reads as it did.
     assert_eq!(retry_reason(&offline(), model), "ChatGPT couldn't be reached");
     assert_eq!(describe_failure(&offline(), model).message, "Kumi couldn't reach ChatGPT; check the connection.");

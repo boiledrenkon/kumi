@@ -202,10 +202,16 @@ pub fn retry_reason(error: &LanguageModelError, binding_id: &str) -> String {
         Some(status) if status >= 500 => format!("{name} is having trouble (HTTP {status})"),
         Some(status) => format!("{name} asked Kumi to wait (HTTP {status})"),
         None => match refused_on_the_way(error) {
+            Some(NetCause::Proxy) if proxy_not_answering(error) => format!("{name} couldn't be reached: the proxy isn't answering"),
             Some(cause) => format!("{name} couldn't be reached: {}", cause.words()),
             None => format!("{name} couldn't be reached"),
         },
     }
+}
+
+/// A proxy in the way that isn't answering (its address refused, its name not found), not one that turned Kumi away.
+fn proxy_not_answering(error: &LanguageModelError) -> bool {
+    failed_call(error).is_some_and(|call| crate::net::proxy::not_answering(call.cause.as_deref().unwrap_or(&call.message)))
 }
 
 /// A call that got no answer because the way there refused it: a certificate this computer doesn't trust (TLS) or a
@@ -286,7 +292,13 @@ pub fn describe_failure(error: &LanguageModelError, binding_id: &str) -> KumiErr
             provider,
         );
     }
-    let on_the_way = refused_on_the_way(error);
+    // A certificate or a proxy in the way: the cause, its fix and the proxy that call went through.
+    let env = crate::system::process_env();
+    let system = crate::net::proxy::current();
+    let on_the_way = refused_on_the_way(error).and_then(|_| {
+        let url = failed_call(error).map(|call| call.url.clone()).unwrap_or_default();
+        cause::unreachable_call(name, &url, error, &env, &system)
+    });
     if let Some(error) = failed_call(error) {
         let status = error.status_code;
         let detail = provider_detail(&error);
@@ -336,8 +348,12 @@ pub fn describe_failure(error: &LanguageModelError, binding_id: &str) -> KumiErr
             None => KumiError::with_provider(
                 FailureKind::Network,
                 match on_the_way {
-                    Some(on_the_way) => cause::unreachable(name, Some(on_the_way), &crate::system::process_env()),
-                    None => format!("Kumi couldn't reach {name}; check the connection."),
+                    Some(on_the_way) => on_the_way,
+                    // A network that lets nothing out but through the proxy an auto-config file names: say to set it.
+                    None => match cause::auto_config_words(&env, &system) {
+                        Some(words) => format!("Kumi couldn't reach {name}; check the connection. {words}"),
+                        None => format!("Kumi couldn't reach {name}; check the connection."),
+                    },
                 },
                 provider,
             ),

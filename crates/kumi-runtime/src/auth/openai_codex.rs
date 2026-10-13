@@ -57,10 +57,15 @@ fn provider_auth(message: impl Into<String>) -> RuntimeError {
 }
 /// OpenAI's sign-in gave no answer: why, in the words setup and model calls use. Anything else, as it came.
 fn fetch_error(error: LanguageModelError) -> RuntimeError {
+    let url = match &error {
+        LanguageModelError::ApiCall(call) => call.url.clone(),
+        _ => TOKEN_URL.into(),
+    };
+    let (env, system) = (crate::system::process_env(), crate::net::proxy::current());
     match error {
         LanguageModelError::Kumi(error) => error.into(),
-        error => match NetCause::of_call(&error) {
-            Some(cause) => unreachable(cause),
+        error => match crate::web::cause::unreachable_call("auth.openai.com", &url, &error, &env, &system) {
+            Some(words) => KumiError::with_provider(FailureKind::Network, words, OPENAI_CODEX).into(),
             None => RuntimeError::plain(error.to_string()),
         },
     }
