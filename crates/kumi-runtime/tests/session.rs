@@ -3831,3 +3831,23 @@ local_test!(a_conversation_taken_up_at_the_start_is_its_sets_latest_even_when_th
     assert_eq!(saved(store.as_ref(), SET_B, 2).await.id, KEPT);
     h.session.close().await.unwrap();
 });
+local_test!(another_sets_latest_conversation_is_not_the_one_going_on, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_B, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some(SET_A));
+    h.session.start().await.unwrap();
+    h.session.submit("hello", None).await.unwrap();
+    saved(store.as_ref(), SET_A, 1).await;
+    let going = now(&h).await.id;
+    // B's latest (as an exit names it) is found, and isn't taken for this one.
+    let ConversationMatch::One(row) = h.session.find_conversation(KEPT).await.unwrap() else { panic!() };
+    assert!(!row.current);
+    let ConversationMatch::One(row) = h.session.find_conversation(&going).await.unwrap() else { panic!() };
+    assert!(row.current);
+    let all = h.session.all_conversations().await.unwrap();
+    assert_eq!(all.iter().filter(|r| r.current).map(|r| r.id.as_str()).collect::<Vec<_>>(), [going.as_str()]);
+    assert_eq!(h.session.conversations().await.unwrap().iter().filter(|r| r.current).count(), 1);
+    h.session.close().await.unwrap();
+});

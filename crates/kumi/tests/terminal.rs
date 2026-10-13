@@ -252,10 +252,12 @@ impl SessionController for Control {
         Ok(true)
     }
     async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
-        Ok(self.all.borrow().clone())
+        // As the session marks them: `current` is the conversation going on, not each Set's own latest.
+        let going = self.conversations.borrow().iter().find(|row| row.current).map(|row| row.id.clone());
+        Ok(self.all.borrow().iter().map(|row| ConversationSummary { current: Some(&row.id) == going.as_ref(), ..row.clone() }).collect())
     }
     async fn find_conversation(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
-        let all = self.all.borrow();
+        let all = self.all_conversations().await?;
         let found: Vec<_> = all.iter().filter(|row| row.id.starts_with(word) || row.name.as_deref() == Some(word)).cloned().collect();
         Ok(match found.len() {
             0 if word == "gone00000000" => ConversationMatch::Gone,
@@ -730,8 +732,9 @@ async fn resume_lists_every_sets_conversations_and_asks_about_another_sets_by_nu
             *f.control.conversations.borrow_mut() = vec![row("here01", "add a hi-hat groove", "a", Some("Song A"), true)];
             *f.control.all.borrow_mut() = vec![
                 row("here01", "add a hi-hat groove", "a", Some("Song A"), true),
+                // Each Set's latest, as the store marks it.
                 ConversationSummary { pinned: true, name: Some("Bass ideas".into()), ..row("there1", "make the bass wider", "b", Some("Song B"), false) },
-                row("there2", "tighten the drums", "b", Some("Song B"), false),
+                row("there2", "tighten the drums", "b", Some("Song B"), true),
             ];
             f.input.write("/resume\n");
             flush().await;

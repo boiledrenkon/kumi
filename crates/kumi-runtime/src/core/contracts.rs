@@ -390,6 +390,7 @@ pub struct ConversationSummary {
     pub saved_at: i64,
     pub first: String,
     pub turns: u32,
+    /// From a store: its place's latest. From a session: the conversation going on now.
     pub current: bool,
     /// Where it's kept: its Set's place (a saved Set's project id, or "unsaved").
     #[serde(default)]
@@ -2052,7 +2053,8 @@ pub trait SessionController {
         let _ = id;
         Ok(false)
     }
-    /// Every Set's kept conversations, newest first; the one going on now is `current`.
+    /// Every Set's kept conversations, newest first; the one going on now is `current` (here and in this Set's list
+    /// and what a word finds).
     async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
         Ok(vec![])
     }

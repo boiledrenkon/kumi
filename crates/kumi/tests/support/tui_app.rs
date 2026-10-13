@@ -436,7 +436,12 @@ impl SessionController for Control {
         Ok(true)
     }
     async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
-        Ok(self.get("all").unwrap_or_else(|| self.conversations.borrow().clone()))
+        let rows: Vec<ConversationSummary> = self.get("all").unwrap_or_else(|| self.conversations.borrow().clone());
+        // As the session marks them: `current` is the conversation going on, not each Set's own latest.
+        Ok(match self.get::<String>("going") {
+            Some(going) => rows.into_iter().map(|row| ConversationSummary { current: row.id == going, ..row }).collect(),
+            None => rows,
+        })
     }
     async fn find_conversation(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
         let all = self.all_conversations().await?;

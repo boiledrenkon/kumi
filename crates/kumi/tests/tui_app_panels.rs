@@ -633,9 +633,11 @@ case!(resume_lists_this_sets_and_every_sets_conversations_and_asks_about_another
     *c.conversations.borrow_mut() =
         serde_json::from_value(json!([{"id":"now001","savedAt":now,"first":"add a hi-hat groove","turns":2,"current":true,"place":"a"}]))
             .unwrap();
+    // Each Set's latest, as the store marks it; the conversation going on is now001.
+    c.set("going", json!("now001"));
     c.set("all", json!([
         {"id":"now001","savedAt":now,"first":"add a hi-hat groove","turns":2,"current":true,"place":"a","set":"Night Drive"},
-        {"id":"far001","savedAt":now-3600000,"first":"make the bass wider","turns":5,"current":false,"place":"b","set":"Morning Run","pinned":true,"name":"Bass ideas"},
+        {"id":"far001","savedAt":now-3600000,"first":"make the bass wider","turns":5,"current":true,"place":"b","set":"Morning Run","pinned":true,"name":"Bass ideas"},
         {"id":"far002","savedAt":now-7200000,"first":"sketch some chords","turns":1,"current":false,"place":"unsaved"}
     ]));
     c.set("lines", json!([{"role":"user","text":"make the bass wider"},{"role":"assistant","text":"Widened it to 140%."}]));
@@ -666,6 +668,9 @@ case!(resume_lists_this_sets_and_every_sets_conversations_and_asks_about_another
     h.has("Copied its id, far001.");
     h.type_text("/resume Bass ideas\r").await;
     h.wait_for_call("resume:far001").await;
+    // Another Set's latest, by the id its exit line gave: it goes back, it isn't "this one".
+    h.type_text("/resume far001\r").await;
+    h.wait_for_calls("resume:far001", 2).await;
     h.type_text("/resume far\r").await;
     h.has("filter: far");
     h.type_text("\x1b").await;

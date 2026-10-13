@@ -1100,6 +1100,14 @@ impl Session {
         }
         Ok(Some(kept.conversation))
     }
+    /// Rows as the app shows them: `current` is the conversation going on now (a store marks each place's own latest).
+    fn mark_going(&self, rows: Vec<ConversationSummary>) -> Vec<ConversationSummary> {
+        let (place, id) = {
+            let s = self.0.state.borrow();
+            (s.place.clone(), s.conversation_id.clone())
+        };
+        rows.into_iter().map(|row| ConversationSummary { current: place.as_ref() == Some(&row.place) && row.id == id, ..row }).collect()
+    }
     /// Go on with a kept conversation the producer chose: Kumi's next answer starts from it.
     async fn go_to(&self, place: String, id: String, conversation: SavedConversation, said: Option<String>) -> Result<(), RuntimeError> {
         self.perform(
@@ -2202,7 +2210,11 @@ impl SessionController for Session {
             let s = self.0.state.borrow();
             s.place.clone().or(s.project.clone()).unwrap_or(UNSAVED.into())
         };
-        Ok(if let Some(store) = &self.0.options.conversations { store.list(&place).await.unwrap_or_default() } else { vec![] })
+        Ok(if let Some(store) = &self.0.options.conversations {
+            self.mark_going(store.list(&place).await.unwrap_or_default())
+        } else {
+            vec![]
+        })
     }
     fn has_resume_conversation(&self) -> bool {
         true
@@ -2260,22 +2272,15 @@ impl SessionController for Session {
     }
     async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
         let Some(store) = &self.0.options.conversations else { return Ok(vec![]) };
-        let (place, id) = {
-            let s = self.0.state.borrow();
-            (s.place.clone(), s.conversation_id.clone())
-        };
-        Ok(store
-            .all()
-            .await?
-            .into_iter()
-            .map(|row| ConversationSummary { current: Some(&row.place) == place.as_ref() && row.id == id, ..row })
-            .collect())
+        Ok(self.mark_going(store.all().await?))
     }
     async fn find_conversation(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
-        match &self.0.options.conversations {
-            Some(store) => store.find(word).await,
-            None => Ok(ConversationMatch::None),
-        }
+        let Some(store) = &self.0.options.conversations else { return Ok(ConversationMatch::None) };
+        Ok(match store.find(word).await? {
+            ConversationMatch::One(row) => ConversationMatch::One(self.mark_going(vec![row]).remove(0)),
+            ConversationMatch::Several(rows) => ConversationMatch::Several(self.mark_going(rows)),
+            other => other,
+        })
     }
     async fn rename_conversation(&self, id: Option<&str>, name: Option<&str>) -> Result<bool, RuntimeError> {
         let Some(store) = self.0.options.conversations.clone() else { return Ok(false) };
