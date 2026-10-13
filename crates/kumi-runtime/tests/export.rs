@@ -137,6 +137,20 @@ fn conversation() -> SavedConversation {
         "state": "undone",
         "at": NOW - 500,
         "picture": {"kind": "eq", "before": [{"shape": "bell", "freq": 1000, "gainDb": 0}], "after": [{"shape": "bell", "freq": 1000, "gainDb": 4}]}
+    }, {
+        "id": "c3",
+        "family": "tempo",
+        "title": "Tempo 120 → 124 BPM",
+        "state": "unsure",
+        "note": "From an earlier session, and never confirmed: check it.",
+        "at": NOW - 400
+    }, {
+        "id": "c4",
+        "family": "rename",
+        "title": "Renamed Bass",
+        "state": "expired",
+        "note": "From an earlier session, so Kumi can't undo it now.",
+        "at": NOW - 300
     }]);
     SavedConversation {
         saved_at: NOW - 100,
@@ -346,7 +360,7 @@ fn export_then_import_shows_the_same_words_and_carries_on_with_any_model() {
         assert_eq!(imported.id.as_deref(), Some("k3x9a1b2"));
         assert_eq!(imported.title, "Make the kick punchier [secret]");
         assert_eq!(imported.place.as_deref(), Some("Song [secret]"));
-        assert_eq!(imported.conversation.changes.as_ref().map(Vec::len), Some(2));
+        assert_eq!(imported.conversation.changes.as_ref().map(Vec::len), Some(4));
         assert_eq!(
             imported.conversation.first.as_deref(),
             Some("Make the kick punchier [secret]. See [the manual](https://www.ableton.com/manual).\n\n[a picture]")
@@ -654,4 +668,22 @@ fn exports_and_imports_keep_no_character_that_draws_nothing() {
     let text = serde_json::to_string(&imported.conversation).unwrap();
     assert!(!text.chars().any(draws_nothing), "{text}");
     assert!(text.contains("Make it warmer") && text.contains("Warmer."));
+}
+
+#[test]
+fn changes_say_what_became_of_them_without_undo_notes() {
+    for format in [Format::Markdown, Format::Html] {
+        let out = render(format, false);
+        assert!(
+            out.contains("Tempo 120 → 124 BPM (Live didn&#39;t confirm it)")
+                || out.contains("Tempo 120 → 124 BPM (Live didn't confirm it)"),
+            "{out}"
+        );
+        assert!(out.contains("EQ Eight band 2 (undone)"), "{out}");
+        assert!(!out.contains("earlier session") && !out.contains("undo it now"), "an undo note left Kumi:\n{out}");
+    }
+    let exported: Value = serde_json::from_str(&render(Format::Json, false)).unwrap();
+    let changes = exported["changes"].as_array().unwrap();
+    assert!(changes.iter().all(|change| change.get("note").is_none()), "{changes:?}");
+    assert_eq!(changes[2]["state"], "unsure");
 }

@@ -321,6 +321,20 @@
           }
         ]
       }
+    },
+    {
+      "id": "c3",
+      "family": "tempo",
+      "title": "Tempo 120 → 124 BPM",
+      "state": "unsure",
+      "at": 1760399999600
+    },
+    {
+      "id": "c4",
+      "family": "rename",
+      "title": "Renamed Bass",
+      "state": "expired",
+      "at": 1760399999700
     }
   ]
 }

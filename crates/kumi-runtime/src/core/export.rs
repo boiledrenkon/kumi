@@ -764,12 +764,13 @@ fn redact_value(value: &Value, redact: &dyn Fn(&str) -> String) -> Value {
     }
 }
 
-/// A change with its words through the redactor: its title and note, its track's name, its devices' names and its
-/// picture's names and values.
+/// A change with its words through the redactor (its title, its track's name, its devices' names and its picture's names
+/// and values), and without the note on why Kumi can or can't undo it.
 fn redacted_change(change: &ChangeRecord, redact: &dyn Fn(&str) -> String) -> ChangeRecord {
     let mut change = change.clone();
     change.title = redact(&change.title);
-    change.note = change.note.as_deref().map(|note| redact(note));
+    // A note says why Kumi can or can't undo it here: nothing for a reader elsewhere.
+    change.note = None;
     if let Some(track) = &mut change.track {
         track.name = redact(&track.name);
     }
@@ -867,7 +868,8 @@ fn steps_word(count: usize) -> &'static str {
     }
 }
 
-/// A change in a line: its title, its track, what became of it and why. `daw` is what the producer calls the DAW.
+/// A change in a line: its title, its track and what became of it (undone, kept, unconfirmed, listened to). `daw` is what
+/// the producer calls the DAW.
 fn change_line(change: &ChangeRecord, daw: &str) -> String {
     let mut line = one_line(&change.title);
     if let Some(track) = &change.track {
@@ -884,9 +886,6 @@ fn change_line(change: &ChangeRecord, daw: &str) -> String {
     };
     if let Some(state) = state {
         line.push_str(&format!(" ({state})"));
-    }
-    if let Some(note) = &change.note {
-        line.push_str(&format!(": {}", one_line(note)));
     }
     line
 }

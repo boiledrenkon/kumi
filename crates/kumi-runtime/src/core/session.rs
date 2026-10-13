@@ -1058,9 +1058,14 @@ impl Session {
                 if !change.id.contains(':') {
                     change.id = format!("{id}:{}", change.id);
                 }
-                if matches!(change.state, ChangeState::Applied | ChangeState::Unsure) {
-                    change.state = ChangeState::Expired;
-                    change.note = Some("From an earlier session, so Kumi can't undo it now.".into());
+                // Kumi can't undo a change from an earlier session; one the DAW never confirmed stays unconfirmed.
+                match change.state {
+                    ChangeState::Applied => {
+                        change.state = ChangeState::Expired;
+                        change.note = Some("From an earlier session, so Kumi can't undo it now.".into());
+                    }
+                    ChangeState::Unsure => change.note = Some("From an earlier session, and never confirmed: check it.".into()),
+                    _ => {}
                 }
                 change
             })

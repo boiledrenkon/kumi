@@ -3724,6 +3724,29 @@ local_test!(an_imported_conversation_asked_for_as_kumi_starts_goes_on_in_a_copy_
 local_test!(an_imported_conversation_asked_for_as_kumi_starts_goes_on_in_a_copy_without_a_set, {
     taken_up_at_start(None).await;
 });
+local_test!(a_change_the_daw_never_confirmed_stays_unconfirmed_in_a_later_session, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    let mut kept = kept_about("make the bass wider", None);
+    kept.changes = Some(
+        serde_json::from_value(json!([
+            {"id": "c1", "family": "mixer", "title": "Bass width 100% → 140%", "state": "applied", "at": 1},
+            {"id": "c2", "family": "tempo", "title": "Tempo 120 → 124 BPM", "state": "unsure", "at": 2}
+        ]))
+        .unwrap(),
+    );
+    store.save(SET_A, KEPT, &kept).await.unwrap();
+    let h = harness(None, |o| {
+        o.conversations = Some(store.clone());
+        o.resume = Some((SET_A.into(), KEPT.into()));
+    });
+    live(&h, Some(SET_A));
+    h.session.start().await.unwrap();
+    let exported = h.session.conversation_to_export().await.unwrap();
+    let states: Vec<ChangeState> = exported.conversation.changes.unwrap().iter().map(|change| change.state).collect();
+    assert_eq!(states, [ChangeState::Expired, ChangeState::Unsure]);
+    h.session.close().await.unwrap();
+});
 local_test!(open_its_set_asks_the_daw_and_the_conversation_goes_on_once_that_set_is_open, {
     let dir = tempfile::tempdir().unwrap();
     let store = create_conversation_store(dir.path());

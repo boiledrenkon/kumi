@@ -83,6 +83,8 @@ CONTINUE: almost there.
 - Volume -6 → -3 dB [secret] · Kick [secret]
   - Volume [secret]: -6 dB → -3 dB
 - EQ Eight band 2 (undone)
+- Tempo 120 → 124 BPM (Live didn't confirm it)
+- Renamed Bass
 
 ---
 
