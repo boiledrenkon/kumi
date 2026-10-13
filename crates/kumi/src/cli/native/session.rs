@@ -110,6 +110,13 @@ impl LiveSetup for LiveSide {
         live_app::settings_menu(kumi_runtime::system::platform())
     }
 }
+/// What `kumi -r` says of a conversation Kumi let go.
+fn gone_words(keep_days: u32) -> String {
+    match keep_days {
+        0 => "That conversation isn't kept any more.".into(),
+        days => format!("That conversation isn't kept any more (Kumi keeps {days} days, and pinned ones always)."),
+    }
+}
 /// Live runs on macOS and Windows only: elsewhere Kumi chats without it, and setup only signs in.
 fn live_here() -> bool {
     live_app::runs_on(kumi_runtime::system::platform())
@@ -226,9 +233,9 @@ pub(super) async fn run_session(
     secrets: &mut Vec<String>,
     factory: AbletonFactory,
 ) -> Result<i32, RuntimeError> {
-    let (inference, bridge_config, bridge_missing) = match config {
-        AppConfig::InferenceOnly { inference, bridge_missing } => (inference, None, bridge_missing.unwrap_or(false)),
-        AppConfig::Live { inference, bridge_config } => (inference, Some(bridge_config), false),
+    let (inference, bridge_config, bridge_missing, resume) = match config {
+        AppConfig::InferenceOnly { inference, bridge_missing, resume } => (inference, None, bridge_missing.unwrap_or(false), resume),
+        AppConfig::Live { inference, bridge_config, resume } => (inference, Some(bridge_config), false, resume),
         _ => unreachable!(),
     };
     let mode = if bridge_config.is_some() { "live" } else { "inference-only" };
@@ -272,6 +279,33 @@ pub(super) async fn run_session(
     let whats_new_on = settings.whats_new != Some(false);
     let instant = settings.instant_phrases != Some(false);
     let projects_dir = load_projects_dir(&io.env)?;
+    // Each Set's kept conversations, while Live may come in this session, or when the producer asked for one (then they
+    // go on saving where they're kept, Live or not).
+    let keep_days = settings.conversations.as_ref().and_then(|c| c.keep_days).unwrap_or(KEEP_DAYS);
+    let conversations = (bridge_config.is_some() || bridge_missing || resume.is_some())
+        .then(|| create_conversation_store_keeping(&projects_dir, keep_days));
+    // The conversation asked for is found before anything shows: a word that names none says so, and Kumi stops there.
+    let (taken_up, choose, resume_notice) = match (&resume, &conversations) {
+        (Some(Resume::Named(word)), Some(store)) => match store.find(word).await? {
+            ConversationMatch::One(row) => (Some((row.place, row.id)), None, None),
+            ConversationMatch::Several(_) => (None, Some(word.clone()), None),
+            ConversationMatch::Gone => {
+                io.err.write(&format!("{}\n", gone_words(keep_days)));
+                return Ok(1);
+            }
+            ConversationMatch::None => {
+                let word: String = word.chars().filter(|c| !c.is_control()).collect();
+                io.err.write(&format!("No conversation {}. {} -r lists them.\n", string::head(&word, 60), io.command()));
+                return Ok(1);
+            }
+        },
+        (Some(Resume::Last), Some(store)) => match store.all().await?.into_iter().next() {
+            Some(row) => (Some((row.place, row.id)), None, None),
+            None => (None, None, Some("No conversation is kept yet, so this one starts afresh.".to_string())),
+        },
+        (Some(Resume::Pick), _) => (None, Some(String::new()), None),
+        _ => (None, None, None),
+    };
     let tools_dir = load_tools_dir(&io.env)?;
     let library = create_library(LibraryOptions {
         dir: load_library_dir(&io.env)?,
@@ -404,6 +438,15 @@ pub(super) async fn run_session(
             options.restore_file = Some(restore_file.clone());
             options.project_store = Some(project_store.clone());
             options.user_library = user_library.clone();
+            // A kept conversation's Set opens in Live as a double-click would.
+            options.open_file = Some({
+                let env = env.clone();
+                Rc::new(move |set| {
+                    let env = env.clone();
+                    async move { live_app::open_set_file(&bridge_setup::default_run(), kumi_runtime::system::platform(), &env, &set).await }
+                        .boxed_local()
+                })
+            });
             // With Live still running, losing it means it's opening another Set, not that it closed (#188).
             options.live_running =
                 Some(Rc::new(|| async { bridge_setup::is_live_running(bridge_setup::default_run()).await }.boxed_local()));
@@ -546,9 +589,8 @@ pub(super) async fn run_session(
     let mut options = SessionOptions::new(kernel_factory, integration_factory, emit.clone());
     // Live may come later in this session, once first-run setup has put the bridge in place.
     let live_possible = bridge_config.is_some() || bridge_missing;
-    if live_possible {
-        options.conversations = Some(create_conversation_store(&projects_dir));
-    }
+    options.conversations = conversations.map(|store| store as Rc<dyn ConversationStore>);
+    options.resume = taken_up;
     // Kumi's database keeps notes, techniques, lessons and gaps, with what earlier Kumis kept in files
     // read in. When it can't open, they stay in their files this time, as before, and Kumi says so once.
     let files = json_files(&io.env)?;
@@ -653,6 +695,10 @@ pub(super) async fn run_session(
         (Some(notice), Some(credentials)) => Some(format!("{notice} {credentials}")),
         (notice, credentials) => notice.or(credentials),
     };
+    let notice = match (notice, resume_notice) {
+        (Some(notice), Some(resume)) => Some(format!("{notice} {resume}")),
+        (notice, resume) => notice.or(resume),
+    };
     // In the app, first-run setup puts the bridge in place instead, with Live restarting around it (where Live runs).
     let connect_why = if bridge_missing {
         live_here().then(|| "The Ableton bridge isn't in Live yet, so Kumi can't see your Set.".to_string())
@@ -701,6 +747,7 @@ pub(super) async fn run_session(
         let mut options = TuiOptions::new(session, io.input.clone(), io.out.clone(), mode);
         options.models = Some(models);
         options.startup_notice = if connect_why.is_some() { None } else { notice };
+        options.choose_conversation = choose.clone();
         options.whats_new = whats_new;
         options.away = away;
         options.instant = instant;
@@ -760,6 +807,7 @@ pub(super) async fn run_session(
     } else {
         let mut options = TerminalOptions::new(session, io.input.clone(), io.out.clone(), models, mode);
         options.startup_notice = notice;
+        options.choose_conversation = choose.clone();
         options.whats_new = whats_new;
         options.instant = instant;
         options.next_time = install::next_time(&io.env);

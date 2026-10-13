@@ -100,7 +100,7 @@ case!(cancel_clear_and_commands, async {
     assert!(!has(&h.screen(), "draft"));
     assert!(!h.calls().contains(&"close".into()));
     h.type_text("/").await;
-    h.has("Forget this conversation and start fresh");
+    h.has("Start a fresh conversation (the last one is kept)");
     h.has("/refresh");
     assert!(!has(&h.screen(), "Read your Live Set again"));
     h.type_text("\x1b[B\x1b[B").await;

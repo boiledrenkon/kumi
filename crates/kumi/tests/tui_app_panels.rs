@@ -49,7 +49,7 @@ case!(missing_default_model_and_commands_over_picker, async {
     }
     h.type_text("/").await;
     assert!(!has(&h.screen(), "Choose a model"));
-    h.has("Forget this conversation and start fresh");
+    h.has("Start a fresh conversation (the last one is kept)");
     h.type_text("help\r").await;
     h.has("enter sends · ctrl+j or alt+enter starts a new line");
     h.type_text("/model\r").await;
@@ -616,8 +616,8 @@ case!(usage_status_api_plan_and_conversation_picker, async {
     h.start().await;
     h.connect();
     h.type_text("/conversations\r").await;
-    h.has("Conversations about Night Drive");
-    assert!(h.screen().iter().any(|s| s.contains("add a hi-hat groove") && s.contains("this one · 2 requests")));
+    h.has("Conversations   This Set · All Sets");
+    assert!(h.screen().iter().any(|s| s.contains("add a hi-hat groove") && s.contains("now001") && s.contains("this one · 2 requests")));
     assert!(h.screen().iter().any(|s| s.contains("make the bass wider") && s.contains("2 hours ago · 5 requests")));
     h.type_text("\x1b[B\r").await;
     assert!(h.calls().contains(&"resume:old001".into()));
@@ -626,6 +626,83 @@ case!(usage_status_api_plan_and_conversation_picker, async {
     h.has("Widened it to 140%.");
     assert!(h.screen().iter().any(|s| s.contains("Bass width") && s.contains("no undo")));
     h.close().await;
+});
+case!(resume_lists_this_sets_and_every_sets_conversations_and_asks_about_another_sets, async {
+    let c = Rc::new(Control::default());
+    let now = kumi_common::time::now_ms();
+    *c.conversations.borrow_mut() =
+        serde_json::from_value(json!([{"id":"now001","savedAt":now,"first":"add a hi-hat groove","turns":2,"current":true,"place":"a"}]))
+            .unwrap();
+    c.set("all", json!([
+        {"id":"now001","savedAt":now,"first":"add a hi-hat groove","turns":2,"current":true,"place":"a","set":"Night Drive"},
+        {"id":"far001","savedAt":now-3600000,"first":"make the bass wider","turns":5,"current":false,"place":"b","set":"Morning Run","pinned":true,"name":"Bass ideas"},
+        {"id":"far002","savedAt":now-7200000,"first":"sketch some chords","turns":1,"current":false,"place":"unsaved"}
+    ]));
+    c.set("lines", json!([{"role":"user","text":"make the bass wider"},{"role":"assistant","text":"Widened it to 140%."}]));
+    let h = Harness::with(120, 36, c, |_| {});
+    h.start().await;
+    h.connect();
+    h.type_text("/resume\r").await;
+    h.has("This Set · All Sets");
+    assert!(!has(&h.screen(), "Bass ideas"));
+    // Tab: every Set's, each with its Set and its id; typing finds one by its first request too.
+    h.type_text("\t").await;
+    assert!(h
+        .screen()
+        .iter()
+        .any(|s| s.contains("Bass ideas") && s.contains("Morning Run") && s.contains("pinned · 1 hour ago · 5 requests")));
+    h.has("A Set not saved yet");
+    h.type_text("bass wider").await;
+    assert!(!has(&h.screen(), "sketch some chords"));
+    // ctrl+f: what else, under how it ended.
+    h.type_text("\x06").await;
+    h.has("“Bass ideas” · far001");
+    h.has("Last asked: make the bass wider");
+    h.has("Kumi: Widened it to 140%.");
+    for row in ["Go back to it", "Rename it", "Unpin it", "Copy its id", "Delete it"] {
+        h.has(row);
+    }
+    h.type_text("\x1b[B\x1b[B\x1b[B\r").await;
+    h.has("Copied its id, far001.");
+    h.type_text("/resume Bass ideas\r").await;
+    h.wait_for_call("resume:far001").await;
+    h.type_text("/resume far\r").await;
+    h.has("filter: far");
+    h.type_text("\x1b").await;
+    h.type_text("/resume nothing\r").await;
+    h.has("No conversation nothing; /resume lists them.");
+    // Another Set's: open it there (recommended), carry it on here as a copy, or leave it; esc leaves it.
+    h.emit(json!({"type":"set-asked","ask":{"id":"far001","title":"Bass ideas","set":"Morning Run","open":"Night Drive","daw":"Live","noun":"Set"}}));
+    h.has("“Bass ideas” is about “Morning Run”; Live has “Night Drive” open");
+    assert!(h.screen().iter().any(|s| s.contains("Open “Morning Run” in Live") && s.contains("recommended")));
+    h.has("Carry it on here, as a copy");
+    h.type_text("\r").await;
+    h.wait_for_call("answer:open").await;
+    h.emit(json!({"type":"set-asked","ask":{"id":"far001","title":"Bass ideas","daw":"Live","noun":"Set"}}));
+    h.has("“Bass ideas” is about its Set; Live has a Set not saved yet open");
+    h.type_text("\x1b").await;
+    h.wait_for_call("answer:cancel").await;
+    // Withdrawn by the session, the question goes.
+    h.emit(json!({"type":"set-asked","ask":{"id":"far001","title":"Bass ideas","daw":"Live","noun":"Set"}}));
+    h.has("“Bass ideas” is about its Set");
+    h.emit(json!({"type":"set-asked"}));
+    assert!(!has(&h.screen(), "“Bass ideas” is about its Set"));
+    // Names, forks, and what /status and the exit say.
+    for line in ["/rename Night drive", "/fork Alt take", "/new Second"] {
+        h.type_text(line).await;
+        h.type_text("\r").await;
+    }
+    h.wait_for_call("rename:this:Second").await;
+    assert!(h.calls().contains(&"rename:this:Night drive".into()) && h.calls().contains(&"fork:Alt take".into()));
+    h.control.set("now", json!({"id":"fork01","title":"Alt take","kept":true,"touched":true}));
+    h.type_text("/rename\r").await;
+    h.has("/rename Alt take");
+    h.type_text("\x15").await;
+    h.type_text("/status\r").await;
+    h.has("Conversation: Alt take · fork01");
+    h.close().await;
+    assert!(h.output.text.borrow().contains("Continue this conversation: "), "{}", h.output.text.borrow());
+    assert!(h.output.text.borrow().contains(" -r fork01"));
 });
 case!(memory_rows_forget_and_use, async {
     let c = Rc::new(Control::default());

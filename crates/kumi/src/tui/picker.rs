@@ -23,6 +23,8 @@ pub struct PickerItem {
     /// Shown but not choosable (a list still loading).
     pub inert: bool,
     pub value: Option<String>,
+    /// More words typing finds it by, not shown (a conversation's first request, under its name).
+    pub words: Option<String>,
     /// On the item Enter sends: the producer moved to it or typed its number, rather than taking the default.
     pub chosen: bool,
 }
@@ -48,6 +50,14 @@ pub struct PickerOptions {
     pub alternate: bool,
 }
 
+/// Lists side by side under one title (This Set, All Sets): Tab goes to the next, and typing filters whichever shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PickerTabs {
+    pub names: Vec<String>,
+    pub lists: Vec<Vec<PickerItem>>,
+    pub at: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Picker {
     pub title: String,
@@ -58,6 +68,7 @@ pub struct Picker {
     pub typed: String,
     /// The producer moved the selection or typed a number: what Enter sends is their choice, not the default.
     pub chosen: bool,
+    pub tabs: Option<PickerTabs>,
     items: Vec<PickerItem>,
     index: usize,
 }
@@ -68,10 +79,35 @@ impl Picker {
     }
 
     pub fn with_options(title: impl Into<String>, items: Vec<PickerItem>, options: PickerOptions) -> Picker {
-        let mut picker =
-            Picker { title: title.into(), options, filter: String::new(), typed: String::new(), chosen: false, items, index: 0 };
+        let mut picker = Picker {
+            title: title.into(),
+            options,
+            filter: String::new(),
+            typed: String::new(),
+            chosen: false,
+            tabs: None,
+            items,
+            index: 0,
+        };
         picker.index = picker.choosable().iter().position(|item| item.note.as_deref() == Some("current")).unwrap_or(0);
         picker
+    }
+
+    /// A picker of lists under tabs, showing the one at `tabs.at`.
+    pub fn with_tabs(title: impl Into<String>, tabs: PickerTabs, options: PickerOptions) -> Picker {
+        let items = tabs.lists.get(tabs.at).cloned().unwrap_or_default();
+        let mut picker = Picker::with_options(title, items, options);
+        picker.tabs = Some(tabs);
+        picker
+    }
+
+    /// The next tab's list (the first after the last), keeping what's typed.
+    pub fn next_tab(&mut self) {
+        let Some(tabs) = self.tabs.as_mut().filter(|tabs| !tabs.lists.is_empty()) else { return };
+        tabs.at = (tabs.at + 1) % tabs.lists.len();
+        self.items = tabs.lists[tabs.at].clone();
+        self.index = 0;
+        self.chosen = false;
     }
 
     /// Swap the items (a list finished loading), keeping the chosen one when it's still there.
@@ -97,11 +133,12 @@ impl Picker {
                 continue;
             }
             let haystack = format!(
-                "{} {} {} {}",
+                "{} {} {} {} {}",
                 heading.map(|heading| heading.label.as_str()).unwrap_or(""),
                 item.label,
                 item.detail.as_deref().unwrap_or(""),
-                item.value.as_deref().unwrap_or("")
+                item.value.as_deref().unwrap_or(""),
+                item.words.as_deref().unwrap_or("")
             )
             .to_lowercase();
             if !words.iter().all(|word| haystack.contains(word)) {

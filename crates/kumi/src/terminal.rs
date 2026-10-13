@@ -21,7 +21,9 @@ use kumi_common::{
 };
 use kumi_runtime::{
     core::{
-        contracts::{KeptLine, NoteChange, SessionController, SessionEvent, TurnState},
+        contracts::{
+            ConversationMatch, ConversationSummary, KeptLine, NoteChange, SessionController, SessionEvent, SetAsk, SetChoice, TurnState,
+        },
         errors::RuntimeError,
     },
     integrations::ableton::project::since,
@@ -57,6 +59,8 @@ pub struct TerminalOptions {
     pub instant: bool,
     /// How to start Kumi next time, said after the farewell when this window can't yet ([`crate::install::next_time`]).
     pub next_time: Option<String>,
+    /// The producer chooses a kept conversation as Kumi starts (`kumi -r`): the list, with these words, is said first.
+    pub choose_conversation: Option<String>,
 }
 impl TerminalOptions {
     pub fn new(
@@ -81,11 +85,12 @@ impl TerminalOptions {
             whats_new: None,
             instant: true,
             next_time: None,
+            choose_conversation: None,
         }
     }
 }
 fn help() -> String {
-    format!("/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new (forget this conversation and start fresh) · /conversations [number] (list this Set's, or go back to one) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes · /willington (Willington's bindings on or off) · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: {} login <provider>.",*KUMI)
+    format!("/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new [name] (start a fresh conversation; the last one is kept) · /resume [number, id or name] (list kept conversations, or go back to one; /conversations too) · /rename <name> · /fork [name] (carry on in a copy) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes · /willington (Willington's bindings on or off) · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: {} login <provider>.",*KUMI)
 }
 fn head(text: &str, limit: usize) -> String {
     String::from_utf16_lossy(&text.encode_utf16().take(limit).collect::<Vec<_>>())
@@ -272,6 +277,8 @@ struct State {
     carry: Vec<u32>,
     /// Each change's state as last said: a change told again as it was (its picture came after it) isn't said twice.
     said: std::collections::HashMap<String, String>,
+    /// Kumi asked about another Set's conversation: the next line's 1, 2 or 3 answers.
+    asking: bool,
 }
 struct Inner {
     options: TerminalOptions,
@@ -309,6 +316,7 @@ pub fn create_terminal(options: TerminalOptions) -> PlainTerminal {
             expired: None,
             carry: vec![],
             said: std::collections::HashMap::new(),
+            asking: false,
         }),
         parser: RefCell::new(None),
         keys: RefCell::new(None),
@@ -394,6 +402,7 @@ impl PlainTerminal {
             )
             .await
             .unwrap_or_else(|_| Err(RuntimeError::plain("Shutdown deadline exceeded")));
+            let hint = this.0.options.controller.conversation_now().await;
             if result.is_err() {
                 code = 1;
             }
@@ -401,10 +410,17 @@ impl PlainTerminal {
                 let mut state = this.0.state.borrow_mut();
                 if !state.output_failed {
                     let text = match result {
-                        Ok(()) => match &this.0.options.next_time {
-                            Some(next) => format!("Kumi closed. Each Set's conversation continues next time.\n{next}"),
-                            None => "Kumi closed. Each Set's conversation continues next time.".into(),
-                        },
+                        Ok(()) => {
+                            let lines: Vec<String> = [
+                                Some("Kumi closed. Each Set's conversation continues next time.".to_string()),
+                                crate::tui::app::continue_hint(hint),
+                                this.0.options.next_time.clone(),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .collect();
+                            lines.join("\n")
+                        }
                         Err(error) => {
                             code = 1;
                             head(&format!("[error] {}", safe_error_message(Some(&error.message()), &this.0.options.secrets)), 2048)
@@ -539,6 +555,21 @@ impl PlainTerminal {
             history.borrow_mut().add(input);
         }
         let controller = &self.0.options.controller;
+        // The answer to Kumi's question about another Set's conversation; anything else leaves that conversation.
+        if std::mem::take(&mut self.0.state.borrow_mut().asking) {
+            let choice = match command {
+                "1" => Some(SetChoice::Open),
+                "2" => Some(SetChoice::Copy),
+                "3" => Some(SetChoice::Cancel),
+                _ => None,
+            };
+            controller.answer_set(choice.unwrap_or(SetChoice::Cancel)).await?;
+            if choice.is_some() {
+                self.prompt();
+                return Ok(());
+            }
+            self.notice("[conversations] Staying with this Set's conversation.");
+        }
         if command == "/quit" {
             self.finish(0).await;
             return Ok(());
@@ -611,6 +642,13 @@ impl PlainTerminal {
                 status.observation.as_deref().unwrap_or("No current Live observation"),
                 library.map(|s| format!("; {s}")).unwrap_or_default()
             ));
+            if let Some(now) = controller.conversation_now().await {
+                let secrets = self.0.options.secrets.clone();
+                self.notice(&format!(
+                    "[status] {}",
+                    crate::tui::app::conversation_line(&now, |text| head(&sanitize_text(text, &secrets), 60))
+                ));
+            }
             return Ok(());
         }
         if self.busy() {
@@ -646,15 +684,107 @@ impl PlainTerminal {
  "/fast"=>{let current=models.current();let on=!models.fast_enabled();match models.set_fast(on).await?{Some(tier)=>self.notice(&format!("[fast] {} is on{}.",tier.name,tier.description.map(|d|format!(": {d}")).unwrap_or_default())),None if on=>self.notice(&format!("[fast] {} has no faster tier.",current.name.or(current.model).unwrap_or_else(||"This model".into()))),None=>self.notice("[fast] Back to the standard tier."),}},
  "/memory"=>{let Some(memory)=controller.memory().await?else{self.notice("[memory] Kumi keeps no notes here.");return Ok(());};let list=|notes:&[kumi_runtime::core::contracts::MemoryNote]|{if notes.is_empty(){"none".into()}else{notes.iter().map(|n|format!("{}{} {}",n.id,if n.pinned{" (pinned)"}else{""},n.text)).collect::<Vec<_>>().join(" · ")}};self.notice(&format!("[memory] About you: {}",list(&memory.memory.producer)));self.notice(&if memory.saved{format!("[memory] About {}: {}",memory.set_name.as_deref().unwrap_or("this Set"),list(&memory.memory.set))}else{"[memory] This Set isn't saved yet; notes about it are kept once it is.".into()});if controller.has_techniques(){let techniques=controller.techniques().await?;self.notice(&format!("[memory] Techniques: {}",if techniques.is_empty(){"none yet".into()}else{techniques.iter().map(|t|format!("{} {} (for {})",t.id,t.name,t.fits)).collect::<Vec<_>>().join(" · ")}));}if controller.has_taste(){let taste=controller.taste().await?;self.notice(&format!("[memory] From your Sets: {}",if taste.is_empty(){"nothing yet".into()}else{taste.iter().enumerate().map(|(i,l)|format!("u{} {}",i+1,l.line)).collect::<Vec<_>>().join(" · ")}));self.0.state.borrow_mut().taste=taste;}},
  "/recipes"=>{let recipes=controller.recipes().await?;self.notice(&if recipes.is_empty(){"[recipes] None yet. Ask Kumi to save a way of working, or say \"watch me\" and do it in Live.".into()}else{format!("[recipes] {}",recipes.iter().map(|r|format!("{}{}: {}",r.name,if r.params.is_empty(){String::new()}else{format!(" (needs {})",r.params.iter().map(|p|p.name.as_str()).collect::<Vec<_>>().join(", "))},r.about)).collect::<Vec<_>>().join(" · "))});},
- "/conversations"=>{let kept=controller.conversations().await?;if let Some(argument)=argument{let n=parse_int(argument)-1.;let row=if n>=0.&&n.fract()==0.{kept.get(n as usize)}else{None};if let Some(row)=row{if row.current{self.notice("[conversations] That's this one.");}else if !controller.resume_conversation(&row.id).await?{self.notice("[conversations] That conversation isn't kept any more.");}}else{self.notice("[conversations] Use: /conversations <number>, with a number from /conversations.");}}else{self.notice(&if kept.is_empty(){"[conversations] None kept yet: a conversation is kept once you've asked something.".into()}else{format!("[conversations] {}. /conversations <number> goes back to one.",kept.iter().enumerate().map(|(i,r)|{let first=head(&sanitize_text(&r.first,&self.0.options.secrets).replace('\n'," "),80);format!("{}. {} ({}, {} {})",i+1,if first.is_empty(){"(nothing asked yet)"}else{&first},if r.current{"this one".into()}else{since(r.saved_at as f64,now_ms_f64())},r.turns,if r.turns==1{"request"}else{"requests"})}).collect::<Vec<_>>().join(" · "))});}},
+ "/resume"|"/conversations"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.resume_command(&words).await?;},
+ "/rename"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.rename_command(&words).await?;},
+ "/fork"=>{let name=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();if controller.fork_conversation((!name.is_empty()).then_some(name.as_str())).await?.is_none(){self.notice("[fork] Nothing to fork yet: ask something first.");}},
  "/note"=>{let usage="[memory] Use: /note <id> <new words>, with an id from /memory.";let words=argument.and_then(|id|command.split_once(id)).map(|(_,words)|words.trim()).unwrap_or("");match argument.filter(|_|!words.is_empty()&&controller.has_change_note()){Some(id)=>match controller.change_note(id,NoteChange::Text(words.into())).await{Ok(Some(_))=>self.notice(&format!("[memory] Changed note {id}.")),Ok(None)=>self.notice(usage),Err(error)=>self.notice(&format!("[memory] {}",error.message()))},None=>self.notice(usage)}},
  "/pin"|"/unpin"=>{let pin=verb=="/pin";let usage=format!("[memory] Use: {verb} <id>, with a note's id from /memory.");match argument.filter(|_|controller.has_change_note()){Some(id)=>match controller.change_note(id,NoteChange::Pinned(pin)).await?{Some(_)=>self.notice(&if pin{format!("[memory] Pinned {id}: Kumi keeps it even when its memory is full.")}else{format!("[memory] Unpinned {id}.")}),None=>self.notice(&usage)},None=>self.notice(&usage)}},
  "/forget"=>{let invalid="[memory] Use: /forget <id>, with an id from /memory.";if argument.is_some_and(|a|a.starts_with('u'))&&controller.has_forget_taste(){if self.0.state.borrow().taste.is_empty(){let taste=controller.taste().await?;self.0.state.borrow_mut().taste=taste;}let n=number::parse(&argument.unwrap()[1..]).unwrap_or(f64::NAN)-1.;let line=if n>=0.&&n.fract()==0.{self.0.state.borrow().taste.get(n as usize).cloned()}else{None};if let Some(line)=line{if controller.forget_taste(&line.id).await?{self.notice(&format!("[memory] Forgot, from your Sets: {}",line.line));}else{self.notice(invalid);}}else{self.notice(invalid);}}else if argument.is_some_and(|a|a.starts_with('t'))&&controller.has_forget_technique(){if !controller.forget_technique(argument.unwrap()).await?{self.notice(invalid);}}else if let Some(argument)=argument{if controller.forget(argument).await?.is_none(){self.notice(invalid);}}else{self.notice(invalid);}},
  "/willington"=>{match self.0.options.willington.clone().and_then(|w|(w.on)().map(|on|(w,on))){Some((willington,on))=>match (willington.set)(!on).await{Ok(said)=>{self.notice(&format!("[willington] {said}"));controller.reconfigure().await?;},Err(error)=>self.notice(&format!("[willington] Kumi couldn't turn Willington's bindings {}: {error}",if on{"off"}else{"on"})),},None=>self.notice("Unknown command. Use /help."),}},
  "/login"=>self.notice(&format!("[login] Sign in from a shell: {} login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here.",*KUMI)),
  "/logout"=>{if let Some(provider)=argument.and_then(ProviderId::parse){self.notice(&if models.sign_out(provider).await?{format!("[logout] Signed out of {}.",provider.as_str())}else{format!("[logout] There was no sign-in for {} to remove.",provider.as_str())});}else{self.notice(&format!("[logout] Use: /logout <provider> ({}).",PROVIDERS.map(|p|p.as_str()).join(", ")));}},
- _=>{if command=="/undo"{if let Some(change)=controller.undo(None).await?{self.notice(&if enum_name(change.state)=="undone"{format!("[undo] Undid: {}",change.title)}else{string::trim(&format!("[undo] Kept: {}. {}",change.title,change.note.unwrap_or_default())).into()});}}else if command=="/refresh"{controller.refresh().await?;}else if command=="/reconnect"&&controller.has_reconnect(){controller.reconnect().await?;}else if command=="/new"{self.notice("── New conversation. Kumi won't use what's above ──");controller.new_conversation().await?;}else if command.starts_with('/'){self.notice("Unknown command. Use /help.");}else if let Some(outcome)=self.instant(input).await{self.notice(&format!("[instant] {}",outcome.text));}else{self.0.state.borrow_mut().answering=true;let result=controller.submit(input,None).await;self.0.state.borrow_mut().answering=false;result?;}}
+ _=>{if command=="/undo"{if let Some(change)=controller.undo(None).await?{self.notice(&if enum_name(change.state)=="undone"{format!("[undo] Undid: {}",change.title)}else{string::trim(&format!("[undo] Kept: {}. {}",change.title,change.note.unwrap_or_default())).into()});}}else if command=="/refresh"{controller.refresh().await?;}else if command=="/reconnect"&&controller.has_reconnect(){controller.reconnect().await?;}else if verb=="/new"{self.notice("── New conversation. Kumi won't use what's above ──");controller.new_conversation().await?;let name=string::trim(command.strip_prefix(verb).unwrap_or(""));if !name.is_empty(){controller.rename_conversation(None,Some(name)).await?;}}else if command.starts_with('/'){self.notice("Unknown command. Use /help.");}else if let Some(outcome)=self.instant(input).await{self.notice(&format!("[instant] {}",outcome.text));}else{self.0.state.borrow_mut().answering=true;let result=controller.submit(input,None).await;self.0.state.borrow_mut().answering=false;result?;}}
  }
+        Ok(())
+    }
+    /// This Set's kept conversations, then other Sets' newest: one numbered list, the same each time it's asked for.
+    async fn listed(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
+        let controller = &self.0.options.controller;
+        let here = controller.conversations().await?;
+        let others = controller.all_conversations().await?.into_iter().filter(|row| !here.iter().any(|h| h.id == row.id)).take(10);
+        Ok(here.iter().cloned().chain(others).collect())
+    }
+    /// /resume: the list; or the conversation a number from it, an id, the start of one or a name gives.
+    async fn resume_command(&self, words: &str) -> Result<(), RuntimeError> {
+        let controller = &self.0.options.controller;
+        let kept = self.listed().await?;
+        let mention = |row: &ConversationSummary, with_set: bool| {
+            let title = head(&sanitize_text(&row.title(), &self.0.options.secrets), 80);
+            let when = if row.current { "this one".into() } else { since(row.saved_at as f64, now_ms_f64()) };
+            let set =
+                row.set.as_deref().map(|set| head(&sanitize_text(set, &self.0.options.secrets), 40)).unwrap_or_else(|| "a Set".into());
+            format!(
+                "{} ({}{}{when}, {} {})",
+                if title.is_empty() { "(nothing asked yet)" } else { &title },
+                if with_set { format!("{set}, ") } else { String::new() },
+                if row.pinned { "pinned, " } else { "" },
+                row.turns,
+                if row.turns == 1 { "request" } else { "requests" }
+            )
+        };
+        if words.is_empty() {
+            if kept.is_empty() {
+                self.notice("[conversations] None kept yet: a conversation is kept once you've asked something.");
+                return Ok(());
+            }
+            let here = controller.conversations().await?.len();
+            let rows: Vec<String> = kept
+                .iter()
+                .enumerate()
+                .map(|(at, row)| {
+                    format!("{}{}. {}", if at == here && at > 0 { "Other Sets: " } else { "" }, at + 1, mention(row, at >= here))
+                })
+                .collect();
+            self.notice(&format!("[conversations] {}. /resume <number, id or name> goes back to one.", rows.join(" · ")));
+            return Ok(());
+        }
+        let n = parse_int(words) - 1.;
+        let found = if n >= 0. && n.fract() == 0. && words.bytes().all(|b| b.is_ascii_digit()) {
+            match kept.get(n as usize) {
+                Some(row) => ConversationMatch::One(row.clone()),
+                None => {
+                    self.notice("[conversations] Use: /resume <number>, with a number from /resume.");
+                    return Ok(());
+                }
+            }
+        } else {
+            controller.find_conversation(words).await?
+        };
+        match found {
+            ConversationMatch::One(row) if row.current => self.notice("[conversations] That's this one."),
+            ConversationMatch::One(row) => {
+                if !controller.resume_conversation(&row.id).await? {
+                    self.notice("[conversations] That conversation isn't kept any more.");
+                }
+            }
+            ConversationMatch::Several(rows) => self.notice(&format!(
+                "[conversations] Several fit: {}. /resume <id> goes back to one.",
+                rows.iter().take(10).map(|row| format!("{} {}", row.id, mention(row, true))).collect::<Vec<_>>().join(" · ")
+            )),
+            ConversationMatch::Gone => self.notice("[conversations] That conversation isn't kept any more."),
+            ConversationMatch::None => self.notice(&format!(
+                "[conversations] No conversation {}; /resume lists them.",
+                head(&sanitize_text(words, &self.0.options.secrets), 60)
+            )),
+        }
+        Ok(())
+    }
+    /// /rename <name>, or (a kept one) /rename <id> <name>.
+    async fn rename_command(&self, words: &str) -> Result<(), RuntimeError> {
+        let controller = &self.0.options.controller;
+        if words.is_empty() {
+            let title = controller.conversation_now().await.map(|now| now.title).unwrap_or_default();
+            self.notice(&format!("[rename] Use: /rename <name>. Now: {}", if title.is_empty() { "(no name yet)" } else { &title }));
+            return Ok(());
+        }
+        let (first, rest) = words.split_once(' ').map(|(a, b)| (a, string::trim(b))).unwrap_or((words, ""));
+        let kept = !rest.is_empty() && matches!(controller.find_conversation(first).await?, ConversationMatch::One(row) if row.id == first);
+        let (id, name) = if kept { (Some(first), rest) } else { (None, words) };
+        self.notice(&if controller.rename_conversation(id, Some(name)).await? {
+            format!("[rename] Named “{}”.", head(&sanitize_text(name, &self.0.options.secrets), 60))
+        } else {
+            "[rename] That conversation isn't kept any more.".into()
+        });
         Ok(())
     }
     /// A fixed phrase ("tempo 124", "mute drums") run at once with no model call; None sends it to the model.
@@ -776,7 +906,7 @@ impl Terminal for PlainTerminal {
             self.0.options.models.current().model.as_deref().unwrap_or("no model chosen yet"),
             if self.0.options.mode == "inference-only" { "MCP disconnected / No Live access" } else { "MCP connecting / Live unverified" }
         ));
-        self.notice("Each Set's conversations are kept: its latest continues next time, and /conversations goes back to earlier ones. /help for commands.");
+        self.notice("Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.");
         if let Some(notice) = self.0.options.startup_notice.as_ref().filter(|s| !s.is_empty()) {
             self.notice(notice);
         }
@@ -824,6 +954,14 @@ impl Terminal for PlainTerminal {
                         this.error(&error);
                         this.finish(1).await;
                     }
+                    return;
+                }
+                // `kumi -r`: the kept conversations to choose from (those the words fit, given words).
+                if let Some(words) = this.0.options.choose_conversation.clone() {
+                    if let Err(error) = this.resume_command(&words).await {
+                        this.error(&error);
+                    }
+                    this.prompt();
                 }
             }
         });
@@ -926,6 +1064,24 @@ impl Terminal for PlainTerminal {
                             head(&sanitize_text(str_(&line["text"]), &self.0.options.secrets).replace('\n', " "), 200)
                         ));
                     }
+                }
+            }
+            "set-asked" => {
+                let ask: Option<SetAsk> = serde_json::from_value(value["ask"].clone()).ok();
+                self.0.state.borrow_mut().asking = ask.is_some();
+                if let Some(ask) = ask {
+                    let clean = |text: &str| head(&sanitize_text(text, &self.0.options.secrets), 40);
+                    let theirs = ask.set.as_deref().map(|set| format!("“{}”", clean(set))).unwrap_or_else(|| format!("its {}", ask.noun));
+                    let open = ask
+                        .open
+                        .as_deref()
+                        .map(|set| format!("“{}”", clean(set)))
+                        .unwrap_or_else(|| format!("a {} not saved yet", ask.noun));
+                    let title = if ask.title.is_empty() { "This conversation".into() } else { format!("“{}”", clean(&ask.title)) };
+                    self.notice(&format!(
+                        "[conversations] {title} is about {theirs}, and {daw} has {open} open. 1. Open {theirs} in {daw} ({daw} may ask whether to save {open} first) · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.",
+                        daw = ask.daw
+                    ));
                 }
             }
             "resend" => {

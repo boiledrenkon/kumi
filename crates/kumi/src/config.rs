@@ -84,12 +84,59 @@ pub enum AppConfig {
         inference: InferenceConfig,
         #[serde(skip_serializing_if = "Option::is_none")]
         bridge_missing: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<Resume>,
     },
     Live {
         #[serde(flatten)]
         inference: InferenceConfig,
         bridge_config: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<Resume>,
     },
+}
+/// Which kept conversation Kumi takes up as it starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Resume {
+    /// `-c`: the one used last, in any Set.
+    Last,
+    /// `-r <words>`: its id, the start of it, or its name.
+    Named(String),
+    /// `-r` alone: the producer chooses.
+    Pick,
+}
+/// `-c`/`--continue` and `-r`/`--resume [id or name]` taken out of a session's arguments: what's left, and which
+/// conversation to take up.
+fn take_resume(args: &[String]) -> Result<(Vec<String>, Option<Resume>), RuntimeError> {
+    let both = || {
+        RuntimeError::plain(format!(
+            "Use {start} -c (the conversation you had last) or {start} -r <id or name>, not both.",
+            start = *KUMI_START
+        ))
+    };
+    let (mut rest, mut resume) = (vec![], None);
+    let mut at = 0;
+    while at < args.len() {
+        let arg = args[at].as_str();
+        let taken = match arg {
+            "-c" | "--continue" => Some(Resume::Last),
+            "-r" | "--resume" => {
+                // The words after it, up to the next option: an id, or a name with spaces in it.
+                let words: Vec<&str> = args[at + 1..].iter().map(String::as_str).take_while(|word| !word.starts_with('-')).collect();
+                at += words.len();
+                Some(if words.is_empty() { Resume::Pick } else { Resume::Named(words.join(" ")) })
+            }
+            _ => arg.strip_prefix("--resume=").map(|word| if trim(word).is_empty() { Resume::Pick } else { Resume::Named(word.into()) }),
+        };
+        match taken {
+            Some(_) if resume.is_some() => return Err(both()),
+            Some(taken) => resume = Some(taken),
+            None => rest.push(args[at].clone()),
+        }
+        at += 1;
+    }
+    Ok((rest, resume))
 }
 fn home() -> String {
     home::home_dir().unwrap_or_default().to_string_lossy().into()
@@ -198,7 +245,19 @@ pub struct Settings {
     /// The model background workers use, from a provider's own list; none uses the conversation's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_model: Option<String>,
+    /// How long kept conversations stay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversations: Option<ConversationSettings>,
 }
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSettings {
+    /// Days a conversation is kept after it was last used, beyond its Set's 20 newest (90); 0 keeps every one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_days: Option<u32>,
+}
+/// The longest keeping a setting asks for: a hundred years.
+const MAX_KEEP_DAYS: u64 = 36_500;
 fn server_settings(value: &Value) -> Vec<ServerSetting> {
     value
         .as_array()
@@ -268,6 +327,10 @@ pub fn read_settings(file: &str) -> Settings {
         fallback_model: value["fallbackModel"].as_str().filter(|m| valid_model(Some(m), &model_servers)).map(str::to_string),
         max_jobs: value["maxJobs"].as_u64().filter(|n| (1..=8).contains(n)).map(|n| n as u32),
         worker_model: value["workerModel"].as_str().filter(|m| valid_model(Some(m), &model_servers)).map(str::to_string),
+        conversations: value["conversations"]["keepDays"]
+            .as_u64()
+            .filter(|days| *days <= MAX_KEEP_DAYS)
+            .map(|days| ConversationSettings { keep_days: Some(days as u32) }),
         model_servers,
     }
 }
@@ -324,6 +387,9 @@ pub fn write_settings(file: &str, next: &Value) -> Result<(), RuntimeError> {
     }
     if let Some(value) = kept("workerModel").filter(|v| v.as_str().is_some_and(|m| !m.is_empty())) {
         settings.insert("workerModel".into(), value.clone());
+    }
+    if let Some(days) = kept("conversations").and_then(|v| v["keepDays"].as_u64()).filter(|days| *days <= MAX_KEEP_DAYS) {
+        settings.insert("conversations".into(), json!({ "keepDays": days }));
     }
     let parent = Path::new(file).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut mkdir = std::fs::DirBuilder::new();
@@ -596,14 +662,17 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
             settings_file: load_settings_file(env)?,
         });
     }
+    let (args, resume) = take_resume(args)?;
+    let at = |i: usize| args.get(i).map(String::as_str);
+    let first = at(0);
     if args.len() == 1 && first == Some("--inference-only") {
-        return Ok(AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: None });
+        return Ok(AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: None, resume });
     }
     if args.is_empty() {
         return Ok(if let Some(bridge_config) = find_bridge_config(env) {
-            AppConfig::Live { inference: load_inference_config(env)?, bridge_config }
+            AppConfig::Live { inference: load_inference_config(env)?, bridge_config, resume }
         } else {
-            AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: Some(true) }
+            AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: Some(true), resume }
         });
     }
     if !matches!(first, Some("--bridge-config" | "--inference-only")) {
@@ -624,7 +693,7 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
             "Bridge configuration must be an existing readable file; its contents are validated by the MCP server.",
         ));
     }
-    Ok(AppConfig::Live { inference: load_inference_config(env)?, bridge_config: bridge.into() })
+    Ok(AppConfig::Live { inference: load_inference_config(env)?, bridge_config: bridge.into(), resume })
 }
 /// Node's stripVTControlCharacters expression, for the same diagnostic and terminal input treatment.
 pub fn strip_vt(text: &str) -> String {

@@ -51,6 +51,7 @@ use kumi_runtime::{
     providers::ProviderId,
     voice::VoiceTrouble,
     web::cause::NetCause,
+    KUMI_START,
 };
 use serde_json::Value;
 use std::{
@@ -113,6 +114,8 @@ pub struct TuiOptions {
     pub remote: bool,
     /// Puts text on this computer's clipboard with its own tool, for terminals that don't take the terminal's way.
     pub copy: Option<Rc<dyn Fn(&str)>>,
+    /// The producer chooses a kept conversation as Kumi starts (`kumi -r`): the list opens with this typed in it.
+    pub choose_conversation: Option<String>,
 }
 /// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
 /// than Kumi's.
@@ -158,6 +161,7 @@ impl TuiOptions {
             reach: None,
             remote: false,
             copy: None,
+            choose_conversation: None,
         }
     }
 }
@@ -302,6 +306,8 @@ struct State {
     panel: Option<PanelRef>,
     /// The picker asking whether to keep a technique: closing it is a no.
     offer: Option<Rc<RefCell<Picker>>>,
+    /// The picker asking about another Set's conversation: closing it leaves that conversation.
+    set_ask: Option<Rc<RefCell<Picker>>>,
     planning: Option<String>,
     planning_since: f64,
     /// A model call being tried again: why, and when (perf time) the next try starts.
@@ -427,6 +433,7 @@ impl State {
             activity: "connecting to Live".into(),
             panel: None,
             offer: None,
+            set_ask: None,
             planning: None,
             planning_since: 0.,
             retry: None,
@@ -784,6 +791,10 @@ impl TuiApp {
             app.0.tty.restore(false);
             if !app.0.output_failed.get() {
                 app.0.options.output.write(&format!("{}\n", app.clean(message.as_deref().unwrap_or(FAREWELL), usize::MAX)));
+                // The conversation this run had or took up, by the id that brings it back.
+                if let Some(now) = continue_hint(app.0.options.controller.conversation_now().await) {
+                    app.0.options.output.write(&format!("\x1b[2m{now}\x1b[22m\n"));
+                }
                 if let Some(next) = &app.0.options.next_time {
                     app.0.options.output.write(&format!("{next}\n"));
                 }
@@ -880,6 +891,11 @@ impl Terminal for TuiApp {
                 app.run_setup(true).await;
             } else if let Err(error) = app.check_model().await {
                 app.panel_failed(&error);
+            } else if let Some(filter) = app.0.options.choose_conversation.clone().filter(|_| app.0.state.borrow().panel.is_none()) {
+                // `kumi -r`: the producer chooses the conversation as Kumi starts.
+                if let Err(error) = app.open_conversations(Some(filter).filter(|f| !f.is_empty())).await {
+                    app.panel_failed(&error);
+                }
             }
             Ok(())
         });
@@ -926,6 +942,20 @@ impl Drop for Inner {
     }
 }
 const FAREWELL: &str = "Kumi closed. Each Set's conversation continues next time.";
+/// The conversation going on, for /status: what it's called and the id that brings it back once it's kept.
+pub(crate) fn conversation_line(now: &ConversationNow, clean: impl Fn(&str) -> String) -> String {
+    let title = clean(&now.title);
+    let title = if title.is_empty() { "new".to_string() } else { title };
+    if now.kept {
+        format!("Conversation: {title} · {}", now.id)
+    } else {
+        format!("Conversation: {title} (kept once you ask something)")
+    }
+}
+/// The line that brings this run's conversation back: when it's kept, and this run made a request in it or took it up.
+pub(crate) fn continue_hint(now: Option<ConversationNow>) -> Option<String> {
+    now.filter(|now| now.kept && now.touched).map(|now| format!("Continue this conversation: {} -r {}", *KUMI_START, now.id))
+}
 const CHANGE_FLASH_MS: f64 = 4000.;
 /// Steps the conversation doesn't show: what Kumi keeps on its own, and finding a tool that wasn't sent up front.
 const QUIET_TOOLS: &[&str] = &["remember", "forget", "save_recipe", "forget_recipe", "reaction", "find_tools"];

@@ -86,6 +86,8 @@ async fn report_contains_versions_doctor_latest_conversation_gaps_live_log_witho
     .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     fs::write(conversations.join("latest1.json"),json!({"savedAt":2,"checkpoint":{"version":1,"messages":[{"role":"user","content":[{"type":"text","text":format!("Load my sample from {home}/Music/kick.wav")}]},{"role":"assistant","content":[{"type":"tool-call","toolName":"make_changes","input":{"steps":[{"tool":"set_tempo","input":{"tempo":124}}]}}]},{"role":"tool","content":[{"type":"tool-result","output":{"type":"text","value":"{\"done\":[{\"changed\":\"Tempo 120 → 124 BPM\"}]}"}}]}]},"changes":[{"title":"Tempo 120 → 124 BPM","state":"applied"}]}).to_string()).unwrap();
+    // A name beside it, written after it, isn't a conversation.
+    fs::write(conversations.join("latest1.meta"), json!({"version":1,"name":"Kick"}).to_string()).unwrap();
     let log = dir.path().join("Log.txt");
     fs::write(
         &log,
@@ -148,6 +150,7 @@ async fn report_contains_versions_doctor_latest_conversation_gaps_live_log_witho
         "Runtime: native Rust",
         "Terminal: ghostty",
         "model: openai-codex/gpt-6-astra",
+        "Conversation latest1, saved",
         "producer: Load my sample from ~/Music/kick.wav",
         "→ make_changes {\"steps\":[{\"tool\":\"set_tempo\"",
         "← {\"type\":\"text\",\"value\":",

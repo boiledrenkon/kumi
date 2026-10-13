@@ -242,6 +242,10 @@ impl TuiApp {
                     self.notice(crate::willington::OFF_AT_START, NoticeTone::Info);
                 }
             }
+            "set-asked" => {
+                let ask: Option<SetAsk> = serde_json::from_value(value["ask"].clone()).ok();
+                self.open_set_ask(ask);
+            }
             "resend" => {
                 let mut state = self.0.state.borrow_mut();
                 if state.editor.is_empty() {
