@@ -24,7 +24,7 @@ pub(super) fn config(http1: bool) -> rustls::ClientConfig {
     config
 }
 
-pub(super) fn configured(trust: Arc<Trust>) -> rustls::ClientConfig {
+fn configured(trust: Arc<Trust>) -> rustls::ClientConfig {
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::clone(&trust.provider))
         .with_protocol_versions(rustls::ALL_VERSIONS)
         .expect("TLS 1.2 and 1.3")
@@ -42,7 +42,7 @@ fn provider() -> Arc<CryptoProvider> {
 
 /// The carried authorities, then the system's trust store.
 #[derive(Debug)]
-pub(super) struct Trust {
+struct Trust {
     carried: Arc<WebPkiServerVerifier>,
     /// None when the system has no trust store to ask (a Linux without a certificate bundle).
     system: OnceLock<Option<Arc<dyn ServerCertVerifier>>>,
@@ -50,18 +50,14 @@ pub(super) struct Trust {
 }
 
 impl Trust {
-    pub(super) fn new(provider: Arc<CryptoProvider>) -> Self {
+    fn new(provider: Arc<CryptoProvider>) -> Self {
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self::with(roots, OnceLock::new(), provider)
     }
 
     /// With other carried authorities and a system already decided (for tests).
-    pub(super) fn with(
-        carried: RootCertStore,
-        system: OnceLock<Option<Arc<dyn ServerCertVerifier>>>,
-        provider: Arc<CryptoProvider>,
-    ) -> Self {
+    fn with(carried: RootCertStore, system: OnceLock<Option<Arc<dyn ServerCertVerifier>>>, provider: Arc<CryptoProvider>) -> Self {
         let carried =
             WebPkiServerVerifier::builder_with_provider(Arc::new(carried), Arc::clone(&provider)).build().expect("the carried authorities");
         Self { carried, system, provider }

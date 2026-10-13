@@ -125,10 +125,12 @@ pub fn current() -> Arc<Settings> {
 /// A proxy variable by its upper-case name, else its lower-case one (on Windows, in any case); one set but empty counts
 /// as unset.
 fn variable<'a>(env: &'a Env, name: &str) -> Option<&'a str> {
+    let set = |value: &'a String| Some(value.trim()).filter(|value| !value.is_empty());
     let lower = name.to_lowercase();
-    let value = env.get(name).or_else(|| env.get(&lower));
-    let value = value.or_else(|| env.iter().find(|(key, _)| cfg!(windows) && key.eq_ignore_ascii_case(name)).map(|(_, value)| value));
-    value.map(|value| value.trim()).filter(|value| !value.is_empty())
+    env.get(name)
+        .and_then(set)
+        .or_else(|| env.get(&lower).and_then(set))
+        .or_else(|| env.iter().filter(|(key, _)| cfg!(windows) && key.eq_ignore_ascii_case(name)).find_map(|(_, value)| set(value)))
 }
 
 /// A proxy's address as a variable or the system gives it ("proxy.corp:8080" is http://), with a scheme reqwest uses.
@@ -528,6 +530,8 @@ mod tests {
     fn the_variables_name_a_proxy_for_each_scheme_upper_case_first() {
         assert_eq!(Settings::from_env(&env(&[])), None, "none set: the system's settings say");
         assert_eq!(Settings::from_env(&env(&[("HTTPS_PROXY", "  "), ("NO_PROXY", "corp")])), None, "an empty one is unset");
+        let lower = Settings::from_env(&env(&[("HTTPS_PROXY", ""), ("https_proxy", "http://lower:2")])).unwrap();
+        assert_eq!(through(&lower, "https://github.com/"), Some("http://lower:2/".into()), "an empty upper case one gives way");
         let set =
             Settings::from_env(&env(&[("HTTPS_PROXY", "http://upper:1"), ("https_proxy", "http://lower:2"), ("http_proxy", "cache:3128")]))
                 .unwrap();
