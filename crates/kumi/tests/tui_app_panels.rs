@@ -121,7 +121,7 @@ case!(chatgpt_browser_clipboard_success_and_cancel, async {
     // No browser here: a code instead, which c copies.
     h.type_text("d").await;
     h.wait_for("KUMI-2026").await;
-    h.has("c copies the code · esc to cancel");
+    h.has("c copies the code · b uses the browser · esc to cancel");
     h.type_text("c").await;
     h.has("Copied the sign-in code.");
     h.type_text("\x1b").await;

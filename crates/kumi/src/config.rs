@@ -469,7 +469,9 @@ fn unknown(word: Option<&str>) -> RuntimeError {
     if COMMANDS.contains(&word) {
         return RuntimeError::plain(format!("{} {word} doesn't take that; {help}", *KUMI_START));
     }
-    let near = COMMANDS.iter().find(|command| edits(command, &word.to_ascii_lowercase()) <= 2);
+    // A short word is near only one letter off: "path" isn't "auth".
+    let most = if word.len() <= 4 { 1 } else { 2 };
+    let near = COMMANDS.iter().find(|command| edits(command, &word.to_ascii_lowercase()) <= most);
     RuntimeError::plain(match near {
         Some(near) => format!("No command called {word} (did you mean {near}?); {help}"),
         None => format!("No command called {word}; {help}"),
@@ -569,6 +571,7 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         let method = if chatgpt && args.len() <= 3 {
             match at(2).unwrap_or("") {
                 "" => Some(chatgpt_sign_in(env)),
+                "--browser" => Some(LoginMethod::Browser),
                 "--device" => Some(LoginMethod::Device),
                 "--from-pi" => Some(LoginMethod::ImportPi),
                 _ => None,
@@ -580,7 +583,7 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         };
         let Some(method) = method else {
             return Err(RuntimeError::plain(if chatgpt {
-                "Use: login openai-codex [--device | --from-pi].".into()
+                "Use: login openai-codex [--browser | --device | --from-pi].".into()
             } else {
                 format!("Use: login {provider}; Kumi asks for the API key, so it stays out of your shell history.")
             }));

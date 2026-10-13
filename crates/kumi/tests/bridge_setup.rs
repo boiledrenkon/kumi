@@ -188,6 +188,18 @@ async fn without_a_terminal_the_question_is_said_with_how_to_answer_it_beforehan
     assert!(said.contains("Is Live closed, with your work saved? (no terminal to answer in; add --yes)\nNothing was changed.\n"), "{said}");
     assert!(!said.contains("Quit Live"), "Live is closed already: {said}");
     assert!(w.calls.borrow().is_empty());
+    // An update's step (an older Kumi's updater runs it so): the producer typed kumi update, so the next line says what
+    // to do rather than --yes.
+    let w = World::new(Some("1.0.33"));
+    let mut io = w.io();
+    io.yes = false;
+    io.input = Some(Rc::new(Piped));
+    io.env.insert("KUMI_BRIDGE_AFTER".into(), "1".into());
+    assert_eq!(setup_bridge(io).await.unwrap(), 0);
+    let said = w.out.0.borrow().clone();
+    let next = format!("The bridge wasn't updated yet. {}.", *kumi_runtime::CONNECT_LIVE);
+    assert!(said.contains(&format!("Is Live closed, with your work saved? (no terminal to answer in)\n{next}\n")), "{said}");
+    assert!(w.calls.borrow().is_empty());
 }
 #[tokio::test(flavor = "current_thread")]
 async fn after_an_update_a_bridge_left_for_later_says_so_and_isnt_a_failure() {

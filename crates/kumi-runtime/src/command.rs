@@ -33,3 +33,8 @@ pub static CONNECT_LIVE: LazyLock<String> = LazyLock::new(|| connect_live(&KUMI_
 pub fn connect_live(start: &str, kumi: &str) -> String {
     format!("Run {start}: it puts the bridge in Live and can restart Live for you (or, with Live closed: {kumi} bridge)")
 }
+
+/// The same where Kumi's setup doesn't run (plain mode): the way by hand first.
+pub fn connect_live_by_hand(kumi: &str) -> String {
+    format!("With Live closed, run: {kumi} bridge (the full-screen app can also restart Live for you)")
+}

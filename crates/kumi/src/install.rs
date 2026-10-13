@@ -164,7 +164,10 @@ async fn live_open(io: &InstalledIo, run: Run) -> bool {
 async fn bridge_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
     let say = |text: String| io.out.write(&format!("{text}\n"));
     let Some(config) = find_bridge_config(&io.env) else {
-        say(format!("The bridge isn't in Live yet. {}.", *CONNECT_LIVE));
+        // Where Live doesn't run (Linux), there's no bridge to put in.
+        if crate::live_app::runs_on(system::platform()) {
+            say(format!("The bridge isn't in Live yet. {}.", *CONNECT_LIVE));
+        }
         return 0;
     };
     let server = read_bridge_server(&config).ok();

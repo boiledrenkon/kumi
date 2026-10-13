@@ -238,7 +238,10 @@ pub async fn login_codex_device(options: LoginOptions, on_code: Rc<dyn Fn(Device
     let start = post("/api/accounts/deviceauth/usercode", json!({"client_id":CLIENT_ID}), &options).await?;
     if !start.ok() {
         return Err(auth(if start.status == 404 {
-            "Device sign-in is not available; use browser sign-in.".into()
+            format!(
+                "Signing in with a code isn't available here; use the browser instead (b in Kumi's sign-in, or: {} login openai-codex --browser).",
+                *crate::KUMI
+            )
         } else {
             format!("Device sign-in could not start (HTTP {}).", start.status)
         }));

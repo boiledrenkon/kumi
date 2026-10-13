@@ -1,6 +1,7 @@
 //! `kumi doctor`; native installs also diagnose legacy bridge configurations.
 use crate::{
     config::*,
+    live_app::LiveInstalled,
     live_extension::*,
     models::OFFER_ORDER,
     spinner::step,
@@ -40,7 +41,7 @@ use kumi_runtime::{
     system::{self, Env},
     video::programs::{ffmpeg_hint, find_ffmpeg, find_whisper, whisper_hint, FfmpegOptions, ProgramOptions},
     voice::{microphone::terminal_app, voice_readiness, ReadinessOptions, VoiceReadiness},
-    CONNECT_LIVE, INSTALLED, KUMI, KUMI_REPAIR, KUMI_VERSION,
+    CONNECT_LIVE, INSTALLED, KUMI, KUMI_REPAIR, KUMI_START, KUMI_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -657,7 +658,17 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
             }
         }
     } else {
-        checks.push(Check::fix("The Ableton bridge isn't installed, so Kumi can't see Live", Some(CONNECT_LIVE.to_string())))
+        // No Live to put a bridge in (Linux, or no Live 12 here) isn't something to fix.
+        let platform = system::platform();
+        let live_12 = || Some(format!("Kumi works with Live 12: once it's installed and opened once, run: {}", *KUMI_START));
+        checks.push(match crate::live_app::runs_on(platform).then(|| crate::live_app::installed(env, platform)) {
+            None => Check::note("There's no Live for this system, so Kumi chats without it", None),
+            Some(LiveInstalled::Missing) => Check::note("Live 12 isn't on this computer, so Kumi chats without Live", live_12()),
+            Some(LiveInstalled::Older(version)) => {
+                Check::note(format!("Only Live {version} is on this computer, so Kumi chats without Live"), live_12())
+            }
+            Some(_) => Check::fix("The Ableton bridge isn't installed, so Kumi can't see Live", Some(CONNECT_LIVE.to_string())),
+        })
     }
     if let Ok(projects) = load_projects_dir(env) {
         checks.push(if access(&projects, false) || access(&dirname(&projects), false) {

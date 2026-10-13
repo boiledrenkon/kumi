@@ -56,6 +56,10 @@ struct FakeLive {
     /// Where Live's Settings are, and how long the Control Surface step waits before saying so.
     menu: RefCell<Option<String>>,
     surface_ms: Cell<u64>,
+    /// The open Live's version.
+    live_version: RefCell<Option<String>>,
+    /// A Set given to open with Live can't be opened (moved, or on a drive that's gone): Live stays closed.
+    set_fails: Cell<bool>,
 }
 impl FakeLive {
     fn new(open: bool) -> Rc<Self> {
@@ -73,6 +77,8 @@ impl FakeLive {
             permission: RefCell::default(),
             menu: RefCell::default(),
             surface_ms: Cell::new(45_000),
+            live_version: RefCell::new(Some("12.4".into())),
+            set_fails: Cell::new(false),
         })
     }
     fn calls(&self) -> Vec<String> {
@@ -136,8 +142,12 @@ impl LiveSetup for FakeLive {
         next.unwrap_or_else(|| Ok("1.0.74".into()))
     }
     async fn start(&self, app: Option<String>, set: Option<String>) -> bool {
+        let failing = set.is_some() && self.set_fails.get();
         let with = set.map(|set| format!(" with {set}")).unwrap_or_default();
         self.calls.borrow_mut().push(format!("start {}{with}", app.clone().unwrap_or_default()).trim().replace("  ", " "));
+        if failing {
+            return false;
+        }
         *self.open.borrow_mut() = Some(app.unwrap_or_else(|| LIVE.into()));
         true
     }
@@ -145,7 +155,7 @@ impl LiveSetup for FakeLive {
         self.calls.borrow_mut().push("connect".into());
     }
     async fn version(&self, _: Option<String>) -> Option<String> {
-        Some("12.4".into())
+        self.live_version.borrow().clone()
     }
     async fn installed(&self) -> LiveInstalled {
         self.looked.set(self.looked.get() + 1);
@@ -612,7 +622,7 @@ case!(chatgpt_signs_in_with_a_code_over_ssh_or_when_d_asks_for_one, async {
     println!("--- sign in with a code ---\n{code}");
     assert!(said(&h).contains("In a browser on any device, open https://auth.example.test/codex/device and enter this code:"), "{code}");
     h.has("Sign in             waiting for the code");
-    h.has("c copies the code · esc back");
+    h.has("c copies the code · b uses the browser · esc back");
     assert_eq!(*models.calls.borrow(), ["chatgpt", "chatgpt code"]);
     // What was to follow the sign-in still does: the bridge goes in once the code is entered.
     models.finish_chatgpt.borrow_mut().take().unwrap().send(()).unwrap();
@@ -628,6 +638,13 @@ case!(chatgpt_signs_in_with_a_code_over_ssh_or_when_d_asks_for_one, async {
     h.wait_for("KUMI-2026").await;
     assert_eq!(*models.calls.borrow(), ["chatgpt code"]);
     assert!(h.browsed.borrow().is_empty(), "no browser opened");
+    // No code sign-in for this account: b goes back to the browser's link (forwarded, say), and signing in there
+    // carries on to the bridge.
+    h.type_text("b").await;
+    h.wait_for("No browser here? d uses a code.").await;
+    assert_eq!(*models.calls.borrow(), ["chatgpt code", "chatgpt"]);
+    models.finish_chatgpt.borrow_mut().take().unwrap().send(()).unwrap();
+    h.wait_for("waiting for Live").await;
     h.close().await;
 });
 
@@ -636,7 +653,7 @@ case!(before_signing_in_a_computer_that_cant_reach_the_sign_in_hears_why, async 
         o.reach = Some(Rc::new(|| {
             async {
                 Some(
-                    "Kumi couldn't reach auth.openai.com: its address couldn't be looked up (DNS). Behind a proxy? Set HTTPS_PROXY to it."
+                    "Kumi couldn't reach ChatGPT's sign-in (auth.openai.com): its address couldn't be looked up (DNS). Behind a proxy? Set HTTPS_PROXY to it."
                         .to_string(),
                 )
             }
@@ -647,12 +664,19 @@ case!(before_signing_in_a_computer_that_cant_reach_the_sign_in_hears_why, async 
     h.wait_for("How do you want to sign in?").await;
     wait_for_said(
         &h,
-        "Kumi couldn't reach auth.openai.com: its address couldn't be looked up (DNS). Behind a proxy? Set HTTPS_PROXY to it.",
+        "Kumi couldn't reach ChatGPT's sign-in (auth.openai.com): its address couldn't be looked up (DNS). Behind a proxy? Set HTTPS_PROXY to it.",
     )
     .await;
     println!("--- can't reach the sign-in ---\n{}", rows(&h));
     // The choices stay: a model on this computer needs no internet, and the network may come back.
     h.has("› ChatGPT");
+    // Not under an API key's box: that's another provider.
+    h.type_text("\x1b[B\r").await;
+    h.wait_for("Paste your Anthropic API key").await;
+    assert!(!said(&h).contains("couldn't reach"), "{}", rows(&h));
+    // Back at the choices, it is again.
+    h.type_text("\x1b").await;
+    wait_for_said(&h, "Kumi couldn't reach ChatGPT's sign-in").await;
     h.close().await;
     // Reached: nothing more is said.
     let h =
@@ -778,6 +802,36 @@ case!(a_restart_opens_the_set_again_or_says_where_it_is, async {
     assert_eq!(live.calls(), ["open?", "quit", "closed?", "install", format!("start {LIVE} with {set}").as_str(), "connect"]);
     assert!(!said(&h).contains("Open Recent"));
     h.close().await;
+    // The Set won't open (moved, or on a drive that's gone): Live opens without it, never staying closed.
+    let live = FakeLive::new(true);
+    *live.set.borrow_mut() = Some(set.into());
+    live.set_fails.set(true);
+    let h = setup(80, FakeModels::catalog(), Some((Some(MISSING), live.clone())), |_| {});
+    h.start().await;
+    h.wait_for("Restart Live now").await;
+    h.type_text("\r").await;
+    h.wait_for("waiting for Live").await;
+    assert_eq!(
+        live.calls(),
+        ["open?", "quit", "closed?", "install", format!("start {LIVE} with {set}").as_str(), format!("start {LIVE}").as_str(), "connect"]
+    );
+    assert!(live.open.borrow().is_some(), "Live open again");
+    wait_for_said(&h, "If you saved your Set, it's in Live's File › Open Recent Set.").await;
+    h.close().await;
+    // The same when the step is put off after the install failed.
+    let live = FakeLive::new(true);
+    *live.set.borrow_mut() = Some(set.into());
+    live.set_fails.set(true);
+    live.installs.borrow_mut().push(Err("disk full".into()));
+    let h = setup(80, FakeModels::catalog(), Some((Some(MISSING), live.clone())), |_| {});
+    h.start().await;
+    h.wait_for("Restart Live now").await;
+    h.type_text("\r").await;
+    h.wait_for("Try again").await;
+    h.type_text("\x1b[B\r").await;
+    wait_for_said(&h, "Live is opening again. If you saved your Set, it's in Live's File › Open Recent Set.").await;
+    assert!(live.open.borrow().is_some(), "Live open again");
+    h.close().await;
     // Not known (an unsaved Set, or one not read yet): where to find it, on the step and once setup ends.
     let live = FakeLive::new(true);
     let h = setup(80, FakeModels::catalog(), Some((Some(MISSING), live.clone())), |_| {});
@@ -832,7 +886,9 @@ case!(a_live_12_that_isnt_here_or_never_opened_is_said_before_anything_is_instal
     h.close().await;
     // Live 12, never opened: Kumi opens it once so it makes its User Library, then restarts it with the bridge.
     let live = FakeLive::new(false);
-    *live.found.borrow_mut() = vec![LiveInstalled::NeverOpened, LiveInstalled::NeverOpened, LiveInstalled::Ready];
+    let twelve = "/Applications/Ableton Live 12 Beta.app";
+    *live.found.borrow_mut() =
+        vec![LiveInstalled::NeverOpened(twelve.into()), LiveInstalled::NeverOpened(twelve.into()), LiveInstalled::Ready];
     let h = setup(80, FakeModels::catalog(), Some((Some(MISSING), live.clone())), |_| {});
     h.start().await;
     h.wait_for("Open Live").await;
@@ -843,7 +899,32 @@ case!(a_live_12_that_isnt_here_or_never_opened_is_said_before_anything_is_instal
     h.wait_for("Restart Live now").await;
     h.type_text("\r").await;
     h.wait_for("waiting for Live").await;
-    assert_eq!(live.calls(), ["open?", "start", "open?", "quit", "closed?", "install", format!("start {LIVE}").as_str(), "connect"]);
+    // The Live 12 found is the one opened, not whichever Live the system picks.
+    assert_eq!(
+        live.calls(),
+        ["open?", format!("start {twelve}").as_str(), "open?", "quit", "closed?", "install", format!("start {twelve}").as_str(), "connect"]
+    );
+    h.close().await;
+    // Live 11 open: said before anything is asked of it, and it stays open.
+    let live = FakeLive::new(true);
+    *live.live_version.borrow_mut() = Some("11.3".into());
+    let h = setup(80, FakeModels::catalog(), Some((Some(MISSING), live.clone())), |_| {});
+    h.start().await;
+    h.wait_for("Look again").await;
+    println!("--- live 11 open ---\n{}", rows(&h));
+    h.has("Connect to Live     Live 12 needed");
+    assert!(said(&h).contains(
+        "Kumi works with Live 12: the Live that's open is 11.3. Open Live 12 instead (ableton.com has it), then choose Look again."
+    ));
+    assert!(!said(&h).contains("Restart Live now"));
+    // Live 12 instead: Look again offers the restart.
+    *live.live_version.borrow_mut() = Some("12.4".into());
+    h.type_text("\r").await;
+    h.wait_for("Restart Live now").await;
+    h.type_text("\x1b").await;
+    h.wait_for("Kumi chats without Live for now").await;
+    assert_eq!(live.count("quit") + live.count("install"), 0, "nothing asked of Live, nothing installed");
+    assert!(live.open.borrow().is_some(), "Live left open");
     h.close().await;
 });
 

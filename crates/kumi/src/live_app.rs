@@ -127,82 +127,76 @@ pub enum LiveInstalled {
     Missing,
     /// Only an older Live: the newest one's version ("11.3.13").
     Older(String),
-    /// Live 12 is installed, but hasn't been opened yet, so it has no User Library.
-    NeverOpened,
+    /// Live 12 is installed (this app), but hasn't been opened yet, so it has no User Library.
+    NeverOpened(String),
 }
 
-/// Which Live is here: from the folders Live is installed in, the settings folder each Live makes as it first
-/// starts (named for its version), and the User Library the bridge goes in.
+/// Which Live is here, from files alone: the Lives installed where their installer puts them, the settings folder
+/// each version makes as it first starts ("Live 12.4.15"), and the User Library the bridge goes in.
 pub fn installed(env: &Env, platform: &str) -> LiveInstalled {
+    let var = |name: &str| system::env_var(env, name, platform).unwrap_or_default().to_string();
     // The producer said where Live's Remote Scripts are: that's Live's to have made.
-    if env.get("KUMI_REMOTE_SCRIPTS_DIR").is_some_and(|dir| !dir.is_empty()) {
+    if !var("KUMI_REMOTE_SCRIPTS_DIR").is_empty() {
         return LiveInstalled::Ready;
     }
-    let var = |name: &str| env.get(name).filter(|value| !value.is_empty()).cloned().unwrap_or_default();
-    let places = match platform {
-        "darwin" => Places {
-            apps: vec!["/Applications".into(), join(&var("HOME"), "Applications")],
-            settings: join(&var("HOME"), "Library/Preferences/Ableton"),
-            libraries: vec![join(&var("HOME"), "Music/Ableton/User Library")],
-        },
-        "win32" => Places {
-            apps: vec![join(&var("ProgramData"), "Ableton")],
-            settings: join(&var("APPDATA"), "Ableton"),
-            libraries: ["Documents", "OneDrive/Documents"]
-                .map(|documents| join(&var("USERPROFILE"), &format!("{documents}/Ableton/User Library")))
-                .into(),
-        },
+    let libraries = match platform {
+        "darwin" => vec![join(&var("HOME"), "Music/Ableton/User Library")],
+        "win32" => ["Documents", "OneDrive/Documents"]
+            .map(|documents| join(&var("USERPROFILE"), &format!("{documents}/Ableton/User Library")))
+            .into(),
         _ => return LiveInstalled::Missing,
     };
-    places.installed()
+    decide(&installed_lives(env, platform), &opened_versions(&crate::config::live_preferences_dir(env)), &libraries)
 }
 
-/// Where Live is installed, keeps its settings, and makes its User Library.
-struct Places {
-    apps: Vec<String>,
-    settings: String,
-    libraries: Vec<String>,
+/// The versions Live has been opened as here, from its settings folders ("Live 12.4.15b6"): newest major first.
+fn opened_versions(settings: &str) -> Vec<(u32, String)> {
+    static OPENED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Live ((\d+)[0-9A-Za-z.]*)$").unwrap());
+    let mut opened: Vec<(u32, String)> = std::fs::read_dir(settings)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let found = OPENED.captures(&name)?;
+            Some((found[2].parse().ok()?, found[1].to_string()))
+        })
+        .collect();
+    opened.sort_by(|a, b| b.0.cmp(&a.0));
+    opened
 }
-impl Places {
-    fn installed(&self) -> LiveInstalled {
-        static APP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:Ableton )?Live (\d+)\b").unwrap());
-        static OPENED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Live ((\d+)[0-9A-Za-z.]*)$").unwrap());
-        let names = |folder: &str| -> Vec<String> {
-            std::fs::read_dir(folder)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect()
-        };
-        let installed: Vec<u32> =
-            self.apps.iter().flat_map(|folder| names(folder)).filter_map(|name| APP.captures(&name)?[1].parse().ok()).collect();
-        let mut opened: Vec<(u32, String)> = names(&self.settings)
-            .into_iter()
-            .filter_map(|name| {
-                let found = OPENED.captures(&name)?;
-                Some((found[2].parse().ok()?, found[1].to_string()))
-            })
-            .collect();
-        opened.sort_by(|a, b| b.0.cmp(&a.0));
-        if opened.iter().any(|(major, _)| *major >= 12) {
-            return LiveInstalled::Ready;
-        }
-        if installed.iter().any(|major| *major >= 12) {
-            return LiveInstalled::NeverOpened;
-        }
-        if let Some((_, version)) = opened.first() {
-            return LiveInstalled::Older(version.clone());
-        }
-        if let Some(major) = installed.iter().max() {
-            return LiveInstalled::Older(major.to_string());
-        }
-        // Live somewhere Kumi doesn't look, that has made its User Library where Live puts it: the bridge can go in.
-        if self.libraries.iter().any(|library| Path::new(library).is_dir()) {
-            return LiveInstalled::Ready;
-        }
-        LiveInstalled::Missing
+
+/// A Live's major version: from its version, else its name ("Ableton Live 12 Suite").
+fn major(live: &InstalledLive) -> Option<u32> {
+    let version = live.version.as_deref().and_then(|version| version.split('.').next()?.parse().ok());
+    version.or_else(|| live.name.split_whitespace().find_map(|word| word.parse().ok()))
+}
+
+/// What setup can do with the Lives installed and opened here, and the User Libraries Live makes.
+fn decide(lives: &[InstalledLive], opened: &[(u32, String)], libraries: &[String]) -> LiveInstalled {
+    if opened.iter().any(|(major, _)| *major >= 12) {
+        return LiveInstalled::Ready;
     }
+    let newest = lives.iter().filter_map(|live| Some((major(live)?, live))).max_by_key(|(major, _)| *major);
+    if let Some((_, live)) = newest.filter(|(major, _)| *major >= 12) {
+        return LiveInstalled::NeverOpened(live.app.clone());
+    }
+    if let Some((_, version)) = opened.first() {
+        return LiveInstalled::Older(version.clone());
+    }
+    if let Some((major, live)) = newest {
+        return LiveInstalled::Older(live.version.clone().unwrap_or_else(|| major.to_string()));
+    }
+    // Live somewhere Kumi doesn't look, that has made its User Library where Live puts it: the bridge can go in.
+    if libraries.iter().any(|library| Path::new(library).is_dir()) {
+        return LiveInstalled::Ready;
+    }
+    LiveInstalled::Missing
+}
+
+/// Whether Live runs on this platform: macOS and Windows. Elsewhere (Linux) Kumi chats without it.
+pub fn runs_on(platform: &str) -> bool {
+    matches!(platform, "darwin" | "win32")
 }
 
 /// Where Live keeps its Settings, for the Control Surface step's second look.
@@ -548,31 +542,35 @@ mod tests {
     fn which_live_is_here_is_read_from_its_folders() {
         let root = tempfile::tempdir().unwrap();
         let path = |name: &str| root.path().join(name).to_string_lossy().into_owned();
-        let places = Places { apps: vec![path("Applications")], settings: path("Preferences"), libraries: vec![path("User Library")] };
         let make = |name: &str| std::fs::create_dir_all(root.path().join(name)).unwrap();
-        assert_eq!(places.installed(), LiveInstalled::Missing, "nothing here");
-        make("Applications/Ableton Live 11 Suite.app");
-        assert_eq!(places.installed(), LiveInstalled::Older("11".into()), "installed, never opened");
+        let live = |name: &str, version: Option<&str>| InstalledLive {
+            app: format!("/Applications/{name}.app"),
+            name: name.into(),
+            version: version.map(str::to_string),
+            opened: false,
+        };
+        let here = |lives: &[InstalledLive]| decide(lives, &opened_versions(&path("Preferences")), &[path("User Library")]);
+        assert_eq!(here(&[]), LiveInstalled::Missing, "nothing here");
+        let eleven = live("Ableton Live 11 Suite", Some("11.3.21"));
+        assert_eq!(here(std::slice::from_ref(&eleven)), LiveInstalled::Older("11.3.21".into()), "installed, never opened");
         make("Preferences/Live 11.3.13");
-        assert_eq!(places.installed(), LiveInstalled::Older("11.3.13".into()), "opened: its whole version");
-        make("Applications/Ableton Live 12 Beta.app");
-        assert_eq!(places.installed(), LiveInstalled::NeverOpened, "Live 12 is here, and hasn't made its User Library");
+        assert_eq!(here(std::slice::from_ref(&eleven)), LiveInstalled::Older("11.3.13".into()), "opened: the version it ran as");
+        // Live 12 here, never opened: the one to open, by its app (a version unread from its name).
+        let twelve = live("Ableton Live 12 Beta", None);
+        assert_eq!(here(&[eleven.clone(), twelve.clone()]), LiveInstalled::NeverOpened("/Applications/Ableton Live 12 Beta.app".into()));
         make("Preferences/Live 12.4.15b6");
-        assert_eq!(places.installed(), LiveInstalled::Ready);
+        make("Preferences/Live Reports");
+        assert_eq!(here(&[eleven, twelve]), LiveInstalled::Ready);
         // Live installed where Kumi doesn't look, that has made its User Library.
-        let elsewhere = Places { apps: vec![path("none")], settings: path("none"), libraries: vec![path("Library")] };
+        let elsewhere = decide(&[], &[], &[path("Library")]);
+        assert_eq!(elsewhere, LiveInstalled::Missing);
         make("Library");
-        assert_eq!(elsewhere.installed(), LiveInstalled::Ready);
-        // On Windows: ProgramData's "Live 12 Suite", AppData's "Live 12.1.5".
-        let windows = Places { apps: vec![path("ProgramData")], settings: path("AppData"), libraries: vec![] };
-        make("ProgramData/Live 12 Suite/Program");
-        assert_eq!(windows.installed(), LiveInstalled::NeverOpened);
-        make("AppData/Live 12.1.5");
-        make("AppData/Live Reports");
-        assert_eq!(windows.installed(), LiveInstalled::Ready);
-        // Remote Scripts named by the producer, and Linux, where Live doesn't run.
+        assert_eq!(decide(&[], &[], &[path("Library")]), LiveInstalled::Ready);
+        // Remote Scripts named by the producer (in any case on Windows), and Linux, where Live doesn't run.
         let named = Env::from([("KUMI_REMOTE_SCRIPTS_DIR".to_string(), path("Remote Scripts"))]);
         assert_eq!(installed(&named, "darwin"), LiveInstalled::Ready);
+        let windows = Env::from([("kumi_remote_scripts_dir".to_string(), path("Remote Scripts"))]);
+        assert_eq!(installed(&windows, "win32"), LiveInstalled::Ready);
         assert_eq!(installed(&Env::new(), "linux"), LiveInstalled::Missing);
         assert_eq!(settings_menu("darwin").as_deref(), Some("Settings is in Live's Live menu (⌘,)."));
         assert_eq!(settings_menu("linux"), None);

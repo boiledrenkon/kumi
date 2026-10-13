@@ -1223,12 +1223,13 @@ impl TuiApp {
                     self.notice(&format!("Copied the sign-in {what}."), NoticeTone::Info);
                 }
             }
-            // No browser here after all: a code instead, with what was to follow the sign-in.
-            Panel::ChatGpt { by_code: false, abort, then, .. } if text.to_lowercase() == "d" => {
-                let then = then.take();
+            // No browser here after all, or no code (over SSH, where the browser's link can still be forwarded): the other
+            // way, with what was to follow the sign-in.
+            Panel::ChatGpt { by_code, abort, then, .. } if text.to_lowercase() == if *by_code { "b" } else { "d" } => {
+                let (then, by_code) = (then.take(), !*by_code);
                 abort.cancel();
                 drop(p);
-                self.sign_in_chatgpt(true, then);
+                self.sign_in_chatgpt(by_code, then);
             }
             Panel::Pick { picker, .. } => {
                 if picker.borrow().options.answers {

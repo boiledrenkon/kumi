@@ -707,7 +707,13 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
             && !(if let Some(confirm) = &io.confirm {
                 confirm("Is Live closed, with your work saved?".into()).await
             } else {
-                ask_yes_no(io.input.clone(), io.out.clone(), "Is Live closed, with your work saved?", Some("add --yes")).await
+                ask_yes_no(
+                    io.input.clone(),
+                    io.out.clone(),
+                    "Is Live closed, with your work saved?",
+                    (!after_update).then_some("add --yes"),
+                )
+                .await
             })
         {
             if after_update {
@@ -789,7 +795,8 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
         && !(if let Some(confirm) = &io.confirm {
             confirm("Is Live closed, with your work saved?".into()).await
         } else {
-            ask_yes_no(io.input.clone(), io.out.clone(), "Is Live closed, with your work saved?", Some("add --yes")).await
+            ask_yes_no(io.input.clone(), io.out.clone(), "Is Live closed, with your work saved?", (!after_update).then_some("add --yes"))
+                .await
         })
     {
         if after_update {

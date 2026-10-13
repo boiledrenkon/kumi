@@ -341,10 +341,10 @@ async fn before_sign_in_kumi_says_why_it_cant_reach_it_with_the_proxy_settings()
     dns.cause = Some("error sending request: client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known".into());
     assert_eq!(
         reach(Err(dns.into())).await.as_deref(),
-        Some("Kumi couldn't reach auth.openai.com: its address couldn't be looked up (DNS). Check that this computer is online; if it is, its DNS isn't answering, so try another network. Behind a proxy? Set HTTPS_PROXY to it.")
+        Some("Kumi couldn't reach ChatGPT's sign-in (auth.openai.com): its address couldn't be looked up (DNS). Check that this computer is online; if it is, its DNS isn't answering, so try another network. Behind a proxy? Set HTTPS_PROXY to it.")
     );
     let proxy = reach(Ok(407)).await.unwrap();
-    assert!(proxy.starts_with("Kumi couldn't reach auth.openai.com: the proxy didn't let Kumi through."), "{proxy}");
+    assert!(proxy.starts_with("Kumi couldn't reach ChatGPT's sign-in (auth.openai.com): the proxy didn't let Kumi through."), "{proxy}");
     // A proxy in the environment is named, without its password.
     let env = Env::from([("HTTPS_PROXY".to_string(), "http://me:secret@proxy.example:3128".to_string())]);
     let mut tls = ApiCallError::new("Cannot connect to API", "u", None, None);
@@ -356,5 +356,5 @@ async fn before_sign_in_kumi_says_why_it_cant_reach_it_with_the_proxy_settings()
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_sign_in_host_that_never_answers_is_a_timeout() {
     let said = reach_sign_in(&Env::new(), Some(Rc::new(Reach(Ok(0))))).await.unwrap();
-    assert!(said.starts_with("Kumi couldn't reach auth.openai.com: nothing answered in time."), "{said}");
+    assert!(said.starts_with("Kumi couldn't reach ChatGPT's sign-in (auth.openai.com): nothing answered in time."), "{said}");
 }

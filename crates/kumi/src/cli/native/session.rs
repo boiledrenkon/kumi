@@ -112,7 +112,7 @@ impl LiveSetup for LiveSide {
 }
 /// Live runs on macOS and Windows only: elsewhere Kumi chats without it, and setup only signs in.
 fn live_here() -> bool {
-    matches!(kumi_runtime::system::platform(), "darwin" | "win32")
+    live_app::runs_on(kumi_runtime::system::platform())
 }
 
 pub(super) async fn probe_live(config: String, factory: AbletonFactory) -> doctor::LiveProbe {
@@ -628,8 +628,8 @@ pub(super) async fn run_session(
         .as_ref()
         .and_then(|_| update::older_bridge(&io.env, bundled.as_deref()))
         .filter(|stale| !(stale.runtime_migration && crate::install::only_the_host_differs(&io.env)));
-    // Without the full screen, what the setup would do is said, in the same words as everywhere else.
-    let connect = kumi_runtime::command::connect_live(io.command(), io.command());
+    // Plain mode has no setup to put the bridge in: the way by hand comes first.
+    let connect = kumi_runtime::command::connect_live_by_hand(io.command());
     let bridge_notice = if bridge_missing {
         live_here().then(|| format!("The Ableton bridge isn't in Live yet, so Kumi can't see your Set; chatting without it. {connect}."))
     } else {

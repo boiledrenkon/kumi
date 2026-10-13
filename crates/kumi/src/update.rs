@@ -234,7 +234,9 @@ pub async fn run_update(io: UpdateIo) -> i32 {
     }
     let bridge = older_bridge(&io.env, bundled.as_deref());
     if find_bridge_config(&io.env).is_none() {
-        say(format!("The bridge isn't in Live yet. {}.", *CONNECT_LIVE));
+        if crate::live_app::runs_on(kumi_runtime::system::platform()) {
+            say(format!("The bridge isn't in Live yet. {}.", *CONNECT_LIVE));
+        }
         return 0;
     }
     let Some(bridge) = bridge else {

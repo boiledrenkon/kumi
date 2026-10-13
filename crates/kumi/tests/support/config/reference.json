@@ -412,7 +412,7 @@
         "--token",
         "test-only-secret-do-not-log"
       ],
-      "error": "Use: login openai-codex [--device | --from-pi]."
+      "error": "Use: login openai-codex [--browser | --device | --from-pi]."
     },
     {
       "args": [
@@ -421,7 +421,7 @@
         "--device",
         "--from-pi"
       ],
-      "error": "Use: login openai-codex [--device | --from-pi]."
+      "error": "Use: login openai-codex [--browser | --device | --from-pi]."
     },
     {
       "args": [
@@ -761,6 +761,24 @@
         "--fix"
       ],
       "error": "npm run kumi -- doctor doesn't take that; npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "path"
+      ],
+      "error": "No command called path; npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "updat"
+      ],
+      "error": "No command called updat (did you mean update?); npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "logn"
+      ],
+      "error": "No command called logn (did you mean login?); npm run kumi -- --help lists the commands."
     }
   ],
   "settings": [

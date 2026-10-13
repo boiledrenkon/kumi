@@ -234,7 +234,7 @@ pub async fn reach_sign_in(env: &Env, fetch: Option<Rc<dyn Fetch>>) -> Option<St
         Err(_) if signal.is_cancelled() => Some(NetCause::Timeout),
         Err(error) => NetCause::of_call(&error),
     };
-    Some(unreachable(SIGN_IN_HOST, cause, env))
+    Some(unreachable(&format!("ChatGPT's sign-in ({SIGN_IN_HOST})"), cause, env))
 }
 
 /// Text onto this computer's clipboard with its own tool (pbcopy, clip, wl-copy or xclip), for terminals that don't

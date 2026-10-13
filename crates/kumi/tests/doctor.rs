@@ -161,8 +161,14 @@ async fn doctor_explains_live_bridge_and_terminal_in_plain_words() {
     io.terminal = Some(TerminalInfo { is_tty: true, columns: Some(50), rows: Some(12) });
     assert!(find(&doctor_checks(&io).await.unwrap(), "Terminal").text.contains("small"));
     io.env.insert("KUMI_REMOTE_SCRIPTS_DIR".into(), s.root.path().join("nowhere").display().to_string());
-    let missing = find(&doctor_checks(&io).await.unwrap(), "The Ableton bridge isn't installed").clone();
-    assert_eq!(missing.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
+    let checks = doctor_checks(&io).await.unwrap();
+    if matches!(kumi_runtime::system::platform(), "darwin" | "win32") {
+        let missing = find(&checks, "The Ableton bridge isn't installed");
+        assert_eq!(missing.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
+    } else {
+        // No Live for Linux: nothing to fix.
+        assert_eq!(find(&checks, "There's no Live for this system, so Kumi chats without it").status, CheckStatus::Note);
+    }
     assert!(find(&doctor_checks(&io).await.unwrap(), "bridge isn't installed")
         .next
         .as_ref()

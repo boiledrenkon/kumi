@@ -300,5 +300,7 @@ fn over_ssh_chatgpt_signs_in_with_a_code() {
     env.insert("SSH_CONNECTION".into(), "192.0.2.1 52000 192.0.2.2 22".into());
     assert_eq!(value(&["login", "openai-codex"], &env)["method"], "device");
     assert_eq!(value(&["login", "openai-codex", "--from-pi"], &env)["method"], "import-pi");
+    // The browser all the same, its link forwarded: --browser.
+    assert_eq!(value(&["login", "openai-codex", "--browser"], &env)["method"], "browser");
     assert_eq!(chatgpt_sign_in(&env), LoginMethod::Device);
 }
