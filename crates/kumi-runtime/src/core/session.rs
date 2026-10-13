@@ -2224,14 +2224,14 @@ impl SessionController for Session {
                     if let Some(l) = &this.0.learned {
                         l.drafts.reset();
                     }
-                    let (place, integrated) = {
+                    let (place, integrated, copy) = {
                         let mut s = this.0.state.borrow_mut();
                         s.start_fresh = true;
                         s.turns = 0;
                         s.must_reset = false;
                         s.settled = None;
                         s.interrupted = None;
-                        (s.place.clone(), s.integration.is_some())
+                        (s.place.clone(), s.integration.is_some(), s.copied_from.is_some())
                     };
                     this.drop_wanted();
                     if let (Some(store), Some(place)) = (this.0.options.conversations.clone(), place) {
@@ -2250,9 +2250,9 @@ impl SessionController for Session {
                         this.emit(SessionEvent::ObjectiveCleared);
                     }
                     this.notice(match this.0.options.conversations {
-                        Some(_) => "New conversation. The last one is kept; /resume goes back to it.",
-                        // A chat without Live keeps none.
-                        None => "New conversation.",
+                        Some(_) if !copy => "New conversation. The last one is kept; /resume goes back to it.",
+                        // A chat without Live keeps none, and a copy is kept from its first request.
+                        _ => "New conversation.",
                     });
                     Ok(None)
                 }
