@@ -260,7 +260,12 @@ async fn dirty_checkout_is_preserved_and_current_or_missing_bridge_is_explained(
     let mut io = c.update(out.clone(), programs(Options::default()).0);
     io.env.insert("KUMI_REMOTE_SCRIPTS_DIR".into(), c.root.path().join("none").display().to_string());
     assert_eq!(run_update(io).await, 0);
-    assert!(out.0.borrow().contains(&format!("The bridge isn't in Live yet. {}.", *kumi_runtime::CONNECT_LIVE)));
+    // How to connect it where Live runs; on Linux, nothing about Live.
+    let said = out.0.borrow().clone();
+    match kumi::install::no_bridge_yet(kumi_runtime::system::platform()) {
+        Some(words) => assert!(said.contains(&words), "{said}"),
+        None => assert!(!said.contains("Live"), "{said}"),
+    }
     for failure in ["git status", "git merge", "cargo build"] {
         let out = Rc::new(Out::default());
         assert_eq!(

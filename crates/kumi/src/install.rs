@@ -164,9 +164,8 @@ async fn live_open(io: &InstalledIo, run: Run) -> bool {
 async fn bridge_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
     let say = |text: String| io.out.write(&format!("{text}\n"));
     let Some(config) = find_bridge_config(&io.env) else {
-        // Where Live doesn't run (Linux), there's no bridge to put in.
-        if crate::live_app::runs_on(system::platform()) {
-            say(format!("The bridge isn't in Live yet. {}.", *CONNECT_LIVE));
+        if let Some(words) = no_bridge_yet(system::platform()) {
+            say(words);
         }
         return 0;
     };
@@ -194,6 +193,11 @@ async fn bridge_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
         return update(app.into()).await;
     }
     bridge_command(app, home).status().await.ok().and_then(|s| s.code()).unwrap_or(1)
+}
+/// With no bridge in Live yet, an update ends by saying how to connect it, where Live runs: on Linux there's no Live,
+/// so nothing is said.
+pub fn no_bridge_yet(platform: &str) -> Option<String> {
+    crate::live_app::runs_on(platform).then(|| format!("The bridge isn't in Live yet. {}.", *CONNECT_LIVE))
 }
 /// `kumi bridge` as an update's last step, Live just found closed: it asks nothing more (its lifecycle looks for
 /// Live again before changing anything) and doesn't wait for a Live nobody has opened.

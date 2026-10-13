@@ -548,6 +548,19 @@ pub fn voice_check(voice: &VoiceReadiness, env: &Env, platform: &str) -> Check {
     }
     Check::ok("Talking to Kumi (ctrl+t): ffmpeg hears the microphone, whisper.cpp writes down what you say, on this computer")
 }
+/// No bridge in Live: something to fix where a Live 12 can take it. No Live to put one in (Linux, where Live's folders
+/// aren't read at all, or no Live 12 here) is a note.
+pub fn missing_bridge(platform: &str, installed: impl FnOnce() -> LiveInstalled) -> Check {
+    let live_12 = || Some(format!("Kumi works with Live 12: once it's installed and opened once, run: {}", *KUMI_START));
+    match crate::live_app::runs_on(platform).then(installed) {
+        None => Check::note("There's no Live for this system, so Kumi chats without it", None),
+        Some(LiveInstalled::Missing) => Check::note("Live 12 isn't on this computer, so Kumi chats without Live", live_12()),
+        Some(LiveInstalled::Older(version)) => {
+            Check::note(format!("Only Live {version} is on this computer, so Kumi chats without Live"), live_12())
+        }
+        Some(_) => Check::fix("The Ableton bridge isn't installed, so Kumi can't see Live", Some(CONNECT_LIVE.to_string())),
+    }
+}
 pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     let env = &io.env;
     let node = io.node_version.as_deref().map(node_check).unwrap_or_else(|| Check::ok(format!("Kumi {KUMI_VERSION} (native executable)")));
@@ -658,17 +671,8 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
             }
         }
     } else {
-        // No Live to put a bridge in (Linux, or no Live 12 here) isn't something to fix.
         let platform = system::platform();
-        let live_12 = || Some(format!("Kumi works with Live 12: once it's installed and opened once, run: {}", *KUMI_START));
-        checks.push(match crate::live_app::runs_on(platform).then(|| crate::live_app::installed(env, platform)) {
-            None => Check::note("There's no Live for this system, so Kumi chats without it", None),
-            Some(LiveInstalled::Missing) => Check::note("Live 12 isn't on this computer, so Kumi chats without Live", live_12()),
-            Some(LiveInstalled::Older(version)) => {
-                Check::note(format!("Only Live {version} is on this computer, so Kumi chats without Live"), live_12())
-            }
-            Some(_) => Check::fix("The Ableton bridge isn't installed, so Kumi can't see Live", Some(CONNECT_LIVE.to_string())),
-        })
+        checks.push(missing_bridge(platform, || crate::live_app::installed(env, platform)))
     }
     if let Ok(projects) = load_projects_dir(env) {
         checks.push(if access(&projects, false) || access(&dirname(&projects), false) {
