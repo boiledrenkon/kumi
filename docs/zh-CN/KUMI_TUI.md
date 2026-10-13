@@ -131,6 +131,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
   - Live 状态栏中的一行（“Kumi · done · the bass is darker”）；从不弹出对话框，也不进入 HISTORY。
   - 每 10 秒最多一条（等待中的最新一条届时送出）；Live 录音时一条也不送，等录音停止；你回来后不再发送。
   - 对从不告知自己是否在前台的终端，在 Mac 上，只有在有事要告诉你时，Kumi 才询问系统哪个应用在前台。
+  - 没有看到通知？请在“系统设置 › 通知”中允许你的终端（若是 macOS 自身的通知，则为“脚本编辑器”）发送通知。
 - **电脑保持唤醒**：在 Kumi 工作期间（一个回答、`/goal`、等待套餐上限）；显示器可以休眠。
 - **设置**（`~/.kumi/settings.json`）：`"notifications": "off"`、`"liveStatusBar": false`、`"keepAwake": false`，以及 `"answerAfter"`（Kumi 选择推荐答案之前的秒数；`0` 表示从不）。
 

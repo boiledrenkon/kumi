@@ -208,6 +208,8 @@ answer, or quits when idle.
     Live is recording, until it stops; none once you're back.
   - A terminal that never says whether it's in front: on a Mac, Kumi asks the
     system which app is, only when there's something to tell.
+  - No notification shows? Allow them for your terminal (or, for macOS's own,
+    Script Editor) in System Settings › Notifications.
 - **The computer stays awake** while Kumi works (an answer, a `/goal`, a wait
   for a plan's limit); the display may sleep.
 - **Settings** (`~/.kumi/settings.json`): `"notifications": "off"`,
