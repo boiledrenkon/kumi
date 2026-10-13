@@ -35,6 +35,8 @@ pub struct TurnTiming {
     /// Each model call's wait for its first content: text, reasoning or a tool call (not the stream's
     /// start or its metadata, which come with the response's headers).
     pub first_part_ms: Vec<u64>,
+    /// Each model call's input tokens and how many of them the provider's cache held, as it counted them.
+    pub call_tokens: Vec<(u64, u64)>,
     pub tools: u32,
     pub tool_ms: u64,
     /// Each tool's calls and their time. Calls that ran together each count their own.
@@ -114,6 +116,7 @@ fn with(add: impl FnOnce(&mut TurnTiming)) {
 pub struct ModelCall {
     began: Instant,
     first: Option<u64>,
+    tokens: Option<(u64, u64)>,
 }
 
 pub fn model_call(model: &str) -> ModelCall {
@@ -124,7 +127,7 @@ pub fn model_call(model: &str) -> ModelCall {
             _ => timing.models.push((model.to_string(), 1)),
         }
     });
-    ModelCall { began: Instant::now(), first: None }
+    ModelCall { began: Instant::now(), first: None, tokens: None }
 }
 
 impl ModelCall {
@@ -140,11 +143,15 @@ impl Drop for ModelCall {
     fn drop(&mut self) {
         let total = self.began.elapsed().as_millis() as u64;
         let first = self.first;
+        let tokens = self.tokens;
         with(|timing| {
             timing.model_calls += 1;
             timing.model_ms += total;
             if let Some(first) = first {
                 timing.first_part_ms.push(first);
+            }
+            if let Some(tokens) = tokens {
+                timing.call_tokens.push(tokens);
             }
         });
     }
@@ -161,6 +168,10 @@ pub fn timed(parts: StreamParts, mut call: ModelCall) -> StreamParts {
             StreamPart::TextDelta { .. } | StreamPart::ReasoningDelta { .. } | StreamPart::ToolInputStart { .. } | StreamPart::ToolCall(_)
         ) {
             call.part();
+        }
+        if let StreamPart::Finish { usage, .. } = part {
+            let count = |tokens: Option<f64>| tokens.unwrap_or(0.0).max(0.0) as u64;
+            call.tokens = Some((count(usage.input_tokens.total), count(usage.input_tokens.cache_read)));
         }
     }))
 }
@@ -281,6 +292,7 @@ pub fn line(timing: &TurnTiming, elapsed_ms: u64, stop: Value, usage: Option<&Us
         "modelCalls": timing.model_calls,
         "modelMs": timing.model_ms,
         "firstPartMs": timing.first_part_ms,
+        "callTokens": timing.call_tokens.iter().map(|(input, cached)| json!([input, cached])).collect::<Vec<_>>(),
         "tools": timing.tools,
         "toolMs": timing.tool_ms,
         "liveRequests": timing.live_requests,
@@ -327,6 +339,10 @@ pub fn line(timing: &TurnTiming, elapsed_ms: u64, stop: Value, usage: Option<&Us
         line["inputTokens"] = json!(usage.input_tokens);
         line["cachedTokens"] = json!(usage.cache_read_tokens);
         line["outputTokens"] = json!(usage.output_tokens);
+        // What the provider wrote to its cache: a turn that wrote much and read little missed the cache.
+        if usage.cache_write_tokens > 0.0 {
+            line["cacheWriteTokens"] = json!(usage.cache_write_tokens);
+        }
     }
     line
 }
@@ -501,5 +517,28 @@ mod tests {
         let timing = recorder.finish();
         assert_eq!(timing.model_calls, 1);
         assert!(timing.first_part_ms[0] >= 60, "{:?}", timing.first_part_ms);
+    }
+
+    #[tokio::test]
+    async fn each_call_logs_its_input_and_what_the_cache_held() {
+        use crate::ai::types::{FinishReason, FinishReasonUnified, InputTokens, OutputTokens, Usage as ModelUsage};
+        use futures::{stream, StreamExt};
+        let finish = |input: f64, cached: Option<f64>| StreamPart::Finish {
+            usage: ModelUsage {
+                input_tokens: InputTokens { total: Some(input), no_cache: None, cache_read: cached, cache_write: None },
+                output_tokens: OutputTokens { total: Some(5.0), text: None, reasoning: None },
+                raw: None,
+            },
+            finish_reason: FinishReason { unified: FinishReasonUnified::Stop, raw: None },
+            provider_metadata: None,
+        };
+        let recorder = begin();
+        for (input, cached) in [(16000.0, None), (16500.0, Some(15872.0))] {
+            let parts: StreamParts = Box::pin(stream::iter([finish(input, cached)]));
+            timed(parts, model_call("openai/gpt-test")).collect::<Vec<_>>().await;
+        }
+        let timing = recorder.finish();
+        assert_eq!(timing.call_tokens, [(16000, 0), (16500, 15872)]);
+        assert_eq!(super::line(&timing, 10, json!("completed"), None)["callTokens"], json!([[16000, 0], [16500, 15872]]));
     }
 }

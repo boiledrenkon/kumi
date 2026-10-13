@@ -9,6 +9,7 @@ pub mod goal_mode;
 pub mod loop_run;
 pub mod match_run;
 pub mod memory;
+pub mod phrases;
 pub mod playbook;
 pub mod private;
 pub mod recall;

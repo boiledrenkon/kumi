@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use super::budget::{fit, opening, put_away_images, transcript_of, ContextBudget, PutAway, DEFAULT_BUDGET};
+use super::deferred::{self, Shelf, CALL_TOOL};
 use super::failure::{describe_failure, plan_limit, provider_name, reset_words, retry_reason, wait_for, PlanLimit, Wait, MAX_RETRIES};
 use crate::ai::error::LanguageModelError;
 use crate::ai::types::{
@@ -169,7 +170,10 @@ impl Abort {
 }
 
 static TOOL_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]{1,64}$").expect("regex"));
+/// The most tools one request carries (deferred tools aren't sent).
 const MAX_TOOLS: usize = 128;
+/// The most tools a kernel holds, deferred ones included.
+const MAX_ALL_TOOLS: usize = 512;
 const MAX_INSTRUCTIONS: usize = 64 * 1024;
 const MAX_STEER: usize = 16 * 1024;
 const MAX_TOOL_ERROR: usize = 4 * 1024;
@@ -217,7 +221,10 @@ struct Inner {
     budget: ContextBudget,
     budget_given: bool,
     tools: HashMap<String, Rc<dyn KernelTool>>,
+    /// What every request carries: the core tools, then find_tools and call_tool when some are deferred.
     specs: Vec<FunctionTool>,
+    /// The tools not sent with every request, which find_tools and call_tool reach.
+    shelf: Option<Rc<Shelf>>,
     session_id: String,
     lifetime: Controller,
     /// What the conversation was made with besides its messages: some models' reasoning is bound to it.
@@ -268,16 +275,25 @@ pub fn create_agent_kernel(options: AgentKernelOptions) -> Result<AgentKernel, R
     if !is_safe_integer(budget.clear_at) || !is_safe_integer(budget.limit) || budget.clear_at < 1024.0 || budget.limit < budget.clear_at {
         return Err(RuntimeError::plain("The context budget must clear at 1 KiB or more, with a limit at least that."));
     }
-    let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
-    if names.len() > MAX_TOOLS
+    // Deferred tools stay out of every request: find_tools and call_tool go in their place, after the core ones.
+    let (deferred, mut sent): (Vec<Rc<dyn KernelTool>>, Vec<Rc<dyn KernelTool>>) = tools.iter().cloned().partition(|tool| tool.deferred());
+    let shelf = Shelf::new(deferred.clone());
+    if let Some(shelf) = &shelf {
+        sent.extend(shelf.tools());
+    }
+    let names: Vec<&str> = sent.iter().chain(&deferred).map(|tool| tool.name()).collect();
+    if sent.len() > MAX_TOOLS
+        || names.len() > MAX_ALL_TOOLS
         || names.iter().collect::<HashSet<_>>().len() != names.len()
         || names.iter().any(|name| !TOOL_NAME.is_match(name))
     {
-        return Err(RuntimeError::plain("Tool names must be unique, at most 64 characters of [a-zA-Z0-9_-], and at most 128 tools."));
+        return Err(RuntimeError::plain(
+            "Tool names must be unique, at most 64 characters of [a-zA-Z0-9_-], and at most 128 tools sent with a request.",
+        ));
     }
-    let specs: Vec<FunctionTool> =
-        tools.iter().map(|tool| FunctionTool::new(tool.name(), tool.description(), Value::Object(tool.input_schema()))).collect();
-    let tools: HashMap<String, Rc<dyn KernelTool>> = tools.iter().map(|tool| (tool.name().to_string(), tool.clone())).collect();
+    let specs: Vec<FunctionTool> = sent.iter().map(deferred::spec).collect();
+    let tools: HashMap<String, Rc<dyn KernelTool>> =
+        sent.iter().chain(&deferred).map(|tool| (tool.name().to_string(), tool.clone())).collect();
     let session_id = match conversation {
         // A UUID of the conversation's own: the same one every time it's carried on.
         Some(conversation) => {
@@ -309,6 +325,7 @@ pub fn create_agent_kernel(options: AgentKernelOptions) -> Result<AgentKernel, R
             budget_given,
             tools,
             specs,
+            shelf,
             session_id,
             lifetime,
             tools_key,
@@ -757,9 +774,14 @@ struct TurnInput<'a> {
 
 impl InputStream for TurnInput<'_> {
     fn start(&self, id: &str, name: &str) {
-        let tool = self.turn.inner.tools.get(name).cloned();
+        // A deferred tool's input is checked whole before it runs, so it never starts early.
+        let tool = self.turn.inner.tools.get(name).filter(|tool| !tool.deferred()).cloned();
         let calls = self.calls.get();
         self.calls.set(calls + 1);
+        // call_tool's own tool is known only once its input is whole: its start shows that tool.
+        if name == CALL_TOOL {
+            return;
+        }
         if calls == 0 {
             if let Some(tool) = tool {
                 let begun = Rc::new(Cell::new(None));
@@ -994,27 +1016,29 @@ impl Turn {
         let mut replies: Vec<String> = Vec::new();
         let mut failed = false;
         let mut quiet = 0;
+        let prepared: Vec<Prepared> = calls.iter().map(|(call, input)| self.prepare(call, input)).collect();
         while results.len() < calls.len() {
             if self.abort.is_cancelled() {
                 return self.stopped(results, finished, calls);
             }
-            let rest = &calls[results.len()..];
+            let rest = &prepared[results.len()..];
             // At most four at once: a reply can ask for many pages, and search services limit bursts.
-            let together = rest.iter().take_while(|(call, _)| TOGETHER.contains(&call.tool_name.as_str())).take(4).count();
+            let together = rest.iter().take_while(|call| TOGETHER.contains(&call.name.as_str())).take(4).count();
             let group = &rest[..together.max(1)];
             let ran = if group.len() > 1 {
                 let began = perf_now();
-                let ran = join_all(group.iter().map(|(call, input)| self.call(call, input, false))).await;
+                let ran = join_all(group.iter().map(|call| self.call(call, false))).await;
                 crate::core::timing::tools(group.len() as u32, round(perf_now() - began).max(0.0) as u64);
                 ran
             } else {
-                vec![self.call(&group[0].0, &group[0].1, true).await]
+                vec![self.call(&group[0], true).await]
             };
-            for ((call, input), ran) in group.iter().zip(ran) {
+            for (prepared, ran) in group.iter().zip(ran) {
+                let (call, input) = (prepared.call, &prepared.input);
                 let outcome = match ran {
                     Ran::Stopped => {
                         // A read away from Live can't have changed it.
-                        let text = if TOGETHER.contains(&call.tool_name.as_str()) { STOPPED_READING } else { STOPPED_WHILE_RUNNING };
+                        let text = if TOGETHER.contains(&prepared.name.as_str()) { STOPPED_READING } else { STOPPED_WHILE_RUNNING };
                         Outcome { text: text.into(), is_error: true, images: Vec::new() }
                     }
                     Ran::Done { outcome, reply } => {
@@ -1055,14 +1079,46 @@ impl Turn {
         Ok((results, reply))
     }
 
+    /// What a call runs: a core tool as it was called, or a deferred one (by call_tool or by its name) with
+    /// its input checked against its schema first.
+    fn prepare<'c>(&self, call: &'c ToolCall, input: &Option<JsonObject>) -> Prepared<'c> {
+        let resolved = self.inner.shelf.as_ref().and_then(|shelf| shelf.resolve(&call.tool_name, input.as_ref()));
+        match resolved {
+            Some(Ok((tool, input))) => Prepared { call, name: tool.name().to_string(), input: Some(input), target: Target::Tool(tool) },
+            Some(Err(why)) => {
+                let named = input.as_ref().and_then(|input| input.get("name")).and_then(Value::as_str);
+                let name = if call.tool_name == CALL_TOOL {
+                    named.map(|name| head(name, 64)).unwrap_or_else(|| CALL_TOOL.into())
+                } else {
+                    call.tool_name.clone()
+                };
+                Prepared { call, name, input: input.clone(), target: Target::Refused(why) }
+            }
+            None => match self.inner.tools.get(&call.tool_name) {
+                Some(tool) => Prepared { call, name: call.tool_name.clone(), input: input.clone(), target: Target::Tool(tool.clone()) },
+                None => Prepared {
+                    call,
+                    name: call.tool_name.clone(),
+                    input: input.clone(),
+                    target: Target::Refused(format!(
+                        "Unknown tool {}; use only the supplied tools{}.",
+                        quote(&head(&call.tool_name, 64)),
+                        if self.inner.shelf.is_some() { " (find_tools lists the others)" } else { "" }
+                    )),
+                },
+            },
+        }
+    }
+
     /// One call, from its start to its result. `alone`: not one of calls running together, whose time
     /// is the group's, not the sum of theirs.
-    async fn call(&self, call: &ToolCall, input: &Option<JsonObject>, alone: bool) -> Ran {
+    async fn call(&self, prepared: &Prepared<'_>, alone: bool) -> Ran {
+        let (call, input) = (prepared.call, &prepared.input);
         let streamed = self.early.borrow().get(&call.tool_call_id).cloned();
         let begun = streamed.as_ref().and_then(|entry| entry.begun.get());
         let started = begun.unwrap_or_else(perf_now);
         if begun.is_none() {
-            (self.deliver)(KernelEvent::ToolStart { id: call.tool_call_id.clone(), name: call.tool_name.clone() });
+            (self.deliver)(KernelEvent::ToolStart { id: call.tool_call_id.clone(), name: prepared.name.clone() });
         }
         // A streamed call that hadn't begun (its first step waiting for the next, to batch them) begins in
         // finish: it's started now, so beginning there doesn't say so a second time.
@@ -1071,18 +1127,14 @@ impl Turn {
                 entry.begun.set(Some(started));
             }
         }
-        let tool = self.inner.tools.get(&call.tool_name).cloned();
         let mut reply = None;
-        let outcome = match tool {
-            None => Outcome {
-                text: format!("Unknown tool {}; use only the supplied tools.", quote(&head(&call.tool_name, 64))),
-                is_error: true,
-                images: Vec::new(),
-            },
-            Some(_) if input.is_none() && streamed.is_none() => {
+        let outcome = match &prepared.target {
+            Target::Refused(why) => Outcome { text: why.clone(), is_error: true, images: Vec::new() },
+            Target::Tool(_) if input.is_none() && streamed.is_none() => {
                 Outcome { text: "Tool arguments must be a JSON object.".to_string(), is_error: true, images: Vec::new() }
             }
-            Some(tool) => {
+            Target::Tool(tool) => {
+                let tool = tool.clone();
                 let input = input.clone();
                 let signal = self.abort.signal();
                 let work = async move {
@@ -1098,17 +1150,17 @@ impl Turn {
                     }
                     Err(_) if self.abort.is_cancelled() => {
                         // A call stopped while it ran still took its time: often the slowest of the turn.
-                        self.timed(call, started, alone);
+                        self.timed(&prepared.name, started, alone);
                         return Ran::Stopped;
                     }
                     Err(error) => Outcome { text: head(&error.to_string(), MAX_TOOL_ERROR), is_error: true, images: Vec::new() },
                 }
             }
         };
-        let elapsed_ms = self.timed(call, started, alone);
+        let elapsed_ms = self.timed(&prepared.name, started, alone);
         (self.deliver)(KernelEvent::ToolEnd {
             id: call.tool_call_id.clone(),
-            name: call.tool_name.clone(),
+            name: prepared.name.clone(),
             is_error: outcome.is_error,
             elapsed_ms,
         });
@@ -1117,9 +1169,9 @@ impl Turn {
 
     /// A call's time, from `started`, added to the turn's: by its tool, and to the turn's tool time when
     /// it ran alone (calls run together add their group's).
-    fn timed(&self, call: &ToolCall, started: f64, alone: bool) -> u64 {
+    fn timed(&self, name: &str, started: f64, alone: bool) -> u64 {
         let elapsed_ms = round(perf_now() - started).max(0.0) as u64;
-        crate::core::timing::tool_call(&call.tool_name, elapsed_ms);
+        crate::core::timing::tool_call(name, elapsed_ms);
         if alone {
             crate::core::timing::tool(elapsed_ms);
         }
@@ -1152,6 +1204,22 @@ impl Turn {
 /// Tools that only read, away from Live: the web, the library and its samples, Live's manual, earlier
 /// conversations. Consecutive calls to them in one reply run together.
 const TOGETHER: &[&str] = &["search_web", "read_web", "find_sounds", "find_presets", "my_sets", "live_manual", "search_conversations"];
+
+/// A call as it runs: the model's own call (its id and name stay on the result), the tool that runs (the one
+/// call_tool names, or the call's own) and its input.
+struct Prepared<'c> {
+    call: &'c ToolCall,
+    /// What NOW, the transcript and the timings show: the tool that runs, never call_tool.
+    name: String,
+    input: Option<JsonObject>,
+    target: Target,
+}
+
+enum Target {
+    Tool(Rc<dyn KernelTool>),
+    /// It can't run (an unknown tool, an input that doesn't fit): why, as its result.
+    Refused(String),
+}
 
 /// What one call came to.
 enum Ran {
@@ -1209,7 +1277,10 @@ pub fn plain_words(messages: &[Message]) -> Vec<Message> {
                     .iter()
                     .map(|part| match part {
                         AssistantPart::Text(text) => text.text.clone(),
-                        AssistantPart::ToolCall(call) => format!("[called {} {}]", call.tool_name, clip(&stringify(&call.input))),
+                        AssistantPart::ToolCall(call) => {
+                            let (name, input) = deferred::shown(&call.tool_name, &call.input);
+                            format!("[called {name} {}]", clip(&stringify(input)))
+                        }
                         _ => String::new(),
                     })
                     .filter(|line| !line.is_empty())

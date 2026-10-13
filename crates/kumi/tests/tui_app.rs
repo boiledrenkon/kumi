@@ -203,6 +203,44 @@ case!(failure_disconnect_focus, async {
     assert!(h.screen()[0].ends_with("● Live not connected  "));
     h.close().await;
 });
+case!(a_fixed_phrase_changes_live_at_once_and_undoes_from_history, async {
+    let h = Harness::new(120, 36);
+    h.control.set("instant", json!(true));
+    h.control.set(
+        "instant-change",
+        json!({"id":"c1","family":"tempo","title":"Tempo 120 → 124 BPM","state":"applied","from":120,"to":124,"at":1}),
+    );
+    h.start().await;
+    h.connect();
+    h.type_text("tempo 124\r").await;
+    h.wait_for_call("instant:tempo 124").await;
+    // No model turn: the answer is Kumi's own, marked instant, and NOW says so with the change.
+    h.has("Tempo 120 → 124 BPM · instant");
+    assert!(!h.calls().iter().any(|c| c.starts_with("submit")), "{:?}", h.calls());
+    let lines = h.screen();
+    let history = lines.iter().position(|s| s.contains("HISTORY")).unwrap();
+    assert!(lines[history + 1].contains("✓ Tempo 120 → 124 BPM") && lines[history + 1].contains("undo"), "{lines:#?}");
+    let mut undone = json!({"id":"c1","family":"tempo","title":"Tempo 120 → 124 BPM","state":"undone","from":120,"to":124,"at":1});
+    *h.control.undo.borrow_mut() = Some(serde_json::from_value(undone.take()).unwrap());
+    h.type_text(&click(&lines, history + 1, "undo")).await;
+    assert!(h.calls().contains(&"undo:c1".into()));
+    h.has("○ Tempo 120 → 124 BPM");
+    // Not a phrase: the model takes it, and Kumi doesn't try it as one.
+    h.type_text("make the bass darker\r").await;
+    h.wait_for_call("submit:make the bass darker").await;
+    assert!(!h.calls().contains(&"instant:make the bass darker".into()));
+    h.close().await;
+});
+case!(a_phrase_kumi_cant_run_as_asked_goes_to_the_model, async {
+    let h = Harness::new(120, 36);
+    h.control.set("instant", json!(true));
+    h.start().await;
+    h.connect();
+    h.type_text("mute guitar\r").await;
+    h.wait_for_call("submit:mute guitar").await;
+    assert!(h.calls().contains(&"instant:mute guitar".into()));
+    h.close().await;
+});
 case!(undo_history_and_clipboard, async {
     let h = Harness::new(120, 36);
     h.start().await;

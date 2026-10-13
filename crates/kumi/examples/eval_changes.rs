@@ -5,6 +5,9 @@
 //! like an instruction. Notes, recipes and audio go to a throwaway folder, never ~/.kumi.
 //!
 //! cargo run --release -p kumi --example eval_changes [-- <part of a case name>]
+//!
+//! EVAL_TIMINGS=<file> writes each turn's timings.jsonl line (model calls, first parts, tokens) after a line naming
+//! its case.
 use ableton_mcp_server::{delivery::PACKAGE_VERSION, tool_catalog::TOOL_CATALOG};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt};
@@ -1532,6 +1535,9 @@ struct Outcome {
     calls: usize,
     tool_ms: f64,
     tools: Option<Vec<String>>,
+    /// The model's find_tools and call_tool calls: the round trips a tool it wasn't sent up front cost.
+    found: usize,
+    called: usize,
     live: Vec<String>,
     changes: Vec<String>,
     recipes: Vec<String>,
@@ -1600,6 +1606,7 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
         let model = model.clone();
         let budget = case.budget;
         Rc::new(move |options: KernelOptions| {
+            OFFERED.with(|offered| *offered.borrow_mut() = options.tools.clone());
             let made = create_agent_kernel(AgentKernelOptions {
                 conversation: None,
                 instructions: options.instructions,
@@ -1683,6 +1690,11 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
     options.techniques = Some(create_technique_store(techniques_file));
     options.gaps = Some(text_of(&gaps_file));
     options.watch = Some(VideoDirectories { videos_dir: text_of(&place.join("videos")), tools_dir: text_of(&place.join("tools")) });
+    // EVAL_TIMINGS=<file>: each turn's timings.jsonl line, after a {"case": …} line naming its case.
+    if let Some(file) = std::env::var_os("EVAL_TIMINGS").filter(|file| !file.is_empty()) {
+        kumi_runtime::core::timing::append(Path::new(&file), &json!({"case": case.name}));
+        options.timings = Some(file.to_string_lossy().into_owned());
+    }
     let session = Rc::new(create_session(options)?);
     *controller.borrow_mut() = Some(Rc::downgrade(&session));
     let started = perf_now();
@@ -1774,6 +1786,18 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
             }
         })
         .collect();
+    // find_tools and call_tool as the model called them (the steps shown name the tool call_tool ran).
+    let called_by_name = |name: &str| {
+        serde_json::from_str::<Vec<Value>>(&conversation)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|message| message.get("content").and_then(Value::as_array))
+            .flatten()
+            .filter(|part| {
+                part.get("type").and_then(Value::as_str) == Some("tool-call") && part.get("toolName").and_then(Value::as_str) == Some(name)
+            })
+            .count()
+    };
     Ok(Outcome {
         name: case.name,
         passed: (case.check)(&run),
@@ -1781,6 +1805,8 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
         calls,
         tool_ms: round(tool_ms.get()),
         tools: Some(tools.clone()),
+        found: called_by_name("find_tools"),
+        called: called_by_name("call_tool"),
         live,
         changes: changes.iter().map(|change| format!("{} · {}", word(change.state), change.title)).collect(),
         recipes: saved
@@ -1813,7 +1839,17 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
 /// A case's lines: pass or FAIL, its time and model calls, then what it changed, kept and said.
 fn report(outcome: &Outcome) {
     let timing = if outcome.ms != 0.0 {
-        format!("  {}s (tools {}s), {} model calls", to_fixed(outcome.ms / 1000.0, 1), to_fixed(outcome.tool_ms / 1000.0, 1), outcome.calls)
+        let deferred = if outcome.found + outcome.called > 0 {
+            format!(" ({} find_tools, {} call_tool)", outcome.found, outcome.called)
+        } else {
+            String::new()
+        };
+        format!(
+            "  {}s (tools {}s), {} model calls{deferred}",
+            to_fixed(outcome.ms / 1000.0, 1),
+            to_fixed(outcome.tool_ms / 1000.0, 1),
+            outcome.calls
+        )
     } else {
         String::new()
     };
@@ -1847,6 +1883,11 @@ fn report(outcome: &Outcome) {
     if let Some(budget) = &outcome.budget {
         println!("        budget: {budget}");
     }
+}
+
+thread_local! {
+    /// Every tool the last kernel was made with, the deferred ones too: what EVAL_MEASURE=tools lists.
+    static OFFERED: RefCell<Vec<Rc<dyn kumi_runtime::KernelTool>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A model that answers nothing, for measuring what a request carries.
@@ -1885,10 +1926,18 @@ async fn measure(catalog: &Rc<ListToolsResult>, watched: &Rc<Watched>) -> Result
     let schema: u64 = sizes.iter().filter_map(|size| size["bytes"].as_u64()).sum();
     let instruction_bytes = instructions.len() as u64;
     let mut measured = json!({"toolCount": tools.len(), "instructionBytes": instruction_bytes, "schemaBytes": schema, "fixedBytes": instruction_bytes + schema, "sizes": sizes});
-    // EVAL_MEASURE=tools: each tool's definition too, as it's sent.
+    // EVAL_MEASURE=tools: each tool's definition too, as it's sent, and those that wait behind find_tools.
     if std::env::var("EVAL_MEASURE").is_ok_and(|measure| measure == "tools") {
         measured["tools"] = serde_json::to_value(&tools).unwrap_or_default();
         measured["instructions"] = Value::String(instructions);
+        measured["deferred"] = OFFERED.with(|offered| {
+            offered
+                .borrow()
+                .iter()
+                .filter(|tool| tool.deferred())
+                .map(|tool| json!({"name": tool.name(), "description": tool.description(), "inputSchema": tool.input_schema(), "listedBy": tool.listed_by()}))
+                .collect()
+        });
     }
     println!("{}", stringify(&measured));
     Ok(0)
@@ -1954,6 +2003,8 @@ async fn run() -> Result<i32, RuntimeError> {
     );
     let (input, cached, output) = model.counting.tokens.get();
     println!("Tokens: {} in ({} of them cache reads), {} out.", to_string(input), to_string(cached), to_string(output));
+    let (found, called) = results.iter().fold((0, 0), |(found, called), result| (found + result.found, called + result.called));
+    println!("Tools not sent up front: {found} find_tools and {called} call_tool calls.");
     Ok(if passed == results.len() { 0 } else { 1 })
 }
 

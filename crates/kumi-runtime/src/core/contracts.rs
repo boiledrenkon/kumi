@@ -81,6 +81,16 @@ pub trait KernelTool {
         let _ = (signal, on_start);
         None
     }
+    /// Rarely needed, so not sent with every request: the model finds it with find_tools and runs it with
+    /// call_tool (or by its name), and every request stays small. Whoever makes the tool decides.
+    fn deferred(&self) -> bool {
+        false
+    }
+    /// The tool whose own description already lists this one with its input (a plan tool whose steps run
+    /// it): find_tools' list points there instead of repeating this one.
+    fn listed_by(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A tool call under way while its input streams in.
@@ -490,6 +500,15 @@ pub trait Integration {
     /// Whether the DAW is recording now; None when it can't say.
     async fn recording(&self, signal: Signal) -> Result<Option<bool>, RuntimeError> {
         let _ = signal;
+        Ok(None)
+    }
+    fn has_instant(&self) -> bool {
+        false
+    }
+    /// A fixed phrase's intent (core/phrases.rs) made as this DAW's change, with no model call: what changed, in
+    /// words. None when it can't run as asked here (a track the Set doesn't have, or two that fit): the model takes it.
+    async fn instant(&self, intent: &crate::core::phrases::Intent, signal: Signal) -> Result<Option<InstantOutcome>, RuntimeError> {
+        let _ = (intent, signal);
         Ok(None)
     }
     fn has_device_tree(&self) -> bool {
@@ -1772,6 +1791,13 @@ pub struct RecipeOutcome {
     pub is_error: bool,
 }
 
+/// A fixed phrase run with no model call ("tempo 124"): what changed, in words, as Kumi says it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstantOutcome {
+    pub text: String,
+    pub is_error: bool,
+}
+
 /// Optional methods (`steer?()` and so on) have a `has_…` flag, false by default, that says whether
 /// this controller offers them; their default bodies answer as an absent method's caller would read.
 #[async_trait(?Send)]
@@ -1903,6 +1929,15 @@ pub trait SessionController {
     /// The producer's saved recipes, most recently used first.
     async fn recipes(&self) -> Result<Vec<RecipeSummary>, RuntimeError> {
         Ok(Vec::new())
+    }
+    fn has_instant(&self) -> bool {
+        false
+    }
+    /// A message that is a fixed phrase ("tempo 124", "mute drums", "loop 9-16"), run with no model call: what
+    /// changed. None when it isn't one, or can't run as asked: then it goes to the model as written.
+    async fn instant(&self, text: &str) -> Result<Option<InstantOutcome>, RuntimeError> {
+        let _ = text;
+        Ok(None)
     }
     fn has_run_recipe(&self) -> bool {
         false

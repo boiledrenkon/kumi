@@ -228,6 +228,7 @@ impl KernelTool for VideoTool {
     fn input_schema(&self) -> JsonObject {
         DATA["schema"].as_object().unwrap().clone()
     }
+
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let url = input.get("url").and_then(Value::as_str).map(trim).unwrap_or("");
         if url.is_empty() {

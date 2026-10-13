@@ -265,6 +265,16 @@ impl SessionController for Control {
     async fn recipes(&self) -> Result<Vec<RecipeSummary>, RuntimeError> {
         Ok(self.get("recipes").unwrap_or_default())
     }
+    fn has_instant(&self) -> bool {
+        self.enabled("instant")
+    }
+    async fn instant(&self, text: &str) -> Result<Option<InstantOutcome>, RuntimeError> {
+        self.call(format!("instant:{text}"));
+        // A phrase the fake can run lands as Kumi's would: its change, then what it said. Without one, the model takes it.
+        let Some(change) = self.get::<ChangeRecord>("instant-change") else { return Ok(None) };
+        self.emit(SessionEvent::Change { change: change.clone() });
+        Ok(Some(InstantOutcome { text: change.title, is_error: false }))
+    }
     fn has_run_recipe(&self) -> bool {
         self.enabled("recipes")
     }

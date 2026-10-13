@@ -126,6 +126,29 @@ message, not a command.
 `/new`, `/reconnect`, `/refresh` and `/undo` work only while Kumi isn't
 answering; during an answer, Kumi says so and leaves things as they are.
 
+## Instant phrases
+
+A message that's one of these phrases changes Live at once, with no model call.
+Its answer says what changed and "instant", and the change is in HISTORY with
+its undo. They're in English for now.
+
+| Phrase | What it does |
+| --- | --- |
+| `tempo 124`, `bpm 124`, `124 bpm` | Sets the tempo |
+| `mute drums`, `unmute drums` | Mutes or unmutes a track |
+| `solo bass`, `unsolo bass` | Solos or unsolos a track |
+| `arm vocals`, `disarm vocals` | Arms a track to record, or disarms it |
+| `loop 9-16`, `loop bars 9 to 16`, `loop off` | Loops bars 9 to 16 (both included), or turns the loop off |
+| `metronome on`, `metronome off` | Turns the metronome on or off |
+
+- A track is its name (any case), the one track whose name starts with what you
+  typed, or its place: `mute track 3`.
+- Anything more ("mute the drums a bit", "solo the bass?"), or a track Kumi
+  can't tell for sure, goes to the model as you wrote it.
+- They run only while Kumi isn't answering; during an answer, Enter steers it as
+  usual.
+- `"instantPhrases": false` in `~/.kumi/settings.json` turns them off.
+
 ## Keys
 
 **Typing and sending**

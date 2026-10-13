@@ -479,12 +479,15 @@ fn responses_request(request: ModelRequest, extra: Map<String, Value>) -> CallOp
     options
 }
 fn anthropic_request(request: ModelRequest, effort: Option<Effort>) -> CallOptions {
+    // The tools and instructions stay cached for an hour, through a long render or listen; the conversation, which
+    // changes each call, for the default five minutes. Anthropic takes the longer one first.
+    let lasting = Map::from_iter([("anthropic".into(), json!({"cacheControl":{"type":"ephemeral","ttl":"1h"}}))]);
     let cache = Map::from_iter([("anthropic".into(), json!({"cacheControl":{"type":"ephemeral"}}))]);
     let mut messages = request.messages;
     if let Some(last) = messages.last_mut() {
-        last.provider_options_mut().get_or_insert_with(Map::new).extend(cache.clone());
+        last.provider_options_mut().get_or_insert_with(Map::new).extend(cache);
     }
-    let mut prompt = vec![Message::System { content: request.instructions, provider_options: Some(cache) }];
+    let mut prompt = vec![Message::System { content: request.instructions, provider_options: Some(lasting) }];
     prompt.extend(messages);
     let mut options = CallOptions {
         prompt,

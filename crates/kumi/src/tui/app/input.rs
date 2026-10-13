@@ -813,6 +813,9 @@ impl TuiApp {
                 state.transcript.add(Entry::User { text });
                 state.last_sent = Some(raw.clone());
             }
+            if self.instant(&raw).await {
+                return Ok(());
+            }
             self.send(&raw).await;
             return Ok(());
         };
@@ -864,6 +867,42 @@ impl TuiApp {
             }
             Ok(())
         });
+    }
+    /// A message that's a fixed phrase ("tempo 124", "mute drums") changes Live at once, with no model call; its
+    /// answer says what changed, marked instant, and the change is in HISTORY with its undo. Anything else, or a phrase
+    /// Kumi can't run as asked (a track it can't tell for sure), goes to the model as written.
+    async fn instant(&self, raw: &str) -> bool {
+        let controller = self.0.options.controller.clone();
+        if !self.0.options.instant
+            || !controller.has_instant()
+            || !self.0.state.borrow().attachments.is_empty()
+            || kumi_runtime::core::phrases::parse(raw).is_none()
+        {
+            return false;
+        }
+        let started = perf_now();
+        {
+            let mut state = self.0.state.borrow_mut();
+            state.instant_running = true;
+            state.activity = "changing".into();
+        }
+        self.0.scheduler.request();
+        let outcome = controller.instant(raw).await;
+        self.0.state.borrow_mut().instant_running = false;
+        let Ok(Some(outcome)) = outcome else { return false };
+        let text = string::trim(&self.clean(&outcome.text, 2000)).to_string();
+        let mut state = self.0.state.borrow_mut();
+        state.transcript.add(Entry::Assistant {
+            text: if outcome.is_error { text } else { format!("{text} · instant") },
+            steps: vec![],
+            status: if outcome.is_error { AnswerStatus::Failed } else { AnswerStatus::Done },
+            elapsed_ms: Some(number::round(perf_now() - started)),
+            started_at: Some(started),
+        });
+        state.scroll = 0;
+        drop(state);
+        self.0.scheduler.request();
+        true
     }
     pub(super) async fn send(&self, raw: &str) -> bool {
         let (pinned, attachments) = {

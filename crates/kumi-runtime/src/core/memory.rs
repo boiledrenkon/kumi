@@ -419,6 +419,10 @@ impl KernelTool for NoteTool {
             FORGET_DESCRIPTION
         }
     }
+    /// Forgetting is asked for; remembering happens on its own, so remember goes with every request.
+    fn deferred(&self) -> bool {
+        !self.remember
+    }
     fn input_schema(&self) -> JsonObject {
         let value = if self.remember {
             json!({"type":"object", "additionalProperties":false, "required":["note","about"], "properties": {

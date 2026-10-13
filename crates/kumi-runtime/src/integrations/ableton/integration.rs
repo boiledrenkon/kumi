@@ -3,12 +3,13 @@ use super::{
     actions::ACTIONS,
     arrange, audition,
     bridge_version::*,
+    catalog,
     changes::CHANGES,
     command_tools::{CommandTools, CommandToolsOptions},
     connection::LiveConnection,
     context::{object, payload},
     history::{result_text, History},
-    judge_tool, live_command,
+    instant, judge_tool, live_command,
     mutations::Mutations,
     observation::{ObservationHost, ObservedChange, Observer},
     options::{AbletonOptions, HandsSetup},
@@ -172,7 +173,25 @@ impl Ableton {
         abort::any([signal, self.connection.lifetime.clone()])
     }
     fn tool(&self, name: &str, description: &str, schema: JsonObject) -> Rc<dyn KernelTool> {
-        Rc::new(LiveTool { owner: self.weak.upgrade().unwrap(), name: name.into(), description: description.into(), schema })
+        Rc::new(LiveTool {
+            owner: self.weak.upgrade().unwrap(),
+            name: name.into(),
+            description: description.into(),
+            schema,
+            deferred: catalog::deferred(name),
+            listed_by: None,
+        })
+    }
+    /// A change or action: with make_changes offered, a step it lists with its input.
+    fn step_tool(&self, name: &str, description: &str, schema: JsonObject, planned: bool) -> Rc<dyn KernelTool> {
+        Rc::new(LiveTool {
+            owner: self.weak.upgrade().unwrap(),
+            name: name.into(),
+            description: description.into(),
+            schema,
+            deferred: catalog::deferred(name),
+            listed_by: planned.then_some(catalog::PLAN_TOOL),
+        })
     }
     fn static_tool(&self, name: &str) -> Rc<dyn KernelTool> {
         self.tool(name, DATA[name]["description"].as_str().unwrap(), DATA[name]["schema"].as_object().unwrap().clone())
@@ -468,6 +487,10 @@ struct LiveTool {
     name: String,
     description: String,
     schema: JsonObject,
+    /// Not sent with every request (catalog.rs).
+    deferred: bool,
+    /// make_changes, which lists this change or action as a step with its input.
+    listed_by: Option<&'static str>,
 }
 /// Live tools that only read Kumi's own library: they don't wait for Live.
 const AWAY_FROM_LIVE: &[&str] = &["find_sounds"];
@@ -486,6 +509,12 @@ impl KernelTool for LiveTool {
     fn stream(&self, signal: Signal, on_start: Rc<dyn Fn()>) -> Option<Box<dyn StreamingCall>> {
         // While a stopped answer's call is still putting Live back, changes wait for it in execute: none stream.
         (self.name == "make_changes" && !self.owner.rendering.is_busy()).then(|| self.owner.mutations.stream_changes(signal, on_start))
+    }
+    fn deferred(&self) -> bool {
+        self.deferred
+    }
+    fn listed_by(&self) -> Option<&str> {
+        self.listed_by
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let owner = &self.owner;
@@ -687,6 +716,10 @@ impl ObservationHost for Ableton {
                 }),
             }));
         }
+        // make_changes runs every change and action as a step; those that aren't tools of their own get a line each in
+        // its description, with their input.
+        let planned = tools.has("live_undo");
+        let mut steps: Vec<String> = Vec::new();
         let mut edits = Vec::new();
         for kind in CHANGES.iter().filter(|k| {
             k.internal != Some(true)
@@ -700,24 +733,37 @@ impl ObservationHost for Ableton {
                 kind.input_schema.clone().unwrap_or_else(|| kind.schema(&preview.unwrap_or_default()))
             };
             edits.push(kind.tool.clone());
-            offered.push(self.tool(&kind.tool, &kind.description, schema));
+            if !kind.core {
+                steps.push(catalog::step_line(&kind.tool, &kind.description, &schema));
+            }
+            offered.push(self.step_tool(&kind.tool, &kind.description, schema, planned));
         }
         let mut actions = Vec::new();
         for kind in ACTIONS.iter().filter(|k| self.mutations.supported(k.since.as_deref()) && tools.has(&k.preview) && tools.has(&k.apply))
         {
             actions.push(kind.tool.clone());
-            offered.push(self.tool(
-                &kind.tool,
-                &kind.description,
-                kind.input_schema.clone().unwrap_or_else(|| object(&json!(tools.tool(&kind.preview).unwrap().input_schema)).unwrap()),
-            ));
+            let schema =
+                kind.input_schema.clone().unwrap_or_else(|| object(&json!(tools.tool(&kind.preview).unwrap().input_schema)).unwrap());
+            if !kind.core {
+                steps.push(catalog::step_line(&kind.tool, &kind.description, &schema));
+            }
+            offered.push(self.step_tool(&kind.tool, &kind.description, schema, planned));
         }
-        if tools.has("live_undo") && !edits.is_empty() {
+        if planned && !edits.is_empty() {
             let mut schema = DATA["make_changes"]["schema"].clone();
             edits.extend(actions);
             edits.push("wait".into());
             schema["properties"]["steps"]["items"]["properties"]["tool"]["enum"] = json!(edits);
-            offered.push(self.tool("make_changes", DATA["make_changes"]["description"].as_str().unwrap(), object(&schema).unwrap()));
+            let base = DATA["make_changes"]["description"].as_str().unwrap();
+            let description = if steps.is_empty() {
+                base.to_string()
+            } else {
+                format!(
+                    "{base} Steps that aren't tools of your own take these inputs (`?`: may be left out; find_tools gives a step's whole input): {}.",
+                    steps.join("; ")
+                )
+            };
+            offered.push(self.tool("make_changes", &description, object(&schema).unwrap()));
         }
         if ["live_undo", "live_clip_duplicate_preview", "live_clip_duplicate_apply"].iter().all(|n| tools.has(n)) {
             offered.push(self.tool(arrange::ARRANGE_TOOL, &arrange::ARRANGE_DESCRIPTION, arrange::ARRANGE_SCHEMA.clone()));
@@ -875,6 +921,17 @@ impl Integration for Ableton {
             &read.get("items").and_then(|items| items.get(0)).and_then(|item| item.get("transport")).cloned().unwrap_or_default();
         let on = |key: &str| transport.get(key) == Some(&Value::Bool(true));
         Ok(Some(on("playing") && (on("sessionRecord") || on("arrangementRecord"))))
+    }
+    fn has_instant(&self) -> bool {
+        true
+    }
+    async fn instant(&self, intent: &crate::core::phrases::Intent, signal: Signal) -> Result<Option<InstantOutcome>, RuntimeError> {
+        let Some(plan) = instant::steps(intent, &self.observer.model(), self.observer.beats_per_bar.get()) else { return Ok(None) };
+        // One Live call at a time, as every Live tool takes it; the plan says what it changed (final).
+        let signal = self.combined(signal);
+        let _live = self.rendering.hold(&signal).await?;
+        let result = self.mutations.make_changes(object(&plan)?, signal).await?;
+        Ok(Some(InstantOutcome { text: result.reply.filter(|reply| !reply.is_empty()).unwrap_or(result.text), is_error: result.is_error }))
     }
     fn has_device_tree(&self) -> bool {
         true

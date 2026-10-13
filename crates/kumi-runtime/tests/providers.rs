@@ -308,7 +308,10 @@ async fn api_key_providers_use_their_endpoints_credentials_and_cache_session_hin
         assert!(r.headers["user-agent"].starts_with("kumi/"));
         if model.starts_with("anthropic/") {
             assert_eq!(r.headers["x-api-key"], "key-fixture-value");
-            assert_eq!(r.body["system"], json!([{"type":"text","text":"fixture instructions","cache_control":{"type":"ephemeral"}}]));
+            assert_eq!(
+                r.body["system"],
+                json!([{"type":"text","text":"fixture instructions","cache_control":{"type":"ephemeral","ttl":"1h"}}])
+            );
             assert_eq!(r.body["messages"][0]["content"][0]["cache_control"], json!({"type":"ephemeral"}));
         } else {
             assert_eq!(r.headers["authorization"], "Bearer key-fixture-value");
@@ -322,6 +325,72 @@ async fn api_key_providers_use_their_endpoints_credentials_and_cache_session_hin
         }
         if model.contains("kimi-") {
             assert_eq!(r.body["messages"][0]["role"], "system");
+        }
+    }
+}
+// A deferred tool the model called by its own name stays in the conversation, while later requests don't list it
+// among their tools: every API's request still carries the call and its result, paired by id.
+#[tokio::test]
+async fn a_call_to_a_tool_the_request_doesnt_list_keeps_its_place_in_each_api() {
+    let history: Vec<Message> = serde_json::from_value(json!([
+        {"role":"user","content":[{"type":"text","text":"watch me"}]},
+        {"role":"assistant","content":[{"type":"tool-call","toolCallId":"call_1","toolName":"watch_me","input":{"action":"start"}}]},
+        {"role":"tool","content":[{"type":"tool-result","toolCallId":"call_1","toolName":"watch_me","output":{"type":"text","value":"Watching."}}]},
+        {"role":"user","content":[{"type":"text","text":"done"}]}
+    ]))
+    .unwrap();
+    let (_dir, store) = store();
+    let credential = credential();
+    store.update_with("openai-codex", move |_| async move { Ok(Some(Credential::Oauth(credential))) }).await.unwrap();
+    for model in ["openai/gpt-6-luna", "openai-codex/gpt-6-astra", "anthropic/claude-sonnet-5", "opencode/kimi-k2.6"] {
+        let (fetch, requests) = recorder(|_, _| rejection());
+        let mut opts = options(model, store.clone(), fetch);
+        opts.env = Some(
+            [
+                ("OPENAI_API_KEY".into(), "key".into()),
+                ("ANTHROPIC_API_KEY".into(), "key".into()),
+                ("OPENCODE_API_KEY".into(), "key".into()),
+            ]
+            .into(),
+        );
+        let binding = resolve_model(opts).await.unwrap();
+        let tempo = Rc::new(Tempo) as Rc<dyn KernelTool>;
+        let listed = FunctionTool::new(tempo.name(), tempo.description(), Value::Object(tempo.input_schema()));
+        let request = ModelRequest {
+            instructions: "fixture instructions".into(),
+            messages: history.clone(),
+            tools: vec![listed],
+            session_id: "session-1".into(),
+        };
+        let result = binding.model.do_stream((binding.prepare)(request)).await;
+        assert!(matches!(result, Err(error) if error.to_string().contains("fixture rejection")), "{model}");
+        let requests = requests.borrow();
+        let body = &requests.last().unwrap().body;
+        let items = |key: &str| body[key].as_array().cloned().unwrap_or_default();
+        let named = |tools: Vec<Value>| {
+            tools
+                .iter()
+                .map(|tool| tool["name"].as_str().or(tool["function"]["name"].as_str()).unwrap_or("").to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(named(items("tools")), ["get_tempo"], "{model}: the request lists only what it sends");
+        if model.starts_with("openai") {
+            let input = items("input");
+            let call = input.iter().find(|item| item["type"] == "function_call").unwrap();
+            assert_eq!([&call["name"], &call["call_id"]], [&json!("watch_me"), &json!("call_1")], "{model}");
+            assert!(input.iter().any(|item| item["type"] == "function_call_output" && item["call_id"] == "call_1"), "{model}");
+        } else if model.starts_with("anthropic/") {
+            let blocks: Vec<Value> =
+                items("messages").iter().flat_map(|message| message["content"].as_array().cloned().unwrap_or_default()).collect();
+            let call = blocks.iter().find(|block| block["type"] == "tool_use").unwrap();
+            assert_eq!([&call["name"], &call["id"]], [&json!("watch_me"), &json!("call_1")]);
+            assert!(blocks.iter().any(|block| block["type"] == "tool_result" && block["tool_use_id"] == "call_1"));
+        } else {
+            let messages = items("messages");
+            let call =
+                messages.iter().find_map(|message| message["tool_calls"].as_array().and_then(|calls| calls.first().cloned())).unwrap();
+            assert_eq!([&call["function"]["name"], &call["id"]], [&json!("watch_me"), &json!("call_1")]);
+            assert!(messages.iter().any(|message| message["role"] == "tool" && message["tool_call_id"] == "call_1"));
         }
     }
 }

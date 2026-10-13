@@ -117,6 +117,10 @@ pub struct ChangeKind {
     pub internal: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
+    /// Sent with every request as a tool of its own; the rest are make_changes steps the model finds with
+    /// find_tools (see catalog.rs).
+    #[serde(default, skip_serializing)]
+    pub core: bool,
     #[serde(skip_serializing)]
     pub methods: Vec<String>,
     /// Bridge tools the change runs through besides its preview and apply (map_modulator's Python).

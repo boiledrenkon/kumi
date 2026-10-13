@@ -960,6 +960,7 @@ Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
 | `liveStatusBar` | `false`: no line in Live's status bar when Kumi finishes or needs you |
 | `keepAwake` | `false`: the computer may sleep while Kumi works |
 | `answerAfter` | Seconds before Kumi takes its recommended answer when nobody's there (60); `0` never does |
+| `instantPhrases` | `false`: fixed phrases ("tempo 124", "mute drums") go to the model like any other message ([instant phrases](KUMI_TUI.md#instant-phrases)) |
 | `modelServers` | OpenAI-compatible model servers: `[{ "name", "baseURL", "apiKey" }]` ([models on your computer](#models-on-your-computer)) |
 | `libraryFolders` | More folders for Kumi to learn sounds, presets and Sets from |
 | `voice` | Talking: `send` (send when you stop), `language`, `microphone` (`/voice`) |

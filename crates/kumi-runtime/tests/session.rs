@@ -813,6 +813,72 @@ async fn saved(store: &dyn ConversationStore, place: &str, turns: u32) -> Curren
     }
     panic!("conversation was not saved");
 }
+// What every request carries stays small: with every one of the session's own tools on, those it sends with each
+// request (not deferred behind find_tools) stay few and short. Live's side has its own ceiling (live_integration.rs).
+local_test!(with_every_session_tool_on_only_a_few_go_with_every_request, {
+    use kumi_runtime::core::memory::{create_memory_store, MemoryStoreOptions};
+    use kumi_runtime::core::session::VideoDirectories;
+    use kumi_runtime::core::techniques::create_technique_store;
+    use kumi_runtime::library::{create_library, sources::SourceOptions, LibraryOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let text = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    let library = create_library(LibraryOptions {
+        dir: text("library"),
+        find_sets: Some(false),
+        fork: Some(false),
+        sources: Some(SourceOptions { home: Some(text("home")), ..Default::default() }),
+        ..Default::default()
+    });
+    let h = harness(None, |o| {
+        o.memory = Some(create_memory_store(MemoryStoreOptions {
+            projects_dir: dir.path().join("projects"),
+            producer_file: dir.path().join("producer.json"),
+        }));
+        o.listen = true;
+        o.web = true;
+        o.recipes = Some(kumi_runtime::create_recipe_store(dir.path().join("recipes")));
+        o.watch = Some(VideoDirectories { videos_dir: text("videos"), tools_dir: text("tools") });
+        o.techniques = Some(create_technique_store(dir.path().join("techniques.json")));
+        o.gaps = Some(text("gaps.jsonl"));
+        o.conversations = Some(create_conversation_store(dir.path()));
+        o.library = Some(library.clone());
+    });
+    h.session.start().await.unwrap();
+    let tools = h.record.created.borrow()[0].tools.clone();
+    let sent: Vec<&str> = tools.iter().filter(|tool| !tool.deferred()).map(|tool| tool.name()).collect();
+    let bytes: usize = tools
+        .iter()
+        .filter(|tool| !tool.deferred())
+        .map(|tool| tool.description().len() + serde_json::to_string(&tool.input_schema()).unwrap().len())
+        .sum();
+    assert_eq!(
+        sent,
+        ["remember", "listen", "watch_video", "search_web", "read_web", "find_sounds", "note_gap"],
+        "a tool that goes with every request is a choice"
+    );
+    assert!(bytes <= 16 * 1024, "{bytes} bytes");
+    let deferred: Vec<&str> = tools.iter().filter(|tool| tool.deferred()).map(|tool| tool.name()).collect();
+    for name in [
+        "forget",
+        "save_recipe",
+        "run_recipe",
+        "forget_recipe",
+        "search_conversations",
+        "technique",
+        "find_presets",
+        "my_sets",
+        "live_manual",
+    ] {
+        assert!(deferred.contains(&name), "{name} waits behind find_tools: {deferred:?}");
+    }
+    // The checker in front of every deferred tool takes what the tool's own schema allows.
+    for tool in tools.iter().filter(|tool| tool.deferred()) {
+        let schema = Value::Object(tool.input_schema());
+        let example = kumi_runtime::kernel::schema::example(&schema).unwrap_or_else(|| panic!("no example for {}", tool.name()));
+        assert_eq!(kumi_runtime::kernel::schema::problem(&schema, &example), None, "{} {example}", tool.name());
+    }
+    h.session.close().await.unwrap();
+});
 fn project(h: &Harness, id: &str) {
     let mut o = h.observation.borrow_mut();
     o.key = id.into();
@@ -1020,6 +1086,64 @@ local_test!(memory_instructions_tools_and_forgetting, {
     h.session.close().await.unwrap();
 });
 
+// A conversation keeps the system text it began with when its kernel is made again (a stopped answer, another model
+// or effort), so the provider's cache of it still holds: a note the model keeps meanwhile is in the conversation already.
+// The producer changing what it holds (forgetting a note in /memory) makes the next kernel read it again.
+local_test!(a_rebuilt_kernel_keeps_the_conversations_system_text_until_the_producer_changes_it, {
+    use kumi_runtime::core::memory::{create_memory_store, MemoryStoreOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_memory_store(MemoryStoreOptions {
+        projects_dir: dir.path().join("projects"),
+        producer_file: dir.path().join("producer.json"),
+    });
+    store
+        .save(MemoryScope::Producer, None, &[MemoryNote { id: "p1".into(), text: "Prefers short reverbs".into(), at: 1, pinned: false }])
+        .await
+        .unwrap();
+    // The second answer hangs until it's stopped; the others finish.
+    let answers = Rc::new(Cell::new(0));
+    let run: Run = Rc::new(move |_, _, _| {
+        answers.set(answers.get() + 1);
+        let hang = answers.get() == 2;
+        async move {
+            if hang {
+                futures::future::pending::<()>().await;
+            }
+            Ok(complete())
+        }
+        .boxed_local()
+    });
+    let h = harness(Some(run), |o| o.memory = Some(store.clone()));
+    h.session.start().await.unwrap();
+    h.session.submit("hello", None).await.unwrap();
+    let first = h.record.created.borrow()[0].instructions.clone();
+    assert!(first.contains("[p1] Prefers short reverbs"));
+    let remember = h.record.created.borrow()[0].tools[0].clone();
+    remember
+        .execute(json!({"note":"The Reese is the main bass","about":"producer"}).as_object().unwrap().clone(), Signal::new())
+        .await
+        .unwrap();
+    // An answer stopped before it settled: the next kernel is made again, with the same system text.
+    let running = spawned(&h.session, "make it wider");
+    settle().await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    h.session.submit("again", None).await.unwrap();
+    assert!(h.notice("Cancelled work was discarded; the conversation continues from before it."));
+    // Another model or effort: made again, the same.
+    h.session.reconfigure().await.unwrap();
+    h.session.refresh().await.unwrap();
+    let made: Vec<String> = h.record.created.borrow().iter().map(|options| options.instructions.clone()).collect();
+    assert!(made.len() >= 3, "{}", made.len());
+    assert!(made.iter().all(|text| *text == first), "the same system text every time it was made");
+    // The producer forgets a note: the next kernel reads what Kumi keeps again, the model's note with it.
+    h.session.forget("p1").await.unwrap();
+    h.session.reconfigure().await.unwrap();
+    h.session.refresh().await.unwrap();
+    let last = h.record.created.borrow().last().unwrap().instructions.clone();
+    assert!(!last.contains("Prefers short reverbs") && last.contains("The Reese is the main bass"), "{last}");
+    h.session.close().await.unwrap();
+});
 local_test!(willington_instructions_follow_the_switch_each_time_the_kernel_is_made, {
     use kumi_runtime::integrations::ableton::willington::WillingtonSwitch;
     let switch = Rc::new(Cell::new(WillingtonSwitch::Off));
@@ -2988,7 +3112,7 @@ local_test!(each_turn_logs_where_its_time_went, {
                     return Err(RuntimeError::plain("model went away"));
                 }
                 Ok(TurnResult {
-                    usage: Some(Usage { input_tokens: 900., cache_read_tokens: 600., output_tokens: 20., ..Default::default() }),
+                    usage: Some(Usage { input_tokens: 900., cache_read_tokens: 600., cache_write_tokens: 250., output_tokens: 20. }),
                     ..complete()
                 })
             }
@@ -3008,7 +3132,10 @@ local_test!(each_turn_logs_where_its_time_went, {
         [&turn["stop"], &turn["model"], &turn["modelCalls"], &turn["tools"], &turn["toolMs"], &turn["liveRequests"], &turn["sentBytes"]],
         [&json!("completed"), &json!("openai/gpt-test"), &json!(1), &json!(1), &json!(40), &json!(1), &json!(1000)]
     );
-    assert_eq!([&turn["inputTokens"], &turn["cachedTokens"], &turn["outputTokens"]], [&json!(900), &json!(600), &json!(20)]);
+    assert_eq!(
+        [&turn["inputTokens"], &turn["cachedTokens"], &turn["cacheWriteTokens"], &turn["outputTokens"]],
+        [&json!(900), &json!(600), &json!(250), &json!(20)]
+    );
     assert_eq!(lines[1]["stop"], "error");
     h.session.close().await.unwrap();
 });

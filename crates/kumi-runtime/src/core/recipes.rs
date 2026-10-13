@@ -319,6 +319,10 @@ impl KernelTool for RecipeTool {
             _ => "Remove a saved recipe, when the producer asks.",
         }
     }
+    /// Saving, running and forgetting recipes are asked for: find_tools reaches them.
+    fn deferred(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> JsonObject {
         let value = match self.action {
             RecipeAction::Saved => json!({"type":"object","additionalProperties":false,"required":["name","about","steps"],"properties":{

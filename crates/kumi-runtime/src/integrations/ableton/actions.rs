@@ -19,6 +19,9 @@ pub struct ActionKind {
     pub since: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub newer: Option<JsonObject>,
+    /// Sent with every request as a tool of its own (see catalog.rs).
+    #[serde(default, skip_serializing)]
+    pub core: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionSummary {

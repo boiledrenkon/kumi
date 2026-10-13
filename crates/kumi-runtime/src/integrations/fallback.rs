@@ -101,6 +101,17 @@ impl Integration for FallbackIntegration {
     async fn recording(&self, signal: Signal) -> Result<Option<bool>, RuntimeError> {
         self.current().recording(signal).await
     }
+    fn has_instant(&self) -> bool {
+        true
+    }
+    async fn instant(&self, intent: &crate::core::phrases::Intent, signal: Signal) -> Result<Option<InstantOutcome>, RuntimeError> {
+        let c = self.current();
+        if c.has_instant() {
+            c.instant(intent, signal).await
+        } else {
+            Ok(None)
+        }
+    }
     fn has_device_tree(&self) -> bool {
         true
     }

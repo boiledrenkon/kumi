@@ -136,6 +136,22 @@ fn settings_persist_privately_effort_is_validated_and_environment_wins() {
     assert_eq!(load_inference_config(&env).unwrap().model.as_deref(), Some("openai/gpt-6-luna"));
 }
 #[test]
+fn instant_phrases_stay_on_unless_turned_off_and_survive_other_writes() {
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("settings.json").to_string_lossy().into_owned();
+    assert_eq!(read_settings(&file).instant_phrases, None, "on by default");
+    std::fs::write(&file, json!({"instantPhrases": false, "model": "anthropic/claude-sonnet-5"}).to_string()).unwrap();
+    assert_eq!(read_settings(&file).instant_phrases, Some(false));
+    // Choosing a model keeps it off.
+    write_settings(&file, &json!({"model": "openai/gpt-6-luna"})).unwrap();
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(written["instantPhrases"], json!(false), "{written}");
+    write_settings(&file, &json!({"instantPhrases": true})).unwrap();
+    assert_eq!(read_settings(&file).instant_phrases, None);
+    std::fs::write(&file, json!({"instantPhrases": "no"}).to_string()).unwrap();
+    assert_eq!(read_settings(&file).instant_phrases, None, "anything but false leaves them on");
+}
+#[test]
 fn settings_filter_unknown_values_but_preserve_unmentioned_preferences_and_raw_servers() {
     let folder = tempfile::tempdir().unwrap();
     let file = folder.path().join("settings.json").to_string_lossy().into_owned();
