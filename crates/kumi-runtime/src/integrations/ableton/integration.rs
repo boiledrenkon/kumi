@@ -844,7 +844,9 @@ impl Integration for Ableton {
     /// without Kumi's Live lock, so it never waits for a step under way.
     async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {
         let text = head(text.trim(), 1024);
-        if text.is_empty() || !self.connection.available() || !self.connection.has("live_message") {
+        // An older bridge would show it as a modal alert, holding Live: no line at all there.
+        let line = at_least(self.connection.version().as_deref(), STATUS_LINE_BRIDGE);
+        if text.is_empty() || !line || !self.connection.available() || !self.connection.has("live_message") {
             return Ok(false);
         }
         let shown =

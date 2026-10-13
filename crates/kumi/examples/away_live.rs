@@ -2,6 +2,7 @@
 //! `live_message`, never its dialog), and whether Live records, which holds a desktop notification back. Live stopped,
 //! playing and recording (arrangement recording with no track armed, so nothing is recorded), then stopped again. No
 //! model and no sign-in. It works in the open Set (it never opens or closes one): name it, and use a disposable one.
+//! The line needs a bridge that shows it as the Control Surface's own (1.0.92 and later).
 //!   cargo build --release -p ableton-mcp-server --bins
 //!   cargo run --release -p kumi --example away_live -- --set "<Set name>"
 use futures::FutureExt;
@@ -121,7 +122,7 @@ impl Run {
         }
         println!("Live's status bar");
         let shown = self.integration.show_message("Kumi · real check · this line is Kumi's", signal()).await;
-        self.say(matches!(shown, Ok(true)), &format!("a line shown in Live's status bar ({shown:?})"));
+        self.say(matches!(shown, Ok(true)), &format!("a line shown in Live's status bar, with bridge 1.0.92 or later ({shown:?})"));
         // A line in passing never holds Live: a modal alert would hold its main thread, and this read with it.
         let began = std::time::Instant::now();
         let answered = self.integration.recording(abort::timeout(5_000)).await;
