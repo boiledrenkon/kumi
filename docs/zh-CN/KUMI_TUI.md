@@ -19,7 +19,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 更新后第一次打开 Kumi 时，对话开头会显示 **What's new**（新功能）：从 Kumi 的更新日志中取最新的最多五条，其余的用 `/changelog` 查看。如果有从上次接着的对话，新功能会显示在它下面。全新安装时不显示，模型也看不到这些内容。在 `~/.kumi/settings.json` 中写入 `"whatsNew": false` 即可关闭。
 
-**设置**会在还有步骤未完成时最先出现：登录、Live 中 Kumi 的桥接（缺失，或比 Kumi 自带的旧），然后是 Control Surface。它列出这三步，已完成的以薄荷绿显示并注明所选内容，并询问当前这一步需要什么；Kumi 等待时（等浏览器、安装或 Live），字标下方的薄荷绿波形会动起来。↑↓ 和 Enter 用于选择，Esc 把这一步留到以后，之后的会话在同一窗口中显示。已经设置好的 Kumi 会直接进入会话。
+**设置**会在还有步骤未完成时最先出现：登录、Live 中 Kumi 的桥接（缺失，或比 Kumi 自带的旧），然后是 Control Surface。它列出这三步，已完成的以薄荷绿显示并注明所选内容，并询问当前这一步需要什么；Kumi 等待时（等浏览器、安装或 Live），字标下方的薄荷绿波形会动起来。↑↓ 和 Enter 用于选择，Esc 把这一步留到以后，之后的会话在同一窗口中显示。等待 ChatGPT 登录时，**c** 复制链接（或代码），**d** 改用代码而不用浏览器。在 Linux 上，设置只进行登录。已经设置好的 Kumi 会直接进入会话。
 
 宽度不足 100 列时，Live 窗格会折叠为输入框上方的两行条带（先是你所在的位置和 Kumi 正在做的事，然后是最近一次修改及其撤销）。窗口小于 24×8 时，Kumi 会请你把窗口调大。
 
@@ -29,21 +29,21 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 | 命令 | 作用 |
 | --- | --- |
-| `kumi` | 在 Live 当前打开的工程上打开 Kumi |
+| `kumi` | 在 Live 当前打开的工程上打开 Kumi；第一次时登录，并把桥接装入 Live（Kumi 可以替你重启 Live） |
 | `kumi --inference-only` | 不连接 Live，只聊天 |
 | `kumi --bridge-config <absolute path>` | 使用你自己的桥接配置 |
 | `kumi login` | 登录：询问使用 ChatGPT 还是 API 密钥 |
-| `kumi login <provider>` | 登录 `openai-codex`（ChatGPT；没有浏览器时加 `--device`），或用 API 密钥登录 `anthropic`、`openai`、`opencode` 或 `opencode-go` |
+| `kumi login <provider>` | 登录 `openai-codex`（ChatGPT；没有浏览器时加 `--device`，通过 SSH 时默认如此），或用 API 密钥登录 `anthropic`、`openai`、`opencode` 或 `opencode-go` |
 | `kumi logout <provider>` | 移除 Kumi 在该提供方的登录 |
 | `kumi model [<provider>/<model>]` | 显示或选择模型，也可以是你电脑上的模型（`ollama/<model>`） |
 | `kumi auth` | 哪些提供方可用、当前模型以及登录文件（从不显示机密信息） |
-| `kumi bridge [--yes] [--allow-dirty]` | 在 Live 关闭时：把桥接装入 Live，或将其更新到最新。`--yes` 确认 Live 已关闭；`--allow-dirty` 允许带有未提交修改的检出副本安装其桥接 |
+| `kumi bridge [--yes] [--allow-dirty]` | 在 Live 关闭时：把桥接装入 Live，或将其更新到最新。`--yes` 确认 Live 已关闭（没有终端时，不加它就什么都不改）；`--allow-dirty` 允许带有未提交修改的检出副本安装其桥接 |
 | `kumi doctor` | 检查 Node、登录、你电脑上的模型服务器、桥接、Live、扩展、素材库、视频程序、说话功能、Live 的菜单和终端；告诉你该运行什么 |
 | `kumi library [--rebuild]` | Kumi 学习你的声音、预设和工程进行到了哪里；`--rebuild` 全部重新学习 |
 | `kumi update [--check \| --rollback]` | 获取最新的 Kumi（桥接较旧时也一并更新）；`--check` 只检查；`--rollback` 回到上一个版本（Live 已关闭时连同其桥接；仅限已安装的 Kumi） |
 | `kumi report` | 写出 `~/kumi-report-<date and time>.txt`，出问题时把它发给我们 |
 | `kumi uninstall [--all] [--yes]` | 卸载已安装的 Kumi；`--all` 同时删除对话、笔记、配方和登录信息；`--yes` 跳过第一个确认问题 |
-| `kumi --version`（或 `-v`）、`kumi --help` | 版本；帮助 |
+| `kumi --version`（或 `-v`）、`kumi --help`（或 `-h`、`help`） | 版本；帮助 |
 
 ## Kumi 内的命令
 

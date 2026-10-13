@@ -784,12 +784,12 @@ case!(a_restart_opens_the_set_again_or_says_where_it_is, async {
     h.wait_for("Restart Live now").await;
     h.type_text("\r").await;
     h.wait_for("waiting for Live").await;
-    wait_for_said(&h, "If you saved your Set, it's in Live's File › Open Recent.").await;
+    wait_for_said(&h, "If you saved your Set, it's in Live's File › Open Recent Set.").await;
     h.connect();
     h.wait_for("You're set.").await;
     h.type_text("\r").await;
     h.wait_until_hidden("You're set.").await;
-    wait_for_said(&h, "If you saved your Set, it's in Live's File › Open Recent.").await;
+    wait_for_said(&h, "If you saved your Set, it's in Live's File › Open Recent Set.").await;
     h.close().await;
     // Live wasn't open: no Set was closed, so nothing to say.
     let live = FakeLive::new(false);

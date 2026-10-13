@@ -204,7 +204,7 @@ const CODE_HINT: &str = "c copies the code · esc back";
 /// How often the sign-in step looks again for models on this computer while the producer chooses.
 const LOCAL_LOOK: Duration = Duration::from_secs(3);
 /// Where the Set is that Kumi's restart closed, when Kumi didn't know it to open it again.
-const OPEN_RECENT: &str = "If you saved your Set, it's in Live's File › Open Recent.";
+const OPEN_RECENT: &str = "If you saved your Set, it's in Live's File › Open Recent Set.";
 
 /// macOS didn't let Kumi ask Live to quit: the producer quits it, and how to let Kumi next time.
 fn refused_words(terminal: Option<&str>) -> String {

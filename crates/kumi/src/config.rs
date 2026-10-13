@@ -458,18 +458,18 @@ fn unknown(word: Option<&str>) -> RuntimeError {
     let help = format!("{} --help lists the commands.", *KUMI_START);
     // Only a short word is said back: a key pasted as an argument stays out of the message.
     let Some(word) = word.filter(|w| (2..=24).contains(&w.len()) && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) else {
-        return RuntimeError::plain(format!("Kumi doesn't know that; {help}"));
+        return RuntimeError::plain(format!("That isn't a command; {help}"));
     };
     if word.starts_with('-') {
-        return RuntimeError::plain(format!("Kumi has no {word} option; {help}"));
+        return RuntimeError::plain(format!("No option called {word}; {help}"));
     }
     if COMMANDS.contains(&word) {
         return RuntimeError::plain(format!("{} {word} doesn't take that; {help}", *KUMI_START));
     }
     let near = COMMANDS.iter().find(|command| edits(command, &word.to_ascii_lowercase()) <= 2);
     RuntimeError::plain(match near {
-        Some(near) => format!("Kumi has no {word} command (did you mean {near}?); {help}"),
-        None => format!("Kumi has no {word} command; {help}"),
+        Some(near) => format!("No command called {word} (did you mean {near}?); {help}"),
+        None => format!("No command called {word}; {help}"),
     })
 }
 /// How many letters to add, drop or change to turn `a` into `b`.

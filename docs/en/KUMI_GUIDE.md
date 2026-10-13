@@ -22,9 +22,20 @@ with an API key, pasted into a box that shows only dots. Kumi checks a key with
 its provider before keeping it; if the provider can't be reached, it keeps the
 key and says it isn't checked yet. `/logout` signs out.
 
+In setup's sign-in step:
+
+- Kumi first checks it can reach ChatGPT's sign-in. When it can't, it says why
+  (DNS, TLS, a proxy, no answer in time, or no connection) and names the proxy
+  settings it went through, or says that `HTTPS_PROXY` sets one.
+- **d** signs in to ChatGPT with a code instead of the browser: enter it in a
+  browser on any device. Over SSH, Kumi uses the code by itself, in `/login`
+  and `kumi login` too.
+- The browser's link shows whole, and **c** copies it.
+- While Ollama or LM Studio runs, **On this computer** is a choice too.
+
 | Provider | Model names | Sign-in |
 | --- | --- | --- |
-| ChatGPT plan | `openai-codex/<model>` | `/login` (browser), or `kumi login openai-codex` (`--device` on a machine without a browser) |
+| ChatGPT plan | `openai-codex/<model>` | `/login` (browser, or a code: **d**), or `kumi login openai-codex` (`--device` without a browser; a code by itself over SSH) |
 | Anthropic API | `anthropic/<model>` | `/login` with an API key, or `ANTHROPIC_API_KEY` |
 | OpenAI API | `openai/<model>` | `/login` with an API key, or `OPENAI_API_KEY` |
 | OpenCode Zen and Go | `opencode/<model>`, `opencode-go/<model>` | `/login` with an API key (one for both), or `OPENCODE_API_KEY` |
@@ -112,28 +123,43 @@ Kumi's bridge is newer than Live's, Kumi's setup runs the steps still missing,
 in the app:
 
 1. **Sign in**, if Kumi isn't signed in yet.
-2. **Connect to Live**: Kumi puts the bridge in place and opens Live. If Live is
-   open, choose **Restart Live now** (Kumi asks Live to quit, and Live asks you
-   to save your work first) or **I'll quit it** (Kumi waits while you quit
-   Live). If Live is still open a while after Kumi asked (you chose Cancel when
-   it asked about saving), Kumi says so and offers to ask again. Once Kumi has
-   Live closed, Live opens again however the step ends.
+2. **Connect to Live**: Kumi puts the bridge in place and opens Live.
+   - **Live isn't open:** Kumi first looks for Live 12. If it isn't installed,
+     or only an older Live is, Kumi says so; **Look again** checks once you've
+     installed it. If Live 12 was never opened, Kumi opens it once, so it makes
+     its User Library.
+   - **Live is open:** choose **Restart Live now** (Kumi asks Live to quit, and
+     Live asks you to save your work first) or **I'll quit it** (Kumi waits while
+     you quit Live). If Live is still open a while after Kumi asked (you chose
+     Cancel when it asked about saving), Kumi says so and offers to ask again.
+   - **On a Mac,** macOS may ask the first time whether your terminal can
+     control Live: choose OK. If you said no, Kumi waits while you quit Live,
+     and says where to allow it: System Settings › Privacy & Security ›
+     Automation.
+   - Once Kumi has Live closed, Live opens again however the step ends, with
+     the Set it had open when Kumi knows it (otherwise your Set is in File ›
+     Open Recent Set).
 3. **Control Surface**: the first time, open **Settings → Link, Tempo & MIDI** in
    Live and choose **AbletonMcpBridge** as a Control Surface. Kumi notices by
-   itself, and Live remembers the choice.
+   itself, and Live remembers the choice. After about 45 seconds, Kumi adds where
+   Settings is (the Live menu on a Mac, Options on Windows), and that a dialog in
+   Live comes first.
+
+On Linux, where Live doesn't run, setup only signs in.
 
 Esc on a step leaves it for later: Kumi chats without Live for now. Sign in and
 Connect to Live are offered again next time; past Connect to Live, Kumi connects
 by itself whenever Live answers. Quitting Kumi while the bridge goes in waits
 until it's in place.
 `kumi bridge` does the same from a shell, with Live closed: it asks you to
-confirm (`--yes` confirms beforehand), refuses while Live is running, and never
-quits or starts Live. Both install or update the bridge through the bridge's own
+confirm (`--yes` confirms beforehand, and without a terminal nothing changes
+without it), refuses while Live is running, and never quits or starts Live. Both install or update the bridge through the bridge's own
 lifecycle, with checks, receipts and rollback, and keep its settings and secret
 across updates. `kumi bridge` waits up to ten minutes for Live to connect, and
-says when it does. `kumi update` runs it for you when
-the bridge in Live is older than Kumi's and Live is closed; `kumi doctor` says
-when to run it yourself.
+says when it does. `kumi update` runs it for you (with `--yes`, and without the
+wait) when the bridge in Live is older than Kumi's and Live is closed. Otherwise
+`kumi update` and `kumi doctor` say to run `kumi`, which puts the bridge in Live
+and can restart Live for you.
 
 Kumi finds Live's Remote Scripts folder in your User Library, including one
 you moved elsewhere (it reads Live's own settings for that).
@@ -855,7 +881,7 @@ kumi uninstall           # remove Kumi; add --all to remove your conversations, 
 `update` fetches the newest release, checks it against its checksum and starts
 it once to be sure it runs before putting it in place; the one before is kept
 for `--rollback`. If the bridge needs an update or a switch from JavaScript to native and Live is closed, it then runs
-`kumi bridge`; if Live is open, it says to quit Live and run `kumi bridge`. In a
+`kumi bridge --yes`; if Live is open, it says to run `kumi`, which can restart Live for you. In a
 copy of the repository, `update` moves the checkout forward instead
 (`git merge --ff-only`, refusing local changes) and builds the workspace with Cargo.
 Inside Kumi, `/update` asks first, then closes Kumi, updates it and opens it

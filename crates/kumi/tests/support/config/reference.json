@@ -333,33 +333,33 @@
         "--api-key",
         "test-only-secret-do-not-log"
       ],
-      "error": "Kumi has no --api-key option; npm run kumi -- --help lists the commands."
+      "error": "No option called --api-key; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--model",
         "openai/gpt-6-luna"
       ],
-      "error": "Kumi has no --model option; npm run kumi -- --help lists the commands."
+      "error": "No option called --model; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--backend",
         "wasm"
       ],
-      "error": "Kumi has no --backend option; npm run kumi -- --help lists the commands."
+      "error": "No option called --backend; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--anything"
       ],
-      "error": "Kumi has no --anything option; npm run kumi -- --help lists the commands."
+      "error": "No option called --anything; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "positional"
       ],
-      "error": "Kumi has no positional command; npm run kumi -- --help lists the commands."
+      "error": "No command called positional; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
@@ -747,13 +747,13 @@
       "args": [
         "udpate"
       ],
-      "error": "Kumi has no udpate command (did you mean update?); npm run kumi -- --help lists the commands."
+      "error": "No command called udpate (did you mean update?); npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "test-only-secret-do-not-log"
       ],
-      "error": "Kumi doesn't know that; npm run kumi -- --help lists the commands."
+      "error": "That isn't a command; npm run kumi -- --help lists the commands."
     },
     {
       "args": [

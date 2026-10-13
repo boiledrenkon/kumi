@@ -157,14 +157,10 @@ case!(help_version_errors_and_checkout_commands, async {
         assert_eq!(f.output(), help(false), "{asked:?}");
     }
     assert_eq!(run(f.io(&["--unknown"]), unused_factory()).await, 1);
-    assert_eq!(f.err.0.borrow().as_str(), "Kumi: Kumi has no --unknown option; cargo run -p kumi -- --help lists the commands.\n");
+    assert_eq!(f.err.0.borrow().as_str(), "Kumi: No option called --unknown; cargo run -p kumi -- --help lists the commands.\n");
     f.err.0.borrow_mut().clear();
     assert_eq!(run(f.io(&["udpate"]), unused_factory()).await, 1);
-    assert!(f
-        .err
-        .0
-        .borrow()
-        .contains("Kumi has no udpate command (did you mean update?); cargo run -p kumi -- --help lists the commands."));
+    assert!(f.err.0.borrow().contains("No command called udpate (did you mean update?); cargo run -p kumi -- --help lists the commands."));
     f.out.0.borrow_mut().clear();
     assert_eq!(run(f.io(&["update", "--rollback"]), unused_factory()).await, 1);
     assert!(f.output().contains("Check out the commit you want with git, then run: cargo build --release --workspace"));

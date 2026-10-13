@@ -65,8 +65,9 @@ install shows none, and the model never sees them. `"whatsNew": false` in
 steps, done ones in mint with what was chosen, and asks what the current one
 needs; a mint waveform under the wordmark moves while Kumi waits (for the
 browser, the install, or Live). ↑↓ and Enter choose, Esc leaves the step for
-later, and the session follows in the same window. A Kumi that's set up starts
-straight into the session.
+later, and the session follows in the same window. While ChatGPT's sign-in waits,
+**c** copies its link (or code) and **d** uses a code instead of the browser. On
+Linux, setup only signs in. A Kumi that's set up starts straight into the session.
 
 Below 100 columns the Live pane folds into a two-line strip above the input box
 (where you are and what Kumi is doing, then the last change with its undo).
@@ -79,21 +80,21 @@ Run these as `kumi <command>`; from a copy of the repository, as
 
 | Command | What it does |
 | --- | --- |
-| `kumi` | Open Kumi on the Set Live has open |
+| `kumi` | Open Kumi on the Set Live has open; the first time, sign in and put the bridge in Live (Kumi can restart Live for you) |
 | `kumi --inference-only` | Chat without Live |
 | `kumi --bridge-config <absolute path>` | Use your own bridge configuration |
 | `kumi login` | Sign in: asks whether with ChatGPT or an API key |
-| `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
+| `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser, the default over SSH), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
 | `kumi logout <provider>` | Remove Kumi's sign-in there |
 | `kumi model [<provider>/<model>]` | Show or choose the model, a model on your computer too (`ollama/<model>`) |
 | `kumi auth` | Which providers are usable, the model and the sign-in file (never secrets) |
-| `kumi bridge [--yes] [--allow-dirty]` | With Live closed: put the bridge into Live, or bring it up to date. `--yes` confirms Live is closed; `--allow-dirty` lets a checkout with uncommitted changes install its bridge |
+| `kumi bridge [--yes] [--allow-dirty]` | With Live closed: put the bridge into Live, or bring it up to date. `--yes` confirms Live is closed (without a terminal, nothing changes without it); `--allow-dirty` lets a checkout with uncommitted changes install its bridge |
 | `kumi doctor` | Check Node, sign-in, the model servers on your computer, the bridge, Live, the extension, your library, video programs, talking, Live's menus and the terminal; says what to run |
 | `kumi library [--rebuild]` | How far Kumi has got learning your sounds, presets and Sets; `--rebuild` learns them all again |
 | `kumi update [--check \| --rollback]` | Get the newest Kumi (and the bridge when it's older); `--check` only asks; `--rollback` goes back to the one before, with its bridge when Live is closed (an installed Kumi only) |
 | `kumi report` | Write `~/kumi-report-<date and time>.txt` to send when something goes wrong |
 | `kumi uninstall [--all] [--yes]` | Remove an installed Kumi; `--all` also removes conversations, notes, recipes and sign-ins; `--yes` skips the first question |
-| `kumi --version` (or `-v`), `kumi --help` | Version; help |
+| `kumi --version` (or `-v`), `kumi --help` (or `-h`, `help`) | Version; help |
 
 ## Commands inside Kumi
 
