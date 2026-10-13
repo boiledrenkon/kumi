@@ -780,10 +780,15 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
                 if let Err(error) = remove(&fresh).and_then(|()| fs::create_dir_all(&fresh)) {
                     return not_in_place(&home, &error).into();
                 }
+                // tar.exe reads its arguments in Windows' code page, which can't spell every folder name: run in
+                // KUMI_HOME, it's given the paths inside it, which are plain ASCII.
+                let inside = |path: &str| {
+                    Path::new(path).strip_prefix(&home).map_or_else(|_| path.to_string(), |inside| inside.display().to_string())
+                };
                 let unpacked = run(
                     system::system_program_default(SystemProgram::Tar),
-                    vec!["-xzf".into(), bundle.clone(), "-C".into(), fresh.clone()],
-                    None,
+                    vec!["-xzf".into(), inside(&bundle), "-C".into(), inside(&fresh)],
+                    Some(home.clone()),
                 )
                 .await;
                 if unpacked.code != 0 {
