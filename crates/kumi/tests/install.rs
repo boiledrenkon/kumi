@@ -2144,3 +2144,26 @@ async fn uninstall_all_takes_a_folder_whole_only_when_it_is_kumis_alone() {
     assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
     assert!(!home.exists());
 }
+/// On Windows, PATH names Kumi's bin folder itself: while that stays, holding the producer's own (uv's .local\bin,
+/// say), so does its PATH entry. Elsewhere Kumi's own lines in the startup files go, as they're only Kumi's.
+#[tokio::test]
+async fn a_bin_folder_that_stays_keeps_its_windows_path_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let local = Path::new(&env["HOME"]).join(".local");
+    env.insert("KUMI_HOME".into(), local.display().to_string());
+    installed_kumi(&local);
+    put(local.join("bin").join(executable_name("uv")), "theirs");
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(said.contains("bin stays: it holds more than Kumi put there."), "{said}");
+    if cfg!(windows) {
+        assert!(
+            said.contains("would stay in your PATH, as it holds more than Kumi put there.") && !said.contains("take Kumi out of your PATH"),
+            "{said}"
+        );
+    } else {
+        assert!(!said.contains("your PATH"), "{said}");
+    }
+}

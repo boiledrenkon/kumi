@@ -1814,7 +1814,10 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
     let files: Vec<String> =
         lines.iter().filter(|lines| !lines.removed.is_empty() && can_change(lines)).map(|lines| display(&lines.file)).collect();
     let mut also = vec![];
-    if cfg!(windows) {
+    let bin = join(home, "bin");
+    if cfg!(windows) && parts.left.contains(&bin) {
+        say(format!("{} would stay in your PATH, as it holds more than Kumi put there.", display(&bin)));
+    } else if cfg!(windows) {
         also.push("take Kumi out of your PATH".to_string());
     } else if !files.is_empty() {
         also.push(format!("take Kumi out of {}", listed(&files)));
@@ -1935,7 +1938,12 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     // The startup files last, and only once Kumi's launcher has gone: until then its PATH line still finds Kumi.
     let launcher = join(&join(&home, "bin"), if cfg!(windows) { "kumi.cmd" } else { "kumi" });
     let rc_changed = if Path::new(&launcher).exists() && !cfg!(windows) { true } else { remove_path_lines(&io, &home) };
-    if cfg!(windows) {
+    // On Windows, PATH names Kumi's bin folder itself, which stays while it holds the producer's own (uv's
+    // .local\bin, say): so does its PATH entry.
+    let bin = join(&home, "bin");
+    if cfg!(windows) && parts.left.contains(&bin) {
+        say(format!("{} stays in your PATH, as it holds more than Kumi put there.", display(&bin)));
+    } else if cfg!(windows) {
         step(io.out.clone(), &io.env, "Taking Kumi out of your PATH…", remove_windows_path(run, &home), false).await;
     }
     if bridge_stays {
