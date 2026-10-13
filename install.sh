@@ -140,9 +140,9 @@ main() {
     fetch() {
       : > "$work/fetch.err"
       if [ -n "${3:-}" ]; then
-        code="$(curl -#SL --retry 3 --retry-delay 2 --connect-timeout 10 -w '%{http_code} %{http_connect}' -o "$2" "$1")"; got=$?
+        code="$(curl -#SL --retry 3 --retry-delay 2 --connect-timeout 20 -w '%{http_code} %{http_connect}' -o "$2" "$1")"; got=$?
       else
-        code="$(curl -sSL --retry 3 --retry-delay 2 --connect-timeout 10 -w '%{http_code} %{http_connect}' -o "$2" "$1" 2>"$work/fetch.err")"; got=$?
+        code="$(curl -sSL --retry 3 --retry-delay 2 --connect-timeout 20 -w '%{http_code} %{http_connect}' -o "$2" "$1" 2>"$work/fetch.err")"; got=$?
       fi
       connect="${code#* }"; code="${code%% *}"
     }
