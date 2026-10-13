@@ -3,6 +3,22 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.16.5 — 2026-10-13
+
+Ships with bridge 1.0.92, as 1.16.4 did.
+
+- Kumi works behind school and office networks. It trusts the certificates your computer trusts, so a
+  network that inspects secure connections works once its certificate is installed, as your browser
+  needs. Without HTTPS_PROXY, Kumi follows the proxy set in macOS's or Windows' settings, with its
+  exceptions, and connects directly when that proxy wants a sign-in Kumi can't give. HTTPS_PROXY,
+  ALL_PROXY (now including socks5://) and NO_PROXY work as before. Models on your computer (Ollama, LM
+  Studio) and model servers you name never go through the system's proxy. When a certificate or a
+  proxy is in the way, Kumi says so and how to fix it, instead of "offline". SSL_CERT_FILE adds
+  certificates for Kumi to trust.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.16.4 — 2026-10-13
 
 Ships with bridge 1.0.92, as 1.16.3 did.
