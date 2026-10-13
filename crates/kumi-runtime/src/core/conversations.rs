@@ -862,9 +862,22 @@ impl ConversationStore for FileConversationStore {
         }
         Ok(true)
     }
-    async fn copy(&self, place: &str, id: &str, conversation: &SavedConversation, from: &str) -> Result<(), RuntimeError> {
+    async fn create(
+        &self,
+        place: &str,
+        id: &str,
+        conversation: &SavedConversation,
+        name: Option<&str>,
+        from: Option<&str>,
+    ) -> Result<(), RuntimeError> {
         self.file(place, id)?;
-        self.write_meta(place, id, &Meta { forked_from: CONVERSATION.is_match(from).then(|| from.to_owned()), ..Meta::default() }).await?;
+        // Beside it before it's there: a look at the folder never finds it without them.
+        let meta = Meta {
+            name: name.and_then(clean_name),
+            forked_from: from.filter(|from| CONVERSATION.is_match(from)).map(str::to_owned),
+            ..Meta::default()
+        };
+        self.write_meta(place, id, &meta).await?;
         self.save(place, id, conversation).await
     }
     fn claim(&self, place: &str, id: &str) -> Claim {

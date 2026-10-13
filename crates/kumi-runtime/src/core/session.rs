@@ -1550,14 +1550,11 @@ impl Session {
         };
         if let (Some(store), Some(place)) = (self.0.options.conversations.clone(), place) {
             self.enqueue(async move {
-                match &from {
-                    Some(from) => store.copy(&place, &id, &conversation, from).await?,
-                    None => store.save(&place, &id, &conversation).await?,
+                if name.is_some() || from.is_some() {
+                    store.create(&place, &id, &conversation, name.as_deref(), from.as_deref()).await
+                } else {
+                    store.save(&place, &id, &conversation).await
                 }
-                if let Some(name) = name {
-                    store.rename(&place, &id, Some(&name)).await?;
-                }
-                Ok(())
             });
         }
     }
@@ -2343,10 +2340,7 @@ impl SessionController for Session {
         self.save_conversation(false);
         let saving = self.0.saving.borrow().clone();
         let _ = saving.await;
-        store.copy(&place, &id, &conversation, &old).await?;
-        if let Some(name) = name {
-            store.rename(&place, &id, Some(name)).await?;
-        }
+        store.create(&place, &id, &conversation, name, Some(&old)).await?;
         store.release(&place, &old);
         store.claim(&place, &id);
         {
@@ -2408,7 +2402,7 @@ impl SessionController for Session {
                 checkpoint.messages = crate::kernel::budget::without_observations(&checkpoint.messages);
                 let copy = SavedConversation { saved_at: now(), checkpoint, changes: None, first: kept.first.clone(), turns: kept.turns };
                 let id = store.new_id().await;
-                store.copy(&here, &id, &copy, &wanted.id).await?;
+                store.create(&here, &id, &copy, None, Some(&wanted.id)).await?;
                 let open = open.map(|name| format!("“{name}”")).unwrap_or_else(|| "a Set not saved yet".into());
                 let other = named.map(|name| format!("another Set, “{name}”,")).unwrap_or_else(|| "another Set".into());
                 self.go_to(here, id, copy, Some(format!("Carrying on a copy here; the original stays with {set} as {}.", wanted.id)))

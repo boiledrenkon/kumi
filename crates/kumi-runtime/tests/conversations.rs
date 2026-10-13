@@ -167,15 +167,18 @@ async fn names_pins_and_copies_live_beside_the_conversation_where_kumi_1_16_read
     store.save(A, "mv66me0m3fa91c", &said("make the bass wider", 10)).await.unwrap();
     assert!(store.rename(A, "mv66me0m3fa91c", Some("  Bass\nideas  ")).await.unwrap());
     assert!(store.pin(A, "mv66me0m3fa91c", true).await.unwrap());
-    store.copy(A, "mv66me0m9fork1", &said("make the bass wider", 11), "mv66me0m3fa91c").await.unwrap();
-    store.copy(B, "mv66me0m9copy1", &said("make the bass wider", 12), "mv66me0m3fa91c").await.unwrap();
+    store.create(A, "mv66me0m9fork1", &said("make the bass wider", 11), None, Some("mv66me0m3fa91c")).await.unwrap();
+    store.create(B, "mv66me0m9copy1", &said("make the bass wider", 12), Some(" Copy\n"), Some("mv66me0m3fa91c")).await.unwrap();
     assert_eq!(store.claim(A, "mv66me0m9fork1"), Claim::Ours);
     assert!(!store.rename(A, "nothere00000", Some("x")).await.unwrap(), "only a kept one");
     let rows = store.all().await.unwrap();
     let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap().clone();
     assert_eq!((row("mv66me0m3fa91c").name.as_deref(), row("mv66me0m3fa91c").pinned), (Some("Bass ideas"), true));
     assert_eq!(row("mv66me0m9fork1").forked_from.as_deref(), Some("mv66me0m3fa91c"));
-    assert_eq!(row("mv66me0m9copy1").forked_from.as_deref(), Some("mv66me0m3fa91c"));
+    assert_eq!(
+        (row("mv66me0m9copy1").forked_from.as_deref(), row("mv66me0m9copy1").name.as_deref()),
+        (Some("mv66me0m3fa91c"), Some("Copy"))
+    );
     // Kumi 1.16.3 reads every conversation file, lists only them, and its report never takes a name, pin or lock for one.
     for place in [A, B] {
         let kept = dir.path().join(place).join("conversations");
@@ -215,7 +218,7 @@ async fn the_index_made_again_from_the_files_is_the_one_kept() {
     store.save("unsaved", "kq01aa000000", &said("sketch some chords", 30)).await.unwrap();
     store.rename(B, "mv66zz0m3fa91c", Some("Drum Bus")).await.unwrap();
     store.pin(A, "mv66me0m3fa91c", true).await.unwrap();
-    store.copy(A, "mv66me0m9fork1", &said("make the bass wider", 40), "mv66me0m3fa91c").await.unwrap();
+    store.create(A, "mv66me0m9fork1", &said("make the bass wider", 40), None, Some("mv66me0m3fa91c")).await.unwrap();
     store.move_conversation("kq01aa000000", "unsaved", B).await.unwrap();
     store.delete(B, "mv66zz0m3fa91c").await.unwrap();
     let file = dir.path().join("conversation-index.json");

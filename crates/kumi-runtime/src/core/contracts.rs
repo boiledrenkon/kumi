@@ -541,9 +541,17 @@ pub trait ConversationStore {
         let _ = (place, id);
         Ok(false)
     }
-    /// Keep `conversation` as a new one, `id`, in `place`, copied from the conversation `from`: the place's current.
-    async fn copy(&self, place: &str, id: &str, conversation: &SavedConversation, from: &str) -> Result<(), RuntimeError> {
-        let _ = from;
+    /// Keep `conversation` as a new one, `id`, in `place` (the place's current), with the producer's name for it and the
+    /// conversation it was copied from, when it has them: all there by the time it's listed.
+    async fn create(
+        &self,
+        place: &str,
+        id: &str,
+        conversation: &SavedConversation,
+        name: Option<&str>,
+        from: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let _ = (name, from);
         self.save(place, id, conversation).await
     }
     /// This Kumi takes the conversation, unless another Kumi that's still open has it.
