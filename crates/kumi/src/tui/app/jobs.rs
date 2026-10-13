@@ -271,7 +271,7 @@ impl TuiApp {
         self.0.scheduler.request();
     }
 
-    /// /jobs: each job, to stop one, read one, or run one again.
+    /// /jobs: each job; Enter opens one, where x stops it and r runs it again.
     pub(super) fn open_jobs(&self) {
         let jobs = self.0.options.controller.jobs();
         let items = if jobs.is_empty() {
@@ -282,14 +282,15 @@ impl TuiApp {
             jobs.iter()
                 .map(|status| {
                     let what = match status.state {
-                        JobState::Running => format!("{} · {}", doing_words(status), helpers::clock_of(job_ms(status))),
+                        JobState::Running => doing_words(status),
                         _ => status.line.clone().unwrap_or_default(),
                     };
                     let (note, tone) = match status.state {
-                        JobState::Running => ("stop", NoteTone::Accent),
-                        JobState::Interrupted => ("run again", NoteTone::Accent),
-                        JobState::Done => ("read", NoteTone::Faint),
-                        _ => ("see why", NoteTone::Faint),
+                        JobState::Running => (format!("running {}", helpers::clock_of(job_ms(status))), NoteTone::Accent),
+                        JobState::Done => ("done".into(), NoteTone::Faint),
+                        JobState::Failed => ("failed".into(), NoteTone::Warn),
+                        JobState::Stopped => ("stopped".into(), NoteTone::Faint),
+                        JobState::Interrupted => ("interrupted".into(), NoteTone::Warn),
                     };
                     noted(
                         item(
@@ -304,16 +305,11 @@ impl TuiApp {
                 .collect()
         };
         self.pick(
-            Picker::with_options("Background jobs · enter stops a running one, or shows one that ended", items, PickerOptions::default()),
+            Picker::with_options("Background jobs · enter opens one: x stops it there, r runs it again", items, PickerOptions::default()),
             move |app, item| async move {
                 app.close_panel();
-                let Some(id) = item.value.as_deref().and_then(|v| v.parse::<u32>().ok()) else { return Ok(()) };
-                let state = app.0.options.controller.jobs().into_iter().find(|s| s.id == id).map(|s| s.state);
-                match state {
-                    Some(JobState::Running) => app.stop_job(id),
-                    Some(JobState::Interrupted) => app.run_job_again(id),
-                    Some(_) => app.open_job(id),
-                    None => {}
+                if let Some(id) = item.value.as_deref().and_then(|v| v.parse::<u32>().ok()) {
+                    app.open_job(id);
                 }
                 Ok(())
             },

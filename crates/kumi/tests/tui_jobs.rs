@@ -156,13 +156,20 @@ case!(ctrl_b_moves_the_step_and_slash_jobs_stops_one, async {
     h.emit(json!({"type":"state","state":"idle"}));
     // /jobs: a running job stops; it works while Kumi answers too.
     let running = job(3, "running", json!({"doing":"watching a video"}));
+    let running_detail = running.clone();
     h.control.set("jobs", json!([running.clone()]));
     h.emit(running);
     h.emit(json!({"type":"state","state":"running"}));
+    h.control.set("job-details", json!([{"status":running_detail,"asked":"Watch the tape loop tutorial","steps":[]}]));
     h.type_text("/jobs\r").await;
     h.has("Job 3 · Burial vocal chops");
+    // Enter opens it; x stops it there.
     h.type_text("\r").await;
+    h.wait_for("Asked: Watch the tape loop tutorial").await;
+    assert!(!h.calls().iter().any(|c| c.starts_with("stop-job")));
+    h.type_text("x").await;
     h.wait_for_call("stop-job:3").await;
+    h.type_text("\x1b").await;
     // Esc stops the answer, not the job, and says so.
     h.type_text("\x1b").await;
     h.wait_for("A job is still running in the background: /jobs to see or stop it.").await;

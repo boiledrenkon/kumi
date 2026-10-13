@@ -454,7 +454,9 @@ impl TuiApp {
                 let mut detail = running.doing.clone().unwrap_or_else(|| doing_label(running.tool.as_deref(), &running.label));
                 // A long step away from Live can go on in the background while the producer carries on.
                 if running.started_at.is_some_and(|at| now - at >= BACKGROUND_HINT_MS) && self.0.options.controller.can_background() {
-                    detail = format!("{detail} · ctrl-b keeps you working while this runs");
+                    // In tmux, ctrl-b is its prefix: twice sends it on.
+                    let keys = if self.0.profile.tmux { "ctrl-b twice" } else { "ctrl-b" };
+                    detail = format!("{detail} · {keys} keeps you working while this runs");
                 }
                 return NowLine {
                     dot,
