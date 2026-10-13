@@ -712,3 +712,8 @@ async fn a_conversation_from_a_file_and_every_copy_of_it_say_so() {
     let again = create_conversation_store(dir.path()).all().await.unwrap();
     assert!(again.iter().find(|row| row.id == "copied000002").unwrap().imported);
 }
+
+#[test]
+fn a_title_draws_what_it_says() {
+    assert_eq!(title(None, "\u{202E}gnol \u{200B}kick\u{E0041}"), "gnol kick");
+}

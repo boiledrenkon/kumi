@@ -168,7 +168,9 @@ impl Drop for FileConversationStore {
 /// looks like a key hidden, at most 60 characters.
 pub fn title(name: Option<&str>, first: &str) -> String {
     let words = name.map(trim).filter(|name| !name.is_empty()).unwrap_or(first);
-    let line = crate::core::recall::plain(words, MAX_TITLE + 1);
+    // Characters that draw nothing could hide words in it, or turn it around.
+    let words: String = words.chars().filter(|c| !crate::core::export::invisible(*c)).collect();
+    let line = crate::core::recall::plain(&words, MAX_TITLE + 1);
     if utf16_len(&line) > MAX_TITLE {
         format!("{}…", trim(&head(&line, MAX_TITLE - 1)))
     } else {

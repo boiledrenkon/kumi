@@ -379,10 +379,11 @@ fn read(source: &Source, options: &Options) -> Document {
     }
 }
 
-/// Words as an export shows them: without control characters but line breaks and tabs, which a terminal would act on
-/// when the file is read in one or its copy pasted.
+/// Words as they're drawn: without control characters but line breaks and tabs (a terminal acts on them when a file is
+/// read in one, or its copy pasted), and without characters that draw nothing but can hide words or turn them around.
+/// Every word an export writes, and every word an import reads, is this.
 fn drawn(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
+    text.chars().filter(|c| (!c.is_control() || *c == '\n' || *c == '\t') && !invisible(*c)).collect()
 }
 
 /// The messages with what may leave Kumi: the producer's words (see [`producer_words`]), Kumi's words and steps, and each
@@ -1298,13 +1299,13 @@ pub fn import(text: &str, now: i64) -> Result<Imported, String> {
     let title = value
         .get("title")
         .and_then(Value::as_str)
-        .map(|title| head(&one_line(&neutralized(&clean_text(title))), MAX_TITLE))
+        .map(|title| head(&one_line(&neutralized(&drawn(title))), MAX_TITLE))
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| head(&one_line(&first), MAX_TITLE));
     let place = value
         .get("set")
         .and_then(Value::as_str)
-        .map(|set| head(&one_line(&neutralized(&clean_text(set))), MAX_TITLE))
+        .map(|set| head(&one_line(&neutralized(&drawn(set))), MAX_TITLE))
         .filter(|set| !set.is_empty());
     let saved_at = value.get("saved").and_then(Value::as_i64).filter(|at| (1..=now).contains(at)).unwrap_or(now);
     let turns = producer.iter().filter(|words| *words != PARTWAY).count() as u32;
@@ -1328,9 +1329,7 @@ pub fn import(text: &str, now: i64) -> Result<Imported, String> {
 /// none of the file speaks as Kumi. None when nothing's left of it.
 fn kept_message(message: Message) -> Option<Value> {
     let words = |text: &str| {
-        Some(neutralized(&clean_text(&bounded(text))))
-            .filter(|text| !trim(text).is_empty())
-            .map(|text| json!({"type": "text", "text": text}))
+        Some(neutralized(&drawn(&bounded(text)))).filter(|text| !trim(text).is_empty()).map(|text| json!({"type": "text", "text": text}))
     };
     let (role, content): (&str, Vec<Value>) = match message {
         Message::User { content, .. } => {
@@ -1341,7 +1340,7 @@ fn kept_message(message: Message) -> Option<Value> {
                     UserPart::File(_) => None,
                 })
                 .collect();
-            match producer_words(&clean_text(&bounded(&text)), 0, &mut Vec::new(), &mut false) {
+            match producer_words(&drawn(&bounded(&text)), 0, &mut Vec::new(), &mut false) {
                 Words::Said(said) => ("user", vec![json!({"type": "text", "text": neutralized(&said)})]),
                 Words::CarryOn | Words::Kumi => return None,
             }
@@ -1368,7 +1367,7 @@ fn kept_message(message: Message) -> Option<Value> {
                 .into_iter()
                 .filter_map(|part| match part {
                     ToolPart::ToolResult(result) => {
-                        let text = neutralized(&clean_text(&bounded(&output_text(&result.output))));
+                        let text = neutralized(&drawn(&bounded(&output_text(&result.output))));
                         Some(json!({
                             "type": "tool-result",
                             "toolCallId": result.tool_call_id,
@@ -1438,20 +1437,12 @@ fn bounded(text: &str) -> String {
     }
 }
 
-/// Words from a file, without the control characters a terminal would act on (line breaks and tabs stay) or characters
-/// that draw nothing.
-fn clean_text(text: &str) -> String {
-    text.chars().filter(|c| (!c.is_control() || *c == '\n' || *c == '\t') && !invisible(*c)).collect()
-}
-
 /// A step's input from a file, each string and key cleaned as words are.
 fn cleaned_value(value: &Value) -> Value {
     match value {
-        Value::String(text) => Value::String(neutralized(&clean_text(&bounded(text)))),
+        Value::String(text) => Value::String(neutralized(&drawn(&bounded(text)))),
         Value::Array(items) => Value::Array(items.iter().map(cleaned_value).collect()),
-        Value::Object(fields) => {
-            Value::Object(fields.iter().map(|(key, item)| (neutralized(&clean_text(key)), cleaned_value(item))).collect())
-        }
+        Value::Object(fields) => Value::Object(fields.iter().map(|(key, item)| (neutralized(&drawn(key)), cleaned_value(item))).collect()),
         other => other.clone(),
     }
 }
