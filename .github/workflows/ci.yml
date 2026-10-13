@@ -321,12 +321,13 @@ jobs:
             sh scripts/check-installers.sh "$2"
           }
           check "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main" "$RUNNER_TEMP/main" || ok=1
-          # Every release since the first one publish attached them to carries both.
-          assets="$(gh release view --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-          if grep -qx install.sh <<<"$assets" && grep -qx install.ps1 <<<"$assets"; then
-            check "https://github.com/$GITHUB_REPOSITORY/releases/latest/download" "$RUNNER_TEMP/latest" || ok=1
+          # The latest release, by the tag the API names: the releases/latest/download redirect can lag a publish by a
+          # couple of minutes. Every release since the first one publish attached them to carries both.
+          for _ in 1 2 3; do latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName,assets --jq '[.tagName] + [.assets[].name] | join(" ")')" && break; sleep 10; done
+          if [[ " $latest " == *" install.sh "* && " $latest " == *" install.ps1 "* ]]; then
+            check "https://github.com/$GITHUB_REPOSITORY/releases/download/${latest%% *}" "$RUNNER_TEMP/latest" || ok=1
           else
-            echo "::notice::The latest release has no installers attached yet."
+            echo "::notice::The latest release (${latest%% *}) has no installers attached yet."
           fi
           exit "$ok"
 
