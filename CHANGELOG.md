@@ -3,6 +3,21 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.15.0 — 2026-10-12
+
+Ships with bridge 1.0.92, as 1.14.0 did.
+
+- Kumi works in the background now. Research, tutorial videos, the manual, your library and device
+  files run as jobs beside the conversation, so you can keep working while they do. The header counts
+  what's running, and the JOBS tab (or /jobs) shows each job's progress, time and tokens; Enter opens
+  one and x stops it. When a job ends, a card says what it found, and Kumi uses it with your next
+  message, or carries on by itself when your request needed it. Ctrl-B moves a slow step that doesn't
+  use Live into the background (press it twice in tmux). maxJobs and workerModel in settings.json set
+  how many run at once and which model they use.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.14.0 — 2026-10-12
 
 Ships with bridge 1.0.92, as 1.13.0 did.
