@@ -522,6 +522,21 @@ async fn escape_deadline_starts_at_input_even_when_its_task_is_not_polled() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_terminals_reply_is_never_typed_and_alt_keys_still_are() {
+    local(async {
+        // Kitty's graphics reply and a DCS report, whole or split across reads: nothing but what was typed after.
+        assert_eq!(parse(&["\u{1b}_Gi=7;OK\u{1b}\\a"], 5.0).await, vec![text("a")]);
+        assert_eq!(parse(&["\u{1b}_Gi=7;EN", "OENT:gone\u{1b}\\b"], 5.0).await, vec![text("b")]);
+        assert_eq!(parse(&["\u{1b}P>|kitty(0.40)\u{1b}\\c"], 5.0).await, vec![text("c")]);
+        assert_eq!(parse(&["\u{1b}P1+r544e\u{7}d"], 5.0).await, vec![text("d")]);
+        // Alt and a letter are keys as before.
+        assert_eq!(parse(&["\u{1b}_"], 5.0).await, vec![key("_", ALT)]);
+        assert_eq!(parse(&["\u{1b}P"], 5.0).await, vec![key("p", ALT_SHIFT)]);
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn pastes_bracketed_pastes_even_split_and_unbracketed_multi_line_reads_never_send_enter() {
     local(async {
         assert_eq!(

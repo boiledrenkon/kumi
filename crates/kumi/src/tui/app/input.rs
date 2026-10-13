@@ -78,7 +78,11 @@ impl TuiApp {
                 self.0.tabs.leave();
                 self.add_attachments(files);
             }
-            InputEvent::Text { text } if self.0.tabs.inside() && text.chars().count() == 1 && self.0.tabs.key(&text.to_lowercase()) => {}
+            // In the tabs, a typed character is the row's key: Space opens a change's picture, `u` undoes it.
+            InputEvent::Text { text }
+                if self.0.tabs.inside()
+                    && text.chars().count() == 1
+                    && self.0.tabs.key(&if text == " " { "space".to_string() } else { text.to_lowercase() }) => {}
             InputEvent::Text { text } | InputEvent::Paste { text } => {
                 self.0.tabs.leave();
                 let mut state = self.0.state.borrow_mut();

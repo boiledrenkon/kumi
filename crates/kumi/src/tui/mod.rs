@@ -9,6 +9,7 @@ pub mod keys;
 pub mod logo;
 pub mod markdown;
 pub mod picker;
+pub mod pictures;
 pub mod render;
 pub mod scheduler;
 pub mod screen;

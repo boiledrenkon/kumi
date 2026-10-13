@@ -127,9 +127,21 @@ impl TuiApp {
         } else {
             screen.put(x, area.y + now_at + 1, &truncate(&now.detail, width), &now.style);
         }
-        if let Some(picture) = self.flashing().and_then(|c| change_picture(&c, width, self.0.depth)) {
-            for (row, line) in picture.iter().take(2).enumerate() {
-                spans(screen, x, area.y + now_at + 2 + row as i32, line, None);
+        if let Some(change) = self.flashing() {
+            // A new clip, a device's place and a colour keep their own pictures; curves, lanes, values and levels are
+            // drawn from the change's picture.
+            let own = change.clip.is_some() || change.devices.is_some() || change.colors.is_some();
+            let drawn = (!own).then(|| self.change_drawn(&change, width.max(4) as usize, 2)).flatten().map(|(drawn, _)| {
+                if drawn.rows.is_empty() {
+                    drawn.lines
+                } else {
+                    drawn.rows
+                }
+            });
+            if let Some(picture) = drawn.filter(|rows| !rows.is_empty()).or_else(|| change_picture(&change, width, self.0.depth)) {
+                for (row, line) in picture.iter().take(2).enumerate() {
+                    spans(screen, x, area.y + now_at + 2 + row as i32, line, None);
+                }
             }
         }
         let bottom = Self::bottom_height(area.height);
@@ -422,7 +434,17 @@ impl TuiApp {
         if area.height > 1 {
             if let Some(last) = last.filter(|c| !self.busy() && c.state == ChangeState::Applied) {
                 let at = area.width - 6;
-                screen.put(2, area.y + 1, &truncate(&format!("✓ {}", last.title), (at - 4).max(1)), &st::TEXT);
+                // A curve, a lane or notes in one row beside it, where there's room.
+                let room = ((at - 4) / 3).clamp(0, 16);
+                let picture = (room >= 8)
+                    .then(|| self.change_drawn(&last, room as usize, 1))
+                    .flatten()
+                    .and_then(|(drawn, _)| drawn.rows.into_iter().next());
+                let title_room = if picture.is_some() { at - 5 - room } else { at - 4 };
+                screen.put(2, area.y + 1, &truncate(&format!("✓ {}", last.title), title_room.max(1)), &st::TEXT);
+                if let Some(picture) = picture {
+                    spans(screen, at - 1 - room, area.y + 1, &picture, None);
+                }
                 screen.put(at, area.y + 1, "undo", &st::ACCENT);
                 self.hit(at, area.y + 1, 4, move |app| {
                     let id = last.id.clone();
@@ -441,16 +463,18 @@ impl TuiApp {
         }
     }
     pub(super) fn history_rows(&self, width: i32) -> Rc<[TabRow]> {
-        // Made again only when the changes or what's kept change, or at another width: not every frame.
-        let revision = {
+        // Made again only when the changes or what's kept change, at another width, or as a row opens or closes: not
+        // every frame.
+        let (revision, expanded) = {
             let state = self.0.state.borrow();
-            if let Some((made, at, rows)) = &state.history_rows {
-                if *made == state.records.revision() && *at == width {
+            if let Some((made, at, open, rows)) = &state.history_rows {
+                if *made == state.records.revision() && *at == width && *open == state.expanded {
                     return rows.clone();
                 }
             }
-            state.records.revision()
+            (state.records.revision(), state.expanded.clone())
         };
+        let mut image = None;
         let mut rows = vec![];
         let (state_kept, changes) = {
             let state = self.0.state.borrow();
@@ -496,7 +520,7 @@ impl TuiApp {
         if !state_kept.is_empty() && !changes.is_empty() {
             rows.push(TabRow::default());
         }
-        for (place, change) in changes.iter().rev().enumerate() {
+        for change in changes.iter().rev() {
             let heard = change.state == ChangeState::Heard;
             let action = if heard {
                 change.score.map(|n| format!("{}%", number::to_string(n))).unwrap_or_else(|| "heard".into())
@@ -553,24 +577,64 @@ impl TuiApp {
             } else {
                 None
             };
+            // Enter, → or Space (or a click on the words) opens the change's picture, and closes it again; `u` and the
+            // label undo it.
+            let open = expanded.as_deref() == Some(change.id.as_str());
+            let toggle: Rc<dyn Fn()> = {
+                let id = change.id.clone();
+                self.click(move |app| {
+                    let mut state = app.0.state.borrow_mut();
+                    state.expanded = if state.expanded.as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
+                })
+            };
+            let close: Option<Rc<dyn Fn()>> = open.then(|| self.click(|app| app.0.state.borrow_mut().expanded = None));
+            let mut keys: Vec<(&'static str, Rc<dyn Fn()>)> = vec![("right", toggle.clone()), ("space", toggle.clone())];
+            keys.extend(close.map(|close| ("left", close)));
+            keys.extend(undo.clone().map(|undo| ("u", undo)));
+            let item = Some(change.id.clone());
             rows.push(TabRow {
                 spans: vec![marker, sp(lines.first().map(String::as_str).unwrap_or(""), title_style)],
                 right: Some(sp(action, action_style)),
-                item: Some(format!("change {place}")),
+                item: item.clone(),
                 action: undo.clone(),
+                open: Some(toggle.clone()),
+                keys: keys.clone(),
                 ..Default::default()
             });
             if lines.len() > 1 {
                 rows.push(TabRow {
                     spans: vec![sp("  ", title_style), sp(lines[1..].join(" "), title_style)],
-                    item: Some(format!("change {place}")),
-                    action: undo,
+                    item: item.clone(),
+                    action: undo.clone(),
+                    open: Some(toggle.clone()),
+                    keys: keys.clone(),
                     ..Default::default()
                 });
             }
+            if open {
+                let cols = (width - 2).max(4) as usize;
+                let extra = |spans: Vec<crate::tui::wrap::Span>| TabRow {
+                    spans: [vec![sp("  ", st::FAINT)], spans].concat(),
+                    item: item.clone(),
+                    action: undo.clone(),
+                    open: Some(toggle.clone()),
+                    keys: keys.clone(),
+                    ..Default::default()
+                };
+                match self.change_drawn(change, cols, self.picture_height(change)) {
+                    Some((drawn, key)) => {
+                        image = key;
+                        rows.extend(drawn.rows.into_iter().chain(drawn.lines).map(extra));
+                    }
+                    None => rows.push(extra(vec![sp("No picture for this change", st::FAINT)])),
+                }
+            }
         }
         let rows: Rc<[TabRow]> = rows.into();
-        self.0.state.borrow_mut().history_rows = Some((revision, width, rows.clone()));
+        let mut state = self.0.state.borrow_mut();
+        state.history_rows = Some((revision, width, expanded, rows.clone()));
+        state.history_image = image;
+        drop(state);
         rows
     }
     /// The /goal objective: what it is, where it stands against its budget, the last check and what's next.

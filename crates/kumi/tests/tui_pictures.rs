@@ -1,0 +1,150 @@
+//! Changes' pictures in HISTORY (a row opens to show it), NOW and the narrow dock; images only where the terminal
+//! shows them.
+#[path = "support/tui_app.rs"]
+mod support;
+use kumi::tui::pictures::Graphics;
+use serde_json::{json, Value};
+use std::rc::Rc;
+use support::*;
+macro_rules! case {
+    ($name:ident,$body:expr) => {
+        #[tokio::test(flavor = "current_thread")]
+        async fn $name() {
+            tokio::task::LocalSet::new().run_until($body).await;
+        }
+    };
+}
+
+fn eq_change(id: &str, gain: f64) -> Value {
+    let band = |gain: f64| json!({"shape":"bell","freq":1000.0,"gainDb":gain,"q":1.0});
+    json!({"type":"change","change":{"id":id,"family":"parameter","title":"EQ Eight · 3 Gain A 0.00 dB → -4.00 dB","state":"applied","at":1,
+        "picture":{"kind":"eq","before":[band(0.0)],"after":[band(gain)],
+            "values":[{"name":"3 Gain A","from":0.0,"to":gain,"fromText":"0.00 dB","toText":"-4.00 dB","asked":"-4.5 dB"}]}}})
+}
+
+fn tempo_change(id: &str) -> Value {
+    json!({"type":"change","change":{"id":id,"family":"tempo","title":"Tempo 120 → 124 BPM","state":"applied","at":2,"from":120.0,"to":124.0,
+        "picture":{"kind":"values","values":[{"name":"Tempo","from":120.0,"to":124.0,"min":20.0,"max":999.0,"fromText":"120 BPM","toText":"124 BPM"}]}}})
+}
+
+/// The first row under HISTORY's strip with `text`.
+fn history_row(lines: &[String], text: &str) -> usize {
+    let strip = lines.iter().position(|line| line.contains("HISTORY")).expect("HISTORY");
+    strip
+        + lines[strip..].iter().position(|line| line.contains(text)).unwrap_or_else(|| panic!("{text:?} in HISTORY:\n{}", lines.join("\n")))
+}
+
+fn braille(lines: &[String]) -> bool {
+    lines.iter().any(|line| line.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)))
+}
+
+case!(a_history_row_opens_to_its_picture_and_closes_again, async {
+    let h = Harness::new(160, 40);
+    h.start().await;
+    h.connect();
+    h.emit(eq_change("c1", -4.));
+    h.emit(tempo_change("c2"));
+    h.has("Tempo 120 → 124 BPM");
+    assert!(!has(&h.screen(), "asked -4.5 dB"), "closed until opened");
+    // Into the tabs: the newest change first, then the EQ move.
+    let opened = |h: &Harness, text: &str| {
+        let lines = h.screen();
+        let strip = lines.iter().position(|line| line.contains("HISTORY")).unwrap();
+        lines[strip..].iter().any(|line| line.contains(text))
+    };
+    h.type_text("\x1b[Z").await;
+    h.type_text("\r").await;
+    assert!(opened(&h, "Tempo 120 BPM → 124 BPM"), "{}", h.screen().join("\n"));
+    h.type_text("\x1b[D").await;
+    assert!(!opened(&h, "Tempo 120 BPM → 124 BPM"));
+    h.type_text("\x1b[B").await;
+    h.type_text(" ").await;
+    h.wait_for("3 Gain A 0.00 dB → -4.00 dB").await;
+    h.has("asked -4.5 dB");
+    assert!(braille(&h.screen()), "the curve, drawn in braille here");
+    // Enter closes it again; nothing was undone.
+    h.type_text("\r").await;
+    h.wait_until_hidden("asked -4.5 dB").await;
+    assert!(!h.calls().iter().any(|call| call.starts_with("undo:")));
+    h.close().await;
+});
+
+case!(a_click_on_a_rows_words_opens_it_and_undo_stays_on_its_label, async {
+    let h = Harness::new(160, 40);
+    h.start().await;
+    h.connect();
+    h.emit(tempo_change("c2"));
+    let lines = h.screen();
+    let row = history_row(&lines, "Tempo 120 → 124 BPM");
+    h.type_text(&click(&lines, row, "Tempo 120")).await;
+    let lines = h.screen();
+    history_row(&lines, "Tempo 120 BPM → 124 BPM");
+    assert!(!h.calls().iter().any(|call| call.starts_with("undo:")));
+    h.type_text(&click(&lines, row, "undo")).await;
+    h.wait_for_call("undo:c2").await;
+    h.close().await;
+});
+
+case!(a_curve_that_comes_after_its_change_is_drawn_again, async {
+    let h = Harness::new(160, 40);
+    h.start().await;
+    h.connect();
+    // The change is told with its values; its curve comes after (read once it was applied).
+    let mut first = eq_change("c1", -4.);
+    first["change"]["picture"] =
+        json!({"kind":"values","values":[{"name":"3 Gain A","from":0.0,"to":-4.0,"fromText":"0.00 dB","toText":"-4.00 dB"}]});
+    h.emit(first);
+    h.type_text("\x1b[Z").await;
+    h.type_text("\r").await;
+    h.wait_for("3 Gain A 0.00 dB → -4.00 dB").await;
+    assert!(!braille(&h.screen()));
+    h.emit(eq_change("c1", -4.));
+    h.wait_for("asked -4.5 dB").await;
+    assert!(braille(&h.screen()), "the curve, now it's here");
+    h.close().await;
+});
+
+case!(the_narrow_dock_shows_the_last_changes_picture_in_a_row, async {
+    let h = Harness::new(80, 30);
+    h.start().await;
+    h.connect();
+    h.emit(eq_change("c1", -4.));
+    let lines = h.screen();
+    let row = lines.iter().position(|line| line.contains("✓ EQ Eight")).expect("the dock's last change");
+    assert!(braille(&lines[row..=row]), "{}", lines[row]);
+    assert!(lines[row].contains("undo"));
+    h.close().await;
+});
+
+case!(images_go_up_only_where_the_terminal_shows_them, async {
+    // Cells: no image, ever.
+    let h = Harness::new(160, 40);
+    h.start().await;
+    h.connect();
+    h.emit(eq_change("c1", -4.));
+    h.type_text("\x1b[Z").await;
+    h.type_text("\r").await;
+    h.wait_for("asked -4.5 dB").await;
+    assert!(!h.output.text.borrow().contains("\x1b_G"));
+    h.close().await;
+    // Kitty's placeholders: the image is uploaded, quietly, before the frame that shows it, and taken down at the end.
+    let h = Harness::with(160, 40, Rc::new(Control::default()), |o| o.graphics = Some(Graphics::Kitty));
+    h.start().await;
+    h.connect();
+    h.emit(eq_change("c1", -4.));
+    h.type_text("\x1b[Z").await;
+    h.type_text("\r").await;
+    h.wait_for("asked -4.5 dB").await;
+    let written = h.output.text.borrow().clone();
+    let upload = written.find("\x1b_Ga=T,U=1,i=").expect("an upload");
+    assert!(written[upload..].starts_with("\x1b_Ga=T,U=1,i="), "{}", &written[upload..upload + 60]);
+    assert!(written[upload..].split("\x1b\\").next().unwrap().contains(",q=2,"));
+    let placeholder = written.find('\u{10EEEE}').expect("placeholder cells");
+    assert!(upload < placeholder, "the image goes up first");
+    // HISTORY's picture (6 rows) and NOW's (2 rows, as the change landed): each uploaded once, however many frames show it.
+    assert_eq!(written.matches(",r=6,o=z").count(), 1, "HISTORY's, once");
+    assert_eq!(written.matches(",r=2,o=z").count(), 1, "NOW's, once");
+    h.close().await;
+    let written = h.output.text.borrow();
+    assert_eq!(written.matches("\x1b_Ga=d,d=I,").count(), 2, "both taken down as Kumi closes");
+});

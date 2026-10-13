@@ -19,9 +19,10 @@ pub struct TabRow {
     pub right: Option<Span>,
     /// Clicking the right edge, or Enter on the row, does this.
     pub action: Option<Rc<dyn Fn()>>,
-    /// Enter does this instead, when the row has it (a job opens; its right edge stops it).
+    /// Enter, or a click on the row's words, does this instead when the row has it: a job opens (its right edge stops
+    /// it), a change opens or closes its picture.
     pub open: Option<Rc<dyn Fn()>>,
-    /// Other keys on the row (a letter), and what each does.
+    /// Other keys on the row (a letter, an arrow, Space), and what each does.
     pub keys: Vec<(&'static str, Rc<dyn Fn()>)>,
     /// Rows of one thing (a change whose title takes two) share this, so "n more" counts things, not rows.
     pub item: Option<String>,
@@ -168,7 +169,8 @@ impl TabPanel {
         self.inner.state.borrow_mut().cursor = None;
     }
 
-    /// Keys while the keyboard is in the panel: arrows and pages move, Enter does the row's action. True when used.
+    /// Keys while the keyboard is in the panel: arrows and pages move; Enter opens a row that opens (a change's
+    /// picture), or does the row's action; →/Space open, ← closes, `u` does an opening row's action. True when used.
     pub fn key(&self, name: &str) -> bool {
         let action = {
             let mut state = self.inner.state.borrow_mut();
@@ -306,6 +308,14 @@ impl TabPanel {
                 screen.fill(Rect { x: area.x - 1, y, width: area.width + 2, height: 1 }, &cursor_band);
             }
             let right = row.right.as_ref().map_or(0, |right| text_width(&right.text));
+            if let Some(open) = &row.open {
+                hits.push(Hit {
+                    x: area.x,
+                    y,
+                    width: (area.width - if right > 0 { right + 1 } else { 0 }).max(1),
+                    action: Rc::clone(open),
+                });
+            }
             let mut column = area.x;
             for span in &row.spans {
                 let room = area.x + area.width - column - if right > 0 { right + 1 } else { 0 };

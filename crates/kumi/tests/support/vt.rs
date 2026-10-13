@@ -44,8 +44,12 @@ impl VirtualTerminal {
                 continue;
             }
             if bytes[index] == 0x1b {
-                // OSC (clipboard, titles) ends at BEL or ESC \; it draws nothing. Other escapes are two characters.
-                if bytes.get(index + 1) == Some(&b']') {
+                // OSC (clipboard, titles) ends at BEL or ESC \, and APC (Kitty's images) and DCS at ESC \; they draw
+                // nothing. Other escapes are two characters.
+                if matches!(bytes.get(index + 1), Some(b'_' | b'P')) {
+                    let st = data[index..].find("\u{1b}\\").map(|at| index + at + 2);
+                    index = st.unwrap_or(bytes.len()).min(bytes.len());
+                } else if bytes.get(index + 1) == Some(&b']') {
                     let bell = data[index..].find('\u{7}').map(|at| index + at + 1);
                     let st = data[index..].find("\u{1b}\\").map(|at| index + at + 2);
                     index = [bell, st].into_iter().flatten().min().unwrap_or(bytes.len()).min(bytes.len());
