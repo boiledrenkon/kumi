@@ -50,10 +50,11 @@ def target():
 
 
 class Server:
-    """Serves a folder of releases; `slow` paths come a little at a time, and `answers` stand in for others."""
+    """Serves a folder of releases. `slow` maps paths to files that come a little at a time, and `answers` paths to
+    answers that stand in for the folder's."""
 
     def __init__(self, folder):
-        self.folder, self.slow, self.answers, self.asked = folder, set(), {}, []
+        self.slow, self.answers, self.asked = {}, {}, []
         server = self
 
         class Handler(http.server.SimpleHTTPRequestHandler):
@@ -71,8 +72,9 @@ class Server:
                     self.end_headers()
                     self.wfile.write(body)
                     return
-                if self.path in server.slow:
-                    data = (Path(server.folder) / self.path.lstrip("/")).read_bytes()
+                slow = server.slow.get(self.path)
+                if slow:
+                    data = slow.read_bytes()
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
@@ -270,10 +272,10 @@ exit $status
         manifest["sha256"] = hashlib.sha256((folder / manifest["bundle"]).read_bytes()).hexdigest()
         (folder / f"kumi-release-{self.target}.json").write_text(json.dumps(manifest))
         self.serve(folder)
-        self.server.slow.add(f"/kumi-{self.target}.tar.gz")
+        self.server.slow[f"/kumi-{self.target}.tar.gz"] = folder / f"kumi-{self.target}.tar.gz"
         for when in ("download", "lookup"):
             if when == "lookup":
-                self.server.slow = {f"/kumi-release-{self.target}.json"}
+                self.server.slow = {f"/kumi-release-{self.target}.json": folder / f"kumi-release-{self.target}.json"}
                 (folder / f"kumi-release-{self.target}.json").write_text(json.dumps(manifest) + " " * 8192)
             process = subprocess.Popen(["sh", str(INSTALL_SH)], env=self.environment(home), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        stdin=subprocess.DEVNULL, text=True, encoding="utf-8", start_new_session=True)
@@ -294,7 +296,7 @@ exit $status
     def test_ctrl_c_on_a_first_install_leaves_no_folder(self):
         folder = self.release("2.0.0")
         self.serve(folder)
-        self.server.slow.add(f"/kumi-release-{self.target}.json")
+        self.server.slow[f"/kumi-release-{self.target}.json"] = folder / f"kumi-release-{self.target}.json"
         (folder / f"kumi-release-{self.target}.json").write_text((folder / f"kumi-release-{self.target}.json").read_text() + " " * 8192)
         home = self.home()
         process = subprocess.Popen(["sh", str(INSTALL_SH)], env=self.environment(home), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
