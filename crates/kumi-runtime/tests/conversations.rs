@@ -276,6 +276,8 @@ async fn a_conversation_another_open_kumi_has_is_taken_until_that_kumi_is_gone()
     // That Kumi closed without letting go (a crash): this one takes it.
     other.kill().unwrap();
     other.wait().unwrap();
+    // Windows keeps a process's record while a handle to it is open.
+    drop(other);
     assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours);
     assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(&lock).unwrap()).unwrap()["pid"], std::process::id());
     // A pid used again by another process (started later than the lock says) is a lock left behind, too.

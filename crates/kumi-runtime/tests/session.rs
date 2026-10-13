@@ -3658,6 +3658,8 @@ local_test!(a_conversation_another_open_kumi_has_goes_on_here_in_a_copy_until_th
     // That Kumi went without letting go (a crash): asked for, the conversation is this one's again.
     other.kill().unwrap();
     other.wait().unwrap();
+    // Windows keeps a process's record while a handle to it is open.
+    drop(other);
     let h = harness(None, |o| {
         o.conversations = Some(store.clone());
         o.resume = Some((SET_A.into(), KEPT.into()));
