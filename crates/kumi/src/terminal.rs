@@ -53,6 +53,8 @@ pub struct TerminalOptions {
     pub willington: Option<WillingtonControl>,
     /// What's new since the producer last opened Kumi, said once as it starts.
     pub whats_new: Option<crate::whats_new::News>,
+    /// Fixed phrases ("tempo 124", "mute drums") change Live at once, with no model call (`instantPhrases`).
+    pub instant: bool,
 }
 impl TerminalOptions {
     pub fn new(
@@ -75,6 +77,7 @@ impl TerminalOptions {
             updates: None,
             willington: None,
             whats_new: None,
+            instant: true,
         }
     }
 }
@@ -629,9 +632,17 @@ impl PlainTerminal {
  "/willington"=>{match self.0.options.willington.clone().and_then(|w|(w.on)().map(|on|(w,on))){Some((willington,on))=>match (willington.set)(!on).await{Ok(said)=>{self.notice(&format!("[willington] {said}"));controller.reconfigure().await?;},Err(error)=>self.notice(&format!("[willington] Kumi couldn't turn Willington's bindings {}: {error}",if on{"off"}else{"on"})),},None=>self.notice("Unknown command. Use /help."),}},
  "/login"=>self.notice(&format!("[login] Sign in from a shell: {} login <provider> (openai-codex, anthropic, openai, opencode). The full-screen app signs in here.",*KUMI)),
  "/logout"=>{if let Some(provider)=argument.and_then(ProviderId::parse){self.notice(&if models.sign_out(provider).await?{format!("[logout] Signed out of {}.",provider.as_str())}else{format!("[logout] There was no sign-in for {} to remove.",provider.as_str())});}else{self.notice(&format!("[logout] Use: /logout <provider> ({}).",PROVIDERS.map(|p|p.as_str()).join(", ")));}},
- _=>{if command=="/undo"{if let Some(change)=controller.undo(None).await?{self.notice(&if enum_name(change.state)=="undone"{format!("[undo] Undid: {}",change.title)}else{string::trim(&format!("[undo] Kept: {}. {}",change.title,change.note.unwrap_or_default())).into()});}}else if command=="/refresh"{controller.refresh().await?;}else if command=="/reconnect"&&controller.has_reconnect(){controller.reconnect().await?;}else if command=="/new"{self.notice("── New conversation. Kumi won't use what's above ──");controller.new_conversation().await?;}else if command.starts_with('/'){self.notice("Unknown command. Use /help.");}else{self.0.state.borrow_mut().answering=true;let result=controller.submit(input,None).await;self.0.state.borrow_mut().answering=false;result?;}}
+ _=>{if command=="/undo"{if let Some(change)=controller.undo(None).await?{self.notice(&if enum_name(change.state)=="undone"{format!("[undo] Undid: {}",change.title)}else{string::trim(&format!("[undo] Kept: {}. {}",change.title,change.note.unwrap_or_default())).into()});}}else if command=="/refresh"{controller.refresh().await?;}else if command=="/reconnect"&&controller.has_reconnect(){controller.reconnect().await?;}else if command=="/new"{self.notice("── New conversation. Kumi won't use what's above ──");controller.new_conversation().await?;}else if command.starts_with('/'){self.notice("Unknown command. Use /help.");}else if let Some(outcome)=self.instant(input).await{self.notice(&format!("[instant] {}",outcome.text));}else{self.0.state.borrow_mut().answering=true;let result=controller.submit(input,None).await;self.0.state.borrow_mut().answering=false;result?;}}
  }
         Ok(())
+    }
+    /// A fixed phrase ("tempo 124", "mute drums") run at once with no model call; None sends it to the model.
+    async fn instant(&self, input: &str) -> Option<kumi_runtime::core::contracts::InstantOutcome> {
+        let controller = &self.0.options.controller;
+        if !self.0.options.instant || !controller.has_instant() || kumi_runtime::core::phrases::parse(input).is_none() {
+            return None;
+        }
+        controller.instant(input).await.ok().flatten()
     }
     async fn model_command(&self, argument: Option<&str>) -> Result<(), RuntimeError> {
         let models = &self.0.options.models;

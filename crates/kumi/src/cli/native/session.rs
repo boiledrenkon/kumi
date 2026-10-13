@@ -250,6 +250,7 @@ pub(super) async fn run_session(
         home.join("app.previous").exists() || home.join("kumi.db").exists()
     };
     let whats_new_on = settings.whats_new != Some(false);
+    let instant = settings.instant_phrases != Some(false);
     let projects_dir = load_projects_dir(&io.env)?;
     let tools_dir = load_tools_dir(&io.env)?;
     let library = create_library(LibraryOptions {
@@ -639,6 +640,7 @@ pub(super) async fn run_session(
         options.startup_notice = if connect_why.is_some() { None } else { notice };
         options.whats_new = whats_new;
         options.away = away;
+        options.instant = instant;
         options.connect_live = live_possible.then(|| ConnectLive {
             why: connect_why,
             bridge: bundled.clone().unwrap_or_default(),
@@ -682,6 +684,7 @@ pub(super) async fn run_session(
         let mut options = TerminalOptions::new(session, io.input.clone(), io.out.clone(), models, mode);
         options.startup_notice = notice;
         options.whats_new = whats_new;
+        options.instant = instant;
         options.secrets = secrets.clone();
         options.history = Some(history);
         options.updates = Some(updates);

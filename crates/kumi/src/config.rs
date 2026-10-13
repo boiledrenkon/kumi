@@ -168,6 +168,9 @@ pub struct Settings {
     /// false: no "What's new" as Kumi first starts after an update (`/changelog` still shows it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub whats_new: Option<bool>,
+    /// false: fixed phrases ("tempo 124", "mute drums") go to the model like any other message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instant_phrases: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library_folders: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -241,6 +244,7 @@ pub fn read_settings(file: &str) -> Settings {
         panel_tab: value["panelTab"].as_str().filter(|s| TAB.is_match(s)).map(str::to_string),
         update_check: (value["updateCheck"] == false).then_some(false),
         whats_new: (value["whatsNew"] == false).then_some(false),
+        instant_phrases: (value["instantPhrases"] == false).then_some(false),
         library_folders: value["libraryFolders"]
             .as_array()
             .into_iter()
@@ -280,6 +284,9 @@ pub fn write_settings(file: &str, next: &Value) -> Result<(), RuntimeError> {
     }
     if kept("whatsNew") == Some(&Value::Bool(false)) {
         settings.insert("whatsNew".into(), json!(false));
+    }
+    if kept("instantPhrases") == Some(&Value::Bool(false)) {
+        settings.insert("instantPhrases".into(), json!(false));
     }
     if let Some(value) = kept("libraryFolders").filter(|v| v.as_array().is_some_and(|v| !v.is_empty())) {
         settings.insert("libraryFolders".into(), value.clone());

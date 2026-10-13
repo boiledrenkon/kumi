@@ -461,7 +461,9 @@ impl TuiApp {
             };
         }
         if let Some(flash) = flash.filter(|_| !action.is_some_and(|a| a.at > state.last_change.as_ref().unwrap().1)) {
-            return simple(&format!("{} {}", if flash.state == ChangeState::Heard { "♪" } else { "✓" }, flash.title), st::BRIGHT);
+            // A fixed phrase's change, made with no model call.
+            let instant = if state.instant_changes.contains(&flash.id) { " · instant" } else { "" };
+            return simple(&format!("{} {}{instant}", if flash.state == ChangeState::Heard { "♪" } else { "✓" }, flash.title), st::BRIGHT);
         }
         if let Some(action) = action {
             return simple(&format!("{} {}", action.glyph, action.title), st::BRIGHT);

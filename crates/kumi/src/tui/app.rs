@@ -98,6 +98,8 @@ pub struct TuiOptions {
     pub alert_gap_ms: Option<f64>,
     /// Whether the terminal's app is in front, for a terminal that says nothing of focus; None asks the system.
     pub front_app: Option<FrontApp>,
+    /// Fixed phrases ("tempo 124", "mute drums") change Live at once, with no model call (`instantPhrases`).
+    pub instant: bool,
 }
 /// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
 /// than Kumi's.
@@ -137,6 +139,7 @@ impl TuiOptions {
             run_notifier: None,
             alert_gap_ms: None,
             front_app: None,
+            instant: true,
         }
     }
 }
@@ -255,6 +258,9 @@ struct State {
     retry: Option<(String, f64)>,
     /// What a long wait for the model is for (a plan's limit, the connection), and when it ends (epoch ms).
     waiting_for: Option<(WaitFor, f64)>,
+    /// A fixed phrase is changing Live: its changes say "instant" in NOW.
+    instant_running: bool,
+    instant_changes: Vec<String>,
     busy_since: f64,
     turn_changes: usize,
     recall: Option<(usize, String)>,
@@ -364,6 +370,8 @@ impl State {
             planning_since: 0.,
             retry: None,
             waiting_for: None,
+            instant_running: false,
+            instant_changes: Vec::new(),
             busy_since: 0.,
             turn_changes: 0,
             recall: None,

@@ -266,6 +266,13 @@ impl TuiApp {
                             !t.name.is_empty() && state.focus.as_ref().and_then(|f| f.track.as_ref()).is_some_and(|f| f.name == t.name)
                         });
                         state.last_change = Some((change.id.clone(), perf_now()));
+                        if state.instant_running {
+                            let id = change.id.clone();
+                            state.instant_changes.push(id);
+                            if state.instant_changes.len() > 50 {
+                                state.instant_changes.remove(0);
+                            }
+                        }
                         let changes = state.records.changes_mut();
                         changes.push(change);
                         if changes.len() > 500 {
