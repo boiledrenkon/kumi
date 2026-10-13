@@ -1519,9 +1519,15 @@ fn not_kumis_said(home: &str, why: NotKumis, display: &dyn Fn(&str) -> String) -
     let shown = display(home);
     let names = "so the names Kumi uses there (bin, downloads, tools…) could be your own";
     let mut said = match why {
+        // A ~ in KUMI_HOME is only a shell's to turn into the home folder: as Kumi reads it, it's a folder named ~.
+        NotKumis::Relative if home.starts_with('~') => {
+            return format!(
+                "Kumi won't uninstall from \"{home}\": KUMI_HOME starts with ~, which only a shell turns into your home folder. Set KUMI_HOME to the whole path of Kumi's folder and run kumi uninstall again. Nothing was removed."
+            )
+        }
         NotKumis::Relative => {
             return format!(
-                "Kumi won't uninstall from {shown}: KUMI_HOME is a relative path, so where it points depends on the folder you're in. Set it to the whole path of Kumi's folder and run kumi uninstall again. Nothing was removed."
+                "Kumi won't uninstall from \"{home}\": KUMI_HOME is a relative path, so where it points depends on the folder you're in. Set it to the whole path of Kumi's folder and run kumi uninstall again. Nothing was removed."
             )
         }
         NotKumis::Missing => return format!("There's no {shown} (Kumi's folder) to uninstall Kumi from. Nothing was removed."),

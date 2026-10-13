@@ -1709,7 +1709,13 @@ async fn uninstall_refuses_a_folder_that_isnt_kumis_own() {
     }
     let unmarked = files_in(&elsewhere);
     for (folder, why, words) in [
-        ("relkumi".to_string(), NotKumis::Relative, "KUMI_HOME is a relative path"),
+        ("relkumi".to_string(), NotKumis::Relative, "Kumi won't uninstall from \"relkumi\": KUMI_HOME is a relative path"),
+        (
+            "~".to_string(),
+            NotKumis::Relative,
+            "Kumi won't uninstall from \"~\": KUMI_HOME starts with ~, which only a shell turns into your home folder.",
+        ),
+        ("~/.kumi".to_string(), NotKumis::Relative, "KUMI_HOME starts with ~, which only a shell turns into your home folder."),
         (
             dir.path().join("nowhere").display().to_string(),
             NotKumis::Missing,
