@@ -7,7 +7,7 @@ use super::summaries::{coalesce, label};
 use super::*;
 
 /// The picture of a change, from its preview, its input and Live's answer (none before it's applied).
-pub(super) fn picture(kind: &ChangeKind, preview: &JsonObject, input: &JsonObject, applied: Option<&JsonObject>) -> Option<ChangePicture> {
+pub(crate) fn picture(kind: &ChangeKind, preview: &JsonObject, input: &JsonObject, applied: Option<&JsonObject>) -> Option<ChangePicture> {
     let empty = JsonObject::new();
     let applied = applied.unwrap_or(&empty);
     match kind.tool.as_str() {
@@ -68,12 +68,49 @@ fn mixer(preview: &JsonObject, applied: &JsonObject) -> Option<ChangePicture> {
     };
     let prior = record(preview.get("prior"));
     let proposed = record(preview.get("proposed"));
-    // What wasn't asked stays as it was: the after shows the whole channel.
+    let prior_texts = record(preview.get("priorDisplay"));
+    // What wasn't asked stays as it was: the after shows the whole channel. A shorter list of sends sets the first
+    // ones; the rest stay.
     let mut after = prior.clone();
-    after.extend(proposed.iter().map(|(key, value)| (key.clone(), value.clone())));
-    let mut after_texts = record(preview.get("priorDisplay")).clone();
-    after_texts.extend(record(applied.get("display")).iter().map(|(key, value)| (key.clone(), value.clone())));
-    Some(ChangePicture::Mix { before: levels(prior, record(preview.get("priorDisplay"))), after: levels(&after, &after_texts) })
+    for (key, value) in proposed {
+        let merged = if key == "sends" { by_index(prior.get("sends"), Some(value)) } else { value.clone() };
+        after.insert(key.clone(), merged);
+    }
+    // The words after: Live's own once it's applied; for what wasn't asked, the words before. An asked level never takes
+    // its old words (an unconfirmed change shows its numbers only).
+    let mut after_texts = JsonObject::new();
+    for (key, value) in prior_texts {
+        if key == "sends" {
+            let asked = array(proposed.get("sends")).len();
+            let kept = array(Some(value)).iter().enumerate().map(|(i, text)| if i < asked { Value::Null } else { text.clone() }).collect();
+            after_texts.insert(key.clone(), Value::Array(kept));
+        } else if !proposed.contains_key(key) {
+            after_texts.insert(key.clone(), value.clone());
+        }
+    }
+    for (key, value) in record(applied.get("display")) {
+        let merged = if key == "sends" { by_index(after_texts.get("sends"), Some(value)) } else { value.clone() };
+        after_texts.insert(key.clone(), merged);
+    }
+    Some(ChangePicture::Mix { before: levels(prior, prior_texts), after: levels(&after, &after_texts) })
+}
+
+/// A list laid over another by place: each of `over`'s items replaces the one at its place (a null keeps it).
+fn by_index(under: Option<&Value>, over: Option<&Value>) -> Value {
+    let mut items = array(under).to_vec();
+    for (index, item) in array(over).iter().enumerate() {
+        if item.is_null() {
+            continue;
+        }
+        match items.get_mut(index) {
+            Some(slot) => *slot = item.clone(),
+            None => {
+                items.resize(index, Value::Null);
+                items.push(item.clone());
+            }
+        }
+    }
+    Value::Array(items)
 }
 
 /// The parameters that moved (all of them when none did): each in its range, as Live shows it before and after, and
@@ -168,7 +205,7 @@ fn new_clip(preview: &JsonObject, input: &JsonObject) -> Option<ChangePicture> {
     let source = if proposed.get("notes").is_some_and(Value::is_array) { array(proposed.get("notes")) } else { array(input.get("notes")) };
     let notes = summaries::drawn_notes(source);
     let length = finite(coalesce(proposed.get("length"), input.get("length"))).filter(|n| *n > 0.)?;
-    (!notes.is_empty()).then(|| ChangePicture::Notes { length, before: Vec::new(), after: notes })
+    (!notes.is_empty()).then(|| ChangePicture::Notes { length, before: Vec::new(), after: notes, partial: false })
 }
 
 /// Notes changed or deleted: the ones touched, before (Live's own) and after (with the changes laid over them).
@@ -204,7 +241,7 @@ fn edited_notes(kind: &ChangeKind, preview: &JsonObject, input: &JsonObject) -> 
     };
     let after = summaries::drawn_notes(&after);
     let end = before.iter().chain(&after).map(|note| note.start + note.duration).fold(0., f64::max);
-    Some(ChangePicture::Notes { length: (end / 4.).ceil().max(1.) * 4., before, after })
+    Some(ChangePicture::Notes { length: (end / 4.).ceil().max(1.) * 4., before, after, partial: false })
 }
 
 /// A clip's automation: Live's points before; after, those with what was drawn laid over them (or erased).
@@ -281,7 +318,7 @@ impl ParameterRow {
 /// the curve (the device's own names then say whether it is one).
 pub fn curve_parameter(name: &str) -> bool {
     static BAND: std::sync::LazyLock<Regex> =
-        std::sync::LazyLock::new(|| Regex::new(r"^[1-8] (Filter On|Filter Type|Frequency|Gain|Q) A$").expect("regex"));
+        std::sync::LazyLock::new(|| Regex::new(r"^[1-8] (Filter On|Filter Type|Frequency|Gain|Q|Resonance) A$").expect("regex"));
     BAND.is_match(name)
         || ["Scale", "Low Gain", "Mid Gain", "Mid Freq", "High Gain", "Highpass On", "Threshold", "Ratio", "Knee", "Output Gain", "Makeup"]
             .contains(&name)
@@ -302,6 +339,24 @@ pub fn curves(read: &[ParameterRow], changes: &[(String, Vec<PictureValue>)]) ->
     }
     drawn.reverse();
     drawn
+}
+
+/// The curves one read gives the changes it was for (`ours`, oldest first, each with every value it moved). Only
+/// changes still applied are in what was read: the others are left out, and get none. Changes made while it read
+/// (`newer`) may be in it too: they're walked back first, and get theirs from a read of their own. None at all when a
+/// moved parameter isn't on the device read: another device sits in its place.
+pub fn curves_for(
+    read: &[ParameterRow],
+    ours: &[(String, Vec<PictureValue>)],
+    newer: &[(String, Vec<PictureValue>)],
+    applied: impl Fn(&str) -> bool,
+) -> Vec<(String, ChangePicture)> {
+    let walk: Vec<(String, Vec<PictureValue>)> = ours.iter().chain(newer).filter(|(id, _)| applied(id)).cloned().collect();
+    let names: std::collections::HashSet<&str> = read.iter().map(|row| row.name.as_str()).collect();
+    if !walk.iter().all(|(_, values)| values.iter().all(|value| names.contains(value.name.as_str()))) {
+        return Vec::new();
+    }
+    curves(read, &walk).into_iter().filter(|(id, _)| ours.iter().any(|(ours, _)| ours == id)).collect()
 }
 
 /// The parameters with the values a change moved put back as they were.
@@ -327,7 +382,10 @@ fn curve_between(before: &[ParameterRow], after: &[ParameterRow], moved: &[Pictu
 /// EQ Eight's bands (the A channel), or Channel EQ's three, by their parameters.
 pub fn eq_bands(rows: &[ParameterRow]) -> Option<Vec<EqBand>> {
     let find = |name: &str| rows.iter().find(|row| row.name == name);
-    if rows.iter().any(|row| row.name.ends_with(" Frequency A")) {
+    // Live's own words say what it is: an EQ's frequencies are in Hz (a Rack's macros named alike show plain numbers).
+    let in_hz = |row: &ParameterRow| row.text.as_deref().is_some_and(|text| text.to_ascii_lowercase().ends_with("hz"));
+    let frequencies: Vec<&ParameterRow> = rows.iter().filter(|row| row.name.ends_with(" Frequency A")).collect();
+    if !frequencies.is_empty() && frequencies.iter().all(|row| in_hz(row)) {
         // Output gain aside, Scale scales every band's gain (100 % is as set).
         let scale = find("Scale").map(|row| row.value).filter(|v| v.is_finite()).unwrap_or(1.);
         let bands = (1..=8)
@@ -335,8 +393,11 @@ pub fn eq_bands(rows: &[ParameterRow]) -> Option<Vec<EqBand>> {
                 let get = |what: &str| find(&format!("{band} {what} A"));
                 let frequency = get("Frequency")?;
                 let freq = frequency.text.as_deref().and_then(amount).unwrap_or_else(|| 10. * 2200f64.powf(position(frequency)));
-                let q =
-                    get("Q").map(|q| q.text.as_deref().and_then(amount).unwrap_or_else(|| 0.1 * 180f64.powf(position(q)))).unwrap_or(0.71);
+                // Live 11 names it Resonance.
+                let q = get("Q")
+                    .or_else(|| get("Resonance"))
+                    .map(|q| q.text.as_deref().and_then(amount).unwrap_or_else(|| 0.1 * 180f64.powf(position(q))))
+                    .unwrap_or(0.71);
                 let gain_db = get("Gain").map(|g| g.text.as_deref().and_then(amount).unwrap_or(g.value)).unwrap_or(0.) * scale;
                 let kind = get("Filter Type");
                 let kind = kind.and_then(|k| k.text.clone()).unwrap_or_else(|| {
@@ -351,7 +412,9 @@ pub fn eq_bands(rows: &[ParameterRow]) -> Option<Vec<EqBand>> {
             .collect::<Vec<_>>();
         return (!bands.is_empty()).then_some(bands);
     }
-    if let (Some(low), Some(mid), Some(mid_freq), Some(high)) = (find("Low Gain"), find("Mid Gain"), find("Mid Freq"), find("High Gain")) {
+    if let (Some(low), Some(mid), Some(mid_freq), Some(high)) =
+        (find("Low Gain"), find("Mid Gain"), find("Mid Freq").filter(|row| in_hz(row)), find("High Gain"))
+    {
         let db = |row: &ParameterRow| row.text.as_deref().and_then(amount).unwrap_or(row.value);
         let mut bands = vec![
             EqBand { shape: EqShape::LowShelf, freq: 100., gain_db: db(low), q: 0.71, on: true, slope: None },
@@ -407,8 +470,13 @@ fn position(row: &ParameterRow) -> f64 {
 pub fn dynamics(rows: &[ParameterRow]) -> Option<Dynamics> {
     let find = |name: &str| rows.iter().find(|row| row.name == name);
     let db = |row: &ParameterRow| row.text.as_deref().and_then(amount).unwrap_or(row.value);
-    let threshold = find("Threshold")?;
-    let ratio = find("Ratio")?;
+    // A compressor's threshold reads in dB and its ratio as "4.00 : 1" (or a Glue's 2, 4 or 10).
+    let threshold = find("Threshold").filter(|row| row.text.as_deref().is_some_and(|text| text.to_ascii_lowercase().contains("db")))?;
+    let ratio = find("Ratio").filter(|row| {
+        row.text.as_deref().is_some_and(|text| {
+            text.contains(':') || text.to_ascii_lowercase().starts_with("inf") || matches!(text.trim(), "2" | "4" | "10")
+        })
+    })?;
     let ratio = match ratio.text.as_deref() {
         Some(text) if text.to_ascii_lowercase().starts_with("inf") => 100.,
         Some(text) => amount(text).unwrap_or(ratio.value),
@@ -498,7 +566,8 @@ mod tests {
     #[test]
     fn notes_written_and_edited_draw_before_and_after() {
         let preview = object(json!({"proposed":{"length":4,"notes":[{"pitch":60,"start":0,"duration":1,"velocity":100}]}}));
-        let ChangePicture::Notes { length, before, after } = picture(kind("write_midi_clip"), &preview, &object(json!({})), None).unwrap()
+        let ChangePicture::Notes { length, before, after, .. } =
+            picture(kind("write_midi_clip"), &preview, &object(json!({})), None).unwrap()
         else {
             panic!()
         };
@@ -564,10 +633,13 @@ mod tests {
         assert_eq!(before[2].gain_db, 0., "the moved parameter's prior gives the before");
         assert!(!after[0].on);
         assert_eq!(values, &moved);
-        // Without Live's words, the positions say the same.
+        // Without Live's words for the frequencies, it isn't known to be an EQ: no curve.
         let bare: Vec<ParameterRow> = rows.iter().map(|r| ParameterRow { text: None, ..r.clone() }).collect();
-        let bands = eq_bands(&bare).unwrap();
-        assert!((bands[2].freq - 469.).abs() < 1., "{}", bands[2].freq);
+        assert_eq!(eq_bands(&bare), None);
+        // With them, a Q without words comes from its place in its range.
+        let no_q: Vec<ParameterRow> =
+            rows.iter().map(|r| if r.name.ends_with(" Q A") { ParameterRow { text: None, ..r.clone() } } else { r.clone() }).collect();
+        let bands = eq_bands(&no_q).unwrap();
         assert!((bands[2].q - 1.34).abs() < 0.01, "{}", bands[2].q);
     }
 
@@ -658,5 +730,135 @@ mod tests {
         // A new, empty lane has nothing to draw.
         let empty = object(json!({"current":{"exists":false,"points":[]}}));
         assert_eq!(picture(kind("set_automation"), &empty, &object(json!({"action":"create-envelope"})), None), None);
+    }
+
+    /// EQ Eight's parameters with bands 1–5 on as bells at 1 kHz, -6 dB (what a read after the change shows).
+    fn eq_eight_after() -> Vec<ParameterRow> {
+        let mut rows = vec![row("Scale", 1., "100 %")];
+        for band in 1..=8 {
+            let on = band <= 5;
+            rows.push(row(&format!("{band} Filter On A"), if on { 1. } else { 0. }, if on { "On" } else { "Off" }));
+            rows.push(row(&format!("{band} Filter Type A"), 3., "Bell"));
+            rows.push(row(&format!("{band} Frequency A"), 0.6, "1.00 kHz"));
+            rows.push(ParameterRow {
+                name: format!("{band} Gain A"),
+                value: if on { -6. } else { 0. },
+                min: -15.,
+                max: 15.,
+                text: Some(if on { "-6.00 dB" } else { "0.00 dB" }.into()),
+            });
+            rows.push(row(&format!("{band} Q A"), 0.5, "1.34"));
+        }
+        rows
+    }
+
+    #[test]
+    fn a_change_to_more_values_than_a_record_keeps_walks_back_all_of_them() {
+        // Bands 1–5 turned on and cut: 20 values, more than a record's picture keeps.
+        let mut moved = Vec::new();
+        for band in 1..=5 {
+            moved.push(PictureValue {
+                name: format!("{band} Filter On A"),
+                from: Some(0.),
+                to: Some(1.),
+                from_text: Some("Off".into()),
+                to_text: Some("On".into()),
+                ..Default::default()
+            });
+            moved.push(PictureValue {
+                name: format!("{band} Gain A"),
+                from: Some(0.),
+                to: Some(-6.),
+                from_text: Some("0.00 dB".into()),
+                to_text: Some("-6.00 dB".into()),
+                ..Default::default()
+            });
+            moved.push(PictureValue {
+                name: format!("{band} Frequency A"),
+                from: Some(0.6),
+                to: Some(0.6),
+                from_text: Some("1.00 kHz".into()),
+                to_text: Some("1.00 kHz".into()),
+                ..Default::default()
+            });
+            moved.push(PictureValue {
+                name: format!("{band} Q A"),
+                from: Some(0.5),
+                to: Some(0.5),
+                from_text: Some("1.34".into()),
+                to_text: Some("1.34".into()),
+                ..Default::default()
+            });
+        }
+        assert_eq!(moved.len(), 20);
+        let drawn = curves(&eq_eight_after(), &[("c1".into(), moved)]);
+        let [(_, ChangePicture::Eq { before, after, .. })] = drawn.as_slice() else { panic!() };
+        assert!(before.iter().all(|band| !band.on && band.gain_db == 0.), "all five were off at 0 dB before: {before:?}");
+        assert!(after[..5].iter().all(|band| band.on && band.gain_db == -6.));
+    }
+
+    #[test]
+    fn a_read_draws_only_the_changes_still_applied_and_only_on_their_own_device() {
+        let gain = |band: u8, from: f64, to: f64| {
+            vec![PictureValue {
+                name: format!("{band} Gain A"),
+                from: Some(from),
+                to: Some(to),
+                from_text: Some(format!("{from:.2} dB")),
+                to_text: Some(format!("{to:.2} dB")),
+                ..Default::default()
+            }]
+        };
+        let read = eq_eight_after();
+        let ours = [("c1".to_string(), gain(1, 0., -6.)), ("c2".to_string(), gain(2, 0., -6.))];
+        // c2 was undone while the read waited: it isn't in what was read, and gets no curve.
+        let drawn = curves_for(&read, &ours, &[], |id| id != "c2");
+        assert_eq!(drawn.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["c1"]);
+        // A change made while it read is walked back first, and draws from its own read.
+        let newer = [("c3".to_string(), gain(3, 0., -6.))];
+        let drawn = curves_for(&read, &ours[..1], &newer, |_| true);
+        let [(id, ChangePicture::Eq { after, .. })] = drawn.as_slice() else { panic!() };
+        assert_eq!((id.as_str(), after[2].gain_db), ("c1", 0.), "band 3's cut came after c1");
+        // A moved parameter missing from the read: another device sits in that place now.
+        let elsewhere = [("c4".to_string(), vec![PictureValue { name: "Drive".into(), to: Some(1.), ..Default::default() }])];
+        assert!(curves_for(&read, &elsewhere, &[], |_| true).is_empty());
+    }
+
+    #[test]
+    fn a_racks_macros_named_like_an_eq_or_a_compressor_draw_no_curve() {
+        // Macros show plain numbers, not Hz, dB or a ratio.
+        let macros: Vec<ParameterRow> = ["1 Frequency A", "1 Gain A", "1 Filter On A", "Threshold", "Ratio"]
+            .iter()
+            .map(|name| ParameterRow { name: name.to_string(), value: 64., min: 0., max: 127., text: Some("64".into()) })
+            .collect();
+        assert_eq!(eq_bands(&macros), None);
+        assert_eq!(dynamics(&macros), None);
+        // Live 11 calls a band's Q its Resonance.
+        let live_11: Vec<ParameterRow> =
+            eq_eight_after().into_iter().map(|row| ParameterRow { name: row.name.replace(" Q A", " Resonance A"), ..row }).collect();
+        assert!((eq_bands(&live_11).unwrap()[0].q - 1.34).abs() < 1e-9);
+        assert!(curve_parameter("2 Resonance A"));
+    }
+
+    #[test]
+    fn a_send_set_alone_keeps_the_others_and_asked_levels_never_take_old_words() {
+        let preview = object(json!({"prior":{"volume":0.85,"sends":[0.1,0.2,0.3,0.4]},"proposed":{"volume":0.6,"sends":[0.5]},
+            "priorDisplay":{"volume":"0.0 dB","sends":["-30 dB","-24 dB","-18 dB","-12 dB"]}}));
+        // Applied: Live's words for what changed.
+        let applied = object(json!({"display":{"volume":"-8.0 dB","sends":["-6.0 dB"]}}));
+        let ChangePicture::Mix { after, .. } = picture(kind("set_mixer"), &preview, &object(json!({})), Some(&applied)).unwrap() else {
+            panic!()
+        };
+        assert_eq!(after.sends.iter().map(|send| send.level).collect::<Vec<_>>(), [0.5, 0.2, 0.3, 0.4]);
+        assert_eq!(
+            after.sends.iter().map(|send| send.text.clone().unwrap_or_default()).collect::<Vec<_>>(),
+            ["-6.0 dB", "-24 dB", "-18 dB", "-12 dB"]
+        );
+        assert_eq!(after.volume_text.as_deref(), Some("-8.0 dB"));
+        // Unconfirmed: the asked level and send have their numbers only.
+        let ChangePicture::Mix { after, .. } = picture(kind("set_mixer"), &preview, &object(json!({})), None).unwrap() else { panic!() };
+        assert_eq!(after.volume_text, None);
+        assert_eq!(after.sends[0].text, None);
+        assert_eq!(after.sends[1].text.as_deref(), Some("-24 dB"));
     }
 }

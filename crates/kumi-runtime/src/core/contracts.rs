@@ -1191,8 +1191,9 @@ pub struct ChangeRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub at: i64,
-    /// What it looks like, before and after (absent on records saved before Kumi drew them).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// What it looks like, before and after (absent on records saved before Kumi drew them, and read as absent when a
+    /// later Kumi drew one this one can't).
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "super::picture::lenient")]
     pub picture: Option<ChangePicture>,
 }
 

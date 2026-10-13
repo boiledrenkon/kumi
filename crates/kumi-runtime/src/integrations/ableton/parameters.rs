@@ -423,7 +423,7 @@ impl Parameters {
         );
         let record = new_record(kind, summary.clone(), ChangeState::Applied, connection.now().timestamp_millis());
         self.history.remember(record.clone(), String::new(), None);
-        curve_later(&self.history, kind, Some(&json!(device)), &record);
+        curve_later(&self.history, kind, Some(&json!(device)), &record.id, summary.picture.as_ref());
         let mut revert = Vec::new();
         for (index, target) in targets.iter().enumerate() {
             let row = rows.get(index).ok_or_else(|| RuntimeError::plain("Live omitted a changed parameter"))?;
@@ -489,55 +489,78 @@ const CURVE_WAIT_MS: f64 = 3_000.;
 
 /// An equaliser's or a compressor's curve for a change to its parameters. The device is read once the change has
 /// been told, so the change isn't kept waiting, and once a run of changes to it has ended; each change of the run
-/// then gets its own before and after (`pictures::curves`), put on its record.
+/// then gets its own before and after (`pictures::curves`), put on its record. `picture` is the change's own (every
+/// value it moved), not its record's shortened one.
 ///
 /// The read goes around Kumi's Live lock, as FOCUS's reads do: it reads parameters through the bridge without
-/// registering references or taking a lease, so it can't come between a turn's own reads and changes.
-pub fn curve_later(history: &Rc<History>, kind: &ChangeKind, device: Option<&Value>, record: &ChangeRecord) {
+/// registering references or taking a lease, so it can't come between a turn's own reads and changes. What else moved
+/// on the device while the run waited (a preset, the producer's own hand) shows in its newest change's after.
+pub fn curve_later(history: &Rc<History>, kind: &ChangeKind, device: Option<&Value>, id: &str, picture: Option<&ChangePicture>) {
     if kind.family != ChangeFamily::Parameter || history.is_quiet() {
         return;
     }
-    let Some(ChangePicture::Values { values }) = record.picture.clone() else { return };
+    let Some(ChangePicture::Values { values }) = picture.cloned() else { return };
     let Some(device) = device.and_then(Value::as_str).map(str::to_owned) else { return };
     if !values.iter().any(|value| pictures::curve_parameter(&value.name)) {
         return;
     }
     let first = {
         let mut runs = history.curve_runs.borrow_mut();
-        let (changes, last) = runs.entry(device.clone()).or_default();
-        changes.push((record.id.clone(), values));
-        *last = perf_now();
-        changes.len() == 1
+        let run = runs.entry(device.clone()).or_default();
+        run.waiting.push((id.to_owned(), values));
+        run.last = perf_now();
+        run.waiting.len() == 1 && run.reading.is_empty()
     };
     if !first {
         return;
     }
     let history = history.clone();
     tokio::task::spawn_local(timing::background(async move {
-        let began = perf_now();
+        // One task a device: it reads again for changes that came while it read.
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let last = history.curve_runs.borrow().get(&device).map(|(_, last)| *last).unwrap_or(0.);
-            if perf_now() - last >= CURVE_QUIET_MS || perf_now() - began >= CURVE_WAIT_MS {
-                break;
+            let began = perf_now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let Some(last) = history.curve_runs.borrow().get(&device).map(|run| run.last) else { return };
+                if perf_now() - last >= CURVE_QUIET_MS || perf_now() - began >= CURVE_WAIT_MS {
+                    break;
+                }
             }
-        }
-        let Some((changes, _)) = history.curve_runs.borrow_mut().remove(&device) else { return };
-        let connection = &history.connection;
-        let signal = abort::any([connection.lifetime.clone(), abort::timeout(5_000)]);
-        let fields = ["name", "value", "min", "max", "displayValue"].map(str::to_owned).to_vec();
-        let Ok(rows) = read_parameters(connection, json!(device), fields, signal).await else { return };
-        let rows: Vec<pictures::ParameterRow> = rows.iter().filter_map(pictures::ParameterRow::from_row).collect();
-        // Changes made while it read are walked back too (they may be in what it read), and get a read of their own.
-        let newer = history.curve_runs.borrow().get(&device).map(|(changes, _)| changes.clone()).unwrap_or_default();
-        let ours: std::collections::HashSet<&str> = changes.iter().map(|(id, _)| id.as_str()).collect();
-        for (id, curve) in pictures::curves(&rows, &[changes.clone(), newer].concat()) {
-            if let Some(curve) = ours.contains(id.as_str()).then_some(curve).and_then(ChangePicture::bounded) {
-                history.set_picture(&id, curve);
+            let changes = {
+                let mut runs = history.curve_runs.borrow_mut();
+                let Some(run) = runs.get_mut(&device) else { return };
+                run.reading = std::mem::take(&mut run.waiting);
+                run.reading.clone()
+            };
+            let connection = &history.connection;
+            let signal = abort::any([connection.lifetime.clone(), abort::timeout(5_000)]);
+            let fields = ["name", "value", "min", "max", "displayValue"].map(str::to_owned).to_vec();
+            let read = read_parameters(connection, json!(device), fields, signal).await;
+            let newer = {
+                let mut runs = history.curve_runs.borrow_mut();
+                let Some(run) = runs.get_mut(&device) else { return };
+                run.reading.clear();
+                run.waiting.clone()
+            };
+            if let Ok(rows) = read {
+                let rows: Vec<pictures::ParameterRow> = rows.iter().filter_map(pictures::ParameterRow::from_row).collect();
+                let applied =
+                    |id: &str| history.entries.borrow().get(id).is_some_and(|entry| entry.borrow().record.state == ChangeState::Applied);
+                for (id, curve) in pictures::curves_for(&rows, &changes, &newer, applied) {
+                    if let Some(curve) = curve.bounded() {
+                        history.set_picture(&id, curve);
+                    }
+                }
+            }
+            let mut runs = history.curve_runs.borrow_mut();
+            if runs.get(&device).is_none_or(|run| run.waiting.is_empty()) {
+                runs.remove(&device);
+                return;
             }
         }
     }));
 }
+
 fn object(value: Value) -> JsonObject {
     value.as_object().cloned().unwrap_or_default()
 }

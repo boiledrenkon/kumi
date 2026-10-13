@@ -11,7 +11,7 @@ use super::contracts::ClipNote;
 pub const MAX_BYTES: usize = 4096;
 const MAX_VALUES: usize = 16;
 const MAX_BANDS: usize = 16;
-const MAX_NOTES: usize = 256;
+const MAX_NOTES: usize = 200;
 const MAX_POINTS: usize = 128;
 const MAX_SENDS: usize = 12;
 const MAX_NAME: usize = 64;
@@ -37,8 +37,17 @@ pub enum ChangePicture {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         values: Vec<PictureValue>,
     },
-    /// A clip's notes before and after, in beats from its start; `length` is the clip's.
-    Notes { length: f64, before: Vec<ClipNote>, after: Vec<ClipNote> },
+    /// A clip's notes before and after, in beats from its start; `length` is the clip's. Each note is kept as
+    /// `[start, pitch, duration, velocity]`. `partial`: the latest bars were left out to keep it small.
+    Notes {
+        length: f64,
+        #[serde(with = "compact_notes")]
+        before: Vec<ClipNote>,
+        #[serde(with = "compact_notes")]
+        after: Vec<ClipNote>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        partial: bool,
+    },
     /// An automation lane's points ([beat, value]) before and after, in the parameter's range.
     Automation {
         #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -183,16 +192,19 @@ impl ChangePicture {
                 }
                 ChangePicture::Dynamics { before, after, values: values(list) }
             }
-            ChangePicture::Notes { length, before, after } => {
+            ChangePicture::Notes { length, before, after, partial } => {
                 let notes = |notes: Vec<ClipNote>| {
                     let mut notes: Vec<ClipNote> = notes.into_iter().filter(finite_note).collect();
                     notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.total_cmp(&b.pitch)));
-                    thin(notes, MAX_NOTES)
+                    notes
                 };
+                let (before, after) = (notes(before), notes(after));
+                let (before, after, cut) = whole_bars(before, after, MAX_NOTES);
                 ChangePicture::Notes {
                     length: if length.is_finite() && length > 0. { length } else { 0. },
-                    before: notes(before),
-                    after: notes(after),
+                    before,
+                    after,
+                    partial: partial || cut,
                 }
             }
             ChangePicture::Automation { parameter, min, max, before, after } => {
@@ -222,11 +234,11 @@ impl ChangePicture {
             ChangePicture::Dynamics { before, after, values } => {
                 ChangePicture::Dynamics { before, after, values: values.iter().take(values.len() / 2).cloned().collect() }
             }
-            ChangePicture::Notes { length, before, after } => ChangePicture::Notes {
-                length,
-                before: thin(before.clone(), half(before.len())),
-                after: thin(after.clone(), half(after.len())),
-            },
+            ChangePicture::Notes { length, before, after, .. } => {
+                let most = half(before.len().max(after.len()));
+                let (before, after, _) = whole_bars(before, after, most);
+                ChangePicture::Notes { length, before, after, partial: true }
+            }
             ChangePicture::Automation { parameter, min, max, before, after } => ChangePicture::Automation {
                 parameter,
                 min,
@@ -307,6 +319,71 @@ impl MixLevels {
     }
 }
 
+/// At most `most` notes on each side, the latest bars left out (whole bars, the same ones on both sides) so what's
+/// drawn is what was written up to there; true when some were. Notes come sorted by start.
+fn whole_bars(before: Vec<ClipNote>, after: Vec<ClipNote>, most: usize) -> (Vec<ClipNote>, Vec<ClipNote>, bool) {
+    let cutoff = |notes: &[ClipNote]| notes.get(most).map(|note| (note.start / 4.).floor() * 4.);
+    let Some(end) = [cutoff(&before), cutoff(&after)].into_iter().flatten().reduce(f64::min) else { return (before, after, false) };
+    let keep = |notes: Vec<ClipNote>| {
+        let kept: Vec<ClipNote> = notes.iter().filter(|note| note.start < end).cloned().collect();
+        // A bar alone holds more than fits: its first notes, then.
+        if kept.is_empty() {
+            notes.into_iter().take(most).collect()
+        } else {
+            kept
+        }
+    };
+    (keep(before), keep(after), true)
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
+/// Notes as `[start, pitch, duration, velocity]`, to 3 decimals (about a third of their size as objects); objects
+/// are read too.
+mod compact_notes {
+    use super::ClipNote;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde_json::Value;
+
+    fn number(n: f64) -> Value {
+        let rounded = (n * 1000.).round() / 1000.;
+        if rounded.fract() == 0. && rounded.abs() < 1e15 {
+            Value::from(rounded as i64)
+        } else {
+            Value::from(rounded)
+        }
+    }
+
+    pub fn serialize<S: Serializer>(notes: &[ClipNote], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(notes.iter().map(|n| [number(n.start), number(n.pitch), number(n.duration), number(n.velocity)]))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<ClipNote>, D::Error> {
+        let items: Vec<Value> = Vec::deserialize(deserializer)?;
+        Ok(items
+            .into_iter()
+            .filter_map(|item| match item {
+                Value::Array(note) => Some(ClipNote {
+                    start: note.first()?.as_f64()?,
+                    pitch: note.get(1)?.as_f64()?,
+                    duration: note.get(2)?.as_f64()?,
+                    velocity: note.get(3).and_then(Value::as_f64).unwrap_or(100.),
+                }),
+                other => serde_json::from_value(other).ok(),
+            })
+            .collect())
+    }
+}
+
+/// A saved record's picture: one a later Kumi drew (a kind or a shape this one doesn't know) reads as none, so the
+/// conversation it's in still loads.
+pub fn lenient<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<ChangePicture>, D::Error> {
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
 fn finite_note(note: &ClipNote) -> bool {
     note.pitch.is_finite() && note.start.is_finite() && note.duration.is_finite() && note.duration > 0. && note.velocity.is_finite()
 }
@@ -342,13 +419,19 @@ mod tests {
             length: 512.,
             before: (0..2000).map(|i| note(i as f64 / 4.)).collect(),
             after: (0..2000).map(|i| note(i as f64 / 4.)).collect(),
+            partial: false,
         };
         let bounded = many.bounded().unwrap();
         assert!(serde_json::to_vec(&bounded).unwrap().len() <= MAX_BYTES);
-        let ChangePicture::Notes { before, after, .. } = &bounded else { panic!() };
+        let ChangePicture::Notes { before, after, partial, .. } = &bounded else { panic!() };
+        assert!(*partial, "said to be partial");
         assert!(!before.is_empty() && !after.is_empty());
-        assert_eq!(after.first().unwrap().start, 0., "the first note stays");
-        assert_eq!(after.last().unwrap().start, 1999. / 4., "and the last");
+        assert_eq!(after.first().unwrap().start, 0., "the first notes stay");
+        // Every note up to where it stops, at a bar's edge: none left out in between.
+        let last = after.last().unwrap().start;
+        assert_eq!(after.len(), (last * 4.) as usize + 1);
+        assert_eq!(((last + 0.25) / 4.).fract(), 0., "it stops at the end of a bar");
+        assert_eq!(before.len(), after.len(), "the same bars on both sides");
         let points = ChangePicture::Automation {
             parameter: "Cutoff".into(),
             min: 0.,
@@ -388,5 +471,37 @@ mod tests {
         assert_eq!(json["kind"], "eq");
         assert_eq!(json["after"][0]["gainDb"], -3.0);
         assert_eq!(serde_json::from_value::<ChangePicture>(json).unwrap(), eq);
+    }
+
+    #[test]
+    fn notes_are_kept_compact_and_old_ones_still_read() {
+        let picture = ChangePicture::Notes {
+            length: 4.,
+            before: vec![],
+            after: vec![ClipNote { pitch: 60., start: 0.333_333, duration: 0.25, velocity: 100. }],
+            partial: false,
+        };
+        let json = serde_json::to_value(&picture).unwrap();
+        assert_eq!(json, serde_json::json!({"kind":"notes","length":4.0,"before":[],"after":[[0.333, 60, 0.25, 100]]}));
+        let read: ChangePicture = serde_json::from_value(json).unwrap();
+        let ChangePicture::Notes { after, .. } = read else { panic!() };
+        assert_eq!((after[0].start, after[0].pitch), (0.333, 60.));
+        // Notes as objects (a picture written another way) read too.
+        let objects = serde_json::json!({"kind":"notes","length":4.0,"before":[{"pitch":60.0,"start":0.0,"duration":1.0,"velocity":90.0}],"after":[]});
+        let ChangePicture::Notes { before, .. } = serde_json::from_value::<ChangePicture>(objects).unwrap() else { panic!() };
+        assert_eq!(before[0].velocity, 90.);
+    }
+
+    #[test]
+    fn a_picture_this_kumi_cant_read_leaves_its_record_readable() {
+        let record = |picture: serde_json::Value| {
+            serde_json::from_value::<super::super::contracts::ChangeRecord>(serde_json::json!({
+                "id":"c1","family":"parameter","title":"t","state":"applied","at":1,"picture":picture
+            }))
+        };
+        assert_eq!(record(serde_json::json!({"kind":"spectrum","bins":[1,2,3]})).unwrap().picture, None, "a kind from a later Kumi");
+        let shape = serde_json::json!({"kind":"eq","before":[],"after":[{"shape":"tilt","freq":1000.0}]});
+        assert_eq!(record(shape).unwrap().picture, None, "a shape from a later Kumi");
+        assert!(record(serde_json::json!({"kind":"values","values":[{"name":"Gain","to":1.0}]})).unwrap().picture.is_some());
     }
 }

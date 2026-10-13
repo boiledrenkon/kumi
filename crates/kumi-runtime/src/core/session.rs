@@ -2089,6 +2089,10 @@ impl SessionController for Session {
             if s.seen.len() > 20_000 {
                 s.seen.shift_remove_index(0);
             }
+            // Only the newest changes keep their pictures here; the conversation keeps its own (`changes`).
+            if let Some((_, older)) = s.seen.iter_mut().rev().nth(500) {
+                older.picture = None;
+            }
             if let Some(previous) = s.changes.iter_mut().find(|c| c.id == change.id) {
                 *previous = change;
             } else {

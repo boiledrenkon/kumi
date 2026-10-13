@@ -223,6 +223,8 @@ impl Mutations {
         if kind.family == ChangeFamily::Parameter && self.parameters.fast_on() {
             return Ok(self.parameters.fast_parameters(kind, &input, signal).await?);
         }
+        // A parameter's value as it was asked ("2 dB"): preparing turns it into Live's number.
+        let asked = (kind.family == ChangeFamily::Parameter).then(|| input.clone());
         let prepared = if kind.has("prepare") {
             match kind
                 .prepare(&input, &PreparationContext { parameters: &self.parameters, samples: &self.samples, signal: signal.clone() })
@@ -341,7 +343,10 @@ impl Mutations {
         if kind.tool == "move_clip" && result.get("replacesUnknown") == Some(&json!(true)) {
             preview.insert("replacesUnknown".into(), json!(true));
         }
-        let final_summary = kind.summarize(&preview, &args, &known, Some(&result));
+        let mut final_summary = kind.summarize(&preview, &args, &known, Some(&result));
+        if let Some(asked) = &asked {
+            final_summary.picture = super::changes::pictures::picture(kind, &preview, asked, Some(&result)).or(final_summary.picture);
+        }
         let applied = result.get("state").and_then(Value::as_str) == Some("applied");
         // What Live left of what it cut, read now: with it, Kumi's undo makes the clips again, so the change isn't
         // Live's alone to take back. A cut past what the read before explains leaves it to Live.
@@ -396,7 +401,7 @@ impl Mutations {
         });
         history.remember(record.clone(), transaction.into(), restore);
         if applied {
-            super::parameters::curve_later(history, kind, args.get("deviceRef"), &record);
+            super::parameters::curve_later(history, kind, args.get("deviceRef"), &record.id, final_summary.picture.as_ref());
         }
         history.made_by(&record.id, &kind.tool);
         if let Some(clip) = args.get("clipRef").and_then(Value::as_str) {
