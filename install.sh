@@ -270,9 +270,9 @@ main() {
   # ── Kumi ───────────────────────────────────────────────────────────────
   begin "Download"
   # Curl's bar takes the line below the step's, and goes once it's done.
-  if [ -n "$bar" ]; then printf '\n'; open=""; fetch "$base/$bundle" "$work/kumi.tar.gz" bar; else fetch "$base/$bundle" "$work/kumi.tar.gz"; fi
+  if [ -n "$bar" ]; then printf '\n'; open=""; blank=""; fetch "$base/$bundle" "$work/kumi.tar.gz" bar; else fetch "$base/$bundle" "$work/kumi.tar.gz"; fi
   if ! fetched; then unfetched "$base/$bundle"; fail "$message" "$said"; fi
-  if [ -n "$bar" ]; then printf '\033[2A\r\033[J'; fi
+  if [ -n "$bar" ]; then printf '\033[2A\r\033[J'; begin "Download"; fi
   if [ "$(sha "$work/kumi.tar.gz")" != "$bundle_sha" ]; then
     if html "$work/kumi.tar.gz"; then fail "$captive"; fi
     fail "Kumi's download didn't match its checksum, so it wasn't used. Try again."

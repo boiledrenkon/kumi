@@ -526,11 +526,10 @@ echo "  HTTP/1.1 $status Whatever" >&2
         self.assertIn("Kumi needs glibc 2.35 or later (Ubuntu 22.04, Debian 12 or newer); this Linux has glibc 2.31.", run.stderr)
 
     # ── A terminal ─────────────────────────────────────────────────────────
-    def test_in_a_terminal_kumi_starts_and_knows_this_window_has_no_kumi_yet(self):
+    def terminal(self, home, **extra):
+        """install.sh in a terminal of its own: its exit status, and what it wrote with the colours taken out."""
         import pty
-        home = self.home()
-        self.serve(self.release("1.0.0"))
-        env = self.environment(home, KUMI_NO_MODIFY_PATH="", TERM="xterm-256color", COLUMNS="80")
+        env = self.environment(home, TERM="xterm-256color", COLUMNS="80", **extra)
         with warnings.catch_warnings():
             # The server's thread: the child only runs exec.
             warnings.simplefilter("ignore", DeprecationWarning)
@@ -548,8 +547,20 @@ echo "  HTTP/1.1 $status Whatever" >&2
             output += chunk
         _, status = os.waitpid(pid, 0)
         os.close(fd)
-        text = output.decode("utf-8", "replace")
-        self.assertEqual(os.waitstatus_to_exitcode(status), 0, text)
+        return os.waitstatus_to_exitcode(status), re.sub(r"\x1b\[[0-9;]*m", "", output.decode("utf-8", "replace"))
+
+    def test_in_a_terminal_a_checksum_that_doesnt_match_follows_the_download_line(self):
+        self.serve(self.release("1.0.0", sha="0" * 64))
+        status, text = self.terminal(self.home(), KUMI_NO_LAUNCH="1")
+        self.assertEqual(status, 1, text)
+        # Curl's bar goes, the step's line comes back, and the error follows it rather than taking its place.
+        self.assertRegex(text, r"\x1b\[2A\r\x1b\[J  Download +…\r?\n\r?\nKumi couldn't be installed: Kumi's download didn't match")
+
+    def test_in_a_terminal_kumi_starts_and_knows_this_window_has_no_kumi_yet(self):
+        home = self.home()
+        self.serve(self.release("1.0.0"))
+        status, text = self.terminal(home, KUMI_NO_MODIFY_PATH="")
+        self.assertEqual(status, 0, text)
         self.assertIn("Looking up the newest Kumi…", text)
         self.assertIn("Starting Kumi…", text)
         self.assertIn(f"fixture 1.0.0 from=new-window home={home}/.kumi", text)
