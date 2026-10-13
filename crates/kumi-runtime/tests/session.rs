@@ -4185,3 +4185,25 @@ local_test!(a_fork_of_a_chosen_conversation_steps_aside_for_another_set_too, {
     assert_eq!(now(&h).await.id, own);
     h.session.close().await.unwrap();
 });
+local_test!(a_copy_with_nothing_kept_yet_forks_as_the_conversation_it_copies, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let other = create_conversation_store(dir.path());
+    assert_eq!(other.claim(SET_A, KEPT), Claim::Ours);
+    let h = harness(None, |o| {
+        o.conversations = Some(store.clone());
+        o.resume = Some((SET_A.into(), KEPT.into()));
+    });
+    live(&h, Some(SET_A));
+    h.session.start().await.unwrap();
+    let copy = now(&h).await.id;
+    assert_ne!(copy, KEPT);
+    // Forked before anything is asked: the copy has nothing kept, so the fork comes from the original, and says so.
+    let fork = h.session.fork_conversation(None).await.unwrap().unwrap();
+    assert!(h.notice(&format!("Forked; the original stays as {KEPT}.")));
+    let rows = store.all().await.unwrap();
+    assert_eq!(rows.iter().find(|r| r.id == fork).and_then(|r| r.forked_from.clone()).as_deref(), Some(KEPT));
+    assert!(rows.iter().all(|r| r.id != copy));
+    h.session.close().await.unwrap();
+});

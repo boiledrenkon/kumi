@@ -2412,12 +2412,13 @@ impl SessionController for Session {
     }
     async fn fork_conversation(&self, name: Option<&str>) -> Result<Option<String>, RuntimeError> {
         let Some(store) = self.0.options.conversations.clone() else { return Ok(None) };
-        let (held, settled, place, old) = {
+        let (held, settled, place, old, copied) = {
             let s = self.0.state.borrow();
             if s.active.is_some() {
                 return Err(KumiError::new(FailureKind::Request, "Kumi is still working: fork once it's done.").into());
             }
-            (s.kernel.clone(), s.settled.clone(), s.place.clone().unwrap_or(UNSAVED.into()), s.conversation_id.clone())
+            let place = s.place.clone().unwrap_or(UNSAVED.into());
+            (s.kernel.clone(), s.settled.clone(), place, s.conversation_id.clone(), s.copied_from.clone())
         };
         let checkpoint = held
             .filter(|h| h.value.has_checkpoint())
@@ -2445,7 +2446,9 @@ impl SessionController for Session {
         }
         let saving = self.0.saving.borrow().clone();
         let _ = saving.await;
-        store.create(&place, &id, &conversation, name, Some(&old)).await?;
+        // A copy with nothing kept yet stands for the conversation it copies: the fork comes from that one.
+        let source = copied.unwrap_or_else(|| old.clone());
+        store.create(&place, &id, &conversation, name, Some(&source)).await?;
         store.release(&place, &old);
         store.claim(&place, &id);
         {
@@ -2456,7 +2459,7 @@ impl SessionController for Session {
             s.touched = true;
         }
         self.wanted_goes_on_as(&place, &old, &id);
-        self.notice(format!("Forked; the original stays as {old}."));
+        self.notice(format!("Forked; the original stays as {source}."));
         Ok(Some(id))
     }
     async fn answer_set(&self, choice: SetChoice) -> Result<(), RuntimeError> {
