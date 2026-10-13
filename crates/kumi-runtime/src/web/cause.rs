@@ -211,12 +211,19 @@ pub fn proxy_variables(env: &Env) -> Vec<String> {
         .collect()
 }
 
-/// "http://user:secret@proxy:8080" as "http://proxy:8080".
+/// A proxy setting without its user name and password: "http://user:secret@proxy:8080" as "http://proxy:8080".
+/// Everything before the value's last @ goes, so a password with a /, ? or # in it never shows either; a scheme is
+/// kept only when it is one (letters, digits, + - .), never part of a password.
 fn without_credentials(value: &str) -> String {
-    let (scheme, rest) = value.split_once("://").map_or(("", value), |(scheme, rest)| (scheme, rest));
-    let (authority, path) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
-    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
-    head(&if scheme.is_empty() { format!("{host}{path}") } else { format!("{scheme}://{host}{path}") }, 120)
+    let scheme = value
+        .split_once("://")
+        .map(|(scheme, _)| scheme)
+        .filter(|scheme| !scheme.is_empty() && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')));
+    let rest = match value.rsplit_once('@') {
+        Some((_, after)) => after,
+        None => scheme.map_or(value, |scheme| &value[scheme.len() + 3..]),
+    };
+    head(&scheme.map_or_else(|| rest.to_string(), |scheme| format!("{scheme}://{rest}")), 120)
 }
 
 #[cfg(test)]
@@ -314,6 +321,25 @@ mod tests {
             assert!(cause.fix().ends_with('.') && !cause.words().ends_with('.'), "{cause:?}");
             assert_eq!(serde_json::to_value(cause).unwrap(), cause.name().to_lowercase(), "{cause:?}");
         }
+    }
+
+    #[test]
+    fn a_proxy_password_never_shows_whatever_it_holds() {
+        for (value, shown) in [
+            ("http://me:pa/ss@proxy.example:3128", "http://proxy.example:3128"),
+            ("http://me:p?a#s/s@proxy.example:3128/", "http://proxy.example:3128/"),
+            ("socks5h://me:x@y@proxy.example:1080", "socks5h://proxy.example:1080"),
+            ("user:pa://ss@cache:80", "cache:80"),
+            ("me:pa/ss@cache:80", "cache:80"),
+            ("http://proxy.example:3128", "http://proxy.example:3128"),
+            ("localhost,.corp", "localhost,.corp"),
+        ] {
+            assert_eq!(without_credentials(value), shown, "{value}");
+        }
+        let env = Env::from([("HTTPS_PROXY".to_string(), "http://kumi:hunter/2?#x@proxy.example:3128".to_string())]);
+        let said = proxy_words(&env);
+        assert_eq!(said, "Kumi's proxy settings: HTTPS_PROXY=http://proxy.example:3128.");
+        assert!(!said.contains("hunter"), "{said}");
     }
 
     /// A local server that does `answer` with each connection.
