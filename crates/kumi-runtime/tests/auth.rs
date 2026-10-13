@@ -6,7 +6,7 @@ use kumi_common::{
 };
 use kumi_runtime::{
     ai::{
-        error::LanguageModelError,
+        error::{ApiCallError, LanguageModelError},
         http::{Fetch, FetchInit, Response},
     },
     auth::{
@@ -46,6 +46,21 @@ fn credential(refresh: &str) -> Credential {
         account_id: "acct-1".into(),
     }
     .into()
+}
+/// Kumi's HTTP failing as it does when nothing answers: the error chain kept as the call's cause.
+struct Unreachable(&'static str);
+#[async_trait(?Send)]
+impl Fetch for Unreachable {
+    async fn fetch(&self, url: &str, init: FetchInit) -> Result<Response, LanguageModelError> {
+        if self.0.is_empty() {
+            // Answers only when stopped, as Kumi's HTTP does.
+            init.signal.unwrap().cancelled().await;
+            return Err(LanguageModelError::other("This operation was aborted"));
+        }
+        let mut error = ApiCallError::new("Cannot connect to API: error sending request", url, None, None);
+        error.cause = Some(format!("error sending request for url ({url}): client error (Connect): {}", self.0));
+        Err(error.into())
+    }
 }
 struct FakeFetch(Rc<dyn Fn(&str, FetchInit) -> Response>);
 #[async_trait(?Send)]
@@ -338,6 +353,38 @@ async fn pi_import_reads_only_the_openai_codex_entry_and_derives_a_missing_accou
     assert!(read_pi_codex_login(&path).await.unwrap_err().to_string().contains("no ChatGPT (openai-codex) session"));
     assert!(read_pi_codex_login(temp.path().join("missing.json")).await.unwrap_err().to_string().contains("No readable Pi login"));
 }
+local_test!(a_sign_in_that_gets_no_answer_says_why_as_everywhere_else, {
+    let words = |error: kumi_runtime::core::errors::RuntimeError| error.to_string();
+    let device = |cause: &'static str| {
+        login_codex_device(LoginOptions { signal: Signal::new(), fetch: Rc::new(Unreachable(cause)) }, Rc::new(|_| {}))
+    };
+    let said =
+        words(device("dns error: failed to lookup address information: nodename nor servname provided, or not known").await.unwrap_err());
+    assert!(said.starts_with("Kumi couldn't reach auth.openai.com: its address couldn't be looked up (DNS)."), "{said}");
+    let said = words(device("invalid peer certificate: UnknownIssuer").await.unwrap_err());
+    assert!(
+        said.starts_with("Kumi couldn't reach auth.openai.com: the secure connection didn't check out (TLS).")
+            && said.contains("SSL_CERT_FILE"),
+        "{said}"
+    );
+    let said = words(device("tunnel error: proxy authorization required").await.unwrap_err());
+    assert!(said.contains("the proxy didn't let Kumi through") && said.contains("NO_PROXY=*"), "{said}");
+    // A refresh that runs out its own time: nothing answered.
+    tokio::time::pause();
+    let temp = tempfile::tempdir().unwrap();
+    let store = Rc::new(open_credential_store(temp.path().join("auth.json")));
+    store
+        .update_with("openai-codex", |_| async {
+            Ok(Some(
+                OAuthCredential { access: token("acct-1"), refresh: "refresh".into(), expires: 0.0, account_id: "acct-1".into() }.into(),
+            ))
+        })
+        .await
+        .unwrap();
+    let source = codex_token_source(store, TokenOptions { fetch: Some(Rc::new(Unreachable(""))), ..Default::default() });
+    let said = words(source().await.unwrap_err());
+    assert!(said.starts_with("Kumi couldn't reach auth.openai.com: nothing answered in time."), "{said}");
+});
 local_test!(concurrent_token_requests_share_one_refresh_and_keep_the_rotated_refresh_token, {
     let temp = tempfile::tempdir().unwrap();
     let store = Rc::new(open_credential_store(temp.path().join("auth.json")));
