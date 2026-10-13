@@ -6,7 +6,7 @@ use super::{
     search::{search_web, SearchCache, SearchWebOptions, SearchWhere},
 };
 use crate::core::{
-    contracts::{JsonObject, KernelTool, SessionEvent, ToolImage, ToolResult, WebAction, WebEvent, WebWhere},
+    contracts::{JsonObject, KernelTool, Reach, SessionEvent, ToolImage, ToolResult, WebAction, WebEvent, WebWhere},
     errors::RuntimeError,
 };
 use async_trait::async_trait;
@@ -141,6 +141,9 @@ impl State {
 }
 #[async_trait(?Send)]
 impl KernelTool for WebTool {
+    fn reach(&self) -> Reach {
+        Reach::AwayFromDaw
+    }
     fn name(&self) -> &str {
         if self.search {
             SEARCH_WEB_TOOL

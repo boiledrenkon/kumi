@@ -66,6 +66,16 @@ pub struct ToolImage {
     pub caption: Option<String>,
 }
 
+/// What a tool does to the DAW: nothing (it works away from it: the web, the producer's files, Kumi's own records),
+/// reads it, or may change it. Background jobs use only tools away from the DAW.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reach {
+    AwayFromDaw,
+    DawRead,
+    DawWrite,
+}
+
 /// A tool the kernel offers the model. `stream` is optional: it returns None for a tool whose calls
 /// can't start before they're whole.
 #[async_trait(?Send)]
@@ -74,6 +84,10 @@ pub trait KernelTool {
     fn description(&self) -> &str;
     fn input_schema(&self) -> JsonObject;
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError>;
+    /// What it does to the DAW. A tool that doesn't say is taken to change it.
+    fn reach(&self) -> Reach {
+        Reach::DawWrite
+    }
     /// Start while the model is still writing the call: a plan's first steps run as its later ones are
     /// written. Offered for a model reply's first call only, since calls run in order. `on_start` says
     /// the work has begun (the call then shows as running).
@@ -452,6 +466,11 @@ pub trait Integration {
     /// The conversation the turns from here belong to: what's kept for a conversation (the devices it made) is this one's.
     fn conversation(&self, id: &str) {
         let _ = id;
+    }
+    /// Tools a background job may use, which never wait on Live (make_device writes its file and doesn't wait for
+    /// Live's Browser to list it).
+    fn worker_tools(&self) -> Vec<Rc<dyn KernelTool>> {
+        Vec::new()
     }
     fn has_undo(&self) -> bool {
         false
@@ -1333,6 +1352,13 @@ pub enum SessionEvent {
     Watching {
         on: bool,
     },
+    /// A background job started, moved on or ended: its whole status, by its id.
+    Job(super::jobs::JobStatus),
+    /// Kumi carries on by itself with a job's result, as the request it was started for asked: an answer follows.
+    CarryOn {
+        job: u32,
+        title: String,
+    },
     #[serde(untagged)]
     Kernel(KernelEvent),
     #[serde(untagged)]
@@ -2042,6 +2068,37 @@ pub trait SessionController {
     /// Whether the DAW is recording now; None when it can't say (no DAW connected, or one that doesn't tell).
     async fn daw_recording(&self) -> Result<Option<bool>, RuntimeError> {
         Ok(None)
+    }
+    fn has_jobs(&self) -> bool {
+        false
+    }
+    /// The background jobs, oldest first (the latest that ended, and every one running).
+    fn jobs(&self) -> Vec<super::jobs::JobStatus> {
+        Vec::new()
+    }
+    /// One job with its steps and report.
+    fn job(&self, id: u32) -> Option<super::jobs::JobDetail> {
+        let _ = id;
+        None
+    }
+    /// Stop a running job; false when it isn't running.
+    fn stop_job(&self, id: u32) -> bool {
+        let _ = id;
+        false
+    }
+    /// Run a job that ended (one interrupted, say) again: the new job's number, or why it can't.
+    fn run_job_again(&self, id: u32) -> Result<u32, String> {
+        let _ = id;
+        Err("Kumi can't run background jobs here.".into())
+    }
+    /// Ctrl-b: the answer's steps at work away from the DAW go on as a job and the answer carries on without them; the
+    /// job's number, or why nothing moved.
+    fn background(&self) -> Result<u32, String> {
+        Err("Kumi can't run background jobs here.".into())
+    }
+    /// Whether ctrl-b has a step to move right now.
+    fn can_background(&self) -> bool {
+        false
     }
     fn has_device_tree(&self) -> bool {
         false

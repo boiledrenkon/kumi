@@ -9,7 +9,7 @@ use super::{
 use crate::{
     audio::audio_path,
     core::{
-        contracts::{JsonObject, KernelTool, SessionEvent, ToolResult},
+        contracts::{JsonObject, KernelTool, Reach, SessionEvent, ToolResult},
         errors::RuntimeError,
     },
     integrations::ableton::samples::{default_sample_folders, find_samples, folder_path, FindSamplesOptions},
@@ -433,6 +433,14 @@ impl LibraryTool {
 }
 #[async_trait(?Send)]
 impl KernelTool for LibraryTool {
+    fn reach(&self) -> Reach {
+        // "like" a clip by its name asks the DAW where its file is.
+        if self.name == FIND_SOUNDS_TOOL && self.options.resolve.is_some() {
+            Reach::DawRead
+        } else {
+            Reach::AwayFromDaw
+        }
+    }
     fn name(&self) -> &str {
         self.name
     }

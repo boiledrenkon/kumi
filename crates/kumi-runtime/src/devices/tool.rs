@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     core::{
-        contracts::{JsonObject, KernelTool, ToolResult},
+        contracts::{JsonObject, KernelTool, Reach, ToolResult},
         errors::RuntimeError,
     },
     ears::device::EARS_NAME,
@@ -244,6 +244,14 @@ fn io_error(error: std::io::Error) -> RuntimeError {
 }
 #[async_trait(?Send)]
 impl KernelTool for DeviceTool {
+    fn reach(&self) -> Reach {
+        // Writing the file is away from the DAW; waiting for its Browser to list the device reads it.
+        if self.options.wait_ms == Some(0) {
+            Reach::AwayFromDaw
+        } else {
+            Reach::DawRead
+        }
+    }
     fn name(&self) -> &str {
         MAKE_DEVICE_TOOL
     }

@@ -1,0 +1,597 @@
+//! Background jobs on the session: the model's two tools (start_job, jobs), workers and their tools, steps moved out of
+//! an answer (ctrl-b), reports for the next turn, and carrying on by itself when a job the request needed is done.
+use super::*;
+use crate::{
+    core::jobs::{
+        first_line, routed, JobDetail, JobHandle, JobKind, JobOutcome, JobReport, JobSpec, JobState, JobStatus, WhenDone, JOBS_TOOL,
+        START_JOB_TOOL, WORKER_INSTRUCTIONS,
+    },
+    video::tool::{video_tools, VideoToolOptions},
+};
+use kumi_common::js::number::to_string;
+use std::{collections::VecDeque, sync::LazyLock};
+
+/// How a session runs background jobs.
+pub struct JobsOptions {
+    /// Makes a worker's model conversation: the main model, or the one settings name for workers.
+    pub worker_factory: KernelFactory,
+    /// How many run at once.
+    pub max: usize,
+}
+
+/// How long a job that carries on waits after the session is free: the producer's own waiting message goes first.
+const CARRY_ON_AFTER_MS: u64 = 60;
+
+static START_JOB_SCHEMA: LazyLock<JsonObject> = LazyLock::new(|| {
+    serde_json::from_value(json!({
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "A few words for the producer's JOBS tab, such as \"Burial vocal chops\"."},
+            "task": {"type": "string", "description": "A worker's task. It can't see the DAW: give it every fact about the Set it needs (track and device names, key, tempo, what the producer wants)."},
+            "tool": {"type": "string", "description": "Instead of task: one tool that works away from the DAW (the web, the producer's library, the manual, earlier conversations, a video, a device's file), run once with args and no model."},
+            "args": {"type": "object", "description": "The tool's arguments, with tool."},
+            "when_done": {"type": "string", "enum": ["tell", "continue"], "description": "tell (the default): the producer sees a card and the report reaches you at the next turn. continue: the request you're working on needs the result, so you carry on with it as soon as the job is done; end your answer now."}
+        },
+        "required": ["title"]
+    }))
+    .expect("start_job schema")
+});
+const START_JOB_DESCRIPTION: &str = "Start work in the background for anything that takes more than about 30 seconds and doesn't change the DAW: research on the web, a tutorial video, the manual, the producer's library or earlier conversations, or a device's file. It returns at once: say in one line what's running, then keep going or end your answer. A worker (task) has only tools away from the DAW and can't see or change it; whatever it finds comes back to you as words, and only you change the Set. Independent jobs run together. Never for an ordinary edit.";
+static JOBS_SCHEMA: LazyLock<JsonObject> = LazyLock::new(|| {
+    serde_json::from_value(json!({
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "result", "stop"], "description": "list: every job and where it is. result: a finished job's whole report. stop: stop a running job."},
+            "id": {"type": "integer", "description": "The job's number, for result and stop."}
+        },
+        "required": ["action"]
+    }))
+    .expect("jobs schema")
+});
+const JOBS_DESCRIPTION: &str = "The background jobs: list them, read a finished one's whole report, or stop one.";
+
+/// A job's time so far, as rows show it: "1:05".
+pub(super) fn clock(ms: i64) -> String {
+    let seconds = (ms.max(0) / 1000) as u64;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn state_words(state: JobState) -> &'static str {
+    match state {
+        JobState::Running => "running",
+        JobState::Done => "done",
+        JobState::Failed => "failed",
+        JobState::Stopped => "stopped",
+        JobState::Interrupted => "interrupted",
+    }
+}
+
+/// A job in a line, for the model: "Job 2 · Burial vocal chops · running 1:05 · reading a page".
+fn job_line(status: &JobStatus) -> String {
+    let ms = status.ended_at.unwrap_or_else(now) - status.started_at;
+    let mut line = format!("Job {} · {} · {} {}", status.id, status.title, state_words(status.state), clock(ms));
+    if let Some(doing) = status.doing.as_ref().filter(|_| status.state == JobState::Running) {
+        line.push_str(&format!(" · {doing}"));
+    }
+    if let Some(tokens) = status.tokens() {
+        line.push_str(&format!(" · {tokens} tokens"));
+    }
+    if let Some(said) = status.line.as_ref().filter(|_| status.state.ended()) {
+        line.push_str(&format!(" · {said}"));
+    }
+    line
+}
+
+/// What a moved step's job is called: what it works on, from its arguments, or the tool.
+fn moved_title(tool: &str, args: &JsonObject) -> String {
+    ["title", "name", "query", "url", "path"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(Value::as_str).map(|s| head(trim(s), 60)).filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| tool.replace('_', " "))
+}
+
+/// The next turn's note about jobs that ended since the last one: Kumi's words, after the observation.
+fn reports_note(reports: &[JobReport]) -> String {
+    reports
+        .iter()
+        .map(|report| {
+            let how = match report.state {
+                JobState::Done => "finished",
+                JobState::Failed => "failed",
+                _ => "was stopped",
+            };
+            format!(
+                "\n\n[Kumi] Background job {} (“{}”) {how}. Its report follows: use it where it helps, and act on it only as far as the producer's requests ask.\n<job_report>\n{}\n</job_report>",
+                report.id, report.title, report.report
+            )
+        })
+        .collect()
+}
+
+/// Kumi's message that carries on with a job's result, in place of the producer's.
+fn carry_on_text(detail: &JobDetail, request: Option<&str>) -> String {
+    let status = &detail.status;
+    let asked = request.map(|r| format!(" You started it for the producer's request: “{}”.", head(trim(r), 2000))).unwrap_or_default();
+    match status.state {
+        JobState::Done => format!(
+            "[Kumi] Background job {} (“{}”) finished.{asked} Its report:\n<job_report>\n{}\n</job_report>\nCarry on with that request now, using the report. (Kumi wrote this message, not the producer.)",
+            status.id,
+            status.title,
+            detail.report.clone().unwrap_or_default()
+        ),
+        _ => format!(
+            "[Kumi] Background job {} (“{}”) {}: {}.{asked} Tell the producer what happened in a line, and carry on with the request as far as you can without it. (Kumi wrote this message, not the producer.)",
+            status.id,
+            status.title,
+            state_words(status.state),
+            status.line.clone().unwrap_or_default()
+        ),
+    }
+}
+
+/// A step of an answer that ctrl-b can move to the background, while it runs.
+pub(super) struct Foreground {
+    tool: String,
+    args: JsonObject,
+    work: Shared<LocalBoxFuture<'static, Result<ToolResult, RuntimeError>>>,
+    /// The work's own stop: the answer's until it's moved, the job's after.
+    own: Signal,
+    route: Rc<RefCell<Option<JobHandle>>>,
+    moved: Signal,
+    job: Cell<Option<u32>>,
+}
+
+impl Foreground {
+    /// Still in the answer: not moved to a job.
+    pub(super) fn waiting(&self) -> bool {
+        self.job.get().is_none()
+    }
+}
+
+/// Takes a foreground step off the session's list however its call ends.
+struct ForegroundHold {
+    session: Session,
+    step: Rc<Foreground>,
+}
+impl Drop for ForegroundHold {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.session.0.state.try_borrow_mut() {
+            s.foreground.retain(|step| !Rc::ptr_eq(step, &self.step));
+        }
+    }
+}
+
+/// A tool away from the DAW, in the main answer: ctrl-b moves its call to the background as a job.
+struct Backgroundable {
+    tool: Rc<dyn KernelTool>,
+    session: std::rc::Weak<Inner>,
+}
+
+#[async_trait(?Send)]
+impl KernelTool for Backgroundable {
+    fn name(&self) -> &str {
+        self.tool.name()
+    }
+    fn description(&self) -> &str {
+        self.tool.description()
+    }
+    fn input_schema(&self) -> JsonObject {
+        self.tool.input_schema()
+    }
+    async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
+        let Some(inner) = self.session.upgrade() else { return self.tool.execute(input, signal).await };
+        let session = Session(inner);
+        let own = Signal::new();
+        let route: Rc<RefCell<Option<JobHandle>>> = Rc::default();
+        let task = {
+            let (tool, args, stop, route) = (self.tool.clone(), input.clone(), own.clone(), route.clone());
+            tokio::task::spawn_local(routed(route, async move { tool.execute(args, stop).await }))
+        };
+        let work: Shared<LocalBoxFuture<'static, Result<ToolResult, RuntimeError>>> =
+            async move { task.await.unwrap_or_else(|error| Err(RuntimeError::plain(error.to_string()))) }.boxed_local().shared();
+        let step = Rc::new(Foreground {
+            tool: self.tool.name().to_string(),
+            args: input,
+            work: work.clone(),
+            own: own.clone(),
+            route,
+            moved: Signal::new(),
+            job: Cell::new(None),
+        });
+        session.0.state.borrow_mut().foreground.push(step.clone());
+        let _hold = ForegroundHold { session: session.clone(), step: step.clone() };
+        // The answer's stop stops the work, unless it was moved first.
+        {
+            let (step, done) = (Rc::downgrade(&step), work.clone());
+            tokio::task::spawn_local(async move {
+                tokio::select! {
+                    _ = signal.cancelled() => {
+                        if let Some(step) = step.upgrade().filter(|step| step.job.get().is_none()) {
+                            step.own.cancel();
+                        }
+                    }
+                    _ = done => {}
+                }
+            });
+        }
+        tokio::select! {
+            result = work => result,
+            _ = step.moved.cancelled() => Ok(ToolResult::text(format!(
+                "The producer moved this to the background as job {} (ctrl-b). Its report joins the conversation when it's done: carry on without it, and don't run it again.",
+                step.job.get().unwrap_or(0)
+            ))),
+        }
+    }
+}
+
+impl Session {
+    /// The main answer's tool: moved to the background with ctrl-b when it works away from the DAW.
+    pub(super) fn with_background(&self, tool: Rc<dyn KernelTool>) -> Rc<dyn KernelTool> {
+        if self.0.jobs.is_some() && tool.reach() == Reach::AwayFromDaw {
+            Rc::new(Backgroundable { tool, session: Rc::downgrade(&self.0) })
+        } else {
+            tool
+        }
+    }
+
+    /// The model's job tools, when the session runs jobs.
+    pub(super) fn job_tools(&self) -> Vec<Rc<dyn KernelTool>> {
+        if self.0.jobs.is_none() {
+            return vec![];
+        }
+        vec![
+            Rc::new(StartJobTool { session: Rc::downgrade(&self.0) }) as Rc<dyn KernelTool>,
+            Rc::new(JobsTool { session: Rc::downgrade(&self.0) }),
+        ]
+    }
+
+    /// The tools a job gets: its own copies of those away from the DAW, whose events are the job's.
+    pub(super) fn worker_tools(&self, handle: &JobHandle) -> Vec<Rc<dyn KernelTool>> {
+        let on_event = handle.on_event();
+        let options = &self.0.options;
+        let mut tools: Vec<Rc<dyn KernelTool>> = vec![];
+        if options.web || options.web_client.is_some() {
+            tools.extend(web_tools(WebToolOptions {
+                on_event: on_event.clone(),
+                client: options.web_client.clone(),
+                ..Default::default()
+            }));
+        }
+        if let Some(library) = &options.library {
+            tools.extend(library.tools(LibraryToolsOptions { on_event: Some(on_event.clone()), resolve: None }));
+        }
+        tools.extend(self.0.recall.clone());
+        if let Some(dirs) = &options.watch {
+            tools.extend(video_tools(VideoToolOptions {
+                videos_dir: dirs.videos_dir.clone(),
+                tools_dir: dirs.tools_dir.clone(),
+                env: None,
+                on_event: on_event.clone(),
+                answer: None,
+            }));
+        }
+        let integration = self.0.state.borrow().integration.clone();
+        if let Some(integration) = integration {
+            tools.extend(integration.worker_tools());
+        }
+        tools.retain(|tool| tool.reach() == Reach::AwayFromDaw);
+        tools
+    }
+
+    /// Starts a job: the producer's request it's for is the turn's under way. Its number, or why it can't start.
+    pub(super) fn start_job(&self, mut spec: JobSpec) -> Result<u32, String> {
+        let jobs = self.0.jobs.clone().ok_or("Kumi can't run background jobs here.")?;
+        spec.title = head(trim(&spec.title), 80);
+        if spec.title.is_empty() {
+            return Err("Give the job a title: a few words for the JOBS tab.".into());
+        }
+        if spec.request.is_none() {
+            spec.request = self.0.state.borrow().active.as_ref().filter(|op| op.is_turn).and_then(|op| op.input.clone());
+        }
+        let this = self.clone();
+        match spec.kind() {
+            JobKind::Worker => {
+                if spec.task.as_deref().is_none_or(|task| trim(task).is_empty()) {
+                    return Err("Say what the worker should do in task.".into());
+                }
+                let started = spec.clone();
+                jobs.start(spec, false, move |handle| this.run_worker(started, handle).boxed_local())
+            }
+            JobKind::Tool => {
+                let Some(tool) = spec.tool.clone() else { return Err("Give a task for a worker, or a tool and its args.".into()) };
+                let names: Vec<String> = self.worker_tools(&JobHandle::detached()).iter().map(|t| t.name().to_string()).collect();
+                if !names.contains(&tool) {
+                    return Err(format!("A job can't use {tool}: only tools away from the DAW, here {}.", names.join(", ")));
+                }
+                let args = spec.args.clone().unwrap_or_default();
+                jobs.start(spec, false, move |handle| this.run_tool_job(tool, args, handle).boxed_local())
+            }
+        }
+    }
+
+    async fn run_worker(self, spec: JobSpec, handle: JobHandle) -> Result<JobOutcome, RuntimeError> {
+        let factory = self.0.options.jobs.as_ref().map(|o| o.worker_factory.clone()).ok_or_else(|| RuntimeError::plain("No jobs here"))?;
+        let tools = self.worker_tools(&handle);
+        let (set, conversation) = {
+            let s = self.0.state.borrow();
+            (s.set_name.clone().filter(|name| !name.is_empty()), s.conversation_id.clone())
+        };
+        let kernel = factory(KernelOptions {
+            instructions: WORKER_INSTRUCTIONS.into(),
+            tools,
+            signal: handle.signal(),
+            checkpoint: None,
+            conversation: Some(format!("{conversation}:job-{}", handle.id())),
+        })
+        .await?;
+        let set = set.map(|name| format!("\n\nThe producer's Set is “{name}”.")).unwrap_or_default();
+        let input = format!("Task: {}{set}", spec.task.unwrap_or_default());
+        let said = Rc::new(RefCell::new(String::new()));
+        handle.doing("thinking");
+        let ran = kernel.run(&input, handle.signal(), handle.kernel_emit(said.clone())).await;
+        kernel.close().await;
+        let turn = ran?;
+        let report = said.borrow().clone();
+        let failed = match turn.stop_reason {
+            StopReason::Completed => None,
+            StopReason::Cancelled => Some("Stopped.".to_string()),
+            StopReason::MaxSteps => Some("It reached its step limit before it finished.".to_string()),
+        };
+        Ok(JobOutcome { report, usage: turn.usage, failed })
+    }
+
+    async fn run_tool_job(self, tool: String, args: JsonObject, handle: JobHandle) -> Result<JobOutcome, RuntimeError> {
+        let Some(found) = self.worker_tools(&handle).into_iter().find(|t| t.name() == tool) else {
+            return Err(RuntimeError::plain(format!("{tool} isn't available to jobs here.")));
+        };
+        handle.step_started(&tool);
+        let result = found.execute(args, handle.signal()).await;
+        handle.step_ended(!result.as_ref().is_ok_and(|r| !r.is_error));
+        let result = result?;
+        Ok(JobOutcome { failed: result.is_error.then(|| first_line(&result.text)), report: result.text, usage: None })
+    }
+
+    /// Ctrl-b: the answer's steps at work away from the DAW go on as one job, and the answer carries on without them.
+    /// The job's number, or why nothing moved.
+    pub(super) fn background(&self) -> Result<u32, String> {
+        let jobs = self.0.jobs.clone().ok_or("Kumi can't run background jobs here.")?;
+        let steps: Vec<Rc<Foreground>> = self.0.state.borrow().foreground.iter().filter(|step| step.job.get().is_none()).cloned().collect();
+        let Some(first) = steps.first().cloned() else {
+            return Err(
+                "Nothing to move: only a step away from the DAW (a video, pages, the manual, your library) can go to the background."
+                    .into(),
+            );
+        };
+        let title = match steps.len() {
+            1 => moved_title(&first.tool, &first.args),
+            n if steps.iter().all(|step| step.tool == first.tool) => {
+                format!("{} ×{}", first.tool.replace('_', " "), to_string(n as f64))
+            }
+            n => format!("{} steps of the answer", to_string(n as f64)),
+        };
+        let one = steps.len() == 1;
+        let spec = JobSpec {
+            title,
+            task: None,
+            tool: one.then(|| first.tool.clone()),
+            args: one.then(|| first.args.clone()),
+            when_done: WhenDone::Tell,
+            request: self.0.state.borrow().active.as_ref().filter(|op| op.is_turn).and_then(|op| op.input.clone()),
+        };
+        let moving = steps.clone();
+        let id = jobs.start(spec, true, move |handle| {
+            async move {
+                for step in &moving {
+                    *step.route.borrow_mut() = Some(handle.clone());
+                    handle.step_started(&step.tool);
+                }
+                // The job's stop stops them now.
+                {
+                    let (stop, owned) = (handle.signal(), moving.iter().map(|step| step.own.clone()).collect::<Vec<_>>());
+                    let all = futures::future::join_all(moving.iter().map(|step| step.work.clone()));
+                    tokio::task::spawn_local(async move {
+                        tokio::select! {
+                            _ = stop.cancelled() => owned.iter().for_each(Signal::cancel),
+                            _ = all => {}
+                        }
+                    });
+                }
+                let mut texts = vec![];
+                let mut failed = None;
+                for step in &moving {
+                    let result = step.work.clone().await;
+                    let ok = result.as_ref().is_ok_and(|r| !r.is_error);
+                    handle.step_ended(!ok);
+                    match result {
+                        Ok(result) => {
+                            if result.is_error && failed.is_none() {
+                                failed = Some(first_line(&result.text));
+                            }
+                            texts.push(result.text);
+                        }
+                        Err(error) => {
+                            failed.get_or_insert(error.message());
+                        }
+                    }
+                }
+                let report = texts.join("\n\n");
+                // One step that failed fails the job; of several, the others' words still help.
+                let failed = failed.filter(|_| texts.iter().all(|text| trim(text).is_empty()) || moving.len() == 1);
+                Ok(JobOutcome { report, usage: None, failed })
+            }
+            .boxed_local()
+        })?;
+        for step in steps {
+            step.job.set(Some(id));
+            step.moved.cancel();
+        }
+        Ok(id)
+    }
+
+    /// A job ended: its card is its last status. A job the request needed carries on with it; any other's report waits
+    /// for the next turn.
+    pub(super) fn job_ended(&self, id: u32) {
+        let Some(status) = self.0.jobs.as_ref().and_then(|jobs| jobs.status(id)) else { return };
+        if status.when_done == WhenDone::Continue && status.state != JobState::Interrupted {
+            self.0.state.borrow_mut().carrying.push_back(id);
+            self.carry_on_later();
+        }
+    }
+
+    /// Carries on with a finished job once the session is free.
+    pub(super) fn carry_on_later(&self) {
+        if self.0.state.borrow().carrying.is_empty() {
+            return;
+        }
+        let this = self.clone();
+        tokio::task::spawn_local(async move {
+            tokio::time::sleep(Duration::from_millis(CARRY_ON_AFTER_MS)).await;
+            this.carry_on();
+        });
+    }
+
+    fn carry_on(&self) {
+        let id = {
+            let s = self.0.state.borrow();
+            if s.state == TurnState::Closed || s.active.is_some() || !s.started {
+                return;
+            }
+            s.carrying.front().copied()
+        };
+        let Some(id) = id else { return };
+        let Some(jobs) = self.0.jobs.clone() else { return };
+        let (Some(detail), spec) = (jobs.detail(id), jobs.spec(id)) else {
+            self.0.state.borrow_mut().carrying.pop_front();
+            return self.carry_on_later();
+        };
+        let text = carry_on_text(&detail, spec.as_ref().and_then(|spec| spec.request.as_deref()));
+        self.0.state.borrow_mut().carrying.pop_front();
+        jobs.delivered(id);
+        self.emit(SessionEvent::CarryOn { job: id, title: detail.status.title.clone() });
+        self.0.state.borrow_mut().turns += 1;
+        let said = text.clone();
+        let started = self.perform(
+            true,
+            Phase::Refresh,
+            Box::new(move |this, op| async move { this.submit_turn(op, text, None, vec![]).await }.boxed_local()),
+            None,
+            Some(said),
+        );
+        if started.is_err() {
+            // Taken meanwhile (the producer's message came first): it carries on after that.
+            self.0.state.borrow_mut().carrying.push_front(id);
+        }
+    }
+
+    /// What the next turn hears of jobs that ended since the last one, as Kumi's note; taken back if the turn fails.
+    pub(super) fn take_job_reports(&self) -> (String, Vec<u32>) {
+        let Some(jobs) = &self.0.jobs else { return (String::new(), vec![]) };
+        let reports = jobs.take_reports();
+        (reports_note(&reports), reports.iter().map(|report| report.id).collect())
+    }
+
+    pub(super) fn return_job_reports(&self, ids: &[u32]) {
+        if let Some(jobs) = &self.0.jobs {
+            for id in ids {
+                jobs.undeliver(*id);
+            }
+        }
+    }
+}
+
+struct StartJobTool {
+    session: std::rc::Weak<Inner>,
+}
+
+#[async_trait(?Send)]
+impl KernelTool for StartJobTool {
+    fn name(&self) -> &str {
+        START_JOB_TOOL
+    }
+    fn description(&self) -> &str {
+        START_JOB_DESCRIPTION
+    }
+    fn input_schema(&self) -> JsonObject {
+        START_JOB_SCHEMA.clone()
+    }
+    async fn execute(&self, input: JsonObject, _signal: Signal) -> Result<ToolResult, RuntimeError> {
+        let Some(inner) = self.session.upgrade() else { return Ok(ToolResult::error("Kumi is closing.")) };
+        let text = |key: &str| input.get(key).and_then(Value::as_str).map(str::to_string);
+        let when_done = match input.get("when_done").and_then(Value::as_str) {
+            Some("continue") => WhenDone::Continue,
+            _ => WhenDone::Tell,
+        };
+        let spec = JobSpec {
+            title: text("title").unwrap_or_default(),
+            task: text("task").filter(|task| !trim(task).is_empty()),
+            tool: text("tool").filter(|tool| !tool.is_empty()),
+            args: input.get("args").and_then(Value::as_object).cloned(),
+            when_done,
+            request: None,
+        };
+        match Session(inner).start_job(spec) {
+            Ok(id) => Ok(ToolResult::text(match when_done {
+                WhenDone::Tell => format!("Job {id} started in the background. Say so in one line and carry on; its report reaches you when it's done."),
+                WhenDone::Continue => format!("Job {id} started in the background. Say so in one line and end your answer: you carry on with this request when its report is in."),
+            })),
+            Err(why) => Ok(ToolResult::error(why)),
+        }
+    }
+}
+
+struct JobsTool {
+    session: std::rc::Weak<Inner>,
+}
+
+#[async_trait(?Send)]
+impl KernelTool for JobsTool {
+    fn name(&self) -> &str {
+        JOBS_TOOL
+    }
+    fn description(&self) -> &str {
+        JOBS_DESCRIPTION
+    }
+    fn input_schema(&self) -> JsonObject {
+        JOBS_SCHEMA.clone()
+    }
+    async fn execute(&self, input: JsonObject, _signal: Signal) -> Result<ToolResult, RuntimeError> {
+        let Some(jobs) = self.session.upgrade().and_then(|inner| inner.jobs.clone()) else {
+            return Ok(ToolResult::error("Kumi can't run background jobs here."));
+        };
+        let id = input.get("id").and_then(Value::as_f64).filter(|n| n.fract() == 0. && *n >= 1. && *n <= u32::MAX as f64).map(|n| n as u32);
+        match input.get("action").and_then(Value::as_str) {
+            Some("list") | None => {
+                let list = jobs.list();
+                Ok(ToolResult::text(if list.is_empty() {
+                    "No background jobs.".to_string()
+                } else {
+                    list.iter().map(job_line).collect::<Vec<_>>().join("\n")
+                }))
+            }
+            Some("result") => {
+                let Some(detail) = id.and_then(|id| jobs.detail(id)) else { return Ok(ToolResult::error("No job with that number.")) };
+                if !detail.status.state.ended() {
+                    return Ok(ToolResult::text(format!(
+                        "{}. It's still running; its report comes when it's done.",
+                        job_line(&detail.status)
+                    )));
+                }
+                jobs.delivered(detail.status.id);
+                Ok(ToolResult::text(format!(
+                    "{}\n<job_report>\n{}\n</job_report>",
+                    job_line(&detail.status),
+                    detail.report.unwrap_or_else(|| detail.status.line.unwrap_or_default())
+                )))
+            }
+            Some("stop") => match id {
+                Some(id) if jobs.stop(id) => Ok(ToolResult::text(format!("Stopping job {id}."))),
+                Some(id) => Ok(ToolResult::error(format!("Job {id} isn't running."))),
+                None => Ok(ToolResult::error("Say which job to stop, by its number.")),
+            },
+            Some(other) => Ok(ToolResult::error(format!("Unknown action {other}: list, result or stop."))),
+        }
+    }
+}
+
+/// The session's carried-on jobs, waiting for it to be free.
+pub(super) type Carrying = VecDeque<u32>;

@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     core::{
-        contracts::{JsonObject, KernelTool, ToolResult},
+        contracts::{JsonObject, KernelTool, Reach, ToolResult},
         errors::RuntimeError,
     },
     web::{
@@ -370,6 +370,9 @@ impl ManualTool {
 }
 #[async_trait(?Send)]
 impl KernelTool for ManualTool {
+    fn reach(&self) -> Reach {
+        Reach::AwayFromDaw
+    }
     fn name(&self) -> &str {
         MANUAL_TOOL
     }

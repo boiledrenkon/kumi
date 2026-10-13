@@ -6,7 +6,7 @@ use super::{
 use crate::{
     audio::{hear, tools::summary, Analysis, AnalyzeOptions},
     core::{
-        contracts::{HeardEvent, JsonObject, KernelTool, SessionEvent, ToolImage, ToolResult, WatchedEvent, WordsSource},
+        contracts::{HeardEvent, JsonObject, KernelTool, Reach, SessionEvent, ToolImage, ToolResult, WatchedEvent, WordsSource},
         errors::RuntimeError,
     },
     kernel::budget::MAX_IMAGES,
@@ -219,6 +219,9 @@ fn tell(callback: &Rc<dyn Fn(SessionEvent)>, event: SessionEvent) {
 }
 #[async_trait(?Send)]
 impl KernelTool for VideoTool {
+    fn reach(&self) -> Reach {
+        Reach::AwayFromDaw
+    }
     fn name(&self) -> &str {
         WATCH_VIDEO_TOOL
     }

@@ -2,7 +2,7 @@
 //! and recipes Kumi kept, by their words. Local and quick: no model call and no embeddings.
 
 use super::{
-    contracts::{ConversationStore, FoundExchange, JsonObject, KernelTool, ToolResult},
+    contracts::{ConversationStore, FoundExchange, JsonObject, KernelTool, Reach, ToolResult},
     errors::RuntimeError,
     recipes::RecipeStore,
     techniques::TechniqueStore,
@@ -219,6 +219,9 @@ fn where_of(hit: &FoundExchange, here: Option<&str>) -> String {
 
 #[async_trait(?Send)]
 impl KernelTool for Recall {
+    fn reach(&self) -> Reach {
+        Reach::AwayFromDaw
+    }
     fn name(&self) -> &str {
         SEARCH_CONVERSATIONS_TOOL
     }
