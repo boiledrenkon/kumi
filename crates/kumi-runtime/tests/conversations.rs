@@ -77,6 +77,38 @@ mod kumi_1_16_3 {
             std::fs::remove_file(kept.join(name)).unwrap();
         }
     }
+    /// The fields it knows of a conversation, the only ones it writes.
+    fn known(value: &Value) -> Value {
+        let mut known = json!({});
+        for key in ["savedAt", "checkpoint", "changes", "first", "turns"] {
+            if !value[key].is_null() {
+                known[key] = value[key].clone();
+            }
+        }
+        known
+    }
+    /// Its save: the conversation, as much as it knows of it, then the place's current one, then its trim.
+    pub fn save(place: &Path, id: &str, conversation: &Value) {
+        let kept = place.join("conversations");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join(format!("{id}.json")), known(conversation).to_string()).unwrap();
+        std::fs::write(place.join("current"), id).unwrap();
+        trim(place);
+    }
+    /// Its move of an unsaved Set's conversation to the Set's own place, once the Set is saved.
+    pub fn move_conversation(projects: &Path, id: &str, from: &str, to: &str) {
+        let file = projects.join(from).join("conversations").join(format!("{id}.json"));
+        let Some(value) = read(&file) else { return };
+        let target = projects.join(to);
+        std::fs::create_dir_all(target.join("conversations")).unwrap();
+        std::fs::write(target.join("conversations").join(format!("{id}.json")), known(&value).to_string()).unwrap();
+        std::fs::write(target.join("current"), id).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        if current(&projects.join(from)).as_deref() == Some(id) {
+            std::fs::write(projects.join(from).join("current"), "").unwrap();
+        }
+        trim(&target);
+    }
     /// What its `kumi report` took for the last conversation: the newest .json in any place's folder.
     pub fn report_candidates(projects: &Path) -> Vec<PathBuf> {
         let mut found = vec![];
@@ -445,6 +477,100 @@ async fn a_name_without_its_conversation_waits_a_while_then_goes_or_follows_it()
     assert!(!unsaved.join("mv66me0m0moved.meta").exists());
     let ConversationMatch::One(row) = store.find("night drive").await.unwrap() else { panic!("not found by its name") };
     assert_eq!((row.place.as_str(), row.id.as_str()), (A, "mv66me0m0moved"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_rollback_to_kumi_1_16_and_forward_again_keeps_what_each_kept() {
+    const C: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
+    let dir = tempfile::tempdir().unwrap();
+    let projects = dir.path();
+    let id = |n: usize| format!("old{n:03}aaaaaa");
+    let kept_in = |place: &str| projects.join(place).join("conversations");
+    // This Kumi keeps 26 conversations in A, named, pinned and forked ones among them, a copy in B, and a named, pinned
+    // one for a Set not saved yet. Another window has one open; a Kumi that crashed had another.
+    let store = create_conversation_store(projects);
+    for n in 0..25 {
+        store.save(A, &id(n), &said(&format!("request {n}"), 10 + n as i64)).await.unwrap();
+    }
+    store.create(A, "fork00aaaaaa", &said("forked", 40), Some("Alt take"), Some(&id(24))).await.unwrap();
+    store.create(B, "copy00aaaaaa", &said("copied", 41), None, Some(&id(23))).await.unwrap();
+    store.save("unsaved", "draft0aaaaaa", &said("a new song", 42)).await.unwrap();
+    assert!(store.rename("unsaved", "draft0aaaaaa", Some("Night drive")).await.unwrap());
+    assert!(store.pin("unsaved", "draft0aaaaaa", true).await.unwrap());
+    assert!(store.rename(A, &id(24), Some("Newest named")).await.unwrap());
+    assert!(store.rename(A, &id(0), Some("Oldest named")).await.unwrap());
+    assert!(store.pin(A, &id(1), true).await.unwrap());
+    // Each its own time, so both Kumis order them alike.
+    for n in 0..25 {
+        age(&kept_in(A).join(format!("{}.json", id(n))), Duration::from_secs(60 * (30 - n as u64)));
+    }
+    age(&kept_in(A).join("fork00aaaaaa.json"), Duration::from_secs(30));
+    let window = create_conversation_store(projects);
+    assert_eq!(window.claim(A, &id(20)), Claim::Ours);
+    std::fs::write(kept_in(A).join(format!("{}.lock", id(21))), json!({"pid":u32::MAX - 1,"started":1}).to_string()).unwrap();
+    assert_eq!(store.all().await.unwrap().len(), 28);
+    drop(store);
+
+    // Rolled back, Kumi 1.16 saves a new conversation in A (its trim keeps 20), saves the named one again with only the
+    // fields it knows, and moves the unsaved Set's conversation to the Set's place once it's saved.
+    let a = projects.join(A);
+    kumi_1_16_3::save(&a, "back16aaaaaa", &serde_json::to_value(said("from 1.16", 50)).unwrap());
+    let mut newest = kumi_1_16_3::read(&kept_in(A).join(format!("{}.json", id(24)))).unwrap();
+    newest["checkpoint"]["messages"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!({"role":"user","content":"and wider"}), json!({"role":"assistant","content":"done"})]);
+    newest["turns"] = json!(2);
+    kumi_1_16_3::save(&a, &id(24), &newest);
+    kumi_1_16_3::move_conversation(projects, "draft0aaaaaa", "unsaved", C);
+    let gone: Vec<String> = (0..7).map(id).collect();
+    for id in &gone {
+        assert!(!kept_in(A).join(format!("{id}.json")).exists(), "1.16 kept {id}");
+    }
+    // It reads every conversation file, and its report takes none of this Kumi's files.
+    for place in [A, B, C, "unsaved"] {
+        for name in kumi_1_16_3::names(&kept_in(place)) {
+            assert!(kumi_1_16_3::read(&kept_in(place).join(&name)).is_some(), "{name}");
+        }
+    }
+    for file in kumi_1_16_3::report_candidates(projects) {
+        assert!(kumi_1_16_3::read(&file).is_some(), "{}", file.display());
+    }
+
+    // Forward again: every file reads, what 1.16 let go says so, and names, pins, sources and holds are as they were.
+    let again = create_conversation_store(projects);
+    for place in [A, B, C] {
+        for name in kumi_1_16_3::names(&kept_in(place)) {
+            assert!(again.load(place, &name[..name.len() - 5]).await.unwrap().is_some(), "{name}");
+        }
+    }
+    let rows = again.all().await.unwrap();
+    assert_eq!(rows.len(), 22, "{:?}", rows.iter().map(|r| &r.id).collect::<Vec<_>>());
+    for id in &gone {
+        assert!(matches!(again.find(id).await.unwrap(), ConversationMatch::Gone), "{id}");
+    }
+    let ConversationMatch::One(named) = again.find("newest named").await.unwrap() else { panic!("the name went") };
+    assert_eq!((named.id.as_str(), named.turns), (id(24).as_str(), 2));
+    let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap().clone();
+    assert_eq!((row("fork00aaaaaa").name.as_deref(), row("fork00aaaaaa").forked_from), (Some("Alt take"), Some(id(24))));
+    assert_eq!(row("copy00aaaaaa").forked_from, Some(id(23)));
+    assert_eq!(again.claim(A, &id(20)), Claim::Taken);
+    assert_eq!(again.claim(A, &id(21)), Claim::Ours);
+    // The moved one's name and pin follow it, and the names of those 1.16 let go go, once they've been left a while.
+    for file in [
+        kept_in("unsaved").join("draft0aaaaaa.meta"),
+        kept_in(A).join(format!("{}.meta", id(0))),
+        kept_in(A).join(format!("{}.meta", id(1))),
+    ] {
+        age(&file, Duration::from_secs(3600));
+    }
+    again.tidy("unsaved").await.unwrap();
+    again.tidy(A).await.unwrap();
+    let ConversationMatch::One(moved) = again.find("night drive").await.unwrap() else { panic!("the moved one's name went") };
+    assert_eq!((moved.place.as_str(), moved.id.as_str(), moved.pinned), (C, "draft0aaaaaa", true));
+    for gone in &gone[..2] {
+        assert!(!kept_in(A).join(format!("{gone}.meta")).exists(), "{gone}");
+    }
 }
 
 /// A tiny generator, so each run makes the same cases.
