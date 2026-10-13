@@ -60,7 +60,8 @@ mod imp {
         fn GetExitCodeProcess(process: *mut std::ffi::c_void, code: *mut u32) -> i32;
         fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     }
-    /// What GetExitCodeProcess says of a process that hasn't exited.
+    /// What GetExitCodeProcess says of a process that hasn't exited. A process that exits with 259 itself reads as
+    /// running while a handle to it is open; Kumi never exits with it.
     const STILL_ACTIVE: u32 = 259;
     pub fn started_at_ms(pid: u32) -> Option<i64> {
         const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;

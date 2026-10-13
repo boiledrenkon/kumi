@@ -859,8 +859,9 @@ Set's conversation moves to the Set's own folder when you first save it.
 - **Keeping:** each Set keeps its 20 newest conversations, any used in the last
   90 days (`conversations.keepDays`; `0` keeps all) and the pinned ones. With
   `keepDays` taken out of settings, Kumi keeps the longer of 90 days and the
-  value last set (`0` still keeps all). After a rollback, a Kumi 1.16 or earlier keeps only each Set's 20 newest, and so
-  does a Kumi window opened before the update, until it closes.
+  value last set (`0` still keeps all). After a rollback, a Kumi 1.16 or
+  earlier keeps only each Set's 20 newest, and so does a Kumi window opened
+  before the update, until it closes.
 
 When you mention something from before ("the reverb chain from last week's
 vocal"), Kumi looks through the conversations kept for every Set, and its
