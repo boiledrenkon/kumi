@@ -38,10 +38,13 @@ const PROXY_VARIABLES: [&str; 4] = ["HTTPS_PROXY", "ALL_PROXY", "HTTP_PROXY", "N
 static ADDRESS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\(?\b(?:https?|wss?)://[^\s)]*\)?").expect("regex"));
 static OS_ERROR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"os error (\d+)").expect("regex"));
 /// The words each cause shows in, as Rust's HTTP, TLS and the three systems word them, most telling first.
-static WORDS: LazyLock<[(NetCause, Regex); 5]> = LazyLock::new(|| {
+static WORDS: LazyLock<[(NetCause, Regex); 6]> = LazyLock::new(|| {
     let words = |pattern: &str| Regex::new(&format!("(?i){pattern}")).expect("regex");
     [
         (NetCause::Proxy, words(r"tunnel error|\bproxy\b")),
+        // A connection dropped partway, though TLS is named: rustls's "peer closed connection without sending TLS
+        // close_notify". A TLS handshake cut short ("tls handshake eof") is TLS's, and stays below.
+        (NetCause::Offline, words(r"close_notify|unexpected eof")),
         (
             NetCause::Tls,
             words(r"certificate|received fatal alert|received corrupt message|peer is incompatible|peer misbehaved|\btls\b|\bssl\b"),
@@ -56,7 +59,7 @@ static WORDS: LazyLock<[(NetCause, Regex); 5]> = LazyLock::new(|| {
         (
             NetCause::Offline,
             words(
-                r"connection (?:was )?(?:refused|reset|aborted)|actively refused|forcibly closed|broken pipe|\bunreachable\b|no route to host|network is down|connection closed before message completed|end of file before message|unexpected eof|\beconn(?:refused|reset|aborted)\b|\be(?:host|net)unreach\b|\bepipe\b",
+                r"connection (?:was )?(?:refused|reset|aborted)|actively refused|forcibly closed|broken pipe|\bunreachable\b|no route to host|network is down|connection closed before message completed|end of file before message|\beconn(?:refused|reset|aborted)\b|\be(?:host|net)unreach\b|\bepipe\b",
             ),
         ),
     ]
@@ -340,6 +343,16 @@ mod tests {
         let said = proxy_words(&env);
         assert_eq!(said, "Kumi's proxy settings: HTTPS_PROXY=http://proxy.example:3128.");
         assert!(!said.contains("hunter"), "{said}");
+    }
+
+    #[test]
+    fn a_connection_dropped_partway_is_the_connection_even_where_tls_is_named() {
+        let close_notify = "error decoding response body: request or response body error: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof";
+        assert_eq!(NetCause::of_text(close_notify), Some(NetCause::Offline));
+        assert_eq!(NetCause::of_text("error reading a body from connection: unexpected EOF"), Some(NetCause::Offline));
+        // A handshake cut short is still TLS's: a Wi-Fi sign-in page or a network inspecting connections does that.
+        assert_eq!(NetCause::of_text("client error (Connect): tls handshake eof"), Some(NetCause::Tls));
+        assert_eq!(NetCause::Offline.words(), "the connection failed");
     }
 
     /// A local server that does `answer` with each connection.
