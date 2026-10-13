@@ -157,6 +157,10 @@ pub enum KernelEvent {
         /// proxy. The wait is the same; the words say which.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cause: Option<crate::web::cause::NetCause>,
+        /// A proxy `cause` that isn't answering (its address refused, its name not found) rather than one that answered
+        /// no: the words say to start it again.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        proxy_down: bool,
     },
     /// Another model answers from here: the producer's fallback, while their model can't (why: its plan's
     /// limit, an outage), or their own model back again (`back`).

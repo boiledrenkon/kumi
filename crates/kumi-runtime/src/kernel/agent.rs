@@ -690,6 +690,7 @@ async fn turn(inner: Rc<Inner>, first: Message, signal: Signal, emit: KernelEmit
                         wait_ms: 0,
                         wait: None,
                         cause: None,
+                        proxy_down: false,
                     });
                     turn.carry_on().await;
                     continue;
@@ -1000,7 +1001,8 @@ impl Turn {
                     // A certificate or a proxy in the way is waited out as offline is (a Wi-Fi sign-in page clears),
                     // but named.
                     let cause = (kind == Some(WaitFor::Offline)).then(|| refused_on_the_way(model)).flatten();
-                    (self.deliver)(KernelEvent::Retry { reason, wait_ms: wait.round() as u64, wait: kind, cause });
+                    let proxy_down = cause.is_some() && crate::web::cause::proxy_down(model);
+                    (self.deliver)(KernelEvent::Retry { reason, wait_ms: wait.round() as u64, wait: kind, cause, proxy_down });
                     // Nothing began, so the retry starts clean.
                     let entries: Vec<Rc<Early>> = self.early.borrow().values().cloned().collect();
                     join_all(entries.iter().map(|entry| entry.call.abandon())).await;

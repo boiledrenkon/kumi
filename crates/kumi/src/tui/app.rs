@@ -310,6 +310,8 @@ struct State {
     waiting_for: Option<(WaitFor, f64)>,
     /// What refused the call on the way, for a wait for the connection: a certificate (TLS) or a proxy.
     waiting_cause: Option<NetCause>,
+    /// That proxy isn't answering, rather than answering no.
+    waiting_proxy_down: bool,
     /// A fixed phrase is changing Live: its changes say "instant" in NOW.
     instant_running: bool,
     instant_changes: Vec<String>,
@@ -432,6 +434,7 @@ impl State {
             retry: None,
             waiting_for: None,
             waiting_cause: None,
+            waiting_proxy_down: false,
             instant_running: false,
             instant_changes: Vec::new(),
             busy_since: 0.,

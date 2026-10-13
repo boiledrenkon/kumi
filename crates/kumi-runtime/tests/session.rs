@@ -3424,7 +3424,7 @@ local_test!(waiting_for_a_plans_limit_stops_the_answers_clocks_but_a_lost_connec
     let waits = |wait: Option<WaitFor>, wait_ms: u64| -> Run {
         Rc::new(move |_, signal, emit| {
             async move {
-                emit(KernelEvent::Retry { reason: "ChatGPT's plan limit".into(), wait_ms, wait, cause: None })?;
+                emit(KernelEvent::Retry { reason: "ChatGPT's plan limit".into(), wait_ms, wait, cause: None, proxy_down: false })?;
                 tokio::select! {_ = signal.cancelled() => return Ok(cancelled()), _ = delay(wait_ms) => {}}
                 emit(KernelEvent::Text { text: "Carried on.".into() })?;
                 Ok(complete())

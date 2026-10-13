@@ -24,6 +24,7 @@ impl TuiApp {
             state.retry = None;
             state.waiting_for = None;
             state.waiting_cause = None;
+            state.waiting_proxy_down = false;
         }
         match kind {
             "retry" => {
@@ -38,6 +39,7 @@ impl TuiApp {
                     state.retry = Some((reason.clone(), until));
                     state.waiting_for = wait.map(|wait| (wait, at));
                     state.waiting_cause = cause;
+                    state.waiting_proxy_down = value["proxyDown"].as_bool().unwrap_or(false);
                 }
                 // A plan's limit pauses the answer until it resets: told once, as a wait, not a stop.
                 if wait == Some(WaitFor::Limit) {

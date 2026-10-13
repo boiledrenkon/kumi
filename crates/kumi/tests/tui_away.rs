@@ -351,6 +351,9 @@ case!(a_plans_limit_shows_when_kumi_carries_on_and_the_fallback_is_named_while_i
     .await;
     h.emit(json!({"type":"retry","reason":"ChatGPT couldn't be reached: the proxy didn't let Kumi through","waitMs":20000,"wait":"offline","cause":"proxy"}));
     h.has("proxy refused · trying again in 20s");
+    // One that isn't answering says so, as the words do.
+    h.emit(json!({"type":"retry","reason":"ChatGPT couldn't be reached: the proxy isn't answering","waitMs":20000,"wait":"offline","cause":"proxy","proxyDown":true}));
+    h.has("proxy not answering · trying again in 20s");
     // The fallback takes over: said once in the conversation, and named in the header while the session says it answers.
     control.extra.borrow_mut()["answering"] = json!("anthropic/claude-sonnet-5-5");
     h.emit(json!({"type":"model-switch","model":"anthropic/claude-sonnet-5-5","reason":"ChatGPT's plan limit resets at 14:20"}));

@@ -2431,6 +2431,7 @@ fn refused_on_the_way(cause: &str) -> LanguageModelError {
 }
 const UNTRUSTED: &str = "invalid peer certificate: UnknownIssuer";
 const PROXY_SIGN_IN: &str = "tunnel error: proxy authorization required";
+const PROXY_DOWN: &str = "tunnel error: failed to create underlying connection: tcp connect error: Connection refused (os error 61)";
 fn busy(retry_after: &str) -> LanguageModelError {
     let mut error = ApiCallError::new("busy", "u", Some(json!({})), Some(429));
     error.response_headers = Some([("retry-after".to_string(), retry_after.to_string())].into_iter().collect());
@@ -2552,8 +2553,7 @@ fn a_certificate_or_a_proxy_in_the_way_is_named_with_its_fix_not_said_as_offline
     assert_eq!(retry_reason(&proxy, model), "ChatGPT couldn't be reached: the proxy didn't let Kumi through");
     assert!(describe_failure(&proxy, model).message.starts_with("Kumi couldn't reach ChatGPT: the proxy didn't let Kumi through. "));
     // A proxy that isn't answering (a crashed one at 127.0.0.1:7890, an office's at home): start it, or go without it.
-    let down =
-        refused_on_the_way("tunnel error: failed to create underlying connection: tcp connect error: Connection refused (os error 61)");
+    let down = refused_on_the_way(PROXY_DOWN);
     assert_eq!(retry_reason(&down, model), "ChatGPT couldn't be reached: the proxy isn't answering");
     let said = describe_failure(&down, model).message;
     assert!(
@@ -2572,9 +2572,11 @@ async fn a_certificate_or_a_proxy_in_the_way_is_waited_out_as_offline_is_but_nam
     local(async {
         tokio::time::pause();
         // A Wi-Fi sign-in page reads as TLS until the producer signs in: the same tries as offline, as long as it takes.
-        for (refused, cause, words) in [
-            (UNTRUSTED, NetCause::Tls, "the secure connection didn't check out (TLS)"),
-            (PROXY_SIGN_IN, NetCause::Proxy, "the proxy didn't let Kumi through"),
+        // A proxy that isn't answering is told apart from one that answered no.
+        for (refused, cause, down, words) in [
+            (UNTRUSTED, NetCause::Tls, false, "the secure connection didn't check out (TLS)"),
+            (PROXY_SIGN_IN, NetCause::Proxy, false, "the proxy didn't let Kumi through"),
+            (PROXY_DOWN, NetCause::Proxy, true, "the proxy isn't answering"),
         ] {
             let h = harness(
                 move |_, n| if n <= 6 { Scripted::Reject(refused_on_the_way(refused)) } else { answer("back") },
@@ -2595,11 +2597,11 @@ async fn a_certificate_or_a_proxy_in_the_way_is_waited_out_as_offline_is_but_nam
                 .borrow()
                 .iter()
                 .filter_map(|event| match event {
-                    KernelEvent::Retry { cause, .. } => Some(*cause),
+                    KernelEvent::Retry { cause, proxy_down, .. } => Some((*cause, *proxy_down)),
                     _ => None,
                 })
                 .collect();
-            assert_eq!(causes, [Some(cause); 6]);
+            assert_eq!(causes, [(Some(cause), down); 6]);
             assert_eq!(texts(&events.borrow()), ["back"]);
             h.kernel.close().await;
         }

@@ -352,6 +352,15 @@ async fn before_sign_in_kumi_says_why_it_cant_reach_it_with_the_proxy_settings()
     let said = reach_sign_in(&env, Some(Rc::new(Reach(Err(tls.into()))))).await.unwrap();
     assert!(said.contains("(TLS)") && said.ends_with("Kumi's proxy settings: HTTPS_PROXY=http://proxy.example:3128."), "{said}");
     assert!(!said.contains("secret"));
+    // A proxy that isn't answering: start it, or go without it; a password wouldn't help.
+    let mut down = ApiCallError::new("Cannot connect to API", "u", None, None);
+    down.cause = Some("error sending request: client error (Connect): tunnel error: failed to create underlying connection: tcp connect error: Connection refused (os error 61)".into());
+    let said = reach_sign_in(&env, Some(Rc::new(Reach(Err(down.into()))))).await.unwrap();
+    assert!(
+        said.starts_with("Kumi couldn't reach ChatGPT's sign-in (auth.openai.com): the proxy isn't answering. Start it again")
+            && !said.contains("user:pass"),
+        "{said}"
+    );
 }
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_sign_in_host_that_never_answers_is_a_timeout() {
