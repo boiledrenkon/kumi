@@ -207,6 +207,25 @@ fn unattended_settings_round_trip_and_survive_other_writes() {
     assert_eq!(read_settings(&file).answer_after, None);
 }
 #[test]
+fn background_job_settings_round_trip_and_survive_a_model_change() {
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("settings.json").to_string_lossy().into_owned();
+    std::fs::write(&file, json!({"model":"anthropic/claude-sonnet-5","maxJobs":5,"workerModel":"openai-codex/gpt-6-astra"}).to_string())
+        .unwrap();
+    let settings = read_settings(&file);
+    assert_eq!((settings.max_jobs, settings.worker_model.as_deref()), (Some(5), Some("openai-codex/gpt-6-astra")));
+    // Choosing a model writes only the model's own keys: the job settings stay.
+    write_settings(&file, &json!({"model":"openai/gpt-6-luna"})).unwrap();
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(written, json!({"model":"openai/gpt-6-luna","maxJobs":5,"workerModel":"openai-codex/gpt-6-astra"}));
+    // Out of range, or not a model: left out.
+    std::fs::write(&file, json!({"maxJobs":0,"workerModel":"not a model"}).to_string()).unwrap();
+    let settings = read_settings(&file);
+    assert_eq!((settings.max_jobs, settings.worker_model), (None, None));
+    std::fs::write(&file, json!({"maxJobs":9}).to_string()).unwrap();
+    assert_eq!(read_settings(&file).max_jobs, None);
+}
+#[test]
 fn local_models_use_named_servers_and_have_no_sign_in() {
     let folder = tempfile::tempdir().unwrap();
     let file = folder.path().join("settings.json");

@@ -15,8 +15,9 @@ use kumi_runtime::{
     core::{
         contracts::*,
         file_sync::FileSync,
+        jobs::{DEFAULT_MAX_JOBS, WORKER_STEPS},
         memory::MemoryStoreOptions,
-        session::VideoDirectories,
+        session::{JobsOptions, VideoDirectories},
         store_backed::{SqliteMemoryStore, SqlitePlaybookStore, SqliteTechniqueStore},
         store_client::StoreClient,
     },
@@ -324,6 +325,31 @@ pub(super) async fn run_session(
             .boxed_local()
         })
     };
+    // Background workers: the conversation's model, or the one settings name for them, and a shorter answer each.
+    let worker_factory: KernelFactory = {
+        let models = models.clone();
+        let worker_model = settings.worker_model.clone();
+        Rc::new(move |options| {
+            let (models, worker_model) = (models.clone(), worker_model.clone());
+            async move {
+                let binding = match &worker_model {
+                    Some(model) => models.binding_for(model).await?,
+                    None => models.binding().await?,
+                };
+                Ok(Rc::new(create_agent_kernel(AgentKernelOptions {
+                    conversation: options.conversation,
+                    instructions: options.instructions,
+                    tools: options.tools,
+                    signal: options.signal,
+                    checkpoint: options.checkpoint,
+                    binding,
+                    max_steps: Some(WORKER_STEPS),
+                    budget: None,
+                })?) as Rc<dyn Kernel>)
+            }
+            .boxed_local()
+        })
+    };
     let bundled = bridge_setup::bundled_bridge_version();
     let project_store = create_project_store(&projects_dir);
     let restore_file = load_restore_file(&io.env)?;
@@ -549,6 +575,7 @@ pub(super) async fn run_session(
         let env = io.env.clone();
         Rc::new(move || Willington::find(&env).map(|willington| willington.switch()))
     });
+    options.jobs = Some(JobsOptions { worker_factory, max: settings.max_jobs.map(|n| n as usize).unwrap_or(DEFAULT_MAX_JOBS) });
     let session: Rc<dyn SessionController> = Rc::new(create_session(options)?);
     *controller.borrow_mut() = Some(Rc::downgrade(&session));
     let (fetch_tx, mut fetch_rx) = tokio::sync::mpsc::unbounded_channel::<String>();

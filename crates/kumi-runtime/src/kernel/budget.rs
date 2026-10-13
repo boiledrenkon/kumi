@@ -42,6 +42,45 @@ pub fn budget_for(window: f64, fixed: f64, answer: f64) -> ContextBudget {
 
 /// How the session attaches each turn's Live observation to the producer's words.
 pub const OBSERVATION_MARKER: &str = "\n\n<current_observation_untrusted>";
+/// A background job's report in a turn's note (after its observation): cleared with the observation, it stays as a stub
+/// that says how to read it again.
+const JOB_REPORT_OPEN: &str = "<job_report id=\"";
+const JOB_REPORT_CLOSE: &str = "</job_report>";
+/// What an observation cleared with reports beside it leaves before their stubs.
+const CLEARED_OBSERVATION: &str =
+    "\n[Kumi cleared this observation to save room; the background jobs' reports below are cut to their opening.]\n</current_observation_untrusted>";
+/// How much of a report its stub keeps.
+const REPORT_STUB: usize = 300;
+
+/// A job's report as a turn's note carries it, with the producer's words safe from its tags.
+pub fn job_report_block(id: u32, report: &str) -> String {
+    let report = report.replace(JOB_REPORT_OPEN, "<job report id=\"").replace(JOB_REPORT_CLOSE, "</job report>");
+    format!("{JOB_REPORT_OPEN}{id}\">\n{report}\n{JOB_REPORT_CLOSE}")
+}
+
+/// The stubs of the job reports in a cleared observation's tail: each one's opening and how to read it whole.
+fn job_report_stubs(tail: &str) -> String {
+    let mut stubs = String::new();
+    let mut rest = tail;
+    while let Some(start) = rest.find(JOB_REPORT_OPEN) {
+        let after = &rest[start + JOB_REPORT_OPEN.len()..];
+        let Some(quote) = after.find("\">") else { break };
+        let id = &after[..quote];
+        let body = &after[quote + 2..];
+        let end = body.find(JOB_REPORT_CLOSE).unwrap_or(body.len());
+        if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+            let report = trim(&body[..end]);
+            let cut = opening(report, REPORT_STUB);
+            let more = if cut.len() < report.len() { "…" } else { "" };
+            stubs.push_str(&format!(
+                "\n\n[Kumi] Background job {id}'s report, cut to its opening: {}{more} The whole report: jobs, action result, id {id}.",
+                cut.split_whitespace().collect::<Vec<_>>().join(" ")
+            ));
+        }
+        rest = &body[end..];
+    }
+    stubs
+}
 /// Starts the first kept message once the earliest exchanges are gone.
 pub const SHORTENED: &str = "[Kumi removed the earlier part of this conversation to save room.]\n\n";
 /// After `SHORTENED`: what the producer said in the removed part, one "- " line each, then a blank line.
@@ -285,7 +324,11 @@ fn last_index(messages: &[Message], role: Role) -> Option<usize> {
 }
 
 fn has_marker(message: &Message) -> bool {
-    matches!(message, Message::User { content, .. } if content.iter().any(|part| matches!(part, UserPart::Text(text) if text.text.contains(OBSERVATION_MARKER))))
+    // One cleared to its jobs' report stubs no longer carries its observation.
+    let observed = |text: &str| {
+        text.find(OBSERVATION_MARKER).is_some_and(|at| !text[at + OBSERVATION_MARKER.len()..].starts_with(CLEARED_OBSERVATION))
+    };
+    matches!(message, Message::User { content, .. } if content.iter().any(|part| matches!(part, UserPart::Text(text) if observed(&text.text))))
 }
 
 /// Where the turn before this one starts: its opening message carries the Live observation, which steering doesn't.
@@ -350,12 +393,17 @@ fn clear_until(messages: &[Message], end: usize, observations: bool) -> Option<V
                         .iter()
                         .map(|part| match part {
                             UserPart::Text(text) => match text.text.find(OBSERVATION_MARKER) {
+                                // Cleared already, its jobs' reports kept as stubs.
+                                Some(at) if text.text[at + OBSERVATION_MARKER.len()..].starts_with(CLEARED_OBSERVATION) => part.clone(),
                                 Some(at) => {
                                     touched = true;
-                                    UserPart::Text(TextPart {
-                                        text: text.text[..at].to_string(),
-                                        provider_options: text.provider_options.clone(),
-                                    })
+                                    let stubs = job_report_stubs(&text.text[at..]);
+                                    let kept = if stubs.is_empty() {
+                                        text.text[..at].to_string()
+                                    } else {
+                                        format!("{}{OBSERVATION_MARKER}{CLEARED_OBSERVATION}{stubs}", &text.text[..at])
+                                    };
+                                    UserPart::Text(TextPart { text: kept, provider_options: text.provider_options.clone() })
                                 }
                                 None => part.clone(),
                             },

@@ -382,8 +382,11 @@ impl Jobs {
     fn end_with(&self, id: u32, how: JobState) -> bool {
         let signal = {
             let mut state = self.state.borrow_mut();
-            let Some(job) = state.jobs.get_mut(&id).filter(|job| job.status.state == JobState::Running) else { return false };
-            job.ending.get_or_insert(how);
+            // One already stopping isn't stopped twice.
+            let Some(job) = state.jobs.get_mut(&id).filter(|job| job.status.state == JobState::Running && job.ending.is_none()) else {
+                return false;
+            };
+            job.ending = Some(how);
             job.status.doing = Some(if how == JobState::Interrupted { "stopping: Kumi is closing" } else { "stopping" }.into());
             job.signal.clone()
         };

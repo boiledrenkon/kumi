@@ -113,7 +113,10 @@ impl Ableton {
                 }
             }));
             let parameters = Rc::new(Parameters::new(history.clone(), options.fast));
-            let mutations = Rc::new(Mutations::new(parameters, observer.clone(), options.clone()));
+            let made = Rc::new(RefCell::new(Made::keeping(replaced_devices())));
+            let mut mutations = Mutations::new(parameters, observer.clone(), options.clone());
+            mutations.made = made.clone();
+            let mutations = Rc::new(mutations);
             let step = mutations.clone();
             let clip = mutations.clone();
             let rendering = Rendering::new(
@@ -165,7 +168,7 @@ impl Ableton {
                 watch,
                 options,
                 closing: RefCell::new(None),
-                made: Rc::new(RefCell::new(Made::keeping(replaced_devices()))),
+                made,
             }
         })
     }
