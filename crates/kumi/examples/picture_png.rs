@@ -89,7 +89,7 @@ fn main() {
             for (col, span) in line.iter().enumerate() {
                 for (half, color) in [(0, span.style.fg.or(span.style.bg)), (1, span.style.bg)] {
                     let [r, g, b] = color.unwrap_or([0x14, 0x16, 0x1a]);
-                    let at = (((row * 2 + half) * cols + col) * 4) as usize;
+                    let at = ((row * 2 + half) * cols + col) * 4;
                     pixels.rgba[at..at + 4].copy_from_slice(&[r, g, b, 255]);
                 }
             }

@@ -120,7 +120,7 @@ const LOWEST_DB: f64 = -60.;
 
 fn dynamics_scene(before: &Dynamics, after: &Dynamics) -> Scene {
     // From 60 dB below full scale, or lower to show a threshold set lower.
-    let low = (before.threshold_db.min(after.threshold_db) - 12.).min(LOWEST_DB).max(-96.);
+    let low = (before.threshold_db.min(after.threshold_db) - 12.).clamp(-96., LOWEST_DB);
     let at = |db: f64| ((db - low) / -low).clamp(0., 1.);
     let curve = |dynamics: &Dynamics| {
         (0..=POINTS)

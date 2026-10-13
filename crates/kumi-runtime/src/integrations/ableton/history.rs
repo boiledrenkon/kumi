@@ -157,13 +157,16 @@ pub enum FastResult {
     Result(Value),
     Error { error: String, sent: bool },
 }
+/// A device's changes waiting for their curve: each change's id and the values it moved, and when the last came.
+pub type CurveRun = (Vec<(String, Vec<PictureValue>)>, f64);
+
 pub struct History {
     pub connection: Rc<LiveConnection>,
     pub remember: Rc<Remember>,
     pub entries: RefCell<IndexMap<String, Rc<RefCell<Applied>>>>,
     /// Changes to a device's curve waiting for one read after the last of them, by device: each change's id and the
     /// values it moved, and when the last came (`parameters::curve_later`).
-    pub curve_runs: RefCell<HashMap<String, (Vec<(String, Vec<PictureValue>)>, f64)>>,
+    pub curve_runs: RefCell<HashMap<String, CurveRun>>,
     pub changes_this_turn: Cell<usize>,
     quiet: RefCell<Option<Vec<String>>>,
     timeout_ms: u64,
