@@ -489,8 +489,10 @@ async fn installation_says_whether_a_newer_kumi_is_out_from_the_daily_check_with
     assert!(check(io.clone()).await.text.starts_with("Kumi looks for updates once a day while it runs"));
     let cache = s.root.path().join("update-check.json");
     let at = now_ms() as f64 - 3. * 3_600_000.;
-    // Versions compare as numbers: 1.16.10 is newer than 1.16.0, 1.9.0 isn't.
-    for (latest, newer) in [("99.0.0", true), ("1.16.10", true), ("1.9.0", false), (kumi_runtime::KUMI_VERSION, false)] {
+    // Versions compare as numbers, from this one: x.y.(z + 10) is newer, and 1.9.0 is older than any 1.10 or later.
+    let this: Vec<u32> = kumi_runtime::KUMI_VERSION.split(['.', '-']).take(3).map(|part| part.parse().unwrap()).collect();
+    let later = format!("{}.{}.{}", this[0], this[1], this[2] + 10);
+    for (latest, newer) in [("99.0.0", true), (later.as_str(), true), ("1.9.0", false), (kumi_runtime::KUMI_VERSION, false)] {
         fs::write(&cache, json!({"checkedAt":at,"latest":latest}).to_string()).unwrap();
         let said = check(io.clone()).await;
         if newer {
