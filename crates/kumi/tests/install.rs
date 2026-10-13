@@ -1727,8 +1727,8 @@ async fn uninstall_refuses_a_folder_that_isnt_kumis_own() {
     assert_eq!(files_in(&elsewhere), unmarked);
     assert!(!dir.path().join("nowhere").exists());
 }
-/// Kumi's parts are taken by their exact names, so a Downloads beside them stays; a fetched folder (tools, models,
-/// videos) goes only while it holds only what Kumi put there.
+/// Kumi's parts are taken by their exact names, so a Downloads beside them stays; from a fetched folder (tools, models,
+/// videos) only what Kumi put there goes, and the folder too once nothing else is left in it.
 #[cfg(not(windows))]
 #[tokio::test]
 async fn uninstall_takes_kumis_names_by_their_case_and_leaves_folders_holding_more() {
@@ -1751,19 +1751,19 @@ async fn uninstall_takes_kumis_names_by_their_case_and_leaves_folders_holding_mo
     assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
     let said = out.0.borrow().clone();
     assert!(
-        said.contains("): app, bin, models.")
+        said.contains("): app, bin, tools/ffmpeg, models, videos/youtube-dqw4w9wgxcq.")
             && said.contains("/tools and ")
             && said.contains("/videos stay: they hold more than Kumi put there."),
         "{said}"
     );
     let (removing, out) = io(&env);
     assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
-    for kept in
-        ["Downloads/song.wav", "videos/holiday.mov", "videos/youtube-dqw4w9wgxcq/meta.json", "tools/mixdown.sh", "tools/ffmpeg/ffmpeg"]
-    {
+    for kept in ["Downloads/song.wav", "videos/holiday.mov", "tools/mixdown.sh"] {
         assert!(home.join(kept).exists(), "{kept}");
     }
-    assert!(!home.join("models").exists() && !home.join("app").exists() && !home.join("bin").exists());
+    for gone in ["videos/youtube-dqw4w9wgxcq", "tools/ffmpeg", "models", "app", "bin"] {
+        assert!(!home.join(gone).exists(), "{gone}");
+    }
 }
 /// A part that can't go doesn't leave Kumi half removed with a bare error: every other part is tried, what stayed is
 /// said with why, and Kumi itself (app, bin and its PATH line) stays so kumi uninstall can run again.
@@ -1945,4 +1945,70 @@ async fn uninstall_as_root_spares_the_home_folder_the_account_database_names() {
     // SAFETY: geteuid has no preconditions.
     assert_eq!(me.root, unsafe { libc::geteuid() } == 0);
     assert!(me.homes.iter().all(|home| Path::new(home).is_absolute()), "{me:?}");
+}
+/// A Kumi folder the producer also uses (KUMI_HOME=~/.local, so the launcher is ~/.local/bin/kumi): with or without
+/// --all, only Kumi's own entries go. Theirs in bin and downloads and beside them stay, Kumi's data stays (its names,
+/// such as projects, could be theirs there), and so does the folder.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
+    let theirs = ["bin/uv-tool", "downloads/mine.zip", "share/applications/x.desktop", "lib/python3/site.py", "state/history"];
+    let data = ["auth.json", "kumi.db", "projects/0123456789abcdef0123456789abcdef/conversations/a.json"];
+    for all in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env(dir.path());
+        let user = Path::new(&env["HOME"]).to_path_buf();
+        let local = user.join(".local");
+        env.insert("KUMI_HOME".into(), local.display().to_string());
+        installed_kumi(&local);
+        put(local.join("app.previous/kumi"), "Kumi's");
+        put(local.join("downloads/kumi-aarch64-apple-darwin.tar.gz"), "Kumi's");
+        put(local.join("tools/ffmpeg/ffmpeg"), "Kumi's");
+        for file in theirs {
+            put(local.join(file), "theirs");
+        }
+        for file in data {
+            put(local.join(file), "Kumi's data");
+        }
+        put(user.join(".profile"), format!("alias ll='ls -l'\n\n{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", local.display()));
+        let kept = "conversations, notes, recipes, sign-ins, library and references";
+        let (dry, out) = io(&env);
+        assert_eq!(uninstall_installed(dry, UninstallOptions { all, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+        let said = out.0.borrow().clone();
+        for words in [
+            "): app, app.previous, bin/kumi, downloads/kumi-aarch64-apple-darwin.tar.gz, tools.".to_string(),
+            "~/.local/bin and ~/.local/downloads stay: they hold more than Kumi put there.".into(),
+            if all {
+                format!("~/.local also holds what isn't Kumi's, so --all would leave your {kept} there too (auth.json, kumi.db and projects): delete them by hand.")
+            } else {
+                format!("Your {kept} would stay in ~/.local, beside what isn't Kumi's (auth.json, kumi.db and projects).")
+            },
+        ] {
+            assert!(said.contains(&words), "{words}: {said}");
+        }
+        let (removing, out) = io(&env);
+        assert_eq!(
+            uninstall_installed(removing, UninstallOptions { all, yes: true, ..Default::default() }).await.unwrap(),
+            0,
+            "{}",
+            out.0.borrow()
+        );
+        for file in theirs {
+            assert_eq!(fs::read_to_string(local.join(file)).unwrap(), "theirs", "{file}");
+        }
+        for file in data {
+            assert_eq!(fs::read_to_string(local.join(file)).unwrap(), "Kumi's data", "{file}");
+        }
+        for gone in ["app", "app.previous", "bin/kumi", "downloads/kumi-aarch64-apple-darwin.tar.gz", "tools"] {
+            assert!(!local.join(gone).exists(), "{gone}");
+        }
+        assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "alias ll='ls -l'\n");
+        let said = out.0.borrow().clone();
+        assert!(
+            said.contains(&format!(
+                "Your {kept} are still in ~/.local, beside what isn't Kumi's (auth.json, kumi.db and projects): delete them by hand to remove them too."
+            )) && !said.contains("delete that folder"),
+            "{said}"
+        );
+    }
 }

@@ -1002,7 +1002,11 @@ notes, recipes, sign-ins, library and references stay unless you add `--all`.
   says what of Kumi's to take out by hand. The installers won't install there.
   Run with `sudo`, it also leaves your home folder alone, and any folder that
   isn't root's.
-- A folder of what Kumi fetched stays when it holds anything else.
+- From `bin`, `downloads` and the folders of what Kumi fetched, only Kumi's own
+  files go. Anything else stays and is named, and so does the folder.
+- When Kumi's folder also holds files that aren't Kumi's (`KUMI_HOME=~/.local`,
+  say), only Kumi itself goes, even with `--all`. Your conversations and the
+  rest stay there, named, for you to delete.
 - When a part can't be removed, it says which and why, and Kumi stays so you
   can run `kumi uninstall` again.
 - A PATH line it can't take out (in a file it can't write, or inside an `if`,

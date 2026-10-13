@@ -1555,11 +1555,50 @@ fn not_kumis_said(home: &str, why: NotKumis, display: &dyn Fn(&str) -> String) -
     }
     said
 }
-/// Whether a folder Kumi fetches into (tools, models, videos) holds only what Kumi puts there.
-fn holds_kumis_own(part: &str, folder: &Path) -> bool {
+/// What Kumi keeps in its folder besides itself, by name: the producer's conversations, notes, recipes, sign-ins,
+/// library and references, and what Kumi remembers between runs. Only --all takes these, and only from a folder of
+/// Kumi's alone: in one the producer also uses, names like projects and settings.json could be theirs.
+const KUMI_S_DATA: [&str; 26] = [
+    "auth.json",
+    "settings.json",
+    "kumi.db",
+    "kumi.db-wal",
+    "kumi.db-shm",
+    "kumi.db-journal",
+    "memory.json",
+    "techniques.json",
+    "playbook.json",
+    "audition-restore.json",
+    "gaps.jsonl",
+    "timings.jsonl",
+    "input-history",
+    "update-check.json",
+    "whats-new.json",
+    "slots.json",
+    "projects",
+    "recipes",
+    "library",
+    "references",
+    "goals",
+    "attachments",
+    "cache",
+    "devices",
+    "max",
+    "probes",
+];
+/// Kumi's folders whose names the producer may use too (`~/.local/bin`, say): only Kumi's entries in them go, and the
+/// folder once nothing else is left in it.
+const SHARED_NAMES: [&str; 7] = ["bin", "downloads", "tools", "models", "videos", "node", "bridge"];
+/// What a file browser leaves in a folder.
+fn litter(name: &str) -> bool {
+    [".DS_Store", "Thumbs.db", "desktop.ini"].contains(&name)
+}
+/// Whether `name` in Kumi's folder `part` is Kumi's: its launcher, a release it downloaded, a program, model or video
+/// it fetched, one of the bridge's generations. Nothing in `node` tells Kumi's old Node from the producer's own, so
+/// its entries count as Kumi's only in a folder of Kumi's alone.
+fn kumis_entry(part: &str, name: &str, path: &Path, alone: bool) -> bool {
     use kumi_runtime::models::pinned::{AFX_REP, BASIC_PITCH, CLAP};
-    let Ok(entries) = fs::read_dir(folder) else { return false };
-    let names = |folder: &Path| -> Vec<String> {
+    let inside = |folder: &Path| -> Vec<String> {
         fs::read_dir(folder)
             .into_iter()
             .flatten()
@@ -1567,41 +1606,43 @@ fn holds_kumis_own(part: &str, folder: &Path) -> bool {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect()
     };
-    let litter = |name: &str| [".DS_Store", "Thumbs.db", "desktop.ini"].contains(&name);
-    entries.filter_map(Result::ok).all(|entry| {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        litter(&name)
-            || match part {
-                "tools" => {
-                    ["ffmpeg", "whisper", "whisper-models", "yt-dlp", "hands"].contains(&name.as_str())
-                        || [".ffmpeg-", ".whisper-", ".yt-dlp"].iter().any(|start| name.starts_with(start))
-                }
-                "models" => {
-                    [CLAP.name, AFX_REP.name, BASIC_PITCH.name, "slots"].contains(&name.as_str())
-                        || name.starts_with("onnxruntime")
-                        || name.contains(".partial-")
-                        || name.contains(".unpacking-")
-                }
-                // A video's folder, named as Kumi names them (its site and id, in lowercase), with Kumi's files in it.
-                "videos" => {
-                    entry.path().is_dir()
-                        && name.contains('-')
-                        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-                        && names(&entry.path()).iter().all(|inside| {
-                            litter(inside)
-                                || ["meta.json", "cues.json", "captions", "frames", "sound"].contains(&inside.as_str())
-                                || inside.starts_with("speech-")
-                        })
-                }
-                _ => false,
+    litter(name)
+        || match part {
+            "bin" => ["kumi", "kumi.cmd"].contains(&name),
+            "downloads" => name.starts_with("kumi") && (name.ends_with(".tar.gz") || name.ends_with(".zip")),
+            "tools" => {
+                ["ffmpeg", "whisper", "whisper-models", "yt-dlp", "hands"].contains(&name)
+                    || [".ffmpeg-", ".whisper-", ".yt-dlp"].iter().any(|start| name.starts_with(start))
             }
-    })
+            "models" => {
+                [CLAP.name, AFX_REP.name, BASIC_PITCH.name, "slots"].contains(&name)
+                    || name.starts_with("onnxruntime")
+                    || name.contains(".partial-")
+                    || name.contains(".unpacking-")
+            }
+            // A video's folder, named as Kumi names them (its site and id, in lowercase), with Kumi's files in it.
+            "videos" => {
+                path.is_dir()
+                    && name.contains('-')
+                    && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+                    && inside(path).iter().all(|entry| {
+                        litter(entry)
+                            || ["meta.json", "cues.json", "captions", "frames", "sound"].contains(&entry.as_str())
+                            || entry.starts_with("speech-")
+                    })
+            }
+            // A generation (its version, then when it went in: 1.0.92-1791674943798), and the state beside them.
+            "bridge" => {
+                name == "state"
+                    || (name.starts_with(|c: char| c.is_ascii_digit())
+                        && name.contains('-')
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+            }
+            _ => alone,
+        }
 }
-/// What an uninstall takes out of `home`, a folder of Kumi's own: with --all everything in it (the bridge's files
-/// excepted while Live uses them); otherwise Kumi's parts, by their exact names as the folder lists them, and what a
-/// stopped installer left (`.install.*`). In KUMI_S_OWN's order. The second list: fetched folders that stay because
-/// they hold more than Kumi put there.
-fn own_parts(home: &str, all: bool, bridge_stays: bool) -> Result<(Vec<String>, Vec<String>), RuntimeError> {
+/// The names in `home`, in KUMI_S_OWN's order, then the rest by name.
+fn names_in(home: &str) -> Result<Vec<String>, RuntimeError> {
     let mut names: Vec<String> = match fs::read_dir(home) {
         Ok(entries) => entries
             .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
@@ -1611,23 +1652,76 @@ fn own_parts(home: &str, all: bool, bridge_stays: bool) -> Result<(Vec<String>, 
         Err(e) => return Err(error(e)),
     };
     names.sort_by_key(|name| (KUMI_S_OWN.iter().position(|own| own == name).unwrap_or(KUMI_S_OWN.len()), name.clone()));
-    let (mut parts, mut left) = (vec![], vec![]);
+    Ok(names)
+}
+/// Whether `home`, holding `names`, is a folder of Kumi's alone: named as the installer names it (.kumi), or holding
+/// only what Kumi makes. Then --all takes it whole; from one the producer also uses (KUMI_HOME=~/.local, say), only
+/// Kumi's own entries go.
+fn kumis_alone(home: &str, names: &[String]) -> bool {
+    Path::new(home).file_name().is_some_and(|name| name == ".kumi")
+        || names.iter().all(|name| {
+            KUMI_S_OWN.contains(&name.as_str()) || KUMI_S_DATA.contains(&name.as_str()) || name.starts_with(".install.") || litter(name)
+        })
+}
+/// What an uninstall does in `home`, a folder of Kumi's own.
+struct Parts {
+    /// What goes: Kumi's parts by their exact names as the folder lists them, what a stopped installer left
+    /// (`.install.*`), and in the folders whose names the producer may use too, only Kumi's entries (the folder
+    /// itself once nothing else is in it). With --all in a folder of Kumi's alone, everything in it (the bridge's
+    /// files excepted while Live uses them). In KUMI_S_OWN's order.
+    gone: Vec<String>,
+    /// Kumi's folders that stay because they hold more than Kumi put there.
+    left: Vec<String>,
+    /// Whether `home` is a folder of Kumi's alone.
+    alone: bool,
+    /// Kumi's data that stays: without --all, or in a folder the producer also uses.
+    data: Vec<String>,
+}
+fn own_parts(home: &str, all: bool, bridge_stays: bool) -> Result<Parts, RuntimeError> {
+    let names = names_in(home)?;
+    let alone = kumis_alone(home, &names);
+    let mut parts = Parts { gone: vec![], left: vec![], alone, data: vec![] };
     for name in names {
         let path = join(home, &name);
         if name == "bridge" && bridge_stays {
             continue;
         }
-        if all {
-            parts.push(path);
-        } else if name.starts_with(".install.") || KUMI_S_OWN.contains(&name.as_str()) {
-            if ["tools", "models", "videos"].contains(&name.as_str()) && !holds_kumis_own(&name, Path::new(&path)) {
-                left.push(path);
+        if all && alone {
+            parts.gone.push(path);
+        } else if SHARED_NAMES.contains(&name.as_str()) {
+            let Ok(entries) = fs::read_dir(&path) else {
+                // Not a folder: Kumi makes none by these names.
+                if alone {
+                    parts.gone.push(path);
+                }
+                continue;
+            };
+            let (kumis, others): (Vec<_>, Vec<_>) = entries
+                .filter_map(Result::ok)
+                .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry.path()))
+                .partition(|(entry, at)| kumis_entry(&name, entry, at, alone));
+            if others.is_empty() {
+                parts.gone.push(path);
             } else {
-                parts.push(path);
+                parts.gone.extend(kumis.into_iter().filter(|(entry, _)| !litter(entry)).map(|(_, at)| at.display().to_string()));
+                parts.left.push(path);
             }
+        } else if name.starts_with(".install.") || KUMI_S_OWN.contains(&name.as_str()) {
+            parts.gone.push(path);
+        } else if KUMI_S_DATA.contains(&name.as_str()) {
+            parts.data.push(path);
         }
     }
-    Ok((parts, left))
+    Ok(parts)
+}
+/// `path`, in `home`, as the part of Kumi's folder it is (`app`, `bin/kumi`).
+fn part_name(home: &str, path: &str) -> String {
+    Path::new(path).strip_prefix(home).map(|part| part.display().to_string()).unwrap_or_else(|_| basename(path))
+}
+/// The part of Kumi's folder `path` is in: `bin` for `bin/kumi`.
+fn top_part(home: &str, path: &str) -> String {
+    let part = part_name(home, path);
+    Path::new(&part).components().next().map(|first| first.as_os_str().to_string_lossy().into_owned()).unwrap_or(part)
 }
 /// The bytes in `path`, its folders walked without following links.
 fn bytes_in(path: &Path) -> u64 {
@@ -1655,6 +1749,14 @@ fn left_said(left: &[String], display: &dyn Fn(&str) -> String) -> Option<String
         _ => Some(format!("{} stay: they hold more than Kumi put there.", listed(&shown))),
     }
 }
+/// Where Kumi's data stays, by what of it is there: the folder, or in one the producer also uses, each name.
+fn data_said(home: &str, parts: &Parts, display: &dyn Fn(&str) -> String) -> String {
+    if parts.alone {
+        return display(home);
+    }
+    let names: Vec<String> = parts.data.iter().map(|path| part_name(home, path)).collect();
+    format!("{}, beside what isn't Kumi's ({})", display(home), listed(&names))
+}
 /// `kumi uninstall --dry-run`: what would go, and what would stay.
 fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dyn Fn(&str) -> String) -> Result<i32, RuntimeError> {
     let say = |s: String| io.out.write(&format!("{s}\n"));
@@ -1666,17 +1768,17 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
         ));
     }
     let bridge = find_bridge_config(&io.env).is_some();
-    let (parts, left) = own_parts(home, options.all, bridge && bridge_uses(&join(home, "bridge"), &io.env))?;
-    let bytes: u64 = parts.iter().map(|part| bytes_in(Path::new(part))).sum();
-    if options.all {
+    let parts = own_parts(home, options.all, bridge && bridge_uses(&join(home, "bridge"), &io.env))?;
+    let bytes: u64 = parts.gone.iter().map(|part| bytes_in(Path::new(part))).sum();
+    if options.all && parts.alone {
         say(format!("kumi uninstall --all would remove {} ({}), with your {KEPT}.", display(home), size(bytes as f64)));
-    } else if parts.is_empty() {
+    } else if parts.gone.is_empty() {
         say(format!("kumi uninstall would find nothing of Kumi's own left in {}.", display(home)));
     } else {
-        let names: Vec<String> = parts.iter().map(|part| basename(part)).collect();
+        let names: Vec<String> = parts.gone.iter().map(|part| part_name(home, part)).collect();
         say(format!("kumi uninstall would remove from {} ({}): {}.", display(home), size(bytes as f64), names.join(", ")));
     }
-    if let Some(said) = left_said(&left, display) {
+    if let Some(said) = left_said(&parts.left, display) {
         say(said);
     }
     let lines = path_lines(&io.env, home);
@@ -1706,8 +1808,15 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
             ));
         }
     }
-    if !options.all {
-        say(format!("Your {KEPT} would stay in {}.", display(home)));
+    if options.all && !parts.alone && !parts.data.is_empty() {
+        let names: Vec<String> = parts.data.iter().map(|path| part_name(home, path)).collect();
+        say(format!(
+            "{} also holds what isn't Kumi's, so --all would leave your {KEPT} there too ({}): delete them by hand.",
+            display(home),
+            listed(&names)
+        ));
+    } else if !options.all && (parts.alone || !parts.data.is_empty()) {
+        say(format!("Your {KEPT} would stay in {}.", data_said(home, &parts, display)));
     }
     say("Nothing was removed (--dry-run).".into());
     Ok(0)
@@ -1737,10 +1846,12 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         return Ok(1);
     }
     let run = io.run.clone().unwrap_or_else(default_run);
-    let keeps = if options.all {
-        format!("Everything in it goes too: your {KEPT}.")
-    } else {
-        format!("Your {KEPT} stay (add --all to remove them too).")
+    let alone = kumis_alone(&home, &names_in(&home)?);
+    let keeps = match (options.all, alone) {
+        (true, true) => format!("Everything in it goes too: your {KEPT}."),
+        (true, false) => format!("It also holds what isn't Kumi's, so your {KEPT} stay there too."),
+        (false, true) => format!("Your {KEPT} stay (add --all to remove them too)."),
+        (false, false) => format!("Your {KEPT} stay."),
     };
     if !options.yes && !ask(&io, &format!("Remove Kumi from {}? {keeps}", display(&home)), Some("add --yes")).await {
         say("Nothing was removed.".into());
@@ -1748,19 +1859,20 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     }
     let bridge = remove_bridge(&io, run.clone()).await?;
     let bridge_stays = bridge != RemovedBridge::Removed && bridge_uses(&join(&home, "bridge"), &io.env);
-    let (parts, left) = own_parts(&home, options.all, bridge_stays)?;
-    let bytes: u64 = parts.iter().map(|part| bytes_in(Path::new(part))).sum();
+    let parts = own_parts(&home, options.all, bridge_stays)?;
+    let whole = options.all && parts.alone && !bridge_stays;
+    let bytes: u64 = parts.gone.iter().map(|part| bytes_in(Path::new(part))).sum();
     // Every part is tried, Kumi itself (app and bin) last: when another part stays, Kumi does too, so kumi uninstall
     // can run again once that's sorted.
     #[cfg(not(windows))]
     let (stayed, kumi_stays) = {
         let (kumi, rest): (Vec<String>, Vec<String>) =
-            parts.iter().cloned().partition(|path| ["app", "bin"].contains(&basename(path).as_str()));
+            parts.gone.iter().cloned().partition(|path| ["app", "bin"].contains(&top_part(&home, path).as_str()));
         let mut stayed = removing(&rest);
         let kumi_stays = !stayed.is_empty();
         if !kumi_stays {
             stayed = removing(&kumi);
-            if stayed.is_empty() && options.all && !bridge_stays {
+            if stayed.is_empty() && whole {
                 stayed.extend(remove(&home).err().map(|error| (home.clone(), error)));
             }
         }
@@ -1770,7 +1882,7 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     let (stayed, kumi_stays): (Vec<(String, std::io::Error)>, bool) = {
         // Windows won't remove a running program: a detached cmd does, once this Kumi has exited.
         use std::os::windows::process::CommandExt;
-        let targets = if options.all && !bridge_stays { vec![home.clone()] } else { parts.clone() };
+        let targets = if whole { vec![home.clone()] } else { parts.gone.clone() };
         let list =
             targets.iter().map(|path| format!("rmdir /s /q \"{path}\" 2>nul & del /f /q \"{path}\" 2>nul")).collect::<Vec<_>>().join(" & ");
         std::process::Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()))
@@ -1783,15 +1895,16 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
             .map_err(error)?;
         (vec![], false)
     };
-    // The startup files last, and only once Kumi's bin has gone: until then its PATH line still finds Kumi.
-    let rc_changed = if Path::new(&join(&home, "bin")).exists() && !cfg!(windows) { true } else { remove_path_lines(&io, &home) };
+    // The startup files last, and only once Kumi's launcher has gone: until then its PATH line still finds Kumi.
+    let launcher = join(&join(&home, "bin"), if cfg!(windows) { "kumi.cmd" } else { "kumi" });
+    let rc_changed = if Path::new(&launcher).exists() && !cfg!(windows) { true } else { remove_path_lines(&io, &home) };
     if cfg!(windows) {
         step(io.out.clone(), &io.env, "Taking Kumi out of your PATH…", remove_windows_path(run, &home), false).await;
     }
     if bridge_stays {
         say(format!("The bridge's files stay in {} while Live uses it.", display(&join(&home, "bridge"))));
     }
-    if let Some(said) = left_said(&left, &display) {
+    if let Some(said) = left_said(&parts.left, &display) {
         say(said);
     }
     if let Some((_, why)) = stayed.first() {
@@ -1814,10 +1927,17 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         return Ok(1);
     }
     let freed = if bytes > 0 { format!(", freeing {}", size(bytes as f64)) } else { String::new() };
-    say(if options.all {
+    say(if options.all && parts.alone {
         format!("Kumi is removed, with everything it kept{}{freed}.", if bridge_stays { " but the bridge's files" } else { "" })
-    } else {
+    } else if parts.alone {
         format!("Kumi is removed{freed}. Your {KEPT} are still in {}; delete that folder to remove them too.", display(&home))
+    } else if parts.data.is_empty() {
+        format!("Kumi is removed{freed}.")
+    } else {
+        format!(
+            "Kumi is removed{freed}. Your {KEPT} are still in {}: delete them by hand to remove them too.",
+            data_said(&home, &parts, &display)
+        )
     });
     say("Open a new terminal window so the `kumi` command is gone there too.".into());
     Ok(i32::from(!rc_changed))
