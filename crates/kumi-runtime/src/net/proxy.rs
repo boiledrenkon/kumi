@@ -8,9 +8,10 @@
 //!   network's address or a .local name, which Kumi reached directly before. A model server the producer names goes by
 //!   the variables alone ([`environment`]), as before: it's on their computer or network, by address or by name.
 //! - A system's proxy in the way is passed by: one that wants a sign-in Kumi can't give (NTLM, Kerberos, a password the
-//!   system keeps), or that isn't answering (a crashed ClashX, an office's proxy set on a laptop at home). After its
-//!   407, its refusal or its name not found, requests go directly while the system names it, as they did before Kumi
-//!   read the settings ([`crate::net::send`]).
+//!   system keeps), that isn't answering (a crashed ClashX, an office's proxy set on a laptop at home), or that shows a
+//!   certificate this computer doesn't trust (one that inspects secure connections, its authority not installed).
+//!   After its 407, its refusal, its name not found or its certificate refused, requests go directly while the system
+//!   names it, as they did before Kumi read the settings ([`crate::net::send`]).
 
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -136,12 +137,19 @@ pub fn pass_by(settings: &Settings, url: &Url) -> bool {
     true
 }
 
-/// Whether a failed request's proxy, rather than the server, was in the way: it wants a sign-in Kumi can't give, or
-/// isn't answering (its address refused, its name not found). A timeout says neither: the network may just be slow.
-/// What reached Kumi directly says nothing of a proxy, so [`pass_by`] decides from the settings whether there was one.
+/// Whether a failed request's proxy, rather than the server, was in the way: it wants a sign-in Kumi can't give, isn't
+/// answering (its address refused, its name not found), or showed a certificate this computer doesn't trust. A timeout
+/// says none of these: the network may just be slow. What reached Kumi directly says nothing of a proxy, so
+/// [`pass_by`] decides from the settings whether there was one.
 pub fn in_the_way(error: &reqwest::Error) -> bool {
     let chain = crate::web::cause::chain(error);
-    !chain.contains("timed out") && (chain.contains("proxy authorization required") || not_answering(&chain))
+    !chain.contains("timed out") && (chain.contains("proxy authorization required") || not_answering(&chain) || certificate_refused(&chain))
+}
+
+/// A certificate the check refused (an unknown issuer, say), as rustls words it, rather than any other TLS failure: an
+/// alert, a protocol neither side speaks, or the system's check running out of time.
+pub fn certificate_refused(chain: &str) -> bool {
+    chain.contains("invalid peer certificate")
 }
 
 /// A proxy that isn't answering, as what a request kept of the failure says: its address refused, or its name not

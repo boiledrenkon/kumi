@@ -30,9 +30,9 @@ pub fn client_through(settings: impl Fn() -> Arc<proxy::Settings> + Send + Sync 
 }
 
 /// Sends a request of a [`client`]'s, and once more directly when the system's proxy was in the way: it wants a sign-in
-/// Kumi can't give, or isn't answering. Kumi went directly then before it read the system's settings, so a crashed
-/// ClashX, an office's proxy at home or an NTLM proxy is never worse than that. That proxy is passed by from then on,
-/// until going directly fails too.
+/// Kumi can't give, isn't answering, or showed a certificate this computer doesn't trust. Kumi went directly then before
+/// it read the system's settings, so a crashed ClashX, an office's proxy at home, an NTLM proxy or one whose authority
+/// isn't installed is never worse than that. That proxy is passed by from then on, until going directly fails too.
 pub async fn send(request: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
     send_through(request, proxy::current()).await
 }
@@ -111,10 +111,38 @@ mod tests {
         (address, count)
     }
 
-    /// An authority, and a server's TLS for `host` from it.
-    fn tls_for(host: &str) -> (rustls::RootCertStore, Arc<rustls::ServerConfig>) {
+    /// A proxy that inspects secure connections: it takes each CONNECT and answers in the tunnel itself, with a
+    /// certificate of its own (`tls`), counting the connections.
+    fn inspecting(tls: Arc<rustls::ServerConfig>) -> (SocketAddr, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&count);
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let tls = Arc::clone(&tls);
+                std::thread::spawn(move || {
+                    let mut connect = [0u8; 4096];
+                    if stream.read(&mut connect).is_err() || stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").is_err() {
+                        return;
+                    }
+                    let mut stream = rustls::StreamOwned::new(rustls::ServerConnection::new(tls).unwrap(), stream);
+                    let mut request = [0u8; 4096];
+                    if stream.read(&mut request).is_ok() {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 9\r\nconnection: close\r\n\r\ninspected");
+                        let _ = stream.flush();
+                    }
+                });
+            }
+        });
+        (address, count)
+    }
+
+    /// An authority by its `name`, and a server's TLS for `host` from it.
+    fn tls_for(name: &str, host: &str) -> (rustls::RootCertStore, Arc<rustls::ServerConfig>) {
         let mut authority = CertificateParams::default();
-        authority.distinguished_name.push(DnType::CommonName, "Kumi send test authority");
+        authority.distinguished_name.push(DnType::CommonName, name);
         authority.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         authority.key_usages = vec![KeyUsagePurpose::KeyCertSign];
         let key = KeyPair::generate().unwrap();
@@ -159,47 +187,59 @@ mod tests {
     #[tokio::test]
     async fn a_system_proxy_in_the_way_is_passed_by_once_directly_as_kumi_went_before() {
         let _turn = proxy::PASSING_BY.lock().await;
-        let (roots, tls) = tls_for("kumi-send.test");
+        let (roots, tls) = tls_for("A public authority", "kumi-send.test");
         let (target, _) = server(b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\nconnection: close\r\n\r\ndirect", Some(tls));
         let url = format!("https://kumi-send.test:{}/", target.port());
         let wants = b"HTTP/1.1 407 Proxy Authentication Required\r\nproxy-authenticate: NTLM\r\n\r\n";
         let (signing_in, asked) = server(wants, None);
+        // A network that inspects secure connections, its own authority not installed here.
+        let (_, its_own) = tls_for("An office's inspecting proxy", "kumi-send.test");
+        let (inspects, inspected) = inspecting(its_own);
         let refused = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         // The system names one proxy at a time: each case starts with none passed by.
-        for (proxy, why) in [
-            (format!("http://{signing_in}"), "an NTLM sign-in (407 to CONNECT)"),
-            (format!("http://{refused}"), "a proxy that isn't running"),
-            ("http://kumi-proxy.invalid:3128".to_string(), "a proxy whose name isn't found"),
+        for (proxy, asked, why) in [
+            (format!("http://{signing_in}"), Some(&asked), "an NTLM sign-in (407 to CONNECT)"),
+            (format!("http://{inspects}"), Some(&inspected), "a certificate this computer doesn't trust"),
+            (format!("http://{refused}"), None, "a proxy that isn't running"),
+            ("http://kumi-proxy.invalid:3128".to_string(), None, "a proxy whose name isn't found"),
         ] {
             proxy::stop_passing_by();
             let (client, settings) = through(Settings::system_for_tests(Some(&proxy), false), roots.clone(), "kumi-send.test", target);
             assert_eq!(text(send_through(client.get(&url), settings).await).await, Ok((200, "direct".into())), "{why}");
             // Passed by from then on: the next request goes directly at once.
-            let before = asked.load(Ordering::SeqCst);
+            let before = asked.map(|asked| asked.load(Ordering::SeqCst));
             let (client, settings) = through(Settings::system_for_tests(Some(&proxy), false), roots.clone(), "kumi-send.test", target);
             assert_eq!(text(send_through(client.get(&url), settings).await).await, Ok((200, "direct".into())), "{why}");
-            assert_eq!(asked.load(Ordering::SeqCst), before, "{why}: passed by");
+            assert_eq!(asked.map(|asked| asked.load(Ordering::SeqCst)), before, "{why}: passed by");
         }
         proxy::stop_passing_by();
-        // A variable's proxy is the producer's own: its 407 and its refusal stand.
-        for proxy in [format!("http://{signing_in}"), format!("http://{refused}")] {
+        // A variable's proxy is the producer's own: its 407, its refusal and its certificate stand.
+        for (proxy, says) in [
+            (format!("http://{signing_in}"), "proxy authorization required"),
+            (format!("http://{refused}"), "refused"),
+            (format!("http://{inspects}"), "invalid peer certificate"),
+        ] {
             let env = crate::system::Env::from([("HTTPS_PROXY".to_string(), proxy.clone())]);
             let (client, settings) = through(Settings::from_env(&env).unwrap(), roots.clone(), "kumi-send.test", target);
             let said = text(send_through(client.get(&url), settings).await).await.unwrap_err();
-            assert!(said.contains("proxy authorization required") || said.contains("refused"), "{proxy}: {said}");
+            assert!(said.contains(says), "{proxy}: {said}");
         }
         // Going directly fails too: the proxy's trouble is what's said, and the proxy is asked again next time.
         let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        let (client, settings) =
-            through(Settings::system_for_tests(Some(&format!("http://{signing_in}")), false), roots.clone(), "kumi-send.test", gone);
-        let said = text(send_through(client.get(format!("https://kumi-send.test:{}/", gone.port())), settings).await).await.unwrap_err();
-        assert!(said.contains("proxy authorization required"), "{said}");
-        let before = asked.load(Ordering::SeqCst);
-        let (client, settings) =
-            through(Settings::system_for_tests(Some(&format!("http://{signing_in}")), false), roots, "kumi-send.test", target);
-        assert_eq!(text(send_through(client.get(&url), settings).await).await, Ok((200, "direct".into())));
-        assert_eq!(asked.load(Ordering::SeqCst), before + 1, "asked again, then passed by");
-        proxy::stop_passing_by();
+        for (proxy, asked, says) in
+            [(signing_in, &asked, "proxy authorization required"), (inspects, &inspected, "invalid peer certificate: UnknownIssuer")]
+        {
+            let system = || Settings::system_for_tests(Some(&format!("http://{proxy}")), false);
+            let (client, settings) = through(system(), roots.clone(), "kumi-send.test", gone);
+            let nowhere = format!("https://kumi-send.test:{}/", gone.port());
+            let said = text(send_through(client.get(nowhere), settings).await).await.unwrap_err();
+            assert!(said.contains(says), "{said}");
+            let before = asked.load(Ordering::SeqCst);
+            let (client, settings) = through(system(), roots.clone(), "kumi-send.test", target);
+            assert_eq!(text(send_through(client.get(&url), settings).await).await, Ok((200, "direct".into())));
+            assert_eq!(asked.load(Ordering::SeqCst), before + 1, "{says}: asked again, then passed by");
+            proxy::stop_passing_by();
+        }
     }
 
     #[tokio::test]
@@ -211,7 +251,7 @@ mod tests {
             let held: Vec<_> = listener.incoming().flatten().collect();
             drop(held);
         });
-        let (roots, tls) = tls_for("kumi-slow.test");
+        let (roots, tls) = tls_for("A public authority", "kumi-slow.test");
         let (target, reached) = server(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n", Some(tls));
         let settings = Arc::new(Settings::system_for_tests(Some(&format!("http://{silent}")), false));
         let asked = Arc::clone(&settings);

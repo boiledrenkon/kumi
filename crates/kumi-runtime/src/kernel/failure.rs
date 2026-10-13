@@ -201,9 +201,10 @@ pub fn retry_reason(error: &LanguageModelError, binding_id: &str) -> String {
         Some(status @ (503 | 529)) => format!("{name} is overloaded (HTTP {status})"),
         Some(status) if status >= 500 => format!("{name} is having trouble (HTTP {status})"),
         Some(status) => format!("{name} asked Kumi to wait (HTTP {status})"),
-        None => match refused_on_the_way(error) {
-            Some(NetCause::Proxy) if cause::proxy_down(error) => format!("{name} couldn't be reached: the proxy isn't answering"),
-            Some(cause) => format!("{name} couldn't be reached: {}", cause.words()),
+        None => match refused_on_the_way(error)
+            .and_then(|_| cause::refused_words(error, &crate::system::process_env(), &crate::net::proxy::current()))
+        {
+            Some(words) => format!("{name} couldn't be reached: {words}"),
             None => format!("{name} couldn't be reached"),
         },
     }

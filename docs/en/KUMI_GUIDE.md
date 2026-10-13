@@ -1010,8 +1010,8 @@ own retention are separate.
   `HTTPS_PROXY` to the proxy's address instead.
 - **A proxy that wants a password:** `HTTPS_PROXY=http://user:pass@host:port`.
   When the system's proxy wants a sign-in Kumi can't give (NTLM, Kerberos),
-  or isn't answering, Kumi tries directly instead. `NO_PROXY=*` always
-  connects directly.
+  isn't answering, or shows a certificate your computer doesn't trust, Kumi
+  tries directly instead. `NO_PROXY=*` always connects directly.
 - **Never through a proxy:** models on your computer (Ollama, LM Studio) and
   Live's bridge. A model server you name (`modelServers`, `KUMI_LISTENER`)
   goes through the variables' proxy only, never the system's. With the
