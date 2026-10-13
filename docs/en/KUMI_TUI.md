@@ -66,7 +66,8 @@ steps, done ones in mint with what was chosen, and asks what the current one
 needs; a mint waveform under the wordmark moves while Kumi waits (for the
 browser, the install, or Live). ↑↓ and Enter choose, Esc leaves the step for
 later, and the session follows in the same window. While ChatGPT's sign-in waits,
-**c** copies its link (or code) and **d** uses a code instead of the browser. On
+**c** copies its link (or code), **d** uses a code instead of the browser, and **b**
+the browser again. On
 Linux, setup only signs in. A Kumi that's set up starts straight into the session.
 
 Below 100 columns the Live pane folds into a two-line strip above the input box
@@ -84,7 +85,7 @@ Run these as `kumi <command>`; from a copy of the repository, as
 | `kumi --inference-only` | Chat without Live |
 | `kumi --bridge-config <absolute path>` | Use your own bridge configuration |
 | `kumi login` | Sign in: asks whether with ChatGPT or an API key |
-| `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser, the default over SSH), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
+| `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser, the default over SSH; `--browser` for the browser), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
 | `kumi logout <provider>` | Remove Kumi's sign-in there |
 | `kumi model [<provider>/<model>]` | Show or choose the model, a model on your computer too (`ollama/<model>`) |
 | `kumi auth` | Which providers are usable, the model and the sign-in file (never secrets) |
@@ -205,8 +206,8 @@ start with; when nobody's there (a `/goal`, `/loop` or match ran, or Kumi's
 window has been behind another for 2 minutes), Kumi takes it after a countdown
 ("Taking 2 (recommended) in 60 s · any key cancels"). In the key box, paste the key and press
 Enter; Kumi checks it with the provider, or saves it unchecked when the provider
-can't be reached. In the ChatGPT sign-in panel, `c` copies the link (or the code), and `d` signs
-in with a code instead of the browser. In the
+can't be reached. In the ChatGPT sign-in panel, `c` copies the link (or the code), `d` signs in
+with a code instead of the browser, and `b` goes back to the browser. In the
 `/btw` panel, ↑↓ and Page Up/Down scroll, ←→ go through earlier answers, `c`
 copies, and Esc, Enter or Space closes it. In a job's details, ↑↓ scroll, `x`
 stops it, `r` runs it again, `c` copies its report, and Esc closes them.

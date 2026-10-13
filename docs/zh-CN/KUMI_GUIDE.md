@@ -13,13 +13,13 @@ Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中�
 在设置的登录步骤中：
 
 - Kumi 会先检查能否连到 ChatGPT 的登录页。连不上时，它会说明原因（DNS、TLS、代理、没有及时应答或无法连接），并列出它经过的代理设置；没有设置时，会告诉你可以用 `HTTPS_PROXY` 设置。
-- 按 **d** 会改用代码登录 ChatGPT，而不用浏览器：在任何设备的浏览器中输入这个代码即可。通过 SSH 时，无论是 `/login` 还是 `kumi login`，Kumi 都会自动使用代码。
+- 按 **d** 会改用代码登录 ChatGPT，而不用浏览器：在任何设备的浏览器中输入这个代码即可。通过 SSH 时，无论是 `/login` 还是 `kumi login`，Kumi 都会自动使用代码；按 **b**（或加 `--browser`）可改回浏览器链接。
 - 浏览器链接会完整显示，按 **c** 可复制。
 - Ollama 或 LM Studio 运行时，还可以选择 **On this computer**。
 
 | 提供方 | 模型名称 | 登录方式 |
 | --- | --- | --- |
-| ChatGPT 套餐 | `openai-codex/<model>` | `/login`（浏览器，或代码：**d**），或 `kumi login openai-codex`（没有浏览器时加 `--device`；通过 SSH 时自动使用代码） |
+| ChatGPT 套餐 | `openai-codex/<model>` | `/login`（浏览器，或代码：**d**），或 `kumi login openai-codex`（没有浏览器时加 `--device`；通过 SSH 时自动使用代码，要用浏览器则加 `--browser`） |
 | Anthropic API | `anthropic/<model>` | 用 API 密钥 `/login`，或 `ANTHROPIC_API_KEY` |
 | OpenAI API | `openai/<model>` | 用 API 密钥 `/login`，或 `OPENAI_API_KEY` |
 | OpenCode Zen 和 Go | `opencode/<model>`、`opencode-go/<model>` | 用 API 密钥 `/login`（两者共用一个密钥），或 `OPENCODE_API_KEY` |

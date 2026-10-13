@@ -29,13 +29,13 @@ In setup's sign-in step:
   settings it went through, or says that `HTTPS_PROXY` sets one.
 - **d** signs in to ChatGPT with a code instead of the browser: enter it in a
   browser on any device. Over SSH, Kumi uses the code by itself, in `/login`
-  and `kumi login` too.
+  and `kumi login` too; **b** (or `--browser`) goes back to the browser's link.
 - The browser's link shows whole, and **c** copies it.
 - While Ollama or LM Studio runs, **On this computer** is a choice too.
 
 | Provider | Model names | Sign-in |
 | --- | --- | --- |
-| ChatGPT plan | `openai-codex/<model>` | `/login` (browser, or a code: **d**), or `kumi login openai-codex` (`--device` without a browser; a code by itself over SSH) |
+| ChatGPT plan | `openai-codex/<model>` | `/login` (browser, or a code: **d**), or `kumi login openai-codex` (`--device` without a browser; over SSH a code by itself, `--browser` for the browser) |
 | Anthropic API | `anthropic/<model>` | `/login` with an API key, or `ANTHROPIC_API_KEY` |
 | OpenAI API | `openai/<model>` | `/login` with an API key, or `OPENAI_API_KEY` |
 | OpenCode Zen and Go | `opencode/<model>`, `opencode-go/<model>` | `/login` with an API key (one for both), or `OPENCODE_API_KEY` |

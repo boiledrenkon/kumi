@@ -13,13 +13,13 @@ Kumi の中で `/login` を使うとサインインします（初回は Kumi �
 セットアップのサインインのステップでは：
 
 - Kumi はまず ChatGPT のサインインに届くかを確かめます。届かないときは、その理由（DNS、TLS、プロキシ、時間内に応答がない、接続できない）と、経由したプロキシの設定を伝えます。設定がなければ、`HTTPS_PROXY` で設定できることを伝えます。
-- **d** を押すと、ブラウザの代わりにコードで ChatGPT にサインインします。どの機器のブラウザでもそのコードを入力できます。SSH 経由では、`/login` でも `kumi login` でも、Kumi が自分でコードを使います。
+- **d** を押すと、ブラウザの代わりにコードで ChatGPT にサインインします。どの機器のブラウザでもそのコードを入力できます。SSH 経由では、`/login` でも `kumi login` でも、Kumi が自分でコードを使います。**b**（または `--browser`）でブラウザ用のリンクに戻れます。
 - ブラウザ用のリンクは全体が表示され、**c** でコピーできます。
 - Ollama か LM Studio が起動している間は、**On this computer** も選べます。
 
 | プロバイダー | モデル名 | サインイン |
 | --- | --- | --- |
-| ChatGPT プラン | `openai-codex/<model>` | `/login`（ブラウザ、またはコード：**d**）、または `kumi login openai-codex`（ブラウザがなければ `--device`。SSH 経由では自動でコード） |
+| ChatGPT プラン | `openai-codex/<model>` | `/login`（ブラウザ、またはコード：**d**）、または `kumi login openai-codex`（ブラウザがなければ `--device`。SSH 経由では自動でコード、ブラウザなら `--browser`） |
 | Anthropic API | `anthropic/<model>` | API キーで `/login`、または `ANTHROPIC_API_KEY` |
 | OpenAI API | `openai/<model>` | API キーで `/login`、または `OPENAI_API_KEY` |
 | OpenCode Zen と Go | `opencode/<model>`、`opencode-go/<model>` | API キー（両方で一つ）で `/login`、または `OPENCODE_API_KEY` |
