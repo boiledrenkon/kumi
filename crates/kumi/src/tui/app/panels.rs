@@ -8,10 +8,10 @@ use crate::{
     voice::VoiceChange,
 };
 use base64::Engine;
+use kumi_common::time::since;
 use kumi_runtime::kernel::failure::reset_words;
 use kumi_runtime::{
     core::{contracts::Picked, errors::FailureKind},
-    integrations::ableton::project::since,
     providers::{
         models::{ApiKeyCheck, ModelInfo, ServiceTier},
         provider_info, Effort, SignIn,

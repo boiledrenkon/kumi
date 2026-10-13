@@ -19,7 +19,7 @@ use kumi_common::{
         number,
         string::{head, trim},
     },
-    time::now_ms,
+    time::{now_ms, since},
 };
 use kumi_runtime::{
     auth::{
@@ -28,7 +28,6 @@ use kumi_runtime::{
     },
     core::errors::RuntimeError,
     hands::{can_build_hands, open_hands, HandsErrorKind, OpenHandsOptions},
-    integrations::ableton::project::since,
     library::{
         learn::LearnPhase,
         sources::{dirname, join},

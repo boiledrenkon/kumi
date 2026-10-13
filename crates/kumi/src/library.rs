@@ -3,10 +3,13 @@ use crate::{
     config::{load_library_dir, load_projects_dir, load_settings_file, read_settings},
     tui::tty::TtyOutput,
 };
-use kumi_common::{abort::Signal, js::number, time::now_ms};
+use kumi_common::{
+    abort::Signal,
+    js::number,
+    time::{now_ms, since},
+};
 use kumi_runtime::{
     core::errors::RuntimeError,
-    integrations::ableton::project::since,
     library::{create_library, learn::LearnPhase, library_logs, read_state, LearnNowOptions, LearnProgress, Library, LibraryOptions},
     system::Env,
     KUMI,

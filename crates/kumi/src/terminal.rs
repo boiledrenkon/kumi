@@ -17,7 +17,7 @@ use crate::{
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::{
     js::{number, string},
-    time::{now_ms_f64, perf_now},
+    time::{now_ms_f64, perf_now, since},
 };
 use kumi_runtime::{
     core::{
@@ -26,7 +26,6 @@ use kumi_runtime::{
         },
         errors::RuntimeError,
     },
-    integrations::ableton::project::since,
     providers::{Effort, ProviderId, EFFORTS, PROVIDERS},
     KUMI,
 };

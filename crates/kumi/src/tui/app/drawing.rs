@@ -11,7 +11,7 @@ use super::super::{
 };
 use super::*;
 use crate::text::library_line;
-use kumi_runtime::integrations::ableton::project::since;
+use kumi_common::time::since;
 use kumi_runtime::kernel::failure::reset_words;
 pub(super) mod st {
     use super::{palette, Style};
