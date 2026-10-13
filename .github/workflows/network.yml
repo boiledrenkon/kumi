@@ -74,12 +74,12 @@ jobs:
         run: |
           sudo cp "$KUMI_TEST_AUTHORITY/authority.pem" /usr/local/share/ca-certificates/kumi-network-test.crt
           sudo update-ca-certificates
-      - name: Install it in the system's trust store (macOS)
+      - name: Install it in the system's trust store (macOS, the System keychain's admin trust settings)
         if: runner.os == 'macOS'
+        timeout-minutes: 3
         run: |
-          # The runner's own: no one is there to approve the change to the trust settings.
-          sudo security authorizationdb write com.apple.trust-settings.admin allow
           sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$KUMI_TEST_AUTHORITY/authority.pem"
+          security dump-trust-settings -d | grep -A2 "Kumi network test authority"
       - name: Install it in the system's trust store (Windows, the machine's Root store)
         if: runner.os == 'Windows'
         shell: pwsh
