@@ -192,6 +192,7 @@ async fn names_pins_and_copies_live_beside_the_conversation_where_kumi_1_16_read
         assert!(all.iter().any(|name| name.ends_with(".meta")) && all.len() > names.len(), "{all:?}");
     }
     assert!(dir.path().join(A).join("conversations/mv66me0m9fork1.lock").exists());
+    assert_eq!(create_conversation_store(dir.path()).claim(A, "mv66me0m9fork1"), Claim::Taken);
     for file in kumi_1_16_3::report_candidates(dir.path()) {
         assert!(kumi_1_16_3::read(&file).is_some(), "{}", file.display());
     }
@@ -200,7 +201,7 @@ async fn names_pins_and_copies_live_beside_the_conversation_where_kumi_1_16_read
     assert!(store.pin(A, "mv66me0m3fa91c", false).await.unwrap());
     assert!(!dir.path().join(A).join("conversations/mv66me0m3fa91c.meta").exists());
     store.release(A, "mv66me0m9fork1");
-    assert!(!dir.path().join(A).join("conversations/mv66me0m9fork1.lock").exists());
+    assert_eq!(create_conversation_store(dir.path()).claim(A, "mv66me0m9fork1"), Claim::Ours);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -248,51 +249,63 @@ async fn the_index_made_again_from_the_files_is_the_one_kept() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a_conversation_another_open_kumi_has_is_taken_until_that_kumi_is_gone() {
+async fn a_conversation_another_open_kumi_has_is_taken_until_that_kumi_lets_go() {
     let dir = tempfile::tempdir().unwrap();
     let store = create_conversation_store(dir.path());
     store.save(A, "mv66me0m3fa91c", &said("make the bass wider", 10)).await.unwrap();
-    let lock = dir.path().join(A).join("conversations/mv66me0m3fa91c.lock");
-    // Another Kumi, still running.
-    let mut other = if cfg!(windows) {
-        let mut command = std::process::Command::new("ping");
-        command.args(["-n", "30", "127.0.0.1"]);
-        command
-    } else {
-        let mut command = std::process::Command::new("sleep");
-        command.arg("30");
-        command
-    }
-    .stdout(std::process::Stdio::null())
-    .spawn()
-    .unwrap();
-    let started = kumi_common::process::started_at_ms(other.id()).unwrap();
-    std::fs::write(&lock, json!({"pid":other.id(),"started":started}).to_string()).unwrap();
+    // Another Kumi (another store, its own lock handle) has it open.
+    let other = create_conversation_store(dir.path());
+    assert_eq!(other.claim(A, "mv66me0m3fa91c"), Claim::Ours);
     assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Taken);
-    // Not let go while it's open there, however old.
+    let lock = dir.path().join(A).join("conversations/mv66me0m3fa91c.lock");
+    assert_eq!(
+        serde_json::from_str::<Value>(&std::fs::read_to_string(&lock).unwrap_or_default()).ok().map(|v| v["pid"].clone()),
+        Some(json!(std::process::id()))
+    );
+    // Not let go while it's open there, however old; and not deleted from under it.
     for n in 0..21 {
         store.save(A, &format!("new{n:03}aaaaaa"), &said("newer", 20 + n)).await.unwrap();
     }
     age(&dir.path().join(A).join("conversations/mv66me0m3fa91c.json"), 200 * DAY);
     store.tidy(A).await.unwrap();
     assert!(store.load(A, "mv66me0m3fa91c").await.unwrap().is_some());
-    // That Kumi closed without letting go (a crash): this one takes it.
-    other.kill().unwrap();
-    other.wait().unwrap();
-    // Windows keeps a process's record while a handle to it is open.
+    assert!(store.delete(A, "mv66me0m3fa91c").await.unwrap_err().to_string().contains("open in another Kumi window"));
+    // That Kumi closed, or crashed: the system let go, and this one takes it.
     drop(other);
     assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours);
-    assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(&lock).unwrap()).unwrap()["pid"], std::process::id());
-    // A pid used again by another process (started later than the lock says) is a lock left behind, too.
-    std::fs::write(&lock, json!({"pid":std::process::id(),"started":1}).to_string()).unwrap();
-    assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours);
-    // Its own again, it keeps it; let go, the file goes; and a store dropped lets go of what it held.
-    assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours);
+    assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours, "its own again");
+    // Let go, it's anyone's; a store dropped lets go of what it held.
     store.release(A, "mv66me0m3fa91c");
-    assert!(!lock.exists());
+    let third = create_conversation_store(dir.path());
+    assert_eq!(third.claim(A, "mv66me0m3fa91c"), Claim::Ours);
+    assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Taken);
+    drop(third);
     assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours);
-    drop(store);
-    assert!(!lock.exists());
+}
+
+#[test]
+fn of_kumis_claiming_a_conversation_at_once_one_gets_it() {
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..20 {
+        let id = format!("race{round:02}aaaaaa");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let done = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let claims: Vec<_> = (0..4)
+            .map(|_| {
+                let (path, id, start, done) = (dir.path().to_path_buf(), id.clone(), start.clone(), done.clone());
+                std::thread::spawn(move || {
+                    let store = create_conversation_store(path);
+                    start.wait();
+                    let claim = store.claim(A, &id);
+                    // Each keeps its hold until all have asked.
+                    done.wait();
+                    claim
+                })
+            })
+            .collect();
+        let claims: Vec<Claim> = claims.into_iter().map(|thread| thread.join().unwrap()).collect();
+        assert_eq!(claims.iter().filter(|claim| **claim == Claim::Ours).count(), 1, "round {round}: {claims:?}");
+    }
 }
 
 /// A tiny generator, so each run makes the same cases.

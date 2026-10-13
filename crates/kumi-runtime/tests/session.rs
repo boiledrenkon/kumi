@@ -3633,24 +3633,9 @@ local_test!(a_conversation_another_open_kumi_has_goes_on_here_in_a_copy_until_th
     let dir = tempfile::tempdir().unwrap();
     let store = create_conversation_store(dir.path());
     store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
-    let mut other = if cfg!(windows) {
-        let mut command = std::process::Command::new("ping");
-        command.args(["-n", "30", "127.0.0.1"]);
-        command
-    } else {
-        let mut command = std::process::Command::new("sleep");
-        command.arg("30");
-        command
-    }
-    .stdout(std::process::Stdio::null())
-    .spawn()
-    .unwrap();
-    let started = kumi_common::process::started_at_ms(other.id()).unwrap();
-    std::fs::write(
-        dir.path().join(SET_A).join(format!("conversations/{KEPT}.lock")),
-        json!({"pid":other.id(),"started":started}).to_string(),
-    )
-    .unwrap();
+    // Another Kumi (its own store and lock handle) has it open.
+    let other = create_conversation_store(dir.path());
+    assert_eq!(other.claim(SET_A, KEPT), Claim::Ours);
     let h = harness(None, |o| o.conversations = Some(store.clone()));
     live(&h, Some(SET_A));
     h.session.start().await.unwrap();
@@ -3664,10 +3649,7 @@ local_test!(a_conversation_another_open_kumi_has_goes_on_here_in_a_copy_until_th
     assert_eq!(rows.iter().find(|r| r.id == copy).unwrap().forked_from.as_deref(), Some(KEPT));
     assert_eq!(rows.iter().find(|r| r.id == KEPT).unwrap().turns, 1);
     h.session.close().await.unwrap();
-    // That Kumi went without letting go (a crash): asked for, the conversation is this one's again.
-    other.kill().unwrap();
-    other.wait().unwrap();
-    // Windows keeps a process's record while a handle to it is open.
+    // That Kumi closed, or crashed, and the system let go: asked for, the conversation is this one's again.
     drop(other);
     let h = harness(None, |o| {
         o.conversations = Some(store.clone());
