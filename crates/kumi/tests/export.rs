@@ -2,6 +2,7 @@
 //! never written over another.
 use std::fs;
 
+use chrono::FixedOffset;
 use kumi::export::{render, svg_of, write_new};
 use kumi::report::redactor;
 use kumi_runtime::core::contracts::{ChangePicture, KernelCheckpoint, SavedConversation};
@@ -16,6 +17,10 @@ const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3
 /// A sign-in Kumi keeps: known to be secret, whatever it looks like.
 const SIGNED_IN: &str = "refresh-token-value-0123";
 const NOW: i64 = 1_760_400_000_000;
+
+fn zone() -> FixedOffset {
+    FixedOffset::east_opt(9 * 3600).unwrap()
+}
 
 /// Every secret planted in `text`'s kind of place.
 fn planted(text: &str) -> String {
@@ -69,7 +74,7 @@ fn no_planted_secret_survives_any_export() {
     let redact: &dyn Fn(&str) -> String = &redactor(&secrets, HOME, USER);
     for format in [Format::Markdown, Format::Html, Format::Json] {
         for full in [false, true] {
-            let out = render(format, &source, full, Some(redact), NOW);
+            let out = render(format, &source, full, Some(redact), zone(), NOW);
             for secret in [KEY, BEARER, JWT, HOME, USER, SIGNED_IN] {
                 assert!(!out.contains(secret), "{format:?} full={full}: {secret} survived:\n{out}");
             }
@@ -78,7 +83,7 @@ fn no_planted_secret_survives_any_export() {
             assert!(out.contains("Louder kick, please."), "{format:?} full={full}: the producer's words are missing");
         }
     }
-    let raw = render(Format::Markdown, &source, false, None, NOW);
+    let raw = render(Format::Markdown, &source, false, None, zone(), NOW);
     assert!(raw.contains(KEY), "--raw leaves the file as it is");
     assert!(raw.contains("Nothing was taken out: this file may hold keys and paths."));
 }

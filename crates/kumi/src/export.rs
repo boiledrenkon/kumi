@@ -30,8 +30,9 @@ pub async fn redactor_for(env: &Env) -> Box<dyn Fn(&str) -> String> {
     Box::new(redactor(&secrets, &home, &username()))
 }
 
-/// A conversation in `format`. `redact` is None only for a file the producer asked for as it is (`--raw`).
-pub fn render(format: Format, source: &Source, full: bool, redact: Option<&dyn Fn(&str) -> String>, now: i64) -> String {
+/// A conversation in `format`, its dates told in `zone` ([`local_zone`]). `redact` is None only for a file the producer
+/// asked for as it is (`--raw`).
+pub fn render(format: Format, source: &Source, full: bool, redact: Option<&dyn Fn(&str) -> String>, zone: FixedOffset, now: i64) -> String {
     let same = |text: &str| text.to_string();
     let options = Options {
         full,
@@ -39,7 +40,7 @@ pub fn render(format: Format, source: &Source, full: bool, redact: Option<&dyn F
         redacted: redact.is_some(),
         label: &step_label,
         picture: &svg_of,
-        zone: local_zone(),
+        zone,
         now,
         version: KUMI_VERSION,
     };
