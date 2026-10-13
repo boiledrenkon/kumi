@@ -2,7 +2,7 @@
 mod installation;
 use crate::{
     config::*,
-    live_app::LiveInstalled,
+    live_app::{LiveInstalled, MIN_LIVE_MAJOR},
     live_extension::*,
     models::OFFER_ORDER,
     spinner::step,
@@ -558,10 +558,12 @@ pub fn voice_check(voice: &VoiceReadiness, env: &Env, platform: &str) -> Check {
 /// No bridge in Live: something to fix where a Live 12 can take it. No Live to put one in (Linux, where Live's folders
 /// aren't read at all, or no Live 12 here) is a note.
 pub fn missing_bridge(platform: &str, installed: impl FnOnce() -> LiveInstalled) -> Check {
-    let live_12 = || Some(format!("Kumi works with Live 12: once it's installed and opened once, run: {}", *KUMI_START));
+    let live_12 = || Some(format!("Kumi works with Live {MIN_LIVE_MAJOR}: once it's installed and opened once, run: {}", *KUMI_START));
     match crate::live_app::runs_on(platform).then(installed) {
         None => Check::note("There's no Live for this system, so Kumi chats without it", None),
-        Some(LiveInstalled::Missing) => Check::note("Live 12 isn't on this computer, so Kumi chats without Live", live_12()),
+        Some(LiveInstalled::Missing) => {
+            Check::note(format!("Live {MIN_LIVE_MAJOR} isn't on this computer, so Kumi chats without Live"), live_12())
+        }
         Some(LiveInstalled::Older(version)) => {
             Check::note(format!("Only Live {version} is on this computer, so Kumi chats without Live"), live_12())
         }

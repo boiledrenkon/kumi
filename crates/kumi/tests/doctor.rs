@@ -521,18 +521,21 @@ async fn installation_checks_room_live_its_user_library_and_the_bridges_ports() 
         version: Some("11.3.21".into()),
         opened: true,
     };
+    // Only an older Live, or none (a build machine, say): listed as it is, never a fix (the bridge's check says what to
+    // do), and no User Library to look for. The exit code stays.
+    let scripts = io.env.remove("KUMI_REMOTE_SCRIPTS_DIR").unwrap();
     io.installation.lives = Some(Rc::new(move || vec![eleven.clone()]));
-    assert_eq!(find(&installation(&io).await, "Kumi works with Live 12").status, CheckStatus::Fix);
-    // No Live on this computer (a build machine, say) is a note: nothing to fix, and the exit code stays.
+    let older = installation(&io).await;
+    assert_eq!(find(&older, "Live installed").text, "Live installed: 11.3.21 (Ableton Live 11 Suite)");
+    assert!(!older.iter().any(|c| c.text.contains("User Library")), "{older:?}");
     io.installation.lives = Some(Rc::new(Vec::new));
     let none = installation(&io).await;
-    assert_eq!(find(&none, "Live isn't installed on this computer").status, CheckStatus::Note);
+    assert_eq!(find(&none, "Live isn't installed here").status, CheckStatus::Note);
     assert_eq!(doctor_code(&[Section { title: "Installation".into(), checks: none }]), 0);
     io.installation.platform = Some("linux".into());
-    assert_eq!(find(&installation(&io).await, "Live doesn't run on Linux").status, CheckStatus::Note);
+    assert!(!installation(&io).await.iter().any(|c| c.text.contains("Live")), "nothing about Live where it doesn't run");
     // The User Library Live's settings name, there or not.
     io.installation = quiet_installation();
-    let scripts = io.env.remove("KUMI_REMOTE_SCRIPTS_DIR").unwrap();
     let settings = PathBuf::from(kumi::config::live_preferences_dir(&io.env)).join("Live 12.4.15");
     let library = s.root.path().join("Music Library");
     let config = format!(

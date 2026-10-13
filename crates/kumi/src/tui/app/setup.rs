@@ -12,7 +12,7 @@ use super::super::{
 };
 use super::drawing::{sp, st};
 use super::*;
-pub use crate::live_app::LiveInstalled;
+pub use crate::live_app::{LiveInstalled, MIN_LIVE_MAJOR};
 use async_trait::async_trait;
 use kumi_common::abort;
 use kumi_runtime::{
@@ -573,13 +573,14 @@ impl TuiApp {
                 // Open (again): nothing is held until the producer says how it closes.
                 self.setup_show(|s| s.holding = false);
                 // A Live older than 12 can't take Kumi's bridge: said before it's asked to quit, and it stays open.
-                let older = live.version(open.clone()).await.filter(|version| major_of(version).is_some_and(|major| major < 12));
+                let older =
+                    live.version(open.clone()).await.filter(|version| major_of(version).is_some_and(|major| major < MIN_LIVE_MAJOR));
                 if let Some(version) = older {
                     let say = vec![format!(
-                        "Kumi works with Live 12: the Live that's open is {version}. Open Live 12 instead (ableton.com has it), then choose Look again."
+                        "Kumi works with Live {MIN_LIVE_MAJOR}: the Live that's open is {version}. Open Live {MIN_LIVE_MAJOR} instead (ableton.com has it), then choose Look again."
                     )];
                     let again = vec![choice("Look again", "", "again"), choice("Later", "chat without Live for now", "later")];
-                    if self.setup_choose("Live 12 needed", say, again).await.as_deref() != Some("again") {
+                    if self.setup_choose(&format!("Live {MIN_LIVE_MAJOR} needed"), say, again).await.as_deref() != Some("again") {
                         return LiveStep::Later(None);
                     }
                     continue;
@@ -626,12 +627,14 @@ impl TuiApp {
                     missing => {
                         let say = vec![match missing {
                             LiveInstalled::Older(version) => format!(
-                                "Kumi works with Live 12: this computer has Live {version}. Install Live 12 (ableton.com) and open it once, then choose Look again."
+                                "Kumi works with Live {MIN_LIVE_MAJOR}: this computer has Live {version}. Install Live {MIN_LIVE_MAJOR} (ableton.com) and open it once, then choose Look again."
                             ),
-                            _ => "Kumi works with Live 12: install it (ableton.com), or open it once if it's here, then choose Look again.".into(),
+                            _ => format!(
+                                "Kumi works with Live {MIN_LIVE_MAJOR}: install it (ableton.com), or open it once if it's here, then choose Look again."
+                            ),
                         }];
                         let again = vec![choice("Look again", "", "again"), choice("Later", "chat without Live for now", "later")];
-                        if self.setup_choose("Live 12 not found", say, again).await.as_deref() != Some("again") {
+                        if self.setup_choose(&format!("Live {MIN_LIVE_MAJOR} not found"), say, again).await.as_deref() != Some("again") {
                             return LiveStep::Later(None);
                         }
                         continue;
@@ -691,10 +694,9 @@ impl TuiApp {
     /// Live 12 (`app`) is here but has never been opened, so it has no User Library for the bridge yet: Kumi opens it
     /// once and waits for it to make one. True once it has: Live is open then, and the step restarts it with the bridge.
     async fn first_open(&self, live: &Rc<dyn LiveSetup>, app: String) -> bool {
-        let say = vec![
-            "Live 12 hasn't been opened here yet, so it has no User Library for the bridge. Kumi opens it once, then restarts it with the bridge."
-                .to_string(),
-        ];
+        let say = vec![format!(
+            "Live {MIN_LIVE_MAJOR} hasn't been opened here yet, so it has no User Library for the bridge. Kumi opens it once, then restarts it with the bridge."
+        )];
         let open = vec![choice("Open Live", "", "open"), choice("Later", "chat without Live for now", "later")];
         if self.setup_choose("Live hasn't been opened yet", say, open).await.as_deref() != Some("open") {
             return false;

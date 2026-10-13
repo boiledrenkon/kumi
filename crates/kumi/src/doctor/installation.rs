@@ -5,11 +5,9 @@
 use super::{tilde, Check};
 use crate::{
     bridge_setup::{default_run, is_live_running, repository_dir, AsyncBool},
-    config::{
-        find_bridge_config, kumi_dir, live_preferences_dir, live_user_library, load_settings_file, read_settings, remote_scripts_dir,
-    },
+    config::{find_bridge_config, kumi_dir, live_user_library, load_settings_file, read_settings, remote_scripts_dir},
     install::{app_version, has_app, not_yours, owner_advice, startup_files, PATH_MARKER, UPDATE_SPACE},
-    live_app::{installed_lives, InstalledLive},
+    live_app::{installed_lives, installed_with, runs_on, InstalledLive, LiveInstalled},
     live_extension::{extension_data_dir, installed_extension, live_extensions_dir, running_extension},
     update::newer,
 };
@@ -158,45 +156,26 @@ fn space_check(free: Option<f64>, home: &str) -> Option<Check> {
     })
 }
 
-/// Live, its User Library, and whether this computer has any Live at all. None found anywhere is a note, never
-/// a fix: Kumi chats without Live, and a computer without it (a build machine, say) isn't broken.
+/// The Lives installed here and, once one Kumi works with can take the bridge (setup's own verdict,
+/// `live_app::installed`), its User Library. No such Live (none, an older one, one never opened) is said with its
+/// next step by the bridge's check below, so here it's information, never a fix: Kumi chats without Live, and a
+/// computer without it (a build machine, say) isn't broken.
 fn live_checks(env: &Env, platform: &str, lives: &[InstalledLive], running: bool) -> Vec<Check> {
-    if platform == "linux" {
-        return vec![Check::note("Live doesn't run on Linux, so Kumi chats here without it", None)];
+    if !runs_on(platform) {
+        return vec![];
     }
-    let preferences = live_preferences_dir(env);
-    let opened_somewhere = std::fs::read_dir(&preferences)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .any(|entry| entry.file_name().to_string_lossy().starts_with("Live "));
-    let mut checks = vec![];
-    if lives.is_empty() {
-        if !opened_somewhere && !running {
-            return vec![Check::note(
-                "Live isn't installed on this computer",
-                Some("Kumi works with Live 12 (ableton.com/live), and chats without it until then".into()),
-            )];
-        }
-        checks.push(Check::ok("Live has been opened on this account (its app isn't in the usual folder)"));
-    } else {
+    let ready = installed_with(env, platform, lives) == LiveInstalled::Ready || running;
+    let mut checks = vec![if !lives.is_empty() {
         let named: Vec<_> =
             lives.iter().map(|live| format!("{} ({})", live.version.as_deref().unwrap_or("version unknown"), live.name)).collect();
-        checks.push(Check::ok(format!("Live installed: {}", named.join(", "))));
-        let major = |live: &InstalledLive| live.version.as_deref().and_then(|v| v.split('.').next()?.parse::<u32>().ok());
-        if lives.iter().all(|live| major(live).is_some_and(|major| major < 12)) {
-            checks.push(Check::fix(
-                "Kumi works with Live 12, and this computer has an older Live",
-                Some("Install Live 12 (ableton.com/live); a trial works too".into()),
-            ));
-        }
-        if !lives.iter().any(|live| live.opened) && !opened_somewhere && !running {
-            checks.push(Check::note(
-                "Live hasn't been opened on this account yet",
-                Some("Open Live once: it sets up its User Library, where Kumi puts its bridge".into()),
-            ));
-            return checks;
-        }
+        Check::ok(format!("Live installed: {}", named.join(", ")))
+    } else if ready {
+        Check::ok("Live has been opened on this account (its app isn't in the usual folder)")
+    } else {
+        Check::note("Live isn't installed here", None)
+    }];
+    if !ready {
+        return checks;
     }
     if let Some(folder) = env.get("KUMI_REMOTE_SCRIPTS_DIR").filter(|s| !s.is_empty()) {
         checks.push(if Path::new(folder).is_dir() {
@@ -217,11 +196,10 @@ fn live_checks(env: &Env, platform: &str, lives: &[InstalledLive], running: bool
                 format!("Live's User Library is set to {}, which isn't there", tilde(&library)),
                 Some("Connect the drive it's on, or choose it again in Live's Settings → Library".into()),
             ),
-            None if opened_somewhere || running => Check::note(
+            None => Check::note(
                 "Kumi can't find Live's User Library",
                 Some("Live's Settings → Library shows where it is: set KUMI_REMOTE_SCRIPTS_DIR to the Remote Scripts folder in it".into()),
             ),
-            None => Check::note("Kumi can't find Live's User Library", Some("Open Live once: it sets one up".into())),
         });
         return checks;
     }
@@ -363,8 +341,8 @@ pub async fn installation_checks(env: &Env, io: &InstallationIo) -> Vec<Check> {
         None => free_bytes(Path::new(&home)).await,
     };
     checks.extend(space_check(free, &home));
-    if platform == "linux" {
-        checks.extend(live_checks(env, &platform, &[], false));
+    // Where Live doesn't run (Linux), nothing below applies; the bridge's check says Kumi chats without Live.
+    if !runs_on(&platform) {
         return checks;
     }
     let lives = match &io.lives {
