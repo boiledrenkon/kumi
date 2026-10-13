@@ -3,6 +3,23 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.16.3 — 2026-10-13
+
+Ships with bridge 1.0.92, as 1.16.2 did.
+
+- Setup finds what's missing and says how to fix it. It tells you when Live 12 isn't installed, when
+  you only have Live 11, or when Live 12 has never been opened (Kumi opens it once for you). On a Mac,
+  it warns that macOS may ask whether your terminal can control Live. If you said no, Kumi tells you
+  where to turn it on and waits while you quit Live. After restarting Live, Kumi opens your Set again.
+  Before you sign in, Kumi checks it can reach the internet and says why when it can't, proxy settings
+  included. Signing in with ChatGPT works without a browser (press d for a code, automatic over SSH; b
+  goes back to the browser). The sign-in link shows in full, and c copies it. Ollama or LM Studio
+  running shows up as a choice. Everywhere Kumi says how to connect Live, it now says the same thing:
+  run kumi (or, with Live closed, kumi bridge). `kumi -h` and `kumi help` show the help.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.16.2 — 2026-10-13
 
 Ships with bridge 1.0.92, as 1.16.1 did.
