@@ -255,10 +255,11 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// The first line of some words, bounded for a row.
+/// The first line of some words, bounded for a row: plain words, without the markdown around them.
 pub fn first_line(text: &str) -> String {
     let line = text.lines().map(trim).find(|line| !line.is_empty()).unwrap_or("");
-    head(line.trim_start_matches(['#', '*', '-', ' ']), 160)
+    let plain = line.replace("**", "").replace("__", "").replace('`', "");
+    head(trim(plain.trim_start_matches(['#', '*', '-', '>', ' '])), 160)
 }
 
 /// A time limit in words: "20 minutes", "45 seconds".

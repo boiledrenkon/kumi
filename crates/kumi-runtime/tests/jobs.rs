@@ -703,3 +703,14 @@ local_test!(jobs_interrupted_by_closing_come_back_next_time_to_run_again, {
     third.session.submit("what did it find?", None).await.unwrap();
     assert!(third.main.borrow()[0].contains("<job_report_untrusted id=\"2\">"), "{}", third.main.borrow()[0]);
 });
+
+#[test]
+fn a_reports_first_line_is_plain_words() {
+    use kumi_runtime::core::jobs::first_line;
+    assert_eq!(
+        first_line("**Found and watched:** “How To Make A Reese Bass” — **Ableton Tips**, `4:44`.\nMore."),
+        "Found and watched: “How To Make A Reese Bass” — Ableton Tips, 4:44."
+    );
+    assert_eq!(first_line("\n## What tape saturation emulates\n"), "What tape saturation emulates");
+    assert_eq!(first_line("1. Groove Pool: repeatable swing"), "1. Groove Pool: repeatable swing");
+}
