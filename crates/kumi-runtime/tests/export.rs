@@ -280,7 +280,7 @@ fn note_tools_stay_out_and_a_conversation_search_shows_only_its_label() {
 fn the_web_page_loads_nothing_and_runs_nothing() {
     for full in [false, true] {
         let page = render(Format::Html, full);
-        assert!(page.contains("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">"));
+        assert!(page.contains("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">"));
         // Links only to what the conversation's words link to, and nothing that loads.
         let links: Vec<&str> = page.split("href=\"").skip(1).map(|rest| &rest[..rest.find('"').unwrap()]).collect();
         assert_eq!(links, ["https://www.ableton.com/manual"], "full={full}");

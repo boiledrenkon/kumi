@@ -217,8 +217,9 @@ pub fn markdown(source: &Source, options: &Options) -> String {
     out.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
 }
 
-/// What a page can load and run: nothing from anywhere, and no scripts; only its own styles.
-const POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'";
+/// What a page can load and run: nothing from anywhere, and no scripts; only its own styles. Neither a base for its links
+/// nor a form's target falls back to `default-src`, so each is named.
+const POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
 
 /// The conversation as one web page: everything it shows is in the file, light or dark as the reader's system is, and
 /// readable on a phone. Each answer's steps fold away.
