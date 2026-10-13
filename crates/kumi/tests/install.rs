@@ -2018,3 +2018,46 @@ async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
         );
     }
 }
+/// When Kumi's app itself can't go, its launcher and PATH lines stay too: a second run then works, and what it says
+/// is still there is.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_keeps_the_launcher_and_path_lines_while_the_app_stays() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root removes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    installed_kumi(home);
+    put(home.join("app.previous/kumi"), "Kumi's");
+    put(home.join("downloads/kumi-aarch64-apple-darwin.tar.gz"), "Kumi's");
+    let rc = format!("{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", home.display());
+    put(user.join(".profile"), &rc);
+    // An app folder this account can't empty.
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o555)).unwrap();
+    let (removing, out) = io(&env);
+    let code = uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains("/app couldn't go (Permission denied (os error 13)). Kumi's launcher (")
+            && said.contains(
+                "/bin/kumi) and PATH lines stay until then: once that's sorted (if another account owns it: sudo chown -R $USER "
+            )
+            && said.contains("run kumi uninstall again, or take out "),
+        "{said}"
+    );
+    assert!(home.join("bin/kumi").exists() && home.join("app/package.json").exists());
+    assert!(!home.join("app.previous").exists() && !home.join("downloads").exists());
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), rc);
+    // Sorted, the second run finishes.
+    let (again, out) = io(&env);
+    assert_eq!(uninstall_installed(again, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    assert!(!home.join("app").exists() && !home.join("bin").exists());
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "");
+}

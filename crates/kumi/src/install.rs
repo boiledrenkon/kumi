@@ -1868,16 +1868,19 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     let parts = own_parts(&home, options.all, bridge_stays)?;
     let whole = options.all && parts.alone && !bridge_stays;
     let bytes: u64 = parts.gone.iter().map(|part| bytes_in(Path::new(part))).sum();
-    // Every part is tried, Kumi itself (app and bin) last: when another part stays, Kumi does too, so kumi uninstall
-    // can run again once that's sorted.
+    // Every part is tried, Kumi itself last: its app, then its launcher. When another part stays, Kumi does too, and
+    // while its app stays, so do the launcher and its PATH lines, so kumi uninstall can run again once that's sorted.
     #[cfg(not(windows))]
     let (stayed, kumi_stays) = {
-        let (kumi, rest): (Vec<String>, Vec<String>) =
-            parts.gone.iter().cloned().partition(|path| ["app", "bin"].contains(&top_part(&home, path).as_str()));
+        let (app, rest): (Vec<String>, Vec<String>) = parts.gone.iter().cloned().partition(|path| top_part(&home, path) == "app");
+        let (bin, rest): (Vec<String>, Vec<String>) = rest.into_iter().partition(|path| top_part(&home, path) == "bin");
         let mut stayed = removing(&rest);
         let kumi_stays = !stayed.is_empty();
         if !kumi_stays {
-            stayed = removing(&kumi);
+            stayed = removing(&app);
+            if stayed.is_empty() {
+                stayed = removing(&bin);
+            }
             if stayed.is_empty() && whole {
                 stayed.extend(remove(&home).err().map(|error| (home.clone(), error)));
             }
@@ -1921,15 +1924,19 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         } else {
             String::new()
         };
-        say(format!(
-            "Kumi is partly removed: {} couldn't go ({why}). {}",
-            listed(&names),
-            if kumi_stays {
-                format!("Kumi itself stays, so you can run kumi uninstall again once that's sorted{owner}, or take {them} out by hand.")
-            } else {
-                format!("Take {them} out by hand{owner}.")
-            }
-        ));
+        let next = if kumi_stays {
+            format!("Kumi itself stays, so you can run kumi uninstall again once that's sorted{owner}, or take {them} out by hand.")
+        } else if Path::new(&launcher).exists() {
+            let lines = format!("the two lines under \"{PATH_MARKER}\" in your shell's startup file");
+            format!(
+                "Kumi's launcher ({}) and PATH lines stay until then: once that's sorted{owner}, run kumi uninstall again, or take out {}, the launcher and {lines} by hand.",
+                display(&launcher),
+                listed(&names)
+            )
+        } else {
+            format!("Take {them} out by hand{owner}.")
+        };
+        say(format!("Kumi is partly removed: {} couldn't go ({why}). {next}", listed(&names)));
         return Ok(1);
     }
     let freed = if bytes > 0 { format!(", freeing {}", size(bytes as f64)) } else { String::new() };
