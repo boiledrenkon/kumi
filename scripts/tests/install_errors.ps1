@@ -155,7 +155,7 @@ try {
   Check 'without its app, the kumi command starts the Kumi before it and says so' (($run.Code -eq 0) -and ($run.Said -match 'fixture in .*app\.previous') -and $run.Said.Contains("Kumi's app is missing, so the Kumi before it starts.")) $run.Said
   Remove-Item -LiteralPath (Join-Path $kumi 'app.previous') -Recurse -Force
   $run = Run { & $cmd --version }
-  Check 'with neither, it says how to repair Kumi' (($run.Code -eq 1) -and $run.Said.Contains("Kumi's app is missing: run the installer again: irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex")) $run.Said
+  Check 'with neither, it says how to repair Kumi' (($run.Code -eq 1) -and $run.Said.Contains("Kumi's app is missing: run the installer again: irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | iex")) $run.Said
 } finally {
   if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue

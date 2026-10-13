@@ -14,8 +14,8 @@ pub static KUMI_START: LazyLock<&'static str> = LazyLock::new(|| if *INSTALLED {
 /// The one-liners that install Kumi, or repair it, as the READMEs give them: Kumi's one copy of each. install.sh,
 /// install.ps1, the launchers they write and the READMEs repeat them, and tests keep every copy the same, so a
 /// new address goes here first and the tests name each place to follow.
-pub const INSTALL_SH: &str = "curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh";
-pub const INSTALL_PS1: &str = "irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex";
+pub const INSTALL_SH: &str = "curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.sh | sh";
+pub const INSTALL_PS1: &str = "irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | iex";
 /// This computer's one-liner.
 pub const REINSTALL: &str = if cfg!(windows) { INSTALL_PS1 } else { INSTALL_SH };
 
