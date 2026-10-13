@@ -423,9 +423,10 @@ exit $status
         run = subprocess.run(["sh", str(INSTALL_SH)], env=self.environment(home, KUMI_HOME="relkumi", KUMI_NO_MODIFY_PATH=""),
                              capture_output=True, text=True, encoding="utf-8", cwd=home, stdin=subprocess.DEVNULL)
         self.assertEqual(run.returncode, 0, run.stderr)
-        line = (home / ".profile").read_text()
-        self.assertIn(f'export PATH="{home}/relkumi/bin:$PATH"', line)
-        self.assertIn(f'(or after: export PATH="{home}/relkumi/bin:$PATH"): kumi', run.stdout)
+        # The folder it ran in, as the shell sees it (macOS's /var is /private/var).
+        here = home.resolve()
+        self.assertIn(f'export PATH="{here}/relkumi/bin:$PATH"', (home / ".profile").read_text())
+        self.assertIn(f'(or after: export PATH="{here}/relkumi/bin:$PATH"): kumi', run.stdout)
 
     def test_the_zsh_line_goes_where_zsh_reads_it_once(self):
         home = self.home()
