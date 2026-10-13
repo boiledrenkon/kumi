@@ -282,7 +282,7 @@ fn the_web_page_loads_nothing_and_runs_nothing() {
 #[test]
 fn markdown_shows_angle_brackets_outside_code_and_keeps_code_as_it_is() {
     let out = render(Format::Markdown, false);
-    assert!(out.contains("Mind &lt;img src=x onerror=alert(1)> here, and `<user>` in code."), "{out}");
+    assert!(out.contains("Mind &lt;img src=x onerror=alert(1)> here, and `&lt;user>` in code."), "{out}");
     assert!(out.contains("```\nlet x = <user>;\n```"), "a code block changed:\n{out}");
 }
 
@@ -548,4 +548,79 @@ fn markdown_and_its_copy_hold_no_control_characters() {
         assert!(controls.is_empty(), "full={full}: {controls:?}");
         assert!(out.contains("Inert: ]0;title ]52;c;aGk="), "{out}");
     }
+}
+
+/// The lines of Markdown outside its fenced blocks, as CommonMark finds them: a fence is at most three spaces in, three or
+/// more backticks (none after them on the line) or tildes; it closes on the same character, at least as many, alone.
+fn outside_fences(markdown: &str) -> Vec<String> {
+    let fence = |line: &str| -> Option<(String, String)> {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let rest = &line[indent..];
+        let run = rest.len() - rest.trim_start_matches(['`', '~']).len();
+        let marker = &rest[..run];
+        let uniform = marker.chars().all(|c| Some(c) == marker.chars().next());
+        let after = &rest[run..];
+        (indent <= 3 && run >= 3 && uniform && !(marker.starts_with('`') && after.contains('`')))
+            .then(|| (marker.to_string(), after.to_string()))
+    };
+    let mut outside = Vec::new();
+    let mut open: Option<String> = None;
+    for line in markdown.lines() {
+        match &open {
+            Some(opened) => {
+                if fence(line).is_some_and(|(marker, after)| {
+                    marker.starts_with(&opened[..1]) && marker.len() >= opened.len() && after.trim().is_empty()
+                }) {
+                    open = None;
+                }
+            }
+            None => match fence(line) {
+                Some((marker, _)) => open = Some(marker),
+                None => outside.push(line.to_string()),
+            },
+        }
+    }
+    outside
+}
+
+#[test]
+fn markdown_runs_no_markup_and_loads_no_picture_whatever_the_words_try() {
+    let messages = vec![
+        json!({"role": "user", "content": [{"type": "text", "text": "<script>alert(0)</script> and ![me](https://example.com/me.png)"}]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": concat!(
+            "Escaped \\`<img src=x onerror=alert(1)>\\` backtick.\n\n",
+            "    ```\n<img src=x onerror=alert(2)>\n    ```\n\n",
+            "`a\n<img src=x onerror=alert(3)>\nb`\n\n",
+            "![pixel](https://example.com/pixel.png) and ![[embed]]\n\n",
+            "``` a`b\n<img src=x onerror=alert(4)>\n```\n\n",
+            "```\n<i>a fence the one above opened</i>"
+        )}]}),
+    ];
+    let answer = |text: &str| {
+        let messages = vec![
+            json!({"role": "user", "content": [{"type": "text", "text": "show me"}]}),
+            json!({"role": "assistant", "content": [{"type": "text", "text": text}]}),
+        ];
+        SavedConversation {
+            saved_at: NOW,
+            checkpoint: KernelCheckpoint { version: 1, messages, origin: None, tools: None },
+            changes: None,
+            first: None,
+            turns: Some(1),
+        }
+    };
+    let markdown_of = |conversation: &SavedConversation| {
+        let source = Source { id: "k3x9a1b2", conversation, title: "t", place: None, words: ("Live", "Set"), created: 0 };
+        markdown(&source, &options(false))
+    };
+    let tricky = SavedConversation { checkpoint: KernelCheckpoint { version: 1, messages, origin: None, tools: None }, ..answer("") };
+    let out = markdown_of(&tricky);
+    for line in outside_fences(&out) {
+        assert!(!line.contains('<') && !line.contains("!["), "{line:?} runs or loads outside a fence:\n{out}");
+    }
+    // A real fenced block stays as it is, and one left open is closed, so it can't take in the rest of the file.
+    let out = markdown_of(&answer("```\nkept <b>code</b>\n```\n\n```\n<i>left open</i>"));
+    assert!(out.contains("```\nkept <b>code</b>\n```"), "{out}");
+    assert!(out.contains("<i>left open</i>\n```"), "{out}");
+    assert!(outside_fences(&out).iter().any(|line| line.contains("Exported from Kumi")), "the footer is outside every fence:\n{out}");
 }

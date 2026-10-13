@@ -26,7 +26,7 @@ Make the kick punchier [secret]. See [the manual](https://www.ableton.com/manual
 
 Looking at your Set [secret].
 
-The kick sits at -6 dB, so I'll raise it to -3 dB. Mind &lt;img src=x onerror=alert(1)> here, and `<user>` in code.
+The kick sits at -6 dB, so I'll raise it to -3 dB. Mind &lt;img src=x onerror=alert(1)> here, and `&lt;user>` in code.
 
 The render is done. More in [the manual](https://www.ableton.com/manual), not [this](file:///etc/passwd).
 

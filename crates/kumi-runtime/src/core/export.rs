@@ -952,8 +952,10 @@ fn fenced(text: &str, language: &str) -> String {
     format!("{fence}{language}\n{text}\n{fence}\n\n")
 }
 
-/// Words for Markdown as the terminal shows them: outside code, a `<` that would open an HTML tag as `&lt;` (so `<user>`
-/// shows, and no markup runs), and each single line break kept as one.
+/// Words for Markdown as the terminal shows them, with nothing in them a Markdown reader runs or loads: outside a real
+/// fenced block every `<` is `&lt;` (whatever backticks are around, so `<user>` shows and no markup runs) and every `![`
+/// is `!\[` (no picture is fetched). A block left open is closed, so it can't take in what follows. Each single line
+/// break stays one.
 fn markdown_safe(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out = String::with_capacity(text.len());
@@ -962,64 +964,41 @@ fn markdown_safe(text: &str) -> String {
         if index > 0 {
             out.push('\n');
         }
-        let opening = OPENING.captures(line).map(|found| found[1].to_string());
         if let Some(open) = &fence {
-            if opening.as_ref().is_some_and(|marker| marker.starts_with(open.as_str())) {
+            if fence_of(line).is_some_and(|(marker, rest)| closes(open, &marker, &rest)) {
                 fence = None;
             }
             out.push_str(line);
             continue;
         }
-        if let Some(marker) = opening {
+        if let Some((marker, _)) = fence_of(line) {
             fence = Some(marker);
             out.push_str(line);
             continue;
         }
-        out.push_str(&outside_code(line));
+        out.push_str(&line.replace('<', "&lt;").replace("![", "!\\["));
         let next = lines.get(index + 1).copied().unwrap_or("");
-        if !trim(line).is_empty() && !trim(next).is_empty() && !OPENING.is_match(next) {
+        if !trim(line).is_empty() && !trim(next).is_empty() && fence_of(next).is_none() {
             out.push_str("  ");
         }
     }
-    out
-}
-
-/// A line with each `<` that would open an HTML tag as `&lt;`, leaving its `code` spans as they are.
-fn outside_code(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut at = 0;
-    while let Some(c) = line[at..].chars().next() {
-        let rest = &line[at..];
-        if c == '`' {
-            let run = rest.len() - rest.trim_start_matches('`').len();
-            let span = run_of(&rest[run..], run).map_or(run, |close| run + close + run);
-            out.push_str(&rest[..span]);
-            at += span;
-            continue;
-        }
-        let tag = c == '<' && rest[1..].chars().next().is_some_and(|next| next.is_ascii_alphabetic() || matches!(next, '/' | '!' | '?'));
-        if tag {
-            out.push_str("&lt;");
-        } else {
-            out.push(c);
-        }
-        at += c.len_utf8();
+    if let Some(open) = fence {
+        out.push_str(&format!("\n{open}"));
     }
     out
 }
 
-/// Where the first run of exactly `count` backticks starts in `text`.
-fn run_of(text: &str, count: usize) -> Option<usize> {
-    let mut at = 0;
-    while let Some(found) = text[at..].find('`') {
-        let start = at + found;
-        let run = text[start..].len() - text[start..].trim_start_matches('`').len();
-        if run == count {
-            return Some(start);
-        }
-        at = start + run;
-    }
-    None
+/// A fenced block's opening or closing line as CommonMark reads one: at most three spaces in, then three or more
+/// backticks (with no backtick after them on the line) or tildes. The fence and what follows it.
+fn fence_of(line: &str) -> Option<(String, String)> {
+    let found = FENCE.captures(line)?;
+    let (marker, rest) = (found[1].to_string(), found[2].to_string());
+    (!(marker.starts_with('`') && rest.contains('`'))).then_some((marker, rest))
+}
+
+/// Whether a fence closes the block `open` began: the same character, at least as many, and nothing after it.
+fn closes(open: &str, marker: &str, rest: &str) -> bool {
+    marker.starts_with(&open[..1]) && marker.len() >= open.len() && trim(rest).is_empty()
 }
 
 /// Text for HTML: its markup characters as entities, and control characters gone.
@@ -1059,6 +1038,7 @@ static INLINE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
     .unwrap()
 });
 static OPENING: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"^\s*(`{3,}|~{3,})").unwrap());
+static FENCE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(&format!(r"^ {{0,3}}(`{{3,}}|~{{3,}})({DOT}*)$")).unwrap());
 static HEADING: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(&format!(r"^\s{{0,3}}(#{{1,6}})\s+({DOT}*?)\s*#*\s*$")).unwrap());
 static RULE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| fancy_regex::Regex::new(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$").unwrap());
