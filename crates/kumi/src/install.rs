@@ -23,7 +23,7 @@ use kumi_runtime::{
     ears::device::EARS_NAME,
     library::sources::{basename, dirname, join, resolve},
     system::{self, Env, SystemProgram},
-    KUMI, KUMI_VERSION,
+    KUMI, KUMI_VERSION, REINSTALL,
 };
 pub use migration::{ensure_native_launcher, finish_legacy_transition, launcher, only_the_host_differs, write_launcher};
 use serde::{Deserialize, Serialize};
@@ -348,7 +348,7 @@ async fn settle_installed(home: &str) {
 /// What to say when the new Kumi couldn't go in; `kept` says whether the one that was there still works.
 fn swap_failed(windows: bool, kept: bool) -> String {
     let what = "Windows kept Kumi's folder busy: a Kumi window, or an antivirus scan of the new files.";
-    let installer = "run the installer again (github.com/user1303836/kumi)";
+    let installer = format!("run the installer again ({REINSTALL})");
     match (windows, kept) {
         (true, true) => format!("{what} The Kumi you had still works: close every Kumi window, give the scan a minute, then run update again."),
         (true, false) => format!(
@@ -414,7 +414,7 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     }
     if manifest.target != native_target() {
         say(format!(
-            "Kumi {} is for {}, but this Kumi is for {}. Run the installer again for this computer (github.com/user1303836/kumi).",
+            "Kumi {} is for {}, but this Kumi is for {}. Run the installer again for this computer ({REINSTALL}).",
             manifest.kumi,
             manifest.target,
             native_target()
@@ -465,7 +465,9 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
                 }
                 let probe = run(join(&fresh, &executable_name("kumi")), vec!["--version".into()], None).await;
                 if probe.code != 0 || !probe.stdout.contains(&manifest.kumi) {
-                    return Ok(Some("The new Kumi didn't start, so this one stays. Try again, or run the installer again.".into()));
+                    return Ok(Some(format!(
+                        "The new Kumi didn't start, so this one stays. Try again, or run the installer again ({REINSTALL})."
+                    )));
                 }
                 write_launcher(&home).map_err(error)?;
                 // Printed above the spinner, which draws its line again below.
@@ -845,7 +847,7 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
             vec![home.clone()]
         }
     } else {
-        ["app", "app.previous", "app.new", "node", "bin", "downloads", "bridge"]
+        ["app", "app.previous", "app.new", "app.replaced", "node", "bin", "downloads", "bridge"]
             .into_iter()
             .filter(|part| *part != "bridge" || !bridge_stays)
             .map(|part| join(&home, part))

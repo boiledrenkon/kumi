@@ -122,6 +122,20 @@ $script:clearFails = 1000
 Check "... and one that stays busy gives up in words, and the Kumi still works" (((Run $h) -eq 'gave up') -and (Holds $h 'old') -and ($script:said -match 'still works'))
 $script:clearFails = 0
 
+# A repair (the same Kumi again): the new copy replaces the one in app, which goes aside, and app.previous stays.
+function Repair([string]$Dir) {
+  $script:said = ''
+  New-Item -ItemType Directory -Force -Path (Join-Path $Dir 'app.previous') | Out-Null
+  Set-Content -LiteralPath (Join-Path $Dir 'app.previous\kumi.exe') -Value 'older'
+  try { Swap (Join-Path $Dir 'fresh') (Join-Path $Dir 'app') (Join-Path $Dir 'app.replaced'); 'in' }
+  catch { if ($_.Exception.Message -eq 'KumiInstallFailed') { 'gave up' } else { "error: $($_.Exception.Message)" } }
+}
+$h = NewHome
+Check 'a repair puts the new copy in and keeps the Kumi to roll back to' (((Repair $h) -eq 'in') -and (Holds $h 'new') -and (Holds $h 'older' 'app.previous') -and (Holds $h 'old' 'app.replaced'))
+$h = NewHome; $script:moveFails = 5
+Check "... and when it can't, the Kumi that was there stays, and so does the one before" (((Repair $h) -eq 'gave up') -and (Holds $h 'old') -and (Holds $h 'older' 'app.previous') -and ($script:said -match 'still works'))
+$script:moveFails = 0
+
 # Windows itself: a Kumi window holds its kumi.exe while the installer runs again.
 Microsoft.PowerShell.Management\Remove-Item -Path Function:\Move-Item, Function:\Rename-Item, Function:\Remove-Item
 $h = NewHome

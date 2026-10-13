@@ -8,22 +8,17 @@
 # again updates or repairs Kumi. Your settings, sign-ins and conversations in ~/.kumi are never touched.
 #
 # Settings (optional): KUMI_HOME (where to install, default ~/.kumi), KUMI_VERSION (a release such as
-# 1.1.0, default the latest), KUMI_RELEASES (where releases are downloaded from), KUMI_NO_MODIFY_PATH=1
-# (leave shell startup files alone).
+# 1.16.0, default latest), KUMI_RELEASES (where releases are downloaded from), KUMI_NO_MODIFY_PATH=1
+# (leave shell startup files alone), KUMI_ALLOW_ROOT=1 (install for root).
 #
 # Everything runs inside main(), so a download cut short can't run half a script.
 
 set -u
 
 main() {
-  KUMI_HOME="${KUMI_HOME:-$HOME/.kumi}"
-  if [ -n "${KUMI_RELEASES:-}" ]; then base="${KUMI_RELEASES%/}"
-  elif [ -n "${KUMI_VERSION:-}" ]; then base="https://github.com/user1303836/kumi/releases/download/v${KUMI_VERSION#v}"
-  else base="https://github.com/user1303836/kumi/releases/latest/download"; fi
-
   # Plain lines, as in Kumi's own setup: the steps aligned, "done" in mint. Colour only in a terminal
-  # that has it, and never with NO_COLOR.
-  bold=""; dim=""; mint=""; reset=""; tty=""
+  # that has it, and never with NO_COLOR. Curl's progress bar shows while Kumi downloads, in a terminal.
+  bold=""; dim=""; mint=""; reset=""; tty=""; bar=""
   if [ -t 1 ] && [ "${TERM:-}" != "dumb" ]; then
     tty=1; bold="$(printf '\033[1m')"; dim="$(printf '\033[2m')"; reset="$(printf '\033[0m')"
     if [ -z "${NO_COLOR:-}" ]; then
@@ -32,16 +27,53 @@ main() {
         *) mint="$(printf '\033[38;5;115m')" ;;
       esac
     fi
+    if [ -t 2 ]; then bar=1; fi
   fi
-  say() { printf '%s\n' "$*"; }
+  # What's on screen last: a blank line (blank), or a line still being written, in a terminal (open).
+  blank=""; open=""
+  say() { printf '%s\n' "$*"; if [ -z "$*" ]; then blank=1; else blank=""; fi; open=""; }
   # A step's line: "…" while it runs (in a terminal), then "done" and what it did.
-  begin() { step_name="$1"; if [ -n "$tty" ]; then printf '  %-20s%s' "$1" "${dim}…${reset}"; fi; }
+  begin() { step_name="$1"; if [ -n "$tty" ]; then printf '  %-20s%s' "$1" "${dim}…${reset}"; open=1; fi; }
   finish() {
     if [ -n "$tty" ]; then printf '\r\033[K'; fi
-    if [ -n "${1:-}" ]; then printf '  %-20s%s%s\n' "$step_name" "${mint}done${reset}" "${dim} · $1${reset}"
-    else printf '  %-20s%s\n' "$step_name" "${mint}done${reset}"; fi
+    if [ -n "${1:-}" ]; then say "$(printf '  %-20s%s%s' "$step_name" "${mint}done${reset}" "${dim} · $1${reset}")"
+    else say "$(printf '  %-20s%s' "$step_name" "${mint}done${reset}")"; fi
   }
-  fail() { printf '\n%s\n' "Kumi couldn't be installed: $*" >&2; exit 1; }
+  # Why Kumi couldn't be installed, after a blank line, then what the program that failed said ($2), if anything.
+  # The EXIT trap tidies up.
+  fail() {
+    if [ -n "$open" ]; then printf '\n' >&2; fi
+    if [ -z "$blank" ] || [ -n "$open" ]; then printf '\n' >&2; fi
+    printf '%s\n' "Kumi couldn't be installed: $1" >&2
+    if [ -n "${2:-}" ]; then printf '  %s\n' "$2" >&2; fi
+    exit 1
+  }
+  # A path as it reads on screen: ~/ for the home folder.
+  # shellcheck disable=SC2088
+  shown() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
+  # A path as the producer would type it: the same, or the whole path in quotes when it has a space.
+  typed() { case "$(shown "$1")" in *" "*) printf '"%s"' "$1" ;; *) shown "$1" ;; esac; }
+  # Whether version $1 comes before $2, compared part by part as numbers (1.9.0 before 1.10.0).
+  older() {
+    awk -v a="${1%%-*}" -v b="${2%%-*}" 'BEGIN {
+      n = split(a, x, "."); m = split(b, y, "."); if (m > n) n = m
+      for (i = 1; i <= n; i++) { if (x[i] + 0 < y[i] + 0) exit 0; if (x[i] + 0 > y[i] + 0) exit 1 }
+      exit 1 }'
+  }
+  releases="https://github.com/user1303836/kumi/releases"
+
+  # ── Ctrl-C ─────────────────────────────────────────────────────────────
+  # Nothing in Kumi's folder changes until the new Kumi is in place, so stopping before then changes nothing:
+  # this run's working folder goes, and so does Kumi's folder when this run made it and it's still empty.
+  work=""; made_home=""
+  tidy() {
+    if [ -n "$work" ]; then rm -rf "$work"; fi
+    if [ -n "$made_home" ]; then rmdir "$KUMI_HOME" 2>/dev/null; fi
+    return 0
+  }
+  stopped() { tidy; trap - EXIT; printf '\n%s\n' "Stopped; nothing was changed." >&2; exit 130; }
+  trap tidy EXIT
+  trap stopped INT TERM HUP
 
   say ""
 
@@ -57,7 +89,9 @@ main() {
     *) fail "Kumi runs on macOS and Windows (and Linux); this is $os." ;;
   esac
   # A Terminal running under Rosetta says x86_64 on an Apple Silicon Mac; Kumi uses the native architecture.
-  if [ "$platform" = "darwin" ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = "1" ]; then arch="arm64"; fi
+  if [ "$platform" = "darwin" ] && { [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ] || [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; }; then
+    arch="arm64"
+  fi
   case "$arch" in
     arm64|aarch64) arch="aarch64" ;;
     x86_64|amd64) arch="x86_64" ;;
@@ -66,79 +100,270 @@ main() {
   if [ "$platform" = "darwin" ]; then
     macos="$(sw_vers -productVersion 2>/dev/null || echo 0)"
     if [ "${macos%%.*}" -lt 13 ] 2>/dev/null; then fail "Kumi needs macOS 13 (Ventura) or later; this Mac has macOS $macos."; fi
+  else
+    # Linux's Kumi is built against glibc 2.35.
+    glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | sed -n 's/^glibc //p')"
+    if [ -z "$glibc" ]; then glibc="$(ldd --version 2>/dev/null | sed -n '1s/.* \([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')"; fi
+    if [ -n "$glibc" ] && older "$glibc" 2.35; then
+      fail "Kumi needs glibc 2.35 or later (Ubuntu 22.04, Debian 12 or newer); this Linux has glibc $glibc."
+    fi
   fi
-
   if [ "$platform" = "darwin" ]; then target="$arch-apple-darwin"; else target="$arch-unknown-linux-gnu"; fi
 
+  # Kumi installs for whoever runs this, with no admin rights: as root (sudo), it would install for root.
+  # A container or CI, where root is the only user, is fine.
+  if [ "$(id -u 2>/dev/null)" = "0" ] && [ -z "${KUMI_ALLOW_ROOT:-}" ] && [ -z "${CI:-}" ] \
+    && [ ! -f /.dockerenv ] && [ ! -f /run/.containerenv ] && [ -z "${container:-}" ] \
+    && ! grep -qsE 'docker|kubepods|containerd|lxc' /proc/1/cgroup; then
+    fail "it's running as root (with sudo?), so Kumi would be installed for root, not for you. Kumi needs no admin rights: run it again without sudo. To install it for root anyway, set KUMI_ALLOW_ROOT=1."
+  fi
+
+  # ── Which release ──────────────────────────────────────────────────────
+  # KUMI_RELEASES (a folder of releases: a mirror, or a test's), else KUMI_VERSION, else the newest.
+  version="${KUMI_VERSION:-}"; version="${version#[vV]}"
+  if [ "$version" = "latest" ] || [ -n "${KUMI_RELEASES:-}" ]; then version=""; fi
+  if [ -n "$version" ]; then
+    printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9_.]+)?$' \
+      || fail "KUMI_VERSION is \"${KUMI_VERSION:-}\"; it takes a release such as 1.16.0, or latest."
+    if older "$version" 1.7.6; then
+      fail "Kumi $version came before native Kumi (1.7.6): install it with that release's own script: curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/v$version/install.sh | KUMI_VERSION=$version sh"
+    fi
+  fi
+  if [ -n "${KUMI_RELEASES:-}" ]; then base="${KUMI_RELEASES%/}"
+  elif [ -n "$version" ]; then base="$releases/download/v$version"
+  else base="$releases/latest/download"; fi
+
   # ── Tools it needs (every Mac has them) ────────────────────────────────
+  # fetch gets $1 into $2, and says how in got (the program's exit status) and code (the HTTP status; 000 for
+  # none). It's the status that tells a missing release: macOS's curl exits 56, not 22, for GitHub's 404.
+  # With $3, curl draws its progress bar.
   if command -v curl >/dev/null 2>&1; then
-    fetch() { curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$2" "$1"; }
+    fetch() {
+      : > "$work/fetch.err"
+      if [ -n "${3:-}" ]; then
+        code="$(curl -#SL --retry 3 --retry-delay 2 --connect-timeout 10 -w '%{http_code} %{http_connect}' -o "$2" "$1")"; got=$?
+      else
+        code="$(curl -sSL --retry 3 --retry-delay 2 --connect-timeout 10 -w '%{http_code} %{http_connect}' -o "$2" "$1" 2>"$work/fetch.err")"; got=$?
+      fi
+      connect="${code#* }"; code="${code%% *}"
+    }
   elif command -v wget >/dev/null 2>&1; then
-    fetch() { wget -q --tries=3 --timeout=30 -O "$2" "$1"; }
+    bar=""
+    fetch() {
+      wget --tries=3 --timeout=30 -S -O "$2" "$1" 2>"$work/fetch.err"; got=$?
+      code="$(sed -n 's/^ *HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$work/fetch.err" | tail -n 1)"; connect=""
+      if [ -z "$code" ]; then code=000; fi
+    }
   else fail "it needs curl or wget to download."; fi
   command -v tar >/dev/null 2>&1 || fail "it needs tar to unpack."
   if command -v shasum >/dev/null 2>&1; then sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
   elif command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum "$1" | cut -d' ' -f1; }
   else fail "it needs shasum or sha256sum to check downloads."; fi
+  # Whether a download came back whole: an HTTP status that's an error (curl answers 0 for those) or a
+  # program that failed isn't.
+  fetched() { case "$code" in [45][0-9][0-9]) return 1 ;; esac; [ "$got" -eq 0 ]; }
+  # A Wi-Fi sign-in page, or a proxy's, in place of what was asked for.
+  html() { dd if="$1" bs=512 count=1 2>/dev/null | grep -Eqi '<(!doctype|html|head|body|title|meta)'; }
+  captive="a Wi-Fi sign-in page or proxy answered instead of GitHub. Sign in to the Wi-Fi (open any web page), or check the proxy, then run this again."
+  # Why a download from $1 didn't come through, in Kumi's own words (DNS, TLS, proxy, timeout, offline), into
+  # message: the HTTP status when something answered, else what curl or wget said (kept in said, for after).
+  unfetched() {
+    host="${1#*://}"; host="${host%%/*}"
+    said="$(sed '/^[[:space:]]*$/d' "$work/fetch.err" 2>/dev/null | tail -n 1 | cut -c1-300)"
+    cause=""; message=""
+    case "$code" in
+      407) cause=proxy ;;
+      511) message="$captive" ;;
+      401|403) message="$host turned the download away (HTTP $code). A network that blocks GitHub does this: try another network." ;;
+      429) message="$host is limiting downloads from this network (HTTP 429). Try again in a few minutes." ;;
+      5[0-9][0-9]) message="$host had a problem (HTTP $code). Try again in a few minutes." ;;
+      4[0-9][0-9]) message="$host answered HTTP $code for $1." ;;
+    esac
+    if [ "${connect:-000}" = 407 ]; then cause=proxy; message=""; fi
+    if [ -z "$cause$message" ]; then
+      case "$got" in
+        5|97) cause=proxy ;;
+        6) cause=dns ;;
+        7) if [ -n "$(proxies)" ]; then cause=proxy; else cause=offline; fi ;;
+        28) cause=timeout ;;
+        35|51|53|54|58|59|60|64|66|77|80|82|83|90|91|98) cause=tls ;;
+        23) message="it couldn't save the download in $(shown "$KUMI_HOME") (is the disk full?)." ;;
+        1|3) message="$1 isn't an address it can download from." ;;
+        47) message="$host kept redirecting: $captive" ;;
+        *) case "$said" in
+             *[Rr]esolv*|*"ame or service not known"*|*"nodename nor servname"*) cause=dns ;;
+             *[Cc]ertificate*|*SSL*|*TLS*) cause=tls ;;
+             *[Pp]roxy*) cause=proxy ;;
+             *"timed out"*|*[Tt]imeout*) cause=timeout ;;
+             *) cause=offline ;;
+           esac ;;
+      esac
+    fi
+    case "$cause" in
+      dns) message="its address couldn't be looked up (DNS). Check that this computer is online; if it is, its DNS isn't answering, so try another network." ;;
+      tls) message="the secure connection didn't check out (TLS). A Wi-Fi sign-in page, a school or office network that inspects secure connections, or a wrong clock does this: sign in to the Wi-Fi, try another network, or check the clock." ;;
+      proxy) message="the proxy didn't let it through. Check the proxy setting, or try without the proxy." ;;
+      timeout) message="nothing answered in time. Check the connection, then try again." ;;
+      offline) message="the connection failed. Check that this computer is online, or try another network." ;;
+    esac
+    if [ -n "$cause" ]; then
+      message="couldn't reach $host: $message"
+      if [ -n "$(proxies)" ]; then message="$message Proxy settings: $(proxies)."; fi
+    fi
+  }
+  # The proxy settings curl and wget read, as NAME=value without any user name or password.
+  proxies() {
+    listed=""
+    for name in HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy; do
+      eval "value=\${$name:-}"
+      if [ -n "$value" ]; then
+        printf '%s%s=%s' "${listed:+, }" "$name" "$(printf '%s' "$value" | sed 's|://[^@/]*@|://|')"; listed=1
+      fi
+    done
+  }
 
   # ── Room and a place to work ───────────────────────────────────────────
+  KUMI_HOME="${KUMI_HOME:-$HOME/.kumi}"
+  # Always an absolute path: it goes in PATH, and in the kumi command.
+  # shellcheck disable=SC2088
+  case "$KUMI_HOME" in "~") KUMI_HOME="$HOME" ;; "~/"*) KUMI_HOME="$HOME/${KUMI_HOME#"~/"}" ;; esac
+  case "$KUMI_HOME" in /*) ;; *) KUMI_HOME="$(pwd)/$KUMI_HOME" ;; esac
+  if [ ! -d "$KUMI_HOME" ]; then made_home=1; fi
   mkdir -p "$KUMI_HOME" || fail "couldn't make $KUMI_HOME."
   free_kb="$(df -Pk "$KUMI_HOME" 2>/dev/null | awk 'NR==2 {print $4}')"
   if [ -n "$free_kb" ] && [ "$free_kb" -lt 300000 ] 2>/dev/null; then
     fail "there's only $((free_kb / 1024)) MB free; Kumi needs about 300 MB. Free some space and run this again."
   fi
-  work="$(mktemp -d "$KUMI_HOME/.install.XXXXXX")" || fail "couldn't make a working folder in $KUMI_HOME."
-  trap 'rm -rf "$work"' EXIT INT TERM
+  work="$(mktemp -d "$KUMI_HOME/.install.XXXXXX")" || { work=""; fail "couldn't make a working folder in $KUMI_HOME."; }
 
   # ── Which Kumi ─────────────────────────────────────────────────────────
-  fetch "$base/kumi-release-$target.json" "$work/release.json"; got=$?
-  if [ "$got" -ne 0 ]; then
-    # curl -f exits 22, and wget 8, when the server answered with an error (no release there) rather than not at all.
-    if [ "$got" -eq 22 ] || [ "$got" -eq 8 ]; then fail "there's no Kumi release to install at ${base#https://} yet. Try again later."; fi
-    fail "couldn't reach GitHub ($base). Check your internet connection and try again."
+  if [ -n "$tty" ]; then printf '  %s' "${dim}Looking up ${version:+Kumi }${version:-the newest Kumi}…${reset}"; open=1; fi
+  fetch "$base/kumi-release-$target.json" "$work/release.json"
+  if [ "$code" = 404 ]; then
+    # Nothing there for this computer: is there a release at all?
+    if [ -n "${KUMI_RELEASES:-}" ]; then fail "there's no Kumi release for this computer ($target) at $base."; fi
+    fetch "$base/kumi-release.json" "$work/any.json"
+    if fetched && ! html "$work/any.json"; then
+      fail "${version:+Kumi }${version:-the newest Kumi} has no build for this computer ($target). The releases are at $releases"
+    fi
+    if [ -n "$version" ]; then fail "there's no Kumi $version. The releases are at $releases"; fi
+    fail "there's no Kumi release to install yet. Try again later."
   fi
+  if ! fetched; then unfetched "$base"; fail "$message" "$said"; fi
+  if html "$work/release.json"; then fail "$captive"; fi
   field() { sed -n "s/.*\"$1\" *: *\"\\([^\"]*\\)\".*/\\1/p" "$work/release.json" | head -n 1; }
   kumi_version="$(field kumi)"; bundle="$(field bundle)"; bundle_sha="$(field sha256)"
+  [ -n "$kumi_version" ] || fail "what came back from ${base#*://} wasn't a Kumi release."
   [ "$(field runtime)" = "rust-native" ] && [ "$(field target)" = "$target" ] || fail "the release doesn't match this computer."
   printf '%s\n' "$kumi_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9_.]+)?$' || fail "the release version didn't make sense."
   printf '%s\n' "$bundle" | grep -Eq '^[A-Za-z0-9_.-]+\.tar\.gz$' || fail "the release archive name didn't make sense."
   printf '%s\n' "$bundle_sha" | grep -Eq '^[0-9a-f]{64}$' || fail "the release checksum didn't make sense."
-  # The header: the wordmark, and the version at the right of the 60 columns after the 2-column margin,
-  # as in Kumi's own setup.
+  # The header, in place of the line above: the wordmark, and the version at the right of the 60 columns
+  # after the 2-column margin, as in Kumi's own setup.
+  if [ -n "$tty" ]; then printf '\r\033[K'; fi
   pad=$((56 - ${#kumi_version})); [ "$pad" -gt 0 ] || pad=1
-  printf "  %s%${pad}s%s\n\n" "${bold}kumi${reset}" "" "${dim}${kumi_version}${reset}"
+  say "$(printf "  %s%${pad}s%s" "${bold}kumi${reset}" "" "${dim}${kumi_version}${reset}")"; say ""
 
   # ── Kumi ───────────────────────────────────────────────────────────────
   begin "Download"
-  fetch "$base/$bundle" "$work/kumi.tar.gz" || fail "couldn't download Kumi from GitHub."
-  [ "$(sha "$work/kumi.tar.gz")" = "$bundle_sha" ] || fail "Kumi's download didn't match its checksum, so it wasn't used. Try again."
+  # Curl's bar takes the line below the step's, and goes once it's done.
+  if [ -n "$bar" ]; then printf '\n'; open=""; fetch "$base/$bundle" "$work/kumi.tar.gz" bar; else fetch "$base/$bundle" "$work/kumi.tar.gz"; fi
+  if ! fetched; then unfetched "$base/$bundle"; fail "$message" "$said"; fi
+  if [ -n "$bar" ]; then printf '\033[2A\r\033[J'; fi
+  if [ "$(sha "$work/kumi.tar.gz")" != "$bundle_sha" ]; then
+    if html "$work/kumi.tar.gz"; then fail "$captive"; fi
+    fail "Kumi's download didn't match its checksum, so it wasn't used. Try again."
+  fi
   finish "checked against its checksum"
   begin "Install"
-  mkdir -p "$work/app" && tar -xzf "$work/kumi.tar.gz" -C "$work/app" || fail "couldn't unpack Kumi."
-  KUMI_INSTALLED=1 KUMI_HOME="$KUMI_HOME" "$work/app/kumi" --version >/dev/null 2>&1 || fail "the downloaded Kumi didn't start. Please report this at github.com/user1303836/kumi/issues."
-  app="$KUMI_HOME/app"
-  rm -rf "$app.previous"; [ -d "$app" ] && mv "$app" "$app.previous"
-  mv "$work/app" "$app" || { [ -d "$app.previous" ] && mv "$app.previous" "$app"; fail "couldn't put Kumi in place."; }
-  home_shown="$KUMI_HOME"
-  case "$home_shown" in "$HOME"/*) home_shown="~/${home_shown#"$HOME"/}" ;; esac
-  finish "$home_shown"
+  if ! { mkdir -p "$work/app" && tar -xzf "$work/kumi.tar.gz" -C "$work/app"; }; then fail "couldn't unpack Kumi."; fi
+  KUMI_INSTALLED=1 KUMI_HOME="$KUMI_HOME" "$work/app/kumi" --version >/dev/null 2>"$work/start.err"; started=$?
+  if [ "$started" -ne 0 ]; then
+    said="$(sed '/^[[:space:]]*$/d' "$work/start.err" | tail -n 1 | cut -c1-300)"
+    if [ -z "$said" ] && [ "$started" -gt 128 ]; then said="it was stopped by signal $((started - 128))"; fi
+    fail "the downloaded Kumi didn't start${said:+ ($said)}. Please report this at github.com/user1303836/kumi/issues."
+  fi
+
+  # The new Kumi goes in app, and the one that was there in app.previous, where kumi update --rollback finds
+  # it, as kumi update does. Ctrl-C waits until it's in: these are renames, and nothing is deleted until then
+  # (what goes waits in the working folder).
+  trap '' INT TERM HUP
+  app="$KUMI_HOME/app"; previous="$app.previous"; older="$previous.old"
+  # A whole Kumi: a native one, or an earlier Node one.
+  has_kumi() { [ -x "$1/kumi" ] || [ -f "$1/apps/kumi/bin/kumi.mjs" ]; }
+  # Moves a whole Kumi back from where it waited; if it can't go, the working folder keeps it, and stays.
+  restore() { mv "$1" "$2" || work=""; }
+  # A run that gave up earlier (this one's, or kumi update's) can leave the only whole Kumi in app.previous, or
+  # the one before it in app.previous.old: it goes back first, and is never what gets cleared.
+  for kept in "$previous" "$older"; do
+    if ! has_kumi "$app" && has_kumi "$kept"; then
+      if [ -e "$app" ]; then mv "$app" "$work/part.1" || fail "couldn't put Kumi in place."; fi
+      mv "$kept" "$app" || fail "couldn't put Kumi in place."
+    fi
+  done
+  if [ ! -e "$previous" ] && has_kumi "$older"; then mv "$older" "$previous"; fi
+  if [ -e "$older" ] && { has_kumi "$app" || has_kumi "$previous"; }; then mv "$older" "$work/older"; fi
+  installed=""
+  if has_kumi "$app"; then installed="$(sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' "$app/package.json" 2>/dev/null | head -n 1)"; fi
+  aside=""; before=""
+  if has_kumi "$app" && [ "$installed" = "$kumi_version" ] && has_kumi "$previous"; then
+    # The same Kumi again (a repair): the new copy replaces it, and the one to roll back to stays.
+    aside="$work/replaced"
+  elif has_kumi "$app"; then
+    # The one before waits aside until the new one is in.
+    if [ -e "$previous" ]; then before="$work/before"; mv "$previous" "$before" || fail "couldn't put Kumi in place."; fi
+    aside="$previous"
+  elif [ -e "$app" ]; then
+    # Part of a Kumi, none whole: the new one replaces it, and app.previous stays as it is.
+    mv "$app" "$work/part.2" || fail "couldn't put Kumi in place."
+  fi
+  held="$work"
+  if [ -n "$aside" ] && ! mv "$app" "$aside"; then
+    if [ -n "$before" ]; then restore "$before" "$previous"; fi
+    if [ -z "$work" ]; then fail "couldn't put Kumi in place; the Kumi you had still works, and the one before it is in $held."; fi
+    fail "couldn't put Kumi in place; the Kumi you had still works."
+  fi
+  if ! mv "$work/app" "$app"; then
+    # Whatever went in part of the way goes, and the Kumi that was there goes back.
+    if [ -n "$aside" ]; then rm -rf "$app"; restore "$aside" "$app"; fi
+    if [ -n "$before" ]; then restore "$before" "$previous"; fi
+    if [ -z "$work" ]; then fail "couldn't put Kumi in place, nor put back the Kumi you had: it's in $held."; fi
+    fail "couldn't put Kumi in place${aside:+; the Kumi you had still works}."
+  fi
+  made_home=""
+  # What changed: an update, the same Kumi again, or an older one in place of a newer.
+  if [ -z "$installed" ]; then outcome=""
+  elif [ "$installed" = "$kumi_version" ]; then outcome="reinstalled $kumi_version"
+  elif older "$kumi_version" "$installed"; then outcome="replaced $installed with older $kumi_version"
+  else outcome="${installed} → ${kumi_version}"; fi
+  finish "$(shown "$KUMI_HOME")${outcome:+, $outcome}"
 
   # ── The kumi command ───────────────────────────────────────────────────
-  mkdir -p "$KUMI_HOME/bin"
-  cat > "$KUMI_HOME/bin/kumi" <<'LAUNCHER'
+  # Kumi writes the same one (crates/kumi/src/install/migration.rs), and a test keeps the two the same.
+  mkdir -p "$KUMI_HOME/bin" || fail "couldn't make $KUMI_HOME/bin."
+  cat > "$work/launcher" <<'LAUNCHER'
 #!/bin/sh
 KUMI_HOME="${KUMI_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 export KUMI_HOME KUMI_INSTALLED=1
 if [ -x "$KUMI_HOME/app/kumi" ]; then
   exec "$KUMI_HOME/app/kumi" "$@"
 fi
-exec "$KUMI_HOME/node/bin/node" "$KUMI_HOME/app/apps/kumi/bin/kumi.mjs" "$@"
+# Rolled back to a JavaScript release: it runs on its own Node.
+if [ -x "$KUMI_HOME/node/bin/node" ] && [ -f "$KUMI_HOME/app/apps/kumi/bin/kumi.mjs" ]; then
+  exec "$KUMI_HOME/node/bin/node" "$KUMI_HOME/app/apps/kumi/bin/kumi.mjs" "$@"
+fi
+if [ -x "$KUMI_HOME/app.previous/kumi" ]; then
+  echo "Kumi's app is missing, so the Kumi before it starts. To repair Kumi, run the installer again: curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh" >&2
+  exec "$KUMI_HOME/app.previous/kumi" "$@"
+fi
+echo "Kumi's app is missing: run the installer again: curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh" >&2
+exit 1
 LAUNCHER
-  chmod 755 "$KUMI_HOME/bin/kumi"
+  if ! { chmod 755 "$work/launcher" && mv -f "$work/launcher" "$KUMI_HOME/bin/kumi"; }; then fail "couldn't write the kumi command in $KUMI_HOME/bin."; fi
 
   # ── PATH ───────────────────────────────────────────────────────────────
   begin "PATH"
-  bin="$KUMI_HOME/bin"; marker="# Added by the Kumi installer"; added=""
+  bin="$KUMI_HOME/bin"; marker="# Added by the Kumi installer"; added=""; ready=""; unwritten=""
   case ":$PATH:" in *":$bin:"*) on_path=1 ;; *) on_path="" ;; esac
   if [ -z "${KUMI_NO_MODIFY_PATH:-}" ]; then
     shell_name="$(basename "${SHELL:-sh}")"
@@ -157,36 +382,42 @@ LAUNCHER
       fish) rc="$HOME/.config/fish/conf.d/kumi.fish"; line="contains -- \"$bin\" \$PATH; or set -gx PATH \"$bin\" \$PATH" ;;
       *) rc="$HOME/.profile"; line="export PATH=\"$bin:\$PATH\"" ;;
     esac
-    if ! grep -qs "$marker" "$rc"; then
-      mkdir -p "$(dirname "$rc")"
-      printf '\n%s\n%s\n' "$marker" "$line" >> "$rc" && added="$rc"
-    fi
+    # Once per file: this Kumi's line may be there already (one for a Kumi elsewhere doesn't count).
+    if grep -qsxF "$line" "$rc"; then ready=1
+    elif mkdir -p "$(dirname "$rc")" 2>/dev/null && printf '\n%s\n%s\n' "$marker" "$line" 2>/dev/null >> "$rc"; then added="$rc"; ready=1
+    else unwritten="$rc"; fi
   fi
-
-  case "$added" in "$HOME"/*) added="~/${added#"$HOME"/}" ;; esac
-  if [ -n "$added" ]; then finish "added in ${added}, for new terminal windows"
+  if [ -n "$added" ]; then finish "added in $(shown "$added"), for new terminal windows"
+  elif [ -n "$unwritten" ] && [ -z "$on_path" ]; then
+    if [ -n "$tty" ]; then printf '\r\033[K'; fi
+    say "$(printf '  %-20s%s' "PATH" "${dim}left as it is: $(shown "$unwritten") couldn't be written${reset}")"
   elif [ -n "${KUMI_NO_MODIFY_PATH:-}" ] && [ -z "$on_path" ]; then
     if [ -n "$tty" ]; then printf '\r\033[K'; fi
-    printf '  %-20s%s\n' "PATH" "${dim}left as it is (KUMI_NO_MODIFY_PATH)${reset}"
+    say "$(printf '  %-20s%s' "PATH" "${dim}left as it is (KUMI_NO_MODIFY_PATH)${reset}")"
   else finish; fi
 
   # ── Done ───────────────────────────────────────────────────────────────
+  # What the new Kumi replaced goes now, before Ctrl-C works again.
+  tidy; work=""
+  trap - INT TERM HUP
   say ""
   say "  ${dim}Update with: kumi update · Remove with: kumi uninstall${reset}"
   say ""
   # Kumi starts here and now: it signs you in and connects to Live. Its keyboard is the terminal's, since
-  # this script's own input is the download.
+  # this script's own input is the download. Its farewell says how to start it next time, when this
+  # window's PATH doesn't have kumi yet: new windows' do (new-window), or nothing changed PATH (no-path).
+  if [ -n "$on_path" ]; then KUMI_FROM_INSTALLER=1; elif [ -n "$ready" ]; then KUMI_FROM_INSTALLER=new-window; else KUMI_FROM_INSTALLER=no-path; fi
   if [ -z "${KUMI_NO_LAUNCH:-}" ] && [ -z "${CI:-}" ] && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
     say "  Starting Kumi…"
-    # exec replaces this shell, so the EXIT trap never runs: the download goes now.
-    rm -rf "$work"; trap - EXIT INT TERM
+    trap - EXIT
+    export KUMI_FROM_INSTALLER
     exec "$bin/kumi" </dev/tty
   fi
-  if [ -z "$on_path" ]; then
-    say "  Next, in a new terminal window (or after: export PATH=\"$bin:\$PATH\"): kumi"
-  else
-    say "  Next: kumi"
-  fi
+  case "$KUMI_FROM_INSTALLER" in
+    1) say "  Next: kumi" ;;
+    new-window) say "  Next, in a new terminal window (or after: export PATH=\"$bin:\$PATH\"): kumi" ;;
+    *) say "  Next: add $(shown "$bin") to PATH, or run $(typed "$bin/kumi")" ;;
+  esac
   say "  ${dim}It signs you in and connects to Live.${reset}"
 }
 
