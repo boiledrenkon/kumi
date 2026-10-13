@@ -93,6 +93,12 @@ impl Integration for FallbackIntegration {
     fn open_set(&self) -> Option<String> {
         self.current().open_set()
     }
+    fn words(&self) -> (&'static str, &'static str) {
+        self.primary.words()
+    }
+    async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {
+        self.current().open_place(place, signal).await
+    }
     fn has_show_message(&self) -> bool {
         true
     }

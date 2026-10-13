@@ -304,3 +304,38 @@ fn over_ssh_chatgpt_signs_in_with_a_code() {
     assert_eq!(value(&["login", "openai-codex", "--browser"], &env)["method"], "browser");
     assert_eq!(chatgpt_sign_in(&env), LoginMethod::Device);
 }
+#[test]
+fn continue_and_resume_take_up_a_kept_conversation_with_or_without_live() {
+    let env = env();
+    let resume = |args_: &[&str]| value(args_, &env)["resume"].clone();
+    assert_eq!(resume(&["-c"]), json!("last"));
+    assert_eq!(resume(&["--continue", "--inference-only"]), json!("last"));
+    assert_eq!(resume(&["-r"]), json!("pick"));
+    assert_eq!(resume(&["--resume", "--inference-only"]), json!("pick"));
+    assert_eq!(resume(&["-r", "mv66me0m3fa91c"]), json!({"named":"mv66me0m3fa91c"}));
+    // A name of several words, before or after the other options.
+    assert_eq!(resume(&["-r", "night", "drive", "--inference-only"]), json!({"named":"night drive"}));
+    assert_eq!(resume(&["--inference-only", "--resume=Night drive"]), json!({"named":"Night drive"}));
+    assert_eq!(value(&["--inference-only", "-r", "x"], &env)["mode"], "inference-only");
+    assert!(value(&[], &env).get("resume").is_none());
+    let both = load_config(&args(&["-c", "-r", "x"]), &env).unwrap_err().to_string();
+    assert!(both.contains("-c (the conversation you had last) or") && both.contains("-r <id or name>, not both"), "{both}");
+    // Not a command's option.
+    assert!(load_config(&args(&["doctor", "-c"]), &env).is_err());
+    assert!(load_config(&args(&["-r", "x", "-z"]), &env).unwrap_err().to_string().contains("No option called -z"));
+}
+#[test]
+fn conversations_keep_days_is_read_kept_and_bounded() {
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("settings.json").to_string_lossy().into_owned();
+    std::fs::write(&file, json!({"conversations":{"keepDays":30}}).to_string()).unwrap();
+    assert_eq!(read_settings(&file).conversations.and_then(|c| c.keep_days), Some(30));
+    write_settings(&file, &json!({"model":"openai/gpt-6-luna"})).unwrap();
+    assert_eq!(read_settings(&file).conversations.and_then(|c| c.keep_days), Some(30));
+    for days in [json!(-1), json!(1e9), json!("90")] {
+        std::fs::write(&file, json!({"conversations":{"keepDays":days}}).to_string()).unwrap();
+        assert_eq!(read_settings(&file).conversations, None, "{days}");
+    }
+    std::fs::write(&file, json!({"conversations":{"keepDays":0}}).to_string()).unwrap();
+    assert_eq!(read_settings(&file).conversations.and_then(|c| c.keep_days), Some(0));
+}

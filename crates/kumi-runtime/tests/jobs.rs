@@ -607,6 +607,7 @@ impl KernelTool for Named {
 
 local_test!(a_session_with_everything_on_offers_the_model_at_most_128_tools, {
     use kumi_runtime::{
+        core::conversations::create_conversation_store,
         core::{
             gaps::GAP_GUIDANCE,
             memory::{create_memory_store, MemoryStoreOptions},
@@ -615,7 +616,6 @@ local_test!(a_session_with_everything_on_offers_the_model_at_most_128_tools, {
             store_import::JsonFiles,
             techniques::create_technique_store,
         },
-        integrations::ableton::project::create_conversation_store,
         library::{create_library, LibraryOptions},
         references::store::ReferenceStore,
     };

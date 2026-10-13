@@ -76,7 +76,7 @@ Kumi は User Library の中から Live の Remote Scripts フォルダーを見
 
 **Kumi の Live 拡張機能。** Live 12.4 以降では、`kumi bridge` は Kumi の拡張機能も Live の Extensions フォルダーに入れます（macOS では `~/Library/Application Support/Ableton/Extensions/kumi.kumi`。Windows では `%LOCALAPPDATA%\Ableton\Extensions` を使いますが、Windows ではまだ確認されていません）。Live は次に開いたときに拡張機能を起動します。拡張機能は、MIDI クリップをアレンジメントに直接書き込み、トラックの一区間をクリアし、トラックのクリップを再生せずにレンダリングし、Live の右クリックメニュー（**Extensions** の下）に **Ask Kumi about this** を加えます。これを選ぶと、クリックしたものが次のメッセージのために固定されます。Developer Mode がオン（Settings → Extensions）のときは Live が拡張機能を一切起動しないので、ブリッジが Kumi の拡張機能を自分で起動します。Kumi は拡張機能がなくても動作します。拡張機能があるか、動いているかは `kumi doctor` が知らせます。
 
-ブリッジをインストールして Live で選べば、`kumi` がそれを見つけて接続します。設定することは何もありません。ブリッジがなくても Kumi は起動し、Live なしでチャットし（**No Live access**）、接続を提案します。`kumi --bridge-config <absolute path>` は自分で用意したブリッジ設定を使い、`kumi --inference-only` は Live なしでチャットします。
+ブリッジをインストールして Live で選べば、`kumi` がそれを見つけて接続します。設定することは何もありません。ブリッジがなくても Kumi は起動し、Live なしでチャットし（**No Live access**）、接続を提案します。`kumi --bridge-config <absolute path>` は自分で用意したブリッジ設定を使い、`kumi --inference-only` は Live なしでチャットします（会話が残るのは `-c` か `-r` で続けたときだけです）。
 
 **Willington。** Willington のファイルを収めたリリースからは、Kumi のブリッジに Willington のネイティブバインディングが入ります。それまでは自分でインストールできます。どちらの場合も、`/willington` でオンにするまではオフです。オンにすると、Kumi はラックのマクロのマッピングとチェーンゾーンの設定もでき、セルフテストが合格していれば Follow Actions も編集できます。Willington のバインディングがある Live のバージョンは、macOS ARM64 の Live 12.4.15b4 と b5（チェーンのゾーンは b5 のみ）と、Windows x64 の Live 12.4.15b5 です。[Willington](WILLINGTON_INTEGRATION.md)を参照してください。
 
@@ -300,11 +300,20 @@ Kumi は、各回答の時間の内訳（モデル、ツール、Live へのリ�
 
 ## 会話と、離れていた間の変化
 
-Kumi は保存済みの各 Set の会話を `~/.kumi/projects` に保存します。回答のたびに保存し、Set ごとに最新 20 件、それぞれ約 256 KB まで（古いやりとりから消えます）。保存済みの Set で Kumi を開くと、その最新の会話の続きになり、HISTORY には直近 100 件の変更が（取り消しなしで）表示されます。`/new` で新しく始めると、直前の会話は残ります。`/conversations` でどの会話にも戻れます。保存していない Set の会話は、初めて保存したときにその Set 自身のフォルダーに移ります。
+Kumi は各 Set の会話を `~/.kumi/projects` に保存します。回答のたびに保存し、それぞれ約 256 KB まで（古いやりとりから消えます）。保存済みの Set で Kumi を開くと、その最新の会話の続きになり、HISTORY には直近 100 件の変更が（取り消しなしで）表示されます。`/new` で新しく始めると、直前の会話は残ります。保存していない Set の会話は、初めて保存したときにその Set 自身のフォルダーに移ります。
+
+- **戻る：** `/resume`（または `/conversations`）でこの Set の会話を一覧表示し、Tab ですべての Set の会話を表示します。入力で絞り込み、Enter でその会話に戻り、ctrl+f で名前の変更、ピン留め、削除、ID のコピーができます。
+- **シェルから：** `kumi -c` は、どの Set のものでも、最後に使った会話の続きから始めます。`kumi -r <ID または名前>` はその会話の続きから始めます（ID は先頭だけでも足ります）。`kumi -r` だけなら一覧から選べます。どちらも `--inference-only` と一緒に使えます。
+- **ID：** すべての会話に `mv66me0m3fa91c` のような ID があります。`/status` で表示され、その会話を使ったときは、Kumi が閉じるときに「Continue this conversation: kumi -r mv66me0m3fa91c」と伝えます。
+- **名前とコピー：** `/rename <name>` でこの会話に名前を付け、`/new <name>` で名前を付けて新しく始め、`/fork` でコピーに続けます（元の会話は残ります）。
+- **別の Set の会話：** Kumi はまず尋ねます。その Set を Live で開く（Live が開いている Set について尋ねることがあります）、ここでコピーとして続ける（別の Set から Kumi が読んだ内容は除きます）、またはキャンセル。Live が閉じているときはそのまま続け、Live が別の Set を開いたときに尋ねます。
+- **二つの Kumi ウインドウ：** 一方で開いている会話は、もう一方ではコピーとして続きます。
+- **モデル：** 戻っても今使っているモデルのままです。会話が別のモデルで行われていたときは、Kumi が一度だけ伝えます。
+- **残す期間：** 各 Set は最新の 20 件、過去 90 日以内に使った会話（`conversations.keepDays`。`0` ですべて残す）、ピン留めした会話を残します。設定から `keepDays` を外すと、90 日と最後に設定した値のうち長いほうで残します（`0` ならすべて残したまま）。ロールバックした後の Kumi 1.16 以前は、各 Set の最新 20 件だけを残します。アップデート前から開いている Kumi のウィンドウも、閉じるまでは同じです。
 
 以前のこと（「先週のボーカルのリバーブチェーン」）に触れると、Kumi はすべての Set について保存した会話と、テクニックやレシピを、その言葉で探します。検索はあなたのコンピューターの中で行われ、見つかったものはほかの読み取りと同じようにモデルに送られます。
 
-Kumi は、保存済みの各 Set を最後に見たときの状態も覚えています。次回、ウェルカム画面にその間に変わったことが表示され（"Since you were last here · 3 days ago: Tempo 120 → 124 BPM; Added track “Pad”"）、Kumi はそれを踏まえて作業します。Set はファイルパスで識別されるので、Save As すると新しく始まります。
+Kumi は、保存済みの各 Set を最後に見たときの状態も覚えています。次回、ウェルカム画面にその間に変わったことが表示され（"Since you were last here · 3 days ago: Tempo 120 → 124 BPM; Added track “Pad”"）、Kumi はそれを踏まえて作業します。Kumi は Set の中に保存した ID で Set を見分けるので、移動した Set や、同じ Live Project フォルダーに別の名前で保存した Set はそのまま続きます。別の場所に保存したコピーは新しく始まります。
 
 ## Live がいなくなったとき
 
@@ -410,6 +419,7 @@ Kumi はすべてを `~/.kumi` に保存します。`~/.kumi/settings.json` に�
 | `voice` | 話しかける設定：`send`（止めたら送る）、`language`、`microphone`（`/voice`） |
 | `maxJobs` | 同時に動くバックグラウンドジョブの数：1〜8、デフォルトは 3 |
 | `workerModel` | バックグラウンドジョブが使うモデル。`/model` の一覧にある `<provider>/<model>`。ない場合は会話と同じモデル |
+| `conversations` | `keepDays`：会話を最後に使ってから残しておく日数。各 Set の最新 20 件はこれとは別に残る（90。外すと 90 日と最後に設定した値のうち長いほう）。`0` ですべて残す |
 
 `~/.kumi/slots.json` には、入れ替えたモデルスロットが保存されます（`/slots`）。`~/.kumi/probes` には、各ノブが何をしたかがデバイスとトラックごとに、`~/.kumi/models` にはモデルランタイムと Kumi 自身のモデルが保存されます。三つとも `KUMI_HOME` に従います。
 

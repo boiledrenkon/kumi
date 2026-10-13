@@ -17,10 +17,8 @@ use super::{
 };
 use crate::{
     audio::tools::{listening_tools, ListeningOptions},
-    integrations::ableton::{
-        project::new_conversation_id,
-        willington::{willington_instructions, WillingtonSwitch},
-    },
+    core::conversations::new_conversation_id,
+    integrations::ableton::willington::{willington_instructions, WillingtonSwitch},
     kernel::budget::{transcript_of, OBSERVATION_MARKER},
     library::{Library, LibraryToolsOptions, FIND_SOUNDS_TOOL},
     web::{
@@ -119,6 +117,8 @@ pub struct SessionOptions {
     pub willington: Option<Rc<dyn Fn() -> Option<WillingtonSwitch>>>,
     /// Background jobs (workers and tool calls beside the conversation); none offers the model no job tools.
     pub jobs: Option<JobsOptions>,
+    /// A kept conversation the producer asked for as Kumi starts (`kumi -c`, `kumi -r`): where it's kept, and its id.
+    pub resume: Option<(String, String)>,
 }
 impl SessionOptions {
     pub fn new(kernel_factory: KernelFactory, integration_factory: IntegrationFactory, on_event: Rc<dyn Fn(SessionEvent)>) -> Self {
@@ -157,6 +157,7 @@ impl SessionOptions {
             objective_budget: None,
             willington: None,
             jobs: None,
+            resume: None,
         }
     }
 }
@@ -234,6 +235,18 @@ struct Chosen {
     id: String,
     conversation: SavedConversation,
 }
+/// A kept conversation the producer chose that isn't going on yet, or goes on while no Set is open: it's taken up once its
+/// Set is open, and Kumi asks about it while another Set is.
+#[derive(Clone, PartialEq)]
+struct Wanted {
+    place: String,
+    /// The conversation that goes on for it: the one chosen, or the copy or fork of it this Kumi carries on in.
+    id: String,
+    /// The one chosen, when a copy or fork goes on for it: what's kept while the copy has nothing kept yet.
+    from: Option<String>,
+    /// The open Set Kumi asked under (its observation key): asked again only when another Set opens.
+    asked: Option<String>,
+}
 /// A conversation's system text, and what it was made from that a rebuild can't keep: the integration's own
 /// instructions and Willington's words.
 struct SystemText {
@@ -310,6 +323,24 @@ struct State {
     conversation_id: String,
     conversation_first: Option<String>,
     conversation_turns: u32,
+    /// What the producer named this conversation before it was first kept, and the one a copy came from: both are kept
+    /// beside it with its first save.
+    conversation_name: Option<String>,
+    copied_from: Option<String>,
+    /// This run made a request in this conversation, or the producer took it up: the exit names it.
+    touched: bool,
+    /// The conversation going on is as kept: taken up, with nothing asked or saved since.
+    as_kept: bool,
+    /// A kept conversation the producer chose, waiting for its Set (or their answer about it).
+    wanted: Option<Wanted>,
+    /// The producer left a chosen conversation that went on in another Set: the open Set's own goes on from the next look.
+    own_set: bool,
+    /// Whether the last look at the DAW found a Set open there.
+    set_open: bool,
+    /// Kumi's note to the model with the next request: the conversation was carried into another Set.
+    next_note: Option<String>,
+    /// Conversations whose other model Kumi has mentioned.
+    model_said: std::collections::HashSet<String>,
     changes: Vec<ChangeRecord>,
     seen: indexmap::IndexMap<String, ChangeRecord>,
     settled: Option<Settled>,
@@ -457,6 +488,7 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
     let close_ms = options.close_timeout_ms.unwrap_or(5_000);
     let grace_ms = options.cancel_grace_ms.unwrap_or(500);
     let timings = options.timings.clone();
+    let options_resume = options.resume.clone();
     if [timeout_ms, idle_ms, turn_limit_ms, close_ms, grace_ms, options.max_turns.unwrap_or(1) as u64]
         .iter()
         .any(|n| *n == 0 || *n > 9_007_199_254_740_991)
@@ -711,6 +743,15 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 conversation_id: new_conversation_id(now()),
                 conversation_first: None,
                 conversation_turns: 0,
+                conversation_name: None,
+                copied_from: None,
+                touched: false,
+                as_kept: false,
+                wanted: options_resume.map(|(place, id)| Wanted { place, id, from: None, asked: None }),
+                own_set: false,
+                set_open: false,
+                next_note: None,
+                model_said: Default::default(),
                 changes: vec![],
                 seen: indexmap::IndexMap::new(),
                 settled: None,
@@ -860,6 +901,10 @@ impl Session {
                 s.observation = None;
                 s.away = true;
                 s.away_cause = cause;
+                // Live closed has no Set open, whatever the last look saw: a conversation asked for now goes on.
+                if cause == Some(DisconnectCause::Live) {
+                    s.set_open = false;
+                }
                 let working = s.active.as_ref().is_some_and(|op| op.is_turn);
                 // A request about the Set Live left isn't offered again in the next one, nor one that carries on
                 // through a busy Live.
@@ -969,10 +1014,30 @@ impl Session {
         }
     }
     fn begin(&self, place: String, id: String, conversation: Option<&SavedConversation>) {
+        // This Kumi holds the conversation it's in, and lets go of the one it leaves.
+        if let Some(store) = &self.0.options.conversations {
+            let before = {
+                let s = self.0.state.borrow();
+                s.place.clone().map(|before| (before, s.conversation_id.clone()))
+            };
+            if before.as_ref() != Some(&(place.clone(), id.clone())) {
+                if let Some((before, was)) = before {
+                    store.release(&before, &was);
+                }
+                store.claim(&place, &id);
+            }
+        }
         let mut s = self.0.state.borrow_mut();
+        if s.conversation_id != id {
+            s.conversation_name = None;
+            s.copied_from = None;
+            s.touched = false;
+            s.next_note = None;
+        }
         s.place = Some(place);
         s.conversation_id = id.clone();
         s.settled = None;
+        s.as_kept = false;
         s.conversation_first = conversation.and_then(|c| c.first.clone());
         s.conversation_turns = conversation.and_then(|c| c.turns).unwrap_or(0);
         s.changes = conversation
@@ -993,6 +1058,168 @@ impl Session {
                 change
             })
             .collect();
+    }
+    /// An id for a new conversation: none kept has it, in any Set.
+    async fn fresh_id(&self) -> String {
+        match &self.0.options.conversations {
+            Some(store) => store.new_id().await,
+            None => new_conversation_id(now()),
+        }
+    }
+    /// This Kumi takes up a kept conversation, or, when another Kumi that's still open has it, a copy of it to carry on
+    /// in (each window keeps its own turns then): the id to go on with, and the one it was copied from.
+    async fn take_up(&self, place: &str, id: &str) -> (String, Option<String>) {
+        let Some(store) = self.0.options.conversations.clone() else { return (id.to_owned(), None) };
+        let ours = {
+            let s = self.0.state.borrow();
+            s.place.as_deref() == Some(place) && s.conversation_id == id
+        };
+        if ours || store.claim(place, id) == Claim::Ours {
+            return (id.to_owned(), None);
+        }
+        let copy = store.new_id().await;
+        self.notice(format!(
+            "Another Kumi window has this conversation open, so this one carries on in a copy ({copy}); each keeps its own turns."
+        ));
+        (copy, Some(id.to_owned()))
+    }
+    /// Begin a kept conversation taken up by `take_up`.
+    fn begin_taken(&self, place: String, (id, from): (String, Option<String>), conversation: &SavedConversation) {
+        self.begin(place, id, Some(conversation));
+        if from.is_some() {
+            self.0.state.borrow_mut().copied_from = from;
+        }
+    }
+    /// The open Set's own conversation, as Kumi opens on it: its place's current one (or a copy, when another Kumi has
+    /// it), or a new one. The kept one, when it goes on.
+    async fn own_conversation(&self, op: &Operation, project: Option<&String>) -> Result<Option<SavedConversation>, RuntimeError> {
+        let kept = if let (Some(project), Some(store)) = (project, &self.0.options.conversations) {
+            store.current(project).await.ok().flatten()
+        } else {
+            None
+        };
+        self.assert_current(op)?;
+        let (Some(kept), Some(project)) = (kept, project) else {
+            let id = self.fresh_id().await;
+            self.begin(project.cloned().unwrap_or(UNSAVED.into()), id, None);
+            return Ok(None);
+        };
+        let begin = {
+            let s = self.0.state.borrow();
+            kept.id != s.conversation_id || s.place.as_ref() != Some(project)
+        };
+        if begin {
+            let taken = self.take_up(project, &kept.id).await;
+            self.begin_taken(project.clone(), taken, &kept.conversation);
+        }
+        Ok(Some(kept.conversation))
+    }
+    /// Rows as the app shows them: `current` is the conversation going on now (a store marks each place's own latest).
+    fn mark_going(&self, rows: Vec<ConversationSummary>) -> Vec<ConversationSummary> {
+        let (place, id) = {
+            let s = self.0.state.borrow();
+            (s.place.clone(), s.conversation_id.clone())
+        };
+        rows.into_iter().map(|row| ConversationSummary { current: place.as_ref() == Some(&row.place) && row.id == id, ..row }).collect()
+    }
+    /// Go on with a kept conversation the producer chose: Kumi's next answer starts from it.
+    async fn go_to(&self, place: String, id: String, conversation: SavedConversation, said: Option<String>) -> Result<(), RuntimeError> {
+        self.perform(
+            false,
+            Phase::Refresh,
+            Box::new(move |this, op| {
+                async move {
+                    this.drop_kernel().await?;
+                    this.assert_current(&op)?;
+                    if let Some(l) = &this.0.learned {
+                        l.drafts.reset();
+                    }
+                    {
+                        let mut s = this.0.state.borrow_mut();
+                        s.chosen = Some(Chosen { place, id, conversation });
+                        s.must_reset = false;
+                        s.turns = 0;
+                        s.interrupted = None;
+                    }
+                    this.observe(&op, None, false).await?;
+                    this.hold_taken_up();
+                    if let Some(said) = said {
+                        this.notice(said);
+                    }
+                    Ok(None)
+                }
+                .boxed_local()
+            }),
+            None,
+            None,
+        )?
+        .await
+    }
+    /// What the producer calls the DAW and a place in it, as the integration says ("Live", "Set").
+    fn words(&self) -> (&'static str, &'static str) {
+        match &self.0.state.borrow().integration {
+            Some(integration) => integration.words(),
+            None => DAW_WORDS,
+        }
+    }
+    /// The conversation the producer chose goes on as `going` (a copy of it, or a fork): Kumi asks about that one, steps
+    /// aside from it for another Set, and comes back to it from here.
+    fn wanted_goes_on_as(&self, place: &str, id: &str, going: &str) {
+        let mut s = self.0.state.borrow_mut();
+        if let Some(w) = s.wanted.as_mut().filter(|w| w.place == place && w.id == id && id != going) {
+            w.from.get_or_insert_with(|| id.to_owned());
+            w.id = going.to_owned();
+        }
+    }
+    /// The conversation the producer chose, as kept: its copy's, else (a copy with nothing kept yet) the one copied.
+    async fn kept_wanted(&self, wanted: &Wanted) -> Result<Option<(String, SavedConversation)>, RuntimeError> {
+        let Some(store) = self.0.options.conversations.clone() else { return Ok(None) };
+        for id in std::iter::once(&wanted.id).chain(wanted.from.as_ref()) {
+            if let Some(kept) = store.load(&wanted.place, id).await? {
+                return Ok(Some((id.clone(), kept)));
+            }
+        }
+        Ok(None)
+    }
+    /// What the store lists for the conversation the producer chose (or the one it copies, before the copy is kept).
+    async fn wanted_row(&self, wanted: &Wanted) -> Option<ConversationSummary> {
+        let store = self.0.options.conversations.clone()?;
+        for id in std::iter::once(&wanted.id).chain(wanted.from.as_ref()) {
+            if let Ok(ConversationMatch::One(row)) = store.find(id).await {
+                return Some(row);
+            }
+        }
+        None
+    }
+    /// The conversation the producer chose is no longer waiting: a question asked about it goes away.
+    fn drop_wanted(&self) -> Option<Wanted> {
+        let wanted = self.0.state.borrow_mut().wanted.take();
+        if wanted.as_ref().is_some_and(|w| w.asked.is_some()) {
+            self.emit(SessionEvent::SetAsked { ask: None });
+        }
+        wanted
+    }
+    /// Ask about the conversation the producer chose, whose Set isn't the open one (`key`): once for each Set that opens.
+    async fn ask_about_wanted(&self, key: &str, open: Option<String>) {
+        let Some(wanted) = self.0.state.borrow().wanted.clone() else { return };
+        if wanted.asked.as_deref() == Some(key) {
+            return;
+        }
+        if let Some(w) = self.0.state.borrow_mut().wanted.as_mut() {
+            w.asked = Some(key.to_owned());
+        }
+        let row = self.wanted_row(&wanted).await;
+        let (daw, noun) = self.words();
+        self.emit(SessionEvent::SetAsked {
+            ask: Some(SetAsk {
+                id: wanted.id.clone(),
+                title: row.as_ref().map(|row| row.title()).unwrap_or_default(),
+                set: row.and_then(|row| row.set),
+                open,
+                daw: daw.into(),
+                noun: noun.into(),
+            }),
+        });
     }
     async fn build_kernel(
         &self,
@@ -1146,8 +1373,24 @@ impl Session {
         let must_reset = self.0.state.borrow().must_reset;
         let identity = held.as_ref().is_some_and(|h| h.key != observation.key);
         let revision = observation.revision.clone().unwrap_or_default();
+        // The open Set's place, when the DAW was read: a saved Set's project, or an unsaved Set's. (Without the DAW, the
+        // project is the last one seen.)
+        let here = observation.set.as_ref().map(|_| observation.project.as_ref().map(|p| p.id.clone()).unwrap_or(UNSAVED.into()));
+        // A conversation the producer chose went on while no Set was open, and another Set is open now (or the producer
+        // left it): the open Set's own conversation goes on, and Kumi asks about the chosen one. Live coming back keeps the
+        // look's key, so this isn't a Set change to it.
+        let astray = {
+            let mut s = self.0.state.borrow_mut();
+            let left = std::mem::take(&mut s.own_set);
+            left || s.wanted.as_ref().is_some_and(|w| {
+                w.place != UNSAVED
+                    && s.conversation_id == w.id
+                    && s.place.as_ref() == Some(&w.place)
+                    && here.as_ref().is_some_and(|here| *here != w.place)
+            })
+        };
         let mut from = None;
-        if let Some(h) = held.as_ref().filter(|h| !identity && !must_reset && h.revision != revision) {
+        if let Some(h) = held.as_ref().filter(|h| !astray && !identity && !must_reset && h.revision != revision) {
             if h.value.has_checkpoint() {
                 from = Some(h.value.checkpoint()?);
                 self.drop_kernel().await?;
@@ -1156,10 +1399,12 @@ impl Session {
         }
         let mut reason = None;
         let first = self.0.state.borrow().kernel.is_none() && !must_reset;
-        if self.0.state.borrow().kernel.is_some() && (identity || must_reset || held.as_ref().is_some_and(|h| h.revision != revision)) {
+        if self.0.state.borrow().kernel.is_some()
+            && (astray || identity || must_reset || held.as_ref().is_some_and(|h| h.revision != revision))
+        {
             self.drop_kernel().await?;
             self.assert_current(op)?;
-            reason = Some(if identity {
+            reason = Some(if identity || astray {
                 "set"
             } else if must_reset {
                 "cancelled"
@@ -1174,21 +1419,33 @@ impl Session {
         }
         if self.0.state.borrow().kernel.is_none() {
             let project = observation.project.as_ref().map(|p| p.id.clone());
-            let (fresh, chosen, switched, carry, settled) = {
+            let (fresh, chosen, switched, carry, settled, wanted) = {
                 let mut s = self.0.state.borrow_mut();
-                (s.start_fresh, s.chosen.take(), s.switched.clone(), s.carry.clone(), s.settled.clone())
+                (s.start_fresh, s.chosen.take(), s.switched.clone(), s.carry.clone(), s.settled.clone(), s.wanted.clone())
             };
             let carry = carry
                 .filter(|(_, place)| !(project.is_some() && place.is_some() && place.as_deref() != Some(UNSAVED) && place != &project));
+            // A conversation the producer chose goes on when its Set is open, or while none is (an unsaved Set's goes with
+            // whichever is open).
+            let wanted_here = wanted.clone().filter(|w| here.is_none() || here.as_ref() == Some(&w.place) || w.place == UNSAVED);
             let mut resumed = None;
             let mut picked = false;
+            // Taken up here (at the start, or once its Set opened): its Set's current from the moment it goes on.
+            let mut taken_up = false;
             if fresh {
-                self.begin(project.clone().unwrap_or(UNSAVED.into()), new_conversation_id(now()), None);
+                let id = self.fresh_id().await;
+                self.begin(project.clone().unwrap_or(UNSAVED.into()), id, None);
             } else if let Some(chosen) = chosen {
                 from = Some(chosen.conversation.checkpoint.clone());
                 picked = true;
-                self.begin(chosen.place, chosen.id, Some(&chosen.conversation));
+                let taken = self.take_up(&chosen.place, &chosen.id).await;
+                self.wanted_goes_on_as(&chosen.place, &chosen.id, &taken.0);
+                self.begin_taken(chosen.place, taken, &chosen.conversation);
+                self.0.state.borrow_mut().touched = true;
                 resumed = Some(chosen.conversation);
+            } else if astray {
+                resumed = self.own_conversation(op, project.as_ref()).await?;
+                from = resumed.as_ref().map(|kept| kept.checkpoint.clone());
             } else if from.is_some() {
             } else if let Some(switched) = switched.filter(|s| s.key == observation.key) {
                 from = Some(switched.checkpoint);
@@ -1196,26 +1453,48 @@ impl Session {
                 from = Some(checkpoint);
             } else if let Some(settled) = settled.filter(|s| reason == Some("cancelled") && s.key == observation.key) {
                 from = Some(settled.checkpoint);
-            } else {
-                let kept = if let (Some(project), Some(store)) = (&project, &self.0.options.conversations) {
-                    store.current(project).await.ok().flatten()
-                } else {
-                    None
+            } else if let Some(w) = wanted_here {
+                let going = {
+                    let s = self.0.state.borrow();
+                    (s.conversation_id == w.id && s.place.as_ref() == Some(&w.place)).then(|| s.settled.clone())
                 };
-                self.assert_current(op)?;
-                if let Some(kept) = kept {
-                    from = Some(kept.conversation.checkpoint.clone());
-                    let begin = {
-                        let s = self.0.state.borrow();
-                        kept.id != s.conversation_id || s.place != project
-                    };
-                    if begin {
-                        self.begin(project.clone().unwrap(), kept.id, Some(&kept.conversation));
+                match going {
+                    // It went on while no Set was open: it carries on now that its own is.
+                    Some(Some(settled)) => from = Some(settled.checkpoint),
+                    _ => {
+                        let saving = self.0.saving.borrow().clone();
+                        let _ = saving.await;
+                        let kept = self.kept_wanted(&w).await.ok().flatten();
+                        self.assert_current(op)?;
+                        match kept {
+                            // Already the one going on: nothing new to show.
+                            Some((_, kept)) if going.is_some() => from = Some(kept.checkpoint),
+                            Some((id, kept)) => {
+                                from = Some(kept.checkpoint.clone());
+                                picked = true;
+                                taken_up = true;
+                                let taken = self.take_up(&w.place, &id).await;
+                                self.wanted_goes_on_as(&w.place, &w.id, &taken.0);
+                                self.begin_taken(w.place.clone(), taken, &kept);
+                                self.0.state.borrow_mut().touched = true;
+                                resumed = Some(kept);
+                            }
+                            None => {
+                                self.notice("That conversation isn't kept any more.");
+                                self.drop_wanted();
+                                resumed = self.own_conversation(op, project.as_ref()).await?;
+                                from = resumed.as_ref().map(|kept| kept.checkpoint.clone());
+                            }
+                        }
                     }
-                    resumed = Some(kept.conversation);
-                } else {
-                    self.begin(project.clone().unwrap_or(UNSAVED.into()), new_conversation_id(now()), None);
                 }
+                // Its Set is open: it's no longer waiting.
+                if here.is_some() {
+                    self.drop_wanted();
+                }
+            } else {
+                resumed = self.own_conversation(op, project.as_ref()).await?;
+                from = resumed.as_ref().map(|kept| kept.checkpoint.clone());
             }
             {
                 let mut s = self.0.state.borrow_mut();
@@ -1237,6 +1516,9 @@ impl Session {
                 }
             };
             self.0.state.borrow_mut().kernel = Some(Held { value: value.clone(), key: observation.key.clone(), revision, lifetime });
+            if taken_up && unreadable.is_none() {
+                self.hold_taken_up();
+            }
             if let Some(kept) = unreadable {
                 self.emit(SessionEvent::Resumed {
                     saved_at: kept.saved_at,
@@ -1248,7 +1530,7 @@ impl Session {
                 self.notice("Kumi couldn't continue that conversation with this model, so it's shown above and a fresh one starts here.");
             } else {
                 match reason {
-                    Some("set") => self.notice(if resumed.is_some() {
+                    Some("set") => self.notice(if resumed.is_some() || from.is_some() {
                         format!(
                             "The open Set changed; continuing your conversation about {}.",
                             observation.project.as_ref().map(|p| p.name.as_str()).unwrap_or("this Set")
@@ -1280,11 +1562,59 @@ impl Session {
                         chosen: picked.then_some(true),
                         unreadable: None,
                     });
+                    self.other_model(&kept, value.as_ref());
                 }
+            }
+            // The conversation the producer chose went on in its own Set, now open: nothing's waiting. Another Set is open:
+            // ask what to do.
+            let done = {
+                let s = self.0.state.borrow();
+                s.wanted.as_ref().is_some_and(|w| here.as_ref() == Some(&w.place) && s.conversation_id == w.id)
+            };
+            if done {
+                self.drop_wanted();
+            }
+            let elsewhere = self.0.state.borrow().wanted.as_ref().is_some_and(|w| here.as_ref().is_some_and(|here| *here != w.place));
+            if elsewhere {
+                self.ask_about_wanted(&observation.key, observation.project.as_ref().map(|p| p.name.clone())).await;
             }
         }
         self.0.state.borrow_mut().must_reset = false;
         Ok(())
+    }
+    /// Said once a conversation: it was had with another model than the one carrying it on now, which stays (Kumi never
+    /// switches by itself).
+    fn other_model(&self, kept: &SavedConversation, kernel: &dyn Kernel) {
+        let was = kept.checkpoint.origin.clone().filter(|origin| origin.contains('/'));
+        let now = kernel.checkpoint().ok().and_then(|checkpoint| checkpoint.origin);
+        let (Some(was), Some(now)) = (was, now) else { return };
+        let id = self.0.state.borrow().conversation_id.clone();
+        if was == now || !self.0.state.borrow_mut().model_said.insert(id) {
+            return;
+        }
+        let name = |model: &str| model.split_once('/').map_or(model, |(_, name)| name).to_string();
+        self.notice(format!("This conversation was with {}; it carries on with {} (/model changes it).", name(&was), name(&now)));
+    }
+    /// A conversation taken up goes on as it's kept, its file untouched (looking at one doesn't change it): it's its
+    /// place's current one, so Kumi comes back to it, and what the kernel restored from it is settled here, so a request
+    /// stopped before its first answer goes back to it. A copy is kept from its first request.
+    fn hold_taken_up(&self) {
+        let held = self.0.state.borrow().kernel.clone();
+        let Some(held) = held.filter(|h| h.value.has_checkpoint()) else {
+            return;
+        };
+        let Ok(checkpoint) = held.value.checkpoint() else {
+            return;
+        };
+        let (place, id, copy) = {
+            let mut s = self.0.state.borrow_mut();
+            s.settled = Some(Settled { checkpoint, key: held.key });
+            s.as_kept = true;
+            (s.place.clone(), s.conversation_id.clone(), s.copied_from.is_some())
+        };
+        if let (Some(store), Some(place), false) = (self.0.options.conversations.clone(), place, copy) {
+            self.enqueue(async move { store.set_current(&place, &id).await });
+        }
     }
     fn save_conversation(&self, turn: bool) {
         let held = self.0.state.borrow().kernel.clone();
@@ -1294,16 +1624,21 @@ impl Session {
         let Ok(checkpoint) = held.value.checkpoint() else {
             return;
         };
-        let (place, id, conversation) = {
+        let empty = checkpoint.messages.is_empty();
+        let (place, id, conversation, name, from) = {
             let mut s = self.0.state.borrow_mut();
             s.settled = Some(Settled { checkpoint: checkpoint.clone(), key: held.key });
+            s.as_kept = false;
             if turn {
                 s.conversation_turns += 1;
+                s.touched = true;
             }
             if s.conversation_first.is_none() {
                 s.conversation_first =
                     transcript_of(&checkpoint.messages).iter().find(|l| l.role == TranscriptRole::User).map(|l| head(&l.text, 200));
             }
+            // Its name and where a copy came from go beside it with the first save that keeps it.
+            let (name, from) = if empty { (None, None) } else { (s.conversation_name.take(), s.copied_from.take()) };
             (
                 s.place.clone(),
                 s.conversation_id.clone(),
@@ -1315,10 +1650,18 @@ impl Session {
                     changes: (!s.changes.is_empty())
                         .then(|| s.changes.iter().skip(s.changes.len().saturating_sub(2000)).cloned().collect()),
                 },
+                name,
+                from,
             )
         };
         if let (Some(store), Some(place)) = (self.0.options.conversations.clone(), place) {
-            self.enqueue(async move { store.save(&place, &id, &conversation).await });
+            self.enqueue(async move {
+                if name.is_some() || from.is_some() {
+                    store.create(&place, &id, &conversation, name.as_deref(), from.as_deref()).await
+                } else {
+                    store.save(&place, &id, &conversation).await
+                }
+            });
         }
     }
     async fn observe(&self, op: &Operation, pinned: Option<PinnedNode>, continuing: bool) -> Result<Observation, RuntimeError> {
@@ -1333,6 +1676,7 @@ impl Session {
             let mut s = self.0.state.borrow_mut();
             s.project = snapshot.project.as_ref().map(|p| p.id.clone());
             s.set_name = snapshot.project.as_ref().map(|p| p.name.clone());
+            s.set_open = snapshot.set.is_some();
             if let Some(identity) = &snapshot.set {
                 s.set_identity = Some(identity.clone());
             }
@@ -1880,15 +2224,16 @@ impl SessionController for Session {
                     if let Some(l) = &this.0.learned {
                         l.drafts.reset();
                     }
-                    let (place, integrated) = {
+                    let (place, integrated, copy) = {
                         let mut s = this.0.state.borrow_mut();
                         s.start_fresh = true;
                         s.turns = 0;
                         s.must_reset = false;
                         s.settled = None;
                         s.interrupted = None;
-                        (s.place.clone(), s.integration.is_some())
+                        (s.place.clone(), s.integration.is_some(), s.copied_from.is_some())
                     };
+                    this.drop_wanted();
                     if let (Some(store), Some(place)) = (this.0.options.conversations.clone(), place) {
                         this.enqueue(async move { store.fresh(&place).await });
                     }
@@ -1904,7 +2249,11 @@ impl SessionController for Session {
                         this.0.state.borrow_mut().objective = None;
                         this.emit(SessionEvent::ObjectiveCleared);
                     }
-                    this.notice("New conversation. The last one is kept; /conversations goes back to it.");
+                    this.notice(match this.0.options.conversations {
+                        Some(_) if !copy => "New conversation. The last one is kept; /resume goes back to it.",
+                        // A chat without Live keeps none, and a copy is kept from its first request.
+                        _ => "New conversation.",
+                    });
                     Ok(None)
                 }
                 .boxed_local()
@@ -1948,27 +2297,38 @@ impl SessionController for Session {
         .await
     }
     fn has_conversations(&self) -> bool {
-        true
+        self.0.options.conversations.is_some()
     }
     async fn conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
         let place = {
             let s = self.0.state.borrow();
             s.place.clone().or(s.project.clone()).unwrap_or(UNSAVED.into())
         };
-        Ok(if let Some(store) = &self.0.options.conversations { store.list(&place).await.unwrap_or_default() } else { vec![] })
+        Ok(if let Some(store) = &self.0.options.conversations {
+            self.mark_going(store.list(&place).await.unwrap_or_default())
+        } else {
+            vec![]
+        })
     }
     fn has_resume_conversation(&self) -> bool {
         true
     }
     async fn resume_conversation(&self, id: &str) -> Result<bool, RuntimeError> {
-        let Some(store) = &self.0.options.conversations else {
+        let Some(store) = self.0.options.conversations.clone() else {
             return Ok(false);
         };
-        let (place, same) = {
+        // Where it's kept: this Set's place, or any Set's, by its id.
+        let (here, open, set_open) = {
             let s = self.0.state.borrow();
-            let place = s.place.clone().or(s.project.clone()).unwrap_or(UNSAVED.into());
-            let same = s.conversation_id == id && s.place.as_deref() == Some(&place);
-            (place, same)
+            (s.place.clone().or(s.project.clone()).unwrap_or(UNSAVED.into()), s.project.clone(), s.set_open)
+        };
+        let place = match store.find(id).await? {
+            ConversationMatch::One(row) if row.id == id => row.place,
+            _ => here.clone(),
+        };
+        let same = {
+            let s = self.0.state.borrow();
+            s.conversation_id == id && s.place.as_deref() == Some(&place)
         };
         if same {
             return Ok(true);
@@ -1978,35 +2338,225 @@ impl SessionController for Session {
         let Some(conversation) = store.load(&place, id).await? else {
             return Ok(false);
         };
+        // The open Set's place, when Live was read (without it, the project is the last one seen).
+        let open = set_open.then(|| open.unwrap_or(UNSAVED.into()));
+        self.drop_wanted();
+        // Another Set's, while a Set is open: the producer says whether to open its Set, carry it on here in a copy, or
+        // leave it.
+        if open.as_ref().is_some_and(|open| *open != place) && place != UNSAVED {
+            let key = {
+                let mut s = self.0.state.borrow_mut();
+                s.wanted = Some(Wanted { place, id: id.to_owned(), from: None, asked: None });
+                s.set.clone().unwrap_or_default()
+            };
+            let name = self.0.state.borrow().set_name.clone().filter(|_| self.0.state.borrow().project.is_some());
+            self.ask_about_wanted(&key, name).await;
+            return Ok(true);
+        }
+        // No Set open yet: it goes on now, and Kumi asks once a Set opens that isn't its own.
+        if open.is_none() && place != UNSAVED {
+            self.0.state.borrow_mut().wanted = Some(Wanted { place: place.clone(), id: id.to_owned(), from: None, asked: None });
+        }
         let id = id.to_owned();
-        self.perform(
-            false,
-            Phase::Refresh,
-            Box::new(move |this, op| {
-                async move {
-                    this.drop_kernel().await?;
-                    this.assert_current(&op)?;
-                    if let Some(l) = &this.0.learned {
-                        l.drafts.reset();
-                    }
-                    {
-                        let mut s = this.0.state.borrow_mut();
-                        s.chosen = Some(Chosen { place, id, conversation });
-                        s.must_reset = false;
-                        s.turns = 0;
-                        s.interrupted = None;
-                    }
-                    this.observe(&op, None, false).await?;
-                    this.save_conversation(false);
-                    Ok(None)
-                }
-                .boxed_local()
-            }),
-            None,
-            None,
-        )?
-        .await?;
+        self.go_to(place, id, conversation, None).await?;
         Ok(true)
+    }
+    async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
+        let Some(store) = &self.0.options.conversations else { return Ok(vec![]) };
+        Ok(self.mark_going(store.all().await?))
+    }
+    async fn find_conversation(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
+        let Some(store) = &self.0.options.conversations else { return Ok(ConversationMatch::None) };
+        Ok(match store.find(word).await? {
+            ConversationMatch::One(row) => ConversationMatch::One(self.mark_going(vec![row]).remove(0)),
+            ConversationMatch::Several(rows) => ConversationMatch::Several(self.mark_going(rows)),
+            other => other,
+        })
+    }
+    async fn rename_conversation(&self, id: Option<&str>, name: Option<&str>) -> Result<bool, RuntimeError> {
+        let Some(store) = self.0.options.conversations.clone() else { return Ok(false) };
+        let (place, now) = {
+            let s = self.0.state.borrow();
+            (s.place.clone().unwrap_or(UNSAVED.into()), s.conversation_id.clone())
+        };
+        let id = id.unwrap_or(&now).to_owned();
+        let saving = self.0.saving.borrow().clone();
+        let _ = saving.await;
+        let place = match store.find(&id).await? {
+            ConversationMatch::One(row) if row.id == id => row.place,
+            // This one isn't kept yet: its name goes with its first save.
+            _ if id == now => {
+                self.0.state.borrow_mut().conversation_name = name.map(str::to_owned);
+                return Ok(true);
+            }
+            _ => place,
+        };
+        store.rename(&place, &id, name).await
+    }
+    async fn pin_conversation(&self, id: &str, pinned: bool) -> Result<bool, RuntimeError> {
+        let Some(store) = &self.0.options.conversations else { return Ok(false) };
+        match store.find(id).await? {
+            ConversationMatch::One(row) if row.id == id => store.pin(&row.place, id, pinned).await,
+            _ => Ok(false),
+        }
+    }
+    async fn delete_conversation(&self, id: &str) -> Result<bool, RuntimeError> {
+        let Some(store) = &self.0.options.conversations else { return Ok(false) };
+        if self.0.state.borrow().conversation_id == id {
+            return Err(KumiError::new(FailureKind::Request, "That's the conversation going on now: /new first, then delete it.").into());
+        }
+        match store.find(id).await? {
+            ConversationMatch::One(row) if row.id == id => store.delete(&row.place, id).await,
+            _ => Ok(false),
+        }
+    }
+    async fn fork_conversation(&self, name: Option<&str>) -> Result<Option<String>, RuntimeError> {
+        let Some(store) = self.0.options.conversations.clone() else { return Ok(None) };
+        let (held, settled, place, old, copied) = {
+            let s = self.0.state.borrow();
+            if s.active.is_some() {
+                return Err(KumiError::new(FailureKind::Request, "Kumi is still working: fork once it's done.").into());
+            }
+            let place = s.place.clone().unwrap_or(UNSAVED.into());
+            (s.kernel.clone(), s.settled.clone(), place, s.conversation_id.clone(), s.copied_from.clone())
+        };
+        let checkpoint = held
+            .filter(|h| h.value.has_checkpoint())
+            .and_then(|h| h.value.checkpoint().ok())
+            .or(settled.map(|s| s.checkpoint))
+            .filter(|checkpoint| !checkpoint.messages.is_empty());
+        let Some(checkpoint) = checkpoint else { return Ok(None) };
+        let saving = self.0.saving.borrow().clone();
+        let _ = saving.await;
+        let id = store.new_id().await;
+        let conversation = {
+            let s = self.0.state.borrow();
+            SavedConversation {
+                saved_at: now(),
+                checkpoint,
+                turns: Some(s.conversation_turns),
+                first: s.conversation_first.clone().filter(|s| !s.is_empty()),
+                changes: (!s.changes.is_empty()).then(|| s.changes.clone()),
+            }
+        };
+        // The original as it is now (as it was kept, when nothing's been asked since it was taken up), then the copy: the
+        // same words, changes and undo, a new id from here on.
+        if !self.0.state.borrow().as_kept {
+            self.save_conversation(false);
+        }
+        let saving = self.0.saving.borrow().clone();
+        let _ = saving.await;
+        // A copy with nothing kept yet stands for the conversation it copies: the fork comes from that one.
+        let source = copied.unwrap_or_else(|| old.clone());
+        store.create(&place, &id, &conversation, name, Some(&source)).await?;
+        store.release(&place, &old);
+        store.claim(&place, &id);
+        {
+            let mut s = self.0.state.borrow_mut();
+            s.conversation_id = id.clone();
+            s.conversation_name = None;
+            s.copied_from = None;
+            s.touched = true;
+        }
+        self.wanted_goes_on_as(&place, &old, &id);
+        self.notice(format!("Forked; the original stays as {source}."));
+        Ok(Some(id))
+    }
+    async fn answer_set(&self, choice: SetChoice) -> Result<(), RuntimeError> {
+        let Some(wanted) = self.0.state.borrow().wanted.clone() else { return Ok(()) };
+        // Answered: the question goes. Opening keeps the conversation waiting for its Set (asked, so not asked again here).
+        match choice {
+            SetChoice::Open => self.emit(SessionEvent::SetAsked { ask: None }),
+            _ => {
+                self.drop_wanted();
+            }
+        }
+        let row = self.wanted_row(&wanted).await;
+        let (daw, noun) = self.words();
+        let named = row.as_ref().and_then(|row| row.set.clone());
+        let set = named.as_ref().map(|name| format!("“{name}”")).unwrap_or_else(|| format!("its {noun}"));
+        match choice {
+            // The open Set's own conversation goes on, whichever was going on.
+            SetChoice::Cancel => {
+                let going = {
+                    let s = self.0.state.borrow();
+                    s.conversation_id == wanted.id && s.place.as_ref() == Some(&wanted.place)
+                };
+                if going && self.0.state.borrow().started {
+                    self.0.state.borrow_mut().own_set = true;
+                    self.refresh().await?;
+                }
+                Ok(())
+            }
+            SetChoice::Open => {
+                let integration = self.0.state.borrow().integration.clone();
+                let opened = match integration {
+                    Some(integration) => integration.open_place(&wanted.place, abort::timeout(30_000)).await?,
+                    None => Err(format!("Kumi isn't connected to {daw}.")),
+                };
+                // It's taken up once its Set is open, however that Set comes to be opened.
+                match opened {
+                    Ok(()) => self.notice(format!("Opening {set} in {daw}; this conversation carries on once it's open.")),
+                    Err(why) => self.notice(format!("{why} Open {set} in {daw} yourself, and this conversation carries on there.")),
+                }
+                Ok(())
+            }
+            SetChoice::Copy => {
+                let Some(store) = self.0.options.conversations.clone() else { return Ok(()) };
+                let saving = self.0.saving.borrow().clone();
+                let _ = saving.await;
+                let Some((source, kept)) = self.kept_wanted(&wanted).await? else {
+                    self.notice("That conversation isn't kept any more.");
+                    return Ok(());
+                };
+                let (here, open) = {
+                    let s = self.0.state.borrow();
+                    (s.project.clone().unwrap_or(UNSAVED.into()), s.set_name.clone().filter(|_| s.project.is_some()))
+                };
+                // What Kumi read of the other Set stays with the original; the model is told where it is now.
+                let mut checkpoint = kept.checkpoint.clone();
+                checkpoint.messages = crate::kernel::budget::without_observations(&checkpoint.messages);
+                let copy = SavedConversation { saved_at: now(), checkpoint, changes: None, first: kept.first.clone(), turns: kept.turns };
+                let id = store.new_id().await;
+                store.create(&here, &id, &copy, None, Some(&source)).await?;
+                let open = open.map(|name| format!("“{name}”")).unwrap_or_else(|| format!("a {noun} not saved yet"));
+                let other = named.map(|name| format!("another {noun}, “{name}”,")).unwrap_or_else(|| format!("another {noun}"));
+                self.go_to(here, id, copy, Some(format!("Carrying on a copy here; the original stays with {set} as {source}."))).await?;
+                self.0.state.borrow_mut().next_note = Some(format!(
+                    "\n\n[Kumi] This conversation began about {other} and carries on here about {open}, as a copy: what Kumi read of that {noun} was taken out. Read the open {noun} before changing anything. (Kumi wrote this note, not the producer.)"
+                ));
+                Ok(())
+            }
+        }
+    }
+    async fn conversation_now(&self) -> Option<ConversationNow> {
+        // A chat that keeps none (without Live, started without -c or -r) has nothing to say of one.
+        self.0.options.conversations.as_ref()?;
+        let (place, id, touched, first, name) = {
+            let s = self.0.state.borrow();
+            (s.place.clone(), s.conversation_id.clone(), s.touched, s.conversation_first.clone(), s.conversation_name.clone())
+        };
+        let row = match &self.0.options.conversations {
+            Some(store) => match store.find(&id).await {
+                Ok(ConversationMatch::One(row)) if Some(&row.place) == place.as_ref() => Some(row),
+                _ => None,
+            },
+            None => None,
+        };
+        Some(ConversationNow {
+            title: match &row {
+                Some(row) if name.is_none() => row.title(),
+                _ => super::conversations::title(name.as_deref(), first.as_deref().unwrap_or("")),
+            },
+            kept: row.is_some(),
+            touched,
+            id,
+        })
+    }
+    async fn conversation_lines(&self, id: &str) -> Result<Vec<TranscriptLine>, RuntimeError> {
+        let Some(store) = &self.0.options.conversations else { return Ok(vec![]) };
+        let ConversationMatch::One(row) = store.find(id).await? else { return Ok(vec![]) };
+        Ok(store.load(&row.place, id).await?.map(|kept| transcript_of(&kept.checkpoint.messages)).unwrap_or_default())
     }
     fn has_watch(&self) -> bool {
         true
@@ -2637,6 +3187,14 @@ impl SessionController for Session {
             }
             let saving = this.0.saving.borrow().clone();
             let _ = this.bounded(saving).await;
+            // Another Kumi may take this conversation up now.
+            let held = {
+                let s = this.0.state.borrow();
+                s.place.clone().map(|place| (place, s.conversation_id.clone()))
+            };
+            if let (Some(store), Some((place, id))) = (&this.0.options.conversations, held) {
+                store.release(&place, &id);
+            }
             let kept = this.clone();
             let _ = this
                 .bounded(async move {

@@ -235,6 +235,9 @@ impl Session {
         // A request the judge can measure gets a hint to work in judged rounds; the model decides, and its own judge
         // call starts the loop.
         let note = if run.is_none() && explicit.is_none() && wants_loop(&text) { format!("{note}{LOOP_HINT}") } else { note };
+        // A conversation carried on in another Set says so once, with the first request there.
+        let moved = self.0.state.borrow_mut().next_note.take().unwrap_or_default();
+        let note = format!("{note}{moved}");
         {
             let mut s = self.0.state.borrow_mut();
             if run.is_none() {

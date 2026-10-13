@@ -435,6 +435,49 @@ impl SessionController for Control {
         self.call(format!("resume:{id}"));
         Ok(true)
     }
+    async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
+        let rows: Vec<ConversationSummary> = self.get("all").unwrap_or_else(|| self.conversations.borrow().clone());
+        // As the session marks them: `current` is the conversation going on, not each Set's own latest.
+        Ok(match self.get::<String>("going") {
+            Some(going) => rows.into_iter().map(|row| ConversationSummary { current: row.id == going, ..row }).collect(),
+            None => rows,
+        })
+    }
+    async fn find_conversation(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
+        let all = self.all_conversations().await?;
+        let found: Vec<_> = all.into_iter().filter(|row| row.id.starts_with(word) || row.name.as_deref() == Some(word)).collect();
+        Ok(match found.len() {
+            0 => ConversationMatch::None,
+            1 => ConversationMatch::One(found[0].clone()),
+            _ => ConversationMatch::Several(found),
+        })
+    }
+    async fn rename_conversation(&self, id: Option<&str>, name: Option<&str>) -> Result<bool, RuntimeError> {
+        self.call(format!("rename:{}:{}", id.unwrap_or("this"), name.unwrap_or("")));
+        Ok(true)
+    }
+    async fn pin_conversation(&self, id: &str, pinned: bool) -> Result<bool, RuntimeError> {
+        self.call(format!("pin:{id}:{pinned}"));
+        Ok(true)
+    }
+    async fn delete_conversation(&self, id: &str) -> Result<bool, RuntimeError> {
+        self.call(format!("delete:{id}"));
+        Ok(true)
+    }
+    async fn fork_conversation(&self, name: Option<&str>) -> Result<Option<String>, RuntimeError> {
+        self.call(format!("fork:{}", name.unwrap_or("")));
+        Ok(Some("fork01".into()))
+    }
+    async fn answer_set(&self, choice: SetChoice) -> Result<(), RuntimeError> {
+        self.call(format!("answer:{}", serde_json::to_value(choice).unwrap().as_str().unwrap()));
+        Ok(())
+    }
+    async fn conversation_now(&self) -> Option<ConversationNow> {
+        self.get("now")
+    }
+    async fn conversation_lines(&self, _: &str) -> Result<Vec<TranscriptLine>, RuntimeError> {
+        Ok(self.get("lines").unwrap_or_default())
+    }
     fn has_library(&self) -> bool {
         self.library.borrow().is_some()
     }

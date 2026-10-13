@@ -181,7 +181,8 @@ Once the bridge is installed and chosen in Live, `kumi` finds it and connects;
 there is nothing to configure. Without it, Kumi starts anyway, chats without
 Live (**No Live access**) and offers to connect. `kumi --bridge-config
 <absolute path>` uses a bridge configuration of your own; `kumi
---inference-only` chats without Live.
+--inference-only` chats without Live, and keeps the conversation only when it
+carries one on (`-c` or `-r`).
 
 **Willington.** Willington's native bindings come in Kumi's bridge from the
 release that carries their files; until then, you can install Willington
@@ -829,12 +830,38 @@ log, it stays on your computer and goes out only in a `kumi report`.
 
 ## Conversations and catching up
 
-Kumi keeps each saved Set's conversations in `~/.kumi/projects`: saved after
-every answer, the latest 20 per Set, each up to about 256 KB (the oldest
-exchanges drop off). Opening Kumi on a saved Set carries on its latest
-conversation, with its last 100 changes in HISTORY (without undo). `/new` starts afresh and
-keeps the last one; `/conversations` goes back to any of them. An unsaved Set's
-conversation moves to the Set's own folder when you first save it.
+Kumi keeps each Set's conversations in `~/.kumi/projects`, saved after every
+answer, each up to about 256 KB (the oldest exchanges drop off). Opening Kumi on
+a saved Set carries on its latest conversation, with its last 100 changes in
+HISTORY (without undo). `/new` starts afresh and keeps the last one. An unsaved
+Set's conversation moves to the Set's own folder when you first save it.
+
+- **Going back:** `/resume` (or `/conversations`) lists this Set's
+  conversations, and Tab shows every Set's. Type to filter; Enter goes back to
+  one; ctrl+f renames, pins or deletes it, or copies its id.
+- **From the shell:** `kumi -c` carries on the conversation you had last, in
+  any Set. `kumi -r <id or name>` carries on that one (the start of an id is
+  enough), and `kumi -r` alone lets you choose. Both work with
+  `--inference-only` too.
+- **Ids:** every conversation has one, such as `mv66me0m3fa91c`. `/status`
+  shows it, and as Kumi closes it says "Continue this conversation:
+  kumi -r mv66me0m3fa91c" after a run that used it.
+- **Names and copies:** `/rename <name>` names this conversation, `/new <name>`
+  names a new one, and `/fork` carries on in a copy (the original stays).
+- **Another Set's conversation:** Kumi asks first: open its Set in Live (Live
+  may ask about the open Set), carry it on here as a copy (without what Kumi
+  read of the other Set), or cancel. With Live closed, it carries on, and Kumi
+  asks once Live opens another Set.
+- **Two Kumi windows:** a conversation open in one carries on in a copy in the
+  other.
+- **The model:** going back keeps the model you use now; Kumi says once when
+  the conversation was had with another.
+- **Keeping:** each Set keeps its 20 newest conversations, any used in the last
+  90 days (`conversations.keepDays`; `0` keeps all) and the pinned ones. With
+  `keepDays` taken out of settings, Kumi keeps the longer of 90 days and the
+  value last set (`0` still keeps all). After a rollback, a Kumi 1.16 or
+  earlier keeps only each Set's 20 newest, and so does a Kumi window opened
+  before the update, until it closes.
 
 When you mention something from before ("the reverb chain from last week's
 vocal"), Kumi looks through the conversations kept for every Set, and its
@@ -843,8 +870,10 @@ it finds goes to the model like any other read.
 
 Kumi also remembers each saved Set as it last saw it. Next time, the welcome
 screen says what changed meanwhile ("Since you were last here · 3 days ago:
-Tempo 120 → 124 BPM; Added track “Pad”"), and Kumi takes it into account. A Set
-is recognized by its file path, so Save As starts afresh.
+Tempo 120 → 124 BPM; Added track “Pad”"), and Kumi takes it into account. Kumi
+knows a Set by an id it keeps inside it, so a Set moved, or saved under another
+name in the same Live Project folder, carries on; a copy saved elsewhere starts
+afresh.
 
 ## When Live goes away
 
@@ -1050,6 +1079,7 @@ Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
 | `voice` | Talking: `send` (send when you stop), `language`, `microphone` (`/voice`) |
 | `maxJobs` | How many background jobs run at once: 1–8, three by default |
 | `workerModel` | The model background jobs use, `<provider>/<model>` from `/model`'s list; the conversation's when absent |
+| `conversations` | `keepDays`: days a conversation is kept after it was last used, beyond each Set's 20 newest (90; once taken out, the longer of 90 and the value last set); `0` keeps all |
 
 `~/.kumi/slots.json` keeps the model slots you swapped (`/slots`),
 `~/.kumi/probes` what each knob was heard to do, by device and track, and

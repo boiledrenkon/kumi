@@ -1,4 +1,5 @@
 pub mod contracts;
+pub mod conversations;
 pub mod disk;
 pub mod errors;
 pub mod evolve;

@@ -90,8 +90,15 @@ struct Control {
     taste: RefCell<Vec<KeptLine>>,
     library: RefCell<Option<LibraryStatus>>,
     conversations: RefCell<Vec<ConversationSummary>>,
+    /// Every Set's, for /resume's list and words.
+    all: RefCell<Vec<ConversationSummary>>,
     resumed: RefCell<Vec<String>>,
     reconnect: Cell<bool>,
+    answers: RefCell<Vec<SetChoice>>,
+    named: RefCell<Vec<(Option<String>, Option<String>)>>,
+    now: RefCell<Option<ConversationNow>>,
+    /// A chat without Live, started without -c or -r: no conversation is kept.
+    keeps_none: Cell<bool>,
 }
 impl Default for Control {
     fn default() -> Self {
@@ -107,8 +114,13 @@ impl Default for Control {
             taste: RefCell::new(vec![]),
             library: RefCell::new(None),
             conversations: RefCell::new(vec![]),
+            all: RefCell::new(vec![]),
             resumed: RefCell::new(vec![]),
             reconnect: Cell::new(false),
+            answers: RefCell::new(vec![]),
+            named: RefCell::new(vec![]),
+            now: RefCell::new(None),
+            keeps_none: Cell::new(false),
         }
     }
 }
@@ -235,12 +247,45 @@ impl SessionController for Control {
         taste.retain(|l| l.id != id);
         Ok(taste.len() != old)
     }
+    fn has_conversations(&self) -> bool {
+        !self.keeps_none.get()
+    }
     async fn conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
         Ok(self.conversations.borrow().clone())
     }
     async fn resume_conversation(&self, id: &str) -> Result<bool, RuntimeError> {
         self.resumed.borrow_mut().push(id.into());
         Ok(true)
+    }
+    async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
+        // As the session marks them: `current` is the conversation going on, not each Set's own latest.
+        let going = self.conversations.borrow().iter().find(|row| row.current).map(|row| row.id.clone());
+        Ok(self.all.borrow().iter().map(|row| ConversationSummary { current: Some(&row.id) == going.as_ref(), ..row.clone() }).collect())
+    }
+    async fn find_conversation(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
+        let all = self.all_conversations().await?;
+        let found: Vec<_> = all.iter().filter(|row| row.id.starts_with(word) || row.name.as_deref() == Some(word)).cloned().collect();
+        Ok(match found.len() {
+            0 if word == "gone00000000" => ConversationMatch::Gone,
+            0 => ConversationMatch::None,
+            1 => ConversationMatch::One(found[0].clone()),
+            _ => ConversationMatch::Several(found),
+        })
+    }
+    async fn rename_conversation(&self, id: Option<&str>, name: Option<&str>) -> Result<bool, RuntimeError> {
+        self.named.borrow_mut().push((id.map(str::to_string), name.map(str::to_string)));
+        Ok(true)
+    }
+    async fn fork_conversation(&self, name: Option<&str>) -> Result<Option<String>, RuntimeError> {
+        self.calls.borrow_mut().push(format!("fork:{}", name.unwrap_or("")));
+        Ok(name.map(|_| "fork01".to_string()))
+    }
+    async fn answer_set(&self, choice: SetChoice) -> Result<(), RuntimeError> {
+        self.answers.borrow_mut().push(choice);
+        Ok(())
+    }
+    async fn conversation_now(&self) -> Option<ConversationNow> {
+        self.now.borrow().clone()
     }
     fn has_reconnect(&self) -> bool {
         self.reconnect.get()
@@ -638,13 +683,21 @@ async fn conversations_resume_reconnect_and_new() {
             flush().await;
             let now = kumi_common::time::now_ms();
             *f.control.conversations.borrow_mut() = vec![
-                ConversationSummary { id: "now001".into(), saved_at: now, first: "add a hi-hat groove".into(), turns: 2, current: true },
+                ConversationSummary {
+                    id: "now001".into(),
+                    saved_at: now,
+                    first: "add a hi-hat groove".into(),
+                    turns: 2,
+                    current: true,
+                    ..Default::default()
+                },
                 ConversationSummary {
                     id: "old001".into(),
                     saved_at: now - 7200000,
                     first: "make the bass wider".into(),
                     turns: 5,
                     current: false,
+                    ..Default::default()
                 },
             ];
             f.control.reconnect.set(true);
@@ -662,6 +715,99 @@ async fn conversations_resume_reconnect_and_new() {
             assert!(f.control.calls.borrow().contains(&"reconnect".into()));
             assert!(f.control.calls.borrow().contains(&"new".into()));
             f.quit().await;
+        })
+        .await;
+}
+#[tokio::test]
+async fn resume_lists_every_sets_conversations_and_asks_about_another_sets_by_number() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let f = Fixture::new(false, false, None, None, None);
+            flush().await;
+            let now = kumi_common::time::now_ms();
+            let row = |id: &str, first: &str, place: &str, set: Option<&str>, current: bool| ConversationSummary {
+                id: id.into(),
+                saved_at: now - 3_600_000,
+                first: first.into(),
+                turns: 1,
+                current,
+                place: place.into(),
+                set: set.map(str::to_string),
+                ..Default::default()
+            };
+            *f.control.conversations.borrow_mut() = vec![row("here01", "add a hi-hat groove", "a", Some("Song A"), true)];
+            *f.control.all.borrow_mut() = vec![
+                row("here01", "add a hi-hat groove", "a", Some("Song A"), true),
+                // Each Set's latest, as the store marks it.
+                ConversationSummary { pinned: true, name: Some("Bass ideas".into()), ..row("there1", "make the bass wider", "b", Some("Song B"), false) },
+                row("there2", "tighten the drums", "b", Some("Song B"), true),
+            ];
+            f.input.write("/resume\n");
+            flush().await;
+            assert!(
+                f.text().contains("1. add a hi-hat groove (this one, 1 request) · Other Sets: 2. Bass ideas (Song B, pinned, 1 hour ago, 1 request) · 3. tighten the drums (Song B, 1 hour ago, 1 request). /resume <number, id or name> goes back to one."),
+                "{}",
+                f.text()
+            );
+            f.input.write("/resume 3\n/resume Bass ideas\n/resume there\n/resume nothing\n/resume gone00000000\n");
+            flush().await;
+            assert_eq!(*f.control.resumed.borrow(), ["there2", "there1"]);
+            assert!(f.text().contains("Several fit: there1 Bass ideas (Song B, pinned"), "{}", f.text());
+            assert!(f.text().contains("No conversation nothing; /resume lists them."));
+            assert!(f.text().contains("That conversation isn't kept any more."));
+            // Another Set's: Kumi asks, and the next line's number answers.
+            f.emit(json!({"type":"set-asked","ask":{"id":"there2","title":"tighten the drums","set":"Song B","open":"Song A","daw":"Live","noun":"Set"}}));
+            assert!(f.text().contains("“tighten the drums” is about “Song B”, and Live has “Song A” open. 1. Open “Song B” in Live (Live may ask whether to save “Song A” first) · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3."), "{}", f.text());
+            f.input.write("2\n");
+            flush().await;
+            assert_eq!(*f.control.answers.borrow(), [SetChoice::Copy]);
+            // A command runs as usual, with the question still open; any other line asks it again.
+            f.emit(json!({"type":"set-asked","ask":{"id":"there2","title":"","daw":"Live","noun":"Set"}}));
+            let question = "This conversation is about its Set, and Live has a Set not saved yet open.";
+            assert_eq!(f.text().matches(question).count(), 1);
+            let statuses = f.text().matches("[status] ").count();
+            f.input.write("/status\n");
+            flush().await;
+            assert!(f.text().matches("[status] ").count() > statuses, "{}", f.text());
+            assert_eq!(*f.control.answers.borrow(), [SetChoice::Copy]);
+            f.input.write("hello\n");
+            flush().await;
+            assert_eq!(f.text().matches(question).count(), 2, "{}", f.text());
+            assert!(!f.control.calls.borrow().contains(&"submit:hello".into()));
+            f.input.write("3\n");
+            flush().await;
+            assert_eq!(*f.control.answers.borrow(), [SetChoice::Copy, SetChoice::Cancel]);
+            // Answered, a line is a line again.
+            f.input.write("hello\n");
+            flush().await;
+            assert!(f.control.calls.borrow().contains(&"submit:hello".into()));
+            // Names, forks and the status line.
+            f.input.write("/rename Night drive\n/rename there1 Bass, take two\n/new Second\n/fork\n/fork Alt\n");
+            flush().await;
+            assert_eq!(
+                *f.control.named.borrow(),
+                [
+                    (None, Some("Night drive".to_string())),
+                    (Some("there1".to_string()), Some("Bass, take two".to_string())),
+                    (None, Some("Second".to_string()))
+                ]
+            );
+            assert!(f.text().contains("[fork] Nothing to fork yet: ask something first."));
+            assert!(f.control.calls.borrow().contains(&"fork:Alt".into()));
+            // A chat that keeps none says so, for a name too.
+            f.control.keeps_none.set(true);
+            f.input.write("/resume\n/new Third\n");
+            flush().await;
+            assert_eq!(f.text().matches("[conversations] A chat without Live keeps no conversations; ").count(), 2, "{}", f.text());
+            assert!(!f.control.named.borrow().iter().any(|(_, name)| name.as_deref() == Some("Third")));
+            f.control.keeps_none.set(false);
+            *f.control.now.borrow_mut() = Some(ConversationNow { id: "fork01".into(), title: "Alt".into(), kept: true, touched: true });
+            f.input.write("/status\n");
+            flush().await;
+            assert!(f.text().contains("[status] Conversation: Alt · fork01"));
+            f.quit().await;
+            assert!(f.text().contains("Kumi closed. Each Set's conversation continues next time.\nContinue this conversation: "), "{}", f.text());
+            assert!(f.text().contains(" -r fork01"));
         })
         .await;
 }

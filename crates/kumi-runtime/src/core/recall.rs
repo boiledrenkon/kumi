@@ -165,7 +165,7 @@ static TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9_\-]{32,
 
 /// Text for the block, as plain words: angle brackets can't close it, control characters and line
 /// breaks become spaces, anything that looks like a key or token is hidden, and it's cut to `most`.
-fn plain(text: &str, most: usize) -> String {
+pub(crate) fn plain(text: &str, most: usize) -> String {
     let text: String = text
         .chars()
         .map(|c| match c {

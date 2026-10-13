@@ -1,5 +1,5 @@
 use super::super::{
-    picker::{NoteTone, PickerOptions},
+    picker::{NoteTone, PickerOptions, PickerTabs},
     width::graphemes,
 };
 use super::*;
@@ -19,6 +19,8 @@ use kumi_runtime::{
 };
 use std::collections::HashMap;
 
+/// What the conversations list says of its keys.
+const CONVERSATIONS_HINT: &str = "enter goes back · tab: this Set or all · ctrl+f rename, pin, delete, copy id · esc closes";
 /// After choosing a model: say when `/fast` puts it on its faster tier, since that costs more.
 fn fast_note(tier: Option<&ServiceTier>) -> String {
     tier.map(|tier| {
@@ -356,50 +358,206 @@ impl TuiApp {
         );
         Ok(())
     }
-    pub(super) async fn open_conversations(&self) -> Result<(), RuntimeError> {
-        let kept = self.0.options.controller.conversations().await?;
+    /// The kept conversations to go back to, this Set's and (under Tab) every Set's, which come first while no Set is
+    /// known. Enter goes back to one; ctrl+f renames, pins or deletes it, or copies its id. `filter`: typed in already.
+    pub(super) async fn open_conversations(&self, filter: Option<String>) -> Result<(), RuntimeError> {
+        let c = &self.0.options.controller;
+        let here = c.conversations().await?;
+        let all = c.all_conversations().await?;
         let now = now_ms_f64();
-        let items = if kept.is_empty() {
-            vec![inert("None kept yet: a conversation is kept once you've asked something")]
-        } else {
-            kept.iter()
-                .map(|row| {
-                    let label = self.clean(&row.first.replace('\n', " "), 120);
-                    noted(
-                        PickerItem::new(if label.is_empty() { "(nothing asked yet)".into() } else { label }, &row.id),
-                        format!(
-                            "{} · {} {}",
-                            if row.current { "this one".into() } else { since(row.saved_at as f64, now) },
-                            row.turns,
-                            if row.turns == 1 { "request" } else { "requests" }
-                        ),
-                        NoteTone::Faint,
-                    )
-                })
-                .collect()
+        // A row's title is cut short enough to leave its Set (in All Sets) and its id room beside it, as far as they go.
+        let row = |row: &ConversationSummary, every: bool| {
+            let title = self.clean(&row.title(), 60);
+            let parts = graphemes(&title);
+            let title = if parts.len() > 30 { format!("{}…", string::trim_end(&parts[..29].concat())) } else { title };
+            let set = match row.set.as_deref() {
+                Some(name) => self.clean(name, 20),
+                None if row.place == "unsaved" => "A Set not saved yet".into(),
+                None => "A saved Set".into(),
+            };
+            let age = if row.current { "this one".into() } else { since(row.saved_at as f64, now) };
+            let mut item = noted(
+                item(
+                    if title.is_empty() { "(nothing asked yet)".into() } else { title },
+                    &row.id,
+                    if every { format!("{set} · {}", row.id) } else { row.id.clone() },
+                ),
+                format!(
+                    "{}{age} · {} {}",
+                    if row.pinned { "pinned · " } else { "" },
+                    row.turns,
+                    if row.turns == 1 { "request" } else { "requests" }
+                ),
+                NoteTone::Faint,
+            );
+            // Found by its whole name too, past where the row cuts it.
+            let name = row.name.as_deref().map(|name| self.clean(name, 60)).unwrap_or_default();
+            item.words = Some(format!("{name} {} {set}", self.clean(&row.first.replace('\n', " "), 200)));
+            item
         };
-        let title = format!("Conversations about {}", self.0.state.borrow().set_name.as_deref().unwrap_or("this Set"));
-        self.pick(Picker::with_options(title, items, PickerOptions { filterable: true, ..Default::default() }), move |app, item| {
-            let row = kept.iter().find(|r| Some(&r.id) == item.value.as_ref()).cloned();
+        let list = |rows: &[ConversationSummary], every: bool| {
+            if rows.is_empty() {
+                vec![inert("None kept yet: a conversation is kept once you've asked something")]
+            } else {
+                rows.iter().map(|r| row(r, every)).collect()
+            }
+        };
+        let known = self.0.state.borrow().set_name.is_some() || !here.is_empty();
+        let tabs = PickerTabs {
+            names: vec!["This Set".into(), "All Sets".into()],
+            lists: vec![list(&here, false), list(&all, true)],
+            at: if known && filter.as_deref().is_none_or(str::is_empty) { 0 } else { 1 },
+        };
+        let options = PickerOptions { filterable: true, alternate: true, hint: Some(CONVERSATIONS_HINT.into()), ..Default::default() };
+        let mut picker = Picker::with_tabs("Conversations", tabs, options);
+        picker.filter = filter.map(|f| string::head(&f, 40)).unwrap_or_default();
+        let kept: Vec<ConversationSummary> = all.iter().chain(here.iter()).cloned().collect();
+        self.pick(picker, move |app, item| {
+            let value = item.value.clone().unwrap_or_default();
+            let (more, id) = match value.strip_prefix("fallback:") {
+                Some(id) => (true, id.to_string()),
+                None => (false, value),
+            };
+            let row = kept.iter().find(|r| r.id == id).cloned();
+            async move {
+                let Some(row) = row else { return Ok(()) };
+                if more {
+                    return app.conversation_actions(row).await;
+                }
+                app.close_panel();
+                app.go_back_to(&row).await;
+                Ok(())
+            }
+        });
+        Ok(())
+    }
+    /// Go back to a kept conversation; one of another Set asks first.
+    pub(super) async fn go_back_to(&self, row: &ConversationSummary) {
+        if row.current {
+            return;
+        }
+        if self.busy() {
+            self.notice("Kumi is still working. Press esc to stop it first.", NoticeTone::Info);
+            return;
+        }
+        self.0.state.borrow_mut().activity = "going back to it".into();
+        match self.0.options.controller.resume_conversation(&row.id).await {
+            Ok(false) => self.notice("That conversation isn't kept any more.", NoticeTone::Info),
+            Err(error) => self.error(&error),
+            _ => {}
+        }
+    }
+    /// What else to do with a kept conversation: go back to it, rename, pin or delete it, or copy its id, under a look at
+    /// how it ended.
+    async fn conversation_actions(&self, row: ConversationSummary) -> Result<(), RuntimeError> {
+        let lines = self.0.options.controller.conversation_lines(&row.id).await.unwrap_or_default();
+        let mut items = vec![];
+        let last = |role: TranscriptRole| lines.iter().rev().find(|l| l.role == role && !l.text.is_empty());
+        if let Some(asked) = last(TranscriptRole::User) {
+            items.push(inert(format!("Last asked: {}", self.clean(&asked.text.replace('\n', " "), 100))));
+        }
+        if let Some(said) = last(TranscriptRole::Assistant) {
+            items.push(inert(format!("Kumi: {}", self.clean(&said.text.replace('\n', " "), 100))));
+        }
+        if !row.current {
+            items.push(item("Go back to it", "back", "Kumi's next answer carries on from it"));
+        }
+        items.push(item("Rename it", "rename", "In the box below; enter keeps the name"));
+        items.push(if row.pinned {
+            item("Unpin it", "pin", "Kept as long as other conversations again")
+        } else {
+            item("Pin it", "pin", "Kept however old it gets")
+        });
+        items.push(item("Copy its id", "copy", format!("{} -r {} brings it back", *KUMI_START, row.id)));
+        if !row.current {
+            items.push(item("Delete it", "delete", "For good"));
+        }
+        items.push(PickerItem::new("Leave it as it is", "keep"));
+        let title = format!("“{}” · {}", self.clean(&row.title(), 50), row.id);
+        self.pick(Picker::new(title, items), move |app, answer| {
+            let row = row.clone();
             async move {
                 app.close_panel();
-                let Some(row) = row.filter(|r| !r.current) else {
-                    return Ok(());
-                };
-                if app.busy() {
-                    app.notice("Kumi is still working. Press esc to stop it first.", NoticeTone::Info);
-                    return Ok(());
-                }
-                app.0.state.borrow_mut().activity = "going back to it".into();
-                match app.0.options.controller.resume_conversation(&row.id).await {
-                    Ok(false) => app.notice("That conversation isn't kept any more.", NoticeTone::Info),
-                    Err(error) => app.error(&error),
+                let c = &app.0.options.controller;
+                match answer.value.as_deref() {
+                    Some("back") => app.go_back_to(&row).await,
+                    Some("rename") => {
+                        app.0.state.borrow_mut().editor.set(&format!("/rename {} {}", row.id, row.name.as_deref().unwrap_or(&row.title())));
+                        app.0.scheduler.request();
+                    }
+                    Some("pin") => match c.pin_conversation(&row.id, !row.pinned).await? {
+                        true if !row.pinned => app.notice("Pinned: Kumi keeps it however old it gets.", NoticeTone::Info),
+                        true => app.notice("Unpinned.", NoticeTone::Info),
+                        false => app.notice("That conversation isn't kept any more.", NoticeTone::Info),
+                    },
+                    Some("copy") => {
+                        app.copy_text(&row.id);
+                        app.notice(&format!("Copied its id, {}.", row.id), NoticeTone::Info);
+                    }
+                    Some("delete") => app.confirm_delete(row),
                     _ => {}
                 }
                 Ok(())
             }
         });
         Ok(())
+    }
+    fn confirm_delete(&self, row: ConversationSummary) {
+        let title = format!("Delete “{}”?", self.clean(&row.title(), 50));
+        self.pick(
+            Picker::new(title, vec![item("Delete it", "yes", "It goes for good"), PickerItem::new("Keep it", "no")]),
+            move |app, answer| {
+                let id = row.id.clone();
+                async move {
+                    app.close_panel();
+                    if answer.value.as_deref() != Some("yes") {
+                        return Ok(());
+                    }
+                    match app.0.options.controller.delete_conversation(&id).await {
+                        Ok(true) => app.notice("Deleted.", NoticeTone::Info),
+                        Ok(false) => app.notice("That conversation was already gone.", NoticeTone::Info),
+                        Err(error) => app.error(&error),
+                    }
+                    Ok(())
+                }
+            },
+        );
+    }
+    /// The conversation the producer chose belongs to another Set: open that Set, carry it on here as a copy, or leave it.
+    /// None: the question was answered or is no longer open.
+    pub(super) fn open_set_ask(&self, ask: Option<SetAsk>) {
+        let Some(ask) = ask else {
+            let open = self.0.state.borrow_mut().set_ask.take();
+            if open.is_some_and(|open| self.same_picker(&open)) {
+                self.close_panel();
+            }
+            return;
+        };
+        let (daw, noun) = (self.clean(&ask.daw, 20), self.clean(&ask.noun, 20));
+        let theirs = ask.set.as_deref().map(|set| format!("“{}”", self.clean(set, 40))).unwrap_or_else(|| format!("its {noun}"));
+        let open = ask.open.as_deref().map(|set| format!("“{}”", self.clean(set, 40))).unwrap_or_else(|| format!("a {noun} not saved yet"));
+        let title = if ask.title.is_empty() { "This conversation".to_string() } else { format!("“{}”", self.clean(&ask.title, 40)) };
+        let items = vec![
+            noted(
+                item(format!("Open {theirs} in {daw}"), "open", format!("{daw} may ask whether to save {open} first")),
+                "recommended",
+                NoteTone::Accent,
+            ),
+            item("Carry it on here, as a copy", "copy", format!("The original stays with {theirs}")),
+            item("Cancel", "cancel", format!("Stay with {open}'s own conversation")),
+        ];
+        let picker = self.pick(Picker::new(format!("{title} is about {theirs}; {daw} has {open} open"), items), |app, answer| async move {
+            app.0.state.borrow_mut().set_ask = None;
+            app.close_panel();
+            let choice = match answer.value.as_deref() {
+                Some("open") => SetChoice::Open,
+                Some("copy") => SetChoice::Copy,
+                _ => SetChoice::Cancel,
+            };
+            app.0.state.borrow_mut().activity = if choice == SetChoice::Copy { "carrying it on here" } else { "opening the Set" }.into();
+            app.0.options.controller.answer_set(choice).await
+        });
+        self.0.state.borrow_mut().set_ask = Some(picker);
     }
     pub(super) async fn open_recipes(&self) -> Result<(), RuntimeError> {
         let recipes = self.0.options.controller.recipes().await?;
@@ -1099,6 +1257,11 @@ impl TuiApp {
         let offer = self.0.state.borrow_mut().offer.take();
         offer.is_some_and(|offer| matches!(&*panel.borrow(), Panel::Pick { picker, .. } if Rc::ptr_eq(picker, &offer)))
     }
+    /// Whether `panel` is the question about another Set's conversation, letting go of it: closing that leaves it.
+    fn closing_set_ask(&self, panel: &PanelRef) -> bool {
+        let ask = self.0.state.borrow_mut().set_ask.take();
+        ask.is_some_and(|ask| matches!(&*panel.borrow(), Panel::Pick { picker, .. } if Rc::ptr_eq(picker, &ask)))
+    }
     fn same_panel(&self, panel: &PanelRef) -> bool {
         self.0.state.borrow().panel.as_ref().is_some_and(|p| Rc::ptr_eq(p, panel))
     }
@@ -1149,9 +1312,13 @@ impl TuiApp {
         if let InputEvent::Key { name, mods, .. } = &event {
             if name == "escape" || (mods.ctrl && name == "c") {
                 let declined = self.closing_offer(&panel);
+                let left = self.closing_set_ask(&panel);
                 self.close_panel();
                 if declined {
                     self.task(|app| async move { app.0.options.controller.answer_technique(false).await.map(|_| ()) });
+                }
+                if left {
+                    self.task(|app| async move { app.0.options.controller.answer_set(SetChoice::Cancel).await });
                 }
                 return;
             }
@@ -1159,6 +1326,7 @@ impl TuiApp {
             match &mut *p {
                 Panel::Pick { picker, choose, choosing } => match name.as_str() {
                     "up" => picker.borrow_mut().r#move(-1),
+                    "tab" if picker.borrow().tabs.is_some() => picker.borrow_mut().next_tab(),
                     "down" | "tab" => picker.borrow_mut().r#move(1),
                     "backspace" => picker.borrow_mut().erase(),
                     // A second Enter before the first choice is made would make it again (an answer sent twice).

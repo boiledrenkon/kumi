@@ -1,5 +1,5 @@
 {
-  "header": "Kumi · openai-codex/fixture · MCP disconnected / No Live access\nEach Set's conversations are kept: its latest continues next time, and /conversations goes back to earlier ones. /help for commands.\n",
+  "header": "Kumi · openai-codex/fixture · MCP disconnected / No Live access\nEach Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.\n",
   "cases": [
     {
       "event": {

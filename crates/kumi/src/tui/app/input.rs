@@ -391,7 +391,7 @@ impl TuiApp {
                         "/recipes" => c.has_recipes(),
                         "/recipe" => c.has_run_recipe(),
                         "/jobs" => c.has_jobs(),
-                        "/conversations" => c.has_conversations(),
+                        "/conversations" | "/resume" | "/rename" | "/fork" => c.has_conversations(),
                         "/reconnect" => c.has_reconnect(),
                         "/stop" => c.has_stop_live(),
                         "/update" => self.0.options.updates.is_some(),
@@ -504,16 +504,11 @@ impl TuiApp {
             }
             return Ok(());
         }
-        for (cmd, available) in [
-            ("/recipes", controller.has_recipes()),
-            ("/conversations", controller.has_conversations()),
-            ("/memory", controller.has_memory()),
-        ] {
+        for (cmd, available) in [("/recipes", controller.has_recipes()), ("/memory", controller.has_memory())] {
             if command == cmd && available {
                 self.clear_editor();
                 let result = match cmd {
                     "/recipes" => self.open_recipes().await,
-                    "/conversations" => self.open_conversations().await,
                     _ => self.open_memory().await,
                 };
                 if let Err(e) = result {
@@ -521,6 +516,78 @@ impl TuiApp {
                 }
                 return Ok(());
             }
+        }
+        // A chat that keeps no conversations says so, rather than send these to the model as words.
+        if !controller.has_conversations()
+            && ["/resume", "/conversations", "/rename", "/fork"].into_iter().any(|verb| argument(command, verb).is_some())
+        {
+            self.clear_editor();
+            self.notice(&super::not_kept(), NoticeTone::Info);
+            return Ok(());
+        }
+        // A kept conversation: the list, or the one an id, the start of one, or a name gives (several: the list of them).
+        if let Some(word) =
+            argument(command, "/resume").or_else(|| argument(command, "/conversations")).filter(|_| controller.has_conversations())
+        {
+            self.clear_editor();
+            let found = if word.is_empty() { None } else { Some(controller.find_conversation(&word).await?) };
+            let result = match found {
+                None => self.open_conversations(None).await,
+                Some(ConversationMatch::One(row)) if row.current => {
+                    self.notice("That's this conversation.", NoticeTone::Info);
+                    Ok(())
+                }
+                Some(ConversationMatch::One(row)) => {
+                    self.go_back_to(&row).await;
+                    Ok(())
+                }
+                Some(ConversationMatch::Several(_)) => self.open_conversations(Some(word)).await,
+                Some(ConversationMatch::Gone) => {
+                    self.notice("That conversation isn't kept any more.", NoticeTone::Info);
+                    Ok(())
+                }
+                Some(ConversationMatch::None) => {
+                    self.notice(&format!("No conversation {}; /resume lists them.", self.clean(&word, 60)), NoticeTone::Info);
+                    Ok(())
+                }
+            };
+            if let Err(e) = result {
+                self.panel_failed(&e);
+            }
+            return Ok(());
+        }
+        // A name for this conversation, or (from the list) a kept one: /rename <id> <name>. Alone, the name it has now, to
+        // change in the box.
+        if let Some(words) = argument(command, "/rename").filter(|_| controller.has_conversations()) {
+            if words.is_empty() {
+                let title = controller.conversation_now().await.map(|now| now.title).unwrap_or_default();
+                self.0.state.borrow_mut().editor.set(&format!("/rename {title}"));
+                self.0.scheduler.request();
+                return Ok(());
+            }
+            self.clear_editor();
+            let (first, rest) = words.split_once(' ').map(|(a, b)| (a, string::trim(b))).unwrap_or((words.as_str(), ""));
+            let kept =
+                !rest.is_empty() && matches!(controller.find_conversation(first).await?, ConversationMatch::One(row) if row.id == first);
+            let (id, name) = if kept { (Some(first), rest) } else { (None, words.as_str()) };
+            if controller.rename_conversation(id, Some(name)).await? {
+                self.notice(&format!("Named “{}”.", self.clean(name, 60)), NoticeTone::Info);
+            } else {
+                self.notice("That conversation isn't kept any more.", NoticeTone::Info);
+            }
+            return Ok(());
+        }
+        // Carry on in a copy of this conversation, named or not; the original stays.
+        if let Some(name) = argument(command, "/fork").filter(|_| controller.has_conversations()) {
+            self.clear_editor();
+            if self.busy() {
+                self.notice("Kumi is still working: fork once it's done, or press esc to stop it.", NoticeTone::Info);
+                return Ok(());
+            }
+            if controller.fork_conversation((!name.is_empty()).then_some(name.as_str())).await?.is_none() {
+                self.notice("Nothing to fork yet: ask something first.", NoticeTone::Info);
+            }
+            return Ok(());
         }
         // A recipe with its blanks filled runs straight away, with no model call; a line that can't run yet
         // stays to be fixed.
@@ -645,6 +712,9 @@ impl TuiApp {
                 ),
                 NoticeTone::Info,
             );
+            if let Some(now) = controller.conversation_now().await {
+                self.notice(&conversation_line(&now, |text| self.clean(text, 60)), NoticeTone::Info);
+            }
             return Ok(());
         }
         if (command == "/btw" || command.starts_with("/btw ")) && controller.has_aside() {
@@ -796,7 +866,7 @@ impl TuiApp {
         let result = if command == "/refresh" {
             self.0.state.borrow_mut().activity = "reading your Set".into();
             controller.refresh().await
-        } else if command == "/new" {
+        } else if let Some(name) = argument(command, "/new") {
             {
                 let mut state = self.0.state.borrow_mut();
                 state.activity = "starting fresh".into();
@@ -806,7 +876,16 @@ impl TuiApp {
                 state.current = None;
                 state.watching = false;
             }
-            controller.new_conversation().await
+            let started = controller.new_conversation().await;
+            // Its name, kept with it from its first save.
+            if started.is_ok() && !name.is_empty() {
+                if controller.has_conversations() {
+                    controller.rename_conversation(None, Some(&name)).await?;
+                } else {
+                    self.notice(&super::not_kept(), NoticeTone::Info);
+                }
+            }
+            started
         } else if command == "/reconnect" && controller.has_reconnect() {
             self.0.state.borrow_mut().activity = "connecting to Live".into();
             let result = controller.reconnect().await;
@@ -1096,6 +1175,11 @@ impl TuiApp {
         (Self::layout_for(self.0.tty.size().columns).1 - 6).max(1)
     }
 }
+/// A command's words after its name (`/rename Night drive`): empty when there are none, None when the line isn't it.
+pub(super) fn argument(command: &str, name: &str) -> Option<String> {
+    let rest = command.strip_prefix(name)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| string::trim(rest).to_string())
+}
 fn enum_name(value: &impl serde::Serialize) -> String {
     serde_json::to_value(value).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
 }
@@ -1104,12 +1188,15 @@ pub(super) struct Command {
     pub about: &'static str,
 }
 
-pub(super) const HELP: &str = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · ctrl+b moves a slow step that doesn't use Live (a video, pages) to the background (press it twice in tmux), and /jobs shows, stops or reruns background jobs · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one; /willington turns Willington's bindings (macro mapping and more) on or off; /slots shows which model does each listening job (stems, transcription, listening, embeddings), swaps one in plain words after a quick test, and /slots back <job> takes a swap back; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands";
+pub(super) const HELP: &str = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · ctrl+b moves a slow step that doesn't use Live (a video, pages) to the background (press it twice in tmux), and /jobs shows, stops or reruns background jobs · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, /resume goes back to one kept (this Set's, or any Set's by its id or name), /rename names this one, and /fork carries on in a copy · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one; /willington turns Willington's bindings (macro mapping and more) on or off; /slots shows which model does each listening job (stems, transcription, listening, embeddings), swaps one in plain words after a quick test, and /slots back <job> takes a swap back; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands";
 pub(super) const COMMANDS: &[Command] = &[
-    Command { name: "/new", about: "Forget this conversation and start fresh" },
+    Command { name: "/new", about: "Start a fresh conversation (the last one is kept); /new <name> names it" },
     Command { name: "/btw", about: "Ask something on the side, without interrupting Kumi" },
     Command { name: "/voice", about: "Talk instead of typing: ctrl+t, and how it listens" },
-    Command { name: "/conversations", about: "Go back to an earlier conversation about this Set" },
+    Command { name: "/resume", about: "Go back to a kept conversation, this Set's or any Set's: /resume <id or name>" },
+    Command { name: "/conversations", about: "The same as /resume" },
+    Command { name: "/rename", about: "Name this conversation: /rename <name>" },
+    Command { name: "/fork", about: "Carry on in a copy of this conversation; the original stays" },
     Command { name: "/reconnect", about: "Connect to Live again, keeping the conversation" },
     Command { name: "/undo", about: "Undo Kumi's last change" },
     Command { name: "/stop", about: "Stop Live: clips, the transport and recording" },

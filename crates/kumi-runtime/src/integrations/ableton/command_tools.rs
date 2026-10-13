@@ -47,7 +47,7 @@ mod conversions;
 
 pub type CommandAction = Rc<dyn Fn(String, JsonObject, Signal) -> LocalBoxFuture<'static, Result<ToolResult, RuntimeError>>>;
 /// How long a Set Kumi asked for may take to open (Live drops Kumi while it loads).
-const SET_OPENING_MS: i64 = 120_000;
+pub(crate) const SET_OPENING_MS: i64 = 120_000;
 /// Keys and menu items that put another Set in place of the open one.
 const SET_KEYS: &[&str] = &["ctrl+n", "cmd+n", "ctrl+o", "cmd+o"];
 fn switches_set(path: &[String]) -> bool {

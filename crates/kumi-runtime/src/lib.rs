@@ -34,14 +34,15 @@ pub use auth::openai_codex::{
 pub use auth::store::{open_credential_store, valid_api_key, ApiKeyCredential, Credential, CredentialStore, OAuthCredential};
 pub use command::{CONNECT_LIVE, INSTALLED, INSTALL_PS1, INSTALL_SH, KUMI, KUMI_REPAIR, KUMI_START, REINSTALL};
 pub use core::contracts::{
-    ArrangementStrip, AuditionEvent, AuditionRequest, AuditionResult, CatchUp, ChainNode, ChangeFamily, ChangeRecord, ClipNote, ClipView,
-    ConnectionState, ConversationStore, ConversationSummary, DeviceNode, DevicePlacement, DeviceTree, DisconnectCause, HeardEvent,
-    Integration, IntegrationFactory, JsonObject, Kernel, KernelCheckpoint, KernelEvent, KernelFactory, KernelOptions, KernelTool,
-    LibraryEvent, LibraryStatus, LiveFocus, LiveTransport, Memory, MemoryEvent, MemoryNote, MemoryScope, MemoryStore, NoteChange,
-    Observation, PinnedNode, RecipeEvent, RecipeSummary, SavedConversation, SessionController, SessionEvent, SessionStatus, SessionStrip,
-    StreamingCall, TechniqueEvent, TechniqueSummary, ToolImage, ToolResult, TranscriptLine, TurnResult, TurnState, Usage, WatchedEvent,
-    WebEvent,
+    ArrangementStrip, AuditionEvent, AuditionRequest, AuditionResult, CatchUp, ChainNode, ChangeFamily, ChangeRecord, Claim, ClipNote,
+    ClipView, ConnectionState, ConversationMatch, ConversationNow, ConversationStore, ConversationSummary, DeviceNode, DevicePlacement,
+    DeviceTree, DisconnectCause, HeardEvent, Integration, IntegrationFactory, JsonObject, Kernel, KernelCheckpoint, KernelEvent,
+    KernelFactory, KernelOptions, KernelTool, LibraryEvent, LibraryStatus, LiveFocus, LiveTransport, Memory, MemoryEvent, MemoryNote,
+    MemoryScope, MemoryStore, NoteChange, Observation, PinnedNode, RecipeEvent, RecipeSummary, SavedConversation, SessionController,
+    SessionEvent, SessionStatus, SessionStrip, SetAsk, SetChoice, StreamingCall, TechniqueEvent, TechniqueSummary, ToolImage, ToolResult,
+    TranscriptLine, TurnResult, TurnState, Usage, WatchedEvent, WebEvent,
 };
+pub use core::conversations::{create_conversation_store, create_conversation_store_keeping, KEEP_DAYS};
 pub use core::errors::{FailureKind, KumiError, RuntimeError};
 pub use core::gaps::{gap_tools, GAP_GUIDANCE, GAP_TOOL};
 pub use core::goal::{create_goal_store, GoalBudget, GoalState, GoalStatus, GoalStore, GOAL_BUDGET};
@@ -61,7 +62,7 @@ pub use core::techniques::{
 pub use ears::device::{install_ears, EARS_NAME};
 pub use hands::{can_build_hands, open_hands, Hands};
 pub use integrations::ableton::focus::parse_focus;
-pub use integrations::ableton::project::{create_conversation_store, create_project_store, since, Baseline, ProjectStore};
+pub use integrations::ableton::project::{create_project_store, since, Baseline, ProjectStore};
 pub use integrations::ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
 pub use integrations::fallback::with_fallback;
 pub use kernel::agent::{create_agent_kernel, AgentKernel, AgentKernelOptions, Checkpoint, ModelBinding, ModelRequest};

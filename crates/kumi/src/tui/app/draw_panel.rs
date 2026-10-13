@@ -54,6 +54,17 @@ impl TuiApp {
                 };
                 let mut title = Line::new(&picker.title, st::TITLE);
                 title.right = filter.map(|f| sp(f, if picker.filter.is_empty() { st::FAINT } else { st::BRIGHT }));
+                // Its tabs beside the title, the one showing lit.
+                if let Some(tabs) = &picker.tabs {
+                    let mut spans = vec![sp(&picker.title, st::TITLE), sp("   ", st::FAINT)];
+                    for (at, name) in tabs.names.iter().enumerate() {
+                        if at > 0 {
+                            spans.push(sp(" · ", st::FAINT));
+                        }
+                        spans.push(sp(name, if at == tabs.at { st::ACCENT } else { st::FAINT }));
+                    }
+                    title.spans = Some(spans);
+                }
                 lines.push(title);
                 if visible.is_empty() {
                     lines.push(Line::new(format!("Nothing matches “{}”.", picker.filter), st::FAINT));

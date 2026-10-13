@@ -55,6 +55,9 @@ pub struct AbletonOptions {
     pub fast: Option<bool>,
     /// Whether Live's process is running, to tell Live closing from Live opening another Set.
     pub live_running: Option<super::connection::LiveRunning>,
+    /// Opens a Set's file in Live (the one running, or Live itself), as the system opens a file: true when it was handed
+    /// over. A kept conversation's Set opens this way when the producer asks.
+    pub open_file: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, bool>>>,
 }
 impl AbletonOptions {
     pub fn new(on_connection: ConnectionListener) -> Self {
@@ -87,6 +90,7 @@ impl AbletonOptions {
             hands: None,
             fast: None,
             live_running: None,
+            open_file: None,
         }
     }
     pub fn connection_options(&self) -> ConnectionOptions {

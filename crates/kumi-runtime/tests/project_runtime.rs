@@ -1,7 +1,10 @@
 //! Pure catch-up/storage cases; real integration cases remain in the integration parity work.
 use kumi_common::js::json::stringify;
 use kumi_runtime::{
-    core::contracts::{ConversationStore, JsonObject, SavedConversation},
+    core::{
+        contracts::{ConversationStore, JsonObject, SavedConversation},
+        conversations::create_conversation_store,
+    },
     integrations::ableton::project::*,
 };
 use serde_json::{json, Value};
@@ -100,7 +103,7 @@ async fn conversations_are_private_and_long_histories_drop_whole_early_exchanges
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn fresh_starts_preserve_history_latest_twenty_remain_unsaved_moves_and_legacy_migrates() {
+async fn fresh_starts_preserve_history_the_newest_and_lately_used_remain_unsaved_moves_and_legacy_migrates() {
     let dir = tempfile::tempdir().unwrap();
     let store = create_conversation_store(dir.path());
     let place = project_id_of("/Music/Night Drive.als");
@@ -116,6 +119,14 @@ async fn fresh_starts_preserve_history_latest_twenty_remain_unsaved_moves_and_le
     for index in 0..22 {
         store.save(&place, &format!("bulk{index:03}"), &said(&format!("request {index}"), 10 + index)).await.unwrap();
     }
+    // Used lately, every one stays; past 90 days unused, the 20 newest do.
+    assert_eq!(store.list(&place).await.unwrap().len(), 24);
+    for name in ["first1", "second", "bulk000", "bulk001"] {
+        let file =
+            std::fs::OpenOptions::new().write(true).open(dir.path().join(&place).join(format!("conversations/{name}.json"))).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(91 * 86_400)).unwrap();
+    }
+    store.tidy(&place).await.unwrap();
     let all = store.list(&place).await.unwrap();
     assert_eq!(all.len(), 20);
     assert_eq!(all.iter().find(|r| r.current).unwrap().id, "bulk021");

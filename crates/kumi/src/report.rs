@@ -137,24 +137,29 @@ async fn modified(file: &str) -> Option<f64> {
         Err(error) => Some(-error.duration().as_secs_f64() * 1000.),
     }
 }
-async fn last_conversation(projects: &str) -> Option<(f64, Value)> {
-    let mut best: Option<(String, f64)> = None;
+/// The newest kept conversation in any Set's folder: when it was saved, its id and the conversation. Only `<id>.json`
+/// files are conversations (a name or pin beside one isn't).
+async fn last_conversation(projects: &str) -> Option<(f64, String, Value)> {
+    let mut best: Option<(String, String, f64)> = None;
     for place in names(projects).await {
         let folder = join(projects, &format!("{place}/conversations"));
         for name in names(&folder).await {
-            if !name.ends_with(".json") {
+            let Some(id) = name
+                .strip_suffix(".json")
+                .filter(|id| (6..=24).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()))
+            else {
                 continue;
-            }
+            };
             let file = join(&folder, &name);
             if let Some(at) = modified(&file).await {
-                if best.as_ref().is_none_or(|best| at > best.1) {
-                    best = Some((file, at))
+                if best.as_ref().is_none_or(|best| at > best.2) {
+                    best = Some((file, id.to_string(), at))
                 }
             }
         }
     }
-    let (file, at) = best?;
-    Some((at, serde_json::from_str(&read(&file).await?).ok()?))
+    let (file, id, at) = best?;
+    Some((at, id, serde_json::from_str(&read(&file).await?).ok()?))
 }
 fn describe_conversation(value: &Value) -> Vec<String> {
     let mut lines = vec![];
@@ -452,9 +457,9 @@ async fn compose(io: &ReportIo, redact: &dyn Fn(&str) -> String, home: &str, now
     };
     section(
         "Last conversation",
-        if let Some((at, value)) = conversation {
+        if let Some((at, id, value)) = conversation {
             let date = DateTime::from_timestamp_millis(at as i64).unwrap_or_default().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-            format!("Saved {date}\n\n{}", describe_conversation(&value).join("\n"))
+            format!("Conversation {id}, saved {date}\n\n{}", describe_conversation(&value).join("\n"))
         } else {
             "none kept yet".into()
         },

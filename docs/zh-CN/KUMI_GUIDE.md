@@ -76,7 +76,7 @@ Kumi 会在你的 User Library 中找到 Live 的 Remote Scripts 文件夹，包
 
 **Kumi 的 Live 扩展。** 在 Live 12.4 及更高版本上，`kumi bridge` 还会把 Kumi 的扩展放进 Live 的 Extensions 文件夹（macOS 上为 `~/Library/Application Support/Ableton/Extensions/kumi.kumi`；Windows 上 Kumi 使用 `%LOCALAPPDATA%\Ableton\Extensions`，这一路径在 Windows 上尚未确认）。Live 下次打开时会启动它。这个扩展可以把 MIDI 片段直接写进编曲视图、清空轨道上的一段区域、在不播放的情况下渲染轨道的片段，并在 Live 的右键菜单（**Extensions** 下）中加入 **Ask Kumi about this**，它会把你点击的对象附加到你的下一条消息中。开启 Developer Mode（Settings → Extensions）时，Live 不会启动任何扩展，所以由桥接自己启动 Kumi 的扩展。没有这个扩展 Kumi 也能工作，`kumi doctor` 会告诉你它是否已安装、是否在运行。
 
-桥接安装好并在 Live 中选中后，`kumi` 会找到并连接它；无需任何配置。没有桥接时，Kumi 照样启动，在不连接 Live 的情况下聊天（**No Live access**），并提出连接。`kumi --bridge-config <absolute path>` 使用你自己的桥接配置；`kumi --inference-only` 在不连接 Live 的情况下聊天。
+桥接安装好并在 Live 中选中后，`kumi` 会找到并连接它；无需任何配置。没有桥接时，Kumi 照样启动，在不连接 Live 的情况下聊天（**No Live access**），并提出连接。`kumi --bridge-config <absolute path>` 使用你自己的桥接配置；`kumi --inference-only` 在不连接 Live 的情况下聊天（只有用 `-c` 或 `-r` 继续对话时才会保存对话）。
 
 **Willington。** 从带有 Willington 文件的版本起，Kumi 的桥接会带上它的原生绑定；在此之前，你可以自己安装 Willington。无论哪种方式，在你用 `/willington` 开启之前它们一直是关闭的。开启后，Kumi 还可以映射机架的宏旋钮、设置链区域（chain zone），并在自检通过时编辑 Follow Actions。Willington 有绑定的 Live 版本：macOS ARM64 上的 Live 12.4.15b4 和 b5（链区域仅限 b5），以及 Windows x64 上的 Live 12.4.15b5；请见 [Willington](WILLINGTON_INTEGRATION.md)。
 
@@ -300,11 +300,20 @@ Kumi 还会把每次回答的时间花在哪里（模型、工具、对 Live 的
 
 ## 对话与离开期间的变化
 
-Kumi 把每个已保存工程的对话保存在 `~/.kumi/projects` 中：每次回答后都会保存，每个工程保留最近 20 个对话，每个最多约 256 KB（最早的交流会被丢弃）。在已保存的工程上打开 Kumi，会接着它最近的对话继续，HISTORY 中显示最近 100 项修改（不带撤销）。`/new` 开始新的对话，并保留上一个；`/conversations` 可以回到其中任何一个。未保存工程的对话会在你第一次保存时移到该工程自己的文件夹。
+Kumi 把每个工程的对话保存在 `~/.kumi/projects` 中：每次回答后都会保存，每个最多约 256 KB（最早的交流会被丢弃）。在已保存的工程上打开 Kumi，会接着它最近的对话继续，HISTORY 中显示最近 100 项修改（不带撤销）。`/new` 开始新的对话，并保留上一个。未保存工程的对话会在你第一次保存时移到该工程自己的文件夹。
+
+- **回到以前的对话：** `/resume`（或 `/conversations`）列出本工程的对话，按 Tab 显示所有工程的对话。输入文字可筛选；Enter 回到所选对话；ctrl+f 可重命名、置顶、删除它，或复制它的 ID。
+- **从 shell 开始：** `kumi -c` 接着你上次使用的对话继续，不论它属于哪个工程。`kumi -r <ID 或名称>` 接着那段对话继续（ID 的开头部分即可），只输入 `kumi -r` 则让你选择。两者都可以和 `--inference-only` 一起使用。
+- **ID：** 每段对话都有一个 ID，例如 `mv66me0m3fa91c`。`/status` 会显示它；用过这段对话后，Kumi 关闭时会提示“Continue this conversation: kumi -r mv66me0m3fa91c”。
+- **名称与副本：** `/rename <name>` 为这段对话命名，`/new <name>` 开始并命名一段新对话，`/fork` 在副本中继续（原对话保留）。
+- **其他工程的对话：** Kumi 会先问你：在 Live 中打开它的工程（Live 可能会就当前打开的工程询问你），在这里作为副本继续（不带 Kumi 从另一个工程读取的内容），或取消。Live 关闭时，对话会直接继续，等 Live 打开另一个工程时 Kumi 再询问。
+- **两个 Kumi 窗口：** 在一个窗口中打开的对话，会在另一个窗口中以副本继续。
+- **模型：** 回到以前的对话时保持你现在使用的模型；如果那段对话用的是别的模型，Kumi 会提示一次。
+- **保留：** 每个工程保留最近 20 段对话、最近 90 天内用过的对话（`conversations.keepDays`；`0` 表示全部保留）以及置顶的对话。从设置中去掉 `keepDays` 后，Kumi 按 90 天与上次设定值中较长的一个保留（上次是 `0` 则仍全部保留）。回滚之后，Kumi 1.16 及更早版本只保留每个工程最近的 20 段；更新前就已打开的 Kumi 窗口在关闭之前也是如此。
 
 当你提到以前的事（“上周那条人声的混响链”）时，Kumi 会按字词查找为每个工程保存的对话，以及它保存的技巧和配方。搜索在你的电脑上进行；找到的内容会像其他读取结果一样发给模型。
 
-Kumi 还会记住它最后一次看到的每个已保存工程是什么样子。下次打开时，欢迎界面会说明这期间发生了哪些变化（“Since you were last here · 3 days ago: Tempo 120 → 124 BPM; Added track “Pad””），Kumi 也会把这些考虑进去。工程是按文件路径识别的，所以 Save As 之后会重新开始。
+Kumi 还会记住它最后一次看到的每个已保存工程是什么样子。下次打开时，欢迎界面会说明这期间发生了哪些变化（“Since you were last here · 3 days ago: Tempo 120 → 124 BPM; Added track “Pad””），Kumi 也会把这些考虑进去。Kumi 用保存在工程内部的 ID 识别工程，所以移动过的工程，或在同一个 Live Project 文件夹中另存为其他名称的工程，会接着之前的继续；保存到其他位置的副本则重新开始。
 
 ## 当 Live 断开时
 
@@ -410,6 +419,7 @@ Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
 | `voice` | 说话设置：`send`（停止后直接发送）、`language`、`microphone`（`/voice`） |
 | `maxJobs` | 同时运行的后台任务数：1–8，默认 3 |
 | `workerModel` | 后台任务使用的模型，取自 `/model` 列表的 `<provider>/<model>`；不设置时与对话相同 |
+| `conversations` | `keepDays`：对话在最后一次使用后保留的天数，每个工程最近的 20 段不受此限（90；去掉后取 90 天与上次设定值中较长的一个）；`0` 表示全部保留 |
 
 `~/.kumi/slots.json` 保存你替换过的模型槽位（`/slots`），`~/.kumi/probes` 按设备和轨道保存每个旋钮起过的作用，`~/.kumi/models` 保存模型运行时和 Kumi 自己的模型。三者都跟随 `KUMI_HOME`。
 

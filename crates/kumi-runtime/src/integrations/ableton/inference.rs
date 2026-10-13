@@ -48,6 +48,9 @@ impl Integration for InferenceOnly {
         }
         Ok(no_access("inference-only", Utc::now(), None))
     }
+    fn words(&self) -> (&'static str, &'static str) {
+        ("Live", "Set")
+    }
     async fn close(&self) -> Result<(), RuntimeError> {
         self.closed.set(true);
         Ok(())

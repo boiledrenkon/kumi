@@ -30,6 +30,8 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | 命令 | 作用 |
 | --- | --- |
 | `kumi` | 在 Live 当前打开的工程上打开 Kumi；第一次时登录，并把桥接装入 Live（Kumi 可以替你重启 Live） |
+| `kumi -c`（或 `--continue`） | 接着你上次使用的对话继续，不论它属于哪个工程 |
+| `kumi -r [ID 或名称]`（或 `--resume`） | 按 ID（或其开头）或名称继续一段保存的对话；不加参数则从列表中选择。两者都可与 `--inference-only` 一起使用 |
 | `kumi --inference-only` | 不连接 Live，只聊天 |
 | `kumi --bridge-config <absolute path>` | 使用你自己的桥接配置 |
 | `kumi login` | 登录：询问使用 ChatGPT 还是 API 密钥 |
@@ -51,9 +53,11 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 | 命令 | 作用 |
 | --- | --- |
-| `/new` | 开始新的对话。之前的内容仍留在屏幕上，以一条分隔线隔开；上一段对话会被保存，HISTORY 中的撤销依然有效 |
+| `/new [name]` | 开始新的对话（可以命名）。之前的内容仍留在屏幕上，以一条分隔线隔开；上一段对话会被保存，HISTORY 中的撤销依然有效 |
 | `/btw <question>` | 随时顺便问个问题，即使 Kumi 正在工作也可以：根据目前为止的对话回答，不使用工具，显示在一个面板中，且不加入对话。只输入 `/btw` 会再次显示上一个回答 |
-| `/conversations` | 本工程保存的对话（最近 20 段）；选择一段即可继续 |
+| `/resume [ID 或名称]` | 保存的对话：本工程的，按 Tab 显示所有工程的；选择一段即可继续。给出 ID（或其开头）或名称时，直接继续那一段。`/conversations` 相同 |
+| `/rename [name]` | 为这段对话命名；不加名称时，当前名称会放进输入框供你修改 |
+| `/fork [name]` | 用新的 ID 在这段对话的副本中继续；原对话保留 |
 | `/reconnect` | 通过新的桥接重新连接 Live，保留对话（之前的修改将失去 Kumi 的撤销） |
 | `/undo` | 撤销 Kumi 最近一次修改 |
 | `/stop` | 停止 Live：片段、走带和录音。同时停止 Kumi 的回答 |
@@ -71,7 +75,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `/recipes` | 你的配方：运行或忘掉一个。有空位的配方会写好一行 `/recipe`，填上已固定的对象，由你补完 |
 | `/recipe <name> blank=value …` | 立即运行一个配方，不调用模型；含空格的值用引号括起，不带引号的数字或 true/false 按原值发送（要作为文字发送就加引号），没填的空位 Kumi 会指出 |
 | `/jobs` | 后台任务：按 Enter 打开一个，在里面按 `x` 停止，按 `r` 重新运行被中断的任务。Kumi 回答时也能用 |
-| `/status` | Kumi 连接到了什么、当前模型、学习素材库的进度，以及使用 API 密钥时本次会话用掉的 token |
+| `/status` | Kumi 连接到了什么、当前模型、学习素材库的进度、使用 API 密钥时本次会话用掉的 token，以及当前对话和它的 ID |
 | `/voice` | 说话功能：开始或停止、“停止后直接发送”、你说的语言和麦克风 |
 | `/update` | 获取最新的 Kumi：它会先询问，然后关闭、更新，再以同一段对话重新打开 |
 | `/changelog` | Kumi 的新功能：自你更新前的版本以来的全部条目（没有则显示最近三个版本），以及完整历史所在的位置 |
@@ -137,11 +141,11 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | Shift-Tab | 进入标签页（再按一次切到下一个标签页）：↑↓ 和 Page Up/Down 移动。在修改上，Enter、→ 或空格展开它的图示，Enter 或 ← 收起，展开时按 `u` 撤销；在记住的内容上，Enter 执行 forget；在 JOBS 的行上，Enter 打开任务，按 `x` 停止。Esc 或 Tab 返回 |
 | 鼠标 | 点击行末的 **undo** 或 **forget**、修改的文字（展开图示）或任务的文字（打开任务）、标签页名称，或点击设备树中的设备以指向它；点击图钉取消固定。拖动时按住 Shift（iTerm2 中为 Option）可选择文字 |
 
-**面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/conversations` 和 `/recipes` 中，输入文字可筛选列表。在 `/model` 中，ctrl+f 设定备用模型。**Your answer**（以带编号选项的问题结尾的回答）：按编号再按 Enter 即可回答。Kumi 推荐的选项带有标记，并一开始就被选中；没有人在时（运行过 `/goal`、`/loop` 或匹配，或 Kumi 的窗口已在其他窗口后面 2 分钟），倒计时结束后 Kumi 会选它（“Taking 2 (recommended) in 60 s · any key cancels”）。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接（或代码），`d` 改用代码登录而不用浏览器，`b` 改回浏览器。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。在任务详情中，↑↓ 滚动，`x` 停止任务，`r` 重新运行，`c` 复制报告，Esc 关闭。
+**面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/resume` 和 `/recipes` 中，输入文字可筛选列表。在 `/model` 中，ctrl+f 设定备用模型。在 `/resume` 中，Tab 在 This Set 和 All Sets 之间切换，ctrl+f 可重命名、置顶、删除所选对话或复制它的 ID。对话属于其他工程时，Kumi 会询问：在 Live 中打开它的工程（推荐）、在这里作为副本继续，或取消（Esc）。**Your answer**（以带编号选项的问题结尾的回答）：按编号再按 Enter 即可回答。Kumi 推荐的选项带有标记，并一开始就被选中；没有人在时（运行过 `/goal`、`/loop` 或匹配，或 Kumi 的窗口已在其他窗口后面 2 分钟），倒计时结束后 Kumi 会选它（“Taking 2 (recommended) in 60 s · any key cancels”）。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接（或代码），`d` 改用代码登录而不用浏览器，`b` 改回浏览器。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。在任务详情中，↑↓ 滚动，`x` 停止任务，`r` 重新运行，`c` 复制报告，Esc 关闭。
 
 ## 纯文本模式
 
-设置 `KUMI_UI=plain`，或者输入或输出经过管道时，Kumi 会改用逐行显示的纯文本界面，适合屏幕阅读器和日志。它支持 `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new`、`/conversations [n]`、`/model [provider/model]`、`/effort [level|default]`、`/fast`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/willington`、`/update`、`/changelog` 和 `/quit`，但没有 `/btw`、`/goal`、`/loop`、`/slots`、`/jobs` 或 `/copy`。后台任务开始和结束时会告诉你，你的请求所需要的任务会在 Kumi 空闲时接着进行。请在 shell 中用 `kumi login` 登录。Ctrl-C 停止回答，空闲时则退出。
+设置 `KUMI_UI=plain`，或者输入或输出经过管道时，Kumi 会改用逐行显示的纯文本界面，适合屏幕阅读器和日志。它支持 `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new [name]`、`/resume [编号、ID 或名称]`（以及 `/conversations`）、`/rename <name>`、`/fork [name]`、`/model [provider/model]`、`/effort [level|default]`、`/fast`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/willington`、`/update`、`/changelog` 和 `/quit`，但没有 `/btw`、`/goal`、`/loop`、`/slots`、`/jobs` 或 `/copy`。`/resume` 先为本工程的对话编号，再为其他工程的对话编号；Kumi 关于其他工程对话的提问用 1、2 或 3 回答（等待回答时命令照常可用，输入其他内容会再问一次）。后台任务开始和结束时会告诉你，你的请求所需要的任务会在 Kumi 空闲时接着进行。请在 shell 中用 `kumi login` 登录。Ctrl-C 停止回答，空闲时则退出。
 
 ## 离开 Kumi 时
 

@@ -2,13 +2,13 @@
 use async_trait::async_trait;
 use kumi_common::{abort, time::now_ms};
 use kumi_runtime::{
+    core::conversations::create_conversation_store,
     core::{
         contracts::{ConversationStore, KernelTool, SavedConversation},
         errors::RuntimeError,
         recall::*,
         recipes::{Recipe, RecipeStore},
     },
-    integrations::ableton::project::create_conversation_store,
 };
 use serde_json::{json, Value};
 use std::rc::Rc;

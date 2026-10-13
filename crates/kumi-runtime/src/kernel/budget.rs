@@ -155,6 +155,44 @@ pub fn transcript_of(messages: &[Value]) -> Vec<TranscriptLine> {
         .collect()
 }
 
+/// Messages as kept on disk, with each request's Live observation taken out (background jobs' reports stay, as their
+/// stubs): a conversation carried on in another Set keeps the words, not what Kumi read of the first one.
+pub fn without_observations(messages: &[Value]) -> Vec<Value> {
+    let cleared = |text: &str| match text.find(OBSERVATION_MARKER) {
+        Some(at) if text[at + OBSERVATION_MARKER.len()..].starts_with(CLEARED_OBSERVATION) => text.to_string(),
+        Some(at) => {
+            let stubs = job_report_stubs(&text[at..]);
+            if stubs.is_empty() {
+                text[..at].to_string()
+            } else {
+                format!("{}{OBSERVATION_MARKER}{CLEARED_OBSERVATION}{stubs}", &text[..at])
+            }
+        }
+        None => text.to_string(),
+    };
+    messages
+        .iter()
+        .map(|message| {
+            if message.get("role").and_then(Value::as_str) != Some("user") {
+                return message.clone();
+            }
+            let mut message = message.clone();
+            match message.get_mut("content") {
+                Some(Value::String(text)) => *text = cleared(text),
+                Some(Value::Array(parts)) => {
+                    for part in parts.iter_mut().filter(|part| part.get("type").and_then(Value::as_str) == Some("text")) {
+                        if let Some(Value::String(text)) = part.get_mut("text") {
+                            *text = cleared(text);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            message
+        })
+        .collect()
+}
+
 const CLEARED: &str = " … [Kumi cleared the rest of this earlier result to save room; read Live again if you need it.]";
 /// Results this small stay whole: change confirmations, refusals, short answers.
 const SMALL: usize = 1024;

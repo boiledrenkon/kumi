@@ -118,6 +118,14 @@ pub async fn start(run: &Run, platform: &str, env: &Env, app: Option<&str>, set:
     }
 }
 
+/// Open a Set's file in the Live that's running, by that Live's own app (a computer can have several Lives), as a
+/// double-click on the file does there: Live asks about its open Set itself, and Kumi never answers for it. False when
+/// no Live is running, or the system didn't take the file.
+pub async fn open_set_file(run: &Run, platform: &str, env: &Env, set: &str) -> bool {
+    let Some(live) = open_live(run, platform, env).await else { return false };
+    start(run, platform, env, Some(&live.app), Some(set)).await
+}
+
 /// What of Live is on this computer, read from its files without opening it: whether it can take the bridge yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveInstalled {
@@ -440,6 +448,49 @@ mod tests {
             "$app = (Get-ChildItem -Path (Join-Path $env:ProgramData 'Ableton\\Live*\\Program\\Ableton Live*.exe') -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName); if ($app) { Start-Process -FilePath $app; 'started' }"
         );
         assert_eq!(scripts[5], "(Get-Item -LiteralPath 'C:\\ProgramData\\Ableton\\Live 12 Suite\\Program\\Ableton Live 12 Suite.exe').VersionInfo.ProductVersion");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sets_file_opens_in_the_live_thats_running_by_that_lives_own_app() {
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let running = Rc::new(RefCell::new(true));
+        let run: Run = {
+            let (calls, running) = (calls.clone(), running.clone());
+            Rc::new(move |command, args, _| {
+                calls.borrow_mut().push(format!("{command} {}", args.join(" ")));
+                let script = args.last().cloned().unwrap_or_default();
+                let stdout = match command.as_str() {
+                    "ps" if *running.borrow() => "/Applications/Ableton Live 12 Beta.app/Contents/MacOS/Live\n".into(),
+                    _ if script.contains("Select-Object -First 1 -ExpandProperty Path") && *running.borrow() => {
+                        "C:\\ProgramData\\Ableton\\Live 12 Beta\\Program\\Ableton Live 12 Beta.exe\r\n".into()
+                    }
+                    _ if script.contains("Start-Process") => "started\r\n".into(),
+                    _ => String::new(),
+                };
+                async move { Ran { code: 0, stdout, stderr: String::new() } }.boxed_local()
+            })
+        };
+        let env = Env::from([("SystemRoot".to_string(), "C:\\Windows".to_string())]);
+        assert!(open_set_file(&run, "darwin", &env, "/Music/Song A Project/Song A.als").await);
+        assert!(open_set_file(&run, "win32", &env, "C:\\Music\\Bob's Song.als").await);
+        {
+            let calls = calls.borrow();
+            assert_eq!(calls[1], "open -a /Applications/Ableton Live 12 Beta.app /Music/Song A Project/Song A.als");
+            assert!(
+                calls[3].ends_with(
+                    "$app = 'C:\\ProgramData\\Ableton\\Live 12 Beta\\Program\\Ableton Live 12 Beta.exe'; if ($app) { Start-Process -FilePath $app -ArgumentList '\"C:\\Music\\Bob''s Song.als\"'; 'started' }"
+                ),
+                "{}",
+                calls[3]
+            );
+        }
+        // No Live running: nothing is opened with whatever app .als files go to.
+        *running.borrow_mut() = false;
+        calls.borrow_mut().clear();
+        assert!(!open_set_file(&run, "darwin", &env, "/Music/Song A Project/Song A.als").await);
+        assert!(!open_set_file(&run, "win32", &env, "C:\\Music\\Song.als").await);
+        assert!(!open_set_file(&run, "linux", &env, "/x.als").await);
+        assert!(calls.borrow().iter().all(|call| !call.starts_with("open ") && !call.contains("Start-Process")), "{:?}", calls.borrow());
     }
 
     #[tokio::test(flavor = "current_thread")]
