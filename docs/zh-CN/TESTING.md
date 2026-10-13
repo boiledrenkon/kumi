@@ -118,7 +118,7 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 
 - `Rust / macOS` 和 `Rust / Windows` 运行因平台而异的测试，`Python Remote Script` 跳过 macOS。
 - Rust 的构建缓存只从 `main` 保存：拉取请求恢复 `main` 的缓存，不保存任何缓存。
-- 只有修改安装、更新、发布、Willington 的文件、Mac 辅助程序或依赖项的变更，Installer 才会构建并安装全部六个。修改桥接或版本号的变更会构建、安装并检查 Linux 的发行包；其他变更只构建 Linux 的发行包。
+- 只有修改安装、更新、发布、Willington 的文件、Mac 辅助程序、Kumi 使用的 `tar` 和 PowerShell、Kumi 把扩展放进 Live 的方式或依赖项的变更，Installer 才会构建并安装全部六个。修改桥接（Remote Script、协议、Live 扩展）或版本号的变更会构建、安装并检查 Linux 的发行包；其他变更只构建 Linux 的发行包。
 - 修改 Kumi 保存其所保留内容的方式（`crates/kumi-store`、设置和登录信息、记忆、技巧、playbook、gaps、旧版 Kumi 的文件）的变更，也会运行 Linux 的安装与更新检查，在已有数据上进行更新和回滚。
 - 在拉取请求和推送到 `main` 时，Installer 的发行包用 `ci-release` 配置构建，它省去 release 配置的全程序优化。标签用 `release` 构建。
 

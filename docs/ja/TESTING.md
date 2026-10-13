@@ -118,7 +118,7 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 
 - `Rust / macOS` と `Rust / Windows` はプラットフォームによって異なるテストを実行し、`Python Remote Script` は macOS を省きます。
 - Rust のビルドキャッシュは `main` からだけ保存されます。プルリクエストは `main` のものを復元し、何も保存しません。
-- Installer が 6 つすべてをビルドしてインストールするのは、インストール、更新、リリース、Willington のファイル、Mac のヘルパー、または依存関係を変える変更の場合だけです。ブリッジやバージョン番号を変える変更では Linux のものをビルド、インストール、確認し、それ以外の変更では Linux のバンドルをビルドするだけです。
+- Installer が 6 つすべてをビルドしてインストールするのは、インストール、更新、リリース、Willington のファイル、Mac のヘルパー、Kumi が使う `tar` と PowerShell、Kumi の拡張機能を Live に入れる処理、または依存関係を変える変更の場合だけです。ブリッジ（Remote Script、プロトコル、Live の拡張機能）やバージョン番号を変える変更では Linux のものをビルド、インストール、確認し、それ以外の変更では Linux のバンドルをビルドするだけです。
 - Kumi が保持するものの保存方法（`crates/kumi-store`、設定とサインイン、メモリー、テクニック、プレイブック、ギャップ、以前の Kumi のファイル）を変える変更にも、既存のデータを残したまま更新とロールバックを行う、Linux のインストールと更新の確認が付きます。
 - プルリクエストと `main` へのプッシュでは、Installer のバンドルを `ci-release` プロファイルでビルドします。これはリリースプロファイルのプログラム全体の最適化を省きます。タグは `release` でビルドします。
 

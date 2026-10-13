@@ -160,9 +160,11 @@ On a pull request, less runs:
 - Rust's build caches are saved from `main` only: a pull request restores
   `main`'s and saves none.
 - The Installer builds and installs all six only for a change to installing,
-  updating, releasing, Willington's files, the Mac helper or a dependency. A
-  change to the bridge or a version number builds, installs and checks Linux's;
-  any other change builds Linux's bundle only.
+  updating, releasing, Willington's files, the Mac helper, the `tar` and
+  PowerShell Kumi runs, how Kumi's extension goes into Live, or a dependency. A
+  change to the bridge (the Remote Script, the protocol, the Live extension) or
+  a version number builds, installs and checks Linux's; any other change builds
+  Linux's bundle only.
 - A change to how Kumi stores what it keeps (`crates/kumi-store`, settings and
   sign-ins, memory, techniques, playbook, gaps, an older Kumi's files) also gets
   Linux's install and update check, which updates and rolls back over existing

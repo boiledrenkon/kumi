@@ -44,18 +44,20 @@ jobs:
       - id: plan
         shell: bash
         run: |
-          # Tags, main and pull requests that change installing, updating, releasing, Willington's files or the Mac
-          # helper the bundle carries build all six platforms, install each, update to it from the release before it
-          # and check the update from the JavaScript release. A pull request that changes
-          # the bridge, a version number or how Kumi stores what it keeps (the store, settings and sign-ins, memory,
+          # Tags, main and pull requests that change installing, updating, releasing, Willington's files, the Mac helper
+          # the bundle carries, the tar and PowerShell Kumi runs, or how Kumi's extension goes into Live build all six
+          # platforms, install each, update to it from the release before it and check the update from the JavaScript
+          # release. A pull request that changes the bridge (the Remote Script, the protocol it ships, the Live
+          # extension), a version number or how Kumi stores what it keeps (the store, settings and sign-ins, memory,
           # techniques, playbook, gaps, an older Kumi's files), which the update and rollback must carry over, does
           # that on Linux. Any other builds Linux's bundle only; main installs and checks it once merged.
           full=true
           checks=true
-          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|bridge_setup|cli/)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/hands/(KumiHands\.swift|mac\.rs))'
+          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|bridge_setup|cli/)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/system\.rs|crates/kumi/src/live_extension\.rs)'
           # A change to any of these gets every system's install and transition jobs before it merges: main broke once
           # when the Mac helper's didn't.
-          for path in install.sh install.ps1 crates/kumi/src/install.rs crates/kumi/src/update.rs crates/kumi/src/install/migration.rs crates/kumi-runtime/src/hands/KumiHands.swift; do
+          for path in install.sh install.ps1 crates/kumi/src/install.rs crates/kumi/src/update.rs crates/kumi/src/install/migration.rs \
+            crates/kumi-runtime/src/hands/KumiHands.swift crates/kumi-runtime/src/system.rs crates/kumi/src/live_extension.rs; do
             grep -q -E "$installing_paths" <<<"$path" || { echo "::error::$path must count as installing"; exit 1; }
           done
           # The nightly run only builds, to keep the release profile's cache warm. A run started by hand also installs.
@@ -72,7 +74,7 @@ jobs:
               | grep -E '^[-+]' | grep -v -E '^(---|\+\+\+) |^[-+]version = "[^"]*"$' || true)"
             if [[ -z "$installing" && -z "$dependencies" ]]; then
               full=false
-              if ! grep -q -E '^(remote-script/|Cargo\.(toml|lock)$|crates/[^/]+/Cargo\.toml$|crates/kumi-store/|crates/kumi-runtime/src/core/(memory|techniques|playbook|gaps|file_sync|store_[a-z_]+)\.rs$|crates/kumi/src/config\.rs$)' <<<"$changed"; then
+              if ! grep -q -E '^(remote-script/|protocol/|apps/live-extension/|Cargo\.(toml|lock)$|crates/[^/]+/Cargo\.toml$|crates/kumi-store/|crates/kumi-runtime/src/core/(memory|techniques|playbook|gaps|file_sync|store_[a-z_]+)\.rs$|crates/kumi/src/config\.rs$)' <<<"$changed"; then
                 checks=false
               fi
             fi
