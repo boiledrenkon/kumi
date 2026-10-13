@@ -123,7 +123,10 @@ try {
   New-Item -ItemType Directory -Force -Path $profileFolder | Out-Null
   foreach ($spelled in @($profileFolder, "$profileFolder\", $profileFolder.ToUpperInvariant())) {
     $run = Install @{ KUMI_HOME = $spelled; USERPROFILE = $profileFolder; KUMI_RELEASES = "$base/empty" }
-    Check "the home folder as KUMI_HOME ($spelled) is refused, and nothing lands there" (($run.Code -eq 1) -and $run.Said.Contains('KUMI_HOME is your home folder; Kumi needs a folder of its own') -and -not (Get-ChildItem -Force -LiteralPath $profileFolder)) $run.Said
+    # PowerShell keeps its own files in a home folder; none of Kumi's may land there.
+    $there = @(Get-ChildItem -Force -Name -LiteralPath $profileFolder)
+    $kumis = @($there | Where-Object { (@('app', 'bin', 'downloads') -contains $_) -or ($_ -like '.install.*') })
+    Check "the home folder as KUMI_HOME ($spelled) is refused, and nothing of Kumi's lands there" (($run.Code -eq 1) -and $run.Said.Contains('KUMI_HOME is your home folder; Kumi needs a folder of its own') -and ($kumis.Count -eq 0)) "$($run.Said)`nExit code $($run.Code); in the folder: $($there -join ', ')"
   }
   $run = Install @{ KUMI_HOME = [IO.Path]::GetPathRoot($root); KUMI_RELEASES = "$base/empty" }
   Check "a drive's root as KUMI_HOME is refused" (($run.Code -eq 1) -and $run.Said.Contains(', the root of a drive; Kumi needs a folder of its own')) $run.Said
