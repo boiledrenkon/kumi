@@ -1,0 +1,127 @@
+name: Network
+
+# Kumi's HTTP as a school's or an office's network has it, on each system, beside reqwest as Kumi made its clients
+# before: a certificate authority installed in the system's own trust store (what a network that inspects secure
+# connections asks for), and a proxy in the system's own settings with an exception (on Linux, which has none, in
+# HTTPS_PROXY and NO_PROXY). The tests are network.rs's ignored ones. Only for changes to how Kumi's HTTP clients are
+# made: macOS runners are scarce.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/kumi-runtime/src/net/**"
+      - "crates/kumi-runtime/tests/network.rs"
+      - ".github/workflows/network.yml"
+  pull_request:
+    paths:
+      - "crates/kumi-runtime/src/net/**"
+      - "crates/kumi-runtime/tests/network.rs"
+      - ".github/workflows/network.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  system:
+    name: Network / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, label: Linux }
+          - { os: macos-15, label: macOS }
+          - { os: windows-2025, label: Windows }
+    env:
+      KUMI_TEST_PROXY_PORT: "18080"
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Stop Windows Defender scanning the workspace
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Where the test authority is kept
+        run: echo "KUMI_TEST_AUTHORITY=$RUNNER_TEMP/kumi-test-authority" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+        with:
+          key: network
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the tests
+        run: cargo test -p kumi-runtime --test network --locked --no-run
+      - name: The tests that need nothing of the system's
+        run: cargo test -p kumi-runtime --test network --locked
+      - name: Make a certificate authority of the network's own
+        run: cargo test -p kumi-runtime --test network --locked -- --ignored --exact make_test_authority
+
+      - name: Install it in the system's trust store (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo cp "$KUMI_TEST_AUTHORITY/authority.pem" /usr/local/share/ca-certificates/kumi-network-test.crt
+          sudo update-ca-certificates
+      - name: Install it in the system's trust store (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # The runner's own: no one is there to approve the change to the trust settings.
+          sudo security authorizationdb write com.apple.trust-settings.admin allow
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$KUMI_TEST_AUTHORITY/authority.pem"
+      - name: Install it in the system's trust store (Windows, the machine's Root store)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: certutil -addstore -f Root "$env:KUMI_TEST_AUTHORITY\authority.pem"
+
+      - name: Trusted by the system's trust store
+        run: cargo test -p kumi-runtime --test network --locked -- --ignored --exact the_systems_trust_store_is_trusted --nocapture
+
+      - name: Through the proxy in HTTPS_PROXY, but for NO_PROXY's exception (Linux)
+        if: runner.os == 'Linux'
+        env:
+          HTTPS_PROXY: http://127.0.0.1:18080
+          NO_PROXY: bypass.kumi-network.test
+        run: cargo test -p kumi-runtime --test network --locked -- --ignored --exact the_systems_proxy_is_followed_with_its_exceptions --nocapture
+      - name: Through the proxy in the system's settings, but for its exception (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Every network service, so whichever is in use has it; taken off again however the test ends.
+          services="$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*')"
+          off() { while IFS= read -r service; do sudo networksetup -setsecurewebproxystate "$service" off; sudo networksetup -setwebproxystate "$service" off; done <<<"$services"; }
+          trap off EXIT
+          while IFS= read -r service; do
+            sudo networksetup -setsecurewebproxy "$service" 127.0.0.1 18080
+            sudo networksetup -setwebproxy "$service" 127.0.0.1 18080
+            sudo networksetup -setproxybypassdomains "$service" "*.local" "169.254/16" bypass.kumi-network.test
+          done <<<"$services"
+          scutil --proxy
+          cargo test -p kumi-runtime --test network --locked -- --ignored --exact the_systems_proxy_is_followed_with_its_exceptions --nocapture
+      - name: Through the proxy in the system's settings, but for its exception (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # This user's settings, as Settings › Network & internet › Proxy writes them; off again however the test ends.
+          $settings = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+          try {
+            New-ItemProperty $settings -Name ProxyServer -Value '127.0.0.1:18080' -PropertyType String -Force | Out-Null
+            New-ItemProperty $settings -Name ProxyOverride -Value 'bypass.kumi-network.test;<local>' -PropertyType String -Force | Out-Null
+            New-ItemProperty $settings -Name ProxyEnable -Value 1 -PropertyType DWord -Force | Out-Null
+            Get-ItemProperty $settings | Select-Object ProxyEnable, ProxyServer, ProxyOverride | Format-List
+            cargo test -p kumi-runtime --test network --locked -- --ignored --exact the_systems_proxy_is_followed_with_its_exceptions --nocapture
+            $code = $LASTEXITCODE
+          } finally {
+            New-ItemProperty $settings -Name ProxyEnable -Value 0 -PropertyType DWord -Force | Out-Null
+          }
+          exit $code
