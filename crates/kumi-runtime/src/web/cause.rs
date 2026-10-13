@@ -392,11 +392,14 @@ mod tests {
     #[tokio::test]
     async fn kumis_own_http_keeps_what_went_wrong_for_each_cause() {
         let fetch = HttpFetch::with_timeouts(Duration::from_secs(5), Duration::from_millis(300));
+        // The read timeout counts from the request on, connecting and looking the name up included, and Windows tries a
+        // closed port again for a second or two before it says refused: these two wait as long as they need.
+        let patient = HttpFetch::with_timeouts(Duration::from_secs(5), Duration::from_secs(5));
         // Refused.
-        let refused = failed(&fetch, &format!("http://{}/", closed_port().await)).await;
+        let refused = failed(&patient, &format!("http://{}/", closed_port().await)).await;
         assert_eq!(NetCause::of_call(&refused), Some(NetCause::Offline), "{refused:?}");
         // A name that never resolves (RFC 6761).
-        let unknown = failed(&fetch, "http://kumi-net-cause.invalid/").await;
+        let unknown = failed(&patient, "http://kumi-net-cause.invalid/").await;
         assert_eq!(NetCause::of_call(&unknown), Some(NetCause::Dns), "{unknown:?}");
         // Something that answers HTTPS with plain words: a captive portal, say.
         let portal = server(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n", true).await;
