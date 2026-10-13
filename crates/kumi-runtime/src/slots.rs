@@ -477,7 +477,12 @@ async fn openai(store: &dyn CredentialStore, env: &HashMap<String, String>, sign
 }
 
 fn local(base: &str, model: &str, env: &HashMap<String, String>) -> Rc<dyn Listener> {
-    Rc::new(ChatListener { base: base.into(), key: env.get("KUMI_LISTENER_KEY").cloned(), model: model.into(), client: listener::client() })
+    Rc::new(ChatListener {
+        base: base.into(),
+        key: env.get("KUMI_LISTENER_KEY").cloned(),
+        model: model.into(),
+        client: listener::named_client(),
+    })
 }
 
 /// The listener a choice names, found now; None when it finds none (Off, or no key).

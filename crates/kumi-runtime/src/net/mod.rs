@@ -1,6 +1,7 @@
 //! How Kumi's HTTP clients are made, in one place, so they all trust certificates and go through proxies alike
 //! (sign-in, updates, model calls, downloads). Each client begins at [`client`] and adds its own timeouts, redirects
-//! and user agent. [`direct`] is for the web tool's guarded lookups, which a proxy would get around.
+//! and user agent. [`model_servers`] is for a model server the producer names, [`direct`] for the web tool's guarded
+//! lookups, which a proxy would get around.
 
 pub mod proxy;
 mod trust;
@@ -11,6 +12,13 @@ use std::sync::Arc;
 /// and its proxies (the environment's or the system's, never for this computer itself).
 pub fn client() -> reqwest::ClientBuilder {
     client_through(proxy::current)
+}
+
+/// [`client`] for a model server the producer names (Ollama, LM Studio, settings.json's modelServers, a listening
+/// model's address): on their computer or network, by address or by a name (nas.lan, a Tailscale name), which a
+/// system's proxy to the internet doesn't lead to. The variables' proxies alone, as before.
+pub fn model_servers() -> reqwest::ClientBuilder {
+    client_through(proxy::environment)
 }
 
 /// [`client`] with proxies from `settings` (asked as each connection is made) instead of the environment's or the

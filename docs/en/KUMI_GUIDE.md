@@ -1008,9 +1008,13 @@ own retention are separate.
   them, it uses the proxy set in macOS's or Windows' settings, with its
   exceptions. Kumi doesn't read a proxy auto-config (PAC) file: set
   `HTTPS_PROXY` to the proxy's address instead.
+- **A proxy that wants a password:** `HTTPS_PROXY=http://user:pass@host:port`.
+  When the system's proxy wants a sign-in Kumi can't give (NTLM, Kerberos),
+  Kumi tries directly instead. `NO_PROXY=*` always connects directly.
 - **Never through a proxy:** models on your computer (Ollama, LM Studio) and
-  Live's bridge. With the system's settings, addresses on your own network
-  aren't either.
+  Live's bridge. A model server you name (`modelServers`, `KUMI_LISTENER`)
+  goes through the variables' proxy only, never the system's. With the
+  system's settings, addresses on your own network go directly too.
 - **A network that inspects secure connections,** as schools and offices often
   have: Kumi trusts the certificates your computer trusts, so it works once the
   network's certificate is installed, as your browser needs. `SSL_CERT_FILE`

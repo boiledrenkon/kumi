@@ -365,6 +365,11 @@ async fn the_systems_proxy_is_followed_with_its_exceptions() {
     let local = local_server();
     assert_eq!(get(net::client(), &format!("http://{local}/")).await.as_deref(), Ok("direct"));
     assert_eq!(*asked.lock().unwrap(), [UNRESOLVED]);
+    // A model server the producer names (nas.lan, a Tailscale name) goes by the variables alone, never the system's proxy.
+    let model_server = format!("http://studio-gpu.lan:{}/api/version", local.rsplit(':').next().unwrap());
+    let named = net::model_servers().resolve("studio-gpu.lan", local.parse().unwrap());
+    assert_eq!(get(named, &model_server).await.as_deref(), Ok("direct"));
+    assert_eq!(*asked.lock().unwrap(), [UNRESOLVED], "the model server went through the proxy");
     let before = get(reqwest::Client::builder(), &format!("https://{UNRESOLVED}/")).await.unwrap_err();
     println!("Kumi: inspected {UNRESOLVED} through the system's proxy\nan exception: {exception}\nbefore: {before}");
 }

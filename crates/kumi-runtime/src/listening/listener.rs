@@ -257,7 +257,7 @@ pub fn from_env(env: &std::collections::HashMap<String, String>) -> FromEnv {
                 base: base.trim().into(),
                 key: env.get("KUMI_LISTENER_KEY").cloned(),
                 model: model.trim().into(),
-                client: client(),
+                client: named_client(),
             })
         }
         _ => FromEnv::Off("KUMI_LISTENER is neither off nor a model's address (<base url>#<model>), so listening is off".into()),
@@ -267,7 +267,17 @@ pub fn from_env(env: &std::collections::HashMap<String, String>) -> FromEnv {
 /// A client for a listening model: one that gives up on a model that stops answering (a minute and a half: it hears
 /// 20 s of audio), and follows no redirect, so a key never goes on to another host.
 pub(crate) fn client() -> reqwest::Client {
-    crate::net::client().timeout(std::time::Duration::from_secs(90)).redirect(reqwest::redirect::Policy::none()).build().unwrap_or_default()
+    listening(crate::net::client())
+}
+
+/// [`client`] for a listening model at an address the producer named (KUMI_LISTENER, a slot): on their computer or
+/// network, so the variables' proxies alone, never the system's.
+pub(crate) fn named_client() -> reqwest::Client {
+    listening(crate::net::model_servers())
+}
+
+fn listening(client: reqwest::ClientBuilder) -> reqwest::Client {
+    client.timeout(std::time::Duration::from_secs(90)).redirect(reqwest::redirect::Policy::none()).build().unwrap_or_default()
 }
 
 /// OpenAI's newest audio-capable chat model for a key, from its own model list (ids that take audio: "…audio…", not

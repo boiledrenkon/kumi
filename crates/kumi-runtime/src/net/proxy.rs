@@ -4,8 +4,11 @@
 //! - Without them, the system's own settings, with their exceptions: macOS's network proxies and Windows' Internet
 //!   settings (Linux has only the variables). Auto-config files and discovery aren't read: `auto_config` says when the
 //!   system uses one, so an error can say to set HTTPS_PROXY.
-//! - Never for this computer itself (localhost, 127.0.0.0/8, ::1): local model servers are reached directly. With the
-//!   system's settings, nor for a private network's address or a .local name, which Kumi reached directly before.
+//! - Never for this computer itself (localhost, 127.0.0.0/8, ::1). With the system's settings, nor for a private
+//!   network's address or a .local name, which Kumi reached directly before. A model server the producer names goes by
+//!   the variables alone ([`environment`]), as before: it's on their computer or network, by address or by name.
+//! - A system's proxy that wants a sign-in Kumi can't give (NTLM, Kerberos, a password the system keeps) is passed by:
+//!   after its 407, requests go directly while the system names it, as they did before Kumi read the settings.
 
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -41,11 +44,16 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// No proxy for any address.
+    pub fn none() -> Self {
+        Self { http: None, https: None, source: Source::Environment, auto_config: false, bypass: Bypass::default() }
+    }
+
     /// The environment's: None when its variables name no proxy, so the system's settings say.
     pub fn from_env(env: &Env) -> Option<Self> {
         // Run as a CGI script, HTTP_PROXY could come from a request's own Proxy header: no proxy, as reqwest had it.
         if env.contains_key("REQUEST_METHOD") {
-            return Some(Self { http: None, https: None, source: Source::Environment, auto_config: false, bypass: Bypass::default() });
+            return Some(Self::none());
         }
         let all = variable(env, "ALL_PROXY");
         let http = variable(env, "HTTP_PROXY").or(all);
@@ -77,10 +85,11 @@ impl Settings {
         }
     }
 
-    /// The system's settings with `https` for every address and nothing excepted, or none and an auto-config file.
+    /// The system's settings with `proxy` for every address and nothing excepted, or none and an auto-config file.
     #[cfg(test)]
-    pub(crate) fn system_for_tests(https: Option<&str>, auto_config: bool) -> Self {
-        Self::from_system(Found { https: https.map(str::to_string), auto_config, ..Found::default() }, "")
+    pub(crate) fn system_for_tests(proxy: Option<&str>, auto_config: bool) -> Self {
+        let proxy = proxy.map(str::to_string);
+        Self::from_system(Found { http: proxy.clone(), https: proxy, auto_config, ..Found::default() }, "")
     }
 
     /// The proxy for a request to `url`, or None to go directly.
@@ -89,24 +98,57 @@ impl Settings {
         if this_computer(&host) || (self.source == Source::System && this_network(&host)) || self.bypass.covers(&host) {
             return None;
         }
-        match url.scheme() {
+        let proxy = match url.scheme() {
             "https" | "wss" => self.https.clone(),
             "http" | "ws" => self.http.clone(),
             _ => None,
-        }
+        }?;
+        let passed = self.source == Source::System && passed_by().as_ref() == Some(&proxy);
+        (!passed).then_some(proxy)
     }
+}
+
+/// The system's proxy that wanted a sign-in Kumi can't give: passed by while the system names it.
+static PASSED_BY: Mutex<Option<Url>> = Mutex::new(None);
+
+fn passed_by() -> std::sync::MutexGuard<'static, Option<Url>> {
+    PASSED_BY.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// After a 407 from the proxy `settings` chose for `url`: when it's the system's (whose sign-in Kumi can't give), it's
+/// passed by from now on, and true says to try once directly. The variables' proxies are the producer's to sign in
+/// to (HTTPS_PROXY=http://user:pass@host:port), so they're kept.
+pub fn pass_by(settings: &Settings, url: &Url) -> bool {
+    let Some(proxy) = settings.proxy_for(url).filter(|_| settings.source == Source::System) else { return false };
+    *passed_by() = Some(proxy);
+    true
+}
+
+/// Going directly failed too: the system's proxy is used again, and its 407 is what's said.
+pub fn stop_passing_by() {
+    *passed_by() = None;
+}
+
+/// The environment's proxy settings, read once.
+struct Environment {
+    proxies: Option<Arc<Settings>>,
+    no_proxy: String,
+}
+
+static ENVIRONMENT: LazyLock<Environment> = LazyLock::new(|| {
+    let env = process_env();
+    Environment { proxies: Settings::from_env(&env).map(Arc::new), no_proxy: variable(&env, "NO_PROXY").unwrap_or("").to_string() }
+});
+
+/// The variables' settings alone, for a model server the producer names (Ollama, LM Studio, settings.json's
+/// modelServers, a listening model's address): none when they name no proxy.
+pub fn environment() -> Arc<Settings> {
+    static NONE: LazyLock<Arc<Settings>> = LazyLock::new(|| Arc::new(Settings::none()));
+    Arc::clone(ENVIRONMENT.proxies.as_ref().unwrap_or(&NONE))
 }
 
 /// The settings in force: the environment's (read once), or else the system's (read again after a while).
 pub fn current() -> Arc<Settings> {
-    struct Environment {
-        proxies: Option<Arc<Settings>>,
-        no_proxy: String,
-    }
-    static ENVIRONMENT: LazyLock<Environment> = LazyLock::new(|| {
-        let env = process_env();
-        Environment { proxies: Settings::from_env(&env).map(Arc::new), no_proxy: variable(&env, "NO_PROXY").unwrap_or("").to_string() }
-    });
     static SYSTEM: Mutex<Option<(Instant, Arc<Settings>)>> = Mutex::new(None);
     if let Some(proxies) = &ENVIRONMENT.proxies {
         return Arc::clone(proxies);
