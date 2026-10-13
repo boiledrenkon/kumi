@@ -3851,3 +3851,64 @@ local_test!(another_sets_latest_conversation_is_not_the_one_going_on, {
     assert_eq!(h.session.conversations().await.unwrap().iter().filter(|r| r.current).count(), 1);
     h.session.close().await.unwrap();
 });
+local_test!(a_conversation_chosen_while_live_was_away_steps_aside_when_live_comes_back_on_another_set, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    h.session.submit("make the pads wider", None).await.unwrap();
+    saved(store.as_ref(), SET_B, 1).await;
+    let own = now(&h).await.id;
+    // Live goes away: the look keeps its key and the last Set's project, with no Set read and no tools.
+    {
+        let mut o = h.observation.borrow_mut();
+        o.set = None;
+        o.revision = Some("no-live".into());
+    }
+    h.session.refresh().await.unwrap();
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    assert_eq!(now(&h).await.id, KEPT);
+    assert!(asks(&h).is_empty());
+    // Live is back on B, under the same key: B's own conversation goes on, and Kumi asks about A's.
+    {
+        let mut o = h.observation.borrow_mut();
+        o.set = Some(format!("identity:{SET_B}"));
+        o.revision = None;
+    }
+    h.session.refresh().await.unwrap();
+    assert_eq!(now(&h).await.id, own);
+    assert_eq!(asks(&h).last().unwrap().as_ref().map(|ask| ask.id.as_str()), Some(KEPT));
+    // A request now is B's own, and nothing of A's goes with it.
+    h.session.submit("hello", None).await.unwrap();
+    let last = h.record.created.borrow().len() - 1;
+    assert!(h.words(last).unwrap().iter().all(|words| !words.contains("make the bass wider")), "{:?}", h.words(last));
+    h.session.answer_set(SetChoice::Cancel).await.unwrap();
+    assert_eq!(now(&h).await.id, own);
+    assert_eq!(asks(&h).last().unwrap(), &None);
+    h.session.close().await.unwrap();
+});
+local_test!(the_question_goes_when_the_chosen_conversations_set_opens_another_way, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    assert!(asks(&h).last().unwrap().is_some());
+    // The producer opens A in Live themselves: the conversation goes on there, and the question goes.
+    live(&h, Some(SET_A));
+    h.session.refresh().await.unwrap();
+    assert_eq!(now(&h).await.id, KEPT);
+    assert_eq!(asks(&h).last().unwrap(), &None);
+    // Asked again, then left for a new conversation: the question goes too.
+    live(&h, Some(SET_B));
+    h.session.refresh().await.unwrap();
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    assert!(asks(&h).last().unwrap().is_some());
+    h.session.new_conversation().await.unwrap();
+    assert_eq!(asks(&h).last().unwrap(), &None);
+    h.session.close().await.unwrap();
+});

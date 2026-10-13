@@ -328,6 +328,8 @@ struct State {
     touched: bool,
     /// A kept conversation the producer chose, waiting for its Set (or their answer about it).
     wanted: Option<Wanted>,
+    /// The producer left a chosen conversation that went on in another Set: the open Set's own goes on from the next look.
+    own_set: bool,
     /// Whether the last look at the DAW found a Set open there.
     set_open: bool,
     /// Kumi's note to the model with the next request: the conversation was carried into another Set.
@@ -740,6 +742,7 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 copied_from: None,
                 touched: false,
                 wanted: options_resume.map(|(place, id)| Wanted { place, id, asked: None }),
+                own_set: false,
                 set_open: false,
                 next_note: None,
                 model_said: Default::default(),
@@ -1141,6 +1144,14 @@ impl Session {
         )?
         .await
     }
+    /// The conversation the producer chose is no longer waiting: a question asked about it goes away.
+    fn drop_wanted(&self) -> Option<Wanted> {
+        let wanted = self.0.state.borrow_mut().wanted.take();
+        if wanted.as_ref().is_some_and(|w| w.asked.is_some()) {
+            self.emit(SessionEvent::SetAsked { ask: None });
+        }
+        wanted
+    }
     /// Ask about the conversation the producer chose, whose Set isn't the open one (`key`): once for each Set that opens.
     async fn ask_about_wanted(&self, key: &str, open: Option<String>) {
         let Some(wanted) = self.0.state.borrow().wanted.clone() else { return };
@@ -1321,8 +1332,24 @@ impl Session {
         let must_reset = self.0.state.borrow().must_reset;
         let identity = held.as_ref().is_some_and(|h| h.key != observation.key);
         let revision = observation.revision.clone().unwrap_or_default();
+        // The open Set's place, when the DAW was read: a saved Set's project, or an unsaved Set's. (Without the DAW, the
+        // project is the last one seen.)
+        let here = observation.set.as_ref().map(|_| observation.project.as_ref().map(|p| p.id.clone()).unwrap_or(UNSAVED.into()));
+        // A conversation the producer chose went on while no Set was open, and another Set is open now (or the producer
+        // left it): the open Set's own conversation goes on, and Kumi asks about the chosen one. Live coming back keeps the
+        // look's key, so this isn't a Set change to it.
+        let astray = {
+            let mut s = self.0.state.borrow_mut();
+            let left = std::mem::take(&mut s.own_set);
+            left || s.wanted.as_ref().is_some_and(|w| {
+                w.place != UNSAVED
+                    && s.conversation_id == w.id
+                    && s.place.as_ref() == Some(&w.place)
+                    && here.as_ref().is_some_and(|here| *here != w.place)
+            })
+        };
         let mut from = None;
-        if let Some(h) = held.as_ref().filter(|h| !identity && !must_reset && h.revision != revision) {
+        if let Some(h) = held.as_ref().filter(|h| !astray && !identity && !must_reset && h.revision != revision) {
             if h.value.has_checkpoint() {
                 from = Some(h.value.checkpoint()?);
                 self.drop_kernel().await?;
@@ -1331,10 +1358,12 @@ impl Session {
         }
         let mut reason = None;
         let first = self.0.state.borrow().kernel.is_none() && !must_reset;
-        if self.0.state.borrow().kernel.is_some() && (identity || must_reset || held.as_ref().is_some_and(|h| h.revision != revision)) {
+        if self.0.state.borrow().kernel.is_some()
+            && (astray || identity || must_reset || held.as_ref().is_some_and(|h| h.revision != revision))
+        {
             self.drop_kernel().await?;
             self.assert_current(op)?;
-            reason = Some(if identity {
+            reason = Some(if identity || astray {
                 "set"
             } else if must_reset {
                 "cancelled"
@@ -1349,9 +1378,6 @@ impl Session {
         }
         if self.0.state.borrow().kernel.is_none() {
             let project = observation.project.as_ref().map(|p| p.id.clone());
-            // The open Set's place, when the DAW was read: a saved Set's project, or an unsaved Set's. (Without the DAW,
-            // the project is the last one seen.)
-            let here = observation.set.as_ref().map(|_| project.clone().unwrap_or(UNSAVED.into()));
             let (fresh, chosen, switched, carry, settled, wanted) = {
                 let mut s = self.0.state.borrow_mut();
                 (s.start_fresh, s.chosen.take(), s.switched.clone(), s.carry.clone(), s.settled.clone(), s.wanted.clone())
@@ -1375,6 +1401,9 @@ impl Session {
                 self.begin_taken(chosen.place, taken, &chosen.conversation);
                 self.0.state.borrow_mut().touched = true;
                 resumed = Some(chosen.conversation);
+            } else if astray {
+                resumed = self.own_conversation(op, project.as_ref()).await?;
+                from = resumed.as_ref().map(|kept| kept.checkpoint.clone());
             } else if from.is_some() {
             } else if let Some(switched) = switched.filter(|s| s.key == observation.key) {
                 from = Some(switched.checkpoint);
@@ -1412,7 +1441,7 @@ impl Session {
                             }
                             None => {
                                 self.notice("That conversation isn't kept any more.");
-                                self.0.state.borrow_mut().wanted = None;
+                                self.drop_wanted();
                                 resumed = self.own_conversation(op, project.as_ref()).await?;
                                 from = resumed.as_ref().map(|kept| kept.checkpoint.clone());
                             }
@@ -1421,7 +1450,7 @@ impl Session {
                 }
                 // Its Set is open: it's no longer waiting.
                 if here.is_some() {
-                    self.0.state.borrow_mut().wanted = None;
+                    self.drop_wanted();
                 }
             } else {
                 resumed = self.own_conversation(op, project.as_ref()).await?;
@@ -1498,13 +1527,14 @@ impl Session {
             }
             // The conversation the producer chose went on in its own Set, now open: nothing's waiting. Another Set is open:
             // ask what to do.
-            let elsewhere = {
-                let mut s = self.0.state.borrow_mut();
-                if s.wanted.as_ref().is_some_and(|w| here.as_ref() == Some(&w.place) && s.conversation_id == w.id) {
-                    s.wanted = None;
-                }
-                s.wanted.as_ref().is_some_and(|w| here.as_ref().is_some_and(|here| *here != w.place))
+            let done = {
+                let s = self.0.state.borrow();
+                s.wanted.as_ref().is_some_and(|w| here.as_ref() == Some(&w.place) && s.conversation_id == w.id)
             };
+            if done {
+                self.drop_wanted();
+            }
+            let elsewhere = self.0.state.borrow().wanted.as_ref().is_some_and(|w| here.as_ref().is_some_and(|here| *here != w.place));
             if elsewhere {
                 self.ask_about_wanted(&observation.key, observation.project.as_ref().map(|p| p.name.clone())).await;
             }
@@ -2132,18 +2162,16 @@ impl SessionController for Session {
                     if let Some(l) = &this.0.learned {
                         l.drafts.reset();
                     }
-                    let (place, integrated, asked) = {
+                    let (place, integrated) = {
                         let mut s = this.0.state.borrow_mut();
                         s.start_fresh = true;
                         s.turns = 0;
                         s.must_reset = false;
                         s.settled = None;
                         s.interrupted = None;
-                        (s.place.clone(), s.integration.is_some(), s.wanted.take().is_some_and(|w| w.asked.is_some()))
+                        (s.place.clone(), s.integration.is_some())
                     };
-                    if asked {
-                        this.emit(SessionEvent::SetAsked { ask: None });
-                    }
+                    this.drop_wanted();
                     if let (Some(store), Some(place)) = (this.0.options.conversations.clone(), place) {
                         this.enqueue(async move { store.fresh(&place).await });
                     }
@@ -2246,10 +2274,7 @@ impl SessionController for Session {
         };
         // The open Set's place, when Live was read (without it, the project is the last one seen).
         let open = set_open.then(|| open.unwrap_or(UNSAVED.into()));
-        let asked = self.0.state.borrow_mut().wanted.take().is_some_and(|w| w.asked.is_some());
-        if asked {
-            self.emit(SessionEvent::SetAsked { ask: None });
-        }
+        self.drop_wanted();
         // Another Set's, while a Set is open: the producer says whether to open its Set, carry it on here in a copy, or
         // leave it.
         if open.as_ref().is_some_and(|open| *open != place) && place != UNSAVED {
@@ -2360,14 +2385,20 @@ impl SessionController for Session {
             s.conversation_name = None;
             s.copied_from = None;
             s.touched = true;
-            s.wanted = None;
         }
+        self.drop_wanted();
         self.notice(format!("Forked; the original stays as {old}."));
         Ok(Some(id))
     }
     async fn answer_set(&self, choice: SetChoice) -> Result<(), RuntimeError> {
         let Some(wanted) = self.0.state.borrow().wanted.clone() else { return Ok(()) };
-        self.emit(SessionEvent::SetAsked { ask: None });
+        // Answered: the question goes. Opening keeps the conversation waiting for its Set (asked, so not asked again here).
+        match choice {
+            SetChoice::Open => self.emit(SessionEvent::SetAsked { ask: None }),
+            _ => {
+                self.drop_wanted();
+            }
+        }
         let row = match &self.0.options.conversations {
             Some(store) => match store.find(&wanted.id).await? {
                 ConversationMatch::One(row) => Some(row),
@@ -2378,8 +2409,16 @@ impl SessionController for Session {
         let named = row.as_ref().and_then(|row| row.set.clone());
         let set = named.as_ref().map(|name| format!("“{name}”")).unwrap_or_else(|| "its Set".into());
         match choice {
+            // The open Set's own conversation goes on, whichever was going on.
             SetChoice::Cancel => {
-                self.0.state.borrow_mut().wanted = None;
+                let going = {
+                    let s = self.0.state.borrow();
+                    s.conversation_id == wanted.id && s.place.as_ref() == Some(&wanted.place)
+                };
+                if going && self.0.state.borrow().started {
+                    self.0.state.borrow_mut().own_set = true;
+                    self.refresh().await?;
+                }
                 Ok(())
             }
             SetChoice::Open => {
@@ -2396,7 +2435,6 @@ impl SessionController for Session {
                 Ok(())
             }
             SetChoice::Copy => {
-                self.0.state.borrow_mut().wanted = None;
                 let Some(store) = self.0.options.conversations.clone() else { return Ok(()) };
                 let saving = self.0.saving.borrow().clone();
                 let _ = saving.await;
