@@ -229,6 +229,15 @@ struct Chosen {
     id: String,
     conversation: SavedConversation,
 }
+/// A conversation's system text, and what it was made from that a rebuild can't keep: the integration's own
+/// instructions and Willington's words.
+struct SystemText {
+    conversation: String,
+    base: String,
+    willington: &'static str,
+    text: String,
+}
+
 struct State {
     matching: Option<Rc<RefCell<MatchRun>>>,
     last_run: Option<Rc<RefCell<MatchRun>>>,
@@ -278,6 +287,12 @@ struct State {
     kernel: Option<Held>,
     must_reset: bool,
     rebuild: bool,
+    /// The system text this conversation's kernels use, kept as it was first made so a rebuild (a stopped answer,
+    /// another model, new tools) sends the same prefix and the provider's cache still holds it.
+    system: Option<SystemText>,
+    /// The producer changed what the system text holds (a note, a recipe, a technique, their taste): the next kernel
+    /// reads it again. What the model keeps itself is already in the conversation.
+    system_stale: bool,
     switched: Option<Settled>,
     away: bool,
     missing: Option<Signal>,
@@ -660,6 +675,8 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 kernel: None,
                 must_reset: false,
                 rebuild: false,
+                system: None,
+                system_stale: false,
                 switched: None,
                 away: false,
                 missing: None,
@@ -956,35 +973,38 @@ impl Session {
             tokio::select! { biased; _ = abort.cancelled() => creation.cancel(), _ = stop_watch.cancelled() => {} }
         });
         let built = async {
-            let memory = if let Some(store) = &self.0.options.memory {
-                store.load(observation.project.as_ref().map(|p| p.id.as_str())).await.ok()
-            } else {
-                None
+            let conversation = self.0.state.borrow().conversation_id.clone();
+            let willington = willington_instructions(self.0.options.willington.as_ref().and_then(|on| on()), |name| {
+                observation.tools.iter().any(|tool| tool.name() == name)
+            });
+            // The same conversation keeps its system text across rebuilds, unless the producer changed what it holds.
+            let kept = {
+                let s = self.0.state.borrow();
+                s.system
+                    .as_ref()
+                    .filter(|kept| {
+                        !s.system_stale
+                            && kept.conversation == conversation
+                            && kept.base == observation.instructions
+                            && kept.willington == willington
+                    })
+                    .map(|kept| kept.text.clone())
             };
-            self.assert_current(op)?;
-            let recipes = if let Some(store) = &self.0.options.recipes { store.list().await.unwrap_or_default() } else { vec![] };
-            self.assert_current(op)?;
-            let techniques = if let Some(learned) = &self.0.learned { learned.list().await.unwrap_or_default() } else { vec![] };
-            self.assert_current(op)?;
-            let habits =
-                if let Some(library) = &self.0.options.library { library.instructions().await.unwrap_or_default() } else { String::new() };
-            self.assert_current(op)?;
-            let extra = [
-                memory.as_ref().map(|m| memory_instructions(m, observation.project.as_ref().map(|p| p.name.as_str()))).unwrap_or_default(),
-                habits,
-                recipe_instructions(&recipes),
-                if self.0.learned.is_some() { TECHNIQUE_GUIDANCE.into() } else { String::new() },
-                technique_instructions(&techniques),
-                if self.0.gaps.is_empty() { String::new() } else { GAP_GUIDANCE.into() },
-                willington_instructions(self.0.options.willington.as_ref().and_then(|on| on()), |name| {
-                    observation.tools.iter().any(|tool| tool.name() == name)
-                })
-                .into(),
-            ]
-            .into_iter()
-            .filter(|s: &String| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+            let instructions = match kept {
+                Some(text) => text,
+                None => {
+                    let text = self.system_text(op, observation, willington).await?;
+                    let mut s = self.0.state.borrow_mut();
+                    s.system = Some(SystemText {
+                        conversation: conversation.clone(),
+                        base: observation.instructions.clone(),
+                        willington,
+                        text: text.clone(),
+                    });
+                    s.system_stale = false;
+                    text
+                }
+            };
             let mut tools: Vec<Rc<dyn KernelTool>> = observation
                 .tools
                 .iter()
@@ -1007,13 +1027,8 @@ impl Session {
             if let Some(taste) = &self.0.taste {
                 tools.push(taste.tool());
             }
-            let conversation = self.0.state.borrow().conversation_id.clone();
             let value = (self.0.options.kernel_factory)(KernelOptions {
-                instructions: if extra.is_empty() {
-                    observation.instructions.clone()
-                } else {
-                    format!("{}\n\n{extra}", observation.instructions)
-                },
+                instructions,
                 tools,
                 signal: lifetime.clone(),
                 checkpoint,
@@ -1037,6 +1052,44 @@ impl Session {
             lifetime.cancel();
         }
         built.map(|value| (value, lifetime))
+    }
+    /// The system text a new conversation starts with: the integration's instructions, then what Kumi keeps (the
+    /// producer's notes, their taste, recipes, techniques) and the guidance that goes with its tools.
+    /// The producer changed what the system text holds: the next kernel reads it again (the model's own notes and
+    /// recipes are in the conversation already).
+    fn changed_system(&self, changed: bool) {
+        if changed {
+            self.0.state.borrow_mut().system_stale = true;
+        }
+    }
+    async fn system_text(&self, op: &Operation, observation: &Observation, willington: &str) -> Result<String, RuntimeError> {
+        let memory = if let Some(store) = &self.0.options.memory {
+            store.load(observation.project.as_ref().map(|p| p.id.as_str())).await.ok()
+        } else {
+            None
+        };
+        self.assert_current(op)?;
+        let recipes = if let Some(store) = &self.0.options.recipes { store.list().await.unwrap_or_default() } else { vec![] };
+        self.assert_current(op)?;
+        let techniques = if let Some(learned) = &self.0.learned { learned.list().await.unwrap_or_default() } else { vec![] };
+        self.assert_current(op)?;
+        let habits =
+            if let Some(library) = &self.0.options.library { library.instructions().await.unwrap_or_default() } else { String::new() };
+        self.assert_current(op)?;
+        let extra = [
+            memory.as_ref().map(|m| memory_instructions(m, observation.project.as_ref().map(|p| p.name.as_str()))).unwrap_or_default(),
+            habits,
+            recipe_instructions(&recipes),
+            if self.0.learned.is_some() { TECHNIQUE_GUIDANCE.into() } else { String::new() },
+            technique_instructions(&techniques),
+            if self.0.gaps.is_empty() { String::new() } else { GAP_GUIDANCE.into() },
+            willington.into(),
+        ]
+        .into_iter()
+        .filter(|s: &String| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+        Ok(if extra.is_empty() { observation.instructions.clone() } else { format!("{}\n\n{extra}", observation.instructions) })
     }
     async fn ensure_kernel(&self, op: &Operation, observation: &Observation) -> Result<(), RuntimeError> {
         self.assert_current(op)?;
@@ -2064,10 +2117,12 @@ impl SessionController for Session {
         self.0.options.library.is_some()
     }
     async fn forget_taste(&self, id: &str) -> Result<bool, RuntimeError> {
-        match &self.0.options.library {
-            Some(library) => library.forget_taste(id).await,
-            None => Ok(false),
-        }
+        let forgot = match &self.0.options.library {
+            Some(library) => library.forget_taste(id).await?,
+            None => false,
+        };
+        self.changed_system(forgot);
+        Ok(forgot)
     }
     fn has_memory(&self) -> bool {
         true
@@ -2090,21 +2145,17 @@ impl SessionController for Session {
         true
     }
     async fn forget(&self, id: &str) -> Result<Option<MemoryNote>, RuntimeError> {
-        if let Some(notes) = &self.0.notes {
-            notes.forget(id).await
-        } else {
-            Ok(None)
-        }
+        let forgot = if let Some(notes) = &self.0.notes { notes.forget(id).await? } else { None };
+        self.changed_system(forgot.is_some());
+        Ok(forgot)
     }
     fn has_change_note(&self) -> bool {
         true
     }
     async fn change_note(&self, id: &str, change: NoteChange) -> Result<Option<MemoryNote>, RuntimeError> {
-        if let Some(notes) = &self.0.notes {
-            notes.change(id, change).await
-        } else {
-            Ok(None)
-        }
+        let changed = if let Some(notes) = &self.0.notes { notes.change(id, change).await? } else { None };
+        self.changed_system(changed.is_some());
+        Ok(changed)
     }
     fn has_recipes(&self) -> bool {
         true
@@ -2212,6 +2263,7 @@ impl SessionController for Session {
         if !store.remove(&recipe.name).await? {
             return Ok(false);
         }
+        self.changed_system(true);
         self.emit(SessionEvent::Recipe(RecipeEvent { action: RecipeAction::Forgotten, name: recipe.name, steps: recipe.steps.len() }));
         Ok(true)
     }
@@ -2239,11 +2291,9 @@ impl SessionController for Session {
         true
     }
     async fn forget_technique(&self, id: &str) -> Result<bool, RuntimeError> {
-        if let Some(l) = &self.0.learned {
-            Ok(l.forget(id).await?.is_some())
-        } else {
-            Ok(false)
-        }
+        let forgot = if let Some(l) = &self.0.learned { l.forget(id).await?.is_some() } else { false };
+        self.changed_system(forgot);
+        Ok(forgot)
     }
     fn has_answer_technique(&self) -> bool {
         self.0.learned.is_some()

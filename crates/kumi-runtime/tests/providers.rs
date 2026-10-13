@@ -308,7 +308,10 @@ async fn api_key_providers_use_their_endpoints_credentials_and_cache_session_hin
         assert!(r.headers["user-agent"].starts_with("kumi/"));
         if model.starts_with("anthropic/") {
             assert_eq!(r.headers["x-api-key"], "key-fixture-value");
-            assert_eq!(r.body["system"], json!([{"type":"text","text":"fixture instructions","cache_control":{"type":"ephemeral"}}]));
+            assert_eq!(
+                r.body["system"],
+                json!([{"type":"text","text":"fixture instructions","cache_control":{"type":"ephemeral","ttl":"1h"}}])
+            );
             assert_eq!(r.body["messages"][0]["content"][0]["cache_control"], json!({"type":"ephemeral"}));
         } else {
             assert_eq!(r.headers["authorization"], "Bearer key-fixture-value");

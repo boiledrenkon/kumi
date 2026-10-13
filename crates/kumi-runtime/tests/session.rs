@@ -1086,6 +1086,64 @@ local_test!(memory_instructions_tools_and_forgetting, {
     h.session.close().await.unwrap();
 });
 
+// A conversation keeps the system text it began with when its kernel is made again (a stopped answer, another model
+// or effort), so the provider's cache of it still holds: a note the model keeps meanwhile is in the conversation already.
+// The producer changing what it holds (forgetting a note in /memory) makes the next kernel read it again.
+local_test!(a_rebuilt_kernel_keeps_the_conversations_system_text_until_the_producer_changes_it, {
+    use kumi_runtime::core::memory::{create_memory_store, MemoryStoreOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_memory_store(MemoryStoreOptions {
+        projects_dir: dir.path().join("projects"),
+        producer_file: dir.path().join("producer.json"),
+    });
+    store
+        .save(MemoryScope::Producer, None, &[MemoryNote { id: "p1".into(), text: "Prefers short reverbs".into(), at: 1, pinned: false }])
+        .await
+        .unwrap();
+    // The second answer hangs until it's stopped; the others finish.
+    let answers = Rc::new(Cell::new(0));
+    let run: Run = Rc::new(move |_, _, _| {
+        answers.set(answers.get() + 1);
+        let hang = answers.get() == 2;
+        async move {
+            if hang {
+                futures::future::pending::<()>().await;
+            }
+            Ok(complete())
+        }
+        .boxed_local()
+    });
+    let h = harness(Some(run), |o| o.memory = Some(store.clone()));
+    h.session.start().await.unwrap();
+    h.session.submit("hello", None).await.unwrap();
+    let first = h.record.created.borrow()[0].instructions.clone();
+    assert!(first.contains("[p1] Prefers short reverbs"));
+    let remember = h.record.created.borrow()[0].tools[0].clone();
+    remember
+        .execute(json!({"note":"The Reese is the main bass","about":"producer"}).as_object().unwrap().clone(), Signal::new())
+        .await
+        .unwrap();
+    // An answer stopped before it settled: the next kernel is made again, with the same system text.
+    let running = spawned(&h.session, "make it wider");
+    settle().await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    h.session.submit("again", None).await.unwrap();
+    assert!(h.notice("Cancelled work was discarded; the conversation continues from before it."));
+    // Another model or effort: made again, the same.
+    h.session.reconfigure().await.unwrap();
+    h.session.refresh().await.unwrap();
+    let made: Vec<String> = h.record.created.borrow().iter().map(|options| options.instructions.clone()).collect();
+    assert!(made.len() >= 3, "{}", made.len());
+    assert!(made.iter().all(|text| *text == first), "the same system text every time it was made");
+    // The producer forgets a note: the next kernel reads what Kumi keeps again, the model's note with it.
+    h.session.forget("p1").await.unwrap();
+    h.session.reconfigure().await.unwrap();
+    h.session.refresh().await.unwrap();
+    let last = h.record.created.borrow().last().unwrap().instructions.clone();
+    assert!(!last.contains("Prefers short reverbs") && last.contains("The Reese is the main bass"), "{last}");
+    h.session.close().await.unwrap();
+});
 local_test!(willington_instructions_follow_the_switch_each_time_the_kernel_is_made, {
     use kumi_runtime::integrations::ableton::willington::WillingtonSwitch;
     let switch = Rc::new(Cell::new(WillingtonSwitch::Off));
