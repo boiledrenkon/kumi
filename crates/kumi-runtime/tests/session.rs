@@ -4036,3 +4036,44 @@ local_test!(a_conversation_asked_for_while_live_was_away_says_it_carries_on_when
     assert!(h.words(last).unwrap().iter().any(|words| words.contains("make the bass wider")), "{:?}", h.words(last));
     h.session.close().await.unwrap();
 });
+local_test!(a_conversation_saved_as_it_is_taken_up_still_says_which_model_it_was_had_with, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", Some("openai/gpt-x"))).await.unwrap();
+    let before = store.load(SET_A, KEPT).await.unwrap().unwrap().saved_at;
+    // Taken up with the model it was had with: saved at once, still naming that model.
+    let h = harness(None, |o| {
+        o.conversations = Some(store.clone());
+        o.resume = Some((SET_A.into(), KEPT.into()));
+    });
+    *h.record.origin.borrow_mut() = Some("openai/gpt-x".into());
+    live(&h, Some(SET_A));
+    h.session.start().await.unwrap();
+    for _ in 0..1000 {
+        if store.load(SET_A, KEPT).await.unwrap().is_some_and(|kept| kept.saved_at != before) {
+            break;
+        }
+        delay(2).await;
+    }
+    let kept = store.load(SET_A, KEPT).await.unwrap().unwrap();
+    assert_ne!(kept.saved_at, before, "saved as it was taken up");
+    assert_eq!(kept.checkpoint.origin.as_deref(), Some("openai/gpt-x"));
+    assert!(!h.notice("This conversation was with"));
+    h.session.close().await.unwrap();
+    // Taken up again with another model: Kumi says so, once.
+    let h = harness(None, |o| {
+        o.conversations = Some(store.clone());
+        o.resume = Some((SET_A.into(), KEPT.into()));
+    });
+    *h.record.origin.borrow_mut() = Some("anthropic/claude-y".into());
+    live(&h, Some(SET_A));
+    h.session.start().await.unwrap();
+    let said = h
+        .events
+        .borrow()
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::Notice { message } if message.contains("This conversation was with gpt-x; it carries on with claude-y")))
+        .count();
+    assert_eq!(said, 1);
+    h.session.close().await.unwrap();
+});
