@@ -24,6 +24,8 @@ const KEEP_LINES: usize = 1000;
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct TurnTiming {
     pub model: Option<String>,
+    /// Each model that answered and its calls, in order: more than one when a fallback took over mid-answer.
+    pub models: Vec<(String, u32)>,
     /// The reasoning effort its model calls asked for ("high"); none when the provider's default.
     pub effort: Option<String>,
     /// The service tier they asked for ("priority", as `/fast` does); none when the provider's default.
@@ -115,7 +117,13 @@ pub struct ModelCall {
 }
 
 pub fn model_call(model: &str) -> ModelCall {
-    with(|timing| timing.model = Some(model.to_string()));
+    with(|timing| {
+        timing.model = Some(model.to_string());
+        match timing.models.last_mut() {
+            Some((last, calls)) if last == model => *calls += 1,
+            _ => timing.models.push((model.to_string(), 1)),
+        }
+    });
     ModelCall { began: Instant::now(), first: None }
 }
 
@@ -289,6 +297,10 @@ pub fn line(timing: &TurnTiming, elapsed_ms: u64, stop: Value, usage: Option<&Us
     }
     if let Some(model) = &timing.model {
         line["model"] = json!(model);
+    }
+    // An answer more than one model served: which, and each one's calls, in order.
+    if timing.models.len() > 1 {
+        line["models"] = json!(timing.models.iter().map(|(model, calls)| json!({"model": model, "calls": calls})).collect::<Vec<_>>());
     }
     if timing.model_calls > 0 {
         line["effort"] = json!(timing.effort.as_deref().unwrap_or("default"));

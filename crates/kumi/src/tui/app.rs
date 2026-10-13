@@ -1,5 +1,7 @@
 mod helpers;
 pub use helpers::*;
+mod away;
+pub use away::{AwaySettings, FrontApp, NotifierRunner};
 mod draw_live;
 mod draw_panel;
 mod drawing;
@@ -12,6 +14,7 @@ mod setup;
 pub use setup::{waveform, LiveSetup, WAVE_WIDTH};
 
 use super::{
+    alerts::{self, ProgramState, StatusReport, TerminalProfile},
     editor::Editor,
     icons::{detect_icon_style_here, IconKind, IconStyle},
     keys::InputEvent,
@@ -85,6 +88,16 @@ pub struct TuiOptions {
     pub slots: Option<Rc<kumi_runtime::slots::SlotsContext>>,
     /// What's new since the producer last opened Kumi, shown once as it starts.
     pub whats_new: Option<crate::whats_new::News>,
+    /// How this terminal shows Kumi's status and notifications; read from the environment when None.
+    pub terminal: Option<TerminalProfile>,
+    /// What the producer chose about being told while away from Kumi's window.
+    pub away: AwaySettings,
+    /// Runs the program that shows a desktop notification, for a terminal without its own; None runs it.
+    pub run_notifier: Option<NotifierRunner>,
+    /// The shortest time between two alerts, and between checks whether the DAW still records; tests shorten it.
+    pub alert_gap_ms: Option<f64>,
+    /// Whether the terminal's app is in front, for a terminal that says nothing of focus; None asks the system.
+    pub front_app: Option<FrontApp>,
 }
 /// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
 /// than Kumi's.
@@ -119,6 +132,11 @@ impl TuiOptions {
             willington: None,
             slots: None,
             whats_new: None,
+            terminal: None,
+            away: AwaySettings::default(),
+            run_notifier: None,
+            alert_gap_ms: None,
+            front_app: None,
         }
     }
 }
@@ -235,6 +253,8 @@ struct State {
     planning_since: f64,
     /// A model call being tried again: why, and when (perf time) the next try starts.
     retry: Option<(String, f64)>,
+    /// What a long wait for the model is for (a plan's limit, the connection), and when it ends (epoch ms).
+    waiting_for: Option<(WaitFor, f64)>,
     busy_since: f64,
     turn_changes: usize,
     recall: Option<(usize, String)>,
@@ -268,6 +288,27 @@ struct State {
     setup: Option<setup::Setup>,
     /// A /slots swap's fetch or check under way: Esc stops it.
     slots_check: Option<Rc<kumi_common::abort::Controller>>,
+    /// Whether Kumi's window is in front, as the terminal says when that changes (assumed until it does), and
+    /// since when it isn't.
+    window_focused: bool,
+    unfocused_since: Option<f64>,
+    /// The terminal has said something of focus since Kumi started (some never do).
+    focus_reported: bool,
+    /// The status last written to the terminal and when; a write waiting for the gap after it.
+    status_sent: Option<(StatusReport, f64)>,
+    status_timer: Option<JoinHandle<()>>,
+    /// How the status rests between answers: done or error with its words, or idle.
+    resting: Option<(ProgramState, String)>,
+    /// The newest alert waiting for the gap after the last, or for the DAW to stop recording; when the last went.
+    alert_waiting: Option<away::Alert>,
+    alert_sent_at: f64,
+    alert_timer: Option<JoinHandle<()>>,
+    /// This answer's run (a /goal, /loop or sound match) said how it ended: its own "done" isn't told too.
+    run_told: bool,
+    /// A /goal, /loop or sound match ran in this answer: nobody may be there to pick.
+    run_active: bool,
+    /// Counting down to Kumi taking its recommended answer; any key stops it.
+    answer_countdown: Option<JoinHandle<()>>,
 }
 impl State {
     fn new(options: &TuiOptions) -> Self {
@@ -322,6 +363,7 @@ impl State {
             planning: None,
             planning_since: 0.,
             retry: None,
+            waiting_for: None,
             busy_since: 0.,
             turn_changes: 0,
             recall: None,
@@ -350,6 +392,18 @@ impl State {
             flash_timers: Vec::new(),
             setup: None,
             slots_check: None,
+            window_focused: true,
+            unfocused_since: None,
+            focus_reported: false,
+            status_sent: None,
+            status_timer: None,
+            resting: None,
+            alert_waiting: None,
+            alert_sent_at: f64::NEG_INFINITY,
+            alert_timer: None,
+            run_told: false,
+            run_active: false,
+            answer_countdown: None,
         }
     }
 }
@@ -368,6 +422,8 @@ struct Inner {
     voice: Option<VoiceInput>,
     done: watch::Sender<Option<i32>>,
     output_failed: Cell<bool>,
+    /// How this terminal shows Kumi's status and notifications.
+    profile: TerminalProfile,
 }
 #[derive(Clone)]
 pub struct TuiApp(Rc<Inner>);
@@ -454,10 +510,21 @@ impl TuiApp {
             let icons = options.icons.unwrap_or_else(detect_icon_style_here);
             let w = weak.clone();
             let resize = weak.clone();
+            let profile = options.terminal.clone().unwrap_or_else(away::detect_profile_here);
+            // Giving the terminal back takes Kumi's status with it, the crash path's way too.
+            let mut farewell = Vec::new();
+            if profile.status {
+                farewell.push(alerts::clear_sequence(None));
+            }
+            if profile.progress {
+                farewell.push(alerts::PROGRESS_CLEAR.to_string());
+            }
+            let farewell = farewell.iter().map(|s| if profile.tmux { alerts::tmux_wrap(s) } else { s.clone() }).collect();
             let tty = Tty::new(TtyOptions {
                 input: options.input.clone(),
                 output: options.output.clone(),
                 mouse: true,
+                farewell,
                 on_input: Rc::new(move |event| {
                     if let Some(a) = w.upgrade() {
                         TuiApp(a).on_input(event);
@@ -503,6 +570,7 @@ impl TuiApp {
                 voice,
                 done,
                 output_failed: Cell::new(false),
+                profile,
             }
         }))
     }
@@ -575,7 +643,9 @@ impl TuiApp {
             state.suppress = true;
             state.stream.discard();
             let flashes = std::mem::take(&mut state.flash_timers);
-            for task in [state.tree_refresh.take(), state.wake_timer.take(), state.beat_timer.take()].into_iter().flatten().chain(flashes) {
+            let timers = [state.tree_refresh.take(), state.wake_timer.take(), state.beat_timer.take(), state.status_timer.take()];
+            let alerting = [state.alert_timer.take(), state.answer_countdown.take()];
+            for task in timers.into_iter().chain(alerting).flatten().chain(flashes) {
                 task.abort();
             }
             if let Some(panel) = state.panel.take() {

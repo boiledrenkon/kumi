@@ -691,6 +691,14 @@ impl LiveConnection {
             }));
         }
     }
+    /// Whether Live played at the last transport read Kumi made; None before the first.
+    pub fn playing(&self) -> Option<bool> {
+        match self.last_transport.borrow().split(':').next() {
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            _ => None,
+        }
+    }
     /// What a transport read found: Live playing is heard, Kumi's own listens too (they play through Main).
     pub fn note_transport(&self, playing: bool) {
         self.note_heard(playing);

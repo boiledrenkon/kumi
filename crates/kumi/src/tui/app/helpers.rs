@@ -384,3 +384,14 @@ pub fn clip_picture(length: f64, notes: &[ClipViewNote], width: i32, rows: usize
             .collect(),
     )
 }
+/// A wait in words: "2h 13m", "13m", "45s".
+pub fn span_words(ms: f64) -> String {
+    let seconds = (ms / 1000.).ceil().max(0.) as u64;
+    let (hours, minutes) = (seconds / 3600, (seconds % 3600) / 60);
+    match (hours, minutes) {
+        (0, 0) => format!("{seconds}s"),
+        (0, minutes) => format!("{minutes}m"),
+        (hours, 0) => format!("{hours}h"),
+        (hours, minutes) => format!("{hours}h {minutes}m"),
+    }
+}

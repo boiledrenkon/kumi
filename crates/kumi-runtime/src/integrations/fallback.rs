@@ -87,6 +87,20 @@ impl Integration for FallbackIntegration {
             Ok(false)
         }
     }
+    fn has_show_message(&self) -> bool {
+        true
+    }
+    async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {
+        let c = self.current();
+        if c.has_show_message() {
+            c.show_message(text, signal).await
+        } else {
+            Ok(false)
+        }
+    }
+    async fn recording(&self, signal: Signal) -> Result<Option<bool>, RuntimeError> {
+        self.current().recording(signal).await
+    }
     fn has_device_tree(&self) -> bool {
         true
     }

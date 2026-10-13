@@ -121,12 +121,32 @@ pub enum KernelEvent {
     Steer {
         text: String,
     },
-    /// A model call failed in a way worth trying again: why, and how long Kumi waits first (the turn can
-    /// still be stopped meanwhile).
+    /// A model call failed in a way worth trying again: why, how long Kumi waits first (the turn can
+    /// still be stopped meanwhile), and what it waits for when that isn't a busy provider.
     Retry {
         reason: String,
         wait_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait: Option<WaitFor>,
     },
+    /// Another model answers from here: the producer's fallback, while their model can't (why: its plan's
+    /// limit, an outage), or their own model back again (`back`).
+    ModelSwitch {
+        model: String,
+        reason: String,
+        #[serde(default)]
+        back: bool,
+    },
+}
+
+/// What a long wait for a model is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WaitFor {
+    /// A plan's usage limit to reset: the answer carries on then.
+    Limit,
+    /// The connection to come back.
+    Offline,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -235,6 +255,10 @@ pub trait Kernel {
     async fn aside(&self, question: &str, signal: Signal, on_text: OnText) -> Result<String, RuntimeError> {
         let _ = (question, signal, on_text);
         Err(absent())
+    }
+    /// The fallback model answering while the producer's can't (`<provider>/<model>`); None while theirs does.
+    fn answering_fallback(&self) -> Option<String> {
+        None
     }
 }
 
@@ -453,6 +477,20 @@ pub trait Integration {
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
         let _ = signal;
         Ok(false)
+    }
+    fn has_show_message(&self) -> bool {
+        false
+    }
+    /// A short line in the DAW's own window (Live's status bar), never a dialog, for a producer working there; true
+    /// when it was shown. A DAW without such a place says false.
+    async fn show_message(&self, text: &str, signal: Signal) -> Result<bool, RuntimeError> {
+        let _ = (text, signal);
+        Ok(false)
+    }
+    /// Whether the DAW is recording now; None when it can't say.
+    async fn recording(&self, signal: Signal) -> Result<Option<bool>, RuntimeError> {
+        let _ = signal;
+        Ok(None)
     }
     fn has_device_tree(&self) -> bool {
         false
@@ -1770,6 +1808,10 @@ pub trait SessionController {
         let _ = (question, on_text, signal);
         Err(absent())
     }
+    /// The fallback model answering for the producer's now (`<provider>/<model>`); None while theirs does.
+    fn answering_fallback(&self) -> Option<String> {
+        None
+    }
     async fn refresh(&self) -> Result<(), RuntimeError>;
     /// Forget this conversation and start afresh; it stays in the Set's kept conversations.
     async fn new_conversation(&self) -> Result<(), RuntimeError>;
@@ -1953,6 +1995,18 @@ pub trait SessionController {
     /// Stop Live (clips, the transport and recording), any time, even during a turn; false when it couldn't.
     async fn stop_live(&self) -> Result<bool, RuntimeError> {
         Ok(false)
+    }
+    fn has_daw_message(&self) -> bool {
+        false
+    }
+    /// A short line in the DAW's own window (Live's status bar), any time, even during a turn; false when it couldn't.
+    async fn daw_message(&self, text: &str) -> Result<bool, RuntimeError> {
+        let _ = text;
+        Ok(false)
+    }
+    /// Whether the DAW is recording now; None when it can't say (no DAW connected, or one that doesn't tell).
+    async fn daw_recording(&self) -> Result<Option<bool>, RuntimeError> {
+        Ok(None)
     }
     fn has_device_tree(&self) -> bool {
         false

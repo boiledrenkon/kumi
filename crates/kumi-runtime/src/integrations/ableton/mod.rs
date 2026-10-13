@@ -60,6 +60,8 @@ pub static BRIDGE_TOOLS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock:
             "live_project_backup_preview",
             "live_project_backup_apply",
             "live_run_python",
+            // A line in Live's status bar for a producer away from Kumi's window (never the modal form).
+            "live_message",
             // A saved Set's project id, kept inside the Set (`project::PROJECT_KEY`).
             "live_data_read",
             "live_data_preview",

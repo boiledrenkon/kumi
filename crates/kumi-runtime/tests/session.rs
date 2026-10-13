@@ -3251,3 +3251,61 @@ local_test!(the_producers_reactions_are_kept_in_kumis_database_and_kumis_own_ste
     assert_eq!((newest[0].kind, newest[0].facts["quote"].clone()), (Kind::Words, json!("too bright")));
     h.session.close().await.unwrap();
 });
+local_test!(waiting_for_a_plans_limit_stops_the_answers_clocks_but_a_lost_connection_doesnt, {
+    // The kernel waits 150 ms for a plan's limit to reset, then answers: the 60 ms hour and the 40 ms quiet
+    // clock both stand aside meanwhile.
+    let waits = |wait: Option<WaitFor>, wait_ms: u64| -> Run {
+        Rc::new(move |_, signal, emit| {
+            async move {
+                emit(KernelEvent::Retry { reason: "ChatGPT's plan limit".into(), wait_ms, wait })?;
+                tokio::select! {_ = signal.cancelled() => return Ok(cancelled()), _ = delay(wait_ms) => {}}
+                emit(KernelEvent::Text { text: "Carried on.".into() })?;
+                Ok(complete())
+            }
+            .boxed_local()
+        })
+    };
+    let h = harness(Some(waits(Some(WaitFor::Limit), 150)), |o| {
+        o.idle_timeout_ms = Some(40);
+        o.turn_limit_ms = Some(60);
+    });
+    h.session.start().await.unwrap();
+    h.session.submit("make it louder", None).await.unwrap();
+    assert!(!h.error("had run for") && !h.error("without progress"), "{:?}", h.events.borrow());
+    assert!(h
+        .events
+        .borrow()
+        .iter()
+        .any(|e| matches!(e, SessionEvent::TurnComplete { result, .. } if result.stop_reason == StopReason::Completed)));
+    h.session.close().await.unwrap();
+    // Offline, the tries count toward the answer's hour.
+    let h = harness(Some(waits(Some(WaitFor::Offline), 150)), |o| {
+        o.idle_timeout_ms = Some(1000);
+        o.turn_limit_ms = Some(60);
+    });
+    h.session.start().await.unwrap();
+    h.session.submit("make it louder", None).await.unwrap();
+    assert!(h.error("this answer had run for"));
+    h.session.close().await.unwrap();
+});
+local_test!(a_goal_blocked_on_a_question_carries_on_with_the_answer, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_objective_store(dir.path().join("goals"));
+    let h = harness(
+        Some(auditing(&["BLOCKED: which bus gets the limiter, the master or the drums bus?", "COMPLETE: the master reads -9 LUFS"])),
+        |o| o.objectives = Some(store.clone()),
+    );
+    h.session.start().await.unwrap();
+    h.session.goal(Some("get the master to -9 LUFS")).await.unwrap();
+    let kept = kept_goal(&store, ObjectiveState::Paused).await;
+    assert_eq!(kept.last.unwrap().verdict, Verdict::Blocked);
+    // The answer Kumi took for the producer: the goal goes on from it, in its own loop.
+    h.session.goal(Some("answer: the drums bus")).await.unwrap();
+    let calls = h.record.calls.borrow().clone();
+    let resumed = calls.iter().rev().find(|call| call.starts_with("[Kumi goal] get the master")).unwrap();
+    assert!(resumed.contains("you asked the producer a question. Next: they answered “the drums bus”; go on from that."), "{resumed}");
+    assert_eq!(objectives(&h).pop().unwrap().state, ObjectiveState::Done);
+    // No answer, no goal to resume: said.
+    assert!(h.session.goal(Some("answer:")).await.is_err() || h.error("Say the answer after /goal answer:"));
+    h.session.close().await.unwrap();
+});

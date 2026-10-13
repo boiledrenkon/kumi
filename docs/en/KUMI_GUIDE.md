@@ -54,6 +54,27 @@ chosen model, Kumi offers to choose another. When an answer breaks off partway
 so in the status line; if it breaks off again, Kumi offers to send your message
 again.
 
+### Limits, outages and a fallback model
+
+- **A plan's limit** (ChatGPT's five-hour or weekly window): Kumi waits for it
+  to reset and carries on with the same answer. NOW says when ("carrying on at
+  14:20"), the answer's hour doesn't count the wait, the computer stays awake,
+  and Esc stops it. A limit more than 6 hours away stops the answer instead,
+  saying when it resets and offering a fallback, another model or another
+  sign-in.
+- **A fallback model** carries on instead of waiting: in `/model`, ctrl+f makes
+  the selected model your fallback (ctrl+f on it again clears it). It takes
+  over at the next step when your model's plan limit is reached, its credit is
+  used up, or its provider is still down after the retries. The header names it
+  while it answers; your model is back at your first message after the reset.
+  A fallback you aren't signed in to is left out, and Kumi says so once.
+- **A busy or failing provider:** Kumi waits as long as it asks (Retry-After,
+  however long, in seconds or as a date) and tries a step up to 3 times.
+- **No connection:** Kumi keeps trying, waiting a little longer each time (up
+  to 30 s), for as long as the answer may run.
+- **Plan usage:** from 80% of a window, the header shows "plan 84% · resets
+  14:20".
+
 ### Models on your computer
 
 - **Ollama** and **LM Studio** are found while they run, with no sign-in.
@@ -486,8 +507,11 @@ the model's own check, which must say complete, blocked (and what you must do
 first) or continue (and the next step). It stops at 12 turns, an hour, or three
 turns in a row that got no closer (by the judge's numbers, a step or more;
 otherwise, a change in the Set), saying how far it got. An error you must fix
-(sign-in, billing, the model, a setting, Live) stops it as blocked, naming what
-to do. A message of yours while it runs is answered, then the goal waits for
+(sign-in, billing, the model, a setting, Live, a plan's limit more than 6 hours
+away) stops it as blocked, naming what to do; a nearer limit is waited out, or
+your fallback carries on. When a turn ends on a question with an option Kumi
+recommends and nobody answers, Kumi takes it after a minute (`answerAfter`) and
+the goal carries on (`/goal answer: <words>` does the same by hand). A message of yours while it runs is answered, then the goal waits for
 you. The GOAL tab shows the goal, its turns and time against the budget, the
 last check and what's next. `/goal` alone shows it; `/goal edit <words>` changes
 it, `/goal resume` carries on (with a fresh budget for whatever ran out),
@@ -853,8 +877,8 @@ closed). Your conversations, notes, recipes and sign-ins stay unless you add
 | What | Limit |
 | --- | --- |
 | A message you send | 16 KiB |
-| One answer | 200 model steps; stops after 10 minutes without progress, or 60 minutes in all (longer for matching and goals) |
-| Retries | Up to 3 for a provider failure, before any output of that step was shown |
+| One answer | 200 model steps; stops after 10 minutes without progress, or 60 minutes in all (longer for matching and goals; waiting for a plan's limit doesn't count) |
+| Retries | Up to 3 for a busy or failing provider, before any output of that step was shown, waiting as long as it asks; a plan's limit up to 6 hours; no connection, for as long as the answer may run |
 | A request to the bridge | 65 seconds |
 | Changes in one answer | 5,000 (a batch of pads or parameters counts once) |
 | A `wait` step in a plan | 30 minutes |
@@ -927,8 +951,15 @@ Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
 | --- | --- |
 | `model` | The chosen model, `<provider>/<model>` (`/model`, `kumi model`) |
 | `effort` | `low`, `medium`, `high`, `xhigh` or `max`; absent means the model's default (`/effort`) |
+| `fast` | `true` asks for the model's faster tier where its provider lists one (`/fast`) |
+| `fallbackModel` | The model that carries on when yours hits its plan's limit or its provider is down, `<provider>/<model>` (ctrl+f in `/model`) |
 | `panelTab` | The Live pane's tab you had open last |
 | `updateCheck` | `false` turns off the check for a newer version at start |
+| `whatsNew` | `false` turns off What's new as Kumi first starts after an update |
+| `notifications` | `"off"`: no desktop notification (or bell) while Kumi's window is behind another; `"auto"` otherwise |
+| `liveStatusBar` | `false`: no line in Live's status bar when Kumi finishes or needs you |
+| `keepAwake` | `false`: the computer may sleep while Kumi works |
+| `answerAfter` | Seconds before Kumi takes its recommended answer when nobody's there (60); `0` never does |
 | `modelServers` | OpenAI-compatible model servers: `[{ "name", "baseURL", "apiKey" }]` ([models on your computer](#models-on-your-computer)) |
 | `libraryFolders` | More folders for Kumi to learn sounds, presets and Sets from |
 | `voice` | Talking: `send` (send when you stop), `language`, `microphone` (`/voice`) |

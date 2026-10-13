@@ -6,6 +6,7 @@ use super::super::{
 use super::*;
 use crate::text::web_words;
 use kumi_runtime::integrations::ableton::project::since;
+use kumi_runtime::kernel::failure::reset_words;
 use serde_json::json;
 
 impl TuiApp {
@@ -19,14 +20,41 @@ impl TuiApp {
         let n = |key: &str| value[key].as_f64().unwrap_or(0.);
         // Anything from the model, or the turn's end, means the wait is over.
         if matches!(kind, "text" | "tool-input" | "tool-start" | "turn-complete" | "state") {
-            self.0.state.borrow_mut().retry = None;
+            let mut state = self.0.state.borrow_mut();
+            state.retry = None;
+            state.waiting_for = None;
         }
         match kind {
             "retry" => {
                 let reason = self.clean_line(get("reason"), 80);
                 // No wait: Kumi carries on at once, and the model's next words end it.
                 let until = if n("waitMs") > 0. { perf_now() + n("waitMs") } else { f64::INFINITY };
-                self.0.state.borrow_mut().retry = Some((reason, until));
+                let wait: Option<WaitFor> = serde_json::from_value(value["wait"].clone()).ok().flatten();
+                let at = now_ms_f64() + n("waitMs");
+                {
+                    let mut state = self.0.state.borrow_mut();
+                    state.retry = Some((reason.clone(), until));
+                    state.waiting_for = wait.map(|wait| (wait, at));
+                }
+                // A plan's limit pauses the answer until it resets: told once, as a wait, not a stop.
+                if wait == Some(WaitFor::Limit) {
+                    let clock = reset_words(at, now_ms_f64());
+                    self.alert(
+                        &format!("Waiting: {reason} · carrying on at {clock}"),
+                        &format!("Kumi · {reason} · carrying on at {clock}"),
+                    );
+                }
+            }
+            "model-switch" => {
+                let model = get("model").to_string();
+                let name = model.split_once('/').map_or(model.as_str(), |(_, name)| name).to_string();
+                let reason = self.clean_line(get("reason"), 120);
+                // The header asks the session which model answers; the conversation says when that changes.
+                if value["back"] == true {
+                    self.notice(&format!("{reason}: back to {name}."), NoticeTone::Info);
+                } else {
+                    self.notice(&format!("{reason}; carrying on with {name} (/model to change)."), NoticeTone::Info);
+                }
             }
             "state" => {
                 {
@@ -69,6 +97,10 @@ impl TuiApp {
                     let mut state = self.0.state.borrow_mut();
                     if matches!(get("state"), "running" | "cancelling") && state.busy_since == 0. {
                         state.busy_since = perf_now();
+                        // At work again: the status says so, not how the last answer ended.
+                        state.resting = None;
+                        state.run_told = false;
+                        state.run_active = false;
                     } else if get("state") == "idle" {
                         state.busy_since = 0.;
                     }
@@ -258,6 +290,13 @@ impl TuiApp {
                     let mut state = self.0.state.borrow_mut();
                     state.failed = true;
                     state.stream.discard();
+                }
+                let message = self.clean_line(get("message"), 300);
+                self.rest(ProgramState::Error, &message);
+                if get("kind") == "auth" {
+                    self.alert(&format!("Needs you: {message}"), "Kumi needs you · sign in, in Kumi");
+                } else {
+                    self.alert(&format!("Stopped: {message}"), &format!("Kumi · stopped · {message}"));
                 }
                 self.notice(get("message"), NoticeTone::Warn);
                 if !get("kind").is_empty() {
@@ -452,6 +491,16 @@ impl TuiApp {
                 self.insert_before(serde_json::from_value(entry).unwrap());
             }
             "goal" => {
+                if matches!(get("state"), "running" | "starting") {
+                    self.0.state.borrow_mut().run_active = true;
+                }
+                let was = self.0.state.borrow().goal.as_ref().map(|goal| s(&goal["state"]).to_string());
+                if matches!(was.as_deref(), Some("running" | "starting")) && matches!(get("state"), "done" | "paused") {
+                    let best =
+                        value.get("best").map(|best| format!(" · best {}%", super::drawing::num(&best["score"]))).unwrap_or_default();
+                    let ended = if get("state") == "done" { "done" } else { "paused" };
+                    self.run_ended(&format!("Sound match {ended}{best}"), &format!("Kumi · sound match {ended}{best}"));
+                }
                 let show = self.0.state.borrow().goal.is_none() || get("state") == "starting";
                 if show {
                     self.0.tabs.show("goal");
@@ -464,6 +513,9 @@ impl TuiApp {
                 state.objective = None;
             }
             "match" => {
+                if get("state") == "running" {
+                    self.0.state.borrow_mut().run_active = true;
+                }
                 self.0.state.borrow_mut().matching = if get("state") == "running" {
                     let mut status = value.clone();
                     status["since"] = json!(perf_now() - n("elapsedMs"));
@@ -472,6 +524,8 @@ impl TuiApp {
                     None
                 };
                 if get("state") == "done" && value.get("best").is_some() {
+                    let best = super::drawing::num(&value["best"]["score"]);
+                    self.run_ended(&format!("Matching done · best {best}%"), &format!("Kumi · matching done · {best}%"));
                     let score = value["best"]["score"].as_f64().unwrap_or(0.);
                     let first = value
                         .get("first")
@@ -497,6 +551,24 @@ impl TuiApp {
                 }
             }
             "objective" => {
+                if get("state") == "running" {
+                    self.0.state.borrow_mut().run_active = true;
+                }
+                let was = self.0.state.borrow().objective.as_ref().map(|goal| s(&goal["state"]).to_string());
+                if was.as_deref() == Some("running") && get("state") != "running" {
+                    let goal = self.clean_line(get("objective"), 80);
+                    let reason = self.clean_line(get("reason"), 120);
+                    let (body, live) = match (get("state"), get("verdict")) {
+                        ("done", "complete") => (format!("Goal met: {goal}"), format!("Kumi · goal met · {goal}")),
+                        (_, "blocked") => (format!("Goal blocked: {reason}"), "Kumi needs you · goal blocked".to_string()),
+                        (_, "stuck") => (format!("Goal stuck: {reason}"), "Kumi · goal stuck".to_string()),
+                        (_, "budget") => (format!("Goal stopped: its budget is spent ({goal})"), "Kumi · goal out of budget".to_string()),
+                        _ => {
+                            (format!("Goal paused: {}", if reason.is_empty() { &goal } else { &reason }), "Kumi · goal paused".to_string())
+                        }
+                    };
+                    self.run_ended(&body, &live);
+                }
                 let mut status = value.clone();
                 status["since"] = json!(perf_now() - n("elapsedMs"));
                 self.0.state.borrow_mut().objective = Some(status);
@@ -505,6 +577,9 @@ impl TuiApp {
             // No goal here (none set, or another Set is open): the GOAL tab stops showing the last one.
             "objective-cleared" => self.0.state.borrow_mut().objective = None,
             "loop" => {
+                if get("state") == "running" {
+                    self.0.state.borrow_mut().run_active = true;
+                }
                 self.0.state.borrow_mut().looping = if get("state") == "running" {
                     let mut status = value.clone();
                     status["since"] = json!(perf_now() - n("elapsedMs"));
@@ -513,6 +588,8 @@ impl TuiApp {
                     None
                 };
                 if get("state") == "done" && n("rounds") > 0. {
+                    let (rounds, kept) = (n("rounds"), n("kept"));
+                    self.run_ended(&format!("Loop done: {rounds} rounds, {kept} kept"), &format!("Kumi · loop done · {kept} kept"));
                     let why = match value["stop"].as_str().unwrap_or("") {
                         "met" => "every item within tolerance",
                         "stalled" => "changes stopped helping",
@@ -737,6 +814,7 @@ impl TuiApp {
             "turn-complete" => {
                 let reason = s(&value["result"]["stopReason"]);
                 let mut offered = None;
+                let mut answer = String::new();
                 {
                     let mut state = self.0.state.borrow_mut();
                     if let Some(usage) = value["result"].get("usage") {
@@ -747,6 +825,8 @@ impl TuiApp {
                     }
                     state.last_stop = Some(reason.into());
                     let Some(entry) = state.current.take() else {
+                        drop(state);
+                        self.answer_ended(reason, n("elapsedMs"), "", None);
                         self.0.scheduler.request();
                         return;
                     };
@@ -766,10 +846,12 @@ impl TuiApp {
                         if reason == "completed" && state.held.is_empty() && state.editor.is_empty() && state.panel.is_none() {
                             offered = choices(text);
                         }
+                        answer = text.clone();
                     }
                     end_steps(&entry);
                     state.transcript.touch(&entry);
                 }
+                self.answer_ended(reason, n("elapsedMs"), &answer, offered.as_ref().map(|(_, choices)| choices.len()));
                 if let Some(offered) = offered {
                     self.open_answers(offered);
                 }

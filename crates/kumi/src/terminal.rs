@@ -973,12 +973,29 @@ impl Terminal for PlainTerminal {
             "retry" => {
                 if !self.0.state.borrow().suppress {
                     let wait = value["waitMs"].as_f64().unwrap_or(0.);
-                    self.notice(&if wait > 0. {
+                    self.notice(&if value["wait"] == "limit" {
+                        let at = kumi_common::time::now_ms_f64() + wait;
+                        format!(
+                            "[wait] {}; carrying on at {} (Ctrl-C stops)",
+                            get("reason"),
+                            kumi_runtime::kernel::failure::reset_words(at, at - wait)
+                        )
+                    } else if value["wait"] == "offline" {
+                        format!("[wait] offline: {}; trying again in {} s", get("reason"), (wait / 1000.).ceil().max(1.))
+                    } else if wait > 0. {
                         format!("[wait] {}; trying again in {} s", get("reason"), (wait / 1000.).ceil().max(1.))
                     } else {
                         format!("[wait] {}; carrying on", get("reason"))
                     });
                 }
+            }
+            "model-switch" => {
+                let model = get("model");
+                self.notice(&if value["back"] == true {
+                    format!("[model] {}: back to {model}", get("reason"))
+                } else {
+                    format!("[model] {}; carrying on with {model}", get("reason"))
+                });
             }
             "tool-end" => {
                 if !self.0.state.borrow().suppress {

@@ -8,6 +8,7 @@ use crate::{
     voice::VoiceChange,
 };
 use base64::Engine;
+use kumi_runtime::kernel::failure::reset_words;
 use kumi_runtime::{
     core::{contracts::Picked, errors::FailureKind},
     integrations::ableton::project::since,
@@ -135,6 +136,8 @@ pub(super) fn recipe_blanks_problem(recipe: &RecipeSummary, with: &JsonObject) -
         .collect();
     (!empty.is_empty()).then(|| format!("“{}” needs {}.", recipe.name, empty.join(", ")))
 }
+/// How long Kumi's window has to be behind another before Kumi answers its own question for the producer.
+const UNATTENDED_MS: f64 = 120_000.;
 fn item(label: impl Into<String>, value: impl Into<String>, detail: impl Into<String>) -> PickerItem {
     let detail = detail.into();
     PickerItem { detail: (!detail.is_empty()).then_some(detail), ..PickerItem::new(label, value) }
@@ -717,6 +720,34 @@ impl TuiApp {
             );
             return;
         }
+        // A plan's limit that resets later than Kumi waits, credit used up, or a provider still busy or down past the
+        // retries.
+        let limited = matches!(kind, "usage-limit" | "billing");
+        if limited || matches!(kind, "rate-limit" | "provider") {
+            let name = provider.map(|p| models.provider_name(p)).unwrap_or_else(|| "The provider".into());
+            let mut items = Vec::new();
+            if limited {
+                items.push(item("Choose a fallback model", "fallback", "it carries on whenever this plan's limit is reached"));
+            } else {
+                items.push(item("Send it again", "again", format!("once {name} answers again")));
+            }
+            items.push(PickerItem::new("Choose another model", "model"));
+            items.push(PickerItem::new("Sign in to another provider", "login"));
+            items.push(PickerItem::new("Not now", "later"));
+            let title = if limited { format!("Carry on without {name}?") } else { format!("{name} isn't answering. Carry on?") };
+            self.pick(Picker::new(title, items), |app, item| async move {
+                app.close_panel();
+                match item.value.as_deref() {
+                    Some("fallback") => app.open_fallbacks().await?,
+                    Some("again") => app.resend(),
+                    Some("model") => app.open_models().await?,
+                    Some("login") => app.open_login().await?,
+                    _ => {}
+                }
+                Ok(())
+            });
+            return;
+        }
         if matches!(kind, "model" | "config") {
             self.pick(
                 Picker::new("Choose another model?", vec![PickerItem::new("Choose a model", "model"), PickerItem::new("Not now", "later")]),
@@ -868,11 +899,25 @@ impl TuiApp {
     }
     /// Kumi's answer asked the producer to pick: its options, picked by number (or ↑↓) and sent with
     /// Enter. Other typing goes to the input box, so a free answer still works.
-    pub(super) fn open_answers(&self, (question, choices): (String, Vec<String>)) {
-        let items = choices.iter().enumerate().map(|(at, choice)| PickerItem::new(format!("{}. {choice}", at + 1), choice)).collect();
+    pub(super) fn open_answers(&self, (question, mut choices): (String, Vec<String>)) {
+        // The option Kumi recommends (marked by the model) is named, chosen to start with, and taken when nobody's there.
+        let recommended = super::super::choices::recommended(&mut choices);
+        let items = choices
+            .iter()
+            .enumerate()
+            .map(|(at, choice)| {
+                let item = PickerItem::new(format!("{}. {choice}", at + 1), choice);
+                if Some(at) == recommended {
+                    noted(item, "recommended", NoteTone::Accent)
+                } else {
+                    item
+                }
+            })
+            .collect();
         let options = PickerOptions { answers: true, ..Default::default() };
+        let taken = recommended.map(|at| (at, choices[at].clone()));
         let offered = Rc::new((question, choices));
-        self.pick(Picker::with_options("Your answer", items, options), move |app, item| {
+        let picker = self.pick(Picker::with_options("Your answer", items, options), move |app, item| {
             let offered = offered.clone();
             async move {
                 app.close_panel();
@@ -888,6 +933,81 @@ impl TuiApp {
                 app.submit().await
             }
         });
+        if let Some((at, value)) = taken {
+            picker.borrow_mut().select(Some(&value));
+            self.answer_for_producer(picker, at, value);
+        }
+    }
+    /// Nobody's there to pick (a /goal, /loop or sound match ran this answer, or Kumi's window has been behind another
+    /// for two minutes): Kumi takes its recommended option after `answerAfter` seconds, counting down in the list. Any
+    /// key stops the count; the producer picks as ever.
+    fn answer_for_producer(&self, picker: Rc<RefCell<Picker>>, at: usize, value: String) {
+        let seconds = self.0.options.away.answer_after;
+        let unattended = {
+            let state = self.0.state.borrow();
+            state.run_active || state.unfocused_since.is_some_and(|since| perf_now() - since >= UNATTENDED_MS)
+        };
+        if seconds == 0 || !unattended {
+            return;
+        }
+        let weak = Rc::downgrade(&self.0);
+        let task = tokio::task::spawn_local(async move {
+            for left in (1..=seconds).rev() {
+                {
+                    let Some(a) = weak.upgrade() else { return };
+                    let app = TuiApp(a);
+                    if !app.same_picker(&picker) {
+                        return;
+                    }
+                    picker.borrow_mut().options.hint = Some(format!("Taking {} (recommended) in {left} s · any key cancels", at + 1));
+                    app.0.scheduler.request();
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            let Some(a) = weak.upgrade() else { return };
+            let app = TuiApp(a);
+            let choose = app.0.state.borrow().panel.clone().and_then(|panel| match &*panel.borrow() {
+                Panel::Pick { picker: active, choose, choosing } if Rc::ptr_eq(active, &picker) && !choosing.get() => {
+                    choosing.set(true);
+                    Some((choose.clone(), choosing.clone()))
+                }
+                _ => None,
+            });
+            app.0.state.borrow_mut().answer_countdown = None;
+            let Some((choose, choosing)) = choose else { return };
+            picker.borrow_mut().select(Some(&value));
+            let item = picker.borrow().selected().cloned().map(|item| PickerItem { chosen: false, ..item });
+            let Some(item) = item else { return };
+            app.notice(&format!("No answer in {seconds} s; went with {}.", at + 1), NoticeTone::Info);
+            // A goal that stopped on this question carries on with the answer, within its budget and its checks.
+            let goal_waits =
+                app.0.state.borrow().objective.as_ref().is_some_and(|goal| goal["state"] == "paused" && goal["verdict"] == "blocked");
+            let chosen = if goal_waits && app.0.options.controller.has_goal() {
+                app.close_panel();
+                app.0.state.borrow_mut().editor.set(&format!("/goal answer: {value}"));
+                app.submit().await
+            } else {
+                choose(item).await
+            };
+            choosing.set(false);
+            if let Err(error) = chosen {
+                app.panel_failed(&error);
+            }
+        });
+        if let Some(old) = self.0.state.borrow_mut().answer_countdown.replace(task) {
+            old.abort();
+        }
+    }
+    /// The producer pressed a key: Kumi doesn't answer for them.
+    pub(super) fn stop_answer_countdown(&self) {
+        let Some(task) = self.0.state.borrow_mut().answer_countdown.take() else { return };
+        task.abort();
+        if let Some(panel) = self.0.state.borrow().panel.clone() {
+            if let Panel::Pick { picker, .. } = &*panel.borrow() {
+                picker.borrow_mut().options.hint = None;
+            }
+        }
+        self.0.scheduler.request();
     }
     /// After an answer, whether to keep the technique from what Kumi built: 1 keeps it, 2 doesn't. Like
     /// an answer's own options, it opens only when nothing else is open, typed or waiting, and never over
@@ -1000,10 +1120,17 @@ impl TuiApp {
                     "down" | "tab" => picker.borrow_mut().r#move(1),
                     "backspace" => picker.borrow_mut().erase(),
                     // A second Enter before the first choice is made would make it again (an answer sent twice).
-                    "enter" if !choosing.get() => {
+                    // Ctrl-F chooses the other way, where the list has one (/model: the fallback).
+                    "enter" | "f" if !choosing.get() && (name == "enter" || mods.ctrl && picker.borrow().options.alternate) => {
                         let item = {
                             let picker = picker.borrow();
-                            picker.selected().cloned().map(|item| PickerItem { chosen: picker.chosen, ..item })
+                            let item = picker.selected().cloned().map(|item| PickerItem { chosen: picker.chosen, ..item });
+                            if name == "f" {
+                                item.filter(|item| item.value.as_deref().is_some_and(|value| !value.contains("signin:")))
+                                    .map(|item| PickerItem { value: item.value.map(|value| format!("fallback:{value}")), ..item })
+                            } else {
+                                item
+                            }
                         };
                         if let Some(item) = item {
                             choosing.set(true);
@@ -1135,12 +1262,28 @@ impl TuiApp {
     }
     pub(super) fn model_label(&self) -> Option<String> {
         let current = self.0.options.models.as_ref()?.current();
+        // The fallback, while it answers for the producer's model.
+        if let Some(answering) = self.0.options.controller.answering_fallback() {
+            let name = answering.split_once('/').map_or(answering.as_str(), |(_, name)| name).to_string();
+            return Some(format!("{name} · fallback"));
+        }
         let Some(model) = current.model else {
             return Some("no model chosen".into());
         };
         let name = current.name.unwrap_or_else(|| model.split_once('/').map(|(_, m)| m).unwrap_or(&model).into());
         let label = current.effort.map(|e| format!("{name} · {}", e.as_str())).unwrap_or(name);
         Some(current.fast.map(|tier| format!("{label} · {}", tier.name.to_lowercase())).unwrap_or(label))
+    }
+    /// How much of the plan behind the answering model is used, near its limit only: "plan 82% · resets 14:20".
+    pub(super) fn plan_line(&self) -> Option<(String, bool)> {
+        let answering = self.0.options.controller.answering_fallback();
+        let provider = match answering {
+            Some(model) => model.split('/').next().map(str::to_string),
+            None => self.0.options.models.as_ref()?.current().provider,
+        }?;
+        let window = kumi_runtime::providers::usage::nearest(&provider, 80.)?;
+        let resets = window.resets_at_ms.map(|at| format!(" · resets {}", reset_words(at, now_ms_f64()))).unwrap_or_default();
+        Some((format!("plan {}%{resets}", window.used_percent.round()), window.used_percent >= 95.))
     }
     pub(super) fn tokens_used(&self) -> String {
         let Some(provider) = self.0.options.models.as_ref().and_then(|m| m.current().provider).as_deref().and_then(ProviderId::parse)
@@ -1168,21 +1311,46 @@ impl TuiApp {
         )
     }
     pub(super) async fn open_models(&self) -> Result<(), RuntimeError> {
+        self.open_model_list(false).await
+    }
+    /// The same list, to choose the model that carries on while the chosen one can't; the message that stopped is
+    /// sent again once one is chosen.
+    pub(super) async fn open_fallbacks(&self) -> Result<(), RuntimeError> {
+        self.open_model_list(true).await
+    }
+    async fn open_model_list(&self, fallback: bool) -> Result<(), RuntimeError> {
         let Some(models) = self.0.options.models.clone() else {
             return Ok(());
         };
+        let options = if fallback {
+            PickerOptions { filterable: true, ..Default::default() }
+        } else {
+            PickerOptions {
+                filterable: true,
+                alternate: true,
+                hint: Some("↑↓ to move · enter to choose · ctrl+f sets the fallback · esc to close".into()),
+                ..Default::default()
+            }
+        };
         let picker = self.pick(
             Picker::with_options(
-                "Choose a model",
+                if fallback { "Choose a fallback model" } else { "Choose a model" },
                 vec![inert("Reading your sign-ins…")],
-                PickerOptions { filterable: true, ..Default::default() },
+                options,
             ),
-            |app, item| async move { app.choose_model_item(item).await },
+            move |app, item| async move {
+                if fallback {
+                    app.choose_fallback(item, true).await
+                } else {
+                    app.choose_model_item(item).await
+                }
+            },
         );
         let m = models.clone();
         let servers = tokio::task::spawn_local(async move { m.local().await });
         let statuses = Rc::new(models.providers().await?);
-        let current = models.current().model;
+        let chosen = models.fallback();
+        let current = if fallback { chosen.clone() } else { models.current().model };
         let lists = Rc::new(RefCell::new(HashMap::<String, Listed>::new()));
         let local = Rc::new(RefCell::new(None::<Vec<LocalStatus>>));
         let weak = Rc::downgrade(&self.0);
@@ -1196,12 +1364,12 @@ impl TuiApp {
                 if let Some(a) = weak.upgrade() {
                     let app = TuiApp(a);
                     if app.same_picker(&picker) {
-                        picker.borrow_mut().set_items(model_items(
-                            &statuses,
-                            &lists.borrow(),
-                            local.borrow().as_deref(),
-                            current.as_deref(),
-                        ));
+                        let mut items =
+                            model_items(&statuses, &lists.borrow(), local.borrow().as_deref(), current.as_deref(), chosen.as_deref());
+                        if fallback && chosen.is_some() {
+                            items.insert(0, item("No fallback", "fallback:", "wait for the limit to reset instead"));
+                        }
+                        picker.borrow_mut().set_items(items);
                         picker.borrow_mut().select(current.as_deref());
                         app.0.scheduler.request();
                     }
@@ -1229,12 +1397,46 @@ impl TuiApp {
         futures::future::join_all(jobs).await;
         Ok(())
     }
+    /// Makes `item`'s model the fallback (`"fallback:"` alone clears it; choosing the fallback again in /model
+    /// with ctrl+f clears it too), then sends the last message again when it was a usage limit that stopped it.
+    async fn choose_fallback(&self, item: PickerItem, resend: bool) -> Result<(), RuntimeError> {
+        let models = self.0.options.models.clone().unwrap();
+        let value = item.value.clone().unwrap_or_default();
+        if let Some(provider) = value.strip_prefix("signin:").and_then(ProviderId::parse) {
+            self.sign_in(provider, Some(self.action(|app| async move { app.open_fallbacks().await })));
+            return Ok(());
+        }
+        let model = value.strip_prefix("fallback:").unwrap_or(&value);
+        let toggled_off = !resend && models.fallback().as_deref() == Some(model);
+        let next = (!model.is_empty() && !toggled_off).then_some(model);
+        models.set_fallback(next).await?;
+        self.close_panel();
+        let name = |id: &str| id.split_once('/').map_or(id, |(_, name)| name).to_string();
+        let current = models.current().model.map(|id| name(&id)).unwrap_or_else(|| "your model".into());
+        match next {
+            Some(model) => self.notice(
+                &format!(
+                    "{} carries on from your next message whenever {current}'s plan limit is reached or its provider is down.",
+                    name(model)
+                ),
+                NoticeTone::Info,
+            ),
+            None => self.notice("No fallback: when the plan's limit is reached, Kumi waits for it to reset.", NoticeTone::Info),
+        }
+        if resend && next.is_some() {
+            self.resend();
+        }
+        Ok(())
+    }
     async fn choose_model_item(&self, item: PickerItem) -> Result<(), RuntimeError> {
         let models = self.0.options.models.as_ref().unwrap();
         let value = item.value.as_deref().unwrap_or("");
         if let Some(provider) = value.strip_prefix("signin:").and_then(ProviderId::parse) {
             self.sign_in(provider, Some(self.action(|app| async move { app.open_models().await })));
             return Ok(());
+        }
+        if value.starts_with("fallback:") {
+            return self.choose_fallback(item, false).await;
         }
         let note = match models.choose(value).await {
             Ok(note) => note,
@@ -1689,11 +1891,14 @@ fn model_items(
     lists: &HashMap<String, Listed>,
     local: Option<&[LocalStatus]>,
     current: Option<&str>,
+    fallback: Option<&str>,
 ) -> Vec<PickerItem> {
     let model_item = |m: &ModelInfo| {
         let i = item(&m.name, &m.id, m.description.clone().unwrap_or_default());
         if Some(m.id.as_str()) == current {
             noted(i, "current", NoteTone::Accent)
+        } else if Some(m.id.as_str()) == fallback {
+            noted(i, "fallback", NoteTone::Faint)
         } else {
             i
         }

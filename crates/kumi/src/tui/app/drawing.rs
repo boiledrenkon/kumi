@@ -12,6 +12,7 @@ use super::super::{
 use super::*;
 use crate::text::library_line;
 use kumi_runtime::integrations::ableton::project::since;
+use kumi_runtime::kernel::failure::reset_words;
 pub(super) mod st {
     use super::{palette, Style};
     pub const GROUND: Style = Style::bg(palette::GROUND);
@@ -52,6 +53,7 @@ impl TuiApp {
         // A panic Kumi caught (a worker's) gave the terminal back: take it again, and draw all of it.
         if self.0.tty.recover() {
             self.0.renderer.borrow_mut().invalidate();
+            self.0.state.borrow_mut().status_sent = None;
         }
         if !self.0.tty.is_active() {
             return;
@@ -125,6 +127,10 @@ impl TuiApp {
         let frame = self.0.renderer.borrow_mut().frame(&screen, cursor);
         self.0.tty.write(&frame);
         *self.0.screen.borrow_mut() = Some(screen);
+        // Between frames, the terminal's status follows what was drawn.
+        if !self.0.state.borrow().closing {
+            self.show_status();
+        }
     }
     fn status_line(&self) -> (Style, &'static str) {
         let state = self.0.state.borrow();
@@ -154,14 +160,20 @@ impl TuiApp {
         if let Some(model) = self.model_label() {
             let text = truncate(&model, 36);
             let at = start - 3 - text_width(&text);
-            if at - (x + set_name.as_ref().map(|n| text_width(n).min(16) + 5).unwrap_or(0)) >= 2 {
-                screen.put(
-                    at,
-                    0,
-                    &text,
-                    &if self.0.options.models.as_ref().is_some_and(|m| m.current().model.is_some()) { st::FAINT } else { st::WARN },
-                );
+            let named = x + set_name.as_ref().map(|n| text_width(n).min(16) + 5).unwrap_or(0);
+            if at - named >= 2 {
+                let chosen = self.0.options.models.as_ref().is_some_and(|m| m.current().model.is_some());
+                let fallback = self.0.options.controller.answering_fallback().is_some();
+                screen.put(at, 0, &text, &if chosen && !fallback { st::FAINT } else { st::WARN });
                 end = at - 3;
+                // Near a plan's limit: how much is used and when it resets, before the model.
+                if let Some((plan, nearly)) = self.plan_line() {
+                    let at = end - text_width(&plan);
+                    if at - named >= 2 {
+                        screen.put(at, 0, &plan, &if nearly { st::WARN } else { st::DIM });
+                        end = at - 3;
+                    }
+                }
             }
         }
         if let Some(name) = set_name.filter(|s| !s.is_empty()) {
@@ -389,10 +401,16 @@ impl TuiApp {
             };
             // A provider asked Kumi to wait: say why and for how long (esc still stops).
             if let Some((reason, until)) = state.retry.as_ref().filter(|(_, until)| *until > now) {
-                let detail = if until.is_infinite() {
-                    format!("carrying on · {reason}")
-                } else {
-                    format!("retrying in {}s · {reason}", ((until - now) / 1000.).ceil().max(1.))
+                let seconds = ((until - now) / 1000.).ceil().max(1.);
+                let detail = match state.waiting_for {
+                    _ if until.is_infinite() => format!("carrying on · {reason}"),
+                    // A plan's limit: the answer carries on when it resets.
+                    Some((WaitFor::Limit, at)) => {
+                        let wall = now_ms_f64();
+                        format!("carrying on at {} (in {}) · {reason}", reset_words(at, wall), helpers::span_words(at - wall))
+                    }
+                    Some((WaitFor::Offline, _)) => format!("offline · trying again in {seconds}s"),
+                    None => format!("retrying in {seconds}s · {reason}"),
                 };
                 return NowLine { dot, label, detail, style: st::DIM, activity: None };
             }
@@ -492,7 +510,13 @@ impl TuiApp {
                 screen.put_in(x, box_.y + 1 + index as i32, row, &st::BRIGHT, box_);
             }
         }
+        // A list's own words when it has them (a countdown to Kumi's pick, another way to choose).
+        let own_hint = state.panel.as_ref().and_then(|p| match &*p.borrow() {
+            Panel::Pick { picker, .. } => picker.borrow().options.hint.clone(),
+            _ => None,
+        });
         let panel_hint = state.panel.as_ref().map(|p| match &*p.borrow() {
+            _ if own_hint.is_some() => own_hint.as_deref().unwrap_or(""),
             Panel::Btw { .. } => "↑↓ to scroll · c copies · esc to close",
             Panel::Pick { picker, .. } if picker.borrow().options.answers => {
                 "a number, then enter answers · or type your own · esc to close"

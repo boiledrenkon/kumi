@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use super::budget::{fit, opening, put_away_images, transcript_of, ContextBudget, PutAway, DEFAULT_BUDGET};
-use super::failure::{describe_failure, retry_delay_ms, retry_reason, MAX_RETRIES};
+use super::failure::{describe_failure, plan_limit, provider_name, reset_words, retry_reason, wait_for, PlanLimit, Wait, MAX_RETRIES};
 use crate::ai::error::LanguageModelError;
 use crate::ai::types::{
     AssistantPart, CallOptions, DataContent, FileData, FilePart, FinishReason, FinishReasonUnified, FunctionTool, Message, Prompt,
@@ -30,7 +30,7 @@ use crate::ai::types::{
 };
 use crate::core::contracts::{
     JsonObject, Kernel, KernelCheckpoint, KernelEmit, KernelEvent, KernelTool, OnText, Picture, StopReason, StreamingCall, ToolImage,
-    TranscriptLine, TurnResult, Usage,
+    TranscriptLine, TurnResult, Usage, WaitFor,
 };
 use crate::core::errors::{FailureKind, KumiError, RuntimeError};
 
@@ -181,6 +181,8 @@ const MAX_REPLY: usize = 8 * 1024;
 /// Images one tool result shows, and the media types models read.
 const MAX_TOOL_IMAGES: usize = 16;
 const IMAGE_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+/// The longest a side question waits before trying again.
+const ASIDE_LONGEST_WAIT_MS: f64 = 30_000.0;
 /// Says what a side question is, ahead of its words.
 const ASIDE_NOTE: &str = "(A side question while you work. Answer it briefly, in plain words, from what's above; use no tools. It doesn't change the request you're working on, and your answer isn't kept in the conversation.)";
 /// What the model is told when its answer broke off and Kumi carries on. `[Kumi]` marks it as Kumi's, not the producer's.
@@ -203,7 +205,13 @@ struct Running {
 }
 
 struct Inner {
-    binding: ModelBinding,
+    /// The binding answering now: the producer's model, or their fallback while that one can't.
+    binding: RefCell<Rc<ModelBinding>>,
+    /// The producer's model, and the one that carries on when its plan's limit is reached or its provider is down.
+    primary: Rc<ModelBinding>,
+    fallback: RefCell<Option<Rc<ModelBinding>>>,
+    /// While the fallback answers: when the producer's model comes back (epoch ms), at the first turn from then.
+    back_at: Cell<Option<f64>>,
     instructions: String,
     max_steps: usize,
     budget: ContextBudget,
@@ -222,11 +230,20 @@ struct Inner {
 }
 
 impl Inner {
+    fn binding(&self) -> Rc<ModelBinding> {
+        self.binding.borrow().clone()
+    }
+
     fn budget_now(&self) -> ContextBudget {
-        match &self.binding.budget {
+        match &self.binding().budget {
             Some(budget) if !self.budget_given => budget(self.fixed),
             _ => self.budget,
         }
+    }
+
+    /// The fallback, ready to take over: set, and not answering already.
+    fn fallback_ready(&self) -> bool {
+        self.back_at.get().is_none() && self.fallback.borrow().is_some()
     }
 }
 
@@ -279,9 +296,13 @@ pub fn create_agent_kernel(options: AgentKernelOptions) -> Result<AgentKernel, R
         Some(checkpoint) => restore(checkpoint, &binding.id, &tools_key)?,
         None => Vec::new(),
     };
+    let binding = Rc::new(binding);
     Ok(AgentKernel {
         inner: Rc::new(Inner {
-            binding,
+            binding: RefCell::new(binding.clone()),
+            primary: binding,
+            fallback: RefCell::new(None),
+            back_at: Cell::new(None),
             instructions,
             max_steps,
             budget,
@@ -334,6 +355,7 @@ impl AgentKernel {
         if signal.is_cancelled() {
             return Ok(TurnResult { stop_reason: StopReason::Cancelled, usage: None });
         }
+        self.come_back(&emit);
         let (done, settled) = watch::channel(false);
         let state = Rc::new(Running { steering: RefCell::new(Vec::new()), context: RefCell::new(None), done: settled });
         *self.inner.running.borrow_mut() = Some(state.clone());
@@ -348,6 +370,34 @@ impl AgentKernel {
             })
         }));
         turn(self.inner.clone(), Message::User { content, provider_options: None }, signal, emit, state).await
+    }
+
+    /// The model that carries on when this kernel's own can't: its plan's limit reached (waiting for the reset
+    /// instead), or its provider down past the retries. It answers until the turn after the reset.
+    pub fn set_fallback(&self, binding: Option<ModelBinding>) {
+        *self.inner.fallback.borrow_mut() = binding.map(Rc::new);
+    }
+
+    /// The model answering now: the producer's, or their fallback.
+    pub fn answering(&self) -> String {
+        self.inner.binding().id.clone()
+    }
+
+    /// The producer's model again, as a turn starts, once the limit it was waiting out has reset: never mid-turn.
+    fn come_back(&self, emit: &KernelEmit) {
+        let inner = &self.inner;
+        let Some(at) = inner.back_at.get() else { return };
+        if kumi_common::time::now_ms_f64() < at {
+            return;
+        }
+        inner.back_at.set(None);
+        *inner.binding.borrow_mut() = inner.primary.clone();
+        // What the fallback reasoned stays with it.
+        let history = without_reasoning(&inner.history.borrow());
+        *inner.history.borrow_mut() = history;
+        let name = provider_name(&inner.primary.id).to_string();
+        let _ =
+            emit(KernelEvent::ModelSwitch { model: inner.primary.id.clone(), reason: format!("{name} is answering again"), back: true });
     }
 
     /// Queue guidance for the running turn; it enters at the next model boundary. False when idle.
@@ -382,7 +432,8 @@ impl AgentKernel {
         // The conversation in plain words, its calls and their results written out: then no tools are
         // offered at all, which every provider takes (some can't be told "none" with calls in the conversation).
         let messages = plain_words(&[fitted.history.as_ref(), fitted.turn.as_ref()].concat());
-        let request = (inner.binding.prepare)(ModelRequest {
+        let binding = inner.binding();
+        let request = (binding.prepare)(ModelRequest {
             instructions: inner.instructions.clone(),
             messages,
             tools: Vec::new(),
@@ -398,8 +449,8 @@ impl AgentKernel {
             let attempted: Result<StepResult, StepError> = async {
                 let mut call = request.clone();
                 call.abort_signal = Some(abort.signal());
-                let timed = crate::core::timing::model_call(&inner.binding.id);
-                let parts = inner.binding.model.do_stream(call).await.map_err(StepError::Model)?;
+                let timed = crate::core::timing::model_call(&binding.id);
+                let parts = binding.model.do_stream(call).await.map_err(StepError::Model)?;
                 consume(crate::core::timing::timed(parts, timed), &abort, &hear, None).await
             }
             .await;
@@ -413,9 +464,14 @@ impl AgentKernel {
                     return Ok(trim(&words).to_string());
                 }
                 Err(error) => {
+                    // A side question is quick and has no fallback: a busy provider, or a dropped connection, is tried
+                    // again briefly; a plan's limit or a long wait is said at once.
                     let wait = match &error {
                         StepError::Model(model) if attempt < MAX_RETRIES && !delivered.get() && !abort.is_cancelled() => {
-                            retry_delay_ms(model, attempt)
+                            match wait_for(model, attempt, attempt, kumi_common::time::now_ms_f64()) {
+                                Some(Wait::Again(ms) | Wait::Offline(ms)) if ms <= ASIDE_LONGEST_WAIT_MS => Some(ms),
+                                _ => None,
+                            }
                         }
                         _ => None,
                     };
@@ -424,7 +480,7 @@ impl AgentKernel {
                             StepError::Aborted => RuntimeError::Aborted,
                             StepError::Model(LanguageModelError::Kumi(error)) => RuntimeError::Kumi(error),
                             StepError::Model(error) if abort.is_cancelled() => RuntimeError::Plain(error.to_string()),
-                            StepError::Model(error) => RuntimeError::Kumi(describe_failure(&error, &inner.binding.id)),
+                            StepError::Model(error) => RuntimeError::Kumi(describe_failure(&error, &binding.id)),
                         });
                     };
                     delay(wait, &abort).await.map_err(|_| RuntimeError::Aborted)?;
@@ -442,7 +498,7 @@ impl AgentKernel {
         Ok(Checkpoint {
             version: 1,
             messages: self.inner.history.borrow().clone(),
-            origin: Some(self.inner.binding.id.clone()),
+            origin: Some(self.inner.binding().id.clone()),
             tools: Some(self.inner.tools_key.clone()),
         })
     }
@@ -509,6 +565,9 @@ impl Kernel for AgentKernel {
     }
     async fn aside(&self, question: &str, signal: Signal, on_text: OnText) -> Result<String, RuntimeError> {
         AgentKernel::aside(self, question, signal, on_text).await
+    }
+    fn answering_fallback(&self) -> Option<String> {
+        self.inner.back_at.get().map(|_| self.inner.binding().id.clone())
     }
 }
 
@@ -594,7 +653,7 @@ async fn turn(inner: Rc<Inner>, first: Message, signal: Signal, emit: KernelEmit
                 return Ok(settled(StopReason::MaxSteps));
             }
             turn.fit_to_budget();
-            let request = (inner.binding.prepare)(ModelRequest {
+            let request = (inner.binding().prepare)(ModelRequest {
                 instructions: inner.instructions.clone(),
                 messages: turn.conversation(),
                 tools: inner.specs.clone(),
@@ -607,8 +666,14 @@ async fn turn(inner: Rc<Inner>, first: Message, signal: Signal, emit: KernelEmit
                 // once a turn, Kumi carries on from the steps it finished and the words shown, and says so.
                 Err(StepError::Model(error)) if !carried_on && turn.can_carry_on(&error) => {
                     carried_on = true;
-                    (turn.deliver)(KernelEvent::Retry { reason: retry_reason(&error, &inner.binding.id), wait_ms: 0 });
+                    (turn.deliver)(KernelEvent::Retry { reason: retry_reason(&error, &inner.binding().id), wait_ms: 0, wait: None });
                     turn.carry_on().await;
+                    continue;
+                }
+                // The producer's model can't answer (its plan's limit, its provider down past the retries): their
+                // fallback carries on this same answer from the steps it finished.
+                Err(StepError::Model(error)) if turn.can_fall_back(&error) => {
+                    turn.fall_back(&error);
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -674,7 +739,7 @@ async fn turn(inner: Rc<Inner>, first: Message, signal: Signal, emit: KernelEmit
                 )
                 .into());
             }
-            Err(describe_failure(&error.into_model_error(), &inner.binding.id).into())
+            Err(describe_failure(&error.into_model_error(), &inner.binding().id).into())
         }
     }
 }
@@ -762,7 +827,9 @@ impl Turn {
     /// Whether a step that failed can carry on: its answer broke off (the connection, or the provider
     /// mid-answer) after its words began showing, and no call that changes Live had begun.
     fn can_carry_on(&self, error: &LanguageModelError) -> bool {
-        let broke_off = retry_delay_ms(error, 0).is_some() || matches!(error, LanguageModelError::Other(_));
+        // A plan's limit isn't a broken answer: it goes to the wait, or the fallback.
+        let broke_off = matches!(wait_for(error, 0, 0, kumi_common::time::now_ms_f64()), Some(Wait::Again(_) | Wait::Offline(_)))
+            || matches!(error, LanguageModelError::Other(_));
         self.broke_off.get() && broke_off && !self.abort.is_cancelled() && !self.early.borrow().values().any(|entry| entry.call.started())
     }
 
@@ -781,6 +848,51 @@ impl Turn {
         messages.push(Message::user_text(CARRY_ON_NOTE));
     }
 
+    /// Whether the fallback can take over for a step that failed before anything of it reached the producer: the
+    /// producer's model hit its plan's limit, or its provider is down (or still busy) past the retries.
+    fn can_fall_back(&self, error: &LanguageModelError) -> bool {
+        let down = |status: u16| status == 429 || status >= 500;
+        let failed = plan_limit(error, 0.0).is_some()
+            || match error {
+                LanguageModelError::ApiCall(call) => call.status_code.is_some_and(down),
+                LanguageModelError::ProviderStream(fields) => {
+                    fields.get("statusCode").and_then(Value::as_u64).is_some_and(|status| down(status as u16))
+                }
+                _ => false,
+            };
+        failed
+            && self.inner.fallback_ready()
+            && !self.broke_off.get()
+            && !self.abort.is_cancelled()
+            && !self.early.borrow().values().any(|entry| entry.call.started())
+    }
+
+    /// Hands the answer to the fallback: it answers from the next step, with the conversation refitted to what it
+    /// reads at once (the loop's next fit) and no reasoning, which stays with the model that wrote it. The producer's
+    /// model comes back at the first turn after its limit resets; after an outage, at the next turn.
+    fn fall_back(&self, error: &LanguageModelError) {
+        let inner = &self.inner;
+        let Some(fallback) = inner.fallback.borrow().clone() else { return };
+        let from = inner.binding();
+        let now = kumi_common::time::now_ms_f64();
+        let name = provider_name(&from.id).to_string();
+        let model = from.id.split_once('/').map_or(from.id.as_str(), |(_, model)| model).to_string();
+        let (back_at, why) = match plan_limit(error, now) {
+            Some(PlanLimit::Reached { resets_at_ms: Some(at) }) => (at, format!("{name}'s plan limit resets at {}", reset_words(at, now))),
+            Some(PlanLimit::Reached { resets_at_ms: None }) => (now, format!("{name}'s plan limit is reached")),
+            Some(PlanLimit::NotIncluded) => (now, format!("{name}'s plan doesn't include {model}")),
+            Some(PlanLimit::Quota) => (now, format!("{name} has no credit left")),
+            None => (now, retry_reason(error, &from.id)),
+        };
+        inner.back_at.set(Some(back_at));
+        *inner.binding.borrow_mut() = fallback.clone();
+        let earlier = without_reasoning(&self.earlier.borrow());
+        let messages = without_reasoning(&self.messages.borrow());
+        *self.earlier.borrow_mut() = earlier;
+        *self.messages.borrow_mut() = messages;
+        (self.deliver)(KernelEvent::ModelSwitch { model: fallback.id.clone(), reason: why, back: false });
+    }
+
     /// A stopped turn (cancelled, timed out or failed) keeps the steps it finished, each model reply
     /// with all its tool results, so the conversation says what those steps changed in Live. The
     /// step in progress goes; a turn that finished no tool round leaves no trace.
@@ -793,10 +905,15 @@ impl Turn {
         }
     }
 
-    /// One model call. Retries up to MAX_RETRIES times, only before any output has escaped this step: text shown, or a
-    /// streaming call's work begun. A reply's first call whose tool can stream starts as it's written.
+    /// One model call. Retries only before any output has escaped this step (text shown, or a streaming call's work
+    /// begun): a busy provider up to MAX_RETRIES times, a plan's limit once it resets (unless the fallback takes
+    /// over), and a lost connection for as long as the answer may run. A reply's first call whose tool can stream
+    /// starts as it's written.
     async fn stream(&self, request: CallOptions) -> Result<StepResult, StepError> {
-        for attempt in 0.. {
+        let binding = self.inner.binding();
+        let mut retries = 0;
+        let mut offline = 0;
+        loop {
             let delivered = Cell::new(false);
             let calls = Cell::new(0usize);
             let input = TurnInput { turn: self, calls: &calls };
@@ -811,8 +928,8 @@ impl Turn {
                 let mut call = request.clone();
                 call.abort_signal = Some(self.abort.signal());
                 crate::core::timing::effort(&call);
-                let timed = crate::core::timing::model_call(&self.inner.binding.id);
-                let parts = self.inner.binding.model.do_stream(call).await.map_err(StepError::Model)?;
+                let timed = crate::core::timing::model_call(&binding.id);
+                let parts = binding.model.do_stream(call).await.map_err(StepError::Model)?;
                 consume(crate::core::timing::timed(parts, timed), &self.abort, &on_text, Some(&input as &dyn InputStream)).await
             }
             .await;
@@ -833,14 +950,25 @@ impl Turn {
                 Err(error) => {
                     let escaped = delivered.get() || self.early.borrow().values().any(|entry| entry.call.started());
                     self.broke_off.set(delivered.get());
-                    let wait = match &error {
-                        StepError::Model(model) if attempt < MAX_RETRIES && !escaped && !self.abort.is_cancelled() => {
-                            retry_delay_ms(model, attempt).map(|wait| (wait, retry_reason(model, &self.inner.binding.id)))
+                    let StepError::Model(model) = &error else { return Err(error) };
+                    if escaped || self.abort.is_cancelled() {
+                        return Err(error);
+                    }
+                    let (wait, kind) = match wait_for(model, retries, offline, kumi_common::time::now_ms_f64()) {
+                        Some(Wait::Again(wait)) if retries < MAX_RETRIES => {
+                            retries += 1;
+                            (wait, None)
                         }
-                        _ => None,
+                        // With a fallback set, it carries on now instead (the turn hands over).
+                        Some(Wait::Reset(wait)) if !self.inner.fallback_ready() => (wait, Some(WaitFor::Limit)),
+                        Some(Wait::Offline(wait)) => {
+                            offline += 1;
+                            (wait, Some(WaitFor::Offline))
+                        }
+                        _ => return Err(error),
                     };
-                    let Some((wait, reason)) = wait else { return Err(error) };
-                    (self.deliver)(KernelEvent::Retry { reason, wait_ms: wait.round() as u64 });
+                    let reason = retry_reason(model, &binding.id);
+                    (self.deliver)(KernelEvent::Retry { reason, wait_ms: wait.round() as u64, wait: kind });
                     // Nothing began, so the retry starts clean.
                     let entries: Vec<Rc<Early>> = self.early.borrow().values().cloned().collect();
                     join_all(entries.iter().map(|entry| entry.call.abandon())).await;
@@ -849,7 +977,6 @@ impl Turn {
                 }
             }
         }
-        unreachable!("a step's attempts end by returning")
     }
 
     /// Runs a step's calls in order. `reply` is set when all succeeded and some finished the request, or

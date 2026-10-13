@@ -151,6 +151,46 @@ fn settings_filter_unknown_values_but_preserve_unmentioned_preferences_and_raw_s
     }
 }
 #[test]
+fn unattended_settings_round_trip_and_survive_other_writes() {
+    let folder = tempfile::tempdir().unwrap();
+    let file = folder.path().join("settings.json").to_string_lossy().into_owned();
+    let saved = || serde_json::from_str::<Value>(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let all =
+        json!({"notifications":"off","liveStatusBar":false,"keepAwake":false,"answerAfter":90,"fallbackModel":"anthropic/claude-sonnet-5"});
+    write_settings(&file, &all).unwrap();
+    assert_eq!(saved(), all);
+    let settings = read_settings(&file);
+    assert_eq!(settings.notifications.as_deref(), Some("off"));
+    assert_eq!((settings.live_status_bar, settings.keep_awake, settings.answer_after), (Some(false), Some(false), Some(90)));
+    assert_eq!(settings.fallback_model.as_deref(), Some("anthropic/claude-sonnet-5"));
+    // Saving the model, a tab or anything else keeps them.
+    write_settings(&file, &json!({"model":"openai-codex/gpt-6-sol","panelTab":"goal"})).unwrap();
+    assert_eq!(
+        saved(),
+        json!({"model":"openai-codex/gpt-6-sol","panelTab":"goal","notifications":"off","liveStatusBar":false,"keepAwake":false,"answerAfter":90,"fallbackModel":"anthropic/claude-sonnet-5"})
+    );
+    // So does the whole of what was read, written back as /model does.
+    write_settings(&file, &serde_json::to_value(read_settings(&file)).unwrap()).unwrap();
+    assert_eq!(saved()["fallbackModel"], "anthropic/claude-sonnet-5");
+    // The defaults ("auto", true) aren't written; null clears the fallback; 0 never answers for the producer.
+    write_settings(&file, &json!({"notifications":"auto","liveStatusBar":true,"keepAwake":true,"answerAfter":0,"fallbackModel":null}))
+        .unwrap();
+    assert_eq!(saved(), json!({"panelTab":"goal","answerAfter":0}));
+    assert_eq!(read_settings(&file).answer_after, Some(0));
+    // What isn't valid is dropped as it's read.
+    std::fs::write(
+        &file,
+        json!({"notifications":"loud","liveStatusBar":"no","keepAwake":0,"answerAfter":-5,"fallbackModel":"no-provider"}).to_string(),
+    )
+    .unwrap();
+    let settings = read_settings(&file);
+    assert_eq!(settings.notifications, None);
+    assert_eq!((settings.live_status_bar, settings.keep_awake, settings.answer_after), (None, None, None));
+    assert_eq!(settings.fallback_model, None);
+    std::fs::write(&file, json!({"answerAfter":3601}).to_string()).unwrap();
+    assert_eq!(read_settings(&file).answer_after, None);
+}
+#[test]
 fn local_models_use_named_servers_and_have_no_sign_in() {
     let folder = tempfile::tempdir().unwrap();
     let file = folder.path().join("settings.json");

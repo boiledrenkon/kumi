@@ -7,6 +7,9 @@ pub const SCALE_BRIDGE: &str = "1.0.57";
 pub const FULL_CONTROL_BRIDGE: &str = "1.0.58";
 pub const PYTHON_BRIDGE: &str = "1.0.68";
 pub const EARS_BRIDGE: &str = "1.0.73";
+/// A message in passing is a line in Live's status bar (the Control Surface's own call). Older bridges showed it
+/// with Application.show_on_the_fly_message, a modal alert in Live 12.4 that holds Live until it's dismissed.
+pub const STATUS_LINE_BRIDGE: &str = "1.0.92";
 /// Unknown versions count as later, as in the source. Components use decimal parseInt, not semver validation.
 pub fn at_least(version: Option<&str>, minimum: &str) -> bool {
     let Some(version) = version.filter(|v| !v.is_empty()) else {

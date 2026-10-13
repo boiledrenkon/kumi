@@ -1080,6 +1080,9 @@ class LiveObjectMapper:
         self.song = song
         self.refs = registry or ReferenceRegistry()
         self.provenance = provenance
+        # The Control Surface's own line in Live's status bar (c_instance.show_message), for a message in passing:
+        # never Application.show_on_the_fly_message, which Live 12.4 shows as a modal alert that holds its main thread.
+        self.status_message: Callable[[str], Any] | None = None
         self._capture_state: dict[str, Any] | None = None
         self._owned_cleanup_tokens: dict[str, dict[str, Any]] = {}
         # The transaction whose operation is running (set by invoke), for ownership bookkeeping.
@@ -1286,9 +1289,10 @@ class LiveObjectMapper:
         if operation in {"undo.step.begin", "undo.step.end"}:
             return callable(getattr(song, "begin_undo_step", None)) and callable(getattr(song, "end_undo_step", None))
         if operation == "application.message":
+            if callable(self.status_message): return True
             try: application = self._application()
             except ValueError: return False
-            return callable(getattr(application, "show_on_the_fly_message", None)) or callable(getattr(application, "show_message", None))
+            return callable(getattr(application, "show_message", None))
         if operation in {"browser.preview.start", "browser.preview.stop"}:
             try: browser = self._browser()
             except ValueError: return False
@@ -10517,11 +10521,12 @@ class LiveObjectMapper:
         return response
 
     def _application_message(self, args: dict[str, Any]) -> dict[str, Any]:
-        """A message from Kumi in Live: shown in passing (Application.show_on_the_fly_message), or,
-        modal, as Application.show_message shows it. Needs no mutation authority: the Set is untouched."""
+        """A message from Kumi in Live: in passing, a line in Live's status bar (the Control Surface's own
+        c_instance.show_message), or, modal, as Application.show_message shows it. Needs no mutation authority: the Set
+        is untouched."""
         text, modal = args.get("text"), args.get("modal", False)
         if set(args) - {"text", "modal"} or not isinstance(text, str) or not 1 <= len(text) <= 1024 or not isinstance(modal, bool): raise ValueError("message arguments are invalid")
-        method = getattr(self._application(), "show_message" if modal else "show_on_the_fly_message", None)
+        method = getattr(self._application(), "show_message", None) if modal else self.status_message
         if not callable(method): raise ValueError(("modal" if modal else "passing") + " messages are unavailable on this Live shape")
         method(text)
         return {"shown": True}
@@ -13929,6 +13934,8 @@ class AbletonMcpBridge:
             # zero-argument accessor. Resolve only the accessor form.
             song = candidate() if callable(candidate) else candidate
         self.mapper = LiveObjectMapper(song, provenance=provenance)
+        status_message = getattr(c_instance, "show_message", None)
+        self.mapper.status_message = status_message if callable(status_message) else None
         self._bridge_epoch = secrets.token_urlsafe(24)
         self.auth = AuthenticatedRemoteScript(secret, self._dispatch, self._bridge_epoch, "internal-bridge-channel")
         self._server = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)

@@ -155,6 +155,8 @@ struct CachedBinding {
 type Defaulting = Shared<LocalBoxFuture<'static, Result<Option<DefaultModel>, RuntimeError>>>;
 struct State {
     model: Option<String>,
+    /// The model that carries on while this one can't (`fallbackModel`).
+    fallback: Option<String>,
     effort: Option<Effort>,
     fast: bool,
     catalog: HashMap<String, Vec<ModelInfo>>,
@@ -187,6 +189,7 @@ pub fn create_model_control(options: ModelControlOptions) -> ModelControl {
             pinned,
             state: RefCell::new(State {
                 model,
+                fallback: settings.fallback_model,
                 effort: settings.effort,
                 fast: settings.fast == Some(true),
                 catalog: HashMap::new(),
@@ -615,6 +618,21 @@ impl ModelControl {
     pub async fn binding(&self) -> Result<ModelBinding, RuntimeError> {
         Ok(self.binding_with_info().await?.binding)
     }
+    /// Says, once, that the fallback can't be used and why (not signed in there, say).
+    pub fn fallback_unusable(&self, error: &RuntimeError) {
+        let fallback = self.inner.state.borrow().fallback.clone().unwrap_or_default();
+        self.say(format!("Your fallback model, {fallback}, can't carry on for now: {}", error.message()));
+    }
+    /// The fallback's binding, unless it's the model already chosen (or none is set); an error when it can't be used
+    /// (not signed in there), which a kernel goes without.
+    pub async fn fallback_binding(&self) -> Result<Option<ModelBinding>, RuntimeError> {
+        let (fallback, model) = {
+            let state = self.inner.state.borrow();
+            (state.fallback.clone(), state.model.clone())
+        };
+        let Some(fallback) = fallback.filter(|fallback| Some(fallback) != model.as_ref()) else { return Ok(None) };
+        Ok(Some(self.bind(&fallback, None, None).await?.binding()))
+    }
 }
 
 /// The app-facing model controls, including the injectable source test contract.
@@ -631,6 +649,15 @@ pub trait ModelController {
     /// Whether `/fast` is on (the setting, whether or not this model has a faster tier).
     fn fast_enabled(&self) -> bool {
         false
+    }
+    /// The model that carries on while the chosen one's plan limit lasts or its provider is down.
+    fn fallback(&self) -> Option<String> {
+        None
+    }
+    /// Sets (or, with None, clears) the fallback; from the next message.
+    async fn set_fallback(&self, model: Option<&str>) -> Result<(), RuntimeError> {
+        let _ = model;
+        Ok(())
     }
     /// `/fast`: the model's faster tier on or off; None when turning it on and the model has none.
     async fn set_fast(&self, on: bool) -> Result<Option<ServiceTier>, RuntimeError> {
@@ -672,6 +699,24 @@ impl ModelController for ModelControl {
     }
     async fn set_fast(&self, on: bool) -> Result<Option<ServiceTier>, RuntimeError> {
         ModelControl::set_fast(self, on).await
+    }
+    fn fallback(&self) -> Option<String> {
+        self.inner.state.borrow().fallback.clone()
+    }
+    async fn set_fallback(&self, model: Option<&str>) -> Result<(), RuntimeError> {
+        let model = model.filter(|model| !model.is_empty()).map(str::to_string);
+        if let Some(model) = &model {
+            if self.parse(Some(model)).is_none() {
+                return Err(KumiError::new(FailureKind::Config, format!("{model} isn't a model Kumi knows how to reach.")).into());
+            }
+        }
+        // Everything else as it is (model, effort and fast are written only as given); null clears it.
+        let mut settings = serde_json::to_value(read_settings(&self.inner.options.settings_file)).unwrap_or_else(|_| json!({}));
+        settings["fallbackModel"] = json!(model);
+        write_settings(&self.inner.options.settings_file, &settings)?;
+        self.inner.state.borrow_mut().fallback = model;
+        // The next kernel carries it.
+        (self.inner.options.changed)().await
     }
     async fn save_key(&self, provider: ProviderId, key: &str, signal: Option<Signal>) -> Result<ApiKeyCheck, RuntimeError> {
         ModelControl::save_key(self, provider, key, signal).await

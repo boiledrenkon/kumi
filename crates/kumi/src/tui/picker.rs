@@ -44,6 +44,8 @@ pub struct PickerOptions {
     pub hint: Option<String>,
     /// Answers to Kumi's question: a number picks one (Enter sends it), and other typing goes to the input box.
     pub answers: bool,
+    /// Ctrl-F chooses the selected item another way (in /model: makes it the fallback).
+    pub alternate: bool,
 }
 
 #[derive(Clone, Debug)]

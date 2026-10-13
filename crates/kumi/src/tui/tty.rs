@@ -70,6 +70,9 @@ pub struct TtyOptions {
     pub on_resize: Rc<dyn Fn()>,
     /// Mouse reporting stops the terminal's own text selection; on by default.
     pub mouse: bool,
+    /// Written before [`RESTORE`] whenever the terminal is given back, the crash path's too: what clears the
+    /// status Kumi showed in the terminal (its OSC 7501 record and 9;4 progress). Empty for none.
+    pub farewell: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +83,8 @@ pub struct Size {
 
 struct Inner {
     options: TtyOptions,
+    /// The farewell, then RESTORE.
+    restore: String,
     active: Arc<AtomicBool>,
     /// The crash path gave the terminal back: a panic, which Kumi may have caught (a worker's) and lived on.
     taken: Arc<AtomicBool>,
@@ -98,6 +103,7 @@ impl Tty {
         let parser = InputParser::new(Rc::clone(&options.on_input));
         Tty {
             inner: Rc::new(Inner {
+                restore: format!("{}{RESTORE}", options.farewell),
                 options,
                 active: Arc::new(AtomicBool::new(false)),
                 taken: Arc::new(AtomicBool::new(false)),
@@ -142,6 +148,7 @@ impl Tty {
         inner.taken.store(false, Ordering::SeqCst);
         let (active, taken) = (Arc::clone(&inner.active), Arc::clone(&inner.taken));
         let writer = output.emergency_writer();
+        let restore = inner.restore.clone();
         let raw_mode = input.emergency_raw_mode();
         let was_raw = inner.was_raw.get();
         inner.emergency.set(Some(register(Arc::new(move || {
@@ -149,7 +156,7 @@ impl Tty {
                 return;
             }
             if let Some(writer) = &writer {
-                writer(RESTORE);
+                writer(&restore);
             }
             if let Some(raw_mode) = &raw_mode {
                 raw_mode(was_raw);
@@ -204,8 +211,8 @@ impl Inner {
         // The terminal may already be gone: a failed write is nothing to report. Once the crash path wrote it, it isn't
         // written again: its `?1049l` would put the cursor back where Kumi found it, over the panic's message (the
         // shell's prompt, or a farewell, would land on it).
-        if active && !(sync && output.write_sync(RESTORE).is_some()) {
-            output.write(RESTORE);
+        if active && !(sync && output.write_sync(&self.restore).is_some()) {
+            output.write(&self.restore);
         }
         input.pause();
         let _ = input.set_raw_mode(self.was_raw.get());
@@ -780,6 +787,7 @@ mod tests {
             on_input: Rc::new(|_| {}),
             on_resize: Rc::new(|| {}),
             mouse: true,
+            farewell: "\u{1b}]7501;state=clear\u{1b}\\".into(),
         });
         assert!(!tty.recover(), "nothing to take back before a crash");
         tty.start().unwrap();
@@ -787,7 +795,8 @@ mod tests {
         // A worker's panic, caught: the crash path gives the terminal back before its message is printed.
         let caught = std::thread::spawn(|| std::panic::catch_unwind(|| panic!("a worker's bug")).is_err()).join().unwrap();
         assert!(caught);
-        assert!(terminal.crashed.lock().unwrap().ends_with(RESTORE));
+        // Kumi's status in the terminal goes with it.
+        assert!(terminal.crashed.lock().unwrap().ends_with(&format!("\u{1b}]7501;state=clear\u{1b}\\{RESTORE}")));
         assert!(!terminal.is_raw());
         assert!(!tty.is_active());
         // Kumi lived on: its next frame takes the terminal again, once, and draws all of it.

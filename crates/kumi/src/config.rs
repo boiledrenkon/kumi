@@ -174,6 +174,21 @@ pub struct Settings {
     pub model_servers: Vec<ServerSetting>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<VoiceSettings>,
+    /// "off": no desktop notification (or bell) while Kumi's window isn't the one in front; "auto" otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<String>,
+    /// false: no line in Live's status bar when Kumi finishes or needs the producer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_status_bar: Option<bool>,
+    /// false: the computer may sleep while Kumi works.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_awake: Option<bool>,
+    /// Seconds before Kumi takes the answer it recommended when nobody's there to pick; 0 never does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_after: Option<u32>,
+    /// "<provider>/<model>" that carries on when the model's usage limit is reached or its provider is down.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
 }
 fn server_settings(value: &Value) -> Vec<ServerSetting> {
     value
@@ -235,10 +250,17 @@ pub fn read_settings(file: &str) -> Settings {
             .take(64)
             .map(str::to_string)
             .collect(),
-        model_servers,
         voice: voice_settings(&value["voice"]),
+        notifications: (value["notifications"] == "off").then(|| "off".to_string()),
+        live_status_bar: (value["liveStatusBar"] == false).then_some(false),
+        keep_awake: (value["keepAwake"] == false).then_some(false),
+        answer_after: value["answerAfter"].as_u64().filter(|seconds| *seconds <= MAX_ANSWER_AFTER).map(|seconds| seconds as u32),
+        fallback_model: value["fallbackModel"].as_str().filter(|m| valid_model(Some(m), &model_servers)).map(str::to_string),
+        model_servers,
     }
 }
+/// The longest wait before Kumi answers for the producer: an hour.
+const MAX_ANSWER_AFTER: u64 = 3600;
 /// A JSON object preserves the difference between omitting a setting and explicitly clearing it.
 pub fn write_settings(file: &str, next: &Value) -> Result<(), RuntimeError> {
     let before = serde_json::to_value(read_settings(file)).unwrap();
@@ -267,6 +289,20 @@ pub fn write_settings(file: &str, next: &Value) -> Result<(), RuntimeError> {
     }
     if let Some(value) = kept("voice").and_then(voice_settings) {
         settings.insert("voice".into(), serde_json::to_value(value).unwrap());
+    }
+    if kept("notifications").and_then(Value::as_str) == Some("off") {
+        settings.insert("notifications".into(), json!("off"));
+    }
+    for key in ["liveStatusBar", "keepAwake"] {
+        if kept(key) == Some(&Value::Bool(false)) {
+            settings.insert(key.into(), json!(false));
+        }
+    }
+    if let Some(value) = kept("answerAfter").filter(|v| v.as_u64().is_some_and(|seconds| seconds <= MAX_ANSWER_AFTER)) {
+        settings.insert("answerAfter".into(), value.clone());
+    }
+    if let Some(value) = kept("fallbackModel").filter(|v| truthy(v)) {
+        settings.insert("fallbackModel".into(), value.clone());
     }
     let parent = Path::new(file).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut mkdir = std::fs::DirBuilder::new();

@@ -193,7 +193,22 @@ impl Operation {
         if matches!(event, Some(KernelEvent::ToolEnd { .. })) {
             self.working.set(self.working.get().saturating_sub(1));
         }
-        self.quiet.set((self.working.get() == 0 && !self.steady.get()).then(|| Instant::now() + Duration::from_millis(self.idle_ms)));
+        // Waiting for a provider isn't the answer being stuck. Waiting for a plan's limit to reset isn't the answer's
+        // time at all: its hour stops meanwhile. A lost connection's tries still count toward it.
+        let waiting = match event {
+            Some(KernelEvent::Retry { wait_ms, wait, .. }) => {
+                let wait_for = Duration::from_millis(*wait_ms);
+                if *wait == Some(WaitFor::Limit) {
+                    if let Some(limit) = self.limit.get() {
+                        self.limit.set(Some(limit + wait_for));
+                    }
+                }
+                wait_for
+            }
+            _ => Duration::ZERO,
+        };
+        self.quiet
+            .set((self.working.get() == 0 && !self.steady.get()).then(|| Instant::now() + waiting + Duration::from_millis(self.idle_ms)));
         self.changed.notify_one();
     }
 }
@@ -2333,6 +2348,26 @@ impl SessionController for Session {
             self.emit(SessionEvent::Action(ActionEvent { title: "Stopped".into(), playing: Some(false), recording: Some(false) }));
         }
         Ok(stopped)
+    }
+    fn answering_fallback(&self) -> Option<String> {
+        self.0.state.borrow().kernel.as_ref().and_then(|held| held.value.answering_fallback())
+    }
+    fn has_daw_message(&self) -> bool {
+        true
+    }
+    async fn daw_message(&self, text: &str) -> Result<bool, RuntimeError> {
+        let integration = self.0.state.borrow().integration.clone();
+        match integration.filter(|i| i.has_show_message()) {
+            Some(i) => i.show_message(text, abort::timeout(5_000)).await,
+            None => Ok(false),
+        }
+    }
+    async fn daw_recording(&self) -> Result<Option<bool>, RuntimeError> {
+        let integration = self.0.state.borrow().integration.clone();
+        match integration {
+            Some(i) => i.recording(abort::timeout(5_000)).await,
+            None => Ok(None),
+        }
     }
     fn has_device_tree(&self) -> bool {
         true
