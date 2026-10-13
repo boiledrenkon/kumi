@@ -472,6 +472,24 @@ exit $status
             self.assertEqual((home / ".zshrc").read_text().count("# Added by the Kumi installer"), 2 if elsewhere else 1, spelled)
             self.assertIn(f'export PATH="{home}/.kumi/bin:$PATH"' if elsewhere else "PATH                done\n", (home / ".zshrc").read_text() if elsewhere else run.stdout)
 
+    def test_a_home_ending_in_a_slash_gets_one_slash_and_one_block(self):
+        # With HOME=/home/me/, the line was …//.kumi/bin, which kumi uninstall didn't know as Kumi's. An earlier
+        # installer's line, written so, still counts: no second block.
+        self.serve(self.release("1.0.0"))
+        home = self.home("slash")
+        for _ in range(2):
+            run = self.install(home, HOME=f"{home}/", SHELL="/bin/zsh", KUMI_NO_MODIFY_PATH="")
+            self.assertEqual(run.returncode, 0, run.stderr)
+        text = (home / ".zshrc").read_text()
+        self.assertEqual(text.count("# Added by the Kumi installer"), 1, text)
+        self.assertIn(f'export PATH="{home}/.kumi/bin:$PATH"', text)
+        self.assertNotIn("//", text)
+        earlier = self.home("earlier slash")
+        (earlier / ".zshrc").write_text(f'# Added by the Kumi installer\nexport PATH="{earlier}//.kumi/bin:$PATH"\n')
+        run = self.install(earlier, HOME=f"{earlier}/", SHELL="/bin/zsh", KUMI_NO_MODIFY_PATH="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((earlier / ".zshrc").read_text().count("# Added by the Kumi installer"), 1)
+
     # ── This computer ──────────────────────────────────────────────────────
     def test_sudo_is_told_kumi_would_install_for_root(self):
         self.stub("id", 'if [ "$1" = "-u" ]; then echo 0; else exec /usr/bin/id "$@"; fi\n')

@@ -231,6 +231,8 @@ main() {
   # shellcheck disable=SC2088
   case "$KUMI_HOME" in "~") KUMI_HOME="$HOME" ;; "~/"*) KUMI_HOME="$HOME/${KUMI_HOME#"~/"}" ;; esac
   case "$KUMI_HOME" in /*) ;; *) KUMI_HOME="$(pwd)/$KUMI_HOME" ;; esac
+  # One slash between names and none at the end: a HOME ending in / would otherwise give …//.kumi/bin in PATH.
+  KUMI_HOME="$(printf '%s\n' "$KUMI_HOME" | sed 's#//*#/#g; s#\(.\)/$#\1#')"
   # A folder of Kumi's own: in the home folder itself or a disk's root, the names Kumi uses (bin, downloads, tools)
   # could be the producer's own, and kumi uninstall takes those names out.
   own_home="$(cd "$HOME" 2>/dev/null && pwd -P)" || own_home="$HOME"
@@ -395,9 +397,11 @@ LAUNCHER
     esac
     # Once per file: the marker with this Kumi's bin on the line after it, as written or spelled from $HOME or ~
     # (someone may have edited it), as kumi uninstall finds it. One for a Kumi elsewhere doesn't count.
-    rel="${bin#"$HOME"/}"; [ "$rel" != "$bin" ] || rel=""
+    # A line an earlier installer wrote with // in it (from a HOME ending in /) counts too.
+    rel="${bin#"${HOME%/}"/}"; [ "$rel" != "$bin" ] || rel=""
     if awk -v marker="$marker" -v bin="$bin" -v rel="$rel" '
-      index(after, marker) && (index($0, bin) || (rel != "" && (index($0, "$HOME/" rel) || index($0, "${HOME}/" rel) || index($0, "~/" rel)))) { found = 1 }
+      { line = $0; gsub(/\/\/+/, "/", line) }
+      index(after, marker) && (index(line, bin) || (rel != "" && (index(line, "$HOME/" rel) || index(line, "${HOME}/" rel) || index(line, "~/" rel)))) { found = 1 }
       { after = $0 } END { exit !found }' "$rc" 2>/dev/null; then ready=1
     elif mkdir -p "$(dirname "$rc")" 2>/dev/null && printf '\n%s\n%s\n' "$marker" "$line" 2>/dev/null >> "$rc"; then added="$rc"; ready=1
     else unwritten="$rc"; fi

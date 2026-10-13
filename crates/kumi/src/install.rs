@@ -1125,11 +1125,22 @@ pub fn path_lines(env: &Env, home: &str) -> Vec<PathLines> {
     if cfg!(windows) {
         return vec![];
     }
-    let bin = join(home, "bin");
+    // One slash between names: an installer given a HOME ending in / wrote …//.kumi/bin.
+    let single = |path: &str| {
+        let mut out = String::with_capacity(path.len());
+        for c in path.chars() {
+            if !(c == '/' && out.ends_with('/')) {
+                out.push(c);
+            }
+        }
+        out
+    };
+    let bin = single(&join(home, "bin"));
     let actual = home::home_dir().unwrap_or_default().display().to_string();
-    let user = env.get("HOME").filter(|s| !s.is_empty()).map(String::as_str).unwrap_or(&actual);
+    let user = single(env.get("HOME").filter(|s| !s.is_empty()).map(String::as_str).unwrap_or(&actual));
     let relative = bin.strip_prefix(&format!("{}/", user.trim_end_matches('/'))).filter(|rest| !rest.is_empty()).map(str::to_string);
     let ours = |line: &str| {
+        let line = single(line);
         line.contains(&bin)
             || relative.as_ref().is_some_and(|rest| ["$HOME/", "${HOME}/", "~/"].iter().any(|from| line.contains(&format!("{from}{rest}"))))
     };

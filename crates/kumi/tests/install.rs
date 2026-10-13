@@ -2061,3 +2061,21 @@ async fn uninstall_keeps_the_launcher_and_path_lines_while_the_app_stays() {
     assert!(!home.join("app").exists() && !home.join("bin").exists());
     assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "");
 }
+/// An installer given a HOME ending in / wrote the PATH line with …//.kumi/bin: it's Kumi's all the same.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_knows_a_path_line_written_from_a_home_ending_in_a_slash() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let user = dir.path().join("user");
+    let home = user.join(".kumi");
+    env.insert("HOME".into(), format!("{}/", user.display()));
+    env.insert("KUMI_HOME".into(), home.display().to_string());
+    installed_kumi(&home);
+    put(user.join(".zshrc"), format!("alias ll='ls -l'\n\n{PATH_MARKER}\nexport PATH=\"{}//.kumi/bin:$PATH\"\n", user.display()));
+    put(user.join(".profile"), format!("{PATH_MARKER}\nexport PATH=\"$HOME/.kumi//bin:$PATH\"\n"));
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    assert_eq!(fs::read_to_string(user.join(".zshrc")).unwrap(), "alias ll='ls -l'\n");
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "");
+}
