@@ -1,3 +1,5 @@
+#[path = "support/change_pictures.rs"]
+mod change_pictures;
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::{
@@ -76,8 +78,7 @@ impl McpEndpoint for Fixture {
 fn canonical(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
-            // A change's picture came after the port (its tests are in changes/pictures.rs): the rest is the source's.
-            let mut keys: Vec<_> = map.keys().filter(|key| *key != "picture").collect();
+            let mut keys: Vec<_> = map.keys().collect();
             keys.sort();
             Value::Object(keys.into_iter().map(|key| (key.clone(), canonical(&map[key]))).collect())
         }
@@ -86,7 +87,8 @@ fn canonical(value: &Value) -> Value {
     }
 }
 fn normalized(value: &Value) -> String {
-    regex::Regex::new(r"\bc\d+\b").unwrap().replace_all(&stringify(&canonical(value)), "<change>").into_owned()
+    let value = change_pictures::without_change_pictures(value);
+    regex::Regex::new(r"\bc\d+\b").unwrap().replace_all(&stringify(&canonical(&value)), "<change>").into_owned()
 }
 fn eq(actual: &Value, expected: &Value, label: &str) {
     // The checkout command changes with the runtime; installed users still invoke `kumi`.

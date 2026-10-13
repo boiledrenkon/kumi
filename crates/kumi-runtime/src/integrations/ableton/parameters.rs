@@ -21,6 +21,7 @@ use kumi_common::{
         number,
         string::{head, trim},
     },
+    time::perf_now,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -481,26 +482,59 @@ pub async fn read_parameters(
     }
     Ok(rows)
 }
-/// An equaliser's or a compressor's curve for a change to its parameters. The device's parameters are read once the
-/// change has been told, so it isn't kept waiting, and the curve then goes on its record.
+/// A plan's steps on one device come close together: the device is read once this long after the last of them.
+const CURVE_QUIET_MS: f64 = 300.;
+/// The longest a run of changes waits for its read.
+const CURVE_WAIT_MS: f64 = 3_000.;
+
+/// An equaliser's or a compressor's curve for a change to its parameters. The device is read once the change has
+/// been told, so the change isn't kept waiting, and once a run of changes to it has ended; each change of the run
+/// then gets its own before and after (`pictures::curves`), put on its record.
+///
+/// The read goes around Kumi's Live lock, as FOCUS's reads do: it reads parameters through the bridge without
+/// registering references or taking a lease, so it can't come between a turn's own reads and changes.
 pub fn curve_later(history: &Rc<History>, kind: &ChangeKind, device: Option<&Value>, record: &ChangeRecord) {
     if kind.family != ChangeFamily::Parameter || history.is_quiet() {
         return;
     }
     let Some(ChangePicture::Values { values }) = record.picture.clone() else { return };
-    let Some(device) = device.filter(|device| device.is_string()).cloned() else { return };
+    let Some(device) = device.and_then(Value::as_str).map(str::to_owned) else { return };
     if !values.iter().any(|value| pictures::curve_parameter(&value.name)) {
         return;
     }
-    let (history, id) = (history.clone(), record.id.clone());
+    let first = {
+        let mut runs = history.curve_runs.borrow_mut();
+        let (changes, last) = runs.entry(device.clone()).or_default();
+        changes.push((record.id.clone(), values));
+        *last = perf_now();
+        changes.len() == 1
+    };
+    if !first {
+        return;
+    }
+    let history = history.clone();
     tokio::task::spawn_local(timing::background(async move {
+        let began = perf_now();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let last = history.curve_runs.borrow().get(&device).map(|(_, last)| *last).unwrap_or(0.);
+            if perf_now() - last >= CURVE_QUIET_MS || perf_now() - began >= CURVE_WAIT_MS {
+                break;
+            }
+        }
+        let Some((changes, _)) = history.curve_runs.borrow_mut().remove(&device) else { return };
         let connection = &history.connection;
         let signal = abort::any([connection.lifetime.clone(), abort::timeout(5_000)]);
         let fields = ["name", "value", "min", "max", "displayValue"].map(str::to_owned).to_vec();
-        let Ok(rows) = read_parameters(connection, device, fields, signal).await else { return };
+        let Ok(rows) = read_parameters(connection, json!(device), fields, signal).await else { return };
         let rows: Vec<pictures::ParameterRow> = rows.iter().filter_map(pictures::ParameterRow::from_row).collect();
-        if let Some(curve) = pictures::curve(&rows, &values).and_then(ChangePicture::bounded) {
-            history.set_picture(&id, curve);
+        // Changes made while it read are walked back too (they may be in what it read), and get a read of their own.
+        let newer = history.curve_runs.borrow().get(&device).map(|(changes, _)| changes.clone()).unwrap_or_default();
+        let ours: std::collections::HashSet<&str> = changes.iter().map(|(id, _)| id.as_str()).collect();
+        for (id, curve) in pictures::curves(&rows, &[changes.clone(), newer].concat()) {
+            if let Some(curve) = ours.contains(id.as_str()).then_some(curve).and_then(ChangePicture::bounded) {
+                history.set_picture(&id, curve);
+            }
         }
     }));
 }

@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     future::Future,
     panic::{catch_unwind, AssertUnwindSafe},
     rc::Rc,
@@ -160,6 +161,9 @@ pub struct History {
     pub connection: Rc<LiveConnection>,
     pub remember: Rc<Remember>,
     pub entries: RefCell<IndexMap<String, Rc<RefCell<Applied>>>>,
+    /// Changes to a device's curve waiting for one read after the last of them, by device: each change's id and the
+    /// values it moved, and when the last came (`parameters::curve_later`).
+    pub curve_runs: RefCell<HashMap<String, (Vec<(String, Vec<PictureValue>)>, f64)>>,
     pub changes_this_turn: Cell<usize>,
     quiet: RefCell<Option<Vec<String>>>,
     timeout_ms: u64,
@@ -195,6 +199,7 @@ impl History {
             timeout_ms: timeout_ms.unwrap_or(30_000),
             on_change,
             entries: RefCell::new(IndexMap::new()),
+            curve_runs: RefCell::default(),
             changes_this_turn: Cell::new(0),
             quiet: RefCell::new(None),
             on_shift: RefCell::new(None),

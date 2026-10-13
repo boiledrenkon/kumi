@@ -285,20 +285,38 @@ pub fn curve_parameter(name: &str) -> bool {
             .contains(&name)
 }
 
-/// An equaliser's or a compressor's curve, before and after a change, from its parameters as read after it (`after`)
-/// and the values that moved (their priors give the before).
-pub fn curve(after: &[ParameterRow], moved: &[PictureValue]) -> Option<ChangePicture> {
-    let before: Vec<ParameterRow> = after
-        .iter()
+/// Each change's curve, from one read of its device made after the last of them (`changes` oldest first, each with
+/// the values it moved). Walking back from the newest: a change's after is the state before the one that followed
+/// it, and its before puts back the values it moved. None for a device that draws no curve.
+pub fn curves(read: &[ParameterRow], changes: &[(String, Vec<PictureValue>)]) -> Vec<(String, ChangePicture)> {
+    let mut state = read.to_vec();
+    let mut drawn = Vec::new();
+    for (id, moved) in changes.iter().rev() {
+        let before = with_priors(&state, moved);
+        if let Some(curve) = curve_between(&before, &state, moved) {
+            drawn.push((id.clone(), curve));
+        }
+        state = before;
+    }
+    drawn.reverse();
+    drawn
+}
+
+/// The parameters with the values a change moved put back as they were.
+fn with_priors(rows: &[ParameterRow], moved: &[PictureValue]) -> Vec<ParameterRow> {
+    rows.iter()
         .map(|row| match moved.iter().find(|value| value.name == row.name) {
             Some(value) => ParameterRow { value: value.from.unwrap_or(row.value), text: value.from_text.clone(), ..row.clone() },
             None => row.clone(),
         })
-        .collect();
-    if let (Some(was), Some(now)) = (eq_bands(&before), eq_bands(after)) {
+        .collect()
+}
+
+fn curve_between(before: &[ParameterRow], after: &[ParameterRow], moved: &[PictureValue]) -> Option<ChangePicture> {
+    if let (Some(was), Some(now)) = (eq_bands(before), eq_bands(after)) {
         return Some(ChangePicture::Eq { before: was, after: now, values: moved.to_vec() });
     }
-    if let (Some(was), Some(now)) = (dynamics(&before), dynamics(after)) {
+    if let (Some(was), Some(now)) = (dynamics(before), dynamics(after)) {
         return Some(ChangePicture::Dynamics { before: was, after: now, values: moved.to_vec() });
     }
     None
@@ -535,13 +553,15 @@ mod tests {
         let gain = rows.iter_mut().find(|r| r.name == "3 Gain A").unwrap();
         gain.value = -4.;
         gain.text = Some("-4.00 dB".into());
-        let Some(ChangePicture::Eq { before, after, values }) = curve(&rows, &moved) else { panic!() };
+        let drawn = curves(&rows, &[("c1".into(), moved.clone())]);
+        let [(id, ChangePicture::Eq { before, after, values })] = drawn.as_slice() else { panic!() };
+        assert_eq!(id, "c1");
         assert_eq!(after.len(), 8);
         let band = &after[2];
         assert_eq!((band.shape, band.freq, band.gain_db, band.q, band.on), (EqShape::Bell, 469., -4., 1.34, true));
         assert_eq!(before[2].gain_db, 0., "the moved parameter's prior gives the before");
         assert!(!after[0].on);
-        assert_eq!(values, moved);
+        assert_eq!(values, &moved);
         // Without Live's words, the positions say the same.
         let bare: Vec<ParameterRow> = rows.iter().map(|r| ParameterRow { text: None, ..r.clone() }).collect();
         let bands = eq_bands(&bare).unwrap();
@@ -560,5 +580,81 @@ mod tests {
         assert_eq!(dynamics(&rows), Some(Dynamics { threshold_db: -20., ratio: 4., knee_db: 6., makeup_db: 3. }));
         let limiting = [ParameterRow { text: Some("inf : 1".into()), ..rows[1].clone() }];
         assert_eq!(dynamics(&[rows[0].clone(), limiting[0].clone()]).unwrap().ratio, 100.);
+    }
+
+    #[test]
+    fn a_run_of_changes_on_one_device_each_get_their_own_before_and_after() {
+        let gain = |value: f64| ParameterRow { name: "Threshold".into(), value, min: -60., max: 0., text: Some(format!("{value:.1} dB")) };
+        let ratio = ParameterRow { name: "Ratio".into(), value: 4., min: 1., max: 100., text: Some("4.00 : 1".into()) };
+        let moved = |from: f64, to: f64| {
+            vec![PictureValue {
+                name: "Threshold".into(),
+                from: Some(from),
+                to: Some(to),
+                from_text: Some(format!("{from:.1} dB")),
+                to_text: Some(format!("{to:.1} dB")),
+                ..Default::default()
+            }]
+        };
+        // -10 → -20, then -20 → -30, read once after both.
+        let read = [gain(-30.), ratio];
+        let drawn = curves(&read, &[("c1".into(), moved(-10., -20.)), ("c2".into(), moved(-20., -30.))]);
+        let threshold = |picture: &ChangePicture| match picture {
+            ChangePicture::Dynamics { before, after, .. } => (before.threshold_db, after.threshold_db),
+            _ => panic!(),
+        };
+        assert_eq!(drawn.len(), 2);
+        assert_eq!((drawn[0].0.as_str(), threshold(&drawn[0].1)), ("c1", (-10., -20.)), "the first change's after isn't the later state");
+        assert_eq!((drawn[1].0.as_str(), threshold(&drawn[1].1)), ("c2", (-20., -30.)));
+    }
+
+    #[test]
+    fn one_parameter_draws_its_value_as_asked_and_as_set() {
+        let preview = object(
+            json!({"device":{"name":"Auto Filter"},"parameter":{"ref":"p","name":"Frequency","min":20,"max":20000,"currentValue":1000,"proposedValue":2000,"displayValue":"1.00 kHz"}}),
+        );
+        let input = object(json!({"deviceRef":"d","parameterRef":"p","value":2010}));
+        let applied = object(json!({"displayValue":"2.00 kHz"}));
+        let ChangePicture::Values { values } = picture(kind("set_device_parameter"), &preview, &input, Some(&applied)).unwrap() else {
+            panic!()
+        };
+        let value = &values[0];
+        assert_eq!(
+            (value.name.as_str(), value.from, value.to, value.min, value.max),
+            ("Frequency", Some(1000.), Some(2000.), Some(20.), Some(20000.))
+        );
+        assert_eq!(
+            (value.from_text.as_deref(), value.to_text.as_deref(), value.asked.as_deref()),
+            (Some("1.00 kHz"), Some("2.00 kHz"), Some("2010"))
+        );
+    }
+
+    #[test]
+    fn automation_steps_erasures_and_removed_lanes_draw_what_is_left() {
+        let current = json!({"exists":true,"points":[{"time":0,"value":0.2},{"time":4,"value":0.4},{"time":8,"value":0.6}]});
+        let step = object(json!({"action":"insert-step","start":3,"length":2,"value":0.9}));
+        let ChangePicture::Automation { after, .. } =
+            picture(kind("set_automation"), &object(json!({"current":current})), &step, None).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(after, vec![[0., 0.2], [8., 0.6], [3., 0.9], [5., 0.9]]);
+        let erase = object(json!({"action":"delete-range","from":2,"to":6}));
+        let ChangePicture::Automation { after, .. } =
+            picture(kind("set_automation"), &object(json!({"current":current})), &erase, None).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(after, vec![[0., 0.2], [8., 0.6]]);
+        let remove = object(json!({"action":"delete-envelope"}));
+        let ChangePicture::Automation { before, after, .. } =
+            picture(kind("set_automation"), &object(json!({"current":current})), &remove, None).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((before.len(), after.len()), (3, 0));
+        // A new, empty lane has nothing to draw.
+        let empty = object(json!({"current":{"exists":false,"points":[]}}));
+        assert_eq!(picture(kind("set_automation"), &empty, &object(json!({"action":"create-envelope"})), None), None);
     }
 }
