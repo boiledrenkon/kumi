@@ -1,3 +1,5 @@
+#[path = "support/change_pictures.rs"]
+mod change_pictures;
 #[path = "../../../tests/support/chunks.rs"]
 mod chunks;
 #[path = "../../../tests/support/fixture_paths.rs"]
@@ -127,7 +129,8 @@ thread_local! {
 }
 fn normalized(value: &Value) -> String {
     let root = EARS.with(|ears| ears.borrow().clone());
-    let value = fixture_paths::map_strings(value, &|text| fixture_paths::normalize_root(text, root.to_str().unwrap(), "$EARS"));
+    let value = change_pictures::without_change_pictures(value);
+    let value = fixture_paths::map_strings(&value, &|text| fixture_paths::normalize_root(text, root.to_str().unwrap(), "$EARS"));
     let mut text = stringify(&canonical(&value));
     for (pattern, replace) in [
         (r"Kumi · render (\d+) [a-f0-9]{4}", "Kumi · render $1 <tag>"),
