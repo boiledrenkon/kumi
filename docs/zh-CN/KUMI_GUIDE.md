@@ -79,6 +79,18 @@ Kumi 工作时，按 Enter 可以补充说明（它会在当前这一步之后�
 
 要给 Kumi 看东西，把文件拖进窗口，或按 **Ctrl-V** 粘贴剪贴板里的图片（比如某个合成器的截图），然后说“做一个这样的”。每个文件都会显示在输入框上方，随下一条消息一起发送；点 ×，或在输入框为空时按 Backspace，即可撤回。模型能看的图片是 PNG、JPEG、GIF 和 WebP，每张不超过 3.75 MB，一条消息合计不超过 20 MB。其他文件，比如参考音频、预设或 Live 工程，会以路径的形式发送，供 Kumi 使用。图片只随它自己的那条消息发送；之后的对话（无论是否保存）会保留每个文件的名称和路径，但不保留图片本身。剪贴板中的图片在 `~/.kumi/attachments` 中保存一周。
 
+## 后台任务
+
+不改动工程的耗时工作，Kumi 会放到后台去做，这期间你可以继续和 Kumi 一起工作：网上查资料、看教程视频、查 Live 手册、翻你的素材库或之前的对话，或者写出一个 Max for Live 设备的文件。
+
+- **开始：** Kumi 用一句话说明正在运行什么，随即就能接收你的下一条消息。你可以主动要求（“在后台查一下这个”），也可以交给 Kumi 决定。
+- **查看：** 顶栏显示正在运行的任务数（◐ 2 jobs），**JOBS** 标签页列出每个任务正在做什么、用时和 token。`/jobs` 也能列出它们。
+- **结束时：** 对话中会出现一张卡片，显示它的第一行（“✓ Job 2 · Burial vocal chops · 5 steps, 3 sources”），Kumi 会在你下一条消息时读取它的报告。你的请求所需要的任务（“看看这个，把贝斯做成他们那样”）会在你没有在选择、输入或打开面板时自己接着进行。
+- **Live 只由 Kumi 操作：** 任务只负责查找和撰写，从不读取或改动 Live。修改由 Kumi 自己完成，记在 HISTORY 中并可撤销。任务读到的内容是数据，不是指令。
+- **Ctrl-B** 把回答中不用 Live 的耗时步骤（视频、网页）移到后台，回答继续进行。在 tmux 中按两次 Ctrl-B。
+- **停止：** 在 JOBS 的行上或任务详情中按 `x`。Esc 只停止回答，不停止任务。退出 Kumi 会中断任务，下次可用 `/jobs` 重新运行。
+- **设置：** `maxJobs`（同时运行三个）和 `workerModel`（任务使用的模型，从 `/model` 的列表中选；默认与对话相同）。每个任务的 token 显示在它那一行。
+
 ## 对 Kumi 说话
 
 按下 **Ctrl-T** 说出你想要的，然后再按一次。你说的话会出现在输入框中；按 Enter 发送。
@@ -325,6 +337,7 @@ Kumi 会在启动时检查是否有新版本，每天最多一次；没有新版
 | 发往桥接的一个请求 | 65 秒 |
 | 一次回答中的修改 | 5,000 项（一批打击垫或参数只算一次） |
 | 计划中的 `wait` 步骤 | 30 分钟 |
+| 后台任务 | 同时 3 个（`maxJobs`，最多 8 个）；每个最多 40 个模型步骤、20 分钟；用 Ctrl-B 移出的步骤沿用回答的 60 分钟 |
 | 对话大小 | 超过约 160 KB 时，较早的 Live 读取结果会被压缩；超过约 400 KB 时，最早的交流会被丢弃 |
 | 能听的音频 | 文件的前 12 分钟（要求时最长一小时）；整首歌最长一小时 |
 | 视频转写 | 每次 90 分钟 |
@@ -342,7 +355,7 @@ Kumi 会在启动时检查是否有新版本，每天最多一次；没有新版
 
 ## 隐私：哪些内容会离开你的电脑
 
-- **你的模型提供方**会收到你的消息、对话、Kumi 从工程中读取的内容、它观看的视频画面、它读取的图片，以及你随消息添加的图片。使用你电脑上的模型时，这些内容不会离开你的电脑（写在 `settings.json` 中的服务器无论运行在哪里都会收到）。
+- **你的模型提供方**会收到你的消息、对话、Kumi 从工程中读取的内容、它观看的视频画面、它读取的图片、你随消息添加的图片，以及交给后台任务的内容和任务读到的内容（设置了 `workerModel` 时则是它的提供方）。使用你电脑上的模型时，这些内容不会离开你的电脑（写在 `settings.json` 中的服务器无论运行在哪里都会收到）。
 - **网络搜索和阅读**会发送到上面提到的搜索服务，Kumi 读取的网页也会看到它的请求。Kumi 不会读取带有密钥或令牌的地址。
 - **下载**来自 GitHub（Kumi 的发布版本和更新检查、yt-dlp、ffmpeg 和 whisper.cpp、ONNX Runtime 和 Kumi 自己的模型）、Hugging Face（语音模型）、你为槽位的模型给出的任意 https 地址，以及你指定的视频网站。
 - 用文字指定的**参考**会按名字在 MusicBrainz 和 ListenBrainz 上查找，Spotify 链接从 Spotify 的公开页面读取（艺人链接从 MusicBrainz），音频通过 YouTube 搜索获取，测量完即删除。
@@ -373,6 +386,8 @@ Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
 | `modelServers` | 兼容 OpenAI 的模型服务器：`[{ "name", "baseURL", "apiKey" }]`（[你电脑上的模型](#你电脑上的模型)） |
 | `libraryFolders` | 供 Kumi 学习声音、预设和工程的其他文件夹 |
 | `voice` | 说话设置：`send`（停止后直接发送）、`language`、`microphone`（`/voice`） |
+| `maxJobs` | 同时运行的后台任务数：1–8，默认 3 |
+| `workerModel` | 后台任务使用的模型，取自 `/model` 列表的 `<provider>/<model>`；不设置时与对话相同 |
 
 `~/.kumi/slots.json` 保存你替换过的模型槽位（`/slots`），`~/.kumi/probes` 按设备和轨道保存每个旋钮起过的作用，`~/.kumi/models` 保存模型运行时和 Kumi 自己的模型。三者都跟随 `KUMI_HOME`。
 
@@ -383,7 +398,7 @@ Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
 | `KUMI_MODEL` | 本次运行使用的 `<provider>/<model>`，覆盖所选模型 |
 | `KUMI_AUTH_FILE`、`KUMI_SETTINGS_FILE` | 登录信息存储和设置文件 |
 | `KUMI_MEMORY_FILE`、`KUMI_TECHNIQUES_FILE`、`KUMI_PLAYBOOK_FILE` | 关于你的笔记、技巧和经验 |
-| `KUMI_RECIPES_DIR`、`KUMI_PROJECTS_DIR`、`KUMI_GOALS_DIR` | 配方；每个工程的对话、笔记和最后状态；进行中的目标和搜索 |
+| `KUMI_RECIPES_DIR`、`KUMI_PROJECTS_DIR`、`KUMI_GOALS_DIR` | 配方；每个工程的对话、笔记和最后状态；进行中的目标和搜索，以及 Kumi 关闭时中断的后台任务 |
 | `KUMI_REFERENCES_DIR` | 测量过的参考 |
 | `KUMI_INPUT_HISTORY_FILE`、`KUMI_GAPS_FILE`、`KUMI_RESTORE_FILE` | 你发送过的内容（供 ↑ 调出）、缺口日志，以及聆听被崩溃打断后留下的渲染轨道 |
 | `KUMI_VIDEOS_DIR`、`KUMI_TOOLS_DIR` | 看过的视频，以及 Kumi 下载的程序 |
