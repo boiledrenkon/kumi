@@ -3947,3 +3947,21 @@ local_test!(a_chat_that_keeps_no_conversations_says_nothing_of_one, {
     assert!(h.session.conversation_now().await.is_none());
     h.session.close().await.unwrap();
 });
+local_test!(a_conversation_whose_lock_cant_be_had_goes_on_all_the_same, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    // Its lock can be neither taken nor written (here, a folder): asked for, it goes on, held by nobody.
+    std::fs::create_dir(dir.path().join(SET_A).join(format!("conversations/{KEPT}.lock"))).unwrap();
+    let h = harness(None, |o| {
+        o.conversations = Some(store.clone());
+        o.resume = Some((SET_A.into(), KEPT.into()));
+    });
+    live(&h, Some(SET_A));
+    h.session.start().await.unwrap();
+    assert_eq!(now(&h).await.id, KEPT);
+    assert!(!h.notice("Another Kumi window"));
+    h.session.submit("and brighter", None).await.unwrap();
+    assert_eq!(saved(store.as_ref(), SET_A, 2).await.id, KEPT);
+    h.session.close().await.unwrap();
+});

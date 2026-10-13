@@ -283,6 +283,90 @@ async fn a_conversation_another_open_kumi_has_is_taken_until_that_kumi_lets_go()
     assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours);
 }
 
+/// Another Kumi, still running, as a lock file names it. On Unix, the process that started the tests: one started here
+/// takes the tests' open files with it for a moment, and with them the locks other tests hold. On Windows, where a new
+/// process takes none, one of the test's own.
+fn another_kumi() -> (Option<std::process::Child>, Value) {
+    #[cfg(unix)]
+    let (child, pid) = (None, std::os::unix::process::parent_id());
+    #[cfg(windows)]
+    let (child, pid) = {
+        let mut command = std::process::Command::new("ping");
+        let child = command.args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let pid = child.id();
+        (Some(child), pid)
+    };
+    let started = kumi_common::process::started_at_ms(pid).unwrap();
+    (child, json!({"pid":pid,"started":started}))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn where_the_file_system_cant_lock_the_lock_file_names_the_kumi_that_has_it() {
+    let dir = tempfile::tempdir().unwrap();
+    // As on a network drive without locks: taking the system's lock fails.
+    let store = create_conversation_store(dir.path());
+    store.without_file_locks();
+    store.save(A, "mv66me0m3fa91c", &said("make the bass wider", 10)).await.unwrap();
+    let lock = dir.path().join(A).join("conversations/mv66me0m3fa91c.lock");
+    // Another Kumi that couldn't lock either named itself, and still runs: it has the conversation, for a Kumi that can
+    // lock too.
+    let (other, named) = another_kumi();
+    std::fs::write(&lock, named.to_string()).unwrap();
+    assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Taken);
+    assert_eq!(create_conversation_store(dir.path()).claim(A, "mv66me0m3fa91c"), Claim::Taken);
+    // Not let go while it's open there, however old; and not deleted from under it.
+    for n in 0..21 {
+        store.save(A, &format!("new{n:03}aaaaaa"), &said("newer", 20 + n)).await.unwrap();
+    }
+    age(&dir.path().join(A).join("conversations/mv66me0m3fa91c.json"), 200 * DAY);
+    store.tidy(A).await.unwrap();
+    assert!(store.load(A, "mv66me0m3fa91c").await.unwrap().is_some());
+    assert!(store.delete(A, "mv66me0m3fa91c").await.unwrap_err().to_string().contains("open in another Kumi window"));
+    // That Kumi is gone, and its pid went to a process started later: this one names itself.
+    std::fs::write(&lock, json!({"pid":named["pid"],"started":1}).to_string()).unwrap();
+    assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours);
+    let says: Value = serde_json::from_str(&std::fs::read_to_string(&lock).unwrap()).unwrap();
+    assert_eq!(says["pid"], std::process::id());
+    // Let go, the file goes; a store dropped lets go of what it held.
+    store.release(A, "mv66me0m3fa91c");
+    assert!(!lock.exists());
+    assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours);
+    drop(store);
+    assert!(!lock.exists());
+    if let Some(mut other) = other {
+        let _ = other.kill();
+        let _ = other.wait();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_lock_kumi_cant_take_or_write_never_stops_a_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(A, "mv66me0m3fa91c", &said("make the bass wider", 10)).await.unwrap();
+    // `<id>.lock` can be neither locked nor written (here, a folder): the conversation goes on, held by nobody.
+    let lock = dir.path().join(A).join("conversations/mv66me0m3fa91c.lock");
+    std::fs::create_dir(&lock).unwrap();
+    assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Ours);
+    assert_eq!(create_conversation_store(dir.path()).claim(A, "mv66me0m3fa91c"), Claim::Ours);
+    let without = create_conversation_store(dir.path());
+    without.without_file_locks();
+    assert_eq!(without.claim(A, "mv66me0m3fa91c"), Claim::Ours);
+    // Saved, found, let go of past its days, and deleted all the same.
+    store.save(A, "mv66me0m3fa91c", &said("and brighter", 20)).await.unwrap();
+    assert!(matches!(store.find("mv66me0m3fa91c").await.unwrap(), ConversationMatch::One(_)));
+    store.release(A, "mv66me0m3fa91c");
+    assert!(store.delete(A, "mv66me0m3fa91c").await.unwrap());
+    assert!(store.load(A, "mv66me0m3fa91c").await.unwrap().is_none());
+    store.save(A, "mv66me0m3fa91c", &said("again", 30)).await.unwrap();
+    for n in 0..21 {
+        store.save(A, &format!("new{n:03}aaaaaa"), &said("newer", 40 + n)).await.unwrap();
+    }
+    age(&dir.path().join(A).join("conversations/mv66me0m3fa91c.json"), 200 * DAY);
+    store.tidy(A).await.unwrap();
+    assert!(store.load(A, "mv66me0m3fa91c").await.unwrap().is_none());
+}
+
 #[test]
 fn of_kumis_claiming_a_conversation_at_once_one_gets_it() {
     let dir = tempfile::tempdir().unwrap();

@@ -24,7 +24,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
@@ -118,11 +118,20 @@ pub struct FileConversationStore {
     directory: PathBuf,
     /// The days settings say to keep conversations past each place's 20 newest; None when they don't say.
     keep_days: Option<u32>,
-    /// The conversations this Kumi has open (place, id), each with its `<id>.lock` held locked by the system for as long as
-    /// the handle is open: a Kumi that closes, or crashes, lets go, so a lock that can be taken is nobody's.
-    held: RefCell<HashMap<(String, String), std::fs::File>>,
+    /// The conversations this Kumi has open (place, id), and how it holds each: another Kumi asking for one carries on in
+    /// a copy, and a Kumi that closes, or crashes, lets go.
+    held: RefCell<HashMap<(String, String), Hold>>,
+    /// Whether to take the system's file locks: without them, as on a file system that can't, the file names its Kumi.
+    file_locks: Cell<bool>,
     /// One look at the files at a time.
     looking: tokio::sync::Mutex<()>,
+}
+/// How this Kumi holds a conversation it has open.
+enum Hold {
+    /// The system's lock on `<id>.lock`, for as long as the handle is open.
+    Locked(std::fs::File),
+    /// Where the file system can't lock (some network drives): `<id>.lock` names this Kumi until it lets go.
+    Named,
 }
 pub fn create_conversation_store(directory: impl Into<PathBuf>) -> Rc<FileConversationStore> {
     create_conversation_store_keeping(directory, None)
@@ -134,8 +143,16 @@ pub fn create_conversation_store_keeping(directory: impl Into<PathBuf>, keep_day
         directory: directory.into(),
         keep_days,
         held: RefCell::default(),
+        file_locks: Cell::new(true),
         looking: tokio::sync::Mutex::new(()),
     })
+}
+impl Drop for FileConversationStore {
+    fn drop(&mut self) {
+        for ((place, id), hold) in self.held.take() {
+            self.let_go(&place, &id, hold);
+        }
+    }
 }
 
 /// What a conversation is called: the producer's name for it, else its first request, as one line with anything that
@@ -213,15 +230,55 @@ async fn read_meta(file: &Path) -> Meta {
     }
 }
 
-/// Which Kumi has a conversation open, written in its lock file for anyone looking: its process, and when that process
-/// started. Who holds the lock is the system's to say, not this.
+/// Which Kumi has a conversation open, written in its lock file: its process, and when that process started (a pid is
+/// used again once its process is gone). The system's lock decides where the file system can lock; this, where it can't.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Lock {
     pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     started: Option<i64>,
 }
-/// The lock on a conversation's `file`, held for as long as the handle stays open; None when another process holds it.
+impl Lock {
+    fn mine() -> Lock {
+        let pid = std::process::id();
+        Lock { pid, started: kumi_common::process::started_at_ms(pid) }
+    }
+    /// The process that wrote it is still running.
+    fn alive(&self) -> bool {
+        matches!((self.started, kumi_common::process::started_at_ms(self.pid)), (Some(was), Some(now)) if (was - now).abs() <= 2000)
+    }
+    fn is_mine(&self) -> bool {
+        self.pid == std::process::id() && self.alive()
+    }
+    /// Another Kumi's, still running.
+    fn other(&self) -> bool {
+        self.pid != std::process::id() && self.alive()
+    }
+}
+fn read_lock(file: &Path) -> Option<Lock> {
+    let bytes = std::fs::read(file).ok().filter(|bytes| bytes.len() <= 4096)?;
+    serde_json::from_slice(&bytes).ok()
+}
+/// What a lock file says, read through the handle that holds it.
+fn said(handle: &mut std::fs::File) -> Option<Lock> {
+    use std::io::{Read, Seek};
+    handle.seek(std::io::SeekFrom::Start(0)).ok()?;
+    let mut bytes = vec![];
+    handle.by_ref().take(4096).read_to_end(&mut bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+/// A held lock file made to name `lock`, or nobody.
+fn say(handle: &mut std::fs::File, lock: Option<&Lock>) -> std::io::Result<()> {
+    use std::io::{Seek, Write};
+    handle.set_len(0)?;
+    handle.seek(std::io::SeekFrom::Start(0))?;
+    match lock {
+        Some(lock) => handle.write_all(stringify(&json!(lock)).as_bytes()),
+        None => Ok(()),
+    }
+}
+/// The system's lock on a conversation's `file`, held for as long as the handle stays open; None when another Kumi holds
+/// it. An error when the file can't be opened, or the file system can't lock (some network drives).
 fn lock_file(file: &Path) -> std::io::Result<Option<std::fs::File>> {
     if let Some(folder) = file.parent() {
         crate::core::private::create_dir_all(folder)?;
@@ -230,16 +287,12 @@ fn lock_file(file: &Path) -> std::io::Result<Option<std::fs::File>> {
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut handle = options.open(file)?;
+    let handle = options.open(file)?;
     match handle.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-        Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        Ok(()) => Ok(Some(handle)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
     }
-    let pid = std::process::id();
-    let mine = Lock { pid, started: kumi_common::process::started_at_ms(pid) };
-    let _ = handle.set_len(0).and_then(|_| std::io::Write::write_all(&mut handle, stringify(&json!(mine)).as_bytes()));
-    Ok(Some(handle))
 }
 /// Whether another process holds the lock on `file` (taking it to see lets it go again at once).
 fn locked_elsewhere(file: &Path) -> bool {
@@ -400,12 +453,16 @@ impl FileConversationStore {
             if current.as_deref() == Some(id) || days == 0 || now - at < f64::from(days) * DAY_MS {
                 continue;
             }
-            if read_meta(&kept.join(format!("{id}.meta"))).await.pinned || self.open_elsewhere(place, id) {
+            if read_meta(&kept.join(format!("{id}.meta"))).await.pinned
+                || self.held.borrow().contains_key(&(place.to_owned(), id.to_owned()))
+                || self.open_elsewhere(place, id)
+            {
                 continue;
             }
             remove(kept.join(&name)).await?;
             remove(kept.join(format!("{id}.meta"))).await?;
-            remove(kept.join(format!("{id}.lock"))).await?;
+            // Only a place to lock: one that can't go (a folder there, say) stays.
+            let _ = tokio::fs::remove_file(kept.join(format!("{id}.lock"))).await;
         }
         // A name or pin whose conversation went goes too: an earlier Kumi let it go, or moved it to its Set's place once
         // the Set was saved (then the name and pin go after it).
@@ -459,10 +516,36 @@ impl FileConversationStore {
         self.index().await;
         Ok(())
     }
-    /// Whether another Kumi has the conversation open (this one's own are in `held`).
+    /// Whether another Kumi has the conversation open (this one's own are in `held`): the system's lock on it is taken,
+    /// or, where the file system can't lock, the file names another Kumi that's still running.
     fn open_elsewhere(&self, place: &str, id: &str) -> bool {
-        !self.held.borrow().contains_key(&(place.to_owned(), id.to_owned()))
-            && self.kept(place).is_ok_and(|kept| locked_elsewhere(&kept.join(format!("{id}.lock"))))
+        if self.held.borrow().contains_key(&(place.to_owned(), id.to_owned())) {
+            return false;
+        }
+        let Ok(kept) = self.kept(place) else { return false };
+        let file = kept.join(format!("{id}.lock"));
+        (self.file_locks.get() && locked_elsewhere(&file)) || read_lock(&file).is_some_and(|lock| lock.other())
+    }
+    /// Lets go of a conversation: the file names nobody, and the system's lock goes with the handle. A file that only
+    /// named this Kumi goes.
+    fn let_go(&self, place: &str, id: &str, hold: Hold) {
+        match hold {
+            Hold::Locked(mut handle) => {
+                let _ = say(&mut handle, None);
+            }
+            Hold::Named => {
+                let Ok(kept) = self.kept(place) else { return };
+                let file = kept.join(format!("{id}.lock"));
+                if read_lock(&file).is_some_and(|lock| lock.is_mine()) {
+                    let _ = std::fs::remove_file(file);
+                }
+            }
+        }
+    }
+    /// Holds conversations as on a file system that can't lock (some network drives): for tests.
+    #[doc(hidden)]
+    pub fn without_file_locks(&self) {
+        self.file_locks.set(false);
     }
     fn place_of(&self, key: &str) -> Option<(String, String)> {
         key.split_once('/').map(|(place, id)| (place.to_owned(), id.to_owned()))
@@ -924,7 +1007,7 @@ impl ConversationStore for FileConversationStore {
         remove(&file).await?;
         remove(kept.join(format!("{id}.meta"))).await?;
         if !self.held.borrow().contains_key(&(place.to_owned(), id.to_owned())) {
-            remove(kept.join(format!("{id}.lock"))).await?;
+            let _ = tokio::fs::remove_file(kept.join(format!("{id}.lock"))).await;
         }
         if self.current_id(place).await.as_deref() == Some(id) {
             write_privately(&self.folder(place)?, "current", "").await?
@@ -956,26 +1039,50 @@ impl ConversationStore for FileConversationStore {
         self.write_meta(place, id, &meta).await?;
         self.save(place, id, conversation).await
     }
-    /// The system's lock on `<id>.lock` decides: one Kumi gets it, however many ask at once, and a Kumi that's gone
-    /// holds nothing, whatever its pid or the clock say since.
+    /// Where the file system can lock, the system's lock on `<id>.lock` decides: one Kumi gets it however many ask at
+    /// once, and a Kumi that's gone holds nothing. Where it can't (some network drives), the file names the Kumi that has
+    /// it, as long as that Kumi runs. Kumi never refuses a conversation: when neither can be had, it goes on, held by
+    /// nobody, as before Kumi 1.17.
     fn claim(&self, place: &str, id: &str) -> Claim {
         let (Ok(kept), true) = (self.kept(place), CONVERSATION.is_match(id)) else { return Claim::Ours };
         let key = (place.to_owned(), id.to_owned());
         if self.held.borrow().contains_key(&key) {
             return Claim::Ours;
         }
-        match lock_file(&kept.join(format!("{id}.lock"))) {
-            Ok(Some(handle)) => {
-                self.held.borrow_mut().insert(key, handle);
-                Claim::Ours
+        let file = kept.join(format!("{id}.lock"));
+        let locked = if self.file_locks.get() { lock_file(&file) } else { Err(std::io::ErrorKind::Unsupported.into()) };
+        let hold = match locked {
+            Ok(None) => return Claim::Taken,
+            Ok(Some(mut handle)) => {
+                // Another Kumi that couldn't lock (from another computer, say) named itself here, and still runs.
+                if said(&mut handle).is_some_and(|lock| lock.other()) {
+                    return Claim::Taken;
+                }
+                let _ = say(&mut handle, Some(&Lock::mine()));
+                Hold::Locked(handle)
             }
-            Ok(None) => Claim::Taken,
-            // A folder or file system that can't hold the lock: nothing tells Kumis apart, and the conversation goes on.
-            Err(_) => Claim::Ours,
-        }
+            Err(_) => {
+                if read_lock(&file).is_some_and(|lock| lock.other()) {
+                    return Claim::Taken;
+                }
+                let mine = Lock::mine();
+                if crate::core::private::write(&file, stringify(&json!(mine)).as_bytes()).is_err() {
+                    return Claim::Ours;
+                }
+                // Two Kumis naming themselves at once: the one whose words stayed has it.
+                if read_lock(&file).is_some_and(|lock| lock != mine && lock.alive()) {
+                    return Claim::Taken;
+                }
+                Hold::Named
+            }
+        };
+        self.held.borrow_mut().insert(key, hold);
+        Claim::Ours
     }
-    /// The lock goes with the handle; the file stays, as only a place to lock.
     fn release(&self, place: &str, id: &str) {
-        self.held.borrow_mut().remove(&(place.to_owned(), id.to_owned()));
+        let hold = self.held.borrow_mut().remove(&(place.to_owned(), id.to_owned()));
+        if let Some(hold) = hold {
+            self.let_go(place, id, hold);
+        }
     }
 }
