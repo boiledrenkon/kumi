@@ -438,6 +438,20 @@ exit $status
         self.assertEqual((zdot / ".zshrc").read_text().count("# Added by the Kumi installer"), 1)
         self.assertFalse((home / ".zshrc").exists())
 
+    def test_an_edited_path_line_still_counts(self):
+        # Someone spelled the line from their home folder (for dotfiles they sync): no second block. A line for a Kumi
+        # elsewhere isn't this one's, so this one gets its own.
+        self.serve(self.release("1.0.0"))
+        for spelled in ('export PATH="$HOME/.kumi/bin:$PATH"', "export PATH=${HOME}/.kumi/bin:$PATH", "path+=(~/.kumi/bin)",
+                        'export PATH="/elsewhere/.kumi/bin:$PATH"'):
+            home = self.home(f"edited {len(spelled)}")
+            (home / ".zshrc").write_text(f"# mine\n# Added by the Kumi installer\n{spelled}\n")
+            run = self.install(home, SHELL="/bin/zsh", KUMI_NO_MODIFY_PATH="")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            elsewhere = "elsewhere" in spelled
+            self.assertEqual((home / ".zshrc").read_text().count("# Added by the Kumi installer"), 2 if elsewhere else 1, spelled)
+            self.assertIn(f'export PATH="{home}/.kumi/bin:$PATH"' if elsewhere else "PATH                done\n", (home / ".zshrc").read_text() if elsewhere else run.stdout)
+
     # ── This computer ──────────────────────────────────────────────────────
     def test_root_is_told_kumi_would_install_for_root(self):
         self.stub("id", 'if [ "$1" = "-u" ]; then echo 0; else exec /usr/bin/id "$@"; fi\n')

@@ -382,8 +382,12 @@ LAUNCHER
       fish) rc="$HOME/.config/fish/conf.d/kumi.fish"; line="contains -- \"$bin\" \$PATH; or set -gx PATH \"$bin\" \$PATH" ;;
       *) rc="$HOME/.profile"; line="export PATH=\"$bin:\$PATH\"" ;;
     esac
-    # Once per file: this Kumi's line may be there already (one for a Kumi elsewhere doesn't count).
-    if grep -qsxF "$line" "$rc"; then ready=1
+    # Once per file: the marker with this Kumi's bin on the line after it, as written or spelled from $HOME or ~
+    # (someone may have edited it), as kumi uninstall finds it. One for a Kumi elsewhere doesn't count.
+    rel="${bin#"$HOME"/}"; [ "$rel" != "$bin" ] || rel=""
+    if awk -v marker="$marker" -v bin="$bin" -v rel="$rel" '
+      index(after, marker) && (index($0, bin) || (rel != "" && (index($0, "$HOME/" rel) || index($0, "${HOME}/" rel) || index($0, "~/" rel)))) { found = 1 }
+      { after = $0 } END { exit !found }' "$rc" 2>/dev/null; then ready=1
     elif mkdir -p "$(dirname "$rc")" 2>/dev/null && printf '\n%s\n%s\n' "$marker" "$line" 2>/dev/null >> "$rc"; then added="$rc"; ready=1
     else unwritten="$rc"; fi
   fi
