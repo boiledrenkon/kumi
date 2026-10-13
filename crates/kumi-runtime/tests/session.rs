@@ -842,6 +842,11 @@ local_test!(with_every_session_tool_on_only_a_few_go_with_every_request, {
         o.gaps = Some(text("gaps.jsonl"));
         o.conversations = Some(create_conversation_store(dir.path()));
         o.library = Some(library.clone());
+        o.jobs = Some(JobsOptions {
+            worker_factory: Rc::new(|_| async { Err(RuntimeError::plain("no workers here")) }.boxed_local()),
+            max: 3,
+            store: None,
+        });
     });
     h.session.start().await.unwrap();
     let tools = h.record.created.borrow()[0].tools.clone();
@@ -851,12 +856,14 @@ local_test!(with_every_session_tool_on_only_a_few_go_with_every_request, {
         .filter(|tool| !tool.deferred())
         .map(|tool| tool.description().len() + serde_json::to_string(&tool.input_schema()).unwrap().len())
         .sum();
+    // start_job and jobs go with every request on purpose: the model has to know it can start a job (and see the ones
+    // running) without searching for it first. That's two more, and their 2 KB.
     assert_eq!(
         sent,
-        ["remember", "listen", "watch_video", "search_web", "read_web", "find_sounds", "note_gap"],
+        ["remember", "listen", "watch_video", "search_web", "read_web", "find_sounds", "note_gap", "start_job", "jobs"],
         "a tool that goes with every request is a choice"
     );
-    assert!(bytes <= 16 * 1024, "{bytes} bytes");
+    assert!(bytes <= 17 * 1024, "{bytes} bytes");
     let deferred: Vec<&str> = tools.iter().filter(|tool| tool.deferred()).map(|tool| tool.name()).collect();
     for name in [
         "forget",

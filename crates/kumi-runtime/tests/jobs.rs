@@ -139,8 +139,8 @@ struct Harness {
     events: Rc<RefCell<Vec<SessionEvent>>>,
     /// What each main turn was asked, in order.
     main: Rc<RefCell<Vec<String>>>,
-    /// The tools each worker was given.
-    worker_tools: Rc<RefCell<Vec<Vec<(String, Reach)>>>>,
+    /// The tools each worker was given, with what each does to the DAW and whether it waits behind find_tools.
+    worker_tools: Rc<RefCell<Vec<Vec<(String, Reach, bool)>>>>,
     /// The main kernel's tools.
     main_tools: Rc<RefCell<Vec<Rc<dyn KernelTool>>>>,
     /// The pictures the main turns were shown.
@@ -162,7 +162,7 @@ fn harness_with(
     let events = Rc::new(RefCell::new(vec![]));
     let main_inputs = Rc::new(RefCell::new(vec![]));
     let main_tools: Rc<RefCell<Vec<Rc<dyn KernelTool>>>> = Rc::default();
-    let worker_tools: Rc<RefCell<Vec<Vec<(String, Reach)>>>> = Rc::default();
+    let worker_tools: Rc<RefCell<Vec<Vec<(String, Reach, bool)>>>> = Rc::default();
     let pictures: Rc<RefCell<Vec<String>>> = Rc::default();
     let instructions: Rc<RefCell<String>> = Rc::default();
     let factory: KernelFactory = {
@@ -177,7 +177,7 @@ fn harness_with(
     let worker_factory: KernelFactory = {
         let seen = worker_tools.clone();
         Rc::new(move |options| {
-            seen.borrow_mut().push(options.tools.iter().map(|tool| (tool.name().to_string(), tool.reach())).collect());
+            seen.borrow_mut().push(options.tools.iter().map(|tool| (tool.name().to_string(), tool.reach(), tool.deferred())).collect());
             let kernel = ScriptedKernel { tools: options.tools, script: worker.clone(), inputs: Rc::default(), pictures: Rc::default() };
             async move { Ok(Rc::new(kernel) as Rc<dyn Kernel>) }.boxed_local()
         })
@@ -431,14 +431,27 @@ local_test!(a_worker_gets_only_tools_away_from_the_daw_and_never_starts_a_job, {
         Rc::new(Fake { name: "make_changes", reach: Reach::DawWrite, gate: None, finish: None, on_event: None }),
         Rc::new(Fake { name: "live_discover", reach: Reach::DawRead, gate: None, finish: None, on_event: None }),
     ];
-    let h = harness_with(starts_a_worker("tell"), worker_waiting(gate.clone()), observation_tools, |options| options.web = true);
+    let dir = tempfile::tempdir().unwrap();
+    let library = kumi_runtime::library::create_library(kumi_runtime::library::LibraryOptions {
+        dir: dir.path().join("library").to_string_lossy().into(),
+        find_sets: Some(false),
+        fork: Some(false),
+        ..Default::default()
+    });
+    let h = harness_with(starts_a_worker("tell"), worker_waiting(gate.clone()), observation_tools, |options| {
+        options.web = true;
+        options.library = Some(library);
+    });
     h.session.start().await.unwrap();
     h.session.submit("research it", None).await.unwrap();
     h.until("the worker", |h| !h.worker_tools.borrow().is_empty()).await;
     let given = h.worker_tools.borrow()[0].clone();
-    let names: Vec<&str> = given.iter().map(|(name, _)| name.as_str()).collect();
-    assert_eq!(names, ["search_web", "read_web"]);
-    assert!(given.iter().all(|(_, reach)| *reach == Reach::AwayFromDaw));
+    let names: Vec<&str> = given.iter().map(|(name, _, _)| name.as_str()).collect();
+    assert_eq!(names, ["search_web", "read_web", "find_sounds", "find_presets", "my_sets", "live_manual"]);
+    assert!(given.iter().all(|(_, reach, _)| *reach == Reach::AwayFromDaw));
+    // The conversation keeps some behind find_tools; a worker's few all go with its every request.
+    assert!(h.main_tools.borrow().iter().any(|t| t.name() == "find_presets" && t.deferred()));
+    assert!(given.iter().all(|(_, _, deferred)| !deferred), "{given:?}");
     // The main answer has the job tools; the DAW's own tools are as they were.
     let main: Vec<String> = h.main_tools.borrow().iter().map(|t| t.name().to_string()).collect();
     assert!(main.contains(&"start_job".to_string()) && main.contains(&"jobs".to_string()), "{main:?}");

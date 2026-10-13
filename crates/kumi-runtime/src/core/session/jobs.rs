@@ -184,6 +184,12 @@ impl KernelTool for Backgroundable {
     fn stream(&self, signal: Signal, on_start: Rc<dyn Fn()>) -> Option<Box<dyn StreamingCall>> {
         self.tool.stream(signal, on_start)
     }
+    fn deferred(&self) -> bool {
+        self.tool.deferred()
+    }
+    fn listed_by(&self) -> Option<&str> {
+        self.tool.listed_by()
+    }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let Some(inner) = self.session.upgrade() else { return self.tool.execute(input, signal).await };
         let session = Session(inner);
@@ -280,8 +286,12 @@ impl Session {
         if let Some(integration) = integration {
             tools.extend(integration.worker_tools());
         }
-        tools.retain(|tool| tool.reach() == Reach::AwayFromDaw);
+        // A worker's few tools all go with its every request: nothing waits behind find_tools.
         tools
+            .into_iter()
+            .filter(|tool| tool.reach() == Reach::AwayFromDaw)
+            .map(|tool| Rc::new(UpFront(tool)) as Rc<dyn KernelTool>)
+            .collect()
     }
 
     /// Starts a job: the producer's request it's for is the turn's under way. Its number, or why it can't start.
@@ -532,6 +542,31 @@ impl Session {
                 jobs.undeliver(*id);
             }
         }
+    }
+}
+
+/// A tool a worker sees in every request, whatever the conversation defers.
+struct UpFront(Rc<dyn KernelTool>);
+
+#[async_trait(?Send)]
+impl KernelTool for UpFront {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn description(&self) -> &str {
+        self.0.description()
+    }
+    fn input_schema(&self) -> JsonObject {
+        self.0.input_schema()
+    }
+    fn reach(&self) -> Reach {
+        self.0.reach()
+    }
+    fn stream(&self, signal: Signal, on_start: Rc<dyn Fn()>) -> Option<Box<dyn StreamingCall>> {
+        self.0.stream(signal, on_start)
+    }
+    async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
+        self.0.execute(input, signal).await
     }
 }
 
