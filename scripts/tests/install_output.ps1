@@ -5,12 +5,12 @@
 # "...", and "Starting Kumi...") are compared function by function. The Installer workflow runs it in Windows
 # PowerShell 5.1 and in PowerShell 7, each starting its own kind:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/install_output.ps1 -Reference <1.16.1's install.ps1>
-param(
-  [Parameter(Mandatory = $true)][string]$Reference,
-  [string]$Installer = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'install.ps1')
-)
+param([string]$Reference, [string]$Installer)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
+# Here, not as the parameters' defaults: Windows PowerShell has no $PSScriptRoot there for a script like this.
+if (-not $Reference) { throw 'Say which install.ps1 to compare with: -Reference <1.16.1''s install.ps1>' }
+if (-not $Installer) { $Installer = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'install.ps1' }
 $Reference = (Resolve-Path -LiteralPath $Reference).Path
 
 $failures = 0
