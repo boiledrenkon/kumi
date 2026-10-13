@@ -6,7 +6,7 @@ use super::{tilde, Check};
 use crate::{
     bridge_setup::{default_run, is_live_running, repository_dir, AsyncBool},
     config::{find_bridge_config, kumi_dir, live_user_library, load_settings_file, read_settings, remote_scripts_dir},
-    install::{app_version, has_app, not_yours, owner_advice, startup_files, PATH_MARKER, UPDATE_SPACE},
+    install::{app_version, chown_line, has_app, not_yours, startup_files, PATH_MARKER, UPDATE_SPACE},
     live_app::{installed_lives, installed_with, runs_on, InstalledLive, LiveInstalled},
     live_extension::{extension_data_dir, installed_extension, live_extensions_dir, running_extension},
     update::newer,
@@ -231,11 +231,16 @@ pub async fn port_owner(port: u16, platform: &str) -> PortOwner {
         return None;
     }
     let run = default_run();
+    // A lookup that hangs (a stuck lsof, a slow PowerShell) leaves the owner unnamed rather than the doctor waiting.
+    let run = move |program: String, args: Vec<String>| {
+        let run = run.clone();
+        async move { tokio::time::timeout(Duration::from_secs(2), run(program, args, None)).await.unwrap_or_default() }
+    };
     let named = match platform {
         "darwin" | "linux" => {
             let lsof = ["/usr/sbin/lsof", "/usr/bin/lsof"].into_iter().find(|p| Path::new(p).exists()).unwrap_or("lsof");
             let args = ["+c", "0", "-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fc"];
-            let ran = run(lsof.into(), args.map(str::to_string).into(), None).await;
+            let ran = run(lsof.into(), args.map(str::to_string).into()).await;
             ran.stdout.lines().find_map(|line| line.strip_prefix('c')).map(str::to_string)
         }
         "win32" => {
@@ -243,7 +248,7 @@ pub async fn port_owner(port: u16, platform: &str) -> PortOwner {
                 "Get-NetTCPConnection -State Listen -LocalPort {port} -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess | ForEach-Object {{ (Get-Process -Id $_ -ErrorAction SilentlyContinue).ProcessName }}"
             );
             let powershell = system::system_program_default(system::SystemProgram::Powershell);
-            let ran = run(powershell, vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script], None).await;
+            let ran = run(powershell, vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script]).await;
             Some(ran.stdout.trim().to_string()).filter(|s| !s.is_empty())
         }
         _ => None,
@@ -333,7 +338,7 @@ pub async fn installation_checks(env: &Env, io: &InstallationIo) -> Vec<Check> {
     }
     checks.push(update_check(env, io.now.unwrap_or_else(|| now_ms() as f64)));
     if let Some(folder) = not_yours(&home) {
-        checks.push(Check::fix(format!("{} isn't yours", tilde(&folder)), Some(owner_advice(&home))));
+        checks.push(Check::fix(format!("{} belongs to another account (installed with sudo?)", tilde(&folder)), Some(chown_line(&home))));
     }
     let free = match &io.free {
         Some(free) => free(home.clone()).await,

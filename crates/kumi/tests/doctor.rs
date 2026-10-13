@@ -597,8 +597,8 @@ async fn installation_names_a_kumi_folder_another_account_owns() {
     let mut io = s.io();
     // /usr stands in for a ~/.kumi an install run with sudo left to root.
     io.env.insert("KUMI_HOME".into(), "/usr".into());
-    let theirs = find(&installation_checks(&io.env, &io.installation).await, "isn't yours").clone();
-    assert_eq!(theirs, Check::fix("/usr isn't yours", Some("/usr isn't yours (installed with sudo?): sudo chown -R $USER /usr".into())));
+    let theirs = find(&installation_checks(&io.env, &io.installation).await, "another account").clone();
+    assert_eq!(theirs, Check::fix("/usr belongs to another account (installed with sudo?)", Some("sudo chown -R $USER /usr".into())));
 }
 #[tokio::test(flavor = "current_thread")]
 async fn doctor_json_takes_out_keys_and_counts_only_fixes() {

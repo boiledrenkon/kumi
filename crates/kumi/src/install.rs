@@ -311,10 +311,13 @@ fn shown_and_typed(home: &str) -> (String, String) {
     };
     (shown, typed)
 }
+/// The command that gives Kumi's folder back to this account.
+pub fn chown_line(home: &str) -> String {
+    format!("sudo chown -R $USER {}", shown_and_typed(home).1)
+}
 /// How to give Kumi's folder back to this account.
 pub fn owner_advice(home: &str) -> String {
-    let (shown, typed) = shown_and_typed(home);
-    format!("{shown} isn't yours (installed with sudo?): sudo chown -R $USER {typed}")
+    format!("{} isn't yours (installed with sudo?): {}", shown_and_typed(home).0, chown_line(home))
 }
 /// What to say when the system refused to change something in Kumi's folder (on macOS and Linux): whose it is
 /// when that's the reason, or the system's words and the usual way back.
