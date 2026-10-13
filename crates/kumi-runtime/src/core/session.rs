@@ -1355,6 +1355,8 @@ impl Session {
             let wanted_here = wanted.clone().filter(|w| here.is_none() || here.as_ref() == Some(&w.place) || w.place == UNSAVED);
             let mut resumed = None;
             let mut picked = false;
+            // Taken up here (at the start, or once its Set opened): saved as soon as it goes on, so it's its Set's latest.
+            let mut taken_up = false;
             if fresh {
                 let id = self.fresh_id().await;
                 self.begin(project.clone().unwrap_or(UNSAVED.into()), id, None);
@@ -1394,6 +1396,7 @@ impl Session {
                             Some(kept) => {
                                 from = Some(kept.checkpoint.clone());
                                 picked = true;
+                                taken_up = true;
                                 let taken = self.take_up(&w.place, &w.id).await;
                                 self.begin_taken(w.place.clone(), taken, &kept);
                                 self.0.state.borrow_mut().touched = true;
@@ -1436,6 +1439,9 @@ impl Session {
                 }
             };
             self.0.state.borrow_mut().kernel = Some(Held { value: value.clone(), key: observation.key.clone(), revision, lifetime });
+            if taken_up && unreadable.is_none() {
+                self.save_conversation(false);
+            }
             if let Some(kept) = unreadable {
                 self.emit(SessionEvent::Resumed {
                     saved_at: kept.saved_at,

@@ -3806,3 +3806,28 @@ local_test!(a_conversation_chosen_in_its_own_set_holds_until_another_set_opens, 
     assert!(asks(&h).is_empty());
     h.session.close().await.unwrap();
 });
+local_test!(a_conversation_taken_up_at_the_start_is_its_sets_latest_even_when_the_first_answer_is_stopped, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_B, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    store.save(SET_B, "mv66me0m9newer", &kept_about("tighten the drums", None)).await.unwrap();
+    let h = harness(Some(hang_once()), |o| {
+        o.conversations = Some(store.clone());
+        o.resume = Some((SET_B.into(), KEPT.into()));
+    });
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    assert_eq!(now(&h).await.id, KEPT);
+    // Stopped before its first answer settles: the next request still goes on with the one chosen.
+    let running = spawned(&h.session, "first");
+    settle().await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    h.session.submit("second", None).await.unwrap();
+    assert_eq!(now(&h).await.id, KEPT);
+    let last = h.record.created.borrow().len() - 1;
+    assert!(h.words(last).unwrap()[0].starts_with("make the bass wider"), "{:?}", h.words(last));
+    // It's the Set's latest, as a conversation taken up is.
+    assert_eq!(saved(store.as_ref(), SET_B, 2).await.id, KEPT);
+    h.session.close().await.unwrap();
+});
