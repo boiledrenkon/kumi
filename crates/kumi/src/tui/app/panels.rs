@@ -20,7 +20,7 @@ use kumi_runtime::{
 use std::collections::HashMap;
 
 /// What the conversations list says of its keys.
-const CONVERSATIONS_HINT: &str = "enter goes back · tab: All Sets · ctrl+f rename, pin, delete, copy id · esc closes";
+const CONVERSATIONS_HINT: &str = "enter goes back · tab: this Set or all · ctrl+f rename, pin, delete, copy id · esc closes";
 /// After choosing a model: say when `/fast` puts it on its faster tier, since that costs more.
 fn fast_note(tier: Option<&ServiceTier>) -> String {
     tier.map(|tier| {
@@ -526,8 +526,7 @@ impl TuiApp {
     pub(super) fn open_set_ask(&self, ask: Option<SetAsk>) {
         let Some(ask) = ask else {
             let open = self.0.state.borrow_mut().set_ask.take();
-            if let Some(open) = open.filter(|open| self.same_picker(open)) {
-                let _ = open;
+            if open.is_some_and(|open| self.same_picker(&open)) {
                 self.close_panel();
             }
             return;

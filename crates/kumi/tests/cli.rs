@@ -334,3 +334,37 @@ case!(a_database_that_cant_open_leaves_notes_in_their_files_and_says_so, async {
     assert_eq!(std::fs::read(&database).unwrap(), b"not a database", "and not the database");
     assert!(!f.folder.path().join("kumi.db-wal").exists());
 });
+case!(continue_and_resume_take_up_a_kept_conversation_or_say_why_not, async {
+    use kumi_runtime::ConversationStore;
+    let f = Fixture::new(false);
+    f.settings(json!({"model":"anthropic/claude-sonnet-5-5","updateCheck":false,"libraryFolders":[]}));
+    let (a, b) = ("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2");
+    let said = |text: &str, at: i64| -> kumi_runtime::SavedConversation {
+        serde_json::from_value(json!({"savedAt":at,"checkpoint":{"version":1,"messages":[{"role":"user","content":text},{"role":"assistant","content":"done"}]}}))
+            .unwrap()
+    };
+    let store = kumi_runtime::create_conversation_store(f.folder.path().join("projects"));
+    store.save(a, "mv66me0m3fa91c", &said("make the bass wider", 1)).await.unwrap();
+    store.save(b, "mv66zz0m3fa91c", &said("tighten the drums", 2)).await.unwrap();
+    store.rename(a, "mv66me0m3fa91c", Some("Bass ideas")).await.unwrap();
+    drop(store);
+    // A word that names none: said, exit 1, before anything starts.
+    assert_eq!(run(f.io(&["-r", "nothing", "--inference-only"]), unused_factory()).await, 1);
+    assert!(f.err.0.borrow().contains("No conversation nothing. cargo run -p kumi -- -r lists them."), "{}", f.err.0.borrow());
+    // -c: the one had last, in any Set; -r: by its name. /status names it, and the exit says how to come back.
+    for (args, title, id) in [
+        (vec!["-c", "--inference-only"], "tighten the drums", "mv66zz0m3fa91c"),
+        (vec!["-r", "bass", "ideas", "--inference-only"], "Bass ideas", "mv66me0m3fa91c"),
+    ] {
+        f.out.0.borrow_mut().clear();
+        let task = tokio::task::spawn_local(run(f.io(&args), unused_factory()));
+        f.input.wait_ready().await;
+        f.wait_output("Back to your conversation").await;
+        f.input.write("/status\n");
+        f.wait_output(&format!("Conversation: {title} · {id}")).await;
+        f.input.write("/quit\n");
+        f.input.end();
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 0);
+        assert!(f.output().contains(&format!("Continue this conversation: cargo run -p kumi -- -r {id}")), "{}", f.output());
+    }
+});

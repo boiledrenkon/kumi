@@ -3769,3 +3769,28 @@ local_test!(with_live_away_a_chosen_conversation_goes_on_and_kumi_asks_once_live
     assert_eq!(asks(&h).iter().flatten().map(|ask| ask.id.as_str()).collect::<Vec<_>>(), [KEPT]);
     h.session.close().await.unwrap();
 });
+local_test!(a_conversation_chosen_in_its_own_set_holds_until_another_set_opens, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    store.save(SET_A, "mv66me0m9newer", &kept_about("tighten the drums", None)).await.unwrap();
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some(SET_A));
+    h.session.start().await.unwrap();
+    assert_eq!(now(&h).await.id, "mv66me0m9newer");
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    assert!(asks(&h).is_empty());
+    // Read again, reconnected: still the one chosen.
+    h.session.refresh().await.unwrap();
+    h.session.reconnect().await.unwrap();
+    assert_eq!(now(&h).await.id, KEPT);
+    // Another Set opens: its own; back in this one, the one chosen is this Set's latest.
+    live(&h, Some(SET_B));
+    h.session.refresh().await.unwrap();
+    assert_ne!(now(&h).await.id, KEPT);
+    live(&h, Some(SET_A));
+    h.session.refresh().await.unwrap();
+    assert_eq!(now(&h).await.id, KEPT);
+    assert!(asks(&h).is_empty());
+    h.session.close().await.unwrap();
+});
