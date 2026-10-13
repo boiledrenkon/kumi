@@ -1,4 +1,5 @@
 //! Background jobs in the app: the JOBS tab, the header's count, the card when one ends, its overlay, /jobs and ctrl-b.
+use super::super::alerts::{self, ProgramState, StatusReport};
 use super::super::{
     activity::{activity_glyph, activity_of},
     markdown::render_markdown,
@@ -81,6 +82,7 @@ impl TuiApp {
             let before = state.jobs.insert(status.id, status.clone());
             status.state.ended() && before.is_none_or(|before| !before.state.ended())
         };
+        self.job_status(status);
         if ended {
             self.job_ended(status);
             if status.when_done == kumi_runtime::core::jobs::WhenDone::Continue && status.state != JobState::Interrupted {
@@ -92,9 +94,60 @@ impl TuiApp {
         self.0.scheduler.set_animating(busy || self.running_jobs() > 0 || self.0.voice.as_ref().is_some_and(VoiceInput::active));
     }
 
+    /// A job's record in the terminal's status (OSC 7501 `id=job-N`, beside Kumi's own): working with what it's doing,
+    /// done or error with its line; one stopped or interrupted is cleared. Written only when it changes.
+    fn job_status(&self, status: &JobStatus) {
+        let profile = &self.0.profile;
+        if !profile.status {
+            return;
+        }
+        let id = format!("job-{}", status.id);
+        let (state, msg) = match status.state {
+            JobState::Running => (Some(ProgramState::Working), doing_words(status)),
+            JobState::Done => (Some(ProgramState::Done), status.line.clone().unwrap_or_default()),
+            JobState::Failed => (Some(ProgramState::Error), status.line.clone().unwrap_or_default()),
+            JobState::Stopped | JobState::Interrupted => (None, String::new()),
+        };
+        let sequence = match state {
+            Some(state) => {
+                let report = StatusReport {
+                    state: Some(state),
+                    id: Some(id),
+                    progress: None,
+                    title: Some(self.clean_text(&status.title)),
+                    msg: Some(self.clean_text(&msg)).filter(|msg| !msg.is_empty()),
+                };
+                if self.0.state.borrow().job_status_sent.get(&status.id) == Some(&report) {
+                    return;
+                }
+                let sequence = alerts::status_sequence(&report);
+                self.0.state.borrow_mut().job_status_sent.insert(status.id, report);
+                sequence
+            }
+            None => {
+                if self.0.state.borrow_mut().job_status_sent.remove(&status.id).is_none() {
+                    return;
+                }
+                Some(alerts::clear_sequence(Some(&id)))
+            }
+        };
+        if let Some(sequence) = sequence {
+            self.0.tty.write(&if profile.tmux { alerts::tmux_wrap(&sequence) } else { sequence });
+        }
+    }
+
     /// A job ended: its card goes into the conversation, above the answer under way if there is one, and the input box is
-    /// left as it is. What else the producer hears of it (an alert while they're away) hangs here.
+    /// left as it is. A producer who's away hears of one that told its result (a job the request needed is told by the
+    /// answer that carries on with it).
     pub(super) fn job_ended(&self, status: &JobStatus) {
+        let title = self.clean_text(&status.title);
+        match status.state {
+            JobState::Done if status.when_done == kumi_runtime::core::jobs::WhenDone::Tell => {
+                self.alert(&format!("Job {} done: {title}", status.id), &format!("Kumi · job done · {title}"))
+            }
+            JobState::Failed => self.alert(&format!("Job {} failed: {title}", status.id), &format!("Kumi · job failed · {title}")),
+            _ => {}
+        }
         let tokens = status.tokens().map(|t| format!(" · {}", tokens_words(t))).unwrap_or_default();
         let (done, head, line) = match status.state {
             JobState::Done => (

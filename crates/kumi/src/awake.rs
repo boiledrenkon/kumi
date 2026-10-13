@@ -25,11 +25,13 @@ pub struct KeepAwake {
     guard: Rc<dyn SleepGuard>,
     holders: RefCell<BTreeSet<&'static str>>,
     held: RefCell<bool>,
+    /// The background jobs running now, by id: the "jobs" holder stays while any does.
+    jobs: RefCell<BTreeSet<u32>>,
 }
 
 impl KeepAwake {
     pub fn new(enabled: bool, guard: Rc<dyn SleepGuard>) -> Self {
-        Self { enabled, guard, holders: RefCell::default(), held: RefCell::new(false) }
+        Self { enabled, guard, holders: RefCell::default(), held: RefCell::new(false), jobs: RefCell::default() }
     }
 
     /// The system's own hold (an IOKit assertion, the thread's execution state, systemd-inhibit).
@@ -52,13 +54,31 @@ impl KeepAwake {
         *self.held.borrow()
     }
 
-    /// Follows the session: held while an answer (or a run of them) is under way, released when Kumi rests.
+    /// Follows the session: held while an answer (or a run of them) is under way, or a background job runs, released
+    /// when Kumi rests.
     pub fn follow(&self, event: &SessionEvent) {
-        if let SessionEvent::State { state } = event {
-            match state {
+        match event {
+            SessionEvent::State { state } => match state {
                 TurnState::Running | TurnState::Cancelling => self.hold("answer"),
                 TurnState::Idle | TurnState::Closed => self.release("answer"),
+            },
+            SessionEvent::Job(status) => {
+                let none = {
+                    let mut jobs = self.jobs.borrow_mut();
+                    if status.state.ended() {
+                        jobs.remove(&status.id);
+                    } else {
+                        jobs.insert(status.id);
+                    }
+                    jobs.is_empty()
+                };
+                if none {
+                    self.release("jobs");
+                } else {
+                    self.hold("jobs");
+                }
             }
+            _ => {}
         }
     }
 
@@ -272,6 +292,41 @@ mod tests {
         awake.release("answer");
         assert!(awake.is_held());
         awake.release("jobs");
+        assert!(!awake.is_held());
+        assert_eq!((fake.taken.get(), fake.given.get()), (1, 1));
+    }
+
+    #[test]
+    fn held_while_any_background_job_runs_after_the_answer_ends() {
+        use kumi_runtime::core::jobs::{JobKind, JobState, JobStatus, WhenDone};
+        let job = |id: u32, state: JobState| {
+            SessionEvent::Job(JobStatus {
+                id,
+                kind: JobKind::Worker,
+                title: "research".into(),
+                state,
+                when_done: WhenDone::Tell,
+                doing: None,
+                tool: None,
+                started_at: 0,
+                ended_at: None,
+                steps: 0,
+                sources: 0,
+                usage: None,
+                line: None,
+                moved: false,
+            })
+        };
+        let fake = Rc::new(Fake::default());
+        let awake = KeepAwake::new(true, fake.clone());
+        awake.follow(&state(TurnState::Running));
+        awake.follow(&job(1, JobState::Running));
+        awake.follow(&job(2, JobState::Running));
+        awake.follow(&state(TurnState::Idle));
+        assert!(awake.is_held(), "the jobs keep it");
+        awake.follow(&job(1, JobState::Done));
+        assert!(awake.is_held(), "job 2 still runs");
+        awake.follow(&job(2, JobState::Stopped));
         assert!(!awake.is_held());
         assert_eq!((fake.taken.get(), fake.given.get()), (1, 1));
     }

@@ -1,5 +1,6 @@
 #[path = "support/tui_app.rs"]
 mod support;
+use kumi::tui::alerts::{NotifyChannel, TerminalProfile};
 use serde_json::{json, Value};
 use std::rc::Rc;
 use support::*;
@@ -173,5 +174,35 @@ case!(ctrl_b_moves_the_step_and_slash_jobs_stops_one, async {
     // Esc stops the answer, not the job, and says so.
     h.type_text("\x1b").await;
     h.wait_for("A job is still running in the background: /jobs to see or stop it.").await;
+    h.close().await;
+});
+
+case!(a_job_has_its_own_status_record_and_its_end_tells_a_producer_whos_away, async {
+    let control = Rc::new(Control::default());
+    control.set("jobs", json!(true));
+    let h = Harness::with(140, 40, control, |o| {
+        o.terminal = Some(TerminalProfile { status: true, progress: false, notify: NotifyChannel::Osc777, tmux: false, app_id: None });
+        o.alert_gap_ms = Some(60.);
+    });
+    h.start().await;
+    h.connect();
+    // The producer goes to Live.
+    h.type_text("\x1b[O").await;
+    h.emit(job(1, "running", json!({"doing":"reading a page"})));
+    let written = || h.output.text.borrow().clone();
+    let record = |state: &str| format!("\x1b]7501;state={state}:id=job-1:");
+    assert!(written().contains(&record("working")), "the job's own record, beside Kumi's");
+    let before = written().matches("id=job-1").count();
+    h.emit(job(1, "running", json!({"doing":"reading a page"})));
+    assert_eq!(written().matches("id=job-1").count(), before, "the same record isn't written twice");
+    h.emit(job(1, "done", json!({"line":"Burial pitches vocal snippets up.","steps":2,"endedAt":now_ms()})));
+    assert!(written().contains(&record("done")));
+    // Away, its end is told: a notification and a line in Live.
+    h.wait_for_call("daw-message:Kumi · job done · Burial vocal chops").await;
+    assert!(written().contains("\x1b]777;notify;Kumi;Job 1 done: Burial vocal chops"), "a desktop notification");
+    // One stopped leaves no record behind.
+    h.emit(job(2, "running", json!({"title":"Tape loop tutorial"})));
+    h.emit(job(2, "stopped", json!({"title":"Tape loop tutorial","endedAt":now_ms()})));
+    assert!(written().contains("\x1b]7501;state=clear:id=job-2\x1b\\"));
     h.close().await;
 });

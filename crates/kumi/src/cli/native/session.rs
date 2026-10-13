@@ -336,7 +336,7 @@ pub(super) async fn run_session(
                     Some(model) => models.binding_for(model).await?,
                     None => models.binding().await?,
                 };
-                Ok(Rc::new(create_agent_kernel(AgentKernelOptions {
+                let kernel = create_agent_kernel(AgentKernelOptions {
                     conversation: options.conversation,
                     instructions: options.instructions,
                     tools: options.tools,
@@ -345,7 +345,12 @@ pub(super) async fn run_session(
                     binding,
                     max_steps: Some(WORKER_STEPS),
                     budget: None,
-                })?) as Rc<dyn Kernel>)
+                })?;
+                // A worker waits out a usage limit, or carries on with the producer's fallback, as the conversation does.
+                if let Ok(fallback) = models.fallback_binding().await {
+                    kernel.set_fallback(fallback);
+                }
+                Ok(Rc::new(kernel) as Rc<dyn Kernel>)
             }
             .boxed_local()
         })

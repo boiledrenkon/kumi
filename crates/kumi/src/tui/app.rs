@@ -342,6 +342,8 @@ struct State {
     jobs: std::collections::BTreeMap<u32, kumi_runtime::core::jobs::JobStatus>,
     /// Jobs that ended whose request carries on, waiting for a moment the producer isn't in the middle of something.
     carry: Vec<u32>,
+    /// Each job's record last written to the terminal's status (OSC 7501 `id=job-N`).
+    job_status_sent: std::collections::BTreeMap<u32, super::alerts::StatusReport>,
 }
 impl State {
     fn new(options: &TuiOptions) -> Self {
@@ -441,6 +443,7 @@ impl State {
             answer_countdown: None,
             jobs: std::collections::BTreeMap::new(),
             carry: vec![],
+            job_status_sent: std::collections::BTreeMap::new(),
         }
     }
 }

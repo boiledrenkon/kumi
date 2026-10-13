@@ -217,6 +217,8 @@ library or earlier conversations, or a Max for Live device's file.
   to the background, and the answer carries on. In tmux, press Ctrl-B twice.
 - **Stopping:** `x` on a JOBS row or in a job's details. Esc stops the answer,
   not the jobs. Quitting interrupts them; `/jobs` runs them again next time.
+- **Away:** while Kumi's window is behind another, a job's end is a notification
+  and a line in Live's status bar, and the computer stays awake while jobs run.
 - **Settings:** `maxJobs` (three at once) and `workerModel` (a model from
   `/model`'s list for the jobs; the conversation's by default). Each job's
   tokens show in its row.
