@@ -76,7 +76,8 @@ impl McpEndpoint for Fixture {
 fn canonical(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
-            let mut keys: Vec<_> = map.keys().collect();
+            // A change's picture came after the port (its tests are in changes/pictures.rs): the rest is the source's.
+            let mut keys: Vec<_> = map.keys().filter(|key| *key != "picture").collect();
             keys.sort();
             Value::Object(keys.into_iter().map(|key| (key.clone(), canonical(&map[key]))).collect())
         }

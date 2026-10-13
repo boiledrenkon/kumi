@@ -395,6 +395,9 @@ impl Mutations {
             })
         });
         history.remember(record.clone(), transaction.into(), restore);
+        if applied {
+            super::parameters::curve_later(history, kind, args.get("deviceRef"), &record);
+        }
         history.made_by(&record.id, &kind.tool);
         if let Some(clip) = args.get("clipRef").and_then(Value::as_str) {
             history.made_on(&record.id, clip);

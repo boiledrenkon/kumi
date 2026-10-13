@@ -385,6 +385,7 @@ mod tests {
             score: None,
             note: None,
             at,
+            picture: None,
         }
     }
     struct Fixture {

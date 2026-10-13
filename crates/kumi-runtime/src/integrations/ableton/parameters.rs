@@ -1,7 +1,8 @@
 //! Parameter discovery, Live's display units, and atomic fast parameter changes.
 use super::{
     bridge_version::{at_least, PYTHON_BRIDGE},
-    changes::{new_record, ChangeKind, ChangeSummary},
+    changes::{new_record, pictures, ChangeKind, ChangeSummary},
+    connection::LiveConnection,
     context,
     display::{value_for_display, DisplayMap, DISPLAY_MAP_SCRIPT},
     fast::{find_script, set_script},
@@ -10,7 +11,7 @@ use super::{
 };
 use crate::{
     command::KUMI,
-    core::{contracts::*, errors::RuntimeError},
+    core::{contracts::*, errors::RuntimeError, timing},
 };
 use indexmap::IndexMap;
 use kumi_common::{
@@ -109,25 +110,7 @@ impl Parameters {
             && self.history.connection.has("live_run_python")
     }
     pub async fn device_parameters(&self, device_ref: Value, fields: Vec<String>, signal: Signal) -> Result<Vec<JsonObject>, RuntimeError> {
-        let connection = &self.history.connection;
-        let mut rows = Vec::new();
-        let mut cursor = None;
-        for _ in 0..10_000 {
-            let mut args = object(json!({"kind":"parameter","parent":device_ref,"fields":fields,"limit":connection.page_limit()}));
-            if let Some(cursor) = &cursor {
-                args.insert("cursor".into(), json!(cursor));
-            }
-            let read = context::payload(&connection.call("live_discover", args, signal.clone()).await?)?;
-            for item in read.get("items").and_then(Value::as_array).into_iter().flatten() {
-                rows.push(context::object(item)?);
-            }
-            let next = read.get("nextCursor").and_then(Value::as_str).filter(|next| Some(*next) != cursor.as_deref()).map(str::to_owned);
-            cursor = next;
-            if cursor.as_ref().is_none_or(|s| s.is_empty()) {
-                break;
-            }
-        }
-        Ok(rows)
+        read_parameters(&self.history.connection, device_ref, fields, signal).await
     }
     pub async fn value_for_text(&self, parameter_ref: &str, text: &str, signal: Signal) -> Result<Result<f64, String>, RuntimeError> {
         let connection = &self.history.connection;
@@ -439,6 +422,7 @@ impl Parameters {
         );
         let record = new_record(kind, summary.clone(), ChangeState::Applied, connection.now().timestamp_millis());
         self.history.remember(record.clone(), String::new(), None);
+        curve_later(&self.history, kind, Some(&json!(device)), &record);
         let mut revert = Vec::new();
         for (index, target) in targets.iter().enumerate() {
             let row = rows.get(index).ok_or_else(|| RuntimeError::plain("Live omitted a changed parameter"))?;
@@ -470,6 +454,55 @@ impl Parameters {
         reply.extend(misses);
         Ok(ChangeOutcome { text: stringify(&json!(reply)), is_error: false, missed: (count > 0).then_some(count), stops: false })
     }
+}
+/// A device's parameters (`fields` of each), page by page.
+pub async fn read_parameters(
+    connection: &LiveConnection,
+    device_ref: Value,
+    fields: Vec<String>,
+    signal: Signal,
+) -> Result<Vec<JsonObject>, RuntimeError> {
+    let mut rows = Vec::new();
+    let mut cursor = None;
+    for _ in 0..10_000 {
+        let mut args = object(json!({"kind":"parameter","parent":device_ref,"fields":fields,"limit":connection.page_limit()}));
+        if let Some(cursor) = &cursor {
+            args.insert("cursor".into(), json!(cursor));
+        }
+        let read = context::payload(&connection.call("live_discover", args, signal.clone()).await?)?;
+        for item in read.get("items").and_then(Value::as_array).into_iter().flatten() {
+            rows.push(context::object(item)?);
+        }
+        let next = read.get("nextCursor").and_then(Value::as_str).filter(|next| Some(*next) != cursor.as_deref()).map(str::to_owned);
+        cursor = next;
+        if cursor.as_ref().is_none_or(|s| s.is_empty()) {
+            break;
+        }
+    }
+    Ok(rows)
+}
+/// An equaliser's or a compressor's curve for a change to its parameters. The device's parameters are read once the
+/// change has been told, so it isn't kept waiting, and the curve then goes on its record.
+pub fn curve_later(history: &Rc<History>, kind: &ChangeKind, device: Option<&Value>, record: &ChangeRecord) {
+    if kind.family != ChangeFamily::Parameter || history.is_quiet() {
+        return;
+    }
+    let Some(ChangePicture::Values { values }) = record.picture.clone() else { return };
+    let Some(device) = device.filter(|device| device.is_string()).cloned() else { return };
+    if !values.iter().any(|value| pictures::curve_parameter(&value.name)) {
+        return;
+    }
+    let (history, id) = (history.clone(), record.id.clone());
+    tokio::task::spawn_local(timing::background(async move {
+        let connection = &history.connection;
+        let signal = abort::any([connection.lifetime.clone(), abort::timeout(5_000)]);
+        let fields = ["name", "value", "min", "max", "displayValue"].map(str::to_owned).to_vec();
+        let Ok(rows) = read_parameters(connection, device, fields, signal).await else { return };
+        let rows: Vec<pictures::ParameterRow> = rows.iter().filter_map(pictures::ParameterRow::from_row).collect();
+        if let Some(curve) = pictures::curve(&rows, &values).and_then(ChangePicture::bounded) {
+            history.set_picture(&id, curve);
+        }
+    }));
 }
 fn object(value: Value) -> JsonObject {
     value.as_object().cloned().unwrap_or_default()

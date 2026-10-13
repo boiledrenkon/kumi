@@ -11,6 +11,7 @@ use super::errors::{FailureKind, RuntimeError};
 use super::evolve::Knob;
 use super::goal::GoalStatus;
 use super::match_run::MatchStatus;
+pub use super::picture::{ChangePicture, Dynamics, EqBand, EqShape, MixLevels, MixSend, PictureValue};
 use crate::audio::matching::{Closeness, Focus};
 
 pub type JsonObject = serde_json::Map<String, Value>;
@@ -1190,6 +1191,9 @@ pub struct ChangeRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub at: i64,
+    /// What it looks like, before and after (absent on records saved before Kumi drew them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<ChangePicture>,
 }
 
 /// A rack's chain, for NOW's picture: its name and its devices in order.

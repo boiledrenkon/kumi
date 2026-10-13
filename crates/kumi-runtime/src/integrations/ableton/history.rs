@@ -286,6 +286,23 @@ impl History {
         self.emit(&record);
         self.remember.schedule_save(20_000);
     }
+    /// A picture made after the change was told (a device's curve, read once it was applied): kept on its record, and
+    /// the record told again, unless it's part of a group or Kumi is keeping changes quiet.
+    pub fn set_picture(&self, id: &str, picture: ChangePicture) {
+        let record = {
+            let entries = self.entries.borrow();
+            let Some(entry) = entries.get(id) else { return };
+            let mut entry = entry.borrow_mut();
+            entry.record.picture = Some(picture);
+            if entry.within.is_some() {
+                return;
+            }
+            entry.record.clone()
+        };
+        if !self.is_quiet() {
+            self.emit(&record);
+        }
+    }
     pub fn retire(&self, note: &str) {
         let entries: Vec<_> = self.entries.borrow().values().cloned().collect();
         for entry in entries {
