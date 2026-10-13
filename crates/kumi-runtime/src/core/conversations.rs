@@ -833,6 +833,12 @@ impl ConversationStore for FileConversationStore {
         self.folder(place)?;
         Ok(self.summaries().await.into_iter().filter(|row| row.place == place).collect())
     }
+    async fn set_current(&self, place: &str, id: &str) -> Result<(), RuntimeError> {
+        if self.file(place, id)?.exists() {
+            write_privately(&self.folder(place)?, "current", id).await?;
+        }
+        Ok(())
+    }
     async fn move_conversation(&self, id: &str, from: &str, to: &str) -> Result<(), RuntimeError> {
         let file = self.file(from, id)?;
         self.file(to, id)?;

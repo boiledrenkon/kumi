@@ -4036,45 +4036,68 @@ local_test!(a_conversation_asked_for_while_live_was_away_says_it_carries_on_when
     assert!(h.words(last).unwrap().iter().any(|words| words.contains("make the bass wider")), "{:?}", h.words(last));
     h.session.close().await.unwrap();
 });
-local_test!(a_conversation_saved_as_it_is_taken_up_still_says_which_model_it_was_had_with, {
+local_test!(looking_at_a_conversation_with_another_model_leaves_it_as_kept, {
     let dir = tempfile::tempdir().unwrap();
     let store = create_conversation_store(dir.path());
-    store.save(SET_A, KEPT, &kept_about("make the bass wider", Some("openai/gpt-x"))).await.unwrap();
-    let before = store.load(SET_A, KEPT).await.unwrap().unwrap().saved_at;
-    // Taken up with the model it was had with: saved at once, still naming that model.
-    let h = harness(None, |o| {
-        o.conversations = Some(store.clone());
-        o.resume = Some((SET_A.into(), KEPT.into()));
-    });
-    *h.record.origin.borrow_mut() = Some("openai/gpt-x".into());
-    live(&h, Some(SET_A));
-    h.session.start().await.unwrap();
-    for _ in 0..1000 {
-        if store.load(SET_A, KEPT).await.unwrap().is_some_and(|kept| kept.saved_at != before) {
-            break;
-        }
-        delay(2).await;
+    // Kept as another model had it: its reasoning (with what that model needs to read it again), its tools, a change.
+    let kept: SavedConversation = serde_json::from_value(json!({"savedAt":1,"turns":1,"first":"make the bass wider",
+        "checkpoint":{"version":1,"origin":"openai/gpt-x","tools":"tools-of-then","messages":[
+            {"role":"user","content":"make the bass wider"},
+            {"role":"assistant","content":[
+                {"type":"reasoning","text":"Widen with the utility.","providerOptions":{"openai":{"reasoningEncryptedContent":"sealed"}}},
+                {"type":"text","text":"Widened it to 140%."}]}]},
+        "changes":[change("c1", "applied", 1)]}))
+    .unwrap();
+    store.save(SET_A, KEPT, &kept).await.unwrap();
+    let file = dir.path().join(SET_A).join(format!("conversations/{KEPT}.json"));
+    let before = std::fs::read(&file).unwrap();
+    std::fs::write(dir.path().join(SET_A).join("current"), "").unwrap();
+    // Taken up with another model and left without a request: Kumi says which model it was had with, and changes nothing
+    // in it; it's its Set's current one.
+    for _ in 0..2 {
+        let h = harness(None, |o| {
+            o.conversations = Some(store.clone());
+            o.resume = Some((SET_A.into(), KEPT.into()));
+        });
+        *h.record.origin.borrow_mut() = Some("anthropic/claude-y".into());
+        live(&h, Some(SET_A));
+        h.session.start().await.unwrap();
+        assert_eq!(now(&h).await.id, KEPT);
+        let said = h
+            .events
+            .borrow()
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::Notice { message } if message.contains("This conversation was with gpt-x; it carries on with claude-y")))
+            .count();
+        assert_eq!(said, 1);
+        h.session.close().await.unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), before, "the file changed");
+        assert_eq!(std::fs::read_to_string(dir.path().join(SET_A).join("current")).unwrap(), KEPT);
     }
-    let kept = store.load(SET_A, KEPT).await.unwrap().unwrap();
-    assert_ne!(kept.saved_at, before, "saved as it was taken up");
-    assert_eq!(kept.checkpoint.origin.as_deref(), Some("openai/gpt-x"));
-    assert!(!h.notice("This conversation was with"));
-    h.session.close().await.unwrap();
-    // Taken up again with another model: Kumi says so, once.
+});
+local_test!(a_copy_taken_up_is_kept_from_its_first_request, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let other = create_conversation_store(dir.path());
+    assert_eq!(other.claim(SET_A, KEPT), Claim::Ours);
     let h = harness(None, |o| {
         o.conversations = Some(store.clone());
         o.resume = Some((SET_A.into(), KEPT.into()));
     });
-    *h.record.origin.borrow_mut() = Some("anthropic/claude-y".into());
     live(&h, Some(SET_A));
     h.session.start().await.unwrap();
-    let said = h
-        .events
-        .borrow()
-        .iter()
-        .filter(|e| matches!(e, SessionEvent::Notice { message } if message.contains("This conversation was with gpt-x; it carries on with claude-y")))
-        .count();
-    assert_eq!(said, 1);
+    let copy = now(&h).await.id;
+    assert_ne!(copy, KEPT);
+    // Nothing kept for the copy yet, and the Set's latest is still the one the other window has.
+    settle().await;
+    assert_eq!(store.all().await.unwrap().len(), 1);
+    assert_eq!(store.current(SET_A).await.unwrap().map(|c| c.id).as_deref(), Some(KEPT));
+    // Its first request keeps it, as a copy of the original.
+    h.session.submit("and brighter", None).await.unwrap();
+    saved(store.as_ref(), SET_A, 2).await;
+    let rows = store.all().await.unwrap();
+    assert_eq!(rows.iter().find(|r| r.id == copy).and_then(|r| r.forked_from.clone()).as_deref(), Some(KEPT));
     h.session.close().await.unwrap();
 });
 /// Live closes: the look keeps its key, with no Set read and no tools.

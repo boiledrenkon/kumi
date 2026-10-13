@@ -500,6 +500,11 @@ pub trait ConversationStore {
     async fn save(&self, place: &str, id: &str, conversation: &SavedConversation) -> Result<(), RuntimeError>;
     /// `place` starts afresh; its conversations stay listed.
     async fn fresh(&self, place: &str) -> Result<(), RuntimeError>;
+    /// Kept conversation `id` is `place`'s current one from here, as it's kept: nothing in it changes.
+    async fn set_current(&self, place: &str, id: &str) -> Result<(), RuntimeError> {
+        let _ = (place, id);
+        Ok(())
+    }
     /// `place`'s conversations, newest first.
     async fn list(&self, place: &str) -> Result<Vec<ConversationSummary>, RuntimeError>;
     /// A conversation moves with its Set (an unsaved Set's, when the Set is first saved).

@@ -329,6 +329,8 @@ struct State {
     copied_from: Option<String>,
     /// This run made a request in this conversation, or the producer took it up: the exit names it.
     touched: bool,
+    /// The conversation going on is as kept: taken up, with nothing asked or saved since.
+    as_kept: bool,
     /// A kept conversation the producer chose, waiting for its Set (or their answer about it).
     wanted: Option<Wanted>,
     /// The producer left a chosen conversation that went on in another Set: the open Set's own goes on from the next look.
@@ -744,6 +746,7 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 conversation_name: None,
                 copied_from: None,
                 touched: false,
+                as_kept: false,
                 wanted: options_resume.map(|(place, id)| Wanted { place, id, from: None, asked: None }),
                 own_set: false,
                 set_open: false,
@@ -1034,6 +1037,7 @@ impl Session {
         s.place = Some(place);
         s.conversation_id = id.clone();
         s.settled = None;
+        s.as_kept = false;
         s.conversation_first = conversation.and_then(|c| c.first.clone());
         s.conversation_turns = conversation.and_then(|c| c.turns).unwrap_or(0);
         s.changes = conversation
@@ -1138,7 +1142,7 @@ impl Session {
                         s.interrupted = None;
                     }
                     this.observe(&op, None, false).await?;
-                    this.save_conversation(false);
+                    this.hold_taken_up();
                     if let Some(said) = said {
                         this.notice(said);
                     }
@@ -1426,7 +1430,7 @@ impl Session {
             let wanted_here = wanted.clone().filter(|w| here.is_none() || here.as_ref() == Some(&w.place) || w.place == UNSAVED);
             let mut resumed = None;
             let mut picked = false;
-            // Taken up here (at the start, or once its Set opened): saved as soon as it goes on, so it's its Set's latest.
+            // Taken up here (at the start, or once its Set opened): its Set's current from the moment it goes on.
             let mut taken_up = false;
             if fresh {
                 let id = self.fresh_id().await;
@@ -1513,7 +1517,7 @@ impl Session {
             };
             self.0.state.borrow_mut().kernel = Some(Held { value: value.clone(), key: observation.key.clone(), revision, lifetime });
             if taken_up && unreadable.is_none() {
-                self.save_conversation(false);
+                self.hold_taken_up();
             }
             if let Some(kept) = unreadable {
                 self.emit(SessionEvent::Resumed {
@@ -1591,6 +1595,27 @@ impl Session {
         let name = |model: &str| model.split_once('/').map_or(model, |(_, name)| name).to_string();
         self.notice(format!("This conversation was with {}; it carries on with {} (/model changes it).", name(&was), name(&now)));
     }
+    /// A conversation taken up goes on as it's kept, its file untouched (looking at one doesn't change it): it's its
+    /// place's current one, so Kumi comes back to it, and what the kernel restored from it is settled here, so a request
+    /// stopped before its first answer goes back to it. A copy is kept from its first request.
+    fn hold_taken_up(&self) {
+        let held = self.0.state.borrow().kernel.clone();
+        let Some(held) = held.filter(|h| h.value.has_checkpoint()) else {
+            return;
+        };
+        let Ok(checkpoint) = held.value.checkpoint() else {
+            return;
+        };
+        let (place, id, copy) = {
+            let mut s = self.0.state.borrow_mut();
+            s.settled = Some(Settled { checkpoint, key: held.key });
+            s.as_kept = true;
+            (s.place.clone(), s.conversation_id.clone(), s.copied_from.is_some())
+        };
+        if let (Some(store), Some(place), false) = (self.0.options.conversations.clone(), place, copy) {
+            self.enqueue(async move { store.set_current(&place, &id).await });
+        }
+    }
     fn save_conversation(&self, turn: bool) {
         let held = self.0.state.borrow().kernel.clone();
         let Some(held) = held.filter(|h| h.value.has_checkpoint()) else {
@@ -1603,6 +1628,7 @@ impl Session {
         let (place, id, conversation, name, from) = {
             let mut s = self.0.state.borrow_mut();
             s.settled = Some(Settled { checkpoint: checkpoint.clone(), key: held.key });
+            s.as_kept = false;
             if turn {
                 s.conversation_turns += 1;
                 s.touched = true;
@@ -2408,8 +2434,11 @@ impl SessionController for Session {
                 changes: (!s.changes.is_empty()).then(|| s.changes.clone()),
             }
         };
-        // The original as it is now, then the copy: the same words, changes and undo, a new id from here on.
-        self.save_conversation(false);
+        // The original as it is now (as it was kept, when nothing's been asked since it was taken up), then the copy: the
+        // same words, changes and undo, a new id from here on.
+        if !self.0.state.borrow().as_kept {
+            self.save_conversation(false);
+        }
         let saving = self.0.saving.borrow().clone();
         let _ = saving.await;
         store.create(&place, &id, &conversation, name, Some(&old)).await?;
