@@ -308,6 +308,34 @@ fn of_kumis_claiming_a_conversation_at_once_one_gets_it() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn the_days_settings_said_to_keep_outlast_an_earlier_kumi_dropping_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let kept = dir.path().join(A).join("conversations");
+    // The producer keeps everything; 25 conversations, 5 of them past the 20 newest and 200 days old.
+    let store = create_conversation_store_keeping(dir.path(), Some(0));
+    for n in 0..25 {
+        store.save(A, &format!("old{n:03}aaaaaa"), &said("older", 10 + n)).await.unwrap();
+    }
+    for n in 0..5 {
+        age(&kept.join(format!("old{n:03}aaaaaa.json")), 200 * DAY);
+    }
+    let index: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("conversation-index.json")).unwrap()).unwrap();
+    assert_eq!(index["keepDays"], 0);
+    // A rollback's Kumi rewrote settings.json without the key: the next Kumi keeps them all the same.
+    let store = create_conversation_store(dir.path());
+    assert_eq!(store.days_kept().await, 0);
+    store.save(A, "new000aaaaaaaa", &said("newer", 100)).await.unwrap();
+    assert_eq!(kumi_1_16_3::names(&kept).len(), 26);
+    // Whichever keeps more: a shorter time said before gives way to 90 days, a longer one stays.
+    for (said_last, now) in [(30, 90), (120, 120), (90, 90)] {
+        create_conversation_store_keeping(dir.path(), Some(said_last)).tidy(A).await.unwrap();
+        assert_eq!(create_conversation_store(dir.path()).days_kept().await, now, "{said_last}");
+    }
+    // What settings say now is what counts.
+    assert_eq!(create_conversation_store_keeping(dir.path(), Some(7)).days_kept().await, 7);
+}
+
 /// A tiny generator, so each run makes the same cases.
 struct Random(u64);
 impl Random {
@@ -361,7 +389,7 @@ async fn every_conversation_kumi_1_16_3_kept_is_still_kept() {
         let before = make(&dir.path().join("before"));
         let now = make(&dir.path().join("now"));
         kumi_1_16_3::trim(&before.parent().unwrap().to_path_buf());
-        create_conversation_store_keeping(dir.path().join("now"), keep_days).tidy(A).await.unwrap();
+        create_conversation_store_keeping(dir.path().join("now"), Some(keep_days)).tidy(A).await.unwrap();
         let old: BTreeSet<String> = kumi_1_16_3::names(&before).into_iter().collect();
         let new: BTreeSet<String> = kumi_1_16_3::names(&now).into_iter().collect();
         assert!(new.is_superset(&old), "round {round}, keeping {keep_days} days: lost {:?}", old.difference(&new).collect::<Vec<_>>());

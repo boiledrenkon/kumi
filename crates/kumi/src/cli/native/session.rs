@@ -281,7 +281,7 @@ pub(super) async fn run_session(
     let projects_dir = load_projects_dir(&io.env)?;
     // Each Set's kept conversations, while Live may come in this session, or when the producer asked for one (then they
     // go on saving where they're kept, Live or not).
-    let keep_days = settings.conversations.as_ref().and_then(|c| c.keep_days).unwrap_or(KEEP_DAYS);
+    let keep_days = settings.conversations.as_ref().and_then(|c| c.keep_days);
     let conversations = (bridge_config.is_some() || bridge_missing || resume.is_some())
         .then(|| create_conversation_store_keeping(&projects_dir, keep_days));
     // The conversation asked for is found before anything shows: a word that names none says so, and Kumi stops there.
@@ -290,7 +290,7 @@ pub(super) async fn run_session(
             ConversationMatch::One(row) => (Some((row.place, row.id)), None, None),
             ConversationMatch::Several(_) => (None, Some(word.clone()), None),
             ConversationMatch::Gone => {
-                io.err.write(&format!("{}\n", gone_words(keep_days)));
+                io.err.write(&format!("{}\n", gone_words(store.days_kept().await)));
                 return Ok(1);
             }
             ConversationMatch::None => {

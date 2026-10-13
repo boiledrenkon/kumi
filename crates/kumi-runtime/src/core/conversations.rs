@@ -113,7 +113,8 @@ pub(crate) async fn modified_ms(path: &Path) -> f64 {
 }
 pub struct FileConversationStore {
     directory: PathBuf,
-    keep_days: u32,
+    /// The days settings say to keep conversations past each place's 20 newest; None when they don't say.
+    keep_days: Option<u32>,
     /// The conversations this Kumi has open (place, id), each with its `<id>.lock` held locked by the system for as long as
     /// the handle is open: a Kumi that closes, or crashes, lets go, so a lock that can be taken is nobody's.
     held: RefCell<HashMap<(String, String), std::fs::File>>,
@@ -121,10 +122,11 @@ pub struct FileConversationStore {
     looking: tokio::sync::Mutex<()>,
 }
 pub fn create_conversation_store(directory: impl Into<PathBuf>) -> Rc<FileConversationStore> {
-    create_conversation_store_keeping(directory, KEEP_DAYS)
+    create_conversation_store_keeping(directory, None)
 }
-/// A store that keeps conversations `keep_days` after they were last used (0: every one, however old).
-pub fn create_conversation_store_keeping(directory: impl Into<PathBuf>, keep_days: u32) -> Rc<FileConversationStore> {
+/// A store that keeps conversations `keep_days` after they were last used (0: every one, however old), as settings say.
+/// None when they don't: as they said last, and 90 days at least.
+pub fn create_conversation_store_keeping(directory: impl Into<PathBuf>, keep_days: Option<u32>) -> Rc<FileConversationStore> {
     Rc::new(FileConversationStore {
         directory: directory.into(),
         keep_days,
@@ -283,6 +285,10 @@ struct Index {
     /// Conversations that went from their folders, and when (ms): Kumi let them go, or an earlier Kumi did.
     #[serde(default)]
     gone: BTreeMap<String, i64>,
+    /// The days settings last said to keep conversations: an earlier Kumi rewriting settings.json drops what it doesn't
+    /// know, and a Kumi after it would otherwise keep 90 days of what the producer kept longer.
+    #[serde(default, rename = "keepDays", skip_serializing_if = "Option::is_none")]
+    keep_days: Option<u32>,
 }
 fn stamp_of(metadata: &std::fs::Metadata) -> u64 {
     metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos() as u64).unwrap_or(0)
@@ -380,9 +386,11 @@ impl FileConversationStore {
         // Newest first, and the same order an earlier Kumi gave them, ties and all.
         all.sort_by(|a, b| b.1.total_cmp(&a.1));
         let now = kumi_common::time::now_ms() as f64;
-        for (name, at) in all.into_iter().skip(MAX_KEPT) {
+        let beyond: Vec<_> = all.into_iter().skip(MAX_KEPT).collect();
+        let days = if beyond.is_empty() { KEEP_DAYS } else { self.days_kept().await };
+        for (name, at) in beyond {
             let id = &name[..name.len() - 5];
-            if current.as_deref() == Some(id) || self.keep_days == 0 || now - at < f64::from(self.keep_days) * DAY_MS {
+            if current.as_deref() == Some(id) || days == 0 || now - at < f64::from(days) * DAY_MS {
                 continue;
             }
             if read_meta(&kept.join(format!("{id}.meta"))).await.pinned || self.open_elsewhere(place, id) {
@@ -404,6 +412,18 @@ impl FileConversationStore {
             }
         }
         Ok(())
+    }
+    /// How many days past its 20 newest a place keeps conversations (0: all of them): what settings say, else what they
+    /// said last, and 90 at least.
+    pub async fn days_kept(&self) -> u32 {
+        if let Some(days) = self.keep_days {
+            return days;
+        }
+        match self.read_index().await.keep_days {
+            Some(0) => 0,
+            Some(days) => days.max(KEEP_DAYS),
+            None => KEEP_DAYS,
+        }
     }
     /// What `place` keeps and lets go, as after each save there.
     pub async fn tidy(&self, place: &str) -> Result<(), RuntimeError> {
@@ -455,6 +475,7 @@ impl FileConversationStore {
         let _one = self.looking.lock().await;
         let before = self.read_index().await;
         let mut index = before.clone();
+        index.keep_days = self.keep_days.or(before.keep_days);
         let files = self.scan().await;
         let kept_ids: HashSet<&str> = files.keys().filter_map(|key| key.split_once('/').map(|(_, id)| id)).collect();
         let now = kumi_common::time::now_ms();
