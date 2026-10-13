@@ -24,7 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = ROOT / "install.sh"
-INSTALL_ONE_LINER = "curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh"
+INSTALL_ONE_LINER = "curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.sh | sh"
 
 # A Kumi that says its version, and otherwise what it was started with.
 FIXTURE = """#!/bin/sh

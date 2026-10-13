@@ -25,13 +25,13 @@ macOS 13 以降、または Windows 10・11 上の Ableton Live 12 が必要で�
 **macOS**（ターミナル）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
+curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.sh | sh
 ```
 
 **Windows**（PowerShell）：
 
 ```powershell
-irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
+irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | iex
 ```
 
 インストールが終わると Kumi が起動し、サインインと Live への接続を案内します。次回からは `kumi` を実行するだけです。うまくいかないときは `kumi doctor` が直し方を教えます。

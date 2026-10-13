@@ -1,7 +1,7 @@
 #!/bin/sh
 # Kumi installer for macOS (and Linux). Run it with:
 #
-#   curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
+#   curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.sh | sh
 #
 # It puts native Kumi in ~/.kumi (no admin rights, nothing outside your home folder),
 # adds ~/.kumi/bin to your PATH, and checks every download against its published checksum. Running it
@@ -85,7 +85,7 @@ main() {
       if [ -f /etc/alpine-release ] || ldd --version 2>&1 | grep -qi musl; then
         fail "this Linux uses musl (Alpine), which this Kumi release doesn't support."
       fi ;;
-    MINGW*|MSYS*|CYGWIN*) fail "on Windows, open PowerShell and run: irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex" ;;
+    MINGW*|MSYS*|CYGWIN*) fail "on Windows, open PowerShell and run: irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | iex" ;;
     *) fail "Kumi runs on macOS and Windows (and Linux); this is $os." ;;
   esac
   # A Terminal running under Rosetta says x86_64 on an Apple Silicon Mac; Kumi uses the native architecture.
@@ -356,10 +356,10 @@ if [ -x "$KUMI_HOME/node/bin/node" ] && [ -f "$KUMI_HOME/app/apps/kumi/bin/kumi.
   exec "$KUMI_HOME/node/bin/node" "$KUMI_HOME/app/apps/kumi/bin/kumi.mjs" "$@"
 fi
 if [ -x "$KUMI_HOME/app.previous/kumi" ]; then
-  echo "Kumi's app is missing, so the Kumi before it starts. To repair Kumi, run the installer again: curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh" >&2
+  echo "Kumi's app is missing, so the Kumi before it starts. To repair Kumi, run the installer again: curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.sh | sh" >&2
   exec "$KUMI_HOME/app.previous/kumi" "$@"
 fi
-echo "Kumi's app is missing: run the installer again: curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh" >&2
+echo "Kumi's app is missing: run the installer again: curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.sh | sh" >&2
 exit 1
 LAUNCHER
   if ! { chmod 755 "$work/launcher" && mv -f "$work/launcher" "$KUMI_HOME/bin/kumi"; }; then fail "couldn't write the kumi command in $KUMI_HOME/bin."; fi

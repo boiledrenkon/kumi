@@ -1,6 +1,6 @@
 # Kumi installer for Windows. Open PowerShell (Start menu > type "PowerShell") and run:
 #
-#   irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
+#   irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | iex
 #
 # It puts native Kumi in %USERPROFILE%\.kumi (no admin rights), adds its folder to your
 # PATH, and checks every download against its published checksum. Running it again updates or repairs
@@ -346,13 +346,13 @@ exit /b %errorlevel%
 :other
 if exist "%KUMI_HOME%\node\node.exe" if exist "%KUMI_HOME%\app\apps\kumi\bin\kumi.mjs" goto node
 if exist "%KUMI_HOME%\app.previous\kumi.exe" goto previous
->&2 echo Kumi's app is missing: run the installer again: irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 ^| iex
+>&2 echo Kumi's app is missing: run the installer again: irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 ^| iex
 exit /b 1
 :node
 "%KUMI_HOME%\node\node.exe" "%KUMI_HOME%\app\apps\kumi\bin\kumi.mjs" %*
 exit /b %errorlevel%
 :previous
->&2 echo Kumi's app is missing, so the Kumi before it starts. To repair Kumi, run the installer again: irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 ^| iex
+>&2 echo Kumi's app is missing, so the Kumi before it starts. To repair Kumi, run the installer again: irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 ^| iex
 "%KUMI_HOME%\app.previous\kumi.exe" %*
 exit /b %errorlevel%
 '@
