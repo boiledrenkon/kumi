@@ -50,6 +50,7 @@ use tokio::{
 };
 
 mod goals;
+mod jobs;
 mod looping;
 mod matching;
 mod objective;
@@ -58,6 +59,7 @@ use super::{
     match_run::{MatchBudget, MatchRun},
     playbook::PlaybookStore,
 };
+pub use jobs::JobsOptions;
 
 /// How long a stopped answer waits for its tool calls to finish putting Live back before it ends anyway.
 const SETTLE_MS: u64 = 60_000;
@@ -115,6 +117,8 @@ pub struct SessionOptions {
     /// How Willington's bindings stand, None while Kumi's bridge in Live doesn't carry them: asked each time
     /// the model's session is made, since /willington switches them while Kumi runs.
     pub willington: Option<Rc<dyn Fn() -> Option<WillingtonSwitch>>>,
+    /// Background jobs (workers and tool calls beside the conversation); none offers the model no job tools.
+    pub jobs: Option<JobsOptions>,
 }
 impl SessionOptions {
     pub fn new(kernel_factory: KernelFactory, integration_factory: IntegrationFactory, on_event: Rc<dyn Fn(SessionEvent)>) -> Self {
@@ -152,6 +156,7 @@ impl SessionOptions {
             objectives: None,
             objective_budget: None,
             willington: None,
+            jobs: None,
         }
     }
 }
@@ -322,6 +327,12 @@ struct State {
     active: Option<Rc<Operation>>,
     closing: Option<Done>,
     started: bool,
+    /// The answer's steps at work away from the DAW, which ctrl-b moves to the background.
+    foreground: Vec<Rc<jobs::Foreground>>,
+    /// Jobs that ended whose request carries on, waiting for the session to be free.
+    carrying: jobs::Carrying,
+    /// The Set whose kept jobs came back this session.
+    jobs_place: Option<String>,
 }
 struct Inner {
     options: SessionOptions,
@@ -340,6 +351,8 @@ struct Inner {
     taste: Option<Rc<TasteLog>>,
     timings: Option<String>,
     shelf: Vec<Rc<dyn KernelTool>>,
+    /// Background jobs, when the session runs them.
+    jobs: Option<Rc<crate::core::jobs::Jobs>>,
     /// Answers begun in this session: tools that count per answer (watch_video) read it.
     answers: Rc<Cell<u64>>,
     unlisten_library: RefCell<Option<Box<dyn FnOnce()>>>,
@@ -615,6 +628,16 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 })
             })
             .unwrap_or_default();
+        let jobs = options.jobs.as_ref().map(|jobs| {
+            let registry = crate::core::jobs::Jobs::new(jobs.max, emit.clone());
+            let weak = weak.clone();
+            registry.on_end(Rc::new(move |id| {
+                if let Some(inner) = weak.upgrade() {
+                    Session(inner).job_ended(id);
+                }
+            }));
+            registry
+        });
         let unlisten_library = options
             .library
             .as_ref()
@@ -637,6 +660,7 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             taste,
             timings,
             shelf,
+            jobs,
             answers,
             unlisten_library: RefCell::new(unlisten_library),
             saving: RefCell::new(ready()),
@@ -703,6 +727,9 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 active: None,
                 closing: None,
                 started: false,
+                foreground: vec![],
+                carrying: Default::default(),
+                jobs_place: None,
             }),
         }
     })))
@@ -710,6 +737,13 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
 
 impl Session {
     fn emit(&self, event: SessionEvent) {
+        // A step moved to the background (ctrl-b): what its tools say from then on is its job's. Only what tools say: the
+        // job's own status, which their words change, goes to the producer.
+        if matches!(event, SessionEvent::Doing { .. } | SessionEvent::Web(_) | SessionEvent::Watched(_)) {
+            if let Some(job) = crate::core::jobs::route() {
+                return job.on_event()(event);
+            }
+        }
         if self.0.state.borrow().state != TurnState::Closed {
             (self.0.options.on_event)(event);
         }
@@ -1009,17 +1043,17 @@ impl Session {
                 .tools
                 .iter()
                 .filter(|tool| self.0.shelf.is_empty() || tool.name() != FIND_SOUNDS_TOOL)
-                .map(|tool| self.with_loop(self.with_taste(self.with_technique(tool.clone()))))
+                .map(|tool| self.with_background(self.with_loop(self.with_taste(self.with_technique(tool.clone())))))
                 .collect();
             if let Some(notes) = &self.0.notes {
                 tools.extend(notes.tools.clone());
             }
             tools.extend(self.0.listening.clone());
-            tools.extend(self.0.watching.clone());
-            tools.extend(self.0.browsing.clone());
-            tools.extend(self.0.shelf.clone());
+            tools.extend(self.0.watching.iter().map(|tool| self.with_background(tool.clone())));
+            tools.extend(self.0.browsing.iter().map(|tool| self.with_background(tool.clone())));
+            tools.extend(self.0.shelf.iter().map(|tool| self.with_background(tool.clone())));
             tools.extend(self.0.recipes.clone());
-            tools.extend(self.0.recall.clone());
+            tools.extend(self.0.recall.iter().map(|tool| self.with_background(tool.clone())));
             if let Some(learned) = &self.0.learned {
                 tools.extend(learned.tools.clone());
             }
@@ -1027,6 +1061,7 @@ impl Session {
             if let Some(taste) = &self.0.taste {
                 tools.push(taste.tool());
             }
+            tools.extend(self.job_tools());
             let value = (self.0.options.kernel_factory)(KernelOptions {
                 instructions,
                 tools,
@@ -1083,6 +1118,7 @@ impl Session {
             if self.0.learned.is_some() { TECHNIQUE_GUIDANCE.into() } else { String::new() },
             technique_instructions(&techniques),
             if self.0.gaps.is_empty() { String::new() } else { GAP_GUIDANCE.into() },
+            if self.0.jobs.is_none() { String::new() } else { crate::core::jobs::JOB_GUIDANCE.into() },
             willington.into(),
         ]
         .into_iter()
@@ -1346,6 +1382,7 @@ impl Session {
         }
         self.0.state.borrow_mut().observation = Some(snapshot.label.clone());
         self.emit(SessionEvent::Observation { label: snapshot.label.clone() });
+        self.bring_back_jobs().await;
         Ok(snapshot)
     }
     async fn reset(&self, op: &Operation) -> Result<(), RuntimeError> {
@@ -2464,6 +2501,38 @@ impl SessionController for Session {
             None => Ok(None),
         }
     }
+    fn has_jobs(&self) -> bool {
+        self.0.jobs.is_some()
+    }
+    fn jobs(&self) -> Vec<crate::core::jobs::JobStatus> {
+        self.0.jobs.as_ref().map(|jobs| jobs.list()).unwrap_or_default()
+    }
+    fn job(&self, id: u32) -> Option<crate::core::jobs::JobDetail> {
+        self.0.jobs.as_ref().and_then(|jobs| jobs.detail(id))
+    }
+    fn stop_job(&self, id: u32) -> bool {
+        self.0.jobs.as_ref().is_some_and(|jobs| jobs.stop(id))
+    }
+    fn run_job_again(&self, id: u32) -> Result<u32, String> {
+        let jobs = self.0.jobs.clone().ok_or("Kumi can't run background jobs here.")?;
+        let spec = jobs
+            .spec(id)
+            .filter(|_| jobs.status(id).is_some_and(|status| status.state.ended()))
+            .filter(|spec| spec.task.is_some() || spec.tool.is_some())
+            .ok_or("That job can't run again.")?;
+        let again = self.start_job(spec)?;
+        jobs.forget(id);
+        Ok(again)
+    }
+    fn background(&self) -> Result<u32, String> {
+        Session::background(self)
+    }
+    fn carry_on(&self, job: u32) -> bool {
+        Session::carry_on(self, job)
+    }
+    fn can_background(&self) -> bool {
+        self.0.state.borrow().foreground.iter().any(|step| step.waiting())
+    }
     fn has_device_tree(&self) -> bool {
         true
     }
@@ -2543,6 +2612,9 @@ impl SessionController for Session {
         if let Some(op) = &op {
             op.signal.cancel();
         }
+        if let Some(jobs) = &self.0.jobs {
+            jobs.interrupt_all();
+        }
         if let Some(unlisten) = self.0.unlisten_library.borrow_mut().take() {
             unlisten();
         }
@@ -2556,6 +2628,13 @@ impl SessionController for Session {
             }
             let saving = this.0.saving.borrow().clone();
             let _ = this.bounded(saving).await;
+            let kept = this.clone();
+            let _ = this
+                .bounded(async move {
+                    kept.keep_jobs().await;
+                    Ok(())
+                })
+                .await;
             let result = this.drop_resources().await;
             let _ = tx.send(result);
         });

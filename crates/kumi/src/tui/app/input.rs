@@ -38,6 +38,7 @@ impl TuiApp {
         let busy_panel = panel.as_ref().is_some_and(|p| match &*p.borrow() {
             Panel::Pick { .. } => false,
             Panel::Btw { at, .. } => self.0.state.borrow().asides.get(*at).is_some_and(|a| a.borrow().state == "asking"),
+            Panel::Job { .. } => false,
             _ => true,
         });
         if let Some(voice) = &self.0.voice {
@@ -65,6 +66,7 @@ impl TuiApp {
         }
         if panel.is_some() && matches!(event, InputEvent::Text { .. } | InputEvent::Paste { .. } | InputEvent::Key { .. }) {
             self.panel_input(event);
+            self.maybe_carry_on();
             self.0.scheduler.request();
             return;
         }
@@ -76,6 +78,7 @@ impl TuiApp {
                 self.0.tabs.leave();
                 self.add_attachments(files);
             }
+            InputEvent::Text { text } if self.0.tabs.inside() && text.chars().count() == 1 && self.0.tabs.key(&text.to_lowercase()) => {}
             InputEvent::Text { text } | InputEvent::Paste { text } => {
                 self.0.tabs.leave();
                 let mut state = self.0.state.borrow_mut();
@@ -102,6 +105,8 @@ impl TuiApp {
             }
             _ => {}
         }
+        // The producer may have finished what they were in the middle of: a job's answer can start.
+        self.maybe_carry_on();
         self.0.scheduler.request();
     }
     fn key(&self, name: &str, mods: Modifiers) {
@@ -200,6 +205,10 @@ impl TuiApp {
             } else {
                 drop(self.finish(0, None));
             }
+            return;
+        }
+        if ctrl && name == "b" && self.0.options.controller.has_jobs() {
+            self.background_now();
             return;
         }
         if ctrl && name == "v" && self.0.options.controller.has_attachments() {
@@ -377,6 +386,7 @@ impl TuiApp {
                         "/note" => c.has_change_note(),
                         "/recipes" => c.has_recipes(),
                         "/recipe" => c.has_run_recipe(),
+                        "/jobs" => c.has_jobs(),
                         "/conversations" => c.has_conversations(),
                         "/reconnect" => c.has_reconnect(),
                         "/stop" => c.has_stop_live(),
@@ -444,6 +454,11 @@ impl TuiApp {
                 }
                 None => self.notice("Kumi's changelog has no notes for this version.", NoticeTone::Info),
             }
+            return Ok(());
+        }
+        if command == "/jobs" && controller.has_jobs() {
+            self.clear_editor();
+            self.open_jobs();
             return Ok(());
         }
         if command == "/voice" && self.0.voice.is_some() {
@@ -1077,7 +1092,7 @@ pub(super) struct Command {
     pub about: &'static str,
 }
 
-pub(super) const HELP: &str = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one; /willington turns Willington's bindings (macro mapping and more) on or off; /slots shows which model does each listening job (stems, transcription, listening, embeddings), swaps one in plain words after a quick test, and /slots back <job> takes a swap back; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands";
+pub(super) const HELP: &str = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · ctrl+b moves a slow step that doesn't use Live (a video, pages) to the background (press it twice in tmux), and /jobs shows, stops or reruns background jobs · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one; /willington turns Willington's bindings (macro mapping and more) on or off; /slots shows which model does each listening job (stems, transcription, listening, embeddings), swaps one in plain words after a quick test, and /slots back <job> takes a swap back; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands";
 pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/new", about: "Forget this conversation and start fresh" },
     Command { name: "/btw", about: "Ask something on the side, without interrupting Kumi" },
@@ -1100,6 +1115,7 @@ pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/note", about: "Change a note's words: /note <id> <new words>" },
     Command { name: "/recipes", about: "Your saved ways of working" },
     Command { name: "/recipe", about: "Run a recipe now: /recipe <name> blank=value …" },
+    Command { name: "/jobs", about: "What's running in the background: see, stop or run one again" },
     Command { name: "/logout", about: "Sign out of a provider" },
     Command { name: "/status", about: "What Kumi is connected to" },
     Command { name: "/update", about: "Get the newest Kumi" },

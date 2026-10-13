@@ -633,6 +633,11 @@ impl ModelControl {
         let Some(fallback) = fallback.filter(|fallback| Some(fallback) != model.as_ref()) else { return Ok(None) };
         Ok(Some(self.bind(&fallback, None, None).await?.binding()))
     }
+    /// Another model the producer chose for some work (background workers), at its provider's default effort.
+    pub async fn binding_for(&self, model: &str) -> Result<ModelBinding, RuntimeError> {
+        let tier = self.tier_for(model).await;
+        Ok(self.bind(model, None, tier).await?.binding())
+    }
 }
 
 /// The app-facing model controls, including the injectable source test contract.

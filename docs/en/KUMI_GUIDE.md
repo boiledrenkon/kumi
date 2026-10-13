@@ -195,6 +195,34 @@ path for Kumi to use. A picture goes with its own message only: after it, the
 conversation, saved or not, keeps each file's name and path but not the picture.
 Clipboard pictures are kept in `~/.kumi/attachments` for a week.
 
+## Background jobs
+
+Kumi does slow work that doesn't change the Set in the background, so you can
+keep working with it: research on the web, a tutorial video, Live's manual, your
+library or earlier conversations, or a Max for Live device's file.
+
+- **Starting:** Kumi says what's running in a line and is free for your next
+  message. Ask for one ("look into this in the background") or let Kumi decide.
+- **Seeing:** the header counts the jobs at work (◐ 2 jobs), and the **JOBS** tab
+  lists each with what it's doing, its time and its tokens. `/jobs` lists them
+  too.
+- **When one ends:** a card in the conversation gives its first line ("✓ Job 2 ·
+  Burial vocal chops · 5 steps, 3 sources"), and Kumi reads its report with your
+  next message. A job your request needs ("watch this and make the bass like
+  theirs") carries on by itself once you're not picking, typing or in a panel.
+- **Live stays Kumi's:** a job researches and writes but never reads or changes
+  Live. Kumi makes any change itself, in HISTORY with its undo. What a job reads
+  is data, not instructions.
+- **Ctrl-B** moves the answer's slow step that doesn't use Live (a video, pages)
+  to the background, and the answer carries on. In tmux, press Ctrl-B twice.
+- **Stopping:** `x` on a JOBS row or in a job's details. Esc stops the answer,
+  not the jobs. Quitting interrupts them; `/jobs` runs them again next time.
+- **Away:** while Kumi's window is behind another, a job's end is a notification
+  and a line in Live's status bar, and the computer stays awake while jobs run.
+- **Settings:** `maxJobs` (three at once) and `workerModel` (a model from
+  `/model`'s list for the jobs; the conversation's by default). Each job's
+  tokens show in its row.
+
 ## Talking to Kumi
 
 Press **Ctrl-T** and say what you want, then press it again. What you said lands
@@ -882,6 +910,7 @@ closed). Your conversations, notes, recipes and sign-ins stay unless you add
 | A request to the bridge | 65 seconds |
 | Changes in one answer | 5,000 (a batch of pads or parameters counts once) |
 | A `wait` step in a plan | 30 minutes |
+| Background jobs | 3 at once (`maxJobs`, up to 8); each 40 model steps and 20 minutes; a step moved with Ctrl-B keeps the answer's 60 minutes |
 | Conversation size | Earlier Live reads shrink past about 160 KB; the oldest exchanges drop off past about 400 KB |
 | Audio heard | The first 12 minutes of a file, up to an hour when asked; a whole song up to an hour |
 | Video transcription | 90 minutes at a time |
@@ -912,8 +941,9 @@ says which need which.
 ## Privacy: what leaves your computer
 
 - **Your model provider** gets your messages, the conversation, what Kumi reads
-  from the Set, the frames of videos it watches, the pictures it reads and the
-  pictures you add to a message. With a
+  from the Set, the frames of videos it watches, the pictures it reads, the
+  pictures you add to a message, and what background jobs are given and read
+  (`workerModel`'s provider, when it's set). With a
   model on your computer, they stay on it (a server named in `settings.json` gets
   them wherever it runs).
 - **Web search and reading** go to the search services above, and the pages Kumi
@@ -964,6 +994,8 @@ Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
 | `modelServers` | OpenAI-compatible model servers: `[{ "name", "baseURL", "apiKey" }]` ([models on your computer](#models-on-your-computer)) |
 | `libraryFolders` | More folders for Kumi to learn sounds, presets and Sets from |
 | `voice` | Talking: `send` (send when you stop), `language`, `microphone` (`/voice`) |
+| `maxJobs` | How many background jobs run at once: 1–8, three by default |
+| `workerModel` | The model background jobs use, `<provider>/<model>` from `/model`'s list; the conversation's when absent |
 
 `~/.kumi/slots.json` keeps the model slots you swapped (`/slots`),
 `~/.kumi/probes` what each knob was heard to do, by device and track, and
@@ -977,7 +1009,7 @@ Environment variables (paths must be absolute):
 | `KUMI_MODEL` | `<provider>/<model>` for this run, overriding the chosen model |
 | `KUMI_AUTH_FILE`, `KUMI_SETTINGS_FILE` | The sign-in store and the settings file |
 | `KUMI_MEMORY_FILE`, `KUMI_TECHNIQUES_FILE`, `KUMI_PLAYBOOK_FILE` | Notes about you, techniques and lessons |
-| `KUMI_RECIPES_DIR`, `KUMI_PROJECTS_DIR`, `KUMI_GOALS_DIR` | Recipes; each Set's conversations, notes and last state; goals and searches in progress |
+| `KUMI_RECIPES_DIR`, `KUMI_PROJECTS_DIR`, `KUMI_GOALS_DIR` | Recipes; each Set's conversations, notes and last state; goals and searches in progress, and background jobs Kumi closed on |
 | `KUMI_REFERENCES_DIR` | Measured references |
 | `KUMI_INPUT_HISTORY_FILE`, `KUMI_GAPS_FILE`, `KUMI_RESTORE_FILE` | What you sent (for ↑), the gap log, and the render tracks a listen cut off by a crash leaves behind |
 | `KUMI_VIDEOS_DIR`, `KUMI_TOOLS_DIR` | Watched videos, and the programs Kumi fetches |

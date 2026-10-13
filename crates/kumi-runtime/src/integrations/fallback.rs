@@ -55,6 +55,9 @@ impl Integration for FallbackIntegration {
     fn conversation(&self, id: &str) {
         self.current().conversation(id)
     }
+    fn worker_tools(&self) -> Vec<Rc<dyn KernelTool>> {
+        self.current().worker_tools()
+    }
     fn has_undo(&self) -> bool {
         true
     }

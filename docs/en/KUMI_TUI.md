@@ -10,8 +10,8 @@ and the plain mode. The [guide](KUMI_GUIDE.md) explains what Kumi does.
 Kumi takes the whole terminal window and gives it back as it was when Kumi
 closes, crashes or is stopped.
 
-- **Header:** Kumi, the Set's name, the model and its effort, and Live's
-  connection. While Live plays, a yellow light blinks on its beat (brightest on
+- **Header:** Kumi, the Set's name, the model and its effort, the background
+  jobs at work (◐ 2 jobs), and Live's connection. While Live plays, a yellow light blinks on its beat (brightest on
   the bar's first beat) beside the tempo. While your fallback model answers,
   it's named there with "· fallback"; near a plan's limit (80% of a window
   used), "plan 84% · resets 14:20" shows beside the model.
@@ -38,6 +38,8 @@ closes, crashes or is stopped.
   and time against the budget (the status line counts the turn under way), the
   last check and what's next; for a sound-match
   `/loop`, the best score with its trend, the leading candidate, and the time.
+  **JOBS** joins them with the first background job: each one's progress, time
+  and tokens, newest first, with **stop**; Enter opens its steps and report.
 - **Input box** (bottom left): messages waiting to be sent show above it, a
   pinned device as a chip, and the files that go with your next message (name,
   kind, size and ×). Empty, it says "ctrl+t to talk". While Kumi listens,
@@ -116,6 +118,7 @@ message, not a command.
 | `/note <id> <new words>` | Change a note's words without the model; a note's "Change the words" in `/memory` starts it for you |
 | `/recipes` | Your recipes: run one or forget it. One with blanks starts a `/recipe` line for you to finish, with what's pinned filled in |
 | `/recipe <name> blank=value …` | Run a recipe now, with no model call; a value with spaces goes in quotes, an unquoted number or true/false goes as itself (quote it to keep it words), and Kumi names any blank left empty |
+| `/jobs` | The background jobs: Enter opens one, where `x` stops it and `r` runs an interrupted one again. Works while Kumi answers |
 | `/status` | What Kumi is connected to, the model, how far it has got learning your library, and on an API key the tokens this session used |
 | `/voice` | Talking instead of typing: start or stop, "Send when you stop", the language you speak and the microphone |
 | `/update` | Get the newest Kumi: it asks, closes, updates and opens again with the same conversation |
@@ -174,6 +177,7 @@ its undo. They're in English for now.
 | --- | --- |
 | Esc | Close the `/` menu; otherwise stop Kumi's answer (the steps it finished stay, waiting messages go back into the box); otherwise unpin the pinned device |
 | Ctrl-C | Stop Kumi's answer; when idle, clear the box; with an empty box, quit |
+| Ctrl-B | Move the answer's slow step that doesn't use Live (a video, pages, the manual, your library) to the background as a job; the answer carries on. In tmux, press Ctrl-B twice |
 | Ctrl-D | Quit, when idle with an empty box |
 | Page Up / Page Down, mouse wheel | Scroll the conversation (the wheel over the tabs scrolls the tab); it stays put while new text arrives |
 | Ctrl-Home / Ctrl-End | The start of the conversation / back to the latest |
@@ -184,7 +188,7 @@ its undo. They're in English for now.
 | Key | Action |
 | --- | --- |
 | Tab, when idle | Into FOCUS's device tree, at Live's selection: ↑↓ move, Enter points at the row, Esc or Tab goes back to typing |
-| Shift-Tab | Into the tabs (again for the next tab): ↑↓ and Page Up/Down move, Enter does the row's **undo** or **forget**, Esc or Tab goes back |
+| Shift-Tab | Into the tabs (again for the next tab): ↑↓ and Page Up/Down move, Enter does the row's **undo** or **forget** (on a JOBS row, opens the job; `x` stops it), Esc or Tab goes back |
 | Mouse | Click **undo** or **forget** at a row's end, a tab's name, or a device in the tree to point at it; click the pin to unpin. Hold Shift while dragging (Option in iTerm2) to select text |
 
 **Panels** (`/model`, `/effort`, `/login`, `/memory` and the others): ↑↓ move,
@@ -198,7 +202,8 @@ window has been behind another for 2 minutes), Kumi takes it after a countdown
 Enter; Kumi checks it with the provider, or saves it unchecked when the provider
 can't be reached. In the ChatGPT sign-in panel, `c` copies the link. In the
 `/btw` panel, ↑↓ and Page Up/Down scroll, ←→ go through earlier answers, `c`
-copies, and Esc, Enter or Space closes it.
+copies, and Esc, Enter or Space closes it. In a job's details, ↑↓ scroll, `x`
+stops it, `r` runs it again, `c` copies its report, and Esc closes them.
 
 ## Plain mode
 
@@ -208,7 +213,8 @@ instead, which suits screen readers and logs. It has `/help`, `/status`,
 `/model [provider/model]`, `/effort [level|default]`, `/fast`, `/logout <provider>`,
 `/memory`, `/forget <id>`, `/note <id> <new words>`, `/pin <id>`, `/unpin <id>`,
 `/recipes`, `/willington`, `/update`, `/changelog` and `/quit`, but no `/btw`,
-`/goal`, `/loop`, `/slots` or `/copy`. Sign in from a shell with `kumi login`. Ctrl-C stops the
+`/goal`, `/loop`, `/slots`, `/jobs` or `/copy`. It says when a background job
+starts and ends, and one your request needs carries on once Kumi is idle. Sign in from a shell with `kumi login`. Ctrl-C stops the
 answer, or quits when idle.
 
 ## Away from Kumi

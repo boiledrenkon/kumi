@@ -68,6 +68,10 @@ impl TuiApp {
                 }
             }
         }
+        if focused {
+            // So have the jobs that ended: their records go, as the root's goes back to idle.
+            self.clear_finished_jobs();
+        }
         self.0.scheduler.request();
     }
 
@@ -186,7 +190,7 @@ impl TuiApp {
     }
 
     /// Whether Kumi's window is known to be in front: the terminal said so last (and has said anything at all).
-    fn known_in_front(&self) -> bool {
+    pub(super) fn known_in_front(&self) -> bool {
         let state = self.0.state.borrow();
         state.focus_reported && state.window_focused
     }

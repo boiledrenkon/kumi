@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     core::{
-        contracts::{JsonObject, KernelTool, ToolResult},
+        contracts::{JsonObject, KernelTool, Reach, ToolResult},
         errors::RuntimeError,
     },
     ears::device::EARS_NAME,
@@ -67,6 +67,9 @@ pub struct Made {
     devices: Vec<MadeDevice>,
     /// Where a replaced device's file is kept, if anywhere.
     kept: Option<PathBuf>,
+    /// Devices written that Live's Browser hadn't listed yet (made by a background job, which doesn't wait for it), by
+    /// item id: loading one waits for the Browser first.
+    unlisted: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +106,23 @@ impl Made {
         };
         let by_name = self.devices.iter().find(|device| device.kind == kind && device.asked == asked).filter(unchanged);
         by_name.or_else(|| self.devices.iter().find(|device| device.kind == kind && device.file == asked).filter(unchanged)).cloned()
+    }
+
+    /// Whether Live's Browser may not list this item yet: a device written without waiting for it.
+    pub fn unlisted(&self, item_id: &str) -> bool {
+        self.unlisted.iter().any(|item| item == item_id)
+    }
+
+    /// Live's Browser lists the item (or its wait is over): loading it waits no more.
+    pub fn listed(&mut self, item_id: &str) {
+        self.unlisted.retain(|item| item != item_id);
+    }
+
+    /// A device written that Live's Browser hasn't listed yet.
+    pub fn written_unlisted(&mut self, item_id: &str) {
+        if !self.unlisted(item_id) {
+            self.unlisted.push(item_id.to_string());
+        }
     }
 
     /// A device made: it takes the place of the record of its own kind that had its file or its asked name. Each kind has
@@ -244,6 +264,14 @@ fn io_error(error: std::io::Error) -> RuntimeError {
 }
 #[async_trait(?Send)]
 impl KernelTool for DeviceTool {
+    fn reach(&self) -> Reach {
+        // Writing the file is away from the DAW; waiting for its Browser to list the device reads it.
+        if self.options.wait_ms == Some(0) {
+            Reach::AwayFromDaw
+        } else {
+            Reach::DawRead
+        }
+    }
     fn name(&self) -> &str {
         MAKE_DEVICE_TOOL
     }
@@ -435,6 +463,11 @@ impl KernelTool for DeviceTool {
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
             signal.check()?;
+        }
+        if seen {
+            self.options.made.borrow_mut().listed(&item_id);
+        } else {
+            self.options.made.borrow_mut().written_unlisted(&item_id);
         }
         // A silent render means the code didn't compile, or a patch passes no sound.
         let silent =

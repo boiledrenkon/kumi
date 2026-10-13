@@ -192,6 +192,12 @@ pub struct Settings {
     /// "<provider>/<model>" that carries on when the model's usage limit is reached or its provider is down.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
+    /// How many background jobs run at once (1–8).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_jobs: Option<u32>,
+    /// The model background workers use, from a provider's own list; none uses the conversation's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_model: Option<String>,
 }
 fn server_settings(value: &Value) -> Vec<ServerSetting> {
     value
@@ -260,6 +266,8 @@ pub fn read_settings(file: &str) -> Settings {
         keep_awake: (value["keepAwake"] == false).then_some(false),
         answer_after: value["answerAfter"].as_u64().filter(|seconds| *seconds <= MAX_ANSWER_AFTER).map(|seconds| seconds as u32),
         fallback_model: value["fallbackModel"].as_str().filter(|m| valid_model(Some(m), &model_servers)).map(str::to_string),
+        max_jobs: value["maxJobs"].as_u64().filter(|n| (1..=8).contains(n)).map(|n| n as u32),
+        worker_model: value["workerModel"].as_str().filter(|m| valid_model(Some(m), &model_servers)).map(str::to_string),
         model_servers,
     }
 }
@@ -310,6 +318,12 @@ pub fn write_settings(file: &str, next: &Value) -> Result<(), RuntimeError> {
     }
     if let Some(value) = kept("fallbackModel").filter(|v| truthy(v)) {
         settings.insert("fallbackModel".into(), value.clone());
+    }
+    if let Some(value) = kept("maxJobs").filter(|v| v.as_u64().is_some_and(|n| (1..=8).contains(&n))) {
+        settings.insert("maxJobs".into(), value.clone());
+    }
+    if let Some(value) = kept("workerModel").filter(|v| v.as_str().is_some_and(|m| !m.is_empty())) {
+        settings.insert("workerModel".into(), value.clone());
     }
     let parent = Path::new(file).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut mkdir = std::fs::DirBuilder::new();

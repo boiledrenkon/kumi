@@ -172,6 +172,39 @@ impl TuiApp {
                     }
                 }
             }
+            Panel::Job { id, scroll } => match self.0.options.controller.job(*id) {
+                None => lines.push(Line::new(format!("Job {id} is gone."), st::FAINT)),
+                Some(detail) => {
+                    let rows = self.job_lines(&detail, inner);
+                    let mut rows = rows.into_iter();
+                    if let Some((spans, right)) = rows.next() {
+                        let mut title = Line::new("", st::TITLE);
+                        title.spans = Some(spans);
+                        title.right = right;
+                        lines.push(title);
+                    }
+                    let body: Vec<_> = rows.collect();
+                    let room = (space - 4).clamp(3, 18);
+                    *scroll = (*scroll).min(body.len() as i32 - room).max(0);
+                    let shown = &body[*scroll as usize..(*scroll as usize + room as usize).min(body.len())];
+                    for (index, (spans, right)) in shown.iter().enumerate() {
+                        let more = if index == 0 && *scroll > 0 {
+                            Some(format!("↑ {} more", *scroll))
+                        } else if index == shown.len() - 1 && *scroll + room < body.len() as i32 {
+                            Some(format!("↓ {} more", body.len() as i32 - *scroll - room))
+                        } else {
+                            None
+                        };
+                        let mut line = Line::new("", st::TEXT);
+                        line.spans = Some(spans.clone());
+                        line.right = more.map(|s| sp(s, st::FAINT)).or_else(|| right.clone());
+                        lines.push(line);
+                    }
+                    if detail.status.state == kumi_runtime::core::jobs::JobState::Running {
+                        self.0.scheduler.request();
+                    }
+                }
+            },
             Panel::Key { provider, secret, checking, status, .. } => {
                 let info = provider_info(*provider);
                 lines.push(Line::new(format!("Sign in to {}", info.name), st::TITLE));

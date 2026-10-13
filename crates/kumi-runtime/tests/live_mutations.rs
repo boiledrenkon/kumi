@@ -501,3 +501,113 @@ async fn a_loads_identity_and_its_tool_reach_history() {
         })
         .await;
 }
+
+/// A bridge whose Browser lists a device only after it's been asked a few times, as Live's does a file just written.
+struct BrowserFixture {
+    calls: RefCell<Vec<String>>,
+    listed_after: usize,
+}
+#[async_trait(?Send)]
+impl McpEndpoint for BrowserFixture {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+    fn server_info(&self) -> Option<Implementation> {
+        Some(serde_json::from_value(json!({"name":"fixture","version":"1.0.89"})).unwrap())
+    }
+    async fn list(&self, _: Option<&str>, _: Signal) -> Result<ListToolsResult, RuntimeError> {
+        Ok(serde_json::from_value(json!({"tools":(["live_status","live_browser_load_preview","live_browser_load_apply","live_browser_inspect"].iter().map(|name|json!({"name":name,"inputSchema":{"type":"object"}})).collect::<Vec<_>>())})).unwrap())
+    }
+    async fn call(&self, name: &str, _: JsonObject, _: Signal) -> Result<CallToolResult, RuntimeError> {
+        if name != "live_status" {
+            self.calls.borrow_mut().push(name.into());
+        }
+        let inspected = self.calls.borrow().iter().filter(|call| *call == "live_browser_inspect").count();
+        let (body, error) = match name {
+            "live_status" => (json!({"connected":true,"adapter":"real-live","epoch":7}), false),
+            "live_browser_inspect" if inspected <= self.listed_after => (json!({"error":"Item not found"}), true),
+            "live_browser_inspect" => (json!({"itemId":"user_library/Kumi/Audio Effects/Tape Wobble"}), false),
+            "live_browser_load_preview" => (
+                json!({"transactionId":"load1","epoch":7,"confirmation":"apply","undoable":true,"proposed":{"itemId":"user_library/Kumi/Audio Effects/Tape Wobble"}}),
+                false,
+            ),
+            "live_browser_load_apply" => {
+                (json!({"state":"applied","undoable":true,"deviceObjectIdentity":"obj-43","loaded":{"name":"Tape Wobble"}}), false)
+            }
+            _ => panic!("unexpected call: {name}"),
+        };
+        Ok(serde_json::from_value(json!({"content":[{"type":"text","text":body.to_string()}],"structuredContent":body,"isError":error}))
+            .unwrap())
+    }
+    fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn stderr_status(&self) -> StderrStatus {
+        StderrStatus { bytes: 0, truncated: false }
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn a_device_a_background_job_wrote_loads_once_lives_browser_lists_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let endpoint = Rc::new(BrowserFixture { calls: RefCell::default(), listed_after: 2 });
+            let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
+            options.connect = Some(Rc::new({
+                let endpoint = endpoint.clone();
+                move |_| {
+                    let endpoint: Rc<dyn McpEndpoint> = endpoint.clone();
+                    async move { Ok(endpoint) }.boxed_local()
+                }
+            }));
+            let integration = Ableton::new(options);
+            let connection = integration.connection.clone();
+            connection.start(Signal::new()).await.unwrap();
+            connection.tools().unwrap().refresh(Signal::new()).await.unwrap();
+            connection.available.set(true);
+            connection.epoch.set(Some(7.));
+            connection.references.borrow_mut().refs.insert("7:track:0".into(), "track".into());
+            // A job wrote it, without waiting for the Browser; the answer loads it at once.
+            let item = "user_library/Kumi/Audio Effects/Tape Wobble";
+            integration.mutations.made.borrow_mut().written_unlisted(item);
+            let result = integration
+                .mutations
+                .make_changes(
+                    json!({"steps":[{"tool":"load_device","input":{"trackRef":"7:track:0","itemId":item}}]}).as_object().unwrap().clone(),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(!result.is_error, "{}", result.text);
+            assert_eq!(
+                *endpoint.calls.borrow(),
+                [
+                    "live_browser_inspect",
+                    "live_browser_inspect",
+                    "live_browser_inspect",
+                    "live_browser_load_preview",
+                    "live_browser_load_apply"
+                ]
+            );
+            assert!(!integration.mutations.made.borrow().unlisted(item));
+            // Once listed, a later load doesn't ask again.
+            integration.mutations.made.borrow_mut().listed(item);
+            endpoint.calls.borrow_mut().clear();
+            let again = integration
+                .mutations
+                .make_changes(
+                    json!({"steps":[{"tool":"load_device","input":{"trackRef":"7:track:0","itemId":item}}]}).as_object().unwrap().clone(),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(!again.is_error, "{}", again.text);
+            assert_eq!(*endpoint.calls.borrow(), ["live_browser_load_preview", "live_browser_load_apply"]);
+        })
+        .await;
+}

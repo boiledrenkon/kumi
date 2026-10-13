@@ -113,7 +113,10 @@ impl Ableton {
                 }
             }));
             let parameters = Rc::new(Parameters::new(history.clone(), options.fast));
-            let mutations = Rc::new(Mutations::new(parameters, observer.clone(), options.clone()));
+            let made = Rc::new(RefCell::new(Made::keeping(replaced_devices())));
+            let mut mutations = Mutations::new(parameters, observer.clone(), options.clone());
+            mutations.made = made.clone();
+            let mutations = Rc::new(mutations);
             let step = mutations.clone();
             let clip = mutations.clone();
             let rendering = Rendering::new(
@@ -165,7 +168,7 @@ impl Ableton {
                 watch,
                 options,
                 closing: RefCell::new(None),
-                made: Rc::new(RefCell::new(Made::keeping(replaced_devices()))),
+                made,
             }
         })
     }
@@ -500,6 +503,15 @@ impl KernelTool for LiveTool {
     fn name(&self) -> &str {
         &self.name
     }
+    fn reach(&self) -> Reach {
+        if AWAY_FROM_LIVE.contains(&self.name.as_str()) {
+            Reach::AwayFromDaw
+        } else if self.name == "read_notes" || crate::mcp::allowed_tools::MODEL_TOOLS.contains(&self.name.as_str()) {
+            Reach::DawRead
+        } else {
+            Reach::DawWrite
+        }
+    }
     fn description(&self) -> &str {
         &self.description
     }
@@ -823,6 +835,19 @@ impl Integration for Ableton {
     }
     fn conversation(&self, id: &str) {
         self.made.borrow_mut().conversation(id);
+    }
+    fn worker_tools(&self) -> Vec<Rc<dyn KernelTool>> {
+        let Some(tools) = self.connection.tools() else { return vec![] };
+        if !(tools.has("live_browser_inspect") && tools.has("live_browser_load_preview")) {
+            return vec![];
+        }
+        // The file only: the conversation that loads it finds it in Live's Browser then.
+        vec![device_tool(DeviceToolOptions {
+            user_library: self.options.user_library.clone().unwrap_or_else(|| samples::user_library(None, None)),
+            wait_ms: Some(0),
+            made: self.made.clone(),
+            browser_sees: Rc::new(|_, _| async { Ok(false) }.boxed_local()),
+        })]
     }
     async fn observe(&self, signal: Signal, hints: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
         self.observer.observe(self, signal, hints).await

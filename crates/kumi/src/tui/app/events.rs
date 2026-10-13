@@ -292,6 +292,12 @@ impl TuiApp {
                 }
             }
             "notice" => self.notice(get("message"), NoticeTone::Info),
+            "job" => {
+                if let SessionEvent::Job(status) = &event {
+                    self.job_event(status);
+                }
+            }
+            "carry-on" => self.carry_on_event(n("job") as u32, get("title")),
             "error" => {
                 {
                     let mut state = self.0.state.borrow_mut();
@@ -872,6 +878,9 @@ impl TuiApp {
             && self.0.state.borrow().held.iter().any(|h| h.when == "now" && !h.taken)
         {
             self.steer_held();
+        }
+        if matches!(kind, "state" | "job") {
+            self.maybe_carry_on();
         }
         self.0.scheduler.request();
     }

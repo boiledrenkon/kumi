@@ -134,12 +134,21 @@ impl Session {
             Ok(())
         });
         // Kumi's own note goes after the observation: it isn't the producer's words, and it goes when the observation does.
-        let input = format!("{text}{OBSERVATION_MARKER}\n{observation}\n</current_observation_untrusted>{note}");
-        if pictures.is_empty() {
+        // Reports of background jobs that ended since the last turn go with it.
+        let (reports, shown, taken) = self.take_job_reports();
+        let mut pictures = pictures;
+        pictures.extend(shown);
+        let input = format!("{text}{OBSERVATION_MARKER}\n{observation}\n</current_observation_untrusted>{note}{reports}");
+        let result = if pictures.is_empty() {
             held.value.run(&input, op.signal.clone(), emit).await
         } else {
             held.value.run_with(&input, pictures, op.signal.clone(), emit).await
+        };
+        // A turn that didn't settle may not have kept them: the next one hears them again.
+        if !matches!(&result, Ok(turn) if turn.stop_reason != StopReason::Cancelled) {
+            self.return_job_reports(&taken);
         }
+        result
     }
     pub(super) async fn submit_turn(
         &self,

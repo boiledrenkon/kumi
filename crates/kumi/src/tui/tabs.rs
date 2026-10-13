@@ -19,6 +19,10 @@ pub struct TabRow {
     pub right: Option<Span>,
     /// Clicking the right edge, or Enter on the row, does this.
     pub action: Option<Rc<dyn Fn()>>,
+    /// Enter does this instead, when the row has it (a job opens; its right edge stops it).
+    pub open: Option<Rc<dyn Fn()>>,
+    /// Other keys on the row (a letter), and what each does.
+    pub keys: Vec<(&'static str, Rc<dyn Fn()>)>,
     /// Rows of one thing (a change whose title takes two) share this, so "n more" counts things, not rows.
     pub item: Option<String>,
 }
@@ -35,6 +39,10 @@ pub trait Tab {
     /// What it says when it has no rows.
     fn empty(&self) -> Option<&str> {
         None
+    }
+    /// Whether it's on the strip: a tab can wait off it until it has something (JOBS, until the first job).
+    fn shown(&self) -> bool {
+        true
     }
 }
 
@@ -95,8 +103,13 @@ impl TabPanel {
         }
     }
 
+    /// The tab showing: the one chosen, or the first on the strip while that one is off it.
     pub fn active_id(&self) -> String {
-        self.inner.state.borrow().active.clone()
+        let active = self.inner.state.borrow().active.clone();
+        if self.inner.tabs.iter().any(|tab| tab.id() == active && tab.shown()) {
+            return active;
+        }
+        self.inner.tabs.iter().find(|tab| tab.shown()).map(|tab| tab.id().to_string()).unwrap_or(active)
     }
 
     pub fn inside(&self) -> bool {
@@ -116,7 +129,7 @@ impl TabPanel {
     pub fn show(&self, id: &str) {
         {
             let mut state = self.inner.state.borrow_mut();
-            if !self.inner.tabs.iter().any(|tab| tab.id() == id) || id == state.active {
+            if !self.inner.tabs.iter().any(|tab| tab.id() == id && tab.shown()) || id == state.active {
                 return;
             }
             state.active = id.to_string();
@@ -129,8 +142,9 @@ impl TabPanel {
 
     pub fn next(&self) {
         let active = self.active_id();
-        let index = self.inner.tabs.iter().position(|tab| tab.id() == active).unwrap_or(0);
-        let next = self.inner.tabs[(index + 1) % self.inner.tabs.len()].id().to_string();
+        let shown: Vec<&Rc<dyn Tab>> = self.inner.tabs.iter().filter(|tab| tab.shown()).collect();
+        let index = shown.iter().position(|tab| tab.id() == active).unwrap_or(0);
+        let next = shown[(index + 1) % shown.len().max(1)].id().to_string();
         self.show(&next);
     }
 
@@ -194,8 +208,11 @@ impl TabPanel {
                     shift(&mut state, by);
                     return true;
                 }
-                "enter" => state.last_rows.get(cursor as usize).and_then(|row| row.action.clone()),
-                _ => return false,
+                "enter" => state.last_rows.get(cursor as usize).and_then(|row| row.open.clone().or_else(|| row.action.clone())),
+                key => match state.last_rows.get(cursor as usize).and_then(|row| row.keys.iter().find(|(name, _)| *name == key)) {
+                    Some((_, action)) => Some(action.clone()),
+                    None => return false,
+                },
             }
         };
         if let Some(action) = action {
@@ -213,7 +230,7 @@ impl TabPanel {
         let cursor_band = Style::bg(palette::SELECTED);
         let active = self.active_id();
         let mut x = area.x;
-        for (index, tab) in self.inner.tabs.iter().enumerate() {
+        for (index, tab) in self.inner.tabs.iter().filter(|tab| tab.shown()).enumerate() {
             if index > 0 {
                 x = screen.put(x, area.y, "   ", &faint);
             }

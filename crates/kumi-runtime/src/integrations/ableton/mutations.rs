@@ -25,6 +25,9 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::LazyLock};
 
+/// The longest a load waits for Live's Browser to list a device Kumi just wrote.
+const BROWSER_WAIT_MS: u64 = 20_000;
+
 pub struct Mutations {
     pub parameters: Rc<Parameters>,
     pub observer: Rc<Observer>,
@@ -34,6 +37,8 @@ pub struct Mutations {
     /// The `@names` this answer's plans made (each the short ref of what its step made): a later plan in the answer
     /// uses them, so steps a plan refused are resent alone, not with everything they hang on (#259).
     pub names: RefCell<IndexMap<String, String>>,
+    /// The devices Kumi made: one a background job wrote isn't in Live's Browser at once, and loading it waits for it.
+    pub made: Rc<RefCell<crate::devices::tool::Made>>,
 }
 impl Mutations {
     pub fn new(parameters: Rc<Parameters>, observer: Rc<Observer>, options: Rc<AbletonOptions>) -> Self {
@@ -44,7 +49,26 @@ impl Mutations {
             samples: SampleBank::default(),
             copied: RefCell::new(HashSet::new()),
             names: RefCell::new(IndexMap::new()),
+            made: Rc::default(),
         }
+    }
+    /// A device Kumi wrote without waiting for Live's Browser (a background job made it): loading it waits until the
+    /// Browser lists it, as making it in the answer would have, so the first load finds it.
+    async fn browser_lists(&self, named: &JsonObject, signal: &Signal) {
+        let Some(item) = named.get("itemId").and_then(Value::as_str).filter(|item| self.made.borrow().unlisted(item)) else { return };
+        let item = item.to_string();
+        let Some(tools) = self.parameters.history.connection.tools() else { return };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(BROWSER_WAIT_MS);
+        while std::time::Instant::now() < deadline && !signal.is_cancelled() {
+            let mut args = JsonObject::new();
+            args.insert("itemId".into(), json!(item));
+            let inspected = tools.call("live_browser_inspect", args, signal.clone(), Default::default()).await;
+            if inspected.is_ok_and(|result| result.is_error != Some(true)) {
+                break;
+            }
+            tokio::select! { _ = signal.cancelled() => return, _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {} }
+        }
+        self.made.borrow_mut().listed(&item);
     }
     pub fn supported(&self, since: Option<&str>) -> bool {
         since.is_none_or(|since| super::bridge_version::at_least(self.parameters.history.connection.version().as_deref(), since))
@@ -80,6 +104,9 @@ impl Mutations {
         )
     }
     pub async fn change(&self, kind: &ChangeKind, named: JsonObject, original: Signal, settled: bool) -> ChangeOutcome {
+        if kind.tool == "load_device" {
+            self.browser_lists(&named, &original).await;
+        }
         // A change acting on a track's devices reads them again first, so what Kumi holds of them is current where it
         // acts, and is refused if a device it names isn't the one this turn showed. One that changes the devices
         // themselves (or renames one) has them read again on the next turn too, since Live tells of no device renamed.

@@ -41,6 +41,8 @@ pub(super) fn spans(screen: &mut Screen, mut x: i32, y: i32, spans: &[Span], cli
     }
     x
 }
+/// How long a step away from Live runs before NOW says ctrl-b can move it to the background.
+const BACKGROUND_HINT_MS: f64 = 20_000.;
 pub(super) struct NowLine {
     pub dot: Option<Style>,
     pub label: String,
@@ -155,6 +157,20 @@ impl TuiApp {
             }
         }
         let mut x = screen.put(2, 0, "Kumi", &st::TITLE);
+        // Background jobs at work: a count the model's name gives way to.
+        let running = self.running_jobs();
+        if running > 0 {
+            let jobs = format!(
+                "{}{running} {}",
+                if self.0.icons == IconStyle::Badges { "" } else { "◐ " },
+                if running == 1 { "job" } else { "jobs" }
+            );
+            let at = start - 3 - text_width(&jobs);
+            if at - x > 4 {
+                screen.put(at, 0, &jobs, &st::ACCENT);
+                start = at;
+            }
+        }
         let mut end = start - 2;
         let set_name = self.0.state.borrow().set_name.clone();
         if let Some(model) = self.model_label() {
@@ -435,10 +451,17 @@ impl TuiApp {
                 };
             }
             if let Some(running) = running {
+                let mut detail = running.doing.clone().unwrap_or_else(|| doing_label(running.tool.as_deref(), &running.label));
+                // A long step away from Live can go on in the background while the producer carries on.
+                if running.started_at.is_some_and(|at| now - at >= BACKGROUND_HINT_MS) && self.0.options.controller.can_background() {
+                    // In tmux, ctrl-b is its prefix: twice sends it on.
+                    let keys = if self.0.profile.tmux { "ctrl-b twice" } else { "ctrl-b" };
+                    detail = format!("{detail} · {keys} keeps you working while this runs");
+                }
                 return NowLine {
                     dot,
                     label,
-                    detail: running.doing.clone().unwrap_or_else(|| doing_label(running.tool.as_deref(), &running.label)),
+                    detail,
                     style: st::DIM,
                     activity: Some((activity_of(running.tool.as_deref()), running.started_at.unwrap_or(now))),
                 };
@@ -474,6 +497,10 @@ impl TuiApp {
                 label: "watching".into(),
                 ..simple("Watching your changes in Live; tell Kumi when you're done", st::TEXT)
             };
+        }
+        let jobs = state.jobs.values().filter(|status| status.state == kumi_runtime::core::jobs::JobState::Running).count();
+        if jobs > 0 {
+            return simple(&format!("Ready · {jobs} {} running in the background", if jobs == 1 { "job" } else { "jobs" }), st::FAINT);
         }
         simple("Ready", st::FAINT)
     }
@@ -520,6 +547,7 @@ impl TuiApp {
         let panel_hint = state.panel.as_ref().map(|p| match &*p.borrow() {
             _ if own_hint.is_some() => own_hint.as_deref().unwrap_or(""),
             Panel::Btw { .. } => "↑↓ to scroll · c copies · esc to close",
+            Panel::Job { .. } => "↑↓ to scroll · x stops it · r runs it again · c copies · esc to close",
             Panel::Pick { picker, .. } if picker.borrow().options.answers => {
                 "a number, then enter answers · or type your own · esc to close"
             }

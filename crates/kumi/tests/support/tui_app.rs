@@ -368,6 +368,34 @@ impl SessionController for Control {
     async fn daw_recording(&self) -> Result<Option<bool>, RuntimeError> {
         Ok(self.get::<bool>("recording"))
     }
+    fn has_jobs(&self) -> bool {
+        self.enabled("jobs")
+    }
+    fn jobs(&self) -> Vec<kumi_runtime::core::jobs::JobStatus> {
+        self.get("jobs").unwrap_or_default()
+    }
+    fn job(&self, id: u32) -> Option<kumi_runtime::core::jobs::JobDetail> {
+        self.get::<Vec<kumi_runtime::core::jobs::JobDetail>>("job-details").unwrap_or_default().into_iter().find(|d| d.status.id == id)
+    }
+    fn stop_job(&self, id: u32) -> bool {
+        self.call(format!("stop-job:{id}"));
+        true
+    }
+    fn run_job_again(&self, id: u32) -> Result<u32, String> {
+        self.call(format!("run-again:{id}"));
+        Ok(id + 100)
+    }
+    fn background(&self) -> Result<u32, String> {
+        self.call("background");
+        self.get::<String>("background-refused").map_or(Ok(7), Err)
+    }
+    fn can_background(&self) -> bool {
+        self.enabled("can-background")
+    }
+    fn carry_on(&self, job: u32) -> bool {
+        self.call(format!("carry-on:{job}"));
+        true
+    }
     fn has_stop_live(&self) -> bool {
         self.stop.get()
     }

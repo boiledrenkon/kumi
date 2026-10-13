@@ -6,7 +6,9 @@ use kumi_runtime::ai::types::{
     ToolResultOutput, ToolResultPart, UserPart,
 };
 use kumi_runtime::kernel::agent::CARRY_ON_NOTE;
-use kumi_runtime::kernel::budget::{drop_earliest, fit, transcript_of, ContextBudget, ASKED, OBSERVATION_MARKER, SHORTENED};
+use kumi_runtime::kernel::budget::{
+    drop_earliest, fit, job_report_block, transcript_of, ContextBudget, ASKED, OBSERVATION_MARKER, SHORTENED,
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -400,4 +402,41 @@ fn a_carried_on_answer_leaves_kumis_note_out_of_the_list_and_the_transcript() {
     let lines = shown(&kept);
     assert!(!lines.iter().any(|line| line.text.contains("connection dropped")), "{lines:?}");
     assert!(lines[0].text.starts_with("a darker filter."), "{lines:?}");
+}
+
+#[test]
+fn a_background_jobs_report_cleared_with_its_observation_stays_as_its_opening_and_how_to_read_it_again() {
+    let report = format!("Burial pitches vocal snippets up an octave and drowns them in reverb. {}", "More detail. ".repeat(80));
+    let with_report = format!(
+        "{}\n\n[Kumi] Background job 3 (“Burial vocal chops”) finished. Its report follows.\n{}",
+        observed("ask a"),
+        job_report_block(3, &report)
+    );
+    let history = [
+        vec![user(&with_report), called("c_a"), result("c_a", &read("a", 3000), false), said("answer a")],
+        exchange("b", 3000),
+        exchange("c", 3000),
+    ]
+    .concat();
+    let turn = vec![user(&observed("now"))];
+    let budget = budget(4096.0, 64.0 * 1024.0);
+    let fitted = fit(&history, &turn, &budget);
+    let kept = text_of(fitted.history.first()).unwrap();
+    assert!(kept.starts_with("ask a"), "{kept}");
+    assert!(!kept.contains("ooooo"), "the observation went");
+    assert!(
+        kept.contains(
+            "[Kumi] Background job 3's report, cut to its opening: Burial pitches vocal snippets up an octave and drowns them in reverb."
+        ),
+        "{kept}"
+    );
+    assert!(kept.ends_with("… The whole report: jobs, action result, id 3."), "{kept}");
+    assert!(kept.len() < 1000);
+    // An earlier turn without a report is cleared as before, to the producer's words.
+    assert_eq!(text_of(fitted.history.get(4)).as_deref(), Some("ask b"));
+    // Fitting again changes nothing, so caches keep working; the producer's words are still only theirs.
+    let again = fit(&fitted.history, &fitted.turn, &budget);
+    assert!(matches!(again.history, Cow::Borrowed(_)));
+    let values: Vec<_> = fitted.history.iter().map(|m| serde_json::to_value(m).unwrap()).collect();
+    assert_eq!(transcript_of(&values)[0].text, "ask a");
 }
