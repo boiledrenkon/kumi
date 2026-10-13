@@ -110,22 +110,12 @@ pub async fn ask_release(env: &Env, fetch: Option<Rc<dyn Fetch>>) -> AskedReleas
 pub async fn ask_release_at(base: &str, fetch: Option<Rc<dyn Fetch>>) -> AskedRelease {
     let fetch = fetch.unwrap_or_else(default_fetch);
     let url = format!("{base}/kumi-release.json");
-    // Twice at most, 10 s each: once more when nothing answered in time or the connection failed.
-    let mut tries = 0;
-    let response = loop {
-        tries += 1;
-        let waited = abort::timeout(10_000);
-        match fetch.fetch(&url, FetchInit { signal: Some(waited.clone()), ..Default::default() }).await {
-            Ok(response) => break response,
-            Err(error) => {
-                let ran_out = waited.is_cancelled();
-                let cause = if ran_out { Some(NetCause::Timeout) } else { NetCause::of_call(&error) };
-                if tries < 2 && matches!(cause, Some(NetCause::Timeout | NetCause::Offline)) {
-                    continue;
-                }
-                return AskedRelease::Offline(cause, (!ran_out).then(|| (url.clone(), error)));
-            }
-        }
+    let waited = abort::timeout(20_000);
+    let response = match fetch.fetch(&url, FetchInit { signal: Some(waited.clone()), ..Default::default() }).await {
+        Ok(response) => response,
+        // Kumi's own wait running out is a timeout, whatever the call says of it.
+        Err(_) if waited.is_cancelled() => return AskedRelease::Offline(Some(NetCause::Timeout), None),
+        Err(error) => return AskedRelease::Offline(NetCause::of_call(&error), Some((url, error))),
     };
     if response.status == 404 {
         return AskedRelease::None;
@@ -224,6 +214,7 @@ fn unasked(asked: &AskedRelease, base: &str, pinned: Option<&str>, env: &Env) ->
         (AskedRelease::Page, _) => {
             format!("A Wi-Fi sign-in page or a proxy answered instead of {}: sign in to the network, then try again", place(base))
         }
+        (_, Some(version)) => format!("Kumi {version}'s description didn't make sense; try again later"),
         _ => "The latest release's description didn't make sense; try again later".into(),
     }
 }
@@ -695,6 +686,10 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
         say(format!("Kumi {version} came before Kumi's native releases, so kumi update can't install it; 1.7.6 is the earliest it can."));
         return Ok(1);
     }
+    if pinned == Some(KUMI_VERSION) {
+        say(format!("Kumi is {KUMI_VERSION} already."));
+        return Ok(bridge_after(&io, &home, &app).await);
+    }
     let looking = pinned.map(|version| format!("Looking for Kumi {version}…")).unwrap_or_else(|| "Looking for a newer Kumi…".into());
     let asking = async {
         match pinned {
@@ -715,10 +710,6 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
         Some(version) if manifest.kumi != version => {
             say(format!("There's no Kumi {version} at {}; it has {}. Nothing was changed.", place(&base), manifest.kumi));
             return Ok(1);
-        }
-        Some(version) if version == KUMI_VERSION => {
-            say(format!("Kumi is {KUMI_VERSION} already."));
-            return Ok(bridge_after(&io, &home, &app).await);
         }
         None if !newer_version(&manifest.kumi, KUMI_VERSION) => {
             say(format!("Kumi is up to date ({KUMI_VERSION})."));

@@ -1320,6 +1320,7 @@ async fn update_version_installs_that_release_and_keeps_this_one_to_go_back_to()
         ),
         ("1.14.0", older.clone(), 200, "There's no Kumi 1.14.0 at example.test; it has 1.15.0. Nothing was changed."),
         ("1.7.5", older.clone(), 200, "Kumi 1.7.5 came before Kumi's native releases, so kumi update can't install it"),
+        ("1.14.0", json!({"nonsense":true}), 200, "Kumi 1.14.0's description didn't make sense; try again later. Nothing was changed."),
         (KUMI_VERSION, manifest(KUMI_VERSION), 200, "already."),
     ] {
         let (mut pinned, out) = io(&env);
@@ -1330,9 +1331,17 @@ async fn update_version_installs_that_release_and_keeps_this_one_to_go_back_to()
         let code = update_installed(pinned).await.unwrap();
         assert!(out.0.borrow().contains(words), "{version}: {}", out.0.borrow());
         assert_eq!(code, if version == KUMI_VERSION { 0 } else { 1 }, "{version}");
-        assert_eq!(served.calls.borrow().len(), usize::from(version != "1.7.5"), "{version}: only its description is asked for");
+        let asked = version != "1.7.5" && version != KUMI_VERSION;
+        assert_eq!(served.calls.borrow().len(), usize::from(asked), "{version}: only its description is asked for");
         assert_eq!(version_of(home.join("app")), KUMI_VERSION);
     }
+    // This version is known without asking, offline too.
+    let (mut current, out) = io(&env);
+    current.version = Some(KUMI_VERSION.into());
+    current.fetcher = Some(Rc::new(Serve { offline: true, ..Rc::try_unwrap(Serve::new(Value::Null)).ok().unwrap() }));
+    current.live_running = Some(Rc::new(|| async { true }.boxed_local()));
+    assert_eq!(update_installed(current).await.unwrap(), 0, "{}", out.0.borrow());
+    assert!(out.0.borrow().contains(&format!("Kumi is {KUMI_VERSION} already.")), "{}", out.0.borrow());
     // Pinned without KUMI_RELEASES: the release's own downloads on GitHub.
     assert_eq!(release_base_for(&Env::new(), Some("1.15.0")), "https://github.com/user1303836/kumi/releases/download/v1.15.0");
     assert_eq!(release_base_for(&env, Some("1.15.0")), "https://example.test/r");
