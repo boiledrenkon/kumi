@@ -265,7 +265,10 @@
       Doing 'Install'
       $freshApp = Join-Path $work 'app'
       New-Item -ItemType Directory -Force -Path $freshApp | Out-Null
-      & $tar -xzf $bundle -C $freshApp
+      # tar.exe reads its arguments in the system's code page, which can't spell every folder name: from the work
+      # folder, the paths it's given are plain ASCII.
+      Push-Location -LiteralPath $work
+      try { & $tar -xzf (Split-Path $bundle -Leaf) -C (Split-Path $freshApp -Leaf) } finally { Pop-Location }
       if ($LASTEXITCODE -ne 0) { Fail "couldn't unpack Kumi." }
       $exe = Join-Path $freshApp 'kumi.exe'
       if (-not (Test-Path -LiteralPath $exe)) { Fail 'the download had no kumi.exe in it. Please report this at github.com/user1303836/kumi/issues.' }

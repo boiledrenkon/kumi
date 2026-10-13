@@ -8,7 +8,7 @@ Kumi 及其桥接如何送到用户手中，这能证明什么、不能证明什
 
 | 内容 | 位置 | 获取方式 |
 | --- | --- | --- |
-| Kumi | `user1303836/kumi` 的 GitHub Releases：原生 `kumi-<target>.tar.gz`、兼容包 `kumi.tar.gz`、`kumi-release.json` 和 `SHA256SUMS`，由 Installer 工作流附加到每个 `vX.Y.Z` 标签上 | `install.sh` 或 `install.ps1`，之后用 `kumi update` |
+| Kumi | `user1303836/kumi` 的 GitHub Releases：原生 `kumi-<target>.tar.gz`、兼容包 `kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS`，以及安装程序 `install.sh` 和 `install.ps1`，由 Installer 工作流附加到每个 `vX.Y.Z` 标签上 | `install.sh` 或 `install.ps1`，之后用 `kumi update` |
 | 桥接（`@ableton-mcp/mcp-server`） | 包含在每个 Kumi 发行包中：既有原生桥接 tarball，也有已解包的桥接包 | `kumi bridge`，它通过桥接的生命周期进行安装（[安装桥接](DELIVERY.md)） |
 | 单独的桥接 | 没有自己的发布版本。用 `python3 scripts/build-native-release.py --bridge-only` 构建（[构建选项](DEVELOPER_GUIDE.md#发布)） | 生命周期 CLI（[安装桥接](DELIVERY.md#独立桥接)） |
 
@@ -53,7 +53,7 @@ Kumi 及其桥接如何送到用户手中，这能证明什么、不能证明什
 
 `Willington files` 只允许仓库所有者从本仓库 `willington/` 分支发出的拉取请求修改 `vendor/willington/`，并且这样的拉取请求不修改其他任何内容。这些文件会发到每位制作人手中，而它们的原生库无法审查，所以检查的是由谁发送。[开发者指南](DEVELOPER_GUIDE.md#willington-的文件)介绍了更新的步骤。
 
-Installer 工作流不是必需的检查，但在标签上，它的 `publish` 作业只有在发行包已在 macOS、Linux 和 Windows 上安装成功之后才会运行。[测试](TESTING.md#ci)介绍了每个作业。
+Installer 工作流不是必需的检查，但在标签上，它的 `publish` 作业只有在发行包已在 macOS、Linux 和 Windows 上安装成功之后才会运行，并且只在两个安装程序都已附加时才发布该版本。[测试](TESTING.md#ci)介绍了每个作业。
 
 ## 待所有者决定的事项
 

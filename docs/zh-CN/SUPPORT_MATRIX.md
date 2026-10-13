@@ -32,7 +32,7 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 
 ## Windows
 
-已测试：在 CI 上，于 Windows PowerShell 5.1 中测试了安装程序、`kumi update`、`kumi bridge` 和 `kumi uninstall`；在一台装有 Live 12.4.15 beta 的 Windows 10 电脑上，测试了用 `kumi bridge` 安装到已移出用户文件夹的 User Library、Remote Script 在 Live 中加载，以及 Kumi 连接。CI 的 Windows 运行器使用默认文件夹的管理员账户，因此无法暴露只在普通账户或移动过的库中才会出现的问题。
+已测试：在 CI 上，于 Windows PowerShell 5.1 和 PowerShell 7 中测试了安装程序、`kumi update`、`kumi bridge` 和 `kumi uninstall`，并在名称含非 ASCII 字符的文件夹中的 `KUMI_HOME` 下测试了安装程序、`kumi bridge`、回滚和 `kumi uninstall`；在一台装有 Live 12.4.15 beta 的 Windows 10 电脑上，测试了用 `kumi bridge` 安装到已移出用户文件夹的 User Library、Remote Script 在 Live 中加载，以及 Kumi 连接。CI 的 Windows 运行器使用默认文件夹的管理员账户，因此无法暴露只在普通账户或移动过的库中才会出现的问题。
 
 尚未在 Windows 上确认：
 

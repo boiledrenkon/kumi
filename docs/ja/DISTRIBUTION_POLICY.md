@@ -8,7 +8,7 @@ Kumi とそのブリッジがどのように人の手に届くか、それによ
 
 | 対象 | 場所 | 入手方法 |
 | --- | --- | --- |
-| Kumi | `user1303836/kumi` の GitHub Releases：ネイティブの `kumi-<target>.tar.gz`、互換用の `kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS`。Installer ワークフローが各 `vX.Y.Z` タグに添付します | `install.sh` または `install.ps1`、その後は `kumi update` |
+| Kumi | `user1303836/kumi` の GitHub Releases：ネイティブの `kumi-<target>.tar.gz`、互換用の `kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS`、インストーラーの `install.sh` と `install.ps1`。Installer ワークフローが各 `vX.Y.Z` タグに添付します | `install.sh` または `install.ps1`、その後は `kumi update` |
 | ブリッジ（`@ableton-mcp/mcp-server`） | 各 Kumi バンドルの中に、ネイティブのブリッジ tarball と展開済みのパッケージが入っています | `kumi bridge`。ブリッジのライフサイクルを通じてインストールします（[ブリッジのインストール](DELIVERY.md)） |
 | ブリッジ単体 | 独自のリリースはありません。`python3 scripts/build-native-release.py --bridge-only` でビルドします（[ビルドオプション](DEVELOPER_GUIDE.md#リリース)） | ライフサイクル CLI（[ブリッジのインストール](DELIVERY.md#スタンドアロンのブリッジ)） |
 
@@ -53,7 +53,7 @@ Kumi とそのブリッジがどのように人の手に届くか、それによ
 
 `Willington files` は、`vendor/willington/` を変えるのを、このリポジトリの `willington/` ブランチから出たリポジトリ所有者のプルリクエストだけに限り、そのプルリクエストがほかに何も変えないようにします。これらのファイルはすべてのプロデューサーに届き、ネイティブライブラリはレビューできないので、だれが送ったかを確認します。更新の手順は[開発者ガイド](DEVELOPER_GUIDE.md#willington-のファイル)にあります。
 
-Installer ワークフローは必須チェックではありませんが、タグでは、その `publish` ジョブはバンドルが macOS、Linux、Windows でインストールできた後にだけ実行されます。すべてのジョブは[テスト](TESTING.md#ci)で説明しています。
+Installer ワークフローは必須チェックではありませんが、タグでは、その `publish` ジョブはバンドルが macOS、Linux、Windows でインストールできた後にだけ実行され、インストーラーが両方添付されているときだけリリースを公開します。すべてのジョブは[テスト](TESTING.md#ci)で説明しています。
 
 ## 未決のオーナー判断
 

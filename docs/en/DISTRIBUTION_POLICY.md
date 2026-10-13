@@ -10,7 +10,7 @@ what the bridge's package may contain. The steps for cutting a release are in
 
 | What | Where | How people get it |
 | --- | --- | --- |
-| Kumi | GitHub Releases of `user1303836/kumi`: native `kumi-<target>.tar.gz` bundles, the compatibility `kumi.tar.gz`, `kumi-release.json` and `SHA256SUMS`, attached to each `vX.Y.Z` tag by the Installer workflow | `install.sh` or `install.ps1`, then `kumi update` |
+| Kumi | GitHub Releases of `user1303836/kumi`: native `kumi-<target>.tar.gz` bundles, the compatibility `kumi.tar.gz`, `kumi-release.json`, `SHA256SUMS` and the installers `install.sh` and `install.ps1`, attached to each `vX.Y.Z` tag by the Installer workflow | `install.sh` or `install.ps1`, then `kumi update` |
 | The bridge (`@ableton-mcp/mcp-server`) | Inside each Kumi bundle, as a native bridge tarball and its prepared package | `kumi bridge`, which installs it through the bridge's lifecycle ([delivery](DELIVERY.md)) |
 | The bridge on its own | No release of its own. Build it with `python3 scripts/build-native-release.py --bridge-only` ([build options](DEVELOPER_GUIDE.md#releasing)) | The lifecycle CLI ([delivery](DELIVERY.md#the-standalone-bridge)) |
 
@@ -94,7 +94,8 @@ libraries can't be reviewed, so who sends them is the check. The
 [developer guide](DEVELOPER_GUIDE.md#willingtons-files) describes an update.
 
 The Installer workflow isn't a required check, but on a tag its `publish` job
-runs only after the bundle has installed on macOS, Linux and Windows.
+runs only after the bundle has installed on macOS, Linux and Windows, and
+publishes the release only with both installers attached.
 [Testing](TESTING.md#ci) describes every job.
 
 ## Open owner decisions
