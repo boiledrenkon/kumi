@@ -71,7 +71,7 @@ function Run([scriptblock]$Command) {
 # install.ps1 in a powershell of its own, from the file (or piped into iex), with these settings, PATH left alone.
 function Install([hashtable]$Settings, [switch]$Iex) {
   $names = @('KUMI_HOME', 'KUMI_RELEASES', 'KUMI_VERSION', 'KUMI_NO_MODIFY_PATH', 'KUMI_NO_LAUNCH', 'HTTPS_PROXY')
-  $saved = @{}; foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
+  $saved = @{}; foreach ($name in $names + @($Settings.Keys)) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
   try {
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $null) }
     $env:KUMI_NO_MODIFY_PATH = '1'; $env:KUMI_NO_LAUNCH = '1'
@@ -83,7 +83,7 @@ function Install([hashtable]$Settings, [switch]$Iex) {
       Run { powershell -NoProfile -ExecutionPolicy Bypass -File $Installer }
     }
   } finally {
-    foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+    foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
   }
 }
 function Home([string]$Name) { Join-Path $root "homes\$Name\.kumi" }
@@ -117,6 +117,16 @@ try {
   Check 'one before the installer says so' (($run.Code -eq 1) -and $run.Said.Contains('Kumi 1.0.0 came before the installer (1.1.0). The releases are at https://github.com/user1303836/kumi/releases')) $run.Said
   $run = Install @{ KUMI_HOME = (Home 'version'); KUMI_VERSION = 'v1.7.5' }
   Check "one before native Kumi gives that release's own script" (($run.Code -eq 1) -and $run.Said.Contains('came before native Kumi (1.7.6)') -and $run.Said.Contains('irm https://raw.githubusercontent.com/user1303836/kumi/v1.7.5/install.ps1 | iex')) $run.Said
+
+  # A home folder (a scratch one here) or a drive's root isn't Kumi's own: kumi uninstall takes Kumi's names out of it.
+  $profileFolder = Join-Path $root 'homes\profile'
+  New-Item -ItemType Directory -Force -Path $profileFolder | Out-Null
+  foreach ($spelled in @($profileFolder, "$profileFolder\", $profileFolder.ToUpperInvariant())) {
+    $run = Install @{ KUMI_HOME = $spelled; USERPROFILE = $profileFolder; KUMI_RELEASES = "$base/empty" }
+    Check "the home folder as KUMI_HOME ($spelled) is refused, and nothing lands there" (($run.Code -eq 1) -and $run.Said.Contains('KUMI_HOME is your home folder; Kumi needs a folder of its own') -and -not (Get-ChildItem -Force -LiteralPath $profileFolder)) $run.Said
+  }
+  $run = Install @{ KUMI_HOME = [IO.Path]::GetPathRoot($root); KUMI_RELEASES = "$base/empty" }
+  Check "a drive's root as KUMI_HOME is refused" (($run.Code -eq 1) -and $run.Said.Contains(', the root of a drive; Kumi needs a folder of its own')) $run.Said
 
   # -- The Kumi that was there stays ----------------------------------------
   $kumi = Home 'kept'

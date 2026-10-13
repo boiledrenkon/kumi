@@ -433,6 +433,21 @@ exit $status
         self.assertIn(f'export PATH="{here}/relkumi/bin:$PATH"', (home / ".profile").read_text())
         self.assertIn(f'(or after: export PATH="{here}/relkumi/bin:$PATH"): kumi', run.stdout)
 
+    def test_a_kumi_home_that_is_the_home_folder_or_the_root_is_refused(self):
+        # kumi uninstall takes Kumi's names (bin, downloads, tools…) out of its folder: there they'd be the producer's.
+        home = self.home()
+        self.serve(self.release("1.0.0"))
+        for kumi_home in [str(home), f"{home}/", f"{home}/.", "~"]:
+            run = self.install(home, KUMI_HOME=kumi_home)
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("KUMI_HOME is your home folder; Kumi needs a folder of its own, such as ~/.kumi.", run.stderr)
+            self.assertEqual(list(home.iterdir()), [], kumi_home)
+        # As root, a refusal that failed would install into /: that run is left to everyone else.
+        if os.geteuid() != 0:
+            run = self.install(home, KUMI_HOME="/")
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("KUMI_HOME is /, the root of the disk; Kumi needs a folder of its own", run.stderr)
+
     def test_the_zsh_line_goes_where_zsh_reads_it_once(self):
         home = self.home()
         zdot = home / "zsh config"

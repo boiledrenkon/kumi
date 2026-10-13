@@ -231,6 +231,14 @@ main() {
   # shellcheck disable=SC2088
   case "$KUMI_HOME" in "~") KUMI_HOME="$HOME" ;; "~/"*) KUMI_HOME="$HOME/${KUMI_HOME#"~/"}" ;; esac
   case "$KUMI_HOME" in /*) ;; *) KUMI_HOME="$(pwd)/$KUMI_HOME" ;; esac
+  # A folder of Kumi's own: in the home folder itself or a disk's root, the names Kumi uses (bin, downloads, tools)
+  # could be the producer's own, and kumi uninstall takes those names out.
+  own_home="$(cd "$HOME" 2>/dev/null && pwd -P)" || own_home="$HOME"
+  own_kumi="$(cd "$KUMI_HOME" 2>/dev/null && pwd -P)" || own_kumi="$KUMI_HOME"
+  case "$own_kumi" in
+    /|//) fail "KUMI_HOME is /, the root of the disk; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")." ;;
+    "$own_home"|"$own_home/") fail "KUMI_HOME is your home folder; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")." ;;
+  esac
   if [ ! -d "$KUMI_HOME" ]; then made_home=1; fi
   mkdir -p "$KUMI_HOME" || fail "couldn't make $KUMI_HOME."
   free_kb="$(df -Pk "$KUMI_HOME" 2>/dev/null | awk 'NR==2 {print $4}')"
