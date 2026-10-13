@@ -1004,9 +1004,10 @@ notes, recipes, sign-ins, library and references stay unless you add `--all`.
   isn't root's.
 - From `bin`, `downloads` and the folders of what Kumi fetched, only Kumi's own
   files go. Anything else stays and is named, and so does the folder.
-- When Kumi's folder also holds files that aren't Kumi's (`KUMI_HOME=~/.local`,
-  say), only Kumi itself goes, even with `--all`. Your conversations and the
-  rest stay there, named, for you to delete.
+- `--all` takes your conversations and the rest only from a folder named
+  `.kumi`, as the installer names it, and the folder once it's empty. From any
+  other (`KUMI_HOME=~/.local`, say), only Kumi itself goes, and they stay there,
+  named, for you to delete.
 - When a part can't be removed, it says which and why, and Kumi stays so you
   can run `kumi uninstall` again.
 - A PATH line it can't take out (in a file it can't write, or inside an `if`,

@@ -73,7 +73,7 @@ fn manifest(version: &str) -> Value {
 }
 fn env(dir: &Path) -> Env {
     [
-        ("KUMI_HOME".into(), dir.join("home").display().to_string()),
+        ("KUMI_HOME".into(), dir.join(".kumi").display().to_string()),
         ("KUMI_RELEASES".into(), "https://example.test/r".into()),
         ("KUMI_REMOTE_SCRIPTS_DIR".into(), dir.join("Remote Scripts").display().to_string()),
         ("HOME".into(), dir.join("user").display().to_string()),
@@ -683,7 +683,7 @@ async fn rollback_to_legacy_requires_closed_live_and_retained_legacy_bridge_gene
 /// where the old Remote Script would answer.
 fn legacy_bridge(dir: &Path, port: u16) -> (Env, String) {
     let env = env(dir);
-    let home = dir.join("home");
+    let home = dir.join(".kumi");
     put(home.join("app/package.json"), json!({"version":"1.7.6","bridge":"1.0.74","runtime":"rust-native"}).to_string());
     put(home.join("app").join(executable_name("ableton-mcp-server")), "native bridge");
     let package = dir.join("old bridge/package");
@@ -719,7 +719,7 @@ async fn startup_switch_failure_never_stops_kumi_and_leaves_no_partial_bridge() 
     // Unwritable: the bridge folder can't be made.
     let dir = tempfile::tempdir().unwrap();
     let (env, config) = legacy_bridge(dir.path(), free_port());
-    put(dir.path().join("home/bridge"), "a file where the bridge folder goes");
+    put(dir.path().join(".kumi/bridge"), "a file where the bridge folder goes");
     let (mut installed, out) = io(&env);
     installed.live_running = Some(Rc::new(|| async { false }.boxed_local()));
     finish_legacy_transition(&installed).await;
@@ -739,7 +739,7 @@ async fn startup_switch_failure_never_stops_kumi_and_leaves_no_partial_bridge() 
         out.0.borrow()
     );
     let left: Vec<_> =
-        fs::read_dir(dir.path().join("home/bridge")).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
+        fs::read_dir(dir.path().join(".kumi/bridge")).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
     assert!(left.is_empty(), "{left:?}");
     assert_eq!(fs::read_to_string(dir.path().join("state/bridge-config.json")).unwrap(), config);
 }
@@ -749,7 +749,7 @@ async fn startup_switch_with_the_same_remote_script_is_quiet_and_never_moves_a_l
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let (env, config) = legacy_bridge(dir.path(), listener.local_addr().unwrap().port());
     // The app's prepared bridge, whose Remote Script is byte for byte the one Live has loaded.
-    let prepared = dir.path().join("home/app/bridge");
+    let prepared = dir.path().join(".kumi/app/bridge");
     let artifact = b"native bridge artifact";
     put(prepared.join("bridge.tar.gz"), artifact);
     put(prepared.join("prepared.json"), json!({"artifact":"bridge.tar.gz","sha256":hex::encode(Sha256::digest(artifact))}).to_string());
@@ -2078,4 +2078,69 @@ async fn uninstall_knows_a_path_line_written_from_a_home_ending_in_a_slash() {
     assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
     assert_eq!(fs::read_to_string(user.join(".zshrc")).unwrap(), "alias ll='ls -l'\n");
     assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "");
+}
+/// A folder counts as Kumi's alone only by its own name, .kumi, once links are followed; what's in it can't tell, as
+/// Kumi's names (bin, projects…) are everyone's. And even there, only Kumi's entries go from bin, downloads and the
+/// rest, and the folder only once it's empty.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_all_takes_a_folder_whole_only_when_it_is_kumis_alone() {
+    let kept = "conversations, notes, recipes, sign-ins, library and references";
+    // A ~/.local that held only the producer's own scripts in bin before Kumi, and a ~/.kumi that is a link to it.
+    for linked in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env(dir.path());
+        let user = Path::new(&env["HOME"]).to_path_buf();
+        let local = user.join(".local");
+        installed_kumi(&local);
+        put(local.join("bin/uv-tool"), "theirs");
+        put(local.join("bin/my-script"), "theirs");
+        put(local.join("auth.json"), "Kumi's data");
+        let home = if linked {
+            std::os::unix::fs::symlink(&local, user.join(".kumi")).unwrap();
+            user.join(".kumi")
+        } else {
+            local.clone()
+        };
+        env.insert("KUMI_HOME".into(), home.display().to_string());
+        let (dry, out) = io(&env);
+        assert_eq!(uninstall_installed(dry, UninstallOptions { all: true, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+        let said = out.0.borrow().clone();
+        assert!(said.contains("): app, bin/kumi.") && said.contains("/bin stays: it holds more than Kumi put there."), "{said}");
+        assert!(said.contains(&format!("--all would leave your {kept} there too (auth.json)")), "{said}");
+        let (removing, out) = io(&env);
+        assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+        for file in ["bin/uv-tool", "bin/my-script"] {
+            assert_eq!(fs::read_to_string(local.join(file)).unwrap(), "theirs", "{file} ({linked})");
+        }
+        assert!(local.join("auth.json").exists() && !local.join("app").exists() && !local.join("bin/kumi").exists());
+        assert!(!out.0.borrow().contains("delete that folder"), "{}", out.0.borrow());
+    }
+    // ~/.kumi itself: --all takes Kumi's data too, but a file of the producer's in its bin keeps that, and the folder.
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    installed_kumi(home);
+    put(home.join("bin/mine.sh"), "theirs");
+    put(home.join("downloads/kumiko.zip"), "theirs");
+    put(home.join("downloads/kumi-aarch64-apple-darwin.tar.gz"), "Kumi's");
+    put(home.join("auth.json"), "Kumi's data");
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert_eq!(
+        files_in(home).into_iter().map(|(file, _)| file).collect::<Vec<_>>(),
+        [home.join("bin/mine.sh").display().to_string(), home.join("downloads/kumiko.zip").display().to_string()]
+    );
+    assert!(
+        said.contains("Kumi is removed, with everything it kept, freeing ") && said.contains(" stays, with what isn't Kumi's in it."),
+        "{said}"
+    );
+    // With nothing else in it, it goes whole.
+    fs::remove_dir_all(home).unwrap();
+    installed_kumi(home);
+    put(home.join("auth.json"), "Kumi's data");
+    let (removing, _) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    assert!(!home.exists());
 }
