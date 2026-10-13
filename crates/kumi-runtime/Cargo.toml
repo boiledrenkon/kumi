@@ -47,6 +47,8 @@ rand.workspace = true
 regex.workspace = true
 fancy-regex.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
 ruzstd.workspace = true
 # Max for Live device code, run in a sandbox.
 rquickjs = { version = "0.9", features = ["bindgen", "classes", "properties"] }
@@ -61,6 +63,7 @@ unicode-segmentation.workspace = true
 unicode-normalization.workspace = true
 url.workspace = true
 uuid.workspace = true
+webpki-roots.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -68,5 +71,7 @@ libc.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+# Certificates for the stand-in servers and proxies of the network tests, with the ring Kumi's TLS already has.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 # live_views reads deep Set snapshots, as the bridge does.
 serde_json = { workspace = true, features = ["unbounded_depth"] }

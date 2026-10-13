@@ -267,11 +267,7 @@ pub fn from_env(env: &std::collections::HashMap<String, String>) -> FromEnv {
 /// A client for a listening model: one that gives up on a model that stops answering (a minute and a half: it hears
 /// 20 s of audio), and follows no redirect, so a key never goes on to another host.
 pub(crate) fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_default()
+    crate::net::client().timeout(std::time::Duration::from_secs(90)).redirect(reqwest::redirect::Policy::none()).build().unwrap_or_default()
 }
 
 /// OpenAI's newest audio-capable chat model for a key, from its own model list (ids that take audio: "…audio…", not

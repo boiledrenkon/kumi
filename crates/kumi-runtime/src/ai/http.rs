@@ -72,7 +72,7 @@ impl Default for HttpFetch {
 }
 impl HttpFetch {
     pub fn with_timeouts(connect: std::time::Duration, read: std::time::Duration) -> Self {
-        Self { client: reqwest::Client::builder().connect_timeout(connect).read_timeout(read).build().expect("an HTTP client") }
+        Self { client: crate::net::client().connect_timeout(connect).read_timeout(read).build().expect("an HTTP client") }
     }
 }
 pub fn default_fetch() -> Rc<dyn Fetch> {

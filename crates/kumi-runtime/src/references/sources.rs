@@ -104,7 +104,7 @@ impl Sources {
     pub fn new(musicbrainz: &str, listenbrainz: &str, spotify: &str) -> Self {
         // Kumi's own sources are https: nothing is followed off it to plain http (stand-in servers in tests are http).
         let secure = [musicbrainz, listenbrainz, spotify].iter().all(|base| base.starts_with("https://"));
-        let client = reqwest::Client::builder()
+        let client = crate::net::client()
             .user_agent(format!("Kumi/{} ( https://github.com/user1303836/kumi )", crate::KUMI_VERSION))
             .timeout(Duration::from_secs(20))
             .https_only(secure)

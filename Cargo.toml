@@ -41,7 +41,12 @@ percent-encoding = "2"
 fancy-regex = "0.14"
 rand = "0.9"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip", "brotli", "deflate", "http2"] }
+# Each client begins at kumi-runtime's net::client, with Kumi's own TLS and proxies; socks: an ALL_PROXY of socks5://.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip", "brotli", "deflate", "http2", "socks"] }
+# Kumi's TLS (net::trust): rustls with the features reqwest's has, the certificates it carries (webpki-roots), and this
+# computer's own trust store when those don't vouch for a server.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-platform-verifier = "0.7"
 # SQLite compiled in (FTS5, JSONB): no system library to find on any platform.
 # Zstandard in pure Rust, for Serum 2's preset bodies.
 ruzstd = "0.9"
@@ -62,6 +67,7 @@ unicode-normalization = "0.1"
 unicode-width = "0.2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+webpki-roots = "1"
 
 # Line tables are enough for a panic's backtrace; full debug info multiplies the build folder's size.
 [profile.dev]

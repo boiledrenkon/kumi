@@ -333,7 +333,7 @@ pub struct ProgramOptions {
 
 // GitHub's API answers 403 to a request without a User-Agent (Node's fetch sent "node").
 static CLIENT: LazyLock<reqwest::Client> =
-    LazyLock::new(|| reqwest::Client::builder().user_agent(format!("kumi/{}", crate::KUMI_VERSION)).build().expect("an HTTP client"));
+    LazyLock::new(|| crate::net::client().user_agent(format!("kumi/{}", crate::KUMI_VERSION)).build().expect("an HTTP client"));
 
 fn last_segment(url: &str) -> &str {
     url.rsplit('/').next().unwrap_or(url)

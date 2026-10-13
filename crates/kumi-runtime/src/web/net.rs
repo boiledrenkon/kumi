@@ -836,20 +836,18 @@ fn system_lookup() -> Lookup {
 /// a name any of whose addresses isn't public is refused, and no proxy stands in between. Redirects are its own to
 /// check, hop by hop.
 pub(crate) fn guarded_http() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().dns_resolver(Arc::new(GuardedLookup { resolve: system_lookup(), allow: public_only() })).no_proxy()
+    crate::net::direct().dns_resolver(Arc::new(GuardedLookup { resolve: system_lookup(), allow: public_only() }))
 }
 
 pub fn create_web_client(options: WebClientOptions) -> Rc<dyn WebClient> {
     let allow: Allow = options.allow.unwrap_or_else(public_only);
     let resolve: Lookup = options.lookup.unwrap_or_else(system_lookup);
-    let http = reqwest::Client::builder()
+    let http = crate::net::direct_http1()
         .dns_resolver(Arc::new(GuardedLookup { resolve, allow: Arc::clone(&allow) }))
         .redirect(reqwest::redirect::Policy::none())
         .gzip(true)
         .brotli(true)
         .deflate(true)
-        .http1_only()
-        .no_proxy()
         .build()
         .expect("a web client");
     Rc::new(NetClient { http, allow, language: locale() })
