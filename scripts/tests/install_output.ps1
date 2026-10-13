@@ -99,7 +99,8 @@ function Printed([string]$Script, [string]$How, [string]$KumiHome, [string]$From
   $process.StandardOutput.BaseStream.CopyTo($memory)
   $process.WaitForExit()
   $text = $bytes.GetString($memory.ToArray()).Replace($KumiHome, '<home>')
-  if ($process.ExitCode -ne 0 -or $errors.Result.Trim()) { Write-Host "($How $Script exited $($process.ExitCode): $($errors.Result))" }
+  # Windows PowerShell also writes its records to a redirected error output, as CLIXML: said only on a failure.
+  if ($process.ExitCode -ne 0) { Write-Host "($How $Script exited $($process.ExitCode): $($errors.Result))" }
   $text
 }
 # What a script's step functions write in a console (Doing, then Done, plainly and in colour), and how it starts
