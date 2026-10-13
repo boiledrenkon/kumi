@@ -57,8 +57,10 @@ main() {
      done
      printf '%s\n' "${out:-/}")
   }
-  # The device a folder is on (GNU and busybox stat, then BSD's): another just below it means a disk is mounted there.
+  # The device a folder is on (GNU and busybox stat, then BSD's).
   device() { stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null; }
+  # Whether a disk is mounted at a folder: the folder (/. follows a link to it) is on another device than its parent.
+  mounted() { [ -d "$1" ] && [ "$(device "$1/.")" != "$(device "$1/..")" ]; }
   # A path as it reads on screen: ~/ for the home folder.
   # shellcheck disable=SC2088
   shown() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
@@ -253,7 +255,7 @@ main() {
     fail "KUMI_HOME is /, the root of the disk; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")."
   elif [ "$own_kumi" -ef "$HOME" ]; then
     fail "KUMI_HOME is your home folder; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")."
-  elif [ -d "$own_kumi" ] && [ "$(device "$own_kumi")" != "$(device "$own_kumi/..")" ]; then
+  elif mounted "$own_kumi"; then
     fail "KUMI_HOME is $(shown "$own_kumi"), where a disk is mounted; Kumi needs a folder of its own there, such as $(shown "$own_kumi")/kumi."
   fi
   if [ ! -d "$KUMI_HOME" ]; then made_home=1; fi

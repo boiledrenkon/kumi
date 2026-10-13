@@ -459,6 +459,12 @@ exit $status
             run = self.install(home, KUMI_HOME="/dev")
             self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
             self.assertIn("KUMI_HOME is /dev, where a disk is mounted; Kumi needs a folder of its own there, such as /dev/kumi.", run.stderr)
+            # Through a link to it, too.
+            mounted = self.root / "to dev"
+            mounted.symlink_to("/dev")
+            run = self.install(home, KUMI_HOME=str(mounted))
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn(", where a disk is mounted; Kumi needs a folder of its own there", run.stderr)
 
     def test_the_zsh_line_goes_where_zsh_reads_it_once(self):
         home = self.home()
