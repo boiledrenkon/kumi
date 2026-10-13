@@ -2660,8 +2660,9 @@ impl SessionController for Session {
         // What the session holds is the whole of it; what's kept may have lost its start, or be all there is (a
         // conversation taken up and not yet answered in this run).
         let conversation = match settled.filter(|checkpoint| !checkpoint.messages.is_empty()) {
+            // Saved last when its row says (the save under way is done); never saved (a chat without Live), 0.
             Some(checkpoint) => SavedConversation {
-                saved_at: now(),
+                saved_at: row.as_ref().map(|row| row.saved_at).unwrap_or(0),
                 checkpoint,
                 changes: (!changes.is_empty()).then_some(changes),
                 first: first.clone(),

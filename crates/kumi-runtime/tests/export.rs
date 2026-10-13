@@ -224,11 +224,13 @@ fn every_export_starts_with_what_it_is_what_it_holds_and_what_it_doesnt() {
     assert!(page.contains("<div><dt>Conversation</dt><dd>k3x9a1b2</dd></div><div><dt>Set</dt><dd>Song [secret]</dd></div>"), "{page}");
     assert!(page.contains("<p class=\"notes\">Secrets, your home folder and your account name are taken out. Each step shows by name, without its input and result.</p>"));
     assert!(page.contains("<footer>Exported from Kumi 9.9.9 on 2025-10-14 09:00.</footer>"));
-    let conversation = conversation();
+    let conversation = SavedConversation { saved_at: 0, ..conversation() };
     let source = Source { id: "k3x9a1b2", conversation: &conversation, title: "t", place: None, words: ("Live", "Set"), created: 0 };
     let raw = markdown(&source, &Options { redacted: false, ..options(false) });
     assert!(raw.contains("> Nothing was taken out: this file may hold keys, tokens and paths."), "{raw}");
-    assert!(!raw.contains("**Started:**") && !raw.contains("**Set:**"), "unknown facts aren't made up:\n{raw}");
+    for unknown in ["**Started:**", "**Set:**", "**Last saved:**"] {
+        assert!(!raw.contains(unknown), "unknown facts aren't made up: {unknown}\n{raw}");
+    }
 }
 
 /// The fixture's exports, as files to read: `KUMI_BLESS=1` writes them afresh.

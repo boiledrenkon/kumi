@@ -3646,6 +3646,21 @@ local_test!(an_imported_conversation_carries_on_here_in_a_copy_and_the_model_hea
     assert_eq!(row(&copy.id).title(), "make the bass wider (imported)");
     h.session.close().await.unwrap();
 });
+local_test!(an_export_says_when_its_conversation_was_last_saved_not_when_it_was_exported, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some(SET_A));
+    h.session.start().await.unwrap();
+    h.session.submit("make the bass wider", None).await.unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let exported = h.session.conversation_to_export().await.unwrap();
+    let rows = store.all().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].saved_at > 0);
+    assert_eq!(exported.conversation.saved_at, rows[0].saved_at);
+    h.session.close().await.unwrap();
+});
 local_test!(a_chat_that_keeps_no_conversations_still_exports_what_was_said, {
     // No store: a chat without Live, started without -c or -r.
     let h = harness(None, |_| {});
@@ -3654,7 +3669,7 @@ local_test!(a_chat_that_keeps_no_conversations_still_exports_what_was_said, {
     assert!(h.session.conversation_to_export().await.is_none(), "nothing said yet");
     h.session.submit("make the bass wider", None).await.unwrap();
     let exported = h.session.conversation_to_export().await.unwrap();
-    assert_eq!((exported.title.as_str(), exported.created), ("make the bass wider", 0));
+    assert_eq!((exported.title.as_str(), exported.created, exported.conversation.saved_at), ("make the bass wider", 0, 0), "never kept");
     let said: Vec<String> = transcript_of(&exported.conversation.checkpoint.messages).into_iter().map(|line| line.text).collect();
     assert_eq!(said, ["make the bass wider"]);
     assert_eq!(exported.set.as_deref(), Some("Song b2"));

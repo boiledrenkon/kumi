@@ -824,8 +824,8 @@ fn redacted_change(change: &ChangeRecord, redact: &dyn Fn(&str) -> String) -> Ch
     change
 }
 
-/// What's known of a conversation, as labels and values: its id, its Set, when it began, was last saved and was
-/// exported (by which Kumi), the model and how many requests it holds.
+/// What's known of a conversation, as labels and values: its id, its Set, when it began and was last saved (when it was),
+/// when it was exported (by which Kumi), the model and how many requests it holds.
 fn facts(doc: &Document, source: &Source, options: &Options) -> Vec<(String, String)> {
     let mut facts = vec![("Conversation".to_string(), source.id.to_string())];
     if let Some(place) = &doc.place {
@@ -834,7 +834,9 @@ fn facts(doc: &Document, source: &Source, options: &Options) -> Vec<(String, Str
     if source.created > 0 {
         facts.push(("Started".to_string(), when(source.created, options.zone)));
     }
-    facts.push(("Last saved".to_string(), when(source.conversation.saved_at, options.zone)));
+    if source.conversation.saved_at > 0 {
+        facts.push(("Last saved".to_string(), when(source.conversation.saved_at, options.zone)));
+    }
     facts.push(("Exported".to_string(), format!("{} by Kumi {}", when(options.now, options.zone), options.version)));
     if let Some(model) = &doc.model {
         facts.push(("Model".to_string(), model.clone()));
