@@ -90,7 +90,7 @@ fn no_planted_secret_survives_any_export() {
     }
     let raw = render(Format::Markdown, &source, false, None, zone(), NOW);
     assert!(raw.contains(KEY), "--raw leaves the file as it is");
-    assert!(raw.contains("Nothing was taken out: this file may hold keys and paths."));
+    assert!(raw.contains("Nothing was taken out: this file may hold keys, tokens and paths."));
 }
 
 #[test]

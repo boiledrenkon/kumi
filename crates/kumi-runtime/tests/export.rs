@@ -168,6 +168,48 @@ fn every_word_passes_the_redactor_and_nothing_private_leaves() {
 }
 
 #[test]
+fn every_export_starts_with_what_it_is_what_it_holds_and_what_it_doesnt() {
+    let short = render(Format::Markdown, false);
+    assert!(
+        short.starts_with(
+            "# Make the kick punchier [secret]\n\n- **Conversation:** k3x9a1b2\n- **Set:** Song [secret]\n- **Started:** 2025-10-14 08:59\n- **Last saved:** 2025-10-14 08:59\n- **Exported:** 2025-10-14 09:00 by Kumi 9.9.9\n- **Model:** openai/gpt-test-[secret]\n- **Requests:** 4\n\n> Secrets, your home folder and your account name are taken out. Each step shows by name, without its input and result.\n\n> The earlier part of this conversation wasn't kept"
+        ),
+        "{short}"
+    );
+    assert!(render(Format::Markdown, true)
+        .contains("> Secrets, your home folder and your account name are taken out. Each step's input and result are included."));
+    let page = render(Format::Html, false);
+    assert!(page.contains("<div><dt>Conversation</dt><dd>k3x9a1b2</dd></div><div><dt>Set</dt><dd>Song [secret]</dd></div>"), "{page}");
+    assert!(page.contains("<p class=\"notes\">Secrets, your home folder and your account name are taken out. Each step shows by name, without its input and result.</p>"));
+    assert!(page.contains("<footer>Exported from Kumi 9.9.9 on 2025-10-14 09:00.</footer>"));
+    let conversation = conversation();
+    let source = Source { id: "k3x9a1b2", conversation: &conversation, title: "t", place: None, words: ("Live", "Set"), created: 0 };
+    let raw = markdown(&source, &Options { redacted: false, ..options(false) });
+    assert!(raw.contains("> Nothing was taken out: this file may hold keys, tokens and paths."), "{raw}");
+    assert!(!raw.contains("**Started:**") && !raw.contains("**Set:**"), "unknown facts aren't made up:\n{raw}");
+}
+
+/// The fixture's exports, as files to read: `KUMI_BLESS=1` writes them afresh.
+#[test]
+fn exports_match_their_golden_files() {
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/export");
+    for format in FORMATS {
+        for full in [false, true] {
+            let out = render(format, full);
+            let file = folder.join(format!("{}.{}", if full { "full" } else { "short" }, format.extension()));
+            if std::env::var_os("KUMI_BLESS").is_some() {
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(&file, &out).unwrap();
+                continue;
+            }
+            let golden =
+                std::fs::read_to_string(&file).unwrap_or_else(|_| panic!("{} is missing: run this test with KUMI_BLESS=1", file.display()));
+            assert!(out == golden, "{} changed: check the difference, then run this test with KUMI_BLESS=1", file.display());
+        }
+    }
+}
+
+#[test]
 fn steps_show_by_name_and_their_inputs_and_results_only_in_full() {
     let short = render(Format::Markdown, false);
     assert!(short.contains("used live_discover · used set_mixer"), "{short}");
@@ -196,12 +238,14 @@ fn note_tools_stay_out_and_a_conversation_search_shows_only_its_label() {
 fn the_web_page_loads_nothing_and_runs_nothing() {
     for full in [false, true] {
         let page = render(Format::Html, full);
-        assert!(page.contains("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'"));
+        assert!(page.contains("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">"));
+        // Links only to what the conversation's words link to, and nothing that loads.
+        let links: Vec<&str> = page.split("href=\"").skip(1).map(|rest| &rest[..rest.find('"').unwrap()]).collect();
+        assert_eq!(links, ["https://www.ableton.com/manual"], "full={full}");
         let escaped = "&lt;img src=x onerror=alert(1)&gt;";
         assert!(page.contains(escaped), "the model's markup wasn't escaped:\n{page}");
         let markup = page.replace(escaped, "").to_lowercase();
-        for outside in ["<script", "<img", "<iframe", "<link", "<object", "<embed", " src=", "@import", "url(", "onerror=", "href=\"file:"]
-        {
+        for outside in ["<script", "<img", "<iframe", "<link", "<object", "<embed", "src=", "@import", "url(", "onerror=", "href=\"file:"] {
             assert!(!markup.contains(outside), "full={full}: the page has {outside}:\n{page}");
         }
         assert!(page.contains("<a href=\"https://www.ableton.com/manual\" rel=\"noopener noreferrer nofollow\">the manual</a>"));
@@ -394,4 +438,19 @@ fn file_names_carry_the_title_and_the_id() {
         "kumi-one-two-three-four-five-six-seven-eight-k3x9a1b2.json"
     );
     assert_eq!(file_name("../../etc/passwd", "../x", Format::Markdown), "kumi-etc-passwd-x.md");
+}
+
+#[test]
+fn an_import_cuts_words_that_run_too_long_and_leaves_out_a_huge_input() {
+    let file = json!({"format": "kumi-conversation", "version": 1, "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "a".repeat(70 * 1024)}]},
+        {"role": "assistant", "content": [{"type": "tool-call", "toolCallId": "x", "toolName": "rename", "input": {"name": "b".repeat(20 * 1024)}}]},
+        {"role": "tool", "content": [{"type": "tool-result", "toolCallId": "x", "toolName": "rename", "output": {"type": "text", "value": "c".repeat(70 * 1024)}}]}
+    ]});
+    let imported = import(&file.to_string(), NOW).unwrap();
+    let messages = &imported.conversation.checkpoint.messages;
+    let said = messages[0]["content"][0]["text"].as_str().unwrap();
+    assert!(said.ends_with(" [cut: it ran longer than Kumi imports]") && said.len() < 65 * 1024, "{}", said.len());
+    assert_eq!(messages[1]["content"][0]["input"], json!({}));
+    assert!(messages[2]["content"][0]["output"]["value"].as_str().unwrap().ends_with(" [cut: it ran longer than Kumi imports]"));
 }

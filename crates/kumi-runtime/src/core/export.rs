@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 
 use chrono::{DateTime, FixedOffset};
 use kumi_common::js::json::{file_text, stringify_pretty};
-use kumi_common::js::string::{head, trim, trim_end, trim_start};
+use kumi_common::js::string::{head, trim, trim_end, trim_start, utf16_len};
 use serde_json::{json, Map, Value};
 
 use super::contracts::{ChangePicture, ChangeRecord, ChangeState, KernelCheckpoint, MixLevels, PictureValue, SavedConversation};
@@ -39,6 +39,10 @@ const MAX_CHANGES: usize = 500;
 const MAX_TITLE: usize = 60;
 /// The longest any of an imported change's words run, in UTF-16 units.
 const MAX_WORDS: usize = 300;
+/// The longest an imported message's words or a step's result run (UTF-16 units), and the most a step's input takes as
+/// JSON (bytes): what's past them is cut, or, for an input, left out.
+const MAX_PART: usize = 64 * 1024;
+const MAX_INPUT: usize = 16 * 1024;
 
 /// The tools whose calls never leave Kumi: what it keeps of the producer (notes, recipes, how something went down) and
 /// how it finds its own tools.
@@ -147,7 +151,7 @@ pub fn markdown(source: &Source, options: &Options) -> String {
     for (label, value) in facts(&doc, source, options) {
         out.push_str(&format!("- **{label}:** {}\n", markdown_safe(&value)));
     }
-    out.push('\n');
+    out.push_str(&format!("\n> {}\n\n", notes(options).join(" ")));
     if doc.partial {
         out.push_str(&format!("> {PARTIAL}\n"));
         if !doc.earlier.is_empty() {
@@ -191,6 +195,9 @@ pub fn markdown(source: &Source, options: &Options) -> String {
         out.push_str(&format!("## What Kumi changed in {}\n\n", markdown_safe(source.words.0)));
         for change in &doc.changes {
             out.push_str(&format!("- {}\n", markdown_safe(&change_line(change))));
+            for value in change.picture.as_ref().map(values_of).unwrap_or_default() {
+                out.push_str(&format!("  - {}\n", markdown_safe(&value)));
+            }
         }
         out.push('\n');
     }
@@ -199,7 +206,7 @@ pub fn markdown(source: &Source, options: &Options) -> String {
 }
 
 /// What a page can load and run: nothing from anywhere, and no scripts; only its own styles.
-const POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
+const POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'";
 
 /// The conversation as one web page: everything it shows is in the file, light or dark as the reader's system is, and
 /// readable on a phone. Each answer's steps fold away.
@@ -210,7 +217,7 @@ pub fn html(source: &Source, options: &Options) -> String {
     for (label, value) in facts(&doc, source, options) {
         body.push_str(&format!("<div><dt>{}</dt><dd>{}</dd></div>", escape(&label), escape(&value)));
     }
-    body.push_str("</dl>\n</header>\n");
+    body.push_str(&format!("</dl>\n<p class=\"notes\">{}</p>\n</header>\n", escape(&notes(options).join(" "))));
     if doc.partial {
         body.push_str(&format!("<aside class=\"partial\"><p>{}</p>", escape(PARTIAL)));
         if !doc.earlier.is_empty() {
@@ -723,36 +730,40 @@ fn redacted_change(change: &ChangeRecord, redact: &dyn Fn(&str) -> String) -> Ch
     change
 }
 
-/// What's known of a conversation, as labels and values.
+/// What's known of a conversation, as labels and values: its id, its Set, when it began, was last saved and was
+/// exported (by which Kumi), the model and how many requests it holds.
 fn facts(doc: &Document, source: &Source, options: &Options) -> Vec<(String, String)> {
-    let mut facts = Vec::new();
+    let mut facts = vec![("Conversation".to_string(), source.id.to_string())];
     if let Some(place) = &doc.place {
         facts.push((source.words.1.to_string(), place.clone()));
-    }
-    if let Some(model) = &doc.model {
-        facts.push(("Model".to_string(), model.clone()));
     }
     if source.created > 0 {
         facts.push(("Started".to_string(), when(source.created, options.zone)));
     }
     facts.push(("Last saved".to_string(), when(source.conversation.saved_at, options.zone)));
+    facts.push(("Exported".to_string(), format!("{} by Kumi {}", when(options.now, options.zone), options.version)));
+    if let Some(model) = &doc.model {
+        facts.push(("Model".to_string(), model.clone()));
+    }
     facts.push(("Requests".to_string(), doc.requests.to_string()));
-    facts.push(("Conversation".to_string(), source.id.to_string()));
     facts
 }
 
+/// What the file holds and what it doesn't: whether secrets were taken out, and whether steps show their inputs and
+/// results.
+fn notes(options: &Options) -> [&'static str; 2] {
+    [
+        if options.redacted {
+            "Secrets, your home folder and your account name are taken out."
+        } else {
+            "Nothing was taken out: this file may hold keys, tokens and paths."
+        },
+        if options.full { "Each step's input and result are included." } else { "Each step shows by name, without its input and result." },
+    ]
+}
+
 fn footer(options: &Options) -> String {
-    let what = if options.full {
-        "Each step's input and result are included."
-    } else {
-        "Each step shows by name; their inputs and results aren't included."
-    };
-    let taken = if options.redacted {
-        "Keys, tokens, your home folder and your account name are taken out."
-    } else {
-        "Nothing was taken out: this file may hold keys and paths."
-    };
-    format!("Exported from Kumi {} on {}. {what} {taken}", options.version, when(options.now, options.zone))
+    format!("Exported from Kumi {} on {}.", options.version, when(options.now, options.zone))
 }
 
 /// A time, as the producer reads it where they are.
@@ -1109,6 +1120,7 @@ dl { display: flex; flex-wrap: wrap; gap: .3rem 1.4rem; margin: 0; font-size: .8
 dl div { display: flex; gap: .4rem; }
 dt { color: var(--faint); }
 dd { margin: 0; color: var(--dim); overflow-wrap: anywhere; }
+.notes { margin: .7rem 0 0; color: var(--faint); font-size: .85rem; }
 .partial { margin: 1rem 0; padding: .6rem .9rem; border-left: 3px solid var(--accent); background: var(--card); color: var(--dim); font-size: .9rem; }
 .partial p { margin: .2rem 0; }
 article { margin: 1.2rem 0; padding: .9rem 1rem; border-radius: 10px; background: var(--card); border: 1px solid var(--rule); }
@@ -1247,7 +1259,9 @@ pub fn import(text: &str, now: i64) -> Result<Imported, String> {
 /// are cleaned as an export cleans them, so nothing in them is hidden from the transcript but seen by the model, and none
 /// pass as Kumi's own notes. None when nothing's left of it.
 fn kept_message(message: Message) -> Option<Value> {
-    let words = |text: &str| Some(clean_text(text)).filter(|text| !trim(text).is_empty()).map(|text| json!({"type": "text", "text": text}));
+    let words = |text: &str| {
+        Some(clean_text(&bounded(text))).filter(|text| !trim(text).is_empty()).map(|text| json!({"type": "text", "text": text}))
+    };
     let (role, content): (&str, Vec<Value>) = match message {
         Message::User { content, .. } => {
             let text: String = content
@@ -1257,7 +1271,7 @@ fn kept_message(message: Message) -> Option<Value> {
                     UserPart::File(_) => None,
                 })
                 .collect();
-            match producer_words(&clean_text(&text), 0, &mut Vec::new(), &mut false) {
+            match producer_words(&clean_text(&bounded(&text)), 0, &mut Vec::new(), &mut false) {
                 Words::Said(said) => ("user", vec![json!({"type": "text", "text": said})]),
                 Words::CarryOn | Words::Kumi => return None,
             }
@@ -1272,7 +1286,7 @@ fn kept_message(message: Message) -> Option<Value> {
                         "type": "tool-call",
                         "toolCallId": call.tool_call_id,
                         "toolName": clean_name(&call.tool_name),
-                        "input": if call.input.is_object() { call.input } else { json!({}) },
+                        "input": if call.input.is_object() && stringify_pretty(&call.input, 0).len() <= MAX_INPUT { call.input } else { json!({}) },
                     })),
                     _ => None,
                 })
@@ -1284,7 +1298,7 @@ fn kept_message(message: Message) -> Option<Value> {
                 .into_iter()
                 .filter_map(|part| match part {
                     ToolPart::ToolResult(result) => {
-                        let text = clean_text(&output_text(&result.output));
+                        let text = clean_text(&bounded(&output_text(&result.output)));
                         Some(json!({
                             "type": "tool-result",
                             "toolCallId": result.tool_call_id,
@@ -1342,6 +1356,15 @@ fn output_text(output: &ToolResultOutput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+    }
+}
+
+/// Words from a file, at most [`MAX_PART`] long: past it, cut, and said to be.
+fn bounded(text: &str) -> String {
+    if utf16_len(text) > MAX_PART {
+        format!("{} [cut: it ran longer than Kumi imports]", head(text, MAX_PART))
+    } else {
+        text.to_string()
     }
 }
 
