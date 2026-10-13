@@ -23,7 +23,7 @@ use kumi_runtime::{
     ears::device::EARS_NAME,
     library::sources::{basename, dirname, join, resolve},
     system::{self, Env, SystemProgram},
-    KUMI, KUMI_VERSION, REINSTALL,
+    CONNECT_LIVE, KUMI, KUMI_VERSION, REINSTALL,
 };
 pub use migration::{ensure_native_launcher, finish_legacy_transition, launcher, only_the_host_differs, write_launcher};
 use serde::{Deserialize, Serialize};
@@ -137,11 +137,12 @@ impl InstalledIo {
         Self { out, env, input: None, run: None, fetcher: None, live_running: None, confirm: None, update_bridge: None, cancel: None }
     }
 }
-async fn ask(io: &InstalledIo, question: &str) -> bool {
+/// A yes/no question; `ahead` says how to answer it beforehand, where a flag does ("add --yes").
+async fn ask(io: &InstalledIo, question: &str, ahead: Option<&str>) -> bool {
     if let Some(ask) = &io.confirm {
         ask(question.into()).await
     } else {
-        ask_yes_no(io.input.clone(), io.out.clone(), question).await
+        ask_yes_no(io.input.clone(), io.out.clone(), question, ahead).await
     }
 }
 async fn live_open(io: &InstalledIo, run: Run) -> bool {
@@ -163,7 +164,9 @@ async fn live_open(io: &InstalledIo, run: Run) -> bool {
 async fn bridge_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
     let say = |text: String| io.out.write(&format!("{text}\n"));
     let Some(config) = find_bridge_config(&io.env) else {
-        say(format!("To connect Live, quit Live, then run: {} bridge", *KUMI));
+        if let Some(words) = no_bridge_yet(system::platform()) {
+            say(words);
+        }
         return 0;
     };
     let server = read_bridge_server(&config).ok();
@@ -183,23 +186,34 @@ async fn bridge_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
         format!("The bridge in Live is {installed}; this Kumi's is {bundled}.")
     });
     if live_open(io, io.run.clone().unwrap_or_else(default_run)).await {
-        say(format!("Quit Live (save your work first), then run: {} bridge", *KUMI));
+        say(format!("{}.", *CONNECT_LIVE));
         return 0;
     }
     if let Some(update) = &io.update_bridge {
         return update(app.into()).await;
     }
+    bridge_command(app, home).status().await.ok().and_then(|s| s.code()).unwrap_or(1)
+}
+/// With no bridge in Live yet, an update ends by saying how to connect it, where Live runs: on Linux there's no Live,
+/// so nothing is said.
+pub fn no_bridge_yet(platform: &str) -> Option<String> {
+    crate::live_app::runs_on(platform).then(|| format!("The bridge isn't in Live yet. {}.", *CONNECT_LIVE))
+}
+/// `kumi bridge` as an update's last step, Live just found closed: it asks nothing more (its lifecycle looks for
+/// Live again before changing anything) and doesn't wait for a Live nobody has opened.
+pub fn bridge_command(app: &str, home: &str) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(join(app, &executable_name("kumi")));
     command
-        .arg("bridge")
+        .args(["bridge", "--yes"])
         .current_dir(home)
         .env("KUMI_INSTALLED", "1")
         .env("KUMI_BRIDGE_AFTER", "1")
+        .env("KUMI_BRIDGE_WAIT_SECONDS", "0")
         .env("KUMI_HOME", home)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    command.status().await.ok().and_then(|s| s.code()).unwrap_or(1)
+    command
 }
 /// What a swap does to Kumi's folders. The tests stand in for Windows holding one.
 trait Folders {
@@ -752,7 +766,7 @@ async fn remove_bridge(io: &InstalledIo, run: Run) -> Result<RemovedBridge, Runt
             .map(|ext| format!(", and {KUMI_EXTENSION_ID} from {ext} and from {}", dirname(&extension_data_dir(ext))))
             .unwrap_or_default()
     );
-    if !ask(io, "Remove the Ableton bridge from Live too?").await {
+    if !ask(io, "Remove the Ableton bridge from Live too?", None).await {
         say(format!("The bridge stays in Live, and so do its files. To take it out later, remove {by_hand}."));
         return Ok(RemovedBridge::Kept);
     }
@@ -843,7 +857,7 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     } else {
         "Your conversations, notes, recipes and sign-ins stay (add --all to remove them too)."
     };
-    if !options.yes && !ask(&io, &format!("Remove Kumi from {}? {keeps}", display(&home))).await {
+    if !options.yes && !ask(&io, &format!("Remove Kumi from {}? {keeps}", display(&home)), Some("add --yes")).await {
         say("Nothing was removed.".into());
         return Ok(1);
     }

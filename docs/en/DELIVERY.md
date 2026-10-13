@@ -11,7 +11,8 @@ remove exactly that. With Kumi, `kumi bridge` runs it for you.
 
 ## With Kumi
 
-Quit Live, then run `kumi bridge`. It:
+Run `kumi`: it puts the bridge in Live and can restart Live for you. By hand, quit Live, then run
+`kumi bridge`. It:
 
 1. refuses while Live is running, and asks you to confirm Live is closed
    (`--yes` confirms beforehand);

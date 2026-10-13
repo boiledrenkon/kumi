@@ -19,7 +19,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 更新后第一次打开 Kumi 时，对话开头会显示 **What's new**（新功能）：从 Kumi 的更新日志中取最新的最多五条，其余的用 `/changelog` 查看。如果有从上次接着的对话，新功能会显示在它下面。全新安装时不显示，模型也看不到这些内容。在 `~/.kumi/settings.json` 中写入 `"whatsNew": false` 即可关闭。
 
-**设置**会在还有步骤未完成时最先出现：登录、Live 中 Kumi 的桥接（缺失，或比 Kumi 自带的旧），然后是 Control Surface。它列出这三步，已完成的以薄荷绿显示并注明所选内容，并询问当前这一步需要什么；Kumi 等待时（等浏览器、安装或 Live），字标下方的薄荷绿波形会动起来。↑↓ 和 Enter 用于选择，Esc 把这一步留到以后，之后的会话在同一窗口中显示。已经设置好的 Kumi 会直接进入会话。
+**设置**会在还有步骤未完成时最先出现：登录、Live 中 Kumi 的桥接（缺失，或比 Kumi 自带的旧），然后是 Control Surface。它列出这三步，已完成的以薄荷绿显示并注明所选内容，并询问当前这一步需要什么；Kumi 等待时（等浏览器、安装或 Live），字标下方的薄荷绿波形会动起来。↑↓ 和 Enter 用于选择，Esc 把这一步留到以后，之后的会话在同一窗口中显示。等待 ChatGPT 登录时，**c** 复制链接（或代码），**d** 改用代码而不用浏览器，**b** 改回浏览器。在 Linux 上，设置只进行登录。已经设置好的 Kumi 会直接进入会话。
 
 宽度不足 100 列时，Live 窗格会折叠为输入框上方的两行条带（先是你所在的位置和 Kumi 正在做的事，然后是最近一次修改及其撤销）。窗口小于 24×8 时，Kumi 会请你把窗口调大。
 
@@ -29,21 +29,21 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 | 命令 | 作用 |
 | --- | --- |
-| `kumi` | 在 Live 当前打开的工程上打开 Kumi |
+| `kumi` | 在 Live 当前打开的工程上打开 Kumi；第一次时登录，并把桥接装入 Live（Kumi 可以替你重启 Live） |
 | `kumi --inference-only` | 不连接 Live，只聊天 |
 | `kumi --bridge-config <absolute path>` | 使用你自己的桥接配置 |
 | `kumi login` | 登录：询问使用 ChatGPT 还是 API 密钥 |
-| `kumi login <provider>` | 登录 `openai-codex`（ChatGPT；没有浏览器时加 `--device`），或用 API 密钥登录 `anthropic`、`openai`、`opencode` 或 `opencode-go` |
+| `kumi login <provider>` | 登录 `openai-codex`（ChatGPT；没有浏览器时加 `--device`，通过 SSH 时默认如此；要用浏览器则加 `--browser`），或用 API 密钥登录 `anthropic`、`openai`、`opencode` 或 `opencode-go` |
 | `kumi logout <provider>` | 移除 Kumi 在该提供方的登录 |
 | `kumi model [<provider>/<model>]` | 显示或选择模型，也可以是你电脑上的模型（`ollama/<model>`） |
 | `kumi auth` | 哪些提供方可用、当前模型以及登录文件（从不显示机密信息） |
-| `kumi bridge [--yes] [--allow-dirty]` | 在 Live 关闭时：把桥接装入 Live，或将其更新到最新。`--yes` 确认 Live 已关闭；`--allow-dirty` 允许带有未提交修改的检出副本安装其桥接 |
+| `kumi bridge [--yes] [--allow-dirty]` | 在 Live 关闭时：把桥接装入 Live，或将其更新到最新。`--yes` 确认 Live 已关闭（没有终端时，不加它就什么都不改）；`--allow-dirty` 允许带有未提交修改的检出副本安装其桥接 |
 | `kumi doctor` | 检查 Node、登录、你电脑上的模型服务器、桥接、Live、扩展、素材库、视频程序、说话功能、Live 的菜单和终端；告诉你该运行什么 |
 | `kumi library [--rebuild]` | Kumi 学习你的声音、预设和工程进行到了哪里；`--rebuild` 全部重新学习 |
 | `kumi update [--check \| --rollback]` | 获取最新的 Kumi（桥接较旧时也一并更新）；`--check` 只检查；`--rollback` 回到上一个版本（Live 已关闭时连同其桥接；仅限已安装的 Kumi） |
 | `kumi report` | 写出 `~/kumi-report-<date and time>.txt`，出问题时把它发给我们 |
 | `kumi uninstall [--all] [--yes]` | 卸载已安装的 Kumi；`--all` 同时删除对话、笔记、配方和登录信息；`--yes` 跳过第一个确认问题 |
-| `kumi --version`（或 `-v`）、`kumi --help` | 版本；帮助 |
+| `kumi --version`（或 `-v`）、`kumi --help`（或 `-h`、`help`） | 版本；帮助 |
 
 ## Kumi 内的命令
 
@@ -62,7 +62,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `/model`、`/effort` | 选择模型（来自各提供方自己的列表，然后是你电脑上的模型服务器：Ollama、LM Studio 以及 settings.json 中写的服务器；输入文字可筛选）以及它思考的力度；从你的下一条消息起生效。在 `/model` 中，ctrl+f 把选中的模型设为备用模型（再按一次取消） |
 | `/fast` | 当提供方在列表中提供时，开启模型的更快档位（ChatGPT 的“Fast”：回答更快，用量也更多）；再次输入 `/fast` 关闭。模型名旁会显示“· fast” |
 | `/willington` | 开启或关闭 [Willington](WILLINGTON_INTEGRATION.md)。在支持的构建上请求机架绑定；片段 Follow Actions 和原生编辑还要求通过匹配实际库的自测。原生编辑仅支持 b5 macOS ARM64。启用前保持关闭；桥接包含 Willington 时可用。 |
-| `/login`、`/logout` | 登录（在浏览器中用 ChatGPT 登录，或输入只显示为圆点的 API 密钥）或退出登录 |
+| `/login`、`/logout` | 登录（在浏览器中或用代码登录 ChatGPT，或输入只显示为圆点的 API 密钥）或退出登录 |
 | `/loop <what to reach>` | 按判定的轮次工作：一次修改，听修改前后，只有目标项变好、其他方面没变差才保留，然后下一个目标。所有项目达成、修改不再有帮助，或到 16 轮或 45 分钟时停止；按 Esc 或 `/loop stop` 也会停止。要匹配某个声音（“让我的 pad 听起来像 ~/ref.wav”）时改为旋钮搜索：单独输入 `/loop` 继续已暂停的搜索，`/loop stop` 结束它 |
 | `/goal <what to reach>` | 跨多个回合坚持一个目标，每个回合后检查（测量过时看判定的数值），直到达成、受阻、停滞（连续三个回合没有更接近）或用完预算。`/goal` 显示它；`/goal resume`（用完的部分换上新的预算）、`/goal edit <words>`、`/goal new: <words>`（替换未完成的目标）、`/goal pause`（或 Esc）、`/goal clear`（没有未完成的目标时，结束暂停中的声音匹配搜索） |
 | `/slots` | 显示每项聆听工作（分轨、扒谱、聆听、嵌入）由哪个模型负责，并用平常的话替换：`/slots listening gemini`、`/slots listening off`、`/slots listening <base URL>#<model>`、`/slots embeddings <.onnx 文件或 https 链接>`。新模型会先测试；`/slots back <job>` 撤回替换 |
@@ -137,7 +137,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | Shift-Tab | 进入标签页（再按一次切到下一个标签页）：↑↓ 和 Page Up/Down 移动。在修改上，Enter、→ 或空格展开它的图示，Enter 或 ← 收起，展开时按 `u` 撤销；在记住的内容上，Enter 执行 forget；在 JOBS 的行上，Enter 打开任务，按 `x` 停止。Esc 或 Tab 返回 |
 | 鼠标 | 点击行末的 **undo** 或 **forget**、修改的文字（展开图示）或任务的文字（打开任务）、标签页名称，或点击设备树中的设备以指向它；点击图钉取消固定。拖动时按住 Shift（iTerm2 中为 Option）可选择文字 |
 
-**面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/conversations` 和 `/recipes` 中，输入文字可筛选列表。在 `/model` 中，ctrl+f 设定备用模型。**Your answer**（以带编号选项的问题结尾的回答）：按编号再按 Enter 即可回答。Kumi 推荐的选项带有标记，并一开始就被选中；没有人在时（运行过 `/goal`、`/loop` 或匹配，或 Kumi 的窗口已在其他窗口后面 2 分钟），倒计时结束后 Kumi 会选它（“Taking 2 (recommended) in 60 s · any key cancels”）。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。在任务详情中，↑↓ 滚动，`x` 停止任务，`r` 重新运行，`c` 复制报告，Esc 关闭。
+**面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/conversations` 和 `/recipes` 中，输入文字可筛选列表。在 `/model` 中，ctrl+f 设定备用模型。**Your answer**（以带编号选项的问题结尾的回答）：按编号再按 Enter 即可回答。Kumi 推荐的选项带有标记，并一开始就被选中；没有人在时（运行过 `/goal`、`/loop` 或匹配，或 Kumi 的窗口已在其他窗口后面 2 分钟），倒计时结束后 Kumi 会选它（“Taking 2 (recommended) in 60 s · any key cancels”）。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接（或代码），`d` 改用代码登录而不用浏览器，`b` 改回浏览器。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。在任务详情中，↑↓ 滚动，`x` 停止任务，`r` 重新运行，`c` 复制报告，Esc 关闭。
 
 ## 纯文本模式
 

@@ -65,8 +65,10 @@ install shows none, and the model never sees them. `"whatsNew": false` in
 steps, done ones in mint with what was chosen, and asks what the current one
 needs; a mint waveform under the wordmark moves while Kumi waits (for the
 browser, the install, or Live). ↑↓ and Enter choose, Esc leaves the step for
-later, and the session follows in the same window. A Kumi that's set up starts
-straight into the session.
+later, and the session follows in the same window. While ChatGPT's sign-in waits,
+**c** copies its link (or code), **d** uses a code instead of the browser, and **b**
+the browser again. On
+Linux, setup only signs in. A Kumi that's set up starts straight into the session.
 
 Below 100 columns the Live pane folds into a two-line strip above the input box
 (where you are and what Kumi is doing, then the last change with its undo).
@@ -79,21 +81,21 @@ Run these as `kumi <command>`; from a copy of the repository, as
 
 | Command | What it does |
 | --- | --- |
-| `kumi` | Open Kumi on the Set Live has open |
+| `kumi` | Open Kumi on the Set Live has open; the first time, sign in and put the bridge in Live (Kumi can restart Live for you) |
 | `kumi --inference-only` | Chat without Live |
 | `kumi --bridge-config <absolute path>` | Use your own bridge configuration |
 | `kumi login` | Sign in: asks whether with ChatGPT or an API key |
-| `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
+| `kumi login <provider>` | Sign in to `openai-codex` (ChatGPT; `--device` without a browser, the default over SSH; `--browser` for the browser), or `anthropic`, `openai`, `opencode` or `opencode-go` with an API key |
 | `kumi logout <provider>` | Remove Kumi's sign-in there |
 | `kumi model [<provider>/<model>]` | Show or choose the model, a model on your computer too (`ollama/<model>`) |
 | `kumi auth` | Which providers are usable, the model and the sign-in file (never secrets) |
-| `kumi bridge [--yes] [--allow-dirty]` | With Live closed: put the bridge into Live, or bring it up to date. `--yes` confirms Live is closed; `--allow-dirty` lets a checkout with uncommitted changes install its bridge |
+| `kumi bridge [--yes] [--allow-dirty]` | With Live closed: put the bridge into Live, or bring it up to date. `--yes` confirms Live is closed (without a terminal, nothing changes without it); `--allow-dirty` lets a checkout with uncommitted changes install its bridge |
 | `kumi doctor` | Check Node, sign-in, the model servers on your computer, the bridge, Live, the extension, your library, video programs, talking, Live's menus and the terminal; says what to run |
 | `kumi library [--rebuild]` | How far Kumi has got learning your sounds, presets and Sets; `--rebuild` learns them all again |
 | `kumi update [--check \| --rollback]` | Get the newest Kumi (and the bridge when it's older); `--check` only asks; `--rollback` goes back to the one before, with its bridge when Live is closed (an installed Kumi only) |
 | `kumi report` | Write `~/kumi-report-<date and time>.txt` to send when something goes wrong |
 | `kumi uninstall [--all] [--yes]` | Remove an installed Kumi; `--all` also removes conversations, notes, recipes and sign-ins; `--yes` skips the first question |
-| `kumi --version` (or `-v`), `kumi --help` | Version; help |
+| `kumi --version` (or `-v`), `kumi --help` (or `-h`, `help`) | Version; help |
 
 ## Commands inside Kumi
 
@@ -114,7 +116,7 @@ message, not a command.
 | `/model`, `/effort` | Choose the model (from each provider's own list, then the model servers on your computer: Ollama, LM Studio and those in settings.json; type to filter) and how hard it thinks; from your next message. In `/model`, ctrl+f makes the selected model your fallback (again clears it) |
 | `/fast` | Turn on the model's faster tier when its provider lists one (ChatGPT's "Fast": quicker answers, more of your usage); `/fast` again turns it off. Shown as "· fast" beside the model |
 | `/willington` | Turn [Willington](WILLINGTON_INTEGRATION.md) on or off. Rack bindings are requested on supported builds; clip Follow Actions and native editing also require passing exact-library self-tests. Native editing is b5 macOS ARM64 only. Off until enabled; available when the bridge carries Willington. |
-| `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
+| `/login`, `/logout` | Sign in (ChatGPT in the browser or with a code, or an API key shown only as dots) or out |
 | `/loop <what to reach>` | Work in judged rounds: one change, heard before and after, kept only if its target improved and nothing else got worse, then the next target. It stops when every item is met, when changes stop helping, or at 16 rounds or 45 minutes; Esc or `/loop stop` stops it. A sound to match ("make my pad sound like ~/ref.wav") runs the knob search instead: `/loop` alone picks a paused one up, `/loop stop` ends it |
 | `/goal <what to reach>` | Keep at one goal across turns, checked after each (by the judge's numbers when measured), until it's met, blocked, stuck (three turns in a row that got no closer) or out of budget. `/goal` shows it; `/goal resume` (a fresh budget for whatever ran out), `/goal edit <words>`, `/goal new: <words>` (replaces an unfinished one), `/goal pause` (or Esc), `/goal clear` (with no unfinished goal, a paused sound-match search) |
 | `/slots` | Which model does each listening job (stems, transcription, listening, embeddings), and swaps one in plain words: `/slots listening gemini`, `/slots listening off`, `/slots listening <base URL>#<model>`, `/slots embeddings <.onnx file or https link>`. A new model is tried first; `/slots back <job>` takes a swap back |
@@ -204,7 +206,8 @@ start with; when nobody's there (a `/goal`, `/loop` or match ran, or Kumi's
 window has been behind another for 2 minutes), Kumi takes it after a countdown
 ("Taking 2 (recommended) in 60 s · any key cancels"). In the key box, paste the key and press
 Enter; Kumi checks it with the provider, or saves it unchecked when the provider
-can't be reached. In the ChatGPT sign-in panel, `c` copies the link. In the
+can't be reached. In the ChatGPT sign-in panel, `c` copies the link (or the code), `d` signs in
+with a code instead of the browser, and `b` goes back to the browser. In the
 `/btw` panel, ↑↓ and Page Up/Down scroll, ←→ go through earlier answers, `c`
 copies, and Esc, Enter or Space closes it. In a job's details, ↑↓ scroll, `x`
 stops it, `r` runs it again, `c` copies its report, and Esc closes them.

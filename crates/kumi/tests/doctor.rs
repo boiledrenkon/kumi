@@ -119,6 +119,9 @@ async fn doctor_says_whats_fine_and_exact_fixes_without_secrets() {
     io.bundled_bridge_version = Some("1.0.10".into());
     assert_eq!(run_doctor(io.clone()).await.unwrap(), 1);
     let printed = out.0.borrow().clone();
+    // An older bridge in Live: the one way Kumi says to connect it, which can restart Live for the producer.
+    let older = find(&doctor_checks(&io).await.unwrap(), "The installed bridge (1.0.9) is older than this Kumi's (1.0.10)").clone();
+    assert_eq!(older.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
     for text in [
         "Node.js 20.11.0 isn't supported (Kumi needs 22 or newer)",
         "Install Node 24 LTS",
@@ -158,11 +161,15 @@ async fn doctor_explains_live_bridge_and_terminal_in_plain_words() {
     io.terminal = Some(TerminalInfo { is_tty: true, columns: Some(50), rows: Some(12) });
     assert!(find(&doctor_checks(&io).await.unwrap(), "Terminal").text.contains("small"));
     io.env.insert("KUMI_REMOTE_SCRIPTS_DIR".into(), s.root.path().join("nowhere").display().to_string());
-    assert!(find(&doctor_checks(&io).await.unwrap(), "bridge isn't installed")
-        .next
-        .as_ref()
-        .unwrap()
-        .contains(&format!("{} bridge", *KUMI)));
+    let checks = doctor_checks(&io).await.unwrap();
+    if matches!(kumi_runtime::system::platform(), "darwin" | "win32") {
+        let missing = find(&checks, "The Ableton bridge isn't installed");
+        assert_eq!(missing.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
+        assert!(missing.next.as_ref().unwrap().contains(&format!("{} bridge", *KUMI)));
+    } else {
+        // No Live for Linux: nothing to fix.
+        assert_eq!(find(&checks, "There's no Live for this system, so Kumi chats without it").status, CheckStatus::Note);
+    }
     io.env.insert("KUMI_MODEL".into(), "openai-codex/gpt-fixture".into());
     assert_eq!(find(&doctor_checks(&io).await.unwrap(), "ChatGPT").next, Some(format!("{} login openai-codex", *KUMI)));
 }
@@ -386,4 +393,29 @@ async fn native_bridge_configuration_resolves_binary_and_sibling_metadata() {
     let mut io = s.io();
     io.node_version = None;
     assert!(doctor_checks(&io).await.unwrap()[0].text.ends_with("(native executable)"));
+}
+#[test]
+fn a_missing_bridge_is_to_fix_only_where_a_live_12_can_take_it() {
+    use kumi::live_app::LiveInstalled;
+    // Linux: no Live, so nothing to fix, and Live's folders aren't read at all.
+    let none = missing_bridge("linux", || unreachable!("no Live folders on Linux"));
+    assert_eq!(
+        (none.status, none.text.as_str(), none.next),
+        (CheckStatus::Note, "There's no Live for this system, so Kumi chats without it", None)
+    );
+    // No Live 12 here: a note, saying what Kumi works with.
+    for (found, text) in [
+        (LiveInstalled::Missing, "Live 12 isn't on this computer, so Kumi chats without Live"),
+        (LiveInstalled::Older("11.3.21".into()), "Only Live 11.3.21 is on this computer, so Kumi chats without Live"),
+    ] {
+        let check = missing_bridge("darwin", || found);
+        assert_eq!((check.status, check.text.as_str()), (CheckStatus::Note, text));
+        assert!(check.next.unwrap().starts_with("Kumi works with Live 12: once it's installed and opened once, run: "));
+    }
+    // Live 12 here (opened or not): the bridge is to put in, the one way.
+    for found in [LiveInstalled::Ready, LiveInstalled::NeverOpened("/Applications/Ableton Live 12 Suite.app".into())] {
+        let check = missing_bridge("win32", || found);
+        assert_eq!(check.status, CheckStatus::Fix);
+        assert_eq!(check.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
+    }
 }

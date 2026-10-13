@@ -14,7 +14,7 @@ use super::{
     observation::{ObservationHost, ObservedChange, Observer},
     options::{AbletonOptions, HandsSetup},
     parameters::Parameters,
-    plugin_tool,
+    plugin_tool, project,
     remember::Remember,
     rendering::Rendering,
     samples, views,
@@ -907,6 +907,11 @@ impl Integration for Ableton {
     }
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
         Ok(self.history.stop_everything(self.combined(signal)).await)
+    }
+    /// Never Live's default Set or a template: opening one of those again would change it.
+    fn open_set(&self) -> Option<String> {
+        let set = self.history.remember.current()?;
+        set.path.clone().filter(|path| !set.unsaved && !path.is_empty() && !project::template_location(path))
     }
     fn has_show_message(&self) -> bool {
         true

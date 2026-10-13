@@ -24,3 +24,17 @@ pub static KUMI_REPAIR: LazyLock<String> =
     LazyLock::new(
         || if *INSTALLED { format!("the Kumi installer again ({REINSTALL})") } else { "cargo build --release --workspace".into() },
     );
+
+/// The one way Kumi says to connect Live: Kumi itself puts the bridge in Live and can restart Live; `kumi bridge` does
+/// it by hand, with Live closed.
+pub static CONNECT_LIVE: LazyLock<String> = LazyLock::new(|| connect_live(&KUMI_START, &KUMI));
+
+/// That sentence, with `start` starting Kumi and `kumi` before its commands.
+pub fn connect_live(start: &str, kumi: &str) -> String {
+    format!("Run {start}: it puts the bridge in Live and can restart Live for you (or, with Live closed: {kumi} bridge)")
+}
+
+/// The same where Kumi's setup doesn't run (plain mode): the way by hand first.
+pub fn connect_live_by_hand(kumi: &str) -> String {
+    format!("With Live closed, run: {kumi} bridge (the full-screen app can also restart Live for you)")
+}

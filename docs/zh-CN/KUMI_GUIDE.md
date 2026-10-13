@@ -10,9 +10,16 @@ Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中�
 
 在 Kumi 中，`/login` 用于登录（第一次时，Kumi 的设置会先问你）：用你的套餐登录 ChatGPT（浏览器会打开，登录结果通过 `localhost:1455` 返回），或用 API 密钥登录 Anthropic、OpenAI 或 OpenCode，密钥粘贴到只显示圆点的输入框中。Kumi 在保存密钥之前会先向其提供方验证；如果连不上提供方，它会保存密钥，并说明尚未验证。`/logout` 用于退出登录。
 
+在设置的登录步骤中：
+
+- Kumi 会先检查能否连到 ChatGPT 的登录页。连不上时，它会说明原因（DNS、TLS、代理、没有及时应答或无法连接），并列出它经过的代理设置；没有设置时，会告诉你可以用 `HTTPS_PROXY` 设置。
+- 按 **d** 会改用代码登录 ChatGPT，而不用浏览器：在任何设备的浏览器中输入这个代码即可。通过 SSH 时，无论是 `/login` 还是 `kumi login`，Kumi 都会自动使用代码；按 **b**（或加 `--browser`）可改回浏览器链接。
+- 浏览器链接会完整显示，按 **c** 可复制。
+- Ollama 或 LM Studio 运行时，还可以选择 **On this computer**。
+
 | 提供方 | 模型名称 | 登录方式 |
 | --- | --- | --- |
-| ChatGPT 套餐 | `openai-codex/<model>` | `/login`（浏览器），或 `kumi login openai-codex`（在没有浏览器的机器上加 `--device`） |
+| ChatGPT 套餐 | `openai-codex/<model>` | `/login`（浏览器，或代码：**d**），或 `kumi login openai-codex`（没有浏览器时加 `--device`；通过 SSH 时自动使用代码，要用浏览器则加 `--browser`） |
 | Anthropic API | `anthropic/<model>` | 用 API 密钥 `/login`，或 `ANTHROPIC_API_KEY` |
 | OpenAI API | `openai/<model>` | 用 API 密钥 `/login`，或 `OPENAI_API_KEY` |
 | OpenCode Zen 和 Go | `opencode/<model>`、`opencode-go/<model>` | 用 API 密钥 `/login`（两者共用一个密钥），或 `OPENCODE_API_KEY` |
@@ -54,10 +61,16 @@ Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中�
 Kumi 通过它的桥接访问 Live：桥接由在 Live 内运行的 Remote Script 和由 Kumi 启动的本地 MCP 服务器组成。第一次打开 Kumi 时，以及每当它自带的桥接比 Live 中的新时，Kumi 的设置都会在应用内只完成尚未完成的步骤：
 
 1. **Sign in**：如果 Kumi 还没有登录，先登录。
-2. **Connect to Live**：Kumi 把桥接放到位并打开 Live。如果 Live 正开着，选择 **Restart Live now**（Kumi 请 Live 退出，Live 会先提示你保存工作）或 **I'll quit it**（Kumi 等你自己退出 Live）。如果 Kumi 请求后过了一会儿 Live 仍然开着（例如它询问是否保存时你选了 Cancel），Kumi 会说明情况，并提出再请求一次。Kumi 关闭 Live 之后，无论这一步如何结束，Live 都会重新打开。
-3. **Control Surface**：第一次时，在 Live 中打开 **Settings → Link, Tempo & MIDI**，把 **AbletonMcpBridge** 选为 Control Surface。Kumi 会自己察觉，Live 也会记住这个选择。
+2. **Connect to Live**：Kumi 把桥接放到位并打开 Live。
+   - **Live 没有打开时：** Kumi 先查找 Live 12。如果没有安装，或只有旧版 Live，它会说明；安装后选 **Look again** 重新检查。如果 Live 12 从未打开过，Kumi 会打开它一次，让它建立 User Library。
+   - **Live 正开着时：** 选择 **Restart Live now**（Kumi 请 Live 退出，Live 会先提示你保存工作）或 **I'll quit it**（Kumi 等你自己退出 Live）。如果 Kumi 请求后过了一会儿 Live 仍然开着（例如它询问是否保存时你选了 Cancel），Kumi 会说明情况，并提出再请求一次。
+   - **在 Mac 上，** macOS 第一次可能会询问是否允许终端控制 Live：请选“好”。如果你拒绝了，Kumi 会等你自己退出 Live，并告诉你在哪里允许：系统设置 › 隐私与安全性 › 自动化。
+   - Kumi 关闭 Live 之后，无论这一步如何结束，Live 都会重新打开；Kumi 知道之前打开的工程时，会连同它一起打开（不知道时，工程在 File › Open Recent Set 中）。
+3. **Control Surface**：第一次时，在 Live 中打开 **Settings → Link, Tempo & MIDI**，把 **AbletonMcpBridge** 选为 Control Surface。Kumi 会自己察觉，Live 也会记住这个选择。大约 45 秒后，Kumi 会补充 Settings 的位置（Mac 上在 Live 菜单，Windows 上在 Options），以及 Live 显示对话框时要先回答它。
 
-在某一步按 Esc，会把这一步留到以后：Kumi 暂时在不连接 Live 的情况下聊天。Sign in 和 Connect to Live 下次会再次提出；Connect to Live 完成之后，只要 Live 应答，Kumi 就会自己连接。在放置桥接时退出 Kumi，它会等桥接放好后再退出。Live 关闭时，`kumi bridge` 在 shell 中做同样的事：它会请你确认（`--yes` 可预先确认），Live 正在运行时会拒绝执行，并且从不退出或启动 Live。两者都通过桥接自身的生命周期流程安装或更新桥接，带有检查、回执和回滚，并在更新之间保留它的设置和密钥。`kumi bridge` 最多等待十分钟让 Live 连接，连上时会告诉你。当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行它；需要你自己运行时，`kumi doctor` 会告诉你。
+在不能运行 Live 的 Linux 上，设置只进行登录。
+
+在某一步按 Esc，会把这一步留到以后：Kumi 暂时在不连接 Live 的情况下聊天。Sign in 和 Connect to Live 下次会再次提出；Connect to Live 完成之后，只要 Live 应答，Kumi 就会自己连接。在放置桥接时退出 Kumi，它会等桥接放好后再退出。Live 关闭时，`kumi bridge` 在 shell 中做同样的事：它会请你确认（`--yes` 可预先确认；没有终端时，不加 `--yes` 就什么都不改），Live 正在运行时会拒绝执行，并且从不退出或启动 Live。两者都通过桥接自身的生命周期流程安装或更新桥接，带有检查、回执和回滚，并在更新之间保留它的设置和密钥。`kumi bridge` 最多等待十分钟让 Live 连接，连上时会告诉你。当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行它（加 `--yes`，且不等待）。其他情况下，`kumi update` 和 `kumi doctor` 会请你运行 `kumi`：它会把桥接装入 Live，也可以替你重启 Live。
 
 Kumi 会在你的 User Library 中找到 Live 的 Remote Scripts 文件夹，包括你移到别处的 User Library（为此它会读取 Live 自己的设置）。`KUMI_REMOTE_SCRIPTS_DIR` 可以覆盖这个位置。
 
@@ -312,7 +325,7 @@ kumi report              # 出问题时生成一个可以发送的文件
 kumi uninstall           # 卸载 Kumi；加上 --all 会同时删除你的对话、笔记和登录信息
 ```
 
-`update` 会获取最新版本，按其校验和验证，并先启动一次以确认它能运行，然后才把它放到位；之前的版本会保留，供 `--rollback` 使用。如果 Live 中的桥接较旧且 Live 已关闭，它接着会运行 `kumi bridge`；如果 Live 正开着，它会告诉你退出 Live 再运行 `kumi bridge`。在仓库的副本中，`update` 改为把检出向前推进（`git merge --ff-only`，有本地修改时拒绝执行），并用 Cargo 构建工作区。在 Kumi 中，`/update` 会先询问你，然后关闭 Kumi、更新，再用同一个对话重新打开它。
+`update` 会获取最新版本，按其校验和验证，并先启动一次以确认它能运行，然后才把它放到位；之前的版本会保留，供 `--rollback` 使用。如果 Live 中的桥接较旧且 Live 已关闭，它接着会运行 `kumi bridge --yes`；如果 Live 正开着，它会请你运行 `kumi`，它可以替你重启 Live。在仓库的副本中，`update` 改为把检出向前推进（`git merge --ff-only`，有本地修改时拒绝执行），并用 Cargo 构建工作区。在 Kumi 中，`/update` 会先询问你，然后关闭 Kumi、更新，再用同一个对话重新打开它。
 
 `--rollback` 会回到上一个 Kumi；如果 Live 已关闭，也会一并恢复它的桥接。在终端中，Kumi 会询问是否等你先退出 Live（Kumi 从不自行关闭 Live）。否则较新的桥接会保留，它同样能与之前的 Kumi 配合使用；要把桥接也恢复，请退出 Live，然后运行两次 `kumi update --rollback`。
 

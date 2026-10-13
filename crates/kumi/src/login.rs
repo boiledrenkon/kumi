@@ -15,7 +15,7 @@ use kumi_common::{
     time::now_ms,
 };
 use kumi_runtime::{
-    ai::http::{default_fetch, Fetch},
+    ai::http::{default_fetch, Fetch, FetchInit},
     auth::{
         openai_codex::{login_codex_browser, login_codex_device, read_pi_codex_login, LoginOptions, OPENAI_CODEX},
         store::{open_credential_store, valid_api_key, Credential, CredentialStore},
@@ -28,6 +28,7 @@ use kumi_runtime::{
         provider_info, KeySource, SignIn,
     },
     system::{self, Env},
+    web::cause::{unreachable, NetCause},
     KUMI, KUMI_START,
 };
 use std::{cell::RefCell, process::Stdio, rc::Rc};
@@ -216,6 +217,54 @@ pub async fn auth_status(config: &AppConfig, io: AuthIo) -> Result<(), RuntimeEr
     ));
     Ok(())
 }
+/// Where ChatGPT's sign-in starts: the host Kumi checks it can reach before anyone signs in.
+pub const SIGN_IN_HOST: &str = "auth.openai.com";
+/// How long that check waits for an answer.
+const REACH_MS: u64 = 8000;
+
+/// Before signing in: whether this computer reaches the sign-in, and if not, why and what to do, in a sentence or two
+/// with the proxy settings. Any answer means it does, unless it's a proxy's own refusal.
+pub async fn reach_sign_in(env: &Env, fetch: Option<Rc<dyn Fetch>>) -> Option<String> {
+    let fetch = fetch.unwrap_or_else(default_fetch);
+    let signal = abort::timeout(REACH_MS);
+    let url = format!("https://{SIGN_IN_HOST}/.well-known/openid-configuration");
+    let cause = match fetch.fetch(&url, FetchInit { signal: Some(signal.clone()), ..Default::default() }).await {
+        Ok(response) => Some(NetCause::of_status(response.status)?),
+        // Kumi's own wait running out is a timeout too.
+        Err(_) if signal.is_cancelled() => Some(NetCause::Timeout),
+        Err(error) => NetCause::of_call(&error),
+    };
+    Some(unreachable(&format!("ChatGPT's sign-in ({SIGN_IN_HOST})"), cause, env))
+}
+
+/// Text onto this computer's clipboard with its own tool (pbcopy, clip, wl-copy or xclip), for terminals that don't
+/// take the terminal's way (OSC 52). Quietly nothing where none is there.
+pub fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    let tools: &[(&str, &[&str])] = match system::platform() {
+        "darwin" => &[("pbcopy", &[])],
+        "win32" => &[("clip", &[])],
+        _ => &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"])],
+    };
+    for (tool, args) in tools {
+        let mut command = std::process::Command::new(tool);
+        command.args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let Ok(mut child) = command.spawn() else { continue };
+        if let Some(mut input) = child.stdin.take() {
+            let _ = input.write_all(text.as_bytes());
+        }
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        return;
+    }
+}
+
 pub fn open_browser(url: &str) {
     let command = match system::platform() {
         "darwin" => "open",

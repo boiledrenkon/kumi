@@ -1014,6 +1014,14 @@ impl TuiApp {
             Ok(())
         });
     }
+    /// Text onto the clipboard: through the terminal (OSC 52, which reaches the producer's clipboard over SSH too), and
+    /// with this computer's own tool where Kumi runs in front of the producer, for terminals that don't take OSC 52.
+    pub(super) fn copy_text(&self, text: &str) {
+        self.0.tty.write(&format!("\x1b]52;c;{}\x07", base64::engine::general_purpose::STANDARD.encode(text)));
+        if let Some(copy) = &self.0.options.copy {
+            copy(text);
+        }
+    }
     fn copy_last_answer(&self) {
         let answer = self.0.state.borrow().transcript.entries.iter().rev().find_map(|e| {
             if let Entry::Assistant { text, .. } = &*e.borrow() {

@@ -284,28 +284,32 @@
       "args": [
         "--bridge-config"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only]; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--bridge-config",
         "--help"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "expected": {
+        "mode": "help"
+      }
     },
     {
       "args": [
         "--inference-only",
         "--inference-only"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only]; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--help",
         "--inference-only"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "expected": {
+        "mode": "help"
+      }
     },
     {
       "args": [
@@ -314,7 +318,7 @@
         "--bridge-config",
         "/other"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only]; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
@@ -322,40 +326,40 @@
         "--bridge-config",
         "/file"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only]; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--api-key",
         "test-only-secret-do-not-log"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "No option called --api-key; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--model",
         "openai/gpt-6-luna"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "No option called --model; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--backend",
         "wasm"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "No option called --backend; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--anything"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "No option called --anything; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "positional"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "No command called positional; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
@@ -408,7 +412,7 @@
         "--token",
         "test-only-secret-do-not-log"
       ],
-      "error": "Use: login openai-codex [--device | --from-pi]."
+      "error": "Use: login openai-codex [--browser | --device | --from-pi]."
     },
     {
       "args": [
@@ -417,7 +421,7 @@
         "--device",
         "--from-pi"
       ],
-      "error": "Use: login openai-codex [--device | --from-pi]."
+      "error": "Use: login openai-codex [--browser | --device | --from-pi]."
     },
     {
       "args": [
@@ -705,6 +709,76 @@
         "--all"
       ],
       "error": "Use: logout opencode-go."
+    },
+    {
+      "args": [
+        "-h"
+      ],
+      "expected": {
+        "mode": "help"
+      }
+    },
+    {
+      "args": [
+        "help"
+      ],
+      "expected": {
+        "mode": "help"
+      }
+    },
+    {
+      "args": [
+        "help",
+        "bridge"
+      ],
+      "expected": {
+        "mode": "help"
+      }
+    },
+    {
+      "args": [
+        "-V"
+      ],
+      "expected": {
+        "mode": "version"
+      }
+    },
+    {
+      "args": [
+        "udpate"
+      ],
+      "error": "No command called udpate (did you mean update?); npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "test-only-secret-do-not-log"
+      ],
+      "error": "That isn't a command; npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "doctor",
+        "--fix"
+      ],
+      "error": "npm run kumi -- doctor doesn't take that; npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "path"
+      ],
+      "error": "No command called path; npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "updat"
+      ],
+      "error": "No command called updat (did you mean update?); npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "logn"
+      ],
+      "error": "No command called logn (did you mean login?); npm run kumi -- --help lists the commands."
     }
   ],
   "settings": [

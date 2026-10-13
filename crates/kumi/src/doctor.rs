@@ -1,6 +1,7 @@
 //! `kumi doctor`; native installs also diagnose legacy bridge configurations.
 use crate::{
     config::*,
+    live_app::LiveInstalled,
     live_extension::*,
     models::OFFER_ORDER,
     spinner::step,
@@ -40,7 +41,7 @@ use kumi_runtime::{
     system::{self, Env},
     video::programs::{ffmpeg_hint, find_ffmpeg, find_whisper, whisper_hint, FfmpegOptions, ProgramOptions},
     voice::{microphone::terminal_app, voice_readiness, ReadinessOptions, VoiceReadiness},
-    INSTALLED, KUMI, KUMI_REPAIR, KUMI_VERSION,
+    CONNECT_LIVE, INSTALLED, KUMI, KUMI_REPAIR, KUMI_START, KUMI_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -547,6 +548,19 @@ pub fn voice_check(voice: &VoiceReadiness, env: &Env, platform: &str) -> Check {
     }
     Check::ok("Talking to Kumi (ctrl+t): ffmpeg hears the microphone, whisper.cpp writes down what you say, on this computer")
 }
+/// No bridge in Live: something to fix where a Live 12 can take it. No Live to put one in (Linux, where Live's folders
+/// aren't read at all, or no Live 12 here) is a note.
+pub fn missing_bridge(platform: &str, installed: impl FnOnce() -> LiveInstalled) -> Check {
+    let live_12 = || Some(format!("Kumi works with Live 12: once it's installed and opened once, run: {}", *KUMI_START));
+    match crate::live_app::runs_on(platform).then(installed) {
+        None => Check::note("There's no Live for this system, so Kumi chats without it", None),
+        Some(LiveInstalled::Missing) => Check::note("Live 12 isn't on this computer, so Kumi chats without Live", live_12()),
+        Some(LiveInstalled::Older(version)) => {
+            Check::note(format!("Only Live {version} is on this computer, so Kumi chats without Live"), live_12())
+        }
+        Some(_) => Check::fix("The Ableton bridge isn't installed, so Kumi can't see Live", Some(CONNECT_LIVE.to_string())),
+    }
+}
 pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     let env = &io.env;
     let node = io.node_version.as_deref().map(node_check).unwrap_or_else(|| Check::ok(format!("Kumi {KUMI_VERSION} (native executable)")));
@@ -567,7 +581,7 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
             if newer(bundled, installed) {
                 checks.push(Check::fix(
                     format!("The installed bridge ({installed}) is older than this Kumi's ({bundled})"),
-                    Some(format!("Quit Live, then run: {} bridge", *KUMI)),
+                    Some(CONNECT_LIVE.to_string()),
                 ))
             }
         }
@@ -657,10 +671,8 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
             }
         }
     } else {
-        checks.push(Check::fix(
-            "The Ableton bridge isn't installed, so Kumi can't see Live",
-            Some(format!("Quit Live, then run: {} bridge", *KUMI)),
-        ))
+        let platform = system::platform();
+        checks.push(missing_bridge(platform, || crate::live_app::installed(env, platform)))
     }
     if let Ok(projects) = load_projects_dir(env) {
         checks.push(if access(&projects, false) || access(&dirname(&projects), false) {

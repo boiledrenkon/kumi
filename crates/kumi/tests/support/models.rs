@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use kumi::models::{ChatGptSignIn, CurrentModel, DefaultModel, LocalStatus, ModelController, ProviderStatus};
 use kumi_common::abort::Signal;
 use kumi_runtime::{
+    auth::openai_codex::DevicePrompt,
     core::errors::{FailureKind, KumiError, RuntimeError},
     providers::{
         models::{ApiKeyCheck, ModelInfo},
@@ -15,6 +16,9 @@ use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
 };
+/// The browser sign-in's link: longer than a narrow window, as a real one is.
+pub const CHATGPT_LINK: &str =
+    "https://auth.example.test/oauth/authorize?response_type=code&client=kumi&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=fixture";
 pub struct FakeModels {
     pub calls: RefCell<Vec<String>>,
     pub model: RefCell<Option<String>>,
@@ -207,13 +211,17 @@ impl ModelController for FakeModels {
         Ok(ApiKeyCheck::Ok)
     }
     async fn sign_in_chatgpt(&self, io: ChatGptSignIn) -> Result<(), RuntimeError> {
-        self.calls.borrow_mut().push("chatgpt".into());
         let signal = match io {
             ChatGptSignIn::Browser { signal, on_url } => {
-                on_url("https://auth.example.test/oauth/authorize?client=kumi&state=fixture".into());
+                self.calls.borrow_mut().push("chatgpt".into());
+                on_url(CHATGPT_LINK.into());
                 signal
             }
-            ChatGptSignIn::Device { signal, .. } => signal,
+            ChatGptSignIn::Device { signal, on_code } => {
+                self.calls.borrow_mut().push("chatgpt code".into());
+                on_code(DevicePrompt { url: "https://auth.example.test/codex/device".into(), code: "KUMI-2026".into() });
+                signal
+            }
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.finish_chatgpt.borrow_mut() = Some(tx);

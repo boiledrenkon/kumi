@@ -381,15 +381,18 @@ pub fn load_inference_config(env: &Env) -> Result<InferenceConfig, RuntimeError>
         auth_file: load_auth_file(env)?,
     })
 }
-pub fn live_user_library(env: &Env) -> Option<String> {
+/// Where Live keeps its settings, a folder for each version it's been opened as ("Live 12.4.15").
+pub fn live_preferences_dir(env: &Env) -> String {
     let home = env.get("HOME").cloned().unwrap_or_else(home);
-    let preferences = if cfg!(windows) {
+    if cfg!(windows) {
         join(&env.get("APPDATA").cloned().unwrap_or_else(|| join(&home, "AppData/Roaming")), "Ableton")
     } else {
         join(&home, "Library/Preferences/Ableton")
-    };
+    }
+}
+pub fn live_user_library(env: &Env) -> Option<String> {
     let mut configs = Vec::new();
-    for entry in std::fs::read_dir(preferences).ok()? {
+    for entry in std::fs::read_dir(live_preferences_dir(env)).ok()? {
         let entry = entry.ok()?;
         if !entry.file_name().to_string_lossy().starts_with("Live ") {
             continue;
@@ -441,13 +444,63 @@ pub fn find_bridge_config(env: &Env) -> Option<String> {
     let config = value["config"].as_str()?;
     (is_absolute(config) && Path::new(config).is_file()).then(|| config.into())
 }
+/// How ChatGPT signs in when nothing says: in this computer's browser, or over SSH, where the browser isn't the
+/// producer's, with a code entered in a browser anywhere.
+pub fn chatgpt_sign_in(env: &Env) -> LoginMethod {
+    if env.get("SSH_CONNECTION").is_some_and(|value| !value.is_empty()) {
+        LoginMethod::Device
+    } else {
+        LoginMethod::Browser
+    }
+}
+/// Kumi's commands, for an unknown one that's probably one of them misspelled.
+const COMMANDS: [&str; 12] =
+    ["auth", "bridge", "doctor", "help", "library", "login", "logout", "model", "report", "uninstall", "update", "version"];
+/// What Kumi says about words it doesn't know, leading to its help.
+fn unknown(word: Option<&str>) -> RuntimeError {
+    let help = format!("{} --help lists the commands.", *KUMI_START);
+    // Only a short word is said back: a key pasted as an argument stays out of the message.
+    let Some(word) = word.filter(|w| (2..=24).contains(&w.len()) && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) else {
+        return RuntimeError::plain(format!("That isn't a command; {help}"));
+    };
+    if word.starts_with('-') {
+        return RuntimeError::plain(format!("No option called {word}; {help}"));
+    }
+    if COMMANDS.contains(&word) {
+        return RuntimeError::plain(format!("{} {word} doesn't take that; {help}", *KUMI_START));
+    }
+    // A short word is near only one letter off: "path" isn't "auth".
+    let most = if word.len() <= 4 { 1 } else { 2 };
+    let near = COMMANDS.iter().find(|command| edits(command, &word.to_ascii_lowercase()) <= most);
+    RuntimeError::plain(match near {
+        Some(near) => format!("No command called {word} (did you mean {near}?); {help}"),
+        None => format!("No command called {word}; {help}"),
+    })
+}
+/// How many letters to add, drop or change to turn `a` into `b`.
+fn edits(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, y) in b.iter().enumerate() {
+            let next = (diagonal + usize::from(x != *y)).min(row[j] + 1).min(row[j + 1] + 1);
+            diagonal = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
+}
 pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError> {
     let at = |i: usize| args.get(i).map(String::as_str);
     let first = at(0);
+    if matches!(first, Some("help" | "--help" | "-h")) || args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return Ok(AppConfig::Help);
+    }
     if args.len() == 1 {
         match first {
-            Some("--help") => return Ok(AppConfig::Help),
-            Some("--version" | "-v") => return Ok(AppConfig::Version),
+            Some("--version" | "-v" | "-V" | "version") => return Ok(AppConfig::Version),
             Some("auth") => return Ok(AppConfig::Auth { auth_file: load_auth_file(env)?, settings_file: load_settings_file(env)? }),
             Some("doctor") => return Ok(AppConfig::Doctor),
             Some("report") => return Ok(AppConfig::Report),
@@ -517,7 +570,8 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         let chatgpt = provider_info(provider).sign_in == SignIn::Chatgpt;
         let method = if chatgpt && args.len() <= 3 {
             match at(2).unwrap_or("") {
-                "" => Some(LoginMethod::Browser),
+                "" => Some(chatgpt_sign_in(env)),
+                "--browser" => Some(LoginMethod::Browser),
                 "--device" => Some(LoginMethod::Device),
                 "--from-pi" => Some(LoginMethod::ImportPi),
                 _ => None,
@@ -529,7 +583,7 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         };
         let Some(method) = method else {
             return Err(RuntimeError::plain(if chatgpt {
-                "Use: login openai-codex [--device | --from-pi].".into()
+                "Use: login openai-codex [--browser | --device | --from-pi].".into()
             } else {
                 format!("Use: login {provider}; Kumi asks for the API key, so it stays out of your shell history.")
             }));
@@ -552,8 +606,14 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
             AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: Some(true) }
         });
     }
+    if !matches!(first, Some("--bridge-config" | "--inference-only")) {
+        return Err(unknown(first));
+    }
     if args.len() != 2 || first != Some("--bridge-config") || at(1).is_none_or(|s| s.is_empty() || s.starts_with('-')) {
-        return Err(RuntimeError::plain(format!("Use: {} [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone.",*KUMI_START)));
+        return Err(RuntimeError::plain(format!(
+            "Use: {start} [--bridge-config /absolute/path.json | --inference-only]; {start} --help lists the commands.",
+            start = *KUMI_START
+        )));
     }
     let bridge = at(1).unwrap();
     if !is_absolute(bridge) {

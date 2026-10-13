@@ -14,7 +14,7 @@ previewed, applied, and undone when needed. A client can also play, record and
 analyze audio.
 
 This guide covers setup, configuration, the deployment policy, how changes work,
-and every tool. If you use Kumi, `kumi bridge` does all of the setup for you;
+and every tool. If you use Kumi, `kumi` does all of the setup for you;
 see the [Kumi guide](KUMI_GUIDE.md).
 
 ## Install
@@ -23,7 +23,8 @@ The native server runs as an executable on macOS, Windows or Linux. Connecting t
 macOS or Windows. Use the archive for your operating system and architecture; the analysis worker
 must remain beside the server. No separate Node runtime is needed.
 
-- **With Kumi:** close Live and run `kumi bridge`.
+- **With Kumi:** run `kumi`: it puts the bridge in Live and can restart Live for you (or, with Live
+  closed: `kumi bridge`).
 - **Standalone:** install the native tarball through `ableton-mcp-server lifecycle`, as described
   in [delivery](DELIVERY.md).
 - **From source:** run `cargo build --release --locked -p ableton-mcp-server --bins` at the repository

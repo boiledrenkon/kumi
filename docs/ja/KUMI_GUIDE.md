@@ -10,9 +10,16 @@ Kumi をインストールして Live につなぐには、[クイックスタ�
 
 Kumi の中で `/login` を使うとサインインします（初回は Kumi のセットアップが先に尋ねます）。ChatGPT にはお使いのプランでサインインするか（ブラウザが開き、サインインの結果は `localhost:1455` に戻ってきます）、Anthropic、OpenAI、OpenCode には API キーでサインインします。キーは、ドットだけが表示される入力欄に貼り付けます。Kumi はキーを保存する前に、そのプロバイダーでキーを確認します。プロバイダーに接続できない場合は、キーを保存し、まだ確認していないことを伝えます。`/logout` でサインアウトします。
 
+セットアップのサインインのステップでは：
+
+- Kumi はまず ChatGPT のサインインに届くかを確かめます。届かないときは、その理由（DNS、TLS、プロキシ、時間内に応答がない、接続できない）と、経由したプロキシの設定を伝えます。設定がなければ、`HTTPS_PROXY` で設定できることを伝えます。
+- **d** を押すと、ブラウザの代わりにコードで ChatGPT にサインインします。どの機器のブラウザでもそのコードを入力できます。SSH 経由では、`/login` でも `kumi login` でも、Kumi が自分でコードを使います。**b**（または `--browser`）でブラウザ用のリンクに戻れます。
+- ブラウザ用のリンクは全体が表示され、**c** でコピーできます。
+- Ollama か LM Studio が起動している間は、**On this computer** も選べます。
+
 | プロバイダー | モデル名 | サインイン |
 | --- | --- | --- |
-| ChatGPT プラン | `openai-codex/<model>` | `/login`（ブラウザ）、または `kumi login openai-codex`（ブラウザのないマシンでは `--device`） |
+| ChatGPT プラン | `openai-codex/<model>` | `/login`（ブラウザ、またはコード：**d**）、または `kumi login openai-codex`（ブラウザがなければ `--device`。SSH 経由では自動でコード、ブラウザなら `--browser`） |
 | Anthropic API | `anthropic/<model>` | API キーで `/login`、または `ANTHROPIC_API_KEY` |
 | OpenAI API | `openai/<model>` | API キーで `/login`、または `OPENAI_API_KEY` |
 | OpenCode Zen と Go | `opencode/<model>`、`opencode-go/<model>` | API キー（両方で一つ）で `/login`、または `OPENCODE_API_KEY` |
@@ -54,10 +61,16 @@ Kumi の中で `/login` を使うとサインインします（初回は Kumi �
 Kumi はブリッジを通じて Live とやりとりします。ブリッジは、Live の中で動く Remote Script と、Kumi が起動するローカルの MCP サーバーからなります。初めて Kumi を開いたとき、また Kumi のブリッジが Live の中のものより新しいときはいつでも、Kumi のセットアップがアプリの中で、まだ済んでいないステップだけを進めます。
 
 1. **Sign in**：Kumi がまだサインインしていなければ、サインインします。
-2. **Connect to Live**：Kumi がブリッジを配置し、Live を開きます。Live が開いていれば、**Restart Live now**（Kumi が Live に終了を頼み、Live が先に作業の保存を求めます）か **I'll quit it**（自分で Live を終了するまで Kumi が待ちます）を選びます。Kumi が頼んでからしばらくしても Live が開いたままなら（保存を尋ねられて Cancel を選んだときなど）、Kumi はそう伝え、もう一度頼むかどうか尋ねます。Kumi が Live を閉じたあとは、ステップがどう終わっても Live はまた開きます。
-3. **Control Surface**：初回は Live で **Settings → Link, Tempo & MIDI** を開き、**AbletonMcpBridge** を Control Surface として選びます。Kumi は自分で気づき、Live はこの選択を覚えておきます。
+2. **Connect to Live**：Kumi がブリッジを配置し、Live を開きます。
+   - **Live が開いていないとき：** Kumi はまず Live 12 を探します。インストールされていない、または古い Live しかない場合はそう伝え、インストールしたら **Look again** で確かめ直します。Live 12 を一度も開いていない場合は、User Library を作らせるために Kumi が一度開きます。
+   - **Live が開いているとき：** **Restart Live now**（Kumi が Live に終了を頼み、Live が先に作業の保存を求めます）か **I'll quit it**（自分で Live を終了するまで Kumi が待ちます）を選びます。Kumi が頼んでからしばらくしても Live が開いたままなら（保存を尋ねられて Cancel を選んだときなど）、Kumi はそう伝え、もう一度頼むかどうか尋ねます。
+   - **Mac では、** 初回に macOS が、ターミナルに Live の操作を許可するか尋ねることがあります。OK を選んでください。許可しなかった場合は、Live を自分で終了するまで Kumi が待ち、許可する場所（システム設定 › プライバシーとセキュリティ › オートメーション）を伝えます。
+   - Kumi が Live を閉じたあとは、ステップがどう終わっても Live はまた開きます。開いていた Set を Kumi が知っていれば、その Set ごと開きます（知らなければ、Set は File › Open Recent Set にあります）。
+3. **Control Surface**：初回は Live で **Settings → Link, Tempo & MIDI** を開き、**AbletonMcpBridge** を Control Surface として選びます。Kumi は自分で気づき、Live はこの選択を覚えておきます。45 秒ほどたつと、Settings の場所（Mac では Live メニュー、Windows では Options）と、Live にダイアログが出ていれば先に答えることを書き添えます。
 
-ステップで Esc を押すと、そのステップは後回しになります。ひとまず Live なしでチャットします。Sign in と Connect to Live は次回また提案されます。Connect to Live が済んでいれば、Live が応答したときに Kumi が自分で接続します。ブリッジの配置中に Kumi を終了すると、配置が終わってから終了します。`kumi bridge` は、Live を閉じた状態で同じことをシェルから行います：確認を求め（`--yes` で事前に確認済みにできます）、Live の実行中は拒否し、Live を終了したり起動したりすることはありません。どちらも、ブリッジ自身のライフサイクルを通じて、チェック、レシート、ロールバック付きでブリッジをインストールまたは更新し、更新をまたいでブリッジの設定とシークレットを保持します。`kumi bridge` は Live が接続するまで最大 10 分待ち、接続したら知らせます。Live の中のブリッジが Kumi のものより古く、Live が閉じている場合は、`kumi update` が代わりに実行します。自分で実行すべきときは `kumi doctor` が知らせます。
+Live が動かない Linux では、セットアップはサインインだけを行います。
+
+ステップで Esc を押すと、そのステップは後回しになります。ひとまず Live なしでチャットします。Sign in と Connect to Live は次回また提案されます。Connect to Live が済んでいれば、Live が応答したときに Kumi が自分で接続します。ブリッジの配置中に Kumi を終了すると、配置が終わってから終了します。`kumi bridge` は、Live を閉じた状態で同じことをシェルから行います：確認を求め（`--yes` で事前に確認済みにできます。ターミナルがないときは、`--yes` なしでは何も変えません）、Live の実行中は拒否し、Live を終了したり起動したりすることはありません。どちらも、ブリッジ自身のライフサイクルを通じて、チェック、レシート、ロールバック付きでブリッジをインストールまたは更新し、更新をまたいでブリッジの設定とシークレットを保持します。`kumi bridge` は Live が接続するまで最大 10 分待ち、接続したら知らせます。Live の中のブリッジが Kumi のものより古く、Live が閉じている場合は、`kumi update` が代わりに実行します（`--yes` を付け、待たずに）。それ以外のときは、`kumi update` と `kumi doctor` が `kumi` を実行するよう伝えます。`kumi` はブリッジを Live に入れ、Live の再起動も任せられます。
 
 Kumi は User Library の中から Live の Remote Scripts フォルダーを見つけます。User Library を別の場所に移していても見つけます（そのために Live 自身の設定を読みます）。`KUMI_REMOTE_SCRIPTS_DIR` で上書きできます。
 
@@ -312,7 +325,7 @@ kumi report              # 問題が起きたときに送るファイル
 kumi uninstall           # Kumi を削除。--all を付けると会話、メモ、サインインも削除
 ```
 
-`update` は最新のリリースを取得し、チェックサムで確認し、配置する前に一度起動して動くことを確かめます。一つ前のものは `--rollback` のために残します。Live の中のブリッジのほうが古く、Live が閉じていれば、続けて `kumi bridge` を実行します。Live が開いていれば、Live を終了して `kumi bridge` を実行するよう伝えます。リポジトリのコピーでは、`update` は代わりにチェックアウトを進め（`git merge --ff-only`。ローカルの変更があれば拒否します）、Cargo でワークスペースをビルドします。Kumi の中の `/update` は、まず確認してから Kumi を閉じ、更新して、同じ会話で開き直します。
+`update` は最新のリリースを取得し、チェックサムで確認し、配置する前に一度起動して動くことを確かめます。一つ前のものは `--rollback` のために残します。Live の中のブリッジのほうが古く、Live が閉じていれば、続けて `kumi bridge --yes` を実行します。Live が開いていれば、`kumi` を実行するよう伝えます。`kumi` は Live の再起動も任せられます。リポジトリのコピーでは、`update` は代わりにチェックアウトを進め（`git merge --ff-only`。ローカルの変更があれば拒否します）、Cargo でワークスペースをビルドします。Kumi の中の `/update` は、まず確認してから Kumi を閉じ、更新して、同じ会話で開き直します。
 
 `--rollback` は一つ前の Kumi に戻し、Live が閉じていればそのブリッジも戻します。ターミナルでは、Live を終了するのを待つか尋ねます（Kumi が Live を終了することはありません）。それ以外の場合は新しいブリッジがそのまま残り、前の Kumi でも動きます。ブリッジも戻すには、Live を終了して `kumi update --rollback` を2回実行します。
 

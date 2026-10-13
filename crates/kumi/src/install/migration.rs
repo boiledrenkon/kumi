@@ -418,7 +418,7 @@ pub(super) async fn earlier_bridge(io: &InstalledIo, home: &str, previous: &str,
         "Live is open. Going back to {earlier} can also put back its bridge {bundled} once Live is closed (save your work, then quit Live). Put it back too?"
     );
     for _ in 0..3 {
-        if !ask(io, &question).await {
+        if !ask(io, &question, None).await {
             break;
         }
         if !live_open(io, run.clone()).await {

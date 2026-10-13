@@ -94,12 +94,16 @@ case!(chatgpt_browser_clipboard_success_and_cancel, async {
     let h = model_harness(fake.clone(), 120);
     h.start().await;
     h.type_text("\r").await;
-    for s in
-        ["Sign in to ChatGPT", "https://auth.example.test/oauth/authorize", "Waiting for the browser…", "c copies the link · esc to cancel"]
-    {
+    for s in [
+        "Sign in to ChatGPT",
+        "https://auth.example.test/oauth/authorize",
+        "Waiting for the browser…",
+        "No browser here? d uses a code.",
+        "c copies the link · d uses a code · esc to cancel",
+    ] {
         h.has(s)
     }
-    let url = "https://auth.example.test/oauth/authorize?client=kumi&state=fixture";
+    let url = models::CHATGPT_LINK;
     assert_eq!(*h.browsed.borrow(), [url]);
     h.type_text("c").await;
     use base64::Engine;
@@ -114,8 +118,14 @@ case!(chatgpt_browser_clipboard_success_and_cancel, async {
     h.type_text("/login\r").await;
     h.type_text("\r").await;
     h.has("Waiting for the browser…");
+    // No browser here: a code instead, which c copies.
+    h.type_text("d").await;
+    h.wait_for("KUMI-2026").await;
+    h.has("c copies the code · b uses the browser · esc to cancel");
+    h.type_text("c").await;
+    h.has("Copied the sign-in code.");
     h.type_text("\x1b").await;
-    h.wait_until_hidden("Waiting for the browser…").await;
+    h.wait_until_hidden("KUMI-2026").await;
     assert!(!has(&h.screen(), "Waiting for the browser…"));
     assert!(!has(&h.screen(), "didn't finish"));
     h.close().await;

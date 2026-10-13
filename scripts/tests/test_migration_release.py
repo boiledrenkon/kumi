@@ -341,7 +341,10 @@ class MigrationRelease(unittest.TestCase):
         said = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, said)
         if manifest["bridge"] != old["packageVersion"]:
-            self.assertIn("The bridge wasn't updated yet: quit Live, then run:", said)
+            # Nobody to answer the question: it's said all the same, then the one way to connect Live.
+            self.assertIn("Is Live closed, with your work saved? (no terminal to answer in)\n", said)
+            self.assertIn("The bridge wasn't updated yet. Run ", said)
+            self.assertIn("it puts the bridge in Live and can restart Live for you", said)
             self.assertNotIn("Nothing was changed", said)
         self.assertIn(f"Kumi is back to {manifest['kumi']}", said)
 
@@ -507,7 +510,7 @@ class MigrationRelease(unittest.TestCase):
         rejected = self.launch_result(launcher, env, "--unknown")
         self.assertEqual(rejected.returncode, 1, rejected.stdout + rejected.stderr)
         self.assertEqual(rejected.stdout, "")
-        self.assertEqual(rejected.stderr, "Kumi: Use: kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone.\n")
+        self.assertEqual(rejected.stderr, "Kumi: No option called --unknown; kumi --help lists the commands.\n")
         self.check_windows_launcher(launcher, self.native_windows_launcher())
         self.assertEqual(config.read_bytes(), config_before)
         self.assertEqual(self.launched(launcher, env, "--version"), f"Kumi {manifest['kumi']}\n")
@@ -568,7 +571,9 @@ class MigrationRelease(unittest.TestCase):
         if manifest["bridge"] != old["packageVersion"]:
             # A newer bridge waits for the producer to say Live is closed. Unanswered here, the update says so
             # and leaves it to native startup, the same handoff a same-version bridge gets.
-            self.assertIn("The bridge wasn't updated yet: quit Live, then run:", updated)
+            self.assertIn("Is Live closed, with your work saved? (no terminal to answer in)\n", updated)
+            self.assertIn("The bridge wasn't updated yet. Run ", updated)
+            self.assertIn("it puts the bridge in Live and can restart Live for you", updated)
             self.assertNotIn("Nothing was changed", updated)
         self.assertIn(f"Kumi is now {manifest['kumi']}", updated)
         self.assertTrue((home / "app" / self.binary).is_file())

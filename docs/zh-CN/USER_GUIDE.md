@@ -9,13 +9,13 @@
 
 服务器通过经过认证的回环连接与 Remote Script 通信。这样，客户端就可以读取当前打开的工程并修改它：每项修改都先预览、再应用，需要时可以撤销。客户端还可以播放、录制和分析音频。
 
-本指南介绍安装设置、配置、部署策略、修改的工作方式以及所有工具。如果你使用 Kumi，`kumi bridge` 会替你完成全部设置；见 [Kumi 指南](KUMI_GUIDE.md)。
+本指南介绍安装设置、配置、部署策略、修改的工作方式以及所有工具。如果你使用 Kumi，`kumi` 会替你完成全部设置；见 [Kumi 指南](KUMI_GUIDE.md)。
 
 ## 安装
 
 原生服务器以可执行文件的形式在 macOS、Windows 或 Linux 上运行。连接 Live 需要 macOS 或 Windows。请使用与你的操作系统和架构对应的归档包；分析工作进程必须留在服务器旁边。不需要单独的 Node 运行时。
 
-- **使用 Kumi：** 关闭 Live，然后运行 `kumi bridge`。
+- **使用 Kumi：** 运行 `kumi`：它会把桥接装入 Live，也可以替你重启 Live（Live 关闭时也可以运行 `kumi bridge`）。
 - **独立使用：** 按照[交付](DELIVERY.md)中的说明，通过 `ableton-mcp-server lifecycle` 安装原生 tarball。
 - **从源码构建：** 在仓库根目录运行 `cargo build --release --locked -p ableton-mcp-server --bins`。在得到配置之前，`target/release/ableton-mcp-server` 启动后只提供离线工具。
 

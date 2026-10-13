@@ -194,7 +194,8 @@ async fn checked_executable_update_swap_and_rollback() {
     );
     assert!(!home.join("app.new").exists());
     assert!(!home.join("downloads/kumi.tar.gz").exists());
-    assert!(out.0.borrow().contains("To connect Live"));
+    // No bridge in Live yet: the one way to connect it, said as everywhere Live runs.
+    says_no_bridge_yet(&out.0.borrow());
     // What this Kumi kept in its database is written back for the older Kumi to read.
     let (database, _) = StoreClient::open(home.join("kumi.db"), json_files(&env).unwrap(), 1).await.unwrap();
     SqliteMemoryStore::new(database).remember(MemoryScope::Producer, None, "Mixes on headphones", None, 2).await.unwrap();
@@ -247,7 +248,8 @@ async fn an_update_in_place_is_an_update_even_when_its_download_cant_be_removed(
     fs::set_permissions(&downloads, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(code.unwrap(), 0, "{}", out.0.borrow());
     assert!(out.0.borrow().contains("Kumi is now 99.0.0"), "{}", out.0.borrow());
-    assert!(out.0.borrow().contains("To connect Live"), "the bridge step still runs: {}", out.0.borrow());
+    // The update goes on to its bridge step, which has something to say where Live runs.
+    says_no_bridge_yet(&out.0.borrow());
 }
 #[tokio::test]
 async fn failed_unpack_or_probe_preserves_current_app() {
@@ -1112,4 +1114,35 @@ fn started_by_the_installer_kumi_says_how_to_start_it_next_time() {
         let (kumi, bin) = (spaced.join("bin/kumi"), spaced.join("bin"));
         assert_eq!(next_time(&env), Some(format!("Next time: run \"{}\", or add {} to PATH", kumi.display(), bin.display())));
     }
+}
+#[test]
+fn an_updates_bridge_step_asks_nothing_more_and_waits_for_no_live() {
+    // Live was just found closed: kumi bridge goes ahead (its lifecycle looks for Live again before it changes anything),
+    // and doesn't wait ten minutes for a Live nobody has opened.
+    let command = kumi::install::bridge_command("/kumi/app", "/kumi");
+    let command = command.as_std();
+    assert_eq!(command.get_program(), std::ffi::OsStr::new(&kumi_runtime::library::sources::join("/kumi/app", &executable_name("kumi"))));
+    assert_eq!(command.get_args().collect::<Vec<_>>(), ["bridge", "--yes"]);
+    let envs: std::collections::HashMap<String, Option<String>> = command
+        .get_envs()
+        .map(|(key, value)| (key.to_string_lossy().into_owned(), value.map(|value| value.to_string_lossy().into_owned())))
+        .collect();
+    for (key, value) in [("KUMI_BRIDGE_WAIT_SECONDS", "0"), ("KUMI_BRIDGE_AFTER", "1"), ("KUMI_INSTALLED", "1"), ("KUMI_HOME", "/kumi")] {
+        assert_eq!(envs.get(key).cloned().flatten().as_deref(), Some(value), "{key}");
+    }
+}
+/// After an update, with no bridge in Live: how to connect it where Live runs, and on Linux nothing about Live at all.
+fn says_no_bridge_yet(said: &str) {
+    match kumi::install::no_bridge_yet(system::platform()) {
+        Some(words) => assert!(said.contains(&words), "{said}"),
+        None => assert!(!said.contains("Live"), "nothing about Live where it doesn't run: {said}"),
+    }
+}
+#[test]
+fn with_no_bridge_in_live_an_update_says_how_to_connect_it_only_where_live_runs() {
+    let words = format!("The bridge isn't in Live yet. {}.", *kumi_runtime::CONNECT_LIVE);
+    for platform in ["darwin", "win32"] {
+        assert_eq!(kumi::install::no_bridge_yet(platform).as_deref(), Some(words.as_str()), "{platform}");
+    }
+    assert_eq!(kumi::install::no_bridge_yet("linux"), None, "no Live for Linux");
 }

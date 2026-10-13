@@ -19,7 +19,7 @@ use kumi_runtime::{
     core::errors::RuntimeError,
     library::sources::{dirname, join},
     system::Env,
-    KUMI, KUMI_REPAIR, KUMI_VERSION,
+    CONNECT_LIVE, KUMI, KUMI_REPAIR, KUMI_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -163,7 +163,14 @@ pub async fn checkout_bridge(repo: &str) -> i32 {
         .map(|dir| if Path::new(&dir).is_absolute() { dir } else { join(repo, &dir) })
         .unwrap_or_else(|| join(repo, "target"));
     let mut command = tokio::process::Command::new(join(&target, &format!("release/{}", executable_name("kumi"))));
-    command.arg("bridge").current_dir(repo).stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    // As an installed Kumi's update does: Live was just found closed, so nothing more is asked or waited for.
+    command
+        .args(["bridge", "--yes"])
+        .env("KUMI_BRIDGE_WAIT_SECONDS", "0")
+        .current_dir(repo)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     command.status().await.ok().and_then(|s| s.code()).unwrap_or(1)
 }
 pub async fn run_update(io: UpdateIo) -> i32 {
@@ -227,7 +234,9 @@ pub async fn run_update(io: UpdateIo) -> i32 {
     }
     let bridge = older_bridge(&io.env, bundled.as_deref());
     if find_bridge_config(&io.env).is_none() {
-        say(format!("To connect Live, quit Live, then run: {} bridge", *KUMI));
+        if let Some(words) = crate::install::no_bridge_yet(kumi_runtime::system::platform()) {
+            say(words);
+        }
         return 0;
     }
     let Some(bridge) = bridge else {
@@ -254,7 +263,7 @@ pub async fn run_update(io: UpdateIo) -> i32 {
     )
     .await
     {
-        say(format!("Quit Live (save your work first), then run: {} bridge", *KUMI));
+        say(format!("{}.", *CONNECT_LIVE));
         return 0;
     }
     if let Some(bridge) = io.update_bridge {

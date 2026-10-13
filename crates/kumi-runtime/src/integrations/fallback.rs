@@ -90,6 +90,9 @@ impl Integration for FallbackIntegration {
             Ok(false)
         }
     }
+    fn open_set(&self) -> Option<String> {
+        self.current().open_set()
+    }
     fn has_show_message(&self) -> bool {
         true
     }

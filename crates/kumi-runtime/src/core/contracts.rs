@@ -508,6 +508,10 @@ pub trait Integration {
         let _ = signal;
         Ok(false)
     }
+    /// The saved Set open in the DAW, by its file, once Kumi has read it: what a restart of the DAW opens again.
+    fn open_set(&self) -> Option<String> {
+        None
+    }
     fn has_show_message(&self) -> bool {
         false
     }
@@ -1922,6 +1926,10 @@ pub trait SessionController {
     }
     /// The producer's library: what Kumi knows of it, and how learning it is going.
     fn library(&self) -> Option<LibraryStatus> {
+        None
+    }
+    /// The saved Set open in the DAW, by its file, once the session has read it.
+    fn open_set(&self) -> Option<String> {
         None
     }
     fn has_taste(&self) -> bool {
