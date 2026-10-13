@@ -678,6 +678,7 @@ pub(super) async fn run_session(
         options.whats_new = whats_new;
         options.away = away;
         options.instant = instant;
+        options.next_time = install::next_time(&io.env);
         options.connect_live = live_possible.then(|| ConnectLive {
             why: connect_why,
             bridge: bundled.clone().unwrap_or_default(),
@@ -722,6 +723,7 @@ pub(super) async fn run_session(
         options.startup_notice = notice;
         options.whats_new = whats_new;
         options.instant = instant;
+        options.next_time = install::next_time(&io.env);
         options.secrets = secrets.clone();
         options.history = Some(history);
         options.updates = Some(updates);

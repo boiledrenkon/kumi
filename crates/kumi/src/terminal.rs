@@ -55,6 +55,8 @@ pub struct TerminalOptions {
     pub whats_new: Option<crate::whats_new::News>,
     /// Fixed phrases ("tempo 124", "mute drums") change Live at once, with no model call (`instantPhrases`).
     pub instant: bool,
+    /// How to start Kumi next time, said after the farewell when this window can't yet ([`crate::install::next_time`]).
+    pub next_time: Option<String>,
 }
 impl TerminalOptions {
     pub fn new(
@@ -78,6 +80,7 @@ impl TerminalOptions {
             willington: None,
             whats_new: None,
             instant: true,
+            next_time: None,
         }
     }
 }
@@ -398,7 +401,10 @@ impl PlainTerminal {
                 let mut state = this.0.state.borrow_mut();
                 if !state.output_failed {
                     let text = match result {
-                        Ok(()) => "Kumi closed. Each Set's conversation continues next time.".into(),
+                        Ok(()) => match &this.0.options.next_time {
+                            Some(next) => format!("Kumi closed. Each Set's conversation continues next time.\n{next}"),
+                            None => "Kumi closed. Each Set's conversation continues next time.".into(),
+                        },
                         Err(error) => {
                             code = 1;
                             head(&format!("[error] {}", safe_error_message(Some(&error.message()), &this.0.options.secrets)), 2048)

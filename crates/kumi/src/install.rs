@@ -512,6 +512,26 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
 pub fn still_open() -> Option<String> {
     (!cfg!(windows)).then(|| format!("Kumi windows opened before the update keep running {KUMI_VERSION} until you restart them."))
 }
+/// What the farewell adds when the installer started Kumi in a window where `kumi` doesn't work yet, as the installer
+/// says in KUMI_FROM_INSTALLER: new terminal windows have it on PATH (`new-window`), or nothing put it there (`no-path`).
+pub fn next_time(env: &Env) -> Option<String> {
+    let home =
+        env.get("HOME").filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| home::home_dir().unwrap_or_default().display().to_string());
+    let shown = |path: String| match path.strip_prefix(&home) {
+        Some(rest) if !home.is_empty() && rest.starts_with('/') => format!("~{rest}"),
+        _ => path,
+    };
+    let bin = join(&kumi_home(env), "bin");
+    match env.get("KUMI_FROM_INSTALLER").map(String::as_str) {
+        Some("new-window") => Some("Next time: open a new terminal window and type kumi".into()),
+        Some("no-path") => {
+            let kumi = shown(join(&bin, "kumi"));
+            let typed = if kumi.contains(' ') { format!("\"{}\"", join(&bin, "kumi")) } else { kumi };
+            Some(format!("Next time: run {typed}, or add {} to PATH", shown(bin)))
+        }
+        _ => None,
+    }
+}
 
 pub async fn rollback_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     let say = |s: String| io.out.write(&format!("{s}\n"));
