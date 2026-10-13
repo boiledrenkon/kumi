@@ -165,3 +165,16 @@ case!(on_a_basic_console_pictures_are_words, async {
     assert!(!braille(&h.screen()), "{}", h.screen().join("\n"));
     h.close().await;
 });
+
+case!(a_change_from_before_pictures_shows_what_it_has, async {
+    let h = Harness::new(160, 40);
+    h.start().await;
+    h.connect();
+    // Saved before Kumi drew pictures: a value's before and after in its range.
+    h.emit(json!({"type":"change","change":{"id":"c9","family":"mixer","title":"Bass volume down","state":"applied","at":9,"from":0.85,"to":0.6,"range":[0.0,1.0]}}));
+    h.type_text("\x1b[Z").await;
+    h.type_text("\r").await;
+    h.wait_for("░").await;
+    assert!(!has(&h.screen(), "No picture for this change"));
+    h.close().await;
+});

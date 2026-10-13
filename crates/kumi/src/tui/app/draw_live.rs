@@ -629,7 +629,12 @@ impl TuiApp {
                         image = key;
                         rows.extend(drawn.rows.into_iter().chain(drawn.lines).map(extra));
                     }
-                    None => rows.push(extra(vec![sp("No picture for this change", st::FAINT)])),
+                    // A change from before pictures (or one without its own): its value bar, swatch or notes, as NOW drew them.
+                    None => match (self.0.graphics != Graphics::Words).then(|| change_picture(change, cols as i32, self.0.depth)).flatten()
+                    {
+                        Some(lines) => rows.extend(lines.into_iter().map(extra)),
+                        None => rows.push(extra(vec![sp("No picture for this change", st::FAINT)])),
+                    },
                 }
             }
         }
