@@ -28,7 +28,7 @@ use kumi_runtime::{
         provider_info, KeySource, SignIn,
     },
     system::{self, Env},
-    web::cause::{unreachable, NetCause},
+    web::cause::{unreachable, unreachable_call, NetCause},
     KUMI, KUMI_START,
 };
 use std::{cell::RefCell, process::Stdio, rc::Rc};
@@ -228,13 +228,20 @@ pub async fn reach_sign_in(env: &Env, fetch: Option<Rc<dyn Fetch>>) -> Option<St
     let fetch = fetch.unwrap_or_else(default_fetch);
     let signal = abort::timeout(REACH_MS);
     let url = format!("https://{SIGN_IN_HOST}/.well-known/openid-configuration");
+    let host = format!("ChatGPT's sign-in ({SIGN_IN_HOST})");
     let cause = match fetch.fetch(&url, FetchInit { signal: Some(signal.clone()), ..Default::default() }).await {
         Ok(response) => Some(NetCause::of_status(response.status)?),
         // Kumi's own wait running out is a timeout too.
         Err(_) if signal.is_cancelled() => Some(NetCause::Timeout),
-        Err(error) => NetCause::of_call(&error),
+        // As a model call says it: a proxy that isn't answering told apart from one that turned Kumi away.
+        Err(error) => {
+            return Some(
+                unreachable_call(&host, &url, &error, env, &kumi_runtime::net::proxy::current())
+                    .unwrap_or_else(|| unreachable(&host, None, env)),
+            )
+        }
     };
-    Some(unreachable(&format!("ChatGPT's sign-in ({SIGN_IN_HOST})"), cause, env))
+    Some(unreachable(&host, cause, env))
 }
 
 /// Text onto this computer's clipboard with its own tool (pbcopy, clip, wl-copy or xclip), for terminals that don't
