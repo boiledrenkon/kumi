@@ -204,5 +204,15 @@ case!(a_job_has_its_own_status_record_and_its_end_tells_a_producer_whos_away, as
     h.emit(job(2, "running", json!({"title":"Tape loop tutorial"})));
     h.emit(job(2, "stopped", json!({"title":"Tape loop tutorial","endedAt":now_ms()})));
     assert!(written().contains("\x1b]7501;state=clear:id=job-2\x1b\\"));
+    // Back at Kumi's window: the finished job's record goes too, so a long session doesn't pile them up.
+    assert!(!written().contains("\x1b]7501;state=clear:id=job-1\x1b\\"));
+    h.type_text("\x1b[I").await;
+    assert!(written().contains("\x1b]7501;state=clear:id=job-1\x1b\\"), "cleared once the producer is back");
+    // One that ends while they look on is seen in its card: no done record stays.
+    h.emit(job(3, "running", json!({"title":"Manual: Grain Delay"})));
+    assert!(written().contains("state=working:id=job-3:"));
+    h.emit(job(3, "done", json!({"title":"Manual: Grain Delay","line":"Grain Delay pitches each grain.","endedAt":now_ms()})));
+    assert!(!written().contains("state=done:id=job-3:"));
+    assert!(written().contains("\x1b]7501;state=clear:id=job-3\x1b\\"));
     h.close().await;
 });

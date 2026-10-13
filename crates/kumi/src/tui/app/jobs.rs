@@ -102,11 +102,13 @@ impl TuiApp {
             return;
         }
         let id = format!("job-{}", status.id);
+        // One that ended while the producer looks on is seen in its card: its record goes, as once they're back.
+        let seen = status.state.ended() && self.known_in_front();
         let (state, msg) = match status.state {
             JobState::Running => (Some(ProgramState::Working), doing_words(status)),
-            JobState::Done => (Some(ProgramState::Done), status.line.clone().unwrap_or_default()),
-            JobState::Failed => (Some(ProgramState::Error), status.line.clone().unwrap_or_default()),
-            JobState::Stopped | JobState::Interrupted => (None, String::new()),
+            JobState::Done if !seen => (Some(ProgramState::Done), status.line.clone().unwrap_or_default()),
+            JobState::Failed if !seen => (Some(ProgramState::Error), status.line.clone().unwrap_or_default()),
+            _ => (None, String::new()),
         };
         let sequence = match state {
             Some(state) => {
@@ -133,6 +135,38 @@ impl TuiApp {
         };
         if let Some(sequence) = sequence {
             self.0.tty.write(&if profile.tmux { alerts::tmux_wrap(&sequence) } else { sequence });
+        }
+    }
+
+    /// The producer is back: the records of jobs that ended (done or failed) go, so a long session doesn't pile them up.
+    pub(super) fn clear_finished_jobs(&self) {
+        let profile = &self.0.profile;
+        let finished: Vec<u32> = {
+            let mut state = self.0.state.borrow_mut();
+            let finished: Vec<u32> = state
+                .job_status_sent
+                .iter()
+                .filter(|(_, report)| matches!(report.state, Some(ProgramState::Done | ProgramState::Error)))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &finished {
+                state.job_status_sent.remove(id);
+            }
+            finished
+        };
+        let out: String = finished
+            .iter()
+            .map(|id| {
+                let sequence = alerts::clear_sequence(Some(&format!("job-{id}")));
+                if profile.tmux {
+                    alerts::tmux_wrap(&sequence)
+                } else {
+                    sequence
+                }
+            })
+            .collect();
+        if !out.is_empty() {
+            self.0.tty.write(&out);
         }
     }
 
