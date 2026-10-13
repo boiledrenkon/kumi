@@ -194,7 +194,7 @@ pub fn markdown(source: &Source, options: &Options) -> String {
     if !doc.changes.is_empty() {
         out.push_str(&format!("## What Kumi changed in {}\n\n", markdown_safe(source.words.0)));
         for change in &doc.changes {
-            out.push_str(&format!("- {}\n", markdown_safe(&change_line(change))));
+            out.push_str(&format!("- {}\n", markdown_safe(&change_line(change, source.words.0))));
             for value in change.picture.as_ref().map(values_of).unwrap_or_default() {
                 out.push_str(&format!("  - {}\n", markdown_safe(&value)));
             }
@@ -269,7 +269,7 @@ pub fn html(source: &Source, options: &Options) -> String {
     if !doc.changes.is_empty() {
         body.push_str(&format!("<section class=\"changes\">\n<h2>What Kumi changed in {}</h2>\n<ul>", escape(source.words.0)));
         for change in &doc.changes {
-            body.push_str(&format!("<li><p>{}</p>", escape(&change_line(change))));
+            body.push_str(&format!("<li><p>{}</p>", escape(&change_line(change, source.words.0))));
             if let Some(picture) = &change.picture {
                 let drawn = (options.picture)(picture);
                 let values = values_of(picture);
@@ -779,8 +779,8 @@ fn steps_word(count: usize) -> &'static str {
     }
 }
 
-/// A change in a line: its title, its track, what became of it and why.
-fn change_line(change: &ChangeRecord) -> String {
+/// A change in a line: its title, its track, what became of it and why. `daw` is what the producer calls the DAW.
+fn change_line(change: &ChangeRecord, daw: &str) -> String {
     let mut line = one_line(&change.title);
     if let Some(track) = &change.track {
         line.push_str(&format!(" · {}", one_line(&track.name)));
@@ -789,7 +789,7 @@ fn change_line(change: &ChangeRecord) -> String {
         ChangeState::Applied | ChangeState::Expired => None,
         ChangeState::Undone => Some("undone".to_string()),
         ChangeState::Kept => Some("kept".to_string()),
-        ChangeState::Unsure => Some("Live didn't confirm it".to_string()),
+        ChangeState::Unsure => Some(format!("{daw} didn't confirm it")),
         ChangeState::Heard => {
             Some(change.score.map(|score| format!("listened: {}% close", score.round())).unwrap_or_else(|| "listened".to_string()))
         }
