@@ -857,8 +857,9 @@ Set's conversation moves to the Set's own folder when you first save it.
 - **The model:** going back keeps the model you use now; Kumi says once when
   the conversation was had with another.
 - **Keeping:** each Set keeps its 20 newest conversations, any used in the last
-  90 days (`conversations.keepDays`; `0` keeps all) and the pinned ones. After
-  a rollback, a Kumi 1.16 or earlier keeps only each Set's 20 newest, and so
+  90 days (`conversations.keepDays`; `0` keeps all) and the pinned ones. With
+  `keepDays` taken out of settings, Kumi keeps the longer of 90 days and the
+  value last set (`0` still keeps all). After a rollback, a Kumi 1.16 or earlier keeps only each Set's 20 newest, and so
   does a Kumi window opened before the update, until it closes.
 
 When you mention something from before ("the reverb chain from last week's
@@ -1077,7 +1078,7 @@ Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
 | `voice` | Talking: `send` (send when you stop), `language`, `microphone` (`/voice`) |
 | `maxJobs` | How many background jobs run at once: 1–8, three by default |
 | `workerModel` | The model background jobs use, `<provider>/<model>` from `/model`'s list; the conversation's when absent |
-| `conversations` | `keepDays`: days a conversation is kept after it was last used, beyond each Set's 20 newest (90); `0` keeps all |
+| `conversations` | `keepDays`: days a conversation is kept after it was last used, beyond each Set's 20 newest (90; once taken out, the longer of 90 and the value last set); `0` keeps all |
 
 `~/.kumi/slots.json` keeps the model slots you swapped (`/slots`),
 `~/.kumi/probes` what each knob was heard to do, by device and track, and
