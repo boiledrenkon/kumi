@@ -1049,40 +1049,47 @@ pub fn startup_files(env: &Env) -> Vec<String> {
     }
     files
 }
-/// The startup files that have Kumi's PATH line, and what each holds once it's out (None: the file goes, as fish's
-/// kumi.fish does). The installer's blank line above the marker goes with it.
+/// The startup files with Kumi's PATH line, and what each holds once it's out (None: fish's kumi.fish goes, once
+/// nothing else is in it). Kumi's line is the one under its marker naming this Kumi's bin, as written or spelled from
+/// $HOME, ${HOME} or ~, as the installer finds it; the installer's blank line above the marker goes with it, and so
+/// does a marker with no PATH under it. A marker over another Kumi's PATH line, and every line under no marker, stay.
 pub fn path_lines(env: &Env, home: &str) -> Vec<(String, Option<String>)> {
     if cfg!(windows) {
         return vec![];
     }
     let bin = join(home, "bin");
+    let actual = home::home_dir().unwrap_or_default().display().to_string();
+    let user = env.get("HOME").filter(|s| !s.is_empty()).map(String::as_str).unwrap_or(&actual);
+    let relative = bin.strip_prefix(&format!("{}/", user.trim_end_matches('/'))).filter(|rest| !rest.is_empty()).map(str::to_string);
+    let ours = |line: &str| {
+        line.contains(&bin)
+            || relative.as_ref().is_some_and(|rest| ["$HOME/", "${HOME}/", "~/"].iter().any(|from| line.contains(&format!("{from}{rest}"))))
+    };
     let mut found = vec![];
     for file in startup_files(env) {
         let Ok(text) = fs::read_to_string(&file) else { continue };
-        if !text.contains(PATH_MARKER) {
-            continue;
-        }
-        if file.ends_with("kumi.fish") {
-            found.push((file, None));
-            continue;
-        }
-        let lines: Vec<_> = text.split('\n').collect();
+        let lines: Vec<&str> = text.split('\n').collect();
         let mut kept: Vec<&str> = vec![];
+        let mut changed = false;
         let mut index = 0;
         while index < lines.len() {
-            if lines[index] == PATH_MARKER {
+            let next = lines.get(index + 1).copied();
+            if lines[index] == PATH_MARKER && !next.is_some_and(|next| !ours(next) && next.contains("PATH")) {
                 if kept.last() == Some(&"") {
                     kept.pop();
                 }
-                if lines.get(index + 1).is_some_and(|s| s.contains(&bin)) {
-                    index += 1
-                }
-            } else {
-                kept.push(lines[index])
+                index += if next.is_some_and(ours) { 2 } else { 1 };
+                changed = true;
+                continue;
             }
-            index += 1
+            kept.push(lines[index]);
+            index += 1;
         }
-        found.push((file, Some(kept.join("\n"))));
+        if changed {
+            let kept = kept.join("\n");
+            let emptied = file.ends_with("kumi.fish") && kept.trim().is_empty();
+            found.push((file, (!emptied).then_some(kept)));
+        }
     }
     found
 }

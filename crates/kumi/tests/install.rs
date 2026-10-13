@@ -1531,3 +1531,47 @@ async fn an_asked_for_update_takes_the_release_githubs_api_names_and_the_usual_w
     assert!(out.0.borrow().contains(&format!("Kumi {KUMI_VERSION} → 99.0.0.")), "{}", out.0.borrow());
     assert_eq!(hub.calls.borrow().last().unwrap(), "https://github.com/user1303836/kumi/releases/download/v99.0.0/kumi.tar.gz");
 }
+/// Kumi's PATH line as the installer writes it, or edited to start from $HOME, ${HOME} or ~: each is Kumi's under its
+/// marker, as install.sh counts it. Another Kumi's line, and Kumi's folder named outside a marker, stay.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_takes_out_kumis_path_line_however_it_is_spelled_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = dir.path().join("user");
+    let home = user.join(".kumi");
+    let mut env = env(dir.path());
+    env.insert("KUMI_HOME".into(), home.display().to_string());
+    fs::create_dir_all(home.join("app")).unwrap();
+    let rc = |name: &str, kumi: &str| (name.to_string(), format!("alias ll='ls -l'\n\n{PATH_MARKER}\n{kumi}\n"));
+    let ours = [
+        rc(".zshrc", &format!("export PATH=\"{}/bin:$PATH\"", home.display())),
+        rc(".zprofile", "export PATH=\"$HOME/.kumi/bin:$PATH\""),
+        rc(".bashrc", "export PATH=\"${HOME}/.kumi/bin:$PATH\""),
+        rc(".bash_profile", "export PATH=~/.kumi/bin:$PATH"),
+    ];
+    for (name, text) in &ours {
+        put(user.join(name), text);
+    }
+    // Another Kumi's, under its own marker, and this Kumi's folder named by hand under none.
+    let theirs = format!("{PATH_MARKER}\nexport PATH=\"/opt/other-kumi/bin:$PATH\"\nexport PATH=\"$HOME/.kumi/bin:$PATH\"\n");
+    put(user.join(".profile"), &theirs);
+    let other_fish = format!("{PATH_MARKER}\ncontains -- \"/opt/other-kumi/bin\" $PATH; or set -gx PATH \"/opt/other-kumi/bin\" $PATH\n");
+    let fish = user.join(".config/fish/conf.d/kumi.fish");
+    put(&fish, format!("\n{PATH_MARKER}\ncontains -- \"~/.kumi/bin\" $PATH; or set -gx PATH \"~/.kumi/bin\" $PATH\n{other_fish}"));
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    for (name, _) in &ours {
+        assert!(said.contains(&format!("/{name}")), "{name}: {said}");
+    }
+    assert!(said.contains("kumi.fish") && !said.contains(".profile"), "{said}");
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0);
+    for (name, _) in &ours {
+        assert_eq!(fs::read_to_string(user.join(name)).unwrap(), "alias ll='ls -l'\n", "{name}: {}", out.0.borrow());
+    }
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), theirs);
+    // The other Kumi's fish lines stay, so the file does.
+    assert_eq!(fs::read_to_string(&fish).unwrap(), other_fish);
+    assert!(out.0.borrow().contains("Took Kumi out of ~/.config/fish/conf.d/kumi.fish."), "{}", out.0.borrow());
+}
