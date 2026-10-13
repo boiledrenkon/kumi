@@ -869,6 +869,17 @@ pub(super) async fn run_session(
         None
     };
     let code = running.await;
+    // The conversation asked for as Kumi started may not be the one going on now: opened again after an update, Kumi
+    // carries on with this one.
+    let going = if update_after.get() {
+        let session = controller.borrow().as_ref().and_then(Weak::upgrade);
+        match session {
+            Some(session) => session.conversation_now().await.filter(|now| now.kept).map(|now| now.id),
+            None => None,
+        }
+    } else {
+        None
+    };
     drop(interrupt);
     #[cfg(unix)]
     drop(terminate);
@@ -881,12 +892,41 @@ pub(super) async fn run_session(
     terminal.borrow_mut().take();
     controller.borrow_mut().take();
     if update_after.get() {
-        super::update_and_reopen(&io).await
+        let mut again = io.clone();
+        again.args = reopened_args(&io.args, going.as_deref());
+        super::update_and_reopen(&again).await
     } else {
         Ok(code)
     }
 }
+/// What Kumi opens again with after an update: the same arguments, but a conversation asked for (`-c`, `-r`) is the
+/// one going on as it closed.
+fn reopened_args(args: &[String], going: Option<&str>) -> Vec<String> {
+    match (crate::config::take_resume(args), going) {
+        (Ok((mut rest, Some(_))), Some(id)) => {
+            rest.extend(["-r".to_string(), id.to_string()]);
+            rest
+        }
+        _ => args.to_vec(),
+    }
+}
 
+#[cfg(test)]
+mod reopen_tests {
+    use super::reopened_args;
+    #[test]
+    fn opened_again_after_an_update_kumi_carries_on_with_the_conversation_going_on() {
+        let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            reopened_args(&args(&["-r", "night", "drive", "--inference-only"]), Some("mv66")),
+            args(&["--inference-only", "-r", "mv66"])
+        );
+        assert_eq!(reopened_args(&args(&["-c"]), Some("mv66")), args(&["-r", "mv66"]));
+        // Not asked for, or nothing kept: as it was.
+        assert_eq!(reopened_args(&args(&["--inference-only"]), Some("mv66")), args(&["--inference-only"]));
+        assert_eq!(reopened_args(&args(&["-c"]), None), args(&["-c"]));
+    }
+}
 #[cfg(test)]
 mod watch_tests {
     use super::*;

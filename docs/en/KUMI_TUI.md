@@ -82,6 +82,8 @@ Run these as `kumi <command>`; from a copy of the repository, as
 | Command | What it does |
 | --- | --- |
 | `kumi` | Open Kumi on the Set Live has open; the first time, sign in and put the bridge in Live (Kumi can restart Live for you) |
+| `kumi -c` | Carry on the conversation you had last, in any Set |
+| `kumi -r [id or name]` | Carry on a kept conversation by its id (or its start) or name; alone, choose one. Both work with `--inference-only` |
 | `kumi --inference-only` | Chat without Live |
 | `kumi --bridge-config <absolute path>` | Use your own bridge configuration |
 | `kumi login` | Sign in: asks whether with ChatGPT or an API key |
@@ -105,9 +107,11 @@ message, not a command.
 
 | Command | What it does |
 | --- | --- |
-| `/new` | Start a fresh conversation. What's above stays on screen under a line, the last conversation is kept, and HISTORY's undo still works |
+| `/new [name]` | Start a fresh conversation, named if you give one. What's above stays on screen under a line, the last conversation is kept, and HISTORY's undo still works |
 | `/btw <question>` | Ask something on the side, any time, even while Kumi works: answered from the conversation so far, without tools, in a panel, and not added to the conversation. `/btw` alone shows the last answer again |
-| `/conversations` | This Set's kept conversations (the latest 20); choose one to carry on with it |
+| `/resume [id or name]` | Kept conversations: this Set's, and every Set's under Tab; choose one to carry on with it. With an id (or its start) or a name, that one. `/conversations` is the same |
+| `/rename [name]` | Name this conversation; alone, its name goes in the box to change |
+| `/fork [name]` | Carry on in a copy of this conversation, with a new id; the original stays |
 | `/reconnect` | Connect to Live again over a fresh bridge, keeping the conversation (earlier changes lose Kumi's undo) |
 | `/undo` | Undo Kumi's latest change |
 | `/stop` | Stop Live: clips, the transport and recording. Also stops Kumi's answer |
@@ -125,7 +129,7 @@ message, not a command.
 | `/recipes` | Your recipes: run one or forget it. One with blanks starts a `/recipe` line for you to finish, with what's pinned filled in |
 | `/recipe <name> blank=value …` | Run a recipe now, with no model call; a value with spaces goes in quotes, an unquoted number or true/false goes as itself (quote it to keep it words), and Kumi names any blank left empty |
 | `/jobs` | The background jobs: Enter opens one, where `x` stops it and `r` runs an interrupted one again. Works while Kumi answers |
-| `/status` | What Kumi is connected to, the model, how far it has got learning your library, and on an API key the tokens this session used |
+| `/status` | What Kumi is connected to, the model, how far it has got learning your library, on an API key the tokens this session used, and the conversation with its id |
 | `/voice` | Talking instead of typing: start or stop, "Send when you stop", the language you speak and the microphone |
 | `/update` | Get the newest Kumi: it asks, closes, updates and opens again with the same conversation |
 | `/changelog` | What's new in Kumi: every note since the version you updated from, or the latest three releases, and where the whole history is |
@@ -198,8 +202,12 @@ its undo. They're in English for now.
 | Mouse | Click **undo** or **forget** at a row's end, a change's words to open its picture (a job's to open the job), a tab's name, or a device in the tree to point at it; click the pin to unpin. Hold Shift while dragging (Option in iTerm2) to select text |
 
 **Panels** (`/model`, `/effort`, `/login`, `/memory` and the others): ↑↓ move,
-Enter chooses, Esc closes; in `/model`, `/memory`, `/conversations` and
+Enter chooses, Esc closes; in `/model`, `/memory`, `/resume` and
 `/recipes`, typing filters the list. In `/model`, ctrl+f sets the fallback.
+In `/resume`, Tab switches between This Set and All Sets, and ctrl+f renames,
+pins, deletes or copies the id of the selected conversation. When a
+conversation belongs to another Set, Kumi asks: open its Set in Live
+(recommended), carry it on here as a copy, or cancel (Esc).
 **Your answer** (an answer that ends on a question with numbered options): a
 number, then Enter, answers. An option Kumi recommends is marked and chosen to
 start with; when nobody's there (a `/goal`, `/loop` or match ran, or Kumi's
@@ -216,11 +224,14 @@ stops it, `r` runs it again, `c` copies its report, and Esc closes them.
 
 `KUMI_UI=plain`, or input or output through a pipe, gives a plain line-by-line interface
 instead, which suits screen readers and logs. It has `/help`, `/status`,
-`/undo`, `/stop`, `/refresh`, `/reconnect`, `/new`, `/conversations [n]`,
+`/undo`, `/stop`, `/refresh`, `/reconnect`, `/new [name]`, `/resume [n, id or name]`
+(and `/conversations`), `/rename <name>`, `/fork [name]`,
 `/model [provider/model]`, `/effort [level|default]`, `/fast`, `/logout <provider>`,
 `/memory`, `/forget <id>`, `/note <id> <new words>`, `/pin <id>`, `/unpin <id>`,
 `/recipes`, `/willington`, `/update`, `/changelog` and `/quit`, but no `/btw`,
-`/goal`, `/loop`, `/slots`, `/jobs` or `/copy`. It says when a background job
+`/goal`, `/loop`, `/slots`, `/jobs` or `/copy`. `/resume` numbers this Set's
+conversations, then other Sets'; Kumi's question about another Set's
+conversation takes 1, 2 or 3. It says when a background job
 starts and ends, and one your request needs carries on once Kumi is idle. Sign in from a shell with `kumi login`. Ctrl-C stops the
 answer, or quits when idle.
 

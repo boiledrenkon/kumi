@@ -108,7 +108,7 @@ pub enum Resume {
 }
 /// `-c`/`--continue` and `-r`/`--resume [id or name]` taken out of a session's arguments: what's left, and which
 /// conversation to take up.
-fn take_resume(args: &[String]) -> Result<(Vec<String>, Option<Resume>), RuntimeError> {
+pub(crate) fn take_resume(args: &[String]) -> Result<(Vec<String>, Option<Resume>), RuntimeError> {
     let both = || {
         RuntimeError::plain(format!(
             "Use {start} -c (the conversation you had last) or {start} -r <id or name>, not both.",
