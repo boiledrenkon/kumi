@@ -327,6 +327,10 @@ pub fn line(timing: &TurnTiming, elapsed_ms: u64, stop: Value, usage: Option<&Us
         line["inputTokens"] = json!(usage.input_tokens);
         line["cachedTokens"] = json!(usage.cache_read_tokens);
         line["outputTokens"] = json!(usage.output_tokens);
+        // What the provider wrote to its cache: a turn that wrote much and read little missed the cache.
+        if usage.cache_write_tokens > 0.0 {
+            line["cacheWriteTokens"] = json!(usage.cache_write_tokens);
+        }
     }
     line
 }

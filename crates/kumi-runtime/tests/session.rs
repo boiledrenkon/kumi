@@ -2988,7 +2988,7 @@ local_test!(each_turn_logs_where_its_time_went, {
                     return Err(RuntimeError::plain("model went away"));
                 }
                 Ok(TurnResult {
-                    usage: Some(Usage { input_tokens: 900., cache_read_tokens: 600., output_tokens: 20., ..Default::default() }),
+                    usage: Some(Usage { input_tokens: 900., cache_read_tokens: 600., cache_write_tokens: 250., output_tokens: 20. }),
                     ..complete()
                 })
             }
@@ -3008,7 +3008,10 @@ local_test!(each_turn_logs_where_its_time_went, {
         [&turn["stop"], &turn["model"], &turn["modelCalls"], &turn["tools"], &turn["toolMs"], &turn["liveRequests"], &turn["sentBytes"]],
         [&json!("completed"), &json!("openai/gpt-test"), &json!(1), &json!(1), &json!(40), &json!(1), &json!(1000)]
     );
-    assert_eq!([&turn["inputTokens"], &turn["cachedTokens"], &turn["outputTokens"]], [&json!(900), &json!(600), &json!(20)]);
+    assert_eq!(
+        [&turn["inputTokens"], &turn["cachedTokens"], &turn["cacheWriteTokens"], &turn["outputTokens"]],
+        [&json!(900), &json!(600), &json!(250), &json!(20)]
+    );
     assert_eq!(lines[1]["stop"], "error");
     h.session.close().await.unwrap();
 });

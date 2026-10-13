@@ -5,6 +5,9 @@
 //! like an instruction. Notes, recipes and audio go to a throwaway folder, never ~/.kumi.
 //!
 //! cargo run --release -p kumi --example eval_changes [-- <part of a case name>]
+//!
+//! EVAL_TIMINGS=<file> writes each turn's timings.jsonl line (model calls, first parts, tokens) after a line naming
+//! its case.
 use ableton_mcp_server::{delivery::PACKAGE_VERSION, tool_catalog::TOOL_CATALOG};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt};
@@ -1683,6 +1686,11 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
     options.techniques = Some(create_technique_store(techniques_file));
     options.gaps = Some(text_of(&gaps_file));
     options.watch = Some(VideoDirectories { videos_dir: text_of(&place.join("videos")), tools_dir: text_of(&place.join("tools")) });
+    // EVAL_TIMINGS=<file>: each turn's timings.jsonl line, after a {"case": …} line naming its case.
+    if let Some(file) = std::env::var_os("EVAL_TIMINGS").filter(|file| !file.is_empty()) {
+        kumi_runtime::core::timing::append(Path::new(&file), &json!({"case": case.name}));
+        options.timings = Some(file.to_string_lossy().into_owned());
+    }
     let session = Rc::new(create_session(options)?);
     *controller.borrow_mut() = Some(Rc::downgrade(&session));
     let started = perf_now();
