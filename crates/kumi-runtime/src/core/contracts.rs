@@ -256,6 +256,10 @@ pub trait Kernel {
         let _ = (question, signal, on_text);
         Err(absent())
     }
+    /// The fallback model answering while the producer's can't (`<provider>/<model>`); None while theirs does.
+    fn answering_fallback(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -1803,6 +1807,10 @@ pub trait SessionController {
     async fn aside(&self, question: &str, on_text: OnText, signal: Option<Signal>) -> Result<String, RuntimeError> {
         let _ = (question, on_text, signal);
         Err(absent())
+    }
+    /// The fallback model answering for the producer's now (`<provider>/<model>`); None while theirs does.
+    fn answering_fallback(&self) -> Option<String> {
+        None
     }
     async fn refresh(&self) -> Result<(), RuntimeError>;
     /// Forget this conversation and start afresh; it stays in the Set's kept conversations.

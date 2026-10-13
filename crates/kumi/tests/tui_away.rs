@@ -301,10 +301,14 @@ case!(a_terminal_that_never_says_where_focus_is_asks_the_system_only_when_theres
 });
 
 fn with_models(width: i32, settings: AwaySettings) -> (Harness, Rc<models::FakeModels>) {
+    with_models_on(Rc::new(Control::default()), width, settings)
+}
+
+fn with_models_on(control: Rc<Control>, width: i32, settings: AwaySettings) -> (Harness, Rc<models::FakeModels>) {
     let fake = models::FakeModels::catalog();
     fake.signed_in.borrow_mut().insert(kumi_runtime::providers::ProviderId::Anthropic);
     let m = fake.clone();
-    let h = Harness::with(width, 36, Rc::new(Control::default()), move |o| {
+    let h = Harness::with(width, 36, control, move |o| {
         o.terminal = Some(profile(NotifyChannel::Osc777));
         o.away = settings;
         o.alert_gap_ms = Some(60.);
@@ -314,7 +318,8 @@ fn with_models(width: i32, settings: AwaySettings) -> (Harness, Rc<models::FakeM
 }
 
 case!(a_plans_limit_shows_when_kumi_carries_on_and_the_fallback_is_named_while_it_answers, async {
-    let (h, _) = with_models(140, AwaySettings::default());
+    let control = Rc::new(Control::default());
+    let (h, _) = with_models_on(control.clone(), 140, AwaySettings::default());
     h.start().await;
     h.connect();
     h.type_text(FOCUS_OUT).await;
@@ -333,13 +338,15 @@ case!(a_plans_limit_shows_when_kumi_carries_on_and_the_fallback_is_named_while_i
     // Offline: tries again, and says so.
     h.emit(json!({"type":"retry","reason":"ChatGPT couldn't be reached","waitMs":20000,"wait":"offline"}));
     h.has("offline · trying again in 20s");
-    // The fallback takes over: said once in the conversation, and named in the header while it answers.
+    // The fallback takes over: said once in the conversation, and named in the header while the session says it answers.
+    control.extra.borrow_mut()["answering"] = json!("anthropic/claude-sonnet-5-5");
     h.emit(json!({"type":"model-switch","model":"anthropic/claude-sonnet-5-5","reason":"ChatGPT's plan limit resets at 14:20"}));
     h.has("ChatGPT's plan limit resets at 14:20; carrying on with claude-sonnet-5-5");
     h.has("claude-sonnet-5-5 · fallback");
     h.emit(json!({"type":"text","text":"Louder now."}));
     h.emit(json!({"type":"turn-complete","result":{"stopReason":"completed"},"elapsedMs":3000}));
     h.emit(json!({"type":"state","state":"idle"}));
+    control.extra.borrow_mut().as_object_mut().unwrap().remove("answering");
     h.emit(json!({"type":"model-switch","model":"openai-codex/gpt-6-astra","reason":"ChatGPT is answering again","back":true}));
     h.has("ChatGPT is answering again: back to gpt-6-astra.");
     h.wait_until_hidden("· fallback").await;

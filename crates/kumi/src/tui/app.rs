@@ -255,8 +255,6 @@ struct State {
     retry: Option<(String, f64)>,
     /// What a long wait for the model is for (a plan's limit, the connection), and when it ends (epoch ms).
     waiting_for: Option<(WaitFor, f64)>,
-    /// The fallback answering while the producer's model can't; None while theirs does.
-    answering: Option<String>,
     busy_since: f64,
     turn_changes: usize,
     recall: Option<(usize, String)>,
@@ -366,7 +364,6 @@ impl State {
             planning_since: 0.,
             retry: None,
             waiting_for: None,
-            answering: None,
             busy_since: 0.,
             turn_changes: 0,
             recall: None,

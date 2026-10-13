@@ -2349,6 +2349,9 @@ impl SessionController for Session {
         }
         Ok(stopped)
     }
+    fn answering_fallback(&self) -> Option<String> {
+        self.0.state.borrow().kernel.as_ref().and_then(|held| held.value.answering_fallback())
+    }
     fn has_daw_message(&self) -> bool {
         true
     }

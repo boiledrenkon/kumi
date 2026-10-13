@@ -345,6 +345,9 @@ impl SessionController for Control {
         }
         Ok(Some(note.clone()))
     }
+    fn answering_fallback(&self) -> Option<String> {
+        self.get::<String>("answering")
+    }
     fn has_daw_message(&self) -> bool {
         true
     }

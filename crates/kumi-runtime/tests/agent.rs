@@ -2610,6 +2610,7 @@ async fn the_fallback_carries_on_the_same_answer_through_tool_calls_and_the_chos
         assert!(first.contains("call_1") && first.contains("two tracks"), "the earlier call and its result stay: {first}");
         assert!(first.contains("look again"));
         assert_eq!(kernel.answering(), "anthropic/claude-sonnet-5-5");
+        assert_eq!(kumi_runtime::core::contracts::Kernel::answering_fallback(&kernel).as_deref(), Some("anthropic/claude-sonnet-5-5"));
         assert_eq!(kernel.checkpoint().unwrap().origin.as_deref(), Some("anthropic/claude-sonnet-5-5"));
         // Once the limit has reset, the chosen model answers again from the next turn.
         sleep(Duration::from_millis(1100)).await;
@@ -2619,6 +2620,7 @@ async fn the_fallback_carries_on_the_same_answer_through_tool_calls_and_the_chos
         assert_eq!(texts(&events.borrow()), ["Back on ChatGPT."]);
         assert_eq!(primary_asked.borrow().len(), 4);
         assert_eq!(kernel.answering(), "openai-codex/gpt-6-sol");
+        assert_eq!(kumi_runtime::core::contracts::Kernel::answering_fallback(&kernel), None);
         kernel.close().await;
     })
     .await

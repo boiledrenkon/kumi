@@ -49,11 +49,10 @@ impl TuiApp {
                 let model = get("model").to_string();
                 let name = model.split_once('/').map_or(model.as_str(), |(_, name)| name).to_string();
                 let reason = self.clean_line(get("reason"), 120);
+                // The header asks the session which model answers; the conversation says when that changes.
                 if value["back"] == true {
-                    self.0.state.borrow_mut().answering = None;
                     self.notice(&format!("{reason}: back to {name}."), NoticeTone::Info);
                 } else {
-                    self.0.state.borrow_mut().answering = Some(model);
                     self.notice(&format!("{reason}; carrying on with {name} (/model to change)."), NoticeTone::Info);
                 }
             }

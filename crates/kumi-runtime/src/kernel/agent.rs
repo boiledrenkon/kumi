@@ -566,6 +566,9 @@ impl Kernel for AgentKernel {
     async fn aside(&self, question: &str, signal: Signal, on_text: OnText) -> Result<String, RuntimeError> {
         AgentKernel::aside(self, question, signal, on_text).await
     }
+    fn answering_fallback(&self) -> Option<String> {
+        self.inner.back_at.get().map(|_| self.inner.binding().id.clone())
+    }
 }
 
 /// Where a turn's finished steps end: a reply whose calls have no results yet is left out.

@@ -1263,7 +1263,7 @@ impl TuiApp {
     pub(super) fn model_label(&self) -> Option<String> {
         let current = self.0.options.models.as_ref()?.current();
         // The fallback, while it answers for the producer's model.
-        if let Some(answering) = self.0.state.borrow().answering.clone() {
+        if let Some(answering) = self.0.options.controller.answering_fallback() {
             let name = answering.split_once('/').map_or(answering.as_str(), |(_, name)| name).to_string();
             return Some(format!("{name} · fallback"));
         }
@@ -1276,7 +1276,7 @@ impl TuiApp {
     }
     /// How much of the plan behind the answering model is used, near its limit only: "plan 82% · resets 14:20".
     pub(super) fn plan_line(&self) -> Option<(String, bool)> {
-        let answering = self.0.state.borrow().answering.clone();
+        let answering = self.0.options.controller.answering_fallback();
         let provider = match answering {
             Some(model) => model.split('/').next().map(str::to_string),
             None => self.0.options.models.as_ref()?.current().provider,
