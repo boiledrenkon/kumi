@@ -130,32 +130,38 @@ pub fn plan_limit(error: &LanguageModelError, now_ms: f64) -> Option<PlanLimit> 
     (codes.iter().any(|code| QUOTA_CODES.contains(code)) || words.contains("credit balance is too low")).then_some(PlanLimit::Quota)
 }
 
-/// Words a provider uses when it doesn't offer the model asked for: ChatGPT's "The '…' model is not supported…", the
-/// OpenAI API's model_not_found, "Model not found", "unknown model" and the like.
+/// Words a provider uses when it doesn't offer the model asked for: ChatGPT's "The '…' model is not supported…",
+/// "Model not found", "unknown model", a model "no longer available" or "retired".
 static MODEL_GONE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\bmodel\b[^.]{0,80}?\b(is not supported|isn't supported|is not available to|does not exist|doesn't exist|not found)\b|\b(unsupported|unknown|invalid) model\b|\bmodel_not_found\b|\bno such model\b",
+        r"(?i)\bmodel\b[^.]{0,80}?\b(is not supported|isn't supported|is not available|isn't available|is no longer (available|supported|offered)|has been (retired|deprecated|removed)|does not exist|doesn't exist|not found)\b|\b(unsupported|unknown) model\b|\bno such model\b",
     )
     .expect("regex")
 });
 
-/// Whether a failed call says the provider doesn't offer the model it was asked for: a 400, 404 or 422 whose body
-/// says so (ChatGPT's `{"detail":"The 'x' model is not supported …"}`, `model_not_found`, Anthropic's
-/// `not_found_error` about the model). Not a plan that leaves the model out (`plan_limit`), nor an unsupported parameter.
+/// Whether a failed call says the provider doesn't offer the model it was asked for: `model_not_found`, or a 400, 404 or
+/// 422 that says so (ChatGPT's `{"detail":"The 'x' model is not supported …"}`, Anthropic's `not_found_error` about the
+/// model). Not a plan that leaves the model out (`plan_limit`), nor a setting the model doesn't take.
 pub fn model_unavailable(error: &LanguageModelError) -> bool {
     let Some(call) = failed_call(error) else { return false };
-    if !matches!(call.status_code, Some(400 | 404 | 422)) {
-        return false;
-    }
     let body = call.response_body.as_deref().and_then(|body| serde_json::from_str::<Value>(body).ok()).or_else(|| call.data.clone());
     let mut codes = Vec::new();
     if let Some(body) = &body {
         collect_codes(body, 0, &mut codes);
     }
+    if codes.contains(&"model_not_found") {
+        return true;
+    }
+    // About one of the request's settings (`"param":"reasoning.effort"`, an unsupported value), not the model.
+    let param = body.as_ref().and_then(|body| find_text(body, "param", 0));
+    if !matches!(call.status_code, Some(400 | 404 | 422))
+        || param.is_some_and(|param| param != "model")
+        || codes.iter().any(|code| code.starts_with("unsupported_"))
+    {
+        return false;
+    }
     let words = format!("{} {}", call.message, call.response_body.as_deref().unwrap_or(""));
-    codes.contains(&"model_not_found")
-        || (codes.contains(&"not_found_error") && words.to_lowercase().contains("model"))
-        || MODEL_GONE.is_match(&words)
+    (codes.contains(&"not_found_error") && words.to_lowercase().contains("model")) || MODEL_GONE.is_match(&words)
 }
 
 /// The values of `type` and `code` fields, a few levels down (`{"error":{"type":…}}`, a stream's frame).
@@ -168,6 +174,11 @@ fn collect_codes<'v>(value: &'v Value, depth: u32, out: &mut Vec<&'v str>) {
             _ => {}
         }
     }
+}
+
+fn find_text<'v>(value: &'v Value, key: &str, depth: u32) -> Option<&'v str> {
+    let object = value.as_object().filter(|_| depth < 5)?;
+    object.get(key).and_then(Value::as_str).or_else(|| object.values().find_map(|value| find_text(value, key, depth + 1)))
 }
 
 fn find_number(value: &Value, key: &str, depth: u32) -> Option<f64> {
@@ -415,6 +426,7 @@ mod tests {
                     r#"{"error":{"message":"The requested model 'gpt-0' does not exist.","type":"invalid_request_error","param":"model","code":"model_not_found"}}"#,
                 ),
             ),
+            ("openai-codex/gpt-5.5", refused(400, "Bad Request", r#"{"detail":"Unsupported model"}"#)),
             (
                 "anthropic/claude-0",
                 refused(404, "model: claude-0", r#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-0"}}"#),
@@ -429,15 +441,11 @@ mod tests {
             assert!(model_unavailable(&error), "{binding}");
             let described = describe_failure(&error, binding);
             assert_eq!(described.kind, FailureKind::Model, "{binding}");
-            let model = binding.split_once('/').unwrap().1;
-            assert!(
-                described.message.contains(&format!("doesn't offer {model} to your sign-in; choose another model")),
-                "{}",
-                described.message
-            );
-            assert_eq!(described.provider.as_deref(), binding.split('/').next());
+            let (provider, model) = binding.split_once('/').unwrap();
+            let said = format!("{} doesn't offer {model} to your sign-in; choose another model.", provider_name(binding));
+            assert_eq!(described.message, said);
+            assert_eq!(described.provider.as_deref(), Some(provider));
         }
-        assert!(describe_failure(&gone_chatgpt(), "openai-codex/gpt-5.5").message.starts_with("ChatGPT doesn't offer gpt-5.5"));
         // Not the model: a parameter it doesn't take, a request too big, a plan that leaves it out.
         for (error, kind) in [
             (
@@ -448,6 +456,14 @@ mod tests {
                 ),
                 FailureKind::Request,
             ),
+            (
+                refused(
+                    400,
+                    "Unsupported value: 'xhigh' is not supported with the 'gpt-6-luna' model. Supported values are: 'low' and 'medium'.",
+                    r#"{"error":{"message":"Unsupported value: 'xhigh' is not supported with the 'gpt-6-luna' model.","type":"invalid_request_error","param":"reasoning.effort","code":"unsupported_value"}}"#,
+                ),
+                FailureKind::Request,
+            ),
             (refused(400, "Bad Request", r#"{"detail":"Input is too long for this request."}"#), FailureKind::Request),
             (refused(403, "Forbidden", r#"{"error":{"type":"usage_not_included"}}"#), FailureKind::Model),
         ] {
@@ -455,10 +471,6 @@ mod tests {
             let described = describe_failure(&error, "openai-codex/gpt-6-sol");
             assert_eq!(described.kind, kind, "{}", described.message);
         }
-    }
-
-    fn gone_chatgpt() -> LanguageModelError {
-        refused(400, "Bad Request", r#"{"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}"#)
     }
 
     #[test]

@@ -853,6 +853,7 @@ impl TuiApp {
         if let Some(status) = &status {
             if !status.signed_in {
                 self.offer_fix("auth", Some(status.id.as_str()));
+                return Ok(());
             }
         } else if let Some(server) = models.local().await.into_iter().find(|s| Some(&s.id) == current.provider.as_ref()) {
             if !server.running && !self.0.state.borrow().closing {
@@ -866,6 +867,22 @@ impl TuiApp {
                     ),
                     NoticeTone::Info,
                 );
+                return Ok(());
+            }
+        }
+        // A saved model the provider's own list no longer shows (retired from a plan's sign-in, say): said once, with the
+        // list to choose another from (unless the producer is already typing or talking), before a message fails on it.
+        if let Some(said) = crate::models::missing_model(models.as_ref()).await {
+            if self.0.state.borrow().closing {
+                return Ok(());
+            }
+            self.notice(&format!("{said}; choose another model."), NoticeTone::Warn);
+            let free = {
+                let state = self.0.state.borrow();
+                state.panel.is_none() && state.editor.is_empty()
+            };
+            if free && !self.busy() {
+                self.open_models().await?;
             }
         }
         Ok(())

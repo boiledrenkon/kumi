@@ -57,6 +57,36 @@ case!(missing_default_model_and_commands_over_picker, async {
     h.has("filter: gpt-6/");
     h.close().await;
 });
+// A saved model its provider's list no longer shows (ChatGPT retiring one from its plans' sign-in): said at start with
+// the list open; once another is chosen, the next start reads the list and says nothing.
+case!(a_saved_model_its_provider_no_longer_lists_is_said_once_with_the_list, async {
+    let fake = FakeModels::catalog();
+    *fake.model.borrow_mut() = Some("openai-codex/gpt-5.5".into());
+    let h = model_harness(fake.clone(), 120);
+    h.start().await;
+    h.wait_for("ChatGPT no longer offers gpt-5.5 to your sign-in; choose another model.").await;
+    h.has("Choose a model");
+    h.type_text("luna\r").await;
+    assert!(fake.calls.borrow().contains(&"choose:openai-codex/gpt-6-luna".into()));
+    h.has("Kumi talks to GPT-6 Luna from your next message");
+    assert_eq!(h.screen().iter().filter(|line| line.contains("no longer offers")).count(), 1);
+    h.close().await;
+    let listed = || fake.calls.borrow().iter().filter(|call| *call == "list:openai-codex").count();
+    let before = listed();
+    let h = model_harness(fake.clone(), 120);
+    h.start().await;
+    for _ in 0..300 {
+        if listed() > before {
+            break;
+        }
+        delay(10).await;
+    }
+    assert!(listed() > before, "the list was read at start");
+    delay(20).await;
+    assert!(!has(&h.screen(), "no longer offers"));
+    assert!(!has(&h.screen(), "Choose a model"));
+    h.close().await;
+});
 case!(chatgpt_browser_clipboard_success_and_cancel, async {
     let fake = FakeModels::catalog();
     *fake.model.borrow_mut() = None;
