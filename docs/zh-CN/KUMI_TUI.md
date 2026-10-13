@@ -8,10 +8,10 @@ Kumi 终端应用的参考：屏幕上显示什么、每条命令和按键，以
 
 Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗口恢复原样。
 
-- **顶栏：** Kumi、工程名称、模型及其推理强度，以及与 Live 的连接状态。Live 播放时，速度旁边有一盏黄灯随节拍闪烁（每小节第一拍最亮）。
+- **顶栏：** Kumi、工程名称、模型及其推理强度，以及与 Live 的连接状态。Live 播放时，速度旁边有一盏黄灯随节拍闪烁（每小节第一拍最亮）。备用模型回答期间，顶栏显示它的名字并加上“· fallback”；接近套餐上限时（某个窗口已用 80%），模型旁边会显示“plan 84% · resets 14:20”。
 - **对话**（左侧）：你的消息、Kumi 的回答及其步骤，用平常的话描述（“looked at your Set”），每条都附有耗时。正在进行的步骤按类型显示动画（搜索、阅读、构建设备、修改、聆听、播放）；同一步骤做了多次会折叠成一行（“read a page ×3”）。Kumi 听到的内容显示为一个小频谱，它记住的内容单独占一行：✎ 笔记，◆ 技巧，↻ 配方，✦ 从匹配中得到的经验。
 - **FOCUS**（右上）：你在 Live 中所处的位置，随你的选择变化而更新：轨道的设备树（含机架链）、以小型钢琴卷帘显示的片段音符，或 Session 视图、编曲视图的条带。你指向的设备（点击它，或在 Live 中使用 **Ask Kumi about this**）会被固定，用于你接下来的消息。
-- **NOW**（右侧中部）：Kumi 正在做的事，随进行实时绘出：某个值修改前后的样子、新片段的音符、色块、落入设备链的设备、“▶ Playing from the start marker”。
+- **NOW**（右侧中部）：Kumi 正在做的事，随进行实时绘出：某个值修改前后的样子、新片段的音符、色块、落入设备链的设备、“▶ Playing from the start marker”。Kumi 等待模型时，会说明原因和要等到何时：“retrying in 5s · ChatGPT is busy”、“carrying on at 14:20 (in 2h 13m) · ChatGPT's plan limit”、“offline · trying again in 20s”（都可用 Esc 停止）。
 - **标签页**（右下）：**HISTORY** 先列出 Kumi 最近记住的三项内容（各带 **forget**），然后是每项修改，最新的在前，各带 **undo**；无法撤销时则显示 **kept** / **no undo** / **check Live**。**GOAL** 显示 `/goal`（设定之前显示“No goal yet”）：目标、已完成的回合数和用时与预算的对比（状态栏计的是进行中的回合）、最后一次检查以及下一步；匹配声音的 `/loop` 则显示最佳得分及其趋势、领先的候选方案，以及用时。
 - **输入框**（左下）：等待发送的消息显示在它上方，被固定的设备显示为一个小标签，随下一条消息发送的文件则显示名称、类型、大小和 ×。为空时显示 “ctrl+t to talk”。Kumi 聆听时，它的底行会显示一个闪烁的薄荷绿 `●`、时间和电平表，右侧是可用的按键；不用红色，因为在 Live 中红色表示录音。
 
@@ -59,7 +59,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `/stop` | 停止 Live：片段、走带和录音。同时停止 Kumi 的回答 |
 | `/refresh` | 重新读取工程，不询问模型 |
 | `/copy` | 把 Kumi 的上一个回答复制到剪贴板 |
-| `/model`、`/effort` | 选择模型（来自各提供方自己的列表，然后是你电脑上的模型服务器：Ollama、LM Studio 以及 settings.json 中写的服务器；输入文字可筛选）以及它思考的力度；从你的下一条消息起生效 |
+| `/model`、`/effort` | 选择模型（来自各提供方自己的列表，然后是你电脑上的模型服务器：Ollama、LM Studio 以及 settings.json 中写的服务器；输入文字可筛选）以及它思考的力度；从你的下一条消息起生效。在 `/model` 中，ctrl+f 把选中的模型设为备用模型（再按一次取消） |
 | `/fast` | 当提供方在列表中提供时，开启模型的更快档位（ChatGPT 的“Fast”：回答更快，用量也更多）；再次输入 `/fast` 关闭。模型名旁会显示“· fast” |
 | `/willington` | 开启或关闭 [Willington](WILLINGTON_INTEGRATION.md)。在支持的构建上请求机架绑定；片段 Follow Actions 和原生编辑还要求通过匹配实际库的自测。原生编辑仅支持 b5 macOS ARM64。启用前保持关闭；桥接包含 Willington 时可用。 |
 | `/login`、`/logout` | 登录（在浏览器中用 ChatGPT 登录，或输入只显示为圆点的 API 密钥）或退出登录 |
@@ -117,15 +117,26 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | Shift-Tab | 进入标签页（再按一次切到下一个标签页）：↑↓ 和 Page Up/Down 移动，Enter 执行该行的 **undo** 或 **forget**，Esc 或 Tab 返回 |
 | 鼠标 | 点击行末的 **undo** 或 **forget**、标签页名称，或点击设备树中的设备以指向它；点击图钉取消固定。拖动时按住 Shift（iTerm2 中为 Option）可选择文字 |
 
-**面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/conversations` 和 `/recipes` 中，输入文字可筛选列表。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。
+**面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/conversations` 和 `/recipes` 中，输入文字可筛选列表。在 `/model` 中，ctrl+f 设定备用模型。**Your answer**（以带编号选项的问题结尾的回答）：按编号再按 Enter 即可回答。Kumi 推荐的选项带有标记，并一开始就被选中；没有人在时（运行过 `/goal`、`/loop` 或匹配，或 Kumi 的窗口已在其他窗口后面 2 分钟），倒计时结束后 Kumi 会选它（“Taking 2 (recommended) in 60 s · any key cancels”）。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。
 
 ## 纯文本模式
 
 设置 `KUMI_UI=plain`，或者输入或输出经过管道时，Kumi 会改用逐行显示的纯文本界面，适合屏幕阅读器和日志。它支持 `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new`、`/conversations [n]`、`/model [provider/model]`、`/effort [level|default]`、`/fast`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/willington`、`/update`、`/changelog` 和 `/quit`，但没有 `/btw`、`/goal`、`/loop`、`/slots` 或 `/copy`。请在 shell 中用 `kumi login` 登录。Ctrl-C 停止回答，空闲时则退出。
 
+## 离开 Kumi 时
+
+- **终端中的状态：** Kumi 用 OSC 7501 报告它在做什么（工作中，附 NOW 的文字和运行进度；等你选择或登录；完成；失败），支持它的终端会显示在标签页或侧栏中。Windows Terminal、ConEmu 和 Ghostty 还会收到 OSC 9;4 进度。Kumi 退出时两者都会清除。
+- **Kumi 的窗口在其他窗口后面时**，Kumi 会在以下情况告诉你：完成一个用时 15 秒或更久的回答、需要你选择或登录、等待套餐上限、因错误停止，或结束一次 `/goal`、`/loop` 或匹配：
+  - 桌面通知：用终端自己的通知（Ghostty、WezTerm 和 foot 用 OSC 777；iTerm2 用 OSC 9；kitty 用 OSC 99），否则用 macOS 的通知（Terminal.app 等）、Linux 上的 `notify-send`，或 Windows Terminal 的响铃（任务栏会闪烁）；
+  - Live 状态栏中的一行（“Kumi · done · the bass is darker”）；从不弹出对话框，也不进入 HISTORY。
+  - 每 10 秒最多一条（等待中的最新一条届时送出）；Live 录音时一条也不送，等录音停止；你回来后不再发送。
+  - 对从不告知自己是否在前台的终端，在 Mac 上，只有在有事要告诉你时，Kumi 才询问系统哪个应用在前台。
+- **电脑保持唤醒**：在 Kumi 工作期间（一个回答、`/goal`、等待套餐上限）；显示器可以休眠。
+- **设置**（`~/.kumi/settings.json`）：`"notifications": "off"`、`"liveStatusBar": false`、`"keepAwake": false`，以及 `"answerAfter"`（Kumi 选择推荐答案之前的秒数；`0` 表示从不）。
+
 ## 终端
 
-Kumi 会检测终端能显示多少种颜色；`KUMI_COLOR`（`truecolor`、`256`、`16`、`none`）可覆盖检测结果，并且会遵循 `NO_COLOR`。在终端符号可能无法显示的地方（旧版 Windows 控制台、Linux 控制台），Kumi 用双字母徽标代替图标；可用 `KUMI_ICONS=glyphs` 或 `badges` 自行选择。在 Windows 上推荐使用 Windows Terminal。在不支持 kitty 键盘协议的终端中，请用 Ctrl-J 或 Alt-Enter 换行。支持该协议的终端会告知按住的 Ctrl-T 何时松开；在其他终端中，按键的重复停止时 Kumi 就停止聆听。
+Kumi 会检测终端能显示多少种颜色；`KUMI_COLOR`（`truecolor`、`256`、`16`、`none`）可覆盖检测结果，并且会遵循 `NO_COLOR`。在终端符号可能无法显示的地方（旧版 Windows 控制台、Linux 控制台），Kumi 用双字母徽标代替图标；可用 `KUMI_ICONS=glyphs` 或 `badges` 自行选择。在 Windows 上推荐使用 Windows Terminal。在不支持 kitty 键盘协议的终端中，请用 Ctrl-J 或 Alt-Enter 换行。在 tmux 中，`set -g allow-passthrough on` 让 Kumi 的状态和通知能够透传，焦点报告需要 `set -g focus-events on`。支持该协议的终端会告知按住的 Ctrl-T 何时松开；在其他终端中，按键的重复停止时 Kumi 就停止聆听。
 
 ## 设计说明
 
