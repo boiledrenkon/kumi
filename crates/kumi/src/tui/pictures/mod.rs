@@ -132,8 +132,8 @@ pub fn lines_of(picture: &ChangePicture, cols: usize) -> Vec<Vec<Span>> {
         }
         ChangePicture::Automation { parameter, before, after, .. } => {
             let plural = |n: usize| format!("{n} point{}", if n == 1 { "" } else { "s" });
-            let what = if parameter.is_empty() { String::new() } else { format!("{parameter} ") };
-            vec![fit(vec![styled(format!("{what}{} → {}", plural(before.len()), plural(after.len())), palette::TEXT)], cols)]
+            let what = if parameter.is_empty() { String::new() } else { format!("{parameter} · ") };
+            vec![fit(vec![styled(format!("{what}{} → {}", before.len(), plural(after.len())), palette::TEXT)], cols)]
         }
         ChangePicture::Mix { before, after } => {
             mix_words(before, after).into_iter().map(|line| fit(vec![styled(line, palette::TEXT)], cols)).collect()
@@ -329,6 +329,19 @@ mod tests {
         let lines = text(&draw(&mix, 40, 6, Graphics::Cells, 1, palette::GROUND).lines);
         assert!(lines[0].ends_with(" Volume -4.5 dB"), "{lines:?}");
         assert_eq!(text(&lines_of(&mix, 40)), ["Volume 0.0 dB → -4.5 dB"]);
+    }
+
+    #[test]
+    fn a_lane_says_its_parameter_and_its_points() {
+        let lane = |parameter: &str| ChangePicture::Automation {
+            parameter: parameter.into(),
+            min: -15.,
+            max: 15.,
+            before: vec![],
+            after: vec![[0., 0.], [4., -8.]],
+        };
+        assert_eq!(text(&lines_of(&lane("3 Gain A"), 40)), ["3 Gain A · 0 → 2 points"]);
+        assert_eq!(text(&lines_of(&lane(""), 40)), ["0 → 2 points"]);
     }
 
     #[test]

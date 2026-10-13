@@ -245,6 +245,17 @@ fn edited_notes(kind: &ChangeKind, preview: &JsonObject, input: &JsonObject) -> 
 }
 
 /// A clip's automation: Live's points before; after, those with what was drawn laid over them (or erased).
+/// Names an automation lane's parameter and draws the lane to the parameter's range, as discovery read them; a lane
+/// with a point outside that range keeps its own.
+pub(crate) fn name_lane(picture: &mut ChangePicture, name: &str, low: f64, high: f64) {
+    if let ChangePicture::Automation { parameter, min, max, before, after } = picture {
+        name.clone_into(parameter);
+        if before.iter().chain(after.iter()).all(|point| (low..=high).contains(&point[1])) {
+            (*min, *max) = (low, high);
+        }
+    }
+}
+
 fn automation(preview: &JsonObject, input: &JsonObject) -> Option<ChangePicture> {
     let points = |items: &[Value]| {
         items
@@ -701,6 +712,24 @@ mod tests {
             (value.from_text.as_deref(), value.to_text.as_deref(), value.asked.as_deref()),
             (Some("1.00 kHz"), Some("2.00 kHz"), Some("2010"))
         );
+    }
+
+    #[test]
+    fn a_lane_takes_its_parameters_name_and_range_when_its_points_fit() {
+        let drawn = object(json!({"action":"insert","points":[{"time":0,"value":0},{"time":4,"value":-8}]}));
+        let mut lane = picture(kind("set_automation"), &JsonObject::new(), &drawn, None).unwrap();
+        let range = |lane: &ChangePicture| match lane {
+            ChangePicture::Automation { parameter, min, max, .. } => (parameter.clone(), *min, *max),
+            _ => panic!(),
+        };
+        // Without a read of the parameter, the lane is drawn to its own points.
+        assert_eq!(range(&lane), (String::new(), -8., 0.));
+        name_lane(&mut lane, "3 Gain A", -15., 15.);
+        assert_eq!(range(&lane), ("3 Gain A".into(), -15., 15.));
+        // A range the points don't fit isn't this lane's: the name is still told.
+        let mut lane = picture(kind("set_automation"), &JsonObject::new(), &drawn, None).unwrap();
+        name_lane(&mut lane, "Dry/Wet", 0., 1.);
+        assert_eq!(range(&lane), ("Dry/Wet".into(), -8., 0.));
     }
 
     #[test]

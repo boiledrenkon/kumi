@@ -347,6 +347,12 @@ impl Mutations {
         if let Some(asked) = &asked {
             final_summary.picture = super::changes::pictures::picture(kind, &preview, asked, Some(&result)).or(final_summary.picture);
         }
+        // An automation lane is drawn to its parameter's range and named, as discovery read them.
+        let parameter =
+            args.get("parameterRef").and_then(Value::as_str).and_then(|r| connection.references.borrow().parameters.get(r).cloned());
+        if let (Some(parameter), Some(picture)) = (parameter, final_summary.picture.as_mut()) {
+            super::changes::pictures::name_lane(picture, &parameter.name, parameter.min, parameter.max);
+        }
         let applied = result.get("state").and_then(Value::as_str) == Some("applied");
         // What Live left of what it cut, read now: with it, Kumi's undo makes the clips again, so the change isn't
         // Live's alone to take back. A cut past what the read before explains leaves it to Live.
