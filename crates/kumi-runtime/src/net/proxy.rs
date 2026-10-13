@@ -314,26 +314,22 @@ fn read_system() -> Found {
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
-        fn CFStringCreateWithBytes(
-            allocator: *const c_void,
-            bytes: *const u8,
-            length: isize,
-            encoding: u32,
-            external: bool,
-        ) -> *const c_void;
+        fn CFStringCreateWithBytes(allocator: *const c_void, bytes: *const u8, length: isize, encoding: u32, external: u8)
+            -> *const c_void;
         fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
         fn CFGetTypeID(object: *const c_void) -> usize;
         fn CFNumberGetTypeID() -> usize;
         fn CFStringGetTypeID() -> usize;
         fn CFArrayGetTypeID() -> usize;
-        fn CFNumberGetValue(number: *const c_void, kind: isize, value: *mut c_void) -> bool;
+        fn CFNumberGetValue(number: *const c_void, kind: isize, value: *mut c_void) -> u8;
         fn CFStringGetLength(string: *const c_void) -> isize;
         fn CFStringGetMaximumSizeForEncoding(length: isize, encoding: u32) -> isize;
-        fn CFStringGetCString(string: *const c_void, buffer: *mut c_char, size: isize, encoding: u32) -> bool;
+        fn CFStringGetCString(string: *const c_void, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
         fn CFArrayGetCount(array: *const c_void) -> isize;
         fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
         fn CFRelease(object: *const c_void);
     }
+    // CoreFoundation's Boolean is an unsigned char: read as a byte, not a Rust bool.
     const UTF8: u32 = 0x0800_0100;
     const SINT64: isize = 4;
     // SAFETY: each value is read only after its type is checked; the copied dictionary and the keys made here are
@@ -344,7 +340,7 @@ fn read_system() -> Found {
             return Found::default();
         }
         let value = |name: &str| {
-            let key = CFStringCreateWithBytes(std::ptr::null(), name.as_ptr(), name.len() as isize, UTF8, false);
+            let key = CFStringCreateWithBytes(std::ptr::null(), name.as_ptr(), name.len() as isize, UTF8, 0);
             if key.is_null() {
                 return std::ptr::null();
             }
@@ -356,8 +352,8 @@ fn read_system() -> Found {
             let (found, mut read) = (value(name), 0i64);
             (!found.is_null()
                 && CFGetTypeID(found) == CFNumberGetTypeID()
-                && CFNumberGetValue(found, SINT64, (&mut read as *mut i64).cast()))
-            .then_some(read)
+                && CFNumberGetValue(found, SINT64, (&mut read as *mut i64).cast()) != 0)
+                .then_some(read)
         };
         let text = |string: *const c_void| {
             if string.is_null() || CFGetTypeID(string) != CFStringGetTypeID() {
@@ -365,7 +361,7 @@ fn read_system() -> Found {
             }
             let size = CFStringGetMaximumSizeForEncoding(CFStringGetLength(string), UTF8) + 1;
             let mut buffer = vec![0 as c_char; size.max(1) as usize];
-            CFStringGetCString(string, buffer.as_mut_ptr(), size, UTF8)
+            (CFStringGetCString(string, buffer.as_mut_ptr(), size, UTF8) != 0)
                 .then(|| CStr::from_ptr(buffer.as_ptr()).to_string_lossy().into_owned())
         };
         let server = |kind: &str, scheme: &str| {
@@ -621,6 +617,16 @@ mod tests {
         let none = Settings::from_system(Found { auto_config: true, ..Found::default() }, "");
         assert!(none.auto_config && none.https.is_none());
         assert_eq!(through(&none, "https://github.com/"), None);
+    }
+
+    #[test]
+    fn this_systems_own_settings_read_as_settings() {
+        // Whatever this machine has set: read through the system's own interface, every time, without failing.
+        for _ in 0..3 {
+            let found = read_system();
+            let settings = Settings::from_system(found, "");
+            assert_eq!(settings.source, Source::System);
+        }
     }
 
     #[test]
