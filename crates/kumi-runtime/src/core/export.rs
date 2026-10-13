@@ -470,20 +470,12 @@ fn producer_words(text: &str, pictures: usize, earlier: &mut Vec<String>, partia
     *partial |= unshortened.len() != words.len();
     let (asks, rest) = split_asks(&unshortened);
     *partial |= !asks.is_empty();
-    earlier.extend(asks);
+    earlier.extend(asks.iter().filter_map(|ask| asked(ask)));
     let rest = trim(rest.split(&format!("\n\n{PLAYBOOK_OPEN}")).next().unwrap_or(""));
     if rest.ends_with(CARRY_ON_NOTE) {
         return Words::CarryOn;
     }
-    let mut said = if let Some(request) = framed(rest, &loop_setup("")) {
-        format!("Loop: {request}")
-    } else if let Some(goal) = framed(rest, &goal_setup("")) {
-        format!("Goal: {goal}")
-    } else if rest.starts_with("[Kumi]") {
-        return Words::Kumi;
-    } else {
-        rest.to_string()
-    };
+    let Some(mut said) = asked(rest) else { return Words::Kumi };
     if pictures > 0 {
         let note = if pictures == 1 { "[a picture]".to_string() } else { format!("[{pictures} pictures]") };
         said = if said.is_empty() { note } else { format!("{said}\n\n{note}") };
@@ -495,12 +487,31 @@ fn producer_words(text: &str, pictures: usize, earlier: &mut Vec<String>, partia
     }
 }
 
+/// What the producer asked, in words Kumi sends the model: theirs, a loop's or a goal's request without Kumi's framing
+/// ("Loop: …", "Goal: …"), or None for Kumi's own words to the model ("[Kumi…": a round's next step, a check, a job's
+/// report, the carry-on note).
+pub(crate) fn asked(words: &str) -> Option<String> {
+    let words = trim(words);
+    if let Some(request) = framed(words, &loop_setup("")) {
+        return Some(format!("Loop: {request}"));
+    }
+    if let Some(goal) = framed(words, &goal_setup("")) {
+        return Some(format!("Goal: {goal}"));
+    }
+    (!words.is_empty() && !words.starts_with("[Kumi")).then(|| words.to_string())
+}
+
 /// The producer's request inside Kumi's framing of it (`setup`, made with an empty request: "[Kumi loop] " then what Kumi
-/// asks), or None for other words. A framing an older Kumi wrote ends at its first blank line.
+/// asks), or None for other words. An older Kumi's framing is a one-line request, a blank line, then what Kumi asked; a
+/// later round's note (a line of its own, then the rest) isn't a request.
 fn framed<'a>(text: &'a str, setup: &str) -> Option<&'a str> {
     let (opening, ending) = setup.split_at(setup.find("\n\n")?);
     let request = text.strip_prefix(opening)?;
-    Some(trim(request.strip_suffix(ending).unwrap_or_else(|| request.split("\n\n").next().unwrap_or(request))))
+    if let Some(request) = request.strip_suffix(ending) {
+        return Some(trim(request));
+    }
+    let (request, _) = request.split_once("\n\n")?;
+    (!request.contains('\n')).then(|| trim(request))
 }
 
 /// A call as the export keeps it: under its tool's own name with nothing of its input, or as it was (redacted) in a full

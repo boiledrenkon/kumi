@@ -98,6 +98,12 @@ Loop: make it louder
 
 Starting.
 
+Round two is in.
+
+Brighter now.
+
+CONTINUE: almost there.
+
 <details><summary>used judge</summary>
 
 ```json

@@ -511,8 +511,9 @@ fn asks_in(messages: &[Message]) -> Vec<String> {
             asks.extend(listed);
             let words = rest.split(OBSERVATION_MARKER).next().unwrap_or_default();
             let words = trim(words.split(&format!("\n\n{PLAYBOOK_OPEN}")).next().unwrap_or_default());
-            if !words.is_empty() && !words.starts_with("[Kumi]") {
-                let line = words.split_whitespace().collect::<Vec<_>>().join(" ");
+            // A loop's or goal's request without Kumi's framing; Kumi's own notes ("[Kumi…") aren't the producer's.
+            if let Some(said) = crate::core::export::asked(words) {
+                let line = said.split_whitespace().collect::<Vec<_>>().join(" ");
                 asks.push(if utf16_len(&line) > ASK { format!("{}…", head(&line, ASK)) } else { line });
             }
         }

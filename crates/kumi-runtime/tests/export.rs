@@ -3,6 +3,7 @@ use kumi_runtime::ai::types::Message;
 use kumi_runtime::core::contracts::{ChangePicture, KernelCheckpoint, SavedConversation, TranscriptLine, TranscriptRole};
 use kumi_runtime::core::export::{file_name, html, import, json, markdown, Format, Options, Source, IMPORT_MAX_BYTES, LEFT_OUT, PARTIAL};
 use kumi_runtime::core::goal::goal_setup;
+use kumi_runtime::core::goal_mode::objective_audit;
 use kumi_runtime::core::loop_run::loop_setup;
 use kumi_runtime::kernel::agent::CARRY_ON_NOTE;
 use kumi_runtime::kernel::budget::{transcript_of, ASKED, OBSERVATION_MARKER, SHORTENED};
@@ -11,7 +12,11 @@ use serde_json::{json, Value};
 /// What the test's redactor takes out, planted in every kind of word an export carries.
 const PLANTED: &str = "PLANTED-7f3a";
 /// What no export may carry, redacted or not.
-const NEVER: [&str; 12] = [
+const NEVER: [&str; 16] = [
+    "Budget left",
+    "Not there yet",
+    "Don't change anything now",
+    "Round 1.",
     "OBSERVED-TRACK-LIST",
     "current_observation_untrusted",
     "ENCRYPTED-REASONING",
@@ -54,7 +59,7 @@ fn messages() -> Vec<Value> {
         json!({"role": "system", "content": "SYSTEM-PROMPT"}),
         json!({"role": "user", "content": [
             {"type": "text", "text": format!(
-                "{SHORTENED}{ASKED}- an earlier ask {PLANTED}\n- a second earlier ask\n\nMake the kick punchier {PLANTED}. See [the manual](https://www.ableton.com/manual).{OBSERVATION_MARKER}\nOBSERVED-TRACK-LIST\n</current_observation_untrusted>"
+                "{SHORTENED}{ASKED}- an earlier ask {PLANTED}\n- [Kumi loop] Round 1. Budget left: 4 rounds.\n- a second earlier ask\n\nMake the kick punchier {PLANTED}. See [the manual](https://www.ableton.com/manual).{OBSERVATION_MARKER}\nOBSERVED-TRACK-LIST\n</current_observation_untrusted>"
             )},
             {"type": "file", "data": "IMAGE-BASE64", "mediaType": "image/png"}
         ]}),
@@ -97,6 +102,13 @@ fn messages() -> Vec<Value> {
             {"type": "text", "text": "Starting."},
             {"type": "tool-call", "toolCallId": "toolu_6", "toolName": "judge", "input": {"goal": "loud"}}
         ]}),
+        // Kumi's notes on later rounds, a goal's next turn and its check: Kumi's words to the model, not the producer's.
+        json!({"role": "user", "content": [{"type": "text", "text": "[Kumi loop] Round 2. Kept: brighter. Budget left: 3 rounds, about 4 minutes. Make one change toward it, then judge it (a tune is judged already; Kumi asks for done when it's time)."}]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "Round two is in."}]}),
+        json!({"role": "user", "content": [{"type": "text", "text": "[Kumi goal] make a pad like the reference\nNot there yet: still too dark. Budget left: 4 turns. Carry on toward it."}]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "Brighter now."}]}),
+        json!({"role": "user", "content": [{"type": "text", "text": objective_audit("make a pad like the reference")}]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "CONTINUE: almost there."}]}),
     ]
 }
 

@@ -54,6 +54,12 @@ Loop: make it louder
 
 Starting.
 
+Round two is in.
+
+Brighter now.
+
+CONTINUE: almost there.
+
 *Step: used judge*
 
 ## What Kumi changed in Live
