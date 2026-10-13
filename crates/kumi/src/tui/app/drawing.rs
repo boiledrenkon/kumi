@@ -439,6 +439,8 @@ impl TuiApp {
                     Some((WaitFor::Offline, _)) => {
                         let word = match state.waiting_cause {
                             Some(NetCause::Tls) => "TLS failed",
+                            // As the words say: a proxy that isn't answering, or one that answered no.
+                            Some(NetCause::Proxy) if state.waiting_proxy_down => "proxy not answering",
                             Some(NetCause::Proxy) => "proxy refused",
                             _ => "offline",
                         };
