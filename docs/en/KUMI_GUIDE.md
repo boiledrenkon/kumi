@@ -1001,6 +1001,25 @@ never instructions. Kumi keeps its files in `~/.kumi`, readable only by you;
 sign-ins are in `~/.kumi/auth.json`. Terminal scrollback and your provider's
 own retention are separate.
 
+## Proxies and school or office networks
+
+- **A proxy:** Kumi goes through `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`
+  (`http://…`, or `socks5://…`), except for `NO_PROXY`'s addresses. Without
+  them, it uses the proxy set in macOS's or Windows' settings, with its
+  exceptions. Kumi doesn't read a proxy auto-config (PAC) file: set
+  `HTTPS_PROXY` to the proxy's address instead.
+- **Never through a proxy:** models on your computer (Ollama, LM Studio) and
+  Live's bridge. With the system's settings, addresses on your own network
+  aren't either.
+- **A network that inspects secure connections,** as schools and offices often
+  have: Kumi trusts the certificates your computer trusts, so it works once the
+  network's certificate is installed, as your browser needs. `SSL_CERT_FILE`
+  names a file of more certificates for Kumi to trust.
+- **Web search and reading** connect directly, never through a proxy. Kumi
+  checks that each address is public before it connects, and a proxy would look
+  the name up again where Kumi can't check it. On a network that lets only a
+  proxy out, they can't read pages.
+
 ## Files and settings
 
 Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
@@ -1052,6 +1071,8 @@ Environment variables (paths must be absolute):
 | `KUMI_LIVE_EXTENSIONS_DIR` | Where `kumi bridge` puts Kumi's extension and `kumi doctor` looks for it, when Kumi doesn't find Live's Extensions folder |
 | `KUMI_BRIDGE_WAIT_SECONDS` | How long `kumi bridge` waits for Live to connect; `0` doesn't wait |
 | `KUMI_NO_UPDATE_CHECK` | Any value turns off the check for a newer version at start |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` | The proxy Kumi goes through, and the addresses it doesn't ([proxies](#proxies-and-school-or-office-networks)) |
+| `SSL_CERT_FILE` | A file of certificates Kumi trusts besides your computer's |
 | `KUMI_UI=plain` | Plain line-by-line output instead of the full-screen app; `kumi bridge`, `kumi update` and the other commands show no spinner while they work |
 | `KUMI_COLOR` | `truecolor`, `256`, `16` or `none`, when detection gets it wrong; `NO_COLOR` is honoured |
 | `KUMI_ICONS` | `glyphs` or `badges` (two-letter icons), when the terminal's symbols look wrong |

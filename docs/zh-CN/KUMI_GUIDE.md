@@ -379,6 +379,13 @@ Kumi 会在启动时检查是否有新版本，每天最多一次；没有新版
 
 轨道、片段和设备的名称、工具结果以及网页对 Kumi 来说都是数据，绝不是指令。Kumi 把它的文件保存在 `~/.kumi` 中，只有你可以读取；登录信息保存在 `~/.kumi/auth.json`。终端的滚动记录，以及提供方自己的数据保留，不在此范围内。
 
+## 代理服务器与学校或公司的网络
+
+- **代理服务器：**Kumi 经由 `HTTPS_PROXY`、`HTTP_PROXY` 或 `ALL_PROXY`（`http://…` 或 `socks5://…`）联网，`NO_PROXY` 中的地址除外。没有这些变量时，它使用 macOS 或 Windows 设置中的代理服务器及其例外。Kumi 不读取代理自动配置（PAC）文件：请改为把 `HTTPS_PROXY` 设为代理服务器的地址。
+- **从不经过代理服务器：**你电脑上的模型（Ollama、LM Studio）和 Live 的桥接。使用系统设置时，你自己网络中的地址也不经过。
+- **检查加密连接的网络**（学校和公司常有）：Kumi 信任你的电脑所信任的证书。和浏览器一样，只要装好了该网络的证书就能工作。`SSL_CERT_FILE` 可以指定一个证书文件，让 Kumi 额外信任其中的证书。
+- **网络搜索和阅读**直接连接，从不经过代理服务器：Kumi 连接前会确认每个地址都是公开地址，而经过代理服务器时，由代理重新解析名字，这项确认就失效了。在只能经由代理服务器上网的网络中，它们无法读取网页。
+
 ## 文件与设置
 
 Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
@@ -427,6 +434,8 @@ Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
 | `KUMI_LIVE_EXTENSIONS_DIR` | Kumi 找不到 Live 的 Extensions 文件夹时，指定 `kumi bridge` 放置 Kumi 扩展、`kumi doctor` 查找扩展的位置 |
 | `KUMI_BRIDGE_WAIT_SECONDS` | `kumi bridge` 等待 Live 连接的时长；`0` 表示不等待 |
 | `KUMI_NO_UPDATE_CHECK` | 设为任意值即关闭启动时的新版本检查 |
+| `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、`NO_PROXY` | Kumi 经由的代理服务器，以及不经过它的地址（[代理服务器](#代理服务器与学校或公司的网络)） |
+| `SSL_CERT_FILE` | 除你电脑上的证书之外，Kumi 还信任的证书文件 |
 | `KUMI_UI=plain` | 用逐行的纯文本输出代替全屏应用；`kumi bridge`、`kumi update` 等命令在运行时也不显示加载动画 |
 | `KUMI_COLOR` | 颜色检测出错时设为 `truecolor`、`256`、`16` 或 `none`；也会遵循 `NO_COLOR` |
 | `KUMI_ICONS` | 终端里的符号显示不正常时设为 `glyphs` 或 `badges`（两个字母的图标） |
