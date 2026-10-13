@@ -18,18 +18,28 @@ use kumi_common::{
     time::now_ms,
 };
 use kumi_runtime::{
-    ai::http::{default_fetch, Fetch, FetchInit},
-    core::{errors::RuntimeError, store_import::write_back},
+    ai::{
+        error::LanguageModelError,
+        http::{default_fetch, Fetch, FetchInit, Headers},
+    },
+    core::{
+        disk::{free_bytes, size, MB},
+        errors::RuntimeError,
+        store_import::write_back,
+    },
     ears::device::EARS_NAME,
     library::sources::{basename, dirname, join, resolve},
     system::{self, Env, SystemProgram},
+    web::cause::{unreachable, NetCause},
     CONNECT_LIVE, KUMI, KUMI_VERSION, REINSTALL,
 };
-pub use migration::{ensure_native_launcher, finish_legacy_transition, launcher, only_the_host_differs, write_launcher};
+pub use migration::{ensure_native_launcher, finish_legacy_transition, has_app, launcher, only_the_host_differs, write_launcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path, process::Stdio, rc::Rc, time::Duration};
+/// What an update needs free beside Kumi: the download, the new Kumi, and the one kept for a rollback.
+pub const UPDATE_SPACE: f64 = 300. * MB;
 pub fn release_base(env: &Env) -> String {
     env.get("KUMI_RELEASES")
         .filter(|s| !s.is_empty())
@@ -37,6 +47,29 @@ pub fn release_base(env: &Env) -> String {
         .unwrap_or("https://github.com/user1303836/kumi/releases/latest/download")
         .trim_end_matches('/')
         .into()
+}
+/// Where `update --version` finds that release: its own downloads on GitHub, or KUMI_RELEASES when that's set.
+pub fn release_base_for(env: &Env, version: Option<&str>) -> String {
+    match version {
+        Some(version) if env.get("KUMI_RELEASES").is_none_or(|s| s.is_empty()) => {
+            format!("https://github.com/user1303836/kumi/releases/download/v{version}")
+        }
+        _ => release_base(env),
+    }
+}
+/// The place releases come from, as Kumi names it: GitHub, or KUMI_RELEASES's host.
+fn place(base: &str) -> String {
+    let host = url::Url::parse(base).ok().and_then(|url| {
+        url.host_str().map(|host| match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        })
+    });
+    match host {
+        Some(host) if host == "github.com" || host.ends_with(".github.com") => "GitHub".into(),
+        Some(host) => host,
+        None => base.into(),
+    }
 }
 pub fn native_target() -> String {
     let arch = std::env::consts::ARCH;
@@ -61,25 +94,50 @@ pub struct ReleaseManifest {
 pub enum AskedRelease {
     Manifest(ReleaseManifest),
     None,
-    Offline,
+    /// Not reached, and why when the error says.
+    Offline(Option<NetCause>),
+    /// Reached, but it answered with this status in place of the release's description.
+    Answered(u16),
     Invalid,
+    /// A web page came back instead of the release's description: a Wi-Fi sign-in page, or a proxy's.
+    Page,
 }
 pub async fn ask_release(env: &Env, fetch: Option<Rc<dyn Fetch>>) -> AskedRelease {
+    ask_release_at(&release_base(env), fetch).await
+}
+pub async fn ask_release_at(base: &str, fetch: Option<Rc<dyn Fetch>>) -> AskedRelease {
     let fetch = fetch.unwrap_or_else(default_fetch);
-    let response = match fetch
-        .fetch(&format!("{}/kumi-release.json", release_base(env)), FetchInit { signal: Some(abort::timeout(20000)), ..Default::default() })
-        .await
-    {
-        Ok(response) => response,
-        Err(_) => return AskedRelease::Offline,
+    let url = format!("{base}/kumi-release.json");
+    // Twice at most, 10 s each: once more when nothing answered in time or the connection failed.
+    let mut tries = 0;
+    let response = loop {
+        tries += 1;
+        let waited = abort::timeout(10_000);
+        match fetch.fetch(&url, FetchInit { signal: Some(waited.clone()), ..Default::default() }).await {
+            Ok(response) => break response,
+            Err(error) => {
+                let cause = if waited.is_cancelled() { Some(NetCause::Timeout) } else { NetCause::of_call(&error) };
+                if tries < 2 && matches!(cause, Some(NetCause::Timeout | NetCause::Offline)) {
+                    continue;
+                }
+                return AskedRelease::Offline(cause);
+            }
+        }
     };
     if response.status == 404 {
         return AskedRelease::None;
     }
     if !response.ok() {
-        return AskedRelease::Offline;
+        return match NetCause::of_status(response.status) {
+            Some(cause) => AskedRelease::Offline(Some(cause)),
+            None => AskedRelease::Answered(response.status),
+        };
     }
-    let Ok(value) = response.json().await else { return AskedRelease::Invalid };
+    let Ok(text) = response.text().await else { return AskedRelease::Offline(Some(NetCause::Offline)) };
+    if text.trim_start().starts_with('<') {
+        return AskedRelease::Page;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(&text) else { return AskedRelease::Invalid };
     let value = match value.get("targets") {
         Some(targets) => match targets.get(native_target()) {
             Some(target) => target.clone(),
@@ -100,19 +158,62 @@ pub async fn ask_release(env: &Env, fetch: Option<Rc<dyn Fetch>>) -> AskedReleas
         AskedRelease::Manifest(manifest)
     }
 }
+/// The newest release's own downloads, as GitHub's API names it. For a few minutes after a release,
+/// `releases/latest/download` can still lead to the one before, while the API already names the new one. The answer
+/// only chooses which release's own description (and checksum) to read. None when the API doesn't say (its rate
+/// limit, a network that blocks it). It's asked without a token.
+async fn newest_release_base(fetch: &Rc<dyn Fetch>) -> Option<String> {
+    let headers =
+        Headers::from([("accept".into(), "application/vnd.github+json".into()), ("user-agent".into(), format!("kumi/{KUMI_VERSION}"))]);
+    let init = FetchInit { headers, signal: Some(abort::timeout(3_000)), ..Default::default() };
+    let response = fetch.fetch("https://api.github.com/repos/user1303836/kumi/releases/latest", init).await.ok()?;
+    if !response.ok() {
+        return None;
+    }
+    let tag = response.json().await.ok()?.get("tag_name")?.as_str()?.to_string();
+    let version = tag.strip_prefix('v')?;
+    (crate::config::release_version(version).as_deref() == Some(version))
+        .then(|| format!("https://github.com/user1303836/kumi/releases/download/{tag}"))
+}
+/// The newest release for `kumi update` and its checks: the one GitHub's API names, read from that release's own
+/// description, else the usual way. With KUMI_RELEASES, only there. The daily check doesn't come here, so it
+/// asks no more than once a day.
+async fn ask_newest(env: &Env, fetch: Rc<dyn Fetch>) -> (String, AskedRelease) {
+    let usual = release_base(env);
+    if env.get("KUMI_RELEASES").is_none_or(|s| s.is_empty()) {
+        if let Some(base) = newest_release_base(&fetch).await {
+            match ask_release_at(&base, Some(fetch.clone())).await {
+                // The usual way goes over the same network: no second wait for the same failure.
+                asked @ (AskedRelease::Manifest(_) | AskedRelease::Offline(_)) => return (base, asked),
+                _ => {}
+            }
+        }
+    }
+    let asked = ask_release_at(&usual, Some(fetch)).await;
+    (usual, asked)
+}
 pub async fn fetch_manifest(env: &Env, fetch: Option<Rc<dyn Fetch>>) -> Option<ReleaseManifest> {
     match ask_release(env, fetch).await {
         AskedRelease::Manifest(manifest) => Some(manifest),
         _ => None,
     }
 }
-fn unasked(asked: &AskedRelease, env: &Env) -> String {
-    match asked {
-        AskedRelease::None => format!(
-            "There's no Kumi release to get at {} yet; try again later",
-            release_base(env).strip_prefix("https://").unwrap_or(&release_base(env))
-        ),
-        AskedRelease::Offline => "Kumi couldn't reach GitHub to ask; check your internet connection".into(),
+/// Why there's no release to go on, without the last full stop. `pinned`: `update --version`'s.
+fn unasked(asked: &AskedRelease, base: &str, pinned: Option<&str>, env: &Env) -> String {
+    match (asked, pinned) {
+        (AskedRelease::None, Some(version)) => {
+            format!("There's no Kumi {version} to get (github.com/user1303836/kumi/releases lists every release)")
+        }
+        (AskedRelease::None, None) => {
+            format!("There's no Kumi release to get at {} yet; try again later", base.strip_prefix("https://").unwrap_or(base))
+        }
+        (AskedRelease::Offline(cause), _) => unreachable(&place(base), *cause, env).trim_end_matches('.').into(),
+        (AskedRelease::Answered(status), _) => {
+            format!("{} answered {status} in place of the release's description; try again in a moment", place(base))
+        }
+        (AskedRelease::Page, _) => {
+            format!("A Wi-Fi sign-in page or a proxy answered instead of {}: sign in to the network, then try again", place(base))
+        }
         _ => "The latest release's description didn't make sense; try again later".into(),
     }
 }
@@ -131,11 +232,93 @@ pub struct InstalledIo {
     pub update_bridge: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, i32>>>,
     /// The producer's Ctrl-C while an update downloads: it stops the download, and nothing changes.
     pub cancel: Option<kumi_common::abort::Signal>,
+    /// `update --version`: that release, newer or older, in place of the newest.
+    pub version: Option<String>,
+    /// Free space on the disk holding a folder (tests say how much).
+    pub free: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, Option<f64>>>>,
+    /// How many other Kumi processes run this Kumi (tests say how many).
+    pub others: Option<Rc<dyn Fn() -> LocalBoxFuture<'static, usize>>>,
 }
 impl InstalledIo {
     pub fn new(out: Rc<dyn TtyOutput>, env: Env) -> Self {
-        Self { out, env, input: None, run: None, fetcher: None, live_running: None, confirm: None, update_bridge: None, cancel: None }
+        Self {
+            out,
+            env,
+            input: None,
+            run: None,
+            fetcher: None,
+            live_running: None,
+            confirm: None,
+            update_bridge: None,
+            cancel: None,
+            version: None,
+            free: None,
+            others: None,
+        }
     }
+}
+/// The version of the Kumi in `folder`, from its package.json.
+pub fn app_version(folder: &str) -> Option<String> {
+    let value: Value = serde_json::from_slice(&fs::read(join(folder, "package.json")).ok()?).ok()?;
+    value.get("version").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
+}
+/// `path` as the producer reads it: their home folder as ~.
+fn tilde(path: &str) -> String {
+    let home = home::home_dir().unwrap_or_default().display().to_string();
+    match path.strip_prefix(&home) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with(['/', '\\'])) => format!("~{rest}"),
+        _ => path.into(),
+    }
+}
+/// The part of Kumi's folder that belongs to another account (an install run with sudo), so Kumi can't update
+/// it: the folder itself, or one of what an update moves. None for root, who can change anything.
+pub fn not_yours(home: &str) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        let me = unsafe { libc::geteuid() };
+        if me == 0 {
+            return None;
+        }
+        return std::iter::once(home.to_string())
+            .chain(["app", "app.previous", "app.previous.old", "app.new", "app.rollback", "bin", "downloads"].map(|part| join(home, part)))
+            .find(|path| fs::symlink_metadata(path).is_ok_and(|m| m.uid() != me));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = home;
+        None
+    }
+}
+/// Kumi's folder as the producer reads it, and as they'd type it in a shell.
+fn shown_and_typed(home: &str) -> (String, String) {
+    let shown = tilde(home);
+    let typed = if shown.chars().all(|c| c.is_ascii_alphanumeric() || "~/._-".contains(c)) {
+        shown.clone()
+    } else {
+        format!("'{}'", home.replace('\'', "'\\''"))
+    };
+    (shown, typed)
+}
+/// How to give Kumi's folder back to this account.
+pub fn owner_advice(home: &str) -> String {
+    let (shown, typed) = shown_and_typed(home);
+    format!("{shown} isn't yours (installed with sudo?): sudo chown -R $USER {typed}")
+}
+/// What to say when the system refused to change something in Kumi's folder (on macOS and Linux): whose it is
+/// when that's the reason, or the system's words and the usual way back.
+fn refused(home: &str, error: &std::io::Error) -> String {
+    if not_yours(home).is_some() {
+        return owner_advice(home);
+    }
+    let (shown, typed) = shown_and_typed(home);
+    format!("The system refused to change {shown} ({error}); if something in it was installed with sudo: sudo chown -R $USER {typed}")
+}
+/// Whether the system refused for want of permission, on macOS and Linux (EACCES, EPERM). On Windows the same
+/// errors mean a folder held for a moment, which `rename_in` waits out.
+fn denied(error: &std::io::Error) -> bool {
+    !cfg!(windows) && (error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1))
 }
 /// A yes/no question; `ahead` says how to answer it beforehand, where a flag does ("add --yes").
 async fn ask(io: &InstalledIo, question: &str, ahead: Option<&str>) -> bool {
@@ -253,19 +436,19 @@ impl Folders for Disk {
 async fn rename(from: &str, to: &str) -> std::io::Result<()> {
     rename_in(&Disk, from, to).await
 }
-/// Renames, waiting out a folder held for a moment (a Kumi window, an antivirus scan) for 5 s.
+/// Renames, waiting out a folder held for a moment (a Kumi window, an antivirus scan) for 5 s. On macOS and
+/// Linux only a busy mount waits: a folder that isn't this account's (EACCES, EPERM) never frees up by itself.
 async fn rename_in(folders: &impl Folders, from: &str, to: &str) -> std::io::Result<()> {
     for attempt in 0..=20 {
         match folders.rename(from, to) {
             Ok(()) => return Ok(()),
             Err(e)
                 if attempt < 20
-                    && (e.kind() == std::io::ErrorKind::PermissionDenied
-                        || (if cfg!(windows) {
-                            matches!(e.raw_os_error(), Some(5 | 32))
-                        } else {
-                            matches!(e.raw_os_error(), Some(1 | 16))
-                        })) =>
+                    && (if cfg!(windows) {
+                        e.kind() == std::io::ErrorKind::PermissionDenied || matches!(e.raw_os_error(), Some(5 | 32))
+                    } else {
+                        e.raw_os_error() == Some(16)
+                    }) =>
             {
                 folders.waiting();
                 tokio::time::sleep(Duration::from_millis(250)).await
@@ -359,8 +542,9 @@ async fn settle_installed(home: &str) {
     let previous = join(home, "app.previous");
     settle(&Disk, &join(home, "app"), &previous, &format!("{previous}.old")).await
 }
-/// What to say when the new Kumi couldn't go in; `kept` says whether the one that was there still works.
-fn swap_failed(windows: bool, kept: bool) -> String {
+/// What to say when the new Kumi couldn't go in; `kept` says whether the one that was there still works, and
+/// `why` is the system's reason (macOS and Linux; Windows names the usual one).
+fn swap_failed(windows: bool, kept: bool, why: &str) -> String {
     let what = "Windows kept Kumi's folder busy: a Kumi window, or an antivirus scan of the new files.";
     let installer = format!("run the installer again ({REINSTALL})");
     match (windows, kept) {
@@ -368,8 +552,8 @@ fn swap_failed(windows: bool, kept: bool) -> String {
         (true, false) => format!(
             "{what} The Kumi you had couldn't go back in place yet, so kumi won't start: close every Kumi window, give the scan a minute, then {installer}."
         ),
-        (false, true) => "Couldn't put the new Kumi in place, so this one stays.".into(),
-        (false, false) => format!("Couldn't put the new Kumi in place, and the one you had couldn't go back, so kumi won't start: {installer}."),
+        (false, true) => format!("Couldn't put the new Kumi in place ({why}), so this one stays."),
+        (false, false) => format!("Couldn't put the new Kumi in place ({why}), and the one you had couldn't go back, so kumi won't start: {installer}."),
     }
 }
 /// What an update leaves behind, removed when it ends, best effort: a file a scan still holds can't make a good
@@ -382,49 +566,152 @@ impl Drop for Cleanup {
         }
     }
 }
+/// Why a download didn't finish.
+enum Stopped {
+    /// The producer's Ctrl-C.
+    Cancelled,
+    /// The connection, and why when the error says.
+    Network(Option<NetCause>),
+    /// What the server answered instead of the bundle.
+    Status(u16),
+    /// Writing it on this computer.
+    Disk(std::io::Error),
+}
+impl Stopped {
+    /// What to say, ending with what that means: nothing was changed.
+    fn said(&self, home: &str) -> String {
+        match self {
+            Self::Cancelled => "The download was stopped, so nothing was changed.".into(),
+            Self::Network(Some(cause)) => {
+                format!("The download stopped partway: {}, so nothing was changed. {}", cause.words(), cause.fix())
+            }
+            Self::Network(None) => "The download stopped partway, so nothing was changed. Check the connection, then try again.".into(),
+            Self::Status(status) => match NetCause::of_status(*status) {
+                Some(cause) => format!("The download stopped: {}, so nothing was changed. {}", cause.words(), cause.fix()),
+                None => format!("The download failed (it answered {status}), so nothing was changed. Try again in a moment."),
+            },
+            Self::Disk(error) if error.kind() == std::io::ErrorKind::StorageFull => {
+                "The disk filled up during the download, so nothing was changed. Free some space, then try again.".into()
+            }
+            Self::Disk(error) if denied(error) => format!("{}. Nothing was changed.", refused(home, error).trim_end_matches('.')),
+            Self::Disk(error) => format!("Kumi couldn't save the download ({error}), so nothing was changed."),
+        }
+    }
+}
 /// Downloads `url` into `file` as it arrives, and gives what it got's SHA-256: the bundle is never held whole, nor
 /// read back to check it.
-async fn download(url: &str, file: &str, fetch: Rc<dyn Fetch>, cancel: Option<abort::Signal>) -> Result<String, RuntimeError> {
+async fn download(url: &str, file: &str, fetch: Rc<dyn Fetch>, cancel: Option<abort::Signal>) -> Result<String, Stopped> {
     use tokio::io::AsyncWriteExt;
-    let signal = abort::any(std::iter::once(abort::timeout(600000)).chain(cancel));
-    let response = fetch.fetch(url, FetchInit { signal: Some(signal.clone()), ..Default::default() }).await.map_err(error)?;
+    let signal = abort::any(std::iter::once(abort::timeout(600000)).chain(cancel.clone()));
+    let stopped = |error: &LanguageModelError| {
+        if cancel.as_ref().is_some_and(abort::Signal::is_cancelled) {
+            Stopped::Cancelled
+        } else {
+            Stopped::Network(NetCause::of_call(error))
+        }
+    };
+    let response = fetch.fetch(url, FetchInit { signal: Some(signal.clone()), ..Default::default() }).await.map_err(|e| stopped(&e))?;
     if !response.ok() {
-        return Err(RuntimeError::plain(format!("the download failed ({})", response.status)));
+        return Err(Stopped::Status(response.status));
     }
-    let mut out = tokio::fs::File::create(file).await.map_err(error)?;
+    let mut out = tokio::fs::File::create(file).await.map_err(Stopped::Disk)?;
     let mut digest = Sha256::new();
     if let Some(mut body) = response.body {
         loop {
             // The body's chunks race the signal too: a stalled connection stops when it fires.
             let chunk = tokio::select! {
                 chunk = body.next() => chunk,
-                _ = signal.cancelled() => return Err(RuntimeError::plain("the download was stopped")),
+                _ = signal.cancelled() => return Err(if cancel.as_ref().is_some_and(abort::Signal::is_cancelled) {
+                    Stopped::Cancelled
+                } else {
+                    Stopped::Network(Some(NetCause::Timeout))
+                }),
             };
             let Some(chunk) = chunk else { break };
-            let chunk = chunk.map_err(error)?;
+            let chunk = chunk.map_err(|e| stopped(&e))?;
             digest.update(&chunk);
-            out.write_all(&chunk).await.map_err(error)?;
+            out.write_all(&chunk).await.map_err(Stopped::Disk)?;
         }
     }
     // A tokio file finishes its last write in the background: wait for it, so a full disk is the download's error.
-    out.flush().await.map_err(error)?;
+    out.flush().await.map_err(Stopped::Disk)?;
     Ok(hex::encode(digest.finalize()))
+}
+/// What a step that moves Kumi's folders says when the system refuses: whose folder it is, or why.
+fn not_in_place(home: &str, error: &std::io::Error) -> String {
+    if denied(error) {
+        format!("{}. The Kumi you had stays.", refused(home, error).trim_end_matches('.'))
+    } else {
+        format!("Couldn't put the new Kumi in place ({error}), so this one stays.")
+    }
+}
+/// The older Kumi reads notes, techniques and lessons from files: what the database keeps is written back for it
+/// first. A file that already says it is left as it is; if this fails, going back still goes ahead.
+async fn write_back_for_older(io: &InstalledIo) {
+    let say = |s: String| io.out.write(&format!("{s}\n"));
+    let written = match (load_db_file(&io.env), json_files(&io.env)) {
+        (Ok(db), Ok(files)) => write_back(db.into(), files, kumi_common::time::now_ms()).await,
+        (Err(why), _) | (_, Err(why)) => Err(why),
+    };
+    match written {
+        Ok(written) => {
+            for (file, why) in written.left {
+                say(format!("Left {} as it was: {why}.", file.display()));
+            }
+        }
+        Err(why) => say(format!(
+            "The older Kumi won't see the notes, techniques or lessons kept since the update ({}); they stay in Kumi's database for when you update again.",
+            why.message()
+        )),
+    }
 }
 pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     let say = |s: String| io.out.write(&format!("{s}\n"));
     let home = kumi_home(&io.env);
     let app = join(&home, "app");
+    // Another account's folder (an install run with sudo) can't take a new Kumi: said before anything moves.
+    if not_yours(&home).is_some() {
+        say(format!("{} Nothing was changed.", owner_advice(&home)));
+        return Ok(1);
+    }
     settle_installed(&home).await;
     let run = io.run.clone().unwrap_or_else(default_run);
     let fetch = io.fetcher.clone().unwrap_or_else(default_fetch);
-    let asked = step(io.out.clone(), &io.env, "Looking for a newer Kumi…", ask_release(&io.env, Some(fetch.clone())), true).await;
+    let pinned = io.version.as_deref();
+    if let Some(version) = pinned.filter(|version| !newer_version(version, "1.7.5")) {
+        say(format!("Kumi {version} came before Kumi's native releases, so kumi update can't install it; 1.7.6 is the earliest it can."));
+        return Ok(1);
+    }
+    let looking = pinned.map(|version| format!("Looking for Kumi {version}…")).unwrap_or_else(|| "Looking for a newer Kumi…".into());
+    let asking = async {
+        match pinned {
+            Some(_) => {
+                let base = release_base_for(&io.env, pinned);
+                let asked = ask_release_at(&base, Some(fetch.clone())).await;
+                (base, asked)
+            }
+            None => ask_newest(&io.env, fetch.clone()).await,
+        }
+    };
+    let (base, asked) = step(io.out.clone(), &io.env, &looking, asking, true).await;
     let AskedRelease::Manifest(manifest) = asked else {
-        say(format!("{}.", unasked(&asked, &io.env)));
+        say(format!("{}. Nothing was changed.", unasked(&asked, &base, pinned, &io.env)));
         return Ok(1);
     };
-    if !newer_version(&manifest.kumi, KUMI_VERSION) {
-        say(format!("Kumi is up to date ({KUMI_VERSION})."));
-        return Ok(bridge_after(&io, &home, &app).await);
+    match pinned {
+        Some(version) if manifest.kumi != version => {
+            say(format!("There's no Kumi {version} at {}; it has {}. Nothing was changed.", place(&base), manifest.kumi));
+            return Ok(1);
+        }
+        Some(version) if version == KUMI_VERSION => {
+            say(format!("Kumi is {KUMI_VERSION} already."));
+            return Ok(bridge_after(&io, &home, &app).await);
+        }
+        None if !newer_version(&manifest.kumi, KUMI_VERSION) => {
+            say(format!("Kumi is up to date ({KUMI_VERSION})."));
+            return Ok(bridge_after(&io, &home, &app).await);
+        }
+        _ => {}
     }
     if manifest.target != native_target() {
         say(format!(
@@ -435,8 +722,24 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
         ));
         return Ok(1);
     }
+    let free = match &io.free {
+        Some(free) => free(home.clone()).await,
+        None => free_bytes(Path::new(&home)).await,
+    };
+    if let Some(free) = free.filter(|free| *free < UPDATE_SPACE) {
+        say(format!(
+            "Kumi needs about 300 MB free to update, and the disk with {} has {}. Free some space (empty the Trash or Recycle Bin, or move old bounces and videos off that disk), then try again. Nothing was changed.",
+            tilde(&home),
+            size(free)
+        ));
+        return Ok(1);
+    }
+    let older = newer_version(KUMI_VERSION, &manifest.kumi);
     let downloads = join(&home, "downloads");
-    tokio::fs::create_dir_all(&downloads).await.map_err(error)?;
+    if let Err(error) = tokio::fs::create_dir_all(&downloads).await {
+        say(Stopped::Disk(error).said(&home));
+        return Ok(1);
+    }
     let bundle = join(&downloads, &manifest.bundle);
     let fresh = join(&home, "app.new");
     let cleanup = Cleanup(vec![fresh.clone(), bundle.clone()]);
@@ -445,25 +748,32 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
             io.out.clone(),
             &io.env,
             &format!("Downloading Kumi {}…", manifest.kumi),
-            download(&format!("{}/{}", release_base(&io.env), manifest.bundle), &bundle, fetch, io.cancel.clone()),
+            download(&format!("{base}/{}", manifest.bundle), &bundle, fetch, io.cancel.clone()),
             true,
         )
         .await;
-        if downloaded.is_err() && io.cancel.as_ref().is_some_and(|cancel| cancel.is_cancelled()) {
-            say("The download was stopped, so nothing was changed.".into());
-            return Ok(1);
-        }
-        if downloaded? != manifest.sha256 {
+        let downloaded = match downloaded {
+            Ok(sha256) => sha256,
+            Err(stopped) => {
+                say(stopped.said(&home));
+                return Ok(1);
+            }
+        };
+        if downloaded != manifest.sha256 {
             say("The download didn't match its checksum, so nothing was changed. Try again in a moment.".into());
             return Ok(1);
+        }
+        if older {
+            write_back_for_older(&io).await;
         }
         let failed = step(
             io.out.clone(),
             &io.env,
             &format!("Putting Kumi {} in place…", manifest.kumi),
             async {
-                remove(&fresh).map_err(error)?;
-                tokio::fs::create_dir_all(&fresh).await.map_err(error)?;
+                if let Err(error) = remove(&fresh).and_then(|()| fs::create_dir_all(&fresh)) {
+                    return not_in_place(&home, &error).into();
+                }
                 let unpacked = run(
                     system::system_program_default(SystemProgram::Tar),
                     vec!["-xzf".into(), bundle.clone(), "-C".into(), fresh.clone()],
@@ -472,18 +782,17 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
                 .await;
                 if unpacked.code != 0 {
                     let text = if unpacked.stderr.is_empty() { &unpacked.stdout } else { &unpacked.stderr };
-                    return Ok::<_, RuntimeError>(Some(format!(
-                        "Unpacking it failed: {}",
-                        trim(text).split('\n').next_back().unwrap_or("tar failed")
-                    )));
+                    return Some(format!("Unpacking it failed: {}", trim(text).split('\n').next_back().unwrap_or("tar failed")));
                 }
                 let probe = run(join(&fresh, &executable_name("kumi")), vec!["--version".into()], None).await;
                 if probe.code != 0 || !probe.stdout.contains(&manifest.kumi) {
-                    return Ok(Some(format!(
+                    return Some(format!(
                         "The new Kumi didn't start, so this one stays. Try again, or run the installer again ({REINSTALL})."
-                    )));
+                    ));
                 }
-                write_launcher(&home).map_err(error)?;
+                if let Err(error) = write_launcher(&home) {
+                    return not_in_place(&home, &error).into();
+                }
                 // Printed above the spinner, which draws its line again below.
                 let spinning = crate::spinner::spins(io.out.as_ref(), &io.env);
                 let say = || {
@@ -495,14 +804,19 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
                     io.out.write(&if spinning { format!("\r\u{1b}[2K{line}\n") } else { format!("{line}\n") })
                 };
                 let folders = Saying { folders: &Disk, say, said: Default::default() };
-                if swap_in_with(&folders, &fresh, &app, &join(&home, "app.previous")).await.is_err() {
-                    return Ok(Some(swap_failed(cfg!(windows), migration::has_app(&app))));
+                if let Err(error) = swap_in_with(&folders, &fresh, &app, &join(&home, "app.previous")).await {
+                    let kept = migration::has_app(&app);
+                    return Some(if denied(&error) && kept {
+                        not_in_place(&home, &error)
+                    } else {
+                        swap_failed(cfg!(windows), kept, &error.to_string())
+                    });
                 }
-                Ok(None)
+                None
             },
             false,
         )
-        .await?;
+        .await;
         if let Some(failed) = failed {
             say(failed);
             return Ok(1);
@@ -511,20 +825,78 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     }
     .await;
     drop(cleanup);
+    // Only when it's empty: a file a scan still holds stays for the next update to clear.
+    let _ = fs::remove_dir(&downloads);
     let code = result?;
     if code != 0 {
         return Ok(code);
     }
-    say(format!("Kumi is now {} ({} update --rollback goes back to {KUMI_VERSION}).", manifest.kumi, *KUMI));
-    if let Some(open) = still_open() {
+    say(format!(
+        "Kumi {KUMI_VERSION} → {}{}. {} update --rollback goes back to {KUMI_VERSION}.",
+        manifest.kumi,
+        if older { ", an earlier one" } else { "" },
+        *KUMI
+    ));
+    if !older {
+        let changelog = fs::read_to_string(join(&app, "CHANGELOG.md")).unwrap_or_default();
+        for line in crate::whats_new::update_lines(&changelog, KUMI_VERSION, &manifest.kumi) {
+            say(line);
+        }
+    }
+    if let Some(open) = still_open(&io, &join(&app, &executable_name("kumi"))).await {
         say(open);
+    }
+    // Going back, a bridge in Live as new as the earlier Kumi's stays: a newer one serves it too, and Live may have it
+    // loaded. An older one is brought up to date as after any update.
+    let installed = find_bridge_config(&io.env).and_then(|config| read_bridge_server(&config).ok()?.version);
+    if let Some(installed) =
+        installed.filter(|installed| older && bridge_version(&app).is_none_or(|bundled| !newer_version(&bundled, installed)))
+    {
+        say(format!("The bridge in Live stays {installed}, which works with {}.", manifest.kumi));
+        return Ok(0);
     }
     Ok(bridge_after(&io, &home, &app).await)
 }
-/// After an update: Kumi windows already open still run this Kumi (Windows can't update while one is
-/// open). What they keep reaches the new Kumi at its next turn; what it keeps reaches them once restarted.
-pub fn still_open() -> Option<String> {
-    (!cfg!(windows)).then(|| format!("Kumi windows opened before the update keep running {KUMI_VERSION} until you restart them."))
+/// How many other processes run `exe` on this account: Kumi windows, or a `kumi` command in another terminal.
+/// None on Windows, where Kumi can't update or roll back while one runs at all.
+pub async fn others_running(exe: &str) -> usize {
+    if cfg!(windows) {
+        return 0;
+    }
+    let ps = if Path::new("/bin/ps").exists() { "/bin/ps" } else { "ps" };
+    let listing = crate::bridge_setup::run_program(ps, &["-axo".into(), "uid=,pid=,args=".into()], None).await.stdout;
+    #[cfg(unix)]
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc::getuid() }.to_string();
+    #[cfg(not(unix))]
+    let uid = String::new();
+    let me = std::process::id().to_string();
+    let names: Vec<String> =
+        [Some(exe.to_string()), fs::canonicalize(exe).ok().map(|p| p.display().to_string())].into_iter().flatten().collect();
+    listing
+        .lines()
+        .filter_map(|line| {
+            let (owner, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (pid, args) = rest.trim_start().split_once(char::is_whitespace).unwrap_or((rest.trim_start(), ""));
+            (owner == uid && pid != me).then_some(args.trim_start())
+        })
+        .filter(|args| names.iter().any(|name| *args == name.as_str() || args.starts_with(&format!("{name} "))))
+        .count()
+}
+/// After an update: Kumi windows already open still run this Kumi (Windows can't update while one is open). What
+/// they keep reaches the new Kumi at its next turn; what it keeps reaches them once restarted. Said only when one is.
+pub fn open_windows(others: usize) -> Option<String> {
+    match others {
+        0 => None,
+        1 => Some(format!("A Kumi window opened before the update keeps running {KUMI_VERSION} until you restart it.")),
+        n => Some(format!("{n} Kumi windows opened before the update keep running {KUMI_VERSION} until you restart them.")),
+    }
+}
+async fn still_open(io: &InstalledIo, exe: &str) -> Option<String> {
+    open_windows(match &io.others {
+        Some(others) => others().await,
+        None => others_running(exe).await,
+    })
 }
 /// What the farewell adds when the installer started Kumi in a window where `kumi` doesn't work yet, as the installer
 /// says in KUMI_FROM_INSTALLER: new terminal windows have it on PATH (`new-window`), or nothing put it there (`no-path`).
@@ -558,25 +930,13 @@ pub async fn rollback_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
         say("There's no earlier Kumi to go back to.".into());
         return Ok(1);
     }
-    // The older Kumi reads notes, techniques and lessons from files: what the database keeps is written
-    // back for it first. If that fails, the rollback still goes ahead.
-    let written = match (load_db_file(&io.env), json_files(&io.env)) {
-        (Ok(db), Ok(files)) => write_back(db.into(), files, kumi_common::time::now_ms()).await,
-        (Err(why), _) | (_, Err(why)) => Err(why),
-    };
-    match written {
-        Ok(written) => {
-            for (file, why) in written.left {
-                say(format!("Left {} as it was: {why}.", file.display()));
-            }
-        }
-        Err(why) => say(format!(
-            "The older Kumi won't see the notes, techniques or lessons kept since the update ({}); they stay in Kumi's database for when you update again.",
-            why.message()
-        )),
-    }
+    write_back_for_older(&io).await;
     // Windows can't roll back while a Kumi window is open; elsewhere one keeps running this Kumi.
-    if !cfg!(windows) {
+    let others = match &io.others {
+        Some(others) => others().await,
+        None => others_running(&join(&app, &executable_name("kumi"))).await,
+    };
+    if others > 0 {
         say(format!(
             "Kumi windows still open keep running {KUMI_VERSION} until you close them; what they keep from now on stays in Kumi's database for your next update."
         ));
@@ -689,40 +1049,55 @@ pub fn startup_files(env: &Env) -> Vec<String> {
     }
     files
 }
-pub fn remove_path_lines(io: &InstalledIo, home: &str) {
+/// The startup files that have Kumi's PATH line, and what each holds once it's out (None: the file goes, as fish's
+/// kumi.fish does). The installer's blank line above the marker goes with it.
+pub fn path_lines(env: &Env, home: &str) -> Vec<(String, Option<String>)> {
     if cfg!(windows) {
-        return;
+        return vec![];
     }
     let bin = join(home, "bin");
-    let actual = home::home_dir().unwrap_or_default().display().to_string();
-    let home = io.env.get("HOME").filter(|s| !s.is_empty()).map(String::as_str).unwrap_or(&actual);
-    for file in startup_files(&io.env) {
-        let result = (|| -> std::io::Result<()> {
-            let text = fs::read_to_string(&file)?;
-            if !text.contains(PATH_MARKER) {
-                return Ok(());
-            }
-            if file.ends_with("kumi.fish") {
-                return remove(&file);
-            }
-            let lines: Vec<_> = text.split('\n').collect();
-            let mut kept = vec![];
-            let mut index = 0;
-            while index < lines.len() {
-                if lines[index] == PATH_MARKER {
-                    if lines.get(index + 1).is_some_and(|s| s.contains(&bin)) {
-                        index += 1
-                    }
-                } else {
-                    kept.push(lines[index])
+    let mut found = vec![];
+    for file in startup_files(env) {
+        let Ok(text) = fs::read_to_string(&file) else { continue };
+        if !text.contains(PATH_MARKER) {
+            continue;
+        }
+        if file.ends_with("kumi.fish") {
+            found.push((file, None));
+            continue;
+        }
+        let lines: Vec<_> = text.split('\n').collect();
+        let mut kept: Vec<&str> = vec![];
+        let mut index = 0;
+        while index < lines.len() {
+            if lines[index] == PATH_MARKER {
+                if kept.last() == Some(&"") {
+                    kept.pop();
                 }
-                index += 1
+                if lines.get(index + 1).is_some_and(|s| s.contains(&bin)) {
+                    index += 1
+                }
+            } else {
+                kept.push(lines[index])
             }
-            fs::write(&file, kept.join("\n"))?;
-            io.out.write(&format!("Took Kumi out of {}.\n", file.replacen(home, "~", 1)));
-            Ok(())
-        })();
-        let _ = result;
+            index += 1
+        }
+        found.push((file, Some(kept.join("\n"))));
+    }
+    found
+}
+pub fn remove_path_lines(io: &InstalledIo, home: &str) {
+    let actual = home::home_dir().unwrap_or_default().display().to_string();
+    let user = io.env.get("HOME").filter(|s| !s.is_empty()).map(String::as_str).unwrap_or(&actual);
+    for (file, kept) in path_lines(&io.env, home) {
+        let shown = file.replacen(user, "~", 1);
+        let result = match &kept {
+            Some(text) => fs::write(&file, text).map(|()| format!("Took Kumi out of {shown}.")),
+            None => remove(&file).map(|()| format!("Took Kumi out of fish ({shown} is gone).")),
+        };
+        if let Ok(said) = result {
+            io.out.write(&format!("{said}\n"));
+        }
     }
 }
 async fn remove_windows_path(run: Run, home: &str) {
@@ -846,16 +1221,115 @@ fn bridge_uses(folder: &str, env: &Env) -> bool {
 pub struct UninstallOptions {
     pub all: bool,
     pub yes: bool,
+    /// Say what would go, and remove nothing.
+    pub dry_run: bool,
+}
+/// What `kumi uninstall` takes out of Kumi's folder: Kumi and the one kept for a rollback, what updates and repairs
+/// leave behind (`app.replaced` is the Windows installer's), and what Kumi fetched and fetches again when needed (programs, models, videos). Never conversations,
+/// notes, recipes, sign-ins, the library or references; the bridge's files stay while Live uses them.
+pub const KUMI_S_OWN: [&str; 13] = [
+    "app",
+    "app.previous",
+    "app.previous.old",
+    "app.new",
+    "app.replaced",
+    "app.rollback",
+    "node",
+    "bin",
+    "downloads",
+    "tools",
+    "models",
+    "videos",
+    "bridge",
+];
+/// What the producer keeps unless they say --all.
+const KEPT: &str = "conversations, notes, recipes, sign-ins, library and references";
+/// The parts of `home` an uninstall removes, those that are there: with --all everything, the bridge's files
+/// excepted while Live uses them; otherwise Kumi's own and what a stopped installer left (`.install.*`).
+fn own_parts(home: &str, all: bool, bridge_stays: bool) -> Result<Vec<String>, RuntimeError> {
+    let inside = || -> Result<Vec<String>, RuntimeError> {
+        Ok(match fs::read_dir(home) {
+            Ok(entries) => {
+                entries.map(|entry| entry.map(|entry| entry.path().display().to_string())).collect::<Result<Vec<_>, _>>().map_err(error)?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+            Err(e) => return Err(error(e)),
+        })
+    };
+    let parts: Vec<String> = match (all, bridge_stays) {
+        (true, true) => inside()?.into_iter().filter(|path| basename(path) != "bridge").collect(),
+        (true, false) => vec![home.into()],
+        (false, _) => KUMI_S_OWN
+            .into_iter()
+            .filter(|part| *part != "bridge" || !bridge_stays)
+            .map(|part| join(home, part))
+            .chain(inside()?.into_iter().filter(|path| basename(path).starts_with(".install.")))
+            .collect(),
+    };
+    Ok(parts.into_iter().filter(|path| fs::symlink_metadata(path).is_ok()).collect())
+}
+/// The bytes in `path`, its folders walked without following links.
+fn bytes_in(path: &Path) -> u64 {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => {
+            fs::read_dir(path).into_iter().flatten().filter_map(Result::ok).map(|entry| bytes_in(&entry.path())).sum()
+        }
+        Ok(meta) => meta.len(),
+        Err(_) => 0,
+    }
+}
+fn listed(words: &[String]) -> String {
+    match words {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+/// `kumi uninstall --dry-run`: what would go, and what would stay.
+fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dyn Fn(&str) -> String) -> Result<i32, RuntimeError> {
+    let say = |s: String| io.out.write(&format!("{s}\n"));
+    let bridge = find_bridge_config(&io.env).is_some();
+    let parts = own_parts(home, options.all, bridge && bridge_uses(&join(home, "bridge"), &io.env))?;
+    let bytes: u64 = parts.iter().map(|part| bytes_in(Path::new(part))).sum();
+    if options.all {
+        say(format!("kumi uninstall --all would remove {} ({}), with your {KEPT}.", display(home), size(bytes as f64)));
+    } else if parts.is_empty() {
+        say(format!("kumi uninstall would find nothing of Kumi's own left in {}.", display(home)));
+    } else {
+        let names: Vec<String> = parts.iter().map(|part| basename(part)).collect();
+        say(format!("kumi uninstall would remove from {} ({}): {}.", display(home), size(bytes as f64), names.join(", ")));
+    }
+    let mut also = vec![];
+    let files: Vec<String> = path_lines(&io.env, home).into_iter().map(|(file, _)| display(&file)).collect();
+    if cfg!(windows) {
+        also.push("take Kumi out of your PATH".to_string());
+    } else if !files.is_empty() {
+        also.push(format!("take Kumi out of {}", listed(&files)));
+    }
+    if bridge {
+        also.push("ask whether to take the bridge out of Live too (its files stay while Live uses it)".into());
+    }
+    if !also.is_empty() {
+        say(format!("It would also {}.", also.join(", and ")));
+    }
+    if !options.all {
+        say(format!("Your {KEPT} would stay in {}.", display(home)));
+    }
+    say("Nothing was removed (--dry-run).".into());
+    Ok(0)
 }
 pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> Result<i32, RuntimeError> {
     let say = |s: String| io.out.write(&format!("{s}\n"));
     let home = kumi_home(&io.env);
     let display = |path: &str| path.replacen(&home::home_dir().unwrap_or_default().display().to_string(), "~", 1);
+    if options.dry_run {
+        return dry_run(&io, &home, options, &display);
+    }
     let run = io.run.clone().unwrap_or_else(default_run);
     let keeps = if options.all {
-        "Everything in it goes too: your conversations, notes, recipes and sign-ins."
+        "Everything in it goes too: your conversations, notes, recipes and sign-ins.".to_string()
     } else {
-        "Your conversations, notes, recipes and sign-ins stay (add --all to remove them too)."
+        format!("Your {KEPT} stay (add --all to remove them too).")
     };
     if !options.yes && !ask(&io, &format!("Remove Kumi from {}? {keeps}", display(&home)), Some("add --yes")).await {
         say("Nothing was removed.".into());
@@ -867,26 +1341,8 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         step(io.out.clone(), &io.env, "Taking Kumi out of your PATH…", remove_windows_path(run, &home), false).await;
     }
     let bridge_stays = bridge != RemovedBridge::Removed && bridge_uses(&join(&home, "bridge"), &io.env);
-    let parts: Vec<String> = if options.all {
-        if bridge_stays {
-            fs::read_dir(&home)
-                .map_err(error)?
-                .map(|entry| entry.map(|entry| entry.path().display().to_string()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(error)?
-                .into_iter()
-                .filter(|path| basename(path) != "bridge")
-                .collect()
-        } else {
-            vec![home.clone()]
-        }
-    } else {
-        ["app", "app.previous", "app.new", "app.replaced", "node", "bin", "downloads", "bridge"]
-            .into_iter()
-            .filter(|part| *part != "bridge" || !bridge_stays)
-            .map(|part| join(&home, part))
-            .collect()
-    };
+    let parts = own_parts(&home, options.all, bridge_stays)?;
+    let bytes: u64 = parts.iter().map(|part| bytes_in(Path::new(part))).sum();
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -908,18 +1364,19 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     if bridge_stays {
         say(format!("The bridge's files stay in {} while Live uses it.", display(&join(&home, "bridge"))));
     }
+    let freed = if bytes > 0 { format!(", freeing {}", size(bytes as f64)) } else { String::new() };
     say(if options.all {
-        format!("Kumi is removed, with everything it kept{}.", if bridge_stays { " but the bridge's files" } else { "" })
+        format!("Kumi is removed, with everything it kept{}{freed}.", if bridge_stays { " but the bridge's files" } else { "" })
     } else {
-        format!("Kumi is removed. Your files are still in {}; delete that folder to remove them too.", display(&home))
+        format!("Kumi is removed{freed}. Your {KEPT} are still in {}; delete that folder to remove them too.", display(&home))
     });
     say("Open a new terminal window so the `kumi` command is gone there too.".into());
     Ok(0)
 }
 pub async fn check_release(env: &Env, fetcher: Option<Rc<dyn Fetch>>) -> Result<Option<String>, RuntimeError> {
-    match ask_release(env, fetcher).await {
-        AskedRelease::Manifest(manifest) => Ok(newer_version(&manifest.kumi, KUMI_VERSION).then_some(manifest.kumi)),
-        asked => Err(RuntimeError::plain(unasked(&asked, env))),
+    match ask_newest(env, fetcher.unwrap_or_else(default_fetch)).await {
+        (_, AskedRelease::Manifest(manifest)) => Ok(newer_version(&manifest.kumi, KUMI_VERSION).then_some(manifest.kumi)),
+        (base, asked) => Err(RuntimeError::plain(unasked(&asked, &base, None, env))),
     }
 }
 pub async fn newer_release(cache_file: &str, env: &Env, now: Option<f64>, fetcher: Option<Rc<dyn Fetch>>) -> Option<String> {
@@ -980,7 +1437,8 @@ mod swap_tests {
             };
             if rule.2 > 0 {
                 rule.2 -= 1;
-                return Err(std::io::ErrorKind::PermissionDenied.into());
+                // A held folder: Windows' sharing violation, or a busy mount elsewhere.
+                return Err(std::io::Error::from_raw_os_error(if cfg!(windows) { 32 } else { 16 }));
             }
             match rule.3 {
                 Then::Moves => fs::rename(from, to),
@@ -1025,7 +1483,10 @@ mod swap_tests {
             Some(fs::read_to_string(join(&folder, &executable_name("kumi"))).unwrap_or_else(|_| "node".into()))
         }
         async fn swap(&self, windows: &Windows) -> std::io::Result<()> {
-            swap_in_with(windows, &self.path("app.new"), &self.path("app"), &self.path("app.previous")).await
+            self.swap_with(windows).await
+        }
+        async fn swap_with(&self, folders: &impl Folders) -> std::io::Result<()> {
+            swap_in_with(folders, &self.path("app.new"), &self.path("app"), &self.path("app.previous")).await
         }
     }
     /// app holds 1.2, app.previous 1.1 to roll back to, and 1.3 waits in app.new.
@@ -1157,12 +1618,44 @@ mod swap_tests {
 
     #[test]
     fn a_failed_update_says_what_holds_the_folder_and_whether_the_kumi_you_had_works() {
-        let kept = swap_failed(true, true);
+        let kept = swap_failed(true, true, "");
         assert!(kept.contains("a Kumi window, or an antivirus scan") && kept.contains("still works") && kept.contains("run update again"));
-        let gone = swap_failed(true, false);
+        let gone = swap_failed(true, false, "");
         assert!(gone.contains("a Kumi window, or an antivirus scan") && !gone.contains("still works") && gone.contains("installer again"));
-        assert_eq!(swap_failed(false, true), "Couldn't put the new Kumi in place, so this one stays.");
-        assert!(swap_failed(false, false).contains("installer again"));
+        assert_eq!(
+            swap_failed(false, true, "Directory not empty"),
+            "Couldn't put the new Kumi in place (Directory not empty), so this one stays."
+        );
+        assert!(swap_failed(false, false, "Directory not empty").contains("installer again"));
+    }
+
+    /// A folder another account owns (an install run with sudo) never frees up: no waiting, and the update says whose.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_folder_this_account_cant_change_isnt_waited_for() {
+        struct Theirs;
+        impl Folders for Theirs {
+            fn rename(&self, _: &str, _: &str) -> std::io::Result<()> {
+                Err(std::io::Error::from_raw_os_error(libc::EACCES))
+            }
+            fn remove(&self, path: &str) -> std::io::Result<()> {
+                remove(path)
+            }
+            fn waiting(&self) {
+                panic!("a folder another account owns isn't waited for")
+            }
+        }
+        let home = updating();
+        let error = home.swap_with(&Theirs).await.unwrap_err();
+        assert!(denied(&error));
+        assert_eq!(home.version("app").as_deref(), Some("1.2"));
+        let said = not_in_place(&home.path(""), &error);
+        assert!(
+            said.starts_with("The system refused to change ")
+                && said.contains("if something in it was installed with sudo: sudo chown -R $USER"),
+            "{said}"
+        );
+        assert!(said.ends_with(". The Kumi you had stays."), "{said}");
     }
 
     fn put_file(path: &str) {

@@ -326,15 +326,26 @@ Kumi 的撤销只在它与 Live 的连接持续期间有效：在 Live 重启、
 ## 更新、报告与卸载
 
 ```sh
-kumi update              # 获取最新的 Kumi；Live 中的桥接较旧时一并更新
-kumi update --check      # 只告诉你是否有更新的 Kumi
-kumi update --rollback   # 回到上次更新之前的 Kumi
-kumi doctor              # 检查 登录、桥接、Live、扩展和终端
-kumi report              # 出问题时生成一个可以发送的文件
-kumi uninstall           # 卸载 Kumi；加上 --all 会同时删除你的对话、笔记和登录信息
+kumi update                    # 获取最新的 Kumi；Live 中的桥接较旧时一并更新
+kumi update --check            # 只告诉你是否有更新的 Kumi
+kumi update --rollback         # 回到上次更新之前的 Kumi
+kumi update --version 1.15.0   # 安装那个版本，较新或较旧都可以；--rollback 可以回来
+kumi doctor                    # 检查安装、登录、桥接、Live 和终端
+kumi doctor --json             # 以 JSON 输出同样的检查，不含密钥和主文件夹
+kumi report                    # 出问题时生成一个可以发送的文件
+kumi uninstall --dry-run       # 只说明 uninstall 会删除什么
+kumi uninstall                 # 卸载 Kumi；加上 --all 会同时删除你的对话、笔记和登录信息
 ```
 
-`update` 会获取最新版本，按其校验和验证，并先启动一次以确认它能运行，然后才把它放到位；之前的版本会保留，供 `--rollback` 使用。如果 Live 中的桥接较旧且 Live 已关闭，它接着会运行 `kumi bridge --yes`；如果 Live 正开着，它会请你运行 `kumi`，它可以替你重启 Live。在仓库的副本中，`update` 改为把检出向前推进（`git merge --ff-only`，有本地修改时拒绝执行），并用 Cargo 构建工作区。在 Kumi 中，`/update` 会先询问你，然后关闭 Kumi、更新，再用同一个对话重新打开它。
+`update` 会获取最新版本，按其校验和验证，并先启动一次以确认它能运行，然后才把它放到位；之前的版本会保留，供 `--rollback` 使用。
+
+- 它需要约 300 MB 的可用空间，不够时会在下载前告诉你。
+- 无法完成时，它会说明原因（连接的问题、代替 GitHub 应答的 Wi-Fi 登录页面、磁盘已满），并说明什么都没有改变。
+- 如果 `~/.kumi` 属于另一个账户（用 `sudo` 运行过安装程序），它会给出收回该文件夹的 `sudo chown` 命令。
+- 结束时显示版本变化（`1.15.0 → 1.16.0`）和几行新功能；其余内容在 Kumi 中用 `/changelog` 查看。只有当已经打开的 Kumi 窗口存在时，才会提到它们。
+- `--version x.y.z` 安装那个版本（1.7.6 或更高），较新或较旧都可以。原来的 Kumi 会保留，所以 `--rollback` 可以回到它。回到较旧的版本时，Live 中较新的桥接会保留，它同样能与之前的 Kumi 配合使用。
+
+如果 Live 中的桥接较旧且 Live 已关闭，它接着会运行 `kumi bridge --yes`；如果 Live 正开着，它会请你运行 `kumi`，它可以替你重启 Live。在仓库的副本中，`update` 改为把检出向前推进（`git merge --ff-only`，有本地修改时拒绝执行），并用 Cargo 构建工作区。在 Kumi 中，`/update` 会先询问你，然后关闭 Kumi、更新，再用同一个对话重新打开它。
 
 `--rollback` 会回到上一个 Kumi；如果 Live 已关闭，也会一并恢复它的桥接。在终端中，Kumi 会询问是否等你先退出 Live（Kumi 从不自行关闭 Live）。否则较新的桥接会保留，它同样能与之前的 Kumi 配合使用；要把桥接也恢复，请退出 Live，然后运行两次 `kumi update --rollback`。
 
@@ -346,9 +357,18 @@ kumi uninstall           # 卸载 Kumi；加上 --all 会同时删除你的对�
 
 Kumi 会在启动时检查是否有新版本，每天最多一次；没有新版本或没有网络时什么也不说。在 `~/.kumi/settings.json` 中加入 `"updateCheck": false`，或者设置 `KUMI_NO_UPDATE_CHECK=1`，即可关闭这项检查。
 
+`doctor` 首先检查安装：
+
+- Kumi 的版本和文件夹，以及 `--rollback` 会回到哪个版本。
+- 你的 shell 找到的 `kumi` 是否就是这个 Kumi。
+- 是否有更新的 Kumi（来自每天一次的检查，不访问网络）。
+- 可用空间、已安装的 Live、Live 的用户库、桥接的端口（9765 和 9766）以及 Live 的 Developer Mode。
+
+每个问题都会给出一个下一步。有需要修复的问题时，`doctor` 以 1 退出；提示（这台电脑上没有 Live、有更新的 Kumi）不算在内。`--json` 以 JSON 输出同样的检查，和报告一样会删除密钥、令牌、主文件夹和账户名。
+
 `report` 会写出 `~/kumi-report-<date and time>.txt`，其中包含 Kumi 和桥接的版本、doctor 的检查结果、你的设置、Kumi 在你上一次对话中做了什么、缺口日志，以及 Live 自身日志中来自桥接的行。密钥和令牌会被删除，你的主文件夹显示为 `~`，你的账户名显示为 `<user>`。发送前请先读一遍。
 
-`uninstall` 会移除 Kumi、保留的旧版 Node、启动器以及它添加的 PATH 条目，并提出把桥接和扩展从 Live 中移除（仅在 Live 关闭时）。你的对话、笔记、配方和登录信息会保留，除非你加上 `--all`。
+`uninstall` 会移除 Kumi、为 `--rollback` 保留的版本、更新留下的文件、保留的旧版 Node、启动器、它添加的 PATH 条目，以及 Kumi 下载的内容（程序、模型和看过的视频，需要时会再次下载），并告诉你释放了多少空间。它会提出把桥接和扩展从 Live 中移除（仅在 Live 关闭时）。你的对话、笔记、配方、登录信息、素材库和参考曲目会保留，除非你加上 `--all`。`--dry-run` 只说明会删除什么，不删除任何东西。
 
 ## 限制
 

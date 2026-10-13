@@ -208,6 +208,45 @@ pub fn more_line(news: &News) -> Option<String> {
     }
 }
 
+/// `kumi update`'s few lines on what changed from `from` to `to`, read from the new Kumi's own changelog: each
+/// note's first sentence, at most three, and where the whole notes are.
+pub fn update_lines(changelog: &str, from: &str, to: &str) -> Vec<String> {
+    const LINES: usize = 3;
+    let releases = since(&releases_in(changelog), from, to);
+    let several = releases.len() > 1;
+    let notes: Vec<String> = releases
+        .iter()
+        .flat_map(|release| {
+            release.items.iter().map(move |item| {
+                if several {
+                    format!("{} · {}", release.version, first_sentence(item))
+                } else {
+                    first_sentence(item)
+                }
+            })
+        })
+        .collect();
+    if notes.is_empty() {
+        return vec![];
+    }
+    let mut lines = vec!["What's new:".to_string()];
+    lines.extend(notes.iter().take(LINES).map(|note| format!("  {note}")));
+    lines.push(match notes.len().saturating_sub(LINES) {
+        0 => "  The whole notes: /changelog in Kumi".into(),
+        more => format!("  And {more} more: /changelog in Kumi"),
+    });
+    lines
+}
+
+/// A note's first sentence: up to its first full stop, question or exclamation mark followed by a space.
+fn first_sentence(note: &str) -> String {
+    let end = note.char_indices().find(|(at, c)| matches!(c, '.' | '!' | '?') && note[at + c.len_utf8()..].starts_with(' '));
+    match end {
+        Some((at, c)) => note[..at + c.len_utf8()].to_string(),
+        None => note.to_string(),
+    }
+}
+
 /// Where the whole history is.
 pub fn history_link() -> String {
     format!("{}/blob/main/CHANGELOG.md", env!("CARGO_PKG_REPOSITORY"))
@@ -275,6 +314,30 @@ mod tests {
         write_seen(&seen_file(&settings), "1.8.9");
         assert_eq!(at_start_from(&all, &settings, "1.8.11", true, false), None);
         assert_eq!(read_seen(&seen_file(&settings)).as_deref(), Some("1.8.11"));
+    }
+
+    #[test]
+    fn an_update_ends_with_each_new_notes_first_sentence_and_where_the_rest_are() {
+        let one = update_lines(SAMPLE, "1.8.10", "1.8.11");
+        assert_eq!(
+            one,
+            [
+                "What's new:",
+                "  Copying a Session clip into the Arrangement over another clip is refused, naming it, instead of losing part of that clip.",
+                "  The whole notes: /changelog in Kumi"
+            ]
+        );
+        let several = update_lines(SAMPLE, "1.8.8", "1.8.11");
+        assert_eq!(several.len(), 5, "{several:?}");
+        assert!(several[1].starts_with("  1.8.11 · Copying"));
+        assert_eq!(several[2], "  1.8.10 · Kumi sees the Set's scale (D Dorian), see the guide.");
+        assert_eq!(several[4], "  And 1 more: /changelog in Kumi");
+        // Versions compare as numbers: 1.8.9 is before 1.8.10.
+        assert!(update_lines(SAMPLE, "1.8.9", "1.8.10")[1].starts_with("  Kumi sees the Set's scale"));
+        assert!(update_lines(SAMPLE, "1.8.11", "1.8.11").is_empty());
+        assert!(update_lines("", "1.8.10", "1.8.11").is_empty());
+        assert_eq!(first_sentence("Faster. Much faster."), "Faster.");
+        assert_eq!(first_sentence("Version 1.2.3 is out"), "Version 1.2.3 is out");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! `kumi doctor`, and voice readiness checks.
 use futures::FutureExt;
-use kumi::{doctor::*, live_extension::install_extension, tui::tty::TtyOutput};
+use kumi::{doctor::*, live_app::InstalledLive, live_extension::install_extension, tui::tty::TtyOutput};
 use kumi_common::time::now_ms;
 use kumi_runtime::{
     providers::{local::local_servers, models::ModelInfo},
@@ -70,6 +70,8 @@ impl Setup {
             ("KUMI_PROJECTS_DIR".into(), root.path().join("projects").display().to_string()),
             ("KUMI_LIBRARY_DIR".into(), root.path().join("library").display().to_string()),
             ("KUMI_LIVE_EXTENSIONS_DIR".into(), root.path().join("Ableton/Extensions").display().to_string()),
+            ("KUMI_HOME".into(), root.path().join(".kumi").display().to_string()),
+            ("HOME".into(), root.path().display().to_string()),
         ]);
         Self { root, env, package, config }
     }
@@ -97,7 +99,27 @@ impl Setup {
         io.hands = Some(Rc::new(|| async { Ok(None) }.boxed_local()));
         io.voice = Some(Rc::new(|| async { Ok(ready()) }.boxed_local()));
         io.model_servers = Some(Rc::new(|| async { Ok(vec![]) }.boxed_local()));
+        io.installation = quiet_installation();
         io
+    }
+}
+/// The Installation section's look at this computer, answered: a Live 12, room on the disk, the ports free.
+fn quiet_installation() -> InstallationIo {
+    InstallationIo {
+        platform: Some("darwin".into()),
+        lives: Some(Rc::new(|| {
+            vec![InstalledLive {
+                app: "/Applications/Ableton Live 12 Suite.app".into(),
+                name: "Ableton Live 12 Suite".into(),
+                version: Some("12.4.15".into()),
+                opened: true,
+            }]
+        })),
+        free: Some(Rc::new(|_| async { Some(50e9) }.boxed_local())),
+        port: Some(Rc::new(|_| async { None }.boxed_local())),
+        live_running: Some(Rc::new(|| async { false }.boxed_local())),
+        live_extension_host: Some(Rc::new(|| async { false }.boxed_local())),
+        now: Some(now_ms() as f64),
     }
 }
 fn find<'a>(checks: &'a [Check], text: &str) -> &'a Check {
@@ -392,7 +414,205 @@ async fn native_bridge_configuration_resolves_binary_and_sibling_metadata() {
     assert_eq!(server.package_root(), Some(binary.parent().unwrap().display().to_string()));
     let mut io = s.io();
     io.node_version = None;
-    assert!(doctor_checks(&io).await.unwrap()[0].text.ends_with("(native executable)"));
+    // A native Kumi's version heads the Installation section; there's no Node to check.
+    assert!(!doctor_checks(&io).await.unwrap().iter().any(|c| c.text.contains("native executable") || c.text.contains("Node")));
+    let installation = installation_checks(&io.env, &io.installation).await;
+    assert!(installation[0].text.starts_with(&format!("Kumi {}", kumi_runtime::KUMI_VERSION)), "{installation:?}");
+}
+fn put(path: &std::path::Path, text: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+}
+/// A file the shell can run: `kumi`, or `kumi.cmd` on Windows.
+fn program(folder: &std::path::Path) -> PathBuf {
+    let file = folder.join(if cfg!(windows) { "kumi.cmd" } else { "kumi" });
+    put(&file, "#!/bin/sh\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    file
+}
+fn path_of(folders: &[&std::path::Path]) -> String {
+    folders.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(if cfg!(windows) { ";" } else { ":" })
+}
+#[tokio::test(flavor = "current_thread")]
+async fn installation_names_this_kumi_what_it_goes_back_to_and_how_the_shell_finds_it() {
+    let s = Setup::new();
+    let mut io = s.io();
+    let home = s.root.path().join(".kumi");
+    io.env.insert("KUMI_INSTALLED".into(), "1".into());
+    put(&home.join("app/package.json"), &json!({"version":kumi_runtime::KUMI_VERSION}).to_string());
+    let checks = installation_checks(&io.env, &io.installation).await;
+    assert!(checks[0].text.starts_with(&format!("Kumi {} in ", kumi_runtime::KUMI_VERSION)), "{checks:?}");
+    assert_eq!(find(&checks, "Nothing kept to go back to yet").status, CheckStatus::Ok);
+    put(&home.join("app.previous/package.json"), &json!({"version":"1.15.0"}).to_string());
+    assert!(find(&installation_checks(&io.env, &io.installation).await, "update --rollback goes back to 1.15.0").next.is_none());
+    put(&home.join("app.previous/package.json"), &json!({"version":kumi_runtime::KUMI_VERSION}).to_string());
+    find(&installation_checks(&io.env, &io.installation).await, "has only this same");
+    // The shell finds Kumi's launcher, or another kumi before it, or none in this window.
+    let ours = home.join("bin");
+    program(&ours);
+    let elsewhere = s.root.path().join("old-install").join("bin");
+    let other = program(&elsewhere);
+    io.env.insert("PATH".into(), path_of(&[&elsewhere, &ours]));
+    let first = find(&installation_checks(&io.env, &io.installation).await, "Another kumi comes first on PATH").clone();
+    assert_eq!(first.status, CheckStatus::Fix);
+    // Shown from the home folder as ~ where it's under it (Windows' temporary folder is).
+    let shown = other.strip_prefix(s.root.path()).unwrap().display().to_string();
+    assert!(first.text.ends_with(&shown) && first.next.unwrap().contains("before"), "{}", first.text);
+    io.env.insert("PATH".into(), path_of(&[&ours, &elsewhere]));
+    assert_eq!(find(&installation_checks(&io.env, &io.installation).await, "kumi on PATH").status, CheckStatus::Ok);
+    io.env.insert("PATH".into(), path_of(&[&s.root.path().join("nowhere")]));
+    let missing = find(&installation_checks(&io.env, &io.installation).await, "kumi isn't on PATH in this window").clone();
+    assert_eq!(missing.status, CheckStatus::Note);
+    if !cfg!(windows) {
+        assert!(missing.next.unwrap().starts_with("Add "));
+        put(&s.root.path().join(".zshrc"), &format!("{}\nexport PATH=\"{}:$PATH\"\n", kumi::install::PATH_MARKER, ours.display()));
+        let added = find(&installation_checks(&io.env, &io.installation).await, "kumi isn't on PATH").next.clone().unwrap();
+        assert!(added.starts_with("Open a new terminal window (") && added.contains(".zshrc adds it there"), "{added}");
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn installation_says_whether_a_newer_kumi_is_out_from_the_daily_check_without_asking() {
+    let s = Setup::new();
+    let io = s.io();
+    // A checkout's section: this Kumi, then whether a newer one is out.
+    let check = |io: DoctorIo| async move { installation_checks(&io.env, &io.installation).await.remove(1) };
+    assert!(check(io.clone()).await.text.starts_with("Kumi looks for updates once a day while it runs"));
+    let cache = s.root.path().join("update-check.json");
+    let at = now_ms() as f64 - 3. * 3_600_000.;
+    // Versions compare as numbers: 1.16.10 is newer than 1.16.0, 1.9.0 isn't.
+    for (latest, newer) in [("99.0.0", true), ("1.16.10", true), ("1.9.0", false), (kumi_runtime::KUMI_VERSION, false)] {
+        fs::write(&cache, json!({"checkedAt":at,"latest":latest}).to_string()).unwrap();
+        let said = check(io.clone()).await;
+        if newer {
+            assert_eq!(said.text, format!("Kumi {latest} is out (this is {})", kumi_runtime::KUMI_VERSION));
+            assert_eq!((said.status, said.next.unwrap()), (CheckStatus::Note, format!("{} update", *KUMI)));
+        } else {
+            assert_eq!(said, Check::ok("Up to date when Kumi last looked (3 hours ago)"), "{latest}");
+        }
+    }
+    fs::write(s.root.path().join("settings.json"), json!({"updateCheck":false}).to_string()).unwrap();
+    assert!(check(io.clone()).await.text.contains("(updateCheck in settings.json)"));
+    let mut off = io.clone();
+    off.env.insert("KUMI_NO_UPDATE_CHECK".into(), "1".into());
+    assert!(check(off).await.text.contains("(KUMI_NO_UPDATE_CHECK)"));
+}
+#[tokio::test(flavor = "current_thread")]
+async fn installation_checks_room_live_its_user_library_and_the_bridges_ports() {
+    let s = Setup::new();
+    let mut io = s.io();
+    let installation = |io: &DoctorIo| {
+        let io = io.clone();
+        async move { installation_checks(&io.env, &io.installation).await }
+    };
+    assert!(find(&installation(&io).await, "free on the disk with").text.starts_with("50.0 GB"));
+    io.installation.free = Some(Rc::new(|_| async { Some(120e6) }.boxed_local()));
+    let low = find(&installation(&io).await, "free on the disk with").clone();
+    assert_eq!((low.status, low.text.starts_with("Only 120 MB")), (CheckStatus::Fix, true));
+    assert!(low.next.unwrap().contains("300 MB"));
+    io.installation = quiet_installation();
+    assert_eq!(find(&installation(&io).await, "Live installed").text, "Live installed: 12.4.15 (Ableton Live 12 Suite)");
+    let eleven = InstalledLive {
+        app: "/Applications/Ableton Live 11 Suite.app".into(),
+        name: "Ableton Live 11 Suite".into(),
+        version: Some("11.3.21".into()),
+        opened: true,
+    };
+    io.installation.lives = Some(Rc::new(move || vec![eleven.clone()]));
+    assert_eq!(find(&installation(&io).await, "Kumi works with Live 12").status, CheckStatus::Fix);
+    // No Live on this computer (a build machine, say) is a note: nothing to fix, and the exit code stays.
+    io.installation.lives = Some(Rc::new(Vec::new));
+    let none = installation(&io).await;
+    assert_eq!(find(&none, "Live isn't installed on this computer").status, CheckStatus::Note);
+    assert_eq!(doctor_code(&[Section { title: "Installation".into(), checks: none }]), 0);
+    io.installation.platform = Some("linux".into());
+    assert_eq!(find(&installation(&io).await, "Live doesn't run on Linux").status, CheckStatus::Note);
+    // The User Library Live's settings name, there or not.
+    io.installation = quiet_installation();
+    let scripts = io.env.remove("KUMI_REMOTE_SCRIPTS_DIR").unwrap();
+    let settings = PathBuf::from(kumi::config::live_preferences_dir(&io.env)).join("Live 12.4.15");
+    let library = s.root.path().join("Music Library");
+    let config = format!(
+        "<Ableton><UserLibrary><ProjectPath Value=\"{}\" /><ProjectName Value=\"User Library\" /></UserLibrary></Ableton>",
+        library.display()
+    );
+    put(&settings.join(if cfg!(windows) { "Preferences/Library.cfg" } else { "Library.cfg" }), &config);
+    let gone = find(&installation(&io).await, "User Library is set to").clone();
+    assert_eq!(gone.status, CheckStatus::Fix);
+    assert!(gone.text.ends_with("which isn't there") && gone.next.unwrap().contains("Settings → Library"));
+    fs::create_dir_all(library.join("User Library")).unwrap();
+    assert_eq!(find(&installation(&io).await, "User Library:").status, CheckStatus::Ok);
+    io.env.insert("KUMI_REMOTE_SCRIPTS_DIR".into(), scripts);
+    assert!(find(&installation(&io).await, "Remote Scripts folder:").text.ends_with("(KUMI_REMOTE_SCRIPTS_DIR)"));
+    // The bridge's ports: free, or another program's.
+    assert_eq!(find(&installation(&io).await, "9765").text, "Ports 9765 and 9766 free for Live's bridge");
+    io.installation.port = Some(Rc::new(|port| async move { (port == 9766).then(|| Some("node".into())) }.boxed_local()));
+    let held = find(&installation(&io).await, "9766").clone();
+    assert_eq!(held, Check::fix("node holds port 9766, which Live's bridge needs", Some("Quit node, then restart Live".into())));
+}
+#[tokio::test(flavor = "current_thread")]
+async fn installation_tells_developer_mode_by_who_started_kumis_extension() {
+    let s = Setup::new();
+    let mut io = s.io();
+    let mode = |io: &DoctorIo| {
+        let io = io.clone();
+        async move { installation_checks(&io.env, &io.installation).await.into_iter().find(|c| c.text.contains("Developer Mode")) }
+    };
+    assert_eq!(mode(&io).await, None, "Live closed and no extension running: can't tell");
+    let endpoint = json!({"host":"127.0.0.1","port":1,"pid":std::process::id()}).to_string();
+    let data = s.root.path().join("Ableton/Extensions Data/kumi.kumi");
+    put(&data.join("endpoint.json"), &endpoint);
+    assert!(mode(&io).await.unwrap().text.starts_with("Live's Developer Mode is off"));
+    fs::remove_dir_all(&data).unwrap();
+    put(&s.config.parent().unwrap().join("live-extension/endpoint.json"), &endpoint);
+    assert!(mode(&io).await.unwrap().text.starts_with("Live's Developer Mode is on"));
+    fs::remove_dir_all(s.config.parent().unwrap().join("live-extension")).unwrap();
+    // Live open with Kumi's extension installed but not running: Live runs its own Extension Host only with it off.
+    extension(&s.root.path().join("Ableton/Extensions/kumi.kumi"), "module.exports = {};\n");
+    io.installation.live_running = Some(Rc::new(|| async { true }.boxed_local()));
+    assert!(mode(&io).await.unwrap().text.starts_with("Live's Developer Mode is on"));
+    io.installation.live_extension_host = Some(Rc::new(|| async { true }.boxed_local()));
+    assert!(mode(&io).await.unwrap().text.starts_with("Live's Developer Mode is off"));
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn installation_names_a_kumi_folder_another_account_owns() {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let s = Setup::new();
+    let mut io = s.io();
+    // /usr stands in for a ~/.kumi an install run with sudo left to root.
+    io.env.insert("KUMI_HOME".into(), "/usr".into());
+    let theirs = find(&installation_checks(&io.env, &io.installation).await, "isn't yours").clone();
+    assert_eq!(theirs, Check::fix("/usr isn't yours", Some("/usr isn't yours (installed with sudo?): sudo chown -R $USER /usr".into())));
+}
+#[tokio::test(flavor = "current_thread")]
+async fn doctor_json_takes_out_keys_and_counts_only_fixes() {
+    let s = Setup::new();
+    let out = Rc::new(Out::default());
+    let mut io = s.io();
+    io.out = out.clone();
+    io.json = true;
+    io.hands = Some(Rc::new(|| async { Ok(Some(Check::note("Read sk-fixture-never-printed in a log", None))) }.boxed_local()));
+    assert_eq!(run_doctor(io.clone()).await.unwrap(), 0);
+    let printed = out.0.borrow().clone();
+    assert!(!printed.contains("sk-fixture-never-printed") && printed.contains("Read [secret] in a log"), "{printed}");
+    let value: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    assert_eq!(value["kumi"], kumi_runtime::KUMI_VERSION);
+    assert_eq!(value["fixes"], 0);
+    let titles: Vec<_> = value["sections"].as_array().unwrap().iter().map(|s| s["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(titles, ["Installation", "Sign-in, Live and the rest"]);
+    assert!(value["sections"][0]["checks"][0]["text"].as_str().unwrap().starts_with("Kumi "));
+    out.0.borrow_mut().clear();
+    io.hands =
+        Some(Rc::new(|| async { Ok(Some(Check::fix("Kumi can't use Live's menus", Some("Run kumi report".into())))) }.boxed_local()));
+    assert_eq!(run_doctor(io).await.unwrap(), 1);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&out.0.borrow()).unwrap()["fixes"], 1);
 }
 #[test]
 fn a_missing_bridge_is_to_fix_only_where_a_live_12_can_take_it() {

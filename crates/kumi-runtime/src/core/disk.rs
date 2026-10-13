@@ -57,7 +57,8 @@ fn free_on(path: &Path) -> Option<f64> {
 
 pub const MB: f64 = 1_000_000.0;
 
-fn size(bytes: f64) -> String {
+/// "412 MB", "12.3 GB": a size in plain words.
+pub fn size(bytes: f64) -> String {
     if bytes >= 1_000.0 * MB {
         format!("{} GB", to_fixed(bytes / (1_000.0 * MB), 1))
     } else {

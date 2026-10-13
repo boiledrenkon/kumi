@@ -1,4 +1,5 @@
 //! `kumi doctor`; native installs also diagnose legacy bridge configurations.
+mod installation;
 use crate::{
     config::*,
     live_app::LiveInstalled,
@@ -12,6 +13,7 @@ use crate::{
     voice::system_language,
 };
 use futures::future::{join_all, LocalBoxFuture};
+pub use installation::{installation_checks, kumi_on_path, port_owner, InstallationIo, PortOwner};
 use kumi_common::{
     js::{
         number,
@@ -122,6 +124,9 @@ pub struct DoctorIo {
     pub hands: Option<AsyncCheck<Option<Check>>>,
     pub model_servers: Option<AsyncCheck<Vec<ServerFinding>>>,
     pub voice: Option<AsyncCheck<VoiceReadiness>>,
+    pub installation: InstallationIo,
+    /// `--json`: the checks as JSON, with keys, tokens and the home folder taken out.
+    pub json: bool,
 }
 impl DoctorIo {
     pub fn new(out: Rc<dyn TtyOutput>, env: Env) -> Self {
@@ -137,6 +142,8 @@ impl DoctorIo {
             hands: None,
             model_servers: None,
             voice: None,
+            installation: InstallationIo::default(),
+            json: false,
         }
     }
 }
@@ -563,6 +570,7 @@ pub fn missing_bridge(platform: &str, installed: impl FnOnce() -> LiveInstalled)
 }
 pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     let env = &io.env;
+    // A native Kumi's version and folder head the Installation section; an earlier Node Kumi's Node is checked here.
     let node = io.node_version.as_deref().map(node_check).unwrap_or_else(|| Check::ok(format!("Kumi {KUMI_VERSION} (native executable)")));
     let servers = match &io.model_servers {
         Some(find) => find().await,
@@ -571,7 +579,7 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     .unwrap_or_default();
     let sign_in = sign_in_check(env, &servers).await?;
     let said = servers.iter().find(|s| sign_in.text.starts_with(&format!("{} isn't running", s.server.name))).map(|s| s.server.id.as_str());
-    let mut checks = vec![node.clone(), sign_in];
+    let mut checks = io.node_version.is_some().then(|| node.clone()).into_iter().chain([sign_in]).collect::<Vec<_>>();
     checks.extend(server_checks(&servers, env, said));
     if let Some(config) = find_bridge_config(env) {
         let server = read_bridge_server(&config).unwrap_or_default();
@@ -791,25 +799,80 @@ async fn node_version(command: &str) -> Option<String> {
     let text = head(trim(&String::from_utf8_lossy(&result.stdout)), 32);
     (!text.is_empty()).then_some(text)
 }
-pub async fn run_doctor(io: DoctorIo) -> Result<i32, RuntimeError> {
-    let checks = step(io.out.clone(), &io.env, "Checking…", doctor_checks(&io), false).await?;
-    io.out.write(&format_doctor(&checks));
-    Ok(if checks.iter().any(|c| c.status == CheckStatus::Fix) { 1 } else { 0 })
+/// Checks under a heading.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Section {
+    pub title: String,
+    pub checks: Vec<Check>,
 }
-pub fn format_doctor(checks: &[Check]) -> String {
-    let mut lines = vec!["Kumi doctor".into(), "".into()];
+/// Every check: the installation's, then sign-in, Live and the rest.
+pub async fn doctor_sections(io: &DoctorIo) -> Result<Vec<Section>, RuntimeError> {
+    let (installation, checks) = futures::join!(installation_checks(&io.env, &io.installation), doctor_checks(io));
+    Ok(vec![
+        Section { title: "Installation".into(), checks: installation },
+        Section { title: "Sign-in, Live and the rest".into(), checks: checks? },
+    ])
+}
+/// 1 when anything needs fixing. Notes (a newer Kumi, Live not installed, `kumi` not on this window's PATH) are
+/// information and don't count.
+pub fn doctor_code(sections: &[Section]) -> i32 {
+    i32::from(sections.iter().flat_map(|s| &s.checks).any(|c| c.status == CheckStatus::Fix))
+}
+pub async fn run_doctor(io: DoctorIo) -> Result<i32, RuntimeError> {
+    if io.json {
+        let sections = doctor_sections(&io).await?;
+        let redact = crate::report::redaction(&io.env).await;
+        let fixes = sections.iter().flat_map(|s| &s.checks).filter(|c| c.status == CheckStatus::Fix).count();
+        let sections: Vec<Section> = sections
+            .into_iter()
+            .map(|section| Section {
+                title: section.title,
+                checks: section
+                    .checks
+                    .into_iter()
+                    .map(|check| Check { text: redact(&check.text), next: check.next.map(|next| redact(&next)), ..check })
+                    .collect(),
+            })
+            .collect();
+        let value = serde_json::json!({"kumi": KUMI_VERSION, "fixes": fixes, "sections": sections});
+        io.out.write(&format!("{}\n", serde_json::to_string_pretty(&value).unwrap_or_default()));
+        return Ok(doctor_code(&sections));
+    }
+    let sections = step(io.out.clone(), &io.env, "Checking…", doctor_sections(&io), false).await?;
+    io.out.write(&format_sections(&sections));
+    Ok(doctor_code(&sections))
+}
+pub fn format_sections(sections: &[Section]) -> String {
+    let mut lines = vec!["Kumi doctor".to_string()];
+    for section in sections {
+        lines.extend(["".into(), section.title.clone()]);
+        lines.extend(check_lines(&section.checks));
+    }
+    lines.push("".into());
+    lines.push(summary(sections.iter().flat_map(|s| &s.checks)));
+    format!("{}\n", lines.join("\n"))
+}
+fn check_lines(checks: &[Check]) -> Vec<String> {
+    let mut lines = vec![];
     for check in checks {
         lines.push(format!("  {:5} {}", check.status.as_str(), check.text));
         if let Some(next) = check.next.as_ref().filter(|s| !s.is_empty()) {
             lines.push(format!("        → {next}"))
         }
     }
-    let fixes = checks.iter().filter(|c| c.status == CheckStatus::Fix).count();
-    lines.push("".into());
-    lines.push(if fixes > 0 {
+    lines
+}
+fn summary<'a>(checks: impl Iterator<Item = &'a Check>) -> String {
+    let fixes = checks.filter(|c| c.status == CheckStatus::Fix).count();
+    if fixes > 0 {
         format!("{fixes} {} to fix (see →).", if fixes == 1 { "thing" } else { "things" })
     } else {
         "Everything Kumi needs is in place.".into()
-    });
+    }
+}
+pub fn format_doctor(checks: &[Check]) -> String {
+    let mut lines = vec!["Kumi doctor".into(), "".into()];
+    lines.extend(check_lines(checks));
+    lines.extend(["".into(), summary(checks.iter())]);
     format!("{}\n", lines.join("\n"))
 }

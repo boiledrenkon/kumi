@@ -73,10 +73,13 @@ pub fn help(installed: bool) -> String {
     ));
     first.push((format!("{cmd} bridge"), "Or, with Live closed: put the bridge into Live, or bring it up to date"));
     let mut more=vec![("-c, --continue","Continue the conversation you had last, in any Set"),("-r, --resume [id or name]","Continue a kept conversation by its id, the start of one, or its name;\nalone, choose one (both work with --inference-only too)"),("--inference-only","Chat without Live"),("--bridge-config <path>","Use this bridge configuration (an absolute path)"),("login","Sign in: asks whether with ChatGPT or an API key"),("login <provider>","Sign in to one provider: openai-codex with a ChatGPT plan (--device\nwithout a browser); anthropic, openai, opencode with an API key (asked for)"),("logout <provider>","Remove Kumi's sign-in for that provider"),("model [<provider>/<model>]","Show or choose the model; ollama/<model> or lmstudio/<model> for one on this computer"),("auth","Show which providers are usable (no secrets)"),("doctor","Check sign-in, the bridge, Live and the terminal"),("library","What Kumi knows of your sounds, presets and Sets (it learns them in the\nbackground); --rebuild learns them all again"),("update","Bring Kumi up to date, and the bridge in Live when it's older"),("update --check","Say whether there's a newer Kumi, without installing it")];
+    let doctor = more.iter().position(|(s, _)| *s == "doctor").map_or(more.len(), |at| at + 1);
+    more.insert(doctor, ("doctor --json", "The doctor's checks as JSON, without keys, to share"));
     if installed {
         more.extend([
             ("update --rollback", "Go back to the Kumi you had before the last update"),
-            ("uninstall", "Remove Kumi (your conversations and notes stay unless you say)"),
+            ("update --version <x.y.z>", "Install that release, newer or older (update --rollback returns)"),
+            ("uninstall", "Remove Kumi (your conversations and notes stay unless you say);\n--dry-run says what would go"),
         ]);
     }
     more.extend([("report", "Write a file to send when something goes wrong (no keys in it)"), ("--version", "Show Kumi's version")]);
@@ -213,12 +216,25 @@ async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>
             io.out.write(&format!("Kumi {KUMI_VERSION}\n"));
             Ok(0)
         }
-        AppConfig::Doctor => doctor::run_doctor(doctor_io(io, factory)).await,
+        AppConfig::Doctor { json } => {
+            let mut doctor = doctor_io(io, factory);
+            doctor.json = *json;
+            doctor::run_doctor(doctor).await
+        }
         AppConfig::Report => write_report(ReportIo::new(doctor_io(io, factory))).await,
-        AppConfig::Update { rollback, check } => {
+        AppConfig::Update { rollback, check, version } => {
             if *rollback && !io.installed() {
                 io.out.write("This Kumi runs from a copy of its repository, so there's no earlier Kumi kept to go back to. Check out the commit you want with git, then run: cargo build --release --workspace\n");
                 return Ok(1);
+            }
+            if let Some(version) = version {
+                if !io.installed() {
+                    io.out.write(&format!("This Kumi runs from a copy of its repository: check out that release with git (git checkout v{version}), then run: cargo build --release --workspace\n"));
+                    return Ok(1);
+                }
+                let mut installed = installed_io(io);
+                installed.version = Some(version.clone());
+                return install::update_installed(installed).await;
             }
             if *check {
                 let latest = step(
@@ -259,9 +275,9 @@ async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>
                 install::update_installed(installed_io(io)).await
             }
         }
-        AppConfig::Uninstall { all, yes } => {
+        AppConfig::Uninstall { all, yes, dry_run } => {
             if io.installed() {
-                install::uninstall_installed(installed_io(io), install::UninstallOptions { all: *all, yes: *yes }).await
+                install::uninstall_installed(installed_io(io), install::UninstallOptions { all: *all, yes: *yes, dry_run: *dry_run }).await
             } else {
                 io.out
                     .write("This Kumi runs from a copy of its repository; delete that folder to remove it (your files are in ~/.kumi).\n");
