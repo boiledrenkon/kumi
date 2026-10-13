@@ -206,9 +206,13 @@ exit $status
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn(f"couldn't reach 127.0.0.1:{port}: the connection failed. Check that this computer is online", run.stderr)
         self.assertIn("curl: (7)", run.stderr)
-        proxied = self.install(home, KUMI_RELEASES=f"http://127.0.0.1:{port}", HTTPS_PROXY="http://someone:secret@127.0.0.1:9")
-        self.assertIn("Proxy settings: HTTPS_PROXY=http://127.0.0.1:9.", proxied.stderr)
-        self.assertNotIn("secret", proxied.stderr)
+        # A user name and password never show, with or without a scheme before them, an @ in the password too.
+        for proxy, shown in (("http://someone:secret@127.0.0.1:9", "http://127.0.0.1:9"), ("someone:secret@127.0.0.1:9", "127.0.0.1:9"),
+                             ("http://someone:sec@ret@127.0.0.1:9", "http://127.0.0.1:9")):
+            proxied = self.install(home, KUMI_RELEASES=f"http://127.0.0.1:{port}", HTTPS_PROXY=proxy)
+            self.assertIn(f"Proxy settings: HTTPS_PROXY={shown}.", proxied.stderr)
+            self.assertNotIn("someone", proxied.stderr)
+            self.assertNotIn("ret@", proxied.stderr)
 
     def test_a_name_that_cant_be_looked_up_is_dns(self):
         home = self.home()

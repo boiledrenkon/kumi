@@ -209,13 +209,14 @@ main() {
       if [ -n "$(proxies)" ]; then message="$message Proxy settings: $(proxies)."; fi
     fi
   }
-  # The proxy settings curl and wget read, as NAME=value without any user name or password.
+  # The proxy settings curl and wget read, as NAME=value without any user name or password (with or without a
+  # scheme before them).
   proxies() {
     listed=""
     for name in HTTPS_PROXY https_proxy ALL_PROXY all_proxy NO_PROXY no_proxy; do
       eval "value=\${$name:-}"
       if [ -n "$value" ]; then
-        printf '%s%s=%s' "${listed:+, }" "$name" "$(printf '%s' "$value" | sed 's|://[^@/]*@|://|')"; listed=1
+        printf '%s%s=%s' "${listed:+, }" "$name" "$(printf '%s' "$value" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)?[^/]*@#\1#')"; listed=1
       fi
     done
   }

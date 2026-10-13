@@ -85,11 +85,12 @@
       [Text.Encoding]::ASCII.GetString($bytes, 0, $count) -match '(?i)<(!doctype|html|head|body|title|meta)'
     } catch { $false }
   }
-  # The proxy settings in the environment, as NAME=value without any user name or password.
+  # The proxy settings in the environment, as NAME=value without any user name or password (with or without a
+  # scheme before them).
   function Proxies {
     @(foreach ($name in 'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY') {
       $value = [Environment]::GetEnvironmentVariable($name)
-      if ($value) { "$name=$($value -replace '://[^@/]*@', '://')" }
+      if ($value) { "$name=$($value -replace '^([A-Za-z][A-Za-z0-9+.-]*://)?[^/]*@', '$1')" }
     }) -join ', '
   }
   # Why a download from $Url didn't come through, in Kumi's own words (DNS, TLS, proxy, timeout, offline): the HTTP

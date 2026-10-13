@@ -70,7 +70,7 @@ function Run([scriptblock]$Command) {
 }
 # install.ps1 in a powershell of its own, from the file (or piped into iex), with these settings, PATH left alone.
 function Install([hashtable]$Settings, [switch]$Iex) {
-  $names = @('KUMI_HOME', 'KUMI_RELEASES', 'KUMI_VERSION', 'KUMI_NO_MODIFY_PATH', 'KUMI_NO_LAUNCH')
+  $names = @('KUMI_HOME', 'KUMI_RELEASES', 'KUMI_VERSION', 'KUMI_NO_MODIFY_PATH', 'KUMI_NO_LAUNCH', 'HTTPS_PROXY')
   $saved = @{}; foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
   try {
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $null) }
@@ -103,6 +103,8 @@ try {
 
   $run = Install @{ KUMI_HOME = (Home 'offline'); KUMI_RELEASES = 'http://127.0.0.1:9' }
   Check 'nothing answering says the connection failed, and what Windows said' (($run.Code -eq 1) -and $run.Said.Contains("couldn't reach 127.0.0.1:9: the connection failed.") -and ($run.Said -match 'remote server|actively refused')) $run.Said
+  $run = Install @{ KUMI_HOME = (Home 'proxy'); KUMI_RELEASES = 'http://127.0.0.1:9'; HTTPS_PROXY = 'someone:sec@ret@127.0.0.1:9' }
+  Check "the proxy settings say no user name or password, with no scheme before them" ($run.Said.Contains('Proxy settings: HTTPS_PROXY=127.0.0.1:9.') -and -not $run.Said.Contains('someone') -and -not $run.Said.Contains('ret@')) $run.Said
 
   New-Item -ItemType Directory -Force -Path (Join-Path $releases 'page') | Out-Null
   [IO.File]::WriteAllText((Join-Path $releases "page\kumi-release-$target.json"), '<!DOCTYPE html><html><head><title>Sign in</title></head><body>Wi-Fi</body></html>')
