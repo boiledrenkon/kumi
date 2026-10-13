@@ -2655,3 +2655,48 @@ async fn a_fallback_that_fails_too_says_so_with_no_loop_and_an_outage_past_the_r
     })
     .await
 }
+
+#[tokio::test]
+async fn a_side_question_says_a_plans_limit_at_once_and_waits_for_no_long_retry() {
+    local(async {
+        tokio::time::pause();
+        let began = tokio::time::Instant::now();
+        let h = harness(|_, _| Scripted::Reject(usage_limit(json!({"resets_in_seconds": 3600}))), Options::default());
+        let error = h.kernel.aside("how long is the tail?", signal(), Rc::new(|_| {})).await.unwrap_err();
+        assert!(error.to_string().contains("test's plan limit is reached; it resets at"), "{error}");
+        assert_eq!(h.count(), 1);
+        // Nor a long Retry-After: a busy provider is tried again only briefly.
+        let h = harness(|_, n| if n == 1 { Scripted::Reject(busy("600")) } else { answer("ok") }, Options::default());
+        assert!(h.kernel.aside("and now?", signal(), Rc::new(|_| {})).await.is_err());
+        assert_eq!(h.count(), 1);
+        let h = harness(|_, n| if n == 1 { Scripted::Reject(busy("2")) } else { answer("ok") }, Options::default());
+        assert_eq!(h.kernel.aside("and now?", signal(), Rc::new(|_| {})).await.unwrap(), "ok");
+        assert!(began.elapsed() < Duration::from_secs(5), "{:?}", began.elapsed());
+    })
+    .await
+}
+
+#[tokio::test]
+async fn the_fallback_reads_the_conversation_refitted_to_what_it_reads_at_once() {
+    local(async {
+        let resets = now_seconds() + 3600.;
+        let big = "x".repeat(60 * 1024);
+        let (primary, _) = scripted("openai-codex/gpt-6-sol", move |_, n| match n {
+            1 => Scripted::Parts(vec![call_id("read", "{}", "call_1"), tool_calls()]),
+            2 => answer("Read it."),
+            _ => Scripted::Reject(usage_limit(json!({"resets_at": resets}))),
+        });
+        // A model on the producer's computer: it reads far less at once than the default budget.
+        let (mut fallback, asked) = scripted("ollama/qwen3:8b", |_, _| answer("Carried on."));
+        fallback.budget = Some(Box::new(|_| ContextBudget { clear_at: 4.0 * 1024.0, limit: 16.0 * 1024.0 }));
+        let kernel = kernel_on(primary, vec![saying("read", &big)]);
+        kernel.set_fallback(Some(fallback));
+        assert_eq!(kernel.run("read the long one", signal(), ignore()).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(kernel.run("now the next part", signal(), ignore()).await.unwrap().stop_reason, StopReason::Completed);
+        let sent = js(&asked.borrow()[0].prompt);
+        assert!(sent.len() < 16 * 1024, "the fallback's own budget: {} bytes", sent.len());
+        assert!(sent.contains("now the next part"), "the producer's words stay");
+        kernel.close().await;
+    })
+    .await
+}

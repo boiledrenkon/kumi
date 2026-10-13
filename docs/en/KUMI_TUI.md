@@ -12,7 +12,9 @@ closes, crashes or is stopped.
 
 - **Header:** Kumi, the Set's name, the model and its effort, and Live's
   connection. While Live plays, a yellow light blinks on its beat (brightest on
-  the bar's first beat) beside the tempo.
+  the bar's first beat) beside the tempo. While your fallback model answers,
+  it's named there with "· fallback"; near a plan's limit (80% of a window
+  used), "plan 84% · resets 14:20" shows beside the model.
 - **Conversation** (left): your messages, Kumi's answers and its steps, in plain
   words ("looked at your Set"), each with its timing. A step at work animates by
   kind (searching, reading, building a device, changing, listening, playing);
@@ -25,7 +27,10 @@ closes, crashes or is stopped.
   it, or use **Ask Kumi about this** in Live) is pinned for your next messages.
 - **NOW** (middle right): what Kumi is doing, drawn as it happens: a value's
   before and after, a new clip's notes, a colour swatch, a device landing in its
-  chain, "▶ Playing from the start marker".
+  chain, "▶ Playing from the start marker". While Kumi waits for the model, it
+  says why and until when: "retrying in 5s · ChatGPT is busy", "carrying on at
+  14:20 (in 2h 13m) · ChatGPT's plan limit", "offline · trying again in 20s"
+  (Esc stops any of them).
 - **Tabs** (bottom right): **HISTORY** lists the latest three things Kumi kept
   (each with **forget**), then every change, newest first, each with **undo**,
   or **kept** / **no undo** / **check Live** when it can't be undone. **GOAL**
@@ -100,7 +105,7 @@ message, not a command.
 | `/stop` | Stop Live: clips, the transport and recording. Also stops Kumi's answer |
 | `/refresh` | Read the Set again without asking the model |
 | `/copy` | Copy Kumi's last answer to the clipboard |
-| `/model`, `/effort` | Choose the model (from each provider's own list, then the model servers on your computer: Ollama, LM Studio and those in settings.json; type to filter) and how hard it thinks; from your next message |
+| `/model`, `/effort` | Choose the model (from each provider's own list, then the model servers on your computer: Ollama, LM Studio and those in settings.json; type to filter) and how hard it thinks; from your next message. In `/model`, ctrl+f makes the selected model your fallback (again clears it) |
 | `/fast` | Turn on the model's faster tier when its provider lists one (ChatGPT's "Fast": quicker answers, more of your usage); `/fast` again turns it off. Shown as "· fast" beside the model |
 | `/willington` | Turn [Willington](WILLINGTON_INTEGRATION.md) on or off. Rack bindings are requested on supported builds; clip Follow Actions and native editing also require passing exact-library self-tests. Native editing is b5 macOS ARM64 only. Off until enabled; available when the bridge carries Willington. |
 | `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
@@ -161,7 +166,12 @@ answering; during an answer, Kumi says so and leaves things as they are.
 
 **Panels** (`/model`, `/effort`, `/login`, `/memory` and the others): ↑↓ move,
 Enter chooses, Esc closes; in `/model`, `/memory`, `/conversations` and
-`/recipes`, typing filters the list. In the key box, paste the key and press
+`/recipes`, typing filters the list. In `/model`, ctrl+f sets the fallback.
+**Your answer** (an answer that ends on a question with numbered options): a
+number, then Enter, answers. An option Kumi recommends is marked and chosen to
+start with; when nobody's there (a `/goal`, `/loop` or match ran, or Kumi's
+window has been behind another for 2 minutes), Kumi takes it after a countdown
+("Taking 2 (recommended) in 60 s · any key cancels"). In the key box, paste the key and press
 Enter; Kumi checks it with the provider, or saves it unchecked when the provider
 can't be reached. In the ChatGPT sign-in panel, `c` copies the link. In the
 `/btw` panel, ↑↓ and Page Up/Down scroll, ←→ go through earlier answers, `c`
@@ -178,6 +188,32 @@ instead, which suits screen readers and logs. It has `/help`, `/status`,
 `/goal`, `/loop`, `/slots` or `/copy`. Sign in from a shell with `kumi login`. Ctrl-C stops the
 answer, or quits when idle.
 
+## Away from Kumi
+
+- **Status in the terminal:** Kumi reports what it's doing with OSC 7501
+  (working with NOW's words and a run's progress, waiting for your pick or a
+  sign-in, done, failed), which terminals that know it show in a tab or sidebar.
+  Windows Terminal, ConEmu and Ghostty also get OSC 9;4 progress. Both clear
+  when Kumi quits.
+- **While Kumi's window is behind another**, Kumi tells you when it finishes an
+  answer of 15 s or more, needs your pick or a sign-in, waits for a plan's limit,
+  stops on an error, or ends a `/goal`, `/loop` or match run:
+  - a desktop notification: by the terminal's own (Ghostty, WezTerm and foot:
+    OSC 777; iTerm2: OSC 9; kitty: OSC 99), else macOS's (Terminal.app and
+    others), `notify-send` on Linux, or the bell on Windows Terminal (it flashes
+    the taskbar);
+  - one line in Live's status bar ("Kumi · done · the bass is darker"); never a
+    dialog, and never in HISTORY.
+  - At most one every 10 s (the newest waiting one goes then); none over a take
+    Live is recording, until it stops; none once you're back.
+  - A terminal that never says whether it's in front: on a Mac, Kumi asks the
+    system which app is, only when there's something to tell.
+- **The computer stays awake** while Kumi works (an answer, a `/goal`, a wait
+  for a plan's limit); the display may sleep.
+- **Settings** (`~/.kumi/settings.json`): `"notifications": "off"`,
+  `"liveStatusBar": false`, `"keepAwake": false`, and `"answerAfter"` (seconds
+  before Kumi takes its recommended answer; `0` never).
+
 ## Terminals
 
 Kumi detects how many colours the terminal shows; `KUMI_COLOR` (`truecolor`,
@@ -185,7 +221,9 @@ Kumi detects how many colours the terminal shows; `KUMI_COLOR` (`truecolor`,
 terminal's symbols may not show (the old Windows console, the Linux console),
 Kumi uses two-letter badges instead of icons; `KUMI_ICONS=glyphs` or `badges`
 chooses. Windows Terminal is recommended on Windows. In terminals without the
-kitty keyboard protocol, use Ctrl-J or Alt-Enter for a new line. Those terminals
+kitty keyboard protocol, use Ctrl-J or Alt-Enter for a new line. Inside tmux,
+Kumi's status and notifications pass through with `set -g allow-passthrough on`,
+and focus reports need `set -g focus-events on`. Those terminals
 say when a held Ctrl-T is let go; elsewhere, Kumi stops listening once the key's
 repeats stop.
 

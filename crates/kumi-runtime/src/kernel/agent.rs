@@ -21,9 +21,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 use super::budget::{fit, opening, put_away_images, transcript_of, ContextBudget, PutAway, DEFAULT_BUDGET};
-use super::failure::{
-    describe_failure, plan_limit, provider_name, reset_words, retry_delay_ms, retry_reason, wait_for, PlanLimit, Wait, MAX_RETRIES,
-};
+use super::failure::{describe_failure, plan_limit, provider_name, reset_words, retry_reason, wait_for, PlanLimit, Wait, MAX_RETRIES};
 use crate::ai::error::LanguageModelError;
 use crate::ai::types::{
     AssistantPart, CallOptions, DataContent, FileData, FilePart, FinishReason, FinishReasonUnified, FunctionTool, Message, Prompt,
@@ -183,6 +181,8 @@ const MAX_REPLY: usize = 8 * 1024;
 /// Images one tool result shows, and the media types models read.
 const MAX_TOOL_IMAGES: usize = 16;
 const IMAGE_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+/// The longest a side question waits before trying again.
+const ASIDE_LONGEST_WAIT_MS: f64 = 30_000.0;
 /// Says what a side question is, ahead of its words.
 const ASIDE_NOTE: &str = "(A side question while you work. Answer it briefly, in plain words, from what's above; use no tools. It doesn't change the request you're working on, and your answer isn't kept in the conversation.)";
 /// What the model is told when its answer broke off and Kumi carries on. `[Kumi]` marks it as Kumi's, not the producer's.
@@ -464,9 +464,14 @@ impl AgentKernel {
                     return Ok(trim(&words).to_string());
                 }
                 Err(error) => {
+                    // A side question is quick and has no fallback: a busy provider, or a dropped connection, is tried
+                    // again briefly; a plan's limit or a long wait is said at once.
                     let wait = match &error {
                         StepError::Model(model) if attempt < MAX_RETRIES && !delivered.get() && !abort.is_cancelled() => {
-                            retry_delay_ms(model, attempt)
+                            match wait_for(model, attempt, attempt, kumi_common::time::now_ms_f64()) {
+                                Some(Wait::Again(ms) | Wait::Offline(ms)) if ms <= ASIDE_LONGEST_WAIT_MS => Some(ms),
+                                _ => None,
+                            }
                         }
                         _ => None,
                     };
@@ -819,7 +824,9 @@ impl Turn {
     /// Whether a step that failed can carry on: its answer broke off (the connection, or the provider
     /// mid-answer) after its words began showing, and no call that changes Live had begun.
     fn can_carry_on(&self, error: &LanguageModelError) -> bool {
-        let broke_off = retry_delay_ms(error, 0).is_some() || matches!(error, LanguageModelError::Other(_));
+        // A plan's limit isn't a broken answer: it goes to the wait, or the fallback.
+        let broke_off = matches!(wait_for(error, 0, 0, kumi_common::time::now_ms_f64()), Some(Wait::Again(_) | Wait::Offline(_)))
+            || matches!(error, LanguageModelError::Other(_));
         self.broke_off.get() && broke_off && !self.abort.is_cancelled() && !self.early.borrow().values().any(|entry| entry.call.started())
     }
 

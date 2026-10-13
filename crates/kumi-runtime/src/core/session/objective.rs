@@ -397,6 +397,29 @@ impl Session {
         if let Some(rest) = words.get(..4).filter(|start| start.eq_ignore_ascii_case("new:")).map(|_| trim(&words[4..])) {
             return Ok(GoalCommand::Run(Objective::new(rest, budget), true));
         }
+        // `/goal answer: <words>`: the producer's answer to the question the goal stopped on, and the goal carries on
+        // from it (what Kumi sends when it takes its recommended answer for a producer who isn't there).
+        if let Some(answer) = words.get(..7).filter(|start| start.eq_ignore_ascii_case("answer:")).map(|_| trim(&words[7..])) {
+            if answer.is_empty() {
+                return Err(KumiError::new(
+                    FailureKind::Request,
+                    "Say the answer after /goal answer:, such as /goal answer: the drums bus.",
+                )
+                .into());
+            }
+            return match self.objective_resume(budget).await? {
+                GoalCommand::Run(mut objective, fresh) => {
+                    objective.last = Some(Check {
+                        verdict: Verdict::Continue,
+                        reason: "you asked the producer a question".into(),
+                        next: Some(format!("they answered “{answer}”; go on from that")),
+                        measured: false,
+                    });
+                    Ok(GoalCommand::Run(objective, fresh))
+                }
+                other => Ok(other),
+            };
+        }
         // Otherwise an unfinished goal is replaced only when the same words are sent again; the goal's own words carry
         // it on.
         if let Some(kept) = self.objective_kept().await.filter(|kept| kept.state != ObjectiveState::Done) {

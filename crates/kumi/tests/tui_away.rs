@@ -433,6 +433,16 @@ case!(nobody_there_kumi_takes_its_recommended_answer_after_the_countdown_and_any
     h.has("No answer in 1 s; went with 2.");
     assert!(!h.calls().iter().any(|c| c.starts_with("picked:")), "not the producer's pick: {:?}", h.calls());
     h.close().await;
+    // Where /goal is offered, the goal that stopped on the question carries on with the answer.
+    let control = Rc::new(Control::default());
+    *control.extra.borrow_mut() = json!({"goal": true});
+    let h = away_with(control, NotifyChannel::None, quick.clone());
+    h.start().await;
+    h.connect();
+    ask_with_a_recommendation(&h).await;
+    h.wait_for_call("goal:answer: Drums bus").await;
+    assert!(!h.calls().iter().any(|c| c == "submit:Drums bus"), "not a message of its own: {:?}", h.calls());
+    h.close().await;
     // A key: the producer's there.
     let h = away_with(Rc::new(Control::default()), NotifyChannel::None, quick.clone());
     h.start().await;

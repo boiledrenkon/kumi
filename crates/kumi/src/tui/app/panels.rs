@@ -979,7 +979,16 @@ impl TuiApp {
             let item = picker.borrow().selected().cloned().map(|item| PickerItem { chosen: false, ..item });
             let Some(item) = item else { return };
             app.notice(&format!("No answer in {seconds} s; went with {}.", at + 1), NoticeTone::Info);
-            let chosen = choose(item).await;
+            // A goal that stopped on this question carries on with the answer, within its budget and its checks.
+            let goal_waits =
+                app.0.state.borrow().objective.as_ref().is_some_and(|goal| goal["state"] == "paused" && goal["verdict"] == "blocked");
+            let chosen = if goal_waits && app.0.options.controller.has_goal() {
+                app.close_panel();
+                app.0.state.borrow_mut().editor.set(&format!("/goal answer: {value}"));
+                app.submit().await
+            } else {
+                choose(item).await
+            };
             choosing.set(false);
             if let Err(error) = chosen {
                 app.panel_failed(&error);

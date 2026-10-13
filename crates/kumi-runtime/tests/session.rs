@@ -3288,3 +3288,24 @@ local_test!(waiting_for_a_plans_limit_stops_the_answers_clocks_but_a_lost_connec
     assert!(h.error("this answer had run for"));
     h.session.close().await.unwrap();
 });
+local_test!(a_goal_blocked_on_a_question_carries_on_with_the_answer, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_objective_store(dir.path().join("goals"));
+    let h = harness(
+        Some(auditing(&["BLOCKED: which bus gets the limiter, the master or the drums bus?", "COMPLETE: the master reads -9 LUFS"])),
+        |o| o.objectives = Some(store.clone()),
+    );
+    h.session.start().await.unwrap();
+    h.session.goal(Some("get the master to -9 LUFS")).await.unwrap();
+    let kept = kept_goal(&store, ObjectiveState::Paused).await;
+    assert_eq!(kept.last.unwrap().verdict, Verdict::Blocked);
+    // The answer Kumi took for the producer: the goal goes on from it, in its own loop.
+    h.session.goal(Some("answer: the drums bus")).await.unwrap();
+    let calls = h.record.calls.borrow().clone();
+    let resumed = calls.iter().rev().find(|call| call.starts_with("[Kumi goal] get the master")).unwrap();
+    assert!(resumed.contains("you asked the producer a question. Next: they answered “the drums bus”; go on from that."), "{resumed}");
+    assert_eq!(objectives(&h).pop().unwrap().state, ObjectiveState::Done);
+    // No answer, no goal to resume: said.
+    assert!(h.session.goal(Some("answer:")).await.is_err() || h.error("Say the answer after /goal answer:"));
+    h.session.close().await.unwrap();
+});
