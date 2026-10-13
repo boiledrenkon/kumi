@@ -35,7 +35,8 @@ The render is done. More in [the manual](https://www.ableton.com/manual), not [t
 ```json
 {
   "kind": "track",
-  "path": "[secret]/Song.als"
+  "path": "[secret]/Song.als",
+  "[secret]": true
 }
 ```
 
@@ -60,6 +61,14 @@ The render is done. More in [the manual](https://www.ableton.com/manual), not [t
 
 ```
 Set [secret] to -3 dB
+```
+
+</details>
+
+<details><summary>used probe_[secret]</summary>
+
+```json
+{}
 ```
 
 </details>
@@ -89,6 +98,14 @@ let x = <user>;
 ```
 
 </details>
+
+## You
+
+and the token?
+
+## Kumi
+
+Your session token is [secret], kept safe.
 
 ## You
 

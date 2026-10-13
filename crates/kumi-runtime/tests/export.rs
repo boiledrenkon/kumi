@@ -66,7 +66,7 @@ fn messages() -> Vec<Value> {
         json!({"role": "assistant", "content": [
             {"type": "reasoning", "text": "ENCRYPTED-REASONING thoughts", "providerOptions": {"openai": {"reasoningEncryptedContent": "ENCRYPTED-REASONING"}}},
             {"type": "text", "text": format!("Looking at your Set {PLANTED}."), "providerOptions": {"anthropic": {"signature": "SIGNATURE-XYZ"}}},
-            {"type": "tool-call", "toolCallId": "toolu_1", "toolName": "live_discover", "input": {"kind": "track", "path": format!("{PLANTED}/Song.als")}},
+            {"type": "tool-call", "toolCallId": "toolu_1", "toolName": "live_discover", "input": {"kind": "track", "path": format!("{PLANTED}/Song.als"), PLANTED: true}},
             {"type": "tool-call", "toolCallId": "toolu_2", "toolName": "remember", "input": {"note": "NOTE-TEXT"}},
             {"type": "tool-call", "toolCallId": "toolu_3", "toolName": "call_tool", "input": {"name": "find_tools", "input": {"query": "FIND-QUERY"}}}
         ]}),
@@ -79,7 +79,8 @@ fn messages() -> Vec<Value> {
         json!({"role": "user", "content": [{"type": "text", "text": CARRY_ON_NOTE}]}),
         json!({"role": "assistant", "content": [
             {"type": "text", "text": " raise it to -3 dB. Mind <img src=x onerror=alert(1)> here, and `<user>` in code."},
-            {"type": "tool-call", "toolCallId": "toolu_4", "toolName": "call_tool", "input": {"name": "set_mixer", "input": {"track": "Kick_01_final", "note": PLANTED}}}
+            {"type": "tool-call", "toolCallId": "toolu_4", "toolName": "call_tool", "input": {"name": "set_mixer", "input": {"track": "Kick_01_final", "note": PLANTED}}},
+            {"type": "tool-call", "toolCallId": "toolu_4b", "toolName": "call_tool", "input": {"name": format!("probe_{PLANTED}"), "input": {}}}
         ]}),
         json!({"role": "tool", "content": [
             {"type": "tool-result", "toolCallId": "toolu_4", "toolName": "call_tool", "output": {"type": "text", "value": format!("Set {PLANTED} to -3 dB")}}
@@ -97,6 +98,11 @@ fn messages() -> Vec<Value> {
             {"type": "tool-result", "toolCallId": "toolu_5", "toolName": "search_conversations", "output": {"type": "text", "value": "OTHER-CONVERSATION words"}}
         ]}),
         json!({"role": "assistant", "content": [{"type": "text", "text": "Here is the pad.\n\n```\nlet x = <user>;\n```"}]}),
+        // A key split where a dropped connection broke the answer off: it reads whole, and is taken out whole.
+        json!({"role": "user", "content": [{"type": "text", "text": "and the token?"}]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "Your session token is PLANT"}]}),
+        json!({"role": "user", "content": [{"type": "text", "text": CARRY_ON_NOTE}]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "ED-7f3a, kept safe."}]}),
         json!({"role": "user", "content": [{"type": "text", "text": loop_setup("make it louder")}]}),
         json!({"role": "assistant", "content": [
             {"type": "text", "text": "Starting."},
@@ -292,9 +298,12 @@ fn a_shortened_conversation_says_so_with_what_the_producer_asked_before() {
 }
 
 #[test]
-fn an_answer_a_dropped_connection_broke_off_reads_as_one() {
+fn an_answer_a_dropped_connection_broke_off_reads_as_one_and_a_key_split_there_is_taken_out_whole() {
     let out = render(Format::Markdown, false);
     assert!(out.contains("so I'll raise it to -3 dB."), "{out}");
+    assert!(out.contains("Your session token is [secret], kept safe."), "{out}");
+    let exported: Value = serde_json::from_str(&render(Format::Json, false)).unwrap();
+    assert!(!exported.to_string().contains("PLANT\""), "a half of the key is left in the file");
 }
 
 fn lines(messages: &Value) -> Vec<TranscriptLine> {

@@ -34,7 +34,9 @@ impl ReportIo {
         Self { doctor, folder: None, home: None, user: None, now: None, live_logs: None }
     }
 }
-/// Secrets are removed before paths and usernames, with the same bounded heuristic patterns as the source.
+/// Secrets are removed first: known ones (sign-ins, keys in the environment), then by their shapes (Bearer tokens, provider
+/// keys, JWTs, a URL's password and query secrets, fields named for a secret with their values quoted or bare, long
+/// tokens). Then the home folder, and the account name (also where a URL encodes it after %2F or %5C).
 pub fn redactor(secrets: &[String], home: &str, user: &str) -> impl Fn(&str) -> String {
     let mut known: Vec<_> = secrets.iter().filter(|s| utf16_len(s) >= 8).cloned().collect();
     known.sort_by_key(|s| std::cmp::Reverse(utf16_len(s)));
@@ -45,17 +47,35 @@ pub fn redactor(secrets: &[String], home: &str, user: &str) -> impl Fn(&str) -> 
             homes.push(path)
         }
     }
-    let name = (utf16_len(user) >= 3)
-        .then(|| fancy_regex::Regex::new(&format!(r"(?i)(?<![A-Za-z0-9]){}(?![A-Za-z0-9])", regex::escape(user))).unwrap());
+    let name = (utf16_len(user) >= 3).then(|| {
+        fancy_regex::Regex::new(&format!(r"(?i)(?:(?<=%2F)|(?<=%5C)|(?<![A-Za-z0-9])){}(?![A-Za-z0-9])", regex::escape(user))).unwrap()
+    });
     let whitespace = r"\x09-\x0d \u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}";
     let bearer = regex::Regex::new(&format!(r#"(?i)(?-u:\b)Bearer[{whitespace}]+[^{whitespace}"']+"#)).unwrap();
-    let key = regex::Regex::new(r"(?-u:\b)(sk|pk|rk)-[A-Za-z0-9_-]{12,}").unwrap();
-    let jwt = regex::Regex::new(r"(?-u:\b)eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}").unwrap();
-    let field = regex::Regex::new(&format!(
-        r#"(?i)("?(?:api[_-]?key|token|secret|password|access|refresh)"?[{whitespace}]*[:=][{whitespace}]*)"([^"]*)""#
+    // Provider keys by their shapes: sk-, pk- and rk- keys, Stripe's, Google's, GitHub's, AWS key ids and Slack's.
+    let key = regex::Regex::new(concat!(
+        r"(?-u:\b)(?:(?:sk|pk|rk)-[A-Za-z0-9_-]{12,}|[sr]k_(?:live|test)_[A-Za-z0-9]{10,}|AIza[0-9A-Za-z_-]{30,}",
+        r"|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[abposr]-[A-Za-z0-9-]{10,})"
     ))
     .unwrap();
-    let long = fancy_regex::Regex::new(r"(?<![A-Za-z0-9+_-])[A-Za-z0-9+_-]{48,}={0,2}(?![A-Za-z0-9+_-])").unwrap();
+    let jwt = regex::Regex::new(r"(?-u:\b)eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}").unwrap();
+    // A URL's password (scheme://user:password@host), and the secrets its query carries.
+    let login = regex::Regex::new(r#"(?i)((?-u:\b)[a-z][a-z0-9+.-]*://[^\s/:@'"]+:)[^\s/@'"]+@"#).unwrap();
+    let query = regex::Regex::new(
+        r#"(?i)([?&;](?:access_token|refresh_token|id_token|token|api_?key|key|secret|client_secret|password|passwd|pwd|auth|sig|signature|code)=)[^&#\s'"]+"#,
+    )
+    .unwrap();
+    // A field named for a secret (api_key, AWS_SECRET_ACCESS_KEY, db_password, x-auth-token…): a value in double quotes,
+    // escaped ones too (JSON inside a string), or for the plainest names in single quotes or bare.
+    let named = r"[A-Za-z0-9_-]*(?:api[_-]?key|apikey|token|secret|password|passwd|pwd|pw|passphrase|private[_-]?key)[A-Za-z0-9_-]*";
+    let quoted = regex::Regex::new(&format!(
+        r#"(?i)((?:\\?")?(?:{named}|access|refresh)(?:\\?")?[{whitespace}]*[:=][{whitespace}]*)(\\?")((?:[^"\\]|\\.)*?)(\\?")"#
+    ))
+    .unwrap();
+    let bare =
+        regex::Regex::new(&format!(r#"(?i)((?-u:\b){named}[{whitespace}]*[:=][{whitespace}]*)('[^'\n]*'|[^{whitespace}"'&,;)\]}}<>]+)"#))
+            .unwrap();
+    let long = fancy_regex::Regex::new(r"(?<![A-Za-z0-9+_-])[A-Za-z0-9+_-]{32,}={0,2}(?![A-Za-z0-9+_-])").unwrap();
     move |text| {
         let mut out = text.to_string();
         for secret in &known {
@@ -67,13 +87,41 @@ pub fn redactor(secrets: &[String], home: &str, user: &str) -> impl Fn(&str) -> 
         out = bearer.replace_all(&out, "Bearer [secret]").into_owned();
         out = key.replace_all(&out, "[secret]").into_owned();
         out = jwt.replace_all(&out, "[secret]").into_owned();
-        out = field
-            .replace_all(
-                &out,
-                |caps: &regex::Captures| if utf16_len(&caps[2]) >= 8 { format!("{}\"[secret]\"", &caps[1]) } else { caps[0].to_string() },
-            )
+        out = login.replace_all(&out, "${1}[secret]@").into_owned();
+        out = query.replace_all(&out, "${1}[secret]").into_owned();
+        out = quoted
+            .replace_all(&out, |caps: &regex::Captures| {
+                if utf16_len(&caps[3]) >= 8 {
+                    format!("{}{}[secret]{}", &caps[1], &caps[2], &caps[4])
+                } else {
+                    caps[0].to_string()
+                }
+            })
             .into_owned();
-        out = long.replace_all(&out, "[long value]").into_owned();
+        out = bare
+            .replace_all(&out, |caps: &regex::Captures| {
+                let value = caps[2].trim_matches('\'');
+                if value == "[secret]" || utf16_len(value) < 8 {
+                    caps[0].to_string()
+                } else if caps[2].starts_with('\'') {
+                    format!("{}'[secret]'", &caps[1])
+                } else {
+                    format!("{}[secret]", &caps[1])
+                }
+            })
+            .into_owned();
+        // A long token: 32 characters with letters and digits in them (as titles hide them), or any 48.
+        out = long
+            .replace_all(&out, |caps: &fancy_regex::Captures| {
+                let run = &caps[0];
+                let mixed = run.chars().any(|c| c.is_ascii_digit()) && run.chars().any(|c| c.is_ascii_alphabetic());
+                if mixed || run.len() >= 48 {
+                    "[long value]".to_string()
+                } else {
+                    run.to_string()
+                }
+            })
+            .into_owned();
         if let Some(name) = &name {
             out = name.replace_all(&out, "<user>").into_owned()
         }

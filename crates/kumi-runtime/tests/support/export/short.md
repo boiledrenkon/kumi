@@ -30,7 +30,7 @@ The kick sits at -6 dB, so I'll raise it to -3 dB. Mind &lt;img src=x onerror=al
 
 The render is done. More in [the manual](https://www.ableton.com/manual), not [this](file:///etc/passwd).
 
-*Steps: used live_discover · used set_mixer*
+*Steps: used live_discover · used set_mixer · used probe_[secret]*
 
 ## You
 
@@ -45,6 +45,14 @@ let x = <user>;
 ```
 
 *Step: used search_conversations*
+
+## You
+
+and the token?
+
+## Kumi
+
+Your session token is [secret], kept safe.
 
 ## You
 

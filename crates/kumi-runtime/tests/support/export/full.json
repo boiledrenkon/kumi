@@ -42,7 +42,8 @@
           "toolName": "live_discover",
           "input": {
             "kind": "track",
-            "path": "[secret]/Song.als"
+            "path": "[secret]/Song.als",
+            "[secret]": true
           }
         }
       ]
@@ -66,11 +67,7 @@
       "content": [
         {
           "type": "text",
-          "text": "The kick sits at -6 dB, so I'll"
-        },
-        {
-          "type": "text",
-          "text": " raise it to -3 dB. Mind <img src=x onerror=alert(1)> here, and `<user>` in code."
+          "text": "The kick sits at -6 dB, so I'll raise it to -3 dB. Mind <img src=x onerror=alert(1)> here, and `<user>` in code."
         },
         {
           "type": "tool-call",
@@ -82,6 +79,15 @@
               "track": "Kick_01_final",
               "note": "[secret]"
             }
+          }
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "call_3",
+          "toolName": "call_tool",
+          "input": {
+            "name": "probe_[secret]",
+            "input": {}
           }
         }
       ]
@@ -96,6 +102,15 @@
           "output": {
             "type": "text",
             "value": "Set [secret] to -3 dB"
+          }
+        },
+        {
+          "type": "tool-result",
+          "toolCallId": "call_3",
+          "toolName": "call_tool",
+          "output": {
+            "type": "text",
+            "value": "[left out of the export]"
           }
         }
       ]
@@ -123,7 +138,7 @@
       "content": [
         {
           "type": "tool-call",
-          "toolCallId": "call_3",
+          "toolCallId": "call_4",
           "toolName": "search_conversations",
           "input": {
             "query": "pads"
@@ -136,7 +151,7 @@
       "content": [
         {
           "type": "tool-result",
-          "toolCallId": "call_3",
+          "toolCallId": "call_4",
           "toolName": "search_conversations",
           "output": {
             "type": "text",
@@ -159,6 +174,24 @@
       "content": [
         {
           "type": "text",
+          "text": "and the token?"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Your session token is [secret], kept safe."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
           "text": "Loop: make it louder"
         }
       ]
@@ -172,7 +205,7 @@
         },
         {
           "type": "tool-call",
-          "toolCallId": "call_4",
+          "toolCallId": "call_5",
           "toolName": "judge",
           "input": {
             "goal": "loud"
@@ -185,7 +218,7 @@
       "content": [
         {
           "type": "tool-result",
-          "toolCallId": "call_4",
+          "toolCallId": "call_5",
           "toolName": "judge",
           "output": {
             "type": "text",

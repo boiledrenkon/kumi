@@ -83,7 +83,8 @@ footer { padding: 1.2rem 16px 2.4rem; color: var(--faint); font-size: .8rem; bor
 <article class="you"><h2>You</h2><div class="words"><p>Make the kick punchier [secret]. See [the manual](https://www.ableton.com/manual).</p><p>[a picture]</p></div></article>
 <article class="kumi"><h2>Kumi</h2><div class="words"><p>Looking at your Set [secret].</p><p>The kick sits at -6 dB, so I&#39;ll raise it to -3 dB. Mind &lt;img src=x onerror=alert(1)&gt; here, and <code>&lt;user&gt;</code> in code.</p><p>The render is done. More in <a href="https://www.ableton.com/manual" rel="noopener noreferrer nofollow">the manual</a>, not this (file:///etc/passwd).</p></div><div class="steps"><details><summary>used live_discover</summary><p class="what">Input</p><pre>{
   &quot;kind&quot;: &quot;track&quot;,
-  &quot;path&quot;: &quot;[secret]/Song.als&quot;
+  &quot;path&quot;: &quot;[secret]/Song.als&quot;,
+  &quot;[secret]&quot;: true
 }</pre><p class="what">Result</p><pre>{
   &quot;tracks&quot;: [
     &quot;Kick_01_final [secret]&quot;
@@ -91,11 +92,13 @@ footer { padding: 1.2rem 16px 2.4rem; color: var(--faint); font-size: .8rem; bor
 }</pre></details><details><summary>used set_mixer</summary><p class="what">Input</p><pre>{
   &quot;track&quot;: &quot;Kick_01_final&quot;,
   &quot;note&quot;: &quot;[secret]&quot;
-}</pre><p class="what">Result</p><pre>Set [secret] to -3 dB</pre></details></div></article>
+}</pre><p class="what">Result</p><pre>Set [secret] to -3 dB</pre></details><details><summary>used probe_[secret]</summary><p class="what">Input</p><pre>{}</pre></details></div></article>
 <article class="you"><h2>You</h2><div class="words"><p>Goal: make a pad like the reference</p></div></article>
 <article class="kumi"><h2>Kumi</h2><div class="words"><p>Here is the pad.</p><pre><code>let x = &lt;user&gt;;</code></pre></div><div class="steps"><details><summary>used search_conversations</summary><p class="what">Input</p><pre>{
   &quot;query&quot;: &quot;pads&quot;
 }</pre><p class="what">Result</p><pre>[left out of the export]</pre></details></div></article>
+<article class="you"><h2>You</h2><div class="words"><p>and the token?</p></div></article>
+<article class="kumi"><h2>Kumi</h2><div class="words"><p>Your session token is [secret], kept safe.</p></div></article>
 <article class="you"><h2>You</h2><div class="words"><p>Loop: make it louder</p></div></article>
 <article class="kumi"><h2>Kumi</h2><div class="words"><p>Starting.</p><p>Round two is in.</p><p>Brighter now.</p><p>CONTINUE: almost there.</p></div><div class="steps"><details><summary>used judge</summary><p class="what">Input</p><pre>{
   &quot;goal&quot;: &quot;loud&quot;

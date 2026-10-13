@@ -63,16 +63,18 @@
       "content": [
         {
           "type": "text",
-          "text": "The kick sits at -6 dB, so I'll"
-        },
-        {
-          "type": "text",
-          "text": " raise it to -3 dB. Mind <img src=x onerror=alert(1)> here, and `<user>` in code."
+          "text": "The kick sits at -6 dB, so I'll raise it to -3 dB. Mind <img src=x onerror=alert(1)> here, and `<user>` in code."
         },
         {
           "type": "tool-call",
           "toolCallId": "call_2",
           "toolName": "set_mixer",
+          "input": {}
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "call_3",
+          "toolName": "probe_[secret]",
           "input": {}
         }
       ]
@@ -84,6 +86,15 @@
           "type": "tool-result",
           "toolCallId": "call_2",
           "toolName": "set_mixer",
+          "output": {
+            "type": "text",
+            "value": "[left out of the export]"
+          }
+        },
+        {
+          "type": "tool-result",
+          "toolCallId": "call_3",
+          "toolName": "probe_[secret]",
           "output": {
             "type": "text",
             "value": "[left out of the export]"
@@ -114,7 +125,7 @@
       "content": [
         {
           "type": "tool-call",
-          "toolCallId": "call_3",
+          "toolCallId": "call_4",
           "toolName": "search_conversations",
           "input": {}
         }
@@ -125,7 +136,7 @@
       "content": [
         {
           "type": "tool-result",
-          "toolCallId": "call_3",
+          "toolCallId": "call_4",
           "toolName": "search_conversations",
           "output": {
             "type": "text",
@@ -148,6 +159,24 @@
       "content": [
         {
           "type": "text",
+          "text": "and the token?"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Your session token is [secret], kept safe."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
           "text": "Loop: make it louder"
         }
       ]
@@ -161,7 +190,7 @@
         },
         {
           "type": "tool-call",
-          "toolCallId": "call_4",
+          "toolCallId": "call_5",
           "toolName": "judge",
           "input": {}
         }
@@ -172,7 +201,7 @@
       "content": [
         {
           "type": "tool-result",
-          "toolCallId": "call_4",
+          "toolCallId": "call_5",
           "toolName": "judge",
           "output": {
             "type": "text",

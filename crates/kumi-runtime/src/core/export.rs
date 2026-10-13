@@ -186,7 +186,7 @@ pub fn markdown(source: &Source, options: &Options) -> String {
                     }
                 } else {
                     let labels: Vec<&str> = steps.iter().map(|step| step.label.as_str()).collect();
-                    out.push_str(&format!("*{}: {}*\n\n", steps_word(steps.len()), labels.join(" · ")));
+                    out.push_str(&format!("*{}: {}*\n\n", steps_word(steps.len()), markdown_safe(&labels.join(" · "))));
                 }
             }
         }
@@ -389,7 +389,7 @@ fn clean(messages: &[Value], options: &Options) -> Cleaned {
                 match producer_words(&texts(&parts), pictures, &mut earlier, &mut partial) {
                     Words::Said(words) => {
                         carried_on = false;
-                        out.push(json!({"role": "user", "content": [{"type": "text", "text": redact(&words)}]}));
+                        out.push(json!({"role": "user", "content": [{"type": "text", "text": words}]}));
                     }
                     Words::CarryOn => carried_on = true,
                     Words::Kumi => carried_on = false,
@@ -403,7 +403,7 @@ fn clean(messages: &[Value], options: &Options) -> Cleaned {
                         "text" => {
                             let text = part.get("text").and_then(Value::as_str).unwrap_or("");
                             if !trim(text).is_empty() {
-                                content.push(json!({"type": "text", "text": redact(text)}));
+                                content.push(json!({"type": "text", "text": text}));
                             }
                         }
                         "tool-call" => content.extend(call_of(part, options, &mut calls, &mut left_out)),
@@ -432,6 +432,25 @@ fn clean(messages: &[Value], options: &Options) -> Cleaned {
             }
             _ => {}
         }
+    }
+    // Words that run on (an answer a dropped connection broke off) are one text, so the redactor sees a key whole.
+    for message in &mut out {
+        let Some(Value::Array(parts)) = message.get_mut("content") else { continue };
+        let mut joined: Vec<Value> = Vec::with_capacity(parts.len());
+        for part in parts.drain(..) {
+            if kind(&part) == "text" && joined.last().is_some_and(|last| kind(last) == "text") {
+                let last = joined.last_mut().expect("a text before");
+                let text = format!("{}{}", last["text"].as_str().unwrap_or(""), part["text"].as_str().unwrap_or(""));
+                last["text"] = Value::String(text);
+            } else {
+                joined.push(part);
+            }
+        }
+        for part in joined.iter_mut().filter(|part| kind(part) == "text") {
+            let text = redact(part["text"].as_str().unwrap_or(""));
+            part["text"] = Value::String(text);
+        }
+        *parts = joined;
     }
     Cleaned { messages: out, earlier: earlier.iter().map(|ask| redact(ask)).collect(), partial }
 }
@@ -526,7 +545,9 @@ fn call_of(part: &Value, options: &Options, calls: &mut HashMap<String, Call>, l
         return None;
     }
     let number = format!("call_{}", calls.len() + 1);
-    let (kept, input) = if options.full { (name.to_string(), redact_value(&input, options.redact)) } else { (tool.to_string(), json!({})) };
+    // The name call_tool ran is the model's words: it passes the redactor too.
+    let (kept, input) =
+        if options.full { (name.to_string(), redact_value(&input, options.redact)) } else { ((options.redact)(tool), json!({})) };
     calls.insert(id, Call { id: number.clone(), name: kept.clone(), step_only: STEP_ONLY.contains(&tool) });
     Some(json!({"type": "tool-call", "toolCallId": number, "toolName": kept, "input": input}))
 }
@@ -589,7 +610,7 @@ fn said_of(messages: &[Value], options: &Options) -> Vec<Said> {
                             let (tool, inner) = shown(name, &input);
                             steps.push(Step {
                                 id: part.get("toolCallId").and_then(Value::as_str).unwrap_or("").to_string(),
-                                label: (options.label)(tool),
+                                label: (options.redact)(&(options.label)(tool)),
                                 input: options.full.then(|| stringify_pretty(inner, 2)),
                                 result: None,
                             });
@@ -677,12 +698,12 @@ fn result_text(output: &Value) -> String {
     }
 }
 
-/// A value with each of its strings through the redactor.
+/// A value with each of its strings, and its keys, through the redactor.
 fn redact_value(value: &Value, redact: &dyn Fn(&str) -> String) -> Value {
     match value {
         Value::String(text) => Value::String(redact(text)),
         Value::Array(items) => Value::Array(items.iter().map(|item| redact_value(item, redact)).collect()),
-        Value::Object(fields) => Value::Object(fields.iter().map(|(key, item)| (key.clone(), redact_value(item, redact))).collect()),
+        Value::Object(fields) => Value::Object(fields.iter().map(|(key, item)| (redact(key), redact_value(item, redact))).collect()),
         other => other.clone(),
     }
 }

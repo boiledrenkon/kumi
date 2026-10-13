@@ -27,9 +27,29 @@ fn zone() -> FixedOffset {
     FixedOffset::east_opt(9 * 3600).unwrap()
 }
 
+/// Secrets by their shapes, each with what of it must not survive.
+const SHAPES: [(&str, &str); 14] = [
+    ("AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY", "9tSrke72PouQMnMX"),
+    ("ghp_16C7e42F292c6912E7710c838347Ae178B4a", "16C7e42F292c6912E77"),
+    ("AKIAIOSFODNN7EXAMPLE", "IOSFODNN7EXAMPLE"),
+    ("aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "bPxRfiCYEXAMPLEKEY"),
+    ("xoxp-1234567890-1234567890-abcdef1234567890", "abcdef1234567890"),
+    // In pieces: whole, a push's secret scanning takes it for a real key.
+    (concat!("sk_", "live_4eC39HqLyjWDarjtT1zdp7dc"), "4eC39HqLyjWDarjtT1zdp7dc"),
+    ("password=hunter2hunter2", "hunter2hunter2"),
+    ("password: 'S1ngl3Quot3dPw'", "S1ngl3Quot3dPw"),
+    ("https://api.example.com/v1?token=t0k3nVALUE123&key=k3yVALUE4567", "VALUE"),
+    ("https://admin:UsrP4ssW0rdX@db.example.com/main", "UsrP4ssW0rdX"),
+    ("%2FUsers%2Fjanedoe%2FMusic", "%2Fjanedoe"),
+    ("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b", "9f86d081884c7d659a2f"),
+    (r#"{\"password\": \"jsonEsc4pedPw\"}"#, "jsonEsc4pedPw"),
+    ("db_password=Pa55w0rdInEnv", "Pa55w0rdInEnv"),
+];
+
 /// Every secret planted in `text`'s kind of place.
 fn planted(text: &str) -> String {
-    format!("{text} {KEY} Bearer {BEARER} {JWT} {HOME}/Music/Song.als {USER}'s mix {SIGNED_IN}")
+    let shapes: Vec<&str> = SHAPES.iter().map(|(planted, _)| *planted).collect();
+    format!("{text} {KEY} Bearer {BEARER} {JWT} {HOME}/Music/Song.als {USER}'s mix {SIGNED_IN} {}", shapes.join(" "))
 }
 
 fn conversation() -> SavedConversation {
@@ -80,7 +100,7 @@ fn no_planted_secret_survives_any_export() {
     for format in [Format::Markdown, Format::Html, Format::Json] {
         for full in [false, true] {
             let out = render(format, &source, full, Some(redact), zone(), NOW);
-            for secret in [KEY, BEARER, JWT, HOME, USER, SIGNED_IN] {
+            for secret in [KEY, BEARER, JWT, HOME, USER, SIGNED_IN].into_iter().chain(SHAPES.iter().map(|(_, kept)| *kept)) {
                 assert!(!out.contains(secret), "{format:?} full={full}: {secret} survived:\n{out}");
             }
             assert!(out.contains("~/Music/Song.als"), "{format:?} full={full}: the home folder wasn't shortened:\n{out}");
@@ -222,4 +242,22 @@ async fn kumi_export_saves_a_kept_conversation_and_kumi_import_keeps_it_to_carry
     fs::write(&not_kumis, "{}").unwrap();
     assert_eq!(import_command(&not_kumis.display().to_string(), &there, &out, &err, "kumi").await.unwrap(), 1);
     assert!(err.0.borrow().contains("That file isn't a Kumi conversation."));
+}
+
+#[test]
+fn file_names_and_ordinary_words_come_out_right() {
+    let redact = redactor(&[], HOME, USER);
+    let title = redact("user hidden pw=hunter2hunter2");
+    assert_eq!(kumi_runtime::core::export::file_name(&title, "k3x9a1b2", Format::Markdown), "kumi-user-hidden-pw-secret-k3x9a1b2.md");
+    // Words that name a secret without holding one stay as they are.
+    for words in [
+        "token: abc",
+        "refresh: reload the Set",
+        "~/.config/ableton-mcp-release-a8a291e/bridge-config.json",
+        "key saved-key-1234567890",
+        "https://www.ableton.com/en/manual/",
+        "the password field is empty",
+    ] {
+        assert_eq!(redact(words), words);
+    }
 }
