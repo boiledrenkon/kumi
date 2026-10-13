@@ -2063,7 +2063,9 @@ impl SessionController for Session {
                 return;
             }
             WatchEvent::Change(c) => {
-                if c.state == ChangeState::Applied {
+                // A change told again as it was (its picture came after it) is no new change in the Set.
+                let again = self.0.state.borrow().seen.get(&c.id).is_some_and(|seen| seen.state == c.state);
+                if c.state == ChangeState::Applied && !again {
                     self.0.state.borrow_mut().applied += 1;
                     let run = self.0.state.borrow().matching.clone();
                     if let Some(run) = run {

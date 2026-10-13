@@ -2895,6 +2895,39 @@ local_test!(a_goal_whose_turns_change_the_set_without_judging_progresses_after_a
     assert_eq!((last.verdict, last.turns), (Some(Verdict::Budget), 3), "not stuck: {last:?}");
     h.session.close().await.unwrap();
 });
+local_test!(a_change_told_again_with_its_picture_is_no_progress_for_a_goal, {
+    let held = Rc::new(RefCell::new(None::<Session>));
+    let active = held.clone();
+    let turns = Rc::new(Cell::new(0i64));
+    let run: Run = Rc::new(move |input, _, emit| {
+        let session = active.borrow().clone().unwrap();
+        let turns = turns.clone();
+        async move {
+            if input.starts_with("[Kumi goal check]") {
+                emit(KernelEvent::Text { text: "CONTINUE: the next section".into() })?;
+                return Ok(complete());
+            }
+            turns.set(turns.get() + 1);
+            // The first turn changes the Set; later ones only see that change told again, with its curve.
+            let mut told = change("c1", "applied", 1);
+            if turns.get() > 1 {
+                told.picture = Some(serde_json::from_value(json!({"kind":"values","values":[{"name":"Gain","to":-3.0}]})).unwrap());
+            }
+            session.watch(WatchEvent::Change(told));
+            emit(KernelEvent::Text { text: "Looked again.".into() })?;
+            Ok(complete())
+        }
+        .boxed_local()
+    });
+    let h = harness(Some(run), |o| o.objective_budget = Some(ObjectiveBudget { turns: 6, idle: 2, ..OBJECTIVE_BUDGET }));
+    *held.borrow_mut() = Some(h.session.clone());
+    h.session.start().await.unwrap();
+    h.session.watch(WatchEvent::Judged(measured(1, 4.)));
+    h.session.goal(Some("add a breakdown at bar 33")).await.unwrap();
+    let last = objectives(&h).pop().unwrap();
+    assert_eq!((last.verdict, last.turns), (Some(Verdict::Stuck), 3), "{last:?}");
+    h.session.close().await.unwrap();
+});
 local_test!(a_goal_that_gets_no_closer_is_stuck_even_when_the_judge_measured_each_turn, {
     let held = Rc::new(RefCell::new(None::<Session>));
     let active = held.clone();
