@@ -844,9 +844,10 @@ impl TuiApp {
             self.copy_last_answer();
             return Ok(());
         }
-        if command == "/export" {
+        // This conversation as a file: the choices, or the one named (copy, md, html, json).
+        if let Some(words) = argument(command, "/export") {
             self.clear_editor();
-            self.open_export();
+            self.export_as(&words).await;
             return Ok(());
         }
         if command == "/share" {
@@ -1212,7 +1213,7 @@ pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/stop", about: "Stop Live: clips, the transport and recording" },
     Command { name: "/refresh", about: "Read your Live Set again" },
     Command { name: "/copy", about: "Copy Kumi's last answer" },
-    Command { name: "/export", about: "This conversation as a file: copy it as Markdown, or save Markdown, a web page or a file for Kumi" },
+    Command { name: "/export", about: "This conversation as a file: choose, or /export copy, md, html or json (for another Kumi)" },
     Command { name: "/share", about: "Save this conversation as a web page that opens anywhere, to send" },
     Command { name: "/model", about: "Choose the model Kumi talks to" },
     Command { name: "/effort", about: "How hard the model thinks" },

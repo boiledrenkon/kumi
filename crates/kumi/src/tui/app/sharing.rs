@@ -35,6 +35,21 @@ impl TuiApp {
         });
     }
 
+    /// /export with words: copy, or save as md, html or json (as plain mode takes them); alone, the choices.
+    pub(super) async fn export_as(&self, words: &str) {
+        match words.to_ascii_lowercase().as_str() {
+            "" => self.open_export(),
+            "copy" => self.copy_conversation().await,
+            "md" | "markdown" => drop(self.save_conversation_as(Format::Markdown, false).await),
+            "html" | "page" | "web" => drop(self.save_conversation_as(Format::Html, false).await),
+            "json" | "kumi" => drop(self.save_conversation_as(Format::Json, false).await),
+            _ => self.notice(
+                "Use /export alone for the choices, or /export copy, md, html or json (a file another Kumi imports).",
+                NoticeTone::Info,
+            ),
+        }
+    }
+
     /// /share: this conversation as a web page (the one saved last, while nothing in the conversation changed), then its
     /// path, to open, show in the file manager or copy, as many as the producer likes, until Done.
     pub(super) async fn share(&self) {

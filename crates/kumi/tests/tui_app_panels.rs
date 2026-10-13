@@ -1175,6 +1175,24 @@ case!(export_copies_or_saves_this_conversation_and_share_offers_the_page, async 
     let saved = exported_files(folder.path(), "md");
     assert_eq!(saved.len(), 1);
     assert!(std::fs::read_to_string(&saved[0]).unwrap().contains("A long one"));
+    // Named: a page straight away, the copy, and a word /export doesn't take.
+    *h.control.export.borrow_mut() = Some(to_export("Named formats", 30));
+    h.type_text("/export html\r").await;
+    h.has("Saved this conversation as a web page:");
+    assert!(folder.path().join("kumi-named-formats-k3x9a1b2.html").exists());
+    h.type_text("/export json\r").await;
+    assert!(folder.path().join("kumi-named-formats-k3x9a1b2.json").exists());
+    h.type_text("/export copy\r").await;
+    h.has("Copied this conversation as Markdown.");
+    h.type_text("/export pdf\r").await;
+    h.has("Use /export alone for the choices");
+    for file in std::fs::read_dir(folder.path()).unwrap() {
+        let file = file.unwrap().path();
+        if file.file_name().unwrap().to_string_lossy().contains("named-formats") {
+            std::fs::remove_file(file).unwrap();
+        }
+    }
+    *h.control.export.borrow_mut() = Some(to_export("A long one", 70_000));
     // A web page; /share shows that one while nothing in the conversation changed, and its choices stay until Done.
     h.type_text("/export\r").await;
     h.type_text("\x1b[B\x1b[B\r").await;
@@ -1182,14 +1200,20 @@ case!(export_copies_or_saves_this_conversation_and_share_offers_the_page, async 
     let page = folder.path().join("kumi-a-long-one-k3x9a1b2.html");
     assert!(std::fs::read_to_string(&page).unwrap().starts_with("<!doctype html>"));
     h.type_text("/share\r").await;
-    h.has("This conversation's web page is saved already");
     h.has("Copy its path");
     h.type_text("\r").await;
     assert_eq!(h.browsed.borrow().last().cloned(), Some(page.display().to_string()));
     h.type_text("\x1b[B\r").await;
     assert_eq!(revealed.borrow().as_slice(), [page.clone()]);
     h.type_text("\x1b[B\r").await;
-    h.has("Copied the page's path.");
+    let copied = {
+        let output = h.output.text.borrow();
+        let start = output.rfind("\x1b]52;c;").expect("a copy through the terminal") + 7;
+        let end = start + output[start..].find('\x07').unwrap();
+        use base64::Engine;
+        String::from_utf8(base64::engine::general_purpose::STANDARD.decode(&output[start..end]).unwrap()).unwrap()
+    };
+    assert_eq!(copied, page.display().to_string());
     h.has("Done");
     h.type_text("\x1b[B\r").await;
     assert_eq!(exported_files(folder.path(), "html"), [page.clone()], "one page, however often it's shared");
