@@ -382,8 +382,8 @@ pub struct SavedConversation {
     pub turns: Option<u32>,
 }
 
-/// A kept conversation, as /conversations lists it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A kept conversation, as /resume lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSummary {
     pub id: String,
@@ -391,6 +391,49 @@ pub struct ConversationSummary {
     pub first: String,
     pub turns: u32,
     pub current: bool,
+    /// Where it's kept: its Set's place (a saved Set's project id, or "unsaved").
+    #[serde(default)]
+    pub place: String,
+    /// The producer's name for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Its Set's name, when Kumi has seen the Set saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set: Option<String>,
+    /// Kept however old it gets.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// The conversation it was copied from: a fork, or one carried on in another Set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+    /// When it began (ms since the epoch).
+    #[serde(default)]
+    pub created: i64,
+}
+
+impl ConversationSummary {
+    /// What it's called: the producer's name for it, else its first request.
+    pub fn title(&self) -> String {
+        super::conversations::title(self.name.as_deref(), &self.first)
+    }
+}
+
+/// What the producer's word for a conversation (`kumi -r`, /resume) names among the kept ones.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConversationMatch {
+    One(ConversationSummary),
+    /// More than one fits, newest first: the producer picks.
+    Several(Vec<ConversationSummary>),
+    /// One Kumi kept once and has let go.
+    Gone,
+    None,
+}
+
+/// Whether this Kumi has a conversation to itself, or another Kumi that's still open has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    Ours,
+    Taken,
 }
 
 /// The conversation a place carries on with: its id and the conversation itself.
@@ -408,7 +451,8 @@ pub trait ConversationStore {
     /// The conversation `place` carries on with, if any.
     async fn current(&self, place: &str) -> Result<Option<CurrentConversation>, RuntimeError>;
     async fn load(&self, place: &str, id: &str) -> Result<Option<SavedConversation>, RuntimeError>;
-    /// Keep `id` as `place`'s current conversation; each place keeps its latest 20.
+    /// Keep `id` as `place`'s current conversation. A place keeps its 20 newest, and others while they're pinned or
+    /// were used lately.
     async fn save(&self, place: &str, id: &str, conversation: &SavedConversation) -> Result<(), RuntimeError>;
     /// `place` starts afresh; its conversations stay listed.
     async fn fresh(&self, place: &str) -> Result<(), RuntimeError>;
@@ -428,6 +472,48 @@ pub trait ConversationStore {
     ) -> Result<Vec<FoundExchange>, RuntimeError> {
         let _ = (words, needed, limit, skip);
         Ok(vec![])
+    }
+    /// Every place's conversations, newest first.
+    async fn all(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
+        Ok(vec![])
+    }
+    /// What `word` names: a conversation's id, the start of one (4 characters or more), or the producer's name for it.
+    async fn find(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
+        let _ = word;
+        Ok(ConversationMatch::None)
+    }
+    /// An id no kept conversation has.
+    async fn new_id(&self) -> String {
+        super::conversations::new_conversation_id(kumi_common::time::now_ms())
+    }
+    /// The producer's name for a kept conversation (None takes it away); false when it isn't kept.
+    async fn rename(&self, place: &str, id: &str, name: Option<&str>) -> Result<bool, RuntimeError> {
+        let _ = (place, id, name);
+        Ok(false)
+    }
+    /// A pinned conversation is kept however old it gets; false when it isn't kept.
+    async fn pin(&self, place: &str, id: &str, pinned: bool) -> Result<bool, RuntimeError> {
+        let _ = (place, id, pinned);
+        Ok(false)
+    }
+    /// The conversation goes for good; false when it wasn't kept.
+    async fn delete(&self, place: &str, id: &str) -> Result<bool, RuntimeError> {
+        let _ = (place, id);
+        Ok(false)
+    }
+    /// Keep `conversation` as a new one, `id`, in `place`, copied from the conversation `from`: the place's current.
+    async fn copy(&self, place: &str, id: &str, conversation: &SavedConversation, from: &str) -> Result<(), RuntimeError> {
+        let _ = from;
+        self.save(place, id, conversation).await
+    }
+    /// This Kumi takes the conversation, unless another Kumi that's still open has it.
+    fn claim(&self, place: &str, id: &str) -> Claim {
+        let _ = (place, id);
+        Claim::Ours
+    }
+    /// This Kumi is done with the conversation (it took another, or is closing).
+    fn release(&self, place: &str, id: &str) {
+        let _ = (place, id);
     }
 }
 

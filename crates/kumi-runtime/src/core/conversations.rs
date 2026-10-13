@@ -1,10 +1,14 @@
 //! Each Set's kept conversations, on disk: `<place>/conversations/<id>.json`, with `<place>/current` naming the one
-//! the place carries on with.
+//! the place carries on with. Beside a conversation, `<id>.meta` keeps the producer's name for it, its pin and what it
+//! was copied from, and `<id>.lock` says which Kumi has it open; an earlier Kumi reading the folder takes neither for a
+//! conversation. `conversation-index.json` lists every place's conversations, to find one by its id or name: it's
+//! read again from the files wherever they changed, and made again from them when it's gone.
 
 use crate::{
     core::{
         contracts::{
-            ChangeState, ConversationStore, ConversationSummary, CurrentConversation, FoundExchange, SavedConversation, TranscriptRole,
+            ChangeState, Claim, ConversationMatch, ConversationStore, ConversationSummary, CurrentConversation, FoundExchange,
+            SavedConversation, TranscriptRole,
         },
         errors::RuntimeError,
     },
@@ -13,12 +17,15 @@ use crate::{
 use async_trait::async_trait;
 use kumi_common::js::{
     json::stringify,
-    string::{head, trim},
+    string::{head, trim, utf16_len},
 };
 use rand::TryRngCore;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
     sync::LazyLock,
@@ -27,7 +34,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const MAX_CONVERSATION_BYTES: usize = 256 * 1024;
 const MAX_KEPT_CHANGES: usize = 100;
+/// The newest conversations a place keeps, however old.
 const MAX_KEPT: usize = 20;
+/// Days a conversation is kept after it was last used, beyond its place's newest (`conversations.keepDays`).
+pub const KEEP_DAYS: u32 = 90;
+const DAY_MS: f64 = 86_400_000.0;
+const INDEX: &str = "conversation-index.json";
+/// The most let-go ids the index remembers, to say one isn't kept any more.
+const MAX_GONE: usize = 2000;
+/// The longest name the producer gives a conversation, and title, in UTF-16 units.
+const MAX_TITLE: usize = 60;
 fn error(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::plain(e.to_string())
 }
@@ -97,9 +113,179 @@ pub(crate) async fn modified_ms(path: &Path) -> f64 {
 }
 pub struct FileConversationStore {
     directory: PathBuf,
+    keep_days: u32,
+    /// The conversations this Kumi has open (place, id): it lets their locks go as it leaves them, and as it closes.
+    held: RefCell<HashSet<(String, String)>>,
+    /// One look at the files at a time.
+    looking: tokio::sync::Mutex<()>,
 }
 pub fn create_conversation_store(directory: impl Into<PathBuf>) -> Rc<FileConversationStore> {
-    Rc::new(FileConversationStore { directory: directory.into() })
+    create_conversation_store_keeping(directory, KEEP_DAYS)
+}
+/// A store that keeps conversations `keep_days` after they were last used (0: every one, however old).
+pub fn create_conversation_store_keeping(directory: impl Into<PathBuf>, keep_days: u32) -> Rc<FileConversationStore> {
+    Rc::new(FileConversationStore {
+        directory: directory.into(),
+        keep_days,
+        held: RefCell::default(),
+        looking: tokio::sync::Mutex::new(()),
+    })
+}
+impl Drop for FileConversationStore {
+    fn drop(&mut self) {
+        for (place, id) in self.held.take() {
+            if let Ok(folder) = self.kept(&place) {
+                let file = folder.join(format!("{id}.lock"));
+                if read_lock(&file).is_some_and(|lock| lock.is_mine()) {
+                    let _ = std::fs::remove_file(file);
+                }
+            }
+        }
+    }
+}
+
+/// What a conversation is called: the producer's name for it, else its first request, as one line with anything that
+/// looks like a key hidden, at most 60 characters.
+pub fn title(name: Option<&str>, first: &str) -> String {
+    let words = name.map(trim).filter(|name| !name.is_empty()).unwrap_or(first);
+    let line = crate::core::recall::plain(words, MAX_TITLE + 1);
+    if utf16_len(&line) > MAX_TITLE {
+        format!("{}…", trim(&head(&line, MAX_TITLE - 1)))
+    } else {
+        line
+    }
+}
+
+/// The first id `make` gives that isn't `taken`: a kept conversation's, or one let go.
+pub fn fresh_id(taken: impl Fn(&str) -> bool, mut make: impl FnMut() -> String) -> String {
+    loop {
+        let id = make();
+        if !taken(&id) {
+            return id;
+        }
+    }
+}
+
+/// When a conversation began, read from its id (the time it was made, in base 36, then six random hex digits).
+fn created_of(id: &str, saved_at: i64) -> i64 {
+    id.get(..id.len().saturating_sub(6))
+        .filter(|time| !time.is_empty())
+        .and_then(|time| i64::from_str_radix(time, 36).ok())
+        .filter(|at| (1..=saved_at).contains(at))
+        .unwrap_or(saved_at)
+}
+
+/// A conversation's own settings, in `<id>.meta`: an earlier Kumi rewriting `<id>.json` keeps only what it knows, so they
+/// live beside it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Meta {
+    #[serde(default)]
+    version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forked_from: Option<String>,
+}
+impl Meta {
+    fn is_empty(&self) -> bool {
+        self.name.is_none() && !self.pinned && self.forked_from.is_none()
+    }
+}
+/// A name as the producer gave it: one line, at most 60 characters; None when there's nothing left.
+fn clean_name(name: &str) -> Option<String> {
+    let line =
+        name.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = head(&line, MAX_TITLE);
+    (!trim(&line).is_empty()).then(|| trim(&line).to_owned())
+}
+async fn read_meta(file: &Path) -> Meta {
+    let Ok(bytes) = tokio::fs::read(file).await else { return Meta::default() };
+    if bytes.len() > 16 * 1024 {
+        return Meta::default();
+    }
+    let meta: Meta = serde_json::from_slice(&bytes).unwrap_or_default();
+    Meta {
+        version: 1,
+        name: meta.name.as_deref().and_then(clean_name),
+        pinned: meta.pinned,
+        forked_from: meta.forked_from.filter(|id| CONVERSATION.is_match(id)),
+    }
+}
+
+/// Which Kumi has a conversation open: its process, and when that process started (a pid is used again once its
+/// process is gone).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Lock {
+    pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started: Option<i64>,
+}
+impl Lock {
+    fn mine() -> Lock {
+        let pid = std::process::id();
+        Lock { pid, started: kumi_common::process::started_at_ms(pid) }
+    }
+    /// The process that took it is still running.
+    fn alive(&self) -> bool {
+        matches!((self.started, kumi_common::process::started_at_ms(self.pid)), (Some(was), Some(now)) if (was - now).abs() <= 2000)
+    }
+    fn is_mine(&self) -> bool {
+        self.pid == std::process::id() && self.alive()
+    }
+}
+fn read_lock(file: &Path) -> Option<Lock> {
+    let bytes = std::fs::read(file).ok().filter(|bytes| bytes.len() <= 4096)?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// The files of a conversation as last read: when `<id>.json` was written (ns) and its size, and when `<id>.meta` was (0
+/// without one). Anything else, and it's read again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Stamp {
+    modified: u64,
+    size: u64,
+    meta: u64,
+}
+/// A kept conversation, as the index lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Entry {
+    saved_at: i64,
+    first: String,
+    turns: u32,
+    created: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forked_from: Option<String>,
+    stamp: Stamp,
+}
+/// A place's Set name, as its baseline said when Kumi read it, with when the baseline was written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PlaceName {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    modified: u64,
+}
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct Index {
+    version: u32,
+    /// By "<place>/<id>".
+    #[serde(default)]
+    conversations: BTreeMap<String, Entry>,
+    #[serde(default)]
+    places: BTreeMap<String, PlaceName>,
+    /// Conversations that went from their folders, and when (ms): Kumi let them go, or an earlier Kumi did.
+    #[serde(default)]
+    gone: BTreeMap<String, i64>,
+}
+fn stamp_of(metadata: &std::fs::Metadata) -> u64 {
+    metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos() as u64).unwrap_or(0)
 }
 impl FileConversationStore {
     fn folder(&self, place: &str) -> Result<PathBuf, RuntimeError> {
@@ -181,25 +367,202 @@ impl FileConversationStore {
         let quoted = BASELINE_NAME.captures(&text)?.get(1)?.as_str();
         serde_json::from_str::<String>(quoted).ok().filter(|name| !trim(name).is_empty())
     }
+    /// A place keeps its current conversation, its 20 newest, the pinned ones, any another Kumi has open, and every one
+    /// used in the last `keep_days` days (all of them, at 0): every conversation an earlier Kumi kept, and more.
     async fn trim(&self, place: &str) -> Result<(), RuntimeError> {
-        let current = format!("{}.json", self.current_id(place).await.as_deref().unwrap_or("undefined"));
-        let names = self.names(place).await;
-        let mut others = vec![];
-        for name in names.iter().filter(|n| **n != current) {
-            let at = tokio::fs::metadata(self.kept(place)?.join(name))
-                .await
-                .ok()
-                .and_then(|s| s.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
-            others.push((name, at));
+        let current = self.current_id(place).await;
+        let kept = self.kept(place)?;
+        let mut all = vec![];
+        for name in self.names(place).await {
+            let at = modified_ms(&kept.join(&name)).await;
+            all.push((name, at));
         }
-        others.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (name, _) in others.into_iter().skip(MAX_KEPT - usize::from(names.contains(&current))) {
-            remove(self.kept(place)?.join(name)).await?
+        // Newest first, and the same order an earlier Kumi gave them, ties and all.
+        all.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let now = kumi_common::time::now_ms() as f64;
+        for (name, at) in all.into_iter().skip(MAX_KEPT) {
+            let id = &name[..name.len() - 5];
+            if current.as_deref() == Some(id) || self.keep_days == 0 || now - at < f64::from(self.keep_days) * DAY_MS {
+                continue;
+            }
+            if read_meta(&kept.join(format!("{id}.meta"))).await.pinned
+                || read_lock(&kept.join(format!("{id}.lock"))).is_some_and(|lock| lock.alive() && !lock.is_mine())
+            {
+                continue;
+            }
+            remove(kept.join(&name)).await?;
+            remove(kept.join(format!("{id}.meta"))).await?;
+            remove(kept.join(format!("{id}.lock"))).await?;
+        }
+        // A name or pin whose conversation went (an earlier Kumi let it go) goes too.
+        if let Ok(mut dir) = tokio::fs::read_dir(&kept).await {
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(id) = name.strip_suffix(".meta").filter(|id| CONVERSATION.is_match(id)) {
+                    if !kept.join(format!("{id}.json")).exists() {
+                        remove(entry.path()).await?;
+                    }
+                }
+            }
         }
         Ok(())
+    }
+    /// What `place` keeps and lets go, as after each save there.
+    pub async fn tidy(&self, place: &str) -> Result<(), RuntimeError> {
+        self.trim(place).await?;
+        self.index().await;
+        Ok(())
+    }
+    fn place_of(&self, key: &str) -> Option<(String, String)> {
+        key.split_once('/').map(|(place, id)| (place.to_owned(), id.to_owned()))
+    }
+    /// Every place's conversation files as they are now: (place, id) → stamp.
+    async fn scan(&self) -> BTreeMap<String, Stamp> {
+        let mut found = BTreeMap::new();
+        let Ok(mut places) = tokio::fs::read_dir(&self.directory).await else { return found };
+        while let Ok(Some(place)) = places.next_entry().await {
+            let Some(place) = place.file_name().to_str().filter(|p| PLACE.is_match(p)).map(str::to_owned) else { continue };
+            let Ok(kept) = self.kept(&place) else { continue };
+            let Ok(mut dir) = tokio::fs::read_dir(&kept).await else { continue };
+            let mut metas = HashMap::new();
+            let mut files = vec![];
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Ok(metadata) = entry.metadata().await else { continue };
+                if let Some(id) = name.strip_suffix(".json").filter(|id| CONVERSATION.is_match(id)) {
+                    files.push((id.to_owned(), Stamp { modified: stamp_of(&metadata), size: metadata.len(), meta: 0 }));
+                } else if let Some(id) = name.strip_suffix(".meta").filter(|id| CONVERSATION.is_match(id)) {
+                    metas.insert(id.to_owned(), stamp_of(&metadata));
+                }
+            }
+            for (id, mut stamp) in files {
+                stamp.meta = metas.get(&id).copied().unwrap_or(0);
+                found.insert(format!("{place}/{id}"), stamp);
+            }
+        }
+        found
+    }
+    async fn read_index(&self) -> Index {
+        let read = tokio::fs::read(self.directory.join(INDEX)).await.ok().and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok());
+        read.filter(|index| index.version == 1).unwrap_or(Index { version: 1, ..Index::default() })
+    }
+    /// The index, read again from the files wherever they changed (made from them all when it's missing or unreadable),
+    /// and written back when anything did.
+    async fn index(&self) -> Index {
+        let _one = self.looking.lock().await;
+        let before = self.read_index().await;
+        let mut index = before.clone();
+        let files = self.scan().await;
+        let kept_ids: HashSet<&str> = files.keys().filter_map(|key| key.split_once('/').map(|(_, id)| id)).collect();
+        let now = kumi_common::time::now_ms();
+        for key in index.conversations.keys().filter(|key| !files.contains_key(*key)).cloned().collect::<Vec<_>>() {
+            index.conversations.remove(&key);
+            if let Some((_, id)) = self.place_of(&key).filter(|(_, id)| !kept_ids.contains(id.as_str())) {
+                index.gone.insert(id, now);
+            }
+        }
+        for (key, stamp) in &files {
+            if index.conversations.get(key).is_some_and(|entry| entry.stamp == *stamp) {
+                continue;
+            }
+            let Some((place, id)) = self.place_of(key) else { continue };
+            let Ok(kept) = self.kept(&place) else { continue };
+            // Reading many files: the app keeps drawing between them.
+            tokio::task::yield_now().await;
+            let Some(value) = Self::read(&kept.join(format!("{id}.json"))).await else {
+                index.conversations.remove(key);
+                continue;
+            };
+            let meta = read_meta(&kept.join(format!("{id}.meta"))).await;
+            let said: Vec<_> = transcript_of(&value.checkpoint.messages).into_iter().filter(|l| l.role == TranscriptRole::User).collect();
+            index.conversations.insert(
+                key.clone(),
+                Entry {
+                    saved_at: value.saved_at,
+                    first: value.first.unwrap_or_else(|| said.first().map(|l| head(&l.text, 200)).unwrap_or_default()),
+                    turns: value.turns.unwrap_or(said.len() as u32),
+                    created: created_of(&id, value.saved_at),
+                    name: meta.name,
+                    pinned: meta.pinned,
+                    forked_from: meta.forked_from,
+                    stamp: *stamp,
+                },
+            );
+        }
+        for id in &kept_ids {
+            index.gone.remove(*id);
+        }
+        while index.gone.len() > MAX_GONE {
+            let oldest = index.gone.iter().min_by_key(|(_, at)| **at).map(|(id, _)| id.clone());
+            if let Some(oldest) = oldest {
+                index.gone.remove(&oldest);
+            }
+        }
+        // Each place's Set name, read again when its baseline was written since.
+        let places: HashSet<String> = index.conversations.keys().filter_map(|key| self.place_of(key).map(|(place, _)| place)).collect();
+        index.places.retain(|place, _| places.contains(place));
+        for place in places {
+            let modified = match self.folder(&place) {
+                Ok(folder) => tokio::fs::metadata(folder.join("last-seen.json")).await.map(|m| stamp_of(&m)).unwrap_or(0),
+                Err(_) => 0,
+            };
+            if index.places.get(&place).is_some_and(|known| known.modified == modified) {
+                continue;
+            }
+            let name = self.set_name(&place).await;
+            index.places.insert(place, PlaceName { name, modified });
+        }
+        if index != before && !(files.is_empty() && index.gone.is_empty()) {
+            let _ = write_privately(&self.directory, INDEX, &stringify(&serde_json::to_value(&index).unwrap_or_default())).await;
+        }
+        index
+    }
+    /// Every kept conversation, from the index, in the order an earlier Kumi listed a place's: newest first.
+    async fn summaries(&self) -> Vec<ConversationSummary> {
+        let index = self.index().await;
+        let mut currents: HashMap<String, Option<String>> = HashMap::new();
+        let mut rows = vec![];
+        for (key, entry) in &index.conversations {
+            let Some((place, id)) = self.place_of(key) else { continue };
+            if !currents.contains_key(&place) {
+                let current = self.current_id(&place).await;
+                currents.insert(place.clone(), current);
+            }
+            rows.push(ConversationSummary {
+                current: currents[&place].as_deref() == Some(id.as_str()),
+                id,
+                saved_at: entry.saved_at,
+                first: entry.first.clone(),
+                turns: entry.turns,
+                set: index.places.get(&place).and_then(|known| known.name.clone()),
+                place,
+                name: entry.name.clone(),
+                pinned: entry.pinned,
+                forked_from: entry.forked_from.clone(),
+                created: entry.created,
+            });
+        }
+        rows.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+        rows
+    }
+    async fn write_meta(&self, place: &str, id: &str, meta: &Meta) -> Result<(), RuntimeError> {
+        let kept = self.kept(place)?;
+        if meta.is_empty() {
+            return remove(kept.join(format!("{id}.meta"))).await;
+        }
+        let meta = Meta { version: 1, ..meta.clone() };
+        write_privately(&kept, &format!("{id}.meta"), &stringify(&serde_json::to_value(meta).map_err(error)?)).await
+    }
+    /// Change a kept conversation's own settings; false when it isn't kept.
+    async fn change_meta(&self, place: &str, id: &str, change: impl FnOnce(&mut Meta)) -> Result<bool, RuntimeError> {
+        if !self.file(place, id)?.exists() {
+            return Ok(false);
+        }
+        let mut meta = read_meta(&self.kept(place)?.join(format!("{id}.meta"))).await;
+        change(&mut meta);
+        self.write_meta(place, id, &meta).await?;
+        self.index().await;
+        Ok(true)
     }
 }
 /// A message as kept on disk: a picture the producer added is named, not kept, so one screenshot
@@ -302,7 +665,9 @@ impl ConversationStore for FileConversationStore {
         self.file(place, id)?;
         write_privately(&self.kept(place)?, &format!("{id}.json"), &stringify(&serde_json::to_value(saved).map_err(error)?)).await?;
         write_privately(&self.folder(place)?, "current", id).await?;
-        self.trim(place).await
+        self.trim(place).await?;
+        self.index().await;
+        Ok(())
     }
     async fn fresh(&self, place: &str) -> Result<(), RuntimeError> {
         let folder = self.folder(place)?;
@@ -315,34 +680,30 @@ impl ConversationStore for FileConversationStore {
         if self.migrate(place).await.is_err() {
             return Ok(vec![]);
         }
-        let current = self.current_id(place).await;
-        let mut rows = vec![];
-        for name in self.names(place).await {
-            let Some(value) = Self::read(&self.kept(place)?.join(&name)).await else { continue };
-            let id = name[..name.len() - 5].to_owned();
-            let said: Vec<_> = transcript_of(&value.checkpoint.messages).into_iter().filter(|l| l.role == TranscriptRole::User).collect();
-            rows.push(ConversationSummary {
-                id: id.clone(),
-                saved_at: value.saved_at,
-                first: value.first.unwrap_or_else(|| said.first().map(|l| head(&l.text, 200)).unwrap_or_default()),
-                turns: value.turns.unwrap_or(said.len() as u32),
-                current: Some(&id) == current.as_ref(),
-            });
-        }
-        rows.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
-        Ok(rows)
+        self.folder(place)?;
+        Ok(self.summaries().await.into_iter().filter(|row| row.place == place).collect())
     }
     async fn move_conversation(&self, id: &str, from: &str, to: &str) -> Result<(), RuntimeError> {
         let file = self.file(from, id)?;
         let Some(value) = Self::read(&file).await else { return Ok(()) };
         self.file(to, id)?;
         write_privately(&self.kept(to)?, &format!("{id}.json"), &stringify(&serde_json::to_value(value).map_err(error)?)).await?;
+        // Its name and pin go with it, and so does this Kumi's hold on it.
+        let meta = read_meta(&self.kept(from)?.join(format!("{id}.meta"))).await;
+        self.write_meta(to, id, &meta).await?;
+        if self.held.borrow().contains(&(from.to_owned(), id.to_owned())) {
+            self.release(from, id);
+            self.claim(to, id);
+        }
         write_privately(&self.folder(to)?, "current", id).await?;
         remove(&file).await?;
+        remove(self.kept(from)?.join(format!("{id}.meta"))).await?;
         if self.current_id(from).await.as_deref() == Some(id) {
             write_privately(&self.folder(from)?, "current", "").await?
         }
-        self.trim(to).await
+        self.trim(to).await?;
+        self.index().await;
+        Ok(())
     }
     async fn search(
         &self,
@@ -435,5 +796,107 @@ impl ConversationStore for FileConversationStore {
             }
         }
         Ok(found)
+    }
+    async fn all(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
+        Ok(self.summaries().await)
+    }
+    async fn find(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
+        let word = trim(word).to_lowercase();
+        if word.is_empty() {
+            return Ok(ConversationMatch::None);
+        }
+        let all = self.summaries().await;
+        let picked = |rows: Vec<ConversationSummary>| match rows.len() {
+            0 => ConversationMatch::None,
+            1 => ConversationMatch::One(rows.into_iter().next().unwrap()),
+            _ => ConversationMatch::Several(rows),
+        };
+        let exact: Vec<_> = all.iter().filter(|row| row.id == word).cloned().collect();
+        if !exact.is_empty() {
+            return Ok(picked(exact));
+        }
+        if CONVERSATION.is_match(&word) && self.read_index().await.gone.contains_key(&word) {
+            return Ok(ConversationMatch::Gone);
+        }
+        // The start of an id (4 characters or more), or the producer's name for one.
+        let start = utf16_len(&word) >= 4 && word.bytes().all(|b| b.is_ascii_digit() || b.is_ascii_lowercase());
+        Ok(picked(
+            all.into_iter()
+                .filter(|row| (start && row.id.starts_with(&word)) || row.name.as_ref().is_some_and(|name| name.to_lowercase() == word))
+                .collect(),
+        ))
+    }
+    async fn new_id(&self) -> String {
+        let index = self.index().await;
+        let taken: HashSet<String> =
+            index.conversations.keys().filter_map(|key| self.place_of(key).map(|(_, id)| id)).chain(index.gone.keys().cloned()).collect();
+        fresh_id(|id| taken.contains(id), || new_conversation_id(kumi_common::time::now_ms()))
+    }
+    async fn rename(&self, place: &str, id: &str, name: Option<&str>) -> Result<bool, RuntimeError> {
+        let name = name.and_then(clean_name);
+        self.change_meta(place, id, |meta| meta.name = name).await
+    }
+    async fn pin(&self, place: &str, id: &str, pinned: bool) -> Result<bool, RuntimeError> {
+        self.change_meta(place, id, |meta| meta.pinned = pinned).await
+    }
+    async fn delete(&self, place: &str, id: &str) -> Result<bool, RuntimeError> {
+        let file = self.file(place, id)?;
+        if !file.exists() {
+            return Ok(false);
+        }
+        let kept = self.kept(place)?;
+        remove(&file).await?;
+        remove(kept.join(format!("{id}.meta"))).await?;
+        if read_lock(&kept.join(format!("{id}.lock"))).is_none_or(|lock| !lock.alive() || lock.is_mine()) {
+            remove(kept.join(format!("{id}.lock"))).await?;
+        }
+        if self.current_id(place).await.as_deref() == Some(id) {
+            write_privately(&self.folder(place)?, "current", "").await?
+        }
+        self.index().await;
+        // Deleted by the producer, not let go: the id is unknown from here on.
+        let _one = self.looking.lock().await;
+        let mut index = self.read_index().await;
+        if index.gone.remove(id).is_some() {
+            let _ = write_privately(&self.directory, INDEX, &stringify(&serde_json::to_value(&index).unwrap_or_default())).await;
+        }
+        Ok(true)
+    }
+    async fn copy(&self, place: &str, id: &str, conversation: &SavedConversation, from: &str) -> Result<(), RuntimeError> {
+        self.file(place, id)?;
+        self.write_meta(place, id, &Meta { forked_from: CONVERSATION.is_match(from).then(|| from.to_owned()), ..Meta::default() }).await?;
+        self.save(place, id, conversation).await
+    }
+    fn claim(&self, place: &str, id: &str) -> Claim {
+        let (Ok(kept), true) = (self.kept(place), CONVERSATION.is_match(id)) else { return Claim::Ours };
+        let file = kept.join(format!("{id}.lock"));
+        match read_lock(&file) {
+            Some(lock) if lock.is_mine() => {}
+            Some(lock) if lock.alive() => return Claim::Taken,
+            // None, or one left by a Kumi that's gone: this Kumi takes it.
+            _ => {
+                let mine = Lock::mine();
+                if crate::core::private::write(&file, stringify(&json!(mine)).as_bytes()).is_err() {
+                    return Claim::Ours;
+                }
+                // Two Kumis taking it at once: the one whose words stayed has it.
+                if read_lock(&file).is_some_and(|lock| lock != mine && lock.alive()) {
+                    return Claim::Taken;
+                }
+            }
+        }
+        self.held.borrow_mut().insert((place.to_owned(), id.to_owned()));
+        Claim::Ours
+    }
+    fn release(&self, place: &str, id: &str) {
+        if !self.held.borrow_mut().remove(&(place.to_owned(), id.to_owned())) {
+            return;
+        }
+        if let Ok(kept) = self.kept(place) {
+            let file = kept.join(format!("{id}.lock"));
+            if read_lock(&file).is_some_and(|lock| lock.is_mine()) {
+                let _ = std::fs::remove_file(file);
+            }
+        }
     }
 }
