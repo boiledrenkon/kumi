@@ -501,9 +501,14 @@ pub async fn import_command(file: &str, env: &Env, out: &dyn TtyOutput, err: &dy
     // A name runs to 60 characters, with the mark.
     let name = format!("{} (imported)", head(&imported.title, 49));
     store.create(IMPORTED, &id, &imported.conversation, Some(name.as_str()), None).await?;
-    // The store keeps the latest part of a long conversation; one whose last exchange alone is too long, it can't.
+    // The store keeps the latest part of a long conversation; one whose last exchange alone is too long, it can't. What
+    // it can't read back goes too: nothing's left of a refused import.
     if store.load(IMPORTED, &id).await?.is_none() {
-        err.write("Kumi can't keep that conversation: its last exchange runs longer than Kumi keeps of one (about 1 MB).\n");
+        let why = match store.delete(IMPORTED, &id).await {
+            Ok(true) => "Kumi can't keep that conversation: it couldn't read it back once kept, so it kept nothing of it.",
+            _ => "Kumi can't keep that conversation: its last exchange runs longer than Kumi keeps of one (about 1 MB).",
+        };
+        err.write(&format!("{why}\n"));
         return Ok(1);
     }
     out.write(&format!("Imported “{}” as {id}. Carry it on: {command} -r {id}\n", imported.title));

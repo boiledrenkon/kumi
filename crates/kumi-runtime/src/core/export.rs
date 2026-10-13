@@ -48,6 +48,9 @@ const MAX_WORDS: usize = 300;
 /// JSON (bytes): what's past them is cut, or, for an input, left out.
 const MAX_PART: usize = 64 * 1024;
 const MAX_INPUT: usize = 16 * 1024;
+/// How deep an imported step's input may nest. Kumi's own steps nest a few levels; a kept conversation is read back with
+/// JSON's usual limit (128 levels), its inputs 7 levels down, so one past it would be kept but never read again.
+const MAX_DEPTH: usize = 64;
 
 /// The tools whose calls never leave Kumi: what it keeps of the producer (notes, recipes, techniques, how something went
 /// down), its notes for whoever makes Kumi (gaps), and how it finds its own tools.
@@ -1367,7 +1370,7 @@ fn kept_message(message: Message) -> Option<Value> {
                         "type": "tool-call",
                         "toolCallId": call.tool_call_id,
                         "toolName": clean_name(&call.tool_name),
-                        "input": if call.input.is_object() && stringify_pretty(&call.input, 0).len() <= MAX_INPUT { cleaned_value(&call.input) } else { json!({}) },
+                        "input": if call.input.is_object() && depth(&call.input) <= MAX_DEPTH && stringify_pretty(&call.input, 0).len() <= MAX_INPUT { cleaned_value(&call.input) } else { json!({}) },
                     })),
                     _ => None,
                 })
@@ -1450,6 +1453,15 @@ fn bounded(text: &str) -> String {
 }
 
 /// A step's input from a file, each string and key cleaned as words are.
+/// How many lists and objects deep a value nests.
+fn depth(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => 1 + items.iter().map(depth).max().unwrap_or(0),
+        Value::Object(fields) => 1 + fields.values().map(depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 fn cleaned_value(value: &Value) -> Value {
     match value {
         Value::String(text) => Value::String(neutralized(&drawn(&bounded(text)))),

@@ -1,12 +1,13 @@
 use chrono::FixedOffset;
 use kumi_runtime::ai::types::Message;
-use kumi_runtime::core::contracts::{ChangeRecord, KernelCheckpoint, SavedConversation, TranscriptLine, TranscriptRole};
+use kumi_runtime::core::contracts::{ChangeRecord, ConversationStore, KernelCheckpoint, SavedConversation, TranscriptLine, TranscriptRole};
 use kumi_runtime::core::export::{file_name, html, import, json, markdown, Format, Options, Source, IMPORT_MAX_BYTES, LEFT_OUT, PARTIAL};
 use kumi_runtime::core::goal::goal_setup;
 use kumi_runtime::core::goal_mode::objective_audit;
 use kumi_runtime::core::loop_run::loop_setup;
 use kumi_runtime::kernel::agent::CARRY_ON_NOTE;
 use kumi_runtime::kernel::budget::{transcript_of, ASKED, OBSERVATION_MARKER, SHORTENED};
+use kumi_runtime::{create_conversation_store, IMPORTED};
 use serde_json::{json, Value};
 
 /// What the test's redactor takes out, planted in every kind of word an export carries.
@@ -497,6 +498,33 @@ fn an_import_cuts_words_that_run_too_long_and_leaves_out_a_huge_input() {
     assert!(said.ends_with(" [cut: it ran longer than Kumi imports]") && said.len() < 65 * 1024, "{}", said.len());
     assert_eq!(messages[1]["content"][0]["input"], json!({}));
     assert!(messages[2]["content"][0]["output"]["value"].as_str().unwrap().ends_with(" [cut: it ran longer than Kumi imports]"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_import_leaves_out_an_input_nesting_deeper_than_a_kept_conversation_reads_back() {
+    let nested =
+        |levels: usize| -> Value { serde_json::from_str(&format!("{}1{}", "{\"a\":".repeat(levels), "}".repeat(levels))).unwrap() };
+    // 122 levels: the file reads (they sit 5 down in it), but a kept conversation holds them 6 down, past JSON's limit.
+    let file = json!({"format": "kumi-conversation", "version": 1, "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "Deep and shallow"}]},
+        {"role": "assistant", "content": [
+            {"type": "tool-call", "toolCallId": "x", "toolName": "rename", "input": nested(122)},
+            {"type": "tool-call", "toolCallId": "y", "toolName": "rename", "input": nested(10)}
+        ]},
+        {"role": "tool", "content": [
+            {"type": "tool-result", "toolCallId": "x", "toolName": "rename", "output": {"type": "text", "value": "Done"}},
+            {"type": "tool-result", "toolCallId": "y", "toolName": "rename", "output": {"type": "text", "value": "Done"}}
+        ]}
+    ]});
+    let imported = import(&file.to_string(), NOW).unwrap();
+    let calls = &imported.conversation.checkpoint.messages[1]["content"];
+    assert_eq!(calls[0]["input"], json!({}));
+    assert_eq!(calls[1]["input"], nested(10), "an input nesting as Kumi's do stays");
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.create(IMPORTED, "k3x9a1b2", &imported.conversation, None, None).await.unwrap();
+    let kept = store.load(IMPORTED, "k3x9a1b2").await.unwrap().expect("a kept import reads back");
+    assert_eq!(kept.checkpoint.messages, imported.conversation.checkpoint.messages);
 }
 
 /// Text as a reader takes it in: compatibility forms, lowercase, without characters that draw nothing.
