@@ -3,6 +3,30 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.13.0 — 2026-10-12
+
+Ships with bridge 1.0.92, which Live loads when it restarts. After updating, Kumi offers to quit Live
+(it asks to save first) and opens it again with the new bridge; or run `kumi bridge` with Live closed.
+
+- Walk away while Kumi works. When Kumi finishes an answer, needs your pick or a sign-in, waits for a
+  plan's limit or stops on an error while its window is behind another, it tells you with a desktop
+  notification and a line in Live's status bar (never over a take you're recording), and terminals
+  that show program status show what Kumi is doing.
+- Kumi survives usage limits. When ChatGPT's plan limit is reached, Kumi waits for it to reset and
+  carries on with the same answer (NOW says when), or hands the answer to your fallback model straight
+  away: choose one with ctrl+f in /model. The header shows how much of the plan is used once it's past
+  80%.
+- Kumi keeps the computer awake while it works, keeps trying when the connection drops, and when
+  nobody's there to answer its question it takes the option it recommended after a minute (any key
+  stops it).
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
+### Bridge 1.0.92
+
+- Kumi's line in Live's status bar is Live's own status-bar line; it never opens a dialog.
+
 ## 1.12.1 — 2026-10-12
 
 Ships with bridge 1.0.91, as 1.12.0 did.
