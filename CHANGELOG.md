@@ -3,6 +3,19 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.16.1 — 2026-10-12
+
+Ships with bridge 1.0.92, as 1.16.0 did.
+
+- When a provider stops offering your saved model (ChatGPT retires GPT-5.5 from plan sign-ins on 14
+  October), Kumi says so as it starts and opens /model so you can choose another; plain mode says it
+  in one line. A message sent to a model the provider doesn't offer now says "ChatGPT doesn't offer
+  gpt-5.5 to your sign-in; choose another model." and offers the choice, instead of "turned the
+  request down (HTTP 400)".
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.16.0 — 2026-10-12
 
 Ships with bridge 1.0.92, as 1.15.0 did.
