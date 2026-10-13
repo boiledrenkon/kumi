@@ -20,12 +20,15 @@ pub struct TerminalProfile {
     pub notify: NotifyChannel,
     /// Inside tmux: each sequence is wrapped to pass through it (tmux needs `allow-passthrough on`).
     pub tmux: bool,
+    /// The terminal app's own id on macOS (`__CFBundleIdentifier`: "com.apple.Terminal"): while the terminal
+    /// says nothing of focus, the system tells whether that app is in front.
+    pub app_id: Option<String>,
 }
 
 impl TerminalProfile {
     /// Nothing at all: no status, no notification. Tests start from this.
     pub fn quiet() -> Self {
-        Self { status: false, progress: false, notify: NotifyChannel::None, tmux: false }
+        Self { status: false, progress: false, notify: NotifyChannel::None, tmux: false, app_id: None }
     }
 }
 
@@ -95,7 +98,8 @@ pub fn detect_terminal_profile(env: &HashMap<String, String>, platform: &str) ->
     } else {
         NotifyChannel::None
     };
-    TerminalProfile { status: true, progress: !tmux && (windows_terminal || conemu || ghostty), notify, tmux }
+    let app_id = Some(get("__CFBundleIdentifier")).filter(|id| platform == "darwin" && !id.is_empty()).map(str::to_string);
+    TerminalProfile { status: true, progress: !tmux && (windows_terminal || conemu || ghostty), notify, tmux, app_id }
 }
 
 fn on_path(name: &str, env: &HashMap<String, String>) -> bool {
@@ -175,11 +179,9 @@ pub fn status_sequence(report: &StatusReport) -> Option<String> {
         pairs.push(format!("title={}", encode(&title)));
     }
     let lead = format!("\u{1b}]7501;{}", pairs.join(":"));
-    let mut msg = report.msg.as_deref().map(|msg| one_line(msg, MAX_MSG)).unwrap_or_default();
-    // ":msg=" and the terminator besides the lead: base64 takes 4 bytes for each 3.
-    while !msg.is_empty() && lead.len() + 5 + msg.len().div_ceil(3) * 4 + ST.len() > MAX_SEQUENCE {
-        msg = fit(&msg, msg.len() - 1);
-    }
+    // What's left besides the lead, ":msg=" and the terminator, in base64's 4 bytes for each 3.
+    let room = MAX_SEQUENCE.saturating_sub(lead.len() + 5 + ST.len()) / 4 * 3;
+    let msg = report.msg.as_deref().map(|msg| fit(&one_line(msg, MAX_MSG), room)).unwrap_or_default();
     let msg = if msg.is_empty() { String::new() } else { format!(":msg={}", encode(&msg)) };
     Some(format!("{lead}{msg}{ST}"))
 }
@@ -235,6 +237,21 @@ pub fn notify_command(channel: NotifyChannel, title: &str, body: &str) -> Option
         NotifyChannel::NotifySend => Some(("notify-send", vec!["--app-name=Kumi".into(), "--".into(), title, body])),
         _ => None,
     }
+}
+
+/// Whether the app in front is the one with this id (macOS's `lsappinfo`, which needs no permission); None where
+/// that can't be told.
+pub async fn app_in_front(app_id: &str) -> Option<bool> {
+    let front = super::attach::bounded("lsappinfo", &["front"]).await.ok()?;
+    let asn = String::from_utf8_lossy(&front.stdout).trim().to_string();
+    if asn.is_empty() {
+        return None;
+    }
+    let info = super::attach::bounded("lsappinfo", &["info", "-only", "bundleID", &asn]).await.ok()?;
+    let text = String::from_utf8_lossy(&info.stdout).into_owned();
+    // `    bundleID="com.apple.Terminal"`, or `bundleID=[ NULL ]` for a process without one.
+    let id = text.split_once("bundleID=\"")?.1.split('"').next()?.to_string();
+    Some(id.eq_ignore_ascii_case(app_id))
 }
 
 /// A sequence wrapped to pass through tmux, which drops the OSCs it doesn't know (each Escape inside is doubled).
@@ -302,8 +319,18 @@ mod tests {
     #[test]
     fn each_terminal_gets_its_own_notification_and_progress() {
         let profile = |pairs: &[(&str, &str)], platform: &str| detect_terminal_profile(&env(pairs), platform);
-        let ghostty = profile(&[("TERM_PROGRAM", "ghostty"), ("TERM", "xterm-ghostty")], "darwin");
-        assert_eq!(ghostty, TerminalProfile { status: true, progress: true, notify: NotifyChannel::Osc777, tmux: false });
+        let ghostty =
+            profile(&[("TERM_PROGRAM", "ghostty"), ("TERM", "xterm-ghostty"), ("__CFBundleIdentifier", "com.mitchellh.ghostty")], "darwin");
+        assert_eq!(
+            ghostty,
+            TerminalProfile {
+                status: true,
+                progress: true,
+                notify: NotifyChannel::Osc777,
+                tmux: false,
+                app_id: Some("com.mitchellh.ghostty".into())
+            }
+        );
         assert_eq!(profile(&[("TERM_PROGRAM", "WezTerm")], "linux").notify, NotifyChannel::Osc777);
         assert_eq!(profile(&[("TERM", "foot")], "linux").notify, NotifyChannel::Osc777);
         assert_eq!(profile(&[("TERM_PROGRAM", "iTerm.app")], "darwin").notify, NotifyChannel::Osc9);
@@ -313,8 +340,8 @@ mod tests {
         assert_eq!(profile(&[("TERM_PROGRAM", "vscode")], "darwin").notify, NotifyChannel::AppleScript);
         // Without notify-send on PATH, a Linux terminal of no known kind has nothing.
         assert_eq!(profile(&[("TERM", "xterm-256color"), ("PATH", "/nowhere")], "linux").notify, NotifyChannel::None);
-        let windows = profile(&[("WT_SESSION", "1")], "win32");
-        assert_eq!(windows, TerminalProfile { status: true, progress: true, notify: NotifyChannel::Bell, tmux: false });
+        let windows = profile(&[("WT_SESSION", "1"), ("__CFBundleIdentifier", "ignored")], "win32");
+        assert_eq!(windows, TerminalProfile { status: true, progress: true, notify: NotifyChannel::Bell, tmux: false, app_id: None });
         assert!(!profile(&[("TERM_PROGRAM", "iTerm.app")], "darwin").progress);
     }
 
@@ -328,7 +355,10 @@ mod tests {
     #[test]
     fn inside_tmux_the_system_notifies_and_sequences_pass_through() {
         let profile = detect_terminal_profile(&env(&[("TMUX", "/tmp/tmux-501/default,1,0"), ("TERM_PROGRAM", "tmux")]), "darwin");
-        assert_eq!(profile, TerminalProfile { status: true, progress: false, notify: NotifyChannel::AppleScript, tmux: true });
+        assert_eq!(
+            profile,
+            TerminalProfile { status: true, progress: false, notify: NotifyChannel::AppleScript, tmux: true, app_id: None }
+        );
         assert_eq!(
             tmux_wrap("\u{1b}]7501;state=idle:app=kumi\u{1b}\\"),
             "\u{1b}Ptmux;\u{1b}\u{1b}]7501;state=idle:app=kumi\u{1b}\u{1b}\\\u{1b}\\"

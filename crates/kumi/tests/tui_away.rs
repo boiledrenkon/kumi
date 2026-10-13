@@ -24,7 +24,7 @@ const FOCUS_OUT: &str = "\x1b[O";
 const FOCUS_IN: &str = "\x1b[I";
 
 fn profile(notify: NotifyChannel) -> TerminalProfile {
-    TerminalProfile { status: true, progress: false, notify, tmux: false }
+    TerminalProfile { status: true, progress: false, notify, tmux: false, app_id: None }
 }
 
 fn away(notify: NotifyChannel) -> Harness {
@@ -78,7 +78,7 @@ fn notifications(h: &Harness) -> Vec<String> {
 }
 
 async fn until(what: &str, ready: impl Fn() -> bool) {
-    for _ in 0..200 {
+    for _ in 0..300 {
         if ready() {
             return;
         }
@@ -100,6 +100,13 @@ case!(the_terminal_shows_what_kumi_is_doing_and_quitting_clears_it, async {
         h.output.text.borrow().rsplit("\x1b]7501;").next().unwrap().split(':').find_map(|p| p.strip_prefix("title=")).map(str::to_string);
     let title = base64::engine::general_purpose::STANDARD.decode(title.expect("the Set as its title")).unwrap();
     assert_eq!(String::from_utf8(title).unwrap(), "Night Drive");
+    // A wait says why, without its countdown: the status changes when what Kumi does changes, not each second (new
+    // words go at most once a second).
+    h.emit(json!({"type":"retry","reason":"ChatGPT is busy (HTTP 429)","waitMs":5000}));
+    until("the wait's words", || reports(&h).last().is_some_and(|(_, words)| words == "working · ChatGPT is busy (HTTP 429)")).await;
+    let count = reports(&h).len();
+    delay(1300).await;
+    assert_eq!(reports(&h).len(), count, "nothing ticks");
     h.emit(json!({"type":"text","text":"## Made the bass darker\n\nThe cutoff is down 2 kHz."}));
     h.emit(json!({"type":"turn-complete","result":{"stopReason":"completed"},"elapsedMs":4000}));
     h.emit(json!({"type":"state","state":"idle"}));
@@ -169,7 +176,8 @@ case!(alerts_keep_a_gap_and_the_newest_of_those_waiting_goes, async {
     h.emit(json!({"type":"error","message":"First."}));
     h.emit(json!({"type":"error","message":"Second."}));
     h.emit(json!({"type":"error","message":"Third."}));
-    until("two notifications", || notifications(&h).len() == 2).await;
+    until("two notifications", || notifications(&h).len() >= 2).await;
+    delay(100).await;
     assert_eq!(notifications(&h), ["Stopped: First.", "Stopped: Third."]);
     // Coming back before a waiting one goes drops it.
     h.emit(json!({"type":"error","message":"Fourth."}));
@@ -239,7 +247,8 @@ case!(a_goals_end_is_told_once_in_place_of_its_answers_done, async {
     h.emit(json!({"type":"state","state":"running"}));
     goal("running", None);
     let (_, words) = reports(&h).last().unwrap().clone();
-    assert!(words.contains("goal · turn 4/12"), "{words}");
+    assert!(words.starts_with("goal · turn 4/12"), "{words}");
+    assert!(!words.contains(':'), "no clock in the status: {words}");
     goal("done", Some("complete"));
     h.emit(json!({"type":"text","text":"Louder by 2 LU."}));
     h.emit(json!({"type":"turn-complete","result":{"stopReason":"completed"},"elapsedMs":600000}));
@@ -247,5 +256,44 @@ case!(a_goals_end_is_told_once_in_place_of_its_answers_done, async {
     until("the goal's notification", || !notifications(&h).is_empty()).await;
     delay(150).await;
     assert_eq!(notifications(&h), ["Goal met: Make the mix louder"]);
+    h.close().await;
+});
+
+case!(a_terminal_that_never_says_where_focus_is_asks_the_system_only_when_theres_something_to_tell, async {
+    let in_front = Rc::new(std::cell::Cell::new(Some(false)));
+    let asked = Rc::new(std::cell::Cell::new(0));
+    let (front, count) = (in_front.clone(), asked.clone());
+    let h = Harness::with(120, 36, Rc::new(Control::default()), |o| {
+        o.terminal = Some(profile(NotifyChannel::Osc777));
+        o.alert_gap_ms = Some(60.);
+        o.front_app = Some(Rc::new(move || {
+            count.set(count.get() + 1);
+            let answer = front.get();
+            Box::pin(async move { answer })
+        }));
+    });
+    h.start().await;
+    h.connect();
+    delay(50).await;
+    assert_eq!(asked.get(), 0, "never on a timer");
+    answer(&h, "Made the bass darker.", 20_000).await;
+    until("the notification", || notifications(&h).len() == 1).await;
+    assert_eq!(asked.get(), 1);
+    // Kumi's terminal is in front: nothing; and nothing when the system can't say.
+    for answer_now in [Some(true), None] {
+        in_front.set(answer_now);
+        delay(80).await;
+        answer(&h, "Made it brighter.", 20_000).await;
+        delay(80).await;
+        assert_eq!(notifications(&h).len(), 1, "{answer_now:?}");
+    }
+    // Once the terminal says where focus is, its word counts and the system isn't asked.
+    let before = asked.get();
+    h.type_text(FOCUS_OUT).await;
+    in_front.set(Some(true));
+    delay(80).await;
+    answer(&h, "Made it wider.", 20_000).await;
+    until("the second notification", || notifications(&h).len() == 2).await;
+    assert_eq!(asked.get(), before);
     h.close().await;
 });

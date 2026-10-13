@@ -24,6 +24,8 @@ impl Default for AwaySettings {
 
 /// Runs a program that shows a desktop notification (osascript, notify-send), with its arguments.
 pub type NotifierRunner = Rc<dyn Fn(&'static str, Vec<String>)>;
+/// Whether Kumi's terminal app is the one in front, asked of the system; None when it can't say.
+pub type FrontApp = Rc<dyn Fn() -> LocalBoxFuture<'static, Option<bool>>>;
 
 /// Something worth telling a producer who isn't looking.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +50,7 @@ impl TuiApp {
     pub(super) fn window_focus(&self, focused: bool) {
         {
             let mut state = self.0.state.borrow_mut();
+            state.focus_reported = true;
             if state.window_focused == focused {
                 return;
             }
@@ -84,9 +87,7 @@ impl TuiApp {
             msg: Some(msg).filter(|msg| !msg.is_empty()),
         };
         if self.busy() {
-            let now = self.now_line();
-            let words: Vec<&str> = [now.label.as_str(), now.detail.as_str()].into_iter().filter(|part| !part.is_empty()).collect();
-            return report(ProgramState::Working, words.join(" · "), self.progress());
+            return report(ProgramState::Working, self.working_words(), self.progress());
         }
         let state = self.0.state.borrow();
         if let Some(panel) = &state.panel {
@@ -104,6 +105,18 @@ impl TuiApp {
             Some((rest, words)) => report(*rest, words.clone(), None),
             None => report(ProgramState::Idle, String::new(), None),
         }
+    }
+
+    /// NOW's words without what ticks (a run's clock, a countdown's seconds), so the status changes only when what
+    /// Kumi does does.
+    fn working_words(&self) -> String {
+        static CLOCK: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| regex::Regex::new(r" · \d+:\d{2}(:\d{2})?$").expect("regex"));
+        let now = self.now_line();
+        let label = CLOCK.replace(&now.label, "").into_owned();
+        let retry = self.0.state.borrow().retry.as_ref().map(|(reason, _)| reason.clone());
+        let detail = retry.unwrap_or(now.detail);
+        [label, detail].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ")
     }
 
     /// How far a run has got, 0–100, when Kumi knows: a /goal's turns against its budget, a /loop's rounds against
@@ -164,10 +177,35 @@ impl TuiApp {
         self.0.state.borrow_mut().status_sent = Some((report, now));
     }
 
-    /// Whether an answer, or the run it's part of, is the producer's to come back to: Kumi's window has been behind
-    /// another since before now.
-    pub(super) fn away(&self) -> bool {
-        !self.0.state.borrow().window_focused
+    /// Whether Kumi's window is known to be in front: the terminal said so last (and has said anything at all).
+    fn known_in_front(&self) -> bool {
+        let state = self.0.state.borrow();
+        state.focus_reported && state.window_focused
+    }
+
+    /// Whether the producer is looking elsewhere now. A terminal that has said nothing of focus may never say (tmux
+    /// without `focus-events on`): then the system says whether its app is in front, asked only when there's
+    /// something to tell.
+    async fn looking_away(&self) -> bool {
+        let (reported, focused) = {
+            let state = self.0.state.borrow();
+            (state.focus_reported, state.window_focused)
+        };
+        if reported {
+            return !focused;
+        }
+        let ask = self.0.options.front_app.clone().or_else(|| {
+            self.0.profile.app_id.clone().map(|id| {
+                Rc::new(move || {
+                    let id = id.clone();
+                    async move { alerts::app_in_front(&id).await }.boxed_local()
+                }) as FrontApp
+            })
+        });
+        match ask {
+            Some(ask) => ask().await == Some(false),
+            None => false,
+        }
     }
 
     /// Tells a producer who isn't looking: a desktop notification and a line in the DAW's window. At most one in
@@ -180,9 +218,12 @@ impl TuiApp {
             return;
         }
         let alert = Alert { body: alerts::one_line(body, 200), live: alerts::one_line(live, 120) };
+        if self.known_in_front() {
+            return;
+        }
         {
             let mut state = self.0.state.borrow_mut();
-            if state.window_focused || state.closing {
+            if state.closing {
                 return;
             }
             let gap = self.0.options.alert_gap_ms.unwrap_or(ALERT_GAP_MS);
@@ -209,7 +250,8 @@ impl TuiApp {
             let waiting = {
                 let mut state = a.state.borrow_mut();
                 state.alert_timer = None;
-                let waiting = state.alert_waiting.take().filter(|_| !state.window_focused && !state.closing);
+                let in_front = state.focus_reported && state.window_focused;
+                let waiting = state.alert_waiting.take().filter(|_| !in_front && !state.closing);
                 if waiting.is_some() {
                     state.alert_sent_at = perf_now();
                 }
@@ -225,9 +267,16 @@ impl TuiApp {
         let settings = self.0.options.away.clone();
         let channel = self.0.profile.notify;
         self.task(move |app| async move {
+            if !app.looking_away().await {
+                return Ok(());
+            }
             let controller = app.0.options.controller.clone();
+            // The DAW's line goes beside the notification: a busy DAW doesn't hold the notification up.
             if settings.live_status_bar && !alert.live.is_empty() && controller.has_daw_message() {
-                let _ = controller.daw_message(&alert.live).await;
+                let (controller, line) = (controller.clone(), alert.live.clone());
+                tokio::task::spawn_local(async move {
+                    let _ = controller.daw_message(&line).await;
+                });
             }
             if !settings.notifications || channel == NotifyChannel::None {
                 return Ok(());
@@ -235,14 +284,15 @@ impl TuiApp {
             // No notification, and no bell, over a take being recorded.
             if controller.daw_recording().await.ok().flatten() == Some(true) {
                 let mut state = app.0.state.borrow_mut();
-                if !state.window_focused && !state.closing && state.alert_timer.is_none() {
+                let in_front = state.focus_reported && state.window_focused;
+                if !in_front && !state.closing && state.alert_timer.is_none() {
                     state.alert_waiting = Some(Alert { live: String::new(), ..alert });
                     let recheck = app.0.options.alert_gap_ms.map_or(RECORDING_RECHECK_MS, |gap| gap as u64);
                     state.alert_timer = Some(app.alert_later(Duration::from_millis(recheck)));
                 }
                 return Ok(());
             }
-            if !app.away() {
+            if app.known_in_front() {
                 return Ok(());
             }
             app.notify(&alert.body);

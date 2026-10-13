@@ -1,7 +1,7 @@
 mod helpers;
 pub use helpers::*;
 mod away;
-pub use away::{AwaySettings, NotifierRunner};
+pub use away::{AwaySettings, FrontApp, NotifierRunner};
 mod draw_live;
 mod draw_panel;
 mod drawing;
@@ -96,6 +96,8 @@ pub struct TuiOptions {
     pub run_notifier: Option<NotifierRunner>,
     /// The shortest time between two alerts, and between checks whether the DAW still records; tests shorten it.
     pub alert_gap_ms: Option<f64>,
+    /// Whether the terminal's app is in front, for a terminal that says nothing of focus; None asks the system.
+    pub front_app: Option<FrontApp>,
 }
 /// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
 /// than Kumi's.
@@ -134,6 +136,7 @@ impl TuiOptions {
             away: AwaySettings::default(),
             run_notifier: None,
             alert_gap_ms: None,
+            front_app: None,
         }
     }
 }
@@ -287,6 +290,8 @@ struct State {
     /// since when it isn't.
     window_focused: bool,
     unfocused_since: Option<f64>,
+    /// The terminal has said something of focus since Kumi started (some never do).
+    focus_reported: bool,
     /// The status last written to the terminal and when; a write waiting for the gap after it.
     status_sent: Option<(StatusReport, f64)>,
     status_timer: Option<JoinHandle<()>>,
@@ -382,6 +387,7 @@ impl State {
             slots_check: None,
             window_focused: true,
             unfocused_since: None,
+            focus_reported: false,
             status_sent: None,
             status_timer: None,
             resting: None,
