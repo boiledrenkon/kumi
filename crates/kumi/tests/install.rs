@@ -302,6 +302,26 @@ async fn failed_unpack_or_probe_preserves_current_app() {
         assert!(out.0.borrow().contains(if unpack != 0 { "Unpacking it failed: last" } else { "new Kumi didn't start" }));
     }
 }
+/// Kumi's folder as the installer leaves it: its launcher and its app, which an uninstall looks for before anything.
+fn installed_kumi(home: &Path) {
+    put(home.join("bin").join(if cfg!(windows) { "kumi.cmd" } else { "kumi" }), launcher(cfg!(windows)));
+    put(home.join("app/package.json"), json!({"name":"kumi","version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "kumi");
+}
+/// Every file under `folder`, with what it holds.
+fn files_in(folder: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = vec![];
+    for entry in fs::read_dir(folder).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(files_in(&path));
+        } else {
+            files.push((path.display().to_string(), fs::read(&path).unwrap()));
+        }
+    }
+    files.sort();
+    files
+}
 #[tokio::test]
 #[cfg(not(windows))]
 async fn uninstall_preserves_producer_files_until_all_requested() {
@@ -311,6 +331,7 @@ async fn uninstall_preserves_producer_files_until_all_requested() {
     for part in ["app", "app.previous", "node", "bin", "projects"] {
         fs::create_dir_all(home.join(part)).unwrap();
     }
+    installed_kumi(home);
     put(home.join("auth.json"), "{}");
     let (mut refused, _) = io(&env);
     refused.confirm = Some(Rc::new(|_| async { false }.boxed_local()));
@@ -322,6 +343,10 @@ async fn uninstall_preserves_producer_files_until_all_requested() {
     }
     assert!(home.join("auth.json").exists());
     assert!(home.join("projects").exists());
+    // Without Kumi in it, the folder is the producer's to delete; installed again, --all takes everything.
+    assert_eq!(uninstall_installed(io(&env).0, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 1);
+    assert!(home.join("auth.json").exists());
+    installed_kumi(home);
     assert_eq!(uninstall_installed(io(&env).0, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
     assert!(!home.exists());
 }
@@ -331,6 +356,7 @@ fn with_bridge(dir: &Path) -> Env {
     for part in ["app", "node", "bin"] {
         fs::create_dir_all(home.join(part)).unwrap();
     }
+    installed_kumi(home);
     let package = home.join("bridge/1.0.52-1/package");
     put(package.join("package.json"), json!({"version":"1.0.52"}).to_string());
     put(package.join(executable_name("ableton-mcp-server")), "fixture");
@@ -397,7 +423,7 @@ async fn path_removal_honors_zdotdir_and_preserves_unrelated_lines() {
     let home = Path::new(&env["KUMI_HOME"]);
     let user = Path::new(&env["HOME"]);
     let zdot = dir.path().join("zdot");
-    fs::create_dir_all(home.join("app")).unwrap();
+    installed_kumi(home);
     put(zdot.join(".zshrc"), format!("alias ll='ls -l'\n\n{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", home.display()));
     put(user.join(".profile"), format!("{PATH_MARKER}\nexport EDITOR=vim\n"));
     put(user.join(".config/fish/conf.d/kumi.fish"), PATH_MARKER);
@@ -1205,11 +1231,12 @@ fn kumi_s_own(home: &Path) {
         ("downloads/kumi.tar.gz", 10),
         ("tools/ffmpeg", 500_000),
         ("models/basic-pitch.onnx", 400_000),
-        ("videos/abc/frame-1.jpg", 90_000),
+        ("videos/youtube-dqw4w9wgxcq/frames/1.jpg", 90_000),
         (".install.Xy12Ab/kumi.tar.gz", 10),
     ] {
         put(home.join(part), vec![b'k'; bytes]);
     }
+    put(home.join("app/package.json"), json!({"name":"kumi","version":KUMI_VERSION}).to_string());
 }
 #[cfg(not(windows))]
 #[tokio::test]
@@ -1586,7 +1613,7 @@ async fn uninstall_takes_out_kumis_path_line_however_it_is_spelled_and_nothing_e
     let home = user.join(".kumi");
     let mut env = env(dir.path());
     env.insert("KUMI_HOME".into(), home.display().to_string());
-    fs::create_dir_all(home.join("app")).unwrap();
+    installed_kumi(&home);
     let rc = |name: &str, kumi: &str| (name.to_string(), format!("alias ll='ls -l'\n\n{PATH_MARKER}\n{kumi}\n"));
     let ours = [
         rc(".zshrc", &format!("export PATH=\"{}/bin:$PATH\"", home.display())),
@@ -1619,4 +1646,248 @@ async fn uninstall_takes_out_kumis_path_line_however_it_is_spelled_and_nothing_e
     // The other Kumi's fish lines stay, so the file does.
     assert_eq!(fs::read_to_string(&fish).unwrap(), other_fish);
     assert!(out.0.borrow().contains("Took Kumi out of ~/.config/fish/conf.d/kumi.fish."), "{}", out.0.borrow());
+}
+/// A folder that isn't Kumi's own keeps everything in it, asked or not: the home folder (a scratch one, as HOME and
+/// KUMI_HOME both), a disk's root and where a disk is mounted (dry runs only), a relative path, a folder that isn't
+/// there, and one without Kumi's launcher and app.
+#[tokio::test]
+async fn uninstall_refuses_a_folder_that_isnt_kumis_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = dir.path().join("user");
+    // Kumi installed into the home folder itself, among the producer's own folders and startup file.
+    installed_kumi(&user);
+    for theirs in ["Downloads/song.wav", "Videos/clip.mov", "models/mine.onnx", "tools/mixdown.sh", "bin/backup.sh"] {
+        put(user.join(theirs), "theirs");
+    }
+    put(user.join(".profile"), format!("alias ll='ls -l'\n\n{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", user.display()));
+    let before = files_in(&user);
+    let mut env = env(dir.path());
+    env.insert("HOME".into(), user.display().to_string());
+    env.insert("KUMI_HOME".into(), user.display().to_string());
+    assert_eq!(not_kumis_own(&env["KUMI_HOME"], &env), Some(NotKumis::Home));
+    for options in [
+        UninstallOptions { dry_run: true, ..Default::default() },
+        UninstallOptions { yes: true, ..Default::default() },
+        UninstallOptions { all: true, yes: true, ..Default::default() },
+    ] {
+        let (io, out) = io(&env);
+        assert_eq!(uninstall_installed(io, options).await.unwrap(), 1);
+        let said = out.0.borrow().clone();
+        assert!(
+            said.starts_with("Kumi won't uninstall from ~: it's your home folder, so the names Kumi uses there (bin, downloads, tools…) could be your own. Nothing was removed."),
+            "{said}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            said.contains(&format!(
+                "Kumi's own there, to take out by hand: ~/app and ~/bin/kumi, and the two lines under \"{PATH_MARKER}\""
+            )),
+            "{said}"
+        );
+        assert_eq!(files_in(&user), before);
+    }
+    // A disk's root, and where a disk is mounted: dry runs only.
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
+    assert_eq!(not_kumis_own(root, &env), Some(NotKumis::Root));
+    #[cfg(unix)]
+    assert_eq!(not_kumis_own("/dev", &env), Some(NotKumis::Root));
+    let mut at_root = env.clone();
+    at_root.insert("KUMI_HOME".into(), root.into());
+    for all in [false, true] {
+        let (io, out) = io(&at_root);
+        assert_eq!(uninstall_installed(io, UninstallOptions { all, dry_run: true, ..Default::default() }).await.unwrap(), 1);
+        let said = out.0.borrow().clone();
+        assert!(
+            said.starts_with(&format!("Kumi won't uninstall from {root}: it's the root of a disk")) && !said.contains("would remove"),
+            "{said}"
+        );
+    }
+    // A relative path, a folder that isn't there, and one without Kumi's launcher and app.
+    let elsewhere = dir.path().join("elsewhere");
+    for theirs in ["downloads/song.wav", "tools/mixdown.sh", "bin/backup.sh", "app/notes.txt"] {
+        put(elsewhere.join(theirs), "theirs");
+    }
+    let unmarked = files_in(&elsewhere);
+    for (folder, why, words) in [
+        ("relkumi".to_string(), NotKumis::Relative, "KUMI_HOME is a relative path"),
+        (
+            dir.path().join("nowhere").display().to_string(),
+            NotKumis::Missing,
+            "(Kumi's folder) to uninstall Kumi from. Nothing was removed.",
+        ),
+        (elsewhere.display().to_string(), NotKumis::Unmarked, "it holds no Kumi launcher (bin/kumi) and app"),
+    ] {
+        assert_eq!(not_kumis_own(&folder, &env), Some(why), "{folder}");
+        let mut there = env.clone();
+        there.insert("KUMI_HOME".into(), folder.clone());
+        let (io, out) = io(&there);
+        assert_eq!(uninstall_installed(io, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 1);
+        assert!(out.0.borrow().contains(words), "{folder}: {}", out.0.borrow());
+    }
+    assert_eq!(files_in(&elsewhere), unmarked);
+    assert!(!dir.path().join("nowhere").exists());
+}
+/// Kumi's parts are taken by their exact names, so a Downloads beside them stays; a fetched folder (tools, models,
+/// videos) goes only while it holds only what Kumi put there.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_takes_kumis_names_by_their_case_and_leaves_folders_holding_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    installed_kumi(home);
+    for (file, text) in [
+        ("Downloads/song.wav", "theirs"),
+        ("videos/youtube-dqw4w9wgxcq/meta.json", "{}"),
+        ("videos/holiday.mov", "theirs"),
+        ("tools/ffmpeg/ffmpeg", "Kumi's"),
+        ("tools/mixdown.sh", "theirs"),
+        ("models/basic-pitch.onnx", "Kumi's"),
+        ("models/slots/0123456789ab/model.onnx", "Kumi's"),
+    ] {
+        put(home.join(file), text);
+    }
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains("): app, bin, models.")
+            && said.contains("/tools and ")
+            && said.contains("/videos stay: they hold more than Kumi put there."),
+        "{said}"
+    );
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    for kept in
+        ["Downloads/song.wav", "videos/holiday.mov", "videos/youtube-dqw4w9wgxcq/meta.json", "tools/mixdown.sh", "tools/ffmpeg/ffmpeg"]
+    {
+        assert!(home.join(kept).exists(), "{kept}");
+    }
+    assert!(!home.join("models").exists() && !home.join("app").exists() && !home.join("bin").exists());
+}
+/// A part that can't go doesn't leave Kumi half removed with a bare error: every other part is tried, what stayed is
+/// said with why, and Kumi itself (app, bin and its PATH line) stays so kumi uninstall can run again.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_tries_every_part_says_what_stayed_and_keeps_kumi_to_run_again() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root removes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    kumi_s_own(home);
+    for file in THEIRS {
+        put(home.join(file), "theirs");
+    }
+    let rc = format!("{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", home.display());
+    put(user.join(".profile"), &rc);
+    // A folder in app.previous this account can't empty.
+    let stuck = home.join("app.previous/locked");
+    put(stuck.join("file"), "x");
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o555)).unwrap();
+    let (removing, out) = io(&env);
+    let code = uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains("Kumi is partly removed: ")
+            && said.contains("/app.previous couldn't go (Permission denied (os error 13)). Kumi itself stays, so you can run kumi uninstall again once that's sorted (if another account owns it: sudo chown -R $USER "),
+        "{said}"
+    );
+    assert!(!said.contains("Took Kumi out of"), "{said}");
+    for part in
+        ["app.previous.old", "app.new", "app.replaced", "app.rollback", "node", "downloads", "tools", "models", "videos", ".install.Xy12Ab"]
+    {
+        assert!(!home.join(part).exists(), "{part} is still there");
+    }
+    assert!(home.join("app/kumi").exists() && home.join("bin/kumi").exists());
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), rc);
+    for file in THEIRS {
+        assert_eq!(fs::read_to_string(home.join(file)).unwrap(), "theirs", "{file}");
+    }
+    // Sorted, it runs again and finishes, the PATH line last.
+    let (again, out) = io(&env);
+    assert_eq!(uninstall_installed(again, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    assert!(!home.join("app").exists() && !home.join("app.previous").exists() && !home.join("bin").exists());
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "");
+}
+/// A startup file uninstall can't change is named with the lines to take out by hand, in the dry run too.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_names_a_startup_file_it_cant_change_and_the_lines_to_take_out() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root writes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    installed_kumi(home);
+    let line = format!("export PATH=\"{}/bin:$PATH\"", home.display());
+    let rc = format!("alias ll='ls -l'\n\n{PATH_MARKER}\n{line}\n");
+    let profile = user.join(".profile");
+    put(&profile, &rc);
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o444)).unwrap();
+    let lines = format!("lines 3–4: {PATH_MARKER} / {line}");
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(said.contains(&format!("It couldn't change ~/.profile (it isn't writable): take out {lines} by hand.")), "{said}");
+    assert!(!said.contains("take Kumi out of"), "{said}");
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 1);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!("Couldn't take Kumi out of ~/.profile (Permission denied (os error 13)): take out {lines} by hand.")),
+        "{said}"
+    );
+    assert_eq!(fs::read_to_string(&profile).unwrap(), rc);
+    assert!(!home.join("app").exists());
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o644)).unwrap();
+}
+/// Kumi's block is found as install.sh finds it (CRLF endings, spaces after the marker), and one inside an if, for or
+/// function body is left alone and named: taking it out could leave an empty body, which the shell refuses.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_finds_kumis_block_as_install_sh_does_and_leaves_one_in_a_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    installed_kumi(home);
+    let line = format!("export PATH=\"{}/bin:$PATH\"", home.display());
+    put(user.join(".zshrc"), format!("alias ll='ls -l'\r\n\r\n{PATH_MARKER}\r\n{line}\r\n"));
+    put(user.join(".zprofile"), format!("alias ll='ls -l'\n\n{PATH_MARKER}   \n{line}\n"));
+    let in_if = format!("if [ -d /opt ]; then\n{PATH_MARKER}\n{line}\nfi\n");
+    let in_function = format!("setup() {{\n  # Kumi\n  {PATH_MARKER}\n  {line}\n}}\n");
+    put(user.join(".bashrc"), &in_if);
+    put(user.join(".profile"), &in_function);
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    for words in [
+        "It would also take Kumi out of ~/.zshrc and ~/.zprofile.".to_string(),
+        format!("It would leave Kumi's PATH line in ~/.bashrc alone (lines 2–3: {PATH_MARKER} / {line}): it sits inside an if, for or function there."),
+        "It would leave Kumi's PATH line in ~/.profile alone (lines 3–4: ".into(),
+    ] {
+        assert!(said.contains(&words), "{words}: {said}");
+    }
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    assert_eq!(fs::read_to_string(user.join(".zshrc")).unwrap(), "alias ll='ls -l'\r\n");
+    assert_eq!(fs::read_to_string(user.join(".zprofile")).unwrap(), "alias ll='ls -l'\n");
+    assert_eq!(fs::read_to_string(user.join(".bashrc")).unwrap(), in_if);
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), in_function);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!("Left Kumi's PATH line in ~/.bashrc alone (lines 2–3: {PATH_MARKER} / {line}): it sits inside an if, for or function there; take it out by hand if you like.")),
+        "{said}"
+    );
 }

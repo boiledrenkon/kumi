@@ -267,11 +267,7 @@ pub fn app_version(folder: &str) -> Option<String> {
 }
 /// `path` as the producer reads it: their home folder as ~.
 fn tilde(path: &str) -> String {
-    let home = home::home_dir().unwrap_or_default().display().to_string();
-    match path.strip_prefix(&home) {
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with(['/', '\\'])) => format!("~{rest}"),
-        _ => path.into(),
-    }
+    tilde_in(path, &home::home_dir().unwrap_or_default().display().to_string())
 }
 /// The part of Kumi's folder that belongs to another account (an install run with sudo), so Kumi can't update
 /// it: the folder itself, or one of what an update moves. None for root, who can change anything.
@@ -742,6 +738,9 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     }
     let older = newer_version(KUMI_VERSION, &manifest.kumi);
     let downloads = join(&home, "downloads");
+    // Gone again once emptied, but only when this update made it: never a folder that was there (in a home folder
+    // used as Kumi's, on a disk that ignores case, `downloads` is the producer's Downloads).
+    let made = fs::symlink_metadata(&downloads).is_err();
     if let Err(error) = tokio::fs::create_dir_all(&downloads).await {
         say(Stopped::Disk(error).said(&home));
         return Ok(1);
@@ -848,7 +847,9 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     .await;
     drop(cleanup);
     // Only when it's empty: a file a scan still holds stays for the next update to clear.
-    let _ = fs::remove_dir(&downloads);
+    if made {
+        let _ = fs::remove_dir(&downloads);
+    }
     let code = result?;
     if code != 0 {
         return Ok(code);
@@ -1075,11 +1076,48 @@ pub fn startup_files(env: &Env) -> Vec<String> {
     }
     files
 }
-/// The startup files with Kumi's PATH line, and what each holds once it's out (None: fish's kumi.fish goes, once
-/// nothing else is in it). Kumi's line is the one under its marker naming this Kumi's bin, as written or spelled from
-/// $HOME, ${HOME} or ~, as the installer finds it; the installer's blank line above the marker goes with it, and so
-/// does a marker with no PATH under it. A marker over another Kumi's PATH line, and every line under no marker, stay.
-pub fn path_lines(env: &Env, home: &str) -> Vec<(String, Option<String>)> {
+/// Kumi's PATH lines in one startup file: what an uninstall takes out, and what it leaves alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathLines {
+    pub file: String,
+    /// What the file holds once Kumi's lines are out; None when it goes (fish's kumi.fish with nothing else in it).
+    pub after: Option<String>,
+    /// Kumi's lines it takes out, with their line numbers (from 1), as they are in the file.
+    pub removed: Vec<(usize, String)>,
+    /// Kumi's lines it leaves alone because they sit inside an if, for or function there: taking them out could leave
+    /// an empty body, which the shell refuses.
+    pub left: Vec<(usize, String)>,
+}
+/// A line that opens a body Kumi's lines could sit in: one ending in `then`, `do`, `{`, `else` or a case's `in`; in
+/// fish, one starting with `if`, `for`, `while`, `function`, `begin`, `switch`, `case` or `else` that doesn't end it.
+fn opens_a_body(line: &str, fish: bool) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let last = words.last().copied().unwrap_or("");
+    if fish {
+        return words.first().is_some_and(|first| ["if", "for", "while", "function", "begin", "switch", "case", "else"].contains(first))
+            && last != "end";
+    }
+    ["then", "do", "{", "else", "in"].contains(&last) || last.ends_with(";then") || last.ends_with(";do")
+}
+/// A line that closes such a body: `fi`, `done`, `}`, `esac`, `else`, `elif`, `;;`, or fish's `end`.
+fn closes_a_body(line: &str) -> bool {
+    line.split_whitespace().next().is_some_and(|first| {
+        ["fi", "done", "}", "esac", "else", "elif", ";;", "end"].contains(&first.trim_end_matches(';'))
+            || first.starts_with('}')
+            || first == ";;"
+    })
+}
+/// A line with code on it: not blank, not a comment.
+fn code(line: &&str) -> bool {
+    let line = line.trim();
+    !line.is_empty() && !line.starts_with('#')
+}
+/// The startup files with Kumi's PATH lines. A marker is found as install.sh finds it, CRLF endings and trailing
+/// spaces included. Kumi's line is the one under it naming this Kumi's bin, as written or spelled from $HOME,
+/// ${HOME} or ~; the installer's blank line above the marker goes with them, and so does a marker with no PATH line
+/// under it. A marker over another Kumi's PATH line, every line under no marker, and a block inside an if, for or
+/// function body stay.
+pub fn path_lines(env: &Env, home: &str) -> Vec<PathLines> {
     if cfg!(windows) {
         return vec![];
     }
@@ -1096,42 +1134,93 @@ pub fn path_lines(env: &Env, home: &str) -> Vec<(String, Option<String>)> {
         let Ok(text) = fs::read_to_string(&file) else { continue };
         let lines: Vec<&str> = text.split('\n').collect();
         let mut kept: Vec<&str> = vec![];
-        let mut changed = false;
+        let (mut removed, mut left) = (vec![], vec![]);
         let mut index = 0;
         while index < lines.len() {
+            let line = lines[index];
             let next = lines.get(index + 1).copied();
-            if lines[index] == PATH_MARKER && !next.is_some_and(|next| !ours(next) && next.contains("PATH")) {
-                if kept.last() == Some(&"") {
-                    kept.pop();
-                }
-                index += if next.is_some_and(ours) { 2 } else { 1 };
-                changed = true;
+            let other_kumis = next.is_some_and(|next| !ours(next) && next.contains("PATH"));
+            if line.trim() != PATH_MARKER || other_kumis {
+                kept.push(line);
+                index += 1;
                 continue;
             }
-            kept.push(lines[index]);
-            index += 1;
+            let block = if next.is_some_and(ours) { 2 } else { 1 };
+            // The code around the block, past blank lines and comments: an if, for or function it may sit in.
+            let above = kept.iter().rev().find(|line| code(line)).copied();
+            let below = lines[index + block..].iter().find(|line| code(line)).copied();
+            let indented = line.starts_with([' ', '\t']) || (block == 2 && next.is_some_and(|next| next.starts_with([' ', '\t'])));
+            if indented || above.is_some_and(|above| opens_a_body(above, file.ends_with(".fish"))) || below.is_some_and(closes_a_body) {
+                left.extend((index..index + block).map(|at| (at + 1, lines[at].trim_end_matches('\r').to_string())));
+                kept.extend(&lines[index..index + block]);
+            } else {
+                if kept.last().is_some_and(|last| last.trim().is_empty()) {
+                    kept.pop();
+                }
+                removed.extend((index..index + block).map(|at| (at + 1, lines[at].trim_end_matches('\r').to_string())));
+            }
+            index += block;
         }
-        if changed {
-            let kept = kept.join("\n");
-            let emptied = file.ends_with("kumi.fish") && kept.trim().is_empty();
-            found.push((file, (!emptied).then_some(kept)));
+        if removed.is_empty() && left.is_empty() {
+            continue;
         }
+        let after = kept.join("\n");
+        let emptied = file.ends_with("kumi.fish") && after.trim().is_empty();
+        found.push(PathLines { file, after: (!emptied).then_some(after), removed, left });
     }
     found
 }
-pub fn remove_path_lines(io: &InstalledIo, home: &str) {
-    let actual = home::home_dir().unwrap_or_default().display().to_string();
-    let user = io.env.get("HOME").filter(|s| !s.is_empty()).map(String::as_str).unwrap_or(&actual);
-    for (file, kept) in path_lines(&io.env, home) {
-        let shown = file.replacen(user, "~", 1);
-        let result = match &kept {
-            Some(text) => fs::write(&file, text).map(|()| format!("Took Kumi out of {shown}.")),
-            None => remove(&file).map(|()| format!("Took Kumi out of fish ({shown} is gone).")),
-        };
-        if let Ok(said) = result {
-            io.out.write(&format!("{said}\n"));
-        }
+/// Whether this account can make the change `lines` needs: write the file, or remove it from its folder.
+fn can_change(lines: &PathLines) -> bool {
+    #[cfg(unix)]
+    {
+        let target = if lines.after.is_some() { lines.file.clone() } else { dirname(&lines.file) };
+        let Ok(path) = std::ffi::CString::new(target) else { return false };
+        // SAFETY: `path` is a valid C string.
+        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = lines;
+        true
+    }
+}
+/// Kumi's lines as the producer would take them out by hand.
+fn by_hand(lines: &[(usize, String)]) -> String {
+    let first = lines.first().map_or(0, |(at, _)| *at);
+    let last = lines.last().map_or(0, |(at, _)| *at);
+    let span = if first == last { format!("line {first}") } else { format!("lines {first}–{last}") };
+    format!("{span}: {}", lines.iter().map(|(_, line)| line.as_str()).collect::<Vec<_>>().join(" / "))
+}
+/// Takes Kumi's PATH lines out of the startup files, and says what it did and what it couldn't do (with the lines to
+/// take out by hand). False when a file couldn't be changed.
+pub fn remove_path_lines(io: &InstalledIo, home: &str) -> bool {
+    let user = user_home(&io.env);
+    let mut changed = true;
+    for lines in path_lines(&io.env, home) {
+        let shown = tilde_in(&lines.file, &user);
+        if !lines.left.is_empty() {
+            io.out.write(&format!(
+                "Left Kumi's PATH line in {shown} alone ({}): it sits inside an if, for or function there; take it out by hand if you like.\n",
+                by_hand(&lines.left)
+            ));
+        }
+        if lines.removed.is_empty() {
+            continue;
+        }
+        let result = match &lines.after {
+            Some(text) => fs::write(&lines.file, text).map(|()| format!("Took Kumi out of {shown}.")),
+            None => remove(&lines.file).map(|()| format!("Took Kumi out of fish ({shown} is gone).")),
+        };
+        io.out.write(&match result {
+            Ok(said) => format!("{said}\n"),
+            Err(error) => {
+                changed = false;
+                format!("Couldn't take Kumi out of {shown} ({error}): take out {} by hand.\n", by_hand(&lines.removed))
+            }
+        });
+    }
+    changed
 }
 async fn remove_windows_path(run: Run, home: &str) {
     if !cfg!(windows) {
@@ -1257,9 +1346,10 @@ pub struct UninstallOptions {
     /// Say what would go, and remove nothing.
     pub dry_run: bool,
 }
-/// What `kumi uninstall` takes out of Kumi's folder: Kumi and the one kept for a rollback, what updates and repairs
-/// leave behind (`app.replaced` is the Windows installer's), and what Kumi fetched and fetches again when needed (programs, models, videos). Never conversations,
-/// notes, recipes, sign-ins, the library or references; the bridge's files stay while Live uses them.
+/// What `kumi uninstall` takes out of Kumi's folder, by these exact names: Kumi and the one kept for a rollback, what
+/// updates and repairs leave behind (`app.replaced` is the Windows installer's), and what Kumi fetched and fetches
+/// again when needed (programs, models, videos; each only while it holds only Kumi's own). Never conversations, notes,
+/// recipes, sign-ins, the library or references; the bridge's files stay while Live uses them.
 pub const KUMI_S_OWN: [&str; 13] = [
     "app",
     "app.previous",
@@ -1277,29 +1367,190 @@ pub const KUMI_S_OWN: [&str; 13] = [
 ];
 /// What the producer keeps unless they say --all.
 const KEPT: &str = "conversations, notes, recipes, sign-ins, library and references";
-/// The parts of `home` an uninstall removes, those that are there: with --all everything, the bridge's files
-/// excepted while Live uses them; otherwise Kumi's own and what a stopped installer left (`.install.*`).
-fn own_parts(home: &str, all: bool, bridge_stays: bool) -> Result<Vec<String>, RuntimeError> {
-    let inside = || -> Result<Vec<String>, RuntimeError> {
-        Ok(match fs::read_dir(home) {
-            Ok(entries) => {
-                entries.map(|entry| entry.map(|entry| entry.path().display().to_string())).collect::<Result<Vec<_>, _>>().map_err(error)?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
-            Err(e) => return Err(error(e)),
-        })
+/// Why a folder isn't one of Kumi's own to uninstall from. In the home folder or at a disk's root, the names Kumi
+/// uses (bin, downloads, tools…) could be the producer's own; on macOS and Windows `downloads` is also their Downloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotKumis {
+    /// A relative path: where it points depends on the folder Kumi runs in.
+    Relative,
+    /// There's no such folder.
+    Missing,
+    /// The home folder itself.
+    Home,
+    /// A disk's root: /, C:\, or where a disk is mounted.
+    Root,
+    /// It holds no Kumi launcher (bin/kumi) and app.
+    Unmarked,
+}
+/// Whether `home` is a folder of Kumi's own, which an uninstall may take Kumi's parts out of; why not, when it isn't.
+pub fn not_kumis_own(home: &str, env: &Env) -> Option<NotKumis> {
+    let folder = Path::new(home);
+    if !folder.is_absolute() {
+        return Some(NotKumis::Relative);
+    }
+    let Ok(real) = fs::canonicalize(folder) else { return Some(NotKumis::Missing) };
+    let homes = [env.get("HOME").cloned(), env.get("USERPROFILE").cloned(), home::home_dir().map(|home| home.display().to_string())];
+    if homes.into_iter().flatten().filter(|home| !home.is_empty()).any(|home| same_folder(&real, Path::new(&home))) {
+        return Some(NotKumis::Home);
+    }
+    if real.parent().is_none() || mount_point(&real) {
+        return Some(NotKumis::Root);
+    }
+    let launcher = real.join("bin").join(if cfg!(windows) { "kumi.cmd" } else { "kumi" });
+    let names_kumi = |app: &str| {
+        let package = fs::read(real.join(app).join("package.json")).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        package.is_some_and(|package| package["name"] == "kumi")
     };
-    let parts: Vec<String> = match (all, bridge_stays) {
-        (true, true) => inside()?.into_iter().filter(|path| basename(path) != "bridge").collect(),
-        (true, false) => vec![home.into()],
-        (false, _) => KUMI_S_OWN
+    if !launcher.is_file() || !(names_kumi("app") || names_kumi("app.previous")) {
+        return Some(NotKumis::Unmarked);
+    }
+    None
+}
+/// Whether two paths name one folder, however each is spelled (case, links, a trailing separator).
+fn same_folder(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (fs::metadata(a), fs::metadata(b)) {
+            return a.dev() == b.dev() && a.ino() == b.ino();
+        }
+    }
+    fs::canonicalize(a).ok().zip(fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b)
+}
+/// Whether a disk is mounted at `path`.
+fn mount_point(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(here), Some(Ok(above))) = (fs::metadata(path), path.parent().map(fs::metadata)) {
+            return here.dev() != above.dev();
+        }
+    }
+    let _ = path;
+    false
+}
+/// `path` as the producer reads it, with `home` (their home folder) as ~.
+fn tilde_in(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['/', '\\']);
+    match path.strip_prefix(home) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with(['/', '\\'])) => format!("~{rest}"),
+        _ => path.into(),
+    }
+}
+/// The producer's home folder, as `env` has it.
+fn user_home(env: &Env) -> String {
+    let actual = home::home_dir().unwrap_or_default().display().to_string();
+    env.get("HOME").or_else(|| env.get("USERPROFILE")).filter(|s| !s.is_empty()).cloned().unwrap_or(actual)
+}
+/// Why an uninstall won't take anything out of `home`, and Kumi's own parts there to take out by hand.
+fn not_kumis_said(home: &str, why: NotKumis, display: &dyn Fn(&str) -> String) -> String {
+    let shown = display(home);
+    let names = "so the names Kumi uses there (bin, downloads, tools…) could be your own";
+    let mut said = match why {
+        NotKumis::Relative => {
+            return format!(
+                "Kumi won't uninstall from {shown}: KUMI_HOME is a relative path, so where it points depends on the folder you're in. Set it to the whole path of Kumi's folder and run kumi uninstall again. Nothing was removed."
+            )
+        }
+        NotKumis::Missing => return format!("There's no {shown} (Kumi's folder) to uninstall Kumi from. Nothing was removed."),
+        NotKumis::Home => format!("Kumi won't uninstall from {shown}: it's your home folder, {names}."),
+        NotKumis::Root => format!("Kumi won't uninstall from {shown}: it's the root of a disk, {names}."),
+        NotKumis::Unmarked => format!("Kumi won't uninstall from {shown}: it holds no Kumi launcher (bin/kumi) and app, {names}."),
+    };
+    said.push_str(" Nothing was removed.");
+    let mut parts: Vec<String> = ["app", "app.previous", "app.previous.old", "app.new", "app.replaced", "app.rollback"]
+        .into_iter()
+        .map(|part| join(home, part))
+        .filter(|part| has_app(part))
+        .collect();
+    let launcher = join(&join(home, "bin"), if cfg!(windows) { "kumi.cmd" } else { "kumi" });
+    if fs::read_to_string(&launcher).is_ok_and(|text| text.contains("KUMI_INSTALLED")) {
+        parts.push(launcher);
+    }
+    if !parts.is_empty() {
+        let shown: Vec<String> = parts.iter().map(|part| display(part)).collect();
+        let path = if cfg!(windows) {
+            format!("{} from your PATH", display(&join(home, "bin")))
+        } else {
+            format!("the two lines under \"{PATH_MARKER}\" in your shell's startup file")
+        };
+        said.push_str(&format!(" Kumi's own there, to take out by hand: {}, and {path}.", listed(&shown)));
+    }
+    said
+}
+/// Whether a folder Kumi fetches into (tools, models, videos) holds only what Kumi puts there.
+fn holds_kumis_own(part: &str, folder: &Path) -> bool {
+    use kumi_runtime::models::pinned::{AFX_REP, BASIC_PITCH, CLAP};
+    let Ok(entries) = fs::read_dir(folder) else { return false };
+    let names = |folder: &Path| -> Vec<String> {
+        fs::read_dir(folder)
             .into_iter()
-            .filter(|part| *part != "bridge" || !bridge_stays)
-            .map(|part| join(home, part))
-            .chain(inside()?.into_iter().filter(|path| basename(path).starts_with(".install.")))
-            .collect(),
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect()
     };
-    Ok(parts.into_iter().filter(|path| fs::symlink_metadata(path).is_ok()).collect())
+    let litter = |name: &str| [".DS_Store", "Thumbs.db", "desktop.ini"].contains(&name);
+    entries.filter_map(Result::ok).all(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        litter(&name)
+            || match part {
+                "tools" => {
+                    ["ffmpeg", "whisper", "whisper-models", "yt-dlp", "hands"].contains(&name.as_str())
+                        || [".ffmpeg-", ".whisper-", ".yt-dlp"].iter().any(|start| name.starts_with(start))
+                }
+                "models" => {
+                    [CLAP.name, AFX_REP.name, BASIC_PITCH.name, "slots"].contains(&name.as_str())
+                        || name.starts_with("onnxruntime")
+                        || name.contains(".partial-")
+                        || name.contains(".unpacking-")
+                }
+                // A video's folder, named as Kumi names them (its site and id, in lowercase), with Kumi's files in it.
+                "videos" => {
+                    entry.path().is_dir()
+                        && name.contains('-')
+                        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+                        && names(&entry.path()).iter().all(|inside| {
+                            litter(inside)
+                                || ["meta.json", "cues.json", "captions", "frames", "sound"].contains(&inside.as_str())
+                                || inside.starts_with("speech-")
+                        })
+                }
+                _ => false,
+            }
+    })
+}
+/// What an uninstall takes out of `home`, a folder of Kumi's own: with --all everything in it (the bridge's files
+/// excepted while Live uses them); otherwise Kumi's parts, by their exact names as the folder lists them, and what a
+/// stopped installer left (`.install.*`). In KUMI_S_OWN's order. The second list: fetched folders that stay because
+/// they hold more than Kumi put there.
+fn own_parts(home: &str, all: bool, bridge_stays: bool) -> Result<(Vec<String>, Vec<String>), RuntimeError> {
+    let mut names: Vec<String> = match fs::read_dir(home) {
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<_, _>>()
+            .map_err(error)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(error(e)),
+    };
+    names.sort_by_key(|name| (KUMI_S_OWN.iter().position(|own| own == name).unwrap_or(KUMI_S_OWN.len()), name.clone()));
+    let (mut parts, mut left) = (vec![], vec![]);
+    for name in names {
+        let path = join(home, &name);
+        if name == "bridge" && bridge_stays {
+            continue;
+        }
+        if all {
+            parts.push(path);
+        } else if name.starts_with(".install.") || KUMI_S_OWN.contains(&name.as_str()) {
+            if ["tools", "models", "videos"].contains(&name.as_str()) && !holds_kumis_own(&name, Path::new(&path)) {
+                left.push(path);
+            } else {
+                parts.push(path);
+            }
+        }
+    }
+    Ok((parts, left))
 }
 /// The bytes in `path`, its folders walked without following links.
 fn bytes_in(path: &Path) -> u64 {
@@ -1318,11 +1569,27 @@ fn listed(words: &[String]) -> String {
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
+/// What's said of the fetched folders that stay because they hold more than Kumi put there.
+fn left_said(left: &[String], display: &dyn Fn(&str) -> String) -> Option<String> {
+    let shown: Vec<String> = left.iter().map(|path| display(path)).collect();
+    match shown.len() {
+        0 => None,
+        1 => Some(format!("{} stays: it holds more than Kumi put there.", shown[0])),
+        _ => Some(format!("{} stay: they hold more than Kumi put there.", listed(&shown))),
+    }
+}
 /// `kumi uninstall --dry-run`: what would go, and what would stay.
 fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dyn Fn(&str) -> String) -> Result<i32, RuntimeError> {
     let say = |s: String| io.out.write(&format!("{s}\n"));
+    if let Some(folder) = not_yours(home) {
+        say(format!(
+            "It would stop before removing anything: {} belongs to another account (installed with sudo?). Run this first: {}",
+            display(&folder),
+            chown_line(home)
+        ));
+    }
     let bridge = find_bridge_config(&io.env).is_some();
-    let parts = own_parts(home, options.all, bridge && bridge_uses(&join(home, "bridge"), &io.env))?;
+    let (parts, left) = own_parts(home, options.all, bridge && bridge_uses(&join(home, "bridge"), &io.env))?;
     let bytes: u64 = parts.iter().map(|part| bytes_in(Path::new(part))).sum();
     if options.all {
         say(format!("kumi uninstall --all would remove {} ({}), with your {KEPT}.", display(home), size(bytes as f64)));
@@ -1332,8 +1599,13 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
         let names: Vec<String> = parts.iter().map(|part| basename(part)).collect();
         say(format!("kumi uninstall would remove from {} ({}): {}.", display(home), size(bytes as f64), names.join(", ")));
     }
+    if let Some(said) = left_said(&left, display) {
+        say(said);
+    }
+    let lines = path_lines(&io.env, home);
+    let files: Vec<String> =
+        lines.iter().filter(|lines| !lines.removed.is_empty() && can_change(lines)).map(|lines| display(&lines.file)).collect();
     let mut also = vec![];
-    let files: Vec<String> = path_lines(&io.env, home).into_iter().map(|(file, _)| display(&file)).collect();
     if cfg!(windows) {
         also.push("take Kumi out of your PATH".to_string());
     } else if !files.is_empty() {
@@ -1345,22 +1617,50 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
     if !also.is_empty() {
         say(format!("It would also {}.", also.join(", and ")));
     }
+    for lines in &lines {
+        if !lines.removed.is_empty() && !can_change(lines) {
+            say(format!("It couldn't change {} (it isn't writable): take out {} by hand.", display(&lines.file), by_hand(&lines.removed)));
+        }
+        if !lines.left.is_empty() {
+            say(format!(
+                "It would leave Kumi's PATH line in {} alone ({}): it sits inside an if, for or function there.",
+                display(&lines.file),
+                by_hand(&lines.left)
+            ));
+        }
+    }
     if !options.all {
         say(format!("Your {KEPT} would stay in {}.", display(home)));
     }
     say("Nothing was removed (--dry-run).".into());
     Ok(0)
 }
+/// Removes each of `parts`; the ones that stayed, with why.
+#[cfg(not(windows))]
+fn removing(parts: &[String]) -> Vec<(String, std::io::Error)> {
+    parts.iter().filter_map(|path| remove(path).err().map(|error| (path.clone(), error))).collect()
+}
 pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> Result<i32, RuntimeError> {
     let say = |s: String| io.out.write(&format!("{s}\n"));
     let home = kumi_home(&io.env);
-    let display = |path: &str| path.replacen(&home::home_dir().unwrap_or_default().display().to_string(), "~", 1);
+    let user = user_home(&io.env);
+    let display = |path: &str| tilde_in(path, &user);
+    // Before any question, any change, or any look inside: a folder that isn't Kumi's own keeps everything in it.
+    if let Some(why) = not_kumis_own(&home, &io.env) {
+        say(not_kumis_said(&home, why, &display));
+        return Ok(1);
+    }
     if options.dry_run {
         return dry_run(&io, &home, options, &display);
     }
+    // A folder another account owns can't lose its parts: said before anything goes, so Kumi isn't left half removed.
+    if not_yours(&home).is_some() {
+        say(format!("{} Nothing was removed.", owner_advice(&home)));
+        return Ok(1);
+    }
     let run = io.run.clone().unwrap_or_else(default_run);
     let keeps = if options.all {
-        "Everything in it goes too: your conversations, notes, recipes and sign-ins.".to_string()
+        format!("Everything in it goes too: your {KEPT}.")
     } else {
         format!("Your {KEPT} stay (add --all to remove them too).")
     };
@@ -1369,18 +1669,32 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         return Ok(1);
     }
     let bridge = remove_bridge(&io, run.clone()).await?;
-    remove_path_lines(&io, &home);
-    if cfg!(windows) {
-        step(io.out.clone(), &io.env, "Taking Kumi out of your PATH…", remove_windows_path(run, &home), false).await;
-    }
     let bridge_stays = bridge != RemovedBridge::Removed && bridge_uses(&join(&home, "bridge"), &io.env);
-    let parts = own_parts(&home, options.all, bridge_stays)?;
+    let (parts, left) = own_parts(&home, options.all, bridge_stays)?;
     let bytes: u64 = parts.iter().map(|part| bytes_in(Path::new(part))).sum();
+    // Every part is tried, Kumi itself (app and bin) last: when another part stays, Kumi does too, so kumi uninstall
+    // can run again once that's sorted.
+    #[cfg(not(windows))]
+    let (stayed, kumi_stays) = {
+        let (kumi, rest): (Vec<String>, Vec<String>) =
+            parts.iter().cloned().partition(|path| ["app", "bin"].contains(&basename(path).as_str()));
+        let mut stayed = removing(&rest);
+        let kumi_stays = !stayed.is_empty();
+        if !kumi_stays {
+            stayed = removing(&kumi);
+            if stayed.is_empty() && options.all && !bridge_stays {
+                stayed.extend(remove(&home).err().map(|error| (home.clone(), error)));
+            }
+        }
+        (stayed, kumi_stays)
+    };
     #[cfg(windows)]
-    {
+    let (stayed, kumi_stays): (Vec<(String, std::io::Error)>, bool) = {
+        // Windows won't remove a running program: a detached cmd does, once this Kumi has exited.
         use std::os::windows::process::CommandExt;
+        let targets = if options.all && !bridge_stays { vec![home.clone()] } else { parts.clone() };
         let list =
-            parts.iter().map(|path| format!("rmdir /s /q \"{path}\" 2>nul & del /f /q \"{path}\" 2>nul")).collect::<Vec<_>>().join(" & ");
+            targets.iter().map(|path| format!("rmdir /s /q \"{path}\" 2>nul & del /f /q \"{path}\" 2>nul")).collect::<Vec<_>>().join(" & ");
         std::process::Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()))
             .raw_arg(format!("/d /s /c \"ping -n 4 127.0.0.1 >nul & {list}\""))
             .creation_flags(0x00000008 | 0x00000200 | 0x08000000)
@@ -1389,13 +1703,37 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
             .stderr(Stdio::null())
             .spawn()
             .map_err(error)?;
-    }
-    #[cfg(not(windows))]
-    for path in &parts {
-        remove(path).map_err(error)?;
+        (vec![], false)
+    };
+    // The startup files last, and only once Kumi's bin has gone: until then its PATH line still finds Kumi.
+    let rc_changed = if Path::new(&join(&home, "bin")).exists() && !cfg!(windows) { true } else { remove_path_lines(&io, &home) };
+    if cfg!(windows) {
+        step(io.out.clone(), &io.env, "Taking Kumi out of your PATH…", remove_windows_path(run, &home), false).await;
     }
     if bridge_stays {
         say(format!("The bridge's files stay in {} while Live uses it.", display(&join(&home, "bridge"))));
+    }
+    if let Some(said) = left_said(&left, &display) {
+        say(said);
+    }
+    if let Some((_, why)) = stayed.first() {
+        let names: Vec<String> = stayed.iter().map(|(path, _)| display(path)).collect();
+        let them = if names.len() == 1 { "it" } else { "them" };
+        let owner = if stayed.iter().any(|(_, error)| error.kind() == std::io::ErrorKind::PermissionDenied) {
+            format!(" (if another account owns {them}: {})", chown_line(&home))
+        } else {
+            String::new()
+        };
+        say(format!(
+            "Kumi is partly removed: {} couldn't go ({why}). {}",
+            listed(&names),
+            if kumi_stays {
+                format!("Kumi itself stays, so you can run kumi uninstall again once that's sorted{owner}, or take {them} out by hand.")
+            } else {
+                format!("Take {them} out by hand{owner}.")
+            }
+        ));
+        return Ok(1);
     }
     let freed = if bytes > 0 { format!(", freeing {}", size(bytes as f64)) } else { String::new() };
     say(if options.all {
@@ -1404,7 +1742,7 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         format!("Kumi is removed{freed}. Your {KEPT} are still in {}; delete that folder to remove them too.", display(&home))
     });
     say("Open a new terminal window so the `kumi` command is gone there too.".into());
-    Ok(0)
+    Ok(i32::from(!rc_changed))
 }
 pub async fn check_release(env: &Env, fetcher: Option<Rc<dyn Fetch>>) -> Result<Option<String>, RuntimeError> {
     match ask_newest(env, fetcher.unwrap_or_else(default_fetch)).await {

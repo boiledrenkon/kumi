@@ -907,7 +907,7 @@ kumi doctor                    # check the installation, sign-in, the bridge, Li
 kumi doctor --json             # the same checks as JSON, without keys or your home folder
 kumi report                    # a file to send when something goes wrong
 kumi uninstall --dry-run       # say what uninstall would remove
-kumi uninstall                 # remove Kumi; add --all to remove your conversations, notes and sign-ins too
+kumi uninstall                 # remove Kumi; add --all to remove what you kept in it too
 ```
 
 `update` fetches the newest release, checks it against its checksum and starts
@@ -989,6 +989,15 @@ needed), and says how much space that frees. It offers to take the bridge and
 the extension out of Live (only while Live is closed). Your conversations,
 notes, recipes, sign-ins, library and references stay unless you add `--all`.
 `--dry-run` says what it would remove, and removes nothing.
+
+- It removes nothing when Kumi's folder (`KUMI_HOME`) is your home folder, a
+  disk's root, a relative path or a folder without Kumi's launcher and app, and
+  says what of Kumi's to take out by hand. The installers won't install there.
+- A folder of what Kumi fetched stays when it holds anything else.
+- When a part can't be removed, it says which and why, and Kumi stays so you
+  can run `kumi uninstall` again.
+- A PATH line it can't take out (in a file it can't write, or inside an `if`,
+  `for` or function) is named with its lines, to take out by hand.
 
 ## Limits
 

@@ -44,7 +44,7 @@ Kumi はターミナルウィンドウ全体を使い、Kumi が閉じたとき�
 | `kumi library [--rebuild]` | Kumi があなたのサウンド、プリセット、Set をどこまで学習したか。`--rebuild` ですべて学習し直す |
 | `kumi update [--check \| --rollback \| --version <x.y.z>]` | 最新の Kumi を取得する（ブリッジが古ければブリッジも）。`--check` は確認だけ、`--rollback` は一つ前に戻す（Live が閉じていればそのブリッジも）、`--version` はそのリリースを新しくても古くても入れる（インストールした Kumi のみ） |
 | `kumi report` | 問題が起きたときに送る `~/kumi-report-<date and time>.txt` を書き出す |
-| `kumi uninstall [--all] [--yes] [--dry-run]` | インストールした Kumi と、Kumi が取得したものを削除する。`--all` は会話、メモ、レシピ、サインインも削除する。`--yes` は最初の質問を省く。`--dry-run` は削除するものを伝えるだけ |
+| `kumi uninstall [--all] [--yes] [--dry-run]` | インストールした Kumi と、Kumi が取得したものを削除する。`--all` は会話、メモ、レシピ、サインイン、ライブラリー、リファレンスも削除する。`--yes` は最初の質問を省く。`--dry-run` は削除するものを伝えるだけ |
 | `kumi --version`（または `-v`）、`kumi --help`（または `-h`、`help`） | バージョン、ヘルプ |
 
 ## Kumi の中のコマンド

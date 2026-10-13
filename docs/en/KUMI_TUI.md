@@ -96,7 +96,7 @@ Run these as `kumi <command>`; from a copy of the repository, as
 | `kumi library [--rebuild]` | How far Kumi has got learning your sounds, presets and Sets; `--rebuild` learns them all again |
 | `kumi update [--check \| --rollback \| --version <x.y.z>]` | Get the newest Kumi (and the bridge when it's older); `--check` only asks; `--rollback` goes back to the one before, with its bridge when Live is closed; `--version` installs that release, newer or older (an installed Kumi only) |
 | `kumi report` | Write `~/kumi-report-<date and time>.txt` to send when something goes wrong |
-| `kumi uninstall [--all] [--yes] [--dry-run]` | Remove an installed Kumi and what it fetched; `--all` also removes conversations, notes, recipes and sign-ins; `--yes` skips the first question; `--dry-run` says what would go |
+| `kumi uninstall [--all] [--yes] [--dry-run]` | Remove an installed Kumi and what it fetched; `--all` also removes conversations, notes, recipes, sign-ins, library and references; `--yes` skips the first question; `--dry-run` says what would go |
 | `kumi --version` (or `-v`), `kumi --help` (or `-h`, `help`) | Version; help |
 
 ## Commands inside Kumi
