@@ -300,18 +300,35 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with:
           python-version: "3.13"
-      # The install jobs run the paths that work; these read every line, the error paths too.
-      - name: The installers are POSIX sh and PowerShell that parses
-        shell: bash
-        run: |
-          sh -n install.sh
-          # A "~/…" shown to producers is meant as text (SC2088).
-          shellcheck --shell=sh --severity=warning --exclude=SC2088 install.sh
-          pwsh -NoProfile -Command '$errors = $null; [void][Management.Automation.Language.Parser]::ParseFile((Resolve-Path install.ps1).Path, [ref]$null, [ref]$errors); if ($errors) { $errors | ForEach-Object { "install.ps1:$($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }'
       - name: Native release packaging (and every packaged document's links)
         run: python3 -m unittest discover -s scripts/tests -p test_native_release.py
       - name: The release script's edits
         run: python3 -m unittest discover -s scripts/tests -p test_release.py
+      # The install jobs run the paths that work; this reads every line, the error paths too.
+      - name: The installers are POSIX sh, and PowerShell that parses and is ASCII
+        run: sh scripts/check-installers.sh .
+      # Older docs and links fetch main's raw installers, and the one-liners the latest release's: both have to stay
+      # scripts that run. Pushes to main and the nightly run check them where producers fetch them.
+      - name: The installers where producers fetch them (main's raw files, and the latest release's)
+        if: github.event_name == 'push' || github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Both are checked, whichever fails.
+          ok=0
+          check() {
+            mkdir -p "$2" && for name in install.sh install.ps1; do curl -fsSL --retry 3 -o "$2/$name" "$1/$name" || return; done
+            sh scripts/check-installers.sh "$2"
+          }
+          check "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main" "$RUNNER_TEMP/main" || ok=1
+          # Every release since the first one publish attached them to carries both.
+          assets="$(gh release view --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          if grep -qx install.sh <<<"$assets" && grep -qx install.ps1 <<<"$assets"; then
+            check "https://github.com/$GITHUB_REPOSITORY/releases/latest/download" "$RUNNER_TEMP/latest" || ok=1
+          else
+            echo "::notice::The latest release has no installers attached yet."
+          fi
+          exit "$ok"
 
   required:
     name: Required CI
