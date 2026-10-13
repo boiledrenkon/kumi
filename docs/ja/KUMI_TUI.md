@@ -30,8 +30,8 @@ Kumi はターミナルウィンドウ全体を使い、Kumi が閉じたとき�
 | コマンド | 内容 |
 | --- | --- |
 | `kumi` | Live で開いている Set で Kumi を開く。初回はサインインし、ブリッジを Live に入れる（Live の再起動も任せられる） |
-| `kumi -c` | どの Set のものでも、最後に使った会話の続きから始める |
-| `kumi -r [ID または名前]` | 保存された会話を ID（または先頭部分）か名前で選んで続ける。引数なしなら一覧から選ぶ。どちらも `--inference-only` と使える |
+| `kumi -c`（`--continue` でも可） | どの Set のものでも、最後に使った会話の続きから始める |
+| `kumi -r [ID または名前]`（`--resume` でも可） | 保存された会話を ID（または先頭部分）か名前で選んで続ける。引数なしなら一覧から選ぶ。どちらも `--inference-only` と使える |
 | `kumi --inference-only` | Live なしでチャットする |
 | `kumi --bridge-config <absolute path>` | 自分のブリッジ設定を使う |
 | `kumi login` | サインイン：ChatGPT か API キーかを尋ねる |

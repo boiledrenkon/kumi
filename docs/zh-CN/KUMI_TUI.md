@@ -30,8 +30,8 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | 命令 | 作用 |
 | --- | --- |
 | `kumi` | 在 Live 当前打开的工程上打开 Kumi；第一次时登录，并把桥接装入 Live（Kumi 可以替你重启 Live） |
-| `kumi -c` | 接着你上次使用的对话继续，不论它属于哪个工程 |
-| `kumi -r [ID 或名称]` | 按 ID（或其开头）或名称继续一段保存的对话；不加参数则从列表中选择。两者都可与 `--inference-only` 一起使用 |
+| `kumi -c`（或 `--continue`） | 接着你上次使用的对话继续，不论它属于哪个工程 |
+| `kumi -r [ID 或名称]`（或 `--resume`） | 按 ID（或其开头）或名称继续一段保存的对话；不加参数则从列表中选择。两者都可与 `--inference-only` 一起使用 |
 | `kumi --inference-only` | 不连接 Live，只聊天 |
 | `kumi --bridge-config <absolute path>` | 使用你自己的桥接配置 |
 | `kumi login` | 登录：询问使用 ChatGPT 还是 API 密钥 |

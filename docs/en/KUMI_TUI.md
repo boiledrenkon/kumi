@@ -82,8 +82,8 @@ Run these as `kumi <command>`; from a copy of the repository, as
 | Command | What it does |
 | --- | --- |
 | `kumi` | Open Kumi on the Set Live has open; the first time, sign in and put the bridge in Live (Kumi can restart Live for you) |
-| `kumi -c` | Carry on the conversation you had last, in any Set |
-| `kumi -r [id or name]` | Carry on a kept conversation by its id (or its start) or name; alone, choose one. Both work with `--inference-only` |
+| `kumi -c` (or `--continue`) | Carry on the conversation you had last, in any Set |
+| `kumi -r [id or name]` (or `--resume`) | Carry on a kept conversation by its id (or its start) or name; alone, choose one. Both work with `--inference-only` |
 | `kumi --inference-only` | Chat without Live |
 | `kumi --bridge-config <absolute path>` | Use your own bridge configuration |
 | `kumi login` | Sign in: asks whether with ChatGPT or an API key |
