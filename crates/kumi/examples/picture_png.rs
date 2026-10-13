@@ -35,6 +35,7 @@ fn samples() -> Vec<(String, ChangePicture)> {
                 length: 8.,
                 before: vec![note(60., 0., 1.), note(63., 1., 1.), note(67., 2., 2.), note(70., 4., 1.)],
                 after: vec![note(60., 0., 1.), note(64., 1., 1.), note(67., 2., 2.), note(72., 5., 1.5), note(55., 6., 2.)],
+                partial: false,
             },
         ),
         (

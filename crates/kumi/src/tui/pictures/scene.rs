@@ -36,7 +36,7 @@ pub fn scene_of(picture: &ChangePicture) -> Option<Scene> {
     match picture {
         ChangePicture::Eq { before, after, .. } => Some(eq_scene(before, after)),
         ChangePicture::Dynamics { before, after, .. } => Some(dynamics_scene(before, after)),
-        ChangePicture::Notes { length, before, after } => notes_scene(*length, before, after),
+        ChangePicture::Notes { length, before, after, .. } => notes_scene(*length, before, after),
         ChangePicture::Automation { min, max, before, after, .. } => automation_scene(*min, *max, before, after),
         ChangePicture::Values { .. } | ChangePicture::Mix { .. } => None,
     }

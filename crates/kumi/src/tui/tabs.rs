@@ -169,8 +169,8 @@ impl TabPanel {
         self.inner.state.borrow_mut().cursor = None;
     }
 
-    /// Keys while the keyboard is in the panel: arrows and pages move; Enter opens a row that opens (a change's
-    /// picture), or does the row's action; →/Space open, ← closes, `u` does an opening row's action. True when used.
+    /// Keys while the keyboard is in the panel: ↑↓ and pages move; Enter opens a row that opens (a job, a change's
+    /// picture) or does the row's action; another key is the row's own, if it has it (`keys`). True when used.
     pub fn key(&self, name: &str) -> bool {
         let action = {
             let mut state = self.inner.state.borrow_mut();

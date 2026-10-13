@@ -178,3 +178,87 @@ case!(a_change_from_before_pictures_shows_what_it_has, async {
     assert!(!has(&h.screen(), "No picture for this change"));
     h.close().await;
 });
+
+case!(a_typed_u_undoes_only_a_change_whose_picture_is_open, async {
+    let h = Harness::new(160, 40);
+    h.start().await;
+    h.connect();
+    h.emit(tempo_change("c2"));
+    // In the tabs, on a closed change: a typed u is a word for the box.
+    h.type_text("\x1b[Z").await;
+    h.type_text("u").await;
+    h.type_text("se more reverb").await;
+    h.has("use more reverb");
+    assert!(!h.calls().iter().any(|call| call.starts_with("undo:")), "{:?}", h.calls());
+    h.type_text("\x1b[H").await;
+    // Opened on purpose, u undoes it.
+    h.type_text("\x15").await;
+    h.type_text("\x1b[Z").await;
+    h.type_text("\r").await;
+    h.wait_for("Tempo 120 BPM → 124 BPM").await;
+    h.type_text("u").await;
+    h.wait_for_call("undo:c2").await;
+    h.close().await;
+});
+
+case!(arrows_open_and_close_and_never_leave_the_row, async {
+    let h = Harness::new(160, 40);
+    h.start().await;
+    h.connect();
+    h.emit(tempo_change("c2"));
+    let shown = |h: &Harness| {
+        let lines = h.screen();
+        let strip = lines.iter().position(|line| line.contains("HISTORY")).unwrap();
+        lines[strip..].iter().any(|line| line.contains("Tempo 120 BPM → 124 BPM"))
+    };
+    h.type_text("\x1b[Z").await;
+    h.type_text("\x1b[C").await;
+    assert!(shown(&h), "→ opens");
+    h.type_text("\x1b[C").await;
+    assert!(shown(&h), "→ on an open row leaves it open");
+    h.type_text("\x1b[D").await;
+    assert!(!shown(&h), "← closes");
+    h.type_text("\x1b[D").await;
+    assert!(h.selected_line().is_some_and(|line| line.contains("Tempo 120 → 124 BPM")), "← on a closed row stays: {:?}", h.selected_line());
+    h.close().await;
+});
+
+case!(opening_a_change_under_kept_things_keeps_it_in_view_and_selected, async {
+    let h = Harness::new(160, 40);
+    h.start().await;
+    h.connect();
+    for (id, text) in [("s1", "The Reese is the main bass"), ("s2", "Drums sit at -6 LUFS")] {
+        h.emit(json!({"type":"remembered","scope":"set","note":{"id":id,"text":text,"at":1}}));
+    }
+    h.emit(eq_change("c1", -4.));
+    h.emit(tempo_change("c2"));
+    h.type_text("\x1b[Z").await;
+    for _ in 0..6 {
+        if h.selected_line().is_some_and(|line| line.contains("EQ Eight")) {
+            break;
+        }
+        h.type_text("\x1b[B").await;
+    }
+    assert!(h.selected_line().is_some_and(|line| line.contains("EQ Eight")), "{:?}", h.selected_line());
+    h.type_text("\r").await;
+    h.wait_for("3 Gain A 0.00 dB → -4.00 dB").await;
+    assert!(h.selected_line().is_some_and(|line| line.contains("✓ EQ Eight")), "{:?}", h.selected_line());
+    h.close().await;
+});
+
+case!(a_value_change_opens_to_its_bar_and_words, async {
+    let h = Harness::new(160, 40);
+    h.start().await;
+    h.connect();
+    h.emit(tempo_change("c2"));
+    h.type_text("\x1b[Z").await;
+    h.type_text("\r").await;
+    let lines = h.screen();
+    let strip = lines.iter().position(|line| line.contains("HISTORY")).unwrap();
+    assert!(
+        lines[strip..].iter().any(|line| line.contains("█") && line.contains("Tempo 120 BPM → 124 BPM")),
+        "{}",
+        lines[strip..].join("\n")
+    );
+    h.close().await;
+});

@@ -192,7 +192,7 @@ its undo. They're in English for now.
 | Key | Action |
 | --- | --- |
 | Tab, when idle | Into FOCUS's device tree, at Live's selection: ↑↓ move, Enter points at the row, Esc or Tab goes back to typing |
-| Shift-Tab | Into the tabs (again for the next tab): ↑↓ and Page Up/Down move. On a change, Enter, → or Space opens its picture, ← closes it, `u` undoes it; on a kept item, Enter forgets it; on a JOBS row, Enter opens the job and `x` stops it. Esc or Tab goes back |
+| Shift-Tab | Into the tabs (again for the next tab): ↑↓ and Page Up/Down move. On a change, Enter, → or Space opens its picture, Enter or ← closes it, and `u` undoes it while it's open; on a kept item, Enter forgets it; on a JOBS row, Enter opens the job and `x` stops it. Esc or Tab goes back |
 | Mouse | Click **undo** or **forget** at a row's end, a change's words to open its picture (a job's to open the job), a tab's name, or a device in the tree to point at it; click the pin to unpin. Hold Shift while dragging (Option in iTerm2) to select text |
 
 **Panels** (`/model`, `/effort`, `/login`, `/memory` and the others): ↑↓ move,

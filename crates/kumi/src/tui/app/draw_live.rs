@@ -205,7 +205,7 @@ impl TuiApp {
         screen.put(
             x,
             y + 1 + picture_rows,
-            &truncate(&if picture.is_some() { facts } else { format!("{facts} · empty") }, width),
+            &truncate(&if clip.notes.is_empty() { format!("{facts} · empty") } else { facts }, width),
             &st::FAINT,
         );
         2 + picture_rows
@@ -512,16 +512,20 @@ impl TuiApp {
                 ],
                 right: Some(sp(if e.forgotten { "forgotten" } else { "forget" }, if e.forgotten { st::FAINT } else { st::ACCENT })),
                 action,
+                // Every row says what it is: rows opening or closing around it leave the keyboard and the view on it.
+                item: Some(format!("kept {}", e.title)),
                 ..Default::default()
             });
         }
         if state_kept.len() > 3 {
             rows.push(TabRow {
-                spans: vec![sp(format!("{} more kept · /memory", state_kept.len() - 3), st::FAINT)], ..Default::default()
+                spans: vec![sp(format!("{} more kept · /memory", state_kept.len() - 3), st::FAINT)],
+                item: Some("kept more".into()),
+                ..Default::default()
             });
         }
         if !state_kept.is_empty() && !changes.is_empty() {
-            rows.push(TabRow::default());
+            rows.push(TabRow { item: Some("kept end".into()), ..Default::default() });
         }
         for change in changes.iter().rev() {
             let heard = change.state == ChangeState::Heard;
@@ -580,8 +584,7 @@ impl TuiApp {
             } else {
                 None
             };
-            // Enter, → or Space (or a click on the words) opens the change's picture, and closes it again; `u` and the
-            // label undo it.
+            // Enter (or a click on the words) opens the change's picture and closes it again; the label undoes it.
             let open = expanded.as_deref() == Some(change.id.as_str());
             let toggle: Rc<dyn Fn()> = {
                 let id = change.id.clone();
@@ -590,10 +593,17 @@ impl TuiApp {
                     state.expanded = if state.expanded.as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
                 })
             };
-            let close: Option<Rc<dyn Fn()>> = open.then(|| self.click(|app| app.0.state.borrow_mut().expanded = None));
-            let mut keys: Vec<(&'static str, Rc<dyn Fn()>)> = vec![("right", toggle.clone()), ("space", toggle.clone())];
-            keys.extend(close.map(|close| ("left", close)));
-            keys.extend(undo.clone().map(|undo| ("u", undo)));
+            // → and Space open the picture, ← closes it, and `u` undoes only an opened change: typed otherwise, it's a
+            // word for the box. With nothing left to do, ←, → and Space stay in the tabs rather than leave them.
+            let stay: Rc<dyn Fn()> = Rc::new(|| {});
+            let keys: Vec<(&'static str, Rc<dyn Fn()>)> = if open {
+                let close = self.click(|app| app.0.state.borrow_mut().expanded = None);
+                let mut keys = vec![("left", close), ("right", stay.clone()), ("space", stay)];
+                keys.extend(undo.clone().map(|undo| ("u", undo)));
+                keys
+            } else {
+                vec![("right", toggle.clone()), ("space", toggle.clone()), ("left", stay)]
+            };
             let item = Some(change.id.clone());
             rows.push(TabRow {
                 spans: vec![marker, sp(lines.first().map(String::as_str).unwrap_or(""), title_style)],

@@ -134,7 +134,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | 按键 | 操作 |
 | --- | --- |
 | Tab（空闲时） | 进入 FOCUS 的设备树，定位到 Live 的当前选择：↑↓ 移动，Enter 指向该行，Esc 或 Tab 回到输入 |
-| Shift-Tab | 进入标签页（再按一次切到下一个标签页）：↑↓ 和 Page Up/Down 移动。在修改上，Enter、→ 或空格展开它的图示，← 收起，`u` 撤销；在记住的内容上，Enter 执行 forget；在 JOBS 的行上，Enter 打开任务，按 `x` 停止。Esc 或 Tab 返回 |
+| Shift-Tab | 进入标签页（再按一次切到下一个标签页）：↑↓ 和 Page Up/Down 移动。在修改上，Enter、→ 或空格展开它的图示，Enter 或 ← 收起，展开时按 `u` 撤销；在记住的内容上，Enter 执行 forget；在 JOBS 的行上，Enter 打开任务，按 `x` 停止。Esc 或 Tab 返回 |
 | 鼠标 | 点击行末的 **undo** 或 **forget**、修改的文字（展开图示）或任务的文字（打开任务）、标签页名称，或点击设备树中的设备以指向它；点击图钉取消固定。拖动时按住 Shift（iTerm2 中为 Option）可选择文字 |
 
 **面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/conversations` 和 `/recipes` 中，输入文字可筛选列表。在 `/model` 中，ctrl+f 设定备用模型。**Your answer**（以带编号选项的问题结尾的回答）：按编号再按 Enter 即可回答。Kumi 推荐的选项带有标记，并一开始就被选中；没有人在时（运行过 `/goal`、`/loop` 或匹配，或 Kumi 的窗口已在其他窗口后面 2 分钟），倒计时结束后 Kumi 会选它（“Taking 2 (recommended) in 60 s · any key cancels”）。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。在任务详情中，↑↓ 滚动，`x` 停止任务，`r` 重新运行，`c` 复制报告，Esc 关闭。

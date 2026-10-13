@@ -37,10 +37,15 @@ pub fn graphics_for(env: &HashMap<String, String>, depth: ColorDepth, glyphs: bo
     if !glyphs || depth == ColorDepth::None {
         return Graphics::Words;
     }
-    let kitty = get("TERM") == "xterm-kitty" || !get("KITTY_WINDOW_ID").is_empty();
-    let ghostty = get("TERM_PROGRAM") == "ghostty";
-    // Inside tmux or screen the image wouldn't reach the terminal: cells there.
-    let multiplexed = !get("TMUX").is_empty() || get("TERM").starts_with("screen") || get("TERM").starts_with("tmux");
+    let term = get("TERM");
+    // What a terminal started from another inherits doesn't count: kitty's window id only where nothing else names
+    // the terminal, and Ghostty's name only where TERM is Ghostty's or a generic xterm's.
+    let kitty =
+        term == "xterm-kitty" || (!get("KITTY_WINDOW_ID").is_empty() && get("TERM_PROGRAM").is_empty() && term.starts_with("xterm"));
+    let ghostty = get("TERM_PROGRAM") == "ghostty"
+        && (term.is_empty() || term == "xterm-ghostty" || term.starts_with("xterm-256") || term == "xterm");
+    // Inside tmux, screen or Zellij the image wouldn't reach the terminal: cells there.
+    let multiplexed = !get("TMUX").is_empty() || !get("ZELLIJ").is_empty() || term.starts_with("screen") || term.starts_with("tmux");
     if depth == ColorDepth::Truecolor && (kitty || ghostty) && !multiplexed && env.get("KUMI_PICTURES").map(String::as_str) != Some("cells")
     {
         Graphics::Kitty
@@ -64,13 +69,16 @@ pub struct Drawn {
 pub fn draw(picture: &ChangePicture, cols: usize, rows: usize, graphics: Graphics, id: u32, ground: Rgb) -> Drawn {
     let cols = cols.max(4);
     let lines = lines_of(picture, cols);
-    if graphics == Graphics::Words || rows == 0 {
+    if graphics == Graphics::Words {
         return Drawn { rows: Vec::new(), lines, image: None };
     }
     let Some(scene) = scene_of(picture) else {
         // Values and levels are bars, the same everywhere.
         return Drawn { rows: Vec::new(), lines: bars_of(picture, cols).unwrap_or(lines), image: None };
     };
+    if rows == 0 {
+        return Drawn { rows: Vec::new(), lines, image: None };
+    }
     match graphics {
         Graphics::Kitty => {
             let image = Raster::draw(&scene, (cols * 8).min(1600) as u32, (rows * 16).min(800) as u32);
@@ -287,6 +295,15 @@ mod tests {
         assert_eq!(graphics_for(&env(&[]), ColorDepth::Colors16, true), Graphics::Cells, "braille shows in 16 colours");
         assert_eq!(graphics_for(&env(&[]), ColorDepth::None, true), Graphics::Words);
         assert_eq!(graphics_for(&env(&[("TERM", "xterm-kitty"), ("KUMI_PICTURES", "cells")]), truecolor, true), Graphics::Cells);
+        // Started from kitty or Ghostty, another terminal inherits their names: no images there.
+        let vscode = env(&[("KITTY_WINDOW_ID", "1"), ("TERM_PROGRAM", "vscode"), ("TERM", "xterm-256color")]);
+        assert_eq!(graphics_for(&vscode, truecolor, true), Graphics::Cells);
+        assert_eq!(graphics_for(&env(&[("TERM_PROGRAM", "ghostty"), ("TERM", "alacritty")]), truecolor, true), Graphics::Cells);
+        assert_eq!(graphics_for(&env(&[("KITTY_WINDOW_ID", "3"), ("TERM", "xterm-256color")]), truecolor, true), Graphics::Kitty);
+        assert_eq!(
+            graphics_for(&env(&[("TERM_PROGRAM", "ghostty"), ("TERM", "xterm-ghostty"), ("ZELLIJ", "0")]), truecolor, true),
+            Graphics::Cells
+        );
     }
 
     #[test]

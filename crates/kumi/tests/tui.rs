@@ -529,8 +529,9 @@ async fn a_terminals_reply_is_never_typed_and_alt_keys_still_are() {
         assert_eq!(parse(&["\u{1b}_Gi=7;EN", "OENT:gone\u{1b}\\b"], 5.0).await, vec![text("b")]);
         assert_eq!(parse(&["\u{1b}P>|kitty(0.40)\u{1b}\\c"], 5.0).await, vec![text("c")]);
         assert_eq!(parse(&["\u{1b}P1+r544e\u{7}d"], 5.0).await, vec![text("d")]);
-        // Alt and a letter are keys as before.
+        // Alt and a letter are keys as before, Alt-_ then G typed fast too.
         assert_eq!(parse(&["\u{1b}_"], 5.0).await, vec![key("_", ALT)]);
+        assert_eq!(parse(&["\u{1b}_Gx"], 5.0).await, vec![key("_", ALT), text("Gx")]);
         assert_eq!(parse(&["\u{1b}P"], 5.0).await, vec![key("p", ALT_SHIFT)]);
     })
     .await;
