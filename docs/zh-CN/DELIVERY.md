@@ -6,7 +6,7 @@
 
 ## 使用 Kumi 安装
 
-退出 Live，然后运行 `kumi bridge`。它会：
+运行 `kumi`：它会把桥接装入 Live，也可以替你重启 Live。手动操作时，退出 Live，然后运行 `kumi bridge`。它会：
 
 1. 在 Live 运行时拒绝执行，并请你确认 Live 已关闭（`--yes` 可事先确认）；
 2. 从 Kumi 发行包中把桥接的包复制到它专用的文件夹（在源码副本中则改用 `scripts/build-native-release.py --bridge-only` 打包），并检查其哈希；
