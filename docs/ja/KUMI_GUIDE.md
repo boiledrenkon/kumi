@@ -76,7 +76,7 @@ Kumi は User Library の中から Live の Remote Scripts フォルダーを見
 
 **Kumi の Live 拡張機能。** Live 12.4 以降では、`kumi bridge` は Kumi の拡張機能も Live の Extensions フォルダーに入れます（macOS では `~/Library/Application Support/Ableton/Extensions/kumi.kumi`。Windows では `%LOCALAPPDATA%\Ableton\Extensions` を使いますが、Windows ではまだ確認されていません）。Live は次に開いたときに拡張機能を起動します。拡張機能は、MIDI クリップをアレンジメントに直接書き込み、トラックの一区間をクリアし、トラックのクリップを再生せずにレンダリングし、Live の右クリックメニュー（**Extensions** の下）に **Ask Kumi about this** を加えます。これを選ぶと、クリックしたものが次のメッセージのために固定されます。Developer Mode がオン（Settings → Extensions）のときは Live が拡張機能を一切起動しないので、ブリッジが Kumi の拡張機能を自分で起動します。Kumi は拡張機能がなくても動作します。拡張機能があるか、動いているかは `kumi doctor` が知らせます。
 
-ブリッジをインストールして Live で選べば、`kumi` がそれを見つけて接続します。設定することは何もありません。ブリッジがなくても Kumi は起動し、Live なしでチャットし（**No Live access**）、接続を提案します。`kumi --bridge-config <absolute path>` は自分で用意したブリッジ設定を使い、`kumi --inference-only` は Live なしでチャットします。
+ブリッジをインストールして Live で選べば、`kumi` がそれを見つけて接続します。設定することは何もありません。ブリッジがなくても Kumi は起動し、Live なしでチャットし（**No Live access**）、接続を提案します。`kumi --bridge-config <absolute path>` は自分で用意したブリッジ設定を使い、`kumi --inference-only` は Live なしでチャットします（会話が残るのは `-c` か `-r` で続けたときだけです）。
 
 **Willington。** Willington のファイルを収めたリリースからは、Kumi のブリッジに Willington のネイティブバインディングが入ります。それまでは自分でインストールできます。どちらの場合も、`/willington` でオンにするまではオフです。オンにすると、Kumi はラックのマクロのマッピングとチェーンゾーンの設定もでき、セルフテストが合格していれば Follow Actions も編集できます。Willington のバインディングがある Live のバージョンは、macOS ARM64 の Live 12.4.15b4 と b5（チェーンのゾーンは b5 のみ）と、Windows x64 の Live 12.4.15b5 です。[Willington](WILLINGTON_INTEGRATION.md)を参照してください。
 

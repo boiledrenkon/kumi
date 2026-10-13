@@ -952,6 +952,10 @@ pub(crate) fn conversation_line(now: &ConversationNow, clean: impl Fn(&str) -> S
         format!("Conversation: {title} (kept once you ask something)")
     }
 }
+/// What the conversation commands say in a chat that keeps none: without Live, started without -c or -r.
+pub(crate) fn not_kept() -> String {
+    format!("A chat without Live keeps no conversations; {k} -c or {k} -r carries on a kept one.", k = *KUMI_START)
+}
 /// The line that brings this run's conversation back: when it's kept, and this run made a request in it or took it up.
 pub(crate) fn continue_hint(now: Option<ConversationNow>) -> Option<String> {
     now.filter(|now| now.kept && now.touched).map(|now| format!("Continue this conversation: {} -r {}", *KUMI_START, now.id))

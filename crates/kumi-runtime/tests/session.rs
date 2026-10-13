@@ -3939,3 +3939,11 @@ local_test!(a_new_sets_conversation_stays_held_when_the_set_is_saved_before_its_
     assert_eq!(create_conversation_store(dir.path()).claim(SET_A, &id), Claim::Taken);
     h.session.close().await.unwrap();
 });
+local_test!(a_chat_that_keeps_no_conversations_says_nothing_of_one, {
+    let h = harness(None, |_| {});
+    h.session.start().await.unwrap();
+    h.session.submit("hello", None).await.unwrap();
+    assert!(!h.session.has_conversations());
+    assert!(h.session.conversation_now().await.is_none());
+    h.session.close().await.unwrap();
+});

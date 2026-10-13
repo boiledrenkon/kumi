@@ -76,7 +76,7 @@ Kumi 会在你的 User Library 中找到 Live 的 Remote Scripts 文件夹，包
 
 **Kumi 的 Live 扩展。** 在 Live 12.4 及更高版本上，`kumi bridge` 还会把 Kumi 的扩展放进 Live 的 Extensions 文件夹（macOS 上为 `~/Library/Application Support/Ableton/Extensions/kumi.kumi`；Windows 上 Kumi 使用 `%LOCALAPPDATA%\Ableton\Extensions`，这一路径在 Windows 上尚未确认）。Live 下次打开时会启动它。这个扩展可以把 MIDI 片段直接写进编曲视图、清空轨道上的一段区域、在不播放的情况下渲染轨道的片段，并在 Live 的右键菜单（**Extensions** 下）中加入 **Ask Kumi about this**，它会把你点击的对象附加到你的下一条消息中。开启 Developer Mode（Settings → Extensions）时，Live 不会启动任何扩展，所以由桥接自己启动 Kumi 的扩展。没有这个扩展 Kumi 也能工作，`kumi doctor` 会告诉你它是否已安装、是否在运行。
 
-桥接安装好并在 Live 中选中后，`kumi` 会找到并连接它；无需任何配置。没有桥接时，Kumi 照样启动，在不连接 Live 的情况下聊天（**No Live access**），并提出连接。`kumi --bridge-config <absolute path>` 使用你自己的桥接配置；`kumi --inference-only` 在不连接 Live 的情况下聊天。
+桥接安装好并在 Live 中选中后，`kumi` 会找到并连接它；无需任何配置。没有桥接时，Kumi 照样启动，在不连接 Live 的情况下聊天（**No Live access**），并提出连接。`kumi --bridge-config <absolute path>` 使用你自己的桥接配置；`kumi --inference-only` 在不连接 Live 的情况下聊天（只有用 `-c` 或 `-r` 继续对话时才会保存对话）。
 
 **Willington。** 从带有 Willington 文件的版本起，Kumi 的桥接会带上它的原生绑定；在此之前，你可以自己安装 Willington。无论哪种方式，在你用 `/willington` 开启之前它们一直是关闭的。开启后，Kumi 还可以映射机架的宏旋钮、设置链区域（chain zone），并在自检通过时编辑 Follow Actions。Willington 有绑定的 Live 版本：macOS ARM64 上的 Live 12.4.15b4 和 b5（链区域仅限 b5），以及 Windows x64 上的 Live 12.4.15b5；请见 [Willington](WILLINGTON_INTEGRATION.md)。
 

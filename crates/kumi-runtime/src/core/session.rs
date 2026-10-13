@@ -2238,7 +2238,7 @@ impl SessionController for Session {
         .await
     }
     fn has_conversations(&self) -> bool {
-        true
+        self.0.options.conversations.is_some()
     }
     async fn conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
         let place = {
@@ -2472,6 +2472,8 @@ impl SessionController for Session {
         }
     }
     async fn conversation_now(&self) -> Option<ConversationNow> {
+        // A chat that keeps none (without Live, started without -c or -r) has nothing to say of one.
+        self.0.options.conversations.as_ref()?;
         let (place, id, touched, first, name) = {
             let s = self.0.state.borrow();
             (s.place.clone(), s.conversation_id.clone(), s.touched, s.conversation_first.clone(), s.conversation_name.clone())

@@ -97,6 +97,8 @@ struct Control {
     answers: RefCell<Vec<SetChoice>>,
     named: RefCell<Vec<(Option<String>, Option<String>)>>,
     now: RefCell<Option<ConversationNow>>,
+    /// A chat without Live, started without -c or -r: no conversation is kept.
+    keeps_none: Cell<bool>,
 }
 impl Default for Control {
     fn default() -> Self {
@@ -118,6 +120,7 @@ impl Default for Control {
             answers: RefCell::new(vec![]),
             named: RefCell::new(vec![]),
             now: RefCell::new(None),
+            keeps_none: Cell::new(false),
         }
     }
 }
@@ -243,6 +246,9 @@ impl SessionController for Control {
         let old = taste.len();
         taste.retain(|l| l.id != id);
         Ok(taste.len() != old)
+    }
+    fn has_conversations(&self) -> bool {
+        !self.keeps_none.get()
     }
     async fn conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
         Ok(self.conversations.borrow().clone())
@@ -776,6 +782,13 @@ async fn resume_lists_every_sets_conversations_and_asks_about_another_sets_by_nu
             );
             assert!(f.text().contains("[fork] Nothing to fork yet: ask something first."));
             assert!(f.control.calls.borrow().contains(&"fork:Alt".into()));
+            // A chat that keeps none says so, for a name too.
+            f.control.keeps_none.set(true);
+            f.input.write("/resume\n/new Third\n");
+            flush().await;
+            assert_eq!(f.text().matches("[conversations] A chat without Live keeps no conversations; ").count(), 2, "{}", f.text());
+            assert!(!f.control.named.borrow().iter().any(|(_, name)| name.as_deref() == Some("Third")));
+            f.control.keeps_none.set(false);
             *f.control.now.borrow_mut() = Some(ConversationNow { id: "fork01".into(), title: "Alt".into(), kept: true, touched: true });
             f.input.write("/status\n");
             flush().await;

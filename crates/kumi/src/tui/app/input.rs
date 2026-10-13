@@ -517,6 +517,14 @@ impl TuiApp {
                 return Ok(());
             }
         }
+        // A chat that keeps no conversations says so, rather than send these to the model as words.
+        if !controller.has_conversations()
+            && ["/resume", "/conversations", "/rename", "/fork"].into_iter().any(|verb| argument(command, verb).is_some())
+        {
+            self.clear_editor();
+            self.notice(&super::not_kept(), NoticeTone::Info);
+            return Ok(());
+        }
         // A kept conversation: the list, or the one an id, the start of one, or a name gives (several: the list of them).
         if let Some(word) =
             argument(command, "/resume").or_else(|| argument(command, "/conversations")).filter(|_| controller.has_conversations())
@@ -870,8 +878,12 @@ impl TuiApp {
             }
             let started = controller.new_conversation().await;
             // Its name, kept with it from its first save.
-            if started.is_ok() && !name.is_empty() && controller.has_conversations() {
-                controller.rename_conversation(None, Some(&name)).await?;
+            if started.is_ok() && !name.is_empty() {
+                if controller.has_conversations() {
+                    controller.rename_conversation(None, Some(&name)).await?;
+                } else {
+                    self.notice(&super::not_kept(), NoticeTone::Info);
+                }
             }
             started
         } else if command == "/reconnect" && controller.has_reconnect() {

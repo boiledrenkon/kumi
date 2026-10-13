@@ -1097,3 +1097,12 @@ case!(fast_turns_on_the_tier_the_model_offers_and_shows_it_beside_the_model, asy
     h.has("Fast is on: 2x speed, increased usage; /fast turns it off.");
     h.close().await;
 });
+case!(a_chat_that_keeps_no_conversations_says_so, async {
+    // No conversation kept: a chat without Live, started without -c or -r.
+    let h = Harness::with(120, 36, Rc::new(Control::default()), |_| {});
+    h.start().await;
+    h.type_text("/resume\r").await;
+    h.has("A chat without Live keeps no conversations; ");
+    assert!(!h.calls().iter().any(|call| call.starts_with("submit")), "{:?}", h.calls());
+    h.close().await;
+});

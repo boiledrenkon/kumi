@@ -181,7 +181,8 @@ Once the bridge is installed and chosen in Live, `kumi` finds it and connects;
 there is nothing to configure. Without it, Kumi starts anyway, chats without
 Live (**No Live access**) and offers to connect. `kumi --bridge-config
 <absolute path>` uses a bridge configuration of your own; `kumi
---inference-only` chats without Live.
+--inference-only` chats without Live, and keeps the conversation only when it
+carries one on (`-c` or `-r`).
 
 **Willington.** Willington's native bindings come in Kumi's bridge from the
 release that carries their files; until then, you can install Willington
