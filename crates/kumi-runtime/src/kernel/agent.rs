@@ -22,7 +22,9 @@ use tokio::sync::watch;
 
 use super::budget::{fit, opening, put_away_images, transcript_of, ContextBudget, PutAway, DEFAULT_BUDGET};
 use super::deferred::{self, Shelf, CALL_TOOL};
-use super::failure::{describe_failure, plan_limit, provider_name, reset_words, retry_reason, wait_for, PlanLimit, Wait, MAX_RETRIES};
+use super::failure::{
+    describe_failure, plan_limit, provider_name, refused_on_the_way, reset_words, retry_reason, wait_for, PlanLimit, Wait, MAX_RETRIES,
+};
 use crate::ai::error::LanguageModelError;
 use crate::ai::types::{
     AssistantPart, CallOptions, DataContent, FileData, FilePart, FinishReason, FinishReasonUnified, FunctionTool, Message, Prompt,
@@ -983,9 +985,10 @@ impl Turn {
                         }
                         // With a fallback set, it carries on now instead (the turn hands over).
                         Some(Wait::Reset(wait)) if !self.inner.fallback_ready() => (wait, Some(WaitFor::Limit)),
+                        // A certificate or a proxy in the way isn't being offline: the wait says which.
                         Some(Wait::Offline(wait)) => {
                             offline += 1;
-                            (wait, Some(WaitFor::Offline))
+                            (wait, refused_on_the_way(model).is_none().then_some(WaitFor::Offline))
                         }
                         _ => return Err(error),
                     };

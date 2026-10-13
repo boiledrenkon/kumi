@@ -2421,6 +2421,16 @@ fn offline() -> LanguageModelError {
     error.is_retryable = true;
     LanguageModelError::ApiCall(error)
 }
+/// No answer because the way there refused it, as Kumi's HTTP keeps the cause: a certificate, or a proxy.
+fn refused_on_the_way(cause: &str) -> LanguageModelError {
+    let mut error = ApiCallError::new("Cannot connect to API: error sending request", "u", Some(json!({})), None);
+    error.is_retryable = true;
+    error.cause =
+        Some(format!("error sending request for url (https://chatgpt.com/backend-api/codex/responses): client error (Connect): {cause}"));
+    LanguageModelError::ApiCall(error)
+}
+const UNTRUSTED: &str = "invalid peer certificate: UnknownIssuer";
+const PROXY_SIGN_IN: &str = "tunnel error: proxy authorization required";
 fn busy(retry_after: &str) -> LanguageModelError {
     let mut error = ApiCallError::new("busy", "u", Some(json!({})), Some(429));
     error.response_headers = Some([("retry-after".to_string(), retry_after.to_string())].into_iter().collect());
@@ -2524,6 +2534,39 @@ async fn a_limit_too_far_off_or_one_waiting_cant_mend_stops_and_names_the_fix() 
             assert_eq!(h.count(), 1);
             h.kernel.close().await;
         }
+    })
+    .await
+}
+
+#[test]
+fn a_certificate_or_a_proxy_in_the_way_is_named_with_its_fix_not_said_as_offline() {
+    use kumi_runtime::kernel::failure::{describe_failure, retry_reason};
+    let model = "openai-codex/gpt-6-astra";
+    let untrusted = refused_on_the_way(UNTRUSTED);
+    assert_eq!(retry_reason(&untrusted, model), "ChatGPT couldn't be reached: the secure connection didn't check out (TLS)");
+    let said = describe_failure(&untrusted, model);
+    assert_eq!(said.kind, FailureKind::Network);
+    assert!(said.message.starts_with("Kumi couldn't reach ChatGPT: the secure connection didn't check out (TLS). "), "{}", said.message);
+    assert!(said.message.contains("certificate installed on this computer"), "{}", said.message);
+    let proxy = refused_on_the_way(PROXY_SIGN_IN);
+    assert_eq!(retry_reason(&proxy, model), "ChatGPT couldn't be reached: the proxy didn't let Kumi through");
+    assert!(describe_failure(&proxy, model).message.starts_with("Kumi couldn't reach ChatGPT: the proxy didn't let Kumi through. "));
+    // Offline reads as it did.
+    assert_eq!(retry_reason(&offline(), model), "ChatGPT couldn't be reached");
+    assert_eq!(describe_failure(&offline(), model).message, "Kumi couldn't reach ChatGPT; check the connection.");
+}
+
+#[tokio::test]
+async fn a_certificate_in_the_way_is_tried_again_as_offline_is_but_named() {
+    local(async {
+        tokio::time::pause();
+        let h = harness(|_, n| if n <= 2 { Scripted::Reject(refused_on_the_way(UNTRUSTED)) } else { answer("back") }, Options::default());
+        let (events, emit) = collect();
+        assert_eq!(h.kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        let reason = "test couldn't be reached: the secure connection didn't check out (TLS)".to_string();
+        assert_eq!(waits(&events.borrow()), [(reason.clone(), 750, None), (reason, 2250, None)]);
+        assert_eq!(texts(&events.borrow()), ["back"]);
+        h.kernel.close().await;
     })
     .await
 }

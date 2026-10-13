@@ -77,6 +77,12 @@ impl Settings {
         }
     }
 
+    /// The system's settings with `https` for every address and nothing excepted, or none and an auto-config file.
+    #[cfg(test)]
+    pub(crate) fn system_for_tests(https: Option<&str>, auto_config: bool) -> Self {
+        Self::from_system(Found { https: https.map(str::to_string), auto_config, ..Found::default() }, "")
+    }
+
     /// The proxy for a request to `url`, or None to go directly.
     pub fn proxy_for(&self, url: &Url) -> Option<Url> {
         let host = url.host()?;

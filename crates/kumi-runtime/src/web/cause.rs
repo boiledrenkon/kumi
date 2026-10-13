@@ -11,6 +11,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::ai::error::LanguageModelError;
+use crate::net::proxy;
 use crate::system::Env;
 
 /// Why a request got no answer.
@@ -140,7 +141,7 @@ impl NetCause {
         match self {
             Self::Dns => "Check that this computer is online; if it is, its DNS isn't answering, so try another network.",
             Self::Tls => {
-                "A Wi-Fi sign-in page, a school or office network that inspects secure connections, or a wrong clock does this: sign in to the Wi-Fi, try another network, or check the clock."
+                "A Wi-Fi sign-in page, a wrong clock, or a school or office network that inspects secure connections does this: sign in to the Wi-Fi, check the clock, or have the network's certificate installed on this computer (or name its file in SSL_CERT_FILE)."
             }
             Self::Proxy => "Check the proxy setting, or try without the proxy.",
             Self::Timeout => "Check the connection, then try again.",
@@ -184,20 +185,40 @@ pub fn chain(error: &(dyn Error + 'static)) -> String {
 /// Why `host` gave no answer and what to do about it, in a sentence or two, then the proxy settings Kumi
 /// went through (or where one is set).
 pub fn unreachable(host: &str, cause: Option<NetCause>, env: &Env) -> String {
+    unreachable_with(host, cause, env, &proxy::current())
+}
+
+/// [`unreachable`], with the system's proxy settings as `system` has them.
+pub fn unreachable_with(host: &str, cause: Option<NetCause>, env: &Env, system: &proxy::Settings) -> String {
     let what = match cause {
         Some(cause) => format!("Kumi couldn't reach {host}: {}. {}", cause.words(), cause.fix()),
         None => format!("Kumi couldn't reach {host}. Check the connection, then try again."),
     };
-    format!("{what} {}", proxy_words(env))
+    format!("{what} {}", proxy_words_with(env, system))
 }
 
 /// The proxy settings Kumi goes through, in a sentence; with none set, where to set one.
 pub fn proxy_words(env: &Env) -> String {
+    proxy_words_with(env, &proxy::current())
+}
+
+/// [`proxy_words`], with the system's proxy settings as `system` has them: without the variables, Kumi goes through
+/// the system's proxy, and says when the system finds one with an auto-config file, which Kumi doesn't read.
+pub fn proxy_words_with(env: &Env, system: &proxy::Settings) -> String {
     let set = proxy_variables(env);
-    if set.is_empty() {
-        "Behind a proxy? Set HTTPS_PROXY to it.".into()
-    } else {
-        format!("Kumi's proxy settings: {}.", set.join(", "))
+    if !set.is_empty() {
+        return format!("Kumi's proxy settings: {}.", set.join(", "));
+    }
+    match (&system.https, system.source) {
+        (Some(through), proxy::Source::System) => {
+            let port = through.port().map(|port| format!(":{port}")).unwrap_or_default();
+            format!("Kumi went through this computer's proxy, {}://{}{port}.", through.scheme(), through.host_str().unwrap_or(""))
+        }
+        (None, proxy::Source::System) if system.auto_config => {
+            "This computer finds its proxy with an auto-config (PAC) file, which Kumi doesn't read: set HTTPS_PROXY to the proxy's address."
+                .into()
+        }
+        _ => "Behind a proxy? Set HTTPS_PROXY to it.".into(),
     }
 }
 
@@ -298,12 +319,13 @@ mod tests {
     #[test]
     fn the_words_name_the_cause_the_fix_and_the_proxy_settings_without_secrets() {
         let none = Env::new();
+        let direct = proxy::Settings::system_for_tests(None, false);
         assert_eq!(
-            unreachable("auth.openai.com", Some(NetCause::Dns), &none),
+            unreachable_with("auth.openai.com", Some(NetCause::Dns), &none, &direct),
             "Kumi couldn't reach auth.openai.com: its address couldn't be looked up (DNS). Check that this computer is online; if it is, its DNS isn't answering, so try another network. Behind a proxy? Set HTTPS_PROXY to it."
         );
         assert_eq!(
-            unreachable("github.com", None, &none),
+            unreachable_with("github.com", None, &none, &direct),
             "Kumi couldn't reach github.com. Check the connection, then try again. Behind a proxy? Set HTTPS_PROXY to it."
         );
         let env = Env::from([
@@ -320,6 +342,17 @@ mod tests {
             "Kumi couldn't reach api.anthropic.com: the proxy didn't let Kumi through. Check the proxy setting, or try without the proxy. Kumi's proxy settings: HTTPS_PROXY=http://proxy.example:3128/, http_proxy=cache:80, no_proxy=localhost,.corp."
         );
         assert!(!said.contains("secret") && !said.contains("hunter2"), "{said}");
+        // Without the variables, the system's own proxy, or its auto-config file that Kumi doesn't read.
+        let system = proxy::Settings::system_for_tests(Some("http://me:secret@proxy.corp:3128"), false);
+        let said = unreachable_with("api.openai.com", Some(NetCause::Tls), &none, &system);
+        assert!(
+            said.contains("SSL_CERT_FILE") && said.ends_with("Kumi went through this computer's proxy, http://proxy.corp:3128."),
+            "{said}"
+        );
+        assert_eq!(
+            proxy_words_with(&none, &proxy::Settings::system_for_tests(None, true)),
+            "This computer finds its proxy with an auto-config (PAC) file, which Kumi doesn't read: set HTTPS_PROXY to the proxy's address."
+        );
         for cause in [NetCause::Dns, NetCause::Tls, NetCause::Proxy, NetCause::Timeout, NetCause::Offline] {
             assert!(cause.fix().ends_with('.') && !cause.words().ends_with('.'), "{cause:?}");
             assert_eq!(serde_json::to_value(cause).unwrap(), cause.name().to_lowercase(), "{cause:?}");
