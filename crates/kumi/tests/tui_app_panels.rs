@@ -1138,6 +1138,35 @@ fn exported_files(folder: &std::path::Path, extension: &str) -> Vec<std::path::P
     files.sort();
     files
 }
+case!(share_over_ssh_says_where_the_page_is_and_opens_nothing, async {
+    let folder = tempfile::tempdir().unwrap();
+    let revealed: Rc<RefCell<Vec<std::path::PathBuf>>> = Rc::default();
+    let (into, shown) = (folder.path().to_path_buf(), revealed.clone());
+    let h = Harness::with(140, 36, Rc::new(Control::default()), move |o| {
+        o.folder = Some(into);
+        o.remote = true;
+        o.reveal = Some(Rc::new(move |path: &std::path::Path| shown.borrow_mut().push(path.to_path_buf())));
+    });
+    h.start().await;
+    h.connect();
+    *h.control.export.borrow_mut() = Some(to_export("Over SSH", 30));
+    h.type_text("/share\r").await;
+    h.has("Saved on the computer Kumi runs on (over SSH):");
+    assert!(!h.screen().join("\n").contains("Open it") && !h.screen().join("\n").contains("Show it in"), "{}", h.screen().join("\n"));
+    let page = exported_files(folder.path(), "html").pop().unwrap();
+    h.type_text("\r").await;
+    let copied = {
+        let output = h.output.text.borrow();
+        let start = output.rfind("\x1b]52;c;").expect("a copy through the terminal") + 7;
+        let end = start + output[start..].find('\x07').unwrap();
+        use base64::Engine;
+        String::from_utf8(base64::engine::general_purpose::STANDARD.decode(&output[start..end]).unwrap()).unwrap()
+    };
+    assert_eq!(copied, page.display().to_string());
+    h.type_text("\x1b[B\r").await;
+    assert!(h.browsed.borrow().is_empty() && revealed.borrow().is_empty(), "nothing opened on the computer Kumi runs on");
+    h.close().await;
+});
 case!(export_copies_or_saves_this_conversation_and_share_offers_the_page, async {
     let folder = tempfile::tempdir().unwrap();
     let revealed: Rc<RefCell<Vec<std::path::PathBuf>>> = Rc::default();

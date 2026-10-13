@@ -115,7 +115,7 @@ message, not a command.
 | `/rename [name]` | Name this conversation; alone, its name goes in the box to change |
 | `/fork [name]` | Carry on in a copy of this conversation, with a new id; the original stays |
 | `/export [copy \| md \| html \| json]` | This conversation as a file: copy it as Markdown, or save Markdown, a web page or a file for Kumi (`kumi import`); alone, choose. Over 64 KB, the copy is saved as a file instead |
-| `/share` | Save this conversation as a web page that opens anywhere (the same page again while nothing changed), then open it, show it in Finder (Explorer) or copy its path, until Done |
+| `/share` | Save this conversation as a web page that opens anywhere (the same page again while nothing changed), then open it, show it in Finder (Explorer) or copy its path, until Done; over SSH, it says where the page is |
 | `/reconnect` | Connect to Live again over a fresh bridge, keeping the conversation (earlier changes lose Kumi's undo) |
 | `/undo` | Undo Kumi's latest change |
 | `/stop` | Stop Live: clips, the transport and recording. Also stops Kumi's answer |

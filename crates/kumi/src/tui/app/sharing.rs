@@ -51,7 +51,8 @@ impl TuiApp {
     }
 
     /// /share: this conversation as a web page (the one saved last, while nothing in the conversation changed), then its
-    /// path, to open, show in the file manager or copy, as many as the producer likes, until Done.
+    /// path, to open, show in the file manager or copy, as many as the producer likes, until Done. Over SSH the page is on
+    /// the computer Kumi runs on, where opening or showing it helps nobody: Kumi says where it is, to copy.
     pub(super) async fn share(&self) {
         let Some(path) = self.save_conversation_as(Format::Html, true).await else { return };
         let reveal = match system::platform() {
@@ -59,13 +60,14 @@ impl TuiApp {
             "win32" => "Show it in Explorer",
             _ => "Open its folder",
         };
-        let items = vec![
-            PickerItem::new("Open it", "open"),
-            PickerItem::new(reveal, "reveal"),
-            PickerItem::new("Copy its path", "copy"),
-            PickerItem::new("Done", "done"),
-        ];
-        let title = format!("Saved: {}", self.clean(&path.display().to_string(), 200));
+        let remote = self.0.options.remote;
+        let mut items = vec![];
+        if !remote {
+            items.extend([PickerItem::new("Open it", "open"), PickerItem::new(reveal, "reveal")]);
+        }
+        items.extend([PickerItem::new("Copy its path", "copy"), PickerItem::new("Done", "done")]);
+        let shown = self.clean(&path.display().to_string(), 200);
+        let title = if remote { format!("Saved on the computer Kumi runs on (over SSH): {shown}") } else { format!("Saved: {shown}") };
         self.pick(Picker::new(title, items), move |app, item| {
             let path = path.clone();
             async move {
