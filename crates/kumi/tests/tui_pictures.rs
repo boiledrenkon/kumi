@@ -148,3 +148,18 @@ case!(images_go_up_only_where_the_terminal_shows_them, async {
     let written = h.output.text.borrow();
     assert_eq!(written.matches("\x1b_Ga=d,d=I,").count(), 2, "both taken down as Kumi closes");
 });
+
+case!(on_a_basic_console_pictures_are_words, async {
+    let h = Harness::with(160, 40, Rc::new(Control::default()), |o| o.graphics = Some(Graphics::Words));
+    h.start().await;
+    h.connect();
+    // A new clip: no braille roll in NOW, its title says it.
+    h.emit(json!({"type":"change","change":{"id":"c3","family":"clip","title":"New MIDI clip “Chord” · 3 notes","state":"applied","at":3,
+        "clip":{"length":4.0,"notes":[{"pitch":60.0,"start":0.0,"duration":1.0,"velocity":100.0}]}}}));
+    h.emit(eq_change("c1", -4.));
+    h.type_text("\x1b[Z").await;
+    h.type_text("\r").await;
+    h.wait_for("3 Gain A 0.00 dB → -4.00 dB").await;
+    assert!(!braille(&h.screen()), "{}", h.screen().join("\n"));
+    h.close().await;
+});

@@ -26,7 +26,7 @@ pub enum Graphics {
     Kitty,
     /// Braille and half-blocks in colour.
     Cells,
-    /// Words only: a console whose symbols or colours may not show.
+    /// Words only: a console whose symbols may not show, or no colour at all.
     Words,
 }
 
@@ -34,7 +34,7 @@ pub enum Graphics {
 /// table, never a query: a terminal's reply would reach the input as keys.
 pub fn graphics_for(env: &HashMap<String, String>, depth: ColorDepth, glyphs: bool) -> Graphics {
     let get = |name: &str| env.get(name).map(String::as_str).unwrap_or("");
-    if !glyphs || matches!(depth, ColorDepth::None | ColorDepth::Colors16) {
+    if !glyphs || depth == ColorDepth::None {
         return Graphics::Words;
     }
     let kitty = get("TERM") == "xterm-kitty" || !get("KITTY_WINDOW_ID").is_empty();
@@ -284,7 +284,8 @@ mod tests {
         assert_eq!(graphics_for(&env(&[("TERM_PROGRAM", "iTerm.app")]), truecolor, true), Graphics::Cells);
         assert_eq!(graphics_for(&env(&[("TERM_PROGRAM", "Apple_Terminal")]), ColorDepth::Colors256, true), Graphics::Cells);
         assert_eq!(graphics_for(&env(&[("TERM", "xterm-kitty")]), truecolor, false), Graphics::Words, "a console without the symbols");
-        assert_eq!(graphics_for(&env(&[]), ColorDepth::Colors16, true), Graphics::Words);
+        assert_eq!(graphics_for(&env(&[]), ColorDepth::Colors16, true), Graphics::Cells, "braille shows in 16 colours");
+        assert_eq!(graphics_for(&env(&[]), ColorDepth::None, true), Graphics::Words);
         assert_eq!(graphics_for(&env(&[("TERM", "xterm-kitty"), ("KUMI_PICTURES", "cells")]), truecolor, true), Graphics::Cells);
     }
 

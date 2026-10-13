@@ -1,3 +1,4 @@
+use super::super::pictures::Graphics;
 use super::super::{
     activity::activity_glyph,
     icons::{icon, track_kind},
@@ -138,7 +139,8 @@ impl TuiApp {
                     drawn.rows
                 }
             });
-            if let Some(picture) = drawn.filter(|rows| !rows.is_empty()).or_else(|| change_picture(&change, width, self.0.depth)) {
+            let cells = || (self.0.graphics != Graphics::Words).then(|| change_picture(&change, width, self.0.depth)).flatten();
+            if let Some(picture) = drawn.filter(|rows| !rows.is_empty()).or_else(cells) {
                 for (row, line) in picture.iter().take(2).enumerate() {
                     spans(screen, x, area.y + now_at + 2 + row as i32, line, None);
                 }
@@ -178,7 +180,8 @@ impl TuiApp {
             &truncate(if clip.name.is_empty() { "Untitled clip" } else { &clip.name }, (x + width - column).max(1)),
             &st::BRIGHT,
         );
-        let picture = clip_picture(clip.length, &clip.notes, width.min(32), 4);
+        // Braille may not show on a basic console: the bars and notes are said below.
+        let picture = (self.0.graphics != Graphics::Words).then(|| clip_picture(clip.length, &clip.notes, width.min(32), 4)).flatten();
         if let Some(picture) = &picture {
             for (row, line) in picture.iter().enumerate() {
                 spans(screen, x, y + 1 + row as i32, line, None);
