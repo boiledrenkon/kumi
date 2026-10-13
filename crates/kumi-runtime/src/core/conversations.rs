@@ -44,6 +44,9 @@ const INDEX: &str = "conversation-index.json";
 const MAX_GONE: usize = 2000;
 /// The longest name the producer gives a conversation, and title, in UTF-16 units.
 const MAX_TITLE: usize = 60;
+/// How long a name or pin stays without its conversation before it's taken for one left behind: a copy's is written just
+/// before the copy itself.
+const ORPHAN_MS: f64 = 10.0 * 60_000.0;
 fn error(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::plain(e.to_string())
 }
@@ -400,18 +403,39 @@ impl FileConversationStore {
             remove(kept.join(format!("{id}.meta"))).await?;
             remove(kept.join(format!("{id}.lock"))).await?;
         }
-        // A name or pin whose conversation went (an earlier Kumi let it go) goes too.
+        // A name or pin whose conversation went goes too: an earlier Kumi let it go, or moved it to its Set's place once
+        // the Set was saved (then the name and pin go after it).
         if let Ok(mut dir) = tokio::fs::read_dir(&kept).await {
             while let Ok(Some(entry)) = dir.next_entry().await {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if let Some(id) = name.strip_suffix(".meta").filter(|id| CONVERSATION.is_match(id)) {
-                    if !kept.join(format!("{id}.json")).exists() {
-                        remove(entry.path()).await?;
+                let Some(id) = name.strip_suffix(".meta").filter(|id| CONVERSATION.is_match(id)) else { continue };
+                if kept.join(format!("{id}.json")).exists() || now - modified_ms(&entry.path()).await < ORPHAN_MS {
+                    continue;
+                }
+                match self.kept_elsewhere(place, id).await {
+                    Some(there) if !there.join(&name).exists() => {
+                        let _ = tokio::fs::rename(entry.path(), there.join(&name)).await;
                     }
+                    _ => remove(entry.path()).await?,
                 }
             }
         }
         Ok(())
+    }
+    /// The folder of another place keeping conversation `id`.
+    async fn kept_elsewhere(&self, place: &str, id: &str) -> Option<PathBuf> {
+        let mut places = tokio::fs::read_dir(&self.directory).await.ok()?;
+        while let Ok(Some(entry)) = places.next_entry().await {
+            let other = entry.file_name().to_string_lossy().into_owned();
+            if other == place || !PLACE.is_match(&other) {
+                continue;
+            }
+            let kept = entry.path().join("conversations");
+            if tokio::fs::try_exists(kept.join(format!("{id}.json"))).await.unwrap_or(false) {
+                return Some(kept);
+            }
+        }
+        None
     }
     /// How many days past its 20 newest a place keeps conversations (0: all of them): what settings say, else what they
     /// said last, and 90 at least.

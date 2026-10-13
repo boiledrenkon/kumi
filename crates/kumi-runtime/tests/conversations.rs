@@ -336,6 +336,33 @@ async fn the_days_settings_said_to_keep_outlast_an_earlier_kumi_dropping_them() 
     assert_eq!(create_conversation_store_keeping(dir.path(), Some(7)).days_kept().await, 7);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn a_name_without_its_conversation_waits_a_while_then_goes_or_follows_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(A, "mv66me0m3fa91c", &said("make the bass wider", 10)).await.unwrap();
+    let kept = dir.path().join(A).join("conversations");
+    // A copy's name and source, written by another Kumi just before the copy: they stay.
+    std::fs::write(kept.join("mv66me0m9copy1.meta"), r#"{"version":1,"name":"Wide bass","forkedFrom":"mv66me0m3fa91c"}"#).unwrap();
+    store.tidy(A).await.unwrap();
+    assert!(kept.join("mv66me0m9copy1.meta").exists());
+    // Left without it for a while (an earlier Kumi let the conversation go): they go.
+    age(&kept.join("mv66me0m9copy1.meta"), Duration::from_secs(3600));
+    store.tidy(A).await.unwrap();
+    assert!(!kept.join("mv66me0m9copy1.meta").exists());
+    // An earlier Kumi moved an unsaved Set's conversation to the Set's place once it was saved, and left its name
+    // behind: the name follows it.
+    let unsaved = dir.path().join("unsaved").join("conversations");
+    store.save("unsaved", "mv66me0m0moved", &said("a new song", 20)).await.unwrap();
+    assert!(store.rename("unsaved", "mv66me0m0moved", Some("Night drive")).await.unwrap());
+    std::fs::rename(unsaved.join("mv66me0m0moved.json"), kept.join("mv66me0m0moved.json")).unwrap();
+    age(&unsaved.join("mv66me0m0moved.meta"), Duration::from_secs(3600));
+    store.tidy("unsaved").await.unwrap();
+    assert!(!unsaved.join("mv66me0m0moved.meta").exists());
+    let ConversationMatch::One(row) = store.find("night drive").await.unwrap() else { panic!("not found by its name") };
+    assert_eq!((row.place.as_str(), row.id.as_str()), (A, "mv66me0m0moved"));
+}
+
 /// A tiny generator, so each run makes the same cases.
 struct Random(u64);
 impl Random {
