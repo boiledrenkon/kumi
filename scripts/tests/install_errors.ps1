@@ -113,6 +113,8 @@ try {
 
   $run = Install @{ KUMI_HOME = (Home 'version'); KUMI_VERSION = '1.13' }
   Check "a KUMI_VERSION that isn't a release says what it takes" (($run.Code -eq 1) -and $run.Said.Contains('KUMI_VERSION is "1.13"; it takes a release such as 1.16.0, or latest.')) $run.Said
+  $run = Install @{ KUMI_HOME = (Home 'version'); KUMI_VERSION = '1.0.0' }
+  Check 'one before the installer says so' (($run.Code -eq 1) -and $run.Said.Contains('Kumi 1.0.0 came before the installer (1.1.0). The releases are at https://github.com/user1303836/kumi/releases')) $run.Said
   $run = Install @{ KUMI_HOME = (Home 'version'); KUMI_VERSION = 'v1.7.5' }
   Check "one before native Kumi gives that release's own script" (($run.Code -eq 1) -and $run.Said.Contains('came before native Kumi (1.7.6)') -and $run.Said.Contains('irm https://raw.githubusercontent.com/user1303836/kumi/v1.7.5/install.ps1 | iex')) $run.Said
 

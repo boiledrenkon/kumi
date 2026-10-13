@@ -123,7 +123,9 @@ main() {
   if [ -n "$version" ]; then
     printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9_.]+)?$' \
       || fail "KUMI_VERSION is \"${KUMI_VERSION:-}\"; it takes a release such as 1.16.0, or latest."
-    if older "$version" 1.7.6; then
+    if older "$version" 1.1.0; then
+      fail "Kumi $version came before the installer (1.1.0). The releases are at $releases"
+    elif older "$version" 1.7.6; then
       fail "Kumi $version came before native Kumi (1.7.6): install it with that release's own script: curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/v$version/install.sh | KUMI_VERSION=$version sh"
     fi
   fi

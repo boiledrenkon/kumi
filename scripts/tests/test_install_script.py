@@ -319,6 +319,7 @@ exit $status
         home = self.home()
         for given, said in (
             ("1.13", 'KUMI_VERSION is "1.13"; it takes a release such as 1.16.0, or latest.'),
+            ("1.0.0", "Kumi 1.0.0 came before the installer (1.1.0). The releases are at https://github.com/user1303836/kumi/releases"),
             ("v1.7.5", "Kumi 1.7.5 came before native Kumi (1.7.6): install it with that release's own script: "
                        "curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/v1.7.5/install.sh | KUMI_VERSION=1.7.5 sh"),
         ):

@@ -204,6 +204,7 @@
     if ($version -eq 'latest' -or $env:KUMI_RELEASES) { $version = '' }
     if ($version) {
       if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9_.]+)?$') { Fail "KUMI_VERSION is `"$env:KUMI_VERSION`"; it takes a release such as 1.16.0, or latest." }
+      if (Older $version '1.1.0') { Fail "Kumi $version came before the installer (1.1.0). The releases are at $releases" }
       if (Older $version '1.7.6') {
         Fail "Kumi $version came before native Kumi (1.7.6): install it with that release's own script: `$env:KUMI_VERSION = '$version'; irm https://raw.githubusercontent.com/user1303836/kumi/v$version/install.ps1 | iex"
       }
