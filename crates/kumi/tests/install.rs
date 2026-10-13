@@ -1374,7 +1374,7 @@ async fn an_update_without_room_or_a_connection_changes_nothing_and_says_why() {
     low.fetcher = Some(serve.clone());
     low.free = Some(Rc::new(|_| async { Some(120e6) }.boxed_local()));
     assert_eq!(update_installed(low).await.unwrap(), 1);
-    assert!(out.0.borrow().contains("Kumi needs about 300 MB free to update, and the disk with "), "{}", out.0.borrow());
+    assert!(out.0.borrow().contains("Kumi needs about 200 MB free to update, and the disk with "), "{}", out.0.borrow());
     assert!(out.0.borrow().contains("has 120 MB.") && out.0.borrow().ends_with("Nothing was changed.\n"), "{}", out.0.borrow());
     assert_eq!(serve.calls.borrow().len(), 1, "only the release's description was asked for");
     unchanged();

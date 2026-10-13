@@ -914,7 +914,7 @@ kumi uninstall                 # remove Kumi; add --all to remove your conversat
 it once to be sure it runs before putting it in place; the one before is kept
 for `--rollback`.
 
-- It needs about 300 MB free, and says so before downloading.
+- It needs about 200 MB free, and says so before downloading.
 - When it can't finish, it says why (the connection's cause, a Wi-Fi sign-in
   page answering instead of GitHub, a full disk) and that nothing was changed.
 - If `~/.kumi` belongs to another account (an install run with `sudo`), it
