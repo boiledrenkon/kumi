@@ -85,12 +85,12 @@ jobs:
             # The Intel Mac bundle is built on an Apple Silicon Mac, a cross build: the Intel runners take about twice
             # as long. The Intel Mac install below still runs on Intel.
             echo 'targets=[{"os":"macos-15","target":"aarch64-apple-darwin"},{"os":"macos-15","target":"x86_64-apple-darwin"},{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-22.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"windows-2025","target":"x86_64-pc-windows-msvc"},{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' >> "$GITHUB_OUTPUT"
-            # One install on each system (edges) also updates to this bundle from the release before it, from GitHub.
-            echo 'installs=[{"os":"macos-15","label":"macOS-arm64","edges":true},{"os":"macos-15-intel","label":"macOS-x64"},{"os":"ubuntu-22.04","label":"Linux-x64","edges":true},{"os":"ubuntu-22.04-arm","label":"Linux-arm64"},{"os":"windows-2025","label":"Windows-x64","edges":true},{"os":"windows-11-arm","label":"Windows-arm64"}]' >> "$GITHUB_OUTPUT"
+            # One install on each system (update) also updates to this bundle from the release before it, from GitHub.
+            echo 'installs=[{"os":"macos-15","label":"macOS-arm64","update":true},{"os":"macos-15-intel","label":"macOS-x64"},{"os":"ubuntu-22.04","label":"Linux-x64","update":true},{"os":"ubuntu-22.04-arm","label":"Linux-arm64"},{"os":"windows-2025","label":"Windows-x64","update":true},{"os":"windows-11-arm","label":"Windows-arm64"}]' >> "$GITHUB_OUTPUT"
             echo 'migrations=["macos-15","ubuntu-24.04","windows-2025"]' >> "$GITHUB_OUTPUT"
           else
             echo 'targets=[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]' >> "$GITHUB_OUTPUT"
-            echo 'installs=[{"os":"ubuntu-22.04","label":"Linux-x64","edges":true}]' >> "$GITHUB_OUTPUT"
+            echo 'installs=[{"os":"ubuntu-22.04","label":"Linux-x64","update":true}]' >> "$GITHUB_OUTPUT"
             echo 'migrations=["ubuntu-24.04"]' >> "$GITHUB_OUTPUT"
           fi
 
@@ -258,7 +258,7 @@ jobs:
           test "$(marked)" = 0
 
       - name: GitHub's latest and the release before this one, updated to this one and back twice (zsh on macOS, fish on Linux; a non-ASCII home)
-        if: ${{ !cancelled() && matrix.edges && runner.os != 'Windows' }}
+        if: ${{ !cancelled() && matrix.update && runner.os != 'Windows' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -417,7 +417,7 @@ jobs:
           if ((([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';') -contains (Join-Path $env:KUMI_HOME 'bin')) { throw 'PATH still has Kumi' }
 
       - name: GitHub's latest and the release before this one, updated to this one and back twice (PowerShell 7; KUMI_HOME in a non-ASCII folder)
-        if: ${{ !cancelled() && matrix.edges && runner.os == 'Windows' }}
+        if: ${{ !cancelled() && matrix.update && runner.os == 'Windows' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
