@@ -3,6 +3,25 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.17.0 — 2026-10-13
+
+Ships with bridge 1.0.92, as 1.16.6 did.
+
+- The install command now fetches the installer from the latest release, so the installer always
+  matches the Kumi it installs, and Kumi's own repair hints give the same command. A change to the
+  installer reaches you only after that release has installed and updated on macOS, Linux and Windows.
+  The old command still works.
+- Every conversation now has an id, shown in `/status` and as Kumi closes. `kumi -r <id or name>` goes
+  back to it from the shell, and `kumi -c` to the one you had last, in any Set. `/resume` lists this
+  Set's conversations and, under Tab, every Set's. You can rename, pin, delete or fork them
+  (`/rename`, `/fork`, `/new <name>`). Going back to another Set's conversation asks first: open that
+  Set in Live, or carry it on here as a copy. A second Kumi window carries on in its own copy instead
+  of overwriting the first. Conversations are kept 90 days after you last used them (pinned ones
+  always), beyond each Set's 20 newest.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.16.6 — 2026-10-13
 
 Ships with bridge 1.0.92, as 1.16.5 did.
