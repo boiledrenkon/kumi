@@ -3,6 +3,18 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.16.4 — 2026-10-13
+
+Ships with bridge 1.0.92, as 1.16.3 did.
+
+- On Windows, Kumi installs in a user folder whose name falls outside Windows' language setting, such
+  as a Japanese name on an English Windows. Before, the installer stopped with "couldn't unpack Kumi."
+  If that happened to you, run the install command again. Each release now also carries its
+  installers, checked on macOS, Linux and Windows before it goes out.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.16.3 — 2026-10-13
 
 Ships with bridge 1.0.92, as 1.16.2 did.
