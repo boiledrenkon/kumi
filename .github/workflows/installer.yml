@@ -431,40 +431,63 @@ jobs:
             Where-Object { $_ -lt [version]$version } | Sort-Object -Descending | Select-Object -First 1
           if (-not $previous) { throw 'no published release before this one' }
           $previous = "$previous"
-          # KUMI_HOME in a folder named with spaces, Japanese and an accented letter, as a profile folder can be:
-          # Windows' tar.exe unpacks into it.
-          $root = Join-Path $env:RUNNER_TEMP ('John Smith ' + [char]0x30DB + [char]0x30FC + [char]0x30E0 + ' ' + [char]0x00E9)
-          $env:KUMI_HOME = Join-Path $root '.kumi'
-          $bin = Join-Path $env:KUMI_HOME 'bin'
-          $kumi = Join-Path $bin 'kumi.cmd'
           function Kumi { & $kumi @args; if ($LASTEXITCODE -ne 0) { throw "kumi $args exited $LASTEXITCODE" } }
           function OnPath { ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -contains $bin }
-
-          # This build's installer, as the release serves it, installing GitHub's latest: the one-liner.
-          irm "$releases/install.ps1" | iex
-          $latest = & $kumi --version; Write-Host $latest
-          if ($latest -notmatch '^Kumi \d+\.\d+\.\d+$') { throw "unexpected version: $latest" }
-          if (-not (OnPath)) { throw 'PATH not updated' }
-          # Pinned to the release before this one: an older one over the latest (or a repair, when that's the latest).
-          $env:KUMI_VERSION = $previous
-          irm "$releases/install.ps1" | iex
-          Remove-Item Env:KUMI_VERSION
-          if ((& $kumi --version) -ne "Kumi $previous") { throw "the pinned install didn't give $previous" }
-
-          # That release's bridge in Live (a scratch Remote Scripts folder: no Live here), then its update to this
-          # build, and back and forth: each time, the bridge in Live is the one that went with that Kumi.
-          $scripts = Join-Path $root 'User Library\Remote Scripts'
-          New-Item -ItemType Directory -Force -Path $scripts | Out-Null
-          $env:KUMI_REMOTE_SCRIPTS_DIR = $scripts
-          $env:KUMI_LIVE_EXTENSIONS_DIR = Join-Path $root 'Live Extensions'
-          $env:KUMI_BRIDGE_WAIT_SECONDS = '0'
-          Kumi bridge --yes
+          # The bridge version in Live, as its reference names it.
           function Bridge {
             $read = { param($path) Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
             $config = & $read (& $read (Join-Path $scripts 'AbletonMcpBridge\bridge-reference.json')).config
             $package = & $read (Join-Path (Split-Path $config.server.command) 'package.json')
             if ($package.bridge) { $package.bridge } else { $package.version }
           }
+          # A home for Kumi in RUNNER_TEMP, with its own Remote Scripts and Extensions folders (no Live here).
+          function UseHome([string]$Folder) {
+            $script:root = Join-Path $env:RUNNER_TEMP $Folder
+            $env:KUMI_HOME = Join-Path $script:root '.kumi'
+            $script:bin = Join-Path $env:KUMI_HOME 'bin'
+            $script:kumi = Join-Path $script:bin 'kumi.cmd'
+            $script:scripts = Join-Path $script:root 'User Library\Remote Scripts'
+            New-Item -ItemType Directory -Force -Path $script:scripts | Out-Null
+            $env:KUMI_REMOTE_SCRIPTS_DIR = $script:scripts
+            $env:KUMI_LIVE_EXTENSIONS_DIR = Join-Path $script:root 'Live Extensions'
+            $env:KUMI_BRIDGE_WAIT_SECONDS = '0'
+            Remove-Item Env:KUMI_RELEASES, Env:KUMI_VERSION -ErrorAction SilentlyContinue
+          }
+          # Uninstalling takes Kumi out of PATH; its folders go a few seconds later.
+          function Uninstall {
+            Kumi uninstall --yes
+            Start-Sleep -Seconds 15
+            foreach ($gone in 'app', 'app.previous', 'bin') { if (Test-Path -LiteralPath (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
+            if (OnPath) { throw 'PATH still has Kumi' }
+          }
+
+          # KUMI_HOME in a folder named with spaces, Japanese and an accented letter, as a profile folder can be (tar.exe
+          # reads its arguments in the system's code page). This build's installer, as the release serves it, installs
+          # GitHub's latest (the one-liner), then this build over it; then the bridge, two rollbacks and the uninstall.
+          UseHome ('John Smith ' + [char]0x30DB + [char]0x30FC + [char]0x30E0 + ' ' + [char]0x00E9)
+          irm "$releases/install.ps1" | iex
+          $latest = & $kumi --version; Write-Host $latest
+          if ($latest -notmatch '^Kumi \d+\.\d+\.\d+$') { throw "unexpected version: $latest" }
+          if (-not (OnPath)) { throw 'PATH not updated' }
+          $env:KUMI_RELEASES = $releases
+          irm "$releases/install.ps1" | iex
+          if ((& $kumi --version) -ne "Kumi $version") { throw "this build's install didn't give $version" }
+          Kumi bridge --yes
+          Kumi update --rollback
+          if ((& $kumi --version) -ne $latest) { throw "the first rollback didn't give $latest back" }
+          Kumi update --rollback
+          if ((& $kumi --version) -ne "Kumi $version") { throw "the second rollback didn't give $version" }
+          Uninstall
+
+          # The release before this one, pinned, then its own kumi update to this build and back and forth: each time,
+          # the bridge in Live is the one that went with that Kumi. (In a home with spaces only: that release's updater
+          # unpacks with tar.exe.)
+          UseHome 'John Smith'
+          $env:KUMI_VERSION = $previous
+          irm "$releases/install.ps1" | iex
+          Remove-Item Env:KUMI_VERSION
+          if ((& $kumi --version) -ne "Kumi $previous") { throw "the pinned install didn't give $previous" }
+          Kumi bridge --yes
           $before = Bridge
           $env:KUMI_RELEASES = $releases
           Kumi update
@@ -476,12 +499,7 @@ jobs:
           Kumi update --rollback
           if ((& $kumi --version) -ne "Kumi $version") { throw "the second rollback didn't give $version" }
           if ((Bridge) -ne $after) { throw "the second rollback left bridge $(Bridge), not $after" }
-
-          # Uninstalling takes Kumi out of PATH; its folders go a few seconds later.
-          Kumi uninstall --yes
-          Start-Sleep -Seconds 15
-          foreach ($gone in 'app', 'app.previous', 'bin') { if (Test-Path -LiteralPath (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
-          if (OnPath) { throw 'PATH still has Kumi' }
+          Uninstall
 
   edges:
     # install.sh and install.ps1 when a release isn't there, nothing answers, a Wi-Fi sign-in page answers, a checksum
