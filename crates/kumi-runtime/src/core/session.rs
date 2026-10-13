@@ -331,6 +331,8 @@ struct State {
     foreground: Vec<Rc<jobs::Foreground>>,
     /// Jobs that ended whose request carries on, waiting for the session to be free.
     carrying: jobs::Carrying,
+    /// The Set whose kept jobs came back this session.
+    jobs_place: Option<String>,
 }
 struct Inner {
     options: SessionOptions,
@@ -727,6 +729,7 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 started: false,
                 foreground: vec![],
                 carrying: Default::default(),
+                jobs_place: None,
             }),
         }
     })))
@@ -1115,6 +1118,7 @@ impl Session {
             if self.0.learned.is_some() { TECHNIQUE_GUIDANCE.into() } else { String::new() },
             technique_instructions(&techniques),
             if self.0.gaps.is_empty() { String::new() } else { GAP_GUIDANCE.into() },
+            if self.0.jobs.is_none() { String::new() } else { crate::core::jobs::JOB_GUIDANCE.into() },
             willington.into(),
         ]
         .into_iter()
@@ -1378,6 +1382,7 @@ impl Session {
         }
         self.0.state.borrow_mut().observation = Some(snapshot.label.clone());
         self.emit(SessionEvent::Observation { label: snapshot.label.clone() });
+        self.bring_back_jobs().await;
         Ok(snapshot)
     }
     async fn reset(&self, op: &Operation) -> Result<(), RuntimeError> {
@@ -2623,6 +2628,13 @@ impl SessionController for Session {
             }
             let saving = this.0.saving.borrow().clone();
             let _ = this.bounded(saving).await;
+            let kept = this.clone();
+            let _ = this
+                .bounded(async move {
+                    kept.keep_jobs().await;
+                    Ok(())
+                })
+                .await;
             let result = this.drop_resources().await;
             let _ = tx.send(result);
         });

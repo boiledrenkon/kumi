@@ -18,6 +18,8 @@ pub struct JobsOptions {
     pub worker_factory: KernelFactory,
     /// How many run at once.
     pub max: usize,
+    /// Where a Set's interrupted jobs and unheard reports wait for the next time Kumi runs.
+    pub store: Option<Rc<dyn crate::core::jobs::JobStore>>,
 }
 
 static START_JOB_SCHEMA: LazyLock<JsonObject> = LazyLock::new(|| {
@@ -479,6 +481,41 @@ impl Session {
         s.carrying.retain(|waiting| *waiting != id);
         s.turns += 1;
         true
+    }
+
+    /// Where this Set's jobs are kept between sessions.
+    fn jobs_place(&self) -> String {
+        self.0.state.borrow().project.clone().unwrap_or_else(|| UNSAVED.into())
+    }
+
+    /// A Set's jobs from the last time Kumi ran come back, once a session: interrupted ones to run again, and reports the
+    /// conversation hadn't heard (it hears them at the next turn).
+    pub(super) async fn bring_back_jobs(&self) {
+        let (Some(jobs), Some(store)) = (self.0.jobs.clone(), self.0.options.jobs.as_ref().and_then(|o| o.store.clone())) else { return };
+        let place = self.jobs_place();
+        if self.0.state.borrow().jobs_place.as_deref() == Some(place.as_str()) {
+            return;
+        }
+        self.0.state.borrow_mut().jobs_place = Some(place.clone());
+        let kept = store.take(&place).await.unwrap_or_default();
+        let interrupted = kept.iter().filter(|job| job.status.state == JobState::Interrupted).count();
+        for job in kept {
+            jobs.restore(job);
+        }
+        if interrupted > 0 {
+            self.notice(format!(
+                "{} interrupted when Kumi last closed: /jobs runs {} again.",
+                if interrupted == 1 { "A background job was".to_string() } else { format!("{interrupted} background jobs were") },
+                if interrupted == 1 { "it" } else { "them" }
+            ));
+        }
+    }
+
+    /// As Kumi closes: what to bring back next time.
+    pub(super) async fn keep_jobs(&self) {
+        let (Some(jobs), Some(store)) = (self.0.jobs.clone(), self.0.options.jobs.as_ref().and_then(|o| o.store.clone())) else { return };
+        let place = self.0.state.borrow().jobs_place.clone().unwrap_or_else(|| self.jobs_place());
+        let _ = store.save(&place, &jobs.to_keep()).await;
     }
 
     /// What the next turn hears of jobs that ended since the last one, as Kumi's note with their pictures; taken back if

@@ -145,6 +145,8 @@ struct Harness {
     main_tools: Rc<RefCell<Vec<Rc<dyn KernelTool>>>>,
     /// The pictures the main turns were shown.
     pictures: Rc<RefCell<Vec<String>>>,
+    /// The main kernel's instructions.
+    instructions: Rc<RefCell<String>>,
 }
 
 fn harness(main: Script, worker: Script, config: impl FnOnce(&mut SessionOptions)) -> Harness {
@@ -162,10 +164,12 @@ fn harness_with(
     let main_tools: Rc<RefCell<Vec<Rc<dyn KernelTool>>>> = Rc::default();
     let worker_tools: Rc<RefCell<Vec<Vec<(String, Reach)>>>> = Rc::default();
     let pictures: Rc<RefCell<Vec<String>>> = Rc::default();
+    let instructions: Rc<RefCell<String>> = Rc::default();
     let factory: KernelFactory = {
-        let (inputs, tools_seen, shown) = (main_inputs.clone(), main_tools.clone(), pictures.clone());
+        let (inputs, tools_seen, shown, told) = (main_inputs.clone(), main_tools.clone(), pictures.clone(), instructions.clone());
         Rc::new(move |options| {
             *tools_seen.borrow_mut() = options.tools.clone();
+            *told.borrow_mut() = options.instructions.clone();
             let kernel = ScriptedKernel { tools: options.tools, script: main.clone(), inputs: inputs.clone(), pictures: shown.clone() };
             async move { Ok(Rc::new(kernel) as Rc<dyn Kernel>) }.boxed_local()
         })
@@ -185,9 +189,9 @@ fn harness_with(
     options.timeout_ms = Some(5000);
     options.cancel_grace_ms = Some(10);
     options.close_timeout_ms = Some(2000);
-    options.jobs = Some(JobsOptions { worker_factory, max: 3 });
+    options.jobs = Some(JobsOptions { worker_factory, max: 3, store: None });
     config(&mut options);
-    Harness { session: create_session(options).unwrap(), events, main: main_inputs, worker_tools, main_tools, pictures }
+    Harness { session: create_session(options).unwrap(), events, main: main_inputs, worker_tools, main_tools, pictures, instructions }
 }
 
 impl Harness {
@@ -438,6 +442,8 @@ local_test!(a_worker_gets_only_tools_away_from_the_daw_and_never_starts_a_job, {
     // The main answer has the job tools; the DAW's own tools are as they were.
     let main: Vec<String> = h.main_tools.borrow().iter().map(|t| t.name().to_string()).collect();
     assert!(main.contains(&"start_job".to_string()) && main.contains(&"jobs".to_string()), "{main:?}");
+    // The conversation's model is told when to start one.
+    assert!(h.instructions.borrow().contains("start_job and keep working with the producer"));
     // A tool job can't use a tool that touches the DAW.
     let start = tool(&h.main_tools.borrow(), "start_job");
     let refused = start.execute(object(json!({"title":"sneaky","tool":"make_changes","args":{}})), Signal::new()).await.unwrap();
@@ -656,4 +662,44 @@ local_test!(a_session_with_everything_on_offers_the_model_at_most_128_tools, {
     // Its job tools are two of them, and every name is the model's once.
     let unique: std::collections::HashSet<&String> = offered.iter().collect();
     assert_eq!(unique.len(), offered.len());
+});
+
+local_test!(jobs_interrupted_by_closing_come_back_next_time_to_run_again, {
+    use kumi_runtime::core::jobs::create_job_store;
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_job_store(dir.path());
+    let first = harness(starts_a_worker("tell"), worker_waiting(Rc::new(Notify::new())), |o| {
+        o.jobs.as_mut().unwrap().store = Some(store.clone());
+    });
+    first.session.start().await.unwrap();
+    first.session.submit("research it", None).await.unwrap();
+    assert_eq!(first.last(1).unwrap().state, JobState::Running);
+    first.session.close().await.unwrap();
+    // The next time Kumi runs on this Set, it's there, interrupted, and runs again.
+    let gate = Rc::new(Notify::new());
+    let second = harness(starts_a_worker("tell"), worker_waiting(gate.clone()), |o| {
+        o.jobs.as_mut().unwrap().store = Some(store.clone());
+    });
+    second.session.start().await.unwrap();
+    let kept = second.session.jobs();
+    assert_eq!(kept.len(), 1);
+    assert_eq!((kept[0].id, kept[0].state, kept[0].title.as_str()), (1, JobState::Interrupted, "Burial vocal chops"));
+    assert!(second.events.borrow().iter().any(|e| matches!(e, SessionEvent::Notice { message } if message == "A background job was interrupted when Kumi last closed: /jobs runs it again.")));
+    assert_eq!(second.session.run_job_again(1), Ok(2));
+    assert_eq!(second.last(2).unwrap().state, JobState::Running);
+    assert!(second.session.jobs().iter().all(|s| s.id != 1), "the interrupted one gives way to its new run");
+    // Taken once: a third start finds nothing of job 1.
+    gate.notify_one();
+    second.until("the job to end", |h| h.last(2).is_some_and(|s| s.state == JobState::Done)).await;
+    second.session.close().await.unwrap();
+    let third = harness(starts_a_worker("tell"), worker_waiting(Rc::new(Notify::new())), |o| {
+        o.jobs.as_mut().unwrap().store = Some(store.clone());
+    });
+    third.session.start().await.unwrap();
+    // Its report the conversation never heard comes back too, for the next turn.
+    let back = third.session.jobs();
+    assert_eq!(back.len(), 1);
+    assert_eq!((back[0].id, back[0].state), (2, JobState::Done));
+    third.session.submit("what did it find?", None).await.unwrap();
+    assert!(third.main.borrow()[0].contains("<job_report_untrusted id=\"2\">"), "{}", third.main.borrow()[0]);
 });

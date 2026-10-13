@@ -15,7 +15,7 @@ use kumi_runtime::{
     core::{
         contracts::*,
         file_sync::FileSync,
-        jobs::{DEFAULT_MAX_JOBS, WORKER_STEPS},
+        jobs::{create_job_store, DEFAULT_MAX_JOBS, WORKER_STEPS},
         memory::MemoryStoreOptions,
         session::{JobsOptions, VideoDirectories},
         store_backed::{SqliteMemoryStore, SqlitePlaybookStore, SqliteTechniqueStore},
@@ -575,7 +575,12 @@ pub(super) async fn run_session(
         let env = io.env.clone();
         Rc::new(move || Willington::find(&env).map(|willington| willington.switch()))
     });
-    options.jobs = Some(JobsOptions { worker_factory, max: settings.max_jobs.map(|n| n as usize).unwrap_or(DEFAULT_MAX_JOBS) });
+    options.jobs = Some(JobsOptions {
+        worker_factory,
+        max: settings.max_jobs.map(|n| n as usize).unwrap_or(DEFAULT_MAX_JOBS),
+        // Beside the goals: a Set's interrupted jobs and unheard reports, for the next time Kumi runs.
+        store: Some(create_job_store(load_goals_dir(&io.env)?)),
+    });
     let session: Rc<dyn SessionController> = Rc::new(create_session(options)?);
     *controller.borrow_mut() = Some(Rc::downgrade(&session));
     let (fetch_tx, mut fetch_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
