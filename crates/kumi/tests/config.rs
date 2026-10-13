@@ -292,3 +292,13 @@ fn live_preferences_find_moved_libraries_and_unescape_xml_once() {
     assert_eq!(remote_scripts_dir(&explicit), "/chosen/Remote Scripts");
     assert!(live_user_library(&Env::from([(key.into(), folder.path().join("none").to_string_lossy().into())])).is_none());
 }
+#[test]
+fn over_ssh_chatgpt_signs_in_with_a_code() {
+    // The browser on a computer reached over SSH isn't the producer's: a code, entered in a browser anywhere.
+    let mut env = env();
+    assert_eq!(value(&["login", "openai-codex"], &env)["method"], "browser");
+    env.insert("SSH_CONNECTION".into(), "192.0.2.1 52000 192.0.2.2 22".into());
+    assert_eq!(value(&["login", "openai-codex"], &env)["method"], "device");
+    assert_eq!(value(&["login", "openai-codex", "--from-pi"], &env)["method"], "import-pi");
+    assert_eq!(chatgpt_sign_in(&env), LoginMethod::Device);
+}

@@ -2147,6 +2147,9 @@ impl SessionController for Session {
     fn library(&self) -> Option<LibraryStatus> {
         self.0.options.library.as_ref().map(|library| library.status())
     }
+    fn open_set(&self) -> Option<String> {
+        self.0.state.borrow().integration.as_ref().and_then(|integration| integration.open_set())
+    }
     fn has_taste(&self) -> bool {
         self.0.options.library.is_some()
     }

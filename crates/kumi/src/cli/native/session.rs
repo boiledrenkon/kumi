@@ -5,7 +5,7 @@ use crate::{
     history::open_input_history,
     models::{create_model_control, ModelControlOptions},
     terminal::{create_terminal, Terminal, TerminalOptions},
-    tui::app::{create_tui, AwaySettings, ConnectLive, LiveSetup, PanelTab, TuiOptions},
+    tui::app::{create_tui, AwaySettings, ConnectLive, LiveInstalled, LiveSetup, PanelTab, TuiOptions},
     voice::{create_voice_control, VoiceControlOptions},
     willington::{Willington, WillingtonControl},
 };
@@ -60,7 +60,7 @@ impl LiveSetup for LiveSide {
     async fn open_live(&self) -> Option<String> {
         live_app::open_live(&self.run, kumi_runtime::system::platform(), &self.env).await.map(|live| live.app)
     }
-    async fn ask_to_quit(&self) {
+    async fn ask_to_quit(&self) -> bool {
         live_app::ask_to_quit(&self.run, kumi_runtime::system::platform(), &self.env).await
     }
     async fn closed(&self, stop: &Signal) -> bool {
@@ -71,8 +71,8 @@ impl LiveSetup for LiveSide {
         options.run = Some(self.run.clone());
         bridge_setup::install_quietly(options).await
     }
-    async fn start(&self, app: Option<String>) -> bool {
-        live_app::start(&self.run, kumi_runtime::system::platform(), &self.env, app.as_deref()).await
+    async fn start(&self, app: Option<String>, set: Option<String>) -> bool {
+        live_app::start(&self.run, kumi_runtime::system::platform(), &self.env, app.as_deref(), set.as_deref()).await
     }
     async fn connect(&self) {
         if !self.given {
@@ -94,6 +94,25 @@ impl LiveSetup for LiveSide {
     async fn version(&self, app: Option<String>) -> Option<String> {
         live_app::version(&self.run, kumi_runtime::system::platform(), &self.env, app.as_deref()).await
     }
+    async fn installed(&self) -> LiveInstalled {
+        live_app::installed(&self.env, kumi_runtime::system::platform())
+    }
+    fn open_set(&self) -> Option<String> {
+        self.controller.borrow().as_ref().and_then(Weak::upgrade).and_then(|session| session.open_set())
+    }
+    fn here(&self) -> bool {
+        live_here()
+    }
+    fn asks_permission(&self) -> Option<String> {
+        (kumi_runtime::system::platform() == "darwin").then(|| kumi_runtime::voice::microphone::terminal_app(&self.env).to_string())
+    }
+    fn settings_menu(&self) -> Option<String> {
+        live_app::settings_menu(kumi_runtime::system::platform())
+    }
+}
+/// Live runs on macOS and Windows only: elsewhere Kumi chats without it, and setup only signs in.
+fn live_here() -> bool {
+    matches!(kumi_runtime::system::platform(), "darwin" | "win32")
 }
 
 pub(super) async fn probe_live(config: String, factory: AbletonFactory) -> doctor::LiveProbe {
@@ -609,13 +628,20 @@ pub(super) async fn run_session(
         .as_ref()
         .and_then(|_| update::older_bridge(&io.env, bundled.as_deref()))
         .filter(|stale| !(stale.runtime_migration && crate::install::only_the_host_differs(&io.env)));
+    // Without the full screen, what the setup would do is said, in the same words as everywhere else.
+    let connect = kumi_runtime::command::connect_live(io.command(), io.command());
     let bridge_notice = if bridge_missing {
-        Some(format!("The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: {} bridge",io.command()))
+        live_here().then(|| format!("The Ableton bridge isn't in Live yet, so Kumi can't see your Set; chatting without it. {connect}."))
     } else {
-        stale.as_ref().map(|stale| if stale.runtime_migration {
-            format!("The bridge in Live still uses JavaScript. Quit Kumi and Live, then run: {} bridge to switch to the native bridge.", io.command())
-        } else {
-            format!("The bridge in Live is {}, older than this Kumi's ({}), so some changes aren't offered. Quit Kumi and Live, then run: {} update",stale.installed,stale.bundled,io.command())
+        stale.as_ref().map(|stale| {
+            if stale.runtime_migration {
+                format!("The bridge in Live still uses JavaScript. {connect}.")
+            } else {
+                format!(
+                    "The bridge in Live is {}, older than this Kumi's ({}), so some changes aren't offered. {connect}.",
+                    stale.installed, stale.bundled
+                )
+            }
         })
     };
     let notice = match (bridge_notice, database_notice) {
@@ -627,9 +653,9 @@ pub(super) async fn run_session(
         (Some(notice), Some(credentials)) => Some(format!("{notice} {credentials}")),
         (notice, credentials) => notice.or(credentials),
     };
-    // In the app, first-run setup puts the bridge in place instead, with Live restarting around it.
+    // In the app, first-run setup puts the bridge in place instead, with Live restarting around it (where Live runs).
     let connect_why = if bridge_missing {
-        Some("The Ableton bridge isn't in Live yet, so Kumi can't see your Set.".to_string())
+        live_here().then(|| "The Ableton bridge isn't in Live yet, so Kumi can't see your Set.".to_string())
     } else {
         stale.as_ref().map(|stale| {
             if stale.runtime_migration {
@@ -693,6 +719,19 @@ pub(super) async fn run_session(
         options.secrets = secrets.clone();
         options.history = Some(history);
         options.open_browser = Some(Rc::new(login::open_browser));
+        // Over SSH, the producer's browser and clipboard are on another computer: ChatGPT signs in with a code, and
+        // copying goes through the terminal alone.
+        options.remote = io.env.get("SSH_CONNECTION").is_some_and(|value| !value.is_empty());
+        if !options.remote {
+            options.copy = Some(Rc::new(login::copy_to_clipboard));
+        }
+        options.reach = Some({
+            let env = io.env.clone();
+            Rc::new(move || {
+                let env = env.clone();
+                async move { login::reach_sign_in(&env, None).await }.boxed_local()
+            })
+        });
         options.updates = Some(updates);
         options.willington = Some(WillingtonControl::new(io.env.clone()));
         options.slots = Some(slots_context);

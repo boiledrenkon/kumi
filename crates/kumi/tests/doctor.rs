@@ -119,6 +119,9 @@ async fn doctor_says_whats_fine_and_exact_fixes_without_secrets() {
     io.bundled_bridge_version = Some("1.0.10".into());
     assert_eq!(run_doctor(io.clone()).await.unwrap(), 1);
     let printed = out.0.borrow().clone();
+    // An older bridge in Live: the one way Kumi says to connect it, which can restart Live for the producer.
+    let older = find(&doctor_checks(&io).await.unwrap(), "The installed bridge (1.0.9) is older than this Kumi's (1.0.10)").clone();
+    assert_eq!(older.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
     for text in [
         "Node.js 20.11.0 isn't supported (Kumi needs 22 or newer)",
         "Install Node 24 LTS",
@@ -158,6 +161,8 @@ async fn doctor_explains_live_bridge_and_terminal_in_plain_words() {
     io.terminal = Some(TerminalInfo { is_tty: true, columns: Some(50), rows: Some(12) });
     assert!(find(&doctor_checks(&io).await.unwrap(), "Terminal").text.contains("small"));
     io.env.insert("KUMI_REMOTE_SCRIPTS_DIR".into(), s.root.path().join("nowhere").display().to_string());
+    let missing = find(&doctor_checks(&io).await.unwrap(), "The Ableton bridge isn't installed").clone();
+    assert_eq!(missing.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
     assert!(find(&doctor_checks(&io).await.unwrap(), "bridge isn't installed")
         .next
         .as_ref()

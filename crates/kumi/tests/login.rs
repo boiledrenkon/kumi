@@ -312,3 +312,49 @@ async fn logout_shared_opencode_preserves_environment_notice_and_status_model_ef
     assert!(output.contains("Model: openai/gpt-fixture (from KUMI_MODEL), effort low\n"));
     assert!(!output.contains("private-env-fixture"));
 }
+/// The sign-in's host answering one way: an HTTP status, or a failure as Kumi's own HTTP reports it.
+struct Reach(Result<u16, LanguageModelError>);
+#[async_trait(?Send)]
+impl Fetch for Reach {
+    async fn fetch(&self, url: &str, init: FetchInit) -> Result<Response, LanguageModelError> {
+        assert_eq!(url, "https://auth.openai.com/.well-known/openid-configuration");
+        match &self.0 {
+            Ok(0) => {
+                // Nothing answers: Kumi's own wait runs out.
+                init.signal.unwrap().cancelled().await;
+                Err(LanguageModelError::other("This operation was aborted"))
+            }
+            Ok(status) => Ok(Response::text_response(*status, "")),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn before_sign_in_kumi_says_why_it_cant_reach_it_with_the_proxy_settings() {
+    use kumi_runtime::ai::error::ApiCallError;
+    let reach = |answer| async move { reach_sign_in(&Env::new(), Some(Rc::new(Reach(answer)))).await };
+    // Any answer from the host is a way there, even one that refuses this request.
+    for status in [200, 403, 404, 500] {
+        assert_eq!(reach(Ok(status)).await, None, "{status}");
+    }
+    let mut dns = ApiCallError::new("Cannot connect to API: error sending request", "u", None, None);
+    dns.cause = Some("error sending request: client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known".into());
+    assert_eq!(
+        reach(Err(dns.into())).await.as_deref(),
+        Some("Kumi couldn't reach auth.openai.com: its address couldn't be looked up (DNS). Check that this computer is online; if it is, its DNS isn't answering, so try another network. Behind a proxy? Set HTTPS_PROXY to it.")
+    );
+    let proxy = reach(Ok(407)).await.unwrap();
+    assert!(proxy.starts_with("Kumi couldn't reach auth.openai.com: the proxy didn't let Kumi through."), "{proxy}");
+    // A proxy in the environment is named, without its password.
+    let env = Env::from([("HTTPS_PROXY".to_string(), "http://me:secret@proxy.example:3128".to_string())]);
+    let mut tls = ApiCallError::new("Cannot connect to API", "u", None, None);
+    tls.cause = Some("error sending request: client error (Connect): invalid peer certificate: UnknownIssuer".into());
+    let said = reach_sign_in(&env, Some(Rc::new(Reach(Err(tls.into()))))).await.unwrap();
+    assert!(said.contains("(TLS)") && said.ends_with("Kumi's proxy settings: HTTPS_PROXY=http://proxy.example:3128."), "{said}");
+    assert!(!said.contains("secret"));
+}
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_sign_in_host_that_never_answers_is_a_timeout() {
+    let said = reach_sign_in(&Env::new(), Some(Rc::new(Reach(Ok(0))))).await.unwrap();
+    assert!(said.starts_with("Kumi couldn't reach auth.openai.com: nothing answered in time."), "{said}");
+}

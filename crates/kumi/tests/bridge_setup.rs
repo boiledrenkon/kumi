@@ -172,6 +172,24 @@ async fn current_bridge_is_left_alone_and_live_open_or_confirmation_declined_cha
     assert!(w.calls.borrow().is_empty());
 }
 #[tokio::test(flavor = "current_thread")]
+async fn without_a_terminal_the_question_is_said_with_how_to_answer_it_beforehand() {
+    // Piped, or run by another program: nobody can answer, so it's no, and the question says how to say yes ahead.
+    struct Piped;
+    impl TerminalInput for Piped {
+        fn resume(&self, _: ByteListener) {}
+        fn pause(&self) {}
+    }
+    let w = World::new(Some("1.0.33"));
+    let mut io = w.io();
+    io.yes = false;
+    io.input = Some(Rc::new(Piped));
+    assert_eq!(setup_bridge(io).await.unwrap(), 1);
+    let said = w.out.0.borrow().clone();
+    assert!(said.contains("Is Live closed, with your work saved? (no terminal to answer in; add --yes)\nNothing was changed.\n"), "{said}");
+    assert!(!said.contains("Quit Live"), "Live is closed already: {said}");
+    assert!(w.calls.borrow().is_empty());
+}
+#[tokio::test(flavor = "current_thread")]
 async fn after_an_update_a_bridge_left_for_later_says_so_and_isnt_a_failure() {
     // Kumi's updater sets KUMI_BRIDGE_AFTER, and so does the migration shim for an older Kumi's.
     let w = World::new(Some("1.0.33"));
@@ -181,7 +199,7 @@ async fn after_an_update_a_bridge_left_for_later_says_so_and_isnt_a_failure() {
     io.confirm = Some(Rc::new(|_| async { false }.boxed_local()));
     assert_eq!(setup_bridge(io).await.unwrap(), 0);
     let said = w.out.0.borrow().clone();
-    assert!(said.contains("The bridge wasn't updated yet: quit Live, then run:"), "{said}");
+    assert!(said.contains(&format!("The bridge wasn't updated yet. {}.", *kumi_runtime::CONNECT_LIVE)), "{said}");
     assert!(!said.contains("Nothing was changed"), "{said}");
     assert!(w.calls.borrow().is_empty());
     let w = World::new(Some("1.0.33"));
@@ -189,7 +207,7 @@ async fn after_an_update_a_bridge_left_for_later_says_so_and_isnt_a_failure() {
     io.env.insert("KUMI_BRIDGE_AFTER".into(), "1".into());
     io.live_running = Some(Rc::new(|| async { true }.boxed_local()));
     assert_eq!(setup_bridge(io).await.unwrap(), 0);
-    assert!(w.out.0.borrow().contains("The bridge wasn't updated yet: save your work, quit Live, then run:"));
+    assert!(w.out.0.borrow().contains(&format!("The bridge wasn't updated yet, because Live is open. {}.", *kumi_runtime::CONNECT_LIVE)));
     assert!(w.calls.borrow().is_empty());
     // The shim marks every command it forwards with KUMI_LEGACY_HANDOFF: alone, it's a kumi bridge the
     // producer runs through an older launcher.

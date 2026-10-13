@@ -67,8 +67,11 @@ pub fn help(installed: bool) -> String {
     if !installed {
         first.push(("cargo build --release --workspace".to_string(), "Build Kumi and the Ableton bridge"));
     }
-    first.push((format!("{cmd} bridge"), "With Live closed: put the bridge into Live, or bring it up to date"));
-    first.push((cmd.into(),"Talk about the open Live Set; the installed bridge is found automatically.\nSign in there with /login, and choose a model with /model."));
+    first.push((
+        cmd.into(),
+        "Sign in and connect Live: it puts the bridge in Live and can restart Live for you.\nThen talk about the open Live Set; /login and /model change the sign-in and model.",
+    ));
+    first.push((format!("{cmd} bridge"), "Or, with Live closed: put the bridge into Live, or bring it up to date"));
     let mut more=vec![("--inference-only","Chat without Live"),("--bridge-config <path>","Use this bridge configuration (an absolute path)"),("login","Sign in: asks whether with ChatGPT or an API key"),("login <provider>","Sign in to one provider: openai-codex with a ChatGPT plan (--device\nwithout a browser); anthropic, openai, opencode with an API key (asked for)"),("logout <provider>","Remove Kumi's sign-in for that provider"),("model [<provider>/<model>]","Show or choose the model; ollama/<model> or lmstudio/<model> for one on this computer"),("auth","Show which providers are usable (no secrets)"),("doctor","Check sign-in, the bridge, Live and the terminal"),("library","What Kumi knows of your sounds, presets and Sets (it learns them in the\nbackground); --rebuild learns them all again"),("update","Bring Kumi up to date, and the bridge in Live when it's older"),("update --check","Say whether there's a newer Kumi, without installing it")];
     if installed {
         more.extend([
@@ -335,7 +338,7 @@ async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>
             if let Some((provider, _)) = chosen {
                 let config = AppConfig::Login {
                     provider: *provider,
-                    method: if *provider == ProviderId::OpenaiCodex { LoginMethod::Browser } else { LoginMethod::Key },
+                    method: if *provider == ProviderId::OpenaiCodex { chatgpt_sign_in(&io.env) } else { LoginMethod::Key },
                     auth_file: auth_file.clone(),
                     pi_auth_file: pi_auth_file.clone(),
                     settings_file: settings_file.clone(),

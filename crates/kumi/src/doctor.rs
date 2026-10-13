@@ -40,7 +40,7 @@ use kumi_runtime::{
     system::{self, Env},
     video::programs::{ffmpeg_hint, find_ffmpeg, find_whisper, whisper_hint, FfmpegOptions, ProgramOptions},
     voice::{microphone::terminal_app, voice_readiness, ReadinessOptions, VoiceReadiness},
-    INSTALLED, KUMI, KUMI_REPAIR, KUMI_VERSION,
+    CONNECT_LIVE, INSTALLED, KUMI, KUMI_REPAIR, KUMI_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -567,7 +567,7 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
             if newer(bundled, installed) {
                 checks.push(Check::fix(
                     format!("The installed bridge ({installed}) is older than this Kumi's ({bundled})"),
-                    Some(format!("Quit Live, then run: {} bridge", *KUMI)),
+                    Some(CONNECT_LIVE.to_string()),
                 ))
             }
         }
@@ -657,10 +657,7 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
             }
         }
     } else {
-        checks.push(Check::fix(
-            "The Ableton bridge isn't installed, so Kumi can't see Live",
-            Some(format!("Quit Live, then run: {} bridge", *KUMI)),
-        ))
+        checks.push(Check::fix("The Ableton bridge isn't installed, so Kumi can't see Live", Some(CONNECT_LIVE.to_string())))
     }
     if let Ok(projects) = load_projects_dir(env) {
         checks.push(if access(&projects, false) || access(&dirname(&projects), false) {

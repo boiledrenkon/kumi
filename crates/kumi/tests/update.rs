@@ -241,7 +241,8 @@ async fn update_moves_forward_rebuilds_native_and_updates_bridge_only_when_live_
     }));
     assert_eq!(run_update(io).await, 0);
     assert!(out.0.borrow().contains("Kumi is up to date (1.0.1)."));
-    assert!(out.0.borrow().contains("Quit Live (save your work first)"));
+    // Live open: the one way to connect it, which can restart Live for the producer.
+    assert!(out.0.borrow().contains(&format!("{}.", *kumi_runtime::CONNECT_LIVE)), "{}", out.0.borrow());
     assert!(!touched.get());
 }
 #[tokio::test(flavor = "current_thread")]
@@ -259,7 +260,7 @@ async fn dirty_checkout_is_preserved_and_current_or_missing_bridge_is_explained(
     let mut io = c.update(out.clone(), programs(Options::default()).0);
     io.env.insert("KUMI_REMOTE_SCRIPTS_DIR".into(), c.root.path().join("none").display().to_string());
     assert_eq!(run_update(io).await, 0);
-    assert!(out.0.borrow().contains("To connect Live, quit Live"));
+    assert!(out.0.borrow().contains(&format!("The bridge isn't in Live yet. {}.", *kumi_runtime::CONNECT_LIVE)));
     for failure in ["git status", "git merge", "cargo build"] {
         let out = Rc::new(Out::default());
         assert_eq!(

@@ -142,8 +142,29 @@ case!(help_version_errors_and_checkout_commands, async {
     assert!(!f.output().contains("Node"));
     assert!(help(true).contains("kumi update --rollback"));
     assert!(!help(false).contains("update --rollback"));
+    // Help leads with kumi itself, which connects Live; kumi bridge is the way by hand.
+    let installed = help(true);
+    let first: Vec<&str> = installed.lines().skip_while(|l| *l != "First run:").skip(1).take_while(|l| !l.is_empty()).collect();
+    assert!(
+        first[0].starts_with("  kumi ")
+            && first[0].contains("Sign in and connect Live: it puts the bridge in Live and can restart Live for you."),
+        "{installed}"
+    );
+    assert!(first.iter().any(|l| l.starts_with("  kumi bridge") && l.contains("Or, with Live closed:")), "{installed}");
+    for asked in [&["-h"][..], &["help"], &["help", "bridge"], &["model", "--help"]] {
+        f.out.0.borrow_mut().clear();
+        assert_eq!(run(f.io(asked), unused_factory()).await, 0, "{asked:?}");
+        assert_eq!(f.output(), help(false), "{asked:?}");
+    }
     assert_eq!(run(f.io(&["--unknown"]), unused_factory()).await, 1);
-    assert!(f.err.0.borrow().starts_with("Kumi:"));
+    assert_eq!(f.err.0.borrow().as_str(), "Kumi: Kumi has no --unknown option; cargo run -p kumi -- --help lists the commands.\n");
+    f.err.0.borrow_mut().clear();
+    assert_eq!(run(f.io(&["udpate"]), unused_factory()).await, 1);
+    assert!(f
+        .err
+        .0
+        .borrow()
+        .contains("Kumi has no udpate command (did you mean update?); cargo run -p kumi -- --help lists the commands."));
     f.out.0.borrow_mut().clear();
     assert_eq!(run(f.io(&["update", "--rollback"]), unused_factory()).await, 1);
     assert!(f.output().contains("Check out the commit you want with git, then run: cargo build --release --workspace"));

@@ -232,14 +232,24 @@ impl TuiApp {
                     inner,
                 );
             }
+            Panel::ChatGpt { by_code: true, code, .. } => {
+                lines.push(Line::new("Sign in to ChatGPT", st::TITLE));
+                if let Some(code) = code {
+                    say(&mut lines, &format!("In a browser on any device, open {} and enter this code:", code.url), st::DIM, inner);
+                    lines.push(Line::new(code.code.clone(), st::BRIGHT));
+                    lines.push(Line::new("Waiting for the code…", st::FAINT));
+                } else {
+                    say(&mut lines, "Asking ChatGPT for a sign-in code…", st::DIM, inner);
+                }
+            }
             Panel::ChatGpt { url, .. } => {
                 lines.push(Line::new("Sign in to ChatGPT", st::TITLE));
                 if let Some(url) = url {
                     say(&mut lines, "Finish in your browser. If it didn't open, open this link (c copies it):", st::DIM, inner);
-                    for part in helpers::chunk(url, inner.max(1) as usize).into_iter().take((space - 4).max(1) as usize) {
+                    for part in helpers::chunk(url, inner.max(1) as usize).into_iter().take((space - 5).max(1) as usize) {
                         lines.push(Line::new(part, st::ACCENT));
                     }
-                    lines.push(Line::new("Waiting for the browser…", st::FAINT));
+                    lines.push(Line::new("Waiting for the browser… No browser here? d uses a code.", st::FAINT));
                 } else {
                     say(&mut lines, "Starting the sign-in…", st::DIM, inner);
                 }

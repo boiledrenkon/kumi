@@ -115,9 +115,13 @@ impl Drop for InputGuard {
         }
     }
 }
-/// Read a yes/no line in the terminal's normal line mode.
-pub async fn ask_yes_no(input: Option<Rc<dyn TerminalInput>>, out: Rc<dyn TtyOutput>, question: &str) -> bool {
-    let Some(input) = input.filter(|input| input.is_tty()) else { return false };
+/// Read a yes/no line in the terminal's normal line mode. Without a terminal nobody can answer, so it's no: the
+/// question is still said, with `ahead` (how to answer it beforehand, "add --yes") when there's a way.
+pub async fn ask_yes_no(input: Option<Rc<dyn TerminalInput>>, out: Rc<dyn TtyOutput>, question: &str, ahead: Option<&str>) -> bool {
+    let Some(input) = input.filter(|input| input.is_tty()) else {
+        out.write(&format!("{question} (no terminal to answer in{})\n", ahead.map(|how| format!("; {how}")).unwrap_or_default()));
+        return false;
+    };
     out.write(&format!("{question} [y/N] "));
     let _guard = InputGuard(Some(input.clone()));
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -165,7 +169,7 @@ use kumi_runtime::{
     core::errors::RuntimeError,
     ears::device::{install_ears, EARS_NAME},
     library::sources::{dirname, join},
-    KUMI, KUMI_REPAIR, KUMI_START,
+    CONNECT_LIVE, KUMI, KUMI_REPAIR, KUMI_START,
 };
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
@@ -703,7 +707,7 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
             && !(if let Some(confirm) = &io.confirm {
                 confirm("Is Live closed, with your work saved?".into()).await
             } else {
-                ask_yes_no(io.input.clone(), io.out.clone(), "Is Live closed, with your work saved?").await
+                ask_yes_no(io.input.clone(), io.out.clone(), "Is Live closed, with your work saved?", Some("add --yes")).await
             })
         {
             if after_update {
@@ -770,13 +774,13 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
     // An update's or a rollback's last step (Kumi's updater, or an older Kumi's through the migration
     // shim): Kumi itself has changed, so a bridge left for later isn't the command failing.
     let after_update = io.env.get("KUMI_BRIDGE_AFTER").is_some_and(|value| value == "1");
-    let later = |what: &str| {
-        say(&format!("The bridge wasn't updated yet: {what}, then run: {} bridge", *KUMI));
+    let later = |why: &str| {
+        say(&format!("The bridge wasn't updated yet{why}. {}.", *CONNECT_LIVE));
         Ok(0)
     };
     if live_open(&io, run.clone()).await {
         if after_update {
-            return later("save your work, quit Live");
+            return later(", because Live is open");
         }
         say(&format!("Live is open. Save your work, quit Live, then run this again: {} bridge", *KUMI));
         return Ok(1);
@@ -785,13 +789,15 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
         && !(if let Some(confirm) = &io.confirm {
             confirm("Is Live closed, with your work saved?".into()).await
         } else {
-            ask_yes_no(io.input.clone(), io.out.clone(), "Is Live closed, with your work saved?").await
+            ask_yes_no(io.input.clone(), io.out.clone(), "Is Live closed, with your work saved?", Some("add --yes")).await
         })
     {
         if after_update {
-            return later("quit Live");
+            return later("");
         }
-        say(&format!("Nothing was changed. Quit Live, then run: {} bridge", *KUMI));
+        // Asked with nobody to answer (no terminal), the question has said how: --yes.
+        let nobody = io.confirm.is_none() && !io.input.as_ref().is_some_and(|input| input.is_tty());
+        say(&if nobody { "Nothing was changed.".into() } else { format!("Nothing was changed. Quit Live, then run: {} bridge", *KUMI) });
         return Ok(1);
     }
     if !Path::new(&scripts).exists() {

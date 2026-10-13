@@ -554,34 +554,55 @@ impl TuiApp {
         }
     }
     pub(super) fn sign_in(&self, provider: ProviderId, then: Option<Action>) {
-        let Some(models) = self.0.options.models.clone() else {
+        if self.0.options.models.is_none() {
             return;
-        };
+        }
         if provider_info(provider).sign_in == SignIn::ApiKey {
             self.0.state.borrow_mut().panel =
                 Some(Rc::new(RefCell::new(Panel::Key { provider, secret: String::new(), checking: false, status: None, then })));
             self.0.scheduler.request();
             return;
         }
+        // Over SSH the browser isn't on this computer: a code, entered in a browser anywhere.
+        self.sign_in_chatgpt(self.0.options.remote, then);
+    }
+    /// ChatGPT's sign-in: in this computer's browser, or `by_code`, with a code entered in a browser anywhere.
+    pub(super) fn sign_in_chatgpt(&self, by_code: bool, then: Option<Action>) {
+        let Some(models) = self.0.options.models.clone() else {
+            return;
+        };
         let abort = Signal::new();
-        let panel = Rc::new(RefCell::new(Panel::ChatGpt { url: None, abort: abort.clone(), then }));
+        let panel = Rc::new(RefCell::new(Panel::ChatGpt { url: None, code: None, by_code, abort: abort.clone(), then }));
         self.0.state.borrow_mut().panel = Some(panel.clone());
         self.0.scheduler.request();
         let weak = Rc::downgrade(&self.0);
         let shown = panel.clone();
-        let on_url = Rc::new(move |url: String| {
-            if let Panel::ChatGpt { url: at, .. } = &mut *shown.borrow_mut() {
-                *at = Some(url.clone());
-            }
-            if let Some(a) = weak.upgrade() {
-                if let Some(open) = &a.options.open_browser {
-                    open(&url);
+        let how = if by_code {
+            let on_code = Rc::new(move |prompt: kumi_runtime::auth::openai_codex::DevicePrompt| {
+                if let Panel::ChatGpt { code, .. } = &mut *shown.borrow_mut() {
+                    *code = Some(prompt);
                 }
-                a.scheduler.request();
-            }
-        });
+                if let Some(a) = weak.upgrade() {
+                    a.scheduler.request();
+                }
+            });
+            ChatGptSignIn::Device { signal: abort.clone(), on_code }
+        } else {
+            let on_url = Rc::new(move |url: String| {
+                if let Panel::ChatGpt { url: at, .. } = &mut *shown.borrow_mut() {
+                    *at = Some(url.clone());
+                }
+                if let Some(a) = weak.upgrade() {
+                    if let Some(open) = &a.options.open_browser {
+                        open(&url);
+                    }
+                    a.scheduler.request();
+                }
+            });
+            ChatGptSignIn::Browser { signal: abort.clone(), on_url }
+        };
         self.task(move |app| async move {
-            let result = models.sign_in_chatgpt(ChatGptSignIn::Browser { signal: abort.clone(), on_url }).await;
+            let result = models.sign_in_chatgpt(how).await;
             match result {
                 Ok(()) => {
                     if app.same_panel(&panel) {
@@ -1193,11 +1214,21 @@ impl TuiApp {
         };
         let mut p = panel.borrow_mut();
         match &mut *p {
-            Panel::ChatGpt { url: Some(url), .. } if text.to_lowercase() == "c" => {
-                let url = url.clone();
+            Panel::ChatGpt { url, code, by_code, .. } if text.to_lowercase() == "c" => {
+                let copied =
+                    if *by_code { code.as_ref().map(|code| ("code", code.code.clone())) } else { url.clone().map(|url| ("link", url)) };
                 drop(p);
-                self.0.tty.write(&format!("\x1b]52;c;{}\x07", base64::engine::general_purpose::STANDARD.encode(url)));
-                self.notice("Copied the sign-in link.", NoticeTone::Info);
+                if let Some((what, text)) = copied {
+                    self.copy_text(&text);
+                    self.notice(&format!("Copied the sign-in {what}."), NoticeTone::Info);
+                }
+            }
+            // No browser here after all: a code instead, with what was to follow the sign-in.
+            Panel::ChatGpt { by_code: false, abort, then, .. } if text.to_lowercase() == "d" => {
+                let then = then.take();
+                abort.cancel();
+                drop(p);
+                self.sign_in_chatgpt(true, then);
             }
             Panel::Pick { picker, .. } => {
                 if picker.borrow().options.answers {

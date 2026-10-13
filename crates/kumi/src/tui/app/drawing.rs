@@ -564,9 +564,10 @@ impl TuiApp {
             }
             Panel::Pick { .. } => "↑↓ to move · enter to choose · esc to close",
             Panel::Key { .. } => "enter to save · esc to cancel",
+            Panel::ChatGpt { by_code: true, .. } => "c copies the code · esc to cancel",
             Panel::ChatGpt { url, .. } => {
                 if url.is_some() {
-                    "c copies the link · esc to cancel"
+                    "c copies the link · d uses a code · esc to cancel"
                 } else {
                     "esc to cancel"
                 }

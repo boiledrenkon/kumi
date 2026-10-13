@@ -12,7 +12,7 @@ mod live;
 mod panels;
 mod records;
 mod setup;
-pub use setup::{waveform, LiveSetup, WAVE_WIDTH};
+pub use setup::{waveform, LiveInstalled, LiveSetup, WAVE_WIDTH};
 mod shown;
 
 use super::{
@@ -106,6 +106,12 @@ pub struct TuiOptions {
     pub graphics: Option<super::pictures::Graphics>,
     /// How to start Kumi next time, said after the farewell when this window can't yet ([`crate::install::next_time`]).
     pub next_time: Option<String>,
+    /// Before signing in: whether this computer reaches the sign-in, and if not, why and what to do, in a sentence.
+    pub reach: Option<Rc<dyn Fn() -> LocalBoxFuture<'static, Option<String>>>>,
+    /// Kumi runs on another computer (over SSH), whose browser isn't the producer's: ChatGPT signs in with a code.
+    pub remote: bool,
+    /// Puts text on this computer's clipboard with its own tool, for terminals that don't take the terminal's way.
+    pub copy: Option<Rc<dyn Fn(&str)>>,
 }
 /// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
 /// than Kumi's.
@@ -148,6 +154,9 @@ impl TuiOptions {
             instant: true,
             graphics: None,
             next_time: None,
+            reach: None,
+            remote: false,
+            copy: None,
         }
     }
 }
@@ -167,8 +176,12 @@ enum Panel {
         status: Option<(String, NoticeTone)>,
         then: Option<Action>,
     },
+    /// ChatGPT's sign-in: in this computer's browser (`url`, once it's known), or `by_code`, with a code entered in
+    /// a browser anywhere.
     ChatGpt {
         url: Option<String>,
+        code: Option<kumi_runtime::auth::openai_codex::DevicePrompt>,
+        by_code: bool,
         abort: Signal,
         then: Option<Action>,
     },

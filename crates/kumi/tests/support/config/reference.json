@@ -284,28 +284,32 @@
       "args": [
         "--bridge-config"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only]; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--bridge-config",
         "--help"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "expected": {
+        "mode": "help"
+      }
     },
     {
       "args": [
         "--inference-only",
         "--inference-only"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only]; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--help",
         "--inference-only"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "expected": {
+        "mode": "help"
+      }
     },
     {
       "args": [
@@ -314,7 +318,7 @@
         "--bridge-config",
         "/other"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only]; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
@@ -322,40 +326,40 @@
         "--bridge-config",
         "/file"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only]; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--api-key",
         "test-only-secret-do-not-log"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Kumi has no --api-key option; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--model",
         "openai/gpt-6-luna"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Kumi has no --model option; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--backend",
         "wasm"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Kumi has no --backend option; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "--anything"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Kumi has no --anything option; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
         "positional"
       ],
-      "error": "Use: npm run kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone."
+      "error": "Kumi has no positional command; npm run kumi -- --help lists the commands."
     },
     {
       "args": [
@@ -705,6 +709,58 @@
         "--all"
       ],
       "error": "Use: logout opencode-go."
+    },
+    {
+      "args": [
+        "-h"
+      ],
+      "expected": {
+        "mode": "help"
+      }
+    },
+    {
+      "args": [
+        "help"
+      ],
+      "expected": {
+        "mode": "help"
+      }
+    },
+    {
+      "args": [
+        "help",
+        "bridge"
+      ],
+      "expected": {
+        "mode": "help"
+      }
+    },
+    {
+      "args": [
+        "-V"
+      ],
+      "expected": {
+        "mode": "version"
+      }
+    },
+    {
+      "args": [
+        "udpate"
+      ],
+      "error": "Kumi has no udpate command (did you mean update?); npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "test-only-secret-do-not-log"
+      ],
+      "error": "Kumi doesn't know that; npm run kumi -- --help lists the commands."
+    },
+    {
+      "args": [
+        "doctor",
+        "--fix"
+      ],
+      "error": "npm run kumi -- doctor doesn't take that; npm run kumi -- --help lists the commands."
     }
   ],
   "settings": [
