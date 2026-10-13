@@ -558,6 +558,7 @@ impl TuiApp {
                 right: Some(sp(action, action_style)),
                 item: Some(format!("change {place}")),
                 action: undo.clone(),
+                ..Default::default()
             });
             if lines.len() > 1 {
                 rows.push(TabRow {

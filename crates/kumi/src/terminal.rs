@@ -265,6 +265,8 @@ struct State {
     /// Changes whose undo just ended for one reason (Live opened another Set): the first is said as it comes, the
     /// rest of them in one line after it, not one each (#254). The reason, and the titles after the first.
     expired: Option<(String, Vec<String>)>,
+    /// Background jobs that ended whose request carries on, once Kumi is idle.
+    carry: Vec<u32>,
 }
 struct Inner {
     options: TerminalOptions,
@@ -300,6 +302,7 @@ pub fn create_terminal(options: TerminalOptions) -> PlainTerminal {
             after_cr: false,
             was_raw: false,
             expired: None,
+            carry: vec![],
         }),
         parser: RefCell::new(None),
         keys: RefCell::new(None),
@@ -330,6 +333,15 @@ impl PlainTerminal {
         if let Some(footer) = footer {
             self.notice(&format!("[new] {footer}"));
         }
+    }
+    /// Carry on with a job whose request needs it, now that Kumi is idle.
+    fn carry_on(&self, id: u32) {
+        let this = self.clone();
+        tokio::task::spawn_local(async move {
+            if this.0.options.controller.carry_on(id) {
+                this.0.state.borrow_mut().carry.retain(|waiting| *waiting != id);
+            }
+        });
     }
     fn notice(&self, message: &str) {
         let mut state = self.0.state.borrow_mut();
@@ -816,14 +828,44 @@ impl Terminal for PlainTerminal {
                     state.suppress = true;
                     state.text.discard();
                 }
+                let carry = (get("state") == "idle" && queued.is_none()).then(|| state.carry.first().copied()).flatten();
                 drop(state);
                 if let Some(line) = queued {
                     let this = self.clone();
                     tokio::task::spawn_local(async move {
                         this.spawn_submit(line);
                     });
+                } else if let Some(id) = carry {
+                    self.carry_on(id);
                 }
             }
+            "job" => {
+                if let SessionEvent::Job(status) = &event {
+                    use kumi_runtime::core::jobs::{JobState, WhenDone};
+                    let line = status.line.clone().map(|line| format!(": {line}")).unwrap_or_default();
+                    match status.state {
+                        JobState::Running if status.steps == 0 && status.tool.is_none() && status.doing.as_deref() == Some("starting") => {
+                            self.notice(&format!("[job {}] started in the background: {}", status.id, status.title))
+                        }
+                        JobState::Running | JobState::Interrupted => {}
+                        state => {
+                            let how = match state {
+                                JobState::Done => "done",
+                                JobState::Stopped => "stopped",
+                                _ => "failed",
+                            };
+                            self.notice(&format!("[job {}] {}: {how}{line}", status.id, status.title));
+                            if status.when_done == WhenDone::Continue && state != JobState::Stopped {
+                                self.0.state.borrow_mut().carry.push(status.id);
+                                if self.0.options.controller.status().state == TurnState::Idle {
+                                    self.carry_on(status.id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "carry-on" => self.notice(&format!("[job {}] Kumi carries on with its result", n("job"))),
             "connection" => self.notice(&format!(
                 "[connection] MCP/Live: {}{}",
                 get("state"),

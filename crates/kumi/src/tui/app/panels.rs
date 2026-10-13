@@ -138,14 +138,14 @@ pub(super) fn recipe_blanks_problem(recipe: &RecipeSummary, with: &JsonObject) -
 }
 /// How long Kumi's window has to be behind another before Kumi answers its own question for the producer.
 const UNATTENDED_MS: f64 = 120_000.;
-fn item(label: impl Into<String>, value: impl Into<String>, detail: impl Into<String>) -> PickerItem {
+pub(super) fn item(label: impl Into<String>, value: impl Into<String>, detail: impl Into<String>) -> PickerItem {
     let detail = detail.into();
     PickerItem { detail: (!detail.is_empty()).then_some(detail), ..PickerItem::new(label, value) }
 }
-fn inert(label: impl Into<String>) -> PickerItem {
+pub(super) fn inert(label: impl Into<String>) -> PickerItem {
     PickerItem { label: label.into(), inert: true, ..Default::default() }
 }
-fn noted(mut item: PickerItem, note: impl Into<String>, tone: NoteTone) -> PickerItem {
+pub(super) fn noted(mut item: PickerItem, note: impl Into<String>, tone: NoteTone) -> PickerItem {
     item.note = Some(note.into());
     item.note_tone = Some(tone);
     item
@@ -881,7 +881,7 @@ impl TuiApp {
             None => async { Ok(()) }.boxed_local(),
         })
     }
-    fn pick<F, Fut>(&self, picker: Picker, f: F) -> Rc<RefCell<Picker>>
+    pub(super) fn pick<F, Fut>(&self, picker: Picker, f: F) -> Rc<RefCell<Picker>>
     where
         F: Fn(TuiApp, PickerItem) -> Fut + 'static,
         Fut: Future<Output = Result<(), RuntimeError>> + 'static,
@@ -1102,6 +1102,10 @@ impl TuiApp {
         };
         if matches!(&*panel.borrow(), Panel::Btw { .. }) {
             self.aside_input(&panel, event);
+            return;
+        }
+        if matches!(&*panel.borrow(), Panel::Job { .. }) {
+            self.job_panel_input(&panel, event);
             return;
         }
         if let InputEvent::Key { name, mods, .. } = &event {

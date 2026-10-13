@@ -7,6 +7,7 @@ mod draw_panel;
 mod drawing;
 mod events;
 mod input;
+mod jobs;
 mod live;
 mod panels;
 mod records;
@@ -147,10 +148,32 @@ type Action = Rc<dyn Fn() -> LocalBoxFuture<'static, Result<(), RuntimeError>>>;
 type Choice = Rc<dyn Fn(PickerItem) -> LocalBoxFuture<'static, Result<(), RuntimeError>>>;
 type PanelRef = Rc<RefCell<Panel>>;
 enum Panel {
-    Pick { picker: Rc<RefCell<Picker>>, choose: Choice, choosing: Rc<Cell<bool>> },
-    Key { provider: ProviderId, secret: String, checking: bool, status: Option<(String, NoticeTone)>, then: Option<Action> },
-    ChatGpt { url: Option<String>, abort: Signal, then: Option<Action> },
-    Btw { at: usize, scroll: i32 },
+    Pick {
+        picker: Rc<RefCell<Picker>>,
+        choose: Choice,
+        choosing: Rc<Cell<bool>>,
+    },
+    Key {
+        provider: ProviderId,
+        secret: String,
+        checking: bool,
+        status: Option<(String, NoticeTone)>,
+        then: Option<Action>,
+    },
+    ChatGpt {
+        url: Option<String>,
+        abort: Signal,
+        then: Option<Action>,
+    },
+    Btw {
+        at: usize,
+        scroll: i32,
+    },
+    /// A background job's steps and report.
+    Job {
+        id: u32,
+        scroll: i32,
+    },
 }
 struct Aside {
     question: String,
@@ -315,6 +338,10 @@ struct State {
     run_active: bool,
     /// Counting down to Kumi taking its recommended answer; any key stops it.
     answer_countdown: Option<JoinHandle<()>>,
+    /// Background jobs as they last stood, by id: JOBS, the header's count and the cards.
+    jobs: std::collections::BTreeMap<u32, kumi_runtime::core::jobs::JobStatus>,
+    /// Jobs that ended whose request carries on, waiting for a moment the producer isn't in the middle of something.
+    carry: Vec<u32>,
 }
 impl State {
     fn new(options: &TuiOptions) -> Self {
@@ -412,6 +439,8 @@ impl State {
             run_told: false,
             run_active: false,
             answer_countdown: None,
+            jobs: std::collections::BTreeMap::new(),
+            carry: vec![],
         }
     }
 }
@@ -558,6 +587,9 @@ impl TuiApp {
                 vec![Rc::new(AppTab { app: weak.clone(), id: "history", title: "HISTORY", empty: "Nothing changed yet" })];
             if options.controller.has_goal() {
                 tabs.push(Rc::new(AppTab { app: weak.clone(), id: "goal", title: "GOAL", empty: "No goal yet: /goal and what to reach" }));
+            }
+            if options.controller.has_jobs() {
+                tabs.push(Rc::new(jobs::JobsTab { app: weak.clone() }));
             }
             tabs.extend(options.tabs.clone());
             let active = options.panel_tab.as_ref().and_then(|p| (p.load)());
@@ -720,6 +752,17 @@ impl TuiApp {
         self.task(|app| async move {
             let result = app.0.options.controller.cancel().await;
             app.0.state.borrow_mut().cancelling = false;
+            let running = app.running_jobs();
+            if running > 0 {
+                app.notice(
+                    &format!(
+                        "{} still running in the background: /jobs to see or stop {}.",
+                        if running == 1 { "A job is" } else { "Jobs are" },
+                        if running == 1 { "it" } else { "them" }
+                    ),
+                    NoticeTone::Info,
+                );
+            }
             app.0.scheduler.request();
             result
         });

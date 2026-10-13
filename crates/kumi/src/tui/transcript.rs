@@ -182,6 +182,13 @@ pub enum Entry {
         items: Vec<String>,
         footer: Option<String>,
     },
+    /// A background job that ended: its head line ("Job 2 · Burial vocal chops · 5 steps, 3 sources") and its report's
+    /// first line, or why it didn't finish.
+    Job {
+        done: bool,
+        head: String,
+        line: Option<String>,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct Band {
@@ -383,6 +390,32 @@ pub fn entry_rows(entry: &Entry, width: i32, now: f64) -> Vec<Row> {
             }
             if let Some(footer) = footer {
                 rows.extend(wrapped(&[span(footer, palette::FAINT)], inner));
+            }
+            rows
+        }
+        Entry::Job { done, head, line } => {
+            let mut rows: Vec<Row> = wrap(&[span(head, palette::TEXT)], (inner - 2).max(1))
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut spans)| {
+                    spans.insert(
+                        0,
+                        if i > 0 {
+                            span("  ", palette::DIM)
+                        } else if *done {
+                            span("✓ ", palette::ACCENT)
+                        } else {
+                            span("✗ ", palette::WARN)
+                        },
+                    );
+                    row(spans)
+                })
+                .collect();
+            if let Some(line) = line.as_ref().filter(|line| !line.is_empty()) {
+                rows.extend(wrap(&[span(line, palette::DIM)], (inner - 2).max(1)).into_iter().map(|mut spans| {
+                    spans.insert(0, span("  ", palette::DIM));
+                    row(spans)
+                }));
             }
             rows
         }
