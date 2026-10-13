@@ -46,6 +46,10 @@ pub trait ProjectStore {
         Ok(self.load(project).await?.filter(|latest| moved_to(&latest.path, path)))
     }
     async fn save(&self, project: &str, baseline: &Baseline) -> Result<(), RuntimeError>;
+    /// Where the project's Set seen last was: what opens to go back to it.
+    async fn set_path(&self, project: &str) -> Option<String> {
+        self.load(project).await.ok().flatten().map(|baseline| baseline.path)
+    }
     /// Which track keeps each of Kumi's track ids in the project (id → the track's identity in Live), so a
     /// copy's id is told from its original's after a restart and by every Kumi alike.
     async fn load_track_keepers(&self, _project: &str) -> Result<HashMap<String, String>, RuntimeError> {
@@ -233,6 +237,12 @@ impl ProjectStore for FileProjectStore {
         write_privately(&folder, "last-seen.json", &text).await?;
         // This Set's own baseline is the latest now.
         remove(sets.join(format!("{}.json", project_id_of(&baseline.path)))).await
+    }
+    async fn set_path(&self, project: &str) -> Option<String> {
+        if !project_id(project) {
+            return None;
+        }
+        baseline_path(&self.directory.join(project).join("last-seen.json")).await
     }
     async fn load_track_keepers(&self, project: &str) -> Result<HashMap<String, String>, RuntimeError> {
         if !project_id(project) {

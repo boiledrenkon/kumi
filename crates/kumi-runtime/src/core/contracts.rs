@@ -436,6 +436,46 @@ pub enum Claim {
     Taken,
 }
 
+/// The conversation going on now: its id and what it's called, whether it's kept yet, and whether this run made a request
+/// in it or took it up (the exit names it then).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationNow {
+    pub id: String,
+    pub title: String,
+    pub kept: bool,
+    pub touched: bool,
+}
+
+/// The conversation the producer chose belongs to another Set than the open one: Kumi asks what to do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAsk {
+    pub id: String,
+    pub title: String,
+    /// Its Set's name, when Kumi has seen that Set saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set: Option<String>,
+    /// The open Set's name; none for one not saved yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<String>,
+    /// What the producer calls the DAW and a place in it ("Live", "Set").
+    pub daw: String,
+    pub noun: String,
+}
+
+/// The producer's answer when a conversation belongs to another Set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SetChoice {
+    /// Open its Set in the DAW, and carry on there.
+    Open,
+    /// Carry it on in the open Set, as a copy.
+    Copy,
+    /// Leave it: the open Set's own conversation goes on.
+    Cancel,
+}
+
 /// The conversation a place carries on with: its id and the conversation itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CurrentConversation {
@@ -601,6 +641,16 @@ pub trait Integration {
     /// The saved Set open in the DAW, by its file, once Kumi has read it: what a restart of the DAW opens again.
     fn open_set(&self) -> Option<String> {
         None
+    }
+    /// What the producer calls the DAW and a place in it: ("Live", "Set").
+    fn words(&self) -> (&'static str, &'static str) {
+        ("Live", "Set")
+    }
+    /// Open the saved Set a kept conversation belongs to (`place`) in the DAW, which may ask first whether to save the open
+    /// one. `Err(why)` inside when it can't.
+    async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {
+        let _ = (place, signal);
+        Ok(Err("Kumi can't open another Set here.".into()))
     }
     fn has_show_message(&self) -> bool {
         false
@@ -1386,6 +1436,12 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unreadable: Option<bool>,
     },
+    /// The conversation the producer chose belongs to another Set: open it there, carry on here in a copy, or leave it.
+    /// `ask` None: the question is no longer open.
+    SetAsked {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<SetAsk>,
+    },
     /// Live is back after stopping a request: the app offers to send `text` again.
     Resend {
         text: String,
@@ -1987,6 +2043,50 @@ pub trait SessionController {
     async fn resume_conversation(&self, id: &str) -> Result<bool, RuntimeError> {
         let _ = id;
         Ok(false)
+    }
+    /// Every Set's kept conversations, newest first; the one going on now is `current`.
+    async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
+        Ok(vec![])
+    }
+    /// What the producer's word names among the kept conversations: an id, the start of one, or a name.
+    async fn find_conversation(&self, word: &str) -> Result<ConversationMatch, RuntimeError> {
+        let _ = word;
+        Ok(ConversationMatch::None)
+    }
+    /// The producer's name for a kept conversation (`id`), or for the one going on now; None takes it away. False when
+    /// there's no such conversation.
+    async fn rename_conversation(&self, id: Option<&str>, name: Option<&str>) -> Result<bool, RuntimeError> {
+        let _ = (id, name);
+        Ok(false)
+    }
+    async fn pin_conversation(&self, id: &str, pinned: bool) -> Result<bool, RuntimeError> {
+        let _ = (id, pinned);
+        Ok(false)
+    }
+    /// A kept conversation goes for good (never the one going on now); false when it wasn't kept.
+    async fn delete_conversation(&self, id: &str) -> Result<bool, RuntimeError> {
+        let _ = id;
+        Ok(false)
+    }
+    /// A copy of the conversation going on now, with a new id, to carry on in; the original stays. Its id, or None with
+    /// nothing to copy yet.
+    async fn fork_conversation(&self, name: Option<&str>) -> Result<Option<String>, RuntimeError> {
+        let _ = name;
+        Ok(None)
+    }
+    /// The producer's answer to `SetAsked`.
+    async fn answer_set(&self, choice: SetChoice) -> Result<(), RuntimeError> {
+        let _ = choice;
+        Ok(())
+    }
+    /// The conversation going on now.
+    async fn conversation_now(&self) -> Option<ConversationNow> {
+        None
+    }
+    /// A kept conversation's words, for a look before going back to it.
+    async fn conversation_lines(&self, id: &str) -> Result<Vec<TranscriptLine>, RuntimeError> {
+        let _ = id;
+        Ok(vec![])
     }
     fn has_watch(&self) -> bool {
         false

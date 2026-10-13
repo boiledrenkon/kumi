@@ -5,7 +5,7 @@ use super::{
     bridge_version::*,
     catalog,
     changes::CHANGES,
-    command_tools::{CommandTools, CommandToolsOptions},
+    command_tools::{CommandTools, CommandToolsOptions, SET_OPENING_MS},
     connection::LiveConnection,
     context::{object, payload},
     history::{result_text, History},
@@ -912,6 +912,30 @@ impl Integration for Ableton {
     fn open_set(&self) -> Option<String> {
         let set = self.history.remember.current()?;
         set.path.clone().filter(|path| !set.unsaved && !path.is_empty() && !project::template_location(path))
+    }
+    /// The Set where Kumi last saw the project, through the system as a double-click would open it: Live asks about the
+    /// open Set in its own dialog. Live drops Kumi while the Set loads, which reads as a Set Kumi asked for (#188).
+    async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {
+        let _ = signal;
+        let path = match &self.options.project_store {
+            Some(store) => store.set_path(place).await,
+            None => None,
+        };
+        let Some(path) = path.filter(|path| !project::template_location(path)) else {
+            return Ok(Err("Kumi doesn't know where that Set is.".into()));
+        };
+        if !std::path::Path::new(&path).is_file() {
+            return Ok(Err(format!("That Set isn't at {path} any more.")));
+        }
+        let Some(open) = self.options.open_file.clone() else {
+            return Ok(Err("Kumi can't open Sets in Live from here.".into()));
+        };
+        self.connection.expect_set_change(SET_OPENING_MS);
+        if !open(path.clone()).await {
+            self.connection.forget_set_change();
+            return Ok(Err(format!("Live didn't take {path}.")));
+        }
+        Ok(Ok(()))
     }
     fn has_show_message(&self) -> bool {
         true
