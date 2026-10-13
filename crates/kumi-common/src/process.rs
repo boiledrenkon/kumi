@@ -1,7 +1,7 @@
 //! Other processes, as the system records them.
 
-/// When process `pid` started, in milliseconds since the Unix epoch; None when it isn't running, can't be read, or the
-/// platform keeps no such record. A pid is reused once its process is gone, so a lock naming a pid whose process
+/// When process `pid` started, in milliseconds since the Unix epoch; None when it isn't running (on Windows, also one
+/// that has exited while something still holds it open), can't be read, or the platform keeps no such record. A pid is reused once its process is gone, so a lock naming a pid whose process
 /// started after the lock was taken was left by a process that's gone.
 pub fn started_at_ms(pid: u32) -> Option<i64> {
     imp::started_at_ms(pid)
@@ -57,8 +57,11 @@ mod imp {
             kernel: *mut FileTime,
             user: *mut FileTime,
         ) -> i32;
+        fn GetExitCodeProcess(process: *mut std::ffi::c_void, code: *mut u32) -> i32;
         fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     }
+    /// What GetExitCodeProcess says of a process that hasn't exited.
+    const STILL_ACTIVE: u32 = 259;
     pub fn started_at_ms(pid: u32) -> Option<i64> {
         const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
         // SAFETY: a plain query; the handle is closed below.
@@ -70,12 +73,16 @@ mod imp {
             (FileTime::default(), FileTime::default(), FileTime::default(), FileTime::default());
         // SAFETY: each pointer is a FileTime of this frame.
         let ok = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+        // An exited process stays on record while any handle to it is open: it isn't running.
+        let mut code = 0u32;
+        // SAFETY: the handle OpenProcess returned, and a u32 of this frame.
+        let running = unsafe { GetExitCodeProcess(handle, &mut code) } != 0 && code == STILL_ACTIVE;
         // SAFETY: the handle OpenProcess returned.
         unsafe { CloseHandle(handle) };
         let _ = (exit, kernel, user);
         // 100-nanosecond intervals since 1601-01-01.
         let intervals = ((creation.high as i64) << 32) | creation.low as i64;
-        (ok != 0).then(|| (intervals - 116_444_736_000_000_000) / 10_000)
+        (ok != 0 && running).then(|| (intervals - 116_444_736_000_000_000) / 10_000)
     }
 }
 
@@ -109,5 +116,8 @@ mod tests {
         child.wait().unwrap();
         let theirs = theirs.expect("the child's start");
         assert!(theirs >= mine && theirs <= crate::time::now_ms() + 1000, "{theirs} against {mine}");
+        // Exited, it has no start, though this process still holds it open (Windows keeps its record then).
+        assert_eq!(started_at_ms(child.id()), None);
+        drop(child);
     }
 }

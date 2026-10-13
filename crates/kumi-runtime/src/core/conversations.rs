@@ -532,6 +532,9 @@ impl FileConversationStore {
         match hold {
             Hold::Locked(mut handle) => {
                 let _ = say(&mut handle, None);
+                // Let go now: Windows frees a closed file's lock only in time, and a process started a moment ago
+                // still shares the handle.
+                let _ = handle.unlock();
             }
             Hold::Named => {
                 let Ok(kept) = self.kept(place) else { return };
