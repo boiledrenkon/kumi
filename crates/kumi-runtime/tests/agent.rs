@@ -217,6 +217,7 @@ fn types(events: &[KernelEvent]) -> Vec<&'static str> {
             KernelEvent::ToolEnd { .. } => "tool-end",
             KernelEvent::Steer { .. } => "steer",
             KernelEvent::Retry { .. } => "retry",
+            KernelEvent::ModelSwitch { .. } => "model-switch",
         })
         .collect()
 }
@@ -763,7 +764,7 @@ async fn retries_up_to_three_times_before_any_output_escapes_but_never_after_tex
             .borrow()
             .iter()
             .filter_map(|event| match event {
-                KernelEvent::Retry { reason, wait_ms } => Some((reason.clone(), *wait_ms)),
+                KernelEvent::Retry { reason, wait_ms, .. } => Some((reason.clone(), *wait_ms)),
                 _ => None,
             })
             .collect();
@@ -1894,7 +1895,7 @@ async fn an_answer_that_breaks_off_after_its_words_began_carries_on_once_from_wh
         assert_eq!(h.count(), 2, "one more request carries on");
         assert_eq!(texts(&events.borrow()).concat(), "The Reese needs a darker filter.");
         assert!(
-            events.borrow().iter().any(|e| matches!(e, KernelEvent::Retry { reason, wait_ms: 0 } if reason.contains("broke off"))),
+            events.borrow().iter().any(|e| matches!(e, KernelEvent::Retry { reason, wait_ms: 0, .. } if reason.contains("broke off"))),
             "the status line says so"
         );
         let carried = js(&h.request(1).prompt);
@@ -2399,4 +2400,253 @@ async fn cancelled_streamed_finish_keeps_cleanup_alive_and_ignores_late_failure(
 #[tokio::test]
 async fn cancellation_during_streamed_abandon_preserves_source_cleanup_wait() {
     local(cancelled_stream_cleanup(true)).await;
+}
+
+/// ChatGPT's 429 when the plan's usage is used up, its body saying when it resets.
+fn usage_limit(resets: Value) -> LanguageModelError {
+    let mut error = ApiCallError::new("The usage limit has been reached", "u", Some(json!({})), Some(429));
+    let mut body = json!({"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"plus"}});
+    for (key, value) in resets.as_object().unwrap() {
+        body["error"][key] = value.clone();
+    }
+    error.response_body = Some(body.to_string());
+    LanguageModelError::ApiCall(error)
+}
+fn now_seconds() -> f64 {
+    kumi_common::time::now_ms_f64() / 1000.
+}
+/// No answer at all: the connection, not the provider.
+fn offline() -> LanguageModelError {
+    let mut error = ApiCallError::new("Cannot connect to API: dns error", "u", Some(json!({})), None);
+    error.is_retryable = true;
+    LanguageModelError::ApiCall(error)
+}
+fn busy(retry_after: &str) -> LanguageModelError {
+    let mut error = ApiCallError::new("busy", "u", Some(json!({})), Some(429));
+    error.response_headers = Some([("retry-after".to_string(), retry_after.to_string())].into_iter().collect());
+    LanguageModelError::ApiCall(error)
+}
+fn waits(events: &[KernelEvent]) -> Vec<(String, u64, Option<kumi_runtime::core::contracts::WaitFor>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            KernelEvent::Retry { reason, wait_ms, wait } => Some((reason.clone(), *wait_ms, *wait)),
+            _ => None,
+        })
+        .collect()
+}
+fn switches(events: &[KernelEvent]) -> Vec<(String, String, bool)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            KernelEvent::ModelSwitch { model, reason, back } => Some((model.clone(), reason.clone(), *back)),
+            _ => None,
+        })
+        .collect()
+}
+/// A model of its own, answering with its own script.
+fn scripted(id: &str, script: impl Fn(&CallOptions, usize) -> Scripted + 'static) -> (ModelBinding, Rc<RefCell<Vec<CallOptions>>>) {
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let model = ScriptedModel { script: Rc::new(script), requests: requests.clone() };
+    let binding = ModelBinding {
+        id: id.into(),
+        model: Rc::new(model),
+        prepare: Box::new(|request| CallOptions {
+            prompt: request.messages,
+            tools: (!request.tools.is_empty()).then_some(request.tools),
+            ..CallOptions::default()
+        }),
+        budget: None,
+    };
+    (binding, requests)
+}
+fn kernel_on(binding: ModelBinding, tools: Vec<Rc<dyn KernelTool>>) -> AgentKernel {
+    create_agent_kernel(AgentKernelOptions {
+        conversation: None,
+        binding,
+        instructions: "fixture instructions".into(),
+        tools,
+        signal: signal(),
+        checkpoint: None,
+        max_steps: None,
+        budget: None,
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_plans_limit_is_waited_out_and_the_same_answer_carries_on_when_it_resets() {
+    local(async {
+        tokio::time::pause();
+        let h = harness(
+            |_, n| if n == 1 { Scripted::Reject(usage_limit(json!({"resets_in_seconds": 3600}))) } else { answer("ok") },
+            Options::default(),
+        );
+        let (events, emit) = collect();
+        let began = tokio::time::Instant::now();
+        assert_eq!(h.kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(h.count(), 2, "the same request, once more");
+        let waited = waits(&events.borrow());
+        assert_eq!(waited.len(), 1);
+        let (reason, wait_ms, wait) = waited[0].clone();
+        assert_eq!(reason, "test's plan limit");
+        assert_eq!(wait, Some(kumi_runtime::core::contracts::WaitFor::Limit));
+        // The hour to the reset, and the margin after it.
+        assert!((3_620_000..=3_631_000).contains(&wait_ms), "{wait_ms}");
+        assert!(began.elapsed() >= Duration::from_secs(3600));
+        assert_eq!(texts(&events.borrow()), ["ok"]);
+        h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_limit_too_far_off_or_one_waiting_cant_mend_stops_and_names_the_fix() {
+    local(async {
+        // A weekly window three days from now: past the longest wait.
+        let h = harness(|_, _| Scripted::Reject(usage_limit(json!({"resets_at": now_seconds() + 3.0 * 86_400.}))), Options::default());
+        let error = kumi_error(h.kernel.run("q", signal(), ignore()).await.unwrap_err());
+        assert_eq!(error.kind, FailureKind::UsageLimit);
+        assert!(error.message.contains("test's plan limit is reached; it resets at"), "{}", error.message);
+        assert!(error.message.contains("Choose a fallback model"), "{}", error.message);
+        assert_eq!(h.count(), 1, "nothing to wait for");
+        h.kernel.close().await;
+        // A plan that doesn't include the model, and credit used up: no wait at all.
+        for (body, kind) in [
+            (json!({"error":{"type":"usage_not_included","message":"Upgrade"}}), FailureKind::Model),
+            (json!({"error":{"code":"insufficient_quota","message":"No credit"}}), FailureKind::Billing),
+        ] {
+            let mut failure = ApiCallError::new("refused", "u", Some(json!({})), Some(429));
+            failure.response_body = Some(body.to_string());
+            let h = harness(move |_, _| Scripted::Reject(LanguageModelError::ApiCall(failure.clone())), Options::default());
+            let error = kumi_error(h.kernel.run("q", signal(), ignore()).await.unwrap_err());
+            assert_eq!(error.kind, kind, "{}", error.message);
+            assert_eq!(h.count(), 1);
+            h.kernel.close().await;
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn offline_it_keeps_trying_with_longer_waits_until_the_connection_is_back() {
+    local(async {
+        tokio::time::pause();
+        let h = harness(|_, n| if n <= 6 { Scripted::Reject(offline()) } else { answer("back") }, Options::default());
+        let (events, emit) = collect();
+        assert_eq!(h.kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(h.count(), 7, "past the three tries a busy provider gets");
+        let waited = waits(&events.borrow());
+        assert!(waited.iter().all(|(_, _, wait)| *wait == Some(kumi_runtime::core::contracts::WaitFor::Offline)), "{waited:?}");
+        assert_eq!(waited.iter().map(|(_, ms, _)| *ms).collect::<Vec<_>>(), [750, 2250, 6750, 20250, 30000, 30000]);
+        assert_eq!(texts(&events.borrow()), ["back"]);
+        h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_providers_retry_after_is_honoured_however_long_in_seconds_or_as_a_date() {
+    local(async {
+        tokio::time::pause();
+        let h = harness(|_, n| if n == 1 { Scripted::Reject(busy("120")) } else { answer("ok") }, Options::default());
+        let (events, emit) = collect();
+        assert_eq!(h.kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(waits(&events.borrow()), [("test is busy (HTTP 429)".to_string(), 120_000, None)]);
+        h.kernel.close().await;
+        let date = (chrono::Utc::now() + chrono::Duration::seconds(90)).format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let h = harness(move |_, n| if n == 1 { Scripted::Reject(busy(&date)) } else { answer("ok") }, Options::default());
+        let (events, emit) = collect();
+        assert_eq!(h.kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        let waited = waits(&events.borrow());
+        assert!((85_000..=90_000).contains(&waited[0].1), "{waited:?}");
+        h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn the_fallback_carries_on_the_same_answer_through_tool_calls_and_the_chosen_model_comes_back_after_the_reset() {
+    local(async {
+        let resets = now_seconds() + 1.0;
+        let (primary, primary_asked) = scripted("openai-codex/gpt-6-sol", move |_, n| match n {
+            1 => Scripted::Parts(
+                [
+                    thinking("r1", meta(json!({"openai": {"itemId": "rs_1", "reasoningEncryptedContent": "sealed"}})), "planning"),
+                    vec![call_id("look", "{}", "call_1"), tool_calls()],
+                ]
+                .concat(),
+            ),
+            2 => answer("Looked."),
+            3 => Scripted::Reject(usage_limit(json!({"resets_at": resets}))),
+            _ => answer("Back on ChatGPT."),
+        });
+        let (fallback, fallback_asked) = scripted("anthropic/claude-sonnet-5-5", |_, n| match n {
+            1 => Scripted::Parts(vec![call_id("look", "{}", "toolu_1"), tool_calls()]),
+            _ => answer("Carried on."),
+        });
+        let kernel = kernel_on(primary, vec![saying("look", "two tracks")]);
+        kernel.set_fallback(Some(fallback));
+        assert_eq!(kernel.run("look", signal(), ignore()).await.unwrap().stop_reason, StopReason::Completed);
+        // The plan's limit: the fallback carries on this same answer, through a tool call of its own.
+        let (events, emit) = collect();
+        assert_eq!(kernel.run("look again", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        let switched = switches(&events.borrow());
+        assert_eq!(switched.len(), 1);
+        assert_eq!(switched[0].0, "anthropic/claude-sonnet-5-5");
+        assert!(switched[0].1.starts_with("ChatGPT's plan limit resets at "), "{}", switched[0].1);
+        assert!(!switched[0].2);
+        assert!(waits(&events.borrow()).is_empty(), "no wait with a fallback set");
+        assert_eq!(texts(&events.borrow()), ["Carried on."]);
+        assert_eq!(fallback_asked.borrow().len(), 2);
+        // What it read: the words, calls and results, without ChatGPT's reasoning or its replay metadata.
+        let first = js(&fallback_asked.borrow()[0].prompt);
+        assert!(!first.contains("planning") && !first.contains("rs_1") && !first.contains("sealed"), "{first}");
+        assert!(first.contains("call_1") && first.contains("two tracks"), "the earlier call and its result stay: {first}");
+        assert!(first.contains("look again"));
+        assert_eq!(kernel.answering(), "anthropic/claude-sonnet-5-5");
+        assert_eq!(kernel.checkpoint().unwrap().origin.as_deref(), Some("anthropic/claude-sonnet-5-5"));
+        // Once the limit has reset, the chosen model answers again from the next turn.
+        sleep(Duration::from_millis(1100)).await;
+        let (events, emit) = collect();
+        assert_eq!(kernel.run("and now?", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(switches(&events.borrow()), [("openai-codex/gpt-6-sol".to_string(), "ChatGPT is answering again".to_string(), true)]);
+        assert_eq!(texts(&events.borrow()), ["Back on ChatGPT."]);
+        assert_eq!(primary_asked.borrow().len(), 4);
+        assert_eq!(kernel.answering(), "openai-codex/gpt-6-sol");
+        kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_fallback_that_fails_too_says_so_with_no_loop_and_an_outage_past_the_retries_hands_over() {
+    local(async {
+        let far = now_seconds() + 3.0 * 86_400.;
+        let (primary, primary_asked) =
+            scripted("openai-codex/gpt-6-sol", move |_, _| Scripted::Reject(usage_limit(json!({"resets_at": far}))));
+        let (fallback, fallback_asked) =
+            scripted("anthropic/claude-sonnet-5-5", move |_, _| Scripted::Reject(usage_limit(json!({"resets_at": far}))));
+        let kernel = kernel_on(primary, vec![]);
+        kernel.set_fallback(Some(fallback));
+        let (events, emit) = collect();
+        let error = kumi_error(kernel.run("q", signal(), emit).await.unwrap_err());
+        assert_eq!(error.kind, FailureKind::UsageLimit);
+        assert!(error.message.starts_with("Anthropic's plan limit is reached"), "the fallback's own error: {}", error.message);
+        assert_eq!((primary_asked.borrow().len(), fallback_asked.borrow().len()), (1, 1));
+        assert_eq!(switches(&events.borrow()).len(), 1);
+        kernel.close().await;
+        // Down past the retries: the fallback takes over.
+        let (primary, primary_asked) = scripted("openai-codex/gpt-6-sol", |_, _| Scripted::Reject(unavailable()));
+        let (fallback, _) = scripted("anthropic/claude-sonnet-5-5", |_, _| answer("Answered by the fallback."));
+        let kernel = kernel_on(primary, vec![]);
+        kernel.set_fallback(Some(fallback));
+        let (events, emit) = collect();
+        assert_eq!(kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(primary_asked.borrow().len(), 4, "the first try and three more");
+        assert_eq!(switches(&events.borrow())[0].1, "ChatGPT is overloaded (HTTP 503)");
+        assert_eq!(texts(&events.borrow()), ["Answered by the fallback."]);
+        kernel.close().await;
+    })
+    .await
 }

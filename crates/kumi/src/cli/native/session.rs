@@ -297,7 +297,7 @@ pub(super) async fn run_session(
                 let checkpoint = options.checkpoint.clone();
                 let result = async {
                     let binding = models.binding().await?;
-                    Ok::<_, RuntimeError>(Rc::new(create_agent_kernel(AgentKernelOptions {
+                    let kernel = create_agent_kernel(AgentKernelOptions {
                         conversation: options.conversation,
                         instructions: options.instructions,
                         tools: options.tools,
@@ -306,7 +306,13 @@ pub(super) async fn run_session(
                         binding,
                         max_steps: None,
                         budget: None,
-                    })?) as Rc<dyn Kernel>)
+                    })?;
+                    // The producer's fallback carries on when their model can't; one that can't be used is said once.
+                    match models.fallback_binding().await {
+                        Ok(fallback) => kernel.set_fallback(fallback),
+                        Err(error) => models.fallback_unusable(&error),
+                    }
+                    Ok::<_, RuntimeError>(Rc::new(kernel) as Rc<dyn Kernel>)
                 }
                 .await;
                 match result {

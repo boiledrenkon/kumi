@@ -6,6 +6,7 @@ use super::super::{
 use super::*;
 use crate::text::web_words;
 use kumi_runtime::integrations::ableton::project::since;
+use kumi_runtime::kernel::failure::reset_words;
 use serde_json::json;
 
 impl TuiApp {
@@ -19,14 +20,42 @@ impl TuiApp {
         let n = |key: &str| value[key].as_f64().unwrap_or(0.);
         // Anything from the model, or the turn's end, means the wait is over.
         if matches!(kind, "text" | "tool-input" | "tool-start" | "turn-complete" | "state") {
-            self.0.state.borrow_mut().retry = None;
+            let mut state = self.0.state.borrow_mut();
+            state.retry = None;
+            state.waiting_for = None;
         }
         match kind {
             "retry" => {
                 let reason = self.clean_line(get("reason"), 80);
                 // No wait: Kumi carries on at once, and the model's next words end it.
                 let until = if n("waitMs") > 0. { perf_now() + n("waitMs") } else { f64::INFINITY };
-                self.0.state.borrow_mut().retry = Some((reason, until));
+                let wait: Option<WaitFor> = serde_json::from_value(value["wait"].clone()).ok().flatten();
+                let at = now_ms_f64() + n("waitMs");
+                {
+                    let mut state = self.0.state.borrow_mut();
+                    state.retry = Some((reason.clone(), until));
+                    state.waiting_for = wait.map(|wait| (wait, at));
+                }
+                // A plan's limit pauses the answer until it resets: told once, as a wait, not a stop.
+                if wait == Some(WaitFor::Limit) {
+                    let clock = reset_words(at, now_ms_f64());
+                    self.alert(
+                        &format!("Waiting: {reason} · carrying on at {clock}"),
+                        &format!("Kumi · {reason} · carrying on at {clock}"),
+                    );
+                }
+            }
+            "model-switch" => {
+                let model = get("model").to_string();
+                let name = model.split_once('/').map_or(model.as_str(), |(_, name)| name).to_string();
+                let reason = self.clean_line(get("reason"), 120);
+                if value["back"] == true {
+                    self.0.state.borrow_mut().answering = None;
+                    self.notice(&format!("{reason}: back to {name}."), NoticeTone::Info);
+                } else {
+                    self.0.state.borrow_mut().answering = Some(model);
+                    self.notice(&format!("{reason}; carrying on with {name} (/model to change)."), NoticeTone::Info);
+                }
             }
             "state" => {
                 {
@@ -72,6 +101,7 @@ impl TuiApp {
                         // At work again: the status says so, not how the last answer ended.
                         state.resting = None;
                         state.run_told = false;
+                        state.run_active = false;
                     } else if get("state") == "idle" {
                         state.busy_since = 0.;
                     }
@@ -462,6 +492,9 @@ impl TuiApp {
                 self.insert_before(serde_json::from_value(entry).unwrap());
             }
             "goal" => {
+                if matches!(get("state"), "running" | "starting") {
+                    self.0.state.borrow_mut().run_active = true;
+                }
                 let was = self.0.state.borrow().goal.as_ref().map(|goal| s(&goal["state"]).to_string());
                 if matches!(was.as_deref(), Some("running" | "starting")) && matches!(get("state"), "done" | "paused") {
                     let best =
@@ -481,6 +514,9 @@ impl TuiApp {
                 state.objective = None;
             }
             "match" => {
+                if get("state") == "running" {
+                    self.0.state.borrow_mut().run_active = true;
+                }
                 self.0.state.borrow_mut().matching = if get("state") == "running" {
                     let mut status = value.clone();
                     status["since"] = json!(perf_now() - n("elapsedMs"));
@@ -516,6 +552,9 @@ impl TuiApp {
                 }
             }
             "objective" => {
+                if get("state") == "running" {
+                    self.0.state.borrow_mut().run_active = true;
+                }
                 let was = self.0.state.borrow().objective.as_ref().map(|goal| s(&goal["state"]).to_string());
                 if was.as_deref() == Some("running") && get("state") != "running" {
                     let goal = self.clean_line(get("objective"), 80);
@@ -539,6 +578,9 @@ impl TuiApp {
             // No goal here (none set, or another Set is open): the GOAL tab stops showing the last one.
             "objective-cleared" => self.0.state.borrow_mut().objective = None,
             "loop" => {
+                if get("state") == "running" {
+                    self.0.state.borrow_mut().run_active = true;
+                }
                 self.0.state.borrow_mut().looping = if get("state") == "running" {
                     let mut status = value.clone();
                     status["since"] = json!(perf_now() - n("elapsedMs"));

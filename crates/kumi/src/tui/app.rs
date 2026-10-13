@@ -253,6 +253,10 @@ struct State {
     planning_since: f64,
     /// A model call being tried again: why, and when (perf time) the next try starts.
     retry: Option<(String, f64)>,
+    /// What a long wait for the model is for (a plan's limit, the connection), and when it ends (epoch ms).
+    waiting_for: Option<(WaitFor, f64)>,
+    /// The fallback answering while the producer's model can't; None while theirs does.
+    answering: Option<String>,
     busy_since: f64,
     turn_changes: usize,
     recall: Option<(usize, String)>,
@@ -303,6 +307,10 @@ struct State {
     alert_timer: Option<JoinHandle<()>>,
     /// This answer's run (a /goal, /loop or sound match) said how it ended: its own "done" isn't told too.
     run_told: bool,
+    /// A /goal, /loop or sound match ran in this answer: nobody may be there to pick.
+    run_active: bool,
+    /// Counting down to Kumi taking its recommended answer; any key stops it.
+    answer_countdown: Option<JoinHandle<()>>,
 }
 impl State {
     fn new(options: &TuiOptions) -> Self {
@@ -357,6 +365,8 @@ impl State {
             planning: None,
             planning_since: 0.,
             retry: None,
+            waiting_for: None,
+            answering: None,
             busy_since: 0.,
             turn_changes: 0,
             recall: None,
@@ -395,6 +405,8 @@ impl State {
             alert_sent_at: f64::NEG_INFINITY,
             alert_timer: None,
             run_told: false,
+            run_active: false,
+            answer_countdown: None,
         }
     }
 }
@@ -635,7 +647,7 @@ impl TuiApp {
             state.stream.discard();
             let flashes = std::mem::take(&mut state.flash_timers);
             let timers = [state.tree_refresh.take(), state.wake_timer.take(), state.beat_timer.take(), state.status_timer.take()];
-            let alerting = [state.alert_timer.take()];
+            let alerting = [state.alert_timer.take(), state.answer_countdown.take()];
             for task in timers.into_iter().chain(alerting).flatten().chain(flashes) {
                 task.abort();
             }

@@ -13,6 +13,8 @@ pub enum FailureKind {
     Config,
     Live,
     RateLimit,
+    /// A plan's usage limit, reached until it resets (ChatGPT's five-hour or weekly window).
+    UsageLimit,
     Request,
     Provider,
     Network,

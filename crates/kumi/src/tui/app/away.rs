@@ -4,6 +4,7 @@
 
 use super::super::alerts::{self, Blocked, NotifyChannel, ProgramState, StatusReport, TerminalProfile};
 use super::*;
+use kumi_runtime::kernel::failure::reset_words;
 
 /// What the producer chose about being told while away (settings.json).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,7 +115,14 @@ impl TuiApp {
             std::sync::LazyLock::new(|| regex::Regex::new(r" · \d+:\d{2}(:\d{2})?$").expect("regex"));
         let now = self.now_line();
         let label = CLOCK.replace(&now.label, "").into_owned();
-        let retry = self.0.state.borrow().retry.as_ref().map(|(reason, _)| reason.clone());
+        let retry = {
+            let state = self.0.state.borrow();
+            state.retry.as_ref().map(|(reason, _)| match state.waiting_for {
+                Some((WaitFor::Limit, at)) => format!("{reason} · carrying on at {}", reset_words(at, now_ms_f64())),
+                Some((WaitFor::Offline, _)) => format!("offline · {reason}"),
+                None => reason.clone(),
+            })
+        };
         let detail = retry.unwrap_or(now.detail);
         [label, detail].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ")
     }

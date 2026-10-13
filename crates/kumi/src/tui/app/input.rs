@@ -18,6 +18,10 @@ impl TuiApp {
             self.window_focus(focused);
             return;
         }
+        // Someone's there: Kumi doesn't answer its own question for them.
+        if matches!(event, InputEvent::Key { .. } | InputEvent::Text { .. } | InputEvent::Paste { .. } | InputEvent::Mouse { .. }) {
+            self.stop_answer_countdown();
+        }
         if self.setup_active() {
             // A sign-in under way takes its own keys; its esc goes back to the setup's choices.
             let signing =

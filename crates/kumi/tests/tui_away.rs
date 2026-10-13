@@ -1,5 +1,7 @@
 //! A producer away from Kumi's window: the terminal's status as Kumi works, and a desktop notification and a
 //! line in the DAW's window only while Kumi's window is behind another.
+#[path = "support/models.rs"]
+mod models;
 #[path = "support/tui_app.rs"]
 mod support;
 use base64::Engine;
@@ -296,4 +298,165 @@ case!(a_terminal_that_never_says_where_focus_is_asks_the_system_only_when_theres
     until("the second notification", || notifications(&h).len() == 2).await;
     assert_eq!(asked.get(), before);
     h.close().await;
+});
+
+fn with_models(width: i32, settings: AwaySettings) -> (Harness, Rc<models::FakeModels>) {
+    let fake = models::FakeModels::catalog();
+    fake.signed_in.borrow_mut().insert(kumi_runtime::providers::ProviderId::Anthropic);
+    let m = fake.clone();
+    let h = Harness::with(width, 36, Rc::new(Control::default()), move |o| {
+        o.terminal = Some(profile(NotifyChannel::Osc777));
+        o.away = settings;
+        o.alert_gap_ms = Some(60.);
+        o.models = Some(m);
+    });
+    (h, fake)
+}
+
+case!(a_plans_limit_shows_when_kumi_carries_on_and_the_fallback_is_named_while_it_answers, async {
+    let (h, _) = with_models(140, AwaySettings::default());
+    h.start().await;
+    h.connect();
+    h.type_text(FOCUS_OUT).await;
+    h.type_text("carry on\r").await;
+    h.emit(json!({"type":"state","state":"running"}));
+    let two_hours: u64 = 2 * 3600 * 1000;
+    h.emit(json!({"type":"retry","reason":"ChatGPT's plan limit","waitMs":two_hours,"wait":"limit"}));
+    h.has("carrying on at");
+    h.has("(in 2h) · ChatGPT's");
+    // Told once, as a wait.
+    until("the wait's notification", || notifications(&h).len() == 1).await;
+    assert!(notifications(&h)[0].starts_with("Waiting: ChatGPT's plan limit · carrying on at "), "{:?}", notifications(&h));
+    let (state, words) = reports(&h).last().unwrap().clone();
+    assert_eq!(state, "working");
+    assert!(words.contains("ChatGPT's plan limit · carrying on at") && !words.contains("(in"), "steady words: {words}");
+    // Offline: tries again, and says so.
+    h.emit(json!({"type":"retry","reason":"ChatGPT couldn't be reached","waitMs":20000,"wait":"offline"}));
+    h.has("offline · trying again in 20s");
+    // The fallback takes over: said once in the conversation, and named in the header while it answers.
+    h.emit(json!({"type":"model-switch","model":"anthropic/claude-sonnet-5-5","reason":"ChatGPT's plan limit resets at 14:20"}));
+    h.has("ChatGPT's plan limit resets at 14:20; carrying on with claude-sonnet-5-5");
+    h.has("claude-sonnet-5-5 · fallback");
+    h.emit(json!({"type":"text","text":"Louder now."}));
+    h.emit(json!({"type":"turn-complete","result":{"stopReason":"completed"},"elapsedMs":3000}));
+    h.emit(json!({"type":"state","state":"idle"}));
+    h.emit(json!({"type":"model-switch","model":"openai-codex/gpt-6-astra","reason":"ChatGPT is answering again","back":true}));
+    h.has("ChatGPT is answering again: back to gpt-6-astra.");
+    h.wait_until_hidden("· fallback").await;
+    h.close().await;
+});
+
+case!(near_a_plans_limit_the_header_says_how_much_is_used_and_when_it_resets, async {
+    let (h, _) = with_models(140, AwaySettings::default());
+    kumi_runtime::providers::usage::forget();
+    h.start().await;
+    h.connect();
+    let at = (kumi_common::time::now_ms_f64() / 1000. + 3600.) as i64;
+    let headers = |used: &str| -> std::collections::BTreeMap<String, String> {
+        [("x-codex-primary-used-percent".to_string(), used.to_string()), ("x-codex-primary-reset-at".to_string(), at.to_string())]
+            .into_iter()
+            .collect()
+    };
+    kumi_runtime::providers::usage::record("openai-codex", &headers("62"));
+    h.emit(json!({"type":"notice","message":"redraw"}));
+    assert!(!h.screen()[0].contains("plan "), "below 80% it says nothing: {}", h.screen()[0]);
+    kumi_runtime::providers::usage::record("openai-codex", &headers("84"));
+    h.emit(json!({"type":"notice","message":"redraw again"}));
+    h.has("plan 84% · resets");
+    kumi_runtime::providers::usage::forget();
+    h.close().await;
+});
+
+case!(a_limit_too_far_off_offers_a_fallback_that_carries_on_at_once, async {
+    let (h, fake) = with_models(140, AwaySettings::default());
+    h.start().await;
+    h.connect();
+    h.type_text("make it louder\r").await;
+    h.wait_for_call("submit:make it louder").await;
+    h.emit(json!({"type":"state","state":"running"}));
+    h.emit(json!({"type":"error","message":"ChatGPT's plan limit is reached; it resets at Fri 09:00.","kind":"usage-limit","provider":"openai-codex"}));
+    h.emit(json!({"type":"state","state":"idle"}));
+    h.has("Carry on without ChatGPT?");
+    h.has("Choose a fallback model");
+    h.has("Sign in to another provider");
+    h.type_text("\r").await;
+    h.has("Choose a fallback model");
+    h.type_text("sonnet").await;
+    h.has("Claude Sonnet 5.5");
+    h.type_text("\r").await;
+    until("the fallback", || fake.calls.borrow().iter().any(|c| c == "fallback:anthropic/claude-sonnet-5-5")).await;
+    // The message that stopped goes again, and the fallback carries on with it.
+    h.wait_for_calls("submit:make it louder", 2).await;
+    h.has("claude-sonnet-5-5 carries on from your next message");
+    h.close().await;
+});
+
+case!(ctrl_f_in_the_model_list_sets_the_fallback_and_again_clears_it, async {
+    let (h, fake) = with_models(140, AwaySettings::default());
+    h.start().await;
+    h.connect();
+    h.type_text("/model\r").await;
+    h.has("ctrl+f sets the fallback");
+    h.type_text("sonnet").await;
+    h.type_text("\x06").await;
+    until("the fallback set", || fake.calls.borrow().iter().any(|c| c == "fallback:anthropic/claude-sonnet-5-5")).await;
+    h.has("carries on from your next message whenever");
+    h.type_text("/model\r").await;
+    h.has("fallback");
+    h.type_text("sonnet").await;
+    h.type_text("\x06").await;
+    until("the fallback cleared", || fake.calls.borrow().iter().any(|c| c == "fallback:")).await;
+    h.has("No fallback");
+    h.close().await;
+});
+
+async fn ask_with_a_recommendation(h: &Harness) {
+    h.type_text("carry on\r").await;
+    h.emit(json!({"type":"state","state":"running"}));
+    h.emit(json!({"type":"objective","objective":"Make the mix louder","state":"running","turns":1,"turnBudget":12,"elapsedMs":1000,"budgetMs":3600000,"measured":true}));
+    h.emit(json!({"type":"text","text":"Which bus should get the limiter?\n\n1. Master\n2. Drums bus (recommended)\n3. Neither"}));
+    h.emit(json!({"type":"objective","objective":"Make the mix louder","state":"paused","turns":2,"turnBudget":12,"elapsedMs":2000,"budgetMs":3600000,"verdict":"blocked","reason":"Needs a choice","measured":true}));
+    h.emit(json!({"type":"turn-complete","result":{"stopReason":"completed"},"elapsedMs":2000}));
+    h.emit(json!({"type":"state","state":"idle"}));
+}
+
+case!(nobody_there_kumi_takes_its_recommended_answer_after_the_countdown_and_any_key_stops_it, async {
+    let quick = AwaySettings { answer_after: 1, ..AwaySettings::default() };
+    let h = away_with(Rc::new(Control::default()), NotifyChannel::None, quick.clone());
+    h.start().await;
+    h.connect();
+    ask_with_a_recommendation(&h).await;
+    h.wait_for("Taking 2 (recommended) in 1 s · any key cancels").await;
+    h.has("2. Drums bus");
+    h.has("recommended");
+    h.wait_for_call("submit:Drums bus").await;
+    h.has("No answer in 1 s; went with 2.");
+    assert!(!h.calls().iter().any(|c| c.starts_with("picked:")), "not the producer's pick: {:?}", h.calls());
+    h.close().await;
+    // A key: the producer's there.
+    let h = away_with(Rc::new(Control::default()), NotifyChannel::None, quick.clone());
+    h.start().await;
+    h.connect();
+    ask_with_a_recommendation(&h).await;
+    h.wait_for("any key cancels").await;
+    h.type_text("\x1b[B").await;
+    delay(1300).await;
+    assert!(!h.calls().iter().any(|c| c == "submit:Drums bus"), "{:?}", h.calls());
+    assert!(!has(&h.screen(), "any key cancels"));
+    h.close().await;
+    // Someone at the window, with no run under way: no countdown; and 0 never counts down.
+    for (settings, run) in [(quick.clone(), false), (AwaySettings { answer_after: 0, ..AwaySettings::default() }, true)] {
+        let h = away_with(Rc::new(Control::default()), NotifyChannel::None, settings);
+        h.start().await;
+        h.connect();
+        if run {
+            ask_with_a_recommendation(&h).await;
+        } else {
+            answer(&h, "Which bus?\n\n1. Master\n2. Drums bus (recommended)", 900).await;
+        }
+        h.has("Your answer");
+        delay(1300).await;
+        assert!(!h.calls().iter().any(|c| c == "submit:Drums bus"), "{:?}", h.calls());
+        h.close().await;
+    }
 });

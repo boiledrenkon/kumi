@@ -121,12 +121,32 @@ pub enum KernelEvent {
     Steer {
         text: String,
     },
-    /// A model call failed in a way worth trying again: why, and how long Kumi waits first (the turn can
-    /// still be stopped meanwhile).
+    /// A model call failed in a way worth trying again: why, how long Kumi waits first (the turn can
+    /// still be stopped meanwhile), and what it waits for when that isn't a busy provider.
     Retry {
         reason: String,
         wait_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait: Option<WaitFor>,
     },
+    /// Another model answers from here: the producer's fallback, while their model can't (why: its plan's
+    /// limit, an outage), or their own model back again (`back`).
+    ModelSwitch {
+        model: String,
+        reason: String,
+        #[serde(default)]
+        back: bool,
+    },
+}
+
+/// What a long wait for a model is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WaitFor {
+    /// A plan's usage limit to reset: the answer carries on then.
+    Limit,
+    /// The connection to come back.
+    Offline,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

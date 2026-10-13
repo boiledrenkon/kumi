@@ -500,7 +500,19 @@ impl ChatStream {
             return Err(LanguageModelError::other("Type validation failed: invalid OpenAI-compatible stream chunk."));
         }
         if let Some(error) = chunk.get("error") {
-            self.error(LanguageModelError::other(error.get("message").and_then(Value::as_str).unwrap_or("Provider stream error")));
+            // The provider's own status when its error has one (a numeric code); a server error otherwise, which is
+            // worth trying again.
+            let status = error
+                .get("code")
+                .and_then(|code| code.as_u64().or_else(|| code.as_str().and_then(|code| code.parse().ok())))
+                .filter(|status| (400..=599).contains(status))
+                .unwrap_or(500);
+            let mut fields = serde_json::Map::new();
+            fields.insert("message".into(), json!(error.get("message").and_then(Value::as_str).unwrap_or("Provider stream error")));
+            fields.insert("statusCode".into(), json!(status));
+            fields.insert("isRetryable".into(), json!(super::error::ApiCallError::default_retryable(Some(status as u16))));
+            fields.insert("data".into(), chunk.clone());
+            self.error(LanguageModelError::ProviderStream(fields));
             return Ok(());
         }
         let choices = chunk

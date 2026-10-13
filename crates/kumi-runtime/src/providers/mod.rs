@@ -2,6 +2,7 @@ pub mod compat;
 pub mod local;
 pub mod models;
 pub mod ollama;
+pub mod usage;
 
 use crate::{
     ai::{
@@ -249,13 +250,19 @@ pub struct ResolveModelOptions {
     /// A faster tier the model's list offers ("priority"), asked for on every request.
     pub service_tier: Option<String>,
 }
-struct IdentifiedFetch(Rc<dyn Fetch>);
+/// Every cloud request: says it's Kumi, and keeps what the answer's headers say of the producer's plan.
+struct IdentifiedFetch {
+    fetch: Rc<dyn Fetch>,
+    provider: ProviderId,
+}
 #[async_trait(?Send)]
 impl Fetch for IdentifiedFetch {
     async fn fetch(&self, url: &str, mut init: FetchInit) -> Result<Response, LanguageModelError> {
         let agent = init.headers.get("user-agent").cloned().unwrap_or_default();
         init.headers.insert("user-agent".into(), format!("{} {agent}", *USER_AGENT).trim().into());
-        self.0.fetch(url, init).await
+        let response = self.fetch.fetch(url, init).await?;
+        usage::record(self.provider.as_str(), &response.headers);
+        Ok(response)
     }
 }
 struct CodexFetch {
@@ -289,7 +296,7 @@ pub async fn resolve_model(options: ResolveModelOptions) -> Result<ModelBinding,
     let provider = parsed.provider;
     let model = parsed.model;
     let base = options.fetch.unwrap_or_else(default_fetch);
-    let identified: Rc<dyn Fetch> = Rc::new(IdentifiedFetch(base.clone()));
+    let identified: Rc<dyn Fetch> = Rc::new(IdentifiedFetch { fetch: base.clone(), provider });
     let effort = options.effort;
     let service_tier = options.service_tier.clone();
     let bind = |model, prepare| ModelBinding { id: options.model.clone(), model, prepare, budget: None };

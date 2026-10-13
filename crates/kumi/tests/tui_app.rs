@@ -255,7 +255,7 @@ case!(models_filter_keys_redaction, async {
         "Frontier model for complex work",
         "Sign in to Anthropic",
         "with an API key",
-        "↑↓ to move · enter to choose · esc to close",
+        "↑↓ to move · enter to choose · ctrl+f sets the fallback · esc to close",
     ] {
         h.has(s)
     }

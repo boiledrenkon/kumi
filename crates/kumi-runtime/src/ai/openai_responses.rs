@@ -621,6 +621,15 @@ impl ResponsesModel {
     }
 }
 
+/// Codes that mean a plan's credit or spend is used up: waiting won't help, so they aren't tried again.
+const QUOTA_CODES: [&str; 5] = [
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+];
+
 fn stream_error(frame: &Value) -> Option<Map<String, Value>> {
     let error = if frame["type"] == "response.failed" {
         &frame["response"]["error"]
@@ -644,8 +653,12 @@ fn stream_error(frame: &Value) -> Option<Map<String, Value>> {
         kind.as_ref().and_then(Value::as_str).unwrap_or("")
     )
     .to_lowercase();
+    // A plan's limit or quota is a 429 (Kumi reads the code itself); a plan that doesn't include the model, a 403.
+    let quota = QUOTA_CODES.iter().any(|code| discriminator.contains(code));
     let status = explicit.unwrap_or_else(|| {
-        if discriminator.contains("insufficient_quota") || discriminator.contains("rate_limit") {
+        if discriminator.contains("usage_not_included") {
+            403
+        } else if quota || discriminator.contains("rate_limit") || discriminator.contains("usage_limit") {
             429
         } else if discriminator.contains("authentication") {
             401
@@ -663,9 +676,7 @@ fn stream_error(frame: &Value) -> Option<Map<String, Value>> {
             500
         }
     });
-    let retry = code != Some(json!("insufficient_quota"))
-        && kind != Some(json!("insufficient_quota"))
-        && ApiCallError::default_retryable(Some(status as u16));
+    let retry = !quota && ApiCallError::default_retryable(Some(status as u16));
     let mut value = json!({"message":message});
     field(&mut value, "type", kind);
     field(&mut value, "code", code);

@@ -3251,3 +3251,40 @@ local_test!(the_producers_reactions_are_kept_in_kumis_database_and_kumis_own_ste
     assert_eq!((newest[0].kind, newest[0].facts["quote"].clone()), (Kind::Words, json!("too bright")));
     h.session.close().await.unwrap();
 });
+local_test!(waiting_for_a_plans_limit_stops_the_answers_clocks_but_a_lost_connection_doesnt, {
+    // The kernel waits 150 ms for a plan's limit to reset, then answers: the 60 ms hour and the 40 ms quiet
+    // clock both stand aside meanwhile.
+    let waits = |wait: Option<WaitFor>, wait_ms: u64| -> Run {
+        Rc::new(move |_, signal, emit| {
+            async move {
+                emit(KernelEvent::Retry { reason: "ChatGPT's plan limit".into(), wait_ms, wait })?;
+                tokio::select! {_ = signal.cancelled() => return Ok(cancelled()), _ = delay(wait_ms) => {}}
+                emit(KernelEvent::Text { text: "Carried on.".into() })?;
+                Ok(complete())
+            }
+            .boxed_local()
+        })
+    };
+    let h = harness(Some(waits(Some(WaitFor::Limit), 150)), |o| {
+        o.idle_timeout_ms = Some(40);
+        o.turn_limit_ms = Some(60);
+    });
+    h.session.start().await.unwrap();
+    h.session.submit("make it louder", None).await.unwrap();
+    assert!(!h.error("had run for") && !h.error("without progress"), "{:?}", h.events.borrow());
+    assert!(h
+        .events
+        .borrow()
+        .iter()
+        .any(|e| matches!(e, SessionEvent::TurnComplete { result, .. } if result.stop_reason == StopReason::Completed)));
+    h.session.close().await.unwrap();
+    // Offline, the tries count toward the answer's hour.
+    let h = harness(Some(waits(Some(WaitFor::Offline), 150)), |o| {
+        o.idle_timeout_ms = Some(1000);
+        o.turn_limit_ms = Some(60);
+    });
+    h.session.start().await.unwrap();
+    h.session.submit("make it louder", None).await.unwrap();
+    assert!(h.error("this answer had run for"));
+    h.session.close().await.unwrap();
+});

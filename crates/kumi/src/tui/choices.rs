@@ -32,6 +32,17 @@ pub fn choices(answer: &str) -> Option<(String, Vec<String>)> {
         .then(|| (plain(question), items.into_iter().map(|(_, text)| text).collect()))
 }
 
+/// The option Kumi recommends, marked "(recommended)" at its end, with the mark taken off every option: the one Kumi
+/// takes when nobody's there to pick. None when no option, or more than one, is marked.
+pub fn recommended(options: &mut [String]) -> Option<usize> {
+    static MARK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s*[(（]\s*recommended\s*[)）]\s*$").unwrap());
+    let marked: Vec<usize> = options.iter().enumerate().filter(|(_, option)| MARK.is_match(option)).map(|(index, _)| index).collect();
+    for option in options.iter_mut() {
+        *option = MARK.replace(option, "").trim().to_string();
+    }
+    (marked.len() == 1).then(|| marked[0])
+}
+
 /// An option without its Markdown emphasis.
 fn plain(text: &str) -> String {
     text.replace("**", "").replace("__", "").replace('`', "").trim().to_string()
@@ -56,6 +67,22 @@ mod tests {
             choices("要给哪一条贝斯加侧链？\n1、低音\n2、Reese").map(|(_, c)| c),
             Some(vec!["低音".to_string(), "Reese".to_string()])
         );
+    }
+
+    #[test]
+    fn one_recommended_option_is_taken_off_its_words_and_named() {
+        let mut options = vec!["Sidechain the Reese".to_string(), "Duck both (recommended)".to_string(), "Leave it".to_string()];
+        assert_eq!(recommended(&mut options), Some(1));
+        assert_eq!(options, ["Sidechain the Reese", "Duck both", "Leave it"]);
+        let mut options = vec!["Warm (Recommended)".to_string(), "Glassy".to_string()];
+        assert_eq!(recommended(&mut options), Some(0));
+        // Two marked, or none: Kumi takes neither.
+        let mut options = vec!["A (recommended)".to_string(), "B (recommended)".to_string()];
+        assert_eq!(recommended(&mut options), None);
+        assert_eq!(options, ["A", "B"]);
+        assert_eq!(recommended(&mut ["A".to_string(), "B".to_string()]), None);
+        // Only a mark at the end counts.
+        assert_eq!(recommended(&mut ["the recommended one".to_string(), "B".to_string()]), None);
     }
 
     #[test]

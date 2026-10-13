@@ -20,6 +20,7 @@ pub struct FakeModels {
     pub model: RefCell<Option<String>>,
     pub effort: RefCell<Option<Effort>>,
     pub fast: RefCell<bool>,
+    pub fallback: RefCell<Option<String>>,
     pub signed_in: RefCell<HashSet<ProviderId>>,
     pub lists: RefCell<HashMap<String, Vec<ModelInfo>>>,
     pub local: RefCell<Vec<LocalStatus>>,
@@ -35,6 +36,7 @@ impl Default for FakeModels {
             model: RefCell::new(None),
             effort: RefCell::new(None),
             fast: RefCell::new(false),
+            fallback: RefCell::new(None),
             signed_in: RefCell::new(HashSet::new()),
             lists: RefCell::new(HashMap::new()),
             local: RefCell::new(vec![]),
@@ -174,6 +176,14 @@ impl ModelController for FakeModels {
     async fn set_effort(&self, next: Option<Effort>) -> Result<(), RuntimeError> {
         *self.effort.borrow_mut() = next;
         self.calls.borrow_mut().push(format!("effort:{}", next.map(|e| e.as_str()).unwrap_or("default")));
+        Ok(())
+    }
+    fn fallback(&self) -> Option<String> {
+        self.fallback.borrow().clone()
+    }
+    async fn set_fallback(&self, model: Option<&str>) -> Result<(), RuntimeError> {
+        self.calls.borrow_mut().push(format!("fallback:{}", model.unwrap_or("")));
+        *self.fallback.borrow_mut() = model.map(str::to_string);
         Ok(())
     }
     fn fast_enabled(&self) -> bool {
