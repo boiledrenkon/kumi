@@ -296,3 +296,28 @@ fn the_page_draws_what_history_draws_from_a_record() {
     }
     assert_eq!(picture_of(&record(json!({}))), None, "nothing to draw");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_import_leaves_nothing_behind() {
+    let home = tempfile::tempdir().unwrap();
+    let env = Env::from([("KUMI_HOME".to_string(), home.path().join("kumi").display().to_string())]);
+    // One exchange past what Kumi keeps of one (about 1 MB): twenty results of 60 KB.
+    let calls: Vec<Value> =
+        (0..20).map(|n| json!({"type": "tool-call", "toolCallId": format!("x{n}"), "toolName": "read", "input": {}})).collect();
+    let results: Vec<Value> = (0..20)
+        .map(|n| json!({"type": "tool-result", "toolCallId": format!("x{n}"), "toolName": "read", "output": {"type": "text", "value": "c".repeat(60 * 1024)}}))
+        .collect();
+    let file = home.path().join("long.json");
+    let messages = json!([
+        {"role": "user", "content": [{"type": "text", "text": "Read everything"}]},
+        {"role": "assistant", "content": calls},
+        {"role": "tool", "content": results}
+    ]);
+    fs::write(&file, json!({"format": "kumi-conversation", "version": 1, "title": "Too long", "messages": messages}).to_string()).unwrap();
+    let (out, err) = (Out::default(), Out::default());
+    assert_eq!(import_command(&file.display().to_string(), &env, &out, &err, "kumi").await.unwrap(), 1);
+    assert!(err.0.borrow().contains("its last exchange runs longer than Kumi keeps of one (about 1 MB)"), "{}", err.0.borrow());
+    let kept = home.path().join("kumi/projects").join(IMPORTED).join("conversations");
+    let left: Vec<_> = fs::read_dir(&kept).map(|files| files.map(|file| file.unwrap().file_name()).collect()).unwrap_or_default();
+    assert!(left.is_empty(), "a refused import left {left:?}");
+}

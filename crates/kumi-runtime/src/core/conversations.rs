@@ -1069,7 +1069,12 @@ impl ConversationStore for FileConversationStore {
         // Beside it before it's there: a look at the folder never finds it without them.
         let meta = Meta { name: name.and_then(clean_name), forked_from: from.map(str::to_owned), imported, ..Meta::default() };
         self.write_meta(place, id, &meta).await?;
-        self.save(place, id, conversation).await
+        self.save(place, id, conversation).await?;
+        // Nothing kept of it (its last exchange alone runs longer than Kumi keeps): nothing beside it either.
+        if !self.file(place, id)?.exists() {
+            remove(self.kept(place)?.join(format!("{id}.meta"))).await?;
+        }
+        Ok(())
     }
     /// Where the file system can lock, the system's lock on `<id>.lock` decides: one Kumi gets it however many ask at
     /// once, and a Kumi that's gone holds nothing. Where it can't (some network drives), the file names the Kumi that has
