@@ -14,8 +14,10 @@ what the bridge's package may contain. The steps for cutting a release are in
 | The bridge (`@ableton-mcp/mcp-server`) | Inside each Kumi bundle, as a native bridge tarball and its prepared package | `kumi bridge`, which installs it through the bridge's lifecycle ([delivery](DELIVERY.md)) |
 | The bridge on its own | No release of its own. Build it with `python3 scripts/build-native-release.py --bridge-only` ([build options](DEVELOPER_GUIDE.md#releasing)) | The lifecycle CLI ([delivery](DELIVERY.md#the-standalone-bridge)) |
 
-The installer scripts are read from the `main` branch; the bundle they install
-comes from the latest published release (or the one `KUMI_VERSION` names). A
+The one-liners fetch the installer from the latest published release, and it
+installs that release's bundle (or the one `KUMI_VERSION` names). A change to
+an installer reaches producers only with a release, once its tag's installs
+pass. `main` keeps both installers at their raw URLs, which older links use. A
 release is a draft until its tag's Installer run passes and publishes it (a tag
 pushed by hand waits for the maintainer to write its notes and publish it), and
 only a published release is "latest". Nothing is published to npm: every
