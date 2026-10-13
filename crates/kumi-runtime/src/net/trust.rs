@@ -61,6 +61,12 @@ fn configured(trust: Arc<Trust>) -> rustls::ClientConfig {
     config
 }
 
+/// A client's TLS that trusts `roots` alone (for tests).
+#[cfg(test)]
+pub(super) fn trusting(roots: RootCertStore) -> rustls::ClientConfig {
+    configured(Arc::new(Trust::with(roots, OnceLock::from(None), |_| None, provider())))
+}
+
 /// The cryptography reqwest's TLS used: one the program installed, else ring.
 fn provider() -> Arc<CryptoProvider> {
     CryptoProvider::get_default().cloned().unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()))
@@ -140,19 +146,42 @@ fn certificates(path: &Path) -> Vec<CertificateDer<'static>> {
 }
 
 /// The system's check, run beside Kumi's one thread for at most `bound`: it can fetch an issuer a certificate names,
-/// which an address that never answers holds for seconds. Its verdict is kept per certificate and name, so a slow
-/// check holds Kumi once rather than on every connection, and one that outlasts the bound is ready for the next try.
+/// which an address that never answers holds for seconds. One check runs per certificate and name, however many
+/// connections ask meanwhile, each waiting out only what's left of its bound; its verdict is kept, so a slow check
+/// holds Kumi once rather than on every connection, and one that outlasts the bound is ready for the next try.
 #[derive(Debug)]
 struct Kept {
     system: Arc<dyn ServerCertVerifier>,
     bound: Duration,
-    verdicts: Arc<Mutex<HashMap<[u8; 32], (Instant, Result<(), Error>)>>>,
+    verdicts: Arc<Mutex<HashMap<[u8; 32], Verdict>>>,
 }
+
+/// A certificate's verdict: still being checked (since when), or given (when).
+#[derive(Debug, Clone)]
+enum Verdict {
+    Checking(Instant, Arc<Pending>),
+    Given(Instant, Result<(), Error>),
+}
+
+/// A check under way: its verdict once it's given.
+#[derive(Debug, Default)]
+struct Pending {
+    verdict: Mutex<Option<Result<(), Error>>>,
+    given: std::sync::Condvar,
+}
+
+/// How long a check that never ends is waited for before another may start.
+const STUCK: Duration = Duration::from_secs(60);
 
 impl Kept {
     fn new(system: Arc<dyn ServerCertVerifier>, bound: Duration) -> Self {
         Self { system, bound, verdicts: Arc::default() }
     }
+}
+
+/// The system's check outlasted [`BOUND`]: a timeout, not a refusal (the certificate may well be installed).
+fn slow() -> Error {
+    Error::General(format!("this computer's check of the server timed out after {} s", BOUND.as_secs()))
 }
 
 /// A certificate's chain and the name it's for, as a key.
@@ -176,27 +205,45 @@ impl ServerCertVerifier for Kept {
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
         let key = fingerprint(end_entity, intermediates, server_name);
-        {
+        let (since, pending) = {
             let mut verdicts = self.verdicts.lock().unwrap_or_else(PoisonError::into_inner);
-            verdicts.retain(|_, (when, verdict)| when.elapsed() < if verdict.is_ok() { KEPT } else { KEPT_NO });
-            if let Some((_, verdict)) = verdicts.get(&key) {
-                return verdict.clone().map(|()| ServerCertVerified::assertion());
+            verdicts.retain(|_, verdict| match verdict {
+                Verdict::Checking(since, _) => since.elapsed() < STUCK,
+                Verdict::Given(when, verdict) => when.elapsed() < if verdict.is_ok() { KEPT } else { KEPT_NO },
+            });
+            match verdicts.get(&key) {
+                Some(Verdict::Given(_, verdict)) => return verdict.clone().map(|()| ServerCertVerified::assertion()),
+                // Already being checked: wait for that check, for what's left of its bound.
+                Some(Verdict::Checking(since, pending)) => (*since, Arc::clone(pending)),
+                None => {
+                    let pending = Arc::new(Pending::default());
+                    let (system, waiting, kept) = (Arc::clone(&self.system), Arc::clone(&pending), Arc::clone(&self.verdicts));
+                    let (end_entity, server_name) = (end_entity.clone().into_owned(), server_name.to_owned());
+                    let intermediates: Vec<_> = intermediates.iter().map(|certificate| certificate.clone().into_owned()).collect();
+                    let ocsp_response = ocsp_response.to_vec();
+                    let checking = std::thread::Builder::new().name("kumi-certificate-check".into()).spawn(move || {
+                        let verdict = system.verify_server_cert(&end_entity, &intermediates, &server_name, &ocsp_response, now).map(|_| ());
+                        kept.lock().unwrap_or_else(PoisonError::into_inner).insert(key, Verdict::Given(Instant::now(), verdict.clone()));
+                        *waiting.verdict.lock().unwrap_or_else(PoisonError::into_inner) = Some(verdict);
+                        waiting.given.notify_all();
+                    });
+                    // No thread to check beside Kumi's: the check can't be bounded, so it's not asked.
+                    if checking.is_err() {
+                        return Err(slow());
+                    }
+                    verdicts.insert(key, Verdict::Checking(Instant::now(), Arc::clone(&pending)));
+                    (Instant::now(), pending)
+                }
             }
-        }
-        let (system, verdicts) = (Arc::clone(&self.system), Arc::clone(&self.verdicts));
-        let (end_entity, server_name) = (end_entity.clone().into_owned(), server_name.to_owned());
-        let intermediates: Vec<_> = intermediates.iter().map(|certificate| certificate.clone().into_owned()).collect();
-        let ocsp_response = ocsp_response.to_vec();
-        let (said, heard) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let verdict = system.verify_server_cert(&end_entity, &intermediates, &server_name, &ocsp_response, now).map(|_| ());
-            verdicts.lock().unwrap_or_else(PoisonError::into_inner).insert(key, (Instant::now(), verdict.clone()));
-            let _ = said.send(verdict);
-        });
-        match heard.recv_timeout(self.bound) {
-            Ok(verdict) => verdict.map(|()| ServerCertVerified::assertion()),
-            // Still checking: refused for now, and the verdict is there for the next try.
-            Err(_) => Err(Error::InvalidCertificate(CertificateError::Other(rustls::OtherError(Arc::new(Slow))))),
+        };
+        let left = self.bound.saturating_sub(since.elapsed());
+        let verdict = pending.verdict.lock().unwrap_or_else(PoisonError::into_inner);
+        let (verdict, _) =
+            pending.given.wait_timeout_while(verdict, left, |verdict| verdict.is_none()).unwrap_or_else(PoisonError::into_inner);
+        match &*verdict {
+            Some(verdict) => verdict.clone().map(|()| ServerCertVerified::assertion()),
+            // Still checking: a timeout for now, and the verdict is there for the next try.
+            None => Err(slow()),
         }
     }
 
@@ -222,18 +269,6 @@ impl ServerCertVerifier for Kept {
         self.system.supported_verify_schemes()
     }
 }
-
-/// The system's check outlasted [`BOUND`].
-#[derive(Debug)]
-struct Slow;
-
-impl std::fmt::Display for Slow {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "this computer's certificate check took longer than {} s", BOUND.as_secs())
-    }
-}
-
-impl std::error::Error for Slow {}
 
 /// A refusal for something other than who issued the certificate.
 fn telling(refused: &Error) -> bool {
@@ -270,6 +305,8 @@ impl ServerCertVerifier for Trust {
         if let (Err(Error::InvalidCertificate(why)), Some(second)) = (&carried, self.second()) {
             match second.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now) {
                 Ok(verified) => return Ok(verified),
+                // The system's check timed out: the certificate may well be installed, so that's what's said.
+                Err(refused) if refused == slow() => return Err(refused),
                 Err(refused) if *why == CertificateError::UnknownIssuer && telling(&refused) => return Err(refused),
                 Err(_) => {}
             }
@@ -471,5 +508,45 @@ mod tests {
             let (_, took) = ask(&kept, "chatgpt.com");
             assert!(took >= Duration::from_millis(100), "{took:?}");
         }
+    }
+
+    #[test]
+    fn connections_at_once_share_one_system_check_and_its_bound() {
+        let (_, issuer) = authority("An office's inspecting proxy");
+        let certificate = server("api.openai.com", &issuer);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slowly = Slowly { taking: Duration::from_millis(500), yes: true, asked: Arc::clone(&asked) };
+        let kept = Arc::new(Kept::new(Arc::new(slowly), Duration::from_millis(200)));
+        let started = Instant::now();
+        let connections: Vec<_> = (0..4)
+            .map(|_| {
+                let (kept, certificate) = (Arc::clone(&kept), certificate.clone());
+                std::thread::spawn(move || {
+                    let name = ServerName::try_from("api.openai.com").unwrap();
+                    kept.verify_server_cert(&certificate, &[], &name, &[], UnixTime::now())
+                })
+            })
+            .collect();
+        for connection in connections {
+            assert_eq!(connection.join().unwrap().err(), Some(slow()), "a timeout for now");
+        }
+        // One bound for them all, not one each.
+        assert!(started.elapsed() < Duration::from_millis(450), "{:?}", started.elapsed());
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "one check");
+        let name = ServerName::try_from("api.openai.com").unwrap();
+        assert!(kept.verify_server_cert(&certificate, &[], &name, &[], UnixTime::now()).is_ok(), "its verdict, kept");
+    }
+
+    #[test]
+    fn a_system_check_that_runs_out_its_time_reads_as_a_timeout_not_an_unknown_issuer() {
+        let (public, _) = authority("A public authority");
+        let (_, office_issuer) = authority("An office's inspecting proxy");
+        let slowly = Slowly { taking: Duration::from_millis(300), yes: true, asked: Arc::default() };
+        let kept: Arc<dyn ServerCertVerifier> = Arc::new(Kept::new(Arc::new(slowly), Duration::from_millis(50)));
+        let trust = Trust::with(roots(&[&public]), OnceLock::from(Some(kept)), unused, provider());
+        let refused = check(&trust, &server("api.openai.com", &office_issuer), "api.openai.com").err();
+        assert_eq!(refused, Some(slow()));
+        assert_eq!(crate::web::cause::NetCause::of_text(&refused.unwrap().to_string()), Some(crate::web::cause::NetCause::Timeout));
     }
 }

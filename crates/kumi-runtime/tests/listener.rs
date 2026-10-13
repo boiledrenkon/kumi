@@ -73,7 +73,13 @@ async fn gemini_listens_with_the_newest_model_that_takes_what_its_given_and_answ
             assert_eq!(listener.name(), "gemini-2.5-flash");
             assert!(!listener.hears_width(), "Gemini hears a mono downmix: no questions about width or air");
             // Every listener is sent a mono downmix, an OpenAI-compatible one too.
-            let chat = ChatListener { base: base.clone(), key: None, model: "audio".into(), client: reqwest::Client::new() };
+            let chat = ChatListener {
+                base: base.clone(),
+                key: None,
+                model: "audio".into(),
+                client: reqwest::Client::new(),
+                proxies: kumi_runtime::net::proxy::environment,
+            };
             assert!(!chat.hears_width());
             let heard = listener.ask(b"RIFF....WAVE", "punch toward 10 dB", Signal::new()).await.unwrap();
             assert_eq!((heard.closer.as_str(), heard.first.as_slice()), ("second", ["muddy".to_string()].as_slice()));

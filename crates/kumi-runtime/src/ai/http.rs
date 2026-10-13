@@ -103,14 +103,6 @@ pub fn default_fetch() -> Rc<dyn Fetch> {
 pub fn model_server_fetch() -> Rc<dyn Fetch> {
     Rc::new(HttpFetch::model_servers())
 }
-/// A request sent, or None when `signal` stopped it first.
-async fn sent(request: reqwest::RequestBuilder, signal: &Signal) -> Option<reqwest::Result<reqwest::Response>> {
-    tokio::select! {
-        biased;
-        _ = signal.cancelled() => None,
-        response = request.send() => Some(response),
-    }
-}
 #[async_trait(?Send)]
 impl Fetch for HttpFetch {
     async fn fetch(&self, url: &str, init: FetchInit) -> Result<Response, LanguageModelError> {
@@ -119,31 +111,20 @@ impl Fetch for HttpFetch {
         } else {
             reqwest::Method::from_bytes(init.method.as_bytes()).map_err(|error| LanguageModelError::other(error.to_string()))?
         };
-        let request = || {
-            let mut request = self.client.request(method.clone(), url);
-            for (key, value) in &init.headers {
-                request = request.header(key.as_str(), value.as_str());
-            }
-            if let Some(body) = &init.body {
-                request = request.body(body.clone());
-            }
-            request
-        };
-        let aborted = || LanguageModelError::other("This operation was aborted");
-        let signal = init.signal.clone().unwrap_or_default();
-        let mut response = sent(request(), &signal).await.ok_or_else(aborted)?;
-        // The system's proxy wants a sign-in Kumi can't give (NTLM, Kerberos, a password the system keeps): once
-        // directly, as Kumi went before it read the system's settings. When that fails too, the 407 is what's said.
-        let wants_sign_in = match &response {
-            Ok(answer) => answer.status() == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-            Err(error) => crate::web::cause::chain(error).contains("proxy authorization required"),
-        };
-        if wants_sign_in && reqwest::Url::parse(url).is_ok_and(|address| proxy::pass_by(&(self.proxies)(), &address)) {
-            match sent(request(), &signal).await.ok_or_else(aborted)? {
-                Ok(direct) => response = Ok(direct),
-                Err(_) => proxy::stop_passing_by(),
-            }
+        let mut request = self.client.request(method, url);
+        for (key, value) in init.headers {
+            request = request.header(key, value);
         }
+        if let Some(body) = init.body {
+            request = request.body(body);
+        }
+        let signal = init.signal.unwrap_or_default();
+        // Past the system's proxy, once, when it's in the way (`net::send`).
+        let response = tokio::select! {
+            biased;
+            _ = signal.cancelled() => return Err(LanguageModelError::other("This operation was aborted")),
+            response = crate::net::send_through(request, (self.proxies)()) => response,
+        };
         let response = response.map_err(|error| {
             let mut api = ApiCallError::new(format!("Cannot connect to API: {error}"), url, None, None);
             api.is_retryable = error.is_connect() || error.is_timeout() || error.is_body() || error.is_request();
@@ -310,6 +291,8 @@ mod transport_tests {
     #[tokio::test]
     async fn a_system_proxy_that_wants_a_sign_in_kumi_cant_give_is_passed_by() {
         use crate::net::proxy::{pass_by, Settings};
+        let _turn = crate::net::proxy::PASSING_BY.lock().await;
+        crate::net::proxy::stop_passing_by();
         let wants = b"HTTP/1.1 407 Proxy Authentication Required\r\nproxy-authenticate: NTLM\r\ncontent-length: 0\r\n\r\n";
         let (proxy, asked) = answering(wants).await;
         let (target, _) = answering(b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\ndirect").await;

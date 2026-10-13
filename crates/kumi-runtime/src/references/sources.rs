@@ -209,7 +209,7 @@ impl Sources {
             self.last.set(Some(Instant::now()));
         }
         let sent = tokio::select! {
-            sent = self.client.get(url).header("Accept", "application/json").send() => sent.map_err(|error| format!("{} didn't answer: {error}", host(url)))?,
+            sent = crate::net::send(self.client.get(url).header("Accept", "application/json")) => sent.map_err(|error| format!("{} didn't answer: {error}", host(url)))?,
             _ = signal.cancelled() => return Err("stopped".into()),
         };
         if !sent.status().is_success() {
@@ -488,7 +488,7 @@ impl Sources {
     /// ListenBrainz's popularity rows for recordings or artists (none when it doesn't answer).
     async fn popularity(&self, of: &str, body: Value, signal: &Signal) -> Value {
         let asked = async {
-            let sent = self.client.post(format!("{}/1/popularity/{of}", self.listenbrainz)).json(&body).send().await.ok()?;
+            let sent = crate::net::send(self.client.post(format!("{}/1/popularity/{of}", self.listenbrainz)).json(&body)).await.ok()?;
             let body = crate::web::net::body_at_most(sent, 8_000_000).await.ok()?;
             serde_json::from_slice::<Value>(&body).ok()
         };

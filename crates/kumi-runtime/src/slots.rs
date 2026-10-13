@@ -482,6 +482,7 @@ fn local(base: &str, model: &str, env: &HashMap<String, String>) -> Rc<dyn Liste
         key: env.get("KUMI_LISTENER_KEY").cloned(),
         model: model.into(),
         client: listener::named_client(),
+        proxies: crate::net::proxy::environment,
     })
 }
 

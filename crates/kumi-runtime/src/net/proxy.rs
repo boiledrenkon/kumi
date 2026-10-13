@@ -7,8 +7,10 @@
 //! - Never for this computer itself (localhost, 127.0.0.0/8, ::1). With the system's settings, nor for a private
 //!   network's address or a .local name, which Kumi reached directly before. A model server the producer names goes by
 //!   the variables alone ([`environment`]), as before: it's on their computer or network, by address or by name.
-//! - A system's proxy that wants a sign-in Kumi can't give (NTLM, Kerberos, a password the system keeps) is passed by:
-//!   after its 407, requests go directly while the system names it, as they did before Kumi read the settings.
+//! - A system's proxy in the way is passed by: one that wants a sign-in Kumi can't give (NTLM, Kerberos, a password the
+//!   system keeps), or that isn't answering (a crashed ClashX, an office's proxy set on a laptop at home). After its
+//!   407, its refusal or its name not found, requests go directly while the system names it, as they did before Kumi
+//!   read the settings ([`crate::net::send`]).
 
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -94,34 +96,62 @@ impl Settings {
 
     /// The proxy for a request to `url`, or None to go directly.
     pub fn proxy_for(&self, url: &Url) -> Option<Url> {
+        let proxy = self.named_for(url)?;
+        let passed = self.source == Source::System && passed_by().as_ref() == Some(&proxy);
+        (!passed).then_some(proxy)
+    }
+
+    /// The proxy the settings name for `url`, passed by or not.
+    fn named_for(&self, url: &Url) -> Option<Url> {
         let host = url.host()?;
         if this_computer(&host) || (self.source == Source::System && this_network(&host)) || self.bypass.covers(&host) {
             return None;
         }
-        let proxy = match url.scheme() {
+        match url.scheme() {
             "https" | "wss" => self.https.clone(),
             "http" | "ws" => self.http.clone(),
             _ => None,
-        }?;
-        let passed = self.source == Source::System && passed_by().as_ref() == Some(&proxy);
-        (!passed).then_some(proxy)
+        }
     }
 }
 
-/// The system's proxy that wanted a sign-in Kumi can't give: passed by while the system names it.
+/// The system's proxy that was in the way: passed by while the system names it.
 static PASSED_BY: Mutex<Option<Url>> = Mutex::new(None);
+
+/// Tests that pass a proxy by take turns: the one passed by is the whole process's.
+#[cfg(test)]
+pub(crate) static PASSING_BY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn passed_by() -> std::sync::MutexGuard<'static, Option<Url>> {
     PASSED_BY.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// After a 407 from the proxy `settings` chose for `url`: when it's the system's (whose sign-in Kumi can't give), it's
-/// passed by from now on, and true says to try once directly. The variables' proxies are the producer's to sign in
-/// to (HTTPS_PROXY=http://user:pass@host:port), so they're kept.
+/// After the proxy `settings` name for `url` was in the way ([`in_the_way`]): when it's the system's, it's passed by
+/// from now on (another request may have passed it by already), and true says to try once directly. The variables'
+/// proxies are the producer's own choice, to sign in to (HTTPS_PROXY=http://user:pass@host:port) or start, so they're
+/// kept.
 pub fn pass_by(settings: &Settings, url: &Url) -> bool {
-    let Some(proxy) = settings.proxy_for(url).filter(|_| settings.source == Source::System) else { return false };
+    let Some(proxy) = settings.named_for(url).filter(|_| settings.source == Source::System) else { return false };
     *passed_by() = Some(proxy);
     true
+}
+
+/// Whether a failed request's proxy, rather than the server, was in the way: it wants a sign-in Kumi can't give, or
+/// isn't answering (its address refused, its name not found). A timeout says neither: the network may just be slow.
+/// What reached Kumi directly says nothing of a proxy, so [`pass_by`] decides from the settings whether there was one.
+pub fn in_the_way(error: &reqwest::Error) -> bool {
+    let chain = crate::web::cause::chain(error);
+    !chain.contains("timed out") && (chain.contains("proxy authorization required") || not_answering(&chain))
+}
+
+/// A proxy that isn't answering, as what a request kept of the failure says: its address refused, or its name not
+/// found.
+pub fn not_answering(chain: &str) -> bool {
+    static WORDS: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?i)connection refused|actively refused|dns error|failed to lookup address|no such host is known|name or service not known|nodename nor servname")
+            .expect("regex")
+    });
+    WORDS.is_match(chain)
 }
 
 /// Going directly failed too: the system's proxy is used again, and its 407 is what's said.
@@ -669,6 +699,39 @@ mod tests {
         let none = Settings::from_system(Found { auto_config: true, ..Found::default() }, "");
         assert!(none.auto_config && none.https.is_none());
         assert_eq!(through(&none, "https://github.com/"), None);
+    }
+
+    #[tokio::test]
+    async fn a_proxy_passed_by_already_is_passed_by_again_and_only_the_systems() {
+        let _turn = PASSING_BY.lock().await;
+        stop_passing_by();
+        let system = Settings::system_for_tests(Some("http://127.0.0.1:7890"), false);
+        let url = Url::parse("https://api.openai.com/v1/responses").unwrap();
+        assert!(pass_by(&system, &url));
+        assert_eq!(system.proxy_for(&url), None, "passed by");
+        // Another request that met it in the way before it was passed by goes directly too.
+        assert!(pass_by(&system, &url));
+        // Not for an address the proxy isn't for, nor for the variables' proxy.
+        assert!(!pass_by(&system, &Url::parse("http://localhost:11434/").unwrap()));
+        let env = env(&[("HTTPS_PROXY", "http://127.0.0.1:7890")]);
+        assert!(!pass_by(&Settings::from_env(&env).unwrap(), &url));
+        stop_passing_by();
+        assert_eq!(system.proxy_for(&url), Some(Url::parse("http://127.0.0.1:7890").unwrap()));
+    }
+
+    #[test]
+    fn a_proxy_in_the_way_is_one_that_refuses_or_isnt_found_not_one_thats_slow() {
+        for said in [
+            "client error (Connect): tunnel error: failed to create underlying connection: tcp connect error: Connection refused (os error 61)",
+            "No connection could be made because the target machine actively refused it. (os error 10061)",
+            "tunnel error: failed to create underlying connection: dns error: failed to lookup address information: nodename nor servname provided, or not known",
+            "dns error: No such host is known. (os error 11001)",
+        ] {
+            assert!(not_answering(said), "{said}");
+        }
+        for said in ["operation timed out", "invalid peer certificate: UnknownIssuer", "connection closed before message completed"] {
+            assert!(!not_answering(said), "{said}");
+        }
     }
 
     #[test]

@@ -239,7 +239,7 @@ pub async fn fetch_unpinned(url: &str, to: &Path, signal: &Signal) -> Result<(),
             .build()
             .map_err(|error| error.to_string())?;
         let mut response = tokio::select! {
-            sent = client.get(url).send() => sent.map_err(|error| error.to_string())?,
+            sent = crate::net::send(client.get(url)) => sent.map_err(|error| error.to_string())?,
             _ = signal.cancelled() => return Err("stopped".into()),
         };
         if !response.status().is_success() {
@@ -295,7 +295,7 @@ async fn download_at_most(url: &str, path: &Path, most: Option<u64>, signal: &Si
         .build()
         .map_err(|error| error.to_string())?;
     let mut response = tokio::select! {
-        sent = client.get(url).send() => sent.map_err(|error| error.to_string())?,
+        sent = crate::net::send(client.get(url)) => sent.map_err(|error| error.to_string())?,
         _ = signal.cancelled() => return Err("stopped".into()),
     };
     if !response.status().is_success() {

@@ -340,7 +340,7 @@ fn last_segment(url: &str) -> &str {
 }
 
 async fn download(url: &str, signal: Option<Signal>) -> Result<Vec<u8>, VideoFailure> {
-    let response = with_signal(&signal, CLIENT.get(url).send()).await??;
+    let response = with_signal(&signal, crate::net::send(CLIENT.get(url))).await??;
     if !response.status().is_success() {
         return Err(VideoFailure::video(format!("Downloading {} failed ({}).", last_segment(url), response.status().as_u16())));
     }
@@ -1008,7 +1008,7 @@ async fn write_download(url: &str, path: &Path, fetching: &Fetching<'_>, size: O
             on_progress(1.0);
         }
     } else {
-        let response = with_signal(&fetching.signal, CLIENT.get(url).send()).await??;
+        let response = with_signal(&fetching.signal, crate::net::send(CLIENT.get(url))).await??;
         if !response.status().is_success() {
             return Err(VideoFailure::video(format!("Downloading {} failed ({}).", last_segment(url), response.status().as_u16())));
         }
