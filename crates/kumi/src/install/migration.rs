@@ -59,9 +59,9 @@ fn write_launcher_for(home: &str, windows: bool) -> std::io::Result<()> {
             return Ok(());
         }
         // cmd.exe resumes a batch file at its old byte offset when the child exits. A native
-        // launcher is left as it is (even LF for CRLF would move its offsets); the template puts
-        // the legacy launcher's resume offsets in its padding, and keeps those of the one before
-        // it as that one's installers wrote it, so those are replaced.
+        // launcher is left as it is (even LF for CRLF would move its offsets). The template puts
+        // the legacy launcher's resume offsets in its padding, and keeps the previous native
+        // launcher's as its installers wrote it (CRLF), so those two are replaced.
         if windows && compatible_windows_launcher(&current) {
             return Ok(());
         }
