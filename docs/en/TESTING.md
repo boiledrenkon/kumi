@@ -151,7 +151,7 @@ These workflows run on every pull request, and the first two on every push to `m
 | | `Release scripts` (Ubuntu) | The whitespace check of the change, then the packaging tests and the release script's tests |
 | | `Required CI` | Passes only when all of the above passed |
 | **Willington files** | `Willington files` (Ubuntu) | Only the repository owner's pull requests, from a `willington/` branch in this repository, change `vendor/willington/`, and such a pull request changes nothing else. `main`'s copy of the check runs, reading the pull request's file list, never its code |
-| **Installer** | `Native bundle / <target>` (six), `Aggregate native and existing-installer releases`, then `Install / <system>` (six) and `Existing installer transition / <system>` (three) | Builds a native bundle for Intel and ARM on macOS, Linux and Windows (each Mac bundle with the helper Kumi uses Live's menus with, universal and ad hoc signed; the Intel one cross-built on Apple Silicon), then the compatibility release that existing installations update from, and serves them locally. On each system: installs as producers do (Windows PowerShell 5.1 on Windows), checks the version, `doctor`, the bridge and its analysis worker, installs again as a repair, runs `kumi bridge --yes` into a scratch Remote Scripts folder, `kumi update`, `kumi update --rollback` and `kumi uninstall`. The transition jobs run the migration tests with Kumi 1.7.5 and the new bundles. On a `v*` tag's push, `publish` then attaches the bundle to the release, and publishes it when `scripts/release.py` wrote its notes. |
+| **Installer** | `Native bundle / <target>` (six), `Aggregate native and existing-installer releases`, then `Install / <system>` (six) and `Existing installer transition / <system>` (three) | Builds a native bundle for Intel and ARM on macOS, Linux and Windows (each Mac bundle with the helper Kumi uses Live's menus with, universal and ad hoc signed; the Intel one cross-built on Apple Silicon), then the compatibility release that existing installations update from, and serves them locally with the installers, as GitHub serves a release's files. On each system: installs with the one-liner from that copy, as producers do (Windows PowerShell 5.1 on Windows), checks the version, `doctor`, the bridge and its analysis worker, installs again as a repair, runs `kumi bridge --yes` into a scratch Remote Scripts folder, `kumi update`, `kumi update --rollback` and `kumi uninstall`. One install on each system (macOS arm64, Linux x64, Windows x64) then, in a home with spaces and non-ASCII letters, installs GitHub's latest release with this build's installer and then, with `KUMI_VERSION`, the release before this build; puts that release's bridge in; updates to this build and rolls back twice, checking the Kumi and the bridge each time; and uninstalls. The PATH line goes in zsh's `ZDOTDIR` on macOS and fish's `conf.d` on Linux, where that shell finds `kumi`, and the uninstall takes it out; Windows runs this in PowerShell 7, with `KUMI_HOME` in a folder named in non-ASCII letters. The transition jobs run the migration tests with Kumi 1.7.5 and the new bundles. On a `v*` tag's push, `publish` then attaches the bundle and the installers to the release, and publishes it when `scripts/release.py` wrote its notes. |
 
 On a pull request, less runs:
 
@@ -160,9 +160,9 @@ On a pull request, less runs:
 - Rust's build caches are saved from `main` only: a pull request restores
   `main`'s and saves none.
 - The Installer builds and installs all six only for a change to installing,
-  updating, releasing, Willington's files or a dependency. A change to the
-  bridge or a version number builds, installs and checks Linux's; any other
-  change builds Linux's bundle only.
+  updating, releasing, Willington's files, the Mac helper or a dependency. A
+  change to the bridge or a version number builds, installs and checks Linux's;
+  any other change builds Linux's bundle only.
 - A change to how Kumi stores what it keeps (`crates/kumi-store`, settings and
   sign-ins, memory, techniques, playbook, gaps, an older Kumi's files) also gets
   Linux's install and update check, which updates and rolls back over existing

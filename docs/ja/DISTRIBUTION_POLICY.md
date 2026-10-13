@@ -8,11 +8,11 @@ Kumi とそのブリッジがどのように人の手に届くか、それによ
 
 | 対象 | 場所 | 入手方法 |
 | --- | --- | --- |
-| Kumi | `user1303836/kumi` の GitHub Releases：ネイティブの `kumi-<target>.tar.gz`、互換用の `kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS`。Installer ワークフローが各 `vX.Y.Z` タグに添付します | `install.sh` または `install.ps1`、その後は `kumi update` |
+| Kumi | `user1303836/kumi` の GitHub Releases：ネイティブの `kumi-<target>.tar.gz`、互換用の `kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS`、インストーラーの `install.sh` と `install.ps1`。Installer ワークフローが各 `vX.Y.Z` タグに添付します | 最新リリースの `install.sh` または `install.ps1`、その後は `kumi update` |
 | ブリッジ（`@ableton-mcp/mcp-server`） | 各 Kumi バンドルの中に、ネイティブのブリッジ tarball と展開済みのパッケージが入っています | `kumi bridge`。ブリッジのライフサイクルを通じてインストールします（[ブリッジのインストール](DELIVERY.md)） |
 | ブリッジ単体 | 独自のリリースはありません。`python3 scripts/build-native-release.py --bridge-only` でビルドします（[ビルドオプション](DEVELOPER_GUIDE.md#リリース)） | ライフサイクル CLI（[ブリッジのインストール](DELIVERY.md#スタンドアロンのブリッジ)） |
 
-インストーラーのスクリプトは `main` ブランチから読み込まれ、それがインストールするバンドルは最新の公開リリース（または `KUMI_VERSION` で指定したリリース）から取得されます。リリースは、そのタグの Installer の実行がパスして公開するまでは下書きです（手でプッシュしたタグは、メンテナーがノートを書いて公開するまで待ちます）。公開されたリリースだけが「latest」になります。npm には何も公開しません。すべてのパッケージが `private: true` なので、`npm publish` は拒否されます。
+ワンライナーはインストーラーを最新の公開リリースから取得し、そのインストーラーはそのリリースのバンドル（または `KUMI_VERSION` で指定したリリースのもの）をインストールします。インストーラーへの変更がプロデューサーに届くのは、タグのインストールがパスしたリリースと一緒のときだけです。`main` も両方のインストーラーを元の raw URL に残しており、古いリンクはそちらを使います。リリースは、そのタグの Installer の実行がパスして公開するまでは下書きです（手でプッシュしたタグは、メンテナーがノートを書いて公開するまで待ちます）。公開されたリリースだけが「latest」になり、インストーラーが両方そろっていないリリースは公開されません。npm には何も公開しません。すべてのパッケージが `private: true` なので、`npm publish` は拒否されます。
 
 ## 完全性は確かめるが、作成者は証明しない
 

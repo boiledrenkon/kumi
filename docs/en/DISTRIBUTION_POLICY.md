@@ -10,16 +10,19 @@ what the bridge's package may contain. The steps for cutting a release are in
 
 | What | Where | How people get it |
 | --- | --- | --- |
-| Kumi | GitHub Releases of `user1303836/kumi`: native `kumi-<target>.tar.gz` bundles, the compatibility `kumi.tar.gz`, `kumi-release.json` and `SHA256SUMS`, attached to each `vX.Y.Z` tag by the Installer workflow | `install.sh` or `install.ps1`, then `kumi update` |
+| Kumi | GitHub Releases of `user1303836/kumi`: native `kumi-<target>.tar.gz` bundles, the compatibility `kumi.tar.gz`, `kumi-release.json`, `SHA256SUMS` and the installers `install.sh` and `install.ps1`, attached to each `vX.Y.Z` tag by the Installer workflow | The latest release's `install.sh` or `install.ps1`, then `kumi update` |
 | The bridge (`@ableton-mcp/mcp-server`) | Inside each Kumi bundle, as a native bridge tarball and its prepared package | `kumi bridge`, which installs it through the bridge's lifecycle ([delivery](DELIVERY.md)) |
 | The bridge on its own | No release of its own. Build it with `python3 scripts/build-native-release.py --bridge-only` ([build options](DEVELOPER_GUIDE.md#releasing)) | The lifecycle CLI ([delivery](DELIVERY.md#the-standalone-bridge)) |
 
-The installer scripts are read from the `main` branch; the bundle they install
-comes from the latest published release (or the one `KUMI_VERSION` names). A
+The one-liners fetch the installer from the latest published release, and it
+installs that release's bundle (or the one `KUMI_VERSION` names). A change to
+an installer reaches producers only with a release, once its tag's installs
+pass. `main` keeps both installers at their raw URLs, which older links use. A
 release is a draft until its tag's Installer run passes and publishes it (a tag
 pushed by hand waits for the maintainer to write its notes and publish it), and
-only a published release is "latest". Nothing is published to npm: every
-package is `private: true`, so `npm publish` refuses.
+only a published release is "latest"; the run won't publish one without both
+installers. Nothing is published to npm: every package is `private: true`, so
+`npm publish` refuses.
 
 ## Integrity, not identity
 
