@@ -125,7 +125,9 @@ pub fn plan_limit(error: &LanguageModelError, now_ms: f64) -> Option<PlanLimit> 
     if codes.contains(&"usage_not_included") {
         return Some(PlanLimit::NotIncluded);
     }
-    codes.iter().any(|code| QUOTA_CODES.contains(code)).then_some(PlanLimit::Quota)
+    // Anthropic says an empty balance only in words, on a 400 invalid_request_error.
+    let words = format!("{} {}", call.message, call.response_body.as_deref().unwrap_or("")).to_lowercase();
+    (codes.iter().any(|code| QUOTA_CODES.contains(code)) || words.contains("credit balance is too low")).then_some(PlanLimit::Quota)
 }
 
 /// The values of `type` and `code` fields, a few levels down (`{"error":{"type":…}}`, a stream's frame).
@@ -340,6 +342,19 @@ mod tests {
         // A limit that doesn't say when, with no Retry-After either: nothing to wait for.
         let unsaid = stream_failure(json!({"error":{"type":"usage_limit_reached"}}), 429);
         assert_eq!(wait_for(&unsaid, 0, 0, now), None);
+    }
+
+    #[test]
+    fn an_empty_credit_balance_is_a_quota_whatever_its_status() {
+        let mut low = ApiCallError::new("invalid_request_error", "u", None, Some(400));
+        low.response_body = Some(
+            json!({"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}})
+                .to_string(),
+        );
+        let low = LanguageModelError::ApiCall(low);
+        assert_eq!(plan_limit(&low, 0.0), Some(PlanLimit::Quota));
+        assert_eq!(wait_for(&low, 0, 0, 0.0), None);
+        assert_eq!(describe_failure(&low, "anthropic/claude-sonnet-5-5").kind, FailureKind::Billing);
     }
 
     #[test]

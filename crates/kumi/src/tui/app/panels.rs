@@ -720,11 +720,13 @@ impl TuiApp {
             );
             return;
         }
-        // A plan's limit that resets later than Kumi waits, or a provider still busy or down past the retries.
-        if matches!(kind, "usage-limit" | "rate-limit" | "provider") {
+        // A plan's limit that resets later than Kumi waits, credit used up, or a provider still busy or down past the
+        // retries.
+        let limited = matches!(kind, "usage-limit" | "billing");
+        if limited || matches!(kind, "rate-limit" | "provider") {
             let name = provider.map(|p| models.provider_name(p)).unwrap_or_else(|| "The provider".into());
             let mut items = Vec::new();
-            if kind == "usage-limit" {
+            if limited {
                 items.push(item("Choose a fallback model", "fallback", "it carries on whenever this plan's limit is reached"));
             } else {
                 items.push(item("Send it again", "again", format!("once {name} answers again")));
@@ -732,8 +734,7 @@ impl TuiApp {
             items.push(PickerItem::new("Choose another model", "model"));
             items.push(PickerItem::new("Sign in to another provider", "login"));
             items.push(PickerItem::new("Not now", "later"));
-            let title =
-                if kind == "usage-limit" { format!("Carry on without {name}?") } else { format!("{name} isn't answering. Carry on?") };
+            let title = if limited { format!("Carry on without {name}?") } else { format!("{name} isn't answering. Carry on?") };
             self.pick(Picker::new(title, items), |app, item| async move {
                 app.close_panel();
                 match item.value.as_deref() {
