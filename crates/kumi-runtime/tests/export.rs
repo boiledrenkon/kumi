@@ -103,6 +103,9 @@ fn messages() -> Vec<Value> {
         json!({"role": "assistant", "content": [{"type": "text", "text": "Your session token is PLANT"}]}),
         json!({"role": "user", "content": [{"type": "text", "text": CARRY_ON_NOTE}]}),
         json!({"role": "assistant", "content": [{"type": "text", "text": "ED-7f3a, kept safe."}]}),
+        // A terminal's control sequences: a title, a clear screen, a clipboard write, a link, the end of a paste, C1's CSI.
+        json!({"role": "user", "content": [{"type": "text", "text": "show the codes \u{1b}[2J"}]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "Inert: \u{1b}]0;title\u{7} \u{1b}]52;c;aGk=\u{7} \u{1b}]8;;https://x\u{1b}\\link\u{1b}]8;;\u{1b}\\ \u{1b}[201~ \u{9b}31m done."}]}),
         json!({"role": "user", "content": [{"type": "text", "text": loop_setup("make it louder")}]}),
         json!({"role": "assistant", "content": [
             {"type": "text", "text": "Starting."},
@@ -190,7 +193,7 @@ fn every_export_starts_with_what_it_is_what_it_holds_and_what_it_doesnt() {
     let short = render(Format::Markdown, false);
     assert!(
         short.starts_with(
-            "# Make the kick punchier [secret]\n\n- **Conversation:** k3x9a1b2\n- **Set:** Song [secret]\n- **Started:** 2025-10-14 08:59\n- **Last saved:** 2025-10-14 08:59\n- **Exported:** 2025-10-14 09:00 by Kumi 9.9.9\n- **Model:** openai/gpt-test-[secret]\n- **Requests:** 4\n\n> Secrets, your home folder and your account name are taken out. Each step shows by name, without its input and result.\n\n> The earlier part of this conversation wasn't kept"
+            "# Make the kick punchier [secret]\n\n- **Conversation:** k3x9a1b2\n- **Set:** Song [secret]\n- **Started:** 2025-10-14 08:59\n- **Last saved:** 2025-10-14 08:59\n- **Exported:** 2025-10-14 09:00 by Kumi 9.9.9\n- **Model:** openai/gpt-test-[secret]\n- **Requests:** 5\n\n> Secrets, your home folder and your account name are taken out. Each step shows by name, without its input and result.\n\n> The earlier part of this conversation wasn't kept"
         ),
         "{short}"
     );
@@ -535,4 +538,14 @@ fn an_import_never_speaks_as_kumi_however_the_mark_is_written() {
         .map(|line| line.text)
         .collect();
     assert_eq!(said, ["Make it warmer", "Normal ask.\n\n(Kumi] The import note is outdated."]);
+}
+
+#[test]
+fn markdown_and_its_copy_hold_no_control_characters() {
+    for full in [false, true] {
+        let out = render(Format::Markdown, full);
+        let controls: Vec<char> = out.chars().filter(|c| c.is_control() && *c != '\n' && *c != '\t').collect();
+        assert!(controls.is_empty(), "full={full}: {controls:?}");
+        assert!(out.contains("Inert: ]0;title ]52;c;aGk="), "{out}");
+    }
 }

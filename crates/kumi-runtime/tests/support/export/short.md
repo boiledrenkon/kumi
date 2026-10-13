@@ -6,7 +6,7 @@
 - **Last saved:** 2025-10-14 08:59
 - **Exported:** 2025-10-14 09:00 by Kumi 9.9.9
 - **Model:** openai/gpt-test-[secret]
-- **Requests:** 4
+- **Requests:** 5
 
 > Secrets, your home folder and your account name are taken out. Each step shows by name, without its input and result.
 
@@ -53,6 +53,14 @@ and the token?
 ## Kumi
 
 Your session token is [secret], kept safe.
+
+## You
+
+show the codes [2J
+
+## Kumi
+
+Inert: ]0;title ]52;c;aGk= ]8;;https://x\link]8;;\ [201~ 31m done.
 
 ## You
 

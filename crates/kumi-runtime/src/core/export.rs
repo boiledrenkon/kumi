@@ -147,7 +147,8 @@ struct Cleaned {
     partial: bool,
 }
 
-/// The conversation as Markdown: a heading, what's known of it, then each turn and what Kumi changed.
+/// The conversation as Markdown: a heading, what's known of it, then each turn and what Kumi changed. It holds no control
+/// characters but line breaks and tabs.
 pub fn markdown(source: &Source, options: &Options) -> String {
     let doc = read(source, options);
     let mut out = format!("# {}\n\n", markdown_safe(&one_line(&doc.title)));
@@ -205,7 +206,9 @@ pub fn markdown(source: &Source, options: &Options) -> String {
         out.push('\n');
     }
     out.push_str(&format!("---\n\n{}\n", footer(options)));
-    out
+    // Read in a terminal (cat) or pasted from the copy, it moves and sets nothing: no control characters but line breaks
+    // and tabs.
+    out.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
 }
 
 /// What a page can load and run: nothing from anywhere, and no scripts; only its own styles.
@@ -355,6 +358,9 @@ pub fn file_name(title: &str, id: &str, format: Format) -> String {
 }
 
 fn read(source: &Source, options: &Options) -> Document {
+    // Every word leaves as a reader sees it before the redactor takes secrets out of it.
+    let words = |text: &str| (options.redact)(&drawn(text));
+    let options = &Options { redact: &words, ..*options };
     let redact = options.redact;
     let cleaned = clean(&source.conversation.checkpoint.messages, options);
     let said = said_of(&cleaned.messages, options);
@@ -371,6 +377,12 @@ fn read(source: &Source, options: &Options) -> Document {
         said,
         changes,
     }
+}
+
+/// Words as an export shows them: without control characters but line breaks and tabs, which a terminal would act on
+/// when the file is read in one or its copy pasted.
+fn drawn(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
 }
 
 /// The messages with what may leave Kumi: the producer's words (see [`producer_words`]), Kumi's words and steps, and each

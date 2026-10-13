@@ -10,7 +10,7 @@
   "created": 1760399990000,
   "saved": 1760399999900,
   "exported": 1760400000000,
-  "requests": 4,
+  "requests": 5,
   "kumi": "9.9.9",
   "full": false,
   "redacted": true,
@@ -169,6 +169,24 @@
         {
           "type": "text",
           "text": "Your session token is [secret], kept safe."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "show the codes [2J"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Inert: ]0;title ]52;c;aGk= ]8;;https://x\\link]8;;\\ [201~ 31m done."
         }
       ]
     },
