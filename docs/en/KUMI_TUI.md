@@ -115,7 +115,7 @@ message, not a command.
 | `/model`, `/effort` | Choose the model (from each provider's own list, then the model servers on your computer: Ollama, LM Studio and those in settings.json; type to filter) and how hard it thinks; from your next message. In `/model`, ctrl+f makes the selected model your fallback (again clears it) |
 | `/fast` | Turn on the model's faster tier when its provider lists one (ChatGPT's "Fast": quicker answers, more of your usage); `/fast` again turns it off. Shown as "· fast" beside the model |
 | `/willington` | Turn [Willington](WILLINGTON_INTEGRATION.md) on or off. Rack bindings are requested on supported builds; clip Follow Actions and native editing also require passing exact-library self-tests. Native editing is b5 macOS ARM64 only. Off until enabled; available when the bridge carries Willington. |
-| `/login`, `/logout` | Sign in (ChatGPT in the browser, or an API key shown only as dots) or out |
+| `/login`, `/logout` | Sign in (ChatGPT in the browser or with a code, or an API key shown only as dots) or out |
 | `/loop <what to reach>` | Work in judged rounds: one change, heard before and after, kept only if its target improved and nothing else got worse, then the next target. It stops when every item is met, when changes stop helping, or at 16 rounds or 45 minutes; Esc or `/loop stop` stops it. A sound to match ("make my pad sound like ~/ref.wav") runs the knob search instead: `/loop` alone picks a paused one up, `/loop stop` ends it |
 | `/goal <what to reach>` | Keep at one goal across turns, checked after each (by the judge's numbers when measured), until it's met, blocked, stuck (three turns in a row that got no closer) or out of budget. `/goal` shows it; `/goal resume` (a fresh budget for whatever ran out), `/goal edit <words>`, `/goal new: <words>` (replaces an unfinished one), `/goal pause` (or Esc), `/goal clear` (with no unfinished goal, a paused sound-match search) |
 | `/slots` | Which model does each listening job (stems, transcription, listening, embeddings), and swaps one in plain words: `/slots listening gemini`, `/slots listening off`, `/slots listening <base URL>#<model>`, `/slots embeddings <.onnx file or https link>`. A new model is tried first; `/slots back <job>` takes a swap back |
@@ -205,7 +205,8 @@ start with; when nobody's there (a `/goal`, `/loop` or match ran, or Kumi's
 window has been behind another for 2 minutes), Kumi takes it after a countdown
 ("Taking 2 (recommended) in 60 s · any key cancels"). In the key box, paste the key and press
 Enter; Kumi checks it with the provider, or saves it unchecked when the provider
-can't be reached. In the ChatGPT sign-in panel, `c` copies the link. In the
+can't be reached. In the ChatGPT sign-in panel, `c` copies the link (or the code), and `d` signs
+in with a code instead of the browser. In the
 `/btw` panel, ↑↓ and Page Up/Down scroll, ←→ go through earlier answers, `c`
 copies, and Esc, Enter or Space closes it. In a job's details, ↑↓ scroll, `x`
 stops it, `r` runs it again, `c` copies its report, and Esc closes them.

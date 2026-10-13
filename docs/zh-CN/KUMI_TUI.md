@@ -62,7 +62,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `/model`、`/effort` | 选择模型（来自各提供方自己的列表，然后是你电脑上的模型服务器：Ollama、LM Studio 以及 settings.json 中写的服务器；输入文字可筛选）以及它思考的力度；从你的下一条消息起生效。在 `/model` 中，ctrl+f 把选中的模型设为备用模型（再按一次取消） |
 | `/fast` | 当提供方在列表中提供时，开启模型的更快档位（ChatGPT 的“Fast”：回答更快，用量也更多）；再次输入 `/fast` 关闭。模型名旁会显示“· fast” |
 | `/willington` | 开启或关闭 [Willington](WILLINGTON_INTEGRATION.md)。在支持的构建上请求机架绑定；片段 Follow Actions 和原生编辑还要求通过匹配实际库的自测。原生编辑仅支持 b5 macOS ARM64。启用前保持关闭；桥接包含 Willington 时可用。 |
-| `/login`、`/logout` | 登录（在浏览器中用 ChatGPT 登录，或输入只显示为圆点的 API 密钥）或退出登录 |
+| `/login`、`/logout` | 登录（在浏览器中或用代码登录 ChatGPT，或输入只显示为圆点的 API 密钥）或退出登录 |
 | `/loop <what to reach>` | 按判定的轮次工作：一次修改，听修改前后，只有目标项变好、其他方面没变差才保留，然后下一个目标。所有项目达成、修改不再有帮助，或到 16 轮或 45 分钟时停止；按 Esc 或 `/loop stop` 也会停止。要匹配某个声音（“让我的 pad 听起来像 ~/ref.wav”）时改为旋钮搜索：单独输入 `/loop` 继续已暂停的搜索，`/loop stop` 结束它 |
 | `/goal <what to reach>` | 跨多个回合坚持一个目标，每个回合后检查（测量过时看判定的数值），直到达成、受阻、停滞（连续三个回合没有更接近）或用完预算。`/goal` 显示它；`/goal resume`（用完的部分换上新的预算）、`/goal edit <words>`、`/goal new: <words>`（替换未完成的目标）、`/goal pause`（或 Esc）、`/goal clear`（没有未完成的目标时，结束暂停中的声音匹配搜索） |
 | `/slots` | 显示每项聆听工作（分轨、扒谱、聆听、嵌入）由哪个模型负责，并用平常的话替换：`/slots listening gemini`、`/slots listening off`、`/slots listening <base URL>#<model>`、`/slots embeddings <.onnx 文件或 https 链接>`。新模型会先测试；`/slots back <job>` 撤回替换 |
@@ -137,7 +137,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | Shift-Tab | 进入标签页（再按一次切到下一个标签页）：↑↓ 和 Page Up/Down 移动。在修改上，Enter、→ 或空格展开它的图示，Enter 或 ← 收起，展开时按 `u` 撤销；在记住的内容上，Enter 执行 forget；在 JOBS 的行上，Enter 打开任务，按 `x` 停止。Esc 或 Tab 返回 |
 | 鼠标 | 点击行末的 **undo** 或 **forget**、修改的文字（展开图示）或任务的文字（打开任务）、标签页名称，或点击设备树中的设备以指向它；点击图钉取消固定。拖动时按住 Shift（iTerm2 中为 Option）可选择文字 |
 
-**面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/conversations` 和 `/recipes` 中，输入文字可筛选列表。在 `/model` 中，ctrl+f 设定备用模型。**Your answer**（以带编号选项的问题结尾的回答）：按编号再按 Enter 即可回答。Kumi 推荐的选项带有标记，并一开始就被选中；没有人在时（运行过 `/goal`、`/loop` 或匹配，或 Kumi 的窗口已在其他窗口后面 2 分钟），倒计时结束后 Kumi 会选它（“Taking 2 (recommended) in 60 s · any key cancels”）。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。在任务详情中，↑↓ 滚动，`x` 停止任务，`r` 重新运行，`c` 复制报告，Esc 关闭。
+**面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/conversations` 和 `/recipes` 中，输入文字可筛选列表。在 `/model` 中，ctrl+f 设定备用模型。**Your answer**（以带编号选项的问题结尾的回答）：按编号再按 Enter 即可回答。Kumi 推荐的选项带有标记，并一开始就被选中；没有人在时（运行过 `/goal`、`/loop` 或匹配，或 Kumi 的窗口已在其他窗口后面 2 分钟），倒计时结束后 Kumi 会选它（“Taking 2 (recommended) in 60 s · any key cancels”）。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接（或代码），`d` 改用代码登录而不用浏览器。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。在任务详情中，↑↓ 滚动，`x` 停止任务，`r` 重新运行，`c` 复制报告，Esc 关闭。
 
 ## 纯文本模式
 
