@@ -11,8 +11,16 @@ pub static KUMI: LazyLock<&'static str> = LazyLock::new(|| if *INSTALLED { "kumi
 /// The command that starts Kumi: "kumi" or "cargo run -p kumi --".
 pub static KUMI_START: LazyLock<&'static str> = LazyLock::new(|| if *INSTALLED { "kumi" } else { "cargo run -p kumi --" });
 
+/// The one-liners that install Kumi, or repair it, as the READMEs give them: Kumi's one copy of each. install.sh,
+/// install.ps1, the launchers they write and the READMEs repeat them, and tests keep every copy the same, so a
+/// new address goes here first and the tests name each place to follow.
+pub const INSTALL_SH: &str = "curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh";
+pub const INSTALL_PS1: &str = "irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex";
+/// This computer's one-liner.
+pub const REINSTALL: &str = if cfg!(windows) { INSTALL_PS1 } else { INSTALL_SH };
+
 /// What puts a missing or broken Kumi back: the installer again, or a rebuild of the checkout.
-pub static KUMI_REPAIR: LazyLock<&'static str> =
+pub static KUMI_REPAIR: LazyLock<String> =
     LazyLock::new(
-        || if *INSTALLED { "the Kumi installer again (github.com/user1303836/kumi)" } else { "cargo build --release --workspace" },
+        || if *INSTALLED { format!("the Kumi installer again ({REINSTALL})") } else { "cargo build --release --workspace".into() },
     );

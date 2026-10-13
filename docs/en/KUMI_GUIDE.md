@@ -1031,7 +1031,17 @@ Environment variables (paths must be absolute):
 | `KUMI_ICONS` | `glyphs` or `badges` (two-letter icons), when the terminal's symbols look wrong |
 | `KUMI_TRACE=1` | Print the name of each bridge call (no arguments or results) |
 
-The installer reads `KUMI_HOME` (install somewhere other than `~/.kumi`; set it
-when installing, not afterwards), `KUMI_VERSION` (install a given release),
-`KUMI_RELEASES` (where to download from; it wins over `KUMI_VERSION`) and
-`KUMI_NO_MODIFY_PATH=1` (leave your PATH alone).
+The installer reads:
+
+- `KUMI_HOME`: install somewhere other than `~/.kumi`. Set it when installing, not afterwards.
+- `KUMI_VERSION`: install a given release, such as `1.16.0`, or `latest`. Releases before 1.7.6
+  install with their own script, which the installer names.
+- `KUMI_RELEASES`: where to download from; it wins over `KUMI_VERSION`.
+- `KUMI_NO_MODIFY_PATH=1`: leave your PATH alone.
+- `KUMI_ALLOW_ROOT=1`: install for root when run with sudo. Otherwise the installer stops there, since
+  Kumi would go in root's home folder, not yours.
+
+Running it again repairs Kumi and keeps the Kumi that `kumi update --rollback` goes back to. Ctrl-C
+before the new Kumi is in place changes nothing. When something goes wrong, it says why: no such
+release, no connection (DNS, TLS, a proxy or a timeout), or a Wi-Fi sign-in page answering in
+GitHub's place.

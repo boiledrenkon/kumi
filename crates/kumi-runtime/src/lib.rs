@@ -31,7 +31,7 @@ pub use auth::openai_codex::{
     login_codex_browser, login_codex_device, login_hint, read_pi_codex_login, DEVICE_VERIFICATION_URL, LOGIN_HINT, OPENAI_CODEX,
 };
 pub use auth::store::{open_credential_store, valid_api_key, ApiKeyCredential, Credential, CredentialStore, OAuthCredential};
-pub use command::{INSTALLED, KUMI, KUMI_REPAIR, KUMI_START};
+pub use command::{INSTALLED, INSTALL_PS1, INSTALL_SH, KUMI, KUMI_REPAIR, KUMI_START, REINSTALL};
 pub use core::contracts::{
     ArrangementStrip, AuditionEvent, AuditionRequest, AuditionResult, CatchUp, ChainNode, ChangeFamily, ChangeRecord, ClipNote, ClipView,
     ConnectionState, ConversationStore, ConversationSummary, DeviceNode, DevicePlacement, DeviceTree, DisconnectCause, HeardEvent,

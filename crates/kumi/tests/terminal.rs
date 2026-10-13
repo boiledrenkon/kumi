@@ -455,6 +455,25 @@ async fn partial_wrapped_unicode_cursor_survives_streaming_and_notices() {
         .await;
 }
 #[tokio::test]
+async fn started_by_the_installer_the_farewell_says_how_to_start_kumi_next_time() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let next = "Next time: run ~/.kumi/bin/kumi, or add ~/.kumi/bin to PATH";
+            for tty in [true, false] {
+                let f = Fixture::with(tty, false, None, None, None, |o| o.next_time = Some(next.into()));
+                flush().await;
+                f.quit().await;
+                assert!(
+                    kumi::text::sanitize_text(&f.text(), &[])
+                        .ends_with(&format!("Kumi closed. Each Set's conversation continues next time.\n{next}\n")),
+                    "{}",
+                    f.text()
+                );
+            }
+        })
+        .await;
+}
+#[tokio::test]
 async fn busy_rejection_cancel_preserves_input_and_close_is_once() {
     tokio::task::LocalSet::new()
         .run_until(async {

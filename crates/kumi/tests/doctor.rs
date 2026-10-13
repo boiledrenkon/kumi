@@ -141,7 +141,7 @@ async fn doctor_explains_live_bridge_and_terminal_in_plain_words() {
     probe(&mut io, LiveProbe { started: true, connected: Some(false), ..Default::default() });
     assert_eq!(find(&doctor_checks(&io).await.unwrap(), "Live isn't connected").status, CheckStatus::Fix);
     probe(&mut io, LiveProbe::default());
-    assert!(find(&doctor_checks(&io).await.unwrap(), "didn't start").next.as_ref().unwrap().contains(*KUMI_REPAIR));
+    assert!(find(&doctor_checks(&io).await.unwrap(), "didn't start").next.as_ref().unwrap().contains(KUMI_REPAIR.as_str()));
     io.bundled_bridge_version = Some("1.0.9".into());
     let checks = doctor_checks(&io).await.unwrap();
     assert!(find(&checks, "couldn't reach Live").next.as_ref().unwrap().contains("answer it first"));

@@ -1092,3 +1092,24 @@ async fn only_the_earlier_kumis_own_bridge_goes_back() {
     assert!(done.ran.is_empty());
     assert_eq!(version_of(home.join("app")), "1.8.11");
 }
+#[test]
+fn started_by_the_installer_kumi_says_how_to_start_it_next_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    assert_eq!(next_time(&env), None);
+    env.insert("KUMI_FROM_INSTALLER".into(), "1".into());
+    assert_eq!(next_time(&env), None, "kumi is on this window's PATH");
+    env.insert("KUMI_FROM_INSTALLER".into(), "new-window".into());
+    assert_eq!(next_time(&env).as_deref(), Some("Next time: open a new terminal window and type kumi"));
+    // With PATH left alone: the kumi command, ~ for the home folder, and quoted to type when it has a space.
+    #[cfg(unix)]
+    {
+        env.insert("KUMI_FROM_INSTALLER".into(), "no-path".into());
+        env.insert("KUMI_HOME".into(), dir.path().join("user/.kumi").display().to_string());
+        assert_eq!(next_time(&env).as_deref(), Some("Next time: run ~/.kumi/bin/kumi, or add ~/.kumi/bin to PATH"));
+        let spaced = dir.path().join("my kumi");
+        env.insert("KUMI_HOME".into(), spaced.display().to_string());
+        let (kumi, bin) = (spaced.join("bin/kumi"), spaced.join("bin"));
+        assert_eq!(next_time(&env), Some(format!("Next time: run \"{}\", or add {} to PATH", kumi.display(), bin.display())));
+    }
+}

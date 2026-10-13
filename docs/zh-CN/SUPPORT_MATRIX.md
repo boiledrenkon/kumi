@@ -10,7 +10,7 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 | --- | --- | --- | --- |
 | macOS | 13（Ventura）或更高 | Apple 芯片、Intel | 原生构建和安装纳入 CI；较早的 TypeScript 版已在 Apple 芯片上配合 Live 测试 |
 | Windows | 10 或 11 | x64、ARM64 | 原生构建和安装纳入 CI；较早的 TypeScript 版已在 Windows 10 上配合 Live 测试；见 [Windows](#windows) |
-| Linux | glibc 发行版（不包括 Alpine 或其他 musl 发行版） | x64、ARM64 | 原生构建和安装纳入 CI；Live 没有 Linux 版 |
+| Linux | glibc 2.35 或更高（Ubuntu 22.04、Debian 12 或更新；不包括 Alpine 或其他 musl 发行版） | x64、ARM64 | 原生构建和安装纳入 CI；Live 没有 Linux 版 |
 
 - Kumi 和独立桥接都是原生 Rust 程序。全新安装不会下载 Node，也不要求 Node。
 - 使用 Node 24 的现有 Kumi 1.7.4 和 1.7.5 可通过 `kumi update` 迁移，保留原有设置、登录和数据。保留的 Node 用于回滚和可选的 YouTube 挑战处理。在 Windows 上，原生版首次启动时会替换旧启动器，之后的启动不再经过 Node。更早的 Node 主版本可能需要使用相同 `KUMI_HOME` 重新运行安装程序；见[更新说明](KUMI_GUIDE.md)。

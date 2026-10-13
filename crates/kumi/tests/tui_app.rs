@@ -40,6 +40,16 @@ case!(startup_restore, async {
         .ends_with(&format!("{}Kumi closed. Each Set's conversation continues next time.\n", kumi::tui::tty::RESTORE)));
     h.close().await;
 });
+case!(started_by_the_installer_the_farewell_says_how_to_start_kumi_next_time, async {
+    let next = "Next time: open a new terminal window and type kumi";
+    let h = Harness::with(120, 36, Rc::new(Control::default()), |o| o.next_time = Some(next.into()));
+    let done = h.app.run();
+    delay(5).await;
+    h.type_text("\x03").await;
+    assert_eq!(done.await, 0);
+    assert!(h.output.text.borrow().ends_with(&format!("Kumi closed. Each Set's conversation continues next time.\n{next}\n")));
+    h.close().await;
+});
 case!(typing_streaming_steps_markdown, async {
     let h = Harness::new(120, 36);
     h.start().await;

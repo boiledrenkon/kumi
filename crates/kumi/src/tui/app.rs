@@ -104,6 +104,8 @@ pub struct TuiOptions {
     pub instant: bool,
     /// How changes' pictures show: read from the terminal when None.
     pub graphics: Option<super::pictures::Graphics>,
+    /// How to start Kumi next time, said after the farewell when this window can't yet ([`crate::install::next_time`]).
+    pub next_time: Option<String>,
 }
 /// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
 /// than Kumi's.
@@ -145,6 +147,7 @@ impl TuiOptions {
             front_app: None,
             instant: true,
             graphics: None,
+            next_time: None,
         }
     }
 }
@@ -764,6 +767,9 @@ impl TuiApp {
             app.0.tty.restore(false);
             if !app.0.output_failed.get() {
                 app.0.options.output.write(&format!("{}\n", app.clean(message.as_deref().unwrap_or(FAREWELL), usize::MAX)));
+                if let Some(next) = &app.0.options.next_time {
+                    app.0.options.output.write(&format!("{next}\n"));
+                }
             }
             app.0.done.send_replace(Some(code));
         });
