@@ -1038,8 +1038,8 @@ The installer reads:
   install with their own script, which the installer names.
 - `KUMI_RELEASES`: where to download from; it wins over `KUMI_VERSION`.
 - `KUMI_NO_MODIFY_PATH=1`: leave your PATH alone.
-- `KUMI_ALLOW_ROOT=1`: install as root. Otherwise the installer stops there, since Kumi would go in
-  root's home folder.
+- `KUMI_ALLOW_ROOT=1`: install for root when run with sudo. Otherwise the installer stops there, since
+  Kumi would go in root's home folder, not yours.
 
 Running it again repairs Kumi and keeps the Kumi that `kumi update --rollback` goes back to. Ctrl-C
 before the new Kumi is in place changes nothing. When something goes wrong, it says why: no such

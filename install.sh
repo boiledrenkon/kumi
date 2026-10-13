@@ -9,7 +9,7 @@
 #
 # Settings (optional): KUMI_HOME (where to install, default ~/.kumi), KUMI_VERSION (a release such as
 # 1.16.0, default latest), KUMI_RELEASES (where releases are downloaded from), KUMI_NO_MODIFY_PATH=1
-# (leave shell startup files alone), KUMI_ALLOW_ROOT=1 (install for root).
+# (leave shell startup files alone), KUMI_ALLOW_ROOT=1 (install for root when run with sudo).
 #
 # Everything runs inside main(), so a download cut short can't run half a script.
 
@@ -110,12 +110,10 @@ main() {
   fi
   if [ "$platform" = "darwin" ]; then target="$arch-apple-darwin"; else target="$arch-unknown-linux-gnu"; fi
 
-  # Kumi installs for whoever runs this, with no admin rights: as root (sudo), it would install for root.
-  # A container or CI, where root is the only user, is fine.
-  if [ "$(id -u 2>/dev/null)" = "0" ] && [ -z "${KUMI_ALLOW_ROOT:-}" ] && [ -z "${CI:-}" ] \
-    && [ ! -f /.dockerenv ] && [ ! -f /run/.containerenv ] && [ -z "${container:-}" ] \
-    && ! grep -qsE 'docker|kubepods|containerd|lxc' /proc/1/cgroup; then
-    fail "it's running as root (with sudo?), so Kumi would be installed for root, not for you. Kumi needs no admin rights: run it again without sudo. To install it for root anyway, set KUMI_ALLOW_ROOT=1."
+  # Kumi installs for whoever runs this, with no admin rights: run with sudo, it would install for root rather than
+  # the one who ran sudo. Root itself (a container, a root-only machine) is fine.
+  if [ "$(id -u 2>/dev/null)" = "0" ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -z "${KUMI_ALLOW_ROOT:-}" ]; then
+    fail "it's running with sudo, so Kumi would be installed for root, not for $SUDO_USER. Kumi needs no admin rights: run it again without sudo. To install it for root anyway, set KUMI_ALLOW_ROOT=1."
   fi
 
   # ── Which release ──────────────────────────────────────────────────────

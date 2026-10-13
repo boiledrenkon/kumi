@@ -453,17 +453,18 @@ exit $status
             self.assertIn(f'export PATH="{home}/.kumi/bin:$PATH"' if elsewhere else "PATH                done\n", (home / ".zshrc").read_text() if elsewhere else run.stdout)
 
     # ── This computer ──────────────────────────────────────────────────────
-    def test_root_is_told_kumi_would_install_for_root(self):
+    def test_sudo_is_told_kumi_would_install_for_root(self):
         self.stub("id", 'if [ "$1" = "-u" ]; then echo 0; else exec /usr/bin/id "$@"; fi\n')
         self.serve(self.release("1.0.0"))
         home = self.home()
-        run = self.install(home, CI="")
-        if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
-            self.skipTest("a container, where root is expected")
+        run = self.install(home, SUDO_USER="someone")
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
-        self.assertIn("so Kumi would be installed for root, not for you", run.stderr)
+        self.assertIn("it's running with sudo, so Kumi would be installed for root, not for someone.", run.stderr)
         self.assertIn("KUMI_ALLOW_ROOT=1", run.stderr)
-        self.assertEqual(self.install(home, CI="", KUMI_ALLOW_ROOT="1").returncode, 0)
+        self.assertEqual(self.install(home, SUDO_USER="someone", KUMI_ALLOW_ROOT="1").returncode, 0)
+        # Root itself (a container, a root-only machine), and sudo by root, install as before.
+        for sudo in (None, "root"):
+            self.assertEqual(self.install(self.home(f"root {sudo}"), SUDO_USER=sudo).returncode, 0, sudo)
 
     @unittest.skipUnless(platform.system() == "Darwin", "Rosetta is a Mac's")
     def test_a_shell_under_rosetta_gets_the_native_build(self):
