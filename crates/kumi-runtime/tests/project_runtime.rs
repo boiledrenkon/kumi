@@ -1,7 +1,10 @@
 //! Pure catch-up/storage cases; real integration cases remain in the integration parity work.
 use kumi_common::js::json::stringify;
 use kumi_runtime::{
-    core::contracts::{ConversationStore, JsonObject, SavedConversation},
+    core::{
+        contracts::{ConversationStore, JsonObject, SavedConversation},
+        conversations::create_conversation_store,
+    },
     integrations::ableton::project::*,
 };
 use serde_json::{json, Value};

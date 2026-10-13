@@ -3,12 +3,12 @@ use async_trait::async_trait;
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::abort::Signal;
 use kumi_runtime::{
+    core::conversations::create_conversation_store,
     core::{
         contracts::*,
         errors::{FailureKind, KumiError, RuntimeError},
         session::*,
     },
-    integrations::ableton::project::create_conversation_store,
     kernel::budget::{transcript_of, OBSERVATION_MARKER},
 };
 use serde_json::{json, Value};

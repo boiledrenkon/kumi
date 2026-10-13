@@ -42,6 +42,7 @@ pub use core::contracts::{
     StreamingCall, TechniqueEvent, TechniqueSummary, ToolImage, ToolResult, TranscriptLine, TurnResult, TurnState, Usage, WatchedEvent,
     WebEvent,
 };
+pub use core::conversations::create_conversation_store;
 pub use core::errors::{FailureKind, KumiError, RuntimeError};
 pub use core::gaps::{gap_tools, GAP_GUIDANCE, GAP_TOOL};
 pub use core::goal::{create_goal_store, GoalBudget, GoalState, GoalStatus, GoalStore, GOAL_BUDGET};
@@ -61,7 +62,7 @@ pub use core::techniques::{
 pub use ears::device::{install_ears, EARS_NAME};
 pub use hands::{can_build_hands, open_hands, Hands};
 pub use integrations::ableton::focus::parse_focus;
-pub use integrations::ableton::project::{create_conversation_store, create_project_store, since, Baseline, ProjectStore};
+pub use integrations::ableton::project::{create_project_store, since, Baseline, ProjectStore};
 pub use integrations::ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
 pub use integrations::fallback::with_fallback;
 pub use kernel::agent::{create_agent_kernel, AgentKernel, AgentKernelOptions, Checkpoint, ModelBinding, ModelRequest};

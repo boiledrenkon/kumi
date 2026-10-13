@@ -17,10 +17,8 @@ use super::{
 };
 use crate::{
     audio::tools::{listening_tools, ListeningOptions},
-    integrations::ableton::{
-        project::new_conversation_id,
-        willington::{willington_instructions, WillingtonSwitch},
-    },
+    core::conversations::new_conversation_id,
+    integrations::ableton::willington::{willington_instructions, WillingtonSwitch},
     kernel::budget::{transcript_of, OBSERVATION_MARKER},
     library::{Library, LibraryToolsOptions, FIND_SOUNDS_TOOL},
     web::{
