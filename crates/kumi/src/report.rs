@@ -17,7 +17,7 @@ use kumi_runtime::{
     core::{errors::RuntimeError, gaps::logged_gaps},
     library::sources::join,
     system::{self, Env},
-    KUMI_VERSION,
+    IMPORTED, KUMI_VERSION,
 };
 use serde_json::Value;
 use std::{path::Path, rc::Rc, time::UNIX_EPOCH};
@@ -186,10 +186,11 @@ async fn modified(file: &str) -> Option<f64> {
     }
 }
 /// The newest kept conversation in any Set's folder: when it was saved, its id and the conversation. Only `<id>.json`
-/// files are conversations (a name or pin beside one isn't).
+/// files are conversations (a name or pin beside one isn't). One imported from a file, or a copy of one, holds someone
+/// else's words, so it's never the one.
 async fn last_conversation(projects: &str) -> Option<(f64, String, Value)> {
     let mut best: Option<(String, String, f64)> = None;
-    for place in names(projects).await {
+    for place in names(projects).await.into_iter().filter(|place| place != IMPORTED) {
         let folder = join(projects, &format!("{place}/conversations"));
         for name in names(&folder).await {
             let Some(id) = name
@@ -200,7 +201,7 @@ async fn last_conversation(projects: &str) -> Option<(f64, String, Value)> {
             };
             let file = join(&folder, &name);
             if let Some(at) = modified(&file).await {
-                if best.as_ref().is_none_or(|best| at > best.2) {
+                if best.as_ref().is_none_or(|best| at > best.2) && !imported(&join(&folder, &format!("{id}.meta"))).await {
                     best = Some((file, id.to_string(), at))
                 }
             }
@@ -208,6 +209,11 @@ async fn last_conversation(projects: &str) -> Option<(f64, String, Value)> {
     }
     let (file, id, at) = best?;
     Some((at, id, serde_json::from_str(&read(&file).await?).ok()?))
+}
+/// Whether a conversation's sidecar says it came from a file (or was copied from one that did).
+async fn imported(meta: &str) -> bool {
+    let Some(text) = read(meta).await.filter(|text| text.len() <= 16 * 1024) else { return false };
+    serde_json::from_str::<Value>(&text).ok().and_then(|meta| meta.get("imported").and_then(Value::as_bool)).unwrap_or(false)
 }
 fn describe_conversation(value: &Value) -> Vec<String> {
     let mut lines = vec![];
