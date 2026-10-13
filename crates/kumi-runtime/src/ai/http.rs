@@ -100,7 +100,7 @@ impl Fetch for HttpFetch {
             response = request.send() => response.map_err(|error| {
                 let mut api = ApiCallError::new(format!("Cannot connect to API: {error}"), url, None, None);
                 api.is_retryable = error.is_connect() || error.is_timeout() || error.is_body() || error.is_request();
-                api.cause = Some(error.to_string()); LanguageModelError::from(api)
+                api.cause = Some(crate::web::cause::chain(&error)); LanguageModelError::from(api)
             })?,
         };
         let status = response.status();
@@ -117,7 +117,8 @@ impl Fetch for HttpFetch {
             let next = tokio::select! {
                 biased;
                 _ = signal.cancelled() => Some(Err(LanguageModelError::other("This operation was aborted"))),
-                chunk = source.next() => chunk.map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(|error| LanguageModelError::other(error.to_string()))),
+                // What went wrong is kept with its causes: `web::cause` reads them.
+                chunk = source.next() => chunk.map(|chunk| chunk.map(|bytes| bytes.to_vec()).map_err(|error| LanguageModelError::other(crate::web::cause::chain(&error)))),
             };
             let ended = next.as_ref().is_some_and(Result::is_err);
             next.map(|next| (next, (source, signal, ended)))
