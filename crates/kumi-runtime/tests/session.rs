@@ -4077,3 +4077,85 @@ local_test!(a_conversation_saved_as_it_is_taken_up_still_says_which_model_it_was
     assert_eq!(said, 1);
     h.session.close().await.unwrap();
 });
+/// Live closes: the look keeps its key, with no Set read and no tools.
+fn live_closes(h: &Harness) {
+    {
+        let mut o = h.observation.borrow_mut();
+        o.set = None;
+        o.revision = Some("no-live".into());
+    }
+    h.connection(ConnectionState::Disconnected, Some(DisconnectCause::Live));
+}
+/// Live comes back on `place`'s Set under the key it had: Kumi looks again by itself.
+async fn live_back_asking(h: &Harness, place: &str) {
+    {
+        let mut o = h.observation.borrow_mut();
+        o.set = Some(format!("identity:{place}"));
+        o.revision = None;
+    }
+    h.connection(ConnectionState::Connected, None);
+    for _ in 0..1000 {
+        if asks(h).last().is_some_and(Option::is_some) {
+            break;
+        }
+        delay(2).await;
+    }
+}
+local_test!(a_copy_of_a_chosen_conversation_steps_aside_for_another_set_as_the_conversation_would, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    // Another Kumi window has A's conversation open.
+    let other = create_conversation_store(dir.path());
+    assert_eq!(other.claim(SET_A, KEPT), Claim::Ours);
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    h.session.submit("make the pads wider", None).await.unwrap();
+    saved(store.as_ref(), SET_B, 1).await;
+    let own = now(&h).await.id;
+    // Live closes; asked for, A's conversation goes on here in a copy.
+    live_closes(&h);
+    settle().await;
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    let copy = now(&h).await.id;
+    assert!(copy != KEPT && copy != own, "{copy}");
+    assert!(h.notice("carries on in a copy"));
+    assert!(asks(&h).is_empty());
+    // Live is back on B under the same key: B's own conversation goes on, and Kumi asks about the copy.
+    live_back_asking(&h, SET_B).await;
+    assert_eq!(now(&h).await.id, own);
+    let ask = asks(&h).last().unwrap().clone().unwrap();
+    assert_eq!((ask.id.as_str(), ask.title.as_str()), (copy.as_str(), "make the bass wider"));
+    // A request is B's own, with nothing of A's; Cancel keeps B's.
+    h.session.submit("hello", None).await.unwrap();
+    let last = h.record.created.borrow().len() - 1;
+    assert!(h.words(last).unwrap().iter().all(|words| !words.contains("make the bass wider")), "{:?}", h.words(last));
+    h.session.answer_set(SetChoice::Cancel).await.unwrap();
+    assert_eq!(now(&h).await.id, own);
+    h.session.close().await.unwrap();
+});
+local_test!(a_fork_of_a_chosen_conversation_steps_aside_for_another_set_too, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    h.session.submit("make the pads wider", None).await.unwrap();
+    saved(store.as_ref(), SET_B, 1).await;
+    let own = now(&h).await.id;
+    live_closes(&h);
+    settle().await;
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    assert_eq!(now(&h).await.id, KEPT);
+    // Forked while Live is away: the fork goes on in A's place, as the conversation chosen.
+    let fork = h.session.fork_conversation(None).await.unwrap().unwrap();
+    assert_eq!(now(&h).await.id, fork);
+    live_back_asking(&h, SET_B).await;
+    assert_eq!(now(&h).await.id, own);
+    assert_eq!(asks(&h).last().unwrap().as_ref().map(|ask| ask.id.as_str()), Some(fork.as_str()));
+    h.session.answer_set(SetChoice::Cancel).await.unwrap();
+    assert_eq!(now(&h).await.id, own);
+    h.session.close().await.unwrap();
+});
