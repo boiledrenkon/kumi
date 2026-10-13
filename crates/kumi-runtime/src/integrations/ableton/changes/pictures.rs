@@ -187,8 +187,10 @@ fn edited_notes(kind: &ChangeKind, preview: &JsonObject, input: &JsonObject) -> 
             .iter()
             .map(|note| {
                 let mut note = record(Some(note)).clone();
+                // Live's notes and the patches on them are keyed by `id`.
+                let id = |row: &JsonObject| row.get("id").or_else(|| row.get("noteId")).cloned();
                 if let Some(change) =
-                    changes.iter().map(|change| record(Some(change))).find(|change| change.get("noteId") == note.get("noteId"))
+                    changes.iter().map(|change| record(Some(change))).find(|change| id(change).is_some() && id(change) == id(&note))
                 {
                     for key in ["pitch", "start", "duration", "velocity"] {
                         if let Some(value) = change.get(key).filter(|v| v.is_number()) {
@@ -502,8 +504,8 @@ mod tests {
         };
         assert_eq!((length, before.len(), after.len()), (4., 0, 1));
         let preview = object(
-            json!({"priorNotes":[{"noteId":1,"pitch":60,"start":0,"duration":1,"velocity":100},{"noteId":2,"pitch":64,"start":1,"duration":1,"velocity":90}],
-            "patches":[{"noteId":2,"pitch":65}]}),
+            json!({"priorNotes":[{"id":1,"pitch":60,"start":0,"duration":1,"velocity":100},{"id":2,"pitch":64,"start":1,"duration":1,"velocity":90}],
+            "patches":[{"id":2,"pitch":65}]}),
         );
         let ChangePicture::Notes { before, after, .. } = picture(kind("change_notes"), &preview, &object(json!({})), None).unwrap() else {
             panic!()
