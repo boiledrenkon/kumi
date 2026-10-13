@@ -205,13 +205,20 @@ pub fn redactor_or(made: Option<&Rc<dyn Fn(&str) -> String>>, secrets: &[String]
     }
 }
 
-/// The conversation going on now in `format`, redacted, and its file's name; Err, in the producer's words, before there's
-/// anything to export.
+/// The conversation going on now as a file: its text, its name, and what it holds as a key (the same while nothing in
+/// the conversation changes, whenever it's exported).
+pub struct Exported {
+    pub text: String,
+    pub name: String,
+    pub key: u64,
+}
+
+/// The conversation going on now in `format`, redacted; Err, in the producer's words, before there's anything to export.
 pub async fn conversation_now(
     controller: &dyn SessionController,
     format: Format,
     redact: &dyn Fn(&str) -> String,
-) -> Result<(String, String), String> {
+) -> Result<Exported, String> {
     let found = controller.conversation_to_export().await.ok_or("There's nothing to export yet: ask Kumi something first.")?;
     let source = Source {
         id: &found.id,
@@ -222,7 +229,15 @@ pub async fn conversation_now(
         created: found.created,
     };
     let text = render(format, &source, false, Some(redact), local_zone(), now_ms());
-    Ok((text, file_name(&redact(&found.title), &found.id, format)))
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (format.extension(), &found.id, &found.title, &found.set).hash(&mut hasher);
+        serde_json::to_string(&found.conversation.checkpoint.messages).unwrap_or_default().hash(&mut hasher);
+        serde_json::to_string(&found.conversation.changes).unwrap_or_default().hash(&mut hasher);
+        hasher.finish()
+    };
+    Ok(Exported { text, name: file_name(&redact(&found.title), &found.id, format), key })
 }
 
 /// Writes an export into `folder`, or the folder Kumi was started in, never over another file; Err says why not.

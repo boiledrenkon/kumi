@@ -256,6 +256,9 @@ struct Strip {
     reading: bool,
 }
 struct State {
+    /// The web page saved last for this conversation (by /share or /export), with its key: /share shows it again while
+    /// nothing in the conversation changed.
+    shared: Option<(u64, std::path::PathBuf)>,
     editor: Editor,
     transcript: Transcript,
     stream: StreamingText,
@@ -396,6 +399,7 @@ struct State {
 impl State {
     fn new(options: &TuiOptions) -> Self {
         Self {
+            shared: None,
             editor: Editor::new(),
             transcript: Transcript::default(),
             stream: StreamingText::new(&options.secrets),

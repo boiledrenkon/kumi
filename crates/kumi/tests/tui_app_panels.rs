@@ -1175,24 +1175,28 @@ case!(export_copies_or_saves_this_conversation_and_share_offers_the_page, async 
     let saved = exported_files(folder.path(), "md");
     assert_eq!(saved.len(), 1);
     assert!(std::fs::read_to_string(&saved[0]).unwrap().contains("A long one"));
-    // A web page, then /share's: never one over the other.
+    // A web page; /share shows that one while nothing in the conversation changed, and its choices stay until Done.
     h.type_text("/export\r").await;
     h.type_text("\x1b[B\x1b[B\r").await;
     h.has("Saved this conversation as a web page:");
+    let page = folder.path().join("kumi-a-long-one-k3x9a1b2.html");
+    assert!(std::fs::read_to_string(&page).unwrap().starts_with("<!doctype html>"));
     h.type_text("/share\r").await;
-    h.has("Open it");
+    h.has("This conversation's web page is saved already");
     h.has("Copy its path");
-    assert_eq!(exported_files(folder.path(), "html").len(), 2);
-    let shared = folder.path().join("kumi-a-long-one-k3x9a1b2-2.html");
-    assert!(std::fs::read_to_string(&shared).unwrap().starts_with("<!doctype html>"));
     h.type_text("\r").await;
-    assert_eq!(h.browsed.borrow().last().cloned(), Some(shared.display().to_string()));
-    h.type_text("/share\r").await;
+    assert_eq!(h.browsed.borrow().last().cloned(), Some(page.display().to_string()));
     h.type_text("\x1b[B\r").await;
-    assert_eq!(revealed.borrow().len(), 1);
-    h.type_text("/share\r").await;
-    h.type_text("\x1b[B\x1b[B\r").await;
+    assert_eq!(revealed.borrow().as_slice(), [page.clone()]);
+    h.type_text("\x1b[B\r").await;
     h.has("Copied the page's path.");
-    assert_eq!(exported_files(folder.path(), "html").len(), 4);
+    h.has("Done");
+    h.type_text("\x1b[B\r").await;
+    assert_eq!(exported_files(folder.path(), "html"), [page.clone()], "one page, however often it's shared");
+    // Something new in the conversation: a new page.
+    *h.control.export.borrow_mut() = Some(to_export("A long one, and more", 70_000));
+    h.type_text("/share\r").await;
+    h.type_text("\x1b[B\x1b[B\x1b[B\r").await;
+    assert_eq!(exported_files(folder.path(), "html").len(), 2);
     h.close().await;
 });

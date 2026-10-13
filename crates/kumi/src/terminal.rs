@@ -259,6 +259,8 @@ impl Presentation {
     }
 }
 struct State {
+    /// The web page saved last for this conversation, with its key: /share says it again while nothing changed.
+    shared: Option<(u64, std::path::PathBuf)>,
     started: bool,
     closing: bool,
     cancelling: bool,
@@ -302,6 +304,7 @@ pub fn create_terminal(options: TerminalOptions) -> PlainTerminal {
     PlainTerminal(Rc::new(Inner {
         options,
         state: RefCell::new(State {
+            shared: None,
             started: false,
             closing: false,
             cancelling: false,
@@ -699,8 +702,8 @@ impl PlainTerminal {
  "/resume"|"/conversations"|"/rename"|"/fork" if !controller.has_conversations()=>self.notice(&format!("[conversations] {}",crate::tui::app::not_kept())),
  "/resume"|"/conversations"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.resume_command(&words).await?;},
  "/rename"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.rename_command(&words).await?;},
- "/export"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.export_command(&words).await;},
- "/share"=>{self.export_command("html").await;},
+ "/export"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.export_command(&words, false).await;},
+ "/share"=>{self.export_command("html", true).await;},
  "/fork"=>{let name=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();if controller.fork_conversation((!name.is_empty()).then_some(name.as_str())).await?.is_none(){self.notice("[fork] Nothing to fork yet: ask something first.");}},
  "/note"=>{let usage="[memory] Use: /note <id> <new words>, with an id from /memory.";let words=argument.and_then(|id|command.split_once(id)).map(|(_,words)|words.trim()).unwrap_or("");match argument.filter(|_|!words.is_empty()&&controller.has_change_note()){Some(id)=>match controller.change_note(id,NoteChange::Text(words.into())).await{Ok(Some(_))=>self.notice(&format!("[memory] Changed note {id}.")),Ok(None)=>self.notice(usage),Err(error)=>self.notice(&format!("[memory] {}",error.message()))},None=>self.notice(usage)}},
  "/pin"|"/unpin"=>{let pin=verb=="/pin";let usage=format!("[memory] Use: {verb} <id>, with a note's id from /memory.");match argument.filter(|_|controller.has_change_note()){Some(id)=>match controller.change_note(id,NoteChange::Pinned(pin)).await?{Some(_)=>self.notice(&if pin{format!("[memory] Pinned {id}: Kumi keeps it even when its memory is full.")}else{format!("[memory] Unpinned {id}.")}),None=>self.notice(&usage)},None=>self.notice(&usage)}},
@@ -721,7 +724,7 @@ impl PlainTerminal {
     }
     /// /resume: the list; or the conversation a number from it, an id, the start of one or a name gives.
     /// /export [md | html | json], and /share (a web page): this conversation saved in the folder Kumi was started in.
-    async fn export_command(&self, words: &str) {
+    async fn export_command(&self, words: &str, again: bool) {
         let format = match words.to_ascii_lowercase().as_str() {
             "" | "md" | "markdown" => Format::Markdown,
             "html" | "page" | "web" => Format::Html,
@@ -732,13 +735,30 @@ impl PlainTerminal {
             }
         };
         let redact = crate::export::redactor_or(self.0.options.redact.as_ref(), &self.0.options.secrets);
-        let saved = match crate::export::conversation_now(&*self.0.options.controller, format, &*redact).await {
-            Ok((text, name)) => {
-                crate::export::save_in(self.0.options.folder.as_deref(), &text, &name).map(|path| crate::export::saved_words(format, &path))
+        let exported = match crate::export::conversation_now(&*self.0.options.controller, format, &*redact).await {
+            Ok(exported) => exported,
+            Err(why) => {
+                self.notice(&format!("[export] {why}"));
+                return;
             }
-            Err(why) => Err(why),
         };
-        self.notice(&format!("[export] {}", saved.unwrap_or_else(|why| why)));
+        // /share again with nothing changed: the page saved last, rather than another just like it.
+        if format == Format::Html {
+            let saved = self.0.state.borrow().shared.clone().filter(|(key, path)| *key == exported.key && path.exists());
+            if let Some((_, path)) = saved.filter(|_| again) {
+                self.notice(&format!("[export] This conversation's web page is saved already: {}.", path.display()));
+                return;
+            }
+        }
+        match crate::export::save_in(self.0.options.folder.as_deref(), &exported.text, &exported.name) {
+            Ok(path) => {
+                if format == Format::Html {
+                    self.0.state.borrow_mut().shared = Some((exported.key, path.clone()));
+                }
+                self.notice(&format!("[export] {}", crate::export::saved_words(format, &path)));
+            }
+            Err(why) => self.notice(&format!("[export] {why}")),
+        }
     }
     async fn resume_command(&self, words: &str) -> Result<(), RuntimeError> {
         let controller = &self.0.options.controller;

@@ -875,8 +875,10 @@ async fn export_and_share_save_this_conversation_where_kumi_was_started_with_sec
             names.sort();
             assert_eq!(
                 names,
-                ["kumi-night-drive-secret-k3x9a1b2-2.html", "kumi-night-drive-secret-k3x9a1b2.html", "kumi-night-drive-secret-k3x9a1b2.md"]
+                ["kumi-night-drive-secret-k3x9a1b2.html", "kumi-night-drive-secret-k3x9a1b2.md"],
+                "/share shows the page again"
             );
+            assert!(f.text().contains("[export] This conversation's web page is saved already: "), "{}", f.text());
             let markdown = std::fs::read_to_string(folder.path().join("kumi-night-drive-secret-k3x9a1b2.md")).unwrap();
             assert!(markdown.contains("Night drive with [secret]") && !markdown.contains("private-token"), "{markdown}");
             assert!(f.text().contains("[export] Saved this conversation as Markdown: "), "{}", f.text());
