@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::ai::error::{ApiCallError, LanguageModelError};
 use crate::core::errors::{FailureKind, KumiError};
+use crate::web::cause::{self, NetCause};
 
 /// How many times a model call is tried again (a busy or overloaded provider usually answers soon).
 pub const MAX_RETRIES: u32 = 3;
@@ -200,8 +201,18 @@ pub fn retry_reason(error: &LanguageModelError, binding_id: &str) -> String {
         Some(status @ (503 | 529)) => format!("{name} is overloaded (HTTP {status})"),
         Some(status) if status >= 500 => format!("{name} is having trouble (HTTP {status})"),
         Some(status) => format!("{name} asked Kumi to wait (HTTP {status})"),
-        None => format!("{name} couldn't be reached"),
+        None => match refused_on_the_way(error) {
+            Some(NetCause::Proxy) if cause::proxy_down(error) => format!("{name} couldn't be reached: the proxy isn't answering"),
+            Some(cause) => format!("{name} couldn't be reached: {}", cause.words()),
+            None => format!("{name} couldn't be reached"),
+        },
     }
+}
+
+/// A call that got no answer because the way there refused it: a certificate this computer doesn't trust (TLS) or a
+/// proxy. That's not being offline, so the words name it, and the fix.
+pub fn refused_on_the_way(error: &LanguageModelError) -> Option<NetCause> {
+    NetCause::of_call(error).filter(|cause| matches!(cause, NetCause::Tls | NetCause::Proxy))
 }
 
 /// A provider by the name producers know it ("ChatGPT"), from a binding id ("openai-codex/gpt-6-sol").
@@ -276,6 +287,13 @@ pub fn describe_failure(error: &LanguageModelError, binding_id: &str) -> KumiErr
             provider,
         );
     }
+    // A certificate or a proxy in the way: the cause, its fix and the proxy that call went through.
+    let env = crate::system::process_env();
+    let system = crate::net::proxy::current();
+    let on_the_way = refused_on_the_way(error).and_then(|_| {
+        let url = failed_call(error).map(|call| call.url.clone()).unwrap_or_default();
+        cause::unreachable_call(name, &url, error, &env, &system)
+    });
     if let Some(error) = failed_call(error) {
         let status = error.status_code;
         let detail = provider_detail(&error);
@@ -322,7 +340,18 @@ pub fn describe_failure(error: &LanguageModelError, binding_id: &str) -> KumiErr
                 format!("{name} turned the request down (HTTP {status}){}.", with(": ")),
                 provider,
             ),
-            None => KumiError::with_provider(FailureKind::Network, format!("Kumi couldn't reach {name}; check the connection."), provider),
+            None => KumiError::with_provider(
+                FailureKind::Network,
+                match on_the_way {
+                    Some(on_the_way) => on_the_way,
+                    // A network that lets nothing out but through the proxy an auto-config file names: say to set it.
+                    None => match cause::auto_config_words(&env, &system) {
+                        Some(words) => format!("Kumi couldn't reach {name}; check the connection. {words}"),
+                        None => format!("Kumi couldn't reach {name}; check the connection."),
+                    },
+                },
+                provider,
+            ),
         };
     }
     KumiError::with_provider(FailureKind::Provider, "The model didn't answer; check the model, sign-in and connection.", provider)

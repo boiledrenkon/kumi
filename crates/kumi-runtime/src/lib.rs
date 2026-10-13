@@ -14,6 +14,7 @@ pub mod library;
 pub mod listening;
 pub mod mcp;
 pub mod models;
+pub mod net;
 pub mod notation;
 pub mod plugins;
 pub mod providers;

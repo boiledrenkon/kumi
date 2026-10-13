@@ -1061,7 +1061,9 @@ impl Terminal for PlainTerminal {
                             kumi_runtime::kernel::failure::reset_words(at, at - wait)
                         )
                     } else if value["wait"] == "offline" {
-                        format!("[wait] offline: {}; trying again in {} s", get("reason"), (wait / 1000.).ceil().max(1.))
+                        // A certificate or a proxy in the way names itself in the reason.
+                        let offline = if value["cause"].is_string() { "" } else { "offline: " };
+                        format!("[wait] {offline}{}; trying again in {} s", get("reason"), (wait / 1000.).ceil().max(1.))
                     } else if wait > 0. {
                         format!("[wait] {}; trying again in {} s", get("reason"), (wait / 1000.).ceil().max(1.))
                     } else {

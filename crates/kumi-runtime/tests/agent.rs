@@ -2421,6 +2421,16 @@ fn offline() -> LanguageModelError {
     error.is_retryable = true;
     LanguageModelError::ApiCall(error)
 }
+/// No answer because the way there refused it, as Kumi's HTTP keeps the cause: a certificate, or a proxy.
+fn refused_on_the_way(cause: &str) -> LanguageModelError {
+    let mut error = ApiCallError::new("Cannot connect to API: error sending request", "u", Some(json!({})), None);
+    error.is_retryable = true;
+    error.cause =
+        Some(format!("error sending request for url (https://chatgpt.com/backend-api/codex/responses): client error (Connect): {cause}"));
+    LanguageModelError::ApiCall(error)
+}
+const UNTRUSTED: &str = "invalid peer certificate: UnknownIssuer";
+const PROXY_SIGN_IN: &str = "tunnel error: proxy authorization required";
 fn busy(retry_after: &str) -> LanguageModelError {
     let mut error = ApiCallError::new("busy", "u", Some(json!({})), Some(429));
     error.response_headers = Some([("retry-after".to_string(), retry_after.to_string())].into_iter().collect());
@@ -2430,7 +2440,7 @@ fn waits(events: &[KernelEvent]) -> Vec<(String, u64, Option<kumi_runtime::core:
     events
         .iter()
         .filter_map(|event| match event {
-            KernelEvent::Retry { reason, wait_ms, wait } => Some((reason.clone(), *wait_ms, *wait)),
+            KernelEvent::Retry { reason, wait_ms, wait, .. } => Some((reason.clone(), *wait_ms, *wait)),
             _ => None,
         })
         .collect()
@@ -2524,6 +2534,81 @@ async fn a_limit_too_far_off_or_one_waiting_cant_mend_stops_and_names_the_fix() 
             assert_eq!(h.count(), 1);
             h.kernel.close().await;
         }
+    })
+    .await
+}
+
+#[test]
+fn a_certificate_or_a_proxy_in_the_way_is_named_with_its_fix_not_said_as_offline() {
+    use kumi_runtime::kernel::failure::{describe_failure, retry_reason};
+    let model = "openai-codex/gpt-6-astra";
+    let untrusted = refused_on_the_way(UNTRUSTED);
+    assert_eq!(retry_reason(&untrusted, model), "ChatGPT couldn't be reached: the secure connection didn't check out (TLS)");
+    let said = describe_failure(&untrusted, model);
+    assert_eq!(said.kind, FailureKind::Network);
+    assert!(said.message.starts_with("Kumi couldn't reach ChatGPT: the secure connection didn't check out (TLS). "), "{}", said.message);
+    assert!(said.message.contains("certificate installed on this computer"), "{}", said.message);
+    let proxy = refused_on_the_way(PROXY_SIGN_IN);
+    assert_eq!(retry_reason(&proxy, model), "ChatGPT couldn't be reached: the proxy didn't let Kumi through");
+    assert!(describe_failure(&proxy, model).message.starts_with("Kumi couldn't reach ChatGPT: the proxy didn't let Kumi through. "));
+    // A proxy that isn't answering (a crashed one at 127.0.0.1:7890, an office's at home): start it, or go without it.
+    let down =
+        refused_on_the_way("tunnel error: failed to create underlying connection: tcp connect error: Connection refused (os error 61)");
+    assert_eq!(retry_reason(&down, model), "ChatGPT couldn't be reached: the proxy isn't answering");
+    let said = describe_failure(&down, model).message;
+    assert!(
+        said.starts_with("Kumi couldn't reach ChatGPT: the proxy isn't answering. Start it again") && !said.contains("user:pass"),
+        "{said}"
+    );
+    // Offline reads as it did.
+    assert_eq!(retry_reason(&offline(), model), "ChatGPT couldn't be reached");
+    assert_eq!(describe_failure(&offline(), model).message, "Kumi couldn't reach ChatGPT; check the connection.");
+}
+
+#[tokio::test]
+async fn a_certificate_or_a_proxy_in_the_way_is_waited_out_as_offline_is_but_named() {
+    use kumi_runtime::core::contracts::WaitFor;
+    use kumi_runtime::web::cause::NetCause;
+    local(async {
+        tokio::time::pause();
+        // A Wi-Fi sign-in page reads as TLS until the producer signs in: the same tries as offline, as long as it takes.
+        for (refused, cause, words) in [
+            (UNTRUSTED, NetCause::Tls, "the secure connection didn't check out (TLS)"),
+            (PROXY_SIGN_IN, NetCause::Proxy, "the proxy didn't let Kumi through"),
+        ] {
+            let h = harness(
+                move |_, n| if n <= 6 { Scripted::Reject(refused_on_the_way(refused)) } else { answer("back") },
+                Options::default(),
+            );
+            let (events, emit) = collect();
+            assert_eq!(h.kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+            assert_eq!(h.count(), 7, "past the three tries a busy provider gets");
+            let waited = waits(&events.borrow());
+            assert!(
+                waited
+                    .iter()
+                    .all(|(reason, _, wait)| *wait == Some(WaitFor::Offline) && *reason == format!("test couldn't be reached: {words}")),
+                "{waited:?}"
+            );
+            assert_eq!(waited.iter().map(|(_, ms, _)| *ms).collect::<Vec<_>>(), [750, 2250, 6750, 20250, 30000, 30000]);
+            let causes: Vec<_> = events
+                .borrow()
+                .iter()
+                .filter_map(|event| match event {
+                    KernelEvent::Retry { cause, .. } => Some(*cause),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(causes, [Some(cause); 6]);
+            assert_eq!(texts(&events.borrow()), ["back"]);
+            h.kernel.close().await;
+        }
+        // Offline itself names no cause, as before.
+        let h = harness(|_, n| if n <= 1 { Scripted::Reject(offline()) } else { answer("back") }, Options::default());
+        let (events, emit) = collect();
+        h.kernel.run("q", signal(), emit).await.unwrap();
+        assert!(events.borrow().iter().all(|event| !matches!(event, KernelEvent::Retry { cause: Some(_), .. })));
+        h.kernel.close().await;
     })
     .await
 }

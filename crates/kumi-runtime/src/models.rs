@@ -231,7 +231,7 @@ pub async fn fetch_unpinned(url: &str, to: &Path, signal: &Signal) -> Result<(),
     std::fs::create_dir_all(folder).map_err(|error| format!("Kumi couldn't make {}: {error}", folder.display()))?;
     let partial = to.with_extension(format!("partial-{}", std::process::id()));
     let fetched: Result<(), String> = async {
-        let client = reqwest::Client::builder()
+        let client = crate::net::client()
             .user_agent(format!("kumi/{}", crate::version::KUMI_VERSION))
             .https_only(true)
             .connect_timeout(std::time::Duration::from_secs(20))
@@ -239,7 +239,7 @@ pub async fn fetch_unpinned(url: &str, to: &Path, signal: &Signal) -> Result<(),
             .build()
             .map_err(|error| error.to_string())?;
         let mut response = tokio::select! {
-            sent = client.get(url).send() => sent.map_err(|error| error.to_string())?,
+            sent = crate::net::send(client.get(url)) => sent.map_err(|error| error.to_string())?,
             _ = signal.cancelled() => return Err("stopped".into()),
         };
         if !response.status().is_success() {
@@ -288,14 +288,14 @@ pub async fn fetch_unpinned(url: &str, to: &Path, signal: &Signal) -> Result<(),
 /// A download streamed to `path`, stopped past `most` bytes: its SHA-256 (hex). A stalled connection gives up rather
 /// than wait for Esc.
 async fn download_at_most(url: &str, path: &Path, most: Option<u64>, signal: &Signal) -> Result<String, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client()
         .user_agent(format!("kumi/{}", crate::version::KUMI_VERSION))
         .connect_timeout(std::time::Duration::from_secs(20))
         .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|error| error.to_string())?;
     let mut response = tokio::select! {
-        sent = client.get(url).send() => sent.map_err(|error| error.to_string())?,
+        sent = crate::net::send(client.get(url)) => sent.map_err(|error| error.to_string())?,
         _ = signal.cancelled() => return Err("stopped".into()),
     };
     if !response.status().is_success() {

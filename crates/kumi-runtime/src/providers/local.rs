@@ -8,7 +8,7 @@ use super::{
 use crate::{
     ai::{
         error::{ApiCallError, LanguageModelError},
-        http::{default_fetch, Fetch, FetchInit, Response},
+        http::{model_server_fetch, Fetch, FetchInit, Response},
         openai_compatible::{openai_compatible, CompatibleSettings},
         types::*,
     },
@@ -247,10 +247,11 @@ async fn request_json(
     if let Some(key) = &server.api_key {
         headers.insert("authorization".into(), format!("Bearer {key}"));
     }
+    // On the producer's computer or network: the variables' proxies alone, never the system's.
     let result = options
         .fetch
         .clone()
-        .unwrap_or_else(default_fetch)
+        .unwrap_or_else(model_server_fetch)
         .fetch(
             url,
             FetchInit { method: if body.is_some() { "POST" } else { "GET" }.into(), headers, body: body.as_ref().map(stringify), signal },
@@ -820,7 +821,7 @@ pub fn resolve_local_model(server: LocalServer, model: String, options: LocalMod
     let state = Rc::new(LocalState {
         server,
         model,
-        identified: Rc::new(Identified(options.fetch.unwrap_or_else(default_fetch))),
+        identified: Rc::new(Identified(options.fetch.unwrap_or_else(model_server_fetch))),
         effort: options.effort,
         on_note: options.on_note,
         facts: RefCell::new(None),

@@ -5,6 +5,7 @@ use crate::{
         http::{default_fetch, Fetch, FetchInit, Response},
     },
     core::errors::{FailureKind, KumiError, RuntimeError},
+    web::cause::NetCause,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures::future::{FutureExt, LocalBoxFuture, Shared};
@@ -54,11 +55,24 @@ fn auth(message: impl Into<String>) -> RuntimeError {
 fn provider_auth(message: impl Into<String>) -> RuntimeError {
     KumiError::with_provider(FailureKind::Auth, message, OPENAI_CODEX).into()
 }
+/// OpenAI's sign-in gave no answer: why, in the words setup and model calls use. Anything else, as it came.
 fn fetch_error(error: LanguageModelError) -> RuntimeError {
+    let url = match &error {
+        LanguageModelError::ApiCall(call) => call.url.clone(),
+        _ => TOKEN_URL.into(),
+    };
+    let (env, system) = (crate::system::process_env(), crate::net::proxy::current());
     match error {
         LanguageModelError::Kumi(error) => error.into(),
-        error => RuntimeError::plain(error.to_string()),
+        error => match crate::web::cause::unreachable_call("auth.openai.com", &url, &error, &env, &system) {
+            Some(words) => KumiError::with_provider(FailureKind::Network, words, OPENAI_CODEX).into(),
+            None => RuntimeError::plain(error.to_string()),
+        },
     }
+}
+fn unreachable(cause: NetCause) -> RuntimeError {
+    let words = crate::web::cause::unreachable("auth.openai.com", Some(cause), &crate::system::process_env());
+    KumiError::with_provider(FailureKind::Network, words, OPENAI_CODEX).into()
 }
 fn claims(token: &str) -> Option<Value> {
     let payload = token.split('.').nth(1)?;
@@ -381,11 +395,12 @@ pub fn codex_token_source(store: Rc<dyn CredentialStore>, options: TokenOptions)
                                         if latest.expires - now() > REFRESH_MARGIN_MS {
                                             return Ok(Some(latest.into()));
                                         }
-                                        Ok(Some(
-                                            refresh_codex_credential(&latest, &LoginOptions { signal: abort::timeout(30_000), fetch })
-                                                .await?
-                                                .into(),
-                                        ))
+                                        // Its own 30 s, run out: nothing answered in time.
+                                        let signal = abort::timeout(30_000);
+                                        let refreshed = refresh_codex_credential(&latest, &LoginOptions { signal: signal.clone(), fetch })
+                                            .await
+                                            .map_err(|error| if signal.is_cancelled() { unreachable(NetCause::Timeout) } else { error })?;
+                                        Ok(Some(refreshed.into()))
                                     }
                                     .boxed_local()
                                 }),

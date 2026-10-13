@@ -436,7 +436,14 @@ impl TuiApp {
                         let wall = now_ms_f64();
                         format!("carrying on at {} (in {}) · {reason}", reset_words(at, wall), helpers::span_words(at - wall))
                     }
-                    Some((WaitFor::Offline, _)) => format!("offline · trying again in {seconds}s"),
+                    Some((WaitFor::Offline, _)) => {
+                        let word = match state.waiting_cause {
+                            Some(NetCause::Tls) => "TLS failed",
+                            Some(NetCause::Proxy) => "proxy refused",
+                            _ => "offline",
+                        };
+                        format!("{word} · trying again in {seconds}s")
+                    }
                     None => format!("retrying in {seconds}s · {reason}"),
                 };
                 return NowLine { dot, label, detail, style: st::DIM, activity: None };

@@ -724,11 +724,7 @@ impl NetClient {
                 return WebError::new(private.0.clone());
             }
             if current.downcast_ref::<LookupFailed>().is_some() {
-                return WebError::with_trouble(
-                    format!("Kumi couldn't find {host}: check the address, or the internet connection."),
-                    None,
-                    WebTrouble::UNREACHABLE,
-                );
+                return unreachable(format!("Kumi couldn't find {host}: check the address, or the internet connection."));
             }
             if let Some(io) = current.downcast_ref::<std::io::Error>() {
                 let code = match io.kind() {
@@ -738,7 +734,7 @@ impl NetClient {
                     _ => None,
                 };
                 if let Some(code) = code {
-                    return WebError::with_trouble(format!("{host} wouldn't connect ({code})."), None, WebTrouble::UNREACHABLE);
+                    return unreachable(format!("{host} wouldn't connect ({code})."));
                 }
                 if let Some(inner) = io.get_ref() {
                     if let Some(tls) = tls_code(&inner.to_string()) {
@@ -748,7 +744,7 @@ impl NetClient {
             }
             let text = current.to_string();
             if text == "connection closed before message completed" {
-                return WebError::with_trouble(format!("{host} wouldn't connect (ECONNRESET)."), None, WebTrouble::UNREACHABLE);
+                return unreachable(format!("{host} wouldn't connect (ECONNRESET)."));
             }
             if let Some(tls) = tls_code(&text) {
                 return WebError::new(format!("{host}'s secure connection didn't check out ({tls}), so Kumi didn't read it."));
@@ -806,16 +802,25 @@ impl WebClient for NetClient {
         }
         let host = url.borrow().host_str().unwrap_or("").to_string();
         Err(WebFailure::Web(match failed {
-            None => WebError::with_trouble(
-                format!("{host} didn't answer within {} seconds.", number::to_string(number::round(timeout_ms as f64 / 1000.0))),
-                None,
-                WebTrouble::UNREACHABLE,
-            ),
+            None => unreachable(format!(
+                "{host} didn't answer within {} seconds.",
+                number::to_string(number::round(timeout_ms as f64 / 1000.0))
+            )),
             Some(Hop::Web(error)) => error,
             Some(Hop::Transport(error)) => Self::transport_error(&host, &error),
             Some(Hop::Other(message)) => WebError::new(format!("Kumi couldn't read {host}: {}.", string::head(&message, 160))),
         }))
     }
+}
+
+/// An address that couldn't be reached, in `words`. When this computer goes out through a proxy (one set, or one an
+/// auto-config file finds), they say the web tool doesn't: it checks each address is public, and a proxy would look the
+/// name up again (`net::direct`).
+fn unreachable(words: String) -> WebError {
+    let settings = crate::net::proxy::current();
+    let through = settings.https.is_some() || settings.auto_config;
+    let words = if through { format!("{words} Kumi reads the web directly, never through a proxy.") } else { words };
+    WebError::with_trouble(words, None, WebTrouble::UNREACHABLE)
 }
 
 /// Only public addresses, unless a test allows others.
@@ -836,20 +841,18 @@ fn system_lookup() -> Lookup {
 /// a name any of whose addresses isn't public is refused, and no proxy stands in between. Redirects are its own to
 /// check, hop by hop.
 pub(crate) fn guarded_http() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().dns_resolver(Arc::new(GuardedLookup { resolve: system_lookup(), allow: public_only() })).no_proxy()
+    crate::net::direct().dns_resolver(Arc::new(GuardedLookup { resolve: system_lookup(), allow: public_only() }))
 }
 
 pub fn create_web_client(options: WebClientOptions) -> Rc<dyn WebClient> {
     let allow: Allow = options.allow.unwrap_or_else(public_only);
     let resolve: Lookup = options.lookup.unwrap_or_else(system_lookup);
-    let http = reqwest::Client::builder()
+    let http = crate::net::direct_http1()
         .dns_resolver(Arc::new(GuardedLookup { resolve, allow: Arc::clone(&allow) }))
         .redirect(reqwest::redirect::Policy::none())
         .gzip(true)
         .brotli(true)
         .deflate(true)
-        .http1_only()
-        .no_proxy()
         .build()
         .expect("a web client");
     Rc::new(NetClient { http, allow, language: locale() })
