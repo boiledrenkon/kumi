@@ -374,3 +374,28 @@ fn a_title_is_the_name_else_the_first_request_on_one_line_with_keys_hidden() {
     assert!(long.ends_with('…') && long.chars().count() <= 60, "{long}");
     assert_eq!(title(None, ""), "");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn what_a_later_kumi_adds_to_the_index_or_beside_a_conversation_is_read_past() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(A, "mv66me0m3fa91c", &said("make the bass wider", 10)).await.unwrap();
+    store.all().await.unwrap();
+    // The index is versioned, and a field more at any level (a DAW, say) is the same version.
+    let file = dir.path().join("conversation-index.json");
+    let mut index: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(index["version"], 1);
+    let key = format!("{A}/mv66me0m3fa91c");
+    index["daw"] = json!("Live");
+    index["conversations"][&key]["daw"] = json!("Live");
+    index["places"][A]["noun"] = json!("Set");
+    // What the index says of a file that hasn't changed is taken as it is: here, a first request only it holds.
+    index["conversations"][&key]["first"] = json!("as the index has it");
+    std::fs::write(&file, index.to_string()).unwrap();
+    let rows = store.all().await.unwrap();
+    assert_eq!(rows[0].first, "as the index has it", "the index was read, not made again");
+    // A sidecar with a field more keeps what's known in it.
+    std::fs::write(dir.path().join(A).join("conversations/mv66me0m3fa91c.meta"), r#"{"version":1,"name":"Bass ideas","daw":"Live"}"#)
+        .unwrap();
+    assert_eq!(store.all().await.unwrap()[0].name.as_deref(), Some("Bass ideas"));
+}
