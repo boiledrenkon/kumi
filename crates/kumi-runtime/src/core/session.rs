@@ -734,9 +734,12 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
 
 impl Session {
     fn emit(&self, event: SessionEvent) {
-        // A step moved to the background (ctrl-b): what its tools say from then on is its job's.
-        if let Some(job) = crate::core::jobs::route() {
-            return job.on_event()(event);
+        // A step moved to the background (ctrl-b): what its tools say from then on is its job's. Only what tools say: the
+        // job's own status, which their words change, goes to the producer.
+        if matches!(event, SessionEvent::Doing { .. } | SessionEvent::Web(_) | SessionEvent::Watched(_)) {
+            if let Some(job) = crate::core::jobs::route() {
+                return job.on_event()(event);
+            }
         }
         if self.0.state.borrow().state != TurnState::Closed {
             (self.0.options.on_event)(event);
@@ -1591,8 +1594,6 @@ impl Session {
         if current {
             self.0.state.borrow_mut().active = None;
             self.set_state(TurnState::Idle);
-            // A job whose request carries on, waiting for this to end.
-            self.carry_on_later();
         }
         result
     }
@@ -2520,6 +2521,9 @@ impl SessionController for Session {
     }
     fn background(&self) -> Result<u32, String> {
         Session::background(self)
+    }
+    fn carry_on(&self, job: u32) -> bool {
+        Session::carry_on(self, job)
     }
     fn can_background(&self) -> bool {
         self.0.state.borrow().foreground.iter().any(|step| step.waiting())

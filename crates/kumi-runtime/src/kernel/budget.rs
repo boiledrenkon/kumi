@@ -44,17 +44,18 @@ pub fn budget_for(window: f64, fixed: f64, answer: f64) -> ContextBudget {
 pub const OBSERVATION_MARKER: &str = "\n\n<current_observation_untrusted>";
 /// A background job's report in a turn's note (after its observation): cleared with the observation, it stays as a stub
 /// that says how to read it again.
-const JOB_REPORT_OPEN: &str = "<job_report id=\"";
-const JOB_REPORT_CLOSE: &str = "</job_report>";
+const JOB_REPORT_OPEN: &str = "<job_report_untrusted id=\"";
+const JOB_REPORT_CLOSE: &str = "</job_report_untrusted>";
 /// What an observation cleared with reports beside it leaves before their stubs.
 const CLEARED_OBSERVATION: &str =
     "\n[Kumi cleared this observation to save room; the background jobs' reports below are cut to their opening.]\n</current_observation_untrusted>";
 /// How much of a report its stub keeps.
 const REPORT_STUB: usize = 300;
 
-/// A job's report as a turn's note carries it, with the producer's words safe from its tags.
+/// A job's report as a turn's note carries it: what a worker read is data, not the producer's words, and its tags can't be
+/// faked from inside it.
 pub fn job_report_block(id: u32, report: &str) -> String {
-    let report = report.replace(JOB_REPORT_OPEN, "<job report id=\"").replace(JOB_REPORT_CLOSE, "</job report>");
+    let report = report.replace(JOB_REPORT_OPEN, "<job report id=\"").replace(JOB_REPORT_CLOSE, "</job report untrusted>");
     format!("{JOB_REPORT_OPEN}{id}\">\n{report}\n{JOB_REPORT_CLOSE}")
 }
 

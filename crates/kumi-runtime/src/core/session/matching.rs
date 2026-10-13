@@ -135,7 +135,9 @@ impl Session {
         });
         // Kumi's own note goes after the observation: it isn't the producer's words, and it goes when the observation does.
         // Reports of background jobs that ended since the last turn go with it.
-        let (reports, taken) = self.take_job_reports();
+        let (reports, shown, taken) = self.take_job_reports();
+        let mut pictures = pictures;
+        pictures.extend(shown);
         let input = format!("{text}{OBSERVATION_MARKER}\n{observation}\n</current_observation_untrusted>{note}{reports}");
         let result = if pictures.is_empty() {
             held.value.run(&input, op.signal.clone(), emit).await

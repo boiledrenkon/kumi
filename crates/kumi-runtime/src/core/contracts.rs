@@ -2100,6 +2100,13 @@ pub trait SessionController {
     fn can_background(&self) -> bool {
         false
     }
+    /// Carry on with a job that ended whose request needs it (`when_done` continue): the app calls this when the producer
+    /// isn't in the middle of something (a pick, a panel, typing). Kumi then answers as itself. False when it can't now
+    /// (Kumi is answering) or the job isn't waiting to carry on.
+    fn carry_on(&self, job: u32) -> bool {
+        let _ = job;
+        false
+    }
     fn has_device_tree(&self) -> bool {
         false
     }
