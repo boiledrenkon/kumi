@@ -262,3 +262,21 @@ case!(a_value_change_opens_to_its_bar_and_words, async {
     );
     h.close().await;
 });
+
+case!(a_fixed_phrases_change_opens_to_its_picture_like_any_other, async {
+    let h = Harness::new(160, 40);
+    h.control.set("instant", json!(true));
+    h.control.set("instant-change", tempo_change("c1")["change"].clone());
+    h.start().await;
+    h.connect();
+    h.type_text("tempo 124\r").await;
+    h.wait_for_call("instant:tempo 124").await;
+    h.has("Tempo 120 → 124 BPM · instant");
+    // In HISTORY the phrase's change opens as any other does: its value on a bar, with its words.
+    h.type_text("\x1b[Z").await;
+    h.type_text("\r").await;
+    let lines = h.screen();
+    let row = history_row(&lines, "Tempo 120 → 124 BPM");
+    assert!(lines[row + 1..].iter().any(|line| line.contains("Tempo 120 BPM → 124 BPM")), "{}", lines.join("\n"));
+    h.close().await;
+});
