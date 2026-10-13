@@ -12,7 +12,9 @@ use serde_json::{json, Value};
 /// What the test's redactor takes out, planted in every kind of word an export carries.
 const PLANTED: &str = "PLANTED-7f3a";
 /// What no export may carry, redacted or not.
-const NEVER: [&str; 16] = [
+const NEVER: [&str; 18] = [
+    "TECHNIQUE-KEPT",
+    "GAP-NOTE",
     "Budget left",
     "Not there yet",
     "Don't change anything now",
@@ -68,12 +70,16 @@ fn messages() -> Vec<Value> {
             {"type": "text", "text": format!("Looking at your Set {PLANTED}."), "providerOptions": {"anthropic": {"signature": "SIGNATURE-XYZ"}}},
             {"type": "tool-call", "toolCallId": "toolu_1", "toolName": "live_discover", "input": {"kind": "track", "path": format!("{PLANTED}/Song.als"), PLANTED: true}},
             {"type": "tool-call", "toolCallId": "toolu_2", "toolName": "remember", "input": {"note": "NOTE-TEXT"}},
-            {"type": "tool-call", "toolCallId": "toolu_3", "toolName": "call_tool", "input": {"name": "find_tools", "input": {"query": "FIND-QUERY"}}}
+            {"type": "tool-call", "toolCallId": "toolu_3", "toolName": "call_tool", "input": {"name": "find_tools", "input": {"query": "FIND-QUERY"}}},
+            {"type": "tool-call", "toolCallId": "toolu_3t", "toolName": "technique", "input": {"name": "TECHNIQUE-KEPT"}},
+            {"type": "tool-call", "toolCallId": "toolu_3g", "toolName": "call_tool", "input": {"name": "note_gap", "input": {"gap": "GAP-NOTE"}}}
         ]}),
         json!({"role": "tool", "content": [
             {"type": "tool-result", "toolCallId": "toolu_1", "toolName": "live_discover", "output": {"type": "json", "value": {"tracks": [format!("Kick_01_final {PLANTED}")]}}},
             {"type": "tool-result", "toolCallId": "toolu_2", "toolName": "remember", "output": {"type": "text", "value": "Noted: NOTE-TEXT"}},
-            {"type": "tool-result", "toolCallId": "toolu_3", "toolName": "call_tool", "output": {"type": "text", "value": "FIND-QUERY found"}}
+            {"type": "tool-result", "toolCallId": "toolu_3", "toolName": "call_tool", "output": {"type": "text", "value": "FIND-QUERY found"}},
+            {"type": "tool-result", "toolCallId": "toolu_3t", "toolName": "technique", "output": {"type": "text", "value": "Kept TECHNIQUE-KEPT"}},
+            {"type": "tool-result", "toolCallId": "toolu_3g", "toolName": "call_tool", "output": {"type": "text", "value": "Noted GAP-NOTE"}}
         ]}),
         json!({"role": "assistant", "content": [{"type": "text", "text": "The kick sits at -6 dB, so I'll"}]}),
         json!({"role": "user", "content": [{"type": "text", "text": CARRY_ON_NOTE}]}),

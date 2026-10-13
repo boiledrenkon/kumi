@@ -13,6 +13,7 @@ use serde_json::{json, Map, Value};
 use unicode_normalization::UnicodeNormalization;
 
 use super::contracts::{ChangePicture, ChangeRecord, ChangeState, KernelCheckpoint, MixLevels, PictureValue, SavedConversation};
+use super::gaps::GAP_TOOL;
 use super::goal::goal_setup;
 use super::loop_run::loop_setup;
 use super::memory::{FORGET_TOOL, REMEMBER_TOOL};
@@ -20,6 +21,7 @@ use super::playbook::PLAYBOOK_OPEN;
 use super::recall::SEARCH_CONVERSATIONS_TOOL;
 use super::recipes::{FORGET_RECIPE_TOOL, SAVE_RECIPE_TOOL};
 use super::taste_log::REACTION_TOOL;
+use super::techniques::TECHNIQUE_TOOL;
 use crate::ai::types::{AssistantPart, Message, ToolPart, ToolResultContentItem, ToolResultOutput, UserPart};
 use crate::kernel::agent::CARRY_ON_NOTE;
 use crate::kernel::budget::{split_asks, OBSERVATION_MARKER, SHORTENED};
@@ -47,9 +49,10 @@ const MAX_WORDS: usize = 300;
 const MAX_PART: usize = 64 * 1024;
 const MAX_INPUT: usize = 16 * 1024;
 
-/// The tools whose calls never leave Kumi: what it keeps of the producer (notes, recipes, how something went down) and
-/// how it finds its own tools.
-const NEVER: [&str; 6] = [REMEMBER_TOOL, FORGET_TOOL, SAVE_RECIPE_TOOL, FORGET_RECIPE_TOOL, REACTION_TOOL, FIND_TOOLS];
+/// The tools whose calls never leave Kumi: what it keeps of the producer (notes, recipes, techniques, how something went
+/// down), its notes for whoever makes Kumi (gaps), and how it finds its own tools.
+const NEVER: [&str; 8] =
+    [REMEMBER_TOOL, FORGET_TOOL, SAVE_RECIPE_TOOL, FORGET_RECIPE_TOOL, REACTION_TOOL, TECHNIQUE_TOOL, GAP_TOOL, FIND_TOOLS];
 /// Tools whose step shows, but not what they found: a search of earlier conversations finds other conversations' words.
 const STEP_ONLY: [&str; 1] = [SEARCH_CONVERSATIONS_TOOL];
 
