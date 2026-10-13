@@ -52,6 +52,12 @@ jobs:
           # that on Linux. Any other builds Linux's bundle only; main installs and checks it once merged.
           full=true
           checks=true
+          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|bridge_setup|cli/)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/hands/(KumiHands\.swift|mac\.rs))'
+          # A change to any of these gets every system's install and transition jobs before it merges: main broke once
+          # when the Mac helper's didn't.
+          for path in install.sh install.ps1 crates/kumi/src/install.rs crates/kumi/src/update.rs crates/kumi/src/install/migration.rs crates/kumi-runtime/src/hands/KumiHands.swift; do
+            grep -q -E "$installing_paths" <<<"$path" || { echo "::error::$path must count as installing"; exit 1; }
+          done
           # The nightly run only builds, to keep the release profile's cache warm. A run started by hand also installs.
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             checks=false
@@ -60,8 +66,7 @@ jobs:
             base="origin/${GITHUB_BASE_REF}"
             # Read whole, then searched: grep -q can close a pipe early, and git, still writing, fails under pipefail.
             changed="$(git diff --name-only "$base...HEAD")"
-            installing="$(grep -E '^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|bridge_setup|cli/)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/hands/(KumiHands\.swift|mac\.rs))' <<<"$changed" \
-              | grep -v -E '^scripts/test-isolated\.' || true)"
+            installing="$(grep -E "$installing_paths" <<<"$changed" | grep -v -E '^scripts/test-isolated\.' || true)"
             # Cargo's changed lines less version numbers (a bridge or release bump): what's left is a dependency.
             dependencies="$(git diff -U0 "$base...HEAD" -- Cargo.toml Cargo.lock 'crates/*/Cargo.toml' \
               | grep -E '^[-+]' | grep -v -E '^(---|\+\+\+) |^[-+]version = "[^"]*"$' || true)"
