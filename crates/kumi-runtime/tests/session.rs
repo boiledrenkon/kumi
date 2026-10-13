@@ -3661,6 +3661,69 @@ local_test!(a_chat_that_keeps_no_conversations_still_exports_what_was_said, {
     assert!(!h.record.created.borrow().last().unwrap().instructions.contains("imported from a file"));
     h.session.close().await.unwrap();
 });
+/// A conversation exported on another computer and imported here, kept where `kumi import` keeps it.
+async fn imported_here(store: &dyn ConversationStore) {
+    use kumi_runtime::core::conversations::IMPORTED;
+    use kumi_runtime::core::export::{import, json as saved_for_kumi, Options, Source};
+    let elsewhere = kept_about("make the bass wider", Some("openai/gpt-test"));
+    let same = |text: &str| text.to_string();
+    let none = |_: &ChangePicture| -> Option<String> { None };
+    let options = Options {
+        full: false,
+        redact: &same,
+        redacted: false,
+        label: &same,
+        picture: &none,
+        zone: chrono::FixedOffset::east_opt(0).unwrap(),
+        now: 2,
+        version: "9.9.9",
+    };
+    let source = Source {
+        id: KEPT,
+        conversation: &elsewhere,
+        title: "make the bass wider",
+        place: Some("Their Song"),
+        words: ("Live", "Set"),
+        created: 1,
+    };
+    let imported = import(&saved_for_kumi(&source, &options), 3).unwrap();
+    store.create(IMPORTED, KEPT, &imported.conversation, Some("make the bass wider (imported)"), None).await.unwrap();
+}
+/// `kumi -r <imported id>` (or `-c` when the import is the latest): the copy goes on, and Kumi asks nothing.
+async fn taken_up_at_start(place: Option<&str>) {
+    use kumi_runtime::core::conversations::IMPORTED;
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    imported_here(store.as_ref()).await;
+    let h = harness(None, |o| {
+        o.conversations = Some(store.clone());
+        o.resume = Some((IMPORTED.into(), KEPT.into()));
+    });
+    live(&h, place);
+    h.session.start().await.unwrap();
+    assert!(asks(&h).is_empty(), "a conversation from a file has no Set to open");
+    let copy = now(&h).await;
+    assert_ne!(copy.id, KEPT, "the import goes on in a copy");
+    assert!(h.notice(&format!("the original stays as {KEPT}")));
+    let created = h.record.created.borrow().last().cloned().unwrap();
+    let said: Vec<String> = transcript_of(&created.checkpoint.unwrap().messages).into_iter().map(|line| line.text).collect();
+    assert_eq!(said, ["make the bass wider", "done"]);
+    assert!(created.instructions.contains("This conversation was imported from a file"));
+    h.session.submit("go on", None).await.unwrap();
+    let kept_in = place.unwrap_or("unsaved");
+    assert_eq!(saved(store.as_ref(), kept_in, 2).await.id, copy.id);
+    let rows = store.all().await.unwrap();
+    let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap().clone();
+    assert_eq!(row(KEPT).place, IMPORTED, "the import stays as it came");
+    assert_eq!((row(&copy.id).place.as_str(), row(&copy.id).forked_from.as_deref(), row(&copy.id).imported), (kept_in, Some(KEPT), true));
+    h.session.close().await.unwrap();
+}
+local_test!(an_imported_conversation_asked_for_as_kumi_starts_goes_on_in_a_copy_in_the_open_set, {
+    taken_up_at_start(Some(SET_B)).await;
+});
+local_test!(an_imported_conversation_asked_for_as_kumi_starts_goes_on_in_a_copy_without_a_set, {
+    taken_up_at_start(None).await;
+});
 local_test!(open_its_set_asks_the_daw_and_the_conversation_goes_on_once_that_set_is_open, {
     let dir = tempfile::tempdir().unwrap();
     let store = create_conversation_store(dir.path());

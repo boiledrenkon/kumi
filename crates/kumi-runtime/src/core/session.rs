@@ -1129,19 +1129,47 @@ impl Session {
         };
         rows.into_iter().map(|row| ConversationSummary { current: place.as_ref() == Some(&row.place) && row.id == id, ..row }).collect()
     }
-    /// A conversation from a file carries on here in a copy, under its name, without what it changed elsewhere; the
-    /// original stays where `kumi import` put it.
-    async fn carry_imported(&self, store: Rc<dyn ConversationStore>, id: &str, kept: SavedConversation) -> Result<(), RuntimeError> {
+    /// A conversation from a file carries on here in a copy (the original stays where `kumi import` put it). False when
+    /// it isn't kept any more.
+    async fn carry_imported(&self, store: Rc<dyn ConversationStore>, id: &str) -> Result<bool, RuntimeError> {
+        let here = self.0.state.borrow().project.clone().unwrap_or(UNSAVED.into());
+        let Some((copy_id, copy)) = self.copy_imported(&store, id, &here).await? else { return Ok(false) };
+        let said = format!("Carrying on a copy of an imported conversation here; the original stays as {id}.");
+        self.go_to(here, copy_id, copy, Some(said)).await?;
+        Ok(true)
+    }
+    /// A copy of a conversation from a file in `place`, under its name and without what it changed elsewhere (marked as
+    /// from a file, as every copy of one is): its id and what it holds. None when the file's conversation isn't kept.
+    async fn copy_imported(
+        &self,
+        store: &Rc<dyn ConversationStore>,
+        id: &str,
+        place: &str,
+    ) -> Result<Option<(String, SavedConversation)>, RuntimeError> {
+        let Some(kept) = store.load(IMPORTED, id).await? else { return Ok(None) };
         let name = match store.find(id).await? {
-            ConversationMatch::One(row) => row.name,
+            ConversationMatch::One(row) if row.id == id => row.name,
             _ => None,
         };
-        let here = self.0.state.borrow().project.clone().unwrap_or(UNSAVED.into());
         let copy = SavedConversation { saved_at: now(), checkpoint: kept.checkpoint, changes: None, first: kept.first, turns: kept.turns };
         let copy_id = store.new_id().await;
-        store.create(&here, &copy_id, &copy, name.as_deref(), Some(id)).await?;
-        self.go_to(here, copy_id, copy, Some(format!("Carrying on a copy of an imported conversation here; the original stays as {id}.")))
-            .await
+        store.create(place, &copy_id, &copy, name.as_deref(), Some(id)).await?;
+        Ok(Some((copy_id, copy)))
+    }
+    /// A conversation from a file asked for as Kumi starts (kumi -r, kumi -c) carries on in a copy, never in the file's
+    /// own place, and Kumi asks nothing (it has no Set to open): the copy is kept as a Set not saved yet's, and goes with
+    /// the Set that's open once Live is read.
+    async fn copy_wanted_import(&self) -> Result<(), RuntimeError> {
+        let wanted = self.0.state.borrow().wanted.clone();
+        let Some(wanted) = wanted.filter(|wanted| wanted.place == IMPORTED) else { return Ok(()) };
+        let Some(store) = self.0.options.conversations.clone() else { return Ok(()) };
+        let Some((copy_id, _)) = self.copy_imported(&store, &wanted.id, UNSAVED).await? else {
+            self.0.state.borrow_mut().wanted = None;
+            return Ok(());
+        };
+        self.0.state.borrow_mut().wanted = Some(Wanted { place: UNSAVED.into(), id: copy_id, from: None, asked: None });
+        self.notice(format!("Carrying on a copy of an imported conversation; the original stays as {}.", wanted.id));
+        Ok(())
     }
     /// Whether the conversation going on came from a file (kumi import), or is a copy of one.
     async fn conversation_imported(&self) -> bool {
@@ -2133,6 +2161,7 @@ impl SessionController for Session {
             Phase::Start,
             Box::new(|this, op| {
                 async move {
+                    this.copy_wanted_import().await?;
                     this.reset(&op).await?;
                     Ok(None)
                 }
@@ -2378,7 +2407,7 @@ impl SessionController for Session {
         self.drop_wanted();
         // One from a file has no Set here: it carries on in a copy, and the model is told where it came from.
         if place == IMPORTED {
-            return self.carry_imported(store, id, conversation).await.map(|()| true);
+            return self.carry_imported(store, id).await;
         }
         // Another Set's, while a Set is open: the producer says whether to open its Set, carry it on here in a copy, or
         // leave it.
