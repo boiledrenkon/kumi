@@ -337,7 +337,7 @@ async fn live_log_lines(file: &str) -> Vec<String> {
     }
     picked.into_iter().rev().take(150).collect::<Vec<_>>().into_iter().rev().map(|s| clip(s, 400)).collect()
 }
-fn username() -> String {
+pub fn username() -> String {
     #[cfg(unix)]
     {
         unsafe {
@@ -368,11 +368,8 @@ fn username() -> String {
     }
     String::new()
 }
-pub async fn write_report(io: ReportIo) -> Result<i32, RuntimeError> {
-    let env = &io.doctor.env;
-    let home = io.home.clone().unwrap_or_else(|| home::home_dir().unwrap_or_default().display().to_string());
-    let user = io.user.clone().unwrap_or_else(username);
-    let now = io.now.as_ref().map(|now| now()).unwrap_or_else(Utc::now);
+/// What Kumi knows to be secret: every string in its saved sign-ins, and the keys in its environment.
+pub async fn known_secrets(env: &Env) -> Vec<String> {
     let mut secrets = vec![];
     if let Ok(file) = load_auth_file(env) {
         if let Ok(credentials) = open_credential_store(file).list().await {
@@ -392,6 +389,14 @@ pub async fn write_report(io: ReportIo) -> Result<i32, RuntimeError> {
     ] {
         secrets.push(env.get(name).cloned().unwrap_or_default())
     }
+    secrets
+}
+pub async fn write_report(io: ReportIo) -> Result<i32, RuntimeError> {
+    let env = &io.doctor.env;
+    let home = io.home.clone().unwrap_or_else(|| home::home_dir().unwrap_or_default().display().to_string());
+    let user = io.user.clone().unwrap_or_else(username);
+    let now = io.now.as_ref().map(|now| now()).unwrap_or_else(Utc::now);
+    let secrets = known_secrets(env).await;
     let redact = redactor(&secrets, &home, &user);
     let file = step(io.doctor.out.clone(), env, "Writing Kumi's report…", compose(&io, &redact, &home, now), false).await?;
     io.doctor.out.write(&format!("Kumi's report is in {}\nIt has Kumi's versions, the doctor's checks, what Kumi did in your last conversation, and the bridge's lines from Live's log. Keys and tokens are taken out. Send it with a few words about what happened.\n",redact(&file)));

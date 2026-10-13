@@ -521,7 +521,7 @@ fn asks_in(messages: &[Message]) -> Vec<String> {
 }
 
 /// A message's text split into the list a removal put at its start and the rest.
-fn split_asks(text: &str) -> (Vec<String>, &str) {
+pub(crate) fn split_asks(text: &str) -> (Vec<String>, &str) {
     let text = text.strip_prefix(SHORTENED).unwrap_or(text);
     let Some(listed) = text.strip_prefix(ASKED) else { return (Vec::new(), text) };
     let (block, rest) = listed.split_once("\n\n").unwrap_or((listed, ""));
