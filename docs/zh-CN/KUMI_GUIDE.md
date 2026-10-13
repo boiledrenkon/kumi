@@ -419,4 +419,12 @@ Kumi 把一切都保存在 `~/.kumi` 中。`~/.kumi/settings.json` 包含：
 | `KUMI_ICONS` | 终端里的符号显示不正常时设为 `glyphs` 或 `badges`（两个字母的图标） |
 | `KUMI_TRACE=1` | 打印每次桥接调用的名称（不含参数和结果） |
 
-安装程序会读取 `KUMI_HOME`（安装到 `~/.kumi` 以外的位置；须在安装时设置，而不是之后）、`KUMI_VERSION`（安装指定的版本）、`KUMI_RELEASES`（从哪里下载；它优先于 `KUMI_VERSION`）和 `KUMI_NO_MODIFY_PATH=1`（不修改你的 PATH）。
+安装程序会读取：
+
+- `KUMI_HOME`：安装到 `~/.kumi` 以外的位置；须在安装时设置，而不是之后。
+- `KUMI_VERSION`：安装指定的版本，如 `1.16.0`，或 `latest`。1.7.6 之前的版本要用该版本自己的脚本安装，安装程序会给出命令。
+- `KUMI_RELEASES`：从哪里下载；它优先于 `KUMI_VERSION`。
+- `KUMI_NO_MODIFY_PATH=1`：不修改你的 PATH。
+- `KUMI_ALLOW_ROOT=1`：以 root 身份安装。否则安装程序会在此停下，因为 Kumi 会被装进 root 的主目录。
+
+再次运行会修复 Kumi，并保留 `kumi update --rollback` 要回到的那个 Kumi。在新的 Kumi 就位之前按 Ctrl-C，不会改变任何东西。出错时它会说明原因：没有这个版本、连不上（DNS、TLS、代理或超时），或是 Wi-Fi 登录页代替 GitHub 作了应答。

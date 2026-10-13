@@ -10,7 +10,7 @@ Kumi とそのブリッジが動作する環境、対応する Live のバージ
 | --- | --- | --- | --- |
 | macOS | 13（Ventura）以降 | Apple silicon、Intel | ネイティブのビルドとインストールは CI 対象。過去の TypeScript 版を Apple silicon 上の Live でテスト済み |
 | Windows | 10 または 11 | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。過去の TypeScript 版を Windows 10 上の Live でテスト済み。[Windows](#windows) を参照 |
-| Linux | glibc のディストリビューション（Alpine などの musl 系は不可） | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。Linux 版の Live は存在しません |
+| Linux | glibc 2.35 以降（Ubuntu 22.04、Debian 12 以降。Alpine などの musl 系は不可） | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。Linux 版の Live は存在しません |
 
 - Kumi と単体のブリッジはネイティブ Rust プログラムです。新規インストールは Node をダウンロードせず、必要としません。
 - Node 24 を使う既存の Kumi 1.7.4 と 1.7.5 は、`kumi update` で設定、サインイン、データを保ったまま移行します。残された Node はロールバックと任意の YouTube チャレンジ処理に使えます。Windows では、ネイティブ版の初回起動で古いランチャーが置き換わり、以降の起動は Node を経由しません。古い Node メジャーでは同じ `KUMI_HOME` でインストーラーの再実行が必要な場合があります。[更新方法](KUMI_GUIDE.md)を参照してください。

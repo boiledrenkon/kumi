@@ -12,7 +12,7 @@ lists the evidence behind each "tested".
 | --- | --- | --- | --- |
 | macOS | 13 (Ventura) or later | Apple silicon, Intel | Native build/install CI; earlier TypeScript releases tested with Live on Apple silicon |
 | Windows | 10 or 11 | x64, ARM64 | Native build/install CI; earlier TypeScript releases tested with Live on Windows 10; see [Windows](#windows) |
-| Linux | glibc distributions (not Alpine or other musl) | x64, ARM64 | Native build/install CI; no Live for Linux |
+| Linux | glibc 2.35 or later (Ubuntu 22.04, Debian 12 or newer; not Alpine or other musl) | x64, ARM64 | Native build/install CI; no Live for Linux |
 
 - Kumi and the standalone bridge run as native Rust programs. Fresh installs do not download or require Node.
 - Existing Kumi 1.7.4 and 1.7.5 installations using Node 24 move to native through `kumi update`, keeping the same settings, sign-in and data. The retained Node supports rollback and optional YouTube challenges. On Windows, the first native start replaces the old launcher, so later starts don't go through Node. Older Node majors may need the installer rerun with the same `KUMI_HOME`; see [updating](KUMI_GUIDE.md).
