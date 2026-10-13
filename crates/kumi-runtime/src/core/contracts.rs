@@ -153,6 +153,10 @@ pub enum KernelEvent {
         wait_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wait: Option<WaitFor>,
+        /// What refused the call on the way, when that's what it waits out as offline: a certificate (TLS) or a
+        /// proxy. The wait is the same; the words say which.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<crate::web::cause::NetCause>,
     },
     /// Another model answers from here: the producer's fallback, while their model can't (why: its plan's
     /// limit, an outage), or their own model back again (`back`).

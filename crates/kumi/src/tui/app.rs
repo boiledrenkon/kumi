@@ -50,6 +50,7 @@ use kumi_runtime::{
     core::{contracts::*, errors::RuntimeError},
     providers::ProviderId,
     voice::VoiceTrouble,
+    web::cause::NetCause,
 };
 use serde_json::Value;
 use std::{
@@ -307,6 +308,8 @@ struct State {
     retry: Option<(String, f64)>,
     /// What a long wait for the model is for (a plan's limit, the connection), and when it ends (epoch ms).
     waiting_for: Option<(WaitFor, f64)>,
+    /// What refused the call on the way, for a wait for the connection: a certificate (TLS) or a proxy.
+    waiting_cause: Option<NetCause>,
     /// A fixed phrase is changing Live: its changes say "instant" in NOW.
     instant_running: bool,
     instant_changes: Vec<String>,
@@ -428,6 +431,7 @@ impl State {
             planning_since: 0.,
             retry: None,
             waiting_for: None,
+            waiting_cause: None,
             instant_running: false,
             instant_changes: Vec::new(),
             busy_since: 0.,

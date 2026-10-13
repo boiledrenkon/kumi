@@ -23,6 +23,7 @@ impl TuiApp {
             let mut state = self.0.state.borrow_mut();
             state.retry = None;
             state.waiting_for = None;
+            state.waiting_cause = None;
         }
         match kind {
             "retry" => {
@@ -30,11 +31,13 @@ impl TuiApp {
                 // No wait: Kumi carries on at once, and the model's next words end it.
                 let until = if n("waitMs") > 0. { perf_now() + n("waitMs") } else { f64::INFINITY };
                 let wait: Option<WaitFor> = serde_json::from_value(value["wait"].clone()).ok().flatten();
+                let cause: Option<NetCause> = serde_json::from_value(value["cause"].clone()).ok().flatten();
                 let at = now_ms_f64() + n("waitMs");
                 {
                     let mut state = self.0.state.borrow_mut();
                     state.retry = Some((reason.clone(), until));
                     state.waiting_for = wait.map(|wait| (wait, at));
+                    state.waiting_cause = cause;
                 }
                 // A plan's limit pauses the answer until it resets: told once, as a wait, not a stop.
                 if wait == Some(WaitFor::Limit) {

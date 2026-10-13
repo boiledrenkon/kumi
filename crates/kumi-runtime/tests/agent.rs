@@ -2440,7 +2440,7 @@ fn waits(events: &[KernelEvent]) -> Vec<(String, u64, Option<kumi_runtime::core:
     events
         .iter()
         .filter_map(|event| match event {
-            KernelEvent::Retry { reason, wait_ms, wait } => Some((reason.clone(), *wait_ms, *wait)),
+            KernelEvent::Retry { reason, wait_ms, wait, .. } => Some((reason.clone(), *wait_ms, *wait)),
             _ => None,
         })
         .collect()
@@ -2557,15 +2557,48 @@ fn a_certificate_or_a_proxy_in_the_way_is_named_with_its_fix_not_said_as_offline
 }
 
 #[tokio::test]
-async fn a_certificate_in_the_way_is_tried_again_as_offline_is_but_named() {
+async fn a_certificate_or_a_proxy_in_the_way_is_waited_out_as_offline_is_but_named() {
+    use kumi_runtime::core::contracts::WaitFor;
+    use kumi_runtime::web::cause::NetCause;
     local(async {
         tokio::time::pause();
-        let h = harness(|_, n| if n <= 2 { Scripted::Reject(refused_on_the_way(UNTRUSTED)) } else { answer("back") }, Options::default());
+        // A Wi-Fi sign-in page reads as TLS until the producer signs in: the same tries as offline, as long as it takes.
+        for (refused, cause, words) in [
+            (UNTRUSTED, NetCause::Tls, "the secure connection didn't check out (TLS)"),
+            (PROXY_SIGN_IN, NetCause::Proxy, "the proxy didn't let Kumi through"),
+        ] {
+            let h = harness(
+                move |_, n| if n <= 6 { Scripted::Reject(refused_on_the_way(refused)) } else { answer("back") },
+                Options::default(),
+            );
+            let (events, emit) = collect();
+            assert_eq!(h.kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+            assert_eq!(h.count(), 7, "past the three tries a busy provider gets");
+            let waited = waits(&events.borrow());
+            assert!(
+                waited
+                    .iter()
+                    .all(|(reason, _, wait)| *wait == Some(WaitFor::Offline) && *reason == format!("test couldn't be reached: {words}")),
+                "{waited:?}"
+            );
+            assert_eq!(waited.iter().map(|(_, ms, _)| *ms).collect::<Vec<_>>(), [750, 2250, 6750, 20250, 30000, 30000]);
+            let causes: Vec<_> = events
+                .borrow()
+                .iter()
+                .filter_map(|event| match event {
+                    KernelEvent::Retry { cause, .. } => Some(*cause),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(causes, [Some(cause); 6]);
+            assert_eq!(texts(&events.borrow()), ["back"]);
+            h.kernel.close().await;
+        }
+        // Offline itself names no cause, as before.
+        let h = harness(|_, n| if n <= 1 { Scripted::Reject(offline()) } else { answer("back") }, Options::default());
         let (events, emit) = collect();
-        assert_eq!(h.kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
-        let reason = "test couldn't be reached: the secure connection didn't check out (TLS)".to_string();
-        assert_eq!(waits(&events.borrow()), [(reason.clone(), 750, None), (reason, 2250, None)]);
-        assert_eq!(texts(&events.borrow()), ["back"]);
+        h.kernel.run("q", signal(), emit).await.unwrap();
+        assert!(events.borrow().iter().all(|event| !matches!(event, KernelEvent::Retry { cause: Some(_), .. })));
         h.kernel.close().await;
     })
     .await

@@ -685,7 +685,12 @@ async fn turn(inner: Rc<Inner>, first: Message, signal: Signal, emit: KernelEmit
                 // once a turn, Kumi carries on from the steps it finished and the words shown, and says so.
                 Err(StepError::Model(error)) if !carried_on && turn.can_carry_on(&error) => {
                     carried_on = true;
-                    (turn.deliver)(KernelEvent::Retry { reason: retry_reason(&error, &inner.binding().id), wait_ms: 0, wait: None });
+                    (turn.deliver)(KernelEvent::Retry {
+                        reason: retry_reason(&error, &inner.binding().id),
+                        wait_ms: 0,
+                        wait: None,
+                        cause: None,
+                    });
                     turn.carry_on().await;
                     continue;
                 }
@@ -985,15 +990,17 @@ impl Turn {
                         }
                         // With a fallback set, it carries on now instead (the turn hands over).
                         Some(Wait::Reset(wait)) if !self.inner.fallback_ready() => (wait, Some(WaitFor::Limit)),
-                        // A certificate or a proxy in the way isn't being offline: the wait says which.
                         Some(Wait::Offline(wait)) => {
                             offline += 1;
-                            (wait, refused_on_the_way(model).is_none().then_some(WaitFor::Offline))
+                            (wait, Some(WaitFor::Offline))
                         }
                         _ => return Err(error),
                     };
                     let reason = retry_reason(model, &binding.id);
-                    (self.deliver)(KernelEvent::Retry { reason, wait_ms: wait.round() as u64, wait: kind });
+                    // A certificate or a proxy in the way is waited out as offline is (a Wi-Fi sign-in page clears),
+                    // but named.
+                    let cause = (kind == Some(WaitFor::Offline)).then(|| refused_on_the_way(model)).flatten();
+                    (self.deliver)(KernelEvent::Retry { reason, wait_ms: wait.round() as u64, wait: kind, cause });
                     // Nothing began, so the retry starts clean.
                     let entries: Vec<Rc<Early>> = self.early.borrow().values().cloned().collect();
                     join_all(entries.iter().map(|entry| entry.call.abandon())).await;

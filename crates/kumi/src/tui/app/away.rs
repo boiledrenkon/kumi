@@ -123,6 +123,7 @@ impl TuiApp {
             let state = self.0.state.borrow();
             state.retry.as_ref().map(|(reason, _)| match state.waiting_for {
                 Some((WaitFor::Limit, at)) => format!("{reason} · carrying on at {}", reset_words(at, now_ms_f64())),
+                Some((WaitFor::Offline, _)) if state.waiting_cause.is_some() => reason.clone(),
                 Some((WaitFor::Offline, _)) => format!("offline · {reason}"),
                 None => reason.clone(),
             })
