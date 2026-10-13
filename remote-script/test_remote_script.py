@@ -9714,8 +9714,11 @@ class ReadsMessagesAndPreviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only an audio clip"): bridge.mapper.invoke("clip.time-convert", {"ref": midi_ref, "from": "beats", "value": 1})
 
     def test_a_message_in_live_needs_no_mutation_authority(self):
-        shown = []; application = types.SimpleNamespace(show_on_the_fly_message=lambda text: shown.append(("passing", text)), show_message=lambda text: shown.append(("modal", text)))
+        # In passing, the Control Surface's own status-bar line; never show_on_the_fly_message, which Live 12.4 shows
+        # as a modal alert that holds its main thread.
+        shown = []; application = types.SimpleNamespace(show_on_the_fly_message=lambda text: shown.append(("on the fly", text)), show_message=lambda text: shown.append(("modal", text)))
         bridge = immediate_bridge(FakeSong()); bridge.mapper._application = lambda: application
+        bridge.mapper.status_message = lambda text: shown.append(("passing", text))
         self.assertIn("application.message", remote_module._AUTHORITY_FREE_INVOKES); self.assertNotIn("application.message", remote_module._READ_ONLY_INVOKES)
         remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, frame: bridge._dispatch_with_holder(method, frame, {}))
         unsigned = remote.bound({"version": PROTOCOL, "id": "message", "method": "invoke", "operation": "application.message", "args": {"text": "Bounced the drums"}, "nonce": "message-nonce-0001", "sequence": 1})
@@ -9727,8 +9730,30 @@ class ReadsMessagesAndPreviewTests(unittest.TestCase):
         self.assertTrue(bridge.mapper._operation_supported("application.message"))
         # The undo steps keep their own probe.
         self.assertFalse(bridge.mapper._operation_supported("undo.step.begin"))
+        # Without the status-bar line, a message in passing is refused (no modal stands in for it); the modal one still
+        # makes the operation available.
+        bridge.mapper.status_message = None
+        with self.assertRaisesRegex(ValueError, "passing messages are unavailable"): bridge.mapper.invoke("application.message", {"text": "Bounced"})
+        self.assertNotIn(("on the fly", "Bounced"), shown)
+        self.assertTrue(bridge.mapper._operation_supported("application.message"))
+        bridge.mapper._application = lambda: types.SimpleNamespace(show_on_the_fly_message=lambda text: shown.append(("on the fly", text)))
+        self.assertFalse(bridge.mapper._operation_supported("application.message"), "show_on_the_fly_message alone doesn't count")
         def unavailable(): raise ValueError("Live's application is unavailable")
         bridge.mapper._application = unavailable; self.assertFalse(bridge.mapper._operation_supported("application.message"))
+        bridge.mapper.status_message = lambda text: None; self.assertTrue(bridge.mapper._operation_supported("application.message"))
+
+    def test_the_status_bar_line_is_the_control_surfaces_own(self):
+        shown = []; c_instance = types.SimpleNamespace(show_message=lambda text: shown.append(text), song=FakeSong())
+        probe = __import__("socket").socket(__import__("socket").AF_INET, __import__("socket").SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        bridge = AbletonMcpBridge(c_instance, {"host": "127.0.0.1", "port": port, "secret": "0123456789abcdef0123456789abcdef"}, song=FakeSong())
+        try:
+            bridge.mapper.invoke("application.message", {"text": "Kumi · done"})
+            self.assertEqual(shown, ["Kumi · done"])
+        finally:
+            bridge.disconnect()
 
     def test_a_preview_is_named_and_only_its_own_name_stops_it(self):
         browser = PreviewBrowser(); bridge = immediate_bridge(FakeSong()); bridge.mapper._browser = lambda: browser

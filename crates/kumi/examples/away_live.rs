@@ -122,9 +122,13 @@ impl Run {
         println!("Live's status bar");
         let shown = self.integration.show_message("Kumi · real check · this line is Kumi's", signal()).await;
         self.say(matches!(shown, Ok(true)), &format!("a line shown in Live's status bar ({shown:?})"));
-        let long = "x".repeat(2000);
-        let cut = self.integration.show_message(&long, signal()).await;
-        self.say(matches!(cut, Ok(true)), "a line past Live's 1,024 characters is cut, not refused");
+        // A line in passing never holds Live: a modal alert would hold its main thread, and this read with it.
+        let began = std::time::Instant::now();
+        let answered = self.integration.recording(abort::timeout(5_000)).await;
+        self.say(
+            answered.is_ok() && began.elapsed() < Duration::from_secs(5),
+            &format!("Live answers at once after it ({:?} in {} ms)", answered, began.elapsed().as_millis()),
+        );
 
         println!("Whether Live records");
         self.python("(setattr(song, 'record_mode', False), song.stop_playing(), True)[-1]").await?;
