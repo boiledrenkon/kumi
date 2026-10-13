@@ -3,6 +3,20 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.14.0 — 2026-10-12
+
+Ships with bridge 1.0.92, as 1.13.0 did.
+
+- Kumi answers sooner and uses less of your plan. Each request now carries only the tools Kumi uses
+  most, under half the size it was, and Kumi finds the others when it needs them. Short commands such
+  as "tempo 124", "mute drums", "solo bass", "arm vocals", "loop 9-16" and "metronome on" change Live
+  at once, without waiting on the model, and each is in HISTORY with its undo. A conversation keeps
+  its cached start when you stop an answer or switch models, and with Anthropic that cache lasts
+  through long renders.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.13.0 — 2026-10-12
 
 Ships with bridge 1.0.92, which Live loads when it restarts. After updating, Kumi offers to quit Live
