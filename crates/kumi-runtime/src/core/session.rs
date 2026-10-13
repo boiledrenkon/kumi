@@ -2433,7 +2433,7 @@ impl SessionController for Session {
                 let integration = self.0.state.borrow().integration.clone();
                 let opened = match integration {
                     Some(integration) => integration.open_place(&wanted.place, abort::timeout(30_000)).await?,
-                    None => Err(format!("{daw} isn't connected.")),
+                    None => Err(format!("Kumi isn't connected to {daw}.")),
                 };
                 // It's taken up once its Set is open, however that Set comes to be opened.
                 match opened {
