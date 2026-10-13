@@ -42,7 +42,9 @@ Native editing (groups, Arrangement automation, scene/global Follow Actions and 
 ## Windows
 
 Tested: the installer, `kumi update`, `kumi bridge` and `kumi uninstall` in
-Windows PowerShell 5.1 on CI; and on a Windows 10 machine with Live 12.4.15
+Windows PowerShell 5.1 and PowerShell 7 on CI, and the installer, `kumi bridge`,
+rollback and `kumi uninstall` with `KUMI_HOME` in a folder named in non-ASCII
+letters; and on a Windows 10 machine with Live 12.4.15
 beta, `kumi bridge` into a User Library moved outside the user folder, the
 Remote Script loading in Live, and Kumi connecting. CI's Windows runner is an
 administrator account with default folders, so it can't show problems that

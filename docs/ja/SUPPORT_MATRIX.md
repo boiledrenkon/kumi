@@ -32,7 +32,7 @@ Kumi とそのブリッジが動作する環境、対応する Live のバージ
 
 ## Windows
 
-テスト済みの項目：CI 上の Windows PowerShell 5.1 での、インストーラー、`kumi update`、`kumi bridge`、`kumi uninstall`。そして Live 12.4.15 beta を入れた Windows 10 マシンでの、ユーザーフォルダーの外に移動した User Library への `kumi bridge`、Live での Remote Script の読み込み、Kumi の接続。CI の Windows ランナーは標準のフォルダー構成の管理者アカウントなので、一般のアカウントや移動したライブラリでしか起きない問題は確認できません。
+テスト済みの項目：CI 上の Windows PowerShell 5.1 と PowerShell 7 での、インストーラー、`kumi update`、`kumi bridge`、`kumi uninstall`。非 ASCII 文字の名前のフォルダーにある `KUMI_HOME` での、インストーラー、`kumi bridge`、ロールバック、`kumi uninstall`。そして Live 12.4.15 beta を入れた Windows 10 マシンでの、ユーザーフォルダーの外に移動した User Library への `kumi bridge`、Live での Remote Script の読み込み、Kumi の接続。CI の Windows ランナーは標準のフォルダー構成の管理者アカウントなので、一般のアカウントや移動したライブラリでしか起きない問題は確認できません。
 
 Windows でまだ確認できていないこと：
 
