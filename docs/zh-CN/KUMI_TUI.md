@@ -145,7 +145,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 ## 纯文本模式
 
-设置 `KUMI_UI=plain`，或者输入或输出经过管道时，Kumi 会改用逐行显示的纯文本界面，适合屏幕阅读器和日志。它支持 `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new [name]`、`/resume [编号、ID 或名称]`（以及 `/conversations`）、`/rename <name>`、`/fork [name]`、`/model [provider/model]`、`/effort [level|default]`、`/fast`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/willington`、`/update`、`/changelog` 和 `/quit`，但没有 `/btw`、`/goal`、`/loop`、`/slots`、`/jobs` 或 `/copy`。`/resume` 先为本工程的对话编号，再为其他工程的对话编号；Kumi 关于其他工程对话的提问用 1、2 或 3 回答。后台任务开始和结束时会告诉你，你的请求所需要的任务会在 Kumi 空闲时接着进行。请在 shell 中用 `kumi login` 登录。Ctrl-C 停止回答，空闲时则退出。
+设置 `KUMI_UI=plain`，或者输入或输出经过管道时，Kumi 会改用逐行显示的纯文本界面，适合屏幕阅读器和日志。它支持 `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new [name]`、`/resume [编号、ID 或名称]`（以及 `/conversations`）、`/rename <name>`、`/fork [name]`、`/model [provider/model]`、`/effort [level|default]`、`/fast`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/willington`、`/update`、`/changelog` 和 `/quit`，但没有 `/btw`、`/goal`、`/loop`、`/slots`、`/jobs` 或 `/copy`。`/resume` 先为本工程的对话编号，再为其他工程的对话编号；Kumi 关于其他工程对话的提问用 1、2 或 3 回答（等待回答时命令照常可用，输入其他内容会再问一次）。后台任务开始和结束时会告诉你，你的请求所需要的任务会在 Kumi 空闲时接着进行。请在 shell 中用 `kumi login` 登录。Ctrl-C 停止回答，空闲时则退出。
 
 ## 离开 Kumi 时
 

@@ -277,8 +277,8 @@ struct State {
     carry: Vec<u32>,
     /// Each change's state as last said: a change told again as it was (its picture came after it) isn't said twice.
     said: std::collections::HashMap<String, String>,
-    /// Kumi asked about another Set's conversation: the next line's 1, 2 or 3 answers.
-    asking: bool,
+    /// Kumi's question about another Set's conversation, open until a line says 1, 2 or 3 (or Kumi withdraws it).
+    asking: Option<String>,
 }
 struct Inner {
     options: TerminalOptions,
@@ -316,7 +316,7 @@ pub fn create_terminal(options: TerminalOptions) -> PlainTerminal {
             expired: None,
             carry: vec![],
             said: std::collections::HashMap::new(),
-            asking: false,
+            asking: None,
         }),
         parser: RefCell::new(None),
         keys: RefCell::new(None),
@@ -555,20 +555,24 @@ impl PlainTerminal {
             history.borrow_mut().add(input);
         }
         let controller = &self.0.options.controller;
-        // The answer to Kumi's question about another Set's conversation; anything else leaves that conversation.
-        if std::mem::take(&mut self.0.state.borrow_mut().asking) {
+        // The answer to Kumi's question about another Set's conversation: 1, 2 or 3. A command runs as usual, with the
+        // question still open; anything else asks it again.
+        let asking = self.0.state.borrow().asking.clone();
+        if let Some(question) = asking.filter(|_| !command.starts_with('/')) {
             let choice = match command {
-                "1" => Some(SetChoice::Open),
-                "2" => Some(SetChoice::Copy),
-                "3" => Some(SetChoice::Cancel),
-                _ => None,
+                "1" => SetChoice::Open,
+                "2" => SetChoice::Copy,
+                "3" => SetChoice::Cancel,
+                _ => {
+                    self.notice(&question);
+                    self.prompt();
+                    return Ok(());
+                }
             };
-            controller.answer_set(choice.unwrap_or(SetChoice::Cancel)).await?;
-            if choice.is_some() {
-                self.prompt();
-                return Ok(());
-            }
-            self.notice("[conversations] Staying with this Set's conversation.");
+            self.0.state.borrow_mut().asking = None;
+            controller.answer_set(choice).await?;
+            self.prompt();
+            return Ok(());
         }
         if command == "/quit" {
             self.finish(0).await;
@@ -1069,7 +1073,7 @@ impl Terminal for PlainTerminal {
             }
             "set-asked" => {
                 let ask: Option<SetAsk> = serde_json::from_value(value["ask"].clone()).ok();
-                self.0.state.borrow_mut().asking = ask.is_some();
+                self.0.state.borrow_mut().asking = None;
                 if let Some(ask) = ask {
                     let clean = |text: &str| head(&sanitize_text(text, &self.0.options.secrets), 40);
                     let theirs = ask.set.as_deref().map(|set| format!("“{}”", clean(set))).unwrap_or_else(|| format!("its {}", ask.noun));
@@ -1079,10 +1083,12 @@ impl Terminal for PlainTerminal {
                         .map(|set| format!("“{}”", clean(set)))
                         .unwrap_or_else(|| format!("a {} not saved yet", ask.noun));
                     let title = if ask.title.is_empty() { "This conversation".into() } else { format!("“{}”", clean(&ask.title)) };
-                    self.notice(&format!(
+                    let question = format!(
                         "[conversations] {title} is about {theirs}, and {daw} has {open} open. 1. Open {theirs} in {daw} ({daw} may ask whether to save {open} first) · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.",
                         daw = ask.daw
-                    ));
+                    );
+                    self.0.state.borrow_mut().asking = Some(question.clone());
+                    self.notice(&question);
                 }
             }
             "resend" => {

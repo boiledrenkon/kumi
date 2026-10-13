@@ -145,7 +145,7 @@ Kumi はターミナルウィンドウ全体を使い、Kumi が閉じたとき�
 
 ## プレーンモード
 
-`KUMI_UI=plain`、またはパイプを通した入力や出力では、代わりに一行ずつのプレーンなインターフェースになり、スクリーンリーダーやログに向いています。使えるのは `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new [name]`、`/resume [番号、ID または名前]`（と `/conversations`）、`/rename <name>`、`/fork [name]`、`/model [provider/model]`、`/effort [level|default]`、`/fast`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/willington`、`/update`、`/changelog`、`/quit` で、`/btw`、`/goal`、`/loop`、`/slots`、`/jobs`、`/copy` はありません。`/resume` はこの Set の会話、次にほかの Set の会話に番号を付けます。別の Set の会話についての Kumi の質問には 1、2、3 で答えます。バックグラウンドジョブが始まったときと終わったときは知らせ、あなたの依頼に必要なジョブは Kumi が何もしていないときに続きを進めます。サインインはシェルから `kumi login` で行います。Ctrl-C は答えを止め、Kumi が何もしていないときは終了します。
+`KUMI_UI=plain`、またはパイプを通した入力や出力では、代わりに一行ずつのプレーンなインターフェースになり、スクリーンリーダーやログに向いています。使えるのは `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new [name]`、`/resume [番号、ID または名前]`（と `/conversations`）、`/rename <name>`、`/fork [name]`、`/model [provider/model]`、`/effort [level|default]`、`/fast`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/willington`、`/update`、`/changelog`、`/quit` で、`/btw`、`/goal`、`/loop`、`/slots`、`/jobs`、`/copy` はありません。`/resume` はこの Set の会話、次にほかの Set の会話に番号を付けます。別の Set の会話についての Kumi の質問には 1、2、3 で答えます（答えを待つ間もコマンドは使え、ほかの言葉にはもう一度質問します）。バックグラウンドジョブが始まったときと終わったときは知らせ、あなたの依頼に必要なジョブは Kumi が何もしていないときに続きを進めます。サインインはシェルから `kumi login` で行います。Ctrl-C は答えを止め、Kumi が何もしていないときは終了します。
 
 ## Kumi から離れているとき
 

@@ -231,7 +231,8 @@ instead, which suits screen readers and logs. It has `/help`, `/status`,
 `/recipes`, `/willington`, `/update`, `/changelog` and `/quit`, but no `/btw`,
 `/goal`, `/loop`, `/slots`, `/jobs` or `/copy`. `/resume` numbers this Set's
 conversations, then other Sets'; Kumi's question about another Set's
-conversation takes 1, 2 or 3. It says when a background job
+conversation takes 1, 2 or 3 (commands still run while it waits, and other
+words ask it again). It says when a background job
 starts and ends, and one your request needs carries on once Kumi is idle. Sign in from a shell with `kumi login`. Ctrl-C stops the
 answer, or quits when idle.
 

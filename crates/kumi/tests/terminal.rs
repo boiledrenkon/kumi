@@ -761,13 +761,25 @@ async fn resume_lists_every_sets_conversations_and_asks_about_another_sets_by_nu
             f.input.write("2\n");
             flush().await;
             assert_eq!(*f.control.answers.borrow(), [SetChoice::Copy]);
-            // Anything else leaves it, and goes on as itself.
+            // A command runs as usual, with the question still open; any other line asks it again.
             f.emit(json!({"type":"set-asked","ask":{"id":"there2","title":"","daw":"Live","noun":"Set"}}));
-            assert!(f.text().contains("This conversation is about its Set, and Live has a Set not saved yet open."));
+            let question = "This conversation is about its Set, and Live has a Set not saved yet open.";
+            assert_eq!(f.text().matches(question).count(), 1);
+            let statuses = f.text().matches("[status] ").count();
+            f.input.write("/status\n");
+            flush().await;
+            assert!(f.text().matches("[status] ").count() > statuses, "{}", f.text());
+            assert_eq!(*f.control.answers.borrow(), [SetChoice::Copy]);
             f.input.write("hello\n");
             flush().await;
+            assert_eq!(f.text().matches(question).count(), 2, "{}", f.text());
+            assert!(!f.control.calls.borrow().contains(&"submit:hello".into()));
+            f.input.write("3\n");
+            flush().await;
             assert_eq!(*f.control.answers.borrow(), [SetChoice::Copy, SetChoice::Cancel]);
-            assert!(f.text().contains("Staying with this Set's conversation."));
+            // Answered, a line is a line again.
+            f.input.write("hello\n");
+            flush().await;
             assert!(f.control.calls.borrow().contains(&"submit:hello".into()));
             // Names, forks and the status line.
             f.input.write("/rename Night drive\n/rename there1 Bass, take two\n/new Second\n/fork\n/fork Alt\n");
