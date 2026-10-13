@@ -257,11 +257,11 @@ async fn a_conversation_another_open_kumi_has_is_taken_until_that_kumi_lets_go()
     let other = create_conversation_store(dir.path());
     assert_eq!(other.claim(A, "mv66me0m3fa91c"), Claim::Ours);
     assert_eq!(store.claim(A, "mv66me0m3fa91c"), Claim::Taken);
-    let lock = dir.path().join(A).join("conversations/mv66me0m3fa91c.lock");
-    assert_eq!(
-        serde_json::from_str::<Value>(&std::fs::read_to_string(&lock).unwrap_or_default()).ok().map(|v| v["pid"].clone()),
-        Some(json!(std::process::id()))
-    );
+    // It names the process for anyone looking (on Windows, nobody else can read a locked file).
+    if cfg!(unix) {
+        let lock = std::fs::read_to_string(dir.path().join(A).join("conversations/mv66me0m3fa91c.lock")).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&lock).unwrap()["pid"], std::process::id());
+    }
     // Not let go while it's open there, however old; and not deleted from under it.
     for n in 0..21 {
         store.save(A, &format!("new{n:03}aaaaaa"), &said("newer", 20 + n)).await.unwrap();
