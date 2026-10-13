@@ -132,10 +132,11 @@ main() {
   else base="$releases/latest/download"; fi
 
   # ── Tools it needs (every Mac has them) ────────────────────────────────
-  # fetch gets $1 into $2, and says how in got (the program's exit status) and code (the HTTP status; 000 for
-  # none). It's the status that tells a missing release: macOS's curl exits 56, not 22, for GitHub's 404.
-  # With $3, curl draws its progress bar.
+  # fetch gets $1 into $2, and says how in got (the program's exit status, curl's or wget's) and code (the HTTP
+  # status; 000 for none). It's the status that tells a missing release: macOS's curl exits 56, not 22, for
+  # GitHub's 404. With $3, curl draws its progress bar.
   if command -v curl >/dev/null 2>&1; then
+    fetcher=curl
     fetch() {
       : > "$work/fetch.err"
       if [ -n "${3:-}" ]; then
@@ -146,7 +147,7 @@ main() {
       connect="${code#* }"; code="${code%% *}"
     }
   elif command -v wget >/dev/null 2>&1; then
-    bar=""
+    fetcher=wget; bar=""
     fetch() {
       wget --tries=3 --timeout=30 -S -O "$2" "$1" 2>"$work/fetch.err"; got=$?
       code="$(sed -n 's/^ *HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' "$work/fetch.err" | tail -n 1)"; connect=""
@@ -179,15 +180,16 @@ main() {
     esac
     if [ "${connect:-000}" = 407 ]; then cause=proxy; message=""; fi
     if [ -z "$cause$message" ]; then
-      case "$got" in
-        5|97) cause=proxy ;;
-        6) cause=dns ;;
-        7) if [ -n "$(proxies)" ]; then cause=proxy; else cause=offline; fi ;;
-        28) cause=timeout ;;
-        35|51|53|54|58|59|60|64|66|77|80|82|83|90|91|98) cause=tls ;;
-        23) message="it couldn't save the download in $(shown "$KUMI_HOME") (is the disk full?)." ;;
-        1|3) message="$1 isn't an address it can download from." ;;
-        47) message="$host kept redirecting: $captive" ;;
+      # Each program's exit statuses mean their own things.
+      case "$fetcher:$got" in
+        curl:5|curl:97|wget:6) cause=proxy ;;
+        curl:6) cause=dns ;;
+        curl:7) if [ -n "$(proxies)" ]; then cause=proxy; else cause=offline; fi ;;
+        curl:28) cause=timeout ;;
+        curl:35|curl:51|curl:53|curl:54|curl:58|curl:59|curl:60|curl:64|curl:66|curl:77|curl:80|curl:82|curl:83|curl:90|curl:91|curl:98|wget:5) cause=tls ;;
+        curl:23|wget:3) message="it couldn't save the download in $(shown "$KUMI_HOME") (is the disk full?)." ;;
+        curl:1|curl:3) message="$1 isn't an address it can download from." ;;
+        curl:47) message="$host kept redirecting: $captive" ;;
         *) case "$said" in
              *[Rr]esolv*|*"ame or service not known"*|*"nodename nor servname"*) cause=dns ;;
              *[Cc]ertificate*|*SSL*|*TLS*) cause=tls ;;

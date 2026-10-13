@@ -470,6 +470,42 @@ exit $status
         for sudo in (None, "root"):
             self.assertEqual(self.install(self.home(f"root {sudo}"), SUDO_USER=sudo).returncode, 0, sudo)
 
+    def test_with_wget_its_own_exit_statuses_are_read(self):
+        # A computer with wget and no curl: every program here but curl, and a wget that fails as asked, or gets the
+        # file with curl, saying the status as wget -S does.
+        tools = self.root / "tools"
+        tools.mkdir()
+        for folder in ("/usr/bin", "/bin", "/usr/sbin", "/sbin"):
+            for program in Path(folder).iterdir():
+                if program.name not in {"curl", "wget"} and not (tools / program.name).exists() and os.access(program, os.X_OK):
+                    (tools / program.name).symlink_to(program)
+        curl = shutil.which("curl")
+        self.stub("wget", f"""for argument; do file="$url"; url="$argument"; done
+case "${{FAKE_WGET:-}}" in
+  tls) echo "ERROR: cannot verify 127.0.0.1's certificate" >&2; exit 5 ;;
+  disk) echo "Cannot write to '$file' (No space left on device)." >&2; exit 3 ;;
+  proxy) echo "Proxy tunneling failed: Proxy Authentication RequiredUnable to establish SSL connection." >&2; exit 6 ;;
+  dns) echo "wget: unable to resolve host address 'kumi.invalid'" >&2; exit 4 ;;
+esac
+status="$("{curl}" -s -o "$file" -w '%{{http_code}}' "$url")"
+echo "  HTTP/1.1 $status Whatever" >&2
+[ "$status" = 200 ] || exit 8
+""")
+        self.serve(self.release("1.0.0"))
+        home = self.home()
+        path = f"{self.stubs}:{tools}"
+        self.assertEqual(self.install(home, PATH=path).returncode, 0)
+        for fake, said in (("tls", "the secure connection didn't check out (TLS)"), ("disk", "it couldn't save the download in"),
+                           ("proxy", "the proxy didn't let it through"), ("dns", "its address couldn't be looked up (DNS)")):
+            run = self.install(home, PATH=path, FAKE_WGET=fake)
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn(said, run.stderr, fake)
+        empty = self.root / "empty"
+        empty.mkdir()
+        self.serve(empty)
+        run = self.install(home, PATH=path)
+        self.assertIn(f"there's no Kumi release for this computer ({self.target})", run.stderr)
+
     @unittest.skipUnless(platform.system() == "Darwin", "Rosetta is a Mac's")
     def test_a_shell_under_rosetta_gets_the_native_build(self):
         self.stub("uname", 'case "$1" in -m) echo x86_64 ;; *) exec /usr/bin/uname "$@" ;; esac\n')
