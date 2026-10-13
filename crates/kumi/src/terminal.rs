@@ -795,6 +795,20 @@ impl Terminal for PlainTerminal {
                     }
                 }
             });
+        } else {
+            // A saved model the provider's own list no longer shows: said once, with how to choose another.
+            let this = self.clone();
+            tokio::task::spawn_local(async move {
+                let models = this.0.options.models.clone();
+                if let Some(said) = crate::models::missing_model(models.as_ref()).await {
+                    if !this.0.state.borrow().closing {
+                        let provider = models.current().provider.unwrap_or_default();
+                        this.notice(&format!(
+                            "[model] {said}. /model {provider} lists the ones it does; /model {provider}/<model> chooses one."
+                        ));
+                    }
+                }
+            });
         }
         let this = self.clone();
         tokio::task::spawn_local(async move {

@@ -505,9 +505,27 @@ async fn eof_and_shutdown_deadline_suppress_late_output_restore_raw_mode() {
         })
         .await;
 }
+// A saved model its provider's list no longer shows: one line at start, naming how to list and choose another.
+#[tokio::test]
+async fn a_saved_model_its_provider_no_longer_lists_is_said_in_one_line() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let models = FakeModels::catalog();
+            *models.model.borrow_mut() = Some("openai-codex/gpt-5.5".into());
+            let f = Fixture::new(false, false, None, None, Some(models));
+            flush().await;
+            f.input.end();
+            f.quit().await;
+            let text = f.text();
+            let said = "[model] ChatGPT no longer offers gpt-5.5 to your sign-in. /model openai-codex lists the ones it does; /model openai-codex/<model> chooses one.";
+            assert_eq!(text.matches(said).count(), 1, "{text}");
+            assert_eq!(*f.models.calls.borrow(), ["list:openai-codex"]);
+        })
+        .await;
+}
 #[tokio::test]
 async fn model_listing_choosing_effort_and_auth_advice() {
-    tokio::task::LocalSet::new().run_until(async{let f=Fixture::new(false,false,None,None,Some(FakeModels::catalog()));flush().await;f.input.write("/model\n/model openai-codex\n/model openai-codex/gpt-6-luna\n/effort low\n/effort turbo\n/logout openai-codex\n");flush().await;f.emit(json!({"type":"error","message":"Not signed in to Anthropic: add its API key with /login (or set ANTHROPIC_API_KEY).","kind":"auth","provider":"anthropic"}));f.input.end();f.quit().await;let text=f.text();for want in ["Kumi · openai-codex/gpt-6-astra","[model] openai-codex/gpt-6-astra. List a provider's with /model <provider> (openai-codex)","[model] openai-codex: gpt-6-astra, gpt-6-luna","[model] openai-codex/gpt-6-luna from the next answer on.","[effort] low.","[effort] Choose one of low, medium, high, xhigh, max or default.","login anthropic"]{assert!(text.contains(want),"{text}");}assert_eq!(*f.models.calls.borrow(),["list:openai-codex","choose:openai-codex/gpt-6-luna","effort:low","signout:openai-codex"]);}).await;
+    tokio::task::LocalSet::new().run_until(async{let f=Fixture::new(false,false,None,None,Some(FakeModels::catalog()));flush().await;f.input.write("/model\n/model openai-codex\n/model openai-codex/gpt-6-luna\n/effort low\n/effort turbo\n/logout openai-codex\n");flush().await;f.emit(json!({"type":"error","message":"Not signed in to Anthropic: add its API key with /login (or set ANTHROPIC_API_KEY).","kind":"auth","provider":"anthropic"}));f.input.end();f.quit().await;let text=f.text();for want in ["Kumi · openai-codex/gpt-6-astra","[model] openai-codex/gpt-6-astra. List a provider's with /model <provider> (openai-codex)","[model] openai-codex: gpt-6-astra, gpt-6-luna","[model] openai-codex/gpt-6-luna from the next answer on.","[effort] low.","[effort] Choose one of low, medium, high, xhigh, max or default.","login anthropic"]{assert!(text.contains(want),"{text}");}assert!(!text.contains("no longer offers"),"{text}");assert_eq!(*f.models.calls.borrow(),["list:openai-codex","list:openai-codex","choose:openai-codex/gpt-6-luna","effort:low","signout:openai-codex"]);}).await;
 }
 #[tokio::test]
 async fn memory_and_library_learning_taste_are_listed_and_forgotten() {

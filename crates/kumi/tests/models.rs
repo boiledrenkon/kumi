@@ -41,7 +41,7 @@ impl Fetch for Offline {
         Err(LanguageModelError::other("offline"))
     }
 }
-/// ChatGPT's model list: Astra offers a faster tier, Luna none.
+/// ChatGPT's model list: Astra offers a faster tier, Luna none; GPT-5.5 hidden, as ChatGPT hides a model it's retiring.
 struct Chatgpt;
 #[async_trait(?Send)]
 impl Fetch for Chatgpt {
@@ -53,7 +53,8 @@ impl Fetch for Chatgpt {
             200,
             json!({"models":[
                 {"slug":"gpt-6-astra","display_name":"GPT-6 Astra","priority":1,"visibility":"list","service_tiers":[{"id":"priority","name":"Fast","description":"2x speed, increased usage"}]},
-                {"slug":"gpt-6-luna","display_name":"GPT-6 Luna","priority":2,"visibility":"list","service_tiers":[]}
+                {"slug":"gpt-6-luna","display_name":"GPT-6 Luna","priority":2,"visibility":"list","service_tiers":[]},
+                {"slug":"gpt-5.5","display_name":"GPT-5.5","priority":13,"visibility":"hide","service_tiers":[]}
             ]}),
         ))
     }
@@ -140,10 +141,9 @@ async fn model_and_effort_persist_an_unsupported_effort_reverts_and_signout_is_a
     assert_eq!(error.kumi().unwrap().provider.as_deref(), Some("anthropic"));
     assert!(!f.control.sign_out(ProviderId::Anthropic).await.unwrap());
 }
-#[tokio::test(flavor = "current_thread")]
-async fn fast_uses_the_tier_the_models_list_offers_persists_and_reaches_the_request() {
+/// Signed in to ChatGPT, with a token good for a day.
+async fn sign_in_chatgpt(store: &Rc<dyn CredentialStore>) {
     use base64::Engine;
-    let f = Fixture::with_fetch(Env::new(), Rc::new(Chatgpt));
     let claims = json!({"https://api.openai.com/auth":{"chatgpt_account_id":"acct-1"},"exp":kumi_common::time::now_ms()/1000+3600});
     let access = format!("e30.{}.sig", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap()));
     let credential = kumi_runtime::auth::store::OAuthCredential {
@@ -152,7 +152,12 @@ async fn fast_uses_the_tier_the_models_list_offers_persists_and_reaches_the_requ
         expires: kumi_common::time::now_ms() as f64 + 86400000.,
         account_id: "acct-1".into(),
     };
-    f.store.update("openai-codex", Box::new(move |_| async move { Ok(Some(Credential::Oauth(credential))) }.boxed_local())).await.unwrap();
+    store.update("openai-codex", Box::new(move |_| async move { Ok(Some(Credential::Oauth(credential))) }.boxed_local())).await.unwrap();
+}
+#[tokio::test(flavor = "current_thread")]
+async fn fast_uses_the_tier_the_models_list_offers_persists_and_reaches_the_request() {
+    let f = Fixture::with_fetch(Env::new(), Rc::new(Chatgpt));
+    sign_in_chatgpt(&f.store).await;
     let tier = |control: &ModelControl| {
         let control = control.clone();
         async move {
@@ -207,6 +212,26 @@ async fn opencode_zen_and_go_share_new_keys_and_invalidate_the_current_binding()
     });
     assert_eq!(control.save_key(ProviderId::Opencode, "oc-fixture-key-0001", None).await.unwrap(), ApiKeyCheck::Unreachable);
     assert_eq!(changes.get(), 1);
+}
+#[tokio::test(flavor = "current_thread")]
+async fn a_saved_model_its_providers_list_no_longer_shows_is_said() {
+    let f = Fixture::with_fetch(Env::new(), Rc::new(Chatgpt));
+    sign_in_chatgpt(&f.store).await;
+    f.control.choose("openai-codex/gpt-5.5").await.unwrap();
+    assert_eq!(missing_model(&f.control).await.as_deref(), Some("ChatGPT no longer offers gpt-5.5 to your sign-in"));
+    f.control.choose("openai-codex/gpt-6-luna").await.unwrap();
+    assert_eq!(missing_model(&f.control).await, None);
+    // Nothing new when the list can't be read (offline, signed out) or KUMI_MODEL picks the model.
+    let offline = Fixture::with_fetch(Env::new(), Rc::new(Offline));
+    sign_in_chatgpt(&offline.store).await;
+    offline.control.choose("openai-codex/gpt-5.5").await.unwrap();
+    assert_eq!(missing_model(&offline.control).await, None);
+    f.control.choose("openai-codex/gpt-5.5").await.unwrap();
+    assert!(f.control.sign_out(ProviderId::OpenaiCodex).await.unwrap());
+    assert_eq!(missing_model(&f.control).await, None);
+    let pinned = Fixture::with_fetch(Env::from([("KUMI_MODEL".into(), "openai-codex/gpt-5.5".into())]), Rc::new(Chatgpt));
+    sign_in_chatgpt(&pinned.store).await;
+    assert_eq!(missing_model(&pinned.control).await, None);
 }
 #[tokio::test(flavor = "current_thread")]
 async fn environment_model_choices_are_temporary_and_environment_keys_cannot_be_removed() {
