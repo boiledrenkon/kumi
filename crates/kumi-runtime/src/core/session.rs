@@ -1555,6 +1555,12 @@ impl KernelTool for LoopGuard {
     fn input_schema(&self) -> JsonObject {
         self.tool.input_schema()
     }
+    fn deferred(&self) -> bool {
+        self.tool.deferred()
+    }
+    fn listed_by(&self) -> Option<&str> {
+        self.tool.listed_by()
+    }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let name = self.tool.name();
         let ending = name == "judge" && input.get("done") == Some(&Value::Bool(true));
@@ -1614,6 +1620,12 @@ impl KernelTool for TechniquePlan {
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         self.tool.execute(take_technique(input, &self.learned), signal).await
+    }
+    fn deferred(&self) -> bool {
+        self.tool.deferred()
+    }
+    fn listed_by(&self) -> Option<&str> {
+        self.tool.listed_by()
     }
     fn stream(&self, signal: Signal, on_start: Rc<dyn Fn()>) -> Option<Box<dyn StreamingCall>> {
         self.tool
@@ -2118,6 +2130,39 @@ impl SessionController for Session {
     }
     fn has_run_recipe(&self) -> bool {
         true
+    }
+    fn has_instant(&self) -> bool {
+        true
+    }
+    async fn instant(&self, text: &str) -> Result<Option<InstantOutcome>, RuntimeError> {
+        let Some(intent) = super::phrases::parse(text) else { return Ok(None) };
+        let integration = self.0.state.borrow().integration.clone();
+        if !self.0.state.borrow().started || !integration.as_ref().is_some_and(|integration| integration.has_instant()) {
+            return Ok(None);
+        }
+        let outcome = Rc::new(RefCell::new(None));
+        let put = outcome.clone();
+        // As a recipe runs: a fresh look for current references, then the change, with no model call.
+        self.perform(
+            false,
+            Phase::Refresh,
+            Box::new(move |this, op| {
+                async move {
+                    this.observe(&op, None, false).await?;
+                    let integration = this.0.state.borrow().integration.clone();
+                    if let Some(integration) = integration {
+                        *put.borrow_mut() = integration.instant(&intent, op.signal.clone()).await?;
+                    }
+                    Ok(None)
+                }
+                .boxed_local()
+            }),
+            Some(self.0.turn_limit_ms),
+            None,
+        )?
+        .await?;
+        let done = outcome.borrow_mut().take();
+        Ok(done)
     }
     async fn run_recipe(&self, name: &str, with: JsonObject) -> Result<RecipeOutcome, RuntimeError> {
         if !self.0.state.borrow().started {

@@ -813,6 +813,67 @@ async fn saved(store: &dyn ConversationStore, place: &str, turns: u32) -> Curren
     }
     panic!("conversation was not saved");
 }
+// What every request carries stays small: with every one of the session's own tools on, those it sends with each
+// request (not deferred behind find_tools) stay few and short. Live's side has its own ceiling (live_integration.rs).
+local_test!(with_every_session_tool_on_only_a_few_go_with_every_request, {
+    use kumi_runtime::core::memory::{create_memory_store, MemoryStoreOptions};
+    use kumi_runtime::core::session::VideoDirectories;
+    use kumi_runtime::core::techniques::create_technique_store;
+    use kumi_runtime::library::{create_library, sources::SourceOptions, LibraryOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let text = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    let library = create_library(LibraryOptions {
+        dir: text("library"),
+        find_sets: Some(false),
+        fork: Some(false),
+        sources: Some(SourceOptions { home: Some(text("home")), ..Default::default() }),
+        ..Default::default()
+    });
+    let h = harness(None, |o| {
+        o.memory = Some(create_memory_store(MemoryStoreOptions {
+            projects_dir: dir.path().join("projects"),
+            producer_file: dir.path().join("producer.json"),
+        }));
+        o.listen = true;
+        o.web = true;
+        o.recipes = Some(kumi_runtime::create_recipe_store(dir.path().join("recipes")));
+        o.watch = Some(VideoDirectories { videos_dir: text("videos"), tools_dir: text("tools") });
+        o.techniques = Some(create_technique_store(dir.path().join("techniques.json")));
+        o.gaps = Some(text("gaps.jsonl"));
+        o.conversations = Some(create_conversation_store(dir.path()));
+        o.library = Some(library.clone());
+    });
+    h.session.start().await.unwrap();
+    let tools = h.record.created.borrow()[0].tools.clone();
+    let sent: Vec<&str> = tools.iter().filter(|tool| !tool.deferred()).map(|tool| tool.name()).collect();
+    let bytes: usize = tools
+        .iter()
+        .filter(|tool| !tool.deferred())
+        .map(|tool| tool.description().len() + serde_json::to_string(&tool.input_schema()).unwrap().len())
+        .sum();
+    assert_eq!(
+        sent,
+        ["remember", "listen", "search_web", "read_web", "find_sounds", "note_gap"],
+        "a tool that goes with every request is a choice"
+    );
+    assert!(bytes <= 13 * 1024, "{bytes} bytes");
+    let deferred: Vec<&str> = tools.iter().filter(|tool| tool.deferred()).map(|tool| tool.name()).collect();
+    for name in [
+        "forget",
+        "watch_video",
+        "save_recipe",
+        "run_recipe",
+        "forget_recipe",
+        "search_conversations",
+        "technique",
+        "find_presets",
+        "my_sets",
+        "live_manual",
+    ] {
+        assert!(deferred.contains(&name), "{name} waits behind find_tools: {deferred:?}");
+    }
+    h.session.close().await.unwrap();
+});
 fn project(h: &Harness, id: &str) {
     let mut o = h.observation.borrow_mut();
     o.key = id.into();

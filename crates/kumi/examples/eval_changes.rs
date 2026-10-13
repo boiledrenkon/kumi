@@ -1535,6 +1535,9 @@ struct Outcome {
     calls: usize,
     tool_ms: f64,
     tools: Option<Vec<String>>,
+    /// The model's find_tools and call_tool calls: the round trips a tool it wasn't sent up front cost.
+    found: usize,
+    called: usize,
     live: Vec<String>,
     changes: Vec<String>,
     recipes: Vec<String>,
@@ -1782,6 +1785,18 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
             }
         })
         .collect();
+    // find_tools and call_tool as the model called them (the steps shown name the tool call_tool ran).
+    let called_by_name = |name: &str| {
+        serde_json::from_str::<Vec<Value>>(&conversation)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|message| message.get("content").and_then(Value::as_array))
+            .flatten()
+            .filter(|part| {
+                part.get("type").and_then(Value::as_str) == Some("tool-call") && part.get("toolName").and_then(Value::as_str) == Some(name)
+            })
+            .count()
+    };
     Ok(Outcome {
         name: case.name,
         passed: (case.check)(&run),
@@ -1789,6 +1804,8 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
         calls,
         tool_ms: round(tool_ms.get()),
         tools: Some(tools.clone()),
+        found: called_by_name("find_tools"),
+        called: called_by_name("call_tool"),
         live,
         changes: changes.iter().map(|change| format!("{} · {}", word(change.state), change.title)).collect(),
         recipes: saved
@@ -1821,7 +1838,17 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
 /// A case's lines: pass or FAIL, its time and model calls, then what it changed, kept and said.
 fn report(outcome: &Outcome) {
     let timing = if outcome.ms != 0.0 {
-        format!("  {}s (tools {}s), {} model calls", to_fixed(outcome.ms / 1000.0, 1), to_fixed(outcome.tool_ms / 1000.0, 1), outcome.calls)
+        let deferred = if outcome.found + outcome.called > 0 {
+            format!(" ({} find_tools, {} call_tool)", outcome.found, outcome.called)
+        } else {
+            String::new()
+        };
+        format!(
+            "  {}s (tools {}s), {} model calls{deferred}",
+            to_fixed(outcome.ms / 1000.0, 1),
+            to_fixed(outcome.tool_ms / 1000.0, 1),
+            outcome.calls
+        )
     } else {
         String::new()
     };
@@ -1962,6 +1989,8 @@ async fn run() -> Result<i32, RuntimeError> {
     );
     let (input, cached, output) = model.counting.tokens.get();
     println!("Tokens: {} in ({} of them cache reads), {} out.", to_string(input), to_string(cached), to_string(output));
+    let (found, called) = results.iter().fold((0, 0), |(found, called), result| (found + result.found, called + result.called));
+    println!("Tools not sent up front: {found} find_tools and {called} call_tool calls.");
     Ok(if passed == results.len() { 0 } else { 1 })
 }
 

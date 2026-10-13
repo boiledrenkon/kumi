@@ -442,6 +442,10 @@ impl KernelTool for LibraryTool {
     fn input_schema(&self) -> JsonObject {
         definition(self.name).input_schema.clone()
     }
+    /// Sounds are looked for all the time; presets and earlier Sets now and then, through find_tools.
+    fn deferred(&self) -> bool {
+        self.name != FIND_SOUNDS_TOOL
+    }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         match self.name {
             FIND_SOUNDS_TOOL => self.find_sounds(input, signal).await,

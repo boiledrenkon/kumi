@@ -345,6 +345,12 @@ impl KernelTool for UndoWatch {
     fn input_schema(&self) -> JsonObject {
         self.tool.input_schema()
     }
+    fn deferred(&self) -> bool {
+        self.tool.deferred()
+    }
+    fn listed_by(&self) -> Option<&str> {
+        self.tool.listed_by()
+    }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let result = self.tool.execute(input, signal).await?;
         if !result.is_error {

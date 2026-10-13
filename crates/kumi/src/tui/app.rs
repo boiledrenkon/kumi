@@ -823,7 +823,8 @@ impl Drop for Inner {
 }
 const FAREWELL: &str = "Kumi closed. Each Set's conversation continues next time.";
 const CHANGE_FLASH_MS: f64 = 4000.;
-const QUIET_TOOLS: &[&str] = &["remember", "forget", "save_recipe", "forget_recipe", "reaction"];
+/// Steps the conversation doesn't show: what Kumi keeps on its own, and finding a tool that wasn't sent up front.
+const QUIET_TOOLS: &[&str] = &["remember", "forget", "save_recipe", "forget_recipe", "reaction", "find_tools"];
 const ACTION_TOOLS: &[&str] = &["play", "fire_scene", "launch_clip", "record", "jump_to_locator", "select", "show"];
 fn head(text: &str, count: usize) -> String {
     String::from_utf16_lossy(&text.encode_utf16().take(count).collect::<Vec<_>>())

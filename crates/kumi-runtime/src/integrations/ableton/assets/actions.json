@@ -1,6 +1,7 @@
 [
   {
     "tool": "play",
+    "core": true,
     "since": "1.0.34",
     "preview": "live_transport_action_preview",
     "apply": "live_transport_action_apply",

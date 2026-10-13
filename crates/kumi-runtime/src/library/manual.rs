@@ -379,6 +379,10 @@ impl KernelTool for ManualTool {
     fn input_schema(&self) -> JsonObject {
         definition(MANUAL_TOOL).input_schema.clone()
     }
+    /// Rarely needed: find_tools reaches it.
+    fn deferred(&self) -> bool {
+        true
+    }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let question = trim(input.get("question").and_then(serde_json::Value::as_str).unwrap_or(""));
         let number = trim(input.get("section").and_then(serde_json::Value::as_str).unwrap_or(""));

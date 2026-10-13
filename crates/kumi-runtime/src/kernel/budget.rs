@@ -88,12 +88,15 @@ pub fn transcript_of(messages: &[Value]) -> Vec<TranscriptLine> {
             carried_on = true;
             continue;
         }
-        // An answer's steps come back too: the tools it called, in order.
+        // An answer's steps come back too: the tools it called, in order (the one call_tool ran, not call_tool).
         let tools: Vec<String> = match role {
             TranscriptRole::Assistant => parts
                 .iter()
                 .filter(|part| part.get("type").and_then(Value::as_str) == Some("tool-call"))
-                .filter_map(|part| part.get("toolName").and_then(Value::as_str).map(str::to_string))
+                .filter_map(|part| {
+                    let name = part.get("toolName").and_then(Value::as_str)?;
+                    Some(super::deferred::shown(name, part.get("input").unwrap_or(&Value::Null)).0.to_string())
+                })
                 .collect(),
             TranscriptRole::User => Vec::new(),
         };

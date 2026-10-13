@@ -228,6 +228,10 @@ impl KernelTool for VideoTool {
     fn input_schema(&self) -> JsonObject {
         DATA["schema"].as_object().unwrap().clone()
     }
+    /// Asked for now and then, and a watch takes minutes: a find_tools call first costs nothing that shows.
+    fn deferred(&self) -> bool {
+        true
+    }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let url = input.get("url").and_then(Value::as_str).map(trim).unwrap_or("");
         if url.is_empty() {

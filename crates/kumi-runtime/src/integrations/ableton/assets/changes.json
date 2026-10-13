@@ -2,6 +2,7 @@
   "kinds": [
     {
       "tool": "set_tempo",
+      "core": true,
       "preview": "live_tempo_preview",
       "apply": "live_tempo_apply",
       "family": "tempo",
@@ -12,6 +13,7 @@
     },
     {
       "tool": "set_mixer",
+      "core": true,
       "preview": "live_mixer_preview",
       "apply": "live_mixer_apply",
       "family": "mixer",
@@ -22,6 +24,7 @@
     },
     {
       "tool": "rename",
+      "core": true,
       "preview": "live_object_rename_preview",
       "apply": "live_object_rename_apply",
       "family": "rename",
@@ -32,6 +35,7 @@
     },
     {
       "tool": "add_tracks_and_scenes",
+      "core": true,
       "preview": "live_session_structure_preview",
       "apply": "live_session_structure_apply",
       "family": "structure",
@@ -45,6 +49,7 @@
     },
     {
       "tool": "write_midi_clip",
+      "core": true,
       "preview": "live_midi_clip_preview",
       "apply": "live_midi_clip_apply",
       "family": "clip",
@@ -212,6 +217,7 @@
     },
     {
       "tool": "load_device",
+      "core": true,
       "preview": "live_browser_load_preview",
       "apply": "live_browser_load_apply",
       "family": "device",
@@ -223,6 +229,7 @@
     },
     {
       "tool": "set_device_parameter",
+      "core": true,
       "preview": "live_device_parameter_preview",
       "apply": "live_device_parameter_apply",
       "family": "parameter",
@@ -249,6 +256,7 @@
     },
     {
       "tool": "edit_rack",
+      "core": true,
       "preview": "live_rack_preview",
       "apply": "live_rack_apply",
       "family": "device",
@@ -490,6 +498,7 @@
     },
     {
       "tool": "duplicate_clip",
+      "core": true,
       "preview": "live_clip_duplicate_preview",
       "apply": "live_clip_duplicate_apply",
       "family": "clip",
@@ -637,6 +646,7 @@
     },
     {
       "tool": "set_automation",
+      "core": true,
       "preview": "live_automation_preview",
       "apply": "live_automation_apply",
       "family": "clip",
@@ -647,6 +657,7 @@
     },
     {
       "tool": "change_structure",
+      "core": true,
       "preview": "live_track_structure_preview",
       "apply": "live_track_structure_apply",
       "family": "structure",

@@ -750,6 +750,11 @@ impl KernelTool for TechniqueTool {
     fn input_schema(&self) -> JsonObject {
         with_final(TOOL_DATA["schema"].as_object().unwrap().clone())
     }
+    /// A technique is drafted beside the make_changes that builds it (its technique field); this one, for
+    /// keeping, using and forgetting them, waits behind find_tools.
+    fn deferred(&self) -> bool {
+        true
+    }
     async fn execute(&self, input: JsonObject, _signal: Signal) -> Result<ToolResult, RuntimeError> {
         let input = Value::Object(input);
         let action = input["action"].as_str().unwrap_or("");

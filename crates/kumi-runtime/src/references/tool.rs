@@ -59,6 +59,10 @@ impl KernelTool for ReferenceTool {
     fn description(&self) -> &str {
         DESCRIPTION
     }
+    /// Rarely needed: find_tools reaches it.
+    fn deferred(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> JsonObject {
         json!({
             "type": "object",
