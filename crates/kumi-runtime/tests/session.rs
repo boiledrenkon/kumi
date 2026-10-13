@@ -69,6 +69,8 @@ struct Record {
     opened: RefCell<Vec<String>>,
     /// The model the kernels say they are.
     origin: RefCell<Option<String>>,
+    /// The integration leaves what the DAW and a place in it are called to the default.
+    plain_words: Cell<bool>,
 }
 struct TestKernel {
     record: Rc<Record>,
@@ -171,6 +173,13 @@ impl Integration for TestIntegration {
     }
     fn conversation(&self, id: &str) {
         self.record.conversations.borrow_mut().push(id.into());
+    }
+    fn words(&self) -> (&'static str, &'static str) {
+        if self.record.plain_words.get() {
+            DAW_WORDS
+        } else {
+            ("Live", "Set")
+        }
     }
     async fn open_place(&self, place: &str, _: Signal) -> Result<Result<(), String>, RuntimeError> {
         self.record.opened.borrow_mut().push(place.into());
@@ -3910,5 +3919,20 @@ local_test!(the_question_goes_when_the_chosen_conversations_set_opens_another_wa
     assert!(asks(&h).last().unwrap().is_some());
     h.session.new_conversation().await.unwrap();
     assert_eq!(asks(&h).last().unwrap(), &None);
+    h.session.close().await.unwrap();
+});
+local_test!(another_daws_words_are_its_own_in_what_kumi_says_about_another_place, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    h.record.plain_words.set(true);
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    let ask = asks(&h).last().unwrap().clone().unwrap();
+    assert_eq!((ask.daw.as_str(), ask.noun.as_str()), ("the DAW", "project"));
+    h.session.answer_set(SetChoice::Open).await.unwrap();
+    assert!(h.notice("Opening its project in the DAW; this conversation carries on once it's open."));
     h.session.close().await.unwrap();
 });

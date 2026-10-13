@@ -913,6 +913,9 @@ impl Integration for Ableton {
         let set = self.history.remember.current()?;
         set.path.clone().filter(|path| !set.unsaved && !path.is_empty() && !project::template_location(path))
     }
+    fn words(&self) -> (&'static str, &'static str) {
+        ("Live", "Set")
+    }
     /// The Set where Kumi last saw the project, through the system as a double-click would open it: Live asks about the
     /// open Set in its own dialog. Live drops Kumi while the Set loads, which reads as a Set Kumi asked for (#188).
     async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {

@@ -430,6 +430,9 @@ pub enum ConversationMatch {
     None,
 }
 
+/// What a DAW and a place in it are called when the integration doesn't say.
+pub const DAW_WORDS: (&str, &str) = ("the DAW", "project");
+
 /// Whether this Kumi has a conversation to itself, or another Kumi that's still open has it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Claim {
@@ -651,15 +654,15 @@ pub trait Integration {
     fn open_set(&self) -> Option<String> {
         None
     }
-    /// What the producer calls the DAW and a place in it: ("Live", "Set").
+    /// What the producer calls the DAW and a place in it (Live's integration: "Live", "Set"); plain words otherwise.
     fn words(&self) -> (&'static str, &'static str) {
-        ("Live", "Set")
+        DAW_WORDS
     }
-    /// Open the saved Set a kept conversation belongs to (`place`) in the DAW, which may ask first whether to save the open
-    /// one. `Err(why)` inside when it can't.
+    /// Open the saved place (a Set, a project) a kept conversation belongs to in the DAW, which may ask first whether to
+    /// save the open one. `Err(why)` inside when it can't.
     async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {
         let _ = (place, signal);
-        Ok(Err("Kumi can't open another Set here.".into()))
+        Ok(Err("Kumi can't open it from here.".into()))
     }
     fn has_show_message(&self) -> bool {
         false

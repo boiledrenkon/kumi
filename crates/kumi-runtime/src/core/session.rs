@@ -1144,6 +1144,13 @@ impl Session {
         )?
         .await
     }
+    /// What the producer calls the DAW and a place in it, as the integration says ("Live", "Set").
+    fn words(&self) -> (&'static str, &'static str) {
+        match &self.0.state.borrow().integration {
+            Some(integration) => integration.words(),
+            None => DAW_WORDS,
+        }
+    }
     /// The conversation the producer chose is no longer waiting: a question asked about it goes away.
     fn drop_wanted(&self) -> Option<Wanted> {
         let wanted = self.0.state.borrow_mut().wanted.take();
@@ -1168,7 +1175,7 @@ impl Session {
             },
             None => None,
         };
-        let (daw, noun) = self.0.state.borrow().integration.as_ref().map(|i| i.words()).unwrap_or(("Live", "Set"));
+        let (daw, noun) = self.words();
         self.emit(SessionEvent::SetAsked {
             ask: Some(SetAsk {
                 id: wanted.id.clone(),
@@ -2406,8 +2413,9 @@ impl SessionController for Session {
             },
             None => None,
         };
+        let (daw, noun) = self.words();
         let named = row.as_ref().and_then(|row| row.set.clone());
-        let set = named.as_ref().map(|name| format!("“{name}”")).unwrap_or_else(|| "its Set".into());
+        let set = named.as_ref().map(|name| format!("“{name}”")).unwrap_or_else(|| format!("its {noun}"));
         match choice {
             // The open Set's own conversation goes on, whichever was going on.
             SetChoice::Cancel => {
@@ -2425,12 +2433,12 @@ impl SessionController for Session {
                 let integration = self.0.state.borrow().integration.clone();
                 let opened = match integration {
                     Some(integration) => integration.open_place(&wanted.place, abort::timeout(30_000)).await?,
-                    None => Err("Live isn't connected.".into()),
+                    None => Err(format!("{daw} isn't connected.")),
                 };
                 // It's taken up once its Set is open, however that Set comes to be opened.
                 match opened {
-                    Ok(()) => self.notice(format!("Opening {set} in Live; this conversation carries on once it's open.")),
-                    Err(why) => self.notice(format!("{why} Open {set} in Live yourself, and this conversation carries on there.")),
+                    Ok(()) => self.notice(format!("Opening {set} in {daw}; this conversation carries on once it's open.")),
+                    Err(why) => self.notice(format!("{why} Open {set} in {daw} yourself, and this conversation carries on there.")),
                 }
                 Ok(())
             }
@@ -2452,12 +2460,12 @@ impl SessionController for Session {
                 let copy = SavedConversation { saved_at: now(), checkpoint, changes: None, first: kept.first.clone(), turns: kept.turns };
                 let id = store.new_id().await;
                 store.create(&here, &id, &copy, None, Some(&wanted.id)).await?;
-                let open = open.map(|name| format!("“{name}”")).unwrap_or_else(|| "a Set not saved yet".into());
-                let other = named.map(|name| format!("another Set, “{name}”,")).unwrap_or_else(|| "another Set".into());
+                let open = open.map(|name| format!("“{name}”")).unwrap_or_else(|| format!("a {noun} not saved yet"));
+                let other = named.map(|name| format!("another {noun}, “{name}”,")).unwrap_or_else(|| format!("another {noun}"));
                 self.go_to(here, id, copy, Some(format!("Carrying on a copy here; the original stays with {set} as {}.", wanted.id)))
                     .await?;
                 self.0.state.borrow_mut().next_note = Some(format!(
-                    "\n\n[Kumi] This conversation began about {other} and carries on here about {open}, as a copy: what Kumi read of that Set was taken out. Read the open Set before changing anything. (Kumi wrote this note, not the producer.)"
+                    "\n\n[Kumi] This conversation began about {other} and carries on here about {open}, as a copy: what Kumi read of that {noun} was taken out. Read the open {noun} before changing anything. (Kumi wrote this note, not the producer.)"
                 ));
                 Ok(())
             }
