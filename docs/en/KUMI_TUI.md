@@ -84,6 +84,8 @@ Run these as `kumi <command>`; from a copy of the repository, as
 | `kumi` | Open Kumi on the Set Live has open; the first time, sign in and put the bridge in Live (Kumi can restart Live for you) |
 | `kumi -c` (or `--continue`) | Carry on the conversation you had last, in any Set |
 | `kumi -r [id or name]` (or `--resume`) | Carry on a kept conversation by its id (or its start) or name; alone, choose one. Both work with `--inference-only` |
+| `kumi export [id or name] [--md \| --html \| --json] [--full] [-o path]` | Save a kept conversation as Markdown (the default), a web page or a file for Kumi; without an id, your latest. `--full` adds each step's input and result; `--raw` leaves keys and paths in |
+| `kumi import <file>` | Keep a conversation saved with `kumi export --json`, to carry on with `kumi -r` |
 | `kumi --inference-only` | Chat without Live |
 | `kumi --bridge-config <absolute path>` | Use your own bridge configuration |
 | `kumi login` | Sign in: asks whether with ChatGPT or an API key |
@@ -112,6 +114,8 @@ message, not a command.
 | `/resume [id or name]` | Kept conversations: this Set's, and every Set's under Tab; choose one to carry on with it. With an id (or its start) or a name, that one. `/conversations` is the same |
 | `/rename [name]` | Name this conversation; alone, its name goes in the box to change |
 | `/fork [name]` | Carry on in a copy of this conversation, with a new id; the original stays |
+| `/export` | This conversation as a file: copy it as Markdown, or save Markdown, a web page or a file for Kumi (`kumi import`). Over 64 KB, the copy is saved as a file instead |
+| `/share` | Save this conversation as a web page that opens anywhere, then open it, show it in Finder (Explorer) or copy its path |
 | `/reconnect` | Connect to Live again over a fresh bridge, keeping the conversation (earlier changes lose Kumi's undo) |
 | `/undo` | Undo Kumi's latest change |
 | `/stop` | Stop Live: clips, the transport and recording. Also stops Kumi's answer |

@@ -32,6 +32,8 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `kumi` | 在 Live 当前打开的工程上打开 Kumi；第一次时登录，并把桥接装入 Live（Kumi 可以替你重启 Live） |
 | `kumi -c`（或 `--continue`） | 接着你上次使用的对话继续，不论它属于哪个工程 |
 | `kumi -r [ID 或名称]`（或 `--resume`） | 按 ID（或其开头）或名称继续一段保存的对话；不加参数则从列表中选择。两者都可与 `--inference-only` 一起使用 |
+| `kumi export [ID 或名称] [--md \| --html \| --json] [--full] [-o 路径]` | 将保存的对话存为 Markdown（默认）、网页或供 Kumi 使用的文件；不写 ID 时为最近的对话。`--full` 加上每个步骤的输入和结果，`--raw` 保留密钥和路径 |
+| `kumi import <文件>` | 导入用 `kumi export --json` 保存的对话，之后可用 `kumi -r` 继续 |
 | `kumi --inference-only` | 不连接 Live，只聊天 |
 | `kumi --bridge-config <absolute path>` | 使用你自己的桥接配置 |
 | `kumi login` | 登录：询问使用 ChatGPT 还是 API 密钥 |
@@ -58,6 +60,8 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `/resume [ID 或名称]` | 保存的对话：本工程的，按 Tab 显示所有工程的；选择一段即可继续。给出 ID（或其开头）或名称时，直接继续那一段。`/conversations` 相同 |
 | `/rename [name]` | 为这段对话命名；不加名称时，当前名称会放进输入框供你修改 |
 | `/fork [name]` | 用新的 ID 在这段对话的副本中继续；原对话保留 |
+| `/export` | 将这段对话存为文件：复制为 Markdown，或保存为 Markdown、网页、供 Kumi 使用的文件（`kumi import`）。超过 64 KB 时改为保存文件 |
+| `/share` | 将这段对话保存为随处可打开的网页，然后打开它、在访达（资源管理器）中显示它，或复制它的路径 |
 | `/reconnect` | 通过新的桥接重新连接 Live，保留对话（之前的修改将失去 Kumi 的撤销） |
 | `/undo` | 撤销 Kumi 最近一次修改 |
 | `/stop` | 停止 Live：片段、走带和录音。同时停止 Kumi 的回答 |
