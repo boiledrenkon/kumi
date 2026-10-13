@@ -746,8 +746,13 @@ impl PlainTerminal {
         let mention = |row: &ConversationSummary, with_set: bool| {
             let title = head(&sanitize_text(&row.title(), &self.0.options.secrets), 80);
             let when = if row.current { "this one".into() } else { since(row.saved_at as f64, now_ms_f64()) };
-            let set =
-                row.set.as_deref().map(|set| head(&sanitize_text(set, &self.0.options.secrets), 40)).unwrap_or_else(|| "a Set".into());
+            let set = row.set.as_deref().map(|set| head(&sanitize_text(set, &self.0.options.secrets), 40)).unwrap_or_else(|| {
+                if row.place == kumi_runtime::IMPORTED {
+                    "imported".into()
+                } else {
+                    "a Set".into()
+                }
+            });
             format!(
                 "{} ({}{}{when}, {} {})",
                 if title.is_empty() { "(nothing asked yet)" } else { &title },
