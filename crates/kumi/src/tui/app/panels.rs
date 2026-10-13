@@ -390,7 +390,9 @@ impl TuiApp {
                 ),
                 NoteTone::Faint,
             );
-            item.words = Some(format!("{} {set}", self.clean(&row.first.replace('\n', " "), 200)));
+            // Found by its whole name too, past where the row cuts it.
+            let name = row.name.as_deref().map(|name| self.clean(name, 60)).unwrap_or_default();
+            item.words = Some(format!("{name} {} {set}", self.clean(&row.first.replace('\n', " "), 200)));
             item
         };
         let list = |rows: &[ConversationSummary], every: bool| {
