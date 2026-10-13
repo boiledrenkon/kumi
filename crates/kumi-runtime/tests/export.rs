@@ -1,6 +1,6 @@
 use chrono::FixedOffset;
 use kumi_runtime::ai::types::Message;
-use kumi_runtime::core::contracts::{ChangePicture, KernelCheckpoint, SavedConversation, TranscriptLine, TranscriptRole};
+use kumi_runtime::core::contracts::{ChangeRecord, KernelCheckpoint, SavedConversation, TranscriptLine, TranscriptRole};
 use kumi_runtime::core::export::{file_name, html, import, json, markdown, Format, Options, Source, IMPORT_MAX_BYTES, LEFT_OUT, PARTIAL};
 use kumi_runtime::core::goal::goal_setup;
 use kumi_runtime::core::goal_mode::objective_audit;
@@ -38,8 +38,8 @@ fn redact(text: &str) -> String {
 fn label(tool: &str) -> String {
     format!("used {tool}")
 }
-fn picture(_: &ChangePicture) -> Option<String> {
-    Some("<svg class=\"drawn\"></svg>".into())
+fn picture(change: &ChangeRecord) -> Option<String> {
+    change.picture.as_ref().map(|_| "<svg class=\"drawn\"></svg>".into())
 }
 fn options(full: bool) -> Options<'static> {
     Options {

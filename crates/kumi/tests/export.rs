@@ -4,10 +4,10 @@ use std::cell::RefCell;
 use std::fs;
 
 use chrono::FixedOffset;
-use kumi::export::{export_command, import_command, render, svg_of, write_new, ExportRequest};
+use kumi::export::{export_command, import_command, picture_of, render, svg_of, write_new, ExportRequest};
 use kumi::report::redactor;
 use kumi::tui::tty::TtyOutput;
-use kumi_runtime::core::contracts::{ChangePicture, ConversationStore, KernelCheckpoint, SavedConversation, TranscriptRole};
+use kumi_runtime::core::contracts::{ChangePicture, ChangeRecord, ConversationStore, KernelCheckpoint, SavedConversation, TranscriptRole};
 use kumi_runtime::core::export::{Format, Source};
 use kumi_runtime::kernel::budget::transcript_of;
 use kumi_runtime::system::Env;
@@ -260,4 +260,39 @@ fn file_names_and_ordinary_words_come_out_right() {
     ] {
         assert_eq!(redact(words), words);
     }
+}
+
+#[test]
+fn the_page_draws_what_history_draws_from_a_record() {
+    let record = |extra: Value| -> ChangeRecord {
+        let mut change = json!({"id": "c1", "family": "clip", "title": "t", "state": "applied", "at": 1});
+        change.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(change).unwrap()
+    };
+    let loads = |page: &str| ["<script", "href", "src=", "<image", "url(", "<foreignObject"].iter().any(|outside| page.contains(outside));
+    // A new clip's notes.
+    let clip =
+        picture_of(&record(json!({"clip": {"length": 4, "notes": [{"pitch": 60, "start": 0, "duration": 1, "velocity": 100}]}}))).unwrap();
+    assert!(clip.starts_with("<svg") && clip.contains("<rect class=\"now\""), "{clip}");
+    // Where a device went, its name written as words.
+    let device =
+        picture_of(&record(json!({"devices": {"devices": ["EQ Eight", "<script>alert(1)</script>", "Limiter"], "index": 1}}))).unwrap();
+    assert!(device.contains("EQ Eight <span>→</span> <strong>&lt;script&gt;alert(1)&lt;/script&gt;</strong>"), "{device}");
+    let rack = picture_of(&record(json!({"devices": {"rack": "Drum Rack", "chains": [{"name": "Kick", "devices": ["Saturator"]}, {"name": "Snare", "devices": []}], "chain": 1}}))).unwrap();
+    assert!(rack.contains("<p class=\"rack\">Drum Rack</p>") && rack.contains("<strong>Snare</strong>: empty"), "{rack}");
+    // Colours as swatches, and only colours.
+    let colors = picture_of(&record(json!({"colors": {"from": "#FF0000", "to": "#00aa55"}}))).unwrap();
+    assert!(colors.contains("fill=\"#ff0000\"") && colors.contains("fill=\"#00aa55\""), "{colors}");
+    assert_eq!(picture_of(&record(json!({"colors": {"to": "red\" onload=\"x"}}))), None);
+    // A value's move as bars.
+    let bars = picture_of(&record(json!({"from": 0.25, "to": 0.75, "range": [0, 1]}))).unwrap();
+    assert!(
+        bars.contains("<rect class=\"ghost\" x=\"0\" y=\"10\" width=\"100.0\"")
+            && bars.contains("<rect class=\"now\" x=\"0\" y=\"40\" width=\"300.0\""),
+        "{bars}"
+    );
+    for page in [&clip, &device, &rack, &colors, &bars] {
+        assert!(!loads(page), "{page}");
+    }
+    assert_eq!(picture_of(&record(json!({}))), None, "nothing to draw");
 }

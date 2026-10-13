@@ -3600,7 +3600,7 @@ local_test!(an_imported_conversation_carries_on_here_in_a_copy_and_the_model_hea
     // Saved for Kumi on another computer, then imported here.
     let elsewhere = kept_about("make the bass wider", Some("openai/gpt-test"));
     let same = |text: &str| text.to_string();
-    let none = |_: &ChangePicture| -> Option<String> { None };
+    let none = |_: &ChangeRecord| -> Option<String> { None };
     let options = Options {
         full: false,
         redact: &same,
@@ -3667,7 +3667,7 @@ async fn imported_here(store: &dyn ConversationStore) {
     use kumi_runtime::core::export::{import, json as saved_for_kumi, Options, Source};
     let elsewhere = kept_about("make the bass wider", Some("openai/gpt-test"));
     let same = |text: &str| text.to_string();
-    let none = |_: &ChangePicture| -> Option<String> { None };
+    let none = |_: &ChangeRecord| -> Option<String> { None };
     let options = Options {
         full: false,
         redact: &same,

@@ -10,9 +10,11 @@ use std::rc::Rc;
 use chrono::{FixedOffset, Local, Offset};
 use kumi_common::js::string::head;
 use kumi_common::time::now_ms;
-use kumi_runtime::core::contracts::{ChangePicture, ConversationMatch, ConversationStore, ConversationSummary, SessionController};
+use kumi_runtime::core::contracts::{
+    ChangePicture, ChangeRecord, ColorChange, ConversationMatch, ConversationStore, ConversationSummary, DevicePlacement, SessionController,
+};
 use kumi_runtime::core::conversations::FileConversationStore;
-use kumi_runtime::core::export::{file_name, html, import, json, markdown, Format, Options, Source, IMPORT_MAX_BYTES};
+use kumi_runtime::core::export::{file_name, html, html_text, import, json, markdown, Format, Options, Source, IMPORT_MAX_BYTES};
 use kumi_runtime::system::{self, Env};
 use kumi_runtime::{create_conversation_store_keeping, gone_words, RuntimeError, IMPORTED, KUMI_VERSION};
 
@@ -48,7 +50,7 @@ pub fn render(format: Format, source: &Source, full: bool, redact: Option<&dyn F
         redact: redact.unwrap_or(&same),
         redacted: redact.is_some(),
         label: &step_label,
-        picture: &svg_of,
+        picture: &picture_of,
         zone,
         now,
         version: KUMI_VERSION,
@@ -63,6 +65,96 @@ pub fn render(format: Format, source: &Source, full: bool, redact: Option<&dyn F
 /// This computer's time zone, as it is now.
 pub fn local_zone() -> FixedOffset {
     Local::now().offset().fix()
+}
+
+/// A change's picture for the web page, from its record alone, as HISTORY draws it: what the change drew (an equaliser's
+/// curve, a compressor's, notes, a lane), else a new clip's notes, where a device went, the colours it moved between or
+/// the value it moved from and to. None when there's nothing to draw.
+pub fn picture_of(change: &ChangeRecord) -> Option<String> {
+    if let Some(picture) = &change.picture {
+        return svg_of(picture);
+    }
+    if let Some(clip) = &change.clip {
+        return svg_of(&ChangePicture::Notes { length: clip.length, before: vec![], after: clip.notes.clone(), partial: false });
+    }
+    if let Some(devices) = &change.devices {
+        return devices_of(devices);
+    }
+    if let Some(colors) = &change.colors {
+        return swatches_of(colors);
+    }
+    bars_of(change.from?, change.to?, change.range?)
+}
+
+/// Where a device went, as a line of names with the new one lit; inside a rack, its chains, the one it went in lit.
+fn devices_of(placement: &DevicePlacement) -> Option<String> {
+    let row = |devices: &[String], lit: Option<f64>| {
+        devices
+            .iter()
+            .enumerate()
+            .map(|(at, name)| {
+                let name = html_text(if name.is_empty() { "Device" } else { name });
+                if lit == Some(at as f64) {
+                    format!("<strong>{name}</strong>")
+                } else {
+                    name
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" <span>→</span> ")
+    };
+    let chains = placement.chains.as_deref().unwrap_or_default();
+    if chains.is_empty() {
+        let devices = placement.devices.as_ref().filter(|devices| !devices.is_empty())?;
+        return Some(format!("<p class=\"chain\">{}</p>", row(devices, placement.index)));
+    }
+    let focus = placement.chain.filter(|chain| chain.is_finite() && *chain >= 0.).unwrap_or(0.) as usize;
+    let mut out = String::from("<div class=\"chain\">");
+    if let Some(rack) = placement.rack.as_deref().filter(|rack| !rack.is_empty()) {
+        out.push_str(&format!("<p class=\"rack\">{}</p>", html_text(rack)));
+    }
+    for (at, chain) in chains.iter().enumerate() {
+        let name = html_text(&chain.name);
+        // A chain lit whole is the new one; otherwise the new device in it is.
+        let name = if at == focus && placement.index.is_none() { format!("<strong>{name}</strong>") } else { name };
+        let devices =
+            if chain.devices.is_empty() { "empty".to_string() } else { row(&chain.devices, placement.index.filter(|_| at == focus)) };
+        out.push_str(&format!("<p>{name}: {devices}</p>"));
+    }
+    out.push_str("</div>");
+    Some(out)
+}
+
+/// A colour change's before and after, as swatches in their own colours (written as "#rrggbb"; anything else draws none).
+fn swatches_of(colors: &ColorChange) -> Option<String> {
+    let hex = |color: &str| {
+        (color.len() == 7 && color.starts_with('#') && color[1..].bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| color.to_ascii_lowercase())
+    };
+    let to = hex(&colors.to)?;
+    let mut shapes = String::new();
+    let mut x = 0.;
+    if let Some(from) = colors.from.as_deref().and_then(hex) {
+        shapes.push_str(&format!("<rect class=\"swatch\" x=\"2\" y=\"10\" width=\"120\" height=\"60\" rx=\"6\" fill=\"{from}\"/>"));
+        shapes.push_str("<polyline class=\"guide\" points=\"140,40 182,40\" stroke-width=\"3\"/>");
+        shapes.push_str("<polyline class=\"guide\" points=\"172,31 182,40 172,49\" stroke-width=\"3\"/>");
+        x = 200.;
+    }
+    shapes.push_str(&format!("<rect class=\"swatch\" x=\"{x}\" y=\"10\" width=\"120\" height=\"60\" rx=\"6\" fill=\"{to}\"/>"));
+    Some(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {WIDTH} 80\" aria-hidden=\"true\">{shapes}</svg>"))
+}
+
+/// A value's move within its range, as two bars: where it was, faint, and where it is now.
+fn bars_of(from: f64, to: f64, [min, max]: [f64; 2]) -> Option<String> {
+    if ![from, to, min, max].iter().all(|value| value.is_finite()) || max <= min {
+        return None;
+    }
+    let width = |value: f64| ((value - min) / (max - min)).clamp(0., 1.) * WIDTH;
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {WIDTH} 70\" aria-hidden=\"true\"><rect class=\"guide\" x=\"0\" y=\"10\" width=\"{WIDTH}\" height=\"20\"/><rect class=\"ghost\" x=\"0\" y=\"10\" width=\"{:.1}\" height=\"20\"/><rect class=\"guide\" x=\"0\" y=\"40\" width=\"{WIDTH}\" height=\"20\"/><rect class=\"now\" x=\"0\" y=\"40\" width=\"{:.1}\" height=\"20\"/></svg>",
+        width(from),
+        width(to)
+    ))
 }
 
 /// A change's picture as an `<svg>` the page colours itself, light or dark: curves as lines, notes as boxes. None for a

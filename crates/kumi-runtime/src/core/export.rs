@@ -96,8 +96,8 @@ pub struct Options<'a> {
     pub redacted: bool,
     /// A step's words, from its tool's name: "looked at your Set".
     pub label: &'a dyn Fn(&str) -> String,
-    /// A change's picture as an `<svg>` for the web page; None draws none.
-    pub picture: &'a dyn Fn(&ChangePicture) -> Option<String>,
+    /// A change's picture for the web page, drawn from its record (an `<svg>`, or a line naming devices); None draws none.
+    pub picture: &'a dyn Fn(&ChangeRecord) -> Option<String>,
     /// Where dates are told: the producer's time zone.
     pub zone: FixedOffset,
     /// When it's exported (ms since the epoch).
@@ -276,20 +276,18 @@ pub fn html(source: &Source, options: &Options) -> String {
         body.push_str(&format!("<section class=\"changes\">\n<h2>What Kumi changed in {}</h2>\n<ul>", escape(source.words.0)));
         for change in &doc.changes {
             body.push_str(&format!("<li><p>{}</p>", escape(&change_line(change, source.words.0))));
-            if let Some(picture) = &change.picture {
-                let drawn = (options.picture)(picture);
-                let values = values_of(picture);
-                if drawn.is_some() || !values.is_empty() {
-                    body.push_str("<figure>");
-                    if let Some(svg) = drawn {
-                        body.push_str(&svg);
-                    }
-                    if !values.is_empty() {
-                        let lines: Vec<String> = values.iter().map(|line| escape(line)).collect();
-                        body.push_str(&format!("<figcaption>{}</figcaption>", lines.join("<br>")));
-                    }
-                    body.push_str("</figure>");
+            let drawn = (options.picture)(change);
+            let values = change.picture.as_ref().map(values_of).unwrap_or_default();
+            if drawn.is_some() || !values.is_empty() {
+                body.push_str("<figure>");
+                if let Some(picture) = drawn {
+                    body.push_str(&picture);
                 }
+                if !values.is_empty() {
+                    let lines: Vec<String> = values.iter().map(|line| escape(line)).collect();
+                    body.push_str(&format!("<figcaption>{}</figcaption>", lines.join("<br>")));
+                }
+                body.push_str("</figure>");
             }
             body.push_str("</li>");
         }
@@ -1001,6 +999,12 @@ fn closes(open: &str, marker: &str, rest: &str) -> bool {
     marker.starts_with(&open[..1]) && marker.len() >= open.len() && trim(rest).is_empty()
 }
 
+/// Text for the web page: its markup characters as entities, and control characters gone. What draws a change's picture
+/// writes names with it.
+pub fn html_text(text: &str) -> String {
+    escape(text)
+}
+
 /// Text for HTML: its markup characters as entities, and control characters gone.
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -1221,6 +1225,12 @@ figure { margin: .4rem 0 0; }
 figure svg { display: block; width: 100%; max-width: 32rem; height: auto; background: var(--card); border: 1px solid var(--rule); border-radius: 8px; }
 figcaption { margin-top: .3rem; color: var(--dim); font-size: .85rem; }
 svg polyline { fill: none; stroke-linejoin: round; stroke-linecap: round; }
+svg rect.swatch { stroke: var(--rule); stroke-width: 2; }
+.chain { margin: .4rem 0 0; color: var(--dim); font-size: .9rem; overflow-wrap: anywhere; }
+.chain p { margin: .15rem 0; }
+.chain .rack { color: var(--faint); }
+.chain strong { color: var(--accent); }
+.chain span { color: var(--faint); }
 svg polyline.guide { stroke: var(--rule); } svg polyline.ghost { stroke: var(--faint); }
 svg polyline.dim { stroke: var(--dim); } svg polyline.now { stroke: var(--accent); }
 svg rect.guide { fill: var(--rule); } svg rect.ghost { fill: var(--faint); }
