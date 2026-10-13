@@ -3945,6 +3945,9 @@ local_test!(a_chat_that_keeps_no_conversations_says_nothing_of_one, {
     h.session.submit("hello", None).await.unwrap();
     assert!(!h.session.has_conversations());
     assert!(h.session.conversation_now().await.is_none());
+    h.session.new_conversation().await.unwrap();
+    assert!(h.notice("New conversation."));
+    assert!(!h.notice("The last one is kept"));
     h.session.close().await.unwrap();
 });
 local_test!(a_conversation_whose_lock_cant_be_had_goes_on_all_the_same, {

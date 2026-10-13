@@ -2249,7 +2249,11 @@ impl SessionController for Session {
                         this.0.state.borrow_mut().objective = None;
                         this.emit(SessionEvent::ObjectiveCleared);
                     }
-                    this.notice("New conversation. The last one is kept; /resume goes back to it.");
+                    this.notice(match this.0.options.conversations {
+                        Some(_) => "New conversation. The last one is kept; /resume goes back to it.",
+                        // A chat without Live keeps none.
+                        None => "New conversation.",
+                    });
                     Ok(None)
                 }
                 .boxed_local()
