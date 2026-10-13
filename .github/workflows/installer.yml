@@ -2,7 +2,7 @@ name: Installer
 
 # Builds the bundle the installer downloads, then installs it the way producers do, on macOS, Linux and
 # Windows (Windows PowerShell 5.1, the one every Windows has), from a local copy of the release. On a
-# version tag it also attaches the bundle to that tag's GitHub release.
+# version tag it also attaches the bundle, and the installers beside it, to that tag's GitHub release.
 #
 # Pull requests and pushes to main build with the quicker ci-release profile: those bundles are installed and
 # checked, never published. Tags build with the release profile, and so does a nightly run of main, which keeps
@@ -44,8 +44,9 @@ jobs:
       - id: plan
         shell: bash
         run: |
-          # Tags, main and pull requests that change installing, updating, releasing or Willington's files build all
-          # six platforms, install each and check the update from the JavaScript release. A pull request that changes
+          # Tags, main and pull requests that change installing, updating, releasing, Willington's files or the Mac
+          # helper the bundle carries build all six platforms, install each, update to it from the release before it
+          # and check the update from the JavaScript release. A pull request that changes
           # the bridge, a version number or how Kumi stores what it keeps (the store, settings and sign-ins, memory,
           # techniques, playbook, gaps, an older Kumi's files), which the update and rollback must carry over, does
           # that on Linux. Any other builds Linux's bundle only; main installs and checks it once merged.
@@ -59,7 +60,7 @@ jobs:
             base="origin/${GITHUB_BASE_REF}"
             # Read whole, then searched: grep -q can close a pipe early, and git, still writing, fails under pipefail.
             changed="$(git diff --name-only "$base...HEAD")"
-            installing="$(grep -E '^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|bridge_setup|cli/)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform))' <<<"$changed" \
+            installing="$(grep -E '^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|bridge_setup|cli/)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/hands/(KumiHands\.swift|mac\.rs))' <<<"$changed" \
               | grep -v -E '^scripts/test-isolated\.' || true)"
             # Cargo's changed lines less version numbers (a bridge or release bump): what's left is a dependency.
             dependencies="$(git diff -U0 "$base...HEAD" -- Cargo.toml Cargo.lock 'crates/*/Cargo.toml' \
@@ -77,11 +78,12 @@ jobs:
             # The Intel Mac bundle is built on an Apple Silicon Mac, a cross build: the Intel runners take about twice
             # as long. The Intel Mac install below still runs on Intel.
             echo 'targets=[{"os":"macos-15","target":"aarch64-apple-darwin"},{"os":"macos-15","target":"x86_64-apple-darwin"},{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-22.04-arm","target":"aarch64-unknown-linux-gnu"},{"os":"windows-2025","target":"x86_64-pc-windows-msvc"},{"os":"windows-11-arm","target":"aarch64-pc-windows-msvc"}]' >> "$GITHUB_OUTPUT"
-            echo 'installs=[{"os":"macos-15","label":"macOS-arm64"},{"os":"macos-15-intel","label":"macOS-x64"},{"os":"ubuntu-22.04","label":"Linux-x64"},{"os":"ubuntu-22.04-arm","label":"Linux-arm64"},{"os":"windows-2025","label":"Windows-x64"},{"os":"windows-11-arm","label":"Windows-arm64"}]' >> "$GITHUB_OUTPUT"
+            # One install on each system (edges) also updates to this bundle from the release before it, from GitHub.
+            echo 'installs=[{"os":"macos-15","label":"macOS-arm64","edges":true},{"os":"macos-15-intel","label":"macOS-x64"},{"os":"ubuntu-22.04","label":"Linux-x64","edges":true},{"os":"ubuntu-22.04-arm","label":"Linux-arm64"},{"os":"windows-2025","label":"Windows-x64","edges":true},{"os":"windows-11-arm","label":"Windows-arm64"}]' >> "$GITHUB_OUTPUT"
             echo 'migrations=["macos-15","ubuntu-24.04","windows-2025"]' >> "$GITHUB_OUTPUT"
           else
             echo 'targets=[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"}]' >> "$GITHUB_OUTPUT"
-            echo 'installs=[{"os":"ubuntu-22.04","label":"Linux-x64"}]' >> "$GITHUB_OUTPUT"
+            echo 'installs=[{"os":"ubuntu-22.04","label":"Linux-x64","edges":true}]' >> "$GITHUB_OUTPUT"
             echo 'migrations=["ubuntu-24.04"]' >> "$GITHUB_OUTPUT"
           fi
 
@@ -162,6 +164,10 @@ jobs:
         # One artifact (a pull request's Linux-only build) is extracted straight into the folder; several
         # get a folder each. Each bundle sits beside its manifest either way.
         run: python3 scripts/build-migration-release.py $(find native-releases -name kumi-release.json | sort) --node "$(node -p process.versions.node)" --out release
+      # The one-liners fetch the latest release's installer, so a change to one reaches producers with its release,
+      # never before. The jobs below install with these copies, as served from the release.
+      - name: The installers, beside the bundles they install
+        run: cp install.sh install.ps1 release/
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kumi-release
@@ -187,10 +193,12 @@ jobs:
         with:
           name: kumi-release
           path: release
-      - name: Serve the release locally
+      # Every file as GitHub serves a release's: application/octet-stream, with no charset (PowerShell's irm
+      # decodes such a script by its own default).
+      - name: Serve the release locally, as GitHub does
         shell: bash
         run: |
-          cd release && (python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          cd release && (python3 -c 'import http.server as h; h.SimpleHTTPRequestHandler.guess_type = lambda self, path: "application/octet-stream"; h.test(h.SimpleHTTPRequestHandler, port=8765, bind="127.0.0.1")' >/dev/null 2>&1 &)
           # The server can take a few seconds to listen on a busy runner (Windows especially): wait for it.
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8765/kumi-release.json; then exit 0; fi
@@ -210,8 +218,9 @@ jobs:
           # A variable name running straight into a non-ASCII character ("$version…") is read as part of
           # the name by macOS's /bin/sh (bash 3.2) in a UTF-8 locale: brace it ("${version}…").
           if LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' install.sh; then exit 1; fi
-          # As producers run it: piped into sh from a Terminal (a UTF-8 locale), with no Node of its own on PATH.
-          env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL=/bin/bash LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh < install.sh
+          # As producers run it: the one-liner, the release's installer piped into sh from a Terminal (a UTF-8 locale),
+          # with no Node of its own on PATH.
+          curl -fsSL "$KUMI_RELEASES/install.sh" | env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL=/bin/bash LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh
           kumi() { env -i HOME="$HOME" PATH=/usr/bin:/bin TERM=xterm KUMI_RELEASES="$KUMI_RELEASES" "$KUMI_HOME/bin/kumi" "$@"; }
           kumi --version | grep -q "Kumi $(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
           kumi --help | grep -q "kumi bridge"
@@ -224,7 +233,7 @@ jobs:
           # PATH line added once, in the startup file bash reads, and not again on a second run (which repairs).
           marked() { grep -c "Added by the Kumi installer" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" 2>/dev/null | awk -F: '{ n += $NF } END { print n + 0 }'; }
           test "$(marked)" = 1
-          env -i HOME="$HOME" PATH=/usr/bin:/bin SHELL=/bin/bash KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh < install.sh
+          curl -fsSL "$KUMI_RELEASES/install.sh" | env -i HOME="$HOME" PATH=/usr/bin:/bin SHELL=/bin/bash KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh
           test "$(marked)" = 1
           ls -la "$KUMI_HOME"
           test -d "$KUMI_HOME/app.previous"
@@ -241,6 +250,84 @@ jobs:
           test -f "$KUMI_HOME/settings-marker"   # the producer's own files stay
           test "$(marked)" = 0
 
+      - name: GitHub's latest and the release before this one, updated to this one and back twice (zsh on macOS, fish on Linux; a non-ASCII home)
+        if: ${{ !cancelled() && matrix.edges && runner.os != 'Windows' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KUMI_RELEASES: http://127.0.0.1:8765
+        run: |
+          set -eux
+          version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          # The release producers update from: the newest one published below this build's version.
+          previous="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 100 --json tagName --jq '.[].tagName' | python3 -c '
+          import re, sys
+          key = lambda version: tuple(map(int, version.split(".")))
+          published = [m[1] for line in sys.stdin if (m := re.fullmatch(r"v(\d+\.\d+\.\d+)", line.strip()))]
+          print(max((v for v in published if key(v) < key(sys.argv[1])), key=key))' "$version")"
+          # A home with spaces and non-ASCII letters. zsh (the Mac's) reads its startup files from ZDOTDIR here, fish
+          # from conf.d. (zsh 5.9 reads none from a ZDOTDIR named in some non-ASCII letters, such as ホーム: zsh's own.)
+          home="$RUNNER_TEMP/John Smith ホーム é"
+          scripts="$home/Music/Ableton/User Library/Remote Scripts"
+          mkdir -p "$scripts"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            shell=/bin/zsh
+            zdotdir="$RUNNER_TEMP/zsh startup"
+            rc="$zdotdir/.zshrc"
+          else
+            sudo apt-get install -y -qq fish >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq fish >/dev/null; }
+            shell="$(command -v fish)"
+            zdotdir=
+            rc="$home/.config/fish/conf.d/kumi.fish"
+          fi
+          # As a producer runs things: their home and shell and a UTF-8 locale, nothing else of this runner's.
+          producer() { env -i HOME="$home" PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL="$shell" ${zdotdir:+"ZDOTDIR=$zdotdir"} LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 "$@"; }
+          kumi() {
+            producer KUMI_RELEASES="$KUMI_RELEASES" KUMI_REMOTE_SCRIPTS_DIR="$scripts" KUMI_LIVE_EXTENSIONS_DIR="$home/Live Extensions" \
+              KUMI_BRIDGE_WAIT_SECONDS=0 "$home/.kumi/bin/kumi" "$@"
+          }
+          marked() { if [[ -f "$rc" ]]; then grep -c "Added by the Kumi installer" "$rc" || true; else echo 0; fi; }
+
+          # This build's installer, as the release serves it, installing GitHub's latest: the one-liner, with no
+          # KUMI_RELEASES.
+          curl -fsSL "$KUMI_RELEASES/install.sh" | producer sh
+          kumi --version
+          test "$(marked)" = 1
+          # A new terminal window finds kumi through the line the installer added.
+          if [[ "$RUNNER_OS" == macOS ]]; then found="$(producer zsh -i -c 'command -v kumi' </dev/null)"; else found="$(producer fish -c 'command --search kumi')"; fi
+          test "$found" = "$home/.kumi/bin/kumi"
+          # Pinned to the release before this one: an older one over the latest (or a repair, when that's the latest).
+          curl -fsSL "$KUMI_RELEASES/install.sh" | producer KUMI_VERSION="$previous" sh
+          test "$(kumi --version)" = "Kumi $previous"
+          test "$(marked)" = 1
+
+          # That release's bridge in Live (a scratch Remote Scripts folder: no Live here), then its update to this
+          # build, and back and forth: each time, the bridge in Live is the one that went with that Kumi.
+          kumi bridge --yes
+          bridge() {
+            python3 -c '
+          import json, os, sys
+          read = lambda path: json.load(open(path, encoding="utf-8"))
+          config = read(read(os.path.join(sys.argv[1], "AbletonMcpBridge", "bridge-reference.json"))["config"])
+          package = read(os.path.join(os.path.dirname(config["server"]["command"]), "package.json"))
+          print(package.get("bridge") or package["version"])' "$scripts"
+          }
+          before="$(bridge)"
+          kumi update
+          test "$(kumi --version)" = "Kumi $version"
+          after="$(bridge)"
+          kumi update --rollback
+          test "$(kumi --version)" = "Kumi $previous"
+          test "$(bridge)" = "$before"
+          kumi update --rollback
+          test "$(kumi --version)" = "Kumi $version"
+          test "$(bridge)" = "$after"
+
+          # Uninstalling takes the PATH line out.
+          kumi uninstall --yes
+          test ! -e "$home/.kumi/app" && test ! -e "$home/.kumi/bin"
+          test "$(marked)" = 0
+
       - name: A Kumi stays in place when Windows holds its folder (Windows PowerShell 5.1)
         if: runner.os == 'Windows'
         shell: powershell
@@ -254,8 +341,8 @@ jobs:
           KUMI_RELEASES: http://127.0.0.1:8765
         run: |
           $ErrorActionPreference = 'Stop'
-          # As producers run it: the script's text into iex.
-          Get-Content -Raw install.ps1 | Invoke-Expression
+          # As producers run it: the one-liner, the release's installer into iex.
+          irm "$env:KUMI_RELEASES/install.ps1" | iex
           $kumi = Join-Path $env:KUMI_HOME 'bin\kumi.cmd'
           if (-not (Test-Path $kumi)) { throw 'no launcher' }
           $version = & $kumi --version; Write-Host $version
@@ -302,7 +389,7 @@ jobs:
           $analysis = $worker | ConvertFrom-Json
           if (-not $analysis.ok -or $analysis.result.sampleCount -ne 4 -or $analysis.result.peak -ne 0.5) { throw 'native worker returned unexpected analysis' }
           # Again: a repair, keeping the one before.
-          Get-Content -Raw install.ps1 | Invoke-Expression
+          irm "$env:KUMI_RELEASES/install.ps1" | iex
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'app.previous'))) { throw 'no previous app after a second install' }
           $scripts = Join-Path $env:RUNNER_TEMP 'User Library\Remote Scripts'
           New-Item -ItemType Directory -Force -Path $scripts | Out-Null
@@ -321,6 +408,73 @@ jobs:
           foreach ($gone in 'app', 'node', 'bin') { if (Test-Path (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'settings-marker'))) { throw 'the producer''s files went too' }
           if ((([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';') -contains (Join-Path $env:KUMI_HOME 'bin')) { throw 'PATH still has Kumi' }
+
+      - name: GitHub's latest and the release before this one, updated to this one and back twice (PowerShell 7; KUMI_HOME in a non-ASCII folder)
+        if: ${{ !cancelled() && matrix.edges && runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releases = 'http://127.0.0.1:8765'
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          # The release producers update from: the newest one published below this build's version.
+          $previous = gh release list --repo $env:GITHUB_REPOSITORY --exclude-drafts --limit 100 --json tagName --jq '.[].tagName' |
+            ForEach-Object { if ($_ -match '^v(\d+\.\d+\.\d+)$') { [version]$Matches[1] } } |
+            Where-Object { $_ -lt [version]$version } | Sort-Object -Descending | Select-Object -First 1
+          if (-not $previous) { throw 'no published release before this one' }
+          $previous = "$previous"
+          # KUMI_HOME in a folder named with spaces, Japanese and an accented letter, as a profile folder can be:
+          # Windows' tar.exe unpacks into it.
+          $root = Join-Path $env:RUNNER_TEMP ('John Smith ' + [char]0x30DB + [char]0x30FC + [char]0x30E0 + ' ' + [char]0x00E9)
+          $env:KUMI_HOME = Join-Path $root '.kumi'
+          $bin = Join-Path $env:KUMI_HOME 'bin'
+          $kumi = Join-Path $bin 'kumi.cmd'
+          function Kumi { & $kumi @args; if ($LASTEXITCODE -ne 0) { throw "kumi $args exited $LASTEXITCODE" } }
+          function OnPath { ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -contains $bin }
+
+          # This build's installer, as the release serves it, installing GitHub's latest: the one-liner.
+          irm "$releases/install.ps1" | iex
+          $latest = & $kumi --version; Write-Host $latest
+          if ($latest -notmatch '^Kumi \d+\.\d+\.\d+$') { throw "unexpected version: $latest" }
+          if (-not (OnPath)) { throw 'PATH not updated' }
+          # Pinned to the release before this one: an older one over the latest (or a repair, when that's the latest).
+          $env:KUMI_VERSION = $previous
+          irm "$releases/install.ps1" | iex
+          Remove-Item Env:KUMI_VERSION
+          if ((& $kumi --version) -ne "Kumi $previous") { throw "the pinned install didn't give $previous" }
+
+          # That release's bridge in Live (a scratch Remote Scripts folder: no Live here), then its update to this
+          # build, and back and forth: each time, the bridge in Live is the one that went with that Kumi.
+          $scripts = Join-Path $root 'User Library\Remote Scripts'
+          New-Item -ItemType Directory -Force -Path $scripts | Out-Null
+          $env:KUMI_REMOTE_SCRIPTS_DIR = $scripts
+          $env:KUMI_LIVE_EXTENSIONS_DIR = Join-Path $root 'Live Extensions'
+          $env:KUMI_BRIDGE_WAIT_SECONDS = '0'
+          Kumi bridge --yes
+          function Bridge {
+            $read = { param($path) Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
+            $config = & $read (& $read (Join-Path $scripts 'AbletonMcpBridge\bridge-reference.json')).config
+            $package = & $read (Join-Path (Split-Path $config.server.command) 'package.json')
+            if ($package.bridge) { $package.bridge } else { $package.version }
+          }
+          $before = Bridge
+          $env:KUMI_RELEASES = $releases
+          Kumi update
+          if ((& $kumi --version) -ne "Kumi $version") { throw "the update didn't give $version" }
+          $after = Bridge
+          Kumi update --rollback
+          if ((& $kumi --version) -ne "Kumi $previous") { throw "the first rollback didn't give $previous" }
+          if ((Bridge) -ne $before) { throw "the first rollback left bridge $(Bridge), not $before" }
+          Kumi update --rollback
+          if ((& $kumi --version) -ne "Kumi $version") { throw "the second rollback didn't give $version" }
+          if ((Bridge) -ne $after) { throw "the second rollback left bridge $(Bridge), not $after" }
+
+          # Uninstalling takes Kumi out of PATH; its folders go a few seconds later.
+          Kumi uninstall --yes
+          Start-Sleep -Seconds 15
+          foreach ($gone in 'app', 'app.previous', 'bin') { if (Test-Path -LiteralPath (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
+          if (OnPath) { throw 'PATH still has Kumi' }
 
   edges:
     # install.sh and install.ps1 when a release isn't there, nothing answers, a Wi-Fi sign-in page answers, a checksum
@@ -434,7 +588,7 @@ jobs:
             echo "$TAG is already published, so its assets stay as they are."
             exit 0
           fi
-          gh release upload "$TAG" release/*.tar.gz release/*.json release/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" release/*.tar.gz release/*.json release/SHA256SUMS release/install.sh release/install.ps1 --repo "$GITHUB_REPOSITORY" --clobber
       # scripts/release.py writes the notes into the draft, marked as its own, when it pushes the tag. Such a draft is
       # published now, every install and migration having passed. Any other draft (notes to come, or written by hand)
       # stays a draft for whoever finishes it.
@@ -450,6 +604,14 @@ jobs:
               echo "$TAG's notes aren't scripts/release.py's, so it stays a draft."
               exit 0
             fi
+            # Published, it's the latest, which the one-liners fetch their installer from: both have to be there.
+            assets="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+            for installer in install.sh install.ps1; do
+              if ! grep -qx "$installer" <<<"$assets"; then
+                echo "$TAG has no $installer, so it stays a draft." >&2
+                exit 1
+              fi
+            done
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
             echo "Published $TAG."
           fi
