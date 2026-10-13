@@ -3,6 +3,19 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.16.0 — 2026-10-12
+
+Ships with bridge 1.0.92, as 1.15.0 did.
+
+- Every change Kumi makes now has a picture. Open a HISTORY row (Enter, → or Space, or click its
+  words) to see an EQ's curve, a compressor's, the notes, an automation lane, or each value before and
+  after, with what you asked for when Live set something else. Kitty and Ghostty show them as images;
+  other terminals draw them in characters. Enter on a HISTORY row now opens it instead of undoing it:
+  click undo, or press `u` while it's open, to undo.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.15.0 — 2026-10-12
 
 Ships with bridge 1.0.92, as 1.14.0 did.
