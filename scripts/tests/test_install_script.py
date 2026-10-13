@@ -439,7 +439,11 @@ exit $status
         self.serve(self.release("1.0.0"))
         link = self.root / "link to home"
         link.symlink_to(home)
-        spellings = [str(home), f"{home}/", f"{home}/.", f"{home}/new/..", "~", str(link)]
+        # A link into a folder of the home folder, then ..: the home folder, though not as written.
+        (home / "sub").mkdir()
+        into = self.root / "link into home"
+        into.symlink_to(home / "sub")
+        spellings = [str(home), f"{home}/", f"{home}/.", f"{home}/new/..", "~", str(link), f"{into}/.."]
         # Other case on a disk that ignores it, and macOS's own path to the data volume.
         if Path(str(home).swapcase()).exists():
             spellings.append(str(home).swapcase())
@@ -449,7 +453,7 @@ exit $status
             run = self.install(home, KUMI_HOME=kumi_home)
             self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
             self.assertIn("KUMI_HOME is your home folder; Kumi needs a folder of its own, such as ~/.kumi.", run.stderr)
-            self.assertEqual(list(home.iterdir()), [], kumi_home)
+            self.assertEqual([path.name for path in home.iterdir()], ["sub"], kumi_home)
         # As root, a refusal that failed would install into / or /dev: those runs are left to everyone else.
         if os.geteuid() != 0:
             run = self.install(home, KUMI_HOME="/")

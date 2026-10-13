@@ -248,14 +248,15 @@ main() {
   KUMI_HOME="$(printf '%s\n' "$KUMI_HOME" | sed 's#//*#/#g; s#\(.\)/$#\1#')"
   # A folder of Kumi's own: in the home folder itself or a disk's root, the names Kumi uses (bin, downloads, tools)
   # could be the producer's own, and kumi uninstall takes those names out. Compared as folders, however they're
-  # spelled (other case, a link, /System/Volumes/Data/…), with . and .. read as written, as it may not exist yet.
+  # spelled (other case, a link, /System/Volumes/Data/…): as written, where .. after a link is the link's own
+  # parent, and as given, where it's the parent of where the link leads, once it's there to follow.
   own_kumi="$(normal "$KUMI_HOME")"
   # shellcheck disable=SC3013 # -ef isn't in POSIX, but dash, bash, zsh, ksh and busybox sh all have it.
-  if [ "$own_kumi" = / ] || [ "$own_kumi" -ef / ]; then
+  if [ "$own_kumi" = / ] || [ "$own_kumi" -ef / ] || [ "$KUMI_HOME" -ef / ]; then
     fail "KUMI_HOME is /, the root of the disk; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")."
-  elif [ "$own_kumi" -ef "$HOME" ]; then
+  elif [ "$own_kumi" -ef "$HOME" ] || [ "$KUMI_HOME" -ef "$HOME" ]; then
     fail "KUMI_HOME is your home folder; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")."
-  elif mounted "$own_kumi"; then
+  elif mounted "$own_kumi" || mounted "$KUMI_HOME"; then
     fail "KUMI_HOME is $(shown "$own_kumi"), where a disk is mounted; Kumi needs a folder of its own there, such as $(shown "$own_kumi")/kumi."
   fi
   if [ ! -d "$KUMI_HOME" ]; then made_home=1; fi
