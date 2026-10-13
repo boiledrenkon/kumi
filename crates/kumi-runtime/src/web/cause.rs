@@ -188,13 +188,19 @@ pub fn unreachable(host: &str, cause: Option<NetCause>, env: &Env) -> String {
     unreachable_with(host, cause, env, &proxy::current())
 }
 
-/// [`unreachable`], with the system's proxy settings as `system` has them.
+/// [`unreachable`], with the system's proxy settings as `system` has them. A proxy in the way says how to get past
+/// it: its password in the variable, or no proxy at all.
 pub fn unreachable_with(host: &str, cause: Option<NetCause>, env: &Env, system: &proxy::Settings) -> String {
     let what = match cause {
         Some(cause) => format!("Kumi couldn't reach {host}: {}. {}", cause.words(), cause.fix()),
         None => format!("Kumi couldn't reach {host}. Check the connection, then try again."),
     };
-    format!("{what} {}", proxy_words_with(env, system))
+    let around = if cause == Some(NetCause::Proxy) {
+        " A proxy that wants a password takes HTTPS_PROXY=http://user:pass@host:port, and NO_PROXY=* connects directly."
+    } else {
+        ""
+    };
+    format!("{what} {}{around}", proxy_words_with(env, system))
 }
 
 /// The proxy settings Kumi goes through, in a sentence; with none set, where to set one.
@@ -205,9 +211,9 @@ pub fn proxy_words(env: &Env) -> String {
 /// [`proxy_words`], with the system's proxy settings as `system` has them: without the variables, Kumi goes through
 /// the system's proxy, and says when the system finds one with an auto-config file, which Kumi doesn't read.
 pub fn proxy_words_with(env: &Env, system: &proxy::Settings) -> String {
-    let set = proxy_variables(env);
-    if !set.is_empty() {
-        return format!("Kumi's proxy settings: {}.", set.join(", "));
+    // NO_PROXY alone (Docker Desktop and many shells set it) names no proxy: the system's is the one in use.
+    if proxy::Settings::from_env(env).is_some() {
+        return format!("Kumi's proxy settings: {}.", proxy_variables(env).join(", "));
     }
     match (&system.https, system.source) {
         (Some(through), proxy::Source::System) => {
@@ -339,7 +345,7 @@ mod tests {
         let said = unreachable("api.anthropic.com", Some(NetCause::Proxy), &env);
         assert_eq!(
             said,
-            "Kumi couldn't reach api.anthropic.com: the proxy didn't let Kumi through. Check the proxy setting, or try without the proxy. Kumi's proxy settings: HTTPS_PROXY=http://proxy.example:3128/, http_proxy=cache:80, no_proxy=localhost,.corp."
+            "Kumi couldn't reach api.anthropic.com: the proxy didn't let Kumi through. Check the proxy setting, or try without the proxy. Kumi's proxy settings: HTTPS_PROXY=http://proxy.example:3128/, http_proxy=cache:80, no_proxy=localhost,.corp. A proxy that wants a password takes HTTPS_PROXY=http://user:pass@host:port, and NO_PROXY=* connects directly."
         );
         assert!(!said.contains("secret") && !said.contains("hunter2"), "{said}");
         // Without the variables, the system's own proxy, or its auto-config file that Kumi doesn't read.
@@ -353,6 +359,12 @@ mod tests {
             proxy_words_with(&none, &proxy::Settings::system_for_tests(None, true)),
             "This computer finds its proxy with an auto-config (PAC) file, which Kumi doesn't read: set HTTPS_PROXY to the proxy's address."
         );
+        // NO_PROXY alone (Docker Desktop sets it) names no proxy: the system's is still the one said.
+        let no_proxy = Env::from([("NO_PROXY".to_string(), "localhost,127.0.0.1".to_string())]);
+        assert_eq!(proxy_words_with(&no_proxy, &system), "Kumi went through this computer's proxy, http://proxy.corp:3128.");
+        // The system's proxy in the way: its words, and the way past it.
+        let said = unreachable_with("api.openai.com", Some(NetCause::Proxy), &none, &system);
+        assert!(said.ends_with("http://proxy.corp:3128. A proxy that wants a password takes HTTPS_PROXY=http://user:pass@host:port, and NO_PROXY=* connects directly."), "{said}");
         for cause in [NetCause::Dns, NetCause::Tls, NetCause::Proxy, NetCause::Timeout, NetCause::Offline] {
             assert!(cause.fix().ends_with('.') && !cause.words().ends_with('.'), "{cause:?}");
             assert_eq!(serde_json::to_value(cause).unwrap(), cause.name().to_lowercase(), "{cause:?}");
@@ -424,10 +436,13 @@ mod tests {
 
     #[tokio::test]
     async fn kumis_own_http_keeps_what_went_wrong_for_each_cause() {
-        let fetch = HttpFetch::with_timeouts(Duration::from_secs(5), Duration::from_millis(300));
+        // No proxy, whatever this machine has set: each cause as the network gives it.
+        let direct =
+            |read| HttpFetch::through(std::sync::Arc::new(|| std::sync::Arc::new(proxy::Settings::none())), Duration::from_secs(5), read);
+        let fetch = direct(Duration::from_millis(300));
         // The read timeout counts from the request on, connecting and looking the name up included, and Windows tries a
         // closed port again for a second or two before it says refused: these two wait as long as they need.
-        let patient = HttpFetch::with_timeouts(Duration::from_secs(5), Duration::from_secs(5));
+        let patient = direct(Duration::from_secs(5));
         // Refused.
         let refused = failed(&patient, &format!("http://{}/", closed_port().await)).await;
         assert_eq!(NetCause::of_call(&refused), Some(NetCause::Offline), "{refused:?}");

@@ -813,10 +813,12 @@ impl WebClient for NetClient {
     }
 }
 
-/// An address that couldn't be reached, in `words`. When this computer goes out through a proxy, they say the web tool
-/// doesn't: it checks each address is public, and a proxy would look the name up again (`net::direct`).
+/// An address that couldn't be reached, in `words`. When this computer goes out through a proxy (one set, or one an
+/// auto-config file finds), they say the web tool doesn't: it checks each address is public, and a proxy would look the
+/// name up again (`net::direct`).
 fn unreachable(words: String) -> WebError {
-    let through = crate::net::proxy::current().https.is_some();
+    let settings = crate::net::proxy::current();
+    let through = settings.https.is_some() || settings.auto_config;
     let words = if through { format!("{words} Kumi reads the web directly, never through a proxy.") } else { words };
     WebError::with_trouble(words, None, WebTrouble::UNREACHABLE)
 }
