@@ -972,9 +972,16 @@ nothing when there's none or no network. `"updateCheck": false` in
   (9765 and 9766) and Live's Developer Mode.
 
 Each problem names one next step. `doctor` exits with 1 when something needs
-fixing; notes (no Live on this computer, a newer Kumi) don't count. `--json`
-prints the same checks as JSON, with keys, tokens, your home folder and account
-name taken out, as in a report.
+fixing; notes (no Live on this computer, a newer Kumi) don't count.
+
+`--json` prints the same checks for sharing, with keys, tokens, your home folder
+and account name taken out, as in a report. Its wording can change between
+versions, so it isn't meant for scripts to match:
+
+- `kumi`: the version; `fixes`: how many checks need fixing.
+- `sections`: each a `title` and its `checks`, each with a `status` (`ok`,
+  `note` or `fix`), its `text` and, when there is one, the `next` step.
+- The exit code is the same as without `--json`.
 
 `report` writes `~/kumi-report-<date and time>.txt`: Kumi's and the bridge's
 versions, the doctor's checks, your settings, what Kumi did in your last
