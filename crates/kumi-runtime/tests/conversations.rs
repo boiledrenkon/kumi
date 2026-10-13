@@ -462,8 +462,22 @@ async fn what_a_later_kumi_adds_to_the_index_or_beside_a_conversation_is_read_pa
     std::fs::write(&file, index.to_string()).unwrap();
     let rows = store.all().await.unwrap();
     assert_eq!(rows[0].first, "as the index has it", "the index was read, not made again");
-    // A sidecar with a field more keeps what's known in it.
-    std::fs::write(dir.path().join(A).join("conversations/mv66me0m3fa91c.meta"), r#"{"version":1,"name":"Bass ideas","daw":"Live"}"#)
-        .unwrap();
+    // A sidecar with a field more keeps what's known in it, and what isn't when it's written again.
+    let meta = dir.path().join(A).join("conversations/mv66me0m3fa91c.meta");
+    std::fs::write(&meta, r#"{"version":1,"name":"Bass ideas","daw":"Live"}"#).unwrap();
     assert_eq!(store.all().await.unwrap()[0].name.as_deref(), Some("Bass ideas"));
+    assert!(store.pin(A, "mv66me0m3fa91c", true).await.unwrap());
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
+    assert_eq!((&written["daw"], &written["pinned"], &written["name"]), (&json!("Live"), &json!(true), &json!("Bass ideas")));
+    assert!(store.rename(A, "mv66me0m3fa91c", None).await.unwrap() && store.pin(A, "mv66me0m3fa91c", false).await.unwrap());
+    assert!(meta.exists(), "what a later Kumi keeps here stays");
+    // An index a later Kumi wrote in a version this one doesn't know is read past, and never written over.
+    let later = json!({"version":2,"conversations":[],"keepDays":0}).to_string();
+    std::fs::write(&file, &later).unwrap();
+    store.save(A, "mv66me0m9newer", &said("and brighter", 20)).await.unwrap();
+    assert_eq!(store.all().await.unwrap().len(), 2);
+    assert!(matches!(store.find("mv66me0m9newer").await.unwrap(), ConversationMatch::One(_)));
+    assert!(store.delete(A, "mv66me0m9newer").await.unwrap());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), later);
+    assert_eq!(store.days_kept().await, 0, "what it says settings said is taken");
 }

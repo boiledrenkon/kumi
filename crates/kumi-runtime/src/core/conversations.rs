@@ -182,10 +182,13 @@ struct Meta {
     pinned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forked_from: Option<String>,
+    /// What a later Kumi keeps here, kept as it is when this one writes the file again.
+    #[serde(flatten)]
+    later: serde_json::Map<String, Value>,
 }
 impl Meta {
     fn is_empty(&self) -> bool {
-        self.name.is_none() && !self.pinned && self.forked_from.is_none()
+        self.name.is_none() && !self.pinned && self.forked_from.is_none() && self.later.is_empty()
     }
 }
 /// A name as the producer gave it: one line, at most 60 characters; None when there's nothing left.
@@ -202,10 +205,11 @@ async fn read_meta(file: &Path) -> Meta {
     }
     let meta: Meta = serde_json::from_slice(&bytes).unwrap_or_default();
     Meta {
-        version: 1,
+        version: meta.version.max(1),
         name: meta.name.as_deref().and_then(clean_name),
         pinned: meta.pinned,
         forked_from: meta.forked_from.filter(|id| CONVERSATION.is_match(id)),
+        later: meta.later,
     }
 }
 
@@ -443,7 +447,7 @@ impl FileConversationStore {
         if let Some(days) = self.keep_days {
             return days;
         }
-        match self.read_index().await.keep_days {
+        match self.read_index().await.0.keep_days {
             Some(0) => 0,
             Some(days) => days.max(KEEP_DAYS),
             None => KEEP_DAYS,
@@ -489,15 +493,30 @@ impl FileConversationStore {
         }
         found
     }
-    async fn read_index(&self) -> Index {
-        let read = tokio::fs::read(self.directory.join(INDEX)).await.ok().and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok());
-        read.filter(|index| index.version == 1).unwrap_or(Index { version: 1, ..Index::default() })
+    /// The index as kept, and whether a later Kumi wrote it in a version this one doesn't know: this one then makes its
+    /// own from the files each time, and never writes over that one.
+    async fn read_index(&self) -> (Index, bool) {
+        let fresh = Index { version: 1, ..Index::default() };
+        let Ok(bytes) = tokio::fs::read(self.directory.join(INDEX)).await else { return (fresh, false) };
+        #[derive(Deserialize)]
+        struct Version {
+            #[serde(default)]
+            version: u64,
+        }
+        match serde_json::from_slice::<Version>(&bytes).map(|written| written.version) {
+            Ok(1) => (serde_json::from_slice::<Index>(&bytes).unwrap_or(fresh), false),
+            Ok(version) if version > 1 => {
+                let said = serde_json::from_slice::<Value>(&bytes).ok().and_then(|index| index["keepDays"].as_u64());
+                (Index { keep_days: said.and_then(|days| u32::try_from(days).ok()), ..fresh }, true)
+            }
+            _ => (fresh, false),
+        }
     }
     /// The index, read again from the files wherever they changed (made from them all when it's missing or unreadable),
     /// and written back when anything did.
     async fn index(&self) -> Index {
         let _one = self.looking.lock().await;
-        let before = self.read_index().await;
+        let (before, later) = self.read_index().await;
         let mut index = before.clone();
         index.keep_days = self.keep_days.or(before.keep_days);
         let files = self.scan().await;
@@ -560,7 +579,7 @@ impl FileConversationStore {
             let name = self.set_name(&place).await;
             index.places.insert(place, PlaceName { name, modified });
         }
-        if index != before && !(files.is_empty() && index.gone.is_empty()) {
+        if !later && index != before && !(files.is_empty() && index.gone.is_empty()) {
             let _ = write_privately(&self.directory, INDEX, &stringify(&serde_json::to_value(&index).unwrap_or_default())).await;
         }
         index
@@ -598,7 +617,7 @@ impl FileConversationStore {
         if meta.is_empty() {
             return remove(kept.join(format!("{id}.meta"))).await;
         }
-        let meta = Meta { version: 1, ..meta.clone() };
+        let meta = Meta { version: meta.version.max(1), ..meta.clone() };
         write_privately(&kept, &format!("{id}.meta"), &stringify(&serde_json::to_value(meta).map_err(error)?)).await
     }
     /// Change a kept conversation's own settings; false when it isn't kept.
@@ -864,7 +883,7 @@ impl ConversationStore for FileConversationStore {
         if !exact.is_empty() {
             return Ok(picked(exact));
         }
-        if CONVERSATION.is_match(&word) && self.read_index().await.gone.contains_key(&word) {
+        if CONVERSATION.is_match(&word) && self.read_index().await.0.gone.contains_key(&word) {
             return Ok(ConversationMatch::Gone);
         }
         // The start of an id (4 characters or more), or the producer's name for one.
@@ -913,8 +932,8 @@ impl ConversationStore for FileConversationStore {
         self.index().await;
         // Deleted by the producer, not let go: the id is unknown from here on.
         let _one = self.looking.lock().await;
-        let mut index = self.read_index().await;
-        if index.gone.remove(id).is_some() {
+        let (mut index, later) = self.read_index().await;
+        if !later && index.gone.remove(id).is_some() {
             let _ = write_privately(&self.directory, INDEX, &stringify(&serde_json::to_value(&index).unwrap_or_default())).await;
         }
         Ok(true)
