@@ -197,8 +197,12 @@ pub fn unreachable_with(host: &str, cause: Option<NetCause>, env: &Env, system: 
 /// that isn't answering told apart from one that turned Kumi away. None when it wasn't the network.
 pub fn unreachable_call(host: &str, url: &str, error: &LanguageModelError, env: &Env, system: &proxy::Settings) -> Option<String> {
     let cause = NetCause::of_call(error)?;
-    let down = cause == NetCause::Proxy && proxy::not_answering(&said(error));
-    Some(told(host, url::Url::parse(url).ok().as_ref(), Some(cause), down, env, system))
+    Some(told(host, url::Url::parse(url).ok().as_ref(), Some(cause), proxy_down(error), env, system))
+}
+
+/// A call's proxy that isn't answering (its address refused, its name not found), not one that turned Kumi away.
+pub fn proxy_down(error: &LanguageModelError) -> bool {
+    NetCause::of_call(error) == Some(NetCause::Proxy) && proxy::not_answering(&said(error))
 }
 
 /// The cause, its fix, then the proxy settings in force for `url`. A proxy in the way says how to get past it: started

@@ -202,16 +202,11 @@ pub fn retry_reason(error: &LanguageModelError, binding_id: &str) -> String {
         Some(status) if status >= 500 => format!("{name} is having trouble (HTTP {status})"),
         Some(status) => format!("{name} asked Kumi to wait (HTTP {status})"),
         None => match refused_on_the_way(error) {
-            Some(NetCause::Proxy) if proxy_not_answering(error) => format!("{name} couldn't be reached: the proxy isn't answering"),
+            Some(NetCause::Proxy) if cause::proxy_down(error) => format!("{name} couldn't be reached: the proxy isn't answering"),
             Some(cause) => format!("{name} couldn't be reached: {}", cause.words()),
             None => format!("{name} couldn't be reached"),
         },
     }
-}
-
-/// A proxy in the way that isn't answering (its address refused, its name not found), not one that turned Kumi away.
-fn proxy_not_answering(error: &LanguageModelError) -> bool {
-    failed_call(error).is_some_and(|call| crate::net::proxy::not_answering(call.cause.as_deref().unwrap_or(&call.message)))
 }
 
 /// A call that got no answer because the way there refused it: a certificate this computer doesn't trust (TLS) or a
