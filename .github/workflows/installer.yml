@@ -45,19 +45,24 @@ jobs:
         shell: bash
         run: |
           # Tags, main and pull requests that change installing, updating, releasing, Willington's files, the Mac helper
-          # the bundle carries, the tar and PowerShell Kumi runs, or how Kumi's extension goes into Live build all six
-          # platforms, install each, update to it from the release before it and check the update from the JavaScript
-          # release. A pull request that changes the bridge (the Remote Script, the protocol it ships, the Live
-          # extension), a version number or how Kumi stores what it keeps (the store, settings and sign-ins, memory,
-          # techniques, playbook, gaps, an older Kumi's files), which the update and rollback must carry over, does
-          # that on Linux. Any other builds Linux's bundle only; main installs and checks it once merged.
+          # the bundle carries, the tar and PowerShell Kumi runs, how it downloads (its HTTP client and network settings)
+          # and builds paths, or how Kumi's extension goes into Live build all six platforms, install each, update to it
+          # from the release before it and check the update from the JavaScript release. A pull request that changes the
+          # bridge (the Remote Script, the protocol it ships, the Live extension), a version number or how Kumi stores
+          # what it keeps (the store, settings and sign-ins, memory, techniques, playbook, gaps, an older Kumi's files),
+          # which the update and rollback must carry over, does that on Linux. Any other builds Linux's bundle only; main
+          # installs and checks it once merged.
           full=true
           checks=true
-          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|bridge_setup|cli/)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/system\.rs|crates/kumi/src/live_extension\.rs)'
+          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|bridge_setup|cli/)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs)|crates/kumi/src/live_extension\.rs)'
           # A change to any of these gets every system's install and transition jobs before it merges: main broke once
-          # when the Mac helper's didn't.
+          # when the Mac helper's didn't. Each has to be there, so a renamed one can't drop out unnoticed.
           for path in install.sh install.ps1 crates/kumi/src/install.rs crates/kumi/src/update.rs crates/kumi/src/install/migration.rs \
-            crates/kumi-runtime/src/hands/KumiHands.swift crates/kumi-runtime/src/system.rs crates/kumi/src/live_extension.rs; do
+            crates/kumi/src/bridge_setup.rs crates/kumi/src/live_extension.rs crates/kumi-runtime/src/hands/KumiHands.swift \
+            crates/kumi-runtime/src/hands/mac.rs crates/kumi-runtime/src/system.rs crates/kumi-runtime/src/ai/http.rs \
+            crates/kumi-runtime/src/library/sources.rs crates/ableton-mcp-server/src/install_remote_script.rs \
+            crates/ableton-mcp-server/src/lifecycle.rs crates/ableton-mcp-server/src/delivery_install.rs; do
+            test -e "$path" || { echo "::error::$path, which the installs depend on, isn't there: point this check at its new name"; exit 1; }
             grep -q -E "$installing_paths" <<<"$path" || { echo "::error::$path must count as installing"; exit 1; }
           done
           # The nightly run only builds, to keep the release profile's cache warm. A run started by hand also installs.
@@ -201,11 +206,12 @@ jobs:
           name: kumi-release
           path: release
       # Every file as GitHub serves a release's: application/octet-stream, with no charset (PowerShell's irm
-      # decodes such a script by its own default).
+      # decodes such a script by its own default). The server listens without first looking up this host's full name,
+      # which takes a macOS runner about 35 s.
       - name: Serve the release locally, as GitHub does
         shell: bash
         run: |
-          cd release && (python3 -c 'import http.server as h; h.SimpleHTTPRequestHandler.guess_type = lambda self, path: "application/octet-stream"; h.test(h.SimpleHTTPRequestHandler, port=8765, bind="127.0.0.1")' >/dev/null 2>&1 &)
+          cd release && (python3 -c 'import http.server as h; h.HTTPServer.server_bind = h.socketserver.TCPServer.server_bind; h.SimpleHTTPRequestHandler.guess_type = lambda self, path: "application/octet-stream"; h.test(h.SimpleHTTPRequestHandler, port=8765, bind="127.0.0.1")' >/dev/null 2>&1 &)
           # The server can take a few seconds to listen on a busy runner (Windows especially): wait for it.
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8765/kumi-release.json; then exit 0; fi
@@ -253,7 +259,10 @@ jobs:
           kumi --version
           echo 1 > "$KUMI_HOME/settings-marker"
           kumi uninstall --yes
-          test ! -e "$KUMI_HOME/app" && test ! -e "$KUMI_HOME/node" && test ! -e "$KUMI_HOME/bin"
+          # One test a line: bash -e doesn't stop at a failing one that isn't the last in an && list.
+          test ! -e "$KUMI_HOME/app"
+          test ! -e "$KUMI_HOME/node"
+          test ! -e "$KUMI_HOME/bin"
           test -f "$KUMI_HOME/settings-marker"   # the producer's own files stay
           test "$(marked)" = 0
 
@@ -266,8 +275,13 @@ jobs:
         run: |
           set -eux
           version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
-          # The release producers update from: the newest one published below this build's version.
-          previous="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 100 --json tagName --jq '.[].tagName' | python3 -c '
+          # The release producers update from: the newest one published below this build's version. Three tries: a tag's
+          # publish waits on this step.
+          releases() {
+            for _ in 1 2 3; do gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 100 --json tagName --jq '.[].tagName' && return; sleep 10; done
+            return 1
+          }
+          previous="$(releases | python3 -c '
           import re, sys
           key = lambda version: tuple(map(int, version.split(".")))
           published = [m[1] for line in sys.stdin if (m := re.fullmatch(r"v(\d+\.\d+\.\d+)", line.strip()))]
@@ -282,7 +296,8 @@ jobs:
             zdotdir="$RUNNER_TEMP/zsh startup"
             rc="$zdotdir/.zshrc"
           else
-            sudo apt-get install -y -qq fish >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq fish >/dev/null; }
+            apt_get() { sudo apt-get -qq -o Acquire::Retries=3 "$@" >/dev/null; }
+            apt_get install -y fish || { apt_get update && apt_get install -y fish; }
             shell="$(command -v fish)"
             zdotdir=
             rc="$home/.config/fish/conf.d/kumi.fish"
@@ -308,31 +323,42 @@ jobs:
           test "$(kumi --version)" = "Kumi $previous"
           test "$(marked)" = 1
 
-          # That release's bridge in Live (a scratch Remote Scripts folder: no Live here), then its update to this
-          # build, and back and forth: each time, the bridge in Live is the one that went with that Kumi.
+          # That release's bridge and Kumi's extension in Live (scratch folders: no Live here), then its update to this
+          # build, and back and forth. The first rollback puts back the very bridge that went with that release (the
+          # package it runs: each install gets a folder of its own) and its extension; the second, this build's. When
+          # the update left the bridge as it was, neither rollback touches it.
           kumi bridge --yes
           bridge() {
             python3 -c '
           import json, os, sys
           read = lambda path: json.load(open(path, encoding="utf-8"))
-          config = read(read(os.path.join(sys.argv[1], "AbletonMcpBridge", "bridge-reference.json"))["config"])
-          package = read(os.path.join(os.path.dirname(config["server"]["command"]), "package.json"))
-          print(package.get("bridge") or package["version"])' "$scripts"
+          command = read(read(os.path.join(sys.argv[1], "AbletonMcpBridge", "bridge-reference.json"))["config"])["server"]["command"]
+          package = read(os.path.join(os.path.dirname(command), "package.json"))
+          print(package.get("bridge") or package["version"], command)' "$scripts"
           }
-          before="$(bridge)"
+          extension() {
+            python3 -c '
+          import hashlib, json, os, sys
+          print(json.load(open(os.path.join(sys.argv[1], "manifest.json"), encoding="utf-8"))["version"],
+                hashlib.sha256(open(os.path.join(sys.argv[1], "dist", "extension.js"), "rb").read()).hexdigest())' "$home/Live Extensions/kumi.kumi"
+          }
+          before="$(bridge)"; before_extension="$(extension)"
           kumi update
           test "$(kumi --version)" = "Kumi $version"
-          after="$(bridge)"
+          after="$(bridge)"; after_extension="$(extension)"
           kumi update --rollback
           test "$(kumi --version)" = "Kumi $previous"
           test "$(bridge)" = "$before"
+          test "$(extension)" = "$before_extension"
           kumi update --rollback
           test "$(kumi --version)" = "Kumi $version"
-          test "$(bridge)" = "$after"
+          if [[ "$before" == "$after" ]]; then test "$(bridge)" = "$after"; else test "$(bridge | cut -d' ' -f1)" = "${after%% *}"; fi
+          test "$(extension)" = "$after_extension"
 
           # Uninstalling takes the PATH line out.
           kumi uninstall --yes
-          test ! -e "$home/.kumi/app" && test ! -e "$home/.kumi/bin"
+          test ! -e "$home/.kumi/app"
+          test ! -e "$home/.kumi/bin"
           test "$(marked)" = 0
 
       - name: A Kumi stays in place when Windows holds its folder (Windows PowerShell 5.1)
@@ -340,11 +366,13 @@ jobs:
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/install_swap.ps1
 
-      - name: Install, use, update and remove (Windows PowerShell 5.1)
+      - name: Install, use, update and remove (Windows PowerShell 5.1; KUMI_HOME in a non-ASCII folder)
         if: runner.os == 'Windows'
         shell: powershell
         env:
-          KUMI_HOME: ${{ runner.temp }}\kumi-home
+          # In a folder named with spaces, Japanese and an accented letter: tar.exe reads its arguments in the system's
+          # code page. Set here, so the Windows PowerShell 5.1 script itself holds no such letters.
+          KUMI_HOME: ${{ runner.temp }}\Jane Doe ホーム é\kumi-home
           KUMI_RELEASES: http://127.0.0.1:8765
         run: |
           $ErrorActionPreference = 'Stop'
@@ -411,7 +439,9 @@ jobs:
           if ((& $kumi --version) -ne $version) { throw "the rollback didn't preserve the release" }
           Set-Content -Path (Join-Path $env:KUMI_HOME 'settings-marker') -Value 1
           & $kumi uninstall --yes
-          Start-Sleep -Seconds 15
+          # Its folders go a few seconds later, from a cmd it leaves running.
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $deadline -and @('app', 'node', 'bin' | Where-Object { Test-Path (Join-Path $env:KUMI_HOME $_) })) { Start-Sleep -Milliseconds 500 }
           foreach ($gone in 'app', 'node', 'bin') { if (Test-Path (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'settings-marker'))) { throw 'the producer''s files went too' }
           if ((([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';') -contains (Join-Path $env:KUMI_HOME 'bin')) { throw 'PATH still has Kumi' }
@@ -425,20 +455,32 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $releases = 'http://127.0.0.1:8765'
           $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
-          # The release producers update from: the newest one published below this build's version.
-          $previous = gh release list --repo $env:GITHUB_REPOSITORY --exclude-drafts --limit 100 --json tagName --jq '.[].tagName' |
+          # The release producers update from: the newest one published below this build's version. Three tries: a tag's
+          # publish waits on this step.
+          foreach ($try in 1..3) {
+            $tags = gh release list --repo $env:GITHUB_REPOSITORY --exclude-drafts --limit 100 --json tagName --jq '.[].tagName'
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 10
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh couldn't list the releases" }
+          $previous = $tags |
             ForEach-Object { if ($_ -match '^v(\d+\.\d+\.\d+)$') { [version]$Matches[1] } } |
             Where-Object { $_ -lt [version]$version } | Sort-Object -Descending | Select-Object -First 1
           if (-not $previous) { throw 'no published release before this one' }
           $previous = "$previous"
           function Kumi { & $kumi @args; if ($LASTEXITCODE -ne 0) { throw "kumi $args exited $LASTEXITCODE" } }
           function OnPath { ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') -contains $bin }
-          # The bridge version in Live, as its reference names it.
+          # The bridge in Live: its version, and the package it runs (each install gets a folder of its own).
           function Bridge {
             $read = { param($path) Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
-            $config = & $read (& $read (Join-Path $scripts 'AbletonMcpBridge\bridge-reference.json')).config
-            $package = & $read (Join-Path (Split-Path $config.server.command) 'package.json')
-            if ($package.bridge) { $package.bridge } else { $package.version }
+            $command = (& $read (& $read (Join-Path $scripts 'AbletonMcpBridge\bridge-reference.json')).config).server.command
+            $package = & $read (Join-Path (Split-Path $command) 'package.json')
+            "$(if ($package.bridge) { $package.bridge } else { $package.version }) $command"
+          }
+          # Kumi's extension in Live: its version, and its code's checksum.
+          function Extension {
+            $folder = Join-Path $root 'Live Extensions\kumi.kumi'
+            "$((Get-Content -Raw -LiteralPath (Join-Path $folder 'manifest.json') | ConvertFrom-Json).version) $((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $folder 'dist\extension.js')).Hash)"
           }
           # A home for Kumi in RUNNER_TEMP, with its own Remote Scripts and Extensions folders (no Live here).
           function UseHome([string]$Folder) {
@@ -453,10 +495,11 @@ jobs:
             $env:KUMI_BRIDGE_WAIT_SECONDS = '0'
             Remove-Item Env:KUMI_RELEASES, Env:KUMI_VERSION -ErrorAction SilentlyContinue
           }
-          # Uninstalling takes Kumi out of PATH; its folders go a few seconds later.
+          # Uninstalling takes Kumi out of PATH; its folders go a few seconds later, from a cmd it leaves running.
           function Uninstall {
             Kumi uninstall --yes
-            Start-Sleep -Seconds 15
+            $deadline = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $deadline -and @('app', 'app.previous', 'bin' | Where-Object { Test-Path -LiteralPath (Join-Path $env:KUMI_HOME $_) })) { Start-Sleep -Milliseconds 500 }
             foreach ($gone in 'app', 'app.previous', 'bin') { if (Test-Path -LiteralPath (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
             if (OnPath) { throw 'PATH still has Kumi' }
           }
@@ -479,26 +522,30 @@ jobs:
           if ((& $kumi --version) -ne "Kumi $version") { throw "the second rollback didn't give $version" }
           Uninstall
 
-          # The release before this one, pinned, then its own kumi update to this build and back and forth: each time,
-          # the bridge in Live is the one that went with that Kumi. (In a home with spaces only: that release's updater
-          # unpacks with tar.exe.)
+          # The release before this one, pinned, then its own kumi update to this build and back and forth. The first
+          # rollback puts back the very bridge that went with that release and its extension; the second, this build's.
+          # When the update left the bridge as it was, neither rollback touches it. (In a home with spaces only: that
+          # release's updater unpacks with tar.exe.)
           UseHome 'John Smith'
           $env:KUMI_VERSION = $previous
           irm "$releases/install.ps1" | iex
           Remove-Item Env:KUMI_VERSION
           if ((& $kumi --version) -ne "Kumi $previous") { throw "the pinned install didn't give $previous" }
           Kumi bridge --yes
-          $before = Bridge
+          $before = Bridge; $beforeExtension = Extension
           $env:KUMI_RELEASES = $releases
           Kumi update
           if ((& $kumi --version) -ne "Kumi $version") { throw "the update didn't give $version" }
-          $after = Bridge
+          $after = Bridge; $afterExtension = Extension
           Kumi update --rollback
           if ((& $kumi --version) -ne "Kumi $previous") { throw "the first rollback didn't give $previous" }
           if ((Bridge) -ne $before) { throw "the first rollback left bridge $(Bridge), not $before" }
+          if ((Extension) -ne $beforeExtension) { throw "the first rollback left extension $(Extension), not $beforeExtension" }
           Kumi update --rollback
           if ((& $kumi --version) -ne "Kumi $version") { throw "the second rollback didn't give $version" }
-          if ((Bridge) -ne $after) { throw "the second rollback left bridge $(Bridge), not $after" }
+          $bridge = Bridge
+          if ($(if ($before -eq $after) { $bridge -ne $after } else { $bridge.Split(' ')[0] -ne $after.Split(' ')[0] })) { throw "the second rollback left bridge $bridge, not $after" }
+          if ((Extension) -ne $afterExtension) { throw "the second rollback left extension $(Extension), not $afterExtension" }
           Uninstall
 
   edges:
@@ -588,7 +635,8 @@ jobs:
     name: Attach the bundle to the release
     # A tag's push only: a run started by hand on a tag must not upload new binaries over a published release.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [bundle, install, migration]
+    # The installers go out with the release as the one-liners' copy, so their error-path checks (edges) pass first.
+    needs: [bundle, install, migration, edges]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
