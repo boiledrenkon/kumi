@@ -3965,3 +3965,41 @@ local_test!(a_conversation_whose_lock_cant_be_had_goes_on_all_the_same, {
     assert_eq!(saved(store.as_ref(), SET_A, 2).await.id, KEPT);
     h.session.close().await.unwrap();
 });
+local_test!(a_conversation_asked_for_once_live_closes_goes_on_without_a_question, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    h.session.submit("make the pads wider", None).await.unwrap();
+    saved(store.as_ref(), SET_B, 1).await;
+    let own = now(&h).await.id;
+    // Live closes, and nothing looks at it again before the producer asks for A's conversation: no Set is open.
+    {
+        let mut o = h.observation.borrow_mut();
+        o.set = None;
+        o.revision = Some("no-live".into());
+    }
+    h.connection(ConnectionState::Disconnected, Some(DisconnectCause::Live));
+    settle().await;
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    assert!(asks(&h).is_empty(), "{:?}", asks(&h));
+    assert_eq!(now(&h).await.id, KEPT);
+    // Live comes back with B, under the same key: B's own conversation goes on, and Kumi asks about A's.
+    {
+        let mut o = h.observation.borrow_mut();
+        o.set = Some(format!("identity:{SET_B}"));
+        o.revision = None;
+    }
+    h.connection(ConnectionState::Connected, None);
+    for _ in 0..1000 {
+        if asks(&h).last().is_some_and(Option::is_some) {
+            break;
+        }
+        delay(2).await;
+    }
+    assert_eq!(now(&h).await.id, own);
+    assert_eq!(asks(&h).last().unwrap().as_ref().map(|ask| ask.id.as_str()), Some(KEPT));
+    h.session.close().await.unwrap();
+});

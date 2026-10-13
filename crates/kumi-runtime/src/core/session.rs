@@ -895,6 +895,10 @@ impl Session {
                 s.observation = None;
                 s.away = true;
                 s.away_cause = cause;
+                // Live closed has no Set open, whatever the last look saw: a conversation asked for now goes on.
+                if cause == Some(DisconnectCause::Live) {
+                    s.set_open = false;
+                }
                 let working = s.active.as_ref().is_some_and(|op| op.is_turn);
                 // A request about the Set Live left isn't offered again in the next one, nor one that carries on
                 // through a busy Live.
