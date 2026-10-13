@@ -141,9 +141,15 @@ async fn doctor_says_whats_fine_and_exact_fixes_without_secrets() {
     io.bundled_bridge_version = Some("1.0.10".into());
     assert_eq!(run_doctor(io.clone()).await.unwrap(), 1);
     let printed = out.0.borrow().clone();
-    // An older bridge in Live: the one way Kumi says to connect it, which can restart Live for the producer.
+    // An older bridge in Live: the one way Kumi says to connect it, which can restart Live for the producer. Where Live
+    // doesn't run (Linux), a note (older_bridge's test has its words).
+    let live = kumi::live_app::runs_on(kumi_runtime::system::platform());
     let older = find(&doctor_checks(&io).await.unwrap(), "The installed bridge (1.0.9) is older than this Kumi's (1.0.10)").clone();
-    assert_eq!(older.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
+    if live {
+        assert_eq!(older.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()));
+    } else {
+        assert_eq!(older.status, CheckStatus::Note);
+    }
     for text in [
         "Node.js 20.11.0 isn't supported (Kumi needs 22 or newer)",
         "Install Node 24 LTS",
@@ -151,7 +157,7 @@ async fn doctor_says_whats_fine_and_exact_fixes_without_secrets() {
         "The installed bridge (1.0.9) is older than this Kumi's (1.0.10)",
         "Other MCP apps would start the bridge with a Node from a temporary folder",
         "Live connected · Night Drive",
-        "2 things to fix",
+        if live { "2 things to fix" } else { "1 thing to fix" },
     ] {
         assert!(printed.contains(text), "{text}: {printed}")
     }
@@ -616,6 +622,22 @@ async fn doctor_json_takes_out_keys_and_counts_only_fixes() {
         Some(Rc::new(|| async { Ok(Some(Check::fix("Kumi can't use Live's menus", Some("Run kumi report".into())))) }.boxed_local()));
     assert_eq!(run_doctor(io).await.unwrap(), 1);
     assert_eq!(serde_json::from_str::<serde_json::Value>(&out.0.borrow()).unwrap()["fixes"], 1);
+}
+#[test]
+fn an_older_bridge_is_to_fix_where_live_runs_and_elsewhere_says_only_what_that_system_can_do() {
+    for platform in ["darwin", "win32"] {
+        let check = older_bridge(platform, "1.0.80", "1.0.92");
+        assert_eq!(
+            (check.status, check.text.as_str()),
+            (CheckStatus::Fix, "The installed bridge (1.0.80) is older than this Kumi's (1.0.92)")
+        );
+        assert_eq!(check.next.as_deref(), Some(kumi_runtime::CONNECT_LIVE.as_str()), "{platform}");
+    }
+    // Linux: no Live to load it, so nothing to fix and nothing about Live; its files can be brought up to date.
+    let linux = older_bridge("linux", "1.0.80", "1.0.92");
+    assert_eq!(linux.status, CheckStatus::Note);
+    assert_eq!(linux.next, Some(format!("{} bridge --yes brings its files up to date", *KUMI)));
+    assert!(!format!("{linux:?}").contains("Live"), "{linux:?}");
 }
 #[test]
 fn a_missing_bridge_is_to_fix_only_where_a_live_12_can_take_it() {

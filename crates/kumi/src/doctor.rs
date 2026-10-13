@@ -570,6 +570,16 @@ pub fn missing_bridge(platform: &str, installed: impl FnOnce() -> LiveInstalled)
         Some(_) => Check::fix("The Ableton bridge isn't installed, so Kumi can't see Live", Some(CONNECT_LIVE.to_string())),
     }
 }
+/// A bridge older than this Kumi's: to bring up to date where Live runs, the one way. Where it doesn't (Linux) there's
+/// no Live to load it, so it's a note, with what this system can do: bring the bridge's files up to date.
+pub fn older_bridge(platform: &str, installed: &str, bundled: &str) -> Check {
+    let text = format!("The installed bridge ({installed}) is older than this Kumi's ({bundled})");
+    if crate::live_app::runs_on(platform) {
+        Check::fix(text, Some(CONNECT_LIVE.to_string()))
+    } else {
+        Check::note(text, Some(format!("{} bridge --yes brings its files up to date", *KUMI)))
+    }
+}
 pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     let env = &io.env;
     // A native Kumi's version and folder head the Installation section; an earlier Node Kumi's Node is checked here.
@@ -589,10 +599,7 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
         checks.push(Check::ok(format!("Ableton bridge{version} ({})", tilde(&config))));
         if let (Some(installed), Some(bundled)) = (&server.version, &io.bundled_bridge_version) {
             if newer(bundled, installed) {
-                checks.push(Check::fix(
-                    format!("The installed bridge ({installed}) is older than this Kumi's ({bundled})"),
-                    Some(CONNECT_LIVE.to_string()),
-                ))
+                checks.push(older_bridge(system::platform(), installed, bundled))
             }
         }
         let later = if server.native() {
