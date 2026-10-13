@@ -291,6 +291,25 @@ mod tests {
         assert_eq!(fake.given.get(), 1, "given back when Kumi lets go of it");
     }
 
+    /// The system's own hold, as `pmset -g assertions` lists it: there while held, gone after. Opt-in (it takes a real
+    /// assertion): `cargo test -p kumi --lib awake -- --ignored`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn the_system_hold_is_named_while_held_and_gone_after() {
+        let listed = || {
+            let output = std::process::Command::new("pmset").args(["-g", "assertions"]).output().expect("pmset");
+            String::from_utf8_lossy(&output.stdout).lines().filter(|line| line.contains(REASON)).map(str::to_string).collect::<Vec<_>>()
+        };
+        let awake = KeepAwake::system(true);
+        awake.hold("answer");
+        assert!(awake.is_held());
+        let held = listed();
+        assert!(held.iter().any(|line| line.contains("PreventUserIdleSystemSleep")), "{held:?}");
+        awake.release("answer");
+        assert!(listed().is_empty(), "{:?}", listed());
+    }
+
     #[test]
     fn a_hold_the_system_refused_is_asked_for_again_next_time() {
         let fake = Rc::new(Fake { refuse: true, ..Default::default() });
