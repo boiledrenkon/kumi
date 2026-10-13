@@ -2167,3 +2167,31 @@ async fn a_bin_folder_that_stays_keeps_its_windows_path_entry() {
         assert!(!said.contains("your PATH"), "{said}");
     }
 }
+/// What's left of an app that lost its program doesn't run, so neither would kumi uninstall: only the way by hand is
+/// offered then.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_offers_a_second_run_only_while_the_app_still_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root removes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    installed_kumi(home);
+    fs::remove_file(home.join("app/kumi")).unwrap();
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o555)).unwrap();
+    let (removing, out) = io(&env);
+    let code = uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains("and PATH lines stay, but what's left of the app doesn't run: take out ")
+            && said.contains(", the launcher and the two lines under ")
+            && !said.contains("run kumi uninstall again"),
+        "{said}"
+    );
+}

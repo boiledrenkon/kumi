@@ -1964,11 +1964,19 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
             format!("Kumi itself stays, so you can run kumi uninstall again once that's sorted{owner}, or take {them} out by hand.")
         } else if Path::new(&launcher).exists() {
             let lines = format!("the two lines under \"{PATH_MARKER}\" in your shell's startup file");
-            format!(
-                "Kumi's launcher ({}) and PATH lines stay until then: once that's sorted{owner}, run kumi uninstall again, or take out {}, the launcher and {lines} by hand.",
-                display(&launcher),
-                listed(&names)
-            )
+            let by_hand = format!("take out {}, the launcher and {lines} by hand", listed(&names));
+            if has_app(&join(&home, "app")) {
+                format!(
+                    "Kumi's launcher ({}) and PATH lines stay until then: once that's sorted{owner}, run kumi uninstall again, or {by_hand}.",
+                    display(&launcher)
+                )
+            } else {
+                // What's left of the app doesn't run, so neither would kumi uninstall: the way on is by hand.
+                format!(
+                    "Kumi's launcher ({}) and PATH lines stay, but what's left of the app doesn't run: {by_hand}{owner}.",
+                    display(&launcher)
+                )
+            }
         } else {
             format!("Take {them} out by hand{owner}.")
         };
