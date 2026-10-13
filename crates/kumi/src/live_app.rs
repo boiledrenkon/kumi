@@ -239,6 +239,90 @@ pub async fn version(run: &Run, platform: &str, env: &Env, app: Option<&str>) ->
     (read.code == 0).then(|| major_minor(&read.stdout)).flatten()
 }
 
+/// A Live installed where its installer puts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledLive {
+    /// The app: a `.app` on macOS, the `.exe` on Windows.
+    pub app: String,
+    /// "Ableton Live 12 Suite", the app's own name.
+    pub name: String,
+    /// "12.4.15b6" as the app has it on macOS; on Windows, its major from its folder ("12").
+    pub version: Option<String>,
+    /// Whether a Live of its major has been opened on this account: Live keeps a settings folder for each version.
+    pub opened: bool,
+}
+
+/// The Lives installed in /Applications and ~/Applications on macOS, or under %ProgramData%\Ableton on
+/// Windows; none on Linux, where Live doesn't run. File reads only.
+pub fn installed_lives(env: &Env, platform: &str) -> Vec<InstalledLive> {
+    let home =
+        env.get("HOME").filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| home::home_dir().unwrap_or_default().display().to_string());
+    let roots = match platform {
+        "darwin" => vec!["/Applications".to_string(), join(&home, "Applications")],
+        "win32" => {
+            let data = env.get("ProgramData").or_else(|| env.get("PROGRAMDATA")).filter(|s| !s.is_empty()).cloned();
+            vec![join(&data.unwrap_or_else(|| "C:\\ProgramData".into()), "Ableton")]
+        }
+        _ => vec![],
+    };
+    installed_lives_in(&roots, &crate::config::live_preferences_dir(env), platform)
+}
+
+/// `installed_lives` in these folders, with Live's settings in `preferences`.
+pub fn installed_lives_in(roots: &[String], preferences: &str, platform: &str) -> Vec<InstalledLive> {
+    let names = |folder: &str| -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let opened = names(preferences);
+    let mut found = vec![];
+    for root in roots {
+        for name in names(root) {
+            let (app, version) = match platform {
+                "darwin" if name.starts_with("Ableton Live") && name.ends_with(".app") => {
+                    let app = join(root, &name);
+                    let plist = std::fs::read_to_string(join(&app, "Contents/Info.plist")).unwrap_or_default();
+                    (app, bundle_version(&plist))
+                }
+                "win32" if name.starts_with("Live ") => {
+                    let program = join(&join(root, &name), "Program");
+                    let Some(exe) =
+                        names(&program).into_iter().find(|n| n.starts_with("Ableton Live") && n.to_ascii_lowercase().ends_with(".exe"))
+                    else {
+                        continue;
+                    };
+                    let major = name.split_whitespace().nth(1).filter(|word| word.bytes().all(|b| b.is_ascii_digit())).map(str::to_string);
+                    (join(&program, &exe), major)
+                }
+                _ => continue,
+            };
+            let file = std::path::Path::new(&app).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = file.strip_suffix(".app").or_else(|| file.strip_suffix(".exe")).unwrap_or(&file).to_string();
+            let major = version.as_deref().and_then(|v| v.split('.').next()).map(str::to_string);
+            let opened = opened.iter().any(|folder| {
+                folder
+                    .strip_prefix("Live ")
+                    .is_some_and(|v| major.as_ref().is_none_or(|major| v == major || v.starts_with(&format!("{major}."))))
+            });
+            found.push(InstalledLive { app, name, version, opened });
+        }
+    }
+    found
+}
+
+/// "12.4.15b6" from an app's Info.plist, as XML: its CFBundleShortVersionString, without the build after it.
+fn bundle_version(plist: &str) -> Option<String> {
+    let after = plist.split("<key>CFBundleShortVersionString</key>").nth(1)?;
+    let value = after.trim_start().strip_prefix("<string>")?.split("</string>").next()?;
+    value.split_whitespace().next().map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +576,35 @@ mod tests {
         assert_eq!(installed(&Env::new(), "linux"), LiveInstalled::Missing);
         assert_eq!(settings_menu("darwin").as_deref(), Some("Settings is in Live's Live menu (⌘,)."));
         assert_eq!(settings_menu("linux"), None);
+    }
+
+    #[test]
+    fn installed_lives_are_read_from_their_folders_with_their_versions_and_whether_they_were_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = |path: &str| dir.path().join(path).to_string_lossy().into_owned();
+        let put = |path: &str, text: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let plist = |version: &str| {
+            format!("<?xml version=\"1.0\"?>\n<plist><dict>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.ableton.live</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>{version}</string>\n</dict></plist>\n")
+        };
+        put("Applications/Ableton Live 12 Beta.app/Contents/Info.plist", &plist("12.4.15b6 (2026-10-01_8378f48a19)"));
+        put("Applications/Ableton Live 11 Suite.app/Contents/Info.plist", &plist("11.3.21"));
+        put("Applications/Logic Pro.app/Contents/Info.plist", &plist("11.0"));
+        put("Preferences/Live 12.4.15b4/Library.cfg", "");
+        let lives = installed_lives_in(&[root("Applications"), root("nowhere")], &root("Preferences"), "darwin");
+        let seen: Vec<_> = lives.iter().map(|live| (live.name.as_str(), live.version.as_deref(), live.opened)).collect();
+        assert_eq!(seen, [("Ableton Live 11 Suite", Some("11.3.21"), false), ("Ableton Live 12 Beta", Some("12.4.15b6"), true)]);
+        assert!(lives[1].app.ends_with("Ableton Live 12 Beta.app"));
+        // Windows: each Live in its own folder under ProgramData\Ableton, named with its major.
+        put("Ableton/Live 12 Suite/Program/Ableton Live 12 Suite.exe", "");
+        put("Ableton/Live 12 Suite/Program/Ableton Index.exe", "");
+        put("Ableton/Live 12 Trial/Resources/readme.txt", "");
+        let lives = installed_lives_in(&[root("Ableton")], &root("nowhere"), "win32");
+        assert_eq!(lives.len(), 1);
+        assert_eq!((lives[0].name.as_str(), lives[0].version.as_deref(), lives[0].opened), ("Ableton Live 12 Suite", Some("12"), false));
+        assert!(installed_lives_in(&[root("Applications")], &root("Preferences"), "linux").is_empty());
     }
 }

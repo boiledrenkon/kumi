@@ -381,15 +381,18 @@ pub fn load_inference_config(env: &Env) -> Result<InferenceConfig, RuntimeError>
         auth_file: load_auth_file(env)?,
     })
 }
-pub fn live_user_library(env: &Env) -> Option<String> {
+/// Where Live keeps its settings, a folder for each version it's been opened as ("Live 12.4.15").
+pub fn live_preferences_dir(env: &Env) -> String {
     let home = env.get("HOME").cloned().unwrap_or_else(home);
-    let preferences = if cfg!(windows) {
+    if cfg!(windows) {
         join(&env.get("APPDATA").cloned().unwrap_or_else(|| join(&home, "AppData/Roaming")), "Ableton")
     } else {
         join(&home, "Library/Preferences/Ableton")
-    };
+    }
+}
+pub fn live_user_library(env: &Env) -> Option<String> {
     let mut configs = Vec::new();
-    for entry in std::fs::read_dir(preferences).ok()? {
+    for entry in std::fs::read_dir(live_preferences_dir(env)).ok()? {
         let entry = entry.ok()?;
         if !entry.file_name().to_string_lossy().starts_with("Live ") {
             continue;
