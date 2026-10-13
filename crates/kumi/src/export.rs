@@ -225,10 +225,12 @@ pub async fn conversation_now(
     Ok((text, file_name(&redact(&found.title), &found.id, format)))
 }
 
-/// Writes an export into the folder Kumi was started in, never over another file; Err says why not.
-pub fn save_here(text: &str, name: &str) -> Result<PathBuf, String> {
-    let folder =
-        std::env::current_dir().map_err(|error| format!("Kumi can't tell which folder it's in ({error}), so it saved nothing."))?;
+/// Writes an export into `folder`, or the folder Kumi was started in, never over another file; Err says why not.
+pub fn save_in(folder: Option<&Path>, text: &str, name: &str) -> Result<PathBuf, String> {
+    let folder = match folder {
+        Some(folder) => folder.to_path_buf(),
+        None => std::env::current_dir().map_err(|error| format!("Kumi can't tell which folder it's in ({error}), so it saved nothing."))?,
+    };
     let path = folder.join(name);
     write_new(&path, text).map_err(|error| format!("Kumi couldn't save {}: {error}.", path.display()))
 }

@@ -1,12 +1,17 @@
 //! Exports as Kumi writes them: redacted by `kumi report`'s redactor, pictures drawn for the page, files kept private and
 //! never written over another.
+use std::cell::RefCell;
 use std::fs;
 
 use chrono::FixedOffset;
-use kumi::export::{render, svg_of, write_new};
+use kumi::export::{export_command, import_command, render, svg_of, write_new, ExportRequest};
 use kumi::report::redactor;
-use kumi_runtime::core::contracts::{ChangePicture, KernelCheckpoint, SavedConversation};
+use kumi::tui::tty::TtyOutput;
+use kumi_runtime::core::contracts::{ChangePicture, ConversationStore, KernelCheckpoint, SavedConversation, TranscriptRole};
 use kumi_runtime::core::export::{Format, Source};
+use kumi_runtime::kernel::budget::transcript_of;
+use kumi_runtime::system::Env;
+use kumi_runtime::{create_conversation_store, IMPORTED};
 use serde_json::{json, Value};
 
 const HOME: &str = "/Users/janedoe";
@@ -138,4 +143,83 @@ fn pictures_draw_in_the_pages_own_colours_and_load_nothing() {
     let values: ChangePicture =
         serde_json::from_value(json!({"kind": "values", "values": [{"name": "Drive", "from": 1, "to": 2}]})).unwrap();
     assert_eq!(svg_of(&values), None, "values read as words on the page");
+}
+
+#[derive(Default)]
+struct Out(RefCell<String>);
+impl TtyOutput for Out {
+    fn is_tty(&self) -> bool {
+        false
+    }
+    fn columns(&self) -> Option<i32> {
+        None
+    }
+    fn rows(&self) -> Option<i32> {
+        None
+    }
+    fn write(&self, s: &str) {
+        self.0.borrow_mut().push_str(s)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn kumi_export_saves_a_kept_conversation_and_kumi_import_keeps_it_to_carry_on() {
+    let home = tempfile::tempdir().unwrap();
+    let kumi = |name: &str| Env::from([("KUMI_HOME".to_string(), home.path().join(name).display().to_string())]);
+    let here = kumi("here");
+    let store = create_conversation_store(home.path().join("here/projects"));
+    store.save("0123456789abcdef0123456789abcdef", "k3x9a1b2c4", &conversation()).await.unwrap();
+    let folder = home.path().join("files");
+    fs::create_dir(&folder).unwrap();
+    let (out, err) = (Out::default(), Out::default());
+    let ask = |conversation: Option<&str>| ExportRequest {
+        conversation: conversation.map(str::to_string),
+        format: Format::Json,
+        out: Some(folder.display().to_string()),
+        full: false,
+        raw: false,
+    };
+    assert_eq!(export_command(ask(Some("zzzz9")), &here, &out, &err, "kumi").await.unwrap(), 1);
+    assert!(err.0.borrow().contains("No conversation zzzz9. kumi -r lists them."), "{}", err.0.borrow());
+    assert_eq!(export_command(ask(Some("k3x9")), &here, &out, &err, "kumi").await.unwrap(), 0);
+    assert_eq!(export_command(ask(None), &here, &out, &err, "kumi").await.unwrap(), 0);
+    assert!(out.0.borrow().contains("Your latest conversation: Louder kick, please. · k3x9a1b2c4"), "{}", out.0.borrow());
+    let mut files: Vec<_> = fs::read_dir(&folder).unwrap().map(|entry| entry.unwrap().path()).collect();
+    files.sort();
+    assert_eq!(
+        files,
+        [folder.join("kumi-louder-kick-please-k3x9a1b2c4-2.json"), folder.join("kumi-louder-kick-please-k3x9a1b2c4.json")],
+        "the second export goes beside the first"
+    );
+    for file in &files {
+        let text = fs::read_to_string(file).unwrap();
+        for secret in [KEY, BEARER, JWT] {
+            assert!(!text.contains(secret), "{secret} survived in {}", file.display());
+        }
+        assert!(out.0.borrow().contains(&format!("Saved for Kumi: {}", file.display())));
+    }
+    // Another Kumi keeps it, with its id while that's free, to carry on with kumi -r.
+    let there = kumi("there");
+    assert_eq!(import_command(&files[1].display().to_string(), &there, &out, &err, "kumi").await.unwrap(), 0);
+    assert!(out.0.borrow().contains("as k3x9a1b2c4. Carry it on: kumi -r k3x9a1b2c4"), "{}", out.0.borrow());
+    let kept = create_conversation_store(home.path().join("there/projects"));
+    let rows = kept.all().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].place.as_str(), rows[0].id.as_str()), (IMPORTED, "k3x9a1b2c4"));
+    assert_eq!(rows[0].title(), "Louder kick, please. (imported)");
+    let saved = kept.load(IMPORTED, "k3x9a1b2c4").await.unwrap().unwrap();
+    let said: Vec<String> = transcript_of(&saved.checkpoint.messages)
+        .into_iter()
+        .filter(|line| line.role == TranscriptRole::User)
+        .map(|line| line.text)
+        .collect();
+    assert_eq!(said.len(), 1);
+    assert!(said[0].starts_with("Louder kick, please. [secret] Bearer [secret] [secret]"), "{}", said[0]);
+    assert_eq!(import_command(&files[0].display().to_string(), &there, &out, &err, "kumi").await.unwrap(), 0);
+    let ids: Vec<String> = kept.all().await.unwrap().into_iter().map(|row| row.id).collect();
+    assert_eq!(ids.len(), 2, "an id that's taken gets another: {ids:?}");
+    let not_kumis = home.path().join("other.json");
+    fs::write(&not_kumis, "{}").unwrap();
+    assert_eq!(import_command(&not_kumis.display().to_string(), &there, &out, &err, "kumi").await.unwrap(), 1);
+    assert!(err.0.borrow().contains("That file isn't a Kumi conversation."));
 }

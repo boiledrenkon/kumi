@@ -65,6 +65,8 @@ pub struct TerminalOptions {
     /// What /export and /share take out: `kumi report`'s redactor. None takes out what `secrets` holds, the home folder
     /// and the account name.
     pub redact: Option<Rc<dyn Fn(&str) -> String>>,
+    /// Where /export and /share save; None saves in the folder Kumi was started in.
+    pub folder: Option<std::path::PathBuf>,
 }
 impl TerminalOptions {
     pub fn new(
@@ -91,6 +93,7 @@ impl TerminalOptions {
             next_time: None,
             choose_conversation: None,
             redact: None,
+            folder: None,
         }
     }
 }
@@ -730,7 +733,9 @@ impl PlainTerminal {
         };
         let redact = crate::export::redactor_or(self.0.options.redact.as_ref(), &self.0.options.secrets);
         let saved = match crate::export::conversation_now(&*self.0.options.controller, format, &*redact).await {
-            Ok((text, name)) => crate::export::save_here(&text, &name).map(|path| crate::export::saved_words(format, &path)),
+            Ok((text, name)) => {
+                crate::export::save_in(self.0.options.folder.as_deref(), &text, &name).map(|path| crate::export::saved_words(format, &path))
+            }
             Err(why) => Err(why),
         };
         self.notice(&format!("[export] {}", saved.unwrap_or_else(|why| why)));

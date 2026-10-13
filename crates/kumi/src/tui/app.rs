@@ -122,6 +122,8 @@ pub struct TuiOptions {
     pub redact: Option<Rc<dyn Fn(&str) -> String>>,
     /// Shows a file in the system's file manager (/share); None shows nothing.
     pub reveal: Option<Rc<dyn Fn(&std::path::Path)>>,
+    /// Where /export and /share save; None saves in the folder Kumi was started in.
+    pub folder: Option<std::path::PathBuf>,
 }
 /// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
 /// than Kumi's.
@@ -170,6 +172,7 @@ impl TuiOptions {
             choose_conversation: None,
             redact: None,
             reveal: None,
+            folder: None,
         }
     }
 }

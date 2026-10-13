@@ -1106,3 +1106,93 @@ case!(a_chat_that_keeps_no_conversations_says_so, async {
     assert!(!h.calls().iter().any(|call| call.starts_with("submit")), "{:?}", h.calls());
     h.close().await;
 });
+/// A conversation as the session gives it to /export: the producer's words and an answer `long` characters long.
+fn to_export(words: &str, long: usize) -> kumi_runtime::core::contracts::ConversationToExport {
+    use kumi_runtime::core::contracts::{ConversationToExport, KernelCheckpoint, SavedConversation};
+    let messages = vec![
+        json!({"role": "user", "content": [{"type": "text", "text": words}]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": format!("Done. {}", "la ".repeat(long / 3))}]}),
+    ];
+    ConversationToExport {
+        id: "k3x9a1b2".into(),
+        title: words.into(),
+        set: Some("Song".into()),
+        created: 1_760_000_000_000,
+        conversation: SavedConversation {
+            saved_at: 1_760_000_100_000,
+            checkpoint: KernelCheckpoint { version: 1, messages, origin: None, tools: None },
+            changes: None,
+            first: Some(words.into()),
+            turns: Some(1),
+        },
+        words: ("Live", "Set"),
+    }
+}
+/// The files in `folder` with `extension`, by name.
+fn exported_files(folder: &std::path::Path, extension: &str) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<_> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == extension))
+        .collect();
+    files.sort();
+    files
+}
+case!(export_copies_or_saves_this_conversation_and_share_offers_the_page, async {
+    let folder = tempfile::tempdir().unwrap();
+    let revealed: Rc<RefCell<Vec<std::path::PathBuf>>> = Rc::default();
+    let (into, shown) = (folder.path().to_path_buf(), revealed.clone());
+    let h = Harness::with(140, 36, Rc::new(Control::default()), move |o| {
+        o.folder = Some(into);
+        o.reveal = Some(Rc::new(move |path: &std::path::Path| shown.borrow_mut().push(path.to_path_buf())));
+    });
+    h.start().await;
+    h.connect();
+    h.type_text("/export\r").await;
+    h.has("Export this conversation");
+    h.type_text("\r").await;
+    h.has("There's nothing to export yet");
+    // Copied through the terminal, with what the session knows to be secret taken out.
+    *h.control.export.borrow_mut() = Some(to_export("Make the kick punchier private-token", 30));
+    h.type_text("/export\r").await;
+    h.type_text("\r").await;
+    h.has("Copied this conversation as Markdown.");
+    let copied = {
+        let output = h.output.text.borrow();
+        let start = output.rfind("\x1b]52;c;").expect("a copy through the terminal") + 7;
+        let end = start + output[start..].find('\x07').unwrap();
+        use base64::Engine;
+        String::from_utf8(base64::engine::general_purpose::STANDARD.decode(&output[start..end]).unwrap()).unwrap()
+    };
+    assert!(copied.starts_with("# Make the kick punchier [secret]\n"), "{copied}");
+    assert!(!copied.contains("private-token"));
+    assert!(exported_files(folder.path(), "md").is_empty(), "a copy saves no file");
+    // Longer than a terminal takes: saved instead, and said so.
+    *h.control.export.borrow_mut() = Some(to_export("A long one", 70_000));
+    h.type_text("/export\r").await;
+    h.type_text("\r").await;
+    h.has("too long to copy through the terminal");
+    let saved = exported_files(folder.path(), "md");
+    assert_eq!(saved.len(), 1);
+    assert!(std::fs::read_to_string(&saved[0]).unwrap().contains("A long one"));
+    // A web page, then /share's: never one over the other.
+    h.type_text("/export\r").await;
+    h.type_text("\x1b[B\x1b[B\r").await;
+    h.has("Saved this conversation as a web page:");
+    h.type_text("/share\r").await;
+    h.has("Open it");
+    h.has("Copy its path");
+    assert_eq!(exported_files(folder.path(), "html").len(), 2);
+    let shared = folder.path().join("kumi-a-long-one-k3x9a1b2-2.html");
+    assert!(std::fs::read_to_string(&shared).unwrap().starts_with("<!doctype html>"));
+    h.type_text("\r").await;
+    assert_eq!(h.browsed.borrow().last().cloned(), Some(shared.display().to_string()));
+    h.type_text("/share\r").await;
+    h.type_text("\x1b[B\r").await;
+    assert_eq!(revealed.borrow().len(), 1);
+    h.type_text("/share\r").await;
+    h.type_text("\x1b[B\x1b[B\r").await;
+    h.has("Copied the page's path.");
+    assert_eq!(exported_files(folder.path(), "html").len(), 4);
+    h.close().await;
+});

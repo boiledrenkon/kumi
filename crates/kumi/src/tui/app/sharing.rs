@@ -1,7 +1,7 @@
 //! /export and /share: this conversation as a file in the folder Kumi was started in, never over another, with what
 //! `kumi report` takes out taken out.
 use super::*;
-use crate::export::{conversation_now, redactor_or, save_here, saved_words, COPY_MOST};
+use crate::export::{conversation_now, redactor_or, save_in, saved_words, COPY_MOST};
 use kumi_runtime::core::export::Format;
 use kumi_runtime::system;
 use std::path::PathBuf;
@@ -10,7 +10,8 @@ impl TuiApp {
     /// /export: copy this conversation as Markdown, or save it as Markdown, a web page or a file for Kumi.
     pub(super) fn open_export(&self) {
         let item = |label: &str, value: &str, detail: &str| PickerItem { detail: Some(detail.into()), ..PickerItem::new(label, value) };
-        let here = std::env::current_dir().map(|folder| self.clean(&folder.display().to_string(), 120)).unwrap_or_default();
+        let here = self.0.options.folder.clone().or_else(|| std::env::current_dir().ok());
+        let here = here.map(|folder| self.clean(&folder.display().to_string(), 120)).unwrap_or_default();
         let items = vec![
             item("Copy as Markdown", "copy", "to paste anywhere"),
             item("Save Markdown", "md", "a .md file"),
@@ -79,7 +80,7 @@ impl TuiApp {
     async fn copy_conversation(&self) {
         let Some((text, name)) = self.exported(Format::Markdown).await else { return };
         if text.len() > COPY_MOST {
-            match save_here(&text, &name) {
+            match save_in(self.0.options.folder.as_deref(), &text, &name) {
                 Ok(path) => self.notice(
                     &format!(
                         "This conversation is too long to copy through the terminal (over 64 KB), so Kumi saved it as {}.",
@@ -101,7 +102,7 @@ impl TuiApp {
     /// Saves this conversation in `format` and says where; None (after saying why) when it couldn't.
     async fn save_conversation_as(&self, format: Format) -> Option<PathBuf> {
         let (text, name) = self.exported(format).await?;
-        match save_here(&text, &name) {
+        match save_in(self.0.options.folder.as_deref(), &text, &name) {
             Ok(path) => {
                 self.notice(&saved_words(format, &path), NoticeTone::Info);
                 Some(path)
