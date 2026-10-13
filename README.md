@@ -25,13 +25,13 @@ Needs Ableton Live 12 on macOS 13+ or Windows 10/11.
 **macOS** (Terminal):
 
 ```sh
-curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
 ```
 
 Kumi opens once it's installed and walks you through signing in and connecting to Live. After that, just run `kumi`. Something off? `kumi doctor` says what to fix.

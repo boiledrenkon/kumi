@@ -25,13 +25,13 @@ https://github.com/user-attachments/assets/f53fe0be-c9a9-476e-a1d5-efe3dc429526
 **macOS**（终端）：
 
 ```sh
-curl -fsSL https://github.com/user1303836/kumi/releases/latest/download/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
 ```
 
 **Windows**（PowerShell）：
 
 ```powershell
-irm https://github.com/user1303836/kumi/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
 ```
 
 安装完成后 Kumi 会自动启动，引导你登录并连接 Live。之后只需运行 `kumi`。遇到问题？`kumi doctor` 会告诉你该怎么修。

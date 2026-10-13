@@ -303,12 +303,11 @@ python3 scripts/release.py --go     # the release
 - **The tag's Installer run** builds native bundles for Intel and ARM on macOS,
   Linux and Windows, tests installs and migration, attaches the per-target
   bundles/manifests plus the compatibility `kumi.tar.gz`, `kumi-release.json`,
-  `SHA256SUMS` and the installers (the one-liners fetch the latest release's),
-  and publishes the release when `release.py` wrote its
-  notes (they end with `<!-- kumi:release-notes -->`). Only then do the
-  installers, `kumi update` and the update check see it. Any other draft, such
-  as a tag pushed by hand with notes to come, stays a draft until someone
-  publishes it.
+  `SHA256SUMS` and the installers, and publishes the release when `release.py`
+  wrote its notes (they end with `<!-- kumi:release-notes -->`) and both
+  installers are attached. Only then do the installers, `kumi update` and the
+  update check see it. Any other draft, such as a tag pushed by hand with notes
+  to come, stays a draft until someone publishes it.
 
 **Local native release staging**, from a clean commit:
 
