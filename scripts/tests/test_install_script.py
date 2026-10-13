@@ -450,11 +450,15 @@ exit $status
             self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
             self.assertIn("KUMI_HOME is your home folder; Kumi needs a folder of its own, such as ~/.kumi.", run.stderr)
             self.assertEqual(list(home.iterdir()), [], kumi_home)
-        # As root, a refusal that failed would install into /: that run is left to everyone else.
+        # As root, a refusal that failed would install into / or /dev: those runs are left to everyone else.
         if os.geteuid() != 0:
             run = self.install(home, KUMI_HOME="/")
             self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
             self.assertIn("KUMI_HOME is /, the root of the disk; Kumi needs a folder of its own", run.stderr)
+            # Where a disk is mounted, as kumi uninstall would refuse it: /dev is one on macOS and Linux.
+            run = self.install(home, KUMI_HOME="/dev")
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("KUMI_HOME is /dev, where a disk is mounted; Kumi needs a folder of its own there, such as /dev/kumi.", run.stderr)
 
     def test_the_zsh_line_goes_where_zsh_reads_it_once(self):
         home = self.home()
