@@ -360,6 +360,7 @@ case!(only_the_missing_steps_run_and_a_set_up_kumi_starts_straight_away, async {
     h.wait_for("Night Drive").await;
     assert!(!h.screen().iter().any(|l| l.contains("Sign in") || l.contains("Connect to Live")));
     assert!(live.calls().is_empty(), "no process looked at, nothing installed");
+    assert_eq!(live.looked.get(), 0, "no folders read for Live either");
     h.close().await;
     // Only signing in is missing: the bridge shows as done, and Live connects as it stands.
     let live = FakeLive::new(false);
