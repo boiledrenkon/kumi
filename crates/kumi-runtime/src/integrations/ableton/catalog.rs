@@ -3,8 +3,6 @@
 //! tools where `CORE` lists them, picked by what producers' conversations call most. A change or action
 //! that isn't core is still a make_changes step, and make_changes' description gives each one's input.
 
-use serde_json::Value;
-
 use super::actions::ACTIONS;
 use super::changes::CHANGES;
 use crate::core::contracts::JsonObject;
@@ -54,18 +52,7 @@ pub fn step_line(name: &str, description: &str, schema: &JsonObject) -> String {
         let cut = head(&what, WHAT);
         what = format!("{}…", cut.rfind(' ').filter(|at| *at > WHAT / 2).map_or(cut.as_str(), |at| &cut[..at]));
     }
-    let required: Vec<&str> =
-        schema.get("required").and_then(Value::as_array).map(|list| list.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-    let fields: Vec<String> = schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .map(|properties| {
-            let mut fields: Vec<String> =
-                required.iter().filter(|field| properties.contains_key(**field)).map(|field| (*field).to_string()).collect();
-            fields.extend(properties.keys().filter(|key| !required.contains(&key.as_str())).map(|key| format!("{key}?")));
-            fields
-        })
-        .unwrap_or_default();
+    let fields = crate::kernel::schema::fields(schema);
     let line = if fields.is_empty() { format!("{name}: {what}") } else { format!("{name}: {what} ({})", fields.join(", ")) };
     if line.len() > LINE {
         let cut = head(&line, LINE - 1);
@@ -112,7 +99,7 @@ mod tests {
         assert_eq!(step_line("wait", "Wait.", &JsonObject::new()), "wait: Wait");
         let long = step_line("edit", &"word ".repeat(80), schema.as_object().unwrap());
         assert!(long.starts_with("edit: word word") && long.ends_with("… (trackRef, enabled?, root?)"), "{long}");
-        let many: serde_json::Map<String, Value> = (0..40).map(|n| (format!("field{n}"), json!({"type": "number"}))).collect();
+        let many: serde_json::Map<String, serde_json::Value> = (0..40).map(|n| (format!("field{n}"), json!({"type": "number"}))).collect();
         let wide = step_line("wide", "Many fields.", &json!({"type":"object","properties":many}).as_object().unwrap().clone());
         assert!(wide.len() <= LINE + 4 && wide.ends_with("…)") && !wide.contains("?…"), "{wide}");
     }

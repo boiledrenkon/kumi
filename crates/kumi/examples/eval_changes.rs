@@ -1606,6 +1606,7 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
         let model = model.clone();
         let budget = case.budget;
         Rc::new(move |options: KernelOptions| {
+            OFFERED.with(|offered| *offered.borrow_mut() = options.tools.clone());
             let made = create_agent_kernel(AgentKernelOptions {
                 conversation: None,
                 instructions: options.instructions,
@@ -1884,6 +1885,11 @@ fn report(outcome: &Outcome) {
     }
 }
 
+thread_local! {
+    /// Every tool the last kernel was made with, the deferred ones too: what EVAL_MEASURE=tools lists.
+    static OFFERED: RefCell<Vec<Rc<dyn kumi_runtime::KernelTool>>> = const { RefCell::new(Vec::new()) };
+}
+
 /// A model that answers nothing, for measuring what a request carries.
 struct Unanswered;
 
@@ -1920,10 +1926,18 @@ async fn measure(catalog: &Rc<ListToolsResult>, watched: &Rc<Watched>) -> Result
     let schema: u64 = sizes.iter().filter_map(|size| size["bytes"].as_u64()).sum();
     let instruction_bytes = instructions.len() as u64;
     let mut measured = json!({"toolCount": tools.len(), "instructionBytes": instruction_bytes, "schemaBytes": schema, "fixedBytes": instruction_bytes + schema, "sizes": sizes});
-    // EVAL_MEASURE=tools: each tool's definition too, as it's sent.
+    // EVAL_MEASURE=tools: each tool's definition too, as it's sent, and those that wait behind find_tools.
     if std::env::var("EVAL_MEASURE").is_ok_and(|measure| measure == "tools") {
         measured["tools"] = serde_json::to_value(&tools).unwrap_or_default();
         measured["instructions"] = Value::String(instructions);
+        measured["deferred"] = OFFERED.with(|offered| {
+            offered
+                .borrow()
+                .iter()
+                .filter(|tool| tool.deferred())
+                .map(|tool| json!({"name": tool.name(), "description": tool.description(), "inputSchema": tool.input_schema(), "listedBy": tool.listed_by()}))
+                .collect()
+        });
     }
     println!("{}", stringify(&measured));
     Ok(0)

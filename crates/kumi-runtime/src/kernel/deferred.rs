@@ -55,10 +55,11 @@ impl Shelf {
         vec![Rc::new(FindTools { shelf: self.clone(), description: self.find_description() }), Rc::new(CallTool)]
     }
 
-    /// find_tools' description: what it does, then every deferred tool by name with what it's for; tools
-    /// that a plan tool lists with their input are left to it.
+    /// find_tools' description: what it does, then every deferred tool as a signature (its fields, `?` after one it
+    /// can leave out) with what it's for, so a call whose input is plain needs no lookup; tools that a plan tool lists
+    /// with their input are left to it.
     fn find_description(&self) -> String {
-        let mut listed: Vec<(&str, String)> = Vec::new();
+        let mut listed: Vec<(&str, Vec<String>, String)> = Vec::new();
         let mut by: Vec<&str> = Vec::new();
         for tool in &self.tools {
             match tool.listed_by() {
@@ -67,25 +68,25 @@ impl Shelf {
                         by.push(plan);
                     }
                 }
-                None => listed.push((tool.name(), clause(tool.description()))),
+                None => listed.push((tool.name(), schema::fields(&tool.input_schema()), clause(tool.description()))),
             }
         }
         let elsewhere =
             if by.is_empty() { String::new() } else { format!(" Besides these, every step {} lists is one too.", by.join(" and ")) };
-        // Every name, and as much of what each is for as fits.
+        // Every name with its fields, and as much of what each is for as fits.
         let mut index = String::new();
-        for room in [90, 64, 48, 32, 20, 0] {
+        for (room, most) in [(90, 8), (64, 8), (48, 6), (36, 6), (28, 5), (20, 4), (0, 4), (0, 0)] {
             index = listed
                 .iter()
-                .map(
-                    |(name, what)| {
-                        if room == 0 || what.is_empty() {
-                            (*name).to_string()
-                        } else {
-                            format!("{name} ({})", words(what, room))
-                        }
-                    },
-                )
+                .map(|(name, fields, what)| {
+                    let signature = if fields.len() > most { format!("{}, …", fields[..most].join(", ")) } else { fields.join(", ") };
+                    let call = if most == 0 { (*name).to_string() } else { format!("{name}({signature})") };
+                    if room == 0 || what.is_empty() {
+                        call
+                    } else {
+                        format!("{call}: {}", words(what, room))
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("; ");
             if index.len() <= INDEX_BYTES {
@@ -93,7 +94,7 @@ impl Shelf {
             }
         }
         format!(
-            "Your other tools, sent only when you need one. Ask by names (or a few words) and it gives each one's whole description and input; then run it with call_tool, or by its name. They are: {index}.{elsewhere}"
+            "Your other tools, sent only when you need one. Each is listed as name(its fields; `?`: may be left out): what it's for. When a tool's fields are plain, run it straight away with call_tool, or by its name; otherwise ask by names (or a few words) and find_tools gives its whole description and input. They are: {index}.{elsewhere}"
         )
     }
 

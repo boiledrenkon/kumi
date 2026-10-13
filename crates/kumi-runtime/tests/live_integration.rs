@@ -88,6 +88,12 @@ async fn of_the_fullest_catalog_only_the_core_tools_go_with_every_request() {
             assert!(definitions.len() > 90, "the fullest catalog: {}", definitions.len());
             assert!(sent.len() <= 22, "{} tools go with every request: {sent:?}", sent.len());
             assert!(bytes <= 40 * 1024, "{bytes} bytes go with every request");
+            // The checker in front of every deferred tool takes what the tool's own schema allows.
+            for tool in definitions.iter().filter(|tool| tool.deferred()) {
+                let schema = Value::Object(tool.input_schema());
+                let example = kumi_runtime::kernel::schema::example(&schema).unwrap_or_else(|| panic!("no example for {}", tool.name()));
+                assert_eq!(kumi_runtime::kernel::schema::problem(&schema, &example), None, "{} {example}", tool.name());
+            }
             // Every change and action that isn't core is a step make_changes lists with its input.
             let plan = definitions.iter().find(|tool| tool.name() == "make_changes").unwrap();
             for tool in definitions.iter().filter(|tool| tool.deferred() && tool.listed_by() == Some("make_changes")) {

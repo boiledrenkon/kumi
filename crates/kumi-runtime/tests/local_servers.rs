@@ -337,6 +337,90 @@ assert_eq!(second["messages"].as_array().unwrap().iter().find(|m|m["role"]=="too
 assert_eq!(second["options"]["num_ctx"],32768);
 }).await;
 }
+/// A tool the request doesn't send: the model finds it with find_tools, or calls it by its name.
+struct Deferred(Rc<dyn KernelTool>);
+#[async_trait(?Send)]
+impl KernelTool for Deferred {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn description(&self) -> &str {
+        self.0.description()
+    }
+    fn input_schema(&self) -> JsonObject {
+        self.0.input_schema()
+    }
+    async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
+        self.0.execute(input, signal).await
+    }
+    fn deferred(&self) -> bool {
+        true
+    }
+}
+fn watching(calls: Rc<RefCell<Vec<Value>>>) -> Rc<dyn KernelTool> {
+    Rc::new(Deferred(Rc::new(Tool {
+        name: "watch_me".into(),
+        description: "Learn a routine".into(),
+        schema: json!({"type":"object","properties":{"action":{"type":"string","enum":["start","stop"]}},"required":["action"]}),
+        calls,
+    })))
+}
+// A deferred tool the model calls by its own name: the next request carries the call and its result, paired by id,
+// while its tools stay the ones sent from the start.
+#[tokio::test]
+async fn ollama_and_lm_studio_take_a_call_to_a_tool_the_request_doesnt_list() {
+    LocalSet::new()
+        .run_until(async {
+            let fake = ollama(json!({"qwen3:8b":{"capabilities":["completion","tools"],"context":40960}}), |_, n| {
+                if n == 1 {
+                    ndjson(vec![
+                        json!({"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"watch_me","arguments":{"action":"start"}}}]},"done":false}),
+                        done(),
+                    ])
+                } else {
+                    ndjson(vec![said("Watching."), done()])
+                }
+            });
+            let calls = Rc::new(RefCell::new(vec![]));
+            let tools = vec![tempo(Default::default()), watching(calls.clone())];
+            let (text, _) = run(binding(ollama_at("127.0.0.1"), "qwen3:8b", Some(fake.clone()), None), "fixture instructions", tools).await.unwrap();
+            assert_eq!(text, "Watching.");
+            assert_eq!(*calls.borrow(), vec![json!({"action":"start"})]);
+            let chats = fake.requests("/api/chat");
+            let names = |body: &Value| body["tools"].as_array().unwrap().iter().map(|tool| tool["function"]["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+            assert_eq!(names(&chats[0].body), ["get_tempo", "find_tools", "call_tool"]);
+            assert_eq!(names(&chats[1].body), names(&chats[0].body));
+            let messages = chats[1].body["messages"].as_array().unwrap();
+            let call = messages.iter().find(|m| m["role"] == "assistant").unwrap();
+            assert_eq!(call["tool_calls"][0]["function"]["name"], "watch_me");
+            let result = messages.iter().find(|m| m["role"] == "tool").unwrap();
+            assert_eq!([&result["tool_name"], &result["tool_call_id"]], [&json!("watch_me"), &call["tool_calls"][0]["id"]]);
+
+            let fake = lm_studio(vec![lm_model("qwen/qwen3-8b", json!({}))], |_, n| {
+                if n == 1 {
+                    vec![
+                        delta(json!({"role":"assistant","content":""}), None),
+                        delta(json!({"tool_calls":[{"index":0,"id":"call_7","type":"function","function":{"name":"watch_me","arguments":"{\"action\":\"stop\"}"}}]}), None),
+                        delta(json!({}), Some("tool_calls")),
+                    ]
+                } else {
+                    vec![delta(json!({"content":"Stopped."}), None), delta(json!({}), Some("stop"))]
+                }
+            });
+            let calls = Rc::new(RefCell::new(vec![]));
+            let tools = vec![tempo(Default::default()), watching(calls.clone())];
+            let (text, _) = run(binding(lm_at(), "qwen/qwen3-8b", Some(fake.clone()), None), "fixture instructions", tools).await.unwrap();
+            assert_eq!(text, "Stopped.");
+            assert_eq!(*calls.borrow(), vec![json!({"action":"stop"})]);
+            let chats = fake.requests("/v1/chat/completions");
+            assert_eq!(names(&chats[1].body), ["get_tempo", "find_tools", "call_tool"]);
+            let messages = chats[1].body["messages"].as_array().unwrap();
+            let call = messages.iter().find(|m| m["role"] == "assistant").unwrap();
+            assert_eq!([&call["tool_calls"][0]["function"]["name"], &call["tool_calls"][0]["id"]], [&json!("watch_me"), &json!("call_7")]);
+            assert!(messages.iter().any(|m| m["role"] == "tool" && m["tool_call_id"] == "call_7"));
+        })
+        .await;
+}
 #[tokio::test]
 async fn full_requests_get_room_and_short_models_are_refused() {
     LocalSet::new().run_until(async{let fixed=fixed(&instructions(),&catalog());

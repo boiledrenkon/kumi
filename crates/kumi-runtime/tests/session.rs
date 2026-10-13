@@ -853,14 +853,13 @@ local_test!(with_every_session_tool_on_only_a_few_go_with_every_request, {
         .sum();
     assert_eq!(
         sent,
-        ["remember", "listen", "search_web", "read_web", "find_sounds", "note_gap"],
+        ["remember", "listen", "watch_video", "search_web", "read_web", "find_sounds", "note_gap"],
         "a tool that goes with every request is a choice"
     );
-    assert!(bytes <= 13 * 1024, "{bytes} bytes");
+    assert!(bytes <= 16 * 1024, "{bytes} bytes");
     let deferred: Vec<&str> = tools.iter().filter(|tool| tool.deferred()).map(|tool| tool.name()).collect();
     for name in [
         "forget",
-        "watch_video",
         "save_recipe",
         "run_recipe",
         "forget_recipe",
@@ -871,6 +870,12 @@ local_test!(with_every_session_tool_on_only_a_few_go_with_every_request, {
         "live_manual",
     ] {
         assert!(deferred.contains(&name), "{name} waits behind find_tools: {deferred:?}");
+    }
+    // The checker in front of every deferred tool takes what the tool's own schema allows.
+    for tool in tools.iter().filter(|tool| tool.deferred()) {
+        let schema = Value::Object(tool.input_schema());
+        let example = kumi_runtime::kernel::schema::example(&schema).unwrap_or_else(|| panic!("no example for {}", tool.name()));
+        assert_eq!(kumi_runtime::kernel::schema::problem(&schema, &example), None, "{} {example}", tool.name());
     }
     h.session.close().await.unwrap();
 });

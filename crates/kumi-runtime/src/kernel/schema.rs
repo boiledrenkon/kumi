@@ -11,6 +11,96 @@ use kumi_common::js::string::head;
 use regex::Regex;
 use serde_json::{Map, Value};
 
+/// A smallest value that fits `schema`, built from it alone (never by asking `problem`): the required fields of an
+/// object, the fewest items of a list, the least number, the first choice. None when it can't find one, such as a
+/// string for a pattern none of its tries match. For checking that the validator takes what a tool's own schema
+/// allows.
+pub fn example(schema: &Value) -> Option<Value> {
+    let schema = schema.as_object()?;
+    if let Some(constant) = schema.get("const") {
+        return Some(constant.clone());
+    }
+    if let Some(first) = schema.get("enum").and_then(Value::as_array).and_then(|choices| choices.first()) {
+        return Some(first.clone());
+    }
+    if let Some(forms) = schema.get("anyOf").and_then(Value::as_array) {
+        return forms.iter().find_map(example);
+    }
+    let types: Vec<&str> = match schema.get("type") {
+        Some(Value::String(name)) => vec![name.as_str()],
+        Some(Value::Array(names)) => names.iter().filter_map(Value::as_str).collect(),
+        // No type: the fields say it's an object, or anything goes.
+        _ if schema.contains_key("properties") => vec!["object"],
+        _ => vec!["string"],
+    };
+    types.into_iter().find_map(|name| example_of(name, schema))
+}
+
+fn example_of(name: &str, schema: &Map<String, Value>) -> Option<Value> {
+    match name {
+        "object" => {
+            let properties = schema.get("properties").and_then(Value::as_object);
+            let mut value = Map::new();
+            for key in schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                let field = properties.and_then(|properties| properties.get(key)).map_or(Some(Value::Null), example)?;
+                value.insert(key.to_string(), field);
+            }
+            Some(Value::Object(value))
+        }
+        "array" => {
+            let items = count(schema, "minItems").unwrap_or(0);
+            let item = match schema.get("items") {
+                Some(each) if items > 0 => Some(example(each)?),
+                _ => None,
+            };
+            Some(Value::Array(item.map(|item| vec![item; items]).unwrap_or_default()))
+        }
+        "string" => {
+            let least = count(schema, "minLength").unwrap_or(0).max(1);
+            let most = count(schema, "maxLength").unwrap_or(usize::MAX);
+            let pattern = schema.get("pattern").and_then(Value::as_str);
+            let mut tries: Vec<String> =
+                vec!["a".repeat(least), "c1".into(), "a1".into(), "1".into(), "x_1".into(), "a:1".into(), "1:track:0".into(), "C3".into()];
+            tries.extend((1..=least.max(8)).map(|n| "1".repeat(n)));
+            // Ids such as a note's p1 or a change's c3.
+            tries.extend(('a'..='z').map(|letter| format!("{letter}1")));
+            tries
+                .into_iter()
+                .find(|text| {
+                    let length = text.chars().count();
+                    length >= least && length <= most && pattern.is_none_or(|pattern| matches_pattern(pattern, text))
+                })
+                .map(Value::String)
+        }
+        "number" | "integer" => {
+            let least = number(schema, "minimum")
+                .or_else(|| {
+                    number(schema, "exclusiveMinimum").map(|above| if name == "integer" { above.floor() + 1.0 } else { above + 1.0 })
+                })
+                .unwrap_or(0.0);
+            let least = if name == "integer" { least.ceil() } else { least };
+            if number(schema, "maximum").is_some_and(|most| least > most) {
+                return None;
+            }
+            Some(if least.fract() == 0.0 && least.abs() < 1e15 { Value::from(least as i64) } else { Value::from(least) })
+        }
+        "boolean" => Some(Value::Bool(false)),
+        "null" => Some(Value::Null),
+        _ => None,
+    }
+}
+
+/// The fields an object schema takes, required ones first, then the rest with `?` after them.
+pub fn fields(schema: &Map<String, Value>) -> Vec<String> {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else { return Vec::new() };
+    let required: Vec<&str> =
+        schema.get("required").and_then(Value::as_array).map(|list| list.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let mut fields: Vec<String> =
+        required.iter().filter(|field| properties.contains_key(**field)).map(|field| (*field).to_string()).collect();
+    fields.extend(properties.keys().filter(|key| !required.contains(&key.as_str())).map(|key| format!("{key}?")));
+    fields
+}
+
 /// The first problem with `value` against `schema`, or None when it fits.
 pub fn problem(schema: &Value, value: &Value) -> Option<String> {
     check(schema, value, "").err()
@@ -70,6 +160,14 @@ fn is_type(name: &str, value: &Value) -> bool {
     }
 }
 
+/// JSON's equality: 1 and 1.0 are the same number (serde_json's `Value` keeps them apart).
+fn same(a: &Value, b: &Value) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(a), Some(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 fn shown(value: &Value) -> String {
     match value {
         Value::String(text) => format!("\"{}\"", head(text, 40)),
@@ -123,14 +221,14 @@ fn check(schema: &Value, value: &Value, path: &str) -> Result<(), String> {
         _ => {}
     }
     if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
-        if !allowed.contains(value) {
+        if !allowed.iter().any(|choice| same(choice, value)) {
             let listed: Vec<String> = allowed.iter().take(24).map(shown).collect();
             let more = if allowed.len() > 24 { ", …" } else { "" };
             return Err(format!("{} must be one of {}{more}, not {}.", field(path), listed.join(", "), shown(value)));
         }
     }
     if let Some(constant) = schema.get("const") {
-        if constant != value {
+        if !same(constant, value) {
             return Err(format!("{} must be {}.", field(path), shown(constant)));
         }
     }
@@ -268,6 +366,23 @@ mod tests {
         for (input, want) in cases {
             assert_eq!(problem(&schema(), &input).as_deref(), Some(want), "{input}");
         }
+    }
+
+    #[test]
+    fn a_number_matches_an_enum_or_const_whatever_its_form() {
+        let schema = json!({"type":"object","properties":{"steps":{"enum":[1, 2.5, "4"]},"one":{"const":1.0}}});
+        assert_eq!(problem(&schema, &json!({"steps": 1.0, "one": 1})), None);
+        assert_eq!(problem(&schema, &json!({"steps": 2.5})), None);
+        assert!(problem(&schema, &json!({"steps": 4})).is_some(), "a number isn't the string \"4\"");
+        assert!(problem(&schema, &json!({"one": "1"})).is_some());
+    }
+
+    #[test]
+    fn a_schemas_own_example_fits_it() {
+        let example = super::example(&schema()).unwrap();
+        assert_eq!(example, json!({"track": "a:1", "beats": 1}));
+        assert_eq!(problem(&schema(), &example), None);
+        assert_eq!(super::example(&json!({"type": "string", "pattern": "^q[0-9]{9}$"})), None, "no try fits");
     }
 
     #[test]

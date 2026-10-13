@@ -215,8 +215,9 @@ async fn deferred_tools_stay_out_of_every_request_and_find_tools_lists_them() {
         assert_eq!(sent(request), ["tempo", "mute", "find_tools", "call_tool"]);
         let find = request.tools.as_ref().unwrap().iter().find(|tool| tool.name == "find_tools").unwrap();
         let description = find.description.clone().unwrap();
-        assert!(description.contains("judge (Does judge things to a track)"), "{description}");
-        assert!(description.contains("arrange (Does arrange things to a track)"), "{description}");
+        // Each with its fields, so a plain call needs no lookup, and what it's for.
+        assert!(description.contains("judge(track, amount?, final?): Does judge things to a track"), "{description}");
+        assert!(description.contains("arrange(track, amount?, final?): Does arrange things to a track"), "{description}");
         assert!(!description.contains("the list leaves out"), "only each tool's first clause: {description}");
     })
     .await;
