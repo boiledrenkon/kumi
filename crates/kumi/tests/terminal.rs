@@ -374,6 +374,28 @@ async fn header_transcript_tool_usage_dispatch_and_redaction() {
     tokio::task::LocalSet::new().run_until(async{let f=Fixture::new(false,false,None,None,None);flush().await;f.input.write("/help\n/status\n/refresh\n/new\n/unknown\nquestion\n");flush().await;for event in [json!({"type":"text","text":"hello "}),json!({"type":"text","text":"world"}),json!({"type":"tool-start","id":"t","name":"live_status"}),json!({"type":"tool-end","id":"t","name":"live_status","elapsedMs":7,"isError":false}),json!({"type":"retry","reason":"ChatGPT is busy (HTTP 429)","waitMs":4200}),json!({"type":"retry","reason":"ChatGPT's answer broke off","waitMs":0}),json!({"type":"turn-complete","elapsedMs":55,"result":{"stopReason":"completed","usage":{"inputTokens":3,"outputTokens":2,"cacheReadTokens":0,"cacheWriteTokens":0}}}),json!({"type":"error","message":"token=private-token\u{1b}[31m bad"})]{f.emit(event);}f.input.write("/quit\n");assert_eq!(f.quit().await,0);let text=f.text();for want in ["Kumi","continues next time","No Live access","hello world","live_status success · 7 ms","[wait] ChatGPT is busy (HTTP 429); trying again in 5 s","[wait] ChatGPT's answer broke off; carrying on","3/2"]{assert!(text.contains(want),"{text}");}assert_eq!(text.matches("hello world").count(),1);assert!(!text.contains("private-token"));assert_eq!(*f.control.calls.borrow(),["start","refresh","new","submit:question","close"]);}).await;
 }
 #[tokio::test]
+async fn a_change_told_again_with_its_picture_is_said_once() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let f = Fixture::new(false, false, None, None, None);
+            flush().await;
+            let change = json!({"id":"c1","family":"parameter","title":"EQ Eight · 3 Gain A 0.00 dB → -4.00 dB","state":"applied","at":1});
+            f.emit(json!({"type":"change","change":change}));
+            let mut pictured = change.clone();
+            pictured["picture"] = json!({"kind":"values","values":[{"name":"3 Gain A","to":-4.0}]});
+            f.emit(json!({"type":"change","change":pictured}));
+            flush().await;
+            assert_eq!(f.text().matches("[change] EQ Eight").count(), 1, "{}", f.text());
+            // A new state is said: undone.
+            let mut undone = change.clone();
+            undone["state"] = json!("undone");
+            f.emit(json!({"type":"change","change":undone}));
+            flush().await;
+            f.quit().await;
+        })
+        .await;
+}
+#[tokio::test]
 async fn changes_undo_and_queued_connecting_request() {
     tokio::task::LocalSet::new()
         .run_until(async {

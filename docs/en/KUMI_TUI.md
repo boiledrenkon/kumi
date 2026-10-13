@@ -26,14 +26,18 @@ closes, crashes or is stopped.
   piano roll, or a Session or Arrangement strip. A device you point at (click
   it, or use **Ask Kumi about this** in Live) is pinned for your next messages.
 - **NOW** (middle right): what Kumi is doing, drawn as it happens: a value's
-  before and after, a new clip's notes, a colour swatch, a device landing in its
-  chain, "▶ Playing from the start marker". While Kumi waits for the model, it
+  before and after, an EQ's or a compressor's curve, an automation lane, a new
+  clip's notes, a colour swatch, a device landing in its chain, "▶ Playing from
+  the start marker". While Kumi waits for the model, it
   says why and until when: "retrying in 5s · ChatGPT is busy", "carrying on at
   14:20 (in 2h 13m) · ChatGPT's plan limit", "offline · trying again in 20s"
   (Esc stops any of them).
 - **Tabs** (bottom right): **HISTORY** lists the latest three things Kumi kept
   (each with **forget**), then every change, newest first, each with **undo**,
-  or **kept** / **no undo** / **check Live** when it can't be undone. **GOAL**
+  or **kept** / **no undo** / **check Live** when it can't be undone. A change
+  opens to its picture: an EQ's curve, a compressor's, the notes (new ones in
+  colour, gone ones faint), an automation lane, or each value before and after,
+  with what was asked when Live set something else ("asked -2 dB"). **GOAL**
   shows the `/goal` ("No goal yet" until there is one): the goal, its turns done
   and time against the budget (the status line counts the turn under way), the
   last check and what's next; for a sound-match
@@ -188,8 +192,8 @@ its undo. They're in English for now.
 | Key | Action |
 | --- | --- |
 | Tab, when idle | Into FOCUS's device tree, at Live's selection: ↑↓ move, Enter points at the row, Esc or Tab goes back to typing |
-| Shift-Tab | Into the tabs (again for the next tab): ↑↓ and Page Up/Down move, Enter does the row's **undo** or **forget** (on a JOBS row, opens the job; `x` stops it), Esc or Tab goes back |
-| Mouse | Click **undo** or **forget** at a row's end, a tab's name, or a device in the tree to point at it; click the pin to unpin. Hold Shift while dragging (Option in iTerm2) to select text |
+| Shift-Tab | Into the tabs (again for the next tab): ↑↓ and Page Up/Down move. On a change, Enter, → or Space opens its picture, Enter or ← closes it, and `u` undoes it while it's open; on a kept item, Enter forgets it; on a JOBS row, Enter opens the job and `x` stops it. Esc or Tab goes back |
+| Mouse | Click **undo** or **forget** at a row's end, a change's words to open its picture (a job's to open the job), a tab's name, or a device in the tree to point at it; click the pin to unpin. Hold Shift while dragging (Option in iTerm2) to select text |
 
 **Panels** (`/model`, `/effort`, `/login`, `/memory` and the others): ↑↓ move,
 Enter chooses, Esc closes; in `/model`, `/memory`, `/conversations` and
@@ -251,7 +255,10 @@ Kumi detects how many colours the terminal shows; `KUMI_COLOR` (`truecolor`,
 `256`, `16`, `none`) overrides it, and `NO_COLOR` is honoured. Where the
 terminal's symbols may not show (the old Windows console, the Linux console),
 Kumi uses two-letter badges instead of icons; `KUMI_ICONS=glyphs` or `badges`
-chooses. Windows Terminal is recommended on Windows. In terminals without the
+chooses. Changes' pictures show as images in kitty and Ghostty (with 24-bit
+colour, outside tmux), in braille and half-blocks elsewhere, and as words where
+symbols may not show; `KUMI_PICTURES=cells` keeps them in cells. Windows
+Terminal is recommended on Windows. In terminals without the
 kitty keyboard protocol, use Ctrl-J or Alt-Enter for a new line. Inside tmux,
 Kumi's status and notifications pass through with `set -g allow-passthrough on`,
 and focus reports need `set -g focus-events on`. Those terminals

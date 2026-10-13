@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     future::Future,
     panic::{catch_unwind, AssertUnwindSafe},
     rc::Rc,
@@ -34,6 +35,8 @@ use std::{
 const RESTORE_MS: u64 = 30_000;
 /// The most changes a session's history keeps, the oldest going first.
 pub const MAX_ENTRIES: usize = 20_000;
+/// The newest changes whose pictures the history keeps.
+pub const PICTURES_KEPT: usize = 500;
 /// How Kumi's Live script says a kept audio clip's file is gone, before its path (snapshots.py).
 const MISSING_FILE: &str = "audio file isn't there any more (";
 
@@ -156,10 +159,25 @@ pub enum FastResult {
     Result(Value),
     Error { error: String, sent: bool },
 }
+/// A device's changes waiting for its curve to be read (`parameters::curve_later`): each change's id and every value
+/// it moved (not the record's shortened list).
+#[derive(Default)]
+pub struct CurveRun {
+    /// Waiting for the next read.
+    pub waiting: Vec<(String, Vec<PictureValue>)>,
+    /// Being read now: listed until the read lands, so changes made meanwhile walk back over them.
+    pub reading: Vec<(String, Vec<PictureValue>)>,
+    /// When the last change came (performance time).
+    pub last: f64,
+}
+
 pub struct History {
     pub connection: Rc<LiveConnection>,
     pub remember: Rc<Remember>,
     pub entries: RefCell<IndexMap<String, Rc<RefCell<Applied>>>>,
+    /// Changes to a device's curve waiting for one read after the last of them, by device: each change's id and the
+    /// values it moved, and when the last came (`parameters::curve_later`).
+    pub curve_runs: RefCell<HashMap<String, CurveRun>>,
     pub changes_this_turn: Cell<usize>,
     quiet: RefCell<Option<Vec<String>>>,
     timeout_ms: u64,
@@ -195,6 +213,7 @@ impl History {
             timeout_ms: timeout_ms.unwrap_or(30_000),
             on_change,
             entries: RefCell::new(IndexMap::new()),
+            curve_runs: RefCell::default(),
             changes_this_turn: Cell::new(0),
             quiet: RefCell::new(None),
             on_shift: RefCell::new(None),
@@ -279,12 +298,37 @@ impl History {
     pub fn remember(&self, record: ChangeRecord, transaction_id: String, restore: Option<Restore>) {
         self.entries.borrow_mut().insert(record.id.clone(), Rc::new(RefCell::new(Applied::new(record.clone(), transaction_id, restore))));
         self.keep_within(MAX_ENTRIES);
+        // Only the newest changes keep their pictures here (each up to 4 KB, and the history keeps thousands).
+        if let Some((_, older)) = self.entries.borrow().iter().rev().nth(PICTURES_KEPT) {
+            older.borrow_mut().record.picture = None;
+        }
         if let Some(quiet) = self.quiet.borrow_mut().as_mut() {
             quiet.push(record.id.clone());
             return;
         }
         self.emit(&record);
         self.remember.schedule_save(20_000);
+    }
+    /// A picture made after the change was told (a device's curve, read once it was applied): kept on its record, and
+    /// the record told again, unless it's part of a group or Kumi is keeping changes quiet.
+    pub fn set_picture(&self, id: &str, picture: ChangePicture) {
+        let record = {
+            let entries = self.entries.borrow();
+            let Some(entry) = entries.get(id) else { return };
+            let mut entry = entry.borrow_mut();
+            // Undone, expired or unsure since: what was read isn't its after.
+            if entry.record.state != ChangeState::Applied {
+                return;
+            }
+            entry.record.picture = Some(picture);
+            if entry.within.is_some() {
+                return;
+            }
+            entry.record.clone()
+        };
+        if !self.is_quiet() {
+            self.emit(&record);
+        }
     }
     pub fn retire(&self, note: &str) {
         let entries: Vec<_> = self.entries.borrow().values().cloned().collect();
@@ -416,6 +460,8 @@ impl History {
     /// the parameter it set, not what moved into its place; one on what was deleted names nothing, and its undo says
     /// so. Returns the refs moved, which Live reads again before Python uses them.
     pub fn shifted(&self, shift: &Shift) -> Vec<String> {
+        // Curves waiting to be read go: the device each names may have moved, and another may sit in its place.
+        self.curve_runs.borrow_mut().clear();
         let mut moved = Vec::new();
         for entry in self.entries.borrow().values() {
             let mut entry = entry.borrow_mut();

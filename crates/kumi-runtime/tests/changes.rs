@@ -125,7 +125,9 @@ fn all_change_summaries_match_complete_source_outputs() {
             &track,
             case.get("applied").and_then(Value::as_object),
         );
-        let actual: Value = serde_json::from_str(&stringify(&serde_json::to_value(result).unwrap())).unwrap();
+        let mut actual: Value = serde_json::from_str(&stringify(&serde_json::to_value(result).unwrap())).unwrap();
+        // Pictures came after the port, with tests of their own (changes/pictures.rs): the summaries are the source's.
+        actual.as_object_mut().unwrap().remove("picture");
         assert_eq!(actual, case["value"], "{case}");
     }
 }

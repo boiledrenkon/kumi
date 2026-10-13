@@ -1,3 +1,5 @@
+#[path = "support/change_pictures.rs"]
+mod change_pictures;
 #[path = "../../../tests/support/fixture_paths.rs"]
 mod fixture_paths;
 use async_trait::async_trait;
@@ -101,7 +103,7 @@ fn normalized(value: &Value) -> String {
     let value = fixture_paths::map_strings(value, &|text| fixture_paths::normalize_root(text, &home, "<home>"));
     let value = FIXTURE_ROOT
         .with(|root| fixture_paths::map_strings(&value, &|text| fixture_paths::normalize_root(text, root.borrow().as_str(), "<fixture>")));
-    let text = stringify(&canonical(&value));
+    let text = stringify(&canonical(&change_pictures::without_change_pictures(&value)));
     let text = regex::Regex::new(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}").unwrap().replace_all(&text, "<uuid>");
     regex::Regex::new(r"\bc\d+\b").unwrap().replace_all(&text, "<change>").into_owned()
 }
@@ -610,4 +612,19 @@ async fn a_device_a_background_job_wrote_loads_once_lives_browser_lists_it() {
             assert_eq!(*endpoint.calls.borrow(), ["live_browser_load_preview", "live_browser_load_apply"]);
         })
         .await;
+}
+
+#[test]
+fn oracle_comparisons_set_aside_only_a_change_records_picture() {
+    let record = |title: &str| json!({"id":"c1","family":"tempo","title":title,"state":"applied","at":1});
+    let mut pictured = record("Tempo 120 → 124 BPM");
+    pictured["picture"] = json!({"kind":"values","values":[{"name":"Tempo","to":124}]});
+    // The same record with and without its picture compares equal;
+    assert_eq!(normalized(&json!([pictured.clone()])), normalized(&json!([record("Tempo 120 → 124 BPM")])));
+    // any other difference still fails, picture or not;
+    let mut other = record("Tempo 120 → 130 BPM");
+    other["picture"] = pictured["picture"].clone();
+    assert_ne!(normalized(&pictured), normalized(&other));
+    // and a "picture" that isn't on a change record stays.
+    assert_ne!(normalized(&json!({"picture":1})), normalized(&json!({})));
 }

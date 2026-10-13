@@ -11,8 +11,8 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 - **顶栏：** Kumi、工程名称、模型及其推理强度、正在运行的后台任务数（◐ 2 jobs），以及与 Live 的连接状态。Live 播放时，速度旁边有一盏黄灯随节拍闪烁（每小节第一拍最亮）。备用模型回答期间，顶栏显示它的名字并加上“· fallback”；接近套餐上限时（某个窗口已用 80%），模型旁边会显示“plan 84% · resets 14:20”。
 - **对话**（左侧）：你的消息、Kumi 的回答及其步骤，用平常的话描述（“looked at your Set”），每条都附有耗时。正在进行的步骤按类型显示动画（搜索、阅读、构建设备、修改、聆听、播放）；同一步骤做了多次会折叠成一行（“read a page ×3”）。Kumi 听到的内容显示为一个小频谱，它记住的内容单独占一行：✎ 笔记，◆ 技巧，↻ 配方，✦ 从匹配中得到的经验。
 - **FOCUS**（右上）：你在 Live 中所处的位置，随你的选择变化而更新：轨道的设备树（含机架链）、以小型钢琴卷帘显示的片段音符，或 Session 视图、编曲视图的条带。你指向的设备（点击它，或在 Live 中使用 **Ask Kumi about this**）会被固定，用于你接下来的消息。
-- **NOW**（右侧中部）：Kumi 正在做的事，随进行实时绘出：某个值修改前后的样子、新片段的音符、色块、落入设备链的设备、“▶ Playing from the start marker”。Kumi 等待模型时，会说明原因和要等到何时：“retrying in 5s · ChatGPT is busy”、“carrying on at 14:20 (in 2h 13m) · ChatGPT's plan limit”、“offline · trying again in 20s”（都可用 Esc 停止）。
-- **标签页**（右下）：**HISTORY** 先列出 Kumi 最近记住的三项内容（各带 **forget**），然后是每项修改，最新的在前，各带 **undo**；无法撤销时则显示 **kept** / **no undo** / **check Live**。**GOAL** 显示 `/goal`（设定之前显示“No goal yet”）：目标、已完成的回合数和用时与预算的对比（状态栏计的是进行中的回合）、最后一次检查以及下一步；匹配声音的 `/loop` 则显示最佳得分及其趋势、领先的候选方案，以及用时。第一个后台任务开始后会多出 **JOBS**：按最新在前列出每个任务的进度、用时和 token，各带 **stop**；按 Enter 打开它的步骤和报告。
+- **NOW**（右侧中部）：Kumi 正在做的事，随进行实时绘出：某个值修改前后的样子、EQ 或压缩器的曲线、自动化包络线、新片段的音符、色块、落入设备链的设备、“▶ Playing from the start marker”。Kumi 等待模型时，会说明原因和要等到何时：“retrying in 5s · ChatGPT is busy”、“carrying on at 14:20 (in 2h 13m) · ChatGPT's plan limit”、“offline · trying again in 20s”（都可用 Esc 停止）。
+- **标签页**（右下）：**HISTORY** 先列出 Kumi 最近记住的三项内容（各带 **forget**），然后是每项修改，最新的在前，各带 **undo**；无法撤销时则显示 **kept** / **no undo** / **check Live**。展开一项修改即可看到它的图示：EQ 曲线、压缩器曲线、音符（新增的为彩色，删除的为淡色）、自动化包络线，或每个值修改前后的对比；当 Live 设置的值与所要求的不同时，也会标出所要求的值（“asked -2 dB”）。**GOAL** 显示 `/goal`（设定之前显示“No goal yet”）：目标、已完成的回合数和用时与预算的对比（状态栏计的是进行中的回合）、最后一次检查以及下一步；匹配声音的 `/loop` 则显示最佳得分及其趋势、领先的候选方案，以及用时。第一个后台任务开始后会多出 **JOBS**：按最新在前列出每个任务的进度、用时和 token，各带 **stop**；按 Enter 打开它的步骤和报告。
 - **输入框**（左下）：等待发送的消息显示在它上方，被固定的设备显示为一个小标签，随下一条消息发送的文件则显示名称、类型、大小和 ×。为空时显示 “ctrl+t to talk”。Kumi 聆听时，它的底行会显示一个闪烁的薄荷绿 `●`、时间和电平表，右侧是可用的按键；不用红色，因为在 Live 中红色表示录音。
 
 欢迎界面会显示自你上次使用以来工程中发生的变化；有更新的 Kumi 时也会显示；第一次时还会说明 Kumi 正在后台学习你的素材库。
@@ -134,8 +134,8 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | 按键 | 操作 |
 | --- | --- |
 | Tab（空闲时） | 进入 FOCUS 的设备树，定位到 Live 的当前选择：↑↓ 移动，Enter 指向该行，Esc 或 Tab 回到输入 |
-| Shift-Tab | 进入标签页（再按一次切到下一个标签页）：↑↓ 和 Page Up/Down 移动，Enter 执行该行的 **undo** 或 **forget**（在 JOBS 的行上打开任务，按 `x` 停止），Esc 或 Tab 返回 |
-| 鼠标 | 点击行末的 **undo** 或 **forget**、标签页名称，或点击设备树中的设备以指向它；点击图钉取消固定。拖动时按住 Shift（iTerm2 中为 Option）可选择文字 |
+| Shift-Tab | 进入标签页（再按一次切到下一个标签页）：↑↓ 和 Page Up/Down 移动。在修改上，Enter、→ 或空格展开它的图示，Enter 或 ← 收起，展开时按 `u` 撤销；在记住的内容上，Enter 执行 forget；在 JOBS 的行上，Enter 打开任务，按 `x` 停止。Esc 或 Tab 返回 |
+| 鼠标 | 点击行末的 **undo** 或 **forget**、修改的文字（展开图示）或任务的文字（打开任务）、标签页名称，或点击设备树中的设备以指向它；点击图钉取消固定。拖动时按住 Shift（iTerm2 中为 Option）可选择文字 |
 
 **面板**（`/model`、`/effort`、`/login`、`/memory` 等）：↑↓ 移动，Enter 选择，Esc 关闭；在 `/model`、`/memory`、`/conversations` 和 `/recipes` 中，输入文字可筛选列表。在 `/model` 中，ctrl+f 设定备用模型。**Your answer**（以带编号选项的问题结尾的回答）：按编号再按 Enter 即可回答。Kumi 推荐的选项带有标记，并一开始就被选中；没有人在时（运行过 `/goal`、`/loop` 或匹配，或 Kumi 的窗口已在其他窗口后面 2 分钟），倒计时结束后 Kumi 会选它（“Taking 2 (recommended) in 60 s · any key cancels”）。在密钥输入框中，粘贴密钥后按 Enter；Kumi 会向提供方验证它，无法连接提供方时则不经验证直接保存。在 ChatGPT 登录面板中，`c` 复制链接。在 `/btw` 面板中，↑↓ 和 Page Up/Down 滚动，←→ 翻看之前的回答，`c` 复制，Esc、Enter 或 Space 关闭面板。在任务详情中，↑↓ 滚动，`x` 停止任务，`r` 重新运行，`c` 复制报告，Esc 关闭。
 
@@ -157,7 +157,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 ## 终端
 
-Kumi 会检测终端能显示多少种颜色；`KUMI_COLOR`（`truecolor`、`256`、`16`、`none`）可覆盖检测结果，并且会遵循 `NO_COLOR`。在终端符号可能无法显示的地方（旧版 Windows 控制台、Linux 控制台），Kumi 用双字母徽标代替图标；可用 `KUMI_ICONS=glyphs` 或 `badges` 自行选择。在 Windows 上推荐使用 Windows Terminal。在不支持 kitty 键盘协议的终端中，请用 Ctrl-J 或 Alt-Enter 换行。在 tmux 中，`set -g allow-passthrough on` 让 Kumi 的状态和通知能够透传，焦点报告需要 `set -g focus-events on`。支持该协议的终端会告知按住的 Ctrl-T 何时松开；在其他终端中，按键的重复停止时 Kumi 就停止聆听。
+Kumi 会检测终端能显示多少种颜色；`KUMI_COLOR`（`truecolor`、`256`、`16`、`none`）可覆盖检测结果，并且会遵循 `NO_COLOR`。在终端符号可能无法显示的地方（旧版 Windows 控制台、Linux 控制台），Kumi 用双字母徽标代替图标；可用 `KUMI_ICONS=glyphs` 或 `badges` 自行选择。修改的图示在 kitty 和 Ghostty 中（24 位色、不在 tmux 内）显示为图像，在其他终端中用盲文点字和半格方块绘出，在符号可能无法显示的地方则以文字呈现；`KUMI_PICTURES=cells` 可让图示始终用字符单元绘出。在 Windows 上推荐使用 Windows Terminal。在不支持 kitty 键盘协议的终端中，请用 Ctrl-J 或 Alt-Enter 换行。在 tmux 中，`set -g allow-passthrough on` 让 Kumi 的状态和通知能够透传，焦点报告需要 `set -g focus-events on`。支持该协议的终端会告知按住的 Ctrl-T 何时松开；在其他终端中，按键的重复停止时 Kumi 就停止聆听。
 
 ## 设计说明
 

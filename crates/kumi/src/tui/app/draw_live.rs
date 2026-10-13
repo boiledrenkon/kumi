@@ -1,3 +1,4 @@
+use super::super::pictures::Graphics;
 use super::super::{
     activity::activity_glyph,
     icons::{icon, track_kind},
@@ -127,9 +128,22 @@ impl TuiApp {
         } else {
             screen.put(x, area.y + now_at + 1, &truncate(&now.detail, width), &now.style);
         }
-        if let Some(picture) = self.flashing().and_then(|c| change_picture(&c, width, self.0.depth)) {
-            for (row, line) in picture.iter().take(2).enumerate() {
-                spans(screen, x, area.y + now_at + 2 + row as i32, line, None);
+        if let Some(change) = self.flashing() {
+            // A new clip, a device's place and a colour keep their own pictures; curves, lanes, values and levels are
+            // drawn from the change's picture.
+            let own = change.clip.is_some() || change.devices.is_some() || change.colors.is_some();
+            let drawn = (!own).then(|| self.change_drawn(&change, width.max(4) as usize, 2)).flatten().map(|(drawn, _)| {
+                if drawn.rows.is_empty() {
+                    drawn.lines
+                } else {
+                    drawn.rows
+                }
+            });
+            let cells = || (self.0.graphics != Graphics::Words).then(|| change_picture(&change, width, self.0.depth)).flatten();
+            if let Some(picture) = drawn.filter(|rows| !rows.is_empty()).or_else(cells) {
+                for (row, line) in picture.iter().take(2).enumerate() {
+                    spans(screen, x, area.y + now_at + 2 + row as i32, line, None);
+                }
             }
         }
         let bottom = Self::bottom_height(area.height);
@@ -166,7 +180,8 @@ impl TuiApp {
             &truncate(if clip.name.is_empty() { "Untitled clip" } else { &clip.name }, (x + width - column).max(1)),
             &st::BRIGHT,
         );
-        let picture = clip_picture(clip.length, &clip.notes, width.min(32), 4);
+        // Braille may not show on a basic console: the bars and notes are said below.
+        let picture = (self.0.graphics != Graphics::Words).then(|| clip_picture(clip.length, &clip.notes, width.min(32), 4)).flatten();
         if let Some(picture) = &picture {
             for (row, line) in picture.iter().enumerate() {
                 spans(screen, x, y + 1 + row as i32, line, None);
@@ -190,7 +205,7 @@ impl TuiApp {
         screen.put(
             x,
             y + 1 + picture_rows,
-            &truncate(&if picture.is_some() { facts } else { format!("{facts} · empty") }, width),
+            &truncate(&if clip.notes.is_empty() { format!("{facts} · empty") } else { facts }, width),
             &st::FAINT,
         );
         2 + picture_rows
@@ -422,7 +437,17 @@ impl TuiApp {
         if area.height > 1 {
             if let Some(last) = last.filter(|c| !self.busy() && c.state == ChangeState::Applied) {
                 let at = area.width - 6;
-                screen.put(2, area.y + 1, &truncate(&format!("✓ {}", last.title), (at - 4).max(1)), &st::TEXT);
+                // A curve, a lane or notes in one row beside it, where there's room.
+                let room = ((at - 4) / 3).clamp(0, 16);
+                let picture = (room >= 8)
+                    .then(|| self.change_drawn(&last, room as usize, 1))
+                    .flatten()
+                    .and_then(|(drawn, _)| drawn.rows.into_iter().next());
+                let title_room = if picture.is_some() { at - 5 - room } else { at - 4 };
+                screen.put(2, area.y + 1, &truncate(&format!("✓ {}", last.title), title_room.max(1)), &st::TEXT);
+                if let Some(picture) = picture {
+                    spans(screen, at - 1 - room, area.y + 1, &picture, None);
+                }
                 screen.put(at, area.y + 1, "undo", &st::ACCENT);
                 self.hit(at, area.y + 1, 4, move |app| {
                     let id = last.id.clone();
@@ -441,16 +466,18 @@ impl TuiApp {
         }
     }
     pub(super) fn history_rows(&self, width: i32) -> Rc<[TabRow]> {
-        // Made again only when the changes or what's kept change, or at another width: not every frame.
-        let revision = {
+        // Made again only when the changes or what's kept change, at another width, or as a row opens or closes: not
+        // every frame.
+        let (revision, expanded) = {
             let state = self.0.state.borrow();
-            if let Some((made, at, rows)) = &state.history_rows {
-                if *made == state.records.revision() && *at == width {
+            if let Some((made, at, open, rows)) = &state.history_rows {
+                if *made == state.records.revision() && *at == width && *open == state.expanded {
                     return rows.clone();
                 }
             }
-            state.records.revision()
+            (state.records.revision(), state.expanded.clone())
         };
+        let mut image = None;
         let mut rows = vec![];
         let (state_kept, changes) = {
             let state = self.0.state.borrow();
@@ -485,18 +512,22 @@ impl TuiApp {
                 ],
                 right: Some(sp(if e.forgotten { "forgotten" } else { "forget" }, if e.forgotten { st::FAINT } else { st::ACCENT })),
                 action,
+                // Every row says what it is: rows opening or closing around it leave the keyboard and the view on it.
+                item: Some(format!("kept {}", e.title)),
                 ..Default::default()
             });
         }
         if state_kept.len() > 3 {
             rows.push(TabRow {
-                spans: vec![sp(format!("{} more kept · /memory", state_kept.len() - 3), st::FAINT)], ..Default::default()
+                spans: vec![sp(format!("{} more kept · /memory", state_kept.len() - 3), st::FAINT)],
+                item: Some("kept more".into()),
+                ..Default::default()
             });
         }
         if !state_kept.is_empty() && !changes.is_empty() {
-            rows.push(TabRow::default());
+            rows.push(TabRow { item: Some("kept end".into()), ..Default::default() });
         }
-        for (place, change) in changes.iter().rev().enumerate() {
+        for change in changes.iter().rev() {
             let heard = change.state == ChangeState::Heard;
             let action = if heard {
                 change.score.map(|n| format!("{}%", number::to_string(n))).unwrap_or_else(|| "heard".into())
@@ -553,24 +584,75 @@ impl TuiApp {
             } else {
                 None
             };
+            // Enter (or a click on the words) opens the change's picture and closes it again; the label undoes it.
+            let open = expanded.as_deref() == Some(change.id.as_str());
+            let toggle: Rc<dyn Fn()> = {
+                let id = change.id.clone();
+                self.click(move |app| {
+                    let mut state = app.0.state.borrow_mut();
+                    state.expanded = if state.expanded.as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
+                })
+            };
+            // → and Space open the picture, ← closes it, and `u` undoes only an opened change: typed otherwise, it's a
+            // word for the box. With nothing left to do, ←, → and Space stay in the tabs rather than leave them.
+            let stay: Rc<dyn Fn()> = Rc::new(|| {});
+            let keys: Vec<(&'static str, Rc<dyn Fn()>)> = if open {
+                let close = self.click(|app| app.0.state.borrow_mut().expanded = None);
+                let mut keys = vec![("left", close), ("right", stay.clone()), ("space", stay)];
+                keys.extend(undo.clone().map(|undo| ("u", undo)));
+                keys
+            } else {
+                vec![("right", toggle.clone()), ("space", toggle.clone()), ("left", stay)]
+            };
+            let item = Some(change.id.clone());
             rows.push(TabRow {
                 spans: vec![marker, sp(lines.first().map(String::as_str).unwrap_or(""), title_style)],
                 right: Some(sp(action, action_style)),
-                item: Some(format!("change {place}")),
+                item: item.clone(),
                 action: undo.clone(),
+                open: Some(toggle.clone()),
+                keys: keys.clone(),
                 ..Default::default()
             });
             if lines.len() > 1 {
                 rows.push(TabRow {
                     spans: vec![sp("  ", title_style), sp(lines[1..].join(" "), title_style)],
-                    item: Some(format!("change {place}")),
-                    action: undo,
+                    item: item.clone(),
+                    action: undo.clone(),
+                    open: Some(toggle.clone()),
+                    keys: keys.clone(),
                     ..Default::default()
                 });
             }
+            if open {
+                let cols = (width - 2).max(4) as usize;
+                let extra = |spans: Vec<crate::tui::wrap::Span>| TabRow {
+                    spans: [vec![sp("  ", st::FAINT)], spans].concat(),
+                    item: item.clone(),
+                    action: undo.clone(),
+                    open: Some(toggle.clone()),
+                    keys: keys.clone(),
+                    ..Default::default()
+                };
+                match self.change_drawn(change, cols, self.picture_height(change)) {
+                    Some((drawn, key)) => {
+                        image = key;
+                        rows.extend(drawn.rows.into_iter().chain(drawn.lines).map(extra));
+                    }
+                    // A change from before pictures (or one without its own): its value bar, swatch or notes, as NOW drew them.
+                    None => match (self.0.graphics != Graphics::Words).then(|| change_picture(change, cols as i32, self.0.depth)).flatten()
+                    {
+                        Some(lines) => rows.extend(lines.into_iter().map(extra)),
+                        None => rows.push(extra(vec![sp("No picture for this change", st::FAINT)])),
+                    },
+                }
+            }
         }
         let rows: Rc<[TabRow]> = rows.into();
-        self.0.state.borrow_mut().history_rows = Some((revision, width, rows.clone()));
+        let mut state = self.0.state.borrow_mut();
+        state.history_rows = Some((revision, width, expanded, rows.clone()));
+        state.history_image = image;
+        drop(state);
         rows
     }
     /// The /goal objective: what it is, where it stands against its budget, the last check and what's next.

@@ -2063,7 +2063,9 @@ impl SessionController for Session {
                 return;
             }
             WatchEvent::Change(c) => {
-                if c.state == ChangeState::Applied {
+                // A change told again as it was (its picture came after it) is no new change in the Set.
+                let again = self.0.state.borrow().seen.get(&c.id).is_some_and(|seen| seen.state == c.state);
+                if c.state == ChangeState::Applied && !again {
                     self.0.state.borrow_mut().applied += 1;
                     let run = self.0.state.borrow().matching.clone();
                     if let Some(run) = run {
@@ -2086,6 +2088,10 @@ impl SessionController for Session {
             s.seen.insert(change.id.clone(), change.clone());
             if s.seen.len() > 20_000 {
                 s.seen.shift_remove_index(0);
+            }
+            // Only the newest changes keep their pictures here; the conversation keeps its own (`changes`).
+            if let Some((_, older)) = s.seen.iter_mut().rev().nth(500) {
+                older.picture = None;
             }
             if let Some(previous) = s.changes.iter_mut().find(|c| c.id == change.id) {
                 *previous = change;

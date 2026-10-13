@@ -1,3 +1,5 @@
+#[path = "support/change_pictures.rs"]
+mod change_pictures;
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::{
@@ -85,7 +87,8 @@ fn canonical(value: &Value) -> Value {
     }
 }
 fn normalized(value: &Value) -> String {
-    regex::Regex::new(r"\bc\d+\b").unwrap().replace_all(&stringify(&canonical(value)), "<change>").into_owned()
+    let value = change_pictures::without_change_pictures(value);
+    regex::Regex::new(r"\bc\d+\b").unwrap().replace_all(&stringify(&canonical(&value)), "<change>").into_owned()
 }
 fn eq(actual: &Value, expected: &Value, label: &str) {
     // The checkout command changes with the runtime; installed users still invoke `kumi`.

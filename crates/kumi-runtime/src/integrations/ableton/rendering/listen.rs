@@ -151,6 +151,7 @@ impl Rendering {
                 clip: None,
                 devices: None,
                 note: None,
+                picture: None,
             });
             if let Some(tell) = &self.on_audition {
                 let event = AuditionEvent {

@@ -267,6 +267,8 @@ struct State {
     expired: Option<(String, Vec<String>)>,
     /// Background jobs that ended whose request carries on, once Kumi is idle.
     carry: Vec<u32>,
+    /// Each change's state as last said: a change told again as it was (its picture came after it) isn't said twice.
+    said: std::collections::HashMap<String, String>,
 }
 struct Inner {
     options: TerminalOptions,
@@ -303,6 +305,7 @@ pub fn create_terminal(options: TerminalOptions) -> PlainTerminal {
             was_raw: false,
             expired: None,
             carry: vec![],
+            said: std::collections::HashMap::new(),
         }),
         parser: RefCell::new(None),
         keys: RefCell::new(None),
@@ -932,6 +935,10 @@ impl Terminal for PlainTerminal {
             }
             "change" => {
                 let c = &value["change"];
+                let (id, state) = (str_(&c["id"]).to_owned(), str_(&c["state"]).to_owned());
+                if !id.is_empty() && self.0.state.borrow_mut().said.insert(id, state.clone()).as_deref() == Some(state.as_str()) {
+                    return;
+                }
                 let title = str_(&c["title"]);
                 let note = str_(&c["note"]);
                 let text = match str_(&c["state"]) {

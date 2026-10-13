@@ -1,5 +1,6 @@
 //! Native change preparation and metadata for Live's guarded preview/apply operations.
 mod more_summaries;
+pub(crate) mod pictures;
 mod summaries;
 use crate::core::{contracts::*, errors::RuntimeError};
 use async_trait::async_trait;
@@ -89,6 +90,8 @@ pub struct ChangeSummary {
     pub lines: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devices: Option<DevicePlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<ChangePicture>,
 }
 impl ChangeSummary {
     pub fn title(title: impl Into<String>) -> Self {
@@ -336,9 +339,13 @@ impl ChangeKind {
         track: &dyn Fn(&Value) -> Option<KnownTrack>,
         applied: Option<&JsonObject>,
     ) -> ChangeSummary {
-        summaries::base(self, preview, input, track, applied)
+        let mut summary = summaries::base(self, preview, input, track, applied)
             .or_else(|| more_summaries::more(self, preview, input, track, applied))
-            .expect("change catalog has a summary for every kind")
+            .expect("change catalog has a summary for every kind");
+        if summary.picture.is_none() {
+            summary.picture = pictures::picture(self, preview, input, applied);
+        }
+        summary
     }
     pub fn has(&self, method: &str) -> bool {
         self.methods.iter().any(|m| m == method)
@@ -804,5 +811,6 @@ pub fn new_record(kind: &ChangeKind, summary: ChangeSummary, state: ChangeState,
         score: None,
         note: None,
         at,
+        picture: summary.picture.and_then(ChangePicture::bounded),
     }
 }

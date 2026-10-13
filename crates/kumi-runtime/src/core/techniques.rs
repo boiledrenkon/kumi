@@ -516,7 +516,10 @@ impl TechniqueDrafts {
         let undone = {
             let mut s = self.0.state.borrow_mut();
             let applied = record.state == ChangeState::Applied;
-            if applied && s.recent.len() < 500 {
+            // A change told again (its picture came after it) replaces itself.
+            if let Some(old) = s.recent.iter_mut().find(|old| old.id == record.id) {
+                *old = record.clone();
+            } else if applied && s.recent.len() < 500 {
                 s.recent.push(record.clone());
             }
             if let Some(draft) = s.draft.as_mut().filter(|_| applied) {

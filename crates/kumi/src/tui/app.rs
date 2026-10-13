@@ -13,6 +13,7 @@ mod panels;
 mod records;
 mod setup;
 pub use setup::{waveform, LiveSetup, WAVE_WIDTH};
+mod shown;
 
 use super::{
     alerts::{self, ProgramState, StatusReport, TerminalProfile},
@@ -101,6 +102,8 @@ pub struct TuiOptions {
     pub front_app: Option<FrontApp>,
     /// Fixed phrases ("tempo 124", "mute drums") change Live at once, with no model call (`instantPhrases`).
     pub instant: bool,
+    /// How changes' pictures show: read from the terminal when None.
+    pub graphics: Option<super::pictures::Graphics>,
 }
 /// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
 /// than Kumi's.
@@ -141,6 +144,7 @@ impl TuiOptions {
             alert_gap_ms: None,
             front_app: None,
             instant: true,
+            graphics: None,
         }
     }
 }
@@ -241,8 +245,14 @@ struct State {
     news_since: Option<String>,
     /// Kumi's changes and what it kept, which HISTORY shows: changed only through its methods, which say so.
     records: records::Records,
-    /// HISTORY's rows, made again when the records change or at another width.
-    history_rows: Option<(u64, i32, Rc<[TabRow]>)>,
+    /// HISTORY's rows, made again when the records change, at another width, or when a row opens or closes.
+    history_rows: Option<(u64, i32, Option<String>, Rc<[TabRow]>)>,
+    /// The change whose picture is open in HISTORY.
+    expanded: Option<String>,
+    /// The image the open row shows (on a terminal with graphics), kept up while it's open.
+    history_image: Option<String>,
+    /// Pictures drawn, and images uploaded to the terminal.
+    images: shown::Images,
     last_change: Option<(String, f64)>,
     last_action: Option<LastAction>,
     goal: Option<Value>,
@@ -366,6 +376,9 @@ impl State {
             news_since: None,
             records: Default::default(),
             history_rows: None,
+            expanded: None,
+            history_image: None,
+            images: shown::Images::default(),
             last_change: None,
             last_action: None,
             goal: None,
@@ -464,6 +477,8 @@ struct Inner {
     output_failed: Cell<bool>,
     /// How this terminal shows Kumi's status and notifications.
     profile: TerminalProfile,
+    /// How changes' pictures show on this terminal.
+    graphics: super::pictures::Graphics,
 }
 #[derive(Clone)]
 pub struct TuiApp(Rc<Inner>);
@@ -551,6 +566,10 @@ impl TuiApp {
             let w = weak.clone();
             let resize = weak.clone();
             let profile = options.terminal.clone().unwrap_or_else(away::detect_profile_here);
+            let graphics = options.graphics.unwrap_or_else(|| {
+                let cells_only = std::env::var("KUMI_PICTURES").is_ok_and(|value| value == "cells");
+                super::pictures::graphics_for(&profile, depth, icons == IconStyle::Glyphs, cells_only)
+            });
             // Giving the terminal back takes Kumi's status with it, the crash path's way too.
             let mut farewell = Vec::new();
             if profile.status {
@@ -558,6 +577,10 @@ impl TuiApp {
             }
             if profile.progress {
                 farewell.push(alerts::PROGRESS_CLEAR.to_string());
+            }
+            // Pictures Kumi put up as images, by the range of ids Kumi gives them: the crash path takes them down too.
+            if graphics == super::pictures::Graphics::Kitty {
+                farewell.push(super::pictures::kitty::DELETE_ALL.to_string());
             }
             let farewell = farewell.iter().map(|s| if profile.tmux { alerts::tmux_wrap(s) } else { s.clone() }).collect();
             let tty = Tty::new(TtyOptions {
@@ -614,6 +637,7 @@ impl TuiApp {
                 done,
                 output_failed: Cell::new(false),
                 profile,
+                graphics,
             }
         }))
     }
@@ -734,6 +758,9 @@ impl TuiApp {
                     ));
                 }
             }
+            // Images Kumi put up go with it.
+            let images = app.0.state.borrow_mut().images.clear();
+            app.0.tty.write(&images);
             app.0.tty.restore(false);
             if !app.0.output_failed.get() {
                 app.0.options.output.write(&format!("{}\n", app.clean(message.as_deref().unwrap_or(FAREWELL), usize::MAX)));

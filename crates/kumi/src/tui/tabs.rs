@@ -19,9 +19,10 @@ pub struct TabRow {
     pub right: Option<Span>,
     /// Clicking the right edge, or Enter on the row, does this.
     pub action: Option<Rc<dyn Fn()>>,
-    /// Enter does this instead, when the row has it (a job opens; its right edge stops it).
+    /// Enter, or a click on the row's words, does this instead when the row has it: a job opens (its right edge stops
+    /// it), a change opens or closes its picture.
     pub open: Option<Rc<dyn Fn()>>,
-    /// Other keys on the row (a letter), and what each does.
+    /// Other keys on the row (a letter, an arrow, Space), and what each does.
     pub keys: Vec<(&'static str, Rc<dyn Fn()>)>,
     /// Rows of one thing (a change whose title takes two) share this, so "n more" counts things, not rows.
     pub item: Option<String>,
@@ -168,7 +169,8 @@ impl TabPanel {
         self.inner.state.borrow_mut().cursor = None;
     }
 
-    /// Keys while the keyboard is in the panel: arrows and pages move, Enter does the row's action. True when used.
+    /// Keys while the keyboard is in the panel: ↑↓ and pages move; Enter opens a row that opens (a job, a change's
+    /// picture) or does the row's action; another key is the row's own, if it has it (`keys`). True when used.
     pub fn key(&self, name: &str) -> bool {
         let action = {
             let mut state = self.inner.state.borrow_mut();
@@ -253,15 +255,29 @@ impl TabPanel {
         let height = (area.height - 1).max(1);
         let total = rows.len() as i32;
         let mut state = self.inner.state.borrow_mut();
-        // Rows that arrive at the top while scrolled down keep the view where it was.
+        // Rows that arrive at the top while scrolled down keep the view where it was. Rows of a thing stay put by it:
+        // a change that opens adds rows under it, not above.
         let before = state.totals.get(&active).copied();
         let scrolled = state.scrolls.get(&active).copied().unwrap_or(0);
-        if let Some(before) = before {
-            if total > before && scrolled > 0 {
-                state.scrolls.insert(active.clone(), scrolled + total - before);
+        // The things (rows' `item`s) at the top of the view and under the keyboard's row, in the rows last drawn.
+        let previous = state.last_rows.clone();
+        let item_at = |at: i32| previous.get(at.max(0) as usize).and_then(|row| row.item.clone());
+        let (top, under) = (item_at(scrolled + if scrolled > 0 { 1 } else { 0 }), state.cursor.and_then(item_at));
+        let find = |item: &Option<String>| item.as_ref().and_then(|item| rows.iter().position(|row| row.item.as_ref() == Some(item)));
+        if let Some(before) = before.filter(|before| *before != total) {
+            match find(&top) {
+                Some(at) if scrolled > 0 => {
+                    state.scrolls.insert(active.clone(), (at as i32 - 1).max(0));
+                }
+                _ if total > before && scrolled > 0 => {
+                    state.scrolls.insert(active.clone(), scrolled + total - before);
+                }
+                _ => {}
             }
-            if total > before && state.cursor.is_some_and(|cursor| cursor > 0) {
-                state.cursor = state.cursor.map(|cursor| cursor + total - before);
+            match (state.cursor, find(&under)) {
+                (Some(_), Some(at)) => state.cursor = Some(at as i32),
+                (Some(cursor), None) if total > before && cursor > 0 => state.cursor = Some(cursor + total - before),
+                _ => {}
             }
         }
         state.totals.insert(active.clone(), total);
@@ -306,6 +322,14 @@ impl TabPanel {
                 screen.fill(Rect { x: area.x - 1, y, width: area.width + 2, height: 1 }, &cursor_band);
             }
             let right = row.right.as_ref().map_or(0, |right| text_width(&right.text));
+            if let Some(open) = &row.open {
+                hits.push(Hit {
+                    x: area.x,
+                    y,
+                    width: (area.width - if right > 0 { right + 1 } else { 0 }).max(1),
+                    action: Rc::clone(open),
+                });
+            }
             let mut column = area.x;
             for span in &row.spans {
                 let room = area.x + area.width - column - if right > 0 { right + 1 } else { 0 };

@@ -21,6 +21,8 @@ pub struct References {
     pub refs: IndexMap<String, String>,
     pub cursors: IndexMap<String, String>,
     pub known: IndexMap<String, KnownTrack>,
+    /// Parameters as discovery last read them, by ref: a picture of one's automation is drawn to its range.
+    pub parameters: IndexMap<String, KnownParameter>,
     short: IndexMap<String, String>,
     long: IndexMap<String, String>,
     counts: IndexMap<String, u64>,
@@ -30,6 +32,14 @@ pub struct References {
     /// (`moved_places`), or it would act on what used to be there.
     moved: IndexSet<String>,
 }
+/// A parameter's name and range, as discovery read them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KnownParameter {
+    pub name: String,
+    pub min: f64,
+    pub max: f64,
+}
+const KNOWN_PARAMETERS: usize = 4096;
 /// Device, chain, parameter and drum pad refs on some tracks (`References::keep`), to put back.
 #[derive(Default)]
 pub struct KeptRefs {
@@ -253,6 +263,7 @@ impl References {
     pub fn retire(&mut self, reference: &str) {
         self.refs.shift_remove(reference);
         self.known.shift_remove(reference);
+        self.parameters.shift_remove(reference);
         self.unname(reference);
     }
     /// What a move or a delete of a device on `track` retires (`retired_by_shift`), with its short names: kept to put
@@ -302,6 +313,8 @@ impl References {
         };
         self.refs = std::mem::take(&mut self.refs).into_iter().filter_map(|(reference, kind)| Some((to(&reference)?, kind))).collect();
         self.known = std::mem::take(&mut self.known).into_iter().filter_map(|(reference, track)| Some((to(&reference)?, track))).collect();
+        self.parameters =
+            std::mem::take(&mut self.parameters).into_iter().filter_map(|(reference, known)| Some((to(&reference)?, known))).collect();
         let names = std::mem::take(&mut self.short);
         self.long.clear();
         for (reference, name) in names {
@@ -351,6 +364,7 @@ impl References {
         self.refs.clear();
         self.cursors.clear();
         self.known.clear();
+        self.parameters.clear();
     }
     pub fn register_rows(
         &mut self,
@@ -381,6 +395,9 @@ impl References {
                         }
                     }
                 }
+                if kind == "parameter" {
+                    self.know_parameter(reference, row);
+                }
                 if kind.ends_with("track") {
                     if let Some(name) = row.get("name").and_then(Value::as_str) {
                         self.known
@@ -404,6 +421,23 @@ impl References {
             }
         }
         Ok(())
+    }
+    /// Keeps a parameter's name and range when its row has them; a row naming it otherwise forgets what was kept.
+    fn know_parameter(&mut self, reference: &str, row: &JsonObject) {
+        let Some(name) = row.get("name").and_then(Value::as_str).map(|name| head(name, 256)) else { return };
+        let (min, max) = (row.get("min").and_then(Value::as_f64), row.get("max").and_then(Value::as_f64));
+        match (min, max) {
+            (Some(min), Some(max)) if min.is_finite() && max.is_finite() && max > min => {
+                if !self.parameters.contains_key(reference) && self.parameters.len() >= KNOWN_PARAMETERS {
+                    self.parameters.shift_remove_index(0);
+                }
+                self.parameters.insert(reference.into(), KnownParameter { name, min, max });
+            }
+            _ if self.parameters.get(reference).is_some_and(|known| known.name != name) => {
+                self.parameters.shift_remove(reference);
+            }
+            _ => {}
+        }
     }
     pub fn validate_parent_and_cursor(&self, args: &JsonObject) -> Result<(), ObservationError> {
         let kind = js_string(args.get("kind"));
@@ -580,6 +614,37 @@ fn same_primitive(a: Option<&Value>, b: Option<&Value>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_discovered_parameter_keeps_its_name_and_range_until_its_ref_goes() {
+        let mut book = References::default();
+        let row = |name: &str, range: Option<(f64, f64)>| {
+            let mut row = json!({"ref":"7:parameter:7:device:6:0:12","name":name}).as_object().unwrap().clone();
+            if let Some((min, max)) = range {
+                row.insert("min".into(), json!(min));
+                row.insert("max".into(), json!(max));
+            }
+            row
+        };
+        let known = |book: &References, reference: &str| book.parameters.get(reference).cloned();
+        book.register_rows("parameter", &[row("3 Gain A", Some((-15., 15.)))], &JsonObject::new(), None).unwrap();
+        let gain = KnownParameter { name: "3 Gain A".into(), min: -15., max: 15. };
+        assert_eq!(known(&book, "7:parameter:7:device:6:0:12"), Some(gain.clone()));
+        // Read again without its range, it's still the same parameter; named otherwise, it isn't.
+        book.register_rows("parameter", &[row("3 Gain A", None)], &JsonObject::new(), None).unwrap();
+        assert_eq!(known(&book, "7:parameter:7:device:6:0:12"), Some(gain.clone()));
+        book.register_rows("parameter", &[row("3 Q A", None)], &JsonObject::new(), None).unwrap();
+        assert_eq!(known(&book, "7:parameter:7:device:6:0:12"), None);
+        // It follows its track when a track before it goes, and goes with its own.
+        book.register_rows("parameter", &[row("3 Gain A", Some((-15., 15.)))], &JsonObject::new(), None).unwrap();
+        book.shift(&Shift { tracks_gone: vec![5], ..Default::default() });
+        assert_eq!(known(&book, "7:parameter:7:device:5:0:12"), Some(gain.clone()));
+        book.shift(&Shift { tracks_gone: vec![5], ..Default::default() });
+        assert!(book.parameters.is_empty());
+        book.register_rows("parameter", &[row("3 Gain A", Some((-15., 15.)))], &JsonObject::new(), None).unwrap();
+        book.invalidate();
+        assert!(book.parameters.is_empty());
+    }
 
     #[test]
     fn a_shift_moves_every_ref_past_the_change_and_retires_what_was_deleted() {

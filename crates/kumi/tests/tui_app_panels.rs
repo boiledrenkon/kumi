@@ -848,7 +848,11 @@ case!(history_scroll_mouse_keyboard_and_badges, async {
         Some(serde_json::from_value(json!({"id":"c35","family":"tempo","title":"Tempo change 35","state":"undone","at":35})).unwrap());
     h.type_text("\x1b[Z").await;
     h.type_text("\x1b[B").await;
+    // Enter opens the row (what it changed, drawn), and `u` undoes it.
     h.type_text("\r").await;
+    h.has("No picture for this change");
+    assert!(!h.calls().contains(&"undo:c35".into()), "Enter never undoes");
+    h.type_text("u").await;
     assert!(h.calls().contains(&"undo:c35".into()));
     assert!(h.has_selection_highlight());
     h.type_text("\x1b").await;

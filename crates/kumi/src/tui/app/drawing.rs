@@ -127,7 +127,18 @@ impl TuiApp {
     /// The frame out to the terminal; its screen is kept to draw the next one on.
     fn present(&self, screen: Screen, cursor: Option<Cursor>) {
         let frame = self.0.renderer.borrow_mut().frame(&screen, cursor);
-        self.0.tty.write(&frame);
+        // Images go up before the cells that show them, inside the frame's synchronized update so a picture taken down
+        // and its cells change at once; those no longer shown are taken down.
+        self.touch_images();
+        let images = self.0.state.borrow_mut().images.writes();
+        let sync = "\u{1b}[?2026h";
+        match frame.strip_prefix(sync) {
+            Some(rest) if !images.is_empty() => self.0.tty.write(&format!("{sync}{images}{rest}")),
+            _ => {
+                self.0.tty.write(&images);
+                self.0.tty.write(&frame);
+            }
+        }
         *self.0.screen.borrow_mut() = Some(screen);
         // Between frames, the terminal's status follows what was drawn.
         if !self.0.state.borrow().closing {

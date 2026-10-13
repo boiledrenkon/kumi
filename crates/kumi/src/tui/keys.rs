@@ -344,6 +344,23 @@ fn escape(state: &mut State, timed_out: bool, events: &mut Vec<InputEvent>) -> u
     if second == b'[' {
         return csi(state, timed_out, events);
     }
+    // A terminal's reply: Kitty's graphics (APC `_G`), a DCS report. Kumi asks for none (its images ask for no
+    // reply), but one is never typed into the box.
+    let third = buffer.as_bytes().get(2).copied();
+    // Kitty's replies go on `i=`, `I=`, `p=` or `;` after the G: Alt-_ and a typed G don't.
+    let after = buffer.get(3..).unwrap_or("");
+    let kitty = second == b'_' && third == Some(b'G') && ["i=", "I=", "p=", ";"].iter().any(|start| after.starts_with(start));
+    if second == b'_' && third == Some(b'G') && !kitty && !timed_out && ["", "i", "I", "p"].contains(&after) {
+        return 0;
+    }
+    if kitty || (second == b'P' && third.is_some_and(|b| b.is_ascii_digit() || b == b'>')) {
+        let end = [buffer[2..].find("\u{1b}\\").map(|at| at + 4), buffer[2..].find('\u{7}').map(|at| at + 3)].into_iter().flatten().min();
+        return match end {
+            Some(end) => end,
+            None if !timed_out && buffer.len() < 64 * 1024 => 0,
+            None => buffer.len(),
+        };
+    }
     if second == b'O' {
         if buffer.len() == 2 && !timed_out {
             return 0;
