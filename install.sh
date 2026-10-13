@@ -48,6 +48,15 @@ main() {
     if [ -n "${2:-}" ]; then printf '  %s\n' "$2" >&2; fi
     exit 1
   }
+  # A path with . and .. taken as written, for one that may not exist yet (KUMI_HOME=$HOME/new/..).
+  normal() {
+    # shellcheck disable=SC2086 # Split on / on purpose, with globbing off.
+    (set -f; IFS=/; out=""
+     for part in $1; do
+       case "$part" in ""|.) ;; ..) out="${out%/*}" ;; *) out="$out/$part" ;; esac
+     done
+     printf '%s\n' "${out:-/}")
+  }
   # A path as it reads on screen: ~/ for the home folder.
   # shellcheck disable=SC2088
   shown() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
@@ -234,13 +243,15 @@ main() {
   # One slash between names and none at the end: a HOME ending in / would otherwise give …//.kumi/bin in PATH.
   KUMI_HOME="$(printf '%s\n' "$KUMI_HOME" | sed 's#//*#/#g; s#\(.\)/$#\1#')"
   # A folder of Kumi's own: in the home folder itself or a disk's root, the names Kumi uses (bin, downloads, tools)
-  # could be the producer's own, and kumi uninstall takes those names out.
-  own_home="$(cd "$HOME" 2>/dev/null && pwd -P)" || own_home="$HOME"
-  own_kumi="$(cd "$KUMI_HOME" 2>/dev/null && pwd -P)" || own_kumi="$KUMI_HOME"
-  case "$own_kumi" in
-    /|//) fail "KUMI_HOME is /, the root of the disk; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")." ;;
-    "$own_home"|"$own_home/") fail "KUMI_HOME is your home folder; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")." ;;
-  esac
+  # could be the producer's own, and kumi uninstall takes those names out. Compared as folders, however they're
+  # spelled (other case, a link, /System/Volumes/Data/…), with . and .. read as written, as it may not exist yet.
+  own_kumi="$(normal "$KUMI_HOME")"
+  # shellcheck disable=SC3013 # -ef isn't in POSIX, but dash, bash, zsh, ksh and busybox sh all have it.
+  if [ "$own_kumi" = / ] || [ "$own_kumi" -ef / ]; then
+    fail "KUMI_HOME is /, the root of the disk; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")."
+  elif [ "$own_kumi" -ef "$HOME" ]; then
+    fail "KUMI_HOME is your home folder; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")."
+  fi
   if [ ! -d "$KUMI_HOME" ]; then made_home=1; fi
   mkdir -p "$KUMI_HOME" || fail "couldn't make $KUMI_HOME."
   free_kb="$(df -Pk "$KUMI_HOME" 2>/dev/null | awk 'NR==2 {print $4}')"

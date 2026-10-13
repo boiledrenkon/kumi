@@ -121,7 +121,13 @@ try {
   # A home folder (a scratch one here) or a drive's root isn't Kumi's own: kumi uninstall takes Kumi's names out of it.
   $profileFolder = Join-Path $root 'homes\profile'
   New-Item -ItemType Directory -Force -Path $profileFolder | Out-Null
-  foreach ($spelled in @($profileFolder, "$profileFolder\", $profileFolder.ToUpperInvariant())) {
+  # Spelled other ways too: . and .., a junction to it, and its 8.3 name where the drive keeps them.
+  $junction = Join-Path $root 'homes\to-profile'
+  New-Item -ItemType Junction -Path $junction -Target $profileFolder | Out-Null
+  $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($profileFolder).ShortPath
+  $spellings = @($profileFolder, "$profileFolder\", $profileFolder.ToUpperInvariant(), "$profileFolder\.", "$profileFolder\new\..", $junction)
+  if ($short -ne $profileFolder) { $spellings += $short }
+  foreach ($spelled in $spellings) {
     $run = Install @{ KUMI_HOME = $spelled; USERPROFILE = $profileFolder; KUMI_RELEASES = "$base/empty" }
     # PowerShell keeps its own files in a home folder; none of Kumi's may land there.
     $there = @(Get-ChildItem -Force -Name -LiteralPath $profileFolder)

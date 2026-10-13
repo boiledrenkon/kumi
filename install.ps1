@@ -187,12 +187,24 @@
   try {
     $KumiHome = if ($env:KUMI_HOME) { $env:KUMI_HOME } else { Join-Path $env:USERPROFILE '.kumi' }
     # A folder of Kumi's own: in the home folder itself or at a drive's root, the names Kumi uses (bin, downloads,
-    # tools) could be the producer's own, and kumi uninstall takes those names out.
+    # tools) could be the producer's own, and kumi uninstall takes those names out. . and .. are read as written.
     $own = Join-Path $env:USERPROFILE '.kumi'
     $whole = $KumiHome; $driveRoot = ''
-    try { $whole = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($KumiHome); $driveRoot = [IO.Path]::GetPathRoot($whole) } catch { }
+    try {
+      $whole = [IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($KumiHome))
+      $driveRoot = [IO.Path]::GetPathRoot($whole)
+    } catch { }
     $whole = "$whole".TrimEnd('\', '/')
-    if ($env:USERPROFILE -and $whole -eq "$env:USERPROFILE".TrimEnd('\', '/')) { Fail "KUMI_HOME is your home folder; Kumi needs a folder of its own, such as $own." }
+    $isHome = [bool]$env:USERPROFILE -and $whole -eq "$env:USERPROFILE".TrimEnd('\', '/')
+    # However else it's spelled (a junction, an 8.3 name): a file put in the home folder shows through it.
+    if (-not $isHome -and $env:USERPROFILE -and (Test-Path -LiteralPath $whole -PathType Container)) {
+      $probe = '.kumi-home-check-' + [Guid]::NewGuid().ToString('N')
+      try {
+        [IO.File]::WriteAllText((Join-Path $env:USERPROFILE $probe), '')
+        $isHome = Test-Path -LiteralPath (Join-Path $whole $probe)
+      } catch { } finally { Remove-Item -LiteralPath (Join-Path $env:USERPROFILE $probe) -Force -ErrorAction SilentlyContinue }
+    }
+    if ($isHome) { Fail "KUMI_HOME is your home folder; Kumi needs a folder of its own, such as $own." }
     if ($driveRoot -and $whole -eq "$driveRoot".TrimEnd('\', '/')) { Fail "KUMI_HOME is $driveRoot, the root of a drive; Kumi needs a folder of its own, such as $own." }
     $releases = 'https://github.com/user1303836/kumi/releases'
 

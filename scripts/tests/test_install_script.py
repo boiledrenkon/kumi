@@ -437,7 +437,15 @@ exit $status
         # kumi uninstall takes Kumi's names (bin, downloads, tools…) out of its folder: there they'd be the producer's.
         home = self.home()
         self.serve(self.release("1.0.0"))
-        for kumi_home in [str(home), f"{home}/", f"{home}/.", "~"]:
+        link = self.root / "link to home"
+        link.symlink_to(home)
+        spellings = [str(home), f"{home}/", f"{home}/.", f"{home}/new/..", "~", str(link)]
+        # Other case on a disk that ignores it, and macOS's own path to the data volume.
+        if Path(str(home).swapcase()).exists():
+            spellings.append(str(home).swapcase())
+        if Path(f"/System/Volumes/Data{home.resolve()}").exists():
+            spellings.append(f"/System/Volumes/Data{home.resolve()}")
+        for kumi_home in spellings:
             run = self.install(home, KUMI_HOME=kumi_home)
             self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
             self.assertIn("KUMI_HOME is your home folder; Kumi needs a folder of its own, such as ~/.kumi.", run.stderr)
