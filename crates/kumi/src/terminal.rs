@@ -722,8 +722,8 @@ impl PlainTerminal {
         let others = controller.all_conversations().await?.into_iter().filter(|row| !here.iter().any(|h| h.id == row.id)).take(10);
         Ok(here.iter().cloned().chain(others).collect())
     }
-    /// /resume: the list; or the conversation a number from it, an id, the start of one or a name gives.
-    /// /export [md | html | json], and /share (a web page): this conversation saved in the folder Kumi was started in.
+    /// /export [md | html | json], and /share (`again`: a web page, the one saved last while nothing changed): this
+    /// conversation saved in the folder Kumi was started in.
     async fn export_command(&self, words: &str, again: bool) {
         let format = match words.to_ascii_lowercase().as_str() {
             "" | "md" | "markdown" => Format::Markdown,
@@ -760,6 +760,7 @@ impl PlainTerminal {
             Err(why) => self.notice(&format!("[export] {why}")),
         }
     }
+    /// /resume: the list; or the conversation a number from it, an id, the start of one or a name gives.
     async fn resume_command(&self, words: &str) -> Result<(), RuntimeError> {
         let controller = &self.0.options.controller;
         let kept = self.listed().await?;
