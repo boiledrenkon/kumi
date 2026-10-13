@@ -3573,7 +3573,7 @@ local_test!(another_sets_conversation_asks_first_and_a_copy_carries_on_here_with
     h.session.submit("and on", None).await.unwrap();
     let calls = h.record.calls.borrow().clone();
     assert!(
-        calls[calls.len() - 2].contains("[Kumi] This conversation began about another Set, its Set, and carries on here about “Song b2”")
+        calls[calls.len() - 2].contains("[Kumi] This conversation began about another Set and carries on here about “Song b2”, as a copy")
     );
     assert!(!calls[calls.len() - 1].contains("[Kumi] This conversation began"));
     // The original stays as it was, in its own Set; the copy says where it came from.

@@ -1019,6 +1019,7 @@ impl Session {
             s.conversation_name = None;
             s.copied_from = None;
             s.touched = false;
+            s.next_note = None;
         }
         s.place = Some(place);
         s.conversation_id = id.clone();
@@ -2369,7 +2370,8 @@ impl SessionController for Session {
             },
             None => None,
         };
-        let set = row.as_ref().and_then(|row| row.set.clone()).map(|name| format!("“{name}”")).unwrap_or_else(|| "its Set".into());
+        let named = row.as_ref().and_then(|row| row.set.clone());
+        let set = named.as_ref().map(|name| format!("“{name}”")).unwrap_or_else(|| "its Set".into());
         match choice {
             SetChoice::Cancel => {
                 self.0.state.borrow_mut().wanted = None;
@@ -2408,10 +2410,13 @@ impl SessionController for Session {
                 let id = store.new_id().await;
                 store.copy(&here, &id, &copy, &wanted.id).await?;
                 let open = open.map(|name| format!("“{name}”")).unwrap_or_else(|| "a Set not saved yet".into());
+                let other = named.map(|name| format!("another Set, “{name}”,")).unwrap_or_else(|| "another Set".into());
+                self.go_to(here, id, copy, Some(format!("Carrying on a copy here; the original stays with {set} as {}.", wanted.id)))
+                    .await?;
                 self.0.state.borrow_mut().next_note = Some(format!(
-                    "\n\n[Kumi] This conversation began about another Set, {set}, and carries on here about {open}, as a copy: what Kumi read of {set} was taken out. Read the open Set before changing anything. (Kumi wrote this note, not the producer.)"
+                    "\n\n[Kumi] This conversation began about {other} and carries on here about {open}, as a copy: what Kumi read of that Set was taken out. Read the open Set before changing anything. (Kumi wrote this note, not the producer.)"
                 ));
-                self.go_to(here, id, copy, Some(format!("Carrying on a copy here; the original stays with {set} as {}.", wanted.id))).await
+                Ok(())
             }
         }
     }
