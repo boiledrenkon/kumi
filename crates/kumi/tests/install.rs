@@ -219,7 +219,11 @@ async fn checked_executable_update_swap_and_rollback() {
     rollback.others = Some(Rc::new(|| async { 2 }.boxed_local()));
     assert_eq!(rollback_installed(rollback).await.unwrap(), 0);
     assert!(!out.0.borrow().contains("won't see"), "{}", out.0.borrow());
-    assert!(out.0.borrow().contains(&format!("Kumi windows still open keep running {KUMI_VERSION}")), "{}", out.0.borrow());
+    assert!(
+        out.0.borrow().contains(&format!("2 Kumi windows still open keep running {KUMI_VERSION} until you close them;")),
+        "{}",
+        out.0.borrow()
+    );
     let written: Value = serde_json::from_slice(&fs::read(home.join("memory.json")).unwrap()).unwrap();
     assert_eq!(written["notes"][0]["text"], "Mixes on headphones");
     assert_eq!(serde_json::from_slice::<Value>(&fs::read(home.join("app/package.json")).unwrap()).unwrap()["version"], KUMI_VERSION);
@@ -1288,9 +1292,20 @@ async fn update_version_installs_that_release_and_keeps_this_one_to_go_back_to()
     let serve = |value: Value, status: u16| -> Rc<Serve> {
         Rc::new(Serve { manifest: value, bytes: bytes.clone(), status, offline: false, calls: RefCell::new(vec![]) })
     };
-    // Before going back, what the database keeps is written back for the older Kumi.
+    // Before going back, what the database keeps is written back for the older Kumi...
     let (database, _) = StoreClient::open(home.join("kumi.db"), json_files(&env).unwrap(), 1).await.unwrap();
     SqliteMemoryStore::new(database).remember(MemoryScope::Producer, None, "Sidechains with Ableton's Compressor", None, 2).await.unwrap();
+    // ...but only once it has unpacked and started: one that doesn't start leaves the files as they were.
+    let (mut broken, out) = io(&env);
+    broken.version = Some("1.15.0".into());
+    broken.fetcher = Some(serve(older.clone(), 200));
+    broken.run = Some(Rc::new(|command, _, _| {
+        async move { Ran { code: i32::from(command.ends_with(&executable_name("kumi"))), stdout: "".into(), stderr: "".into() } }
+            .boxed_local()
+    }));
+    assert_eq!(update_installed(broken).await.unwrap(), 1);
+    assert!(out.0.borrow().contains("The new Kumi didn't start, so this one stays."), "{}", out.0.borrow());
+    assert!(!home.join("memory.json").exists(), "nothing written back for a Kumi that didn't go in");
     let (mut pinned, out) = io(&env);
     pinned.version = Some("1.15.0".into());
     pinned.fetcher = Some(serve(older.clone(), 200));
@@ -1308,7 +1323,13 @@ async fn update_version_installs_that_release_and_keeps_this_one_to_go_back_to()
     let (mut rollback, out) = io(&env);
     rollback.live_running = Some(Rc::new(|| async { false }.boxed_local()));
     rollback.update_bridge = Some(Rc::new(|_| async { 0 }.boxed_local()));
+    rollback.others = Some(Rc::new(|| async { 1 }.boxed_local()));
     assert_eq!(rollback_installed(rollback).await.unwrap(), 0, "{}", out.0.borrow());
+    assert!(
+        out.0.borrow().contains(&format!("A Kumi window still open keeps running {KUMI_VERSION} until you close it;")),
+        "{}",
+        out.0.borrow()
+    );
     assert_eq!(version_of(home.join("app")), KUMI_VERSION);
     // A version that isn't there, one another release answers for, one before native releases, and this one.
     for (version, answer, status, words) in [

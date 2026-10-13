@@ -769,13 +769,10 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
             say("The download didn't match its checksum, so nothing was changed. Try again in a moment.".into());
             return Ok(1);
         }
-        if older {
-            write_back_for_older(&io).await;
-        }
-        let failed = step(
+        let unpacked = step(
             io.out.clone(),
             &io.env,
-            &format!("Putting Kumi {} in place…", manifest.kumi),
+            &format!("Unpacking Kumi {}…", manifest.kumi),
             async {
                 if let Err(error) = remove(&fresh).and_then(|()| fs::create_dir_all(&fresh)) {
                     return not_in_place(&home, &error).into();
@@ -796,6 +793,25 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
                         "The new Kumi didn't start, so this one stays. Try again, or run the installer again ({REINSTALL})."
                     ));
                 }
+                None
+            },
+            false,
+        )
+        .await;
+        if let Some(failed) = unpacked {
+            say(failed);
+            return Ok(1);
+        }
+        // Going back: what the database keeps is written for the older Kumi just before it goes in, once it's
+        // unpacked and has started.
+        if older {
+            write_back_for_older(&io).await;
+        }
+        let failed = step(
+            io.out.clone(),
+            &io.env,
+            &format!("Putting Kumi {} in place…", manifest.kumi),
+            async {
                 if let Err(error) = write_launcher(&home) {
                     return not_in_place(&home, &error).into();
                 }
@@ -936,16 +952,19 @@ pub async fn rollback_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
         say("There's no earlier Kumi to go back to.".into());
         return Ok(1);
     }
-    write_back_for_older(&io).await;
     // Windows can't roll back while a Kumi window is open; elsewhere one keeps running this Kumi.
     let others = match &io.others {
         Some(others) => others().await,
         None => others_running(&join(&app, &executable_name("kumi"))).await,
     };
-    if others > 0 {
-        say(format!(
-            "Kumi windows still open keep running {KUMI_VERSION} until you close them; what they keep from now on stays in Kumi's database for your next update."
-        ));
+    match others {
+        0 => {}
+        1 => say(format!(
+            "A Kumi window still open keeps running {KUMI_VERSION} until you close it; what it keeps from now on stays in Kumi's database for your next update."
+        )),
+        n => say(format!(
+            "{n} Kumi windows still open keep running {KUMI_VERSION} until you close them; what they keep from now on stays in Kumi's database for your next update."
+        )),
     }
     let legacy = !Path::new(&join(&previous, &executable_name("kumi"))).is_file();
     let version = fs::read(join(&previous, "package.json"))
@@ -960,6 +979,7 @@ pub async fn rollback_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     } else {
         (None, Some(migration::earlier_bridge(&io, &home, &previous, &version).await))
     };
+    write_back_for_older(&io).await;
     write_launcher(&home).map_err(error)?;
     if let Some(rollback) = &bridge_rollback {
         rollback.apply().await?;
