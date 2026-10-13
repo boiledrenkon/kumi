@@ -255,15 +255,29 @@ impl TabPanel {
         let height = (area.height - 1).max(1);
         let total = rows.len() as i32;
         let mut state = self.inner.state.borrow_mut();
-        // Rows that arrive at the top while scrolled down keep the view where it was.
+        // Rows that arrive at the top while scrolled down keep the view where it was. Rows of a thing stay put by it:
+        // a change that opens adds rows under it, not above.
         let before = state.totals.get(&active).copied();
         let scrolled = state.scrolls.get(&active).copied().unwrap_or(0);
-        if let Some(before) = before {
-            if total > before && scrolled > 0 {
-                state.scrolls.insert(active.clone(), scrolled + total - before);
+        // The things (rows' `item`s) at the top of the view and under the keyboard's row, in the rows last drawn.
+        let previous = state.last_rows.clone();
+        let item_at = |at: i32| previous.get(at.max(0) as usize).and_then(|row| row.item.clone());
+        let (top, under) = (item_at(scrolled + if scrolled > 0 { 1 } else { 0 }), state.cursor.and_then(item_at));
+        let find = |item: &Option<String>| item.as_ref().and_then(|item| rows.iter().position(|row| row.item.as_ref() == Some(item)));
+        if let Some(before) = before.filter(|before| *before != total) {
+            match find(&top) {
+                Some(at) if scrolled > 0 => {
+                    state.scrolls.insert(active.clone(), (at as i32 - 1).max(0));
+                }
+                _ if total > before && scrolled > 0 => {
+                    state.scrolls.insert(active.clone(), scrolled + total - before);
+                }
+                _ => {}
             }
-            if total > before && state.cursor.is_some_and(|cursor| cursor > 0) {
-                state.cursor = state.cursor.map(|cursor| cursor + total - before);
+            match (state.cursor, find(&under)) {
+                (Some(_), Some(at)) => state.cursor = Some(at as i32),
+                (Some(cursor), None) if total > before && cursor > 0 => state.cursor = Some(cursor + total - before),
+                _ => {}
             }
         }
         state.totals.insert(active.clone(), total);

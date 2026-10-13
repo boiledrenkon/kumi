@@ -61,6 +61,8 @@ case!(a_history_row_opens_to_its_picture_and_closes_again, async {
     h.type_text(" ").await;
     h.wait_for("3 Gain A 0.00 dB → -4.00 dB").await;
     h.has("asked -4.5 dB");
+    // The keyboard stays on the change that opened, not on a row of its picture.
+    assert!(h.selected_line().is_some_and(|line| line.contains("✓ EQ Eight")), "{:?}", h.selected_line());
     assert!(braille(&h.screen()), "the curve, drawn in braille here");
     // Enter closes it again; nothing was undone.
     h.type_text("\r").await;

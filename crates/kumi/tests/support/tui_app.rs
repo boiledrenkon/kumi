@@ -607,6 +607,17 @@ impl Harness {
         let background = format!("{r},{g},{b}");
         self.vt.borrow().styles.iter().flatten().any(|style| style.split('|').nth(1) == Some(background.as_str()))
     }
+    /// The line the selection band is on (the keyboard's row in the tabs or a panel), if any.
+    pub fn selected_line(&self) -> Option<String> {
+        let lines = self.screen();
+        let [r, g, b] = kumi::tui::style::palette::SELECTED;
+        let background = format!("{r},{g},{b}");
+        let vt = self.vt.borrow();
+        vt.styles
+            .iter()
+            .position(|row| row.iter().any(|style| style.split('|').nth(1) == Some(background.as_str())))
+            .map(|at| lines[at].clone())
+    }
     pub async fn wait_until_selection_clears(&self) {
         self.wait_for_screen("selection highlight to disappear", |_| !self.has_selection_highlight()).await;
     }
