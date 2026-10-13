@@ -3782,6 +3782,16 @@ local_test!(a_conversation_chosen_in_its_own_set_holds_until_another_set_opens, 
     assert_eq!(now(&h).await.id, "mv66me0m9newer");
     assert!(h.session.resume_conversation(KEPT).await.unwrap());
     assert!(asks(&h).is_empty());
+    // Taken up, it's this Set's latest (a slow disk saves it a moment later).
+    let mut latest = None;
+    for _ in 0..1000 {
+        latest = store.current(SET_A).await.unwrap().map(|kept| kept.id);
+        if latest.as_deref() == Some(KEPT) {
+            break;
+        }
+        delay(2).await;
+    }
+    assert_eq!(latest.as_deref(), Some(KEPT));
     // Read again, reconnected: still the one chosen.
     h.session.refresh().await.unwrap();
     h.session.reconnect().await.unwrap();
