@@ -283,10 +283,16 @@
         Fail "the downloaded Kumi didn't start ($why). Please report this at github.com/user1303836/kumi/issues."
       }
       $app = Join-Path $KumiHome 'app'
-      # A run that gave up earlier (this one's, or kumi update's) can leave the only whole Kumi in app.previous, or
-      # the one before it in app.previous.old: it goes back first, as kumi update does, and is never what gets cleared.
-      if (-not (HasKumi $app) -and -not (PutBack $app "$app.previous")) { [void](PutBack $app "$app.previous.old") }
+      # A run that gave up earlier (this one's, or kumi update's) can leave the only whole Kumi aside: in app.replaced
+      # (a repair's), app.previous, or the one before it in app.previous.old. It goes back first, as kumi update does,
+      # and is never what gets cleared. Once app holds a whole Kumi, what's left aside goes.
+      foreach ($kept in "$app.replaced", "$app.previous", "$app.previous.old") { if (-not (HasKumi $app)) { [void](PutBack $app $kept) } }
       if (-not (Test-Path -LiteralPath "$app.previous") -and (HasKumi "$app.previous.old")) { [void](PutBack "$app.previous" "$app.previous.old") }
+      if (HasKumi $app) {
+        foreach ($aside in "$app.replaced", "$app.previous.old") {
+          if (Test-Path -LiteralPath $aside) { Remove-Item -LiteralPath $aside -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+      }
       $installed = VersionIn $app
       if ($installed -and $installed -eq $kumiVersion -and (HasKumi "$app.previous")) {
         # The same Kumi again (a repair): the new copy replaces it, and the one to roll back to stays.

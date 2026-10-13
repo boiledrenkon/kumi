@@ -135,6 +135,17 @@ try {
   Check 'an older one says so' (($run.Code -eq 0) -and $run.Said.Contains('replaced 2.0.0 with older 1.0.0')) $run.Said
   Check 'PATH left alone says how to start Kumi in a new window' ($run.Said.Contains('In a new window, add') -or $run.Said.Contains('Next (in this window): kumi')) $run.Said
 
+  # -- What a repair left aside --------------------------------------------
+  # app holds 1.0.0 and app.previous 2.0.0. A repair's leftover goes once app is whole...
+  Copy-Item -LiteralPath (Join-Path $kumi 'app') -Destination (Join-Path $kumi 'app.replaced') -Recurse
+  $run = Install @{ KUMI_HOME = $kumi; KUMI_RELEASES = "$base/one" }
+  Check "a repair's leftover goes once app is whole" (($run.Code -eq 0) -and -not (Test-Path -LiteralPath (Join-Path $kumi 'app.replaced')) -and ((Version (Join-Path $kumi 'app.previous')) -eq '2.0.0')) $run.Said
+  # ...and one cut short with only app.replaced holding the Kumi that was in app puts that one back, not app.previous.
+  Rename-Item -LiteralPath (Join-Path $kumi 'app') -NewName 'app.replaced'
+  $run = Install @{ KUMI_HOME = $kumi; KUMI_RELEASES = "$base/one" }
+  $back = ((Version (Join-Path $kumi 'app')) -eq '1.0.0') -and ((Version (Join-Path $kumi 'app.previous')) -eq '2.0.0') -and -not (Test-Path -LiteralPath (Join-Path $kumi 'app.replaced'))
+  Check 'a repair cut short puts its Kumi back first' (($run.Code -eq 0) -and $run.Said.Contains('reinstalled 1.0.0') -and $back) $run.Said
+
   # -- The kumi command without Kumi's app ----------------------------------
   $cmd = Join-Path $kumi 'bin\kumi.cmd'
   Remove-Item -LiteralPath (Join-Path $kumi 'app') -Recurse -Force
