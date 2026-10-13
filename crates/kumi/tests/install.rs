@@ -1891,3 +1891,58 @@ async fn uninstall_finds_kumis_block_as_install_sh_does_and_leaves_one_in_a_body
         "{said}"
     );
 }
+/// sudo sets HOME to root's own while Kumi's launcher still finds Kumi's folder beside it: in the home folder of the
+/// account that ran sudo, when an earlier installer put Kumi there. The account database's home folders count too,
+/// and root leaves a folder that isn't root's alone (su sets no SUDO_USER).
+#[tokio::test]
+async fn uninstall_as_root_spares_the_home_folder_the_account_database_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let theirs = dir.path().join("home-me");
+    let roots = dir.path().join("root");
+    installed_kumi(&theirs);
+    put(theirs.join("bin/backup.sh"), "theirs");
+    put(theirs.join("notes.txt"), "theirs");
+    fs::create_dir_all(&roots).unwrap();
+    let before = files_in(&theirs);
+    let mut env = env(dir.path());
+    env.insert("HOME".into(), roots.display().to_string());
+    env.insert("KUMI_HOME".into(), theirs.display().to_string());
+    // Under sudo: root, with root's home folder and that of the account that ran sudo.
+    let sudo = Runner { root: true, homes: vec![roots.display().to_string(), theirs.display().to_string()] };
+    assert_eq!(not_kumis_own_for(&env["KUMI_HOME"], &env, &sudo), Some(NotKumis::Home));
+    for options in [UninstallOptions { yes: true, ..Default::default() }, UninstallOptions { all: true, yes: true, ..Default::default() }] {
+        let (mut io, out) = io(&env);
+        io.runner = Some(sudo.clone());
+        assert_eq!(uninstall_installed(io, options).await.unwrap(), 1);
+        assert!(out.0.borrow().contains(": it's your home folder, so the names Kumi uses there"), "{}", out.0.borrow());
+        assert_eq!(files_in(&theirs), before);
+    }
+    // Root, on a folder that isn't root's, wherever it is.
+    #[cfg(unix)]
+    // SAFETY: geteuid has no preconditions. As root, the test's own folders are root's.
+    if unsafe { libc::geteuid() } != 0 {
+        let kumi = dir.path().join("elsewhere/.kumi");
+        installed_kumi(&kumi);
+        let before = files_in(&kumi);
+        let mut there = env.clone();
+        there.insert("KUMI_HOME".into(), kumi.display().to_string());
+        let root = Runner { root: true, homes: vec![] };
+        assert_eq!(not_kumis_own_for(&there["KUMI_HOME"], &there, &root), Some(NotKumis::NotRoots));
+        assert_eq!(not_kumis_own_for(&there["KUMI_HOME"], &there, &Runner::default()), None);
+        let (mut io, out) = io(&there);
+        io.runner = Some(root);
+        assert_eq!(uninstall_installed(io, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 1);
+        assert!(
+            out.0.borrow().contains("as root (sudo): it belongs to another account. Run kumi uninstall without sudo. Nothing was removed."),
+            "{}",
+            out.0.borrow()
+        );
+        assert_eq!(files_in(&kumi), before);
+    }
+    // The account database answers for whoever runs this.
+    let me = Runner::current(&Env::new());
+    #[cfg(unix)]
+    // SAFETY: geteuid has no preconditions.
+    assert_eq!(me.root, unsafe { libc::geteuid() } == 0);
+    assert!(me.homes.iter().all(|home| Path::new(home).is_absolute()), "{me:?}");
+}

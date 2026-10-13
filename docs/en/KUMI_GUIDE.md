@@ -1000,6 +1000,8 @@ notes, recipes, sign-ins, library and references stay unless you add `--all`.
 - It removes nothing when Kumi's folder (`KUMI_HOME`) is your home folder, a
   disk's root, a relative path or a folder without Kumi's launcher and app, and
   says what of Kumi's to take out by hand. The installers won't install there.
+  Run with `sudo`, it also leaves your home folder alone, and any folder that
+  isn't root's.
 - A folder of what Kumi fetched stays when it holds anything else.
 - When a part can't be removed, it says which and why, and Kumi stays so you
   can run `kumi uninstall` again.

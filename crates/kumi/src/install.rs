@@ -242,6 +242,8 @@ pub struct InstalledIo {
     pub free: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, Option<f64>>>>,
     /// How many other Kumi processes run this Kumi (tests say how many).
     pub others: Option<Rc<dyn Fn() -> LocalBoxFuture<'static, usize>>>,
+    /// Who runs this Kumi, for what an uninstall may touch (tests say who).
+    pub runner: Option<Runner>,
 }
 impl InstalledIo {
     pub fn new(out: Rc<dyn TtyOutput>, env: Env) -> Self {
@@ -258,6 +260,7 @@ impl InstalledIo {
             version: None,
             free: None,
             others: None,
+            runner: None,
         }
     }
 }
@@ -1382,16 +1385,77 @@ pub enum NotKumis {
     Root,
     /// It holds no Kumi launcher (bin/kumi) and app.
     Unmarked,
+    /// Root (sudo) on a folder that isn't root's: someone else's Kumi, perhaps in their home folder.
+    NotRoots,
+}
+/// Who runs this Kumi, for what an uninstall may touch: whether as root (sudo, su), and the home folders the account
+/// database gives, whatever HOME says. sudo sets HOME to root's own, while Kumi's launcher still finds Kumi's folder
+/// beside it: in the home folder of the account that ran sudo, if an earlier installer put it there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Runner {
+    pub root: bool,
+    /// This account's home folder, and under sudo, the home folder of the account that ran it.
+    pub homes: Vec<String>,
+}
+impl Runner {
+    pub fn current(env: &Env) -> Self {
+        #[cfg(unix)]
+        {
+            // SAFETY: getuid and geteuid have no preconditions.
+            let (uid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
+            let mut homes: Vec<String> = account_home_of(uid).into_iter().collect();
+            if euid == 0 || uid == 0 {
+                homes.extend(env.get("SUDO_USER").filter(|user| !user.is_empty()).and_then(|user| account_home_named(user)));
+                homes.extend(env.get("SUDO_UID").and_then(|id| id.parse().ok()).and_then(account_home_of));
+            }
+            Runner { root: euid == 0, homes }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = env;
+            Runner::default()
+        }
+    }
+}
+/// A home folder from the account database, by a lookup that fills in the record (getpwuid_r, getpwnam_r).
+#[cfg(unix)]
+fn account_home(lookup: impl FnOnce(*mut libc::passwd, *mut libc::c_char, usize, *mut *mut libc::passwd) -> libc::c_int) -> Option<String> {
+    let mut buffer = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: passwd is plain data, which the lookup fills in, pointing into `buffer`.
+    let mut record: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found = std::ptr::null_mut();
+    if lookup(&mut record, buffer.as_mut_ptr(), buffer.len(), &mut found) != 0 || found.is_null() || record.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir points at a NUL-terminated string in `buffer`, which is still alive.
+    let home = unsafe { std::ffi::CStr::from_ptr(record.pw_dir) }.to_string_lossy().into_owned();
+    (!home.is_empty()).then_some(home)
+}
+#[cfg(unix)]
+fn account_home_of(uid: libc::uid_t) -> Option<String> {
+    // SAFETY: getpwuid_r writes only into the record and buffer it's given.
+    account_home(|record, buffer, size, found| unsafe { libc::getpwuid_r(uid, record, buffer, size, found) })
+}
+#[cfg(unix)]
+fn account_home_named(name: &str) -> Option<String> {
+    let name = std::ffi::CString::new(name).ok()?;
+    // SAFETY: as above; `name` is a valid C string.
+    account_home(|record, buffer, size, found| unsafe { libc::getpwnam_r(name.as_ptr(), record, buffer, size, found) })
 }
 /// Whether `home` is a folder of Kumi's own, which an uninstall may take Kumi's parts out of; why not, when it isn't.
 pub fn not_kumis_own(home: &str, env: &Env) -> Option<NotKumis> {
+    not_kumis_own_for(home, env, &Runner::current(env))
+}
+/// As [`not_kumis_own`], for `runner`.
+pub fn not_kumis_own_for(home: &str, env: &Env, runner: &Runner) -> Option<NotKumis> {
     let folder = Path::new(home);
     if !folder.is_absolute() {
         return Some(NotKumis::Relative);
     }
     let Ok(real) = fs::canonicalize(folder) else { return Some(NotKumis::Missing) };
     let homes = [env.get("HOME").cloned(), env.get("USERPROFILE").cloned(), home::home_dir().map(|home| home.display().to_string())];
-    if homes.into_iter().flatten().filter(|home| !home.is_empty()).any(|home| same_folder(&real, Path::new(&home))) {
+    let homes = homes.into_iter().flatten().chain(runner.homes.iter().cloned());
+    if homes.filter(|home| !home.is_empty()).any(|home| same_folder(&real, Path::new(&home))) {
         return Some(NotKumis::Home);
     }
     if real.parent().is_none() || mount_point(&real) {
@@ -1404,6 +1468,13 @@ pub fn not_kumis_own(home: &str, env: &Env) -> Option<NotKumis> {
     };
     if !launcher.is_file() || !(names_kumi("app") || names_kumi("app.previous")) {
         return Some(NotKumis::Unmarked);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if runner.root && fs::metadata(&real).is_ok_and(|meta| meta.uid() != 0) {
+            return Some(NotKumis::NotRoots);
+        }
     }
     None
 }
@@ -1457,6 +1528,11 @@ fn not_kumis_said(home: &str, why: NotKumis, display: &dyn Fn(&str) -> String) -
         NotKumis::Home => format!("Kumi won't uninstall from {shown}: it's your home folder, {names}."),
         NotKumis::Root => format!("Kumi won't uninstall from {shown}: it's the root of a disk, {names}."),
         NotKumis::Unmarked => format!("Kumi won't uninstall from {shown}: it holds no Kumi launcher (bin/kumi) and app, {names}."),
+        NotKumis::NotRoots => {
+            return format!(
+                "Kumi won't uninstall from {shown} as root (sudo): it belongs to another account. Run kumi uninstall without sudo. Nothing was removed."
+            )
+        }
     };
     said.push_str(" Nothing was removed.");
     let mut parts: Vec<String> = ["app", "app.previous", "app.previous.old", "app.new", "app.replaced", "app.rollback"]
@@ -1647,7 +1723,8 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     let user = user_home(&io.env);
     let display = |path: &str| tilde_in(path, &user);
     // Before any question, any change, or any look inside: a folder that isn't Kumi's own keeps everything in it.
-    if let Some(why) = not_kumis_own(&home, &io.env) {
+    let runner = io.runner.clone().unwrap_or_else(|| Runner::current(&io.env));
+    if let Some(why) = not_kumis_own_for(&home, &io.env, &runner) {
         say(not_kumis_said(&home, why, &display));
         return Ok(1);
     }
