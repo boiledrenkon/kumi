@@ -4003,3 +4003,36 @@ local_test!(a_conversation_asked_for_once_live_closes_goes_on_without_a_question
     assert_eq!(asks(&h).last().unwrap().as_ref().map(|ask| ask.id.as_str()), Some(KEPT));
     h.session.close().await.unwrap();
 });
+local_test!(a_conversation_asked_for_while_live_was_away_says_it_carries_on_when_its_set_opens, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.save(SET_A, KEPT, &kept_about("make the bass wider", None)).await.unwrap();
+    let h = harness(None, |o| o.conversations = Some(store.clone()));
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    {
+        let mut o = h.observation.borrow_mut();
+        o.set = None;
+        o.revision = Some("no-live".into());
+    }
+    h.connection(ConnectionState::Disconnected, Some(DisconnectCause::Live));
+    settle().await;
+    assert!(h.session.resume_conversation(KEPT).await.unwrap());
+    // Live opens A, the conversation's own Set: it carries on there, and says so.
+    live(&h, Some(SET_A));
+    h.connection(ConnectionState::Connected, None);
+    for _ in 0..1000 {
+        if h.notice("The open Set changed") {
+            break;
+        }
+        delay(2).await;
+    }
+    assert_eq!(now(&h).await.id, KEPT);
+    assert!(asks(&h).iter().all(Option::is_none), "{:?}", asks(&h));
+    assert!(h.notice("The open Set changed; continuing your conversation about"));
+    assert!(!h.notice("starting a fresh conversation"));
+    h.session.submit("and brighter", None).await.unwrap();
+    let last = h.record.created.borrow().len() - 1;
+    assert!(h.words(last).unwrap().iter().any(|words| words.contains("make the bass wider")), "{:?}", h.words(last));
+    h.session.close().await.unwrap();
+});

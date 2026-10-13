@@ -1501,7 +1501,7 @@ impl Session {
                 self.notice("Kumi couldn't continue that conversation with this model, so it's shown above and a fresh one starts here.");
             } else {
                 match reason {
-                    Some("set") => self.notice(if resumed.is_some() {
+                    Some("set") => self.notice(if resumed.is_some() || from.is_some() {
                         format!(
                             "The open Set changed; continuing your conversation about {}.",
                             observation.project.as_ref().map(|p| p.name.as_str()).unwrap_or("this Set")
