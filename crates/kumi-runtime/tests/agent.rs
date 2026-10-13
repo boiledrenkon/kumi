@@ -2590,7 +2590,12 @@ async fn the_fallback_carries_on_the_same_answer_through_tool_calls_and_the_chos
         assert_eq!(kernel.run("look", signal(), ignore()).await.unwrap().stop_reason, StopReason::Completed);
         // The plan's limit: the fallback carries on this same answer, through a tool call of its own.
         let (events, emit) = collect();
+        let recorder = kumi_runtime::core::timing::begin();
         assert_eq!(kernel.run("look again", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        // The turn's timing says which model made each call.
+        let line = kumi_runtime::core::timing::line(&recorder.finish(), 0, json!("completed"), None);
+        assert_eq!(line["models"], json!([{"model":"openai-codex/gpt-6-sol","calls":1},{"model":"anthropic/claude-sonnet-5-5","calls":2}]));
+        assert_eq!(line["model"], "anthropic/claude-sonnet-5-5");
         let switched = switches(&events.borrow());
         assert_eq!(switched.len(), 1);
         assert_eq!(switched[0].0, "anthropic/claude-sonnet-5-5");
