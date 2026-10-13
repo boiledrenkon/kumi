@@ -8,10 +8,9 @@ pub mod kitty;
 pub mod raster;
 pub mod scene;
 
-use std::collections::HashMap;
-
 use kumi_runtime::core::contracts::{ChangePicture, MixLevels, PictureValue};
 
+use super::alerts::TerminalProfile;
 use super::style::{palette, ColorDepth, Rgb, Style};
 use super::width::{text_width, truncate};
 use super::wrap::Span;
@@ -30,24 +29,13 @@ pub enum Graphics {
     Words,
 }
 
-/// How pictures show here, from the terminal's environment, colour depth and whether symbols show. A known-terminal
-/// table, never a query: a terminal's reply would reach the input as keys.
-pub fn graphics_for(env: &HashMap<String, String>, depth: ColorDepth, glyphs: bool) -> Graphics {
-    let get = |name: &str| env.get(name).map(String::as_str).unwrap_or("");
+/// How pictures show here: images where the terminal's profile says it shows Kitty's placeholders (at 24-bit colour
+/// only: an image's id travels in its placeholders' colour), cells elsewhere or when the producer keeps them there
+/// (`KUMI_PICTURES=cells`), words where symbols may not show or there's no colour.
+pub fn graphics_for(profile: &TerminalProfile, depth: ColorDepth, glyphs: bool, cells_only: bool) -> Graphics {
     if !glyphs || depth == ColorDepth::None {
-        return Graphics::Words;
-    }
-    let term = get("TERM");
-    // What a terminal started from another inherits doesn't count: kitty's window id only where nothing else names
-    // the terminal, and Ghostty's name only where TERM is Ghostty's or a generic xterm's.
-    let kitty =
-        term == "xterm-kitty" || (!get("KITTY_WINDOW_ID").is_empty() && get("TERM_PROGRAM").is_empty() && term.starts_with("xterm"));
-    let ghostty = get("TERM_PROGRAM") == "ghostty"
-        && (term.is_empty() || term == "xterm-ghostty" || term.starts_with("xterm-256") || term == "xterm");
-    // Inside tmux, screen or Zellij the image wouldn't reach the terminal: cells there.
-    let multiplexed = !get("TMUX").is_empty() || !get("ZELLIJ").is_empty() || term.starts_with("screen") || term.starts_with("tmux");
-    if depth == ColorDepth::Truecolor && (kitty || ghostty) && !multiplexed && env.get("KUMI_PICTURES").map(String::as_str) != Some("cells")
-    {
+        Graphics::Words
+    } else if profile.images && depth == ColorDepth::Truecolor && !cells_only {
         Graphics::Kitty
     } else {
         Graphics::Cells
@@ -270,40 +258,25 @@ mod tests {
     use super::*;
     use kumi_runtime::core::contracts::{EqBand, EqShape};
 
-    fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect()
-    }
-
     fn text(rows: &[Vec<Span>]) -> Vec<String> {
         rows.iter().map(|row| row.iter().map(|span| span.text.as_str()).collect()).collect()
     }
 
     #[test]
-    fn graphics_go_only_to_terminals_known_to_show_them() {
+    fn images_need_a_terminal_that_shows_them_24_bit_colour_and_symbols() {
+        let shows = TerminalProfile { images: true, ..TerminalProfile::quiet() };
         let truecolor = ColorDepth::Truecolor;
-        assert_eq!(graphics_for(&env(&[("TERM", "xterm-kitty")]), truecolor, true), Graphics::Kitty);
-        assert_eq!(graphics_for(&env(&[("TERM_PROGRAM", "ghostty")]), truecolor, true), Graphics::Kitty);
+        assert_eq!(graphics_for(&shows, truecolor, true, false), Graphics::Kitty);
+        assert_eq!(graphics_for(&shows, ColorDepth::Colors256, true, false), Graphics::Cells, "the id needs 24-bit colour");
+        assert_eq!(graphics_for(&shows, truecolor, true, true), Graphics::Cells, "KUMI_PICTURES=cells");
+        assert_eq!(graphics_for(&TerminalProfile::quiet(), truecolor, true, false), Graphics::Cells);
+        assert_eq!(graphics_for(&shows, truecolor, false, false), Graphics::Words, "a console without the symbols");
         assert_eq!(
-            graphics_for(&env(&[("TERM_PROGRAM", "ghostty")]), ColorDepth::Colors256, true),
+            graphics_for(&TerminalProfile::quiet(), ColorDepth::Colors16, true, false),
             Graphics::Cells,
-            "the id needs 24-bit colour"
+            "braille shows in 16 colours"
         );
-        assert_eq!(graphics_for(&env(&[("TERM_PROGRAM", "ghostty"), ("TMUX", "/tmp/t,1,0")]), truecolor, true), Graphics::Cells);
-        assert_eq!(graphics_for(&env(&[("TERM_PROGRAM", "iTerm.app")]), truecolor, true), Graphics::Cells);
-        assert_eq!(graphics_for(&env(&[("TERM_PROGRAM", "Apple_Terminal")]), ColorDepth::Colors256, true), Graphics::Cells);
-        assert_eq!(graphics_for(&env(&[("TERM", "xterm-kitty")]), truecolor, false), Graphics::Words, "a console without the symbols");
-        assert_eq!(graphics_for(&env(&[]), ColorDepth::Colors16, true), Graphics::Cells, "braille shows in 16 colours");
-        assert_eq!(graphics_for(&env(&[]), ColorDepth::None, true), Graphics::Words);
-        assert_eq!(graphics_for(&env(&[("TERM", "xterm-kitty"), ("KUMI_PICTURES", "cells")]), truecolor, true), Graphics::Cells);
-        // Started from kitty or Ghostty, another terminal inherits their names: no images there.
-        let vscode = env(&[("KITTY_WINDOW_ID", "1"), ("TERM_PROGRAM", "vscode"), ("TERM", "xterm-256color")]);
-        assert_eq!(graphics_for(&vscode, truecolor, true), Graphics::Cells);
-        assert_eq!(graphics_for(&env(&[("TERM_PROGRAM", "ghostty"), ("TERM", "alacritty")]), truecolor, true), Graphics::Cells);
-        assert_eq!(graphics_for(&env(&[("KITTY_WINDOW_ID", "3"), ("TERM", "xterm-256color")]), truecolor, true), Graphics::Kitty);
-        assert_eq!(
-            graphics_for(&env(&[("TERM_PROGRAM", "ghostty"), ("TERM", "xterm-ghostty"), ("ZELLIJ", "0")]), truecolor, true),
-            Graphics::Cells
-        );
+        assert_eq!(graphics_for(&TerminalProfile::quiet(), ColorDepth::None, true, false), Graphics::Words);
     }
 
     #[test]

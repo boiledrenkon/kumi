@@ -349,6 +349,9 @@ pub fn transmit(id: u32, raster: &Raster, cols: usize, rows: usize) -> String {
     out
 }
 
+/// Deletes every image Kumi put up (ids 1 to 2^24 − 2, as Kumi gives them) and their placements.
+pub const DELETE_ALL: &str = "\u{1b}_Ga=d,d=R,x=1,y=16777214,q=2\u{1b}\\";
+
 /// Deletes the image under `id` and its placements.
 pub fn delete(id: u32) -> String {
     format!("\u{1b}_Ga=d,d=I,i={id},q=2\u{1b}\\")

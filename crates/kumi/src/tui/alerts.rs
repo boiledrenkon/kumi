@@ -23,12 +23,14 @@ pub struct TerminalProfile {
     /// The terminal app's own id on macOS (`__CFBundleIdentifier`: "com.apple.Terminal"): while the terminal
     /// says nothing of focus, the system tells whether that app is in front.
     pub app_id: Option<String>,
+    /// Kitty's images through Unicode placeholders (changes' pictures): kitty and Ghostty, outside a multiplexer.
+    pub images: bool,
 }
 
 impl TerminalProfile {
     /// Nothing at all: no status, no notification. Tests start from this.
     pub fn quiet() -> Self {
-        Self { status: false, progress: false, notify: NotifyChannel::None, tmux: false, app_id: None }
+        Self { status: false, progress: false, notify: NotifyChannel::None, tmux: false, app_id: None, images: false }
     }
 }
 
@@ -99,7 +101,14 @@ pub fn detect_terminal_profile(env: &HashMap<String, String>, platform: &str) ->
         NotifyChannel::None
     };
     let app_id = Some(get("__CFBundleIdentifier")).filter(|id| platform == "darwin" && !id.is_empty()).map(str::to_string);
-    TerminalProfile { status: true, progress: !tmux && (windows_terminal || conemu || ghostty), notify, tmux, app_id }
+    // Images only where the terminal is the one named: a terminal started from kitty or Ghostty inherits their names
+    // (kitty's window id where nothing else names the terminal, Ghostty's name where TERM is its own or a generic
+    // xterm's), and inside tmux, screen or Zellij an image wouldn't reach the terminal.
+    let own_kitty = term == "xterm-kitty" || (!get("KITTY_WINDOW_ID").is_empty() && program.is_empty() && term.starts_with("xterm"));
+    let own_ghostty = ghostty && (term.is_empty() || term == "xterm-ghostty" || term.starts_with("xterm-256") || term == "xterm");
+    let multiplexed = tmux || !get("ZELLIJ").is_empty() || term.starts_with("screen") || term.starts_with("tmux");
+    let images = !multiplexed && (own_kitty || own_ghostty);
+    TerminalProfile { status: true, progress: !tmux && (windows_terminal || conemu || ghostty), notify, tmux, app_id, images }
 }
 
 fn on_path(name: &str, env: &HashMap<String, String>) -> bool {
@@ -328,7 +337,8 @@ mod tests {
                 progress: true,
                 notify: NotifyChannel::Osc777,
                 tmux: false,
-                app_id: Some("com.mitchellh.ghostty".into())
+                app_id: Some("com.mitchellh.ghostty".into()),
+                images: true,
             }
         );
         assert_eq!(profile(&[("TERM_PROGRAM", "WezTerm")], "linux").notify, NotifyChannel::Osc777);
@@ -341,8 +351,28 @@ mod tests {
         // Without notify-send on PATH, a Linux terminal of no known kind has nothing.
         assert_eq!(profile(&[("TERM", "xterm-256color"), ("PATH", "/nowhere")], "linux").notify, NotifyChannel::None);
         let windows = profile(&[("WT_SESSION", "1"), ("__CFBundleIdentifier", "ignored")], "win32");
-        assert_eq!(windows, TerminalProfile { status: true, progress: true, notify: NotifyChannel::Bell, tmux: false, app_id: None });
+        assert_eq!(
+            windows,
+            TerminalProfile { status: true, progress: true, notify: NotifyChannel::Bell, tmux: false, app_id: None, images: false }
+        );
         assert!(!profile(&[("TERM_PROGRAM", "iTerm.app")], "darwin").progress);
+    }
+
+    #[test]
+    fn images_go_only_to_the_terminal_that_names_itself_outside_a_multiplexer() {
+        let images = |pairs: &[(&str, &str)]| detect_terminal_profile(&env(pairs), "darwin").images;
+        assert!(images(&[("TERM", "xterm-kitty")]));
+        assert!(images(&[("KITTY_WINDOW_ID", "3"), ("TERM", "xterm-256color")]));
+        assert!(images(&[("TERM_PROGRAM", "ghostty"), ("TERM", "xterm-ghostty")]));
+        assert!(images(&[("TERM_PROGRAM", "ghostty")]));
+        assert!(!images(&[("TERM_PROGRAM", "iTerm.app")]));
+        // Started from kitty or Ghostty, another terminal inherits their names.
+        assert!(!images(&[("KITTY_WINDOW_ID", "1"), ("TERM_PROGRAM", "vscode"), ("TERM", "xterm-256color")]));
+        assert!(!images(&[("TERM_PROGRAM", "ghostty"), ("TERM", "alacritty")]));
+        // An image wouldn't pass a multiplexer.
+        assert!(!images(&[("TERM_PROGRAM", "ghostty"), ("TERM", "xterm-ghostty"), ("ZELLIJ", "0")]));
+        assert!(!images(&[("TERM", "xterm-kitty"), ("TMUX", "/tmp/tmux-501/default,1,0")]));
+        assert!(!images(&[("TERM", "screen-256color"), ("KITTY_WINDOW_ID", "1")]));
     }
 
     #[test]
@@ -357,7 +387,7 @@ mod tests {
         let profile = detect_terminal_profile(&env(&[("TMUX", "/tmp/tmux-501/default,1,0"), ("TERM_PROGRAM", "tmux")]), "darwin");
         assert_eq!(
             profile,
-            TerminalProfile { status: true, progress: false, notify: NotifyChannel::AppleScript, tmux: true, app_id: None }
+            TerminalProfile { status: true, progress: false, notify: NotifyChannel::AppleScript, tmux: true, app_id: None, images: false }
         );
         assert_eq!(
             tmux_wrap("\u{1b}]7501;state=idle:app=kumi\u{1b}\\"),

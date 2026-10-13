@@ -563,12 +563,13 @@ impl TuiApp {
         Self(Rc::new_cyclic(|weak: &Weak<Inner>| {
             let depth = options.color_depth.unwrap_or_else(super::style::detect_color_depth_here);
             let icons = options.icons.unwrap_or_else(detect_icon_style_here);
-            let graphics = options
-                .graphics
-                .unwrap_or_else(|| super::pictures::graphics_for(&kumi_common::env::vars(), depth, icons == IconStyle::Glyphs));
             let w = weak.clone();
             let resize = weak.clone();
             let profile = options.terminal.clone().unwrap_or_else(away::detect_profile_here);
+            let graphics = options.graphics.unwrap_or_else(|| {
+                let cells_only = std::env::var("KUMI_PICTURES").is_ok_and(|value| value == "cells");
+                super::pictures::graphics_for(&profile, depth, icons == IconStyle::Glyphs, cells_only)
+            });
             // Giving the terminal back takes Kumi's status with it, the crash path's way too.
             let mut farewell = Vec::new();
             if profile.status {
@@ -576,6 +577,10 @@ impl TuiApp {
             }
             if profile.progress {
                 farewell.push(alerts::PROGRESS_CLEAR.to_string());
+            }
+            // Pictures Kumi put up as images, by the range of ids Kumi gives them: the crash path takes them down too.
+            if graphics == super::pictures::Graphics::Kitty {
+                farewell.push(super::pictures::kitty::DELETE_ALL.to_string());
             }
             let farewell = farewell.iter().map(|s| if profile.tmux { alerts::tmux_wrap(s) } else { s.clone() }).collect();
             let tty = Tty::new(TtyOptions {
