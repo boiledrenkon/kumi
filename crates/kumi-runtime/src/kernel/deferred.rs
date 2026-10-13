@@ -26,6 +26,9 @@ const INDEX_BYTES: usize = 3 * 1024;
 const FOUND: usize = 8;
 const MAX_NAMES: usize = 16;
 
+/// The tool a call runs and its input, or why it can't run (the call's result).
+pub type Resolved = Result<(Rc<dyn KernelTool>, JsonObject), String>;
+
 /// The deferred tools, in the order they were given.
 pub struct Shelf {
     tools: Vec<Rc<dyn KernelTool>>,
@@ -163,7 +166,7 @@ impl Shelf {
 
     /// The deferred tool a call runs and its input: call_tool's own, or a deferred tool called by its name.
     /// Err says what's wrong, as the call's result.
-    pub fn resolve(&self, name: &str, input: Option<&JsonObject>) -> Option<Result<(Rc<dyn KernelTool>, JsonObject), String>> {
+    pub fn resolve(&self, name: &str, input: Option<&JsonObject>) -> Option<Resolved> {
         if name == CALL_TOOL {
             return Some(self.unwrap(input));
         }
@@ -172,7 +175,7 @@ impl Shelf {
         Some(checked(tool, input))
     }
 
-    fn unwrap(&self, input: Option<&JsonObject>) -> Result<(Rc<dyn KernelTool>, JsonObject), String> {
+    fn unwrap(&self, input: Option<&JsonObject>) -> Resolved {
         let input = input.ok_or_else(|| "call_tool's input must be a JSON object: {\"name\": …, \"input\": {…}}.".to_string())?;
         let Some(name) = input.get("name").and_then(Value::as_str).map(trim).filter(|name| !name.is_empty()) else {
             return Err("call_tool needs `name`: a tool from find_tools' list.".into());
@@ -193,7 +196,7 @@ impl Shelf {
 }
 
 /// A deferred tool's input, checked against its own schema first.
-fn checked(tool: &Rc<dyn KernelTool>, input: JsonObject) -> Result<(Rc<dyn KernelTool>, JsonObject), String> {
+fn checked(tool: &Rc<dyn KernelTool>, input: JsonObject) -> Resolved {
     match schema::problem(&Value::Object(tool.input_schema()), &Value::Object(input.clone())) {
         Some(problem) => Err(format!("{}: {problem} find_tools gives its whole input.", tool.name())),
         None => Ok((tool.clone(), input)),
