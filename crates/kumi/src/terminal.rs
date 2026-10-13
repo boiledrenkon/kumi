@@ -25,6 +25,7 @@ use kumi_runtime::{
             ConversationMatch, ConversationSummary, KeptLine, NoteChange, SessionController, SessionEvent, SetAsk, SetChoice, TurnState,
         },
         errors::RuntimeError,
+        export::Format,
     },
     integrations::ableton::project::since,
     providers::{Effort, ProviderId, EFFORTS, PROVIDERS},
@@ -61,6 +62,9 @@ pub struct TerminalOptions {
     pub next_time: Option<String>,
     /// The producer chooses a kept conversation as Kumi starts (`kumi -r`): the list, with these words, is said first.
     pub choose_conversation: Option<String>,
+    /// What /export and /share take out: `kumi report`'s redactor. None takes out what `secrets` holds, the home folder
+    /// and the account name.
+    pub redact: Option<Rc<dyn Fn(&str) -> String>>,
 }
 impl TerminalOptions {
     pub fn new(
@@ -86,11 +90,12 @@ impl TerminalOptions {
             instant: true,
             next_time: None,
             choose_conversation: None,
+            redact: None,
         }
     }
 }
 fn help() -> String {
-    format!("/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new [name] (start a fresh conversation; the last one is kept) · /resume [number, id or name] (list kept conversations, or go back to one; /conversations too) · /rename <name> · /fork [name] (carry on in a copy) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes · /willington (Willington's bindings on or off) · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: {} login <provider>.",*KUMI)
+    format!("/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new [name] (start a fresh conversation; the last one is kept) · /resume [number, id or name] (list kept conversations, or go back to one; /conversations too) · /rename <name> · /fork [name] (carry on in a copy) · /export [md|html|json] (save this conversation; keys and paths taken out) · /share (save it as a web page) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes · /willington (Willington's bindings on or off) · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: {} login <provider>.",*KUMI)
 }
 fn head(text: &str, limit: usize) -> String {
     String::from_utf16_lossy(&text.encode_utf16().take(limit).collect::<Vec<_>>())
@@ -691,6 +696,8 @@ impl PlainTerminal {
  "/resume"|"/conversations"|"/rename"|"/fork" if !controller.has_conversations()=>self.notice(&format!("[conversations] {}",crate::tui::app::not_kept())),
  "/resume"|"/conversations"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.resume_command(&words).await?;},
  "/rename"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.rename_command(&words).await?;},
+ "/export"=>{let words=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();self.export_command(&words).await;},
+ "/share"=>{self.export_command("html").await;},
  "/fork"=>{let name=string::trim(command.strip_prefix(verb).unwrap_or("")).to_string();if controller.fork_conversation((!name.is_empty()).then_some(name.as_str())).await?.is_none(){self.notice("[fork] Nothing to fork yet: ask something first.");}},
  "/note"=>{let usage="[memory] Use: /note <id> <new words>, with an id from /memory.";let words=argument.and_then(|id|command.split_once(id)).map(|(_,words)|words.trim()).unwrap_or("");match argument.filter(|_|!words.is_empty()&&controller.has_change_note()){Some(id)=>match controller.change_note(id,NoteChange::Text(words.into())).await{Ok(Some(_))=>self.notice(&format!("[memory] Changed note {id}.")),Ok(None)=>self.notice(usage),Err(error)=>self.notice(&format!("[memory] {}",error.message()))},None=>self.notice(usage)}},
  "/pin"|"/unpin"=>{let pin=verb=="/pin";let usage=format!("[memory] Use: {verb} <id>, with a note's id from /memory.");match argument.filter(|_|controller.has_change_note()){Some(id)=>match controller.change_note(id,NoteChange::Pinned(pin)).await?{Some(_)=>self.notice(&if pin{format!("[memory] Pinned {id}: Kumi keeps it even when its memory is full.")}else{format!("[memory] Unpinned {id}.")}),None=>self.notice(&usage)},None=>self.notice(&usage)}},
@@ -710,6 +717,24 @@ impl PlainTerminal {
         Ok(here.iter().cloned().chain(others).collect())
     }
     /// /resume: the list; or the conversation a number from it, an id, the start of one or a name gives.
+    /// /export [md | html | json], and /share (a web page): this conversation saved in the folder Kumi was started in.
+    async fn export_command(&self, words: &str) {
+        let format = match words.to_ascii_lowercase().as_str() {
+            "" | "md" | "markdown" => Format::Markdown,
+            "html" | "page" | "web" => Format::Html,
+            "json" | "kumi" => Format::Json,
+            _ => {
+                self.notice("[export] Use /export [md | html | json] (Markdown, a web page, or a file another Kumi imports).");
+                return;
+            }
+        };
+        let redact = crate::export::redactor_or(self.0.options.redact.as_ref(), &self.0.options.secrets);
+        let saved = match crate::export::conversation_now(&*self.0.options.controller, format, &*redact).await {
+            Ok((text, name)) => crate::export::save_here(&text, &name).map(|path| crate::export::saved_words(format, &path)),
+            Err(why) => Err(why),
+        };
+        self.notice(&format!("[export] {}", saved.unwrap_or_else(|why| why)));
+    }
     async fn resume_command(&self, words: &str) -> Result<(), RuntimeError> {
         let controller = &self.0.options.controller;
         let kept = self.listed().await?;

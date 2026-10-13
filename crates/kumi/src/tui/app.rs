@@ -13,6 +13,7 @@ mod panels;
 mod records;
 mod setup;
 pub use setup::{waveform, LiveInstalled, LiveSetup, WAVE_WIDTH};
+mod sharing;
 mod shown;
 
 use super::{
@@ -116,6 +117,11 @@ pub struct TuiOptions {
     pub copy: Option<Rc<dyn Fn(&str)>>,
     /// The producer chooses a kept conversation as Kumi starts (`kumi -r`): the list opens with this typed in it.
     pub choose_conversation: Option<String>,
+    /// What /export and /share take out: `kumi report`'s redactor. None takes out what `secrets` holds, the home folder
+    /// and the account name.
+    pub redact: Option<Rc<dyn Fn(&str) -> String>>,
+    /// Shows a file in the system's file manager (/share); None shows nothing.
+    pub reveal: Option<Rc<dyn Fn(&std::path::Path)>>,
 }
 /// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
 /// than Kumi's.
@@ -162,6 +168,8 @@ impl TuiOptions {
             remote: false,
             copy: None,
             choose_conversation: None,
+            redact: None,
+            reveal: None,
         }
     }
 }

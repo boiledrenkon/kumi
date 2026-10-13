@@ -38,6 +38,13 @@ const MAX_KEPT_CHANGES: usize = 100;
 const MAX_KEPT: usize = 20;
 /// Days a conversation is kept after it was last used, beyond its place's newest (`conversations.keepDays`).
 pub const KEEP_DAYS: u32 = 90;
+/// What Kumi says of a conversation it let go, when the producer names it.
+pub fn gone_words(keep_days: u32) -> String {
+    match keep_days {
+        0 => "That conversation isn't kept any more.".into(),
+        days => format!("That conversation isn't kept any more (Kumi keeps {days} days, and pinned ones always)."),
+    }
+}
 const DAY_MS: f64 = 86_400_000.0;
 const INDEX: &str = "conversation-index.json";
 /// The most let-go ids the index remembers, to say one isn't kept any more.
@@ -99,7 +106,9 @@ pub fn new_conversation_id(at: i64) -> String {
     rand::rngs::OsRng.try_fill_bytes(&mut bytes).expect("OS randomness");
     format!("{}{}", digits.into_iter().rev().collect::<String>(), hex::encode(bytes))
 }
-static PLACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([0-9a-f]{32}|unsaved)$").unwrap());
+/// Where `kumi import` keeps conversations from files: made on another computer, they carry on in a copy.
+pub const IMPORTED: &str = "imported";
+static PLACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([0-9a-f]{32}|unsaved|imported)$").unwrap());
 static CONVERSATION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-z]{6,24}$").unwrap());
 /// The Set's name in a baseline file: its first key `name`, which comes before the pages.
 static BASELINE_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"[{,]"name":("(?:[^"\\]|\\.)*")"#).unwrap());

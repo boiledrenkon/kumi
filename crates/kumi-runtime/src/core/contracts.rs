@@ -455,6 +455,18 @@ pub struct ConversationNow {
     pub touched: bool,
 }
 
+/// The conversation going on now as an export reads it: its id, what it's called, its Set's name, when it began (0 when
+/// it isn't kept yet), what was said up to its last answer, and what the producer calls the DAW and a place in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationToExport {
+    pub id: String,
+    pub title: String,
+    pub set: Option<String>,
+    pub created: i64,
+    pub conversation: SavedConversation,
+    pub words: (&'static str, &'static str),
+}
+
 /// The conversation the producer chose belongs to another Set than the open one: Kumi asks what to do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2109,6 +2121,10 @@ pub trait SessionController {
     async fn conversation_lines(&self, id: &str) -> Result<Vec<TranscriptLine>, RuntimeError> {
         let _ = id;
         Ok(vec![])
+    }
+    /// The conversation going on now, to export (/export, /share): None before its first answer.
+    async fn conversation_to_export(&self) -> Option<ConversationToExport> {
+        None
     }
     fn has_watch(&self) -> bool {
         false
