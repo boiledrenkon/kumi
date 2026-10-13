@@ -29,8 +29,9 @@ use kumi_runtime::{
     },
     ears::device::EARS_NAME,
     library::sources::{basename, dirname, join, resolve},
+    net::proxy,
     system::{self, Env, SystemProgram},
-    web::cause::{unreachable, NetCause},
+    web::cause::{unreachable, unreachable_call, NetCause},
     CONNECT_LIVE, KUMI, KUMI_VERSION, REINSTALL,
 };
 pub use migration::{ensure_native_launcher, finish_legacy_transition, has_app, launcher, only_the_host_differs, write_launcher};
@@ -90,12 +91,13 @@ pub struct ReleaseManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bridge: Option<String>,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AskedRelease {
     Manifest(ReleaseManifest),
     None,
-    /// Not reached, and why when the error says.
-    Offline(Option<NetCause>),
+    /// Not reached: why, when that's known, and the call that failed, whose words say more (a proxy that isn't
+    /// answering, the proxy settings for that address). No call for Kumi's own wait running out or a cut-off answer.
+    Offline(Option<NetCause>, Option<(String, LanguageModelError)>),
     /// Reached, but it answered with this status in place of the release's description.
     Answered(u16),
     Invalid,
@@ -116,11 +118,12 @@ pub async fn ask_release_at(base: &str, fetch: Option<Rc<dyn Fetch>>) -> AskedRe
         match fetch.fetch(&url, FetchInit { signal: Some(waited.clone()), ..Default::default() }).await {
             Ok(response) => break response,
             Err(error) => {
-                let cause = if waited.is_cancelled() { Some(NetCause::Timeout) } else { NetCause::of_call(&error) };
+                let ran_out = waited.is_cancelled();
+                let cause = if ran_out { Some(NetCause::Timeout) } else { NetCause::of_call(&error) };
                 if tries < 2 && matches!(cause, Some(NetCause::Timeout | NetCause::Offline)) {
                     continue;
                 }
-                return AskedRelease::Offline(cause);
+                return AskedRelease::Offline(cause, (!ran_out).then(|| (url.clone(), error)));
             }
         }
     };
@@ -129,11 +132,11 @@ pub async fn ask_release_at(base: &str, fetch: Option<Rc<dyn Fetch>>) -> AskedRe
     }
     if !response.ok() {
         return match NetCause::of_status(response.status) {
-            Some(cause) => AskedRelease::Offline(Some(cause)),
+            Some(cause) => AskedRelease::Offline(Some(cause), None),
             None => AskedRelease::Answered(response.status),
         };
     }
-    let Ok(text) = response.text().await else { return AskedRelease::Offline(Some(NetCause::Offline)) };
+    let Ok(text) = response.text().await else { return AskedRelease::Offline(Some(NetCause::Offline), None) };
     if text.trim_start().starts_with('<') {
         return AskedRelease::Page;
     }
@@ -184,7 +187,7 @@ async fn ask_newest(env: &Env, fetch: Rc<dyn Fetch>) -> (String, AskedRelease) {
         if let Some(base) = newest_release_base(&fetch).await {
             match ask_release_at(&base, Some(fetch.clone())).await {
                 // The usual way goes over the same network: no second wait for the same failure.
-                asked @ (AskedRelease::Manifest(_) | AskedRelease::Offline(_)) => return (base, asked),
+                asked @ (AskedRelease::Manifest(_) | AskedRelease::Offline(..)) => return (base, asked),
                 _ => {}
             }
         }
@@ -207,7 +210,14 @@ fn unasked(asked: &AskedRelease, base: &str, pinned: Option<&str>, env: &Env) ->
         (AskedRelease::None, None) => {
             format!("There's no Kumi release to get at {} yet; try again later", base.strip_prefix("https://").unwrap_or(base))
         }
-        (AskedRelease::Offline(cause), _) => unreachable(&place(base), *cause, env).trim_end_matches('.').into(),
+        (AskedRelease::Offline(cause, call), _) => {
+            let host = place(base);
+            call.as_ref()
+                .and_then(|(url, error)| unreachable_call(&host, url, error, env, &proxy::current()))
+                .unwrap_or_else(|| unreachable(&host, *cause, env))
+                .trim_end_matches('.')
+                .into()
+        }
         (AskedRelease::Answered(status), _) => {
             format!("{} answered {status} in place of the release's description; try again in a moment", place(base))
         }

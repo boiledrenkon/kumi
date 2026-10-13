@@ -414,7 +414,7 @@ async fn no_release_is_distinct_from_offline_or_invalid() {
     assert_eq!(ask_release(&env, Some(notfound())).await, AskedRelease::None);
     assert!(matches!(
         ask_release(&env, Some(Rc::new(Serve { offline: true, ..Rc::try_unwrap(Serve::new(Value::Null)).ok().unwrap() }))).await,
-        AskedRelease::Offline(_)
+        AskedRelease::Offline(..)
     ));
     assert_eq!(ask_release(&env, Some(Serve::new(json!("<html>")))).await, AskedRelease::Invalid);
     assert!(check_release(&env, Some(notfound())).await.unwrap_err().message().contains("no Kumi release to get at example.test/r yet"));
@@ -1384,6 +1384,11 @@ async fn an_update_without_room_or_a_connection_changes_nothing_and_says_why() {
     assert_eq!(update_installed(lost).await.unwrap(), 1);
     assert!(out.0.borrow().contains("Kumi couldn't reach example.test: its address couldn't be looked up (DNS)."), "{}", out.0.borrow());
     assert!(out.0.borrow().ends_with("Nothing was changed.\n"), "{}", out.0.borrow());
+    // A proxy that isn't answering, told apart from one that turned Kumi away (web::cause's words).
+    let (mut proxied, out) = io(&env);
+    proxied.fetcher = Some(Rc::new(DeadProxy));
+    assert_eq!(update_installed(proxied).await.unwrap(), 1);
+    assert!(out.0.borrow().contains("Kumi couldn't reach example.test: the proxy isn't answering."), "{}", out.0.borrow());
     let (mut portal, out) = io(&env);
     portal.fetcher = Some(Rc::new(Page));
     assert_eq!(update_installed(portal).await.unwrap(), 1);
@@ -1408,6 +1413,16 @@ impl Fetch for Unresolved {
     async fn fetch(&self, url: &str, _: FetchInit) -> Result<Response, LanguageModelError> {
         Err(LanguageModelError::other(format!(
             "error sending request for url ({url}): client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known"
+        )))
+    }
+}
+/// A proxy whose address refuses the connection.
+struct DeadProxy;
+#[async_trait(?Send)]
+impl Fetch for DeadProxy {
+    async fn fetch(&self, url: &str, _: FetchInit) -> Result<Response, LanguageModelError> {
+        Err(LanguageModelError::other(format!(
+            "error sending request for url ({url}): client error (Connect): tunnel error: proxy 127.0.0.1:9 connection refused"
         )))
     }
 }
