@@ -193,7 +193,7 @@
     try { $whole = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($KumiHome); $driveRoot = [IO.Path]::GetPathRoot($whole) } catch { }
     $whole = "$whole".TrimEnd('\', '/')
     if ($env:USERPROFILE -and $whole -eq "$env:USERPROFILE".TrimEnd('\', '/')) { Fail "KUMI_HOME is your home folder; Kumi needs a folder of its own, such as $own." }
-    if ($driveRoot -and $whole -eq "$driveRoot".TrimEnd('\', '/')) { Fail "KUMI_HOME is $whole, the root of a drive; Kumi needs a folder of its own, such as $own." }
+    if ($driveRoot -and $whole -eq "$driveRoot".TrimEnd('\', '/')) { Fail "KUMI_HOME is $driveRoot, the root of a drive; Kumi needs a folder of its own, such as $own." }
     $releases = 'https://github.com/user1303836/kumi/releases'
 
     Say ''
