@@ -208,13 +208,16 @@ struct Meta {
     pinned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forked_from: Option<String>,
+    /// It came from a file (kumi import), or was copied from one that did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    imported: bool,
     /// What a later Kumi keeps here, kept as it is when this one writes the file again.
     #[serde(flatten)]
     later: serde_json::Map<String, Value>,
 }
 impl Meta {
     fn is_empty(&self) -> bool {
-        self.name.is_none() && !self.pinned && self.forked_from.is_none() && self.later.is_empty()
+        self.name.is_none() && !self.pinned && self.forked_from.is_none() && !self.imported && self.later.is_empty()
     }
 }
 /// A name as the producer gave it: one line, at most 60 characters; None when there's nothing left.
@@ -235,6 +238,7 @@ async fn read_meta(file: &Path) -> Meta {
         name: meta.name.as_deref().and_then(clean_name),
         pinned: meta.pinned,
         forked_from: meta.forked_from.filter(|id| CONVERSATION.is_match(id)),
+        imported: meta.imported,
         later: meta.later,
     }
 }
@@ -334,6 +338,8 @@ struct Entry {
     pinned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forked_from: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    imported: bool,
     stamp: Stamp,
 }
 /// A place's Set name, as its baseline said when Kumi read it, with when the baseline was written.
@@ -647,6 +653,7 @@ impl FileConversationStore {
                     name: meta.name,
                     pinned: meta.pinned,
                     forked_from: meta.forked_from,
+                    imported: meta.imported,
                     stamp: *stamp,
                 },
             );
@@ -690,6 +697,7 @@ impl FileConversationStore {
                 let current = self.current_id(&place).await;
                 currents.insert(place.clone(), current);
             }
+            let imported = entry.imported || place == IMPORTED;
             rows.push(ConversationSummary {
                 current: currents[&place].as_deref() == Some(id.as_str()),
                 id,
@@ -702,6 +710,7 @@ impl FileConversationStore {
                 pinned: entry.pinned,
                 forked_from: entry.forked_from.clone(),
                 created: entry.created,
+                imported,
             });
         }
         rows.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
@@ -1048,12 +1057,15 @@ impl ConversationStore for FileConversationStore {
         from: Option<&str>,
     ) -> Result<(), RuntimeError> {
         self.file(place, id)?;
+        let from = from.filter(|from| CONVERSATION.is_match(from));
+        // A copy of a conversation from a file is one too: its words are the file's, however often it's copied.
+        let imported = place == IMPORTED
+            || match from {
+                Some(from) => matches!(self.find(from).await, Ok(ConversationMatch::One(row)) if row.id == from && row.imported),
+                None => false,
+            };
         // Beside it before it's there: a look at the folder never finds it without them.
-        let meta = Meta {
-            name: name.and_then(clean_name),
-            forked_from: from.filter(|from| CONVERSATION.is_match(from)).map(str::to_owned),
-            ..Meta::default()
-        };
+        let meta = Meta { name: name.and_then(clean_name), forked_from: from.map(str::to_owned), imported, ..Meta::default() };
         self.write_meta(place, id, &meta).await?;
         self.save(place, id, conversation).await
     }

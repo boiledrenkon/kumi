@@ -3632,12 +3632,12 @@ local_test!(an_imported_conversation_carries_on_here_in_a_copy_and_the_model_hea
     let checkpoint = h.record.created.borrow().last().unwrap().checkpoint.clone().unwrap();
     let said: Vec<String> = transcript_of(&checkpoint.messages).into_iter().map(|line| line.text).collect();
     assert_eq!(said, ["make the bass wider", "done"]);
-    // The model hears where it came from, with the first request here only.
+    // The model hears where it came from in the conversation's system text: with every request, whatever the budget clears.
     h.session.submit("go on", None).await.unwrap();
     h.session.submit("and on", None).await.unwrap();
-    let calls = h.record.calls.borrow().clone();
-    assert!(calls[calls.len() - 2].contains("[Kumi] This conversation was imported from a file"), "{}", calls[calls.len() - 2]);
-    assert!(!calls[calls.len() - 1].contains("imported from a file"));
+    let instructions = h.record.created.borrow().last().unwrap().instructions.clone();
+    assert!(instructions.contains("This conversation was imported from a file"), "{instructions}");
+    assert!(!h.record.calls.borrow().iter().any(|call| call.contains("imported from a file")), "it isn't the producer's words");
     // The import stays as it came; the copy is this Set's, named as the import was.
     let rows = store.all().await.unwrap();
     let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap().clone();
@@ -3658,6 +3658,7 @@ local_test!(a_chat_that_keeps_no_conversations_still_exports_what_was_said, {
     let said: Vec<String> = transcript_of(&exported.conversation.checkpoint.messages).into_iter().map(|line| line.text).collect();
     assert_eq!(said, ["make the bass wider"]);
     assert_eq!(exported.set.as_deref(), Some("Song b2"));
+    assert!(!h.record.created.borrow().last().unwrap().instructions.contains("imported from a file"));
     h.session.close().await.unwrap();
 });
 local_test!(open_its_set_asks_the_daw_and_the_conversation_goes_on_once_that_set_is_open, {

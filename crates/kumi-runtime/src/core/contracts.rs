@@ -414,6 +414,9 @@ pub struct ConversationSummary {
     /// When it began (ms since the epoch).
     #[serde(default)]
     pub created: i64,
+    /// It came from a file (kumi import), or is a copy of one: its earlier words are the file's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
 }
 
 impl ConversationSummary {

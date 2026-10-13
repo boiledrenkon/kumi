@@ -10,6 +10,7 @@ use chrono::{DateTime, FixedOffset};
 use kumi_common::js::json::{file_text, stringify_pretty};
 use kumi_common::js::string::{head, trim, trim_end, trim_start, utf16_len};
 use serde_json::{json, Map, Value};
+use unicode_normalization::UnicodeNormalization;
 
 use super::contracts::{ChangePicture, ChangeRecord, ChangeState, KernelCheckpoint, MixLevels, PictureValue, SavedConversation};
 use super::goal::goal_setup;
@@ -35,6 +36,8 @@ pub const PARTIAL: &str = "The earlier part of this conversation wasn't kept: Ku
 pub const IMPORT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MESSAGES: usize = 20_000;
 const MAX_CHANGES: usize = 500;
+/// The producer's first words in an imported conversation that starts with Kumi's answer.
+const PARTWAY: &str = "(This conversation starts partway.)";
 /// The longest a title runs, in UTF-16 units.
 const MAX_TITLE: usize = 60;
 /// The longest any of an imported change's words run, in UTF-16 units.
@@ -517,7 +520,47 @@ pub(crate) fn asked(words: &str) -> Option<String> {
     if let Some(goal) = framed(words, &goal_setup("")) {
         return Some(format!("Goal: {goal}"));
     }
-    (!words.is_empty() && !words.starts_with("[Kumi")).then(|| words.to_string())
+    (!words.is_empty() && !kumis(words)).then(|| words.to_string())
+}
+
+/// Whether words open with Kumi's mark for its own notes to the model ("[Kumi"), in any case, form or width, with white
+/// space and invisible characters aside.
+pub(crate) fn kumis(words: &str) -> bool {
+    let mut chars = words.chars().filter(|c| !invisible(*c)).skip_while(|c| c.is_whitespace());
+    chars.next().is_some_and(|c| folded(c) == "[") && spells_kumi(&chars.take(16).collect::<Vec<_>>())
+}
+
+/// A character as a reader takes it in: its compatibility form (fullwidth and styled letters, brackets that read as "["),
+/// in lowercase.
+fn folded(c: char) -> String {
+    if c.is_ascii() {
+        return c.to_ascii_lowercase().to_string();
+    }
+    std::iter::once(c).nfkc().collect::<String>().to_lowercase()
+}
+
+/// Whether characters spell "kumi" in any case, form or width, after white space and invisible characters.
+fn spells_kumi(chars: &[char]) -> bool {
+    let mut spelled = String::new();
+    for c in chars.iter().filter(|c| !invisible(**c)).skip_while(|c| c.is_whitespace()) {
+        spelled.push_str(&folded(*c));
+        if spelled.len() >= 4 {
+            break;
+        }
+    }
+    spelled.starts_with("kumi")
+}
+
+/// Text from a file with Kumi's mark taken off wherever it stands: "[Kumi", in any case, form or width, becomes "(Kumi", so
+/// nothing in it reads as Kumi's own words to the model.
+fn neutralized(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (at, c) in chars.iter().enumerate() {
+        let opens = (*c == '[' || !c.is_ascii()) && folded(*c) == "[";
+        out.push(if opens && spells_kumi(&chars[at + 1..chars.len().min(at + 17)]) { '(' } else { *c });
+    }
+    out
 }
 
 /// The producer's request inside Kumi's framing of it (`setup`, made with an empty request: "[Kumi loop] " then what Kumi
@@ -1236,10 +1279,7 @@ pub fn import(text: &str, now: i64) -> Result<Imported, String> {
             .collect(),
     );
     if messages.first().is_some_and(|first| first.get("role").and_then(Value::as_str) != Some("user")) {
-        messages.insert(
-            0,
-            json!({"role": "user", "content": [{"type": "text", "text": "[Kumi] This conversation was imported, and starts partway."}]}),
-        );
+        messages.insert(0, json!({"role": "user", "content": [{"type": "text", "text": PARTWAY}]}));
     }
     let messages = pair(messages);
     let producer: Vec<String> = messages
@@ -1247,7 +1287,7 @@ pub fn import(text: &str, now: i64) -> Result<Imported, String> {
         .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
         .map(|message| trim(&texts(&parts_of(message))).to_string())
         .collect();
-    let Some(first) = producer.iter().find(|words| !words.is_empty() && !words.starts_with("[Kumi]")).cloned() else {
+    let Some(first) = producer.iter().find(|words| !words.is_empty() && *words != PARTWAY).cloned() else {
         return Err("That Kumi conversation has nothing in it to continue.".to_string());
     };
     let changes: Vec<ChangeRecord> = value
@@ -1266,13 +1306,16 @@ pub fn import(text: &str, now: i64) -> Result<Imported, String> {
     let title = value
         .get("title")
         .and_then(Value::as_str)
-        .map(|title| head(&one_line(&clean_text(title)), MAX_TITLE))
+        .map(|title| head(&one_line(&neutralized(&clean_text(title))), MAX_TITLE))
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| head(&one_line(&first), MAX_TITLE));
-    let place =
-        value.get("set").and_then(Value::as_str).map(|set| head(&one_line(&clean_text(set)), MAX_TITLE)).filter(|set| !set.is_empty());
+    let place = value
+        .get("set")
+        .and_then(Value::as_str)
+        .map(|set| head(&one_line(&neutralized(&clean_text(set))), MAX_TITLE))
+        .filter(|set| !set.is_empty());
     let saved_at = value.get("saved").and_then(Value::as_i64).filter(|at| (1..=now).contains(at)).unwrap_or(now);
-    let turns = producer.iter().filter(|words| !words.starts_with("[Kumi]")).count() as u32;
+    let turns = producer.iter().filter(|words| *words != PARTWAY).count() as u32;
     Ok(Imported {
         id,
         title,
@@ -1288,11 +1331,14 @@ pub fn import(text: &str, now: i64) -> Result<Imported, String> {
 }
 
 /// A message read from a file, with only what Kumi writes: words, calls and their results as text. The producer's words
-/// are cleaned as an export cleans them, so nothing in them is hidden from the transcript but seen by the model, and none
-/// pass as Kumi's own notes. None when nothing's left of it.
+/// are cleaned as an export cleans them, so nothing in them is hidden from the transcript but seen by the model; a message
+/// that opens with Kumi's mark goes, and the mark is taken off wherever else it stands, inputs and results included, so
+/// none of the file speaks as Kumi. None when nothing's left of it.
 fn kept_message(message: Message) -> Option<Value> {
     let words = |text: &str| {
-        Some(clean_text(&bounded(text))).filter(|text| !trim(text).is_empty()).map(|text| json!({"type": "text", "text": text}))
+        Some(neutralized(&clean_text(&bounded(text))))
+            .filter(|text| !trim(text).is_empty())
+            .map(|text| json!({"type": "text", "text": text}))
     };
     let (role, content): (&str, Vec<Value>) = match message {
         Message::User { content, .. } => {
@@ -1304,7 +1350,7 @@ fn kept_message(message: Message) -> Option<Value> {
                 })
                 .collect();
             match producer_words(&clean_text(&bounded(&text)), 0, &mut Vec::new(), &mut false) {
-                Words::Said(said) => ("user", vec![json!({"type": "text", "text": said})]),
+                Words::Said(said) => ("user", vec![json!({"type": "text", "text": neutralized(&said)})]),
                 Words::CarryOn | Words::Kumi => return None,
             }
         }
@@ -1318,7 +1364,7 @@ fn kept_message(message: Message) -> Option<Value> {
                         "type": "tool-call",
                         "toolCallId": call.tool_call_id,
                         "toolName": clean_name(&call.tool_name),
-                        "input": if call.input.is_object() && stringify_pretty(&call.input, 0).len() <= MAX_INPUT { call.input } else { json!({}) },
+                        "input": if call.input.is_object() && stringify_pretty(&call.input, 0).len() <= MAX_INPUT { cleaned_value(&call.input) } else { json!({}) },
                     })),
                     _ => None,
                 })
@@ -1330,7 +1376,7 @@ fn kept_message(message: Message) -> Option<Value> {
                 .into_iter()
                 .filter_map(|part| match part {
                     ToolPart::ToolResult(result) => {
-                        let text = clean_text(&bounded(&output_text(&result.output)));
+                        let text = neutralized(&clean_text(&bounded(&output_text(&result.output))));
                         Some(json!({
                             "type": "tool-result",
                             "toolCallId": result.tool_call_id,
@@ -1400,9 +1446,33 @@ fn bounded(text: &str) -> String {
     }
 }
 
-/// Words from a file, without the control characters a terminal would act on (line breaks and tabs stay).
+/// Words from a file, without the control characters a terminal would act on (line breaks and tabs stay) or characters
+/// that draw nothing.
 fn clean_text(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
+    text.chars().filter(|c| (!c.is_control() || *c == '\n' || *c == '\t') && !invisible(*c)).collect()
+}
+
+/// A step's input from a file, each string and key cleaned as words are.
+fn cleaned_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(neutralized(&clean_text(&bounded(text)))),
+        Value::Array(items) => Value::Array(items.iter().map(cleaned_value).collect()),
+        Value::Object(fields) => {
+            Value::Object(fields.iter().map(|(key, item)| (neutralized(&clean_text(key)), cleaned_value(item))).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Whether a character draws nothing and moves nothing a reader sees, but can hide words or turn them around: format
+/// characters (zero-width spaces and joiners, direction marks and overrides, the byte-order mark, soft hyphens), tag
+/// characters, variation selectors and the other default-ignorable code points.
+pub(crate) fn invisible(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFF8}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}')
 }
 
 /// A tool's name from a file: letters, digits, `_` and `-`, at most 64 of them.

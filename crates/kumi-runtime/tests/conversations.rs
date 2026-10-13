@@ -692,3 +692,23 @@ async fn what_a_later_kumi_adds_to_the_index_or_beside_a_conversation_is_read_pa
     assert_eq!(std::fs::read_to_string(&file).unwrap(), later);
     assert_eq!(store.days_kept().await, 0, "what it says settings said is taken");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_conversation_from_a_file_and_every_copy_of_it_say_so() {
+    use kumi_runtime::core::conversations::IMPORTED;
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    store.create(IMPORTED, "imported0001", &said("from a file", 10), Some("Theirs (imported)"), None).await.unwrap();
+    store.create(A, "copied000001", &said("from a file", 11), None, Some("imported0001")).await.unwrap();
+    store.create(B, "copied000002", &said("from a file", 12), None, Some("copied000001")).await.unwrap();
+    store.create(A, "mine00000001", &said("my own", 13), None, None).await.unwrap();
+    store.create(B, "mine00000002", &said("my own", 14), None, Some("mine00000001")).await.unwrap();
+    let rows = store.all().await.unwrap();
+    let imported = |id: &str| rows.iter().find(|row| row.id == id).unwrap().imported;
+    assert!(imported("imported0001") && imported("copied000001") && imported("copied000002"));
+    assert!(!imported("mine00000001") && !imported("mine00000002"));
+    // A fresh look at the folders finds the same.
+    std::fs::remove_file(dir.path().join("conversation-index.json")).ok();
+    let again = create_conversation_store(dir.path()).all().await.unwrap();
+    assert!(again.iter().find(|row| row.id == "copied000002").unwrap().imported);
+}
