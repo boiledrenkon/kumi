@@ -458,8 +458,9 @@ async fn a_name_without_its_conversation_waits_a_while_then_goes_or_follows_it()
     let store = create_conversation_store(dir.path());
     store.save(A, "mv66me0m3fa91c", &said("make the bass wider", 10)).await.unwrap();
     let kept = dir.path().join(A).join("conversations");
-    // A copy's name and source, written by another Kumi just before the copy: they stay.
+    // A copy's name and source, written by another Kumi before the copy (5 minutes, for a slow one): they stay.
     std::fs::write(kept.join("mv66me0m9copy1.meta"), r#"{"version":1,"name":"Wide bass","forkedFrom":"mv66me0m3fa91c"}"#).unwrap();
+    age(&kept.join("mv66me0m9copy1.meta"), Duration::from_secs(5 * 60));
     store.tidy(A).await.unwrap();
     assert!(kept.join("mv66me0m9copy1.meta").exists());
     // Left without it for a while (an earlier Kumi let the conversation go): they go.
