@@ -2195,3 +2195,33 @@ async fn uninstall_offers_a_second_run_only_while_the_app_still_runs() {
         "{said}"
     );
 }
+/// Even in a folder named .kumi, --all takes only Kumi's names: what the producer put there themselves stays, named,
+/// and keeps the folder.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_all_keeps_what_the_producer_put_in_kumis_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let home = Path::new(&env["HOME"]).join("Studio/.kumi");
+    env.insert("KUMI_HOME".into(), home.display().to_string());
+    installed_kumi(&home);
+    for (file, text) in
+        [("my-notes.txt", "theirs"), ("my-stems/kick.wav", "theirs"), ("auth.json", "Kumi's data"), ("projects/x.json", "Kumi's data")]
+    {
+        put(home.join(file), text);
+    }
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { all: true, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(said.contains("kumi uninstall --all would remove everything of Kumi's from ~/Studio/.kumi ("), "{said}");
+    assert!(said.contains("my-notes.txt and my-stems stay in ~/Studio/.kumi: they aren't Kumi's."), "{said}");
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert_eq!(
+        files_in(&home).into_iter().map(|(file, _)| file).collect::<Vec<_>>(),
+        [home.join("my-notes.txt").display().to_string(), home.join("my-stems/kick.wav").display().to_string()]
+    );
+    assert!(said.contains("my-notes.txt and my-stems stay in ~/Studio/.kumi: they aren't Kumi's."), "{said}");
+    assert!(said.contains("~/Studio/.kumi stays, with what isn't Kumi's in it."), "{said}");
+}

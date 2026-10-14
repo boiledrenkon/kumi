@@ -1682,8 +1682,8 @@ fn kumis_alone(home: &str) -> bool {
 struct Parts {
     /// What goes: Kumi's parts by their exact names as the folder lists them, what a stopped installer left
     /// (`.install.*`), and in the folders whose names the producer may use too, only Kumi's entries (the folder
-    /// itself once nothing else is in it). With --all in a folder of Kumi's alone, everything else in it too (the
-    /// bridge's files excepted while Live uses them). In KUMI_S_OWN's order.
+    /// itself once nothing else is in it). With --all in a folder of Kumi's alone, Kumi's data too (the bridge's
+    /// files excepted while Live uses them). In KUMI_S_OWN's order.
     gone: Vec<String>,
     /// Kumi's folders that stay because they hold more than Kumi put there.
     left: Vec<String>,
@@ -1691,17 +1691,23 @@ struct Parts {
     alone: bool,
     /// Kumi's data that stays: without --all, or in a folder the producer also uses.
     data: Vec<String>,
+    /// What else is in `home`, by names Kumi doesn't make: it stays, and the folder with it.
+    others: Vec<String>,
 }
 impl Parts {
     /// Whether `home` is a folder of Kumi's alone with nothing of anyone else's in it: then it's Kumi's to name whole.
     fn clean(&self) -> bool {
-        self.alone && self.left.is_empty()
+        self.alone && self.left.is_empty() && self.others.is_empty()
+    }
+    /// Whether all that's in `home` is Kumi's, whatever its name.
+    fn only_kumis(&self) -> bool {
+        self.left.is_empty() && self.others.is_empty()
     }
 }
 fn own_parts(home: &str, all: bool, bridge_stays: bool) -> Result<Parts, RuntimeError> {
     let names = names_in(home)?;
     let alone = kumis_alone(home);
-    let mut parts = Parts { gone: vec![], left: vec![], alone, data: vec![] };
+    let mut parts = Parts { gone: vec![], left: vec![], alone, data: vec![], others: vec![] };
     for name in names {
         let path = join(home, &name);
         if name == "bridge" && bridge_stays {
@@ -1725,13 +1731,33 @@ fn own_parts(home: &str, all: bool, bridge_stays: bool) -> Result<Parts, Runtime
                 parts.gone.extend(kumis.into_iter().filter(|(entry, _)| !litter(entry)).map(|(_, at)| at.display().to_string()));
                 parts.left.push(path);
             }
-        } else if name.starts_with(".install.") || KUMI_S_OWN.contains(&name.as_str()) || (all && alone) {
+        } else if name.starts_with(".install.") || KUMI_S_OWN.contains(&name.as_str()) {
             parts.gone.push(path);
         } else if KUMI_S_DATA.contains(&name.as_str()) {
-            parts.data.push(path);
+            if all && alone {
+                parts.gone.push(path);
+            } else {
+                parts.data.push(path);
+            }
+        } else if litter(&name) {
+            if all && alone {
+                parts.gone.push(path);
+            }
+        } else {
+            parts.others.push(path);
         }
     }
     Ok(parts)
+}
+/// What's said of what stays in a folder of Kumi's alone by names Kumi doesn't make.
+fn others_said(home: &str, parts: &Parts, display: &dyn Fn(&str) -> String) -> Option<String> {
+    let names: Vec<String> = parts.others.iter().map(|path| part_name(home, path)).collect();
+    match names.len() {
+        _ if !parts.alone => None,
+        0 => None,
+        1 => Some(format!("{} stays in {}: it isn't Kumi's.", names[0], display(home))),
+        _ => Some(format!("{} stay in {}: they aren't Kumi's.", listed(&names), display(home))),
+    }
 }
 /// Whether `folder` holds nothing but what a file browser leaves.
 fn emptied(folder: &str) -> bool {
@@ -1778,6 +1804,9 @@ fn data_said(home: &str, parts: &Parts, display: &dyn Fn(&str) -> String) -> Str
         return display(home);
     }
     let names: Vec<String> = parts.data.iter().map(|path| part_name(home, path)).collect();
+    if parts.only_kumis() {
+        return format!("{} ({})", display(home), listed(&names));
+    }
     format!("{}, beside what isn't Kumi's ({})", display(home), listed(&names))
 }
 /// `kumi uninstall --dry-run`: what would go, and what would stay.
@@ -1808,6 +1837,9 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
         say(format!("kumi uninstall would remove from {} ({}): {}.", display(home), size(bytes as f64), names.join(", ")));
     }
     if let Some(said) = left_said(&parts.left, display) {
+        say(said);
+    }
+    if let Some(said) = others_said(home, &parts, display) {
         say(said);
     }
     let lines = path_lines(&io.env, home);
@@ -1878,9 +1910,11 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         return Ok(1);
     }
     let run = io.run.clone().unwrap_or_else(default_run);
-    let alone = kumis_alone(&home);
-    let keeps = match (options.all, alone) {
-        (true, true) => format!("Your {KEPT} go too."),
+    let before = own_parts(&home, options.all, false)?;
+    let keeps = match (options.all, before.alone) {
+        (true, true) if before.only_kumis() => format!("Your {KEPT} go too."),
+        (true, true) => format!("Your {KEPT} go too; what isn't Kumi's in it stays."),
+        (true, false) if before.only_kumis() => format!("It isn't named .kumi, so your {KEPT} stay there too."),
         (true, false) => format!("It also holds what isn't Kumi's, so your {KEPT} stay there too."),
         (false, true) => format!("Your {KEPT} stay (add --all to remove them too)."),
         (false, false) => format!("Your {KEPT} stay."),
@@ -1952,6 +1986,9 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     if let Some(said) = left_said(&parts.left, &display) {
         say(said);
     }
+    if let Some(said) = others_said(&home, &parts, &display) {
+        say(said);
+    }
     if let Some((_, why)) = stayed.first() {
         let names: Vec<String> = stayed.iter().map(|(path, _)| display(path)).collect();
         let them = if names.len() == 1 { "it" } else { "them" };
@@ -1985,7 +2022,7 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     }
     let freed = if bytes > 0 { format!(", freeing {}", size(bytes as f64)) } else { String::new() };
     say(if options.all && parts.alone {
-        let rest = if parts.left.is_empty() { String::new() } else { format!(" {} stays, with what isn't Kumi's in it.", display(&home)) };
+        let rest = if parts.only_kumis() { String::new() } else { format!(" {} stays, with what isn't Kumi's in it.", display(&home)) };
         format!("Kumi is removed, with everything it kept{}{freed}.{rest}", if bridge_stays { " but the bridge's files" } else { "" })
     } else if parts.clean() {
         format!("Kumi is removed{freed}. Your {KEPT} are still in {}; delete that folder to remove them too.", display(&home))
