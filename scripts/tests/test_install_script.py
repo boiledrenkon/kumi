@@ -470,6 +470,22 @@ exit $status
             self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
             self.assertIn(", where a disk is mounted; Kumi needs a folder of its own there", run.stderr)
 
+    @unittest.skipUnless(shutil.which("zsh"), "no zsh here")
+    def test_run_by_zsh_it_reads_paths_as_sh_does(self):
+        # curl … | zsh: zsh splits no words unless told to, which reading . and .. counts on.
+        home = self.home()
+        self.serve(self.release("1.0.0"))
+        cases = [(f"{home}/new/..", "KUMI_HOME is your home folder")]
+        # As root, a refusal that failed would install into /private or /: that run is left to everyone else.
+        if os.geteuid() != 0:
+            cases.append(("/tmp/..", "KUMI_HOME is /, the root of the disk"))
+        for kumi_home, said in cases:
+            run = subprocess.run(["zsh"], input=INSTALL_SH.read_text(), env=self.environment(home, KUMI_HOME=kumi_home),
+                                 capture_output=True, text=True, encoding="utf-8", timeout=120)
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn(said, run.stderr)
+            self.assertEqual(list(home.iterdir()), [], kumi_home)
+
     def test_the_zsh_line_goes_where_zsh_reads_it_once(self):
         home = self.home()
         zdot = home / "zsh config"

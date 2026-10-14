@@ -13,6 +13,8 @@
 #
 # Everything runs inside main(), so a download cut short can't run half a script.
 
+# Run by zsh (curl … | zsh), it splits words and expands globs as sh does: normal() below counts on it.
+if [ -n "${ZSH_VERSION:-}" ]; then emulate sh; fi
 set -u
 
 main() {
