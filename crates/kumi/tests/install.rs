@@ -156,6 +156,33 @@ fn fake_release_with(dir: &Path, version: &str, bridge: Option<&str>) -> Vec<u8>
         .success());
     fs::read(file).unwrap()
 }
+/// tar.exe reads its arguments in Windows' code page, which can't spell every folder name: an update unpacks in
+/// KUMI_HOME, so the paths tar gets are plain ASCII however the folders above it are named.
+#[tokio::test]
+async fn an_update_unpacks_in_a_home_named_in_letters_a_code_page_lacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir.path().join("John Smith ホーム é"));
+    let home = Path::new(&env["KUMI_HOME"]);
+    put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "earlier");
+    let bytes = fake_release(dir.path(), "99.0.0");
+    let mut good = manifest("99.0.0");
+    good["sha256"] = json!(hex::encode(Sha256::digest(&bytes)));
+    let (mut updated, out) = io(&env);
+    updated.fetcher = Some(Rc::new(Serve { manifest: good, bytes, status: 200, offline: false, calls: RefCell::new(vec![]) }));
+    let calls = Rc::new(RefCell::new(vec![]));
+    let seen = calls.clone();
+    updated.run = Some(Rc::new(move |command, args, cwd| {
+        seen.borrow_mut().push((command.clone(), args.clone(), cwd.clone()));
+        async move { run_program(&command, &args, cwd.as_deref()).await }.boxed_local()
+    }));
+    assert_eq!(update_installed(updated).await.unwrap(), 0, "{}", out.0.borrow());
+    assert_eq!(version_of(home.join("app")), "99.0.0");
+    let tar = system::system_program_default(SystemProgram::Tar);
+    let (_, args, cwd) = calls.borrow().iter().find(|(command, _, _)| command == &tar).cloned().unwrap();
+    assert_eq!(cwd.as_deref(), Some(home.to_str().unwrap()));
+    assert!(args.iter().all(|arg| arg.is_ascii() && !Path::new(arg).is_absolute()), "{args:?}");
+}
 #[tokio::test]
 async fn checked_executable_update_swap_and_rollback() {
     let dir = tempfile::tempdir().unwrap();
