@@ -92,11 +92,11 @@ Run these as `kumi <command>`; from a copy of the repository, as
 | `kumi model [<provider>/<model>]` | Show or choose the model, a model on your computer too (`ollama/<model>`) |
 | `kumi auth` | Which providers are usable, the model and the sign-in file (never secrets) |
 | `kumi bridge [--yes] [--allow-dirty]` | With Live closed: put the bridge into Live, or bring it up to date. `--yes` confirms Live is closed (without a terminal, nothing changes without it); `--allow-dirty` lets a checkout with uncommitted changes install its bridge |
-| `kumi doctor` | Check Node, sign-in, the model servers on your computer, the bridge, Live, the extension, your library, video programs, talking, Live's menus and the terminal; says what to run |
+| `kumi doctor [--json]` | Check the installation (version, rollback, PATH, updates, free space, Live, its User Library, the bridge's ports, Developer Mode), sign-in, the model servers on your computer, the bridge, Live, the extension, your library, video programs, talking, Live's menus and the terminal; says what to run. `--json` prints it without keys or your home folder |
 | `kumi library [--rebuild]` | How far Kumi has got learning your sounds, presets and Sets; `--rebuild` learns them all again |
-| `kumi update [--check \| --rollback]` | Get the newest Kumi (and the bridge when it's older); `--check` only asks; `--rollback` goes back to the one before, with its bridge when Live is closed (an installed Kumi only) |
+| `kumi update [--check \| --rollback \| --version <x.y.z>]` | Get the newest Kumi (and the bridge when it's older); `--check` only asks; `--rollback` goes back to the one before, with its bridge when Live is closed; `--version` installs that release, newer or older (an installed Kumi only) |
 | `kumi report` | Write `~/kumi-report-<date and time>.txt` to send when something goes wrong |
-| `kumi uninstall [--all] [--yes]` | Remove an installed Kumi; `--all` also removes conversations, notes, recipes and sign-ins; `--yes` skips the first question |
+| `kumi uninstall [--all] [--yes] [--dry-run]` | Remove an installed Kumi and what it fetched; `--all` also removes conversations, notes, recipes, sign-ins, library and references; `--yes` skips the first question; `--dry-run` says what would go |
 | `kumi --version` (or `-v`), `kumi --help` (or `-h`, `help`) | Version; help |
 
 ## Commands inside Kumi

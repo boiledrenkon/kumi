@@ -61,15 +61,21 @@ pub enum AppConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
-    Doctor,
+    Doctor {
+        json: bool,
+    },
     Report,
     Update {
         rollback: bool,
         check: bool,
+        /// `--version x.y.z`: that release, newer or older.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
     },
     Uninstall {
         all: bool,
         yes: bool,
+        dry_run: bool,
     },
     Library {
         rebuild: bool,
@@ -150,6 +156,23 @@ fn absolute_file(env: &Env, variable: &str, fallback: String) -> Result<String, 
         return Err(RuntimeError::plain(format!("{variable} must be an absolute file path without control characters.")));
     }
     Ok(file)
+}
+/// A release's version as `update --version` and the installer take it: "1.15.0", "v1.15.0", or "latest".
+pub fn release_version(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text == "latest" {
+        return Some(text.into());
+    }
+    let parts: Vec<_> = text
+        .strip_prefix('v')
+        .unwrap_or(text)
+        .split('.')
+        .map(|p| p.bytes().all(|b| b.is_ascii_digit()).then(|| p.parse::<u32>().ok()).flatten())
+        .collect();
+    match parts[..] {
+        [Some(major), Some(minor), Some(patch)] => Some(format!("{major}.{minor}.{patch}")),
+        _ => None,
+    }
 }
 pub fn kumi_dir(env: &Env) -> String {
     env.get("KUMI_HOME").filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| join(&home(), ".kumi"))
@@ -568,7 +591,7 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         match first {
             Some("--version" | "-v" | "-V" | "version") => return Ok(AppConfig::Version),
             Some("auth") => return Ok(AppConfig::Auth { auth_file: load_auth_file(env)?, settings_file: load_settings_file(env)? }),
-            Some("doctor") => return Ok(AppConfig::Doctor),
+            Some("doctor") => return Ok(AppConfig::Doctor { json: false }),
             Some("report") => return Ok(AppConfig::Report),
             _ => {}
         }
@@ -579,17 +602,27 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         }
         return Ok(AppConfig::Library { rebuild: at(1) == Some("--rebuild") });
     }
+    if first == Some("doctor") && args.len() == 2 && at(1) == Some("--json") {
+        return Ok(AppConfig::Doctor { json: true });
+    }
     if first == Some("update") {
-        if args.len() > 2 || at(1).is_some_and(|s| s != "--rollback" && s != "--check") {
-            return Err(RuntimeError::plain("Use: update [--check | --rollback]."));
+        if at(1) == Some("--version") {
+            let Some(version) = at(2).filter(|_| args.len() == 3).and_then(release_version) else {
+                return Err(RuntimeError::plain("Use: update --version <x.y.z>, such as update --version 1.15.0."));
+            };
+            return Ok(AppConfig::Update { rollback: false, check: false, version: (version != "latest").then_some(version) });
         }
-        return Ok(AppConfig::Update { rollback: at(1) == Some("--rollback"), check: at(1) == Some("--check") });
+        if args.len() > 2 || at(1).is_some_and(|s| s != "--rollback" && s != "--check") {
+            return Err(RuntimeError::plain("Use: update [--check | --rollback | --version <x.y.z>]."));
+        }
+        return Ok(AppConfig::Update { rollback: at(1) == Some("--rollback"), check: at(1) == Some("--check"), version: None });
     }
     if first == Some("uninstall") {
-        if args[1..].iter().any(|s| s != "--all" && s != "--yes") {
-            return Err(RuntimeError::plain("Use: uninstall [--all] [--yes]."));
+        if args[1..].iter().any(|s| s != "--all" && s != "--yes" && s != "--dry-run") {
+            return Err(RuntimeError::plain("Use: uninstall [--all] [--yes] [--dry-run]."));
         }
-        return Ok(AppConfig::Uninstall { all: args[1..].iter().any(|s| s == "--all"), yes: args[1..].iter().any(|s| s == "--yes") });
+        let has = |flag: &str| args[1..].iter().any(|s| s == flag);
+        return Ok(AppConfig::Uninstall { all: has("--all"), yes: has("--yes"), dry_run: has("--dry-run") });
     }
     if first == Some("bridge") {
         if args[1..].iter().any(|s| s != "--yes" && s != "--allow-dirty") {

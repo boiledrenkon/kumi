@@ -148,10 +148,12 @@ pub struct UpdateIo {
     pub repo_dir: Option<String>,
     pub live_running: Option<AsyncBool>,
     pub update_bridge: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, i32>>>,
+    /// How many other Kumi processes run this build (tests say how many).
+    pub others: Option<Rc<dyn Fn() -> LocalBoxFuture<'static, usize>>>,
 }
 impl UpdateIo {
     pub fn new(out: Rc<dyn TtyOutput>, env: Env) -> Self {
-        Self { out, env, run: None, repo_dir: None, live_running: None, update_bridge: None }
+        Self { out, env, run: None, repo_dir: None, live_running: None, update_bridge: None, others: None }
     }
 }
 fn last(ran: &Ran) -> String {
@@ -229,8 +231,14 @@ pub async fn run_update(io: UpdateIo) -> i32 {
     let version = read_version(&join(&repo, "package.json")).unwrap_or(KUMI_VERSION.into());
     let bundled = read_cargo_version(&join(&repo, "crates/ableton-mcp-server/Cargo.toml"));
     say(if behind > 0. { format!("Kumi is now {version}.") } else { format!("Kumi is up to date ({version}).") });
-    if let Some(open) = (behind > 0.).then(crate::install::still_open).flatten() {
-        say(open);
+    if behind > 0. {
+        let others = match &io.others {
+            Some(others) => others().await,
+            None => crate::install::others_running(&std::env::current_exe().map(|exe| exe.display().to_string()).unwrap_or_default()).await,
+        };
+        if let Some(open) = crate::install::open_windows(others) {
+            say(open);
+        }
     }
     let bridge = older_bridge(&io.env, bundled.as_deref());
     if find_bridge_config(&io.env).is_none() {

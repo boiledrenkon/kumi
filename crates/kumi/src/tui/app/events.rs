@@ -5,7 +5,7 @@ use super::super::{
 };
 use super::*;
 use crate::text::web_words;
-use kumi_runtime::integrations::ableton::project::since;
+use kumi_common::time::since;
 use kumi_runtime::kernel::failure::reset_words;
 use serde_json::json;
 

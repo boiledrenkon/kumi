@@ -40,11 +40,11 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `kumi model [<provider>/<model>]` | 显示或选择模型，也可以是你电脑上的模型（`ollama/<model>`） |
 | `kumi auth` | 哪些提供方可用、当前模型以及登录文件（从不显示机密信息） |
 | `kumi bridge [--yes] [--allow-dirty]` | 在 Live 关闭时：把桥接装入 Live，或将其更新到最新。`--yes` 确认 Live 已关闭（没有终端时，不加它就什么都不改）；`--allow-dirty` 允许带有未提交修改的检出副本安装其桥接 |
-| `kumi doctor` | 检查 Node、登录、你电脑上的模型服务器、桥接、Live、扩展、素材库、视频程序、说话功能、Live 的菜单和终端；告诉你该运行什么 |
+| `kumi doctor [--json]` | 检查安装（版本、回滚、PATH、更新、可用空间、Live、用户库、桥接的端口、Developer Mode）、登录、你电脑上的模型服务器、桥接、Live、扩展、素材库、视频程序、说话功能、Live 的菜单和终端；告诉你该运行什么。`--json` 输出时不含密钥和主文件夹 |
 | `kumi library [--rebuild]` | Kumi 学习你的声音、预设和工程进行到了哪里；`--rebuild` 全部重新学习 |
-| `kumi update [--check \| --rollback]` | 获取最新的 Kumi（桥接较旧时也一并更新）；`--check` 只检查；`--rollback` 回到上一个版本（Live 已关闭时连同其桥接；仅限已安装的 Kumi） |
+| `kumi update [--check \| --rollback \| --version <x.y.z>]` | 获取最新的 Kumi（桥接较旧时也一并更新）；`--check` 只检查；`--rollback` 回到上一个版本（Live 已关闭时连同其桥接）；`--version` 安装那个版本，较新或较旧都可以（仅限已安装的 Kumi） |
 | `kumi report` | 写出 `~/kumi-report-<date and time>.txt`，出问题时把它发给我们 |
-| `kumi uninstall [--all] [--yes]` | 卸载已安装的 Kumi；`--all` 同时删除对话、笔记、配方和登录信息；`--yes` 跳过第一个确认问题 |
+| `kumi uninstall [--all] [--yes] [--dry-run]` | 卸载已安装的 Kumi 及其下载的内容；`--all` 同时删除对话、笔记、配方、登录信息、素材库和参考曲目；`--yes` 跳过第一个确认问题；`--dry-run` 只说明会删除什么 |
 | `kumi --version`（或 `-v`）、`kumi --help`（或 `-h`、`help`） | 版本；帮助 |
 
 ## Kumi 内的命令

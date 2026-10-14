@@ -13,6 +13,8 @@
 #
 # Everything runs inside main(), so a download cut short can't run half a script.
 
+# Run by zsh (curl … | zsh), it splits words and expands globs as sh does: normal() below counts on it.
+if [ -n "${ZSH_VERSION:-}" ]; then emulate sh; fi
 set -u
 
 main() {
@@ -48,6 +50,19 @@ main() {
     if [ -n "${2:-}" ]; then printf '  %s\n' "$2" >&2; fi
     exit 1
   }
+  # A path with . and .. taken as written, for one that may not exist yet (KUMI_HOME=$HOME/new/..).
+  normal() {
+    # shellcheck disable=SC2086 # Split on / on purpose, with globbing off.
+    (set -f; IFS=/; out=""
+     for part in $1; do
+       case "$part" in ""|.) ;; ..) out="${out%/*}" ;; *) out="$out/$part" ;; esac
+     done
+     printf '%s\n' "${out:-/}")
+  }
+  # The device a folder is on (GNU and busybox stat, then BSD's).
+  device() { stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null; }
+  # Whether a disk is mounted at a folder: the folder (/. follows a link to it) is on another device than its parent.
+  mounted() { [ -d "$1" ] && [ "$(device "$1/.")" != "$(device "$1/..")" ]; }
   # A path as it reads on screen: ~/ for the home folder.
   # shellcheck disable=SC2088
   shown() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
@@ -231,6 +246,21 @@ main() {
   # shellcheck disable=SC2088
   case "$KUMI_HOME" in "~") KUMI_HOME="$HOME" ;; "~/"*) KUMI_HOME="$HOME/${KUMI_HOME#"~/"}" ;; esac
   case "$KUMI_HOME" in /*) ;; *) KUMI_HOME="$(pwd)/$KUMI_HOME" ;; esac
+  # One slash between names and none at the end: a HOME ending in / would otherwise give …//.kumi/bin in PATH.
+  KUMI_HOME="$(printf '%s\n' "$KUMI_HOME" | sed 's#//*#/#g; s#\(.\)/$#\1#')"
+  # A folder of Kumi's own: in the home folder itself or a disk's root, the names Kumi uses (bin, downloads, tools)
+  # could be the producer's own, and kumi uninstall takes those names out. Compared as folders, however they're
+  # spelled (other case, a link, /System/Volumes/Data/…): as written, where .. after a link is the link's own
+  # parent, and as given, where it's the parent of where the link leads, once it's there to follow.
+  own_kumi="$(normal "$KUMI_HOME")"
+  # shellcheck disable=SC3013 # -ef isn't in POSIX, but dash, bash, zsh, ksh and busybox sh all have it.
+  if [ "$own_kumi" = / ] || [ "$own_kumi" -ef / ] || [ "$KUMI_HOME" -ef / ]; then
+    fail "KUMI_HOME is /, the root of the disk; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")."
+  elif [ "$own_kumi" -ef "$HOME" ] || [ "$KUMI_HOME" -ef "$HOME" ]; then
+    fail "KUMI_HOME is your home folder; Kumi needs a folder of its own, such as $(shown "$HOME/.kumi")."
+  elif mounted "$own_kumi" || mounted "$KUMI_HOME"; then
+    fail "KUMI_HOME is $(shown "$own_kumi"), where a disk is mounted; Kumi needs a folder of its own there, such as $(shown "$own_kumi")/kumi."
+  fi
   if [ ! -d "$KUMI_HOME" ]; then made_home=1; fi
   mkdir -p "$KUMI_HOME" || fail "couldn't make $KUMI_HOME."
   free_kb="$(df -Pk "$KUMI_HOME" 2>/dev/null | awk 'NR==2 {print $4}')"
@@ -387,9 +417,11 @@ LAUNCHER
     esac
     # Once per file: the marker with this Kumi's bin on the line after it, as written or spelled from $HOME or ~
     # (someone may have edited it), as kumi uninstall finds it. One for a Kumi elsewhere doesn't count.
-    rel="${bin#"$HOME"/}"; [ "$rel" != "$bin" ] || rel=""
+    # A line an earlier installer wrote with // in it (from a HOME ending in /) counts too.
+    rel="${bin#"${HOME%/}"/}"; [ "$rel" != "$bin" ] || rel=""
     if awk -v marker="$marker" -v bin="$bin" -v rel="$rel" '
-      index(after, marker) && (index($0, bin) || (rel != "" && (index($0, "$HOME/" rel) || index($0, "${HOME}/" rel) || index($0, "~/" rel)))) { found = 1 }
+      { line = $0; gsub(/\/\/+/, "/", line) }
+      index(after, marker) && (index(line, bin) || (rel != "" && (index(line, "$HOME/" rel) || index(line, "${HOME}/" rel) || index(line, "~/" rel)))) { found = 1 }
       { after = $0 } END { exit !found }' "$rc" 2>/dev/null; then ready=1
     elif mkdir -p "$(dirname "$rc")" 2>/dev/null && printf '\n%s\n%s\n' "$marker" "$line" 2>/dev/null >> "$rc"; then added="$rc"; ready=1
     else unwritten="$rc"; fi

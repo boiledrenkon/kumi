@@ -266,7 +266,7 @@ impl Remember {
      described=match diff{Ok(diff) if diff.lines.is_empty()=>None,Ok(diff)=>Some(diff),Err(_)=>Some(DescribedDiff{lines:vec!["The Set changed, but it's too big for Kumi to compare yet".into()],more:0})};
     }
     if let Some(described)=described{let mut summary=project::catch_up_from(&name,&baseline,described);if after_reconnect{summary.after_reconnect=Some(true);}
-     let mut context=super::views::object(json!({"lastSeen":project::since(baseline.saved_at as f64,connection.now().timestamp_millis() as f64),"changes":summary.lines}));if summary.more!=0{context.insert("more".into(),json!(summary.more));}*this.context.borrow_mut()=Some(context);
+     let mut context=super::views::object(json!({"lastSeen":kumi_common::time::since(baseline.saved_at as f64,connection.now().timestamp_millis() as f64),"changes":summary.lines}));if summary.more!=0{context.insert("more".into(),json!(summary.more));}*this.context.borrow_mut()=Some(context);
      if let Some(callback)=&this.on_catch_up{let _=catch_unwind(AssertUnwindSafe(||callback(summary)));}
     }
    }

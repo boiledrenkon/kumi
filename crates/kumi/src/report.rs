@@ -1,7 +1,7 @@
 //! `kumi report`, with native runtime version information.
 use crate::{
     config::{load_auth_file, load_db_file, load_gaps_file, load_projects_dir, load_settings_file, load_timings_file},
-    doctor::{doctor_checks, format_doctor, Check, DoctorIo},
+    doctor::{doctor_sections, format_doctor, format_sections, Check, DoctorIo},
     spinner::step,
     tui::style::os_release,
 };
@@ -368,11 +368,8 @@ fn username() -> String {
     }
     String::new()
 }
-pub async fn write_report(io: ReportIo) -> Result<i32, RuntimeError> {
-    let env = &io.doctor.env;
-    let home = io.home.clone().unwrap_or_else(|| home::home_dir().unwrap_or_default().display().to_string());
-    let user = io.user.clone().unwrap_or_else(username);
-    let now = io.now.as_ref().map(|now| now()).unwrap_or_else(Utc::now);
+/// Every saved sign-in's strings and the keys in the environment: what a report or `doctor --json` takes out.
+async fn known_secrets(env: &Env) -> Vec<String> {
     let mut secrets = vec![];
     if let Ok(file) = load_auth_file(env) {
         if let Ok(credentials) = open_credential_store(file).list().await {
@@ -392,7 +389,18 @@ pub async fn write_report(io: ReportIo) -> Result<i32, RuntimeError> {
     ] {
         secrets.push(env.get(name).cloned().unwrap_or_default())
     }
-    let redact = redactor(&secrets, &home, &user);
+    secrets
+}
+/// What's safe to share: a report's redaction, for this computer's home folder and account name.
+pub async fn redaction(env: &Env) -> impl Fn(&str) -> String {
+    redactor(&known_secrets(env).await, &home::home_dir().unwrap_or_default().display().to_string(), &username())
+}
+pub async fn write_report(io: ReportIo) -> Result<i32, RuntimeError> {
+    let env = &io.doctor.env;
+    let home = io.home.clone().unwrap_or_else(|| home::home_dir().unwrap_or_default().display().to_string());
+    let user = io.user.clone().unwrap_or_else(username);
+    let now = io.now.as_ref().map(|now| now()).unwrap_or_else(Utc::now);
+    let redact = redactor(&known_secrets(env).await, &home, &user);
     let file = step(io.doctor.out.clone(), env, "Writing Kumi's report…", compose(&io, &redact, &home, now), false).await?;
     io.doctor.out.write(&format!("Kumi's report is in {}\nIt has Kumi's versions, the doctor's checks, what Kumi did in your last conversation, and the bridge's lines from Live's log. Keys and tokens are taken out. Send it with a few words about what happened.\n",redact(&file)));
     Ok(0)
@@ -428,10 +436,11 @@ async fn compose(io: &ReportIo, redact: &dyn Fn(&str) -> String, home: &str, now
             now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         ),
     );
-    let checks = doctor_checks(&io.doctor)
-        .await
-        .unwrap_or_else(|error| vec![Check::fix(format!("The doctor stopped: {}", head(&error.message(), 200)), None)]);
-    section("Doctor", trim_end(&format_doctor(&checks)).to_string());
+    let doctor = match doctor_sections(&io.doctor).await {
+        Ok(sections) => format_sections(&sections),
+        Err(error) => format_doctor(&[Check::fix(format!("The doctor stopped: {}", head(&error.message(), 200)), None)]),
+    };
+    section("Doctor", trim_end(&doctor).to_string());
     let settings = match load_settings_file(env) {
         Ok(file) => read(&file).await.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
         _ => None,

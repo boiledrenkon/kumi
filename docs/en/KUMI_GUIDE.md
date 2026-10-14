@@ -899,17 +899,34 @@ only with Live's own undo. `/new` keeps the connection, so undo still works.
 ## Updating, reporting and uninstalling
 
 ```sh
-kumi update              # the newest Kumi and its bridge
-kumi update --check      # only say whether there's a newer Kumi
-kumi update --rollback   # go back to the Kumi before the last update
-kumi doctor              # check sign-in, the bridge, Live, the extension and the terminal
-kumi report              # a file to send when something goes wrong
-kumi uninstall           # remove Kumi; add --all to remove your conversations, notes and sign-ins too
+kumi update                    # the newest Kumi and its bridge
+kumi update --check            # only say whether there's a newer Kumi
+kumi update --rollback         # go back to the Kumi before the last update
+kumi update --version 1.15.0   # that release, newer or older; --rollback returns
+kumi doctor                    # check the installation, sign-in, the bridge, Live and the terminal
+kumi doctor --json             # the same checks as JSON, without keys or your home folder
+kumi report                    # a file to send when something goes wrong
+kumi uninstall --dry-run       # say what uninstall would remove
+kumi uninstall                 # remove Kumi; add --all to remove what you kept in it too
 ```
 
 `update` fetches the newest release, checks it against its checksum and starts
 it once to be sure it runs before putting it in place; the one before is kept
-for `--rollback`. If the bridge needs an update or a switch from JavaScript to native and Live is closed, it then runs
+for `--rollback`.
+
+- It needs about 250 MB free, and says so before downloading.
+- When it can't finish, it says why (the connection's cause, a Wi-Fi sign-in
+  page answering instead of GitHub, a full disk) and that nothing was changed.
+- If `~/.kumi` belongs to another account (an install run with `sudo`), it
+  gives the `sudo chown` line that takes it back.
+- It ends with the versions (`1.15.0 → 1.16.0`) and a few lines on what's new;
+  `/changelog` in Kumi has the rest. Kumi windows already open are mentioned
+  only when one is.
+- `--version x.y.z` installs that release, newer or older (1.7.6 or later). The
+  Kumi you had is kept, so `--rollback` returns to it. Going back leaves the
+  newer bridge in Live, which works with the earlier Kumi.
+
+If the bridge needs an update or a switch from JavaScript to native and Live is closed, it then runs
 `kumi bridge --yes`; if Live is open, it says to run `kumi`, which can restart Live for you. In a
 copy of the repository, `update` moves the checkout forward instead
 (`git merge --ff-only`, refusing local changes) and builds the workspace with Cargo.
@@ -946,16 +963,55 @@ Kumi checks for a newer version as it starts, at most once a day, and says
 nothing when there's none or no network. `"updateCheck": false` in
 `~/.kumi/settings.json`, or `KUMI_NO_UPDATE_CHECK=1`, turns that off.
 
+`doctor` starts with the installation:
+
+- Kumi's version and folder, and what `--rollback` goes back to.
+- Whether the `kumi` your shell finds is this one.
+- Whether a newer Kumi is out, from the daily check (it doesn't ask the network).
+- Free space, the Lives installed, Live's User Library, the bridge's ports
+  (9765 and 9766) and Live's Developer Mode.
+
+Each problem names one next step. `doctor` exits with 1 when something needs
+fixing; notes (no Live on this computer, a newer Kumi) don't count.
+
+`--json` prints the same checks for sharing, with keys, tokens, your home folder
+and account name taken out, as in a report. Its wording can change between
+versions, so it isn't meant for scripts to match:
+
+- `kumi`: the version; `fixes`: how many checks need fixing.
+- `sections`: each a `title` and its `checks`, each with a `status` (`ok`,
+  `note` or `fix`), its `text` and, when there is one, the `next` step.
+- The exit code is the same as without `--json`.
+
 `report` writes `~/kumi-report-<date and time>.txt`: Kumi's and the bridge's
 versions, the doctor's checks, your settings, what Kumi did in your last
 conversation, the gap log, and the bridge's lines from Live's own log. Keys and
 tokens are taken out, your home folder shows as `~` and your account name as
 `<user>`. Read it before sending.
 
-`uninstall` removes Kumi, any retained legacy Node runtime, its launcher and the PATH entry it added,
-and offers to take the bridge and the extension out of Live (only while Live is
-closed). Your conversations, notes, recipes and sign-ins stay unless you add
-`--all`.
+`uninstall` removes Kumi, the one kept for `--rollback`, what updates leave
+behind, any retained legacy Node runtime, its launcher, the PATH entry it added
+and what Kumi fetched (programs, models and watched videos, fetched again when
+needed), and says how much space that frees. It offers to take the bridge and
+the extension out of Live (only while Live is closed). Your conversations,
+notes, recipes, sign-ins, library and references stay unless you add `--all`.
+`--dry-run` says what it would remove, and removes nothing.
+
+- It removes nothing when Kumi's folder (`KUMI_HOME`) is your home folder, a
+  disk's root, a relative path or a folder without Kumi's launcher and app, and
+  says what of Kumi's to take out by hand. The installers won't install there.
+  Run with `sudo`, it also leaves your home folder alone, and any folder that
+  isn't root's.
+- From `bin`, `downloads` and the folders of what Kumi fetched, only Kumi's own
+  files go. Anything else stays and is named, and so does the folder.
+- `--all` takes your conversations and the rest only from a folder named
+  `.kumi`, as the installer names it, and the folder once it's empty: anything
+  you put there yourself stays. From any other (`KUMI_HOME=~/.local`, say), only
+  Kumi itself goes, and they stay there, named, for you to delete.
+- When a part can't be removed, it says which and why, and Kumi stays so you
+  can run `kumi uninstall` again.
+- A PATH line it can't take out (in a file it can't write, or inside an `if`,
+  `for` or function) is named with its lines, to take out by hand.
 
 ## Limits
 
