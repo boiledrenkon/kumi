@@ -3627,7 +3627,7 @@ local_test!(an_imported_conversation_carries_on_here_in_a_copy_and_the_model_hea
     assert!(h.session.resume_conversation(KEPT).await.unwrap());
     assert!(asks(&h).is_empty(), "a conversation from a file has no Set to open");
     let copy = now(&h).await;
-    assert!(copy.id != KEPT && copy.kept, "{copy:?}");
+    assert!(copy.id != KEPT && !copy.kept, "kept by its first request: {copy:?}");
     assert!(h.notice(&format!("the original stays as {KEPT}")));
     let checkpoint = h.record.created.borrow().last().unwrap().checkpoint.clone().unwrap();
     let said: Vec<String> = transcript_of(&checkpoint.messages).into_iter().map(|line| line.text).collect();
@@ -3638,7 +3638,8 @@ local_test!(an_imported_conversation_carries_on_here_in_a_copy_and_the_model_hea
     let instructions = h.record.created.borrow().last().unwrap().instructions.clone();
     assert!(instructions.contains("This conversation was imported from a file"), "{instructions}");
     assert!(!h.record.calls.borrow().iter().any(|call| call.contains("imported from a file")), "it isn't the producer's words");
-    // The import stays as it came; the copy is this Set's, named as the import was.
+    // The import stays as it came; the copy, kept by the first request, is this Set's, named as the import was.
+    assert_eq!(saved(store.as_ref(), SET_B, 3).await.id, copy.id);
     let rows = store.all().await.unwrap();
     let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap().clone();
     assert_eq!(row(KEPT).place, IMPORTED);
@@ -3660,6 +3661,42 @@ local_test!(an_export_says_when_its_conversation_was_last_saved_not_when_it_was_
     assert!(rows[0].saved_at > 0);
     assert_eq!(exported.conversation.saved_at, rows[0].saved_at);
     h.session.close().await.unwrap();
+});
+local_test!(an_imported_conversation_taken_up_and_left_keeps_no_copy_and_its_first_request_keeps_one, {
+    use kumi_runtime::core::conversations::IMPORTED;
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_conversation_store(dir.path());
+    imported_here(store.as_ref()).await;
+    let copies = || async { store.all().await.unwrap().into_iter().filter(|row| row.id != KEPT).collect::<Vec<_>>() };
+    // kumi -r <its id> twice, and /resume twice, each left without a request.
+    for _ in 0..2 {
+        let h = harness(None, |o| {
+            o.conversations = Some(store.clone());
+            o.resume = Some((IMPORTED.into(), KEPT.into()));
+        });
+        live(&h, Some(SET_B));
+        h.session.start().await.unwrap();
+        assert!(h.notice(&format!("the original stays as {KEPT}")));
+        assert!(h.record.created.borrow().last().unwrap().instructions.contains("This conversation was imported from a file"));
+        assert!(h.session.resume_conversation(KEPT).await.unwrap());
+        h.session.close().await.unwrap();
+    }
+    assert!(copies().await.is_empty(), "taking it up keeps nothing: {:?}", copies().await);
+    // A request keeps exactly one, marked as from a file, with the note.
+    let h = harness(None, |o| {
+        o.conversations = Some(store.clone());
+        o.resume = Some((IMPORTED.into(), KEPT.into()));
+    });
+    live(&h, Some(SET_B));
+    h.session.start().await.unwrap();
+    h.session.submit("go on", None).await.unwrap();
+    assert!(h.record.created.borrow().last().unwrap().instructions.contains("This conversation was imported from a file"));
+    let copy = saved(store.as_ref(), SET_B, 2).await;
+    h.session.close().await.unwrap();
+    let kept = copies().await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!((kept[0].id.as_str(), kept[0].forked_from.as_deref(), kept[0].imported), (copy.id.as_str(), Some(KEPT), true));
+    assert_eq!(kept[0].title(), "make the bass wider (imported)");
 });
 local_test!(a_chat_that_keeps_no_conversations_still_exports_what_was_said, {
     // No store: a chat without Live, started without -c or -r.

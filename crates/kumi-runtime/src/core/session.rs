@@ -241,6 +241,8 @@ struct Chosen {
     place: String,
     id: String,
     conversation: SavedConversation,
+    /// A copy not kept yet: the conversation it copies and its name, kept beside it by its first request.
+    copy_of: Option<(String, Option<String>)>,
 }
 /// A kept conversation the producer chose that isn't going on yet, or goes on while no Set is open: it's taken up once its
 /// Set is open, and Kumi asks about it while another Set is.
@@ -1138,56 +1140,65 @@ impl Session {
     /// it isn't kept any more.
     async fn carry_imported(&self, store: Rc<dyn ConversationStore>, id: &str) -> Result<bool, RuntimeError> {
         let here = self.0.state.borrow().project.clone().unwrap_or(UNSAVED.into());
-        let Some((copy_id, copy)) = self.copy_imported(&store, id, &here).await? else { return Ok(false) };
+        let Some(copy) = self.copy_imported(&store, id, &here).await? else { return Ok(false) };
         let said = format!("Carrying on a copy of an imported conversation here; the original stays as {id}.");
-        self.go_to(here, copy_id, copy, Some(said)).await?;
+        self.go_to(copy, Some(said)).await?;
         Ok(true)
     }
-    /// A copy of a conversation from a file in `place`, under its name and without what it changed elsewhere (marked as
-    /// from a file, as every copy of one is): its id and what it holds. None when the file's conversation isn't kept.
-    async fn copy_imported(
-        &self,
-        store: &Rc<dyn ConversationStore>,
-        id: &str,
-        place: &str,
-    ) -> Result<Option<(String, SavedConversation)>, RuntimeError> {
+    /// A copy of a conversation from a file to carry on in `place`: a new id, its words without what it changed
+    /// elsewhere, and the file's conversation and name. Like a copy taken up while another window has the original, it's
+    /// kept by its first request (marked as from a file, as every copy of one is), so taking it up and leaving keeps
+    /// nothing. None when the file's conversation isn't kept.
+    async fn copy_imported(&self, store: &Rc<dyn ConversationStore>, id: &str, place: &str) -> Result<Option<Chosen>, RuntimeError> {
         let Some(kept) = store.load(IMPORTED, id).await? else { return Ok(None) };
         let name = match store.find(id).await? {
             ConversationMatch::One(row) if row.id == id => row.name,
             _ => None,
         };
         let copy = SavedConversation { saved_at: now(), checkpoint: kept.checkpoint, changes: None, first: kept.first, turns: kept.turns };
-        let copy_id = store.new_id().await;
-        store.create(place, &copy_id, &copy, name.as_deref(), Some(id)).await?;
-        Ok(Some((copy_id, copy)))
+        Ok(Some(Chosen { place: place.to_owned(), id: store.new_id().await, conversation: copy, copy_of: Some((id.to_owned(), name)) }))
     }
     /// A conversation from a file asked for as Kumi starts (kumi -r, kumi -c) carries on in a copy, never in the file's
-    /// own place, and Kumi asks nothing (it has no Set to open): the copy is kept as a Set not saved yet's, and goes with
-    /// the Set that's open once Live is read.
+    /// own place, and Kumi asks nothing (it has no Set to open): the copy goes on as a Set not saved yet's, and with the
+    /// Set that's open once Live is read.
     async fn copy_wanted_import(&self) -> Result<(), RuntimeError> {
         let wanted = self.0.state.borrow().wanted.clone();
         let Some(wanted) = wanted.filter(|wanted| wanted.place == IMPORTED) else { return Ok(()) };
         let Some(store) = self.0.options.conversations.clone() else { return Ok(()) };
-        let Some((copy_id, _)) = self.copy_imported(&store, &wanted.id, UNSAVED).await? else {
-            self.0.state.borrow_mut().wanted = None;
-            return Ok(());
-        };
-        self.0.state.borrow_mut().wanted = Some(Wanted { place: UNSAVED.into(), id: copy_id, from: None, asked: None });
-        self.notice(format!("Carrying on a copy of an imported conversation; the original stays as {}.", wanted.id));
+        let copy = self.copy_imported(&store, &wanted.id, UNSAVED).await?;
+        let found = copy.is_some();
+        {
+            let mut s = self.0.state.borrow_mut();
+            s.wanted = None;
+            s.chosen = copy;
+        }
+        if found {
+            self.notice(format!("Carrying on a copy of an imported conversation; the original stays as {}.", wanted.id));
+        }
         Ok(())
     }
-    /// Whether the conversation going on came from a file (kumi import), or is a copy of one.
+    /// Whether the conversation going on came from a file (kumi import), or is a copy of one (kept or not yet).
     async fn conversation_imported(&self) -> bool {
         let Some(store) = self.0.options.conversations.clone() else { return false };
-        let (place, id) = {
+        // A copy's first save marks it as from a file: what's being saved is kept first.
+        let saving = self.0.saving.borrow().clone();
+        let _ = saving.await;
+        let (place, id, from) = {
             let s = self.0.state.borrow();
-            (s.place.clone(), s.conversation_id.clone())
+            (s.place.clone(), s.conversation_id.clone(), s.copied_from.clone())
         };
-        place.as_deref() == Some(IMPORTED)
-            || matches!(store.find(&id).await, Ok(ConversationMatch::One(row)) if row.id == id && row.imported)
+        if place.as_deref() == Some(IMPORTED) {
+            return true;
+        }
+        for id in std::iter::once(&id).chain(from.as_ref()) {
+            if matches!(store.find(id).await, Ok(ConversationMatch::One(row)) if row.id == *id && row.imported) {
+                return true;
+            }
+        }
+        false
     }
     /// Go on with a kept conversation the producer chose: Kumi's next answer starts from it.
-    async fn go_to(&self, place: String, id: String, conversation: SavedConversation, said: Option<String>) -> Result<(), RuntimeError> {
+    async fn go_to(&self, chosen: Chosen, said: Option<String>) -> Result<(), RuntimeError> {
         self.perform(
             false,
             Phase::Refresh,
@@ -1200,7 +1211,7 @@ impl Session {
                     }
                     {
                         let mut s = this.0.state.borrow_mut();
-                        s.chosen = Some(Chosen { place, id, conversation });
+                        s.chosen = Some(chosen);
                         s.must_reset = false;
                         s.turns = 0;
                         s.interrupted = None;
@@ -1509,7 +1520,15 @@ impl Session {
                 let taken = self.take_up(&chosen.place, &chosen.id).await;
                 self.wanted_goes_on_as(&chosen.place, &chosen.id, &taken.0);
                 self.begin_taken(chosen.place, taken, &chosen.conversation);
-                self.0.state.borrow_mut().touched = true;
+                let mut s = self.0.state.borrow_mut();
+                s.touched = true;
+                // A copy not kept yet: its first request keeps it, with its name and the one it copies.
+                if let Some((of, name)) = chosen.copy_of {
+                    s.copied_from = Some(of);
+                    s.conversation_name = name;
+                    taken_up = true;
+                }
+                drop(s);
                 resumed = Some(chosen.conversation);
             } else if astray {
                 resumed = self.own_conversation(op, project.as_ref()).await?;
@@ -2430,8 +2449,7 @@ impl SessionController for Session {
         if open.is_none() && place != UNSAVED {
             self.0.state.borrow_mut().wanted = Some(Wanted { place: place.clone(), id: id.to_owned(), from: None, asked: None });
         }
-        let id = id.to_owned();
-        self.go_to(place, id, conversation, None).await?;
+        self.go_to(Chosen { place, id: id.to_owned(), conversation, copy_of: None }, None).await?;
         Ok(true)
     }
     async fn all_conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
@@ -2594,7 +2612,8 @@ impl SessionController for Session {
                 store.create(&here, &id, &copy, None, Some(&source)).await?;
                 let open = open.map(|name| format!("“{name}”")).unwrap_or_else(|| format!("a {noun} not saved yet"));
                 let other = named.map(|name| format!("another {noun}, “{name}”,")).unwrap_or_else(|| format!("another {noun}"));
-                self.go_to(here, id, copy, Some(format!("Carrying on a copy here; the original stays with {set} as {source}."))).await?;
+                let said = format!("Carrying on a copy here; the original stays with {set} as {source}.");
+                self.go_to(Chosen { place: here, id, conversation: copy, copy_of: None }, Some(said)).await?;
                 self.0.state.borrow_mut().next_note = Some(format!(
                     "\n\n[Kumi] This conversation began about {other} and carries on here about {open}, as a copy: what Kumi read of that {noun} was taken out. Read the open {noun} before changing anything. (Kumi wrote this note, not the producer.)"
                 ));
