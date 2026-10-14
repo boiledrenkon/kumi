@@ -2189,7 +2189,7 @@ async fn uninstall_offers_a_second_run_only_while_the_app_still_runs() {
     let said = out.0.borrow().clone();
     assert_eq!(code, 1, "{said}");
     assert!(
-        said.contains("and PATH lines stay, but what's left of the app doesn't run: take out ")
+        said.contains("and PATH lines stay, but what's left can't uninstall itself: take out ")
             && said.contains(", the launcher and the two lines under ")
             && !said.contains("run kumi uninstall again"),
         "{said}"
@@ -2224,4 +2224,36 @@ async fn uninstall_all_keeps_what_the_producer_put_in_kumis_folder() {
     );
     assert!(said.contains("my-notes.txt and my-stems stay in ~/Studio/.kumi: they aren't Kumi's."), "{said}");
     assert!(said.contains("~/Studio/.kumi stays, with what isn't Kumi's in it."), "{said}");
+}
+/// A second run is offered only while it would run: Kumi's program still in app, in a folder that still passes as
+/// Kumi's. Here the app keeps its program but the folder has lost what marks it as Kumi's (its package.json went
+/// with app.previous), so only the way by hand is offered.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_offers_a_second_run_only_while_kumi_would_still_take_it() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root removes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    installed_kumi(home);
+    fs::rename(home.join("app/package.json"), home.join("app.previous.json")).unwrap();
+    put(home.join("app.previous/package.json"), fs::read(home.join("app.previous.json")).unwrap());
+    fs::remove_file(home.join("app.previous.json")).unwrap();
+    put(home.join("app.previous/kumi"), "Kumi's");
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o555)).unwrap();
+    let (removing, out) = io(&env);
+    let code = uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 1, "{said}");
+    assert!(home.join("app/kumi").is_file() && !home.join("app.previous").exists(), "{said}");
+    assert!(
+        said.contains("and PATH lines stay, but what's left can't uninstall itself: take out ")
+            && !said.contains("run kumi uninstall again"),
+        "{said}"
+    );
 }
