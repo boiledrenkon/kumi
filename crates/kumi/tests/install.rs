@@ -2123,6 +2123,7 @@ async fn uninstall_all_takes_a_folder_whole_only_when_it_is_kumis_alone() {
     installed_kumi(home);
     put(home.join("bin/mine.sh"), "theirs");
     put(home.join("downloads/kumiko.zip"), "theirs");
+    put(home.join("downloads/kumi-photos.zip"), "theirs");
     put(home.join("downloads/kumi-aarch64-apple-darwin.tar.gz"), "Kumi's");
     put(home.join("auth.json"), "Kumi's data");
     let (removing, out) = io(&env);
@@ -2130,7 +2131,11 @@ async fn uninstall_all_takes_a_folder_whole_only_when_it_is_kumis_alone() {
     let said = out.0.borrow().clone();
     assert_eq!(
         files_in(home).into_iter().map(|(file, _)| file).collect::<Vec<_>>(),
-        [home.join("bin/mine.sh").display().to_string(), home.join("downloads/kumiko.zip").display().to_string()]
+        [
+            home.join("bin/mine.sh").display().to_string(),
+            home.join("downloads/kumi-photos.zip").display().to_string(),
+            home.join("downloads/kumiko.zip").display().to_string()
+        ]
     );
     assert!(
         said.contains("Kumi is removed, with everything it kept, freeing ") && said.contains(" stays, with what isn't Kumi's in it."),

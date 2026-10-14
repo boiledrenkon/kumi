@@ -1626,8 +1626,20 @@ fn kumis_entry(part: &str, name: &str, path: &Path, alone: bool) -> bool {
     litter(name)
         || match part {
             "bin" => ["kumi", "kumi.cmd"].contains(&name),
-            // A release's bundle: kumi-<target>.tar.gz (kumi.tar.gz before targets; .zip for Windows' Node ones).
-            "downloads" => name == "kumi.tar.gz" || (name.starts_with("kumi-") && (name.ends_with(".tar.gz") || name.ends_with(".zip"))),
+            // A release's bundle, by Kumi's own names: kumi-<target>.tar.gz or .zip for the computers it's built for
+            // (aarch64-apple-darwin, x86_64-pc-windows-msvc…), kumi.tar.gz before targets.
+            "downloads" => {
+                name == "kumi.tar.gz"
+                    || name
+                        .strip_prefix("kumi-")
+                        .and_then(|rest| rest.strip_suffix(".tar.gz").or_else(|| rest.strip_suffix(".zip")))
+                        .is_some_and(|target| {
+                            let parts: Vec<&str> = target.split('-').collect();
+                            parts.len() >= 3
+                                && ["x86_64", "aarch64"].contains(&parts[0])
+                                && parts.iter().all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                        })
+            }
             "tools" => {
                 ["ffmpeg", "whisper", "whisper-models", "yt-dlp", "hands"].contains(&name)
                     || [".ffmpeg-", ".whisper-", ".yt-dlp"].iter().any(|start| name.starts_with(start))
