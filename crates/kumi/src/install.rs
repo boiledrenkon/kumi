@@ -1886,11 +1886,8 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
     }
     if options.all && !parts.alone && !parts.data.is_empty() {
         let names: Vec<String> = parts.data.iter().map(|path| part_name(home, path)).collect();
-        say(format!(
-            "{} also holds what isn't Kumi's, so --all would leave your {KEPT} there too ({}): delete them by hand.",
-            display(home),
-            listed(&names)
-        ));
+        let why = if parts.only_kumis() { "isn't named .kumi" } else { "also holds what isn't Kumi's" };
+        say(format!("{} {why}, so --all would leave your {KEPT} there too ({}): delete them by hand.", display(home), listed(&names)));
     } else if !options.all && (parts.alone || !parts.data.is_empty()) {
         say(format!("Your {KEPT} would stay in {}.", data_said(home, &parts, display)));
     }

@@ -2262,3 +2262,33 @@ async fn uninstall_offers_a_second_run_only_while_kumi_would_still_take_it() {
         "{said}"
     );
 }
+/// A folder holding only Kumi's, but not named .kumi (KUMI_HOME=~/Music/kumi): --all leaves Kumi's data, and says why
+/// as it is, not that the folder holds what isn't Kumi's.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_all_says_a_folder_of_only_kumis_isnt_named_kumi() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let home = Path::new(&env["HOME"]).join("Music/kumi");
+    env.insert("KUMI_HOME".into(), home.display().to_string());
+    installed_kumi(&home);
+    put(home.join("auth.json"), "Kumi's data");
+    let kept = "conversations, notes, recipes, sign-ins, library and references";
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { all: true, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!(
+            "~/Music/kumi isn't named .kumi, so --all would leave your {kept} there too (auth.json): delete them by hand."
+        )),
+        "{said}"
+    );
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!("Your {kept} are still in ~/Music/kumi (auth.json): delete them by hand to remove them too.")),
+        "{said}"
+    );
+    assert!(!said.contains("what isn't Kumi's") && home.join("auth.json").exists() && !home.join("app").exists(), "{said}");
+}
