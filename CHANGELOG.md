@@ -3,6 +3,27 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.17.1 — 2026-10-13
+
+Ships with bridge 1.0.92, as 1.17.0 did.
+
+- `kumi doctor` now starts with your installation. It shows Kumi's version and folder, what `kumi
+  update --rollback` goes back to, whether another `kumi` comes first on your PATH, and whether a
+  newer Kumi is out. It also checks free space, the Lives installed and their User Library, the
+  bridge's ports and Live's Developer Mode, and each problem names one next step. `kumi doctor --json`
+  gives the same, without keys, to share. `kumi update` checks for room first. When it can't finish,
+  it says why (the connection, a Wi-Fi sign-in page answering instead of GitHub, a full disk, a Kumi
+  folder installed with sudo) and that nothing was changed. It ends with "1.17.0 → 1.17.1" and a few
+  lines on what's new. `kumi update --version 1.17.0` installs a given release, older ones too, and
+  `--rollback` returns. `kumi uninstall` also removes the programs, models and videos Kumi fetched,
+  says how much space that frees, and takes its PATH line out cleanly; `--dry-run` says what would go.
+  Your conversations, notes, recipes, sign-ins, library and references stay. It removes nothing when
+  Kumi's folder is your home folder or a disk's root, and the installers won't install there; from a
+  folder you also use, it takes only Kumi's own files.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.17.0 — 2026-10-13
 
 Ships with bridge 1.0.92, as 1.16.6 did.
