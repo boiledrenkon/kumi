@@ -234,6 +234,19 @@ pub fn page(id: &str, name: &str, sources: &[String], slots: usize, modulate: bo
         }
         lines.push(cord(&k("map"), 0, &k("listen"), 0));
         lines.push(cord(&k("listen"), 0, &k("live-map"), 0));
+        // One slot listens at a time, as in Live's own modulators: a Map pressed tells the device's other slots to stop.
+        boxes.push(object(&k("pressed-map"), "sel 1", 2, 2, [100.0, row + 20.0]));
+        boxes.push(message(&k("me"), &slot.to_string(), [100.0, row + 45.0]));
+        boxes.push(object(&k("tell"), "s ---kumi.map.listening", 1, 0, [100.0, row + 70.0]));
+        boxes.push(object(&k("told"), "r ---kumi.map.listening", 0, 1, [160.0, row + 20.0]));
+        boxes.push(object(&k("another"), &format!("sel {slot}"), 2, 2, [160.0, row + 45.0]));
+        boxes.push(message(&k("stop"), "0", [160.0, row + 70.0]));
+        lines.push(cord(&k("map"), 0, &k("pressed-map"), 0));
+        lines.push(cord(&k("pressed-map"), 0, &k("me"), 0));
+        lines.push(cord(&k("me"), 0, &k("tell"), 0));
+        lines.push(cord(&k("told"), 0, &k("another"), 0));
+        lines.push(cord(&k("another"), 1, &k("stop"), 0));
+        lines.push(cord(&k("stop"), 0, &k("listen"), 0));
         lines.push(cord(&k("unmap"), 0, &k("pressed"), 0));
         lines.push(cord(&k("pressed"), 0, &k("forget"), 0));
         lines.push(cord(&k("forget"), 0, &k("live-map"), 0));
@@ -332,5 +345,38 @@ mod tests {
             .any(|entry| entry["box"]["text"] == "live.remote~ @normalized 1 @smoothing 0"));
         let (w, h) = size(1, 8);
         assert!(h <= 169.0 - 6.0 && w < 220.0, "{w} {h}");
+    }
+
+    #[test]
+    fn a_map_pressed_stops_the_devices_other_slots_listening() {
+        let page = page("obj-mod", "kumi.map", &["LFO".into()], 3, true);
+        let boxes = page["patcher"]["boxes"].as_array().unwrap();
+        let lines = page["patcher"]["lines"].as_array().unwrap();
+        let text = |id: &str| {
+            boxes.iter().find(|entry| entry["box"]["id"] == id).map(|entry| entry["box"]["text"].as_str().unwrap_or_default().to_string())
+        };
+        let cord = |from: &str, outlet: u64, to: &str, inlet: u64| {
+            lines
+                .iter()
+                .any(|line| line["patchline"]["source"] == json!([from, outlet]) && line["patchline"]["destination"] == json!([to, inlet]))
+        };
+        for slot in 1..=3 {
+            let k = |part: &str| format!("{part}-{slot}");
+            // Pressed (1): the slot's number goes to the device's other slots, named for this copy of the device alone.
+            assert_eq!(text(&k("pressed-map")).as_deref(), Some("sel 1"));
+            assert!(
+                cord(&k("map"), 0, &k("pressed-map"), 0) && cord(&k("pressed-map"), 0, &k("me"), 0) && cord(&k("me"), 0, &k("tell"), 0)
+            );
+            assert_eq!(text(&k("me")), Some(slot.to_string()));
+            assert_eq!(text(&k("tell")).as_deref(), Some("s ---kumi.map.listening"));
+            // Another slot's number stops this one's live.map listening; its own passes by.
+            assert_eq!(text(&k("told")).as_deref(), Some("r ---kumi.map.listening"));
+            assert_eq!(text(&k("another")), Some(format!("sel {slot}")));
+            assert!(
+                cord(&k("told"), 0, &k("another"), 0) && cord(&k("another"), 1, &k("stop"), 0) && !cord(&k("another"), 0, &k("stop"), 0)
+            );
+            assert_eq!(text(&k("stop")).as_deref(), Some("0"));
+            assert!(cord(&k("stop"), 0, &k("listen"), 0) && cord(&k("listen"), 0, &k("live-map"), 0));
+        }
     }
 }
