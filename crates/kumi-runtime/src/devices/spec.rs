@@ -37,6 +37,8 @@ pub struct NumericControl {
     pub default: f64,
     #[serde(default)]
     pub unit: Unit,
+    #[serde(default, skip_serializing_if = "Place::is_default")]
+    pub place: Place,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -44,12 +46,83 @@ pub struct ChoiceControl {
     pub name: String,
     pub options: Vec<String>,
     pub default: String,
+    #[serde(default, skip_serializing_if = "Place::is_default")]
+    pub place: Place,
 }
 
+/// A switch: on or off. A trigger is a switch shown as a button that's on only while it's pressed.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SwitchControl {
     pub name: String,
     pub default: bool,
+    #[serde(default, skip_serializing_if = "Place::is_default")]
+    pub place: Place,
+}
+
+/// Where a control sits on the face and how it shows: its group (the controls that work together, under a heading of
+/// the group's name) and its look. Kumi lays the face out from these.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Place {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
+    #[serde(default, skip_serializing_if = "Show::is_auto")]
+    pub show: Show,
+}
+
+impl Place {
+    pub fn is_default(&self) -> bool {
+        self == &Place::default()
+    }
+}
+
+/// How a control shows on the face; Auto is its type's own look (a dial, a menu, a button with its name).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Show {
+    #[default]
+    Auto,
+    /// A number: a knob with its name and value.
+    Dial,
+    /// A number: a small box of its value, under its name.
+    Number,
+    /// A number: an upright fader.
+    Slider,
+    /// A choice: a menu.
+    Menu,
+    /// A choice: its options as buttons side by side.
+    Tabs,
+    /// A switch: a button with its name, lit while on.
+    Button,
+    /// A trigger: a button with its name, on only while it's pressed.
+    Trigger,
+}
+
+impl Show {
+    pub fn is_auto(&self) -> bool {
+        *self == Show::Auto
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Show::Auto => "",
+            Show::Dial => "dial",
+            Show::Number => "number",
+            Show::Slider => "slider",
+            Show::Menu => "menu",
+            Show::Tabs => "tabs",
+            Show::Button => "button",
+            Show::Trigger => "trigger",
+        }
+    }
+
+    /// The looks a control of `kind` can take (its type as the model names it).
+    pub fn for_type(kind: &str) -> &'static [Show] {
+        match kind {
+            "number" | "integer" => &[Show::Dial, Show::Number, Show::Slider],
+            "choice" => &[Show::Menu, Show::Tabs],
+            _ => &[Show::Button],
+        }
+    }
 }
 
 impl Control {
@@ -61,14 +134,29 @@ impl Control {
         }
     }
 
-    /// The control's type as the model names it: number, integer, choice or switch.
+    /// The control's type as the model names it: number, integer, choice, switch or trigger.
     pub fn type_name(&self) -> &'static str {
         match self {
             Control::Number(_) => "number",
             Control::Integer(_) => "integer",
             Control::Choice(_) => "choice",
+            Control::Switch(control) if control.place.show == Show::Trigger => "trigger",
             Control::Switch(_) => "switch",
         }
+    }
+
+    /// Where it sits on the face and how it shows.
+    pub fn place(&self) -> &Place {
+        match self {
+            Control::Number(control) | Control::Integer(control) => &control.place,
+            Control::Choice(control) => &control.place,
+            Control::Switch(control) => &control.place,
+        }
+    }
+
+    /// Whether it's a trigger: a button on only while it's pressed.
+    pub fn trigger(&self) -> bool {
+        matches!(self, Control::Switch(control) if control.place.show == Show::Trigger)
     }
 
     /// The control's default as JSON: a number, an option or true/false.
@@ -258,6 +346,29 @@ pub struct PatchSpec {
     pub about: String,
     pub controls: Vec<Control>,
     pub patch: String,
+    /// The Map page's slots and its sources' names, for a patch that sends modulation to mod.
+    #[serde(default, skip_serializing_if = "MapSpec::is_default")]
+    pub map: MapSpec,
+}
+
+/// A device's Map page: how many slots, and what each source the patch sends to mod (mod.0, mod.1…) is called.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MapSpec {
+    pub slots: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+}
+
+impl Default for MapSpec {
+    fn default() -> MapSpec {
+        MapSpec { slots: super::mapping::SLOTS, sources: Vec::new() }
+    }
+}
+
+impl MapSpec {
+    pub fn is_default(&self) -> bool {
+        self == &MapSpec::default()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -574,6 +685,73 @@ pub fn kept_unrun(code: &str, why: &str) -> String {
     lines.join("\n")
 }
 
+/// A Map page's slots and sources' names, from what was given, made the nearest way they can be.
+fn map_of(given: Option<&Value>, patched: bool, found: &mut Findings) -> MapSpec {
+    let mut map = MapSpec::default();
+    let Some(given) = given.filter(|given| !given.is_null()) else { return map };
+    if !patched {
+        found.changed.push("map: a Map page is for a patch that sends its modulation to mod, so this was left out.".into());
+        return map;
+    }
+    let Some(fields) = given.as_object() else {
+        found.changed.push("map: it's an object ({\"slots\": 8, \"sources\": [\"LFO 1\"]}), so the page has 8 slots.".into());
+        return map;
+    };
+    if let Some(slots) = fields.get("slots") {
+        match slots.as_f64().filter(|slots| slots.is_finite()) {
+            Some(count) if count.fract() == 0.0 && (1.0..=super::mapping::MOST_SLOTS as f64).contains(&count) => map.slots = count as usize,
+            _ => {
+                map.slots = slots
+                    .as_f64()
+                    .filter(|slots| slots.is_finite())
+                    .map_or(super::mapping::SLOTS, |slots| slots.round().clamp(1.0, super::mapping::MOST_SLOTS as f64) as usize);
+                found.changed.push(format!("map.slots {}: made {} (1 to {}).", stringify(slots), map.slots, super::mapping::MOST_SLOTS));
+            }
+        }
+    }
+    if let Some(Value::Array(sources)) = fields.get("sources") {
+        map.sources = sources
+            .iter()
+            .take(super::mapping::MOST_SOURCES)
+            .map(|source| head(trim(source.as_str().unwrap_or("")), 16))
+            .map(|name| if name.is_empty() { "Mod".to_string() } else { name })
+            .collect();
+        if sources.len() > super::mapping::MOST_SOURCES {
+            found.changed.push(format!("map.sources: the first {} were kept.", super::mapping::MOST_SOURCES));
+        }
+    }
+    map
+}
+
+/// The most characters of a group's name: a heading over a few controls.
+const MOST_GROUP: usize = 24;
+
+/// Where a control sits and how it shows, from its group and show, made the nearest way they can be.
+fn place_of(control: &Map<String, Value>, control_type: &str, label: &str, found: &mut Findings) -> Place {
+    let group = trimmed_string(control.get("group"));
+    let group = if utf16_len(&group) > MOST_GROUP {
+        let cut = head(&group, MOST_GROUP).trim_end().to_string();
+        found.changed.push(format!("{label}: group \"{group}\" was cut to \"{cut}\" ({MOST_GROUP} characters, a heading)."));
+        cut
+    } else {
+        group
+    };
+    let looks = Show::for_type(control_type);
+    let show = match (control_type, control.get("show").and_then(Value::as_str).map(trim)) {
+        ("trigger", _) => Show::Trigger,
+        (_, None | Some("")) => Show::Auto,
+        (_, Some(given)) => match looks.iter().find(|look| look.as_str() == given) {
+            Some(look) => *look,
+            None => {
+                let can = looks.iter().map(|look| look.as_str()).collect::<Vec<_>>().join(", ");
+                found.changed.push(format!("{label}: show \"{given}\" isn't a look a {control_type} has ({can}), so it shows its own."));
+                Show::Auto
+            }
+        },
+    };
+    Place { group, show }
+}
+
 /// A device from the model's input, always: what doesn't fit is made the nearest way it can be, and every such
 /// change and every problem with the code is said beside it, so the model can fix it on its next call.
 pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
@@ -769,7 +947,7 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
         let label = format!("{label} ({control_name})");
         let given_type = control.get("type").and_then(Value::as_str).unwrap_or("");
         let control_type = match given_type {
-            "number" | "integer" | "choice" | "switch" => given_type,
+            "number" | "integer" | "choice" | "switch" | "trigger" => given_type,
             _ => {
                 let made = if control.get("options").is_some_and(Value::is_array) {
                     "choice"
@@ -779,12 +957,13 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
                     "number"
                 };
                 found.changed.push(format!(
-                    "{label}: type {}: made as a {made} (number, integer, choice or switch).",
+                    "{label}: type {}: made as a {made} (number, integer, choice, switch or trigger).",
                     stringify(&Value::String(given_type.into()))
                 ));
                 made
             }
         };
+        let place = place_of(&control, control_type, &label, &mut found);
         if control_type == "number" || control_type == "integer" {
             let finite = |key: &str| control.get(key).and_then(Value::as_f64).filter(|value| value.is_finite());
             let (given_min, given_max, given_default) = (finite("min"), finite("max"), finite("default"));
@@ -847,7 +1026,7 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
                     number_to_string(fallback)
                 ));
             }
-            let numeric = NumericControl { name: control_name, min, max, default: fallback, unit };
+            let numeric = NumericControl { name: control_name, min, max, default: fallback, unit, place };
             checked.push(if control_type == "integer" { Control::Integer(numeric) } else { Control::Number(numeric) });
         } else if control_type == "choice" {
             let given_options: Vec<Value> = match control.get("options") {
@@ -910,7 +1089,9 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
                     options.iter().map(|option| format!("\"{option}\"")).collect::<Vec<_>>().join(", ")
                 ));
             }
-            checked.push(Control::Choice(ChoiceControl { name: control_name, options, default }));
+            checked.push(Control::Choice(ChoiceControl { name: control_name, options, default, place }));
+        } else if control_type == "trigger" {
+            checked.push(Control::Switch(SwitchControl { name: control_name, default: false, place }));
         } else {
             let default = match control.get("default") {
                 Some(Value::Bool(on)) => *on,
@@ -928,7 +1109,7 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
                     on
                 }
             };
-            checked.push(Control::Switch(SwitchControl { name: control_name, default }));
+            checked.push(Control::Switch(SwitchControl { name: control_name, default, place }));
         }
     }
     let mut code = input.get("code").and_then(Value::as_str).unwrap_or("").to_string();
@@ -1079,8 +1260,9 @@ pub fn check_spec(input: &Map<String, Value>) -> (DeviceSpec, Findings) {
             )),
         }
     }
+    let map = map_of(input.get("map"), patched, &mut found);
     let spec = if patched {
-        DeviceSpec::Patch(PatchSpec { kind, name, about, controls: checked, patch })
+        DeviceSpec::Patch(PatchSpec { kind, name, about, controls: checked, patch, map })
     } else {
         match kind {
             DeviceType::AudioEffect => DeviceSpec::AudioEffect(AudioEffectSpec { name, about, controls: checked, code }),

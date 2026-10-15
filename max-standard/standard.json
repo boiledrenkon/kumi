@@ -15,7 +15,12 @@
     "params.bank-missing": { "level": "warn", "looks_at": "parameters", "measured": { "found": 55, "of": 203 } },
     "params.no-info": { "level": "advice", "looks_at": "parameters", "measured": { "found": 198, "of": 203 } },
     "gen.param-twice": { "level": "error", "looks_at": "Param declarations", "measured": { "found": 2, "of": 359 } },
-    "face.hidden-by-panel": { "level": "warn", "looks_at": "panels", "measured": { "found": 0, "of": 10 } }
+    "face.hidden-by-panel": { "level": "warn", "looks_at": "panels", "measured": { "found": 0, "of": 10 } },
+    "timing.polled-position": { "level": "error", "looks_at": "plugsync~ objects", "measured": { "found": 0, "of": 0 } },
+    "timing.ms-clock": { "level": "error", "looks_at": "clocks that time MIDI", "measured": { "found": 0, "of": 0 } },
+    "timing.off-grid-clock": { "level": "error", "looks_at": "clocks that time MIDI", "measured": { "found": 0, "of": 0 } },
+    "timing.low-priority-notes": { "level": "error", "looks_at": "low-priority objects a clock reaches", "measured": { "found": 0, "of": 16 } },
+    "map.own-mapping": { "level": "error", "looks_at": "objects that map parameters", "measured": { "found": 0, "of": 0 } }
   },
   "measured": { "devices": 8, "patchers": 236, "boxes": 6925, "cords": 7727, "layout": { "bent_cords": 2140, "crossings": 6974, "boxes_in_columns": 5655, "down_gap_quartiles": [11.5, 25.0, 61.0], "side_gap_quartiles": [25.9, 67.5, 165.5] } }
 }

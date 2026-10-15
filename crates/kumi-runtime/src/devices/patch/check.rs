@@ -13,6 +13,10 @@
 //!   Info View.
 //! - **gen**: a gen~ Param is declared once.
 //! - **face**: no opaque panel hides what's on the device's face.
+//! - **timing**: notes a clock times go out on Live's grid and tempo, on Max's high-priority thread: no step made from
+//!   plugsync~'s polled position, no clock in milliseconds or off Live's grid, nothing low-priority between a clock and
+//!   MIDI out. Kumi's own building blocks ([p kumi.clock] and the rest) are made that way, so they're not looked into.
+//! - **map**: a device with Map buttons uses Kumi's mapping page, not a live.map of its own.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -43,9 +47,14 @@ pub const BANK_MISSING: &str = "params.bank-missing";
 pub const NO_INFO: &str = "params.no-info";
 pub const PARAM_TWICE: &str = "gen.param-twice";
 pub const HIDDEN_BY_PANEL: &str = "face.hidden-by-panel";
+pub const POLLED_POSITION: &str = "timing.polled-position";
+pub const MS_CLOCK: &str = "timing.ms-clock";
+pub const OFF_GRID_CLOCK: &str = "timing.off-grid-clock";
+pub const LOW_PRIORITY_NOTES: &str = "timing.low-priority-notes";
+pub const OWN_MAPPING: &str = "map.own-mapping";
 
 /// Every rule the checker knows.
-pub const RULES: [&str; 15] = [
+pub const RULES: [&str; 20] = [
     UNKNOWN_OBJECT,
     NO_SUCH_PORT,
     CORD_OVER_BOX,
@@ -61,6 +70,11 @@ pub const RULES: [&str; 15] = [
     NO_INFO,
     PARAM_TWICE,
     HIDDEN_BY_PANEL,
+    POLLED_POSITION,
+    MS_CLOCK,
+    OFF_GRID_CLOCK,
+    LOW_PRIORITY_NOTES,
+    OWN_MAPPING,
 ];
 
 /// How far a chain of messages is followed from a fan-out.
@@ -128,7 +142,7 @@ pub fn check(patcher: &Patcher) -> Report {
 /// A device's patcher checked against `standard`, and against what `reference` knows of Max's objects (the installed
 /// Max's, from [`super::reference::installed`]).
 pub fn check_with(patcher: &Patcher, standard: &Standard, reference: Option<&Reference>) -> Report {
-    let mut checker = Checker { standard, catalog: catalog(), reference, report: Report::default(), files_seen: HashSet::new() };
+    let mut checker = Checker { standard, catalog: catalog(), reference, report: Report::default(), files_seen: HashSet::new(), in_kit: 0 };
     checker.walk(patcher, "");
     checker.params(patcher);
     checker.face(patcher);
@@ -142,6 +156,8 @@ struct Checker<'a> {
     report: Report,
     /// Files already checked: a dial used three times is one patcher, checked once.
     files_seen: HashSet<String>,
+    /// How many of Kumi's own building blocks the patcher being checked is inside.
+    in_kit: usize,
 }
 
 /// The place inside `at` of a box's own patcher.
@@ -171,6 +187,10 @@ impl Checker<'_> {
             self.objects(patcher, at);
             self.order(patcher, at);
             self.names(patcher, at);
+            if self.in_kit == 0 {
+                self.timing(patcher, at);
+                self.mapping(patcher, at);
+            }
         }
         for item in &patcher.boxes {
             let inner = match (&item.patcher, &item.file) {
@@ -178,8 +198,136 @@ impl Checker<'_> {
                 (None, Some((name, inner))) if self.files_seen.insert(name.clone()) => inner,
                 _ => continue,
             };
+            let kit = is_kit(item);
+            self.in_kit += usize::from(kit);
             self.walk(inner, &inside(at, item));
+            self.in_kit -= usize::from(kit);
         }
+    }
+
+    /// Notes a clock times reach MIDI out on Live's grid and tempo, on the high-priority thread.
+    fn timing(&mut self, patcher: &Patcher, at: &str) {
+        let label = labels(patcher);
+        let next = downstream(patcher);
+        let outs: Vec<&str> = patcher.boxes.iter().filter(|item| self.sends_midi(item)).map(MaxBox::id).collect();
+        let to_midi = |from: &str| outs.iter().any(|out| reaches(&next, from, out));
+        // plugsync~'s song position comes once per signal vector, and late.
+        for item in patcher.boxes.iter().filter(|item| item.class() == "plugsync~") {
+            self.looked(POLLED_POSITION, 1);
+            let starts: Vec<&str> = next
+                .get(item.id())
+                .into_iter()
+                .flatten()
+                .filter(|(outlet, _, _)| [1, 2, 3, 6, 7].contains(outlet))
+                .map(|(_, to, _)| *to)
+                .collect();
+            let made_signal = starts.iter().any(|start| {
+                patcher.boxes.iter().filter(|other| matches!(other.class(), "sig~" | "mc.sig~")).any(|sig| reaches(&next, start, sig.id()))
+            });
+            if made_signal || starts.iter().any(|start| to_midi(start)) {
+                self.found(
+                    POLLED_POSITION,
+                    at,
+                    format!(
+                        "{} gives the song position once per signal vector, and late, so steps taken from it land late and off Live's grid: take them from [kumi.clock] (or the song position at every sample from [kumi.transport]).",
+                        label[item.id()]
+                    ),
+                );
+            }
+        }
+        for item in patcher.boxes.iter().filter(|item| matches!(item.class(), "metro" | "qmetro" | "tempo")) {
+            if !to_midi(item.id()) {
+                continue;
+            }
+            self.looked(MS_CLOCK, 1);
+            self.looked(OFF_GRID_CLOCK, 1);
+            let (relative, quantized) = clock_time(item);
+            if item.class() == "qmetro" {
+                // Its low priority is said below, with the path it takes.
+            } else if !relative {
+                self.found(
+                    MS_CLOCK,
+                    at,
+                    format!(
+                        "{} counts milliseconds, so the notes it times drift from Live's tempo and grid: take them from [kumi.clock].",
+                        label[item.id()]
+                    ),
+                );
+            } else if !quantized {
+                self.found(
+                    OFF_GRID_CLOCK,
+                    at,
+                    format!(
+                        "{} follows Live's tempo but not its grid (it has no @quantize), so its notes fall between Live's beats: take them from [kumi.clock].",
+                        label[item.id()]
+                    ),
+                );
+            }
+        }
+        // Between a clock and MIDI out, nothing that waits for Max's low-priority thread.
+        let clocks: Vec<&MaxBox> = patcher
+            .boxes
+            .iter()
+            .filter(|item| {
+                matches!(item.class(), "metro" | "qmetro" | "tempo" | "edge~") || (is_kit(item) && item.text() == "p kumi.clock")
+            })
+            .collect();
+        for slow in patcher.boxes.iter().filter(|item| self.catalog.low_priority(item.class()) || item.class() == "v8.codebox") {
+            let Some(clock) = clocks.iter().find(|clock| clock.id() != slow.id() && reaches(&next, clock.id(), slow.id())) else {
+                // A [qmetro] is a clock and low-priority itself.
+                if slow.class() == "qmetro" && to_midi(slow.id()) {
+                    self.looked(LOW_PRIORITY_NOTES, 1);
+                    self.found(
+                        LOW_PRIORITY_NOTES,
+                        at,
+                        format!(
+                            "{} sends on Max's low-priority thread, so the notes it times reach MIDI out late and unevenly: take them from [kumi.clock].",
+                            label[slow.id()]
+                        ),
+                    );
+                }
+                continue;
+            };
+            self.looked(LOW_PRIORITY_NOTES, 1);
+            if to_midi(slow.id()) {
+                self.found(
+                    LOW_PRIORITY_NOTES,
+                    at,
+                    format!(
+                        "the notes {} times reach MIDI out through {}, which sends on Max's low-priority thread, so they land late and unevenly: keep the path from the clock to out in objects ([kumi.clock] to [kumi.notes]); code can fill a table the path reads.",
+                        label[clock.id()],
+                        label[slow.id()]
+                    ),
+                );
+            }
+        }
+    }
+
+    /// A device with Map buttons uses Kumi's mapping page.
+    fn mapping(&mut self, patcher: &Patcher, at: &str) {
+        let label = labels(patcher);
+        for item in &patcher.boxes {
+            // The Map button's way in code: watching the parameter Live has selected (a string, in its source).
+            let source = item.fields.get("textfile").and_then(|file| file.get("text")).or_else(|| item.fields.get("code"));
+            let code_maps = source.and_then(Value::as_str).is_some_and(|code| code.contains("selected_parameter"));
+            if item.class() != "live.map" && !code_maps {
+                continue;
+            }
+            self.looked(OWN_MAPPING, 1);
+            self.found(
+                OWN_MAPPING,
+                at,
+                format!(
+                    "{} lets the producer map parameters itself: a device with Map buttons gets Kumi's mapping page, so send the modulation to mod (a signal from 0 to 1) and leave the mapping out.",
+                    label[item.id()]
+                ),
+            );
+        }
+    }
+
+    /// Whether a box sends MIDI out of the device: a MIDI output object, or Kumi's [kumi.notes], whose MIDI goes to out.
+    fn sends_midi(&self, item: &MaxBox) -> bool {
+        self.catalog.midi_out(item.class()) || (is_kit(item) && item.text() == "p kumi.notes")
     }
 
     /// How many inlets (or outlets) a box has: as saved with it, else as the reference counts them for its text.
@@ -669,6 +817,47 @@ fn banked_while_running(patcher: &Patcher, names: &mut HashSet<String>) {
             banked_while_running(inner, names);
         }
     }
+}
+
+/// Whether a box is one of Kumi's own building blocks ([p kumi.clock] and the rest) or its Map page (a bpatcher named
+/// kumi.map), made the way they're tested.
+fn is_kit(item: &MaxBox) -> bool {
+    let words = item.words();
+    matches!(words.as_slice(), ["p" | "patcher", name, ..] if name.starts_with("kumi."))
+        || (item.maxclass() == "bpatcher" && item.str("varname").starts_with("kumi."))
+}
+
+/// A clock's time, as its box gives it: whether it follows Live's tempo (a note value, ticks, bars.beats.units) and
+/// whether it's held to Live's grid (@quantize).
+fn clock_time(item: &MaxBox) -> (bool, bool) {
+    let words = item.words();
+    let relative_word = |word: &str| {
+        word == "ticks"
+            || crate::devices::kit::note_value(word).is_some()
+            || (word.split('.').count() == 3 && word.split('.').all(|part| part.parse::<f64>().is_ok()))
+    };
+    let mut relative = false;
+    let mut quantized = false;
+    let mut at = 1;
+    // The interval: the first argument, or @interval's.
+    while at < words.len() {
+        match words[at] {
+            "@quantize" => {
+                quantized = words.get(at + 1).is_some_and(|word| relative_word(word) || word.parse::<f64>().is_ok());
+                at += 2;
+            }
+            "@interval" => {
+                relative |= words[at + 1..].iter().take(2).any(|word| relative_word(word));
+                at += 2;
+            }
+            word if at == 1 && !word.starts_with('@') => {
+                relative |= relative_word(word) || words.get(2).is_some_and(|unit| relative_word(unit));
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    (relative, quantized)
 }
 
 /// Each box's cords: the outlet, the box and inlet it goes to.

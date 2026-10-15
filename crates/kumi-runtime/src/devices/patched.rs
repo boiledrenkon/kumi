@@ -6,6 +6,11 @@
 //! - An audio effect: `in.0` and `in.1` are the input's left and right; `out.0` and `out.1` go to Kumi's output stage
 //!   (Mix against the dry input, then Output) and on to Live.
 //! - An instrument: `in` is the track's MIDI (bytes); `out.0` and `out.1` go to Kumi's output stage (Output).
+//!
+//! Any kind can also send:
+//! - `mod`: modulation, a signal from 0 to 1 (`mod.1` and on for more sources). Kumi gives the device a Map page of
+//!   slots that map it to parameters anywhere in Live ([`super::mapping`]).
+//! - `playhead`: the playing step's index, from 0, which lights it on the face's step grid ([`super::look`]).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -14,19 +19,27 @@ use serde_json::{json, Value};
 use super::amxd::{device_patcher, DevicePatcherOptions, DeviceType, Line, PatchBox};
 use super::findings::Findings;
 use super::gen::{gen_box, Face, MIX, OUTPUT, OUTPUT_STAGE_EFFECT, OUTPUT_STAGE_INSTRUMENT};
+use super::look;
+use super::mapping;
 use super::patch::check::check_with;
-use super::patch::notation::{expand, parse, ports_had, Outside};
+use super::patch::notation::{expand, parse, ports_had, End, Outside};
 use super::patch::reference::Reference;
 use super::patch::standard::{standard, Level};
 use super::patch::{NoFiles, Patcher};
 use super::spec::PatchSpec;
 
 /// What a patch's maker answers for: what's in it (its objects and cords, the order its messages go in, the names it
-/// shares). Its layout, its face and its parameters are Kumi's.
-const THE_PATCH_S: [&str; 3] = ["patch.", "order.", "names."];
+/// shares, how it times its notes, whether it maps parameters itself). Its layout, its face and its parameters are
+/// Kumi's.
+const THE_PATCH_S: [&str; 5] = ["patch.", "order.", "names.", "timing.", "map."];
 
 /// A [v8ui]'s size on the face: as tall as the face has room for.
 const VIEW: [f64; 2] = [160.0, 150.0];
+/// Where the patch's playhead and modulation go: the face's step numbers, and the Map page.
+const PLAYHEAD: &str = "obj-playhead";
+const MAP_PAGE: &str = "obj-mod";
+/// The Map page's scripting name, by which its tab shows it.
+const MAP_NAME: &str = "kumi.map";
 
 /// A newobj box of Kumi's own, with its in- and outlets and what each outlet sends.
 fn object(id: &str, text: &str, ins: usize, outs: usize, outlettype: &[&str]) -> PatchBox {
@@ -47,8 +60,15 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
         DeviceType::AudioEffect => vec![&*MIX, &*OUTPUT],
         DeviceType::Instrument => vec![&*OUTPUT],
     };
-    let on_face = spec.controls.len() + kumis.len();
-    let mut face = Face::new(on_face);
+    let mut face = Face::new();
+    // How many sources the patch sends to mod (mod.0, mod.1…): a Map page for any.
+    let sources = notation
+        .cords
+        .iter()
+        .filter_map(|link| matches!(&link.to, End::Outside(name) if name == "mod").then_some(link.inlet + 1))
+        .max()
+        .unwrap_or(0)
+        .min(mapping::MOST_SOURCES);
     match spec.kind {
         DeviceType::MidiEffect => {
             boxes.push(object("obj-in", "midiin", 1, 1, &["int"]));
@@ -80,7 +100,12 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
         face.add(control, param, &["obj-out"]);
     }
     let outside = Outside {
-        boxes: HashMap::from([("in".to_string(), "obj-in".to_string()), ("out".to_string(), "obj-out".to_string())]),
+        boxes: HashMap::from([
+            ("in".to_string(), "obj-in".to_string()),
+            ("out".to_string(), "obj-out".to_string()),
+            ("playhead".to_string(), PLAYHEAD.to_string()),
+            ("mod".to_string(), MAP_PAGE.to_string()),
+        ]),
         controls,
         reference,
         output_stage: spec.kind != DeviceType::MidiEffect,
@@ -88,19 +113,11 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
     let expanded = expand(&notation, &outside);
     found.append(expanded.found);
     let mut patch_boxes = expanded.boxes;
-    // What draws (a [v8ui]) is on the face too: beside the controls, each as tall as the face, the device as wide as
-    // they take.
-    let mut width = face.width();
-    let mut x = if on_face == 0 { 8.0 } else { width };
-    for entry in patch_boxes.iter_mut().filter(|entry| entry["box"]["maxclass"] == "v8ui") {
-        entry["box"]["presentation"] = json!(1);
-        entry["box"]["presentation_rect"] = json!([x, 8.0, VIEW[0], VIEW[1]]);
-        x += VIEW[0] + 8.0;
-        width = width.max(x);
-    }
-    // The ports of Kumi's own boxes (in, out, the face's controls), for the cords that reach them, and what the patch
-    // calls each.
+    // The ports of Kumi's own boxes (in, out, the face's controls, the playhead and the Map page), for the cords that
+    // reach them, and what the patch calls each.
     let mut own: HashMap<String, (usize, usize, String)> = HashMap::new();
+    own.insert(PLAYHEAD.into(), (1, 0, "playhead".into()));
+    own.insert(MAP_PAGE.into(), (sources.max(1), 0, "mod".into()));
     for item in boxes.iter().chain(&face.boxes) {
         let (Some(id), Some(ins), Some(outs)) = (
             item.item.get("id").and_then(Value::as_str),
@@ -119,9 +136,6 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
                 .map_or(id.to_string(), |(name, _)| format!("\"{name}\"")),
         };
         own.insert(id.to_string(), (ins as usize, outs as usize, called));
-    }
-    for entry in patch_boxes {
-        boxes.push(PatchBox::new(entry["box"].clone()));
     }
     for (entry, line) in &expanded.lines {
         let end = |key: &str| {
@@ -173,8 +187,55 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
         }
         _ => {}
     }
+    // What draws (a [v8ui]) is on the face too, in a section of its own; a patch sending modulation gets the Map page.
+    let pictures: Vec<usize> =
+        patch_boxes.iter().enumerate().filter(|(_, entry)| entry["box"]["maxclass"] == "v8ui").map(|(at, _)| at).collect();
+    let names: Vec<String> = (0..sources)
+        .map(|at| spec.map.sources.get(at).cloned().unwrap_or_else(|| if sources == 1 { "Mod".into() } else { format!("Mod {}", at + 1) }))
+        .collect();
+    let extras = look::Extras {
+        pictures: pictures.iter().map(|_| (VIEW[0], VIEW[1])).collect(),
+        map_page: (sources > 0).then(|| mapping::size(sources, spec.map.slots)),
+    };
+    let laid = face.finish(&extras, PLAYHEAD);
+    let mut main: Vec<String> = face.main_page();
+    for (picture, rect) in pictures.iter().zip(&laid.pictures) {
+        let item = &mut patch_boxes[*picture]["box"];
+        item["presentation"] = json!(1);
+        item["presentation_rect"] = json!(rect);
+        // Its scripting name, by which the page tabs show and hide it.
+        if item.get("varname").and_then(Value::as_str).is_none() {
+            item["varname"] = json!(format!("kumi-picture-{}", picture + 1));
+        }
+        main.push(item["varname"].as_str().unwrap_or_default().to_string());
+    }
+    if let (Some(rect), Some(tabs)) = (laid.map_page, laid.tabs) {
+        // live.modulate~ where this Max has it (Live 12's), live.remote~ where it hasn't.
+        let modulate = reference.is_none_or(|reference| reference.object("live.modulate~").is_some());
+        let mut page = mapping::page(MAP_PAGE, MAP_NAME, &names, spec.map.slots, modulate);
+        page["presentation_rect"] = json!(rect);
+        boxes.push(PatchBox::new(page));
+        let (tab_boxes, tab_cords) = look::pages(tabs, &main, MAP_NAME);
+        boxes.extend(tab_boxes.into_iter().map(PatchBox::new));
+        lines.extend(tab_cords.into_iter().map(|(from, outlet, to, inlet)| Line::new(&from, outlet, &to, inlet)));
+    }
+    if !laid.playhead && lines.iter().any(|line| line.patchline.destination.0 == PLAYHEAD) {
+        found.wrong.push(
+            "patch: playhead lights the face's step grid, and this face has none, so its cords were left out: name the controls of each step for it (\"Gate 1\" … \"Gate 16\"), or leave playhead out."
+                .into(),
+        );
+        lines.retain(|line| line.patchline.destination.0 != PLAYHEAD);
+    }
+    let width = laid.width;
+    for item in patch_boxes.drain(..) {
+        boxes.push(PatchBox::new(item["box"].clone()));
+    }
     boxes.extend(face.boxes);
     lines.extend(face.lines);
+    if !laid.playhead {
+        // No step grid: the playhead's own boxes went unused.
+        boxes.retain(|item| item.item.get("id").and_then(Value::as_str) != Some(PLAYHEAD));
+    }
     let document =
         device_patcher(spec.kind, DevicePatcherOptions { title: spec.name.clone(), description: spec.about.clone(), width, boxes, lines });
     let report = check_with(&Patcher::read(&document, &NoFiles), standard(), reference);
@@ -202,7 +263,7 @@ mod tests {
     use crate::devices::spec::{Control, NumericControl, Unit};
 
     fn knob(name: &str, min: f64, max: f64, unit: Unit) -> Control {
-        Control::Number(NumericControl { name: name.into(), min, max, default: min.max(0.0).min(max), unit })
+        Control::Number(NumericControl { name: name.into(), min, max, default: min.max(0.0).min(max), unit, place: Default::default() })
     }
 
     /// What Max says of the objects these patches use, as its help shows them bare and with up to two arguments.
@@ -255,7 +316,7 @@ mod tests {
     }
 
     fn spec(kind: DeviceType, controls: Vec<Control>, patch: &str) -> PatchSpec {
-        PatchSpec { kind, name: "Patched".into(), about: "A patch.".into(), controls, patch: patch.into() }
+        PatchSpec { kind, name: "Patched".into(), about: "A patch.".into(), controls, patch: patch.into(), map: Default::default() }
     }
 
     /// Every rule the checker finds broken in a device, at any level but advice.
@@ -327,10 +388,14 @@ mod tests {
         let (drawn, found) =
             patched_device(&spec(DeviceType::MidiEffect, vec![knob("Semitones", -24.0, 24.0, Unit::St)], drawn), Some(&reference));
         assert!(found.is_empty(), "{found:?}");
-        let view = Patcher::read(&drawn, &NoFiles).boxes.into_iter().find(|item| item.maxclass() == "v8ui").unwrap();
+        let drawn_patcher = Patcher::read(&drawn, &NoFiles);
+        let view = drawn_patcher.boxes.iter().find(|item| item.maxclass() == "v8ui").unwrap();
+        let dial = drawn_patcher.boxes.iter().find(|item| item.str("varname") == "Semitones").unwrap();
         assert!(view.shown());
-        assert_eq!(view.presentation_rect().map(|rect| (rect.x, rect.w)), Some((140.0, VIEW[0])));
-        assert_eq!(drawn["patcher"]["devicewidth"], json!(140.0 + VIEW[0] + 8.0));
+        let (view_rect, dial_rect) = (view.presentation_rect().unwrap(), dial.presentation_rect().unwrap());
+        assert_eq!(view_rect.w, VIEW[0]);
+        assert!(view_rect.x >= dial_rect.x + dial_rect.w, "the picture in a section of its own, right of the controls");
+        assert!(drawn["patcher"]["devicewidth"].as_f64().unwrap() >= view_rect.x + view_rect.w);
         assert_eq!(broken(&drawn, &reference), Vec::<String>::new());
 
         let synth = concat!(
@@ -418,6 +483,90 @@ mod tests {
             let fb = into_out.iter().filter(|(source, _)| patched(source)).map(|(_, inlet)| *inlet).collect::<Vec<_>>();
             assert_eq!(fb, [0, 1], "the gen~ reaches out.0 and out.1 through what was its plugout~ and its dac~");
         }
+    }
+
+    /// What's wrong with a MIDI effect made from `patch`, by the rules it breaks ("timing.ms-clock").
+    fn rules_broken(patch: &str) -> Vec<String> {
+        let (_, found) = patched_device(&spec(DeviceType::MidiEffect, vec![], patch), None);
+        found.wrong.iter().filter_map(|text| text.split(": ").nth(1).map(str::to_string)).filter(|rule| rule.contains('.')).collect()
+    }
+
+    #[test]
+    fn notes_timed_from_a_polled_position_in_milliseconds_off_the_grid_or_through_low_priority_are_wrong() {
+        // The old way: plugsync~'s song position made a signal, steps found in gen~, sent out by edge~ and snapshot~.
+        let polled = concat!(
+            "sync = [plugsync~]\n",
+            "heard = [sig~]\n",
+            "sync.6 -> heard\n",
+            "engine = [gen~] { out1 = in1 > 1; out2 = 60; }\n",
+            "heard -> engine\n",
+            "starts = [edge~]\n",
+            "engine -> starts\n",
+            "note = [snapshot~]\n",
+            "engine.1 -> note\n",
+            "starts -> note\n",
+            "note -> [pack 0 100] -> [midiformat] -> out\n",
+        );
+        assert_eq!(rules_broken(polled), ["timing.polled-position"]);
+        let clocked =
+            |clock: &str| format!("clock = [{clock}]\nclock -> [makenote 60 100 50] -> pair = [pack 0 0]\npair -> [midiformat] -> out\n");
+        assert_eq!(rules_broken(&clocked("metro 125 @active 1")), ["timing.ms-clock"]);
+        assert_eq!(rules_broken(&clocked("metro @interval 250 ms")), ["timing.ms-clock"]);
+        assert_eq!(rules_broken(&clocked("metro 16n @active 1")), ["timing.off-grid-clock"]);
+        assert_eq!(rules_broken(&clocked("qmetro 16n @quantize 16n")), ["timing.low-priority-notes"]);
+        assert!(rules_broken(&clocked("metro 16n @quantize 16n @active 1")).is_empty());
+        assert!(rules_broken(&clocked("metro @interval 120 ticks @quantize 120 ticks")).is_empty());
+        let deferred = "clock = [metro 16n @quantize 16n]\nclock -> [deferlow] -> [makenote 60 100 50] -> pair = [pack 0 0]\npair -> [midiformat] -> out\n";
+        assert_eq!(rules_broken(deferred), ["timing.low-priority-notes"]);
+        let coded = "clock = [metro 16n @quantize 16n]\nclock -> step = [v8 step] { function bang() { outlet(0, 60); } }\nstep -> [makenote 60 100 50] -> pair = [pack 0 0]\npair -> [midiformat] -> out\n";
+        assert_eq!(rules_broken(coded), ["timing.low-priority-notes"]);
+    }
+
+    #[test]
+    fn milliseconds_and_low_priority_that_time_no_notes_are_fine() {
+        // A display refreshed by [qmetro], a [delay] after the device loads, a fixed live.remote~ and MIDI passed
+        // through code are all fine: none times notes from a clock.
+        let fine = concat!(
+            "[qmetro 33] -> [snapshot~] -> [prepend set] -> view = [v8ui] { function msg_float(v) { mgraphics.redraw(); } }\n",
+            "[live.thisdevice] -> [delay 100] -> [deferlow] -> (getid) -> volume = [live.path live_set master_track mixer_device volume]\n",
+            "remote = [live.remote~]\n",
+            "volume -> remote.1\n",
+            "[sig~ 0.5] -> remote\n",
+            "in -> pass = [v8 pass] { function msg_int(v) { outlet(0, v); } }\n",
+            "pass -> out\n",
+        );
+        assert!(rules_broken(fine).is_empty(), "{:?}", rules_broken(fine));
+        // Kumi's own clock and notes: plugsync~ and a sig~ inside them, all made the tested way.
+        let kit = concat!(
+            "clock = [kumi.clock 16n 8n]\n",
+            "\"Rate\" -> clock\n",
+            "notes = [kumi.notes]\n",
+            "clock -> [+ 60] -> notes\n",
+            "clock.1 -> [* 0.5] -> notes.2\n",
+            "notes -> out\n",
+        );
+        let (_, found) = patched_device(
+            &spec(
+                DeviceType::MidiEffect,
+                vec![Control::Choice(crate::devices::spec::ChoiceControl {
+                    name: "Rate".into(),
+                    options: vec!["1/16".into(), "1/8".into()],
+                    default: "1/16".into(),
+                    place: Default::default(),
+                })],
+                kit,
+            ),
+            None,
+        );
+        assert!(found.wrong.is_empty(), "{:?}", found.wrong);
+    }
+
+    #[test]
+    fn a_device_that_maps_parameters_itself_is_pointed_to_kumis_mapping_page() {
+        let mapped = "map = [live.map]\n(mapping 1) -> map\nmap.1 -> remote = [live.remote~]\n[sig~ 0.5] -> remote\nin -> out\n";
+        assert_eq!(rules_broken(mapped), ["map.own-mapping"]);
+        let watched = "watch = [v8 watch] { const api = new LiveAPI(null, \"live_set view selected_parameter\"); }\nin -> out\n";
+        assert_eq!(rules_broken(watched), ["map.own-mapping"]);
     }
 
     #[test]

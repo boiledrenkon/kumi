@@ -85,8 +85,9 @@ pub struct Link {
     pub line: usize,
 }
 
-/// The names that are the device's own: what it receives and what it sends.
-pub const OUTSIDE: [&str; 2] = ["in", "out"];
+/// The names that are the device's own: what it receives and what it sends, the modulation its Map page maps, and the
+/// step its step grid lights.
+pub const OUTSIDE: [&str; 4] = ["in", "out", "mod", "playhead"];
 
 /// What sends sound out of a device by itself. Where Kumi's output stage makes a device's sound safe, that stage is the
 /// only way out.
@@ -616,6 +617,18 @@ impl Reader<'_> {
                             _ => What::Patcher { text, inner: Notation::default() },
                         }
                     }
+                    (None, None) if class.starts_with("kumi.") => match crate::devices::kit::expand(&text) {
+                        // One of Kumi's building blocks: a subpatcher of Max's own objects, made the way it's tested.
+                        Ok((head, patch)) => {
+                            let (inner, found) = parse_from(&patch, line, false, self.depth + 1);
+                            self.found.append(found);
+                            What::Patcher { text: head, inner }
+                        }
+                        Err(why) => {
+                            self.found.wrong.push(format!("line {line}: {why}, so Max will show [{text}] as a broken box."));
+                            What::Object(text)
+                        }
+                    },
                     (None, None) => What::Object(text),
                 }
             }
@@ -940,7 +953,9 @@ fn expand_within(notation: &Notation, outside: &Outside, top: bool) -> Expanded 
                     "outlettype": if inlet { vec![""] } else { vec![] }, "patching_rect": [40.0 + (order - 1) as f64 * 80.0, 20.0, 30.0, 30.0] })
             }
             What::Object(text) => {
-                if let Some(reference) = outside.reference.filter(|reference| reference.object(&class).is_none()) {
+                // A building block that couldn't be made was said as the patch was read.
+                let kit = class.starts_with("kumi.");
+                if let Some(reference) = outside.reference.filter(|reference| !kit && reference.object(&class).is_none()) {
                     let near = super::page::nearest(reference, &class);
                     let near = if near.is_empty() {
                         String::new()

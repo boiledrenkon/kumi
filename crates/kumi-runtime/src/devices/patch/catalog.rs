@@ -33,6 +33,8 @@ pub struct Catalog {
     contents: HashSet<String>,
     named: HashSet<String>,
     roles: HashMap<String, Role>,
+    low_priority: HashSet<String>,
+    midi_out: HashSet<String>,
 }
 
 static CATALOG: LazyLock<Catalog> = LazyLock::new(|| {
@@ -70,6 +72,8 @@ impl Catalog {
         catalog.audio_with_messages = names(&value["audio_with_messages"]["classes"]).collect();
         catalog.contents = names(&value["contents"]["classes"]).collect();
         catalog.named = names(&value["named"]["classes"]).collect();
+        catalog.low_priority = names(&value["low_priority"]["classes"]).collect();
+        catalog.midi_out = names(&value["midi_out"]["classes"]).collect();
         for (role, key) in [(Role::Dsp, "dsp"), (Role::Storage, "storage"), (Role::Timing, "timing"), (Role::Wireless, "wireless")] {
             for class in names(&value["roles"][key]) {
                 catalog.roles.insert(class, role);
@@ -120,6 +124,16 @@ impl Catalog {
         self.named.contains(self.canonical(class))
     }
 
+    /// Whether the object sends on Max's low-priority thread, whatever reached it.
+    pub fn low_priority(&self, class: &str) -> bool {
+        self.low_priority.contains(self.canonical(class))
+    }
+
+    /// Whether the object sends MIDI out of the device.
+    pub fn midi_out(&self, class: &str) -> bool {
+        self.midi_out.contains(self.canonical(class))
+    }
+
     pub fn role(&self, class: &str) -> Option<Role> {
         self.roles.get(self.canonical(class)).copied()
     }
@@ -144,5 +158,7 @@ mod tests {
         assert!(catalog.ports_from_contents("p") && catalog.ports_from_contents("gen~") && !catalog.ports_from_contents("route"));
         assert_eq!(catalog.role("buffer~"), Some(Role::Storage));
         assert_eq!(catalog.role("prepend"), None);
+        assert!(catalog.low_priority("deferlow") && catalog.low_priority("v8") && !catalog.low_priority("delay"));
+        assert!(catalog.midi_out("midiout") && catalog.midi_out("noteout") && !catalog.midi_out("midiformat"));
     }
 }

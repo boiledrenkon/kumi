@@ -18,14 +18,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use kumi_common::js::number::{round, to_string as num};
-use kumi_common::js::string::{head, trim_end};
+use kumi_common::js::string::trim_end;
 use regex::Regex;
 use serde_json::{json, Value};
 
-use super::amxd::{device_patcher, face_layout, DevicePatcherOptions, DeviceType, FaceLayout, Line, PatchBox};
+use super::amxd::{device_patcher, DevicePatcherOptions, DeviceType, Line, PatchBox};
 use super::findings::Findings;
-use super::midi::unit_style;
-use super::spec::{AudioEffectSpec, Control, InstrumentSpec, NumericControl, Unit};
+use super::look;
+use super::spec::{AudioEffectSpec, Control, InstrumentSpec, NumericControl, Place, Show, Unit};
 
 /// gen~'s operators, constants and keywords (as Max 9's gen~ names them), which a control's Param
 /// mustn't be (a Param named mix would hide the mix operator), and the names Kumi's own Params use. Kumi's output stage
@@ -405,17 +405,18 @@ pub(crate) fn gen_box(id: &str, code: &str, rect: [f64; 4]) -> PatchBox {
     )
 }
 
-/// Builds the face's `total` controls: each sends "<param> <value>" to its targets, or (in a patch) its value alone.
+/// Builds the face's controls: each sends "<param> <value>" to its targets, or (in a patch) its value alone. Kumi lays
+/// them out once they're all in ([`Face::finish`]), from their groups and looks ([`super::look`]).
 pub(crate) struct Face {
     pub(crate) boxes: Vec<PatchBox>,
     pub(crate) lines: Vec<Line>,
-    count: usize,
-    layout: FaceLayout,
+    /// Each control and its box's id, in the order they were added.
+    controls: Vec<(String, Control)>,
 }
 
 impl Face {
-    pub(crate) fn new(total: usize) -> Face {
-        Face { boxes: Vec::new(), lines: Vec::new(), count: 0, layout: face_layout(total) }
+    pub(crate) fn new() -> Face {
+        Face { boxes: Vec::new(), lines: Vec::new(), controls: Vec::new() }
     }
 
     pub(crate) fn add(&mut self, control: &Control, param: &str, targets: &[&str]) {
@@ -423,8 +424,8 @@ impl Face {
     }
 
     /// A control whose "<param> <value>" goes into inlet `inlet` of each target.
-    fn add_to(&mut self, control: &Control, param: &str, targets: &[&str], inlet: u32) {
-        let index = self.count;
+    pub(crate) fn add_to(&mut self, control: &Control, param: &str, targets: &[&str], inlet: u32) {
+        let index = self.controls.len();
         let id = self.add_alone(control);
         let prepend = format!("obj-prepend-{}", index + 1);
         self.boxes.push(PatchBox::new(json!({ "id": prepend, "maxclass": "newobj", "text": format!("prepend {param}"), "numinlets": 1, "numoutlets": 1, "outlettype": [""], "patching_rect": [760.0 + index as f64 * 90.0, 100.0, 80.0, 22.0] })));
@@ -434,23 +435,48 @@ impl Face {
         }
     }
 
-    /// A control in its place on the face, alone: its box's id. A menu's first outlet is the chosen option's index; a
-    /// dial's and a toggle's is the value.
+    /// A control on the face, alone: its box's id. A menu's first outlet is the chosen option's index; a dial's and a
+    /// button's is the value. Its place comes when the face is laid out.
     pub(crate) fn add_alone(&mut self, control: &Control) -> String {
-        let index = self.count;
-        self.count += 1;
+        let index = self.controls.len();
         let id = format!("obj-control-{}", index + 1);
-        let (x, y) = self.layout.at(index);
-        let (item, valueof) = face_control(control, x, y);
-        let mut item_box = json!({ "id": id, "varname": control.name(), "parameter_enable": 1, "presentation": 1, "patching_rect": [760.0 + index as f64 * 90.0, 30.0, 44.0, 48.0] });
+        let (item, valueof) = look::control_box(control);
+        let mut item_box = json!({ "id": id, "varname": control.name(), "parameter_enable": 1, "presentation": 1, "presentation_rect": [8.0, 8.0, 44.0, 48.0], "patching_rect": [760.0 + index as f64 * 90.0, 30.0, 44.0, 48.0] });
         extend(&mut item_box, item);
         extend(&mut item_box, json!({ "saved_attribute_attributes": { "valueof": valueof } }));
         self.boxes.push(PatchBox::new(item_box));
+        self.controls.push((id.clone(), control.clone()));
         id
     }
 
-    pub(crate) fn width(&self) -> f64 {
-        (16 + self.layout.columns * 52).max(140) as f64
+    /// The face laid out with what else it holds: every control in its place, and the face's labels, headings, lines
+    /// and step numbers among its boxes. `playhead` is the id the patch's playhead reaches, when it has a step grid.
+    pub(crate) fn finish(&mut self, extras: &look::Extras, playhead: &str) -> look::Face {
+        let controls: Vec<Control> = self.controls.iter().map(|(_, control)| control.clone()).collect();
+        let face = look::lay_out(&controls, extras);
+        for ((id, _), spot) in self.controls.iter().zip(&face.spots) {
+            if let Some(item) = self.boxes.iter_mut().find(|item| item.item.get("id").and_then(Value::as_str) == Some(id)) {
+                let mut fields = Value::Object(std::mem::take(&mut item.item));
+                look::put(&mut fields, spot);
+                if let Value::Object(fields) = fields {
+                    item.item = fields;
+                }
+            }
+        }
+        let (marks, cords) = look::marks(&controls, &face, playhead);
+        self.boxes.extend(marks.into_iter().map(PatchBox::new));
+        self.lines.extend(cords.into_iter().map(|(from, outlet, to, inlet)| Line::new(&from, outlet, &to, inlet)));
+        face
+    }
+
+    /// Every box on the face's main page, by its scripting name: what the page tabs hide to show the Map page.
+    pub(crate) fn main_page(&self) -> Vec<String> {
+        self.boxes
+            .iter()
+            .filter(|item| item.item.get("presentation").and_then(Value::as_i64) == Some(1))
+            .filter_map(|item| item.item.get("varname").and_then(Value::as_str).map(str::to_string))
+            .filter(|name| !name.starts_with("kumi-page-"))
+            .collect()
     }
 }
 
@@ -463,55 +489,18 @@ pub(crate) fn extend(target: &mut Value, source: Value) {
     }
 }
 
-/// A control's box on the face (its class, in/outlets and place) and its `valueof`: how Live sees the parameter.
-pub(crate) fn face_control(control: &Control, x: f64, y: f64) -> (Value, Value) {
-    let mut valueof =
-        json!({ "parameter_longname": control.name(), "parameter_shortname": head(control.name(), 12), "parameter_initial_enable": 1 });
-    let item = match control {
-        Control::Choice(control) => {
-            extend(
-                &mut valueof,
-                json!({ "parameter_type": 2, "parameter_enum": control.options, "parameter_mmax": control.options.len() as i64 - 1, "parameter_initial": [option_index(&control.options, &control.default)] }),
-            );
-            json!({ "maxclass": "live.menu", "numinlets": 1, "numoutlets": 3, "outlettype": ["", "", "float"], "presentation_rect": [x, y + 24.0, 48.0, 15.0] })
-        }
-        Control::Switch(control) => {
-            extend(
-                &mut valueof,
-                json!({ "parameter_type": 2, "parameter_enum": ["off", "on"], "parameter_mmax": 1, "parameter_initial": [if control.default { 1 } else { 0 }] }),
-            );
-            json!({ "maxclass": "live.toggle", "numinlets": 1, "numoutlets": 1, "outlettype": [""], "presentation_rect": [x + 12.0, y + 24.0, 20.0, 20.0] })
-        }
-        Control::Number(numeric) | Control::Integer(numeric) => {
-            let integer = matches!(control, Control::Integer(_));
-            let unit = unit_style(numeric, integer);
-            extend(
-                &mut valueof,
-                json!({ "parameter_type": if integer { 1 } else { 0 }, "parameter_mmin": numeric.min, "parameter_mmax": numeric.max, "parameter_initial": [numeric.default], "parameter_unitstyle": unit.style }),
-            );
-            if let Some(units) = unit.units {
-                extend(&mut valueof, json!({ "parameter_units": units }));
-            }
-            // Frequencies and times spread over decades turn more evenly on a curve.
-            if exponential(numeric) {
-                extend(&mut valueof, json!({ "parameter_exponent": 3.0 }));
-            }
-            json!({ "maxclass": "live.dial", "numinlets": 1, "numoutlets": 2, "outlettype": ["", "float"], "presentation_rect": [x, y + 8.0, 44.0, 48.0] })
-        }
-    };
-    (item, valueof)
-}
-
-/// Whether a dial turns on a curve: a frequency or a time spread over decades.
-fn exponential(control: &NumericControl) -> bool {
-    (control.unit == Unit::Hz || control.unit == Unit::Ms) && control.min > 0.0 && control.max / control.min >= 20.0
+/// Kumi's own knobs' place: their own group at the end of the face.
+fn kumis_own() -> Place {
+    Place { group: "Output".into(), show: Show::Auto }
 }
 
 /// Kumi's own knobs: Mix (effects) and Output.
-pub static MIX: LazyLock<Control> =
-    LazyLock::new(|| Control::Number(NumericControl { name: "Mix".into(), min: 0.0, max: 100.0, default: 100.0, unit: Unit::Percent }));
-pub static OUTPUT: LazyLock<Control> =
-    LazyLock::new(|| Control::Number(NumericControl { name: "Output".into(), min: -36.0, max: 12.0, default: 0.0, unit: Unit::Db }));
+pub static MIX: LazyLock<Control> = LazyLock::new(|| {
+    Control::Number(NumericControl { name: "Mix".into(), min: 0.0, max: 100.0, default: 100.0, unit: Unit::Percent, place: kumis_own() })
+});
+pub static OUTPUT: LazyLock<Control> = LazyLock::new(|| {
+    Control::Number(NumericControl { name: "Output".into(), min: -36.0, max: 12.0, default: 0.0, unit: Unit::Db, place: kumis_own() })
+});
 
 /// What an audio effect's or an instrument's patcher is built from (an instrument's `voices`).
 #[derive(Debug, Clone, PartialEq)]
@@ -568,7 +557,7 @@ pub fn voice_code(spec: &GenSpec) -> String {
 pub fn audio_effect_patcher(spec: &GenSpec) -> Value {
     let mut boxes: Vec<PatchBox> = Vec::new();
     let mut lines: Vec<Line> = Vec::new();
-    let mut face = Face::new(spec.controls.len() + 2);
+    let mut face = Face::new();
     boxes.push(PatchBox::new(json!({ "id": "obj-plugin", "maxclass": "newobj", "text": "plugin~ 1 2", "numinlets": 1, "numoutlets": 2, "outlettype": ["signal", "signal"], "patching_rect": [40.0, 30.0, 80.0, 22.0] })));
     let effect = gen_box("obj-effect", &effect_code(spec), [40.0, 120.0, 300.0, 22.0]);
     let ins = inputs_read(&spec.code);
@@ -588,7 +577,7 @@ pub fn audio_effect_patcher(spec: &GenSpec) -> Value {
     }
     face.add(&MIX, "kumi_mix", &["obj-output"]);
     face.add(&OUTPUT, "kumi_output", &["obj-output"]);
-    let width = face.width();
+    let width = face.finish(&look::Extras::default(), "obj-playhead").width;
     boxes.extend(face.boxes);
     lines.extend(face.lines);
     device_patcher(
@@ -663,7 +652,7 @@ pub fn instrument_patcher(spec: &GenSpec) -> Value {
     let voices = round(spec.voices.unwrap_or(8.0)).clamp(1.0, MAX_VOICES as f64) as usize;
     let mut boxes: Vec<PatchBox> = Vec::new();
     let mut lines: Vec<Line> = Vec::new();
-    let mut face = Face::new(spec.controls.len() + 1);
+    let mut face = Face::new();
     // The track's notes; poly shares them out to voices, taking the oldest when all are busy, and sends voice, pitch, velocity.
     obj(&mut boxes, "obj-notein", "notein", 1, 3, [40.0, 20.0, 60.0, 22.0], Some(&["int", "int", "int"]));
     obj(&mut boxes, "obj-poly", &format!("poly {voices} 1"), 2, 3, [40.0, 60.0, 80.0, 22.0], Some(&["int", "int", "int"]));
@@ -711,7 +700,7 @@ pub fn instrument_patcher(spec: &GenSpec) -> Value {
         face.add_to(control, &param_name(control.name()), &targets, 1);
     }
     face.add(&OUTPUT, "kumi_output", &["obj-output"]);
-    let width = face.width();
+    let width = face.finish(&look::Extras::default(), "obj-playhead").width;
     boxes.extend(face.boxes);
     lines.extend(face.lines);
     device_patcher(
