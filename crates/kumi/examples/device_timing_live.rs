@@ -8,6 +8,11 @@
 //!
 //! It checks a step sequencer made with make_device from Kumi's [kumi.clock] and [kumi.notes], and any device file
 //! given (--file <path>.amxd, with --rate "<its rate parameter>", --from <index> --to <index> for its two divisions).
+//! Then scenes, each note against where Live's song was: Live's loop (3 and 3.5 beats), 7/8 and 6/8, a jump while
+//! playing, a tempo ramp, tempos typed in, and a stop then Space (--scenarios: the scenes only).
+//! --probe <spec>.json plays a device spec through starts, stops, loops, jumps and tempo changes and reads its
+//! controls after each; for a recorder (a buffer~ it writes to a file), KUMI_PROBE_WAV names that file and each scene's
+//! is kept beside it, and KUMI_PROBE_TAKE (steady, jump or tempo) records one take of it instead.
 //! No model and no sign-in. It works in the open Set (it never opens or closes one): name it, and use a disposable
 //! one. It sets the tempo to 120 and takes everything back after.
 //!   cargo build -p ableton-mcp-server -p kumi-runtime --bins
@@ -53,6 +58,10 @@ fn main() {
         eprintln!("It adds tracks, records in the Arrangement and undoes it all, so use a disposable Set.");
         std::process::exit(2);
     };
+    let scenarios_only = argv.iter().any(|arg| arg == "--scenarios");
+    // A device spec (JSON) whose controls the patch sets to what it measured: it's played in each scene and its
+    // controls read after.
+    let probe = values("--probe").into_iter().next();
     let file = values("--file").into_iter().next().map(|file| Subject {
         file: PathBuf::from(file),
         rate: values("--rate").into_iter().next().unwrap_or_else(|| "Rate".into()),
@@ -75,7 +84,7 @@ fn main() {
     }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
     let local = tokio::task::LocalSet::new();
-    std::process::exit(local.block_on(&runtime, device_timing_live(wanted, file, bridge_config, bridge)));
+    std::process::exit(local.block_on(&runtime, device_timing_live(wanted, file, scenarios_only, probe, bridge_config, bridge)));
 }
 
 /// A device file to check: its rate parameter and the two values it's moved between.
@@ -117,7 +126,14 @@ struct Run {
     failed: RefCell<Vec<String>>,
 }
 
-async fn device_timing_live(wanted: String, file: Option<Subject>, bridge_config: String, bridge: PathBuf) -> i32 {
+async fn device_timing_live(
+    wanted: String,
+    file: Option<Subject>,
+    scenarios_only: bool,
+    probe: Option<String>,
+    bridge_config: String,
+    bridge: PathBuf,
+) -> i32 {
     let records = Rc::new(RefCell::new(Vec::<ChangeRecord>::new()));
     let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
     options.bridge_config = Some(bridge_config.clone());
@@ -140,7 +156,7 @@ async fn device_timing_live(wanted: String, file: Option<Subject>, bridge_config
         made: RefCell::default(),
         failed: RefCell::default(),
     };
-    let code = match run.check(&wanted, file).await {
+    let code = match run.check(&wanted, file, scenarios_only, probe).await {
         Ok(()) => {
             let failed = run.failed.borrow();
             println!("\n{} failed{}", failed.len(), if failed.is_empty() { String::new() } else { format!(": {}", failed.join("; ")) });
@@ -420,7 +436,7 @@ impl Run {
         }
     }
 
-    async fn check(&self, wanted: &str, file: Option<Subject>) -> Result<(), RuntimeError> {
+    async fn check(&self, wanted: &str, file: Option<Subject>, scenarios_only: bool, probe: Option<String>) -> Result<(), RuntimeError> {
         self.integration.start(signal()).await?;
         let observation = self.observe().await?;
         let context: Value = serde_json::from_str(&observation.context).unwrap_or(Value::Null);
@@ -430,6 +446,15 @@ impl Run {
             return Err(RuntimeError::plain("not the Set named"));
         }
         let stamp = (now_ms() % 10_000) as u128;
+        if let Some(probe) = probe {
+            if std::env::var("KUMI_PROBE_TAKE").is_ok() {
+                return self.probe_take(&probe, stamp).await;
+            }
+            return self.probe(&probe, stamp).await;
+        }
+        if scenarios_only {
+            return self.scenarios(stamp).await;
+        }
         // A step sequencer made the way the guide says: every step on, its pitch the step's index.
         let spec = json!({
             "type": "midi_effect",
@@ -594,12 +619,441 @@ impl Run {
         if !names.as_array().is_some_and(|names| names.iter().any(|name| name == "Bars") && !names.iter().any(|name| name == "Map 1 Min")) {
             self.fail("the Map page's device");
         }
+        self.scenarios(stamp).await?;
         if let Some(subject) = file {
             println!("\n{}, its {} moved from {} to {} and back", subject.file.display(), subject.rate, subject.from, subject.to);
             let item = self.copy(&subject.file, &format!("Timing File {stamp}")).map_err(RuntimeError::plain)?;
             self.observe().await?;
             let notes = self.take("file", &item, &subject.rate, subject.from, subject.to, stamp).await?;
             self.say("the file", &notes, 0.25, 0.5);
+        }
+        Ok(())
+    }
+
+    /// Python statements in Live, with `result` as the answer.
+    async fn python_exec(&self, code: &str) -> Result<Value, RuntimeError> {
+        let done = self.call("run_python", json!({"code": code})).await.map_err(RuntimeError::plain)?;
+        let done = if done.get("ok").is_some() { done } else { done["live"].clone() };
+        if done["ok"] != true {
+            return Err(RuntimeError::plain(format!("Live's Python: {}", head(&done.to_string(), 300))));
+        }
+        Ok(done["result"].clone())
+    }
+
+    /// The device on a track of its own, its MIDI recorded into a Session clip on another (the clip's time is linear,
+    /// whatever Live's song position does) for `beats`, with `setup` run first and each of `actions` at its second. The
+    /// notes: pitch, start and length in beats from the recording's start.
+    async fn session_take(
+        &self,
+        label: &str,
+        item: &str,
+        setup: &str,
+        actions: &[(f64, String)],
+        beats: f64,
+        stamp: u128,
+    ) -> Result<Vec<(i64, f64, f64)>, RuntimeError> {
+        let device_track = format!("Timing {label} {stamp}");
+        let take_track = format!("Timing Take {label} {stamp}");
+        self.add_track(&device_track).await?;
+        self.load(&device_track, item).await.map_err(RuntimeError::plain)?;
+        self.add_track(&take_track).await?;
+        let take = self.track(&take_track).await?;
+        self.call(
+            "set_routing",
+            json!({"trackRef": take["ref"], "inputType": device_track, "inputSubRouting": "Post FX", "outputType": "No Output", "arm": true, "monitoring": "off"}),
+        )
+        .await
+        .map_err(RuntimeError::plain)?;
+        let track = format!("[t for t in song.tracks if t.name == {}][0]", json!(take_track));
+        self.python_exec(&format!(
+            "song.tempo = {BPM:.1}\nsong.clip_trigger_quantization = 0\nsong.stop_playing()\nsong.current_song_time = 0.0\n{setup}\n{track}.clip_slots[0].fire()\nresult = True"
+        ))
+        .await?;
+        let began = std::time::Instant::now();
+        for (at, code) in actions {
+            let left = at - began.elapsed().as_secs_f64();
+            if left > 0.0 {
+                tokio::time::sleep(Duration::from_secs_f64(left)).await;
+            }
+            self.python_exec(&format!("{code}\nresult = True")).await?;
+        }
+        let left = beats * 60.0 / BPM - began.elapsed().as_secs_f64();
+        if left > 0.0 {
+            tokio::time::sleep(Duration::from_secs_f64(left)).await;
+        }
+        self.python_exec("song.stop_playing()\nresult = True").await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let notes = self
+            .python_exec(&format!(
+                "clip = {track}.clip_slots[0].clip\nresult = [[n.pitch, n.start_time, n.duration] for n in clip.get_notes_extended(0, 128, 0.0, 100000.0)] if clip else []\nsong.loop = False\nsong.signature_numerator = 4\nsong.signature_denominator = 4\nsong.tempo = {BPM:.1}"
+            ))
+            .await?;
+        self.observe().await?;
+        let mut notes: Vec<(i64, f64, f64)> = notes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|note| Some((note[0].as_i64()?, note[1].as_f64()?, note[2].as_f64()?)))
+            .collect();
+        notes.sort_by(|a, b| a.1.total_cmp(&b.1));
+        Ok(notes)
+    }
+
+    /// Played from the start, stopped `stop` seconds in, then (after `between`, Python run while stopped) played again
+    /// with Space's start_playing, from Live's insert marker, while Live records the arrangement: where Live started
+    /// again (beats) and the notes recorded, at their song positions.
+    async fn restart_take(
+        &self,
+        label: &str,
+        item: &str,
+        stop: f64,
+        between: &str,
+        stamp: u128,
+    ) -> Result<(f64, Vec<(i64, f64, f64)>), RuntimeError> {
+        let device_track = format!("Timing {label} {stamp}");
+        let take_track = format!("Timing Take {label} {stamp}");
+        self.add_track(&device_track).await?;
+        self.load(&device_track, item).await.map_err(RuntimeError::plain)?;
+        self.add_track(&take_track).await?;
+        let take = self.track(&take_track).await?;
+        self.call(
+            "set_routing",
+            json!({"trackRef": take["ref"], "inputType": device_track, "inputSubRouting": "Post FX", "outputType": "No Output", "arm": true, "monitoring": "off"}),
+        )
+        .await
+        .map_err(RuntimeError::plain)?;
+        let track = format!("[t for t in song.tracks if t.name == {}][0]", json!(take_track));
+        self.python_exec(&format!(
+            "song.tempo = {BPM:.1}\nsong.loop = False\nsong.record_mode = False\nsong.stop_playing()\nsong.stop_playing()\nsong.current_song_time = 0.0\nsong.start_playing()\nresult = True"
+        ))
+        .await?;
+        tokio::time::sleep(Duration::from_secs_f64(stop)).await;
+        self.python_exec("song.stop_playing()\nresult = True").await?;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        if !between.is_empty() {
+            self.python_exec(&format!("{between}\nresult = True")).await?;
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        }
+        self.python_exec("song.record_mode = True\nsong.start_playing()\nresult = True").await?;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        self.python_exec("song.stop_playing()\nsong.record_mode = False\nresult = True").await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let read = self
+            .python_exec(&format!(
+                "clips = list({track}.arrangement_clips)\nresult = [min([c.start_time for c in clips] or [-1]), [[n.pitch, c.start_time + n.start_time, n.duration] for c in clips for n in c.get_notes_extended(0, 128, 0.0, 100000.0)]]"
+            ))
+            .await?;
+        self.observe().await?;
+        let take = self.track(&take_track).await?;
+        self.call("set_routing", json!({"trackRef": take["ref"], "arm": false})).await.map_err(RuntimeError::plain)?;
+        self.observe().await?;
+        let mut notes: Vec<(i64, f64, f64)> = read[1]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|note| Some((note[0].as_i64()?, note[1].as_f64()?, note[2].as_f64()?)))
+            .collect();
+        notes.sort_by(|a, b| a.1.total_cmp(&b.1));
+        Ok((read[0].as_f64().unwrap_or(-1.0), notes))
+    }
+
+    /// Notes against where Live's song was: `song` gives the song position (beats) for a time in the clip. Each should
+    /// start on a sixteenth and play 60 plus its step (16 steps of a sixteenth). Says what's wrong, if anything. `bpm`:
+    /// the take's fastest tempo, for its milliseconds.
+    fn followed(&self, label: &str, notes: &[(i64, f64, f64)], song: impl Fn(f64) -> f64, expected: usize, bpm: f64) {
+        let mut wrong = Vec::new();
+        for (pitch, start, _) in notes {
+            let position = song(*start);
+            let line = (position / 0.25).round() * 0.25;
+            let off_ms = (position - line) * 60_000.0 / bpm;
+            let index = ((line / 0.25).round() as i64).rem_euclid(16);
+            if off_ms.abs() > ON_GRID_MS || *pitch != 60 + index {
+                wrong.push(format!("{pitch} at {start:.4} (song {position:.4}, {off_ms:+.2} ms, step {})", index + 1));
+            }
+        }
+        for pair in notes.windows(2) {
+            if (pair[1].1 - pair[0].1) * 60_000.0 / bpm < 1.0 {
+                wrong.push(format!("doubled at {:.4}", pair[0].1));
+            }
+        }
+        let count_ok = notes.len() + 1 >= expected && notes.len() <= expected + 1;
+        println!(
+            "  {label}: {} notes (about {expected} due); {}",
+            notes.len(),
+            if wrong.is_empty() {
+                "each on its sixteenth, playing its own step".to_string()
+            } else {
+                format!("{} wrong: {}", wrong.len(), wrong.iter().take(12).cloned().collect::<Vec<_>>().join("; "))
+            }
+        );
+        if !wrong.is_empty() || !count_ok {
+            self.fail(label);
+            let all: Vec<String> = notes.iter().map(|(pitch, start, _)| format!("{pitch}@{start:.3}")).collect();
+            println!("    notes: {}", all.join(" "));
+        }
+    }
+
+    /// A probe device played in each scene, its controls read after: what it measured.
+    async fn probe(&self, spec: &str, stamp: u128) -> Result<(), RuntimeError> {
+        let mut spec: Value = serde_json::from_str(&std::fs::read_to_string(spec).map_err(|error| RuntimeError::plain(error.to_string()))?)
+            .map_err(|error| RuntimeError::plain(error.to_string()))?;
+        spec["name"] = json!(format!("Probe {stamp}"));
+        let made = self.call("make_device", spec).await.map_err(RuntimeError::plain)?;
+        for key in ["wrong", "changed", "notes"] {
+            if let Some(said) = made.get(key) {
+                println!("  make_device {key}: {said}");
+            }
+        }
+        if let Some(file) = made["file"].as_str() {
+            self.made.borrow_mut().push(PathBuf::from(file));
+        }
+        let item = made["itemId"].as_str().unwrap_or_default().to_string();
+        // A recorder writes `current.wav` beside where the spec says when it's done; each scene's is kept by name.
+        let written = std::env::var("KUMI_PROBE_WAV").ok().map(PathBuf::from);
+        let ramp = |from: f64, to: f64, start: f64, seconds: f64| -> Vec<(f64, String)> {
+            let steps = (seconds / 0.1).round() as usize;
+            (1..=steps)
+                .map(|step| (start + step as f64 * 0.1, format!("song.tempo = {:.2}", from + (to - from) * step as f64 / steps as f64)))
+                .collect()
+        };
+        let scenes: Vec<(&str, &str, Vec<(f64, String)>)> = vec![
+            (
+                "restart",
+                "song.start_playing()",
+                vec![(3.185, "song.stop_playing()".into()), (4.5, "song.start_playing()".into()), (7.0, "song.stop_playing()".into())],
+            ),
+            (
+                "restart-six",
+                "song.start_playing()",
+                vec![
+                    (3.0, "song.stop_playing()".into()),
+                    (3.3, "song.current_song_time = 6.0".into()),
+                    (4.5, "song.start_playing()".into()),
+                    (7.0, "song.stop_playing()".into()),
+                ],
+            ),
+            ("loop-3.5", "song.loop_start = 0.0\nsong.loop_length = 3.5\nsong.loop = True\nsong.start_playing()", vec![]),
+            ("loop-3", "song.loop_start = 0.0\nsong.loop_length = 3.0\nsong.loop = True\nsong.start_playing()", vec![]),
+            (
+                "jump",
+                "song.start_playing()",
+                vec![
+                    (1.6, "song.current_song_time = 8.0".into()),
+                    (4.0, "song.current_song_time = 2.37".into()),
+                    (6.0, "song.current_song_time = 0.0".into()),
+                ],
+            ),
+            (
+                "tempo-big",
+                "song.start_playing()",
+                vec![
+                    (1.5, "song.tempo = 60.0".into()),
+                    (3.0, "song.tempo = 120.0".into()),
+                    (4.5, "song.tempo = 70.0".into()),
+                    (5.5, "song.tempo = 140.0".into()),
+                    (6.5, "song.tempo = 20.0".into()),
+                    (8.0, "song.tempo = 999.0".into()),
+                    (9.0, "song.tempo = 20.0".into()),
+                    (10.5, "song.tempo = 120.0".into()),
+                ],
+            ),
+            (
+                "continue-mid",
+                "song.start_playing()",
+                vec![
+                    (1.0, "song.stop_playing()".into()),
+                    (1.5, "song.current_song_time = 2.37".into()),
+                    (2.5, "song.continue_playing()".into()),
+                    (5.0, "song.stop_playing()".into()),
+                    (5.5, "song.current_song_time = 6.0".into()),
+                    (6.5, "song.continue_playing()".into()),
+                ],
+            ),
+            ("tempo", "song.start_playing()", {
+                let mut actions: Vec<(f64, String)> = vec![(2.0, "song.tempo = 59.0".into()), (3.5, "song.tempo = 160.0".into())];
+                actions.extend(ramp(160.0, 100.0, 5.0, 4.0));
+                actions
+            }),
+        ];
+        for (label, setup, actions) in scenes {
+            let track = format!("Probe {label} {stamp}");
+            if let Some(file) = &written {
+                let _ = std::fs::remove_file(file);
+            }
+            self.add_track(&track).await?;
+            self.load(&track, &item).await.map_err(RuntimeError::plain)?;
+            self.python_exec(&format!("song.tempo = {BPM:.1}\nsong.clip_trigger_quantization = 0\nsong.stop_playing()\nsong.current_song_time = 0.0\n{setup}\nresult = True")).await?;
+            let began = std::time::Instant::now();
+            for (at, code) in &actions {
+                let left = at - began.elapsed().as_secs_f64();
+                if left > 0.0 {
+                    tokio::time::sleep(Duration::from_secs_f64(left)).await;
+                }
+                self.python_exec(&format!("{code}\nresult = True")).await?;
+            }
+            match &written {
+                Some(file) => {
+                    // The recorder runs 12 s from its load.
+                    let mut waited = 0;
+                    while !file.exists() && waited < 200 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        waited += 1;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let kept = file.with_file_name(format!("{label}.wav"));
+                    match std::fs::rename(file, &kept) {
+                        Ok(()) => println!("  {label}: {}", kept.display()),
+                        Err(error) => println!("  {label}: no recording ({error})"),
+                    }
+                }
+                None => {
+                    tokio::time::sleep(Duration::from_secs_f64((8.0 * 60.0 / BPM - began.elapsed().as_secs_f64()).max(0.0))).await;
+                    let read = self
+                        .python(&format!(
+                            "[[p.name, p.value] for p in [t for t in song.tracks if t.name == {}][0].devices[0].parameters]",
+                            json!(track)
+                        ))
+                        .await?;
+                    println!("  {label}: {read}");
+                }
+            }
+            self.python_exec(&format!("song.stop_playing()\nsong.loop = False\nsong.tempo = {BPM:.1}\nresult = True")).await?;
+            self.observe().await?;
+        }
+        Ok(())
+    }
+
+    /// A recorder that also plays notes, in a take: the notes recorded (pitch, start, length) and its recording,
+    /// written beside KUMI_PROBE_WAV as take-notes.json and take.wav.
+    async fn probe_take(&self, spec: &str, stamp: u128) -> Result<(), RuntimeError> {
+        let mut spec: Value = serde_json::from_str(&std::fs::read_to_string(spec).map_err(|error| RuntimeError::plain(error.to_string()))?)
+            .map_err(|error| RuntimeError::plain(error.to_string()))?;
+        spec["name"] = json!(format!("Probe {stamp}"));
+        let made = self.call("make_device", spec).await.map_err(RuntimeError::plain)?;
+        if let Some(file) = made["file"].as_str() {
+            self.made.borrow_mut().push(PathBuf::from(file));
+        }
+        let item = made["itemId"].as_str().unwrap_or_default().to_string();
+        let written = PathBuf::from(std::env::var("KUMI_PROBE_WAV").map_err(|_| RuntimeError::plain("KUMI_PROBE_WAV"))?);
+        let _ = std::fs::remove_file(&written);
+        let actions: Vec<(f64, String)> = match std::env::var("KUMI_PROBE_TAKE").unwrap_or_default().as_str() {
+            "jump" => vec![(1.6, "song.current_song_time = 8.0".into()), (4.0, "song.current_song_time = 2.37".into())],
+            "tempo" => vec![
+                (1.0, "song.tempo = 60.0".into()),
+                (2.5, "song.tempo = 240.0".into()),
+                (3.5, "song.tempo = 70.0".into()),
+                (4.5, "song.tempo = 140.0".into()),
+            ],
+            _ => vec![],
+        };
+        let notes = self.session_take("probe", &item, "", &actions, 16.0, stamp).await?;
+        let mut waited = 0;
+        while !written.exists() && waited < 200 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            waited += 1;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::rename(&written, written.with_file_name("take.wav")).map_err(|error| RuntimeError::plain(error.to_string()))?;
+        std::fs::write(written.with_file_name("take-notes.json"), serde_json::to_string(&notes).unwrap())
+            .map_err(|error| RuntimeError::plain(error.to_string()))?;
+        println!("  {} notes; {}", notes.len(), written.with_file_name("take.wav").display());
+        Ok(())
+    }
+
+    /// Live's loop, an odd meter, a jump while playing, a tempo that falls, and a stop with a note held.
+    async fn scenarios(&self, stamp: u128) -> Result<(), RuntimeError> {
+        let spec = json!({
+            "type": "midi_effect",
+            "name": format!("Timing Scenes {stamp}"),
+            "about": "Kumi's timing check: 60 plus the step's index on every sixteenth.",
+            "controls": [],
+            "patch": concat!(
+                "clock = [kumi.clock 16n]\n",
+                "notes = [kumi.notes]\n",
+                "clock -> [+ 60] -> notes\n",
+                "clock.1 -> [* 0.5] -> notes.2\n",
+                "notes -> out\n",
+            ),
+        });
+        let made = self.call("make_device", spec).await.map_err(RuntimeError::plain)?;
+        if let Some(file) = made["file"].as_str() {
+            self.made.borrow_mut().push(PathBuf::from(file));
+        }
+        let item = made["itemId"].as_str().unwrap_or_default().to_string();
+        println!("\nScenes: each note against where Live's song was");
+        for length in [3.0, 3.5] {
+            let setup = format!("song.loop_start = 0.0\nsong.loop_length = {length}\nsong.loop = True");
+            let notes = self.session_take(&format!("loop {length}"), &item, &setup, &[], 12.0, stamp).await?;
+            self.followed(&format!("a loop of {length} beats, four times round"), &notes, |t| t % length, (12.0 / 0.25) as usize, BPM);
+        }
+        let notes = self
+            .session_take("seven eight", &item, "song.signature_numerator = 7\nsong.signature_denominator = 8", &[], 8.0, stamp)
+            .await?;
+        self.followed("7/8", &notes, |t| t, 32, BPM);
+        let notes =
+            self.session_take("six eight", &item, "song.signature_numerator = 6\nsong.signature_denominator = 8", &[], 8.0, stamp).await?;
+        self.followed("6/8", &notes, |t| t, 32, BPM);
+        // A jump while playing, to beat 8, about 1.6 s in: the steps after it follow the song from there. Live jumps on
+        // its audio buffer's first sample and takes a device's MIDI per buffer, and a note due in a buffer's last
+        // signal vector goes out at the next buffer's start: so the step just before the jump can go out with the
+        // landing's step, playing its own pitch.
+        let notes = self.session_take("jump", &item, "", &[(1.6, "song.current_song_time = 8.0".to_string())], 8.0, stamp).await?;
+        let jumped_at = notes.windows(2).find(|pair| pair[1].0 == 60 && pair[0].0 != 75).map(|pair| pair[1].1);
+        match jumped_at {
+            Some(at) => {
+                let landing = |note: &(i64, f64, f64)| (note.1 - at).abs() < 0.002;
+                let before_pitch = |note: &(i64, f64, f64)| note.0 == 60 + (((note.1 / 0.25).floor()) as i64).rem_euclid(16);
+                let before: Vec<(i64, f64, f64)> = notes
+                    .iter()
+                    .copied()
+                    .filter(|note| note.1 < at - 0.002 || (landing(note) && note.0 != 60 && before_pitch(note)))
+                    .collect();
+                let after: Vec<(i64, f64, f64)> = notes.iter().copied().filter(|note| !before.contains(note)).collect();
+                let together = before.iter().filter(|note| landing(note)).count();
+                if together > 0 {
+                    println!("  the step before the jump went out with the landing's (due in the last vector of Live's buffer)");
+                }
+                self.followed("before the jump", &before, |t| t, before.len(), BPM);
+                self.followed("after the jump", &after, |t| t - at + 8.0, after.len(), BPM);
+            }
+            None => {
+                let all: Vec<String> = notes.iter().map(|(pitch, start, _)| format!("{pitch}@{start:.3}")).collect();
+                println!("  a jump: no step 1 after the jump: {}", all.join(" "));
+                self.fail("a jump");
+            }
+        }
+        // A tempo that falls from 160 to 100 BPM over 4 s while it plays: Live's clip keeps beats.
+        let ramp: Vec<(f64, String)> =
+            (1..=40).map(|tick| (tick as f64 * 0.1, format!("song.tempo = {:.2}", 160.0 - 1.5 * tick as f64))).collect();
+        let notes = self.session_take("ramp", &item, "song.tempo = 160.0", &ramp, 12.0, stamp).await?;
+        let expected = notes.last().map_or(0, |note| (note.1 / 0.25).round() as usize + 1);
+        self.followed("a tempo falling from 160 to 100", &notes, |t| t, expected, 160.0);
+        // Tempos typed in while it plays: halved, quadrupled, and down and up again.
+        let typed: Vec<(f64, String)> = [(1.0, 60.0), (2.5, 240.0), (3.5, 70.0), (4.5, 140.0), (5.5, 20.0)]
+            .iter()
+            .map(|(at, bpm)| (*at, format!("song.tempo = {bpm:.1}")))
+            .collect();
+        let notes = self.session_take("typed", &item, "", &typed, 13.0, stamp).await?;
+        let expected = notes.last().map_or(0, |note| (note.1 / 0.25).round() as usize + 1);
+        self.followed("tempos typed in: 120, 60, 240, 70, 140, 20", &notes, |t| t, expected, 240.0);
+        // Stopped mid-bar, then Space: Live plays again from its insert marker, the first note that step's, on time.
+        for (label, stop, between) in [("restart", 3.185, ""), ("restart at six", 3.0, "song.current_song_time = 6.0")] {
+            let (from, notes) = self.restart_take(label, &item, stop, between, stamp).await?;
+            let first = notes.first().copied();
+            let on_time = first.is_some_and(|(pitch, start, _)| {
+                let line = (from / 0.25).ceil() * 0.25;
+                (start - line).abs() * 60_000.0 / BPM <= ON_GRID_MS && pitch == 60 + ((line / 0.25).round() as i64).rem_euclid(16)
+            });
+            println!(
+                "  stopped {stop} s in{}, then Space: Live played from {from:.4}; first notes {}",
+                if between.is_empty() { String::new() } else { format!(" ({between})") },
+                notes.iter().take(4).map(|(pitch, start, _)| format!("{pitch}@{start:.4}")).collect::<Vec<_>>().join(" ")
+            );
+            let label = format!("{label}: the first step on time");
+            if !on_time {
+                self.fail(&label);
+            }
+            self.followed(&label, &notes, |t| t, notes.len(), BPM);
         }
         Ok(())
     }

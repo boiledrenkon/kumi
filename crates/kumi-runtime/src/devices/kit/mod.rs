@@ -72,8 +72,9 @@ pub fn expand(text: &str, line: usize) -> Result<(String, String), String> {
     }
 }
 
-/// Live's transport into the transport's gen~ (`song`): the beat's phase, plugsync~'s song position, and Live's loop
-/// settings (read through the Live API, whose answers come on Max's low-priority thread; the loop rarely changes).
+/// Live's transport into the transport's gen~ (`song`): the beat's phase, plugsync~'s song position, play flag and
+/// tempo, and Live's loop settings (read through the Live API, whose answers come on Max's low-priority thread; the loop
+/// rarely changes).
 /// `outlets` names the song's outlets the patch sends on, by what they are: position, playing, tempo.
 fn transport_patch(outlets: &[&str]) -> String {
     let mut patch = String::from(concat!(
@@ -81,12 +82,18 @@ fn transport_patch(outlets: &[&str]) -> String {
         "beat = [plugphasor~]\n",
         "sync = [plugsync~]\n",
         "heard = [sig~]\n",
+        "flag = [sig~]\n",
+        "bpm = [sig~]\n",
         "sync.6 -> heard\n",
+        "sync -> flag\n",
+        "sync.5 -> bpm\n",
     ));
     patch.push_str(&format!("song = [gen~] {{\n{TRANSPORT}}}\n"));
     patch.push_str(concat!(
         "beat -> song\n",
         "heard -> song.1\n",
+        "flag -> song.2\n",
+        "bpm -> song.3\n",
         "# Live's loop, so the steps go back with it on the sample it jumps.\n",
         "ready = [live.thisdevice]\n",
         "find = [live.path]\n",
