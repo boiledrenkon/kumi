@@ -28,7 +28,7 @@
 /// The transport's GenExpr: in1 is plugphasor~, in2 to in4 plugsync~'s song position in beats, play flag and tempo;
 /// Params say Live's loop. out1: the song position in beats; out2 and out3: 1 while Live plays; out4: how many samples
 /// back a step's line can be and still start now; out5: the tempo (BPM); out6: 1 where Live started, moved the song
-/// position or looped.
+/// position or looped, 2 where a tempo change moved it on (the steps follow it, and none starts twice).
 pub const TRANSPORT: &str = r#"// Made by Kumi: Live's transport at every sample (fixed).
 // Live starts, stops, moves the song position and changes tempo on a signal vector's first sample.
 // in2 to in4: plugsync~'s song position (beats), whether Live plays, and its tempo, on each vector's first sample. While
@@ -88,10 +88,11 @@ if (fresh > 0.5 && flag < 0.5) {
             anchored = 1;
             if (bpm != t_bpm && abs(gap) < 8192 * abs(told - advance) + 2 * told) {
                 // A tempo change moves Live's song position on or back by up to an audio buffer's worth of the change
-                // (Live's buffer is up to 2048 samples, 8192 to spare). On: the steps follow it, and the step it moved
-                // into starts now if it passed that step's line. Back: a line it goes back over doesn't start again.
+                // (Live's buffer is up to 2048 samples, 8192 to spare). On: the steps follow it (2), and the step it
+                // moved into starts now if it passed that step's line. Back: a line it goes back over doesn't start
+                // again.
                 late = max(gap, 0) / told + 1;
-                moved = gap > 0;
+                moved = 2 * (gap > 0);
             } else {
                 // Live moved the song position.
                 moved = 1;
@@ -178,8 +179,11 @@ if (playing < 0.5) {
 }
 if (moved > 0.5) {
     follow = 1;
-    fired_pair = -1;
-    reached = -1000000000;
+    // A tempo change that moves the song on (2) keeps what's started: the step just played doesn't start again.
+    if (moved < 1.5) {
+        fired_pair = -1;
+        reached = -1000000000;
+    }
 }
 each = max(division, 0.001);
 amount = clamp(swing, 0, 0.5);
@@ -743,11 +747,15 @@ mod tests {
 
     /// The lines a song reached, as (sample, line): each the first time the song position is at or past it, so a line
     /// the song goes back over isn't due again, and where it moves on past several at once only the one it's in is.
+    /// A song that starts inside a step owes that step nothing.
     fn lines_reached(positions: &[(usize, f64)], division: f64) -> Vec<(usize, f64)> {
         let mut lines = Vec::new();
         let mut reached = f64::MIN;
-        for &(sample, now) in positions {
+        for (at, &(sample, now)) in positions.iter().enumerate() {
             let line = (now / division + 1e-9).floor() * division;
+            if at == 0 && now - line > 1e-9 {
+                reached = line;
+            }
             if line > reached + 1e-9 {
                 lines.push((sample, line));
                 reached = line;
@@ -756,18 +764,19 @@ mod tests {
         lines
     }
 
-    /// The steps of a song whose tempo `tempo` sets before each vector (by seconds in), checked line by line: every
-    /// line the song reaches gets one step, its own, on its sample or (where a tempo change moved the song on past it)
-    /// on the vector it moved.
-    fn every_line_once(label: &str, shift: f64, from: f64, samples: usize, tempo: impl Fn(f64) -> Option<f64>) {
+    /// The steps of a song played from `start` whose tempo `tempo` sets before each vector (by its first sample),
+    /// checked line by line: every line the song reaches gets one step, its own, on its sample or (where a tempo
+    /// change moved the song on past it) on the vector it moved.
+    fn every_line_once(label: &str, shift: f64, from: f64, start: f64, samples: usize, tempo: impl Fn(usize) -> Option<f64>) {
         for delayed in [false, true] {
             let mut live = Live::new();
             live.bpm = from;
             live.tempo_shift = shift;
+            live.position = start;
             let mut device = Device::new(delayed, 0.25, 16.0);
             live.change(Change::Play);
             let (steps, positions) = run_tracing(&mut device, &mut live, samples, |_, live, sample| {
-                if let Some(bpm) = tempo(sample as f64 / RATE) {
+                if let Some(bpm) = tempo(sample) {
                     if bpm != live.bpm {
                         live.change(Change::Tempo(bpm));
                     }
@@ -810,8 +819,9 @@ mod tests {
                             &format!("{from} to {to}"),
                             shift,
                             from,
+                            0.0,
                             (RATE * (at + 4.0 * 60.0 / to.min(from) + 0.5)) as usize,
-                            |t| Some(if t >= at { to } else { from }),
+                            |sample| Some(if sample as f64 / RATE >= at { to } else { from }),
                         );
                     }
                 });
@@ -826,9 +836,33 @@ mod tests {
             for (from, to) in [(160.0, 100.0), (100.0, 160.0)] {
                 for shift in [0.0, 400.0, 2048.0, -2048.0] {
                     scope.spawn(move || {
-                        every_line_once(&format!("ramp {from} to {to}"), shift, from, (RATE * 6.0) as usize, |t| {
+                        every_line_once(&format!("ramp {from} to {to}"), shift, from, 0.0, (RATE * 6.0) as usize, |sample| {
+                            let t = sample as f64 / RATE;
                             Some(from + (to - from) * ((t / 0.1).floor() * 0.1 / 4.0).min(1.0))
                         });
+                    });
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_tempo_rise_just_after_a_line_starts_that_step_once() {
+        // Beat 1's line crossed 1 to 40 samples before the vector a tempo rise lands on: Live's shift moves the song
+        // on, past the next line or not, and the step just played doesn't start again. A thread a rise.
+        std::thread::scope(|scope| {
+            for (from, to) in [(60.0_f64, 240.0_f64), (120.0, 121.0), (20.0, 999.0)] {
+                for shift in [400.0, 2048.0] {
+                    scope.spawn(move || {
+                        let rise = 8 * VECTOR;
+                        let advance = from / 60.0 / RATE;
+                        for before in 1..=40 {
+                            let start = 1.0 + 0.5 * advance - (rise - before) as f64 * advance;
+                            let samples = rise + (0.6 * 60.0 / to * RATE) as usize + VECTOR;
+                            every_line_once(&format!("{from} to {to}, {before} after the line"), shift, from, start, samples, |sample| {
+                                Some(if sample >= rise { to } else { from })
+                            });
+                        }
                     });
                 }
             }
