@@ -10,9 +10,9 @@
 //! given (--file <path>.amxd, with --rate "<its rate parameter>", --from <index> --to <index> for its two divisions).
 //! Then scenes, each note against where Live's song was: Live's loop (3 and 3.5 beats), 7/8 and 6/8, a jump while
 //! playing, a tempo ramp, tempos typed in, and a stop then Space (--scenarios: the scenes only).
-//! --probe <spec>.json plays a device spec through starts, stops, loops, jumps and tempo changes and reads its
-//! controls after each; for a recorder (a buffer~ it writes to a file), KUMI_PROBE_WAV names that file and each scene's
-//! is kept beside it, and KUMI_PROBE_TAKE (steady, jump or tempo) records one take of it instead.
+//! --record <file>.json records Live's own transport instead, for the clock's replay test: a device writes down what
+//! plugphasor~ and plugsync~ say at every sample through eight scenes (stops and plays, loops, jumps, tempo changes).
+//! --encode <folder> <file>.json makes that file from recordings already made (no Live).
 //! No model and no sign-in. It works in the open Set (it never opens or closes one): name it, and use a disposable
 //! one. It sets the tempo to 120 and takes everything back after.
 //!   cargo build -p ableton-mcp-server -p kumi-runtime --bins
@@ -53,15 +53,27 @@ fn main() {
     let values = |flag: &str| -> Vec<String> {
         argv.windows(2).filter(|pair| pair[0] == flag).map(|pair| trim(&pair[1]).to_owned()).filter(|value| !value.is_empty()).collect()
     };
+    if let Some(at) = argv.iter().position(|arg| arg == "--encode") {
+        let (Some(folder), Some(out)) = (argv.get(at + 1), argv.get(at + 2)) else {
+            eprintln!("--encode <folder of recordings> <file>.json");
+            std::process::exit(2);
+        };
+        match encode_folder(Path::new(folder)).and_then(|text| std::fs::write(out, text).map_err(|error| error.to_string())) {
+            Ok(()) => println!("{out}"),
+            Err(why) => {
+                eprintln!("{why}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let Some(wanted) = values("--set").into_iter().next() else {
         eprintln!("Name the open Set, as Live shows it: cargo run -p kumi --example device_timing_live -- --set \"<Set name>\"");
         eprintln!("It adds tracks, records in the Arrangement and undoes it all, so use a disposable Set.");
         std::process::exit(2);
     };
     let scenarios_only = argv.iter().any(|arg| arg == "--scenarios");
-    // A device spec (JSON) whose controls the patch sets to what it measured: it's played in each scene and its
-    // controls read after.
-    let probe = values("--probe").into_iter().next();
+    let record = values("--record").into_iter().next();
     let file = values("--file").into_iter().next().map(|file| Subject {
         file: PathBuf::from(file),
         rate: values("--rate").into_iter().next().unwrap_or_else(|| "Rate".into()),
@@ -84,7 +96,7 @@ fn main() {
     }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
     let local = tokio::task::LocalSet::new();
-    std::process::exit(local.block_on(&runtime, device_timing_live(wanted, file, scenarios_only, probe, bridge_config, bridge)));
+    std::process::exit(local.block_on(&runtime, device_timing_live(wanted, file, scenarios_only, record, bridge_config, bridge)));
 }
 
 /// A device file to check: its rate parameter and the two values it's moved between.
@@ -130,7 +142,7 @@ async fn device_timing_live(
     wanted: String,
     file: Option<Subject>,
     scenarios_only: bool,
-    probe: Option<String>,
+    record: Option<String>,
     bridge_config: String,
     bridge: PathBuf,
 ) -> i32 {
@@ -156,7 +168,7 @@ async fn device_timing_live(
         made: RefCell::default(),
         failed: RefCell::default(),
     };
-    let code = match run.check(&wanted, file, scenarios_only, probe).await {
+    let code = match run.check(&wanted, file, scenarios_only, record).await {
         Ok(()) => {
             let failed = run.failed.borrow();
             println!("\n{} failed{}", failed.len(), if failed.is_empty() { String::new() } else { format!(": {}", failed.join("; ")) });
@@ -436,7 +448,7 @@ impl Run {
         }
     }
 
-    async fn check(&self, wanted: &str, file: Option<Subject>, scenarios_only: bool, probe: Option<String>) -> Result<(), RuntimeError> {
+    async fn check(&self, wanted: &str, file: Option<Subject>, scenarios_only: bool, record: Option<String>) -> Result<(), RuntimeError> {
         self.integration.start(signal()).await?;
         let observation = self.observe().await?;
         let context: Value = serde_json::from_str(&observation.context).unwrap_or(Value::Null);
@@ -446,11 +458,8 @@ impl Run {
             return Err(RuntimeError::plain("not the Set named"));
         }
         let stamp = (now_ms() % 10_000) as u128;
-        if let Some(probe) = probe {
-            if std::env::var("KUMI_PROBE_TAKE").is_ok() {
-                return self.probe_take(&probe, stamp).await;
-            }
-            return self.probe(&probe, stamp).await;
+        if let Some(out) = record {
+            return self.record(Path::new(&out), stamp).await;
         }
         if scenarios_only {
             return self.scenarios(stamp).await;
@@ -793,170 +802,52 @@ impl Run {
         }
     }
 
-    /// A probe device played in each scene, its controls read after: what it measured.
-    async fn probe(&self, spec: &str, stamp: u128) -> Result<(), RuntimeError> {
-        let mut spec: Value = serde_json::from_str(&std::fs::read_to_string(spec).map_err(|error| RuntimeError::plain(error.to_string()))?)
-            .map_err(|error| RuntimeError::plain(error.to_string()))?;
-        spec["name"] = json!(format!("Probe {stamp}"));
-        let made = self.call("make_device", spec).await.map_err(RuntimeError::plain)?;
-        for key in ["wrong", "changed", "notes"] {
-            if let Some(said) = made.get(key) {
-                println!("  make_device {key}: {said}");
-            }
-        }
+    /// Live's own transport through each of the scenes, recorded by a device that writes it down, as the clock's replay
+    /// test reads it.
+    async fn record(&self, out: &Path, stamp: u128) -> Result<(), RuntimeError> {
+        let folder = std::env::temp_dir().join(format!("kumi-live-transport-{stamp}"));
+        std::fs::create_dir_all(&folder).map_err(|error| RuntimeError::plain(error.to_string()))?;
+        let wav = folder.join("current.wav");
+        let made = self.call("make_device", recorder(&wav, stamp)?).await.map_err(RuntimeError::plain)?;
         if let Some(file) = made["file"].as_str() {
             self.made.borrow_mut().push(PathBuf::from(file));
         }
         let item = made["itemId"].as_str().unwrap_or_default().to_string();
-        // A recorder writes `current.wav` beside where the spec says when it's done; each scene's is kept by name.
-        let written = std::env::var("KUMI_PROBE_WAV").ok().map(PathBuf::from);
-        let ramp = |from: f64, to: f64, start: f64, seconds: f64| -> Vec<(f64, String)> {
-            let steps = (seconds / 0.1).round() as usize;
-            (1..=steps)
-                .map(|step| (start + step as f64 * 0.1, format!("song.tempo = {:.2}", from + (to - from) * step as f64 / steps as f64)))
-                .collect()
-        };
-        let scenes: Vec<(&str, &str, Vec<(f64, String)>)> = vec![
-            (
-                "restart",
-                "song.start_playing()",
-                vec![(3.185, "song.stop_playing()".into()), (4.5, "song.start_playing()".into()), (7.0, "song.stop_playing()".into())],
-            ),
-            (
-                "restart-six",
-                "song.start_playing()",
-                vec![
-                    (3.0, "song.stop_playing()".into()),
-                    (3.3, "song.current_song_time = 6.0".into()),
-                    (4.5, "song.start_playing()".into()),
-                    (7.0, "song.stop_playing()".into()),
-                ],
-            ),
-            ("loop-3.5", "song.loop_start = 0.0\nsong.loop_length = 3.5\nsong.loop = True\nsong.start_playing()", vec![]),
-            ("loop-3", "song.loop_start = 0.0\nsong.loop_length = 3.0\nsong.loop = True\nsong.start_playing()", vec![]),
-            (
-                "jump",
-                "song.start_playing()",
-                vec![
-                    (1.6, "song.current_song_time = 8.0".into()),
-                    (4.0, "song.current_song_time = 2.37".into()),
-                    (6.0, "song.current_song_time = 0.0".into()),
-                ],
-            ),
-            (
-                "tempo-big",
-                "song.start_playing()",
-                vec![
-                    (1.5, "song.tempo = 60.0".into()),
-                    (3.0, "song.tempo = 120.0".into()),
-                    (4.5, "song.tempo = 70.0".into()),
-                    (5.5, "song.tempo = 140.0".into()),
-                    (6.5, "song.tempo = 20.0".into()),
-                    (8.0, "song.tempo = 999.0".into()),
-                    (9.0, "song.tempo = 20.0".into()),
-                    (10.5, "song.tempo = 120.0".into()),
-                ],
-            ),
-            (
-                "continue-mid",
-                "song.start_playing()",
-                vec![
-                    (1.0, "song.stop_playing()".into()),
-                    (1.5, "song.current_song_time = 2.37".into()),
-                    (2.5, "song.continue_playing()".into()),
-                    (5.0, "song.stop_playing()".into()),
-                    (5.5, "song.current_song_time = 6.0".into()),
-                    (6.5, "song.continue_playing()".into()),
-                ],
-            ),
-            ("tempo", "song.start_playing()", {
-                let mut actions: Vec<(f64, String)> = vec![(2.0, "song.tempo = 59.0".into()), (3.5, "song.tempo = 160.0".into())];
-                actions.extend(ramp(160.0, 100.0, 5.0, 4.0));
-                actions
-            }),
-        ];
-        for (label, setup, actions) in scenes {
-            let track = format!("Probe {label} {stamp}");
-            if let Some(file) = &written {
-                let _ = std::fs::remove_file(file);
-            }
+        println!("\nLive's transport, recorded at every sample");
+        for scene in scenes() {
+            let _ = std::fs::remove_file(&wav);
+            let track = format!("Recorder {} {stamp}", scene.name);
             self.add_track(&track).await?;
             self.load(&track, &item).await.map_err(RuntimeError::plain)?;
-            self.python_exec(&format!("song.tempo = {BPM:.1}\nsong.clip_trigger_quantization = 0\nsong.stop_playing()\nsong.current_song_time = 0.0\n{setup}\nresult = True")).await?;
+            self.python_exec(&format!(
+                "song.tempo = {BPM:.1}\nsong.clip_trigger_quantization = 0\nsong.stop_playing()\nsong.current_song_time = 0.0\n{}\nresult = True",
+                scene.setup
+            ))
+            .await?;
             let began = std::time::Instant::now();
-            for (at, code) in &actions {
+            for (at, code) in &scene.actions {
                 let left = at - began.elapsed().as_secs_f64();
                 if left > 0.0 {
                     tokio::time::sleep(Duration::from_secs_f64(left)).await;
                 }
                 self.python_exec(&format!("{code}\nresult = True")).await?;
             }
-            match &written {
-                Some(file) => {
-                    // The recorder runs 12 s from its load.
-                    let mut waited = 0;
-                    while !file.exists() && waited < 200 {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        waited += 1;
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    let kept = file.with_file_name(format!("{label}.wav"));
-                    match std::fs::rename(file, &kept) {
-                        Ok(()) => println!("  {label}: {}", kept.display()),
-                        Err(error) => println!("  {label}: no recording ({error})"),
-                    }
-                }
-                None => {
-                    tokio::time::sleep(Duration::from_secs_f64((8.0 * 60.0 / BPM - began.elapsed().as_secs_f64()).max(0.0))).await;
-                    let read = self
-                        .python(&format!(
-                            "[[p.name, p.value] for p in [t for t in song.tracks if t.name == {}][0].devices[0].parameters]",
-                            json!(track)
-                        ))
-                        .await?;
-                    println!("  {label}: {read}");
-                }
+            // The recorder writes 12 s from its load.
+            let mut waited = 0;
+            while !wav.exists() && waited < 200 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                waited += 1;
             }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let kept = folder.join(format!("{}.wav", scene.name));
+            std::fs::rename(&wav, &kept).map_err(|error| RuntimeError::plain(format!("{}: no recording ({error})", scene.name)))?;
+            println!("  {}: {}", scene.name, kept.display());
             self.python_exec(&format!("song.stop_playing()\nsong.loop = False\nsong.tempo = {BPM:.1}\nresult = True")).await?;
             self.observe().await?;
         }
-        Ok(())
-    }
-
-    /// A recorder that also plays notes, in a take: the notes recorded (pitch, start, length) and its recording,
-    /// written beside KUMI_PROBE_WAV as take-notes.json and take.wav.
-    async fn probe_take(&self, spec: &str, stamp: u128) -> Result<(), RuntimeError> {
-        let mut spec: Value = serde_json::from_str(&std::fs::read_to_string(spec).map_err(|error| RuntimeError::plain(error.to_string()))?)
-            .map_err(|error| RuntimeError::plain(error.to_string()))?;
-        spec["name"] = json!(format!("Probe {stamp}"));
-        let made = self.call("make_device", spec).await.map_err(RuntimeError::plain)?;
-        if let Some(file) = made["file"].as_str() {
-            self.made.borrow_mut().push(PathBuf::from(file));
-        }
-        let item = made["itemId"].as_str().unwrap_or_default().to_string();
-        let written = PathBuf::from(std::env::var("KUMI_PROBE_WAV").map_err(|_| RuntimeError::plain("KUMI_PROBE_WAV"))?);
-        let _ = std::fs::remove_file(&written);
-        let actions: Vec<(f64, String)> = match std::env::var("KUMI_PROBE_TAKE").unwrap_or_default().as_str() {
-            "jump" => vec![(1.6, "song.current_song_time = 8.0".into()), (4.0, "song.current_song_time = 2.37".into())],
-            "tempo" => vec![
-                (1.0, "song.tempo = 60.0".into()),
-                (2.5, "song.tempo = 240.0".into()),
-                (3.5, "song.tempo = 70.0".into()),
-                (4.5, "song.tempo = 140.0".into()),
-            ],
-            _ => vec![],
-        };
-        let notes = self.session_take("probe", &item, "", &actions, 16.0, stamp).await?;
-        let mut waited = 0;
-        while !written.exists() && waited < 200 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            waited += 1;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        std::fs::rename(&written, written.with_file_name("take.wav")).map_err(|error| RuntimeError::plain(error.to_string()))?;
-        std::fs::write(written.with_file_name("take-notes.json"), serde_json::to_string(&notes).unwrap())
-            .map_err(|error| RuntimeError::plain(error.to_string()))?;
-        println!("  {} notes; {}", notes.len(), written.with_file_name("take.wav").display());
+        let text = encode_folder(&folder).map_err(RuntimeError::plain)?;
+        std::fs::write(out, text).map_err(|error| RuntimeError::plain(error.to_string()))?;
+        println!("  written: {}", out.display());
         Ok(())
     }
 
@@ -1071,4 +962,234 @@ impl Run {
 
 fn signal() -> Signal {
     abort::timeout(120_000)
+}
+
+/// A scene the recorder plays Live through: Python run at the start (from the downbeat, stopped, at 120 BPM) and at
+/// its seconds after.
+struct Scene {
+    name: &'static str,
+    what: &'static str,
+    looped: Option<(f64, f64)>,
+    setup: String,
+    actions: Vec<(f64, String)>,
+}
+
+fn scenes() -> Vec<Scene> {
+    let at = |list: &[(f64, &str)]| list.iter().map(|(at, code)| (*at, code.to_string())).collect::<Vec<_>>();
+    let ramp = (1..=40).map(|step| (5.0 + step as f64 * 0.1, format!("song.tempo = {:.2}", 160.0 - 1.5 * step as f64)));
+    let looped = |length: f64| format!("song.loop_start = 0.0\nsong.loop_length = {length}\nsong.loop = True\nsong.start_playing()");
+    vec![
+        Scene {
+            name: "restart",
+            what: "played from the start, stopped 3.185 s in, played again (from the start) and stopped",
+            looped: None,
+            setup: "song.start_playing()".into(),
+            actions: at(&[(3.185, "song.stop_playing()"), (4.5, "song.start_playing()"), (7.0, "song.stop_playing()")]),
+        },
+        Scene {
+            name: "restart-six",
+            what: "stopped 3 s in and moved to beat 6 while stopped, then played again (from the start)",
+            looped: None,
+            setup: "song.start_playing()".into(),
+            actions: at(&[
+                (3.0, "song.stop_playing()"),
+                (3.3, "song.current_song_time = 6.0"),
+                (4.5, "song.start_playing()"),
+                (7.0, "song.stop_playing()"),
+            ]),
+        },
+        Scene {
+            name: "loop-3.5",
+            what: "Live's loop of 3.5 beats from the downbeat",
+            looped: Some((0.0, 3.5)),
+            setup: looped(3.5),
+            actions: Vec::new(),
+        },
+        Scene {
+            name: "loop-3",
+            what: "Live's loop of 3 beats from the downbeat",
+            looped: Some((0.0, 3.0)),
+            setup: looped(3.0),
+            actions: Vec::new(),
+        },
+        Scene {
+            name: "jump",
+            what: "jumps while playing: to beat 8, to 2.37 and back to the downbeat",
+            looped: None,
+            setup: "song.start_playing()".into(),
+            actions: at(&[
+                (1.6, "song.current_song_time = 8.0"),
+                (4.0, "song.current_song_time = 2.37"),
+                (6.0, "song.current_song_time = 0.0"),
+            ]),
+        },
+        Scene {
+            name: "tempo-big",
+            what: "tempos typed in while playing: 120, 60, 120, 70, 140, 20, 999, 20, 120",
+            looped: None,
+            setup: "song.start_playing()".into(),
+            actions: at(&[
+                (1.5, "song.tempo = 60.0"),
+                (3.0, "song.tempo = 120.0"),
+                (4.5, "song.tempo = 70.0"),
+                (5.5, "song.tempo = 140.0"),
+                (6.5, "song.tempo = 20.0"),
+                (8.0, "song.tempo = 999.0"),
+                (9.0, "song.tempo = 20.0"),
+                (10.5, "song.tempo = 120.0"),
+            ]),
+        },
+        Scene {
+            name: "continue-mid",
+            what: "stopped mid-beat, moved while stopped, and played on (from where it stopped), twice",
+            looped: None,
+            setup: "song.start_playing()".into(),
+            actions: at(&[
+                (1.0, "song.stop_playing()"),
+                (1.5, "song.current_song_time = 2.37"),
+                (2.5, "song.continue_playing()"),
+                (5.0, "song.stop_playing()"),
+                (5.5, "song.current_song_time = 6.0"),
+                (6.5, "song.continue_playing()"),
+            ]),
+        },
+        Scene {
+            name: "tempo",
+            what: "120 to 59 and 160 typed in, then a ramp from 160 to 100 in steps of a tenth of a second",
+            looped: None,
+            setup: "song.start_playing()".into(),
+            actions: at(&[(2.0, "song.tempo = 59.0"), (3.5, "song.tempo = 160.0")]).into_iter().chain(ramp).collect(),
+        },
+    ]
+}
+
+/// A device that writes down, at every sample for 12 s from its load, plugphasor~ and plugsync~'s position (each as a
+/// float32 and what float32 left of it), play flag and tempo, then saves them to `wav`.
+fn recorder(wav: &Path, stamp: u128) -> Result<Value, RuntimeError> {
+    let path = wav.to_string_lossy();
+    if path.contains(char::is_whitespace) {
+        return Err(RuntimeError::plain(format!("the recording's folder has a space in it: {path}")));
+    }
+    let code = concat!(
+        "Buffer b(\"kumi.transport.recording\");\n",
+        "History n(0);\n",
+        "k = n;\n",
+        "if (k < dim(b)) {\n",
+        "  poke(b, in1, k, 0);\n",
+        "  phase = peek(b, k, 0);\n",
+        "  poke(b, in1 - phase, k, 1);\n",
+        "  poke(b, in2, k, 2);\n",
+        "  heard = peek(b, k, 2);\n",
+        "  poke(b, in2 - heard, k, 3);\n",
+        "  poke(b, in3, k, 4);\n",
+        "  poke(b, in4, k, 5);\n",
+        "  k = k + 1;\n",
+        "}\n",
+        "n = k;\n",
+        "out1 = k >= dim(b);\n",
+    );
+    let patch = format!(
+        concat!(
+            "beat = [plugphasor~]\nsync = [plugsync~]\nheard = [sig~]\nflag = [sig~]\nbpm = [sig~]\n",
+            "sync.6 -> heard\nsync -> flag\nsync.5 -> bpm\n",
+            "memory = [buffer~ kumi.transport.recording 12000 6]\n",
+            "write = [gen~] {{\n{code}}}\n",
+            "beat -> write\nheard -> write.1\nflag -> write.2\nbpm -> write.3\n",
+            "tick = [metro 100 @active 1]\ndone = [snapshot~]\ntick -> done\nwrite -> done\n",
+            "save = (samptype float32, writewave {path})\n",
+            "done -> [change] -> [sel 1] -> save\nsave -> memory\n",
+        ),
+        code = code,
+        path = path
+    );
+    Ok(json!({
+        "type": "midi_effect",
+        "name": format!("Transport Recorder {stamp}"),
+        "about": "Writes down Live's transport at every sample for Kumi's timing tests.",
+        "controls": [],
+        "patch": patch,
+    }))
+}
+
+/// A recording: the sample rate, and at each sample the phase, plugsync~'s position, its play flag and its tempo.
+fn read_recording(path: &Path) -> Result<(f64, Vec<[f64; 4]>), String> {
+    let data = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let (mut at, mut channels, mut rate) = (12, 0, 0.0);
+    while at + 8 <= data.len() {
+        let size = u32::from_le_bytes(data[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = data.get(at + 8..at + 8 + size).ok_or_else(|| format!("{}: cut short", path.display()))?;
+        match &data[at..at + 4] {
+            b"fmt " => {
+                channels = u16::from_le_bytes(body[2..4].try_into().unwrap()) as usize;
+                rate = u32::from_le_bytes(body[4..8].try_into().unwrap()) as f64;
+            }
+            b"data" if channels == 6 => {
+                let floats: Vec<f64> = body.chunks_exact(4).map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()) as f64).collect();
+                return Ok((rate, floats.chunks_exact(6).map(|c| [c[0] + c[1], c[2] + c[3], c[4], c[5]]).collect()));
+            }
+            _ => {}
+        }
+        at += 8 + size + (size & 1);
+    }
+    Err(format!("{}: not a recording of 6 channels", path.display()))
+}
+
+/// The scenes' recordings in `folder`, as the clock's replay test reads them: plugphasor~ as runs (from, value, step
+/// per sample, the value as it is on the run's first sample and from there on its fraction; a step of 0 holds the value),
+/// and plugsync~'s position, play flag and tempo on each vector they aren't where the vector before puts them.
+fn encode_folder(folder: &Path) -> Result<String, String> {
+    const VECTOR: usize = 64;
+    let fraction = |x: f64| x - x.floor();
+    let mut written = Vec::new();
+    let mut sample_rate = 0.0;
+    for scene in scenes() {
+        let (rate, samples) = read_recording(&folder.join(format!("{}.wav", scene.name)))?;
+        sample_rate = rate;
+        let mut runs = Vec::new();
+        let mut from = 0;
+        while from < samples.len() {
+            let value = samples[from][0];
+            let step = samples.get(from + 1).map_or(0.0, |next| {
+                let step = next[0] - value;
+                step - step.round()
+            });
+            // plugphasor~ can read 1 on a beat's line: a run's first sample is its value as it is.
+            let at = |k: usize| if step == 0.0 || k == 0 { value } else { fraction(value + k as f64 * step) };
+            let mut to = from + 1;
+            while to < samples.len() && (at(to - from) - samples[to][0]).abs() < 1e-9 {
+                to += 1;
+            }
+            runs.push(serde_json::to_string(&json!([from, value, step])).unwrap());
+            from = to;
+        }
+        let mut sync = Vec::new();
+        let (mut heard, mut flag, mut bpm) = (0.0, 0.0, 0.0);
+        for (vector, block) in samples.chunks(VECTOR).enumerate() {
+            let [_, said, playing, tempo] = block[0];
+            if block.iter().any(|sample| sample[1] != said || sample[2] != playing || sample[3] != tempo) {
+                return Err(format!("{}: plugsync~ changed inside vector {vector}", scene.name));
+            }
+            if flag > 0.5 {
+                heard += VECTOR as f64 * bpm / 60.0 / rate;
+            }
+            if (said - heard).abs() > 1e-9 || playing != flag || tempo != bpm {
+                sync.push(serde_json::to_string(&json!([vector, said, playing, tempo])).unwrap());
+                (heard, flag, bpm) = (said, playing, tempo);
+            }
+        }
+        written.push(format!(
+            "  {{\n   \"name\": {},\n   \"what\": {},\n   \"loop\": {},\n   \"samples\": {},\n   \"phase\": [\n    {}\n   ],\n   \"sync\": [\n    {}\n   ]\n  }}",
+            json!(scene.name),
+            json!(scene.what),
+            scene.looped.map_or(Value::Null, |(start, length)| json!([start, length])),
+            samples.len(),
+            runs.join(",\n    "),
+            sync.join(",\n    ")
+        ));
+    }
+    Ok(format!(
+        "{{\n \"about\": {},\n \"rate\": {sample_rate},\n \"vector\": {VECTOR},\n \"scenes\": [\n{}\n ]\n}}\n",
+        json!("Live's transport as a Max for Live device reads it at every sample, recorded in Live 12.4 by device_timing_live --record. phase: plugphasor~ as runs of [from sample, value, step per sample]: the value as it is on the run's first sample, then the fraction of value plus step times samples since (a step of 0 holds the value). sync: plugsync~'s [vector, song position in beats, play flag, tempo] on each signal vector where they aren't what the vector before puts them (the same, the position on by a vector at the tempo while playing)."),
+        written.join(",\n")
+    ))
 }

@@ -1016,6 +1016,154 @@ mod tests {
         assert!(positions[0] < 0.001 && (positions[1] - 2.0 / 3.0).abs() < 0.0002 && (positions[2] - 1.0).abs() < 0.0002, "{positions:?}");
     }
 
+    /// Live's own transport, recorded in Live 12 at every sample through eight scenes (tests/support's
+    /// live-transport.json, made by the device_timing_live example): each scene's name, Live's loop if it had one, and
+    /// what a device reads at each sample (plugphasor~, and plugsync~'s position, play flag and tempo).
+    fn recorded() -> Vec<(String, Option<(f64, f64)>, Vec<[f64; 4]>)> {
+        let file: serde_json::Value = serde_json::from_str(include_str!("../../../tests/support/live-transport.json")).unwrap();
+        let rate = file["rate"].as_f64().unwrap();
+        assert_eq!((rate, file["vector"].as_u64()), (RATE, Some(VECTOR as u64)));
+        let number = |value: &serde_json::Value| value.as_f64().unwrap();
+        let mut scenes = Vec::new();
+        for scene in file["scenes"].as_array().unwrap() {
+            let samples = scene["samples"].as_u64().unwrap() as usize;
+            let mut read = vec![[0.0; 4]; samples];
+            let runs = scene["phase"].as_array().unwrap();
+            for (at, run) in runs.iter().enumerate() {
+                let from = run[0].as_u64().unwrap() as usize;
+                let to = runs.get(at + 1).map_or(samples, |next| next[0].as_u64().unwrap() as usize);
+                let (value, step) = (number(&run[1]), number(&run[2]));
+                for (k, sample) in read[from..to].iter_mut().enumerate() {
+                    let x = value + k as f64 * step;
+                    sample[0] = if step == 0.0 || k == 0 { value } else { x - x.floor() };
+                }
+            }
+            let mut said = scene["sync"].as_array().unwrap().iter().peekable();
+            let (mut heard, mut flag, mut bpm) = (0.0, 0.0, 0.0);
+            for vector in 0..samples.div_ceil(VECTOR) {
+                if flag > 0.5 {
+                    heard += VECTOR as f64 * bpm / 60.0 / rate;
+                }
+                if let Some(news) = said.next_if(|news| news[0].as_u64() == Some(vector as u64)) {
+                    (heard, flag, bpm) = (number(&news[1]), number(&news[2]), number(&news[3]));
+                }
+                for sample in read.iter_mut().skip(vector * VECTOR).take(VECTOR) {
+                    (sample[1], sample[2], sample[3]) = (heard, flag, bpm);
+                }
+            }
+            let looped = scene["loop"].as_array().map(|pair| (number(&pair[0]), number(&pair[1])));
+            scenes.push((scene["name"].as_str().unwrap().to_string(), looped, read));
+        }
+        scenes
+    }
+
+    /// Where Live's song truly was at each sample (None while it's stopped), with hindsight: plugsync~'s word on each
+    /// vector, on at its tempo, put to a fraction of a sample by the phase where that moves on steadily, and back at
+    /// Live's loop's end (each recorded loop plays from inside it).
+    fn truth(read: &[[f64; 4]], looped: Option<(f64, f64)>) -> Vec<Option<f64>> {
+        let back = |x: f64| match looped {
+            Some((start, length)) if x >= start + length - 1e-9 => (x - length).max(start),
+            _ => x,
+        };
+        let (mut said, mut advance) = (0.0, 0.0);
+        let mut truth = Vec::with_capacity(read.len());
+        for (i, &[phase, heard, flag, bpm]) in read.iter().enumerate() {
+            if flag < 0.5 {
+                truth.push(None);
+                continue;
+            }
+            if i % VECTOR == 0 {
+                advance = bpm / 60.0 / RATE;
+                said = heard + VECTOR as f64 * advance;
+            }
+            let estimate = back(said + (i % VECTOR) as f64 * advance);
+            let steady = i > 0 && read[i - 1][2] > 0.5 && {
+                let step = phase - read[i - 1][0];
+                (step - step.round() - advance).abs() < 1e-7
+            };
+            let fine = phase - phase.floor();
+            let whole = (estimate - fine).round();
+            truth.push(Some(if steady && (whole + fine - estimate).abs() < 2.0 * advance { back(whole + fine) } else { estimate }));
+        }
+        truth
+    }
+
+    /// One recorded scene through the transport and clock at each of two grids: every line the song reached has one
+    /// step, its own (the steps follow the song), on its sample or the next (a line on a sample's edge), and no step
+    /// falls on no line.
+    fn replay(name: &str, looped: Option<(f64, f64)>, read: &[[f64; 4]]) {
+        let truth = truth(read, looped);
+        for division in [0.25, 1.0 / 6.0] {
+            let mut device = Device::new(false, division, 16.0);
+            if let Some((start, length)) = looped {
+                device.transport.set("loop_on", 1.0);
+                device.transport.set("loop_start", start);
+                device.transport.set("loop_length", length);
+            }
+            let mut steps: Vec<(usize, f64)> = Vec::new();
+            for (i, sample) in read.iter().enumerate() {
+                let transport = device.transport.tick(sample, 6);
+                let clock = device.clock.tick(&transport, 4);
+                if clock[0] > 0.5 {
+                    steps.push((i, clock[1]));
+                }
+            }
+            // Each line the song reached, the first time it did; where the song jumped, from where it landed.
+            let mut lines = Vec::new();
+            let mut reached = f64::MIN;
+            for i in 1..read.len() {
+                let Some(now) = truth[i] else {
+                    reached = f64::MIN;
+                    continue;
+                };
+                let line = (now / division + 1e-9).floor() * division;
+                match truth[i - 1] {
+                    Some(was) if (now - was).abs() < 0.3 => {
+                        if line > was.min(now) + 1e-12 && line <= now + 1e-12 && line > reached + 1e-9 {
+                            lines.push((i, line));
+                            reached = line;
+                        }
+                    }
+                    _ => {
+                        reached = f64::MIN;
+                        if now - line < 2.0 * read[i][3] / 60.0 / RATE {
+                            lines.push((i, line));
+                            reached = line;
+                        }
+                    }
+                }
+            }
+            let mut missing = Vec::new();
+            for &(sample, line) in &lines {
+                let index = ((line / division).round() as i64).rem_euclid(16) as f64;
+                match steps.iter().position(|&(step, played)| step + 1 >= sample && step <= sample + 1 && played == index) {
+                    Some(at) => {
+                        steps.remove(at);
+                    }
+                    None => missing.push((sample, line)),
+                }
+            }
+            assert!(lines.len() > 40, "{name}: {} lines", lines.len());
+            assert!(
+                missing.is_empty() && steps.is_empty(),
+                "{name}, every {division} beats: no step for the lines at samples {missing:?}; steps on no line at {steps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_lives_own_recordings_every_line_the_song_reaches_gets_one_step_on_its_sample() {
+        // Two restarts, loops of 3.5 and 3 beats, jumps, tempos from 20 to 999 BPM typed in, stops and plays on
+        // mid-beat, and a ramp, each as Live played it: a thread a scene.
+        let scenes = recorded();
+        assert_eq!(scenes.len(), 8);
+        std::thread::scope(|scope| {
+            for (name, looped, read) in &scenes {
+                scope.spawn(move || replay(name, *looped, read));
+            }
+        });
+    }
+
     #[test]
     fn no_name_the_building_blocks_use_is_one_gen_keeps() {
         let names = |code: &str| crate::devices::gen::names(code).declared.into_keys().chain(crate::devices::gen::names(code).read);
