@@ -146,7 +146,9 @@ fn a_midi_effects_patch_midiin_the_code_midiout_and_each_control_a_live_paramete
         "a time over decades turns on a curve"
     );
     assert_eq!(boxes.iter().find(|item| item["maxclass"] == "live.menu").unwrap()["varname"], "Mode");
-    assert_eq!(boxes.iter().find(|item| item["maxclass"] == "live.toggle").unwrap()["varname"], "Bypass Drums");
+    // A switch is a button with its name, lit while it's on.
+    let button = boxes.iter().find(|item| item["maxclass"] == "live.text").unwrap();
+    assert_eq!((&button["varname"], &button["text"], &button["mode"]), (&json!("Bypass Drums"), &json!("Bypass Drums"), &json!(1)));
     assert_eq!(patcher["patcher"]["openinpresentation"], 1);
     assert_eq!(patcher["patcher"]["project"]["amxdtype"], 0x6d6d6d6d);
     assert_eq!(patcher["patcher"]["description"], lowest()["about"]);
@@ -848,17 +850,19 @@ fn a_device_gets_what_it_needs_many_controls_in_rows_on_the_face_names_with_punc
         .map(|item| item["presentation_rect"].as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect())
         .collect();
     assert_eq!(faces.len(), 22, "20 of the model's, Mix and Output");
-    // 22 controls: three rows of 8, all inside Live's 169-pixel device view, and the face as wide as its rows.
-    let mut rows: Vec<f64> = Vec::new();
-    for rect in &faces {
-        if !rows.contains(&rect[1]) {
-            rows.push(rect[1]);
+    // 22 dials: columns of two, all inside Live's 169-pixel device view, none over another, Kumi's own Mix and Output
+    // last, and the face as wide as its columns.
+    assert!(faces.iter().all(|rect| rect[1] >= 0.0 && rect[1] + rect[3] <= 169.0));
+    for (at, a) in faces.iter().enumerate() {
+        for b in &faces[at + 1..] {
+            let apart = a[0] + a[2] <= b[0] || b[0] + b[2] <= a[0] || a[1] + a[3] <= b[1] || b[1] + b[3] <= a[1];
+            assert!(apart, "{a:?} over {b:?}");
         }
     }
-    assert_eq!(rows, [8.0, 60.0, 112.0]);
-    assert!(faces.iter().all(|rect| rect[1] + rect[3] <= 169.0));
-    assert_eq!(patcher["patcher"]["devicewidth"], (16 + 8 * 52) as f64);
-    // Up to eight stay in one row, as before.
+    let width = patcher["patcher"]["devicewidth"].as_f64().unwrap();
+    assert!(faces.iter().all(|rect| rect[0] + rect[2] <= width));
+    assert!(faces[20][0] > faces[19][0] && faces[21][0] >= faces[20][0], "Mix and Output last");
+    // A device with no controls is Live's narrowest.
     let midi = midi_device_patcher(&spec(json!({})));
     assert_eq!(midi["patcher"]["devicewidth"], 120.0);
     let options: Vec<String> = (0..40).map(|index| format!("Mode {}", index + 1)).collect();

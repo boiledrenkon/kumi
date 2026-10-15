@@ -9,8 +9,9 @@ use kumi_common::js::json::stringify;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use super::amxd::{device_patcher, face_layout, DevicePatcherOptions, DeviceType, Line, PatchBox};
-use super::gen::{extend, face_control};
+use super::amxd::{device_patcher, DevicePatcherOptions, DeviceType, Line, PatchBox};
+use super::gen::{extend, Face};
+use super::look;
 use super::spec::{Control, MidiSpec, NumericControl, Unit};
 
 /// The frame, with __CONTROLS__ and __DEFAULTS__ for the device's controls and __CODE__ for its code.
@@ -190,34 +191,15 @@ pub fn midi_device_patcher(spec: &MidiSpec) -> Value {
         "numinlets": 2, "numoutlets": 1, "outlettype": [""], "patching_rect": [40.0, 120.0, 520.0, 280.0], "saved_object_attributes": { "parameter_enable": 0 } })));
     lines.push(Line::new("obj-midiin", 0, "obj-code", 0));
     lines.push(Line::new("obj-code", 0, "obj-midiout", 0));
-    let face = face_layout(spec.controls.len());
+    let mut face = Face::new();
     for (index, control) in spec.controls.iter().enumerate() {
-        let id = format!("obj-control-{}", index + 1);
-        let (x, y) = face.at(index);
-        let (item, valueof) = face_control(control, x, y);
-        let mut item_box = json!({ "id": id, "varname": control.name(), "parameter_enable": 1, "presentation": 1, "patching_rect": [600.0 + index as f64 * 60.0, 30.0, 44.0, 48.0] });
-        extend(&mut item_box, item);
-        extend(&mut item_box, json!({ "saved_attribute_attributes": { "valueof": valueof } }));
-        boxes.push(PatchBox::new(item_box));
-        let prepend = format!("obj-prepend-{}", index + 1);
-        text(
-            &mut boxes,
-            &prepend,
-            &format!("prepend c{}", index + 1),
-            [600.0 + index as f64 * 60.0, 90.0, 60.0, 20.0],
-            json!({ "numinlets": 1, "numoutlets": 1, "outlettype": [""] }),
-        );
-        lines.push(Line::new(&id, 0, &prepend, 0));
-        lines.push(Line::new(&prepend, 0, "obj-code", 1));
+        face.add_to(control, &format!("c{}", index + 1), &["obj-code"], 1);
     }
+    let width = face.finish(&look::Extras::default(), "obj-playhead").width;
+    boxes.extend(face.boxes);
+    lines.extend(face.lines);
     device_patcher(
         DeviceType::MidiEffect,
-        DevicePatcherOptions {
-            title: spec.name.clone(),
-            description: spec.about.clone(),
-            width: (16 + face.columns * 52).max(120) as f64,
-            boxes,
-            lines,
-        },
+        DevicePatcherOptions { title: spec.name.clone(), description: spec.about.clone(), width, boxes, lines },
     )
 }
