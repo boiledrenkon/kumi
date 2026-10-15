@@ -766,12 +766,20 @@ impl Run {
         Ok((read[0].as_f64().unwrap_or(-1.0), notes))
     }
 
-    /// Notes against where Live's song was: `song` gives the song position (beats) for a time in the clip. Each should
-    /// start on a sixteenth and play 60 plus its step (16 steps of a sixteenth). Says what's wrong, if anything. `bpm`:
-    /// the take's fastest tempo, for its milliseconds.
-    fn followed(&self, label: &str, notes: &[(i64, f64, f64)], song: impl Fn(f64) -> f64, expected: usize, bpm: f64) {
+    /// Notes against where Live's song was: `song` gives the song position (beats) for a time in the clip. From the
+    /// first note to the last there should be one on every sixteenth and no two within half a step, each on its line
+    /// and playing 60 plus its step (16 steps of a sixteenth). Says what's wrong, if anything. `bpm`: the take's fastest
+    /// tempo, for its milliseconds.
+    fn followed(&self, label: &str, notes: &[(i64, f64, f64)], song: impl Fn(f64) -> f64, bpm: f64) {
+        let (Some(first), Some(last)) = (notes.first().copied(), notes.last().copied()) else {
+            println!("  {label}: no notes");
+            self.fail(label);
+            return;
+        };
         let mut wrong = Vec::new();
+        let mut each = vec![0; ((last.1 - first.1) / 0.25).round() as usize + 1];
         for (pitch, start, _) in notes {
+            each[((start - first.1) / 0.25).round() as usize] += 1;
             let position = song(*start);
             let line = (position / 0.25).round() * 0.25;
             let off_ms = (position - line) * 60_000.0 / bpm;
@@ -780,22 +788,25 @@ impl Run {
                 wrong.push(format!("{pitch} at {start:.4} (song {position:.4}, {off_ms:+.2} ms, step {})", index + 1));
             }
         }
-        for pair in notes.windows(2) {
-            if (pair[1].1 - pair[0].1) * 60_000.0 / bpm < 1.0 {
-                wrong.push(format!("doubled at {:.4}", pair[0].1));
+        for (at, count) in each.iter().enumerate() {
+            if *count != 1 {
+                wrong.push(format!("{count} notes at {:.4}", first.1 + at as f64 * 0.25));
             }
         }
-        let count_ok = notes.len() + 1 >= expected && notes.len() <= expected + 1;
         println!(
-            "  {label}: {} notes (about {expected} due); {}",
+            "  {label}: {} notes, {}@{:.4} to {}@{:.4}; {}",
             notes.len(),
+            first.0,
+            first.1,
+            last.0,
+            last.1,
             if wrong.is_empty() {
-                "each on its sixteenth, playing its own step".to_string()
+                "one on every sixteenth between, each on its line, playing its own step".to_string()
             } else {
                 format!("{} wrong: {}", wrong.len(), wrong.iter().take(12).cloned().collect::<Vec<_>>().join("; "))
             }
         );
-        if !wrong.is_empty() || !count_ok {
+        if !wrong.is_empty() {
             self.fail(label);
             let all: Vec<String> = notes.iter().map(|(pitch, start, _)| format!("{pitch}@{start:.3}")).collect();
             println!("    notes: {}", all.join(" "));
@@ -875,15 +886,15 @@ impl Run {
         for length in [3.0, 3.5] {
             let setup = format!("song.loop_start = 0.0\nsong.loop_length = {length}\nsong.loop = True");
             let notes = self.session_take(&format!("loop {length}"), &item, &setup, &[], 12.0, stamp).await?;
-            self.followed(&format!("a loop of {length} beats, four times round"), &notes, |t| t % length, (12.0 / 0.25) as usize, BPM);
+            self.followed(&format!("a loop of {length} beats, four times round"), &notes, |t| t % length, BPM);
         }
         let notes = self
             .session_take("seven eight", &item, "song.signature_numerator = 7\nsong.signature_denominator = 8", &[], 8.0, stamp)
             .await?;
-        self.followed("7/8", &notes, |t| t, 32, BPM);
+        self.followed("7/8", &notes, |t| t, BPM);
         let notes =
             self.session_take("six eight", &item, "song.signature_numerator = 6\nsong.signature_denominator = 8", &[], 8.0, stamp).await?;
-        self.followed("6/8", &notes, |t| t, 32, BPM);
+        self.followed("6/8", &notes, |t| t, BPM);
         // A jump while playing, to beat 8, about 1.6 s in: the steps after it follow the song from there. Live jumps on
         // its audio buffer's first sample and takes a device's MIDI per buffer, and a note due in a buffer's last
         // signal vector goes out at the next buffer's start: so the step just before the jump can go out with the
@@ -904,8 +915,8 @@ impl Run {
                 if together > 0 {
                     println!("  the step before the jump went out with the landing's (due in the last vector of Live's buffer)");
                 }
-                self.followed("before the jump", &before, |t| t, before.len(), BPM);
-                self.followed("after the jump", &after, |t| t - at + 8.0, after.len(), BPM);
+                self.followed("before the jump", &before, |t| t, BPM);
+                self.followed("after the jump", &after, |t| t - at + 8.0, BPM);
             }
             None => {
                 let all: Vec<String> = notes.iter().map(|(pitch, start, _)| format!("{pitch}@{start:.3}")).collect();
@@ -917,16 +928,14 @@ impl Run {
         let ramp: Vec<(f64, String)> =
             (1..=40).map(|tick| (tick as f64 * 0.1, format!("song.tempo = {:.2}", 160.0 - 1.5 * tick as f64))).collect();
         let notes = self.session_take("ramp", &item, "song.tempo = 160.0", &ramp, 12.0, stamp).await?;
-        let expected = notes.last().map_or(0, |note| (note.1 / 0.25).round() as usize + 1);
-        self.followed("a tempo falling from 160 to 100", &notes, |t| t, expected, 160.0);
+        self.followed("a tempo falling from 160 to 100", &notes, |t| t, 160.0);
         // Tempos typed in while it plays: halved, quadrupled, and down and up again.
         let typed: Vec<(f64, String)> = [(1.0, 60.0), (2.5, 240.0), (3.5, 70.0), (4.5, 140.0), (5.5, 20.0)]
             .iter()
             .map(|(at, bpm)| (*at, format!("song.tempo = {bpm:.1}")))
             .collect();
         let notes = self.session_take("typed", &item, "", &typed, 13.0, stamp).await?;
-        let expected = notes.last().map_or(0, |note| (note.1 / 0.25).round() as usize + 1);
-        self.followed("tempos typed in: 120, 60, 240, 70, 140, 20", &notes, |t| t, expected, 240.0);
+        self.followed("tempos typed in: 120, 60, 240, 70, 140, 20", &notes, |t| t, 240.0);
         // Stopped mid-bar, then Space: Live plays again from its insert marker, the first note that step's, on time.
         for (label, stop, between) in [("restart", 3.185, ""), ("restart at six", 3.0, "song.current_song_time = 6.0")] {
             let (from, notes) = self.restart_take(label, &item, stop, between, stamp).await?;
@@ -944,7 +953,7 @@ impl Run {
             if !on_time {
                 self.fail(&label);
             }
-            self.followed(&label, &notes, |t| t, notes.len(), BPM);
+            self.followed(&label, &notes, |t| t, BPM);
         }
         Ok(())
     }

@@ -8,7 +8,8 @@
 //! - plugphasor~ is the beat's phase, exact while Live plays steadily. It only takes Live's word on a vector's first
 //!   sample, so it runs on past Live's loop until then; when Live's phase is behind its own (a jump, a loop, a start,
 //!   a tempo that falls) it holds still for up to a vector; while Live is stopped it holds (its reference says 0).
-//! - A tempo change moves the song position on or back a little, up to a few hundredths of a beat.
+//! - A tempo change moves the song position on or back by up to an audio buffer's worth of the change in its advance
+//!   (a few hundredths of a beat at Live's 512-sample buffer, more at its largest).
 //! - Live takes a device's MIDI once per audio buffer (several vectors), and Max's messages from a buffer's last vector
 //!   come too late for it: a note due there goes out at the next buffer's start, up to a vector late.
 //!
@@ -85,10 +86,12 @@ if (fresh > 0.5 && flag < 0.5) {
         if (abs(gap) > 1.5 * max(advance, told)) {
             position = said;
             anchored = 1;
-            if (bpm != t_bpm && abs(gap) < 1024 * abs(told - advance) + 2 * told) {
-                // A tempo change moves Live's song position on or back a little: a line it passed starts now, and
-                // one it goes back over doesn't start again (the clock keeps steps apart).
+            if (bpm != t_bpm && abs(gap) < 8192 * abs(told - advance) + 2 * told) {
+                // A tempo change moves Live's song position on or back by up to an audio buffer's worth of the change
+                // (Live's buffer is up to 2048 samples, 8192 to spare). On: the steps follow it, and the step it moved
+                // into starts now if it passed that step's line. Back: a line it goes back over doesn't start again.
                 late = max(gap, 0) / told + 1;
+                moved = gap > 0;
             } else {
                 // Live moved the song position.
                 moved = 1;
@@ -552,37 +555,6 @@ mod tests {
         (step.position - line) / (bpm / 60.0 / RATE)
     }
 
-    /// The grid lines of `division` the true song position reached for the first time between two samples, as
-    /// (sample, line); after a jump (the position more than `jump` beats from where it was), from where it landed.
-    fn lines_crossed(positions: &[(usize, f64)], division: f64, jump: f64) -> Vec<(usize, f64)> {
-        let mut lines = Vec::new();
-        let mut reached = f64::MIN;
-        if let Some(&(sample, now)) = positions.first() {
-            if (now - (now / division).round() * division).abs() < 1e-9 {
-                lines.push((sample, (now / division).round() * division));
-                reached = lines[0].1;
-            }
-        }
-        for pair in positions.windows(2) {
-            let ((_, was), (sample, now)) = (pair[0], pair[1]);
-            if (now - was).abs() > jump {
-                reached = f64::MIN;
-                let line = (now / division).floor() * division;
-                if (now - line).abs() < 1e-9 {
-                    lines.push((sample, line));
-                    reached = line;
-                }
-                continue;
-            }
-            let line = (now / division).floor() * division;
-            if line > was.min(now) && line <= now && line > reached + 1e-9 {
-                lines.push((sample, line));
-                reached = line;
-            }
-        }
-        lines
-    }
-
     #[test]
     fn steps_start_on_the_sample_their_line_falls_in_from_the_downbeat_at_play() {
         let steps = each_way(|way| {
@@ -769,8 +741,23 @@ mod tests {
         }
     }
 
+    /// The lines a song reached, as (sample, line): each the first time the song position is at or past it, so a line
+    /// the song goes back over isn't due again, and where it moves on past several at once only the one it's in is.
+    fn lines_reached(positions: &[(usize, f64)], division: f64) -> Vec<(usize, f64)> {
+        let mut lines = Vec::new();
+        let mut reached = f64::MIN;
+        for &(sample, now) in positions {
+            let line = (now / division + 1e-9).floor() * division;
+            if line > reached + 1e-9 {
+                lines.push((sample, line));
+                reached = line;
+            }
+        }
+        lines
+    }
+
     /// The steps of a song whose tempo `tempo` sets before each vector (by seconds in), checked line by line: every
-    /// line the song reaches gets one step, in order, on its sample or (where a tempo change moved the song on past it)
+    /// line the song reaches gets one step, its own, on its sample or (where a tempo change moved the song on past it)
     /// on the vector it moved.
     fn every_line_once(label: &str, shift: f64, from: f64, samples: usize, tempo: impl Fn(f64) -> Option<f64>) {
         for delayed in [false, true] {
@@ -786,12 +773,7 @@ mod tests {
                     }
                 }
             });
-            let lines = lines_crossed(&positions, 0.25, 0.3);
-            let missing: Vec<&(usize, f64)> = lines
-                .iter()
-                .filter(|(_, line)| !steps.iter().any(|step| (step.position - line).abs() < 0.3 && (step.position - line) >= -1e-9))
-                .collect();
-            assert!(missing.is_empty(), "{label}, shift {shift}: no step for {missing:?}");
+            let lines = lines_reached(&positions, 0.25);
             assert_eq!(steps.len(), lines.len(), "{label}, shift {shift}: {steps:?}\n{lines:?}");
             for (step, (sample, line)) in steps.iter().zip(&lines) {
                 assert!(step.position - line >= -1e-9, "{label}, shift {shift}: early: {step:?} for {line}");
@@ -799,16 +781,17 @@ mod tests {
                     step.sample >= *sample && step.sample - sample <= 1,
                     "{label}, shift {shift}: {step:?} for line {line} at {sample}"
                 );
+                assert_eq!(step.index, ((line / 0.25).round() as usize) % 16, "{label}, shift {shift}: {step:?} for line {line}");
             }
-            assert!(steps.windows(2).all(|pair| pair[1].index == (pair[0].index + 1) % 16), "{label}, shift {shift}: {steps:?}");
         }
     }
 
     #[test]
     fn a_tempo_change_of_any_size_gives_every_line_its_step() {
-        // Typed in mid-step: halved, doubled, and the far ends of Live's range; Live moves the song position a little
-        // each way when its tempo changes, by how much it changes.
-        for (from, to) in [
+        // Typed in mid-step: halved, doubled, and the far ends of Live's range. Live moves the song position a little
+        // each way when its tempo changes, by how much it changes, up to its audio buffer's worth (512 samples here,
+        // up to 2048 at Live's largest). A thread a change.
+        let changes = [
             (120.0_f64, 60.0_f64),
             (120.0, 240.0),
             (140.0, 70.0),
@@ -817,26 +800,39 @@ mod tests {
             (80.0, 170.0),
             (20.0, 999.0),
             (999.0, 20.0),
-        ] {
-            for shift in [0.0, 400.0, -400.0] {
-                let at = 1.13 * 60.0 / from;
-                every_line_once(&format!("{from} to {to}"), shift, from, (RATE * (at + 4.0 * 60.0 / to.min(from) + 0.5)) as usize, |t| {
-                    Some(if t >= at { to } else { from })
+        ];
+        std::thread::scope(|scope| {
+            for (from, to) in changes {
+                scope.spawn(move || {
+                    for shift in [0.0, 400.0, -400.0, 2048.0, -2048.0, 4096.0] {
+                        let at = 1.13 * 60.0 / from;
+                        every_line_once(
+                            &format!("{from} to {to}"),
+                            shift,
+                            from,
+                            (RATE * (at + 4.0 * 60.0 / to.min(from) + 0.5)) as usize,
+                            |t| Some(if t >= at { to } else { from }),
+                        );
+                    }
                 });
             }
-        }
+        });
     }
 
     #[test]
     fn a_tempo_ramp_gives_every_line_its_step() {
         // Down from 160 to 100 BPM in steps every tenth of a second, as automation does, and up again.
-        for (from, to) in [(160.0, 100.0), (100.0, 160.0)] {
-            for shift in [0.0, 400.0] {
-                every_line_once(&format!("ramp {from} to {to}"), shift, from, (RATE * 6.0) as usize, |t| {
-                    Some(from + (to - from) * ((t / 0.1).floor() * 0.1 / 4.0).min(1.0))
-                });
+        std::thread::scope(|scope| {
+            for (from, to) in [(160.0, 100.0), (100.0, 160.0)] {
+                for shift in [0.0, 400.0, 2048.0, -2048.0] {
+                    scope.spawn(move || {
+                        every_line_once(&format!("ramp {from} to {to}"), shift, from, (RATE * 6.0) as usize, |t| {
+                            Some(from + (to - from) * ((t / 0.1).floor() * 0.1 / 4.0).min(1.0))
+                        });
+                    });
+                }
             }
-        }
+        });
     }
 
     #[test]
