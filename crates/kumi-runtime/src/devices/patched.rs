@@ -93,8 +93,44 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
             }
         }
     }
-    let controls: BTreeMap<String, String> =
+    let mut controls: BTreeMap<String, String> =
         spec.controls.iter().map(|control| (control.name().to_string(), face.add_alone(control))).collect();
+    // A step lane the patch reads by its name ("Gate" for "Gate 1" … "Gate 16"): the step's index in, that step's value
+    // out. Its controls' values gather in a [pak], which a [zl.lookup] reads by index. The lanes read this way, or every
+    // lane when the patch lights the playhead, are the face's step grid.
+    let named: Vec<&str> = notation
+        .cords
+        .iter()
+        .flat_map(|link| [&link.from, &link.to])
+        .filter_map(|end| match end {
+            End::Control(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let lights = notation.cords.iter().any(|link| matches!(&link.to, End::Outside(name) if name == "playhead"));
+    let candidates = look::lanes(&spec.controls);
+    let read: Vec<String> = candidates
+        .iter()
+        .map(|(lane, _)| lane.clone())
+        .filter(|lane| named.contains(&lane.as_str()) && !controls.contains_key(lane))
+        .collect();
+    let grid: Vec<String> =
+        if read.is_empty() && lights { candidates.iter().map(|(lane, _)| lane.clone()).collect() } else { read.clone() };
+    for (at, (lane, members)) in candidates.into_iter().enumerate() {
+        if !read.contains(&lane) {
+            continue;
+        }
+        let whole = members.iter().all(|index| !matches!(spec.controls[*index], super::spec::Control::Number(_)));
+        let zero = if whole { "0" } else { "0." };
+        let (gather, read) = (format!("obj-lane-{}", at + 1), format!("obj-lane-{}-step", at + 1));
+        boxes.push(object(&gather, &format!("pak {}", vec![zero; members.len()].join(" ")), members.len(), 1, &[""]));
+        boxes.push(object(&read, "zl.lookup", 2, 2, &["", ""]));
+        for (step, index) in members.iter().enumerate() {
+            lines.push(Line::new(&controls[spec.controls[*index].name()], 0, &gather, step as u32));
+        }
+        lines.push(Line::new(&gather, 0, &read, 1));
+        controls.insert(lane, read);
+    }
     for control in kumis {
         let param = if control.name() == "Mix" { "kumi_mix" } else { "kumi_output" };
         face.add(control, param, &["obj-out"]);
@@ -196,6 +232,7 @@ pub fn patched_device(spec: &PatchSpec, reference: Option<&Reference>) -> (Value
     let extras = look::Extras {
         pictures: pictures.iter().map(|_| (VIEW[0], VIEW[1])).collect(),
         map_page: (sources > 0).then(|| mapping::size(sources, spec.map.slots)),
+        lanes: grid,
     };
     let laid = face.finish(&extras, PLAYHEAD);
     let mut main: Vec<String> = face.main_page();
@@ -536,6 +573,12 @@ mod tests {
             "pass -> out\n",
         );
         assert!(rules_broken(fine).is_empty(), "{:?}", rules_broken(fine));
+        // An LFO that sends a controller in milliseconds times no notes.
+        let cc = "[metro 10 @active 1] -> [snapshot~] -> [ctlout 1]\n[cycle~ 0.5] -> [snapshot~]\nin -> out\n";
+        assert!(rules_broken(cc).is_empty(), "{:?}", rules_broken(cc));
+        let formatted =
+            "form = [midiformat]\nclock = [metro 125 @active 1]\nclock -> [i 74] -> cc = [pack 74 0]\ncc -> form.2\nform -> out\n";
+        assert!(rules_broken(formatted).is_empty(), "a controller formatted for midiformat's controller inlet");
         // Kumi's own clock and notes: plugsync~ and a sig~ inside them, all made the tested way.
         let kit = concat!(
             "clock = [kumi.clock 16n 8n]\n",
@@ -559,6 +602,42 @@ mod tests {
             None,
         );
         assert!(found.wrong.is_empty(), "{:?}", found.wrong);
+    }
+
+    #[test]
+    fn a_step_lane_is_read_by_its_name_and_its_steps_need_no_cords_of_their_own() {
+        let mut controls: Vec<Control> = Vec::new();
+        for step in 1..=8 {
+            controls.push(Control::Switch(crate::devices::spec::SwitchControl {
+                name: format!("Gate {step}"),
+                default: true,
+                place: Default::default(),
+            }));
+        }
+        for step in 1..=8 {
+            controls.push(knob(&format!("Note {step}"), 0.0, 127.0, Unit::None));
+        }
+        let patch = concat!(
+            "clock = [kumi.clock 16n @length 8]\n",
+            "clock -> step = [t i i i]\n",
+            "step.2 -> \"Gate\" -> open = [gate]\n",
+            "step.1 -> playhead\n",
+            "step -> \"Note\" -> open.1\n",
+            "open -> notes = [kumi.notes]\n",
+            "clock.1 -> [* 0.5] -> notes.2\n",
+            "notes -> out\n",
+        );
+        let (device, found) = patched_device(&spec(DeviceType::MidiEffect, controls, patch), None);
+        assert!(found.wrong.is_empty(), "{:?}", found.wrong);
+        let patcher = Patcher::read(&device, &NoFiles);
+        let gather: Vec<&str> = patcher.boxes.iter().map(|item| item.text()).filter(|text| text.starts_with("pak ")).collect();
+        assert_eq!(gather, ["pak 0 0 0 0 0 0 0 0", "pak 0. 0. 0. 0. 0. 0. 0. 0."], "a switch lane's values are whole, a number lane's not");
+        let note_8 = patcher.boxes.iter().find(|item| item.str("varname") == "Note 8").unwrap();
+        let into: Vec<usize> = patcher.cords.iter().filter(|cord| cord.from == note_8.id()).map(|cord| cord.inlet).collect();
+        assert_eq!(into, [7], "step 8 into the lane's eighth place");
+        // The playhead lights the step grid: its step numbers are on the face.
+        assert!(patcher.cords.iter().any(|cord| cord.to == PLAYHEAD));
+        assert_eq!(patcher.boxes.iter().filter(|item| item.maxclass() == "live.text" && item.str("text") == "8").count(), 1);
     }
 
     #[test]

@@ -8,8 +8,8 @@
 //! - **Looks.** A number is a dial with its name and value, a small box of its value under its name, or a fader. A
 //!   choice is a menu, or its options as tabs. A switch is a button with its name, lit while on, and a trigger is a
 //!   button that's on only while it's pressed.
-//! - **Steps.** Controls named for a step ("Gate 1" … "Gate 16", or "Step 1 Note") make a step grid: a row a lane, a
-//!   column a step. The playing step lights when the patch sends its index to `playhead`.
+//! - **Steps.** Controls named for a step ("Gate 1" … "Gate 16", or "Step 1 Note") that the patch reads by step make a
+//!   step grid: a row a lane, a column a step. The playing step lights when the patch sends its index to `playhead`.
 //! - **Pictures.** What a [v8ui] draws gets a section of its own.
 //! - **Pages.** A device that modulates has a page of mapping slots. Tabs at the face's left edge show its main page or
 //!   its Map page, and switching them adds nothing to Live's undo history or automation.
@@ -142,6 +142,9 @@ pub enum Mark {
 pub struct Extras {
     pub pictures: Vec<(f64, f64)>,
     pub map_page: Option<(f64, f64)>,
+    /// The step lanes shown as a step grid, by name: those the patch reads by step, or every lane when it sends the
+    /// playing step to playhead. Numbered controls are a grid only then ("Band 1" … "Band 4" stay controls).
+    pub lanes: Vec<String>,
 }
 
 /// The face laid out: each control's spot (by its index), the marks, each picture's rect, the mapping page's, and the
@@ -172,7 +175,7 @@ fn step_of(name: &str) -> Option<(usize, String)> {
 
 /// The step lanes among the controls: each lane's name and its controls' indexes by step, for lanes of the same type
 /// whose steps run 1 to N without a gap (N at least 4), all lanes of one grid with the same N.
-fn lanes(controls: &[Control]) -> Vec<(String, Vec<usize>)> {
+pub fn lanes(controls: &[Control]) -> Vec<(String, Vec<usize>)> {
     let mut found: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
     for (index, control) in controls.iter().enumerate() {
         if let Some((step, lane)) = step_of(control.name()) {
@@ -204,7 +207,7 @@ fn lanes(controls: &[Control]) -> Vec<(String, Vec<usize>)> {
 
 /// Lays a face out: `controls` in their groups (Kumi's own Mix and Output among them, in their group), then `extras`.
 pub fn lay_out(controls: &[Control], extras: &Extras) -> Face {
-    let lanes = lanes(controls);
+    let lanes: Vec<(String, Vec<usize>)> = lanes(controls).into_iter().filter(|(lane, _)| extras.lanes.contains(lane)).collect();
     let in_grid: Vec<bool> = (0..controls.len()).map(|index| lanes.iter().any(|(_, steps)| steps.contains(&index))).collect();
     // The sections, in the order their first control was given; the step grid where its first step was.
     let mut sections: Vec<(String, Vec<usize>)> = Vec::new();
@@ -656,7 +659,7 @@ mod tests {
             controls.push(number(&format!("Step {step:02} Note"), ""));
         }
         controls.push(number("Velocity 3", ""));
-        let face = lay_out(&controls, &Extras::default());
+        let face = lay_out(&controls, &Extras { lanes: vec!["Gate".into(), "Note".into()], ..Extras::default() });
         tidy(&face);
         assert!(face.playhead);
         let lanes: Vec<&str> =
@@ -671,7 +674,7 @@ mod tests {
     #[test]
     fn a_mapping_page_stands_in_the_main_page_s_place_with_tabs_to_switch() {
         let controls = vec![number("Rate", "LFO"), number("Depth", "LFO")];
-        let face = lay_out(&controls, &Extras { pictures: vec![(160.0, 150.0)], map_page: Some((260.0, 158.0)) });
+        let face = lay_out(&controls, &Extras { pictures: vec![(160.0, 150.0)], map_page: Some((260.0, 158.0)), lanes: Vec::new() });
         let page = face.map_page.unwrap();
         let tabs = face.tabs.unwrap();
         assert!(tabs[0] + tabs[2] <= page[0], "the tabs left of the pages");
@@ -685,6 +688,14 @@ mod tests {
         let controls: Vec<Control> = (0..40).map(|n| number(&format!("Knob {n}x"), if n < 20 { "A" } else { "B" })).collect();
         let face = lay_out(&controls, &Extras::default());
         tidy(&face);
+    }
+
+    #[test]
+    fn numbered_controls_the_patch_doesnt_read_by_step_stay_controls() {
+        let controls: Vec<Control> = (1..=4).map(|band| number(&format!("Band {band} Freq"), "EQ")).collect();
+        let face = lay_out(&controls, &Extras::default());
+        tidy(&face);
+        assert!(!face.playhead && face.spots.iter().all(|spot| !spot.step), "four bands are four dials");
     }
 
     #[test]

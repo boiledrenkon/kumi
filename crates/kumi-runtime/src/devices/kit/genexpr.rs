@@ -1,7 +1,7 @@
 //! A GenExpr interpreter for the part of the language Kumi's own building blocks are written in, so their tests run the
 //! very code a device ships, one sample at a time. It isn't Max's compiler. It reads:
-//! - Param and History declarations;
-//! - assignments (=, +=, -=, *=, /=) and if/else;
+//! - Param, History and Buffer declarations;
+//! - assignments (=, +=, -=, *=, /=), if/else, and poke(buffer, value, index) into a Buffer;
 //! - expressions of numbers, names and in1…inN, using + - * / %, comparisons, && || !, and ?:;
 //! - the operators the building blocks call.
 //!
@@ -85,6 +85,8 @@ enum Expr {
 enum Statement {
     Assign(String, String, Expr),
     If(Expr, Vec<Statement>, Vec<Statement>),
+    /// poke(buffer, value, index): writes into a Buffer.
+    Poke(String, Expr, Expr),
 }
 
 struct Parser {
@@ -148,6 +150,22 @@ impl Parser {
             return Statement::If(test, then, otherwise);
         }
         let target = self.name();
+        if target == "poke" {
+            self.expect("(");
+            let buffer = self.name();
+            self.expect(",");
+            let value = self.expression();
+            self.expect(",");
+            let index = self.expression();
+            // A channel (and more) may follow; the building blocks write channel 0.
+            while self.symbol(",") {
+                self.next();
+                self.expression();
+            }
+            self.expect(")");
+            self.expect(";");
+            return Statement::Poke(buffer, value, index);
+        }
         let operator = match self.next() {
             Token::Symbol(symbol) if ["=", "+=", "-=", "*=", "/="].contains(&symbol.as_str()) => symbol,
             other => panic!("expected an assignment to {target}, not {other:?}"),
@@ -246,6 +264,7 @@ enum Op {
 enum Step {
     Assign(Name, u8, Op),
     If(Op, Vec<Step>, Vec<Step>),
+    Poke(usize, Op, Op),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -257,6 +276,8 @@ enum Kind {
 
 /// One gen~ codebox, run a sample at a time.
 pub struct Gen {
+    /// Each Buffer the code declares, by name, and what it holds (what a [peek~] of its buffer~ reads).
+    pub buffers: Vec<(String, Vec<f64>)>,
     names: Vec<String>,
     kinds: Vec<Kind>,
     values: Vec<f64>,
@@ -273,6 +294,7 @@ impl Gen {
     pub fn new(code: &str, delayed: bool) -> Gen {
         let mut parser = Parser { tokens: tokens(code), at: 0 };
         let mut gen = Gen {
+            buffers: Vec::new(),
             names: Vec::new(),
             kinds: Vec::new(),
             values: Vec::new(),
@@ -284,6 +306,13 @@ impl Gen {
         };
         let mut statements = Vec::new();
         while parser.peek().is_some() {
+            if parser.word("Buffer") {
+                parser.next();
+                let name = parser.name();
+                parser.expect(";");
+                gen.buffers.push((name, vec![0.0; 16]));
+                continue;
+            }
             if parser.word("Param") || parser.word("History") {
                 let kind = if parser.name() == "Param" { Kind::Param } else { Kind::History };
                 loop {
@@ -365,6 +394,10 @@ impl Gen {
                 let otherwise = otherwise.iter().map(|statement| self.step(statement)).collect();
                 Step::If(test, then, otherwise)
             }
+            Statement::Poke(buffer, value, index) => {
+                let at = self.buffers.iter().position(|(name, _)| name == buffer).unwrap_or_else(|| panic!("no Buffer {buffer}"));
+                Step::Poke(at, self.op(value), self.op(index))
+            }
         }
     }
 
@@ -424,6 +457,12 @@ impl Gen {
                     } else {
                         self.steps(otherwise, run);
                     }
+                }
+                Step::Poke(at, value, index) => {
+                    let (value, index) = (self.eval(value, run), self.eval(index, run));
+                    let index = index.floor();
+                    assert!(index >= 0.0 && (index as usize) < self.buffers[*at].1.len(), "poke past the buffer: {index}");
+                    self.buffers[*at].1[index as usize] = value;
                 }
                 Step::Assign(target, operator, value) => {
                     let value = self.eval(value, run);
@@ -544,6 +583,14 @@ mod tests {
         assert_eq!(gen.tick(&[2.0], 3), vec![1.0, -14.0, 10.0], "5 % 4 is 1; the History kept its value");
         gen.set("rate", 0.0);
         assert_eq!(gen.tick(&[2.0], 3)[0], 1.0);
+    }
+
+    #[test]
+    fn poke_writes_a_buffer_that_reads_back_at_once() {
+        let mut gen = Gen::new("Buffer memory;\nHistory n(0);\nn = n + 1;\npoke(memory, n * 10, 1, 0);\nout1 = n;\n", false);
+        gen.tick(&[], 1);
+        gen.tick(&[], 1);
+        assert_eq!(gen.buffers[0].1[1], 20.0);
     }
 
     #[test]

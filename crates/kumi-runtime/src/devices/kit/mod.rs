@@ -42,7 +42,7 @@ fn decimal(value: f64) -> String {
 
 /// What a building block's box (its text, as the model wrote it) is made of: the [p]'s text and the patch in it, in
 /// Kumi's notation; or why it can't be made, said by the box's line.
-pub fn expand(text: &str) -> Result<(String, String), String> {
+pub fn expand(text: &str, line: usize) -> Result<(String, String), String> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let (class, rest) = words.split_first().map(|(class, rest)| (*class, rest)).unwrap_or(("", &[]));
     match class {
@@ -52,7 +52,7 @@ pub fn expand(text: &str) -> Result<(String, String), String> {
             }
             Ok((format!("p {class}"), transport_patch(&["position", "playing", "tempo"])))
         }
-        "kumi.clock" => clock_patch(rest).map(|patch| (format!("p {class}"), patch)),
+        "kumi.clock" => clock_patch(rest, line).map(|patch| (format!("p {class}"), patch)),
         "kumi.notes" => {
             let channel = match rest {
                 [] => 1,
@@ -119,7 +119,7 @@ fn transport_patch(outlets: &[&str]) -> String {
 
 /// [kumi.clock]: its arguments are the divisions its first inlet's index picks from (note values: 16n, 8nt, 4nd…, 16n
 /// by default), with @length (steps) and @swing (percent, 50 straight to 75) to start with.
-fn clock_patch(arguments: &[&str]) -> Result<String, String> {
+fn clock_patch(arguments: &[&str], line: usize) -> Result<String, String> {
     let mut divisions: Vec<(String, f64)> = Vec::new();
     let (mut length, mut swing) = (16.0, 50.0);
     let mut words = arguments.iter();
@@ -155,6 +155,8 @@ fn clock_patch(arguments: &[&str]) -> Result<String, String> {
         .replace("Param length(16);", &format!("Param length({});", decimal(length)))
         .replace("Param swing(0);", &format!("Param swing({});", decimal((swing - 50.0) / 50.0)));
     let beats: Vec<String> = divisions.iter().map(|(_, beats)| decimal(*beats)).collect();
+    // The clock's buffer: its own in each copy of the device (---) and for each clock in it (its line).
+    let memory = format!("---kumi.clock.{line}");
     let mut patch = String::from(concat!(
         "# Kumi's clock: steps on Live's grid, each on the sample it's due. In: the division (an index into ",
         "the list below, or beats followed by a step's length in beats), swing (percent: 50 straight to 75) and the ",
@@ -187,20 +189,28 @@ fn clock_patch(arguments: &[&str]) -> Result<String, String> {
         "grid -> [prepend division] -> clock\n",
         "swing -> [- 50.] -> [* 0.02] -> [prepend swing] -> clock\n",
         "length -> [prepend length] -> clock\n",
-        "# A step: its length first, then its index, at the sample it starts.\n",
+        "# A step: its length first, then its index, on the sample it starts. The clock writes both to its buffer\n",
+        "# then, and peek~ reads them when edge~ answers.\n",
         "starts = [edge~]\n",
         "clock -> starts\n",
         "take = [t b b]\n",
         "starts -> take\n",
-        "index = [snapshot~]\n",
-        "ms = [snapshot~]\n",
-        "clock.1 -> index\n",
-        "clock.2 -> ms\n",
-        "take.1 -> ms\n",
-        "take -> index\n",
         "step = [outlet]\n",
         "long = [outlet]\n",
         "plays = [outlet]\n",
+    ));
+    patch.push_str(&format!(
+        concat!(
+            "memory = [buffer~ {memory} @samps 2]\n",
+            "[loadmess memory {memory}] -> clock\n",
+            "index = [peek~ {memory}]\n",
+            "ms = [peek~ {memory}]\n",
+        ),
+        memory = memory
+    ));
+    patch.push_str(concat!(
+        "take.1 -> (1) -> ms\n",
+        "take -> (0) -> index\n",
         "index -> [i] -> step\n",
         "ms -> long\n",
         "runs = [edge~]\n",
@@ -270,26 +280,27 @@ mod tests {
     #[test]
     fn each_building_block_is_a_patch_that_reads_whole() {
         for text in ["kumi.transport", "kumi.clock", "kumi.clock 16n 8n 8nt @length 12 @swing 58", "kumi.notes", "kumi.notes 10"] {
-            let (head, patch) = expand(text).unwrap();
+            let (head, patch) = expand(text, 3).unwrap();
             assert!(head.starts_with("p kumi."), "{head}");
             let (notation, found) = parse(&patch);
             assert!(found.is_empty(), "{text}: {found:?}");
             assert!(notation.boxes.iter().any(|item| matches!(item.what, What::Object(ref t) if t == "inlet" || t == "outlet")));
         }
-        let (_, clock) = expand("kumi.clock 16n 8n @length 12 @swing 62.5").unwrap();
+        let (_, clock) = expand("kumi.clock 16n 8n @length 12 @swing 62.5", 3).unwrap();
         assert!(clock.contains("Param division(0.25);") && clock.contains("Param length(12.);") && clock.contains("Param swing(0.25);"));
         assert!(clock.contains("[zl.lookup 0.25 0.5]"), "{clock}");
-        let (_, plain) = expand("kumi.clock").unwrap();
+        let (_, plain) = expand("kumi.clock", 3).unwrap();
+        assert!(plain.contains("[buffer~ ---kumi.clock.3 @samps 2]") && plain.contains("[loadmess memory ---kumi.clock.3]"), "{plain}");
         assert!(plain.contains("[zl.lookup 4. 2. 1. 0.5 0.25 0.125]") && plain.contains("Param division(0.25);"));
-        assert!(expand("kumi.notes 10").unwrap().1.contains("[midiformat 10]"));
+        assert!(expand("kumi.notes 10", 3).unwrap().1.contains("[midiformat 10]"));
     }
 
     #[test]
     fn a_building_block_given_what_it_cant_take_says_what_it_takes() {
-        assert!(expand("kumi.clock 3n").unwrap_err().contains("note values"));
-        assert!(expand("kumi.clock @length").unwrap_err().contains("@length needs a number"));
-        assert!(expand("kumi.notes 17").unwrap_err().contains("1 to 16"));
-        assert!(expand("kumi.transport 4n").unwrap_err().contains("no arguments"));
-        assert!(expand("kumi.lfo").unwrap_err().contains("[kumi.transport], [kumi.clock], [kumi.notes]"));
+        assert!(expand("kumi.clock 3n", 1).unwrap_err().contains("note values"));
+        assert!(expand("kumi.clock @length", 1).unwrap_err().contains("@length needs a number"));
+        assert!(expand("kumi.notes 17", 1).unwrap_err().contains("1 to 16"));
+        assert!(expand("kumi.transport 4n", 1).unwrap_err().contains("no arguments"));
+        assert!(expand("kumi.lfo", 1).unwrap_err().contains("[kumi.transport], [kumi.clock], [kumi.notes]"));
     }
 }

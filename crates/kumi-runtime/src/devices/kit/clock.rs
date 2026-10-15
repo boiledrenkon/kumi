@@ -42,6 +42,7 @@ History t_zero(0);
 History t_starting(0);
 History t_offset(0);
 History t_confirmed(0);
+History t_held(0);
 phase = in1;
 heard = in2;
 was_phase = t_phase;
@@ -55,6 +56,8 @@ zero = t_zero;
 starting = t_starting;
 offset = t_offset;
 confirmed = t_confirmed;
+held = t_held;
+hold = 0;
 moved = 0;
 late = 0;
 position = was_position;
@@ -102,11 +105,27 @@ if (playing < 0.5) {
     }
     off = phase - (predicted - floor(predicted));
     off = off - floor(off + 0.5);
-    if (abs(off) < 0.0002) {
+    if (phase == 0) {
+        // The phase is exactly 0: Live stopped (plugphasor~ is 0 while stopped), or a beat's line fell on this very
+        // sample. The song position moves on as it was, nothing starts on this sample, and the next sample says which:
+        // still 0 is stopped.
+        zero = zero + 1;
+        position = predicted;
+        hold = 1;
+        if (zero > 1.5) {
+            playing = 0;
+            sure = 0;
+            position = heard;
+        }
+    } else if (abs(off) < min(0.0002, advance * 0.5)) {
         // Moving as it was; a tempo change moves the phase on a little more or less.
         position = predicted + off;
         advance = max(advance + off, 0.0000001);
         zero = 0;
+        if (held > 0.5) {
+            // A step due on the sample held at 0 starts now, a sample late.
+            late = 1;
+        }
         if (looped > 0.5 && sure > 0.5) {
             // The steps follow the song position back to the loop's start.
             moved = 1;
@@ -142,16 +161,6 @@ if (playing < 0.5) {
             late = vectorsize * 4;
             confirmed = 0;
         }
-    } else if (phase == 0) {
-        // The phase went to 0: Live stopped, or it jumped to a whole beat. The next sample says which.
-        zero = zero + 1;
-        position = was_position;
-        sure = 0;
-        waited = 0;
-        confirmed = 0;
-        if (zero > 1.5) {
-            playing = 0;
-        }
     } else {
         // The phase jumped: Live moved the song position. plugsync~ gives its whole beats a vector or two later.
         position = whole + phase;
@@ -172,9 +181,10 @@ t_zero = zero;
 t_starting = starting;
 t_offset = offset;
 t_confirmed = confirmed;
+t_held = hold;
 out1 = position;
 out2 = playing;
-out3 = sure;
+out3 = sure * (1 - hold);
 out4 = late;
 out5 = advance * 60 * samplerate;
 out6 = moved;
@@ -183,20 +193,28 @@ out6 = moved;
 /// The clock's GenExpr: in1–in6 are the transport's outlets; Params set a step's length in beats (division), how late
 /// every second step comes as a fraction of a step (swing, 0 to 0.5) and the steps before the pattern starts again
 /// (length). out1: 1 on the sample a step starts; out2: that step's index, from 0; out3: its length in milliseconds at
-/// the tempo now; out4: 1 while Live plays.
+/// the tempo then; out4: 1 while Live plays.
+///
+/// Each step's index and length also go into the Buffer `memory` (samples 0 and 1) on the sample it starts, for the
+/// patch to read with [peek~] when edge~ answers the pulse. snapshot~ can't be used for them: in Max for Live it reads
+/// the first sample of its vector, before a step that starts inside it.
 pub const CLOCK: &str = r#"// Made by Kumi: the clock's steps, each on the sample it's due (fixed).
 // in1 to in6: Kumi's transport (the song position in beats, playing, sure, how late, the tempo, moved).
 Param division(0.25);
 Param swing(0);
 Param length(16);
+Buffer memory;
 History c_count(-1);
 History c_index(0);
-History c_since(1000000000);
 History c_shortest(0.25);
 History c_follow(1);
 History c_keep(0);
 History c_pair(-1);
 History c_second(0);
+History c_length(0);
+History c_beats(1000000000);
+History c_each(0);
+History c_fired_pair(-1);
 position = in1;
 playing = in2;
 sure = in3;
@@ -205,12 +223,14 @@ tempo = in5;
 moved = in6;
 was_count = c_count;
 index = c_index;
-since_fire = c_since + 1;
 was_shortest = c_shortest;
 follow = c_follow;
 keep = c_keep;
 was_pair = c_pair;
 was_second = c_second;
+step_ms = c_length;
+was_each = c_each;
+fired_pair = c_fired_pair;
 if (playing < 0.5) {
     follow = 1;
     keep = 0;
@@ -218,6 +238,7 @@ if (playing < 0.5) {
 if (moved > 0.5) {
     follow = 1;
     keep = moved > 1.5;
+    fired_pair = -1;
 }
 each = max(division, 0.001);
 amount = clamp(swing, 0, 0.5);
@@ -233,13 +254,23 @@ begun = pairs * pair + second * offbeat;
 since = position - begun;
 per_sample = max(tempo, 1) / 60 / samplerate;
 tolerance = (late + 1.5) * per_sample;
-fewest = min(shortest, was_shortest) / per_sample - 1.5;
-// A swing change can move the second step of a pair to before the sample now: it starts now, not never.
-swung = sure > 0.5 && pairs == was_pair && second > 0.5 && was_second < 0.5;
+// How far apart in beats steps are kept, and how many beats have passed since the last: beats, not samples, so a
+// tempo that falls between two steps doesn't hold the second back.
+since_beats = c_beats + per_sample;
+fewest = min(shortest, was_shortest) - 1.5 * per_sample;
+same_grid = abs(each - was_each) < 0.0000001;
+if (same_grid < 0.5) {
+    fired_pair = -1;
+}
+// A swing change can move the second step of a pair to before the sample now: it starts now, not never. Only with
+// the division as it was: another division's pairs are other pairs.
+swung = sure > 0.5 && same_grid > 0.5 && pairs == was_pair && second > 0.5 && was_second < 0.5;
 due = since < tolerance || swung;
+// A pair's second step starts once, however the swing moves it.
+again = second > 0.5 && pairs == fired_pair;
 fire = 0;
-if (playing > 0.5 && sure > 0.5 && due && (count != was_count || follow > 0.5)) {
-    if ((follow > 0.5 && keep < 0.5) || since_fire >= fewest) {
+if (playing > 0.5 && sure > 0.5 && due && again < 0.5 && (count != was_count || follow > 0.5)) {
+    if ((follow > 0.5 && keep < 0.5) || since_beats >= fewest) {
         fire = 1;
     }
 }
@@ -252,31 +283,44 @@ if (fire > 0.5) {
             index = 0;
         }
     }
-    since_fire = 0;
+    // Measured from the step's line, not the sample it started on (a step after a start or a jump can start late);
+    // a second step the swing moved behind the sample now counts from now.
+    since_beats = 0;
+    if (since < tolerance) {
+        since_beats = since;
+    }
     was_shortest = shortest;
     follow = 0;
     keep = 0;
+    if (second > 0.5) {
+        fired_pair = pairs;
+    }
+    step_ms = offbeat * 60000 / max(tempo, 1);
+    if (second > 0.5) {
+        step_ms = shortest * 60000 / max(tempo, 1);
+    }
+    poke(memory, index, 0, 0);
+    poke(memory, step_ms, 1, 0);
 }
 if (sure > 0.5) {
     was_count = count;
     was_pair = pairs;
     was_second = second;
 }
-beats = offbeat;
-if (second > 0.5) {
-    beats = shortest;
-}
 c_count = was_count;
 c_index = index;
-c_since = since_fire;
 c_shortest = was_shortest;
 c_follow = follow;
 c_keep = keep;
 c_pair = was_pair;
 c_second = was_second;
+c_length = step_ms;
+c_beats = since_beats;
+c_each = each;
+c_fired_pair = fired_pair;
 out1 = fire;
 out2 = index;
-out3 = beats * 60000 / max(tempo, 1);
+out3 = step_ms;
 out4 = playing;
 "#;
 
@@ -356,13 +400,18 @@ mod tests {
             device.clock.set("length", length);
             device
         }
-        /// One sample: whether a step starts, its index and its length in ms, and where the true song position was.
+        /// One sample: whether a step starts, its index and its length in ms (read from the clock's buffer, as the
+        /// patch's peek~ reads them once the vector is done), and where the true song position was.
         fn tick(&mut self, live: &mut Live) -> (bool, f64, f64, f64) {
             let truth = live.position;
             let (phase, heard) = live.tick();
             let transport = self.transport.tick(&[phase, heard], 6);
             let clock = self.clock.tick(&transport, 4);
-            (clock[0] > 0.5, clock[1], clock[2], truth)
+            let memory = &self.clock.buffers[0].1;
+            if clock[0] > 0.5 {
+                assert_eq!((memory[0], memory[1]), (clock[1], clock[2]), "the buffer holds the step that starts");
+            }
+            (clock[0] > 0.5, memory[0], memory[1], truth)
         }
     }
 
@@ -623,6 +672,131 @@ mod tests {
         assert_eq!(&indices[..11], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         assert_eq!(indices[11], 0, "{indices:?}");
         assert!(indices[11..].windows(2).all(|pair| pair[1] == (pair[0] + 1) % 8), "{indices:?}");
+    }
+
+    /// The grid lines of `division` the true song position crossed between two samples, as (sample, line).
+    fn lines_crossed(positions: &[(usize, f64)], division: f64) -> Vec<(usize, f64)> {
+        positions
+            .windows(2)
+            .filter_map(|pair| {
+                let line = (pair[1].1 / division).floor() * division;
+                (line > pair[0].1 && line <= pair[1].1).then_some((pair[1].0, line))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tempo_that_falls_drops_no_step() {
+        // A ramp from 160 to 120 BPM over 8 seconds, and a step from 120 to 119 inside a step: every sixteenth plays.
+        for (from, to, over) in [(160.0, 120.0, 8.0), (120.0, 119.0, 0.0)] {
+            let mut live = Live::new(1);
+            live.bpm = from;
+            let mut device = Device::new(false, 0.25, 16.0);
+            live.playing = true;
+            let mut positions = Vec::new();
+            let samples = (RATE * 8.0) as usize;
+            let mut steps = Vec::new();
+            for _ in 0..samples {
+                if live.sample % VECTOR == 0 {
+                    let t = live.sample as f64 / RATE;
+                    live.bpm = if over > 0.0 {
+                        from + (to - from) * (t / over).min(1.0)
+                    } else if t > 1.1 {
+                        to
+                    } else {
+                        from
+                    };
+                }
+                let sample = live.sample;
+                let (fire, index, _, position) = device.tick(&mut live);
+                positions.push((sample, position));
+                if fire {
+                    steps.push(Step { sample, index: index as usize, position });
+                }
+            }
+            let lines = lines_crossed(&positions, 0.25);
+            assert_eq!(steps.len(), lines.len() + 1, "{from}→{to}: a step on every line, and the downbeat's");
+            assert!(steps.windows(2).all(|pair| pair[1].index == (pair[0].index + 1) % 16));
+        }
+    }
+
+    #[test]
+    fn a_stop_at_a_beats_line_starts_no_step_and_leaves_the_transport_stopped() {
+        for stop in [5.000_02, 4.999_98, 5.0] {
+            let mut live = Live::new(1);
+            let mut device = Device::new(false, 0.25, 16.0);
+            live.playing = true;
+            let mut steps = Vec::new();
+            while live.position < stop {
+                let sample = live.sample;
+                let (fire, index, _, position) = device.tick(&mut live);
+                if fire {
+                    steps.push(Step { sample, index: index as usize, position });
+                }
+            }
+            let before = steps.len();
+            live.playing = false;
+            for _ in 0..20_000 {
+                let (fire, _, _, _) = device.tick(&mut live);
+                assert!(!fire, "stopped at {stop}: a step after the stop");
+            }
+            let transport = device.transport.tick(&[0.0, live.position], 6);
+            assert_eq!((transport[1], transport[2]), (0.0, 0.0), "stopped at {stop}: the transport says stopped");
+            assert!(before >= 20, "{before}");
+            // Moved back to the downbeat while stopped (plugsync~ says so at its next poll), then started: its step on
+            // time, the next at a sixteenth, each with its index.
+            live.position = 0.0;
+            for _ in 0..(4 * VECTOR) {
+                device.tick(&mut live);
+            }
+            live.playing = true;
+            let mut again = Vec::new();
+            for _ in 0..6_000 {
+                let sample = live.sample;
+                let (fire, index, _, position) = device.tick(&mut live);
+                if fire {
+                    again.push(Step { sample, index: index as usize, position });
+                }
+            }
+            assert_eq!(again.iter().map(|step| step.index).collect::<Vec<_>>(), [0, 1], "stopped at {stop}: {again:?}");
+            assert!(off_grid(&again[0], 0.25) <= 2.5 && (0.0..1.0).contains(&off_grid(&again[1], 0.25)), "{again:?}");
+        }
+    }
+
+    #[test]
+    fn a_swing_raised_after_the_off_beat_doesnt_play_it_again() {
+        let mut live = Live::new(1);
+        let mut device = Device::new(false, 0.25, 16.0);
+        live.playing = true;
+        let raise = (0.26 / 2.0 * RATE) as usize / VECTOR * VECTOR;
+        let steps = run(&mut device, &mut live, (RATE * 1.0) as usize, |device, _, sample| {
+            if sample == raise {
+                device.clock.set("swing", 0.5);
+            }
+        });
+        let first_pair: Vec<f64> = steps.iter().filter(|step| step.position < 0.49).map(|step| step.position).collect();
+        assert_eq!(first_pair.len(), 2, "the downbeat and the off-beat, once each: {steps:?}");
+        assert!(steps.windows(2).all(|pair| pair[1].index == pair[0].index + 1), "{steps:?}");
+        // The next pairs swing: their second steps three quarters of the way in.
+        let later: Vec<f64> = steps.iter().filter(|step| step.position > 0.49).map(|step| (step.position * 8.0).round() / 8.0).collect();
+        assert_eq!(&later[..4], &[0.5, 0.875, 1.0, 1.375], "{steps:?}");
+    }
+
+    #[test]
+    fn a_division_change_inside_a_pair_waits_for_the_new_grids_line() {
+        // From quarter notes to eighth-note triplets at 0.4 beats: nothing at once, the next step at 2/3.
+        let mut live = Live::new(1);
+        let mut device = Device::new(false, 1.0, 16.0);
+        live.playing = true;
+        let change = (0.4 / 2.0 * RATE) as usize / VECTOR * VECTOR;
+        let steps = run(&mut device, &mut live, (RATE * 0.6) as usize, |device, _, sample| {
+            if sample == change {
+                device.clock.set("division", 1.0 / 3.0);
+            }
+        });
+        let positions: Vec<f64> = steps.iter().map(|step| step.position).collect();
+        assert_eq!(positions.len(), 3, "the downbeat, 2/3 and 1: {positions:?}");
+        assert!(positions[0] < 0.001 && (positions[1] - 2.0 / 3.0).abs() < 0.0002 && (positions[2] - 1.0).abs() < 0.0002, "{positions:?}");
     }
 
     #[test]

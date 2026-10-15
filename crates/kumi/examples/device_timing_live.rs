@@ -133,8 +133,13 @@ async fn device_timing_live(wanted: String, file: Option<Subject>, bridge_config
         })
     });
     options.change_timeout_ms = Some(30_000);
-    let run =
-        Run { integration: create_ableton_integration(options), observation: RefCell::default(), records, made: RefCell::default(), failed: RefCell::default() };
+    let run = Run {
+        integration: create_ableton_integration(options),
+        observation: RefCell::default(),
+        records,
+        made: RefCell::default(),
+        failed: RefCell::default(),
+    };
     let code = match run.check(&wanted, file).await {
         Ok(()) => {
             let failed = run.failed.borrow();
@@ -174,10 +179,8 @@ struct Timing {
 /// The notes' timing against two grids, `fine` and `coarse` (step lengths in beats): each note belongs to the nearer.
 fn timing(notes: &[Value], fine: f64, coarse: f64) -> Timing {
     let ms = |beats: f64| beats * 60_000.0 / BPM;
-    let mut starts: Vec<(f64, f64, i64)> = notes
-        .iter()
-        .filter_map(|note| Some((note["start"].as_f64()?, note["duration"].as_f64()?, note["pitch"].as_i64()?)))
-        .collect();
+    let mut starts: Vec<(f64, f64, i64)> =
+        notes.iter().filter_map(|note| Some((note["start"].as_f64()?, note["duration"].as_f64()?, note["pitch"].as_i64()?))).collect();
     starts.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut found = Timing { notes: starts.len(), ..Timing::default() };
     let mut total = 0.0;
@@ -310,18 +313,22 @@ impl Run {
         )
         .await
         .map_err(RuntimeError::plain)?;
-        let set = |value: f64| format!(
+        let set = |value: f64| {
+            format!(
             "[p for p in [t for t in song.tracks if t.name == {}][0].devices[0].parameters if p.name == {}][0].__setattr__('value', {value})",
             json!(device_track),
             json!(rate)
-        );
+        )
+        };
         self.python(&set(from)).await?;
         self.python(&format!("song.__setattr__('tempo', {BPM:.1})")).await?;
         self.call("set_transport", json!({"position": 0, "loopEnabled": false})).await.map_err(RuntimeError::plain)?;
         // A change makes refs found before it stale: the take's track is found again.
         self.observe().await?;
         let take = self.track(&take_track).await?;
-        self.call("record", json!({"action": "start", "lane": "arrangement", "destinationTrackRef": take["ref"]})).await.map_err(RuntimeError::plain)?;
+        self.call("record", json!({"action": "start", "lane": "arrangement", "destinationTrackRef": take["ref"]}))
+            .await
+            .map_err(RuntimeError::plain)?;
         let began = std::time::Instant::now();
         let at = |seconds: f64| async move {
             let left = seconds - began.elapsed().as_secs_f64();
@@ -334,6 +341,50 @@ impl Run {
         at(BACK_AT).await;
         self.python(&set(from)).await?;
         at(BEATS * 60.0 / BPM).await;
+        self.call("play", json!({"action": "stop"})).await.map_err(RuntimeError::plain)?;
+        let _ = self.call("record", json!({"action": "stop", "lane": "arrangement"})).await;
+        self.observe().await?;
+        let take = self.track(&take_track).await?;
+        self.call("set_routing", json!({"trackRef": take["ref"], "arm": false})).await.map_err(RuntimeError::plain)?;
+        self.observe().await?;
+        let take = self.track(&take_track).await?;
+        let clips = self.rows("arrangement-clip", json!({"parent": take["ref"]})).await;
+        let Some(clip) = clips.first() else { return Ok(Vec::new()) };
+        let read = self.call("read_notes", json!({"clipRef": clip["ref"], "format": "json"})).await.map_err(RuntimeError::plain)?;
+        Ok(read["clips"][0]["notes"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// A device holding a long note, turned off (`delete` false) or deleted two beats in: the notes recorded. Its note
+    /// should end there, not at the end of its length.
+    async fn held(&self, item: &str, delete: bool, stamp: u128) -> Result<Vec<Value>, RuntimeError> {
+        let label = if delete { "deleted" } else { "off" };
+        let device_track = format!("Timing {label} {stamp}");
+        let take_track = format!("Timing Take {label} {stamp}");
+        self.add_track(&device_track).await?;
+        self.load(&device_track, item).await.map_err(RuntimeError::plain)?;
+        self.add_track(&take_track).await?;
+        let take = self.track(&take_track).await?;
+        self.call(
+            "set_routing",
+            json!({"trackRef": take["ref"], "inputType": device_track, "inputSubRouting": "Post FX", "outputType": "No Output", "arm": true, "monitoring": "off"}),
+        )
+        .await
+        .map_err(RuntimeError::plain)?;
+        self.python(&format!("song.__setattr__('tempo', {BPM:.1})")).await?;
+        self.call("set_transport", json!({"position": 0, "loopEnabled": false})).await.map_err(RuntimeError::plain)?;
+        self.observe().await?;
+        let take = self.track(&take_track).await?;
+        self.call("record", json!({"action": "start", "lane": "arrangement", "destinationTrackRef": take["ref"]}))
+            .await
+            .map_err(RuntimeError::plain)?;
+        tokio::time::sleep(Duration::from_secs_f64(2.0 * 60.0 / BPM)).await;
+        let track = format!("[t for t in song.tracks if t.name == {}][0]", json!(device_track));
+        if delete {
+            self.python(&format!("{track}.delete_device(0)")).await?;
+        } else {
+            self.python(&format!("{track}.devices[0].parameters[0].__setattr__('value', 0)")).await?;
+        }
+        tokio::time::sleep(Duration::from_secs_f64(3.0 * 60.0 / BPM)).await;
         self.call("play", json!({"action": "stop"})).await.map_err(RuntimeError::plain)?;
         let _ = self.call("record", json!({"action": "stop", "lane": "arrangement"})).await;
         self.observe().await?;
@@ -407,6 +458,142 @@ impl Run {
         println!("\nKumi's clock, 1/16 moved to 1/8 and back");
         let notes = self.take("clock", &item, "Rate", 2.0, 1.0, stamp).await?;
         self.say("Kumi's clock", &notes, 0.25, 0.5);
+        // The guide's step sequencer: each step's gate and note read from its lane by name. Odd steps are on, each
+        // playing 60 plus its index, so a note's pitch and place say whether the right step played.
+        let mut controls = vec![json!({"name": "Rate", "type": "choice", "options": ["1/8", "1/16"], "default": "1/16", "group": "Clock"})];
+        for step in 1..=16 {
+            controls.push(json!({"name": format!("Gate {step}"), "type": "switch", "default": step % 2 == 1}));
+        }
+        for step in 1..=16 {
+            controls.push(json!({"name": format!("Note {step}"), "type": "integer", "min": 0, "max": 127, "default": 59 + step}));
+        }
+        let lanes = json!({
+            "type": "midi_effect",
+            "name": format!("Timing Lanes {stamp}"),
+            "about": "Kumi's timing check: a step sequencer read by lane.",
+            "controls": controls,
+            "patch": concat!(
+                "clock = [kumi.clock 8n 16n]\n",
+                "\"Rate\" -> clock\n",
+                "clock -> step = [t i i i]\n",
+                "step.2 -> \"Gate\" -> open = [gate]\n",
+                "step.1 -> playhead\n",
+                "step -> \"Note\" -> open.1\n",
+                "open -> notes = [kumi.notes]\n",
+                "clock.1 -> [* 0.5] -> notes.2\n",
+                "notes -> out\n",
+            ),
+        });
+        let made = self.call("make_device", lanes).await.map_err(RuntimeError::plain)?;
+        for key in ["wrong", "changed", "notes"] {
+            if let Some(said) = made.get(key) {
+                println!("  make_device {key}: {said}");
+            }
+        }
+        if let Some(file) = made["file"].as_str() {
+            self.made.borrow_mut().push(PathBuf::from(file));
+        }
+        let item = made["itemId"].as_str().unwrap_or_default().to_string();
+        println!("\nThe guide's step sequencer, read by lane");
+        let notes = self.take("lanes", &item, "Rate", 1.0, 1.0, stamp).await?;
+        self.say("the lanes", &notes, 0.25, 0.5);
+        let wrong: Vec<String> = notes
+            .iter()
+            .filter_map(|note| {
+                let (start, pitch) = (note["start"].as_f64()?, note["pitch"].as_i64()?);
+                let index = ((start / 0.25).round() as i64).rem_euclid(16);
+                (index % 2 == 1 || pitch != 60 + index).then(|| format!("{pitch} at beat {start:.3} (step {})", index + 1))
+            })
+            .collect();
+        println!(
+            "  {} notes; on a step that's off or with another step's note: {}",
+            notes.len(),
+            if wrong.is_empty() { "none".into() } else { wrong.join(", ") }
+        );
+        if notes.len() < 28 || !wrong.is_empty() {
+            self.fail("the lanes' steps");
+        }
+        // Long notes (a whole note a step, 90% of it held), ended by turning the device off or deleting it.
+        let long = json!({
+            "type": "midi_effect",
+            "name": format!("Timing Held {stamp}"),
+            "about": "Kumi's timing check: long notes.",
+            "controls": [],
+            "patch": concat!(
+                "clock = [kumi.clock 1n]\n",
+                "notes = [kumi.notes]\n",
+                "clock -> [+ 48] -> notes\n",
+                "clock.1 -> [* 0.9] -> notes.2\n",
+                "notes -> out\n",
+            ),
+        });
+        let made = self.call("make_device", long).await.map_err(RuntimeError::plain)?;
+        if let Some(file) = made["file"].as_str() {
+            self.made.borrow_mut().push(PathBuf::from(file));
+        }
+        let long_item = made["itemId"].as_str().unwrap_or_default().to_string();
+        for delete in [false, true] {
+            let label = if delete { "deleted" } else { "turned off" };
+            let notes = self.held(&long_item, delete, stamp).await?;
+            let ends: Vec<String> = notes
+                .iter()
+                .filter_map(|note| {
+                    Some(format!(
+                        "{} from beat {:.3} to {:.3}",
+                        note["pitch"],
+                        note["start"].as_f64()?,
+                        note["start"].as_f64()? + note["duration"].as_f64()?
+                    ))
+                })
+                .collect();
+            // Its note started at beat 0 and would run to 3.6: it should end within half a beat of 2.
+            let ended = notes.iter().all(|note| {
+                let end = note["start"].as_f64().unwrap_or(0.0) + note["duration"].as_f64().unwrap_or(9.0);
+                end < 2.6
+            });
+            println!("\nA long note, its device {label} at beat 2: {}", if ends.is_empty() { "no notes".into() } else { ends.join("; ") });
+            if notes.is_empty() || !ended {
+                self.fail(&format!("a held note when the device was {label}"));
+            }
+        }
+        // A modulator: an LFO in time with Live's bars, sent to mod, so it has a Map page.
+        let lfo = json!({
+            "type": "audio_effect",
+            "name": format!("Timing LFO {stamp}"),
+            "about": "Kumi's timing check: an LFO with a Map page.",
+            "controls": [{"name": "Bars", "type": "integer", "min": 1, "max": 8, "default": 1, "group": "LFO"}],
+            "map": {"slots": 8},
+            "patch": concat!(
+                "song = [kumi.transport]\n",
+                "wave = [gen~] { Param bars(1); out1 = 0.5 + 0.5 * sin(twopi * in1 / (4 * bars)); }\n",
+                "song -> wave\n",
+                "\"Bars\" -> [prepend bars] -> wave\n",
+                "wave -> mod\n",
+                "in.0 -> out.0\n",
+                "in.1 -> out.1\n",
+            ),
+        });
+        let made = self.call("make_device", lfo).await.map_err(RuntimeError::plain)?;
+        for key in ["wrong", "changed", "notes"] {
+            if let Some(said) = made.get(key) {
+                println!("  make_device {key}: {said}");
+            }
+        }
+        if let Some(file) = made["file"].as_str() {
+            self.made.borrow_mut().push(PathBuf::from(file));
+        }
+        let lfo_track = format!("Timing LFO {stamp}");
+        self.add_track(&lfo_track).await?;
+        self.load(&lfo_track, made["itemId"].as_str().unwrap_or_default()).await.map_err(RuntimeError::plain)?;
+        let names = self
+            .python(&format!("[p.name for p in [t for t in song.tracks if t.name == {}][0].devices[0].parameters]", json!(lfo_track)))
+            .await?;
+        // The Map page's own parameters are stored with the Set only, as Live's own multimap's are, so Live's list has
+        // just the device's own.
+        println!("\nA Map page's device: Live sees {names}");
+        if !names.as_array().is_some_and(|names| names.iter().any(|name| name == "Bars") && !names.iter().any(|name| name == "Map 1 Min")) {
+            self.fail("the Map page's device");
+        }
         if let Some(subject) = file {
             println!("\n{}, its {} moved from {} to {} and back", subject.file.display(), subject.rate, subject.from, subject.to);
             let item = self.copy(&subject.file, &format!("Timing File {stamp}")).map_err(RuntimeError::plain)?;

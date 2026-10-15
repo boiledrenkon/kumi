@@ -617,7 +617,7 @@ impl Reader<'_> {
                             _ => What::Patcher { text, inner: Notation::default() },
                         }
                     }
-                    (None, None) if class.starts_with("kumi.") => match crate::devices::kit::expand(&text) {
+                    (None, None) if class.starts_with("kumi.") => match crate::devices::kit::expand(&text, line) {
                         // One of Kumi's building blocks: a subpatcher of Max's own objects, made the way it's tested.
                         Ok((head, patch)) => {
                             let (inner, found) = parse_from(&patch, line, false, self.depth + 1);

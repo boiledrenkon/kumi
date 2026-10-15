@@ -13,9 +13,10 @@
 //!   Info View.
 //! - **gen**: a gen~ Param is declared once.
 //! - **face**: no opaque panel hides what's on the device's face.
-//! - **timing**: notes a clock times go out on Live's grid and tempo, on Max's high-priority thread: no step made from
+//! - **timing**: notes a clock times play on Live's grid and tempo, on Max's high-priority thread: no step made from
 //!   plugsync~'s polled position, no clock in milliseconds or off Live's grid, nothing low-priority between a clock and
-//!   MIDI out. Kumi's own building blocks ([p kumi.clock] and the rest) are made that way, so they're not looked into.
+//!   a note. Only a path to a note counts. Kumi's own building blocks ([p kumi.clock] and the rest) are made that way, so
+//!   they're not looked into.
 //! - **map**: a device with Map buttons uses Kumi's mapping page, not a live.map of its own.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -205,12 +206,13 @@ impl Checker<'_> {
         }
     }
 
-    /// Notes a clock times reach MIDI out on Live's grid and tempo, on the high-priority thread.
+    /// Notes a clock times play on Live's grid and tempo, on the high-priority thread. Only a path to a note counts: a
+    /// controller an LFO sends in milliseconds is fine.
     fn timing(&mut self, patcher: &Patcher, at: &str) {
         let label = labels(patcher);
         let next = downstream(patcher);
-        let outs: Vec<&str> = patcher.boxes.iter().filter(|item| self.sends_midi(item)).map(MaxBox::id).collect();
-        let to_midi = |from: &str| outs.iter().any(|out| reaches(&next, from, out));
+        let notes: Vec<&str> = patcher.boxes.iter().filter(|item| self.plays_notes(item)).map(MaxBox::id).collect();
+        let to_midi = |from: &str| notes.iter().any(|note| reaches_port(&next, from, note, 0));
         // plugsync~'s song position comes once per signal vector, and late.
         for item in patcher.boxes.iter().filter(|item| item.class() == "plugsync~") {
             self.looked(POLLED_POSITION, 1);
@@ -325,9 +327,11 @@ impl Checker<'_> {
         }
     }
 
-    /// Whether a box sends MIDI out of the device: a MIDI output object, or Kumi's [kumi.notes], whose MIDI goes to out.
-    fn sends_midi(&self, item: &MaxBox) -> bool {
-        self.catalog.midi_out(item.class()) || (is_kit(item) && item.text() == "p kumi.notes")
+    /// Whether a box plays a note when its left inlet is reached: [makenote], [noteout] and [xnoteout], [midiformat]
+    /// (whose left inlet is a note's), and Kumi's [kumi.notes].
+    fn plays_notes(&self, item: &MaxBox) -> bool {
+        matches!(self.catalog.canonical(item.class()), "makenote" | "noteout" | "xnoteout" | "midiformat")
+            || (is_kit(item) && item.text() == "p kumi.notes")
     }
 
     /// How many inlets (or outlets) a box has: as saved with it, else as the reference counts them for its text.
@@ -867,6 +871,23 @@ fn downstream(patcher: &Patcher) -> HashMap<&str, Vec<(usize, &str, usize)>> {
         next.entry(cord.from.as_str()).or_default().push((cord.outlet, cord.to.as_str(), cord.inlet));
     }
     next
+}
+
+/// Whether inlet `inlet` of box `to` can be reached from box `from` along cords.
+fn reaches_port(next: &HashMap<&str, Vec<(usize, &str, usize)>>, from: &str, to: &str, inlet: usize) -> bool {
+    let mut queue = VecDeque::from([from]);
+    let mut seen = HashSet::from([from]);
+    while let Some(id) = queue.pop_front() {
+        for &(_, next_id, next_inlet) in next.get(id).into_iter().flatten() {
+            if next_id == to && next_inlet == inlet {
+                return true;
+            }
+            if seen.insert(next_id) {
+                queue.push_back(next_id);
+            }
+        }
+    }
+    false
 }
 
 /// Whether box `to` can be reached from box `from` along cords.

@@ -2,7 +2,7 @@
 //! modulation to `mod`. Each slot maps one parameter anywhere in Live with its Map button, which shows the mapped
 //! parameter's name once it's clicked. A slot has:
 //! - × to unmap it;
-//! - Min and Max: the modulation's range, as a percentage of the parameter's;
+//! - Min and Max: the part of the modulation's range the source sweeps, in percent (Max below Min turns it upside down);
 //! - when the patch sends several sources (`mod.0`, `mod.1`…), the source it follows.
 //!
 //! Each slot drives a live.modulate~. It modulates the parameter from where its own control is, the way Live's
@@ -19,8 +19,8 @@ use super::look::theme;
 
 /// How many slots a Map page has, as Live's own modulators do.
 pub const SLOTS: usize = 8;
-/// The most slots, and the most sources.
-pub const MOST_SLOTS: usize = 16;
+/// The most slots (the page is as tall as the face), and the most sources.
+pub const MOST_SLOTS: usize = 8;
 pub const MOST_SOURCES: usize = 8;
 /// A slot's row.
 const ROW: f64 = 18.0;
@@ -36,11 +36,13 @@ pub fn size(sources: usize, slots: usize) -> (f64, f64) {
     (width, HEADER + slots as f64 * ROW)
 }
 
-/// The scaler's GenExpr: each slot's modulation from its source (in1…, 0 to 1), between its Min and Max, as a share of
-/// the parameter's range (live.modulate~ takes −1 to 1).
-pub fn scaler(sources: usize, slots: usize) -> String {
+/// The scaler's GenExpr: each slot's modulation from its source (in1…, 0 to 1), between its Min and Max (percent of the
+/// modulation's range). For live.modulate~ (`modulate`) that's −1 to 1: a parameter Live modulates both ways moves
+/// around where its control is, and one it modulates one way moves from its minimum up to its control. For live.remote~
+/// it's 0 to 1, the parameter's own range.
+pub fn scaler(sources: usize, slots: usize, modulate: bool) -> String {
     let mut code = String::from(
-        "// Made by Kumi: each slot's modulation, from its source (0 to 1), between its Min and Max (percent of its parameter's range).\n",
+        "// Made by Kumi: each slot's modulation, from its source (0 to 1), between its Min and Max (percent of the modulation's range).\n",
     );
     for slot in 1..=slots {
         code.push_str(&format!("Param min{slot}(0);\nParam max{slot}(100);\n"));
@@ -54,7 +56,8 @@ pub fn scaler(sources: usize, slots: usize) -> String {
             pick = format!("source{slot} < {}.5 ? in{source} : ({pick})", source - 1);
         }
         let pick = if sources > 1 { pick } else { "in1".to_string() };
-        code.push_str(&format!("s{slot} = clamp({pick}, 0, 1);\nout{slot} = (min{slot} + s{slot} * (max{slot} - min{slot})) * 0.01;\n"));
+        let range = if modulate { "* 0.02 - 1" } else { "* 0.01" };
+        code.push_str(&format!("s{slot} = clamp({pick}, 0, 1);\nout{slot} = (min{slot} + s{slot} * (max{slot} - min{slot})) {range};\n"));
     }
     code
 }
@@ -119,7 +122,7 @@ pub fn page(id: &str, name: &str, sources: &[String], slots: usize, modulate: bo
             "numinlets": 0, "numoutlets": 1, "outlettype": ["signal"], "patching_rect": [40.0 + at as f64 * 60.0, 20.0, 30.0, 30.0] }),
         );
     }
-    let code = scaler(count, slots);
+    let code = scaler(count, slots, modulate);
     boxes.push(json!({ "id": "scale", "maxclass": "newobj", "text": "gen~", "numinlets": count, "numoutlets": slots, "outlettype": vec!["signal"; slots],
         "patching_rect": [40.0, 80.0, 60.0, 22.0], "patcher": super::gen::gen_patcher(&code, count, slots) }));
     for at in 0..count {
@@ -199,7 +202,7 @@ pub fn page(id: &str, name: &str, sources: &[String], slots: usize, modulate: bo
                     &format!("Map {slot} {part}"),
                     part,
                     1,
-                    json!({ "parameter_type": 1, "parameter_mmin": -100.0, "parameter_mmax": 100.0, "parameter_initial": [initial], "parameter_unitstyle": 5 }),
+                    json!({ "parameter_type": 1, "parameter_mmin": 0.0, "parameter_mmax": 100.0, "parameter_initial": [initial], "parameter_unitstyle": 5 }),
                 )),
             ));
         }
@@ -274,17 +277,27 @@ mod tests {
 
     #[test]
     fn each_slot_follows_its_source_between_its_min_and_max() {
-        let mut gen = Gen::new(&scaler(2, 3), false);
-        gen.set("min1", -50.0);
-        gen.set("max1", 50.0);
+        // live.modulate~ takes −1 to 1: Min 0 and Max 100 sweep all of it.
+        let mut gen = Gen::new(&scaler(2, 3, true), false);
+        gen.set("min1", 25.0);
+        gen.set("max1", 75.0);
         gen.set("source2", 1.0);
         gen.set("min3", 100.0);
         gen.set("max3", 0.0);
         let out = gen.tick(&[0.5, 1.0], 3);
-        assert_eq!(out, vec![0.0, 1.0, 0.5], "slot 1 halfway between −50% and 50%; slot 2 follows source 2; slot 3 runs backwards");
+        assert_eq!(
+            out,
+            vec![0.0, 1.0, 0.0],
+            "slot 1 halfway between 25% and 75%; slot 2 follows source 2 to the top; slot 3 runs backwards"
+        );
         let clamped = gen.tick(&[2.0, -1.0], 3);
-        assert_eq!(clamped, vec![0.5, 0.0, 0.0], "a source past 0 to 1 is held at its end");
-        assert_eq!(Gen::new(&scaler(1, 8), false).tick(&[1.0], 8), vec![1.0; 8], "one source, every slot from 0% to 100%");
+        assert_eq!(clamped, vec![0.5, -1.0, -1.0], "a source past 0 to 1 is held at its end (slot 3's top is its Max, 0%)");
+        assert_eq!(Gen::new(&scaler(1, 8, true), false).tick(&[0.0], 8), vec![-1.0; 8], "one source, every slot at the bottom");
+        // live.remote~ takes the parameter's range, 0 to 1.
+        let mut remote = Gen::new(&scaler(1, 1, false), false);
+        remote.set("min1", 20.0);
+        remote.set("max1", 60.0);
+        assert_eq!(remote.tick(&[0.5], 1), vec![0.4]);
     }
 
     #[test]
