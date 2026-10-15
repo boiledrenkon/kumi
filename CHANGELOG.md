@@ -3,6 +3,25 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.18.0 — 2026-10-15
+
+Ships with bridge 1.0.92, as 1.17.1 did.
+
+- `kumi update` works in a non-ASCII folder too. On Windows, an update whose user folder has letters
+  outside Windows' language setting (a Japanese name on an English Windows, say) stopped with
+  "Unpacking it failed". If that happened to you, run the install command once more; updates after
+  that work.
+- Devices Kumi makes keep Live's time: a sequencer, arpeggiator or clock steps on Live's grid to the
+  sample through loops, jumps, tempo changes and a stop then play, a Rate or Swing that's automated or
+  mapped moves cleanly, and every note ends, even when Live stops.
+- Devices Kumi makes look like Live's own, in your theme: controls in named sections, labelled
+  buttons, step grids that light the playing step.
+- An LFO or other modulator Kumi makes gets a Map page of 8 slots, each with Map, Min and Max,
+  modulating like Live's own.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.17.1 — 2026-10-13
 
 Ships with bridge 1.0.92, as 1.17.0 did.
