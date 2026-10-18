@@ -7,6 +7,7 @@ use kumi_common::abort::Signal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use super::daw::{Capabilities, DawId, DawProfile, DawWords, ScriptKind};
 use super::errors::{FailureKind, RuntimeError};
 use super::evolve::Knob;
 use super::goal::GoalStatus;
@@ -438,7 +439,7 @@ pub enum ConversationMatch {
 }
 
 /// What a DAW and a place in it are called when the integration doesn't say.
-pub const DAW_WORDS: (&str, &str) = ("the DAW", "project");
+pub const DAW_WORDS: (&str, &str) = DawProfile::UNKNOWN.word_pair();
 
 /// Whether this Kumi has a conversation to itself, or another Kumi that's still open has it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -618,9 +619,13 @@ pub struct ObserveHints {
     pub continuing: Option<bool>,
 }
 
-/// Optional methods (`undo?()` and so on) have a `has_…` flag, false by default.
+/// Optional methods (`undo?()` and so on) have a `has_…` flag, which the profile's capabilities answer by default.
 #[async_trait(?Send)]
 pub trait Integration {
+    /// The DAW this drives, its words and what it can ever do; no DAW known by default.
+    fn profile(&self) -> &DawProfile {
+        &DawProfile::UNKNOWN
+    }
     async fn start(&self, signal: Signal) -> Result<(), RuntimeError>;
     /// What's in Live now; `pinned` (what the producer pointed at) is checked against it and given to the model.
     async fn observe(&self, signal: Signal, hints: Option<ObserveHints>) -> Result<Observation, RuntimeError>;
@@ -640,7 +645,7 @@ pub trait Integration {
         Vec::new()
     }
     fn has_undo(&self) -> bool {
-        false
+        self.profile().caps.undo
     }
     /// Undo one of Kumi's changes (the latest undoable one when `id` is omitted).
     async fn undo(&self, id: Option<&str>, signal: Signal) -> Result<ChangeRecord, RuntimeError> {
@@ -659,7 +664,7 @@ pub trait Integration {
         None
     }
     fn has_audio_file(&self) -> bool {
-        false
+        self.profile().caps.audio_file
     }
     /// The audio file behind something in the Set the model names (a clip, say); None when it isn't one.
     async fn audio_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError> {
@@ -667,7 +672,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_stop_live(&self) -> bool {
-        false
+        self.profile().caps.stop_transport
     }
     /// Stop clips, the transport and recording in Live at once; true when Live is stopped afterwards.
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
@@ -680,7 +685,7 @@ pub trait Integration {
     }
     /// What the producer calls the DAW and a place in it (Live's integration: "Live", "Set"); plain words otherwise.
     fn words(&self) -> (&'static str, &'static str) {
-        DAW_WORDS
+        self.profile().word_pair()
     }
     /// Open the saved place (a Set, a project) a kept conversation belongs to in the DAW, which may ask first whether to
     /// save the open one. `Err(why)` inside when it can't.
@@ -689,7 +694,7 @@ pub trait Integration {
         Ok(Err("Kumi can't open it from here.".into()))
     }
     fn has_show_message(&self) -> bool {
-        false
+        self.profile().caps.status_line
     }
     /// A short line in the DAW's own window (Live's status bar), never a dialog, for a producer working there; true
     /// when it was shown. A DAW without such a place says false.
@@ -703,7 +708,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_instant(&self) -> bool {
-        false
+        self.profile().caps.instant
     }
     /// A fixed phrase's intent (core/phrases.rs) made as this DAW's change, with no model call: what changed, in
     /// words. None when it can't run as asked here (a track the Set doesn't have, or two that fit): the model takes it.
@@ -712,7 +717,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_device_tree(&self) -> bool {
-        false
+        self.profile().caps.device_tree
     }
     /// A track's devices, racks' chains and what's in them, for FOCUS; None when Live can't say.
     async fn device_tree(&self, track_ref: &str, signal: Signal) -> Result<Option<DeviceTree>, RuntimeError> {
@@ -720,7 +725,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_clip_view(&self) -> bool {
-        false
+        self.profile().caps.note_view
     }
     /// The MIDI clip in a Session slot, its notes and which are selected, for FOCUS; None for none (or audio).
     async fn clip_view(&self, slot_ref: &str, signal: Signal) -> Result<Option<ClipView>, RuntimeError> {
@@ -728,7 +733,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_session_strip(&self) -> bool {
-        false
+        self.profile().caps.launcher_grid
     }
     /// A track's Session slots around a scene, for FOCUS.
     async fn session_strip(&self, track_ref: &str, scene: f64, signal: Signal) -> Result<Option<SessionStrip>, RuntimeError> {
@@ -736,7 +741,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_arrangement_strip(&self) -> bool {
-        false
+        self.profile().caps.timeline_strip
     }
     /// The Arrangement at a glance (length, playhead, loop, locators), for FOCUS.
     async fn arrangement_strip(&self, signal: Signal) -> Result<Option<ArrangementStrip>, RuntimeError> {
@@ -744,7 +749,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_audition(&self) -> bool {
-        false
+        self.profile().caps.audition
     }
     /// Render candidates, hear them and set them against a reference (the audition tool's work); `Err(why)` inside says why not.
     async fn audition(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
@@ -752,7 +757,7 @@ pub trait Integration {
         Err(absent())
     }
     fn has_goal(&self) -> bool {
-        false
+        self.profile().caps.goal_rig
     }
     /// A goal's render rig over these candidates (kept open across generations), or why not.
     async fn goal(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
@@ -760,7 +765,7 @@ pub trait Integration {
         Err(absent())
     }
     fn has_hear(&self) -> bool {
-        false
+        self.profile().caps.hear
     }
     /// Hear tracks (or the mix) in the Set directly: as they play now, or by playing a stretch of the Arrangement; a file each, or why not.
     async fn hear(&self, request: &HearRequest, signal: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {

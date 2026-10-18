@@ -24,6 +24,7 @@ pub(crate) fn no_access(key: &str, now: DateTime<Utc>, project: Option<ProjectRe
         ),
     }
 }
+const NO_LIVE: DawProfile = DawProfile::ABLETON.without_caps();
 struct InferenceOnly {
     closed: Cell<bool>,
     on_connection: Rc<dyn Fn(ConnectionState)>,
@@ -48,8 +49,9 @@ impl Integration for InferenceOnly {
         }
         Ok(no_access("inference-only", Utc::now(), None))
     }
-    fn words(&self) -> (&'static str, &'static str) {
-        ("Live", "Set")
+    /// Live's words, with nothing Live does: there's no Live here.
+    fn profile(&self) -> &DawProfile {
+        &NO_LIVE
     }
     async fn close(&self) -> Result<(), RuntimeError> {
         self.closed.set(true);

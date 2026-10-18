@@ -824,6 +824,9 @@ impl ObservationHost for Ableton {
 }
 #[async_trait(?Send)]
 impl Integration for Ableton {
+    fn profile(&self) -> &DawProfile {
+        &DawProfile::ABLETON
+    }
     async fn start(&self, signal: Signal) -> Result<(), RuntimeError> {
         self.connection.start(signal).await
     }
@@ -885,9 +888,6 @@ impl Integration for Ableton {
     fn first_heard(&self, since: i64) -> Option<i64> {
         self.connection.first_heard(since)
     }
-    fn has_undo(&self) -> bool {
-        true
-    }
     async fn undo(&self, id: Option<&str>, signal: Signal) -> Result<ChangeRecord, RuntimeError> {
         if !self.connection.started.get() || self.connection.closed.get() {
             return Err(KumiError::new(FailureKind::Request, "Kumi isn't connected to Live, so it can't undo.").into());
@@ -896,14 +896,8 @@ impl Integration for Ableton {
         let outcome = self.history.undo(id.unwrap_or("last"), signal, false).await?;
         outcome.record.ok_or_else(|| KumiError::new(FailureKind::Request, outcome.text).into())
     }
-    fn has_audio_file(&self) -> bool {
-        true
-    }
     async fn audio_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError> {
         self.mutations.clip_file(named, signal).await
-    }
-    fn has_stop_live(&self) -> bool {
-        true
     }
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
         Ok(self.history.stop_everything(self.combined(signal)).await)
@@ -912,9 +906,6 @@ impl Integration for Ableton {
     fn open_set(&self) -> Option<String> {
         let set = self.history.remember.current()?;
         set.path.clone().filter(|path| !set.unsaved && !path.is_empty() && !project::template_location(path))
-    }
-    fn words(&self) -> (&'static str, &'static str) {
-        ("Live", "Set")
     }
     /// The Set where Kumi last saw the project, through the system as a double-click would open it: Live asks about the
     /// open Set in its own dialog. Live drops Kumi while the Set loads, which reads as a Set Kumi asked for (#188).
@@ -939,9 +930,6 @@ impl Integration for Ableton {
             return Ok(Err(format!("Live didn't take {path}.")));
         }
         Ok(Ok(()))
-    }
-    fn has_show_message(&self) -> bool {
-        true
     }
     /// Live's status bar, through the bridge's `live_message` (never its modal form); outside Live's undo, and
     /// without Kumi's Live lock, so it never waits for a step under way.
@@ -979,9 +967,6 @@ impl Integration for Ableton {
         let on = |key: &str| transport.get(key) == Some(&Value::Bool(true));
         Ok(Some(on("playing") && (on("sessionRecord") || on("arrangementRecord"))))
     }
-    fn has_instant(&self) -> bool {
-        true
-    }
     async fn instant(&self, intent: &crate::core::phrases::Intent, signal: Signal) -> Result<Option<InstantOutcome>, RuntimeError> {
         let Some(plan) = instant::steps(intent, &self.observer.model(), self.observer.beats_per_bar.get()) else { return Ok(None) };
         // One Live call at a time, as every Live tool takes it; the plan says what it changed (final).
@@ -990,46 +975,25 @@ impl Integration for Ableton {
         let result = self.mutations.make_changes(object(&plan)?, signal).await?;
         Ok(Some(InstantOutcome { text: result.reply.filter(|reply| !reply.is_empty()).unwrap_or(result.text), is_error: result.is_error }))
     }
-    fn has_device_tree(&self) -> bool {
-        true
-    }
     async fn device_tree(&self, track: &str, signal: Signal) -> Result<Option<DeviceTree>, RuntimeError> {
         timing::background(views::device_tree(self.connection.as_ref(), track, self.combined(signal))).await
-    }
-    fn has_clip_view(&self) -> bool {
-        true
     }
     async fn clip_view(&self, slot: &str, signal: Signal) -> Result<Option<ClipView>, RuntimeError> {
         timing::background(views::clip_view(self.connection.as_ref(), slot, self.combined(signal))).await
     }
-    fn has_session_strip(&self) -> bool {
-        true
-    }
     async fn session_strip(&self, track: &str, scene: f64, signal: Signal) -> Result<Option<SessionStrip>, RuntimeError> {
         timing::background(views::session_strip(self.connection.as_ref(), track, scene, self.combined(signal))).await
     }
-    fn has_arrangement_strip(&self) -> bool {
-        true
-    }
     async fn arrangement_strip(&self, signal: Signal) -> Result<Option<ArrangementStrip>, RuntimeError> {
         timing::background(views::arrangement_strip(self.connection.as_ref(), self.combined(signal))).await
-    }
-    fn has_audition(&self) -> bool {
-        true
     }
     async fn audition(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
         let _live = self.rendering.hold(&signal).await?;
         self.rendering.audition(request, signal).await
     }
-    fn has_goal(&self) -> bool {
-        true
-    }
     async fn goal(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
         let _live = self.rendering.hold(&signal).await?;
         self.rendering.open_goal(request, signal).await
-    }
-    fn has_hear(&self) -> bool {
-        true
     }
     async fn hear(&self, request: &HearRequest, signal: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
         let _live = self.rendering.hold(&signal).await?;

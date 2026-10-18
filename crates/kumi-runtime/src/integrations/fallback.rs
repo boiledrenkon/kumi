@@ -27,6 +27,10 @@ impl FallbackIntegration {
 }
 #[async_trait(?Send)]
 impl Integration for FallbackIntegration {
+    /// The primary's DAW, whichever answers now: what it can do is checked at each call.
+    fn profile(&self) -> &DawProfile {
+        self.primary.profile()
+    }
     async fn start(&self, signal: Signal) -> Result<(), RuntimeError> {
         if let Err(error) = self.primary.start(signal.clone()).await {
             if signal.is_cancelled() || !error.kumi().is_some_and(|e| e.kind == FailureKind::Live) {
