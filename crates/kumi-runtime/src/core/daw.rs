@@ -641,7 +641,15 @@ impl DawProfile {
     pub const REAPER: DawProfile = DawProfile {
         id: Some(DawId::Reaper),
         words: DawWords { app: "REAPER", place: "project", places: "projects", master: "the master track", timeline: "arrange view" },
-        caps: Capabilities::NONE,
+        // FOCUS follows REAPER (M2): its FX chains, a take's notes, the arrange view, the focus and transport as read.
+        caps: Capabilities {
+            device_tree: true,
+            note_view: true,
+            timeline_strip: true,
+            focus_stream: true,
+            transport_stream: true,
+            ..Capabilities::NONE
+        },
         vocab: PromptVocab {
             plan_tool: "make_changes",
             ref_example: "track:3",
@@ -686,7 +694,8 @@ impl DawProfile {
     pub const RENOISE: DawProfile = DawProfile {
         id: Some(DawId::Renoise),
         words: DawWords { app: "Renoise", place: "song", places: "songs", master: "the Master track", timeline: "pattern sequence" },
-        caps: Capabilities::NONE,
+        // FOCUS follows Renoise (M2): its DSP chains, the focus and transport as read.
+        caps: Capabilities { device_tree: true, focus_stream: true, transport_stream: true, ..Capabilities::NONE },
         vocab: PromptVocab {
             plan_tool: "make_changes",
             ref_example: "track:3",
