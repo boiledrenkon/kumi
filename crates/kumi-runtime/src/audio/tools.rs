@@ -3,7 +3,7 @@
 use super::{
     analyze::{Analysis, AnalyzeOptions, HeardNote},
     audio_path, compare, hear,
-    structure::{hear_form, FormOptions},
+    structure::{form_in_words, hear_form, FormOptions},
     AudioError,
 };
 use crate::core::daw::{asset_in_words, AssetPhrase, DawProfile, DawWords};
@@ -202,7 +202,7 @@ impl KernelTool for ListenTool {
         let yes = |key: &str| input.get(key).and_then(Value::as_bool) == Some(true);
         if yes("form") {
             let file = text("file").unwrap_or("");
-            let result:Result<_,ListenError>=async{let path=self.locate(file,signal.clone()).await?;let form=hear_form(&path,FormOptions{tempo:number("tempo"),beats_per_bar:number("beats_per_bar"),signal:Some(signal.clone())}).await?;Ok(ToolResult::text(stringify(&json!({"form":form,"note":"Bars are the reference's own, counted at its tempo. To mirror it, arrange with these sections (their bars, names fitting the genre) and pick which tracks play in each by its energy, density and low end."}))))}.await;
+            let result:Result<_,ListenError>=async{let path=self.locate(file,signal.clone()).await?;let form=form_in_words(hear_form(&path,FormOptions{tempo:number("tempo"),beats_per_bar:number("beats_per_bar"),signal:Some(signal.clone())}).await?,self.profile.words.place);Ok(ToolResult::text(stringify(&json!({"form":form,"note":"Bars are the reference's own, counted at its tempo. To mirror it, arrange with these sections (their bars, names fitting the genre) and pick which tracks play in each by its energy, density and low end."}))))}.await;
             return match result {
                 Ok(result) => Ok(result),
                 Err(error) => {

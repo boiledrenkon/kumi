@@ -66,7 +66,27 @@ pub struct PromptVocab {
     pub eq: &'static str,
     /// The octave the DAW names middle C (MIDI 60) in: Live calls it C3.
     pub middle_c_octave: i8,
+    /// For each gap no knob closes, the structural change that closes it, with the DAW's own devices.
+    pub structure_moves: &'static [(crate::audio::matching::StructuralKind, &'static str)],
 }
+
+/// The structural changes for a DAW Kumi doesn't know: no device names.
+const UNKNOWN_STRUCTURE_MOVES: &[(crate::audio::matching::StructuralKind, &str)] = {
+    use crate::audio::matching::StructuralKind::*;
+    &[
+        (MissingLow, "add a sub layer (a sine one octave down, in a parallel chain), a low-shelf EQ, or change the base instrument"),
+        (ExcessLow, "high-pass it (an EQ), take the low layer out, or change the base"),
+        (MissingTop, "add saturation, an exciter or a brighter base (a saw or noise layer)"),
+        (ExcessTop, "low-pass it (a filter), use a darker base (sine, triangle), or take a layer out"),
+        (MissingMids, "add a layer for the body (a second oscillator or a parallel chain), or change the base"),
+        (ExcessMids, "cut the mids (an EQ), change the base, or thin the layers"),
+        (Envelope, "change the instrument family (a plucked or struck model against a sustained one), or add a transient shaper"),
+        (Register, "transpose it (the MIDI, or the instrument's octave), or change the base"),
+        (Pitched, "change the kind of source: a tonal oscillator against noise or a sample"),
+        (Width, "widen or narrow it: a stereo width control, a chorus, or parallel chains panned apart"),
+        (Density, "change the MIDI: more or fewer notes, another rhythm"),
+    ]
+};
 
 /// Live's word for each field of a profile's words and vocabulary: the one place they're spelled, so a text
 /// `daw_text!` makes in Live's words stays byte for byte what it was.
@@ -338,6 +358,7 @@ impl DawProfile {
             write_notes_tool: "the tool that writes notes",
             eq: "an EQ",
             middle_c_octave: 4,
+            structure_moves: UNKNOWN_STRUCTURE_MOVES,
         },
     };
 
@@ -400,6 +421,7 @@ impl DawProfile {
             write_notes_tool: crate::live_word!(write_notes_tool),
             eq: crate::live_word!(eq),
             middle_c_octave: 3,
+            structure_moves: crate::audio::matching::STRUCTURE_MOVES,
         },
     };
 
@@ -546,6 +568,15 @@ mod tests {
         assert_eq!(SAID, "Save the Set in Live, or make a device.");
         assert_eq!(said(&DawProfile::ABLETON), SAID);
         assert_eq!(said(&DawProfile::UNKNOWN), "Save the project in the DAW.");
+    }
+
+    #[test]
+    fn every_profile_has_a_structural_change_for_every_gap() {
+        for profile in [DawProfile::ABLETON, DawProfile::UNKNOWN] {
+            for (kind, _) in crate::audio::matching::STRUCTURE_MOVES {
+                assert!(profile.vocab.structure_moves.iter().any(|(k, _)| k == kind), "{kind:?}");
+            }
+        }
     }
 
     #[test]
