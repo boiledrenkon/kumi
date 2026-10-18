@@ -10,7 +10,7 @@ local byte, sub = string.byte, string.sub
 
 local M = {}
 
-M.METHODS = { "ping", "status", "renoise.reload" }
+M.METHODS = { "ping", "status", "renoise.reload", "read", "snapshot", "focus", "focus_body" }
 M.EVENTS = { "project", "tracks", "selection", "transport" }
 
 -- Kept across payload reloads (the bridge sets it to its own state).

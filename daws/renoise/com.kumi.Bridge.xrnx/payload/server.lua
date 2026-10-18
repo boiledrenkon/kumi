@@ -238,14 +238,14 @@ end
 -- the next tick.
 function M:run_requests(record)
   local waiting = record.requests
-  if not waiting[1] then return end
+  if not waiting[1] or record.job then return end
   if record.closing then
     record.requests = {}
     return
   end
   local started = self.ctx.now_ms()
   local done = 0
-  while waiting[done + 1] and not record.closing and not record.gone do
+  while waiting[done + 1] and not record.closing and not record.gone and not record.job do
     done = done + 1
     self:answer(record, waiting[done])
     if self.ctx.now_ms() - started >= M.REQUEST_BUDGET_MS then break end
@@ -264,6 +264,25 @@ function M:answer(record, request)
     return self:send(record, wire.error(request.id, "deadline", "the deadline passed before the work started"))
   end
   local ok, result = xpcall(self.ctx.on_request, debug.traceback, record, request)
+  -- A long read comes back as a job to be run a slice at a time; the connection's later requests wait behind it, so
+  -- answers keep their order.
+  if ok and type(result) == "table" and result.kumi_job then
+    record.job = self.ctx.start_job(record, request, result.kumi_job)
+    return
+  end
+  self:respond(record, request, ok, result)
+end
+
+-- A job has ended: its answer goes out, then the requests that waited behind it are answered.
+function M:finish_job(record, request, ok, value)
+  record.job = nil
+  if self.ctx.connections[record.key] ~= record or record.closing then return end
+  self:respond(record, request, ok, value)
+  self:run_requests(record)
+end
+
+-- What a request came to (the handler's result, or what it raised), as the response.
+function M:respond(record, request, ok, result)
   if ok then
     local text, err = wire.ok(request.id, result)
     if not text then
@@ -339,6 +358,7 @@ function M:tick()
     if record.outbox[1] then self:flush(record, M.SEND_TICK_BYTES) end
     if is_gone(record) then
       self.ctx.connections[key] = nil
+      if self.ctx.cancel_jobs then self.ctx.cancel_jobs(record) end
       if not record.closing then self.ctx.log("info", "connection " .. key .. " went away") end
     end
   end

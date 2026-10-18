@@ -155,6 +155,12 @@ local function refused(peer, reason)
   return got[1]
 end
 
+-- (For test_reads.lua, which plays the host against a song.)
+T.harness = {
+  setup = setup, connect = connect, send = send, frames = frames, tick = tick, request = request, events = events,
+  no_dialogs = no_dialogs, retired = retired, read = read, PORT = PORT,
+}
+
 test("bridge: listens on 127.0.0.1:9780 and writes the discovery file", function()
   local env = setup()
   local server = mock.server()
@@ -192,7 +198,7 @@ test("bridge: the handshake proves both sides and the welcome says who it is", f
   eq(welcome.project.title, "Tune Title")
   eq(welcome.project.path, "/songs/tune.xrns")
   ok(welcome.project.id:match("^%x+$") and #welcome.project.id == 32)
-  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload")
+  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload,read,snapshot,focus,focus_body")
   eq(table.concat(welcome.events, ","), "project,tracks,selection,transport")
   eq(mock.statuses[#mock.statuses], "Kumi connected")
   no_dialogs()

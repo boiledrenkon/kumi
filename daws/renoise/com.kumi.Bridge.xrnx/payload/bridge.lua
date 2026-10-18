@@ -5,6 +5,9 @@ local json = import("json")
 local wire = import("wire")
 local server = import("server")
 local sync = import("sync")
+local jobs_module = import("jobs")
+local reads = import("reads")
+local focus = import("focus")
 local status = import("status")
 local config = import("config")
 local discovery = import("discovery")
@@ -14,6 +17,10 @@ local VERSION = import("version")
 local M = {}
 
 M.RETRY_MS = 1000
+-- A read in progress that the timers haven't run for this long is run from the next message.
+M.STALE_JOBS_MS = 100
+-- With the timers stopped nothing but Renoise's dialog is in use, so such a slice may be longer.
+M.STALE_SLICE_MS = 25
 M.SETUP_RETRY_MS = 5000
 
 
@@ -22,7 +29,19 @@ function M.now_ms()
   return os.clock() * 1000
 end
 
-local host, st, b, conns, observers
+local host, st, b, conns, observers, jobs
+
+-- The epoch: refs are valid within one. It moves when a song is switched, and when something happens to the song that
+-- the tool can't map into the refs it handed out (instruments, patterns or the sequence restructured, devices, samples or
+-- phrases inserted or removed, tracks swapped).
+local function epoch()
+  return string.format("%x", b.epoch_n)
+end
+
+local function bump_epoch(reason)
+  b.epoch_n = b.epoch_n + 1
+  log.write("info", "epoch " .. epoch() .. ": " .. reason)
+end
 
 function M.log_error(where, err)
   log.write("error", where .. ": " .. tostring(err))
@@ -154,18 +173,53 @@ local function transport(song)
   return { playing = t.playing, bpm = t.bpm, lpb = t.lpb }
 end
 
+local TRANSPORT_OBSERVABLES = {
+  "playing_observable", "bpm_observable", "lpb_observable", "tpl_observable", "edit_mode_observable",
+  "follow_player_observable", "loop_pattern_observable",
+}
+local SELECTION_OBSERVABLES = {
+  "selected_track_index_observable", "selected_instrument_index_observable", "selected_pattern_index_observable",
+  "selected_sequence_index_observable", "selected_sample_observable", "selected_phrase_observable",
+  "selected_track_device_observable",
+}
+
+-- Everything the focus pane and the reads depend on is watched: events for what Kumi is told as it happens, a counter
+-- for the rest (`changed`), and structural marks for what moves the refs.
 local function attach(song)
   observers:detach()
   if not song then return end
-  observers:watch(song.tracks_observable, "tracks")
-  observers:watch(song.selected_track_index_observable, "selection")
-  observers:watch(song.selected_instrument_index_observable, "selection")
-  observers:watch(song.selected_pattern_index_observable, "selection")
-  observers:watch(song.selected_sequence_index_observable, "selection")
-  observers:watch(song.transport.playing_observable, "transport")
-  observers:watch(song.transport.bpm_observable, "transport")
-  observers:watch(song.transport.lpb_observable, "transport")
+  for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection") end
+  for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport") end
   observers:watch(song.name_observable, "project")
+  observers:watch_list(song.tracks_observable, "tracks")
+  observers:watch_structural(song.instruments_observable, "the instruments changed")
+  observers:watch_structural(song.patterns_observable, "the patterns changed")
+  local sequencer = song.sequencer
+  observers:watch_structural(sequencer.pattern_sequence_observable, "the sequence changed")
+  observers:watch_changes(sequencer.pattern_assignments_observable)
+  observers:watch_changes(sequencer.pattern_slot_mutes_observable)
+  for p = 1, #song.patterns do
+    local pattern = song:pattern(p)
+    observers:watch_lines(pattern)
+    observers:watch_changes(pattern.name_observable)
+    observers:watch_layout(pattern.number_of_lines_observable)
+  end
+  for t = 1, song.sequencer_track_count + 1 + song.send_track_count do
+    local track = song:track(t)
+    observers:watch_changes(track.name_observable)
+    observers:watch_changes(track.color_observable)
+    observers:watch_changes(track.mute_state_observable)
+    observers:watch_changes(track.solo_state_observable)
+    observers:watch_changes(track.visible_note_columns_observable)
+    observers:watch_changes(track.visible_effect_columns_observable)
+    observers:watch_structural(track.devices_observable, "a track's devices changed")
+  end
+  for i = 1, #song.instruments do
+    local instrument = song:instrument(i)
+    observers:watch_changes(instrument.name_observable)
+    observers:watch_structural(instrument.samples_observable, "an instrument's samples changed")
+    observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed")
+  end
   observers:changed("tracks", tracks(song))
   observers:changed("selection", selection(song))
   observers:changed("transport", transport(song))
@@ -184,9 +238,28 @@ local function flush_events()
   local song = renoise.song()
   if not song then return end
   local dirty = observers:take_dirty()
+  -- A new track has none of the watching the others have: the song is watched anew once this is told.
+  local reattach = false
   if dirty.tracks then
-    local value = tracks(song)
-    if observers:changed("tracks", value) then conns:event("tracks", value) end
+    reattach = true
+    local count = tracks(song).count
+    local known = observers.last.tracks and observers.last.tracks.count or count
+    -- Each insert or removal is told as it happened, so Kumi can shift its refs; anything else moves the epoch.
+    local told = false
+    for _, op in ipairs(observers:take_ops("tracks")) do
+      if op.type == "insert" then
+        known = known + 1
+        conns:event("tracks", { count = known, made = json.array({ op.index }), gone = json.array() })
+        told = true
+      elseif op.type == "remove" then
+        known = known - 1
+        conns:event("tracks", { count = known, made = json.array(), gone = json.array({ op.index }) })
+        told = true
+      else
+        observers.structural = observers.structural or "tracks were swapped"
+      end
+    end
+    if not told and count ~= known then conns:event("tracks", { count = count, made = json.array(), gone = json.array() }) end
   end
   if dirty.selection then
     local value = selection(song)
@@ -197,6 +270,12 @@ local function flush_events()
     if observers:changed("transport", value) then conns:event("transport", value) end
   end
   if dirty.project and observers:changed("project", status.project(b.memory)) then send_project() end
+  local reason = observers:take_structural()
+  if reason then
+    bump_epoch(reason)
+    reattach = true
+  end
+  if reattach then attach(song) end
 end
 
 -- Requests
@@ -209,6 +288,27 @@ end
 
 function handlers.status()
   return status.status(b.memory, host.bundle_path)
+end
+
+-- The reads. A long one is a job, run a slice at a time from the timers (the fast one while any is pending).
+local function as_job(work)
+  return { kumi_job = work }
+end
+
+function handlers.read(params)
+  return as_job(function(job) return reads.read(job, params, job.epoch) end)
+end
+
+function handlers.snapshot()
+  return as_job(function(job) return focus.snapshot(job, job.epoch, b.changed or 0) end)
+end
+
+function handlers.focus()
+  return focus.focus(epoch(), b.changed or 0)
+end
+
+function handlers.focus_body(params)
+  return as_job(function(job) return focus.focus_body(job, params, job.epoch) end)
 end
 
 handlers["renoise.reload"] = function()
@@ -243,6 +343,8 @@ function M.start(h, reloading)
     end,
     identity = identity,
     on_request = M.handle,
+    start_job = function(record, request, work) return jobs:add(record, request, work) end,
+    cancel_jobs = function(record) jobs:cancel(record) end,
     on_authenticated = function(record)
       log.write("info", "Kumi connected from " .. record.key)
       show_status("Kumi connected")
@@ -252,7 +354,18 @@ function M.start(h, reloading)
       b.remake = "too many connections held open after being refused (" .. open .. ")"
     end,
   })
-  observers = sync.new(guard)
+  b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
+  b.changed = b.changed or 0
+  observers = sync.new(guard, b)
+  jobs = jobs_module.new({
+    now_ms = M.now_ms,
+    epoch = epoch,
+    layout = function() return b.layout or 0 end,
+    finish = function(job, ok, value)
+      conns:finish_job(job.record, job.request, ok, value)
+    end,
+    on_active = function(active) if host.set_fast then host.set_fast(active) end end,
+  })
   status.cache = b
   if b.cfg and b.cfg.log_dir then configure_log(b.cfg.log_dir) end
   -- Two Renoises write to one log: each line says whose it is.
@@ -272,6 +385,7 @@ end
 
 function M.stop(_, reloading)
   if observers then observers:detach() end
+  if jobs then jobs:abort_all("reloading", "the tool was stopped or reloaded: ask again") end
   if not reloading then
     -- Renoise releases the song just before it quits; a tool disabled or reloaded sees no release.
     if conns then conns:close_all(b.quitting and "quit" or "shutdown") end
@@ -304,6 +418,7 @@ function M.tick()
   -- One failing step mustn't skip the others: connections still need their tick.
   local ok, err = xpcall(flush_events, debug.traceback)
   if not ok then M.log_error("events", err) end
+  jobs:run()
   conns:tick()
   b.ticks = (b.ticks or 0) + 1
   if b.ticks % 20 == 0 then log.flush() end
@@ -313,8 +428,10 @@ function M.on_accept(client)
   conns:accept(client)
 end
 
+-- (Every message also gives the reads in progress a slice if the timers haven't: see jobs.lua.)
 function M.on_message(client, data)
   conns:receive(client, data)
+  jobs:run_if_stale(M.STALE_JOBS_MS, M.STALE_SLICE_MS)
 end
 
 -- Only noted, whatever the error: it may be one client's (a reset, a timeout) and the server serves the others. Closing
@@ -332,8 +449,14 @@ function M.on_socket_error(message)
   log.write("error", "socket error: " .. text .. " (server running: " .. tostring(server_running()) .. ")")
 end
 
+-- Called from the fast timer while jobs are pending.
+function M.tick_jobs()
+  if jobs and jobs:pending() > 0 then jobs:run() end
+end
+
 function M.on_new_document()
   b.quitting = false
+  bump_epoch("a song was opened")
   attach(renoise.song())
   send_project()
 end

@@ -7,6 +7,8 @@ local BUNDLE = tool.bundle_path
 if not BUNDLE:match("[/\\]$") then BUNDLE = BUNDLE .. "/" end
 
 local TICK_MS = 50
+-- While a read is pending its slices run on this faster timer (the 50 ms one alone would make a big read take minutes).
+local JOB_TICK_MS = 10
 -- A payload whose start raised is tried again after this long.
 local START_RETRY_MS = 5000
 
@@ -175,6 +177,18 @@ local tick = guard("tick", function()
   call_payload("tick")
 end)
 
+local job_tick = guard("job_tick", function() call_payload("tick_jobs") end)
+
+-- The payload says whether any read is pending; the fast timer runs only then.
+function host.set_fast(active)
+  local running = tool:has_timer(job_tick)
+  if active and not running then
+    tool:add_timer(job_tick, JOB_TICK_MS)
+  elseif not active and running then
+    tool:remove_timer(job_tick)
+  end
+end
+
 -- main.lua runs once per Lua state, and a closure made here is never one already added: there's nothing to look for.
 local hooks = {}
 local function hook(observable, where, fn)
@@ -186,6 +200,7 @@ end
 hook(tool.tool_finished_loading_observable, "finished_loading", start)
 hook(tool.tool_will_unload_observable, "will_unload", function()
   if tool:has_timer(tick) then tool:remove_timer(tick) end
+  host.set_fast(false)
   stop()
   -- Renoise's own observers outlive this Lua state's tool object in no case we know of; taking ours off costs nothing.
   for _, entry in ipairs(hooks) do
