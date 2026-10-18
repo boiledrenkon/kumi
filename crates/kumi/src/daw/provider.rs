@@ -19,8 +19,12 @@ use std::{
 
 use super::ableton::AbletonFactory;
 use crate::doctor::{Check, DoctorIo, InstallationIo};
+use crate::install::InstalledIo;
+use crate::process::Run;
 use crate::report::LogFiles;
 use crate::tui::app::DawSetup;
+use crate::tui::tty::TtyOutput;
+use crate::update::UpdateIo;
 use kumi_runtime::RuntimeError;
 
 /// Makes each registered DAW's integration from its options: the app's own, or a test's stand-in.
@@ -86,6 +90,36 @@ pub struct BridgeState {
     pub why: Option<String>,
 }
 
+/// What became of the DAW's bridge when Kumi was removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovedBridge {
+    Removed,
+    Kept,
+    None,
+}
+
+/// `kumi bridge`'s options: answer yes to its questions, allow a checkout with changes, and how long to wait for the
+/// DAW to answer once the bridge is in place.
+#[derive(Clone, Default)]
+pub struct BridgeCommand {
+    pub input: Option<Rc<dyn crate::input::TerminalInput>>,
+    pub yes: bool,
+    pub allow_dirty: bool,
+    pub wait_ms: Option<u64>,
+}
+
+/// A DAW's bridge in a rollback of Kumi: put back before Kumi's folders swap when the earlier Kumi needs it first,
+/// restored if the swap fails, and finished once Kumi is back.
+#[async_trait::async_trait(?Send)]
+pub trait BridgeRollbackStep {
+    /// Before the swap.
+    async fn before_swap(&self) -> Result<(), RuntimeError>;
+    /// The swap failed: what to say when the bridge couldn't be restored either.
+    async fn swap_failed(&self) -> Option<String>;
+    /// Kumi is back at `version` (`native`: a native Kumi); the exit code.
+    async fn after_swap(&self, io: &InstalledIo, home: &str, app: &str, version: &str, native: bool) -> i32;
+}
+
 /// What the app says while it watches for the DAW to answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchWords {
@@ -149,6 +183,36 @@ pub trait DawProvider {
     /// The DAW's log for `kumi report`: its heading, and its bridge's lines and errors (`logs`: a test's log files in
     /// place of the DAW's own).
     fn report_log<'a>(&'a self, env: &'a Env, home: &'a str, logs: Option<&'a LogFiles>) -> LocalBoxFuture<'a, (String, String)>;
+    /// After an installed Kumi's update, its bridge brought up to date where it can be, or how to: the exit code.
+    fn after_update<'a>(&'a self, io: &'a InstalledIo, home: &'a str, app: &'a str) -> LocalBoxFuture<'a, i32>;
+    /// After a checkout's update, the same, with the checkout's own build of the bridge.
+    fn after_checkout_update<'a>(&'a self, io: &'a UpdateIo, run: Run, repo: &'a str) -> LocalBoxFuture<'a, i32>;
+    /// Ready the bridge for a rollback to the Kumi at `previous` (`version`; `legacy`: a JavaScript Kumi).
+    fn prepare_rollback<'a>(
+        &'a self,
+        io: &'a InstalledIo,
+        home: &'a str,
+        previous: &'a str,
+        version: &'a str,
+        legacy: bool,
+    ) -> LocalBoxFuture<'a, Result<Box<dyn BridgeRollbackStep>, RuntimeError>>;
+    /// Finishes a switch of the bridge an earlier updater began, before a session starts. Best effort.
+    fn finish_transition<'a>(&'a self, io: &'a InstalledIo) -> LocalBoxFuture<'a, ()>;
+    /// `kumi bridge`: puts Kumi's bridge in the DAW, or brings it up to date.
+    fn setup_bridge(&self, out: Rc<dyn TtyOutput>, env: &Env, command: BridgeCommand)
+        -> LocalBoxFuture<'static, Result<i32, RuntimeError>>;
+    /// Whether Kumi's bridge is in the DAW, for removing Kumi.
+    fn bridge_installed(&self, env: &Env) -> bool;
+    /// Kumi's folder of the DAW's bridge files, under Kumi's home ("bridge").
+    fn bridge_folder(&self) -> &'static str;
+    /// Whether the DAW uses the bridge files in `folder`, so they stay when Kumi goes.
+    fn bridge_files_in_use(&self, folder: &str, env: &Env) -> bool;
+    /// Takes Kumi's bridge out of the DAW, asking first.
+    fn remove_bridge<'a>(&'a self, io: &'a InstalledIo, run: Run) -> LocalBoxFuture<'a, Result<RemovedBridge, RuntimeError>>;
+    /// What `kumi uninstall --dry-run` says it would also do with the bridge.
+    fn removal_question(&self) -> &'static str;
+    /// What removing Kumi says when the bridge's files stay in `folder`.
+    fn files_stay(&self, folder: &str) -> String;
     /// Chatting without the DAW, in its words.
     fn without_daw(&self, on_connection: Rc<dyn Fn(ConnectionState)>) -> Rc<dyn Integration>;
 }

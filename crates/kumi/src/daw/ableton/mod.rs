@@ -2,6 +2,7 @@
 //! Extension, and Willington's bindings.
 pub mod bridge_setup;
 pub mod doctor;
+pub mod install;
 pub mod live_app;
 pub mod live_extension;
 pub mod provider;

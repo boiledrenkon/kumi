@@ -1,8 +1,8 @@
 //! `kumi update` for a checkout: pulls, rebuilds and launches native binaries.
+/// Live's part, where update has always had it.
+pub use crate::daw::ableton::install::{checkout_bridge, older_bridge, OlderBridge};
 use crate::{
-    bridge_setup::{default_run, executable_name, is_live_running, repository_dir, AsyncBool, Ran, Run},
-    config::find_bridge_config,
-    doctor::read_bridge_server,
+    bridge_setup::{default_run, repository_dir, AsyncBool, Ran, Run},
     spinner::step,
     tui::tty::TtyOutput,
 };
@@ -19,11 +19,10 @@ use kumi_runtime::{
     core::errors::RuntimeError,
     library::sources::{dirname, join},
     system::Env,
-    CONNECT_LIVE, KUMI, KUMI_REPAIR, KUMI_VERSION,
+    KUMI, KUMI_REPAIR, KUMI_VERSION,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs, path::Path, process::Stdio, rc::Rc};
+use std::{fs, path::Path, rc::Rc};
 const DAY: f64 = 86400000.;
 pub fn newer(left: &str, right: &str) -> bool {
     fn parts(text: &str) -> Vec<f64> {
@@ -121,25 +120,6 @@ pub async fn newer_kumi(io: CheckIo) -> Option<String> {
     }
     newer(&latest, current).then_some(latest)
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OlderBridge {
-    pub installed: String,
-    pub bundled: String,
-    #[serde(default)]
-    pub runtime_migration: bool,
-}
-pub fn older_bridge(env: &Env, bundled: Option<&str>) -> Option<OlderBridge> {
-    let config = find_bridge_config(env)?;
-    let bundled = bundled.filter(|s| !s.is_empty())?;
-    let server = read_bridge_server(&config).ok()?;
-    let runtime_migration = !server.native();
-    let installed = server.version?;
-    (newer(bundled, &installed) || (runtime_migration && bundled == installed)).then(|| OlderBridge {
-        installed,
-        bundled: bundled.into(),
-        runtime_migration,
-    })
-}
 #[derive(Clone)]
 pub struct UpdateIo {
     pub out: Rc<dyn TtyOutput>,
@@ -158,22 +138,6 @@ impl UpdateIo {
 }
 fn last(ran: &Ran) -> String {
     head(trim(if ran.stderr.is_empty() { &ran.stdout } else { &ran.stderr }).split('\n').next_back().unwrap_or(""), 300)
-}
-pub async fn checkout_bridge(repo: &str) -> i32 {
-    let target = std::env::var("CARGO_TARGET_DIR")
-        .ok()
-        .map(|dir| if Path::new(&dir).is_absolute() { dir } else { join(repo, &dir) })
-        .unwrap_or_else(|| join(repo, "target"));
-    let mut command = tokio::process::Command::new(join(&target, &format!("release/{}", executable_name("kumi"))));
-    // As an installed Kumi's update does: Live was just found closed, so nothing more is asked or waited for.
-    command
-        .args(["bridge", "--yes"])
-        .env("KUMI_BRIDGE_WAIT_SECONDS", "0")
-        .current_dir(repo)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    command.status().await.ok().and_then(|s| s.code()).unwrap_or(1)
 }
 pub async fn run_update(io: UpdateIo) -> i32 {
     let say = |s: String| io.out.write(&format!("{s}\n"));
@@ -229,7 +193,6 @@ pub async fn run_update(io: UpdateIo) -> i32 {
         }
     }
     let version = read_version(&join(&repo, "package.json")).unwrap_or(KUMI_VERSION.into());
-    let bundled = read_cargo_version(&join(&repo, "crates/ableton-mcp-server/Cargo.toml"));
     say(if behind > 0. { format!("Kumi is now {version}.") } else { format!("Kumi is up to date ({version}).") });
     if behind > 0. {
         let others = match &io.others {
@@ -240,51 +203,21 @@ pub async fn run_update(io: UpdateIo) -> i32 {
             say(open);
         }
     }
-    let bridge = older_bridge(&io.env, bundled.as_deref());
-    if find_bridge_config(&io.env).is_none() {
-        if let Some(words) = crate::install::no_bridge_yet(kumi_runtime::system::platform()) {
-            say(words);
+    // Each DAW's bridge, brought up to date where it can be, or how to.
+    let mut code = 0;
+    for provider in crate::daw::providers() {
+        let done = provider.after_checkout_update(&io, run.clone(), &repo).await;
+        if code == 0 {
+            code = done;
         }
-        return 0;
     }
-    let Some(bridge) = bridge else {
-        say("The bridge in Live is up to date.".into());
-        return 0;
-    };
-    say(if bridge.runtime_migration {
-        format!("The bridge in Live uses JavaScript ({}); this Kumi includes the native bridge ({}).", bridge.installed, bridge.bundled)
-    } else {
-        format!("The bridge in Live is {}; this Kumi's is {}.", bridge.installed, bridge.bundled)
-    });
-    if step(
-        io.out.clone(),
-        &io.env,
-        "Checking whether Live is open…",
-        async {
-            if let Some(live) = &io.live_running {
-                live().await
-            } else {
-                is_live_running(run).await
-            }
-        },
-        false,
-    )
-    .await
-    {
-        say(format!("{}.", *CONNECT_LIVE));
-        return 0;
-    }
-    if let Some(bridge) = io.update_bridge {
-        bridge(repo).await
-    } else {
-        checkout_bridge(&repo).await
-    }
+    code
 }
 fn read_version(file: &str) -> Option<String> {
     serde_json::from_slice::<Value>(&fs::read(file).ok()?).ok()?.get("version")?.as_str().map(str::to_string)
 }
 /// A Cargo.toml's `[package]` version, as written there (`version = "1.0.74"`).
-fn read_cargo_version(file: &str) -> Option<String> {
+pub(crate) fn read_cargo_version(file: &str) -> Option<String> {
     let text = fs::read_to_string(file).ok()?;
     let package = text.split("[package]").nth(1)?.split("\n[").next()?;
     package.lines().find_map(|line| {

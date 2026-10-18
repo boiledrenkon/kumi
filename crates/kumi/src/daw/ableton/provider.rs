@@ -6,10 +6,13 @@ use super::{
     setup::{live_here, LiveSide},
     willington::Willington,
 };
-use crate::daw::provider::{BridgeState, DawFactory, DawProvider, DawSession, EnableStep, WatchWords};
+use crate::daw::provider::{
+    BridgeCommand, BridgeRollbackStep, BridgeState, DawFactory, DawProvider, DawSession, EnableStep, RemovedBridge, WatchWords,
+};
 use crate::doctor::{Check, DoctorIo, InstallationIo, LiveProbe};
 use crate::report::LogFiles;
 use crate::tui::app::DawSetup;
+use crate::{install::InstalledIo, process::Run, tui::tty::TtyOutput, update::UpdateIo};
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::abort;
 use kumi_runtime::core::contracts::SessionController;
@@ -165,6 +168,56 @@ impl DawProvider for Ableton {
             super::report::log_section(env, home, logs).await
         }
         .boxed_local()
+    }
+    fn after_update<'a>(&'a self, io: &'a InstalledIo, home: &'a str, app: &'a str) -> LocalBoxFuture<'a, i32> {
+        super::install::bridge_after(io, home, app).boxed_local()
+    }
+    fn after_checkout_update<'a>(&'a self, io: &'a UpdateIo, run: Run, repo: &'a str) -> LocalBoxFuture<'a, i32> {
+        super::install::after_checkout_update(io, run, repo).boxed_local()
+    }
+    fn prepare_rollback<'a>(
+        &'a self,
+        io: &'a InstalledIo,
+        home: &'a str,
+        previous: &'a str,
+        version: &'a str,
+        legacy: bool,
+    ) -> LocalBoxFuture<'a, Result<Box<dyn BridgeRollbackStep>, RuntimeError>> {
+        super::install::prepare_rollback(io, home, previous, version, legacy).boxed_local()
+    }
+    fn finish_transition<'a>(&'a self, io: &'a InstalledIo) -> LocalBoxFuture<'a, ()> {
+        super::install::finish_legacy_transition(io).boxed_local()
+    }
+    fn setup_bridge(
+        &self,
+        out: Rc<dyn TtyOutput>,
+        env: &Env,
+        command: BridgeCommand,
+    ) -> LocalBoxFuture<'static, Result<i32, RuntimeError>> {
+        let mut options = bridge_setup::BridgeSetupIo::new(out, env.clone());
+        options.input = command.input;
+        options.yes = command.yes;
+        options.allow_dirty = command.allow_dirty;
+        options.wait_ms = command.wait_ms;
+        bridge_setup::setup_bridge(options).boxed_local()
+    }
+    fn bridge_installed(&self, env: &Env) -> bool {
+        crate::config::find_bridge_config(env).is_some()
+    }
+    fn bridge_folder(&self) -> &'static str {
+        "bridge"
+    }
+    fn bridge_files_in_use(&self, folder: &str, env: &Env) -> bool {
+        super::install::bridge_uses(folder, env)
+    }
+    fn remove_bridge<'a>(&'a self, io: &'a InstalledIo, run: Run) -> LocalBoxFuture<'a, Result<RemovedBridge, RuntimeError>> {
+        super::install::remove_bridge(io, run).boxed_local()
+    }
+    fn removal_question(&self) -> &'static str {
+        "ask whether to take the bridge out of Live too (its files stay while Live uses it)"
+    }
+    fn files_stay(&self, folder: &str) -> String {
+        format!("The bridge's files stay in {folder} while Live uses it.")
     }
     fn without_daw(&self, on_connection: Rc<dyn Fn(ConnectionState)>) -> Rc<dyn Integration> {
         kumi_runtime::integrations::create_inference_only_integration(on_connection)

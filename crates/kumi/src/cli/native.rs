@@ -3,9 +3,8 @@ mod session;
 mod shutdown;
 pub use crate::daw::ableton::AbletonFactory;
 use crate::{
-    bridge_setup::{self, BridgeSetupIo},
     config::*,
-    daw::{DawFactory, DawSession, WatchWords},
+    daw::{BridgeCommand, DawFactory, DawSession, WatchWords},
     doctor::{self, DoctorIo},
     export::{self, ExportRequest},
     input::TerminalInput,
@@ -152,7 +151,7 @@ fn installed_io(io: &CliIo) -> InstalledIo {
 }
 fn doctor_io(io: &CliIo, factory: DawFactory) -> DoctorIo {
     let mut doctor = DoctorIo::new(io.out.clone(), io.env.clone());
-    doctor.bundled_bridge_version = bridge_setup::bundled_bridge_version();
+    doctor.bundled_bridge_version = crate::daw::current().bundled_bridge_version();
     doctor.probe_live = Some(Rc::new(move |config| {
         let factory = factory.clone();
         async move { Ok(crate::daw::current().probe(config, &factory).await) }.boxed_local()
@@ -291,17 +290,14 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
             run_library(options).await
         }
         AppConfig::Bridge { yes, allow_dirty } => {
-            let mut options = BridgeSetupIo::new(io.out.clone(), io.env.clone());
-            options.input = Some(io.input.clone());
-            options.yes = *yes;
-            options.allow_dirty = *allow_dirty;
-            options.wait_ms = io
+            let wait_ms = io
                 .env
                 .get("KUMI_BRIDGE_WAIT_SECONDS")
                 .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(|n| n.saturating_mul(1000));
-            bridge_setup::setup_bridge(options).await
+            let command = BridgeCommand { input: Some(io.input.clone()), yes: *yes, allow_dirty: *allow_dirty, wait_ms };
+            crate::daw::current().setup_bridge(io.out.clone(), &io.env, command).await
         }
         AppConfig::Auth { .. } => {
             login::auth_status(&config, AuthIo { out: io.out.clone(), env: io.env.clone(), fetch: None }).await?;
@@ -371,7 +367,10 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
         }
         AppConfig::InferenceOnly { .. } | AppConfig::Live { .. } => {
             if io.installed() && matches!(config, AppConfig::Live { .. }) {
-                install::finish_legacy_transition(&installed_io(io)).await;
+                let installed = installed_io(io);
+                for provider in crate::daw::providers() {
+                    provider.finish_transition(&installed).await;
+                }
             }
             session::run_session(io.clone(), config, secrets, factory).await
         }
@@ -420,7 +419,7 @@ async fn reopen(io: &CliIo) -> Result<i32, RuntimeError> {
         return Ok(reopen().await);
     }
     let exe = if io.installed() {
-        std::path::Path::new(&install::kumi_home(&io.env)).join("app").join(bridge_setup::executable_name("kumi"))
+        std::path::Path::new(&install::kumi_home(&io.env)).join("app").join(crate::process::executable_name("kumi"))
     } else {
         std::env::current_exe().map_err(|e| RuntimeError::plain(e.to_string()))?
     };

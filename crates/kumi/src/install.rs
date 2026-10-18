@@ -1,13 +1,15 @@
 //! Installed Kumi and its native release bundles.
 mod migration;
 pub use crate::config::kumi_dir as kumi_home;
+/// Live's part, where install has always had it.
+pub use crate::daw::ableton::install::{bridge_command, finish_legacy_transition, no_bridge_yet, only_the_host_differs};
+use crate::daw::RemovedBridge;
 pub use crate::update::newer as newer_version;
 use crate::{
-    bridge_setup::{ask_yes_no, bridge_version, default_run, executable_dir, executable_name, is_live_running, AsyncBool, Confirm, Run},
-    config::{find_bridge_config, json_files, load_db_file, remote_scripts_dir},
+    bridge_setup::{ask_yes_no, bridge_version, default_run, executable_name, AsyncBool, Confirm, Run},
+    config::{find_bridge_config, json_files, load_db_file},
     doctor::read_bridge_server,
     input::TerminalInput,
-    live_extension::{extension_data_dir, live_extensions_dir, remove_extension, remove_former_extension, KUMI_EXTENSION_ID},
     spinner::step,
     tui::tty::TtyOutput,
 };
@@ -27,18 +29,19 @@ use kumi_runtime::{
         errors::RuntimeError,
         store_import::write_back,
     },
-    ears::device::EARS_NAME,
-    library::sources::{basename, dirname, join, resolve},
+    library::sources::{basename, dirname, join},
     net::proxy,
     system::{self, Env, SystemProgram},
     web::cause::{unreachable, unreachable_call, NetCause},
-    CONNECT_LIVE, KUMI, KUMI_VERSION, REINSTALL,
+    KUMI, KUMI_VERSION, REINSTALL,
 };
-pub use migration::{ensure_native_launcher, finish_legacy_transition, has_app, launcher, only_the_host_differs, write_launcher};
+pub use migration::{ensure_native_launcher, has_app, launcher, write_launcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path, process::Stdio, rc::Rc, time::Duration};
+#[cfg(windows)]
+use std::process::Stdio;
+use std::{fs, path::Path, rc::Rc, time::Duration};
 /// What an update needs free: what it writes, the download and the new Kumi unpacked beside it. Kumi and the one kept
 /// for a rollback are only renamed, and the one before that goes after the swap, with the download. Measured on a real
 /// update (1.16.5 → 1.16.6, macOS arm64): free space fell by 131 MB (41 MB download + 90 MB unpacked). Windows x64's
@@ -221,7 +224,7 @@ fn unasked(asked: &AskedRelease, base: &str, pinned: Option<&str>, env: &Env) ->
         _ => "The latest release's description didn't make sense; try again later".into(),
     }
 }
-fn error(e: impl std::fmt::Display) -> RuntimeError {
+pub(crate) fn error(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::plain(e.to_string())
 }
 #[derive(Clone)]
@@ -327,82 +330,24 @@ fn denied(error: &std::io::Error) -> bool {
     !cfg!(windows) && (error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1))
 }
 /// A yes/no question; `ahead` says how to answer it beforehand, where a flag does ("add --yes").
-async fn ask(io: &InstalledIo, question: &str, ahead: Option<&str>) -> bool {
+pub(crate) async fn ask(io: &InstalledIo, question: &str, ahead: Option<&str>) -> bool {
     if let Some(ask) = &io.confirm {
         ask(question.into()).await
     } else {
         ask_yes_no(io.input.clone(), io.out.clone(), question, ahead).await
     }
 }
-async fn live_open(io: &InstalledIo, run: Run) -> bool {
-    step(
-        io.out.clone(),
-        &io.env,
-        "Checking whether Live is open…",
-        async {
-            if let Some(live) = &io.live_running {
-                live().await
-            } else {
-                is_live_running(run).await
-            }
-        },
-        false,
-    )
-    .await
-}
-async fn bridge_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
-    let say = |text: String| io.out.write(&format!("{text}\n"));
-    let Some(config) = find_bridge_config(&io.env) else {
-        if let Some(words) = no_bridge_yet(system::platform()) {
-            say(words);
+/// Each DAW's bridge after Kumi changed: brought up to date where it can be, or how to. The exit code is the first
+/// one that isn't 0.
+async fn bridges_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
+    let mut code = 0;
+    for provider in crate::daw::providers() {
+        let done = provider.after_update(io, home, app).await;
+        if code == 0 {
+            code = done;
         }
-        return 0;
-    };
-    let server = read_bridge_server(&config).ok();
-    let runtime_migration = server.as_ref().is_some_and(|s| !s.native());
-    let installed = server.and_then(|s| s.version);
-    let bundled = bridge_version(app);
-    let Some((installed, bundled)) = installed
-        .zip(bundled)
-        .filter(|(installed, bundled)| newer_version(bundled, installed) || (runtime_migration && bundled == installed))
-    else {
-        say("The bridge in Live is up to date.".into());
-        return 0;
-    };
-    say(if runtime_migration {
-        format!("The bridge in Live uses JavaScript ({installed}); this Kumi includes the native bridge ({bundled}).")
-    } else {
-        format!("The bridge in Live is {installed}; this Kumi's is {bundled}.")
-    });
-    if live_open(io, io.run.clone().unwrap_or_else(default_run)).await {
-        say(format!("{}.", *CONNECT_LIVE));
-        return 0;
     }
-    if let Some(update) = &io.update_bridge {
-        return update(app.into()).await;
-    }
-    bridge_command(app, home).status().await.ok().and_then(|s| s.code()).unwrap_or(1)
-}
-/// With no bridge in Live yet, an update ends by saying how to connect it, where Live runs: on Linux there's no Live,
-/// so nothing is said.
-pub fn no_bridge_yet(platform: &str) -> Option<String> {
-    crate::live_app::runs_on(platform).then(|| format!("The bridge isn't in Live yet. {}.", *CONNECT_LIVE))
-}
-/// `kumi bridge` as an update's last step, Live just found closed: it asks nothing more (its lifecycle looks for
-/// Live again before changing anything) and doesn't wait for a Live nobody has opened.
-pub fn bridge_command(app: &str, home: &str) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(join(app, &executable_name("kumi")));
-    command
-        .args(["bridge", "--yes"])
-        .current_dir(home)
-        .env("KUMI_INSTALLED", "1")
-        .env("KUMI_BRIDGE_AFTER", "1")
-        .env("KUMI_BRIDGE_WAIT_SECONDS", "0")
-        .env("KUMI_HOME", home)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    command
+    code
 }
 /// What a swap does to Kumi's folders. The tests stand in for Windows holding one.
 trait Folders {
@@ -690,7 +635,7 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     }
     if pinned == Some(KUMI_VERSION) {
         say(format!("Kumi is {KUMI_VERSION} already."));
-        return Ok(bridge_after(&io, &home, &app).await);
+        return Ok(bridges_after(&io, &home, &app).await);
     }
     let looking = pinned.map(|version| format!("Looking for Kumi {version}…")).unwrap_or_else(|| "Looking for a newer Kumi…".into());
     let asking = async {
@@ -715,7 +660,7 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
         }
         None if !newer_version(&manifest.kumi, KUMI_VERSION) => {
             say(format!("Kumi is up to date ({KUMI_VERSION})."));
-            return Ok(bridge_after(&io, &home, &app).await);
+            return Ok(bridges_after(&io, &home, &app).await);
         }
         _ => {}
     }
@@ -887,7 +832,7 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
         say(format!("The bridge in Live stays {installed}, which works with {}.", manifest.kumi));
         return Ok(0);
     }
-    Ok(bridge_after(&io, &home, &app).await)
+    Ok(bridges_after(&io, &home, &app).await)
 }
 /// How many other processes run `exe` on this account: Kumi windows, or a `kumi` command in another terminal.
 /// None on Windows, where Kumi can't update or roll back while one runs at all.
@@ -982,17 +927,15 @@ pub async fn rollback_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|v| v.get("version").and_then(Value::as_str).map(str::to_string))
         .unwrap_or("the one before".into());
-    // A Node Kumi can't run without its own bridge: that goes back first, and forward again if the swap fails. A
-    // native one runs with a newer bridge too, so its own goes back after the swap, when it can.
-    let (bridge_rollback, earlier) = if legacy {
-        (migration::prepare_legacy_rollback(&io, &home).await?, None)
-    } else {
-        (None, Some(migration::earlier_bridge(&io, &home, &previous, &version).await))
-    };
+    // Each DAW's bridge, readied for the rollback: what goes back before the swap, and after it.
+    let mut bridges = vec![];
+    for provider in crate::daw::providers() {
+        bridges.push(provider.prepare_rollback(&io, &home, &previous, &version, legacy).await?);
+    }
     write_back_for_older(&io).await;
     write_launcher(&home).map_err(error)?;
-    if let Some(rollback) = &bridge_rollback {
-        rollback.apply().await?;
+    for bridge in &bridges {
+        bridge.before_swap().await?;
     }
     let switched = async {
         remove(&hold)?;
@@ -1010,65 +953,25 @@ pub async fn rollback_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
                 rename(&hold, &app).await.map_err(error)?;
             }
         }
-        if let Some(rollback) = &bridge_rollback {
-            if let Err(error) = rollback.apply().await {
-                say(format!(
-                    "The application swap failed, and restoring its bridge also failed: {}. Keep Live closed and run: kumi bridge",
-                    error.message()
-                ));
+        for bridge in &bridges {
+            if let Some(said) = bridge.swap_failed().await {
+                say(said);
             }
         }
         say("Couldn't switch back; close every Kumi window and try again.".into());
         return Ok(1);
     }
     say(format!("Kumi is back to {version}. {} update --rollback again returns to {KUMI_VERSION}.", *KUMI));
-    if Path::new(&join(&app, &executable_name("kumi"))).exists() {
-        let Some(migration::EarlierBridge { rollback, said: Some(said), later }) = earlier else {
-            return Ok(bridge_after(&io, &home, &app).await);
-        };
-        let Some(rollback) = rollback else {
-            say(said);
-            return Ok(0);
-        };
-        // This process is still the newer Kumi: the swap only renamed its folder, which nothing from here on reads
-        // (on Windows too, where the running executable stays in use). The bridge's own rollback and the kept
-        // extension come from the bridge's folders, which the swap doesn't move.
-        // Live may have opened while the folders moved (a rename can wait on a held folder): the switch runs with
-        // it closed, or not at all.
-        if live_open(&io, io.run.clone().unwrap_or_else(default_run)).await {
-            say(later.unwrap_or_default());
-            return Ok(0);
+    // Each DAW's bridge, finished now Kumi is back.
+    let native = Path::new(&join(&app, &executable_name("kumi"))).exists();
+    let mut code = 0;
+    for bridge in &bridges {
+        let done = bridge.after_swap(&io, &home, &app, &version, native).await;
+        if code == 0 {
+            code = done;
         }
-        match step(io.out.clone(), &io.env, "Putting back the bridge…", rollback.apply(), true).await {
-            Ok(()) => {
-                say(said);
-                if let Some(placed) = rollback.place_extension(&io.env) {
-                    say(placed);
-                }
-                Ok(0)
-            }
-            // The lifecycle couldn't put its own changes back: the bridge is neither one nor the other.
-            Err(reason) if reason.message().contains("compensation was incomplete") => {
-                say(format!("The bridge's rollback stopped partway ({}). {} doctor says how to repair it.", reason.message(), *KUMI));
-                Ok(1)
-            }
-            Err(reason) => {
-                say(format!(
-                    "The bridge couldn't go back ({}): the one in Live stays, and works with {version}. To try again, quit Live, then run {} update --rollback twice.",
-                    reason.message(),
-                    *KUMI
-                ));
-                Ok(0)
-            }
-        }
-    } else {
-        // The receipt-bound bridge rollback above restored the legacy command/config as well; Live's extension goes
-        // back with it.
-        if let Some(said) = bridge_rollback.as_ref().and_then(|rollback| rollback.place_extension(&io.env)) {
-            say(said);
-        }
-        Ok(0)
     }
+    Ok(code)
 }
 pub const PATH_MARKER: &str = "# Added by the Kumi installer";
 pub fn startup_files(env: &Env) -> Vec<String> {
@@ -1265,99 +1168,6 @@ if ($path) {{
         None,
     )
     .await;
-}
-#[derive(PartialEq, Eq)]
-enum RemovedBridge {
-    Removed,
-    Kept,
-    None,
-}
-async fn remove_bridge(io: &InstalledIo, run: Run) -> Result<RemovedBridge, RuntimeError> {
-    let say = |s: String| io.out.write(&format!("{s}\n"));
-    let Some(config) = find_bridge_config(&io.env) else { return Ok(RemovedBridge::None) };
-    let extensions = live_extensions_dir(&io.env, system::platform());
-    let by_hand = format!(
-        "AbletonMcpBridge from Live's Remote Scripts folder{}",
-        extensions
-            .as_ref()
-            .map(|ext| format!(", and {KUMI_EXTENSION_ID} from {ext} and from {}", dirname(&extension_data_dir(ext))))
-            .unwrap_or_default()
-    );
-    if !ask(io, "Remove the Ableton bridge from Live too?", None).await {
-        say(format!("The bridge stays in Live, and so do its files. To take it out later, remove {by_hand}."));
-        return Ok(RemovedBridge::Kept);
-    }
-    if live_open(io, run.clone()).await {
-        say(format!("Live is open, so the bridge stays, and so do its files. Quit Live, then remove {by_hand}."));
-        return Ok(RemovedBridge::Kept);
-    }
-    let root = read_bridge_server(&config).ok().and_then(|server| server.package_root());
-    let lifecycle =
-        root.as_ref().map(|root| join(root, &executable_name("ableton-mcp-server"))).filter(|file| Path::new(file).is_file()).or_else(
-            || {
-                let file = join(&executable_dir(), &executable_name("ableton-mcp-server"));
-                Path::new(&file).is_file().then_some(file)
-            },
-        );
-    let Some((root, lifecycle)) = root.zip(lifecycle) else {
-        say(format!("Kumi couldn't find the bridge's own uninstaller; remove {by_hand} by hand."));
-        return Ok(RemovedBridge::Kept);
-    };
-    let ran = step(
-        io.out.clone(),
-        &io.env,
-        "Taking the bridge out of Live…",
-        run(
-            lifecycle,
-            vec![
-                "lifecycle".into(),
-                "uninstall".into(),
-                "--remote-scripts-dir".into(),
-                remote_scripts_dir(&io.env),
-                "--state-dir".into(),
-                dirname(&config),
-                "--package-root".into(),
-                root,
-                "--apply".into(),
-                "--confirm-live-stopped".into(),
-            ],
-            None,
-        ),
-        false,
-    )
-    .await;
-    if ran.code != 0 {
-        say(format!("The bridge's uninstaller refused; remove {by_hand} by hand."));
-        return Ok(RemovedBridge::Kept);
-    }
-    let removed_extension = extensions.as_ref().map(|ext| remove_extension(ext)).transpose().map_err(error)?.unwrap_or(false);
-    let removed_former = remove_former_extension(&io.env, system::platform()).map_err(error)?;
-    say(if removed_extension || removed_former {
-        "The bridge and Kumi's extension are out of Live."
-    } else {
-        "The bridge is out of Live."
-    }
-    .into());
-    let scripts = remote_scripts_dir(&io.env);
-    if basename(&scripts) == "Remote Scripts" {
-        remove(&join(&join(&dirname(&scripts), "Kumi"), &format!("{EARS_NAME}.amxd"))).map_err(error)?;
-    }
-    Ok(RemovedBridge::Removed)
-}
-fn bridge_uses(folder: &str, env: &Env) -> bool {
-    let Some(config) = find_bridge_config(env) else { return false };
-    let inside = |path: &str| {
-        let mut folder = resolve(folder);
-        let mut path = resolve(path);
-        if cfg!(windows) {
-            folder = folder.to_lowercase();
-            path = path.to_lowercase();
-        }
-        Path::new(&path)
-            .strip_prefix(&folder)
-            .is_ok_and(|relative| !relative.as_os_str().is_empty() && !relative.to_string_lossy().starts_with(".."))
-    };
-    inside(&config) || read_bridge_server(&config).ok().and_then(|s| s.entry).is_some_and(|entry| inside(&entry))
 }
 #[derive(Clone, Copy, Default)]
 pub struct UninstallOptions {
@@ -1721,13 +1531,14 @@ impl Parts {
         self.left.is_empty() && self.others.is_empty()
     }
 }
-fn own_parts(home: &str, all: bool, bridge_stays: bool) -> Result<Parts, RuntimeError> {
+/// `kept`: the folders of DAWs' bridge files that stay, as their DAWs use them.
+fn own_parts(home: &str, all: bool, kept: &[&str]) -> Result<Parts, RuntimeError> {
     let names = names_in(home)?;
     let alone = kumis_alone(home);
     let mut parts = Parts { gone: vec![], left: vec![], alone, data: vec![], others: vec![] };
     for name in names {
         let path = join(home, &name);
-        if name == "bridge" && bridge_stays {
+        if kept.contains(&name.as_str()) {
             continue;
         }
         if SHARED_NAMES.contains(&name.as_str()) {
@@ -1836,8 +1647,14 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
             chown_line(home)
         ));
     }
-    let bridge = find_bridge_config(&io.env).is_some();
-    let parts = own_parts(home, options.all, bridge && bridge_uses(&join(home, "bridge"), &io.env))?;
+    // The DAWs whose bridge is in them, and the bridge files they use, which stay.
+    let bridges: Vec<_> = crate::daw::providers().into_iter().filter(|provider| provider.bridge_installed(&io.env)).collect();
+    let kept: Vec<&str> = bridges
+        .iter()
+        .filter(|provider| provider.bridge_files_in_use(&join(home, provider.bridge_folder()), &io.env))
+        .map(|provider| provider.bridge_folder())
+        .collect();
+    let parts = own_parts(home, options.all, &kept)?;
     let bytes: u64 = parts.gone.iter().map(|part| bytes_in(Path::new(part))).sum();
     if options.all && parts.clean() {
         say(format!("kumi uninstall --all would remove {} ({}), with your {KEPT}.", display(home), size(bytes as f64)));
@@ -1871,8 +1688,8 @@ fn dry_run(io: &InstalledIo, home: &str, options: UninstallOptions, display: &dy
     } else if !files.is_empty() {
         also.push(format!("take Kumi out of {}", listed(&files)));
     }
-    if bridge {
-        also.push("ask whether to take the bridge out of Live too (its files stay while Live uses it)".into());
+    for provider in &bridges {
+        also.push(provider.removal_question().into());
     }
     if !also.is_empty() {
         say(format!("It would also {}.", also.join(", and ")));
@@ -1924,7 +1741,7 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         return Ok(1);
     }
     let run = io.run.clone().unwrap_or_else(default_run);
-    let before = own_parts(&home, options.all, false)?;
+    let before = own_parts(&home, options.all, &[])?;
     let keeps = match (options.all, before.alone) {
         (true, true) if before.only_kumis() => format!("Your {KEPT} go too."),
         (true, true) => format!("Your {KEPT} go too; what isn't Kumi's in it stays."),
@@ -1937,9 +1754,17 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
         say("Nothing was removed.".into());
         return Ok(1);
     }
-    let bridge = remove_bridge(&io, run.clone()).await?;
-    let bridge_stays = bridge != RemovedBridge::Removed && bridge_uses(&join(&home, "bridge"), &io.env);
-    let parts = own_parts(&home, options.all, bridge_stays)?;
+    // Each DAW's bridge, taken out when the producer says so; the files of one that stays stay too, while it uses them.
+    let mut staying = vec![];
+    for provider in crate::daw::providers() {
+        let removed = provider.remove_bridge(&io, run.clone()).await?;
+        if removed != RemovedBridge::Removed && provider.bridge_files_in_use(&join(&home, provider.bridge_folder()), &io.env) {
+            staying.push(provider);
+        }
+    }
+    let kept: Vec<&str> = staying.iter().map(|provider| provider.bridge_folder()).collect();
+    let bridge_stays = !staying.is_empty();
+    let parts = own_parts(&home, options.all, &kept)?;
     let whole = options.all && parts.alone && !bridge_stays;
     let bytes: u64 = parts.gone.iter().map(|part| bytes_in(Path::new(part))).sum();
     // Every part is tried, Kumi itself last: its app, then its launcher. When another part stays, Kumi does too, and
@@ -1994,8 +1819,8 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     } else if cfg!(windows) {
         step(io.out.clone(), &io.env, "Taking Kumi out of your PATH…", remove_windows_path(run, &home), false).await;
     }
-    if bridge_stays {
-        say(format!("The bridge's files stay in {} while Live uses it.", display(&join(&home, "bridge"))));
+    for provider in &staying {
+        say(provider.files_stay(&display(&join(&home, provider.bridge_folder()))));
     }
     if let Some(said) = left_said(&parts.left, &display) {
         say(said);

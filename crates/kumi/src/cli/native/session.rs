@@ -144,6 +144,7 @@ async fn connect_when_live_answers<F, A, O, B>(
 #[cfg(test)]
 use crate::{
     daw::ableton::{
+        bridge_setup,
         provider::{LIVE_STARTING, NO_LIVE},
         setup::LiveSide,
     },
