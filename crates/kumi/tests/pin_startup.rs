@@ -206,7 +206,12 @@ struct Failing(String, Rc<Cell<u32>>);
 impl Integration for Failing {
     async fn start(&self, _: Signal) -> Result<(), RuntimeError> {
         self.1.set(self.1.get() + 1);
-        Err(KumiError::new(FailureKind::Live, self.0.clone()).into())
+        // As Live's integration says it: another bridge in Live is a failure restarting Live fixes.
+        let failure = KumiError::new(FailureKind::Live, self.0.clone());
+        if self.0.contains(kumi_common::bridge::ANOTHER_BRIDGE) {
+            return Err(failure.with_setup(kumi_runtime::SetupFailure::RestartDaw).into());
+        }
+        Err(failure.into())
     }
     async fn observe(&self, _: Signal, _: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
         Err(RuntimeError::plain("not started"))

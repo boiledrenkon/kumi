@@ -11,7 +11,7 @@ use crate::{
     command::KUMI,
     core::{
         contracts::*,
-        errors::{FailureKind, KumiError, RuntimeError},
+        errors::{FailureKind, KumiError, RuntimeError, SetupFailure},
     },
     mcp::{
         allowed_tools::{AllowedTools, CallOptions},
@@ -315,13 +315,12 @@ impl LiveConnection {
             // Live still running the bridge it loaded before an update: restart Live, not another update, in the
             // bridge's own words. Anything else gets the usual way back after an update, with what the bridge said.
             let said = error.to_string();
-            let message = if said.contains(kumi_common::bridge::ANOTHER_BRIDGE) {
-                said
-            } else {
-                let cause = said.strip_prefix("Kumi's bridge didn't start: ").map(|cause| format!(" ({cause})")).unwrap_or_default();
-                format!("Kumi couldn't start its bridge to Live{cause}. After updating Kumi, Live's part needs updating too: quit Live, then run {} bridge. Otherwise: {} doctor",*KUMI,*KUMI)
-            };
-            return Err(KumiError::new(FailureKind::Live, message).into());
+            if said.contains(kumi_common::bridge::ANOTHER_BRIDGE) {
+                return Err(KumiError::new(FailureKind::Daw, said).with_setup(SetupFailure::RestartDaw).into());
+            }
+            let cause = said.strip_prefix("Kumi's bridge didn't start: ").map(|cause| format!(" ({cause})")).unwrap_or_default();
+            let message = format!("Kumi couldn't start its bridge to Live{cause}. After updating Kumi, Live's part needs updating too: quit Live, then run {} bridge. Otherwise: {} doctor",*KUMI,*KUMI);
+            return Err(KumiError::new(FailureKind::Daw, message).into());
         }
         Ok(())
     }

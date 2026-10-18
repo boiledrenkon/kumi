@@ -543,19 +543,20 @@ pub(super) async fn run_session(
             let watching_live = watching_live.clone();
             let restart_said = restart_said.clone();
             let env = env.clone();
-            with_fallback(
+            with_fallback_failure(
                 factory(options),
                 Rc::new(move || {
                     let on_connection = on_connection.clone();
                     create_inference_only_integration(Rc::new(move |state| on_connection(state, None)))
                 }),
-                Rc::new(move |message: String| {
+                Rc::new(move |failure: &KumiError| {
+                    let message = failure.message.clone();
                     let installed = doctor::read_bridge_server(&bridge_config).ok().and_then(|s| s.version);
                     let current = installed.is_some() && installed == bundled;
                     // Live still runs the bridge it loaded before an update: restarting Live is the fix whether or not
                     // the installed bridge is current (right after kumi bridge it is). Said once; the watch then
                     // connects once Live answers with the one installed.
-                    let restart = message.contains(kumi_common::bridge::ANOTHER_BRIDGE);
+                    let restart = failure.setup == Some(SetupFailure::RestartDaw);
                     if restart && !restart_said.replace(true) {
                         emit(SessionEvent::Notice { message: message.clone() });
                     }

@@ -342,7 +342,7 @@ pub fn error_check(error: &RuntimeError) -> Check {
         Some(FailureKind::Billing) => Some("sort out the provider account's billing or credits, or choose another model (/model)"),
         Some(FailureKind::Model) => Some("choose another model (/model)"),
         Some(FailureKind::Config) => Some("fix the setting the error names"),
-        Some(FailureKind::Live) => Some("check that Live is open with Kumi's bridge"),
+        Some(FailureKind::Daw) => Some("check that Live is open with Kumi's bridge"),
         Some(FailureKind::UsageLimit) => Some("choose a fallback model (ctrl+f in /model), or wait for the plan's limit to reset"),
         _ => None,
     };

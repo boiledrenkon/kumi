@@ -1987,7 +1987,7 @@ impl Session {
                     let actionable = kumi.is_some_and(|e| {
                         matches!(
                             e.kind,
-                            FailureKind::Auth | FailureKind::Billing | FailureKind::Model | FailureKind::Config | FailureKind::Live
+                            FailureKind::Auth | FailureKind::Billing | FailureKind::Model | FailureKind::Config | FailureKind::Daw
                         )
                     });
                     let message = if actionable {

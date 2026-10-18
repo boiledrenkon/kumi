@@ -43,7 +43,7 @@ pub use core::contracts::{
     TranscriptLine, TurnResult, TurnState, Usage, WatchedEvent, WebEvent,
 };
 pub use core::conversations::{create_conversation_store, create_conversation_store_keeping, gone_words, IMPORTED, KEEP_DAYS};
-pub use core::errors::{FailureKind, KumiError, RuntimeError};
+pub use core::errors::{FailureKind, KumiError, RuntimeError, SetupFailure};
 pub use core::gaps::{gap_tools, GAP_GUIDANCE, GAP_TOOL};
 pub use core::goal::{create_goal_store, GoalBudget, GoalState, GoalStatus, GoalStore, GOAL_BUDGET};
 pub use core::goal_mode::{create_objective_store, Objective, ObjectiveBudget, ObjectiveStatus, ObjectiveStore, OBJECTIVE_BUDGET};
@@ -61,7 +61,7 @@ pub use core::techniques::{
 };
 pub use ears::device::{install_ears, EARS_NAME};
 pub use hands::{can_build_hands, open_hands, Hands};
-pub use integrations::fallback::with_fallback;
+pub use integrations::fallback::{with_fallback, with_fallback_failure};
 pub use integrations::{
     create_ableton_integration, create_inference_only_integration, create_project_store, parse_focus, Baseline, ProjectStore, BRIDGE_TOOLS,
 };

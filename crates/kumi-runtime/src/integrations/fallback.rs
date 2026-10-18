@@ -1,4 +1,4 @@
-//! Continue without Live when the primary integration reports a Live setup failure.
+//! Continue without the DAW when the primary integration reports a DAW setup failure.
 use crate::core::{
     contracts::*,
     errors::{FailureKind, KumiError, RuntimeError},
@@ -11,12 +11,21 @@ pub struct FallbackIntegration {
     primary: Rc<dyn Integration>,
     current: RefCell<Rc<dyn Integration>>,
     fallback: Rc<dyn Fn() -> Rc<dyn Integration>>,
-    on_fallback: Rc<dyn Fn(String)>,
+    on_fallback: Rc<dyn Fn(&KumiError)>,
 }
+/// `on_fallback` is told what the primary said, in its own words.
 pub fn with_fallback(
     primary: Rc<dyn Integration>,
     fallback: Rc<dyn Fn() -> Rc<dyn Integration>>,
     on_fallback: Rc<dyn Fn(String)>,
+) -> Rc<FallbackIntegration> {
+    with_fallback_failure(primary, fallback, Rc::new(move |failure: &KumiError| on_fallback(failure.message.clone())))
+}
+/// `on_fallback` is told the primary's whole failure: its words, and the setup fix it has (restart the DAW).
+pub fn with_fallback_failure(
+    primary: Rc<dyn Integration>,
+    fallback: Rc<dyn Fn() -> Rc<dyn Integration>>,
+    on_fallback: Rc<dyn Fn(&KumiError)>,
 ) -> Rc<FallbackIntegration> {
     Rc::new(FallbackIntegration { current: RefCell::new(primary.clone()), primary, fallback, on_fallback })
 }
@@ -33,14 +42,16 @@ impl Integration for FallbackIntegration {
     }
     async fn start(&self, signal: Signal) -> Result<(), RuntimeError> {
         if let Err(error) = self.primary.start(signal.clone()).await {
-            if signal.is_cancelled() || !error.kumi().is_some_and(|e| e.kind == FailureKind::Live) {
+            if signal.is_cancelled() || !error.kumi().is_some_and(|e| e.kind == FailureKind::Daw) {
                 return Err(error);
             }
             let _ = self.primary.close().await;
             let fallback = (self.fallback)();
             *self.current.borrow_mut() = fallback.clone();
             fallback.start(signal).await?;
-            (self.on_fallback)(error.message());
+            if let Some(failure) = error.kumi() {
+                (self.on_fallback)(failure);
+            }
         }
         Ok(())
     }
