@@ -1,0 +1,302 @@
+//! In-process stand-ins for the bridges inside REAPER and Renoise: the same wire through daw-bridge's
+//! [`ServerConnection`], a scripted identity, and a transcript of every line, for the host's tests.
+use daw_bridge::auth::Secret;
+use daw_bridge::files::{write_discovery, Discovery, DISCOVERY_SCHEMA};
+use daw_bridge::handshake::{Offer, ServerAction, ServerConnection};
+use daw_bridge::wire::{code, event, Frame, Identity, Project, Request, PROTOCOL};
+use daw_bridge::Daw;
+use serde_json::{json, Map, Value};
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, watch};
+
+/// One line on a simulated connection: `>` from the host, `<` from the bridge, with the connection's number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    pub connection: usize,
+    pub from_host: bool,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SimulatorConfig {
+    pub secret: Secret,
+    pub identity: Identity,
+    pub offer: Offer,
+    /// Extra `status` fields (Renoise's `demo`).
+    pub status_extra: Map<String, Value>,
+    /// Where to write the discovery file, if anywhere.
+    pub discovery_dir: Option<PathBuf>,
+}
+
+impl SimulatorConfig {
+    /// REAPER 7.82 on a portable resource folder, with a saved project.
+    pub fn reaper(secret: Secret, resource: &str) -> Self {
+        Self {
+            secret,
+            identity: Identity {
+                daw: Daw::Reaper.id().into(),
+                bridge: "0.1.0".into(),
+                daw_version: "7.82/macOS-arm64".into(),
+                pid: std::process::id(),
+                resource: resource.into(),
+                project: Some(Project {
+                    name: Some("Song.rpp".into()),
+                    path: Some(format!("{resource}/Projects/Song.rpp")),
+                    ..Project::default()
+                }),
+            },
+            offer: Offer {
+                events: vec![event::PROJECT.into(), event::TRANSPORT.into(), event::TRACKS.into(), event::SELECTION.into()],
+                ..Offer::default()
+            },
+            status_extra: Map::new(),
+            discovery_dir: None,
+        }
+    }
+
+    /// Renoise 3.5.4 (licensed) with an unsaved song.
+    pub fn renoise(secret: Secret, resource: &str) -> Self {
+        let mut status_extra = Map::new();
+        status_extra.insert("demo".into(), false.into());
+        Self {
+            secret,
+            identity: Identity {
+                daw: Daw::Renoise.id().into(),
+                bridge: "0.1.0".into(),
+                daw_version: "3.5.4".into(),
+                pid: std::process::id(),
+                resource: resource.into(),
+                project: Some(Project { name: Some("Untitled".into()), ..Project::default() }),
+            },
+            offer: Offer {
+                events: vec![event::PROJECT.into(), event::TRANSPORT.into(), event::TRACKS.into(), event::SELECTION.into()],
+                ..Offer::default()
+            },
+            status_extra,
+            discovery_dir: None,
+        }
+    }
+}
+
+struct State {
+    identity: Identity,
+    busy: Option<String>,
+    transcript: Vec<Line>,
+    connections: usize,
+}
+
+/// A running simulated bridge on 127.0.0.1 (an ephemeral port).
+pub struct Simulator {
+    address: SocketAddr,
+    state: Arc<Mutex<State>>,
+    events: broadcast::Sender<(String, Value)>,
+    stop: watch::Sender<bool>,
+    config: SimulatorConfig,
+    started_ms: u64,
+}
+
+impl Simulator {
+    pub async fn start(config: SimulatorConfig) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let state = Arc::new(Mutex::new(State { identity: config.identity.clone(), busy: None, transcript: vec![], connections: 0 }));
+        let (events, _) = broadcast::channel(256);
+        let (stop, stopped) = watch::channel(false);
+        let started_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let simulator = Self { address, state: state.clone(), events: events.clone(), stop, config: config.clone(), started_ms };
+        simulator.write_discovery()?;
+        tokio::spawn(async move {
+            let mut stopped_accepting = stopped.clone();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((stream, peer)) = accepted else { continue };
+                        if !daw_bridge::loopback::peer_allowed(&peer) {
+                            continue;
+                        }
+                        let number = {
+                            let mut state = state.lock().unwrap();
+                            state.connections += 1;
+                            state.connections
+                        };
+                        tokio::spawn(serve(stream, number, config.clone(), state.clone(), events.subscribe(), stopped.clone()));
+                    }
+                    _ = stopped_accepting.changed() => return,
+                }
+            }
+        });
+        Ok(simulator)
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    pub fn discovery(&self) -> Discovery {
+        let identity = self.state.lock().unwrap().identity.clone();
+        Discovery {
+            schema: DISCOVERY_SCHEMA.into(),
+            daw: identity.daw,
+            pid: identity.pid,
+            host: "127.0.0.1".into(),
+            port: self.address.port(),
+            protocol: PROTOCOL.into(),
+            version: identity.bridge,
+            daw_version: identity.daw_version,
+            resource: identity.resource,
+            project: identity.project,
+            started_ms: self.started_ms,
+        }
+    }
+
+    fn write_discovery(&self) -> std::io::Result<()> {
+        if let Some(dir) = &self.config.discovery_dir {
+            write_discovery(dir, &self.discovery())?;
+        }
+        Ok(())
+    }
+
+    /// Sends an event to every authenticated connection.
+    pub fn emit(&self, name: &str, data: Value) {
+        let _ = self.events.send((name.into(), data));
+    }
+
+    /// Opens another project: the discovery file and `status` follow, and a `project` event goes out.
+    pub fn open_project(&self, project: Option<Project>) -> std::io::Result<()> {
+        self.state.lock().unwrap().identity.project = project.clone();
+        self.write_discovery()?;
+        self.emit(event::PROJECT, serde_json::to_value(project).unwrap());
+        Ok(())
+    }
+
+    /// Busy (`Some("rendering")`): requests are refused as busy and heartbeats stop, as in a modal dialog.
+    pub fn set_busy(&self, busy: Option<&str>) {
+        self.state.lock().unwrap().busy = busy.map(str::to_string);
+    }
+
+    /// Every line so far, in order.
+    pub fn transcript(&self) -> Vec<Line> {
+        self.state.lock().unwrap().transcript.clone()
+    }
+
+    /// Says bye to every connection, closes them and removes the discovery file, as a DAW quitting does.
+    pub fn stop(&self) {
+        let _ = self.stop.send(true);
+        if let Some(dir) = &self.config.discovery_dir {
+            let _ = std::fs::remove_file(dir.join(self.discovery().file_name()));
+        }
+    }
+}
+
+impl Drop for Simulator {
+    fn drop(&mut self) {
+        let _ = self.stop.send(true);
+    }
+}
+
+fn record(state: &Mutex<State>, connection: usize, from_host: bool, bytes: &[u8]) {
+    let mut state = state.lock().unwrap();
+    for line in String::from_utf8_lossy(bytes).split('\n').filter(|line| !line.trim().is_empty()) {
+        state.transcript.push(Line { connection, from_host, text: line.trim_end_matches('\r').to_string() });
+    }
+}
+
+fn answer(request: &Request, state: &Mutex<State>, config: &SimulatorConfig) -> Frame {
+    let state = state.lock().unwrap();
+    if let Some(busy) = &state.busy {
+        return Frame::error(request.id, code::BUSY, format!("{} is {busy}", state.identity.daw));
+    }
+    match request.method.as_str() {
+        "ping" => Frame::ok(request.id, json!({})),
+        "status" => {
+            let mut status = serde_json::to_value(&state.identity).unwrap();
+            status["busy"] = false.into();
+            for (key, value) in &config.status_extra {
+                status[key] = value.clone();
+            }
+            Frame::ok(request.id, status)
+        }
+        other => Frame::error(request.id, code::UNKNOWN_METHOD, format!("no method {other}")),
+    }
+}
+
+async fn serve(
+    stream: TcpStream,
+    number: usize,
+    config: SimulatorConfig,
+    state: Arc<Mutex<State>>,
+    mut events: broadcast::Receiver<(String, Value)>,
+    mut stopped: watch::Receiver<bool>,
+) {
+    let (mut reader, mut writer) = stream.into_split();
+    let clock = Instant::now();
+    let mut connection = ServerConnection::new(config.secret.clone(), 0);
+    let mut chunk = vec![0u8; 64 * 1024];
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(config.offer.heartbeat_ms.max(1)));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let mut out: Vec<u8> = vec![];
+        let mut close = false;
+        tokio::select! {
+            read = reader.read(&mut chunk) => {
+                let count = match read { Ok(0) | Err(_) => return, Ok(count) => count };
+                record(&state, number, true, &chunk[..count]);
+                let mut identity = || (state.lock().unwrap().identity.clone(), config.offer.clone());
+                for action in connection.on_bytes(&chunk[..count], &mut identity) {
+                    match action {
+                        ServerAction::Send(bytes) => out.extend(bytes),
+                        ServerAction::Close(_) => close = true,
+                        ServerAction::Authenticated => {}
+                        ServerAction::Request(request) => out.extend(answer(&request, &state, &config).encode()),
+                    }
+                }
+            }
+            _ = heartbeat.tick() => {
+                for action in connection.on_tick(clock.elapsed().as_millis() as u64) {
+                    match action {
+                        ServerAction::Send(bytes) => out.extend(bytes),
+                        ServerAction::Close(_) => close = true,
+                        _ => {}
+                    }
+                }
+                if connection.is_authenticated() && state.lock().unwrap().busy.is_none() {
+                    out.extend(Frame::Heartbeat { ms: clock.elapsed().as_millis() as u64 }.encode());
+                }
+            }
+            sent = events.recv() => {
+                if let Ok((name, data)) = sent {
+                    if let Some(bytes) = connection.event(&name, data) {
+                        out.extend(bytes);
+                    }
+                }
+            }
+            _ = stopped.changed() => {
+                if connection.is_authenticated() {
+                    out.extend(Frame::Bye { reason: "quit".into() }.encode());
+                }
+                close = true;
+            }
+        }
+        if !out.is_empty() {
+            // Heartbeats are left out of the transcript: their timing isn't the test's.
+            let kept: Vec<u8> = String::from_utf8_lossy(&out)
+                .split_inclusive('\n')
+                .filter(|line| !line.starts_with("{\"type\":\"heartbeat\""))
+                .collect::<String>()
+                .into_bytes();
+            record(&state, number, false, &kept);
+            if writer.write_all(&out).await.is_err() {
+                return;
+            }
+        }
+        if close {
+            let _ = writer.shutdown().await;
+            return;
+        }
+    }
+}

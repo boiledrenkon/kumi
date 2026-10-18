@@ -492,6 +492,10 @@ name = "daw-mcp-server"
 version = "0.1.0"
 dependencies = [
  "daw-bridge",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

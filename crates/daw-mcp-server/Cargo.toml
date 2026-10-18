@@ -18,3 +18,9 @@ path = "src/bin/daw-mcp-server.rs"
 
 [dependencies]
 daw-bridge.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

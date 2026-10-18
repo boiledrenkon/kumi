@@ -1,0 +1,141 @@
+//! The host's bridge client against simulated REAPER and Renoise bridges: the handshake, requests, events, busy and
+//! quitting, with golden NDJSON transcripts of the wire (tests/golden/*-bridge.ndjson; KUMI_BLESS=1 rewrites them).
+use daw_bridge::auth::Secret;
+use daw_bridge::wire::Project;
+use daw_mcp_server::client::{BridgeClient, ConnectError, RequestError};
+use daw_mcp_server::simulator::{Line, Simulator, SimulatorConfig};
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::time::Duration;
+
+const CLIENT: &str = "daw-mcp-server/test";
+const WAIT: Duration = Duration::from_secs(5);
+
+fn secret() -> Secret {
+    Secret::new("simulated-secret-0123456789-abcdefghijklmnop").unwrap()
+}
+
+/// The transcript with what changes from run to run (nonces, proofs, sessions, the pid) replaced by names.
+pub fn normalized(lines: &[Line]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        let mut value: Value = serde_json::from_str(&line.text).unwrap_or_else(|_| Value::String(line.text.clone()));
+        if let Some(object) = value.as_object_mut() {
+            for key in ["nonce", "proof", "session"] {
+                if object.contains_key(key) {
+                    object.insert(key.into(), format!("<{key}>").into());
+                }
+            }
+            if object.contains_key("pid") {
+                object.insert("pid".into(), "<pid>".into());
+            }
+            if let Some(result) = object.get_mut("result").and_then(Value::as_object_mut) {
+                if result.contains_key("pid") {
+                    result.insert("pid".into(), "<pid>".into());
+                }
+            }
+        }
+        out.push_str(&format!("{} {} {}\n", line.connection, if line.from_host { ">" } else { "<" }, value));
+    }
+    out
+}
+
+pub fn golden(name: &str, made: &str) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("golden").join(name);
+    if std::env::var("KUMI_BLESS").is_ok_and(|value| value == "1") {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, made).unwrap();
+        return;
+    }
+    let kept = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{} is missing; run with KUMI_BLESS=1", path.display()));
+    assert_eq!(made, kept, "{name} changed; bless it if that's intended");
+}
+
+async fn session(simulator: &Simulator) {
+    let client = BridgeClient::connect(simulator.address(), secret(), CLIENT).await.unwrap();
+    let mut events = client.events();
+    assert_eq!(client.request("ping", json!({}), WAIT).await.unwrap(), json!({}));
+    let status = client.request("status", json!({}), WAIT).await.unwrap();
+    assert_eq!(status["busy"], false);
+    assert_eq!(
+        client.request("render", json!({}), WAIT).await,
+        Err(RequestError::Bridge { code: "unknown-method".into(), message: "no method render".into() })
+    );
+    simulator.open_project(Some(Project { name: Some("Next".into()), ..Project::default() })).unwrap();
+    let event = tokio::time::timeout(WAIT, events.recv()).await.unwrap().unwrap();
+    assert_eq!((event.seq, event.name.as_str(), &event.data), (1, "project", &json!({"name": "Next"})));
+    assert_eq!(client.request("status", json!({}), WAIT).await.unwrap()["project"], json!({"name": "Next"}));
+    simulator.set_busy(Some("rendering"));
+    assert!(matches!(client.request("status", json!({}), WAIT).await, Err(RequestError::Bridge { code, .. }) if code == "busy"));
+    simulator.set_busy(None);
+    simulator.stop();
+    for _ in 0..100 {
+        if client.is_closed() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(client.is_closed());
+    assert_eq!(client.request("ping", json!({}), WAIT).await, Err(RequestError::Closed));
+}
+
+#[tokio::test]
+async fn reaper_session_transcript() {
+    let simulator = Simulator::start(SimulatorConfig::reaper(secret(), "/lab/REAPER")).await.unwrap();
+    session(&simulator).await;
+    golden("reaper-bridge.ndjson", &normalized(&simulator.transcript()));
+}
+
+#[tokio::test]
+async fn renoise_session_transcript() {
+    let simulator = Simulator::start(SimulatorConfig::renoise(secret(), "/lab/Renoise/V3.5.4")).await.unwrap();
+    session(&simulator).await;
+    let transcript = normalized(&simulator.transcript());
+    assert!(transcript.contains("\"demo\":false"));
+    golden("renoise-bridge.ndjson", &transcript);
+}
+
+#[tokio::test]
+async fn a_wrong_secret_or_a_non_loopback_address_never_connects() {
+    let simulator = Simulator::start(SimulatorConfig::reaper(secret(), "/lab/REAPER")).await.unwrap();
+    let other = Secret::new("another-secret-0123456789-abcdefghijklmnopq").unwrap();
+    let refused = BridgeClient::connect(simulator.address(), other, CLIENT).await;
+    assert!(matches!(refused, Err(ConnectError::Handshake(daw_bridge::handshake::HandshakeError::BadProof))));
+    // The host never sent its own proof.
+    assert!(simulator.transcript().iter().all(|line| !line.text.contains("\"auth\"")));
+    let remote = "192.0.2.1:9770".parse().unwrap();
+    assert!(matches!(BridgeClient::connect(remote, secret(), CLIENT).await, Err(ConnectError::NotLoopback(_))));
+}
+
+#[tokio::test]
+async fn silence_reads_as_busy_and_heartbeats_clear_it() {
+    let mut config = SimulatorConfig::renoise(secret(), "/lab/Renoise/V3.5.4");
+    config.offer.heartbeat_ms = 40;
+    let simulator = Simulator::start(config).await.unwrap();
+    let client = BridgeClient::connect(simulator.address(), secret(), CLIENT).await.unwrap();
+    assert_eq!(client.welcome().heartbeat_ms, 40);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!client.busy());
+    simulator.set_busy(Some("showing a dialog"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(client.busy());
+    simulator.set_busy(None);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!client.busy());
+}
+
+#[tokio::test]
+async fn several_connections_each_number_their_own_events() {
+    let simulator = Simulator::start(SimulatorConfig::reaper(secret(), "/lab/REAPER")).await.unwrap();
+    let first = BridgeClient::connect(simulator.address(), secret(), CLIENT).await.unwrap();
+    let mut first_events = first.events();
+    simulator.emit("tracks", json!({"count": 3}));
+    assert_eq!(tokio::time::timeout(WAIT, first_events.recv()).await.unwrap().unwrap().seq, 1);
+    let second = BridgeClient::connect(simulator.address(), secret(), CLIENT).await.unwrap();
+    let mut second_events = second.events();
+    assert_ne!(first.welcome().session, second.welcome().session);
+    simulator.emit("tracks", json!({"count": 4}));
+    assert_eq!(tokio::time::timeout(WAIT, first_events.recv()).await.unwrap().unwrap().seq, 2);
+    let event = tokio::time::timeout(WAIT, second_events.recv()).await.unwrap().unwrap();
+    assert_eq!((event.seq, event.data), (1, json!({"count": 4})));
+}
