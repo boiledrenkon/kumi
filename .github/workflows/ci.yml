@@ -233,6 +233,21 @@ jobs:
         run: |
           $tests = if ($env:KUMI_TESTS) { $env:KUMI_TESTS.Trim() -split ' +' } else { @() }
           ./scripts/test-isolated.ps1 --no-fail-fast --partition 'hash:${{ matrix.part }}/2' @tests
+      # The list above names test files, which leaves out the unit tests of these crates (REAPER's vtable test, the
+      # bridge's lifecycle and sockets) on a pull request; main and the nightly take every test.
+      - name: The REAPER and Renoise bridges' crates, every test
+        if: env.KUMI_TESTS != '' && runner.os != 'Windows'
+        env:
+          KUMI_NEXTEST: "1"
+          KUMI_PACKAGES: daw-bridge reaper-kumi daw-mcp-server
+        run: sh scripts/test-isolated.sh --no-fail-fast
+      - name: The REAPER and Renoise bridges' crates, half of their tests (Windows)
+        if: env.KUMI_TESTS != '' && runner.os == 'Windows' && !matrix.checks
+        shell: pwsh
+        env:
+          KUMI_NEXTEST: "1"
+          KUMI_PACKAGES: daw-bridge reaper-kumi daw-mcp-server
+        run: ./scripts/test-isolated.ps1 --no-fail-fast --partition 'hash:${{ matrix.part }}/2'
 
   remote-script:
     name: Python Remote Script / ${{ matrix.os }}
@@ -323,6 +338,52 @@ jobs:
       - name: It loads, with REAPER's entry point
         run: cargo test -p reaper-kumi --locked --test loads
 
+  renoise-tool:
+    # The Renoise tool's Lua: its tests (LuaJIT, against a mock of Renoise's API, replaying the wire's conformance
+    # vectors) and lua-language-server's check against Renoise's own API definitions. Every tool is pinned: a LuaJIT
+    # built from the commit the tests were written on, lua-language-server's release (by checksum) and the API 6.2 tag
+    # of github.com/renoise/definitions.
+    name: Renoise tool
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: LuaJIT, built from a pinned commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/luajit"
+          mkdir "$RUNNER_TEMP/luajit-src"
+          cd "$RUNNER_TEMP/luajit-src"
+          git init -q
+          git fetch -q --depth 1 https://github.com/LuaJIT/LuaJIT.git 659a61693aa3b87661864ad0f12eee14c865cd7f
+          git checkout -q FETCH_HEAD
+          make -j"$(nproc)" PREFIX="$prefix" > /dev/null
+          make install PREFIX="$prefix" > /dev/null
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+      - name: lua-language-server 3.19.2, and Renoise's API 6.2 definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o luals.tar.gz https://github.com/LuaLS/lua-language-server/releases/download/3.19.2/lua-language-server-3.19.2-linux-x64.tar.gz
+          echo "93ad326b10f6c00911dd8c450fa098332dbd8f9f45d1052f5636a2d54479b947  luals.tar.gz" | sha256sum -c -
+          mkdir luals
+          tar -xzf luals.tar.gz -C luals
+          mkdir definitions
+          cd definitions
+          git init -q
+          git fetch -q --depth 1 https://github.com/renoise/definitions.git 08faaea744156f2f7eddc898eb46fd972453a1af
+          git checkout -q FETCH_HEAD
+          echo "$RUNNER_TEMP/luals/bin" >> "$GITHUB_PATH"
+          echo "RENOISE_DEFINITIONS=$RUNNER_TEMP/definitions/library" >> "$GITHUB_ENV"
+      - name: The tool's tests and the type check (a missing lua-language-server fails)
+        env:
+          KUMI_REQUIRE_LUALS: "1"
+        run: sh daws/renoise/tests/run.sh
+
   scripts:
     name: Release scripts
     runs-on: ubuntu-24.04
@@ -375,7 +436,7 @@ jobs:
   required:
     name: Required CI
     if: always()
-    needs: [changes, rust-linux, rust-lint, rust-platforms, remote-script, live-extension, reaper-extension, scripts]
+    needs: [changes, rust-linux, rust-lint, rust-platforms, remote-script, live-extension, reaper-extension, renoise-tool, scripts]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every job above (the builds may skip a documentation-only change)
@@ -391,3 +452,4 @@ jobs:
           ok "${{ needs.remote-script.result }}"
           ok "${{ needs.live-extension.result }}"
           ok "${{ needs.reaper-extension.result }}"
+          ok "${{ needs.renoise-tool.result }}"
