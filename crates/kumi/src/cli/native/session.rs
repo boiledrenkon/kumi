@@ -511,6 +511,11 @@ pub(super) async fn run_session(
                     emit(SessionEvent::Judged(round));
                 })
             });
+            // How Willington's bindings stand, read again for each new model session.
+            options.willington = Some({
+                let env = env.clone();
+                Rc::new(move || Willington::find(&env).map(|willington| willington.switch()))
+            });
             options.references = Some(references.clone());
             options.listener = Some({
                 let store: Rc<dyn CredentialStore> = listener_store.clone();
@@ -630,10 +635,6 @@ pub(super) async fn run_session(
     options.watch = Some(VideoDirectories { videos_dir: load_videos_dir(&io.env)?, tools_dir: tools_dir.clone() });
     options.web = true;
     options.library = Some(library.clone());
-    options.willington = Some({
-        let env = io.env.clone();
-        Rc::new(move || Willington::find(&env).map(|willington| willington.switch()))
-    });
     options.jobs = Some(JobsOptions {
         worker_factory,
         max: settings.max_jobs.map(|n| n as usize).unwrap_or(DEFAULT_MAX_JOBS),

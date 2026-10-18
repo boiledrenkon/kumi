@@ -18,7 +18,6 @@ use super::{
 use crate::{
     audio::tools::{listening_tools, ListeningOptions},
     core::conversations::{new_conversation_id, IMPORTED},
-    integrations::ableton::willington::{willington_instructions, WillingtonSwitch},
     kernel::budget::{transcript_of, OBSERVATION_MARKER},
     library::{Library, LibraryToolsOptions, FIND_SOUNDS_TOOL},
     web::{
@@ -119,9 +118,6 @@ pub struct SessionOptions {
     /// Where /goal keeps its objective, per Set, so it survives a restart.
     pub objectives: Option<Rc<dyn super::goal_mode::ObjectiveStore>>,
     pub objective_budget: Option<super::goal_mode::ObjectiveBudget>,
-    /// How Willington's bindings stand, None while Kumi's bridge in Live doesn't carry them: asked each time
-    /// the model's session is made, since /willington switches them while Kumi runs.
-    pub willington: Option<Rc<dyn Fn() -> Option<WillingtonSwitch>>>,
     /// Background jobs (workers and tool calls beside the conversation); none offers the model no job tools.
     pub jobs: Option<JobsOptions>,
     /// A kept conversation the producer asked for as Kumi starts (`kumi -c`, `kumi -r`): where it's kept, and its id.
@@ -162,7 +158,6 @@ impl SessionOptions {
             goal_budget: None,
             objectives: None,
             objective_budget: None,
-            willington: None,
             jobs: None,
             resume: None,
         }
@@ -257,11 +252,11 @@ struct Wanted {
     asked: Option<String>,
 }
 /// A conversation's system text, and what it was made from that a rebuild can't keep: the integration's own
-/// instructions and Willington's words.
+/// instructions and the words it adds at the end (Live's: Willington's).
 struct SystemText {
     conversation: String,
     base: String,
-    willington: &'static str,
+    addendum: String,
     text: String,
 }
 
@@ -1310,9 +1305,10 @@ impl Session {
         });
         let built = async {
             let conversation = self.0.state.borrow().conversation_id.clone();
-            let willington = willington_instructions(self.0.options.willington.as_ref().and_then(|on| on()), |name| {
-                observation.tools.iter().any(|tool| tool.name() == name)
-            });
+            let integration = self.0.state.borrow().integration.clone();
+            let addendum = integration
+                .map(|integration| integration.instructions_addendum(&|name| observation.tools.iter().any(|tool| tool.name() == name)))
+                .unwrap_or_default();
             // The same conversation keeps its system text across rebuilds, unless the producer changed what it holds.
             let kept = {
                 let s = self.0.state.borrow();
@@ -1322,19 +1318,19 @@ impl Session {
                         !s.system_stale
                             && kept.conversation == conversation
                             && kept.base == observation.instructions
-                            && kept.willington == willington
+                            && kept.addendum == addendum
                     })
                     .map(|kept| kept.text.clone())
             };
             let instructions = match kept {
                 Some(text) => text,
                 None => {
-                    let text = self.system_text(op, observation, willington).await?;
+                    let text = self.system_text(op, observation, &addendum).await?;
                     let mut s = self.0.state.borrow_mut();
                     s.system = Some(SystemText {
                         conversation: conversation.clone(),
                         base: observation.instructions.clone(),
-                        willington,
+                        addendum,
                         text: text.clone(),
                     });
                     s.system_stale = false;
@@ -1399,7 +1395,7 @@ impl Session {
             self.0.state.borrow_mut().system_stale = true;
         }
     }
-    async fn system_text(&self, op: &Operation, observation: &Observation, willington: &str) -> Result<String, RuntimeError> {
+    async fn system_text(&self, op: &Operation, observation: &Observation, addendum: &str) -> Result<String, RuntimeError> {
         let memory = if let Some(store) = &self.0.options.memory {
             store.load(observation.project.as_ref().map(|p| p.id.as_str())).await.ok()
         } else {
@@ -1424,7 +1420,7 @@ impl Session {
             technique_instructions(&techniques),
             if self.0.gaps.is_empty() { String::new() } else { GAP_GUIDANCE.into() },
             if self.0.jobs.is_none() { String::new() } else { crate::core::jobs::JOB_GUIDANCE.into() },
-            willington.into(),
+            addendum.into(),
             if imported { imported_guidance(noun) } else { String::new() },
         ]
         .into_iter()

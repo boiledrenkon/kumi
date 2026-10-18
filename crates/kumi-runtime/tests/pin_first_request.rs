@@ -263,6 +263,9 @@ fn integration(setup: Setup) -> IntegrationFactory {
         options.generation = Some("connection".into());
         options.reconnect_interval_ms = Some(3_600_000);
         options.focus_interval_ms = Some(3_600_000);
+        if let Some(switch) = setup.willington {
+            options.willington = Some(Rc::new(move || Some(switch)));
+        }
         let fallback = on_connection.clone();
         with_fallback(
             create_ableton_integration(options),
@@ -318,9 +321,6 @@ async fn run(setup: Setup, script: Script) -> Run {
             max: 3,
             store: None,
         });
-    }
-    if let Some(switch) = setup.willington {
-        options.willington = Some(Rc::new(move || Some(switch)));
     }
     let session = create_session(options).unwrap();
     session.start().await.unwrap();

@@ -635,6 +635,13 @@ pub trait Integration {
     async fn settled(&self) {}
     /// The producer's words came into the answer under way (a steer): what it changes from here may be theirs.
     fn steered(&self) {}
+    /// Words the integration adds at the end of the system text, read again each time the model's session is made:
+    /// Live's say what Willington's bindings allow, as their switch stands now. `offered` says whether the model has a
+    /// tool by a name. None by default.
+    fn instructions_addendum(&self, offered: &dyn Fn(&str) -> bool) -> String {
+        let _ = offered;
+        String::new()
+    }
     /// The conversation the turns from here belong to: what's kept for a conversation (the devices it made) is this one's.
     fn conversation(&self, id: &str) {
         let _ = id;

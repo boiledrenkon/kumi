@@ -58,6 +58,9 @@ pub struct AbletonOptions {
     /// Opens a Set's file in Live (the one running, or Live itself), as the system opens a file: true when it was handed
     /// over. A kept conversation's Set opens this way when the producer asks.
     pub open_file: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, bool>>>,
+    /// How Willington's bindings stand, None while Kumi's bridge in Live doesn't carry them: asked each time the model's
+    /// session is made, since /willington switches them while Kumi runs.
+    pub willington: Option<Rc<dyn Fn() -> Option<super::willington::WillingtonSwitch>>>,
 }
 impl AbletonOptions {
     pub fn new(on_connection: ConnectionListener) -> Self {
@@ -91,6 +94,7 @@ impl AbletonOptions {
             fast: None,
             live_running: None,
             open_file: None,
+            willington: None,
         }
     }
     pub fn connection_options(&self) -> ConnectionOptions {

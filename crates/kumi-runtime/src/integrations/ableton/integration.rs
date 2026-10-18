@@ -839,6 +839,10 @@ impl Integration for Ableton {
     fn conversation(&self, id: &str) {
         self.made.borrow_mut().conversation(id);
     }
+    /// Willington's words, as its switch stands now (read again for each new model session).
+    fn instructions_addendum(&self, offered: &dyn Fn(&str) -> bool) -> String {
+        super::willington::willington_instructions(self.options.willington.as_ref().and_then(|on| on()), offered).to_string()
+    }
     fn worker_tools(&self) -> Vec<Rc<dyn KernelTool>> {
         let Some(tools) = self.connection.tools() else { return vec![] };
         if !(tools.has("live_browser_inspect") && tools.has("live_browser_load_preview")) {

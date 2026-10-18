@@ -59,6 +59,9 @@ impl Integration for FallbackIntegration {
     fn conversation(&self, id: &str) {
         self.current().conversation(id)
     }
+    fn instructions_addendum(&self, offered: &dyn Fn(&str) -> bool) -> String {
+        self.current().instructions_addendum(offered)
+    }
     fn worker_tools(&self) -> Vec<Rc<dyn KernelTool>> {
         self.current().worker_tools()
     }
