@@ -159,7 +159,11 @@ async fn a_page_a_bridge_made_too_big_is_asked_for_again_with_fewer_rows() {
 #[tokio::test]
 async fn only_known_arguments_reach_the_tool_and_a_window_is_a_range() {
     let mut lab = Lab::start(None).await;
-    lab.tool("read", json!({"kind": "track", "limit": 5000, "pid": std::process::id(), "mood": "loud"})).await;
+    // More rows than a page holds is refused before the bridge is asked, as the bridges refuse it.
+    let (refused, is_error) = lab.tool("read", json!({"kind": "track", "limit": 5000})).await;
+    assert!(is_error && refused["error"].as_str().unwrap().contains("from 1 to 200"), "{refused}");
+    assert!(lab.script.asked().is_empty());
+    lab.tool("read", json!({"kind": "track", "limit": 200, "pid": std::process::id(), "mood": "loud"})).await;
     lab.tool("focus_body", json!({"kind": "pattern", "window": {"from": 3, "to": 6}, "extra": 1})).await;
     lab.tool("read", json!({"ref": "1:track:3", "kind": "ignored"})).await;
     let asked = lab.script.asked();

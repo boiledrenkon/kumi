@@ -47,7 +47,8 @@ fn limit_arg(arguments: &Value) -> Result<Option<u64>, String> {
     match arguments.get("limit") {
         None | Some(Value::Null) => Ok(None),
         Some(value) => match value.as_u64() {
-            Some(n) if n >= 1 => Ok(Some(n.min(MAX_LIMIT))),
+            // Over the most a page holds is refused, as the bridges refuse it, not quietly cut.
+            Some(n) if (1..=MAX_LIMIT).contains(&n) => Ok(Some(n)),
             _ => Err(format!("limit must be a whole number from 1 to {MAX_LIMIT}")),
         },
     }
@@ -250,7 +251,7 @@ mod tests {
     #[test]
     fn a_read_forwards_only_what_it_knows_checked() {
         let params =
-            read_params(&json!({"kind": "item", "parent": "r:track:master", "cursor": "c", "limit": 500, "pid": 4, "extra": true}))
+            read_params(&json!({"kind": "item", "parent": "r:track:master", "cursor": "c", "limit": 200, "pid": 4, "extra": true}))
                 .unwrap();
         assert_eq!(params, json!({"kind": "item", "parent": "r:track:master", "cursor": "c", "limit": 200}));
         assert_eq!(read_params(&json!({"ref": "r:track:master"})).unwrap(), json!({"ref": "r:track:master"}));
@@ -259,6 +260,7 @@ mod tests {
             json!({"kind": 3}),
             json!({"kind": ""}),
             json!({"kind": "track", "limit": 0}),
+            json!({"kind": "track", "limit": 201}),
             json!({"kind": "track", "limit": "9"}),
             json!({"kind": "track", "cursor": []}),
             json!({"kind": "line", "track": 0}),
