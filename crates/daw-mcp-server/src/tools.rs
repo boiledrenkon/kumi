@@ -1,0 +1,229 @@
+//! The host's tools that read the DAW: `read`, `snapshot`, `focus` and `focus_body`. One implementation for every DAW:
+//! each checks its arguments, asks the chosen bridge the method of the same name and hands the answer back, keeping
+//! it inside the frame bound. What the rows and bodies hold is the DAW's own (see the M2 contract).
+use crate::host::{CallError, Host, Pick, MAX_ANSWER_BYTES};
+use daw_bridge::Daw;
+use serde_json::{json, Map, Value};
+use std::time::Duration;
+
+/// A read, a snapshot or a body waits this long: the bridge answers a busy DAW at once, so this is for a slow project.
+const READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// `focus` is polled; it never waits for the DAW.
+const FOCUS_TIMEOUT: Duration = Duration::from_secs(3);
+/// Rows in a page by default, and at most: the contract's.
+pub const DEFAULT_LIMIT: u64 = 50;
+pub const MAX_LIMIT: u64 = 200;
+/// How many times a page the bridge made too big is asked for again with half the rows.
+const SMALLER_PAGES: usize = 4;
+
+/// What a DAW's `read` takes as a kind, and its `focus_body` as a body.
+pub struct Kinds {
+    pub read: &'static [&'static str],
+    pub bodies: &'static [&'static str],
+}
+
+pub fn kinds(daw: Daw) -> Kinds {
+    match daw {
+        Daw::Reaper => Kinds {
+            read: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"],
+            bodies: &["arrange", "midi", "fx", "routing"],
+        },
+        Daw::Renoise => Kinds {
+            read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],
+            bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
+        },
+    }
+}
+
+fn text_arg(arguments: &Value, name: &str) -> Result<Option<String>, String> {
+    match arguments.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if !text.is_empty() => Ok(Some(text.clone())),
+        Some(_) => Err(format!("{name} must be a non-empty string")),
+    }
+}
+
+fn limit_arg(arguments: &Value) -> Result<Option<u64>, String> {
+    match arguments.get("limit") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => match value.as_u64() {
+            Some(n) if n >= 1 => Ok(Some(n.min(MAX_LIMIT))),
+            _ => Err(format!("limit must be a whole number from 1 to {MAX_LIMIT}")),
+        },
+    }
+}
+
+fn window_arg(arguments: &Value) -> Result<Option<Value>, String> {
+    let Some(window) = arguments.get("window").filter(|w| !w.is_null()) else { return Ok(None) };
+    let number = |name: &str| window.get(name).and_then(Value::as_f64).filter(|n| n.is_finite());
+    match (number("from"), number("to")) {
+        (Some(from), Some(to)) if to > from => Ok(Some(json!({"from": from, "to": to}))),
+        _ => Err("window must be {from, to}: two numbers, to after from".into()),
+    }
+}
+
+/// The arguments a `read` forwards: only the ones it knows, each checked.
+fn read_params(arguments: &Value) -> Result<Value, String> {
+    let mut params = Map::new();
+    for name in ["kind", "ref", "parent", "cursor"] {
+        if let Some(text) = text_arg(arguments, name)? {
+            params.insert(name.into(), text.into());
+        }
+    }
+    if !params.contains_key("kind") && !params.contains_key("ref") {
+        return Err("kind: what to read (or ref: one object)".into());
+    }
+    if let Some(limit) = limit_arg(arguments)? {
+        params.insert("limit".into(), limit.into());
+    }
+    Ok(Value::Object(params))
+}
+
+/// The arguments a `focus_body` forwards.
+fn body_params(arguments: &Value) -> Result<Value, String> {
+    let mut params = Map::new();
+    let Some(kind) = text_arg(arguments, "kind")? else { return Err("kind: which body".into()) };
+    params.insert("kind".into(), kind.into());
+    for name in ["ref", "cursor"] {
+        if let Some(text) = text_arg(arguments, name)? {
+            params.insert(name.into(), text.into());
+        }
+    }
+    if let Some(window) = window_arg(arguments)? {
+        params.insert("window".into(), window);
+    }
+    if let Some(limit) = limit_arg(arguments)? {
+        params.insert("limit".into(), limit.into());
+    }
+    Ok(Value::Object(params))
+}
+
+fn size_of(value: &Value) -> usize {
+    serde_json::to_string(value).map(|text| text.len()).unwrap_or(usize::MAX)
+}
+
+impl Host {
+    /// The answer of a call as a tool gives it: the JSON, and whether it is an error.
+    async fn answer_of(&self, method: &str, params: Value, pick: &Pick, timeout: Duration) -> (Value, bool) {
+        match self.call(method, params, pick, timeout).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
+    /// A call whose answer is a page: if the bridge sends one past the frame bound, the same page is asked for again
+    /// with half the rows, down to one.
+    async fn paged(&self, method: &str, mut params: Value, pick: &Pick, timeout: Duration) -> (Value, bool) {
+        for attempt in 0..=SMALLER_PAGES {
+            match self.call(method, params.clone(), pick, timeout).await {
+                Ok(answer) if size_of(&answer) <= MAX_ANSWER_BYTES => return (answer, false),
+                Ok(_) => {
+                    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(DEFAULT_LIMIT);
+                    if limit <= 1 || attempt == SMALLER_PAGES {
+                        return (self.call_error(&CallError::TooBig), true);
+                    }
+                    params["limit"] = (limit / 2).into();
+                }
+                Err(error) => return (self.call_error(&error), true),
+            }
+        }
+        (self.call_error(&CallError::TooBig), true)
+    }
+
+    fn pick_of(arguments: &Value) -> Result<Pick, (Value, bool)> {
+        Pick::from_arguments(arguments).map_err(|why| (json!({"error": why}), true))
+    }
+
+    /// `read`: rows of one kind, a page, or one object by ref.
+    pub async fn read(&self, arguments: &Value) -> (Value, bool) {
+        let pick = match Self::pick_of(arguments) {
+            Ok(pick) => pick,
+            Err(answer) => return answer,
+        };
+        match read_params(arguments) {
+            Ok(params) => self.paged("read", params, &pick, READ_TIMEOUT).await,
+            Err(why) => (json!({"error": why}), true),
+        }
+    }
+
+    /// `snapshot`: the project on one screen.
+    pub async fn snapshot(&self, arguments: &Value) -> (Value, bool) {
+        match Self::pick_of(arguments) {
+            Ok(pick) => self.answer_of_bounded("snapshot", json!({}), &pick, READ_TIMEOUT).await,
+            Err(answer) => answer,
+        }
+    }
+
+    /// `focus`: what the producer is looking at, cheap enough to poll.
+    pub async fn focus(&self, arguments: &Value) -> (Value, bool) {
+        match Self::pick_of(arguments) {
+            Ok(pick) => self.answer_of("focus", json!({}), &pick, FOCUS_TIMEOUT).await,
+            Err(answer) => answer,
+        }
+    }
+
+    /// `focus_body`: one FOCUS body.
+    pub async fn focus_body(&self, arguments: &Value) -> (Value, bool) {
+        let pick = match Self::pick_of(arguments) {
+            Ok(pick) => pick,
+            Err(answer) => return answer,
+        };
+        match body_params(arguments) {
+            Ok(params) => self.paged("focus_body", params, &pick, READ_TIMEOUT).await,
+            Err(why) => (json!({"error": why}), true),
+        }
+    }
+
+    /// An answer that has no page to shrink: past the frame bound it is refused.
+    async fn answer_of_bounded(&self, method: &str, params: Value, pick: &Pick, timeout: Duration) -> (Value, bool) {
+        let (answer, is_error) = self.answer_of(method, params, pick, timeout).await;
+        if !is_error && size_of(&answer) > MAX_ANSWER_BYTES {
+            return (self.call_error(&CallError::TooBig), true);
+        }
+        (answer, is_error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_forwards_only_what_it_knows_checked() {
+        let params =
+            read_params(&json!({"kind": "item", "parent": "r:track:master", "cursor": "c", "limit": 500, "pid": 4, "extra": true}))
+                .unwrap();
+        assert_eq!(params, json!({"kind": "item", "parent": "r:track:master", "cursor": "c", "limit": 200}));
+        assert_eq!(read_params(&json!({"ref": "r:track:master"})).unwrap(), json!({"ref": "r:track:master"}));
+        for bad in [
+            json!({}),
+            json!({"kind": 3}),
+            json!({"kind": ""}),
+            json!({"kind": "track", "limit": 0}),
+            json!({"kind": "track", "limit": "9"}),
+            json!({"kind": "track", "cursor": []}),
+        ] {
+            assert!(read_params(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_body_forwards_its_window_when_it_is_a_range() {
+        let params = body_params(&json!({"kind": "arrange", "window": {"from": 0, "to": 32}, "limit": 10, "resource": "/x"})).unwrap();
+        assert_eq!(params, json!({"kind": "arrange", "window": {"from": 0.0, "to": 32.0}, "limit": 10}));
+        for bad in [
+            json!({}),
+            json!({"kind": "arrange", "window": {"from": 5, "to": 5}}),
+            json!({"kind": "arrange", "window": "all"}),
+            json!({"kind": "fx", "ref": 2}),
+        ] {
+            assert!(body_params(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn each_daw_has_its_own_kinds() {
+        assert!(kinds(Daw::Reaper).read.contains(&"envelope") && !kinds(Daw::Reaper).read.contains(&"pattern"));
+        assert!(kinds(Daw::Renoise).bodies.contains(&"matrix") && !kinds(Daw::Renoise).bodies.contains(&"arrange"));
+    }
+}

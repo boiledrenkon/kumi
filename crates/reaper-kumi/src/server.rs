@@ -53,8 +53,8 @@ const WRITER_POLL: Duration = Duration::from_millis(50);
 const CLOSING: &str = "REAPER is closing; nothing changed";
 
 /// Methods served off the main thread: they answer even while REAPER shows a dialog.
-const SOCKET_METHODS: [&str; 2] = ["ping", "status"];
-const MAIN_METHODS: [&str; 2] = ["action", "quit"];
+const SOCKET_METHODS: [&str; 3] = ["ping", "status", "focus"];
+const MAIN_METHODS: [&str; 5] = ["action", "quit", "read", "snapshot", "focus_body"];
 const EVENTS: [&str; 4] = [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION];
 
 /// Where the reference file lives for a resource folder.
@@ -353,10 +353,25 @@ impl Server {
     }
 }
 
+/// The longest project name and path the discovery file and the welcome carry (in characters): hosts skip a discovery
+/// file over 64 KiB, and a project title can be as long as its author likes.
+pub const MAX_NAME: usize = 256;
+pub const MAX_PATH: usize = 1024;
+
+/// Text cut to `max` characters, the last of them an ellipsis when something was cut.
+pub fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
+}
+
 fn project(summary: &ProjectSummary) -> Project {
     Project {
-        name: (!summary.name.is_empty()).then(|| summary.name.clone()),
-        path: (!summary.path.is_empty()).then(|| summary.path.clone()),
+        name: (!summary.name.is_empty()).then(|| cut(&summary.name, MAX_NAME)),
+        path: (!summary.path.is_empty()).then(|| cut(&summary.path, MAX_PATH)),
         ..Project::default()
     }
 }
@@ -420,11 +435,33 @@ impl Shared {
         status
     }
 
+    /// `focus`: what the main thread last polled, with how old that is. Answered here, so it never waits for REAPER.
+    fn focus(&self, id: u64) -> Frame {
+        let (focus, polled) = {
+            let snapshot = lock(&self.snapshot);
+            (snapshot.focus.clone(), snapshot.focus_at)
+        };
+        let busy = self.busy();
+        if focus.is_null() {
+            return match busy {
+                Some(busy) => Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason())),
+                None => Frame::error(id, code::FAILED, "REAPER has no project open"),
+            };
+        }
+        let mut focus = focus;
+        focus["ageMs"] = polled.map(|at| at.elapsed().as_millis() as u64).into();
+        if let Some(busy) = busy {
+            focus["busy"] = busy.code().into();
+        }
+        Frame::ok(id, focus)
+    }
+
     fn answer(&self, request: Request) -> Frame {
         let id = request.id;
         match request.method.as_str() {
             "ping" => return Frame::ok(id, json!({})),
             "status" => return Frame::ok(id, self.status()),
+            "focus" => return self.focus(id),
             _ => {}
         }
         if self.stopping.load(Ordering::Acquire) {
@@ -699,6 +736,8 @@ mod tests {
                 last_tick: Some(Instant::now()),
                 busy: None,
                 status: json!({"tracks": 3}),
+                focus: Value::Null,
+                focus_at: None,
             }));
             let hub = Hub::default();
             let (tx, jobs) = queue::channel();
@@ -875,6 +914,50 @@ mod tests {
     }
 
     #[test]
+    fn reads_are_listed_in_the_welcome_and_reach_the_main_thread() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, welcome) = lab.authenticated();
+        let methods: Vec<&str> = welcome["methods"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(["read", "snapshot", "focus_body"].iter().all(|m| methods.contains(m)), "{methods:?}");
+        let jobs = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
+        let main = thread::spawn(move || {
+            for _ in 0..2 {
+                let job = jobs.recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(job.claim());
+                let method = job.method.clone();
+                job.answer(Ok(json!({"method": method})));
+            }
+        });
+        assert_eq!(request(&mut stream, &mut reader, 1, "read")["result"], json!({"method": "read"}));
+        assert_eq!(request(&mut stream, &mut reader, 2, "snapshot")["result"], json!({"method": "snapshot"}));
+        main.join().unwrap();
+    }
+
+    #[test]
+    fn focus_is_answered_off_the_main_thread_with_its_age_and_why_it_may_be_stale() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, welcome) = lab.authenticated();
+        assert!(welcome["methods"].as_array().unwrap().iter().any(|m| m == "focus"));
+        // Nothing polled yet and no project: not an empty answer.
+        let none = request(&mut stream, &mut reader, 1, "focus");
+        assert_eq!(none["error"]["code"], code::FAILED);
+        {
+            let mut snapshot = lab.snapshot.lock().unwrap();
+            snapshot.focus = json!({"epoch": "e-1", "view": "arrange", "changed": 4});
+            snapshot.focus_at = Some(Instant::now() - Duration::from_millis(120));
+        }
+        let focus = request(&mut stream, &mut reader, 2, "focus")["result"].clone();
+        assert_eq!((&focus["epoch"], &focus["view"], &focus["changed"]), (&json!("e-1"), &json!("arrange"), &json!(4)));
+        assert!(focus["ageMs"].as_u64().unwrap() >= 120);
+        assert_eq!(focus.get("busy"), None);
+        // The main thread stops ticking: the last focus still answers, and says why it is old.
+        lab.snapshot.lock().unwrap().last_tick = Some(Instant::now() - Duration::from_secs(5));
+        let focus = request(&mut stream, &mut reader, 3, "focus")["result"].clone();
+        assert_eq!(focus["busy"], "modal");
+        assert_eq!(focus["view"], "arrange");
+    }
+
+    #[test]
     fn status_answers_off_the_main_thread_and_says_when_it_is_held() {
         let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
         let (mut stream, mut reader, _) = lab.authenticated();
@@ -947,6 +1030,32 @@ mod tests {
         assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
         assert_eq!(read_line(&mut reader), None);
         assert!(files::scan_discovery(&dir, Daw::Reaper).is_empty());
+    }
+
+    #[test]
+    fn a_long_project_title_is_cut_in_the_discovery_file_and_the_welcome() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let mut snapshot = lab.snapshot.lock().unwrap().clone();
+        snapshot.project = Some(ProjectSummary { name: "é".repeat(100_000), path: format!("/m/{}", "p".repeat(100_000)) });
+        *lab.snapshot.lock().unwrap() = snapshot.clone();
+        lab.server().publish(&snapshot);
+        let dir = lab.dir.path().join("bridges/reaper/discovery");
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).collect();
+        assert_eq!(files.len(), 1);
+        // Far under the 64 KiB a host will read, and still found.
+        assert!(files[0].metadata().unwrap().len() < 8 * 1024, "{} bytes", files[0].metadata().unwrap().len());
+        let found = files::scan_discovery(&dir, Daw::Reaper);
+        let project = found[0].discovery.as_ref().unwrap().project.clone().unwrap();
+        let name = project.name.unwrap();
+        assert_eq!(name.chars().count(), MAX_NAME);
+        assert!(name.ends_with('…') && name.starts_with("éé"));
+        assert_eq!(project.path.unwrap().chars().count(), MAX_PATH);
+        // The welcome carries the same, so a long title can't hold up the handshake either.
+        let (_stream, _reader, welcome) = lab.authenticated();
+        assert_eq!(welcome["project"]["name"].as_str().unwrap().chars().count(), MAX_NAME);
+        // A name that fits is left alone.
+        assert_eq!(cut("Song.rpp", MAX_NAME), "Song.rpp");
+        assert_eq!(cut(&"a".repeat(MAX_NAME), MAX_NAME).chars().count(), MAX_NAME);
     }
 
     #[test]
