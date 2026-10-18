@@ -51,6 +51,9 @@ pub struct Record {
     /// `k` and four base-36 characters, in the change's DAW step description, so the DAW's own undo of it is known.
     pub nonce: String,
     pub desc: Option<String>,
+    /// The plan's DAW step the change was made in (its label, with the plan's nonce): the DAW's undo names that, not
+    /// the change's own description.
+    pub step_desc: Option<String>,
     pub applied: Option<Value>,
     pub created: Option<Value>,
     pub material: Option<Value>,
@@ -99,6 +102,8 @@ struct Inner {
     /// Each record's JSON size, and their sum.
     sizes: HashMap<String, usize>,
     total: usize,
+    /// The plan's DAW step open now (its label, with its nonce), if one is.
+    open_step: Option<String>,
 }
 
 impl Inner {
@@ -163,6 +168,7 @@ impl Journal {
             confirmation: format!("c{}", token(seed ^ 0xa11ce)),
             nonce,
             desc: None,
+            step_desc: None,
             applied: None,
             created: None,
             material: None,
@@ -217,7 +223,16 @@ impl Journal {
             .unwrap_or_else(|| record.kind.clone());
         record.desc = Some(format!("Kumi: {title} ({})", record.nonce));
         record.state = State::Applying;
-        Ok(Ok(record.clone()))
+        let record = record.clone();
+        let step = inner.open_step.clone();
+        let record = match inner.records.get_mut(id) {
+            Some(kept) => {
+                kept.step_desc = step;
+                kept.clone()
+            }
+            None => record,
+        };
+        Ok(Ok(record))
     }
 
     /// The bridge's answer to the apply (or None when it never came): the record's state, and the answer kept for its key.
@@ -317,10 +332,24 @@ impl Journal {
         ids.iter().filter(|id| inner.remove(id)).count()
     }
 
-    /// The changes whose DAW step description is one of `descs` (the DAW's own undo or redo of them).
+    /// The changes whose DAW step description is one of `descs` (the DAW's own undo or redo of them): their own, or
+    /// the plan's step they were made in.
     pub fn by_descs(&self, descs: &[String]) -> Vec<String> {
         let inner = self.inner.lock().expect("journal lock");
-        inner.order.iter().filter(|id| inner.records[*id].desc.as_ref().is_some_and(|desc| descs.contains(desc))).cloned().collect()
+        let named = |desc: &Option<String>| desc.as_ref().is_some_and(|desc| descs.contains(desc));
+        inner.order.iter().filter(|id| named(&inner.records[*id].desc) || named(&inner.records[*id].step_desc)).cloned().collect()
+    }
+
+    /// A plan's DAW step label, with a nonce of its own, so the DAW's undo of the plan names its changes.
+    pub fn step_label(&self, label: &str) -> String {
+        let mut inner = self.inner.lock().expect("journal lock");
+        inner.next += 1;
+        format!("Kumi: {label} (k{})", token(inner.next ^ now_ms() ^ 0x57e9))
+    }
+
+    /// The plan's step opened (Some, its label) or closed (None): the changes made meanwhile are in it.
+    pub fn step(&self, open: Option<String>) {
+        self.inner.lock().expect("journal lock").open_step = open;
     }
 
     pub fn len(&self) -> usize {
@@ -470,21 +499,34 @@ impl crate::host::Host {
         }
     }
 
-    /// `undo_step_begin` / `undo_step_end`: one DAW undo step around a plan's changes, where the DAW gives one.
+    /// `undo_step_begin` / `undo_step_end`: one DAW undo step around a plan's changes, where the DAW gives one. Its
+    /// label carries a nonce, so the DAW's own undo of the plan names the plan's changes.
     pub async fn undo_step(&self, method: &str, arguments: &Value) -> (Value, bool) {
-        let params = match method {
+        let (params, label) = match method {
             "undo_step_begin" => match text(arguments, "label") {
-                Ok(label) => json!({"label": label}),
+                Ok(label) => {
+                    let label = self.journal().step_label(label);
+                    (json!({"label": label}), Some(label))
+                }
                 Err(answer) => return answer,
             },
             _ => match text(arguments, "stepId") {
-                Ok(step) => json!({"stepId": step}),
+                Ok(step) => (json!({"stepId": step}), None),
                 Err(answer) => return answer,
             },
         };
         match self.call(method, params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
-            Ok(answer) => (answer, false),
-            Err(error) => (self.call_error(&error), true),
+            Ok(answer) => {
+                // Closed (or refused to close) or opened: the changes made from now on are in it, or aren't.
+                self.journal().step(label);
+                (answer, false)
+            }
+            Err(error) => {
+                if method == "undo_step_end" {
+                    self.journal().step(None);
+                }
+                (self.call_error(&error), true)
+            }
         }
     }
 
@@ -589,6 +631,24 @@ mod tests {
             undone_in_daw(&journal, "undone_in_daw", json!({"descs": [applying.desc.unwrap(), "Adjust track volume"], "how": "undo"}));
         assert_eq!((&data["transactionIds"], &data["how"]), (&json!([record.id]), &json!("undo")));
         assert_eq!(undone_in_daw(&journal, "tracks", json!({"count": 3})), json!({"count": 3}));
+    }
+
+    #[test]
+    fn the_daws_undo_of_a_plan_names_the_changes_made_in_its_step() {
+        let journal = Journal::default();
+        let label = journal.step_label("Tighten the drums");
+        assert!(label.starts_with("Kumi: Tighten the drums (k") && label.ends_with(')'), "{label}");
+        journal.step(Some(label.clone()));
+        let (first, second) = (preview(&journal), preview(&journal));
+        for record in [&first, &second] {
+            journal.begin_apply(&record.id, &record.confirmation, "a", None).unwrap().unwrap();
+            journal.end_apply(&record.id, "a", Ok(&json!({"applied": {}})));
+        }
+        journal.step(None);
+        let after = preview(&journal);
+        journal.begin_apply(&after.id, &after.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&after.id, "a", Ok(&json!({"applied": {}})));
+        assert_eq!(journal.by_descs(std::slice::from_ref(&label)), vec![first.id, second.id], "the plan's changes, not the one after");
     }
 
     #[test]
