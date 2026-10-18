@@ -1,5 +1,5 @@
 //! Repeatable plans of changes with named blanks, saved privately and replayed through make_changes.
-use super::daw::{DawProfile, DawWords};
+use super::daw::{DawId, DawProfile, DawWords};
 use super::{
     contracts::{with_final, JsonObject, KernelTool, RecipeAction, RecipeEvent, ToolResult},
     errors::RuntimeError,
@@ -39,6 +39,15 @@ pub struct Recipe {
     pub used: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_used: Option<f64>,
+    /// The DAW it runs in; missing for Live's (never written for Live, so an older Kumi reads it as it always did).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daw: Option<DawId>,
+}
+impl Recipe {
+    /// The DAW it runs in.
+    pub fn daw(&self) -> DawId {
+        self.daw.unwrap_or(DawId::Ableton)
+    }
 }
 #[async_trait(?Send)]
 pub trait RecipeStore {
@@ -138,6 +147,7 @@ impl FileRecipeStore {
             steps: steps(raw.get("steps")).into_iter().take(MAX_RECIPE_STEPS).collect(),
             created: raw["created"].as_f64().unwrap_or(0.0),
             used: raw["used"].as_f64().unwrap_or(0.0),
+            daw: serde_json::from_value(raw["daw"].clone()).ok().filter(|daw| *daw != DawId::Ableton),
             last_used: raw["lastUsed"].as_f64(),
         };
         (!recipe.name.is_empty() && !suspect(&recipe)).then_some(recipe)
@@ -421,6 +431,7 @@ impl RecipeTool {
             created: existing.as_ref().map(|r| r.created).unwrap_or_else(|| now_ms() as f64),
             used: existing.as_ref().map(|r| r.used).unwrap_or(0.0),
             last_used: existing.as_ref().and_then(|r| r.last_used).filter(|v| *v != 0.0),
+            daw: self.profile.id.filter(|daw| *daw != DawId::Ableton),
         };
         if suspect(&recipe) {
             return Ok(ToolResult::error(
@@ -437,6 +448,8 @@ impl RecipeTool {
     }
     async fn run(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let recipe = if let Some(name) = input.get("name").and_then(Value::as_str) { self.options.store.get(name).await? } else { None };
+        // Only this DAW's recipes run here: another's steps are its own tools'.
+        let recipe = recipe.filter(|recipe| recipe.daw() == self.profile.id.unwrap_or(DawId::Ableton));
         let Some(mut recipe) = recipe else {
             return Ok(ToolResult::error(format!(
                 "There's no recipe called {}.",

@@ -666,7 +666,8 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                         let s = inner.state.borrow();
                         (s.conversation_id.clone(), s.project.clone())
                     };
-                    Whereabouts { session, project, set: integration(&inner).and_then(|i| i.fingerprint()) }
+                    let daw = inner.options.profile.id.filter(|daw| *daw != DawId::Ableton);
+                    Whereabouts { session, project, set: integration(&inner).and_then(|i| i.fingerprint()), daw }
                 }),
                 Rc::new(move |since| hear.upgrade().and_then(|inner| integration(&inner)).and_then(|i| i.first_heard(since))),
             )
@@ -1451,7 +1452,10 @@ impl Session {
             None
         };
         self.assert_current(op)?;
+        let daw = self.0.options.profile.id.unwrap_or(DawId::Ableton);
         let recipes = if let Some(store) = &self.0.options.recipes { store.list().await.unwrap_or_default() } else { vec![] };
+        // Only this DAW's recipes: another's steps are its own tools'.
+        let recipes: Vec<_> = recipes.into_iter().filter(|recipe| recipe.daw() == daw).collect();
         self.assert_current(op)?;
         let techniques = if let Some(learned) = &self.0.learned { learned.list().await.unwrap_or_default() } else { vec![] };
         self.assert_current(op)?;
@@ -2090,7 +2094,11 @@ impl Session {
             }
         }
         if let (Some(recorder), Some((stop, usage)), Some(file)) = (recorder, ended, self.0.timings.clone()) {
-            let line = timing::line(&recorder.finish(), began.elapsed().as_millis() as u64, stop, usage.as_ref());
+            let mut line = timing::line(&recorder.finish(), began.elapsed().as_millis() as u64, stop, usage.as_ref());
+            // The DAW the turn ran in, when it isn't Live (never written for Live).
+            if let Some(daw) = self.0.options.profile.id.filter(|daw| *daw != DawId::Ableton) {
+                line["daw"] = json!(daw);
+            }
             timing::append(std::path::Path::new(&file), &line);
         }
         let current = self.0.state.borrow().active.as_ref().is_some_and(|a| a.id == op.id);

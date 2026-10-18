@@ -65,6 +65,12 @@ pub struct Technique {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub undone: f64,
 }
+impl Technique {
+    /// The DAW it was learned in: Live's, since kumi.db keeps no DAW for it yet (another DAW's tag comes with that DAW).
+    pub fn daw(&self) -> crate::core::daw::DawId {
+        crate::core::daw::DawId::Ableton
+    }
+}
 fn is_zero(value: &f64) -> bool {
     *value == 0.0
 }

@@ -629,6 +629,7 @@ fn recipe() -> Recipe {
         created: (AT - 86_400_000) as f64,
         used: 3.0,
         last_used: Some(AT as f64),
+        daw: None,
     }
 }
 
@@ -820,6 +821,7 @@ fn set_entry() -> SetEntry {
             main: Some(track("Main", TrackKind::Main)),
             arrangement_beats: Some(512.0),
             live: Some("12.2".into()),
+            daw: None,
         }),
         error: None,
     }
@@ -924,7 +926,7 @@ async fn kumi_db_rows_about_a_set_keep_their_shape() {
     let fingerprint = json!({"name":"Night Drive","tempo":124,"meter":"4/4","roles":["bass","drums"]});
     let log = TasteLog::with_clock(
         client.clone(),
-        Rc::new(move || Whereabouts { session: ID1.into(), project: Some(A.into()), set: Some(fingerprint.clone()) }),
+        Rc::new(move || Whereabouts { session: ID1.into(), project: Some(A.into()), set: Some(fingerprint.clone()), daw: None }),
         Rc::new(|_: i64| None),
         Rc::new(|| AT + 200_000),
     );

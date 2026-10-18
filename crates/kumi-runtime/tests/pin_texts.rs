@@ -305,6 +305,7 @@ fn recipe(name: &str, about: &str, params: &[(&str, &str)], steps: usize) -> Rec
         created: 1.0,
         used: 0.0,
         last_used: None,
+        daw: None,
     }
 }
 

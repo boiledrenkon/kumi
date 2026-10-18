@@ -1,5 +1,5 @@
 //! Capabilities the producer needed that Kumi or Live does not offer, logged locally for developers.
-use super::daw::DawProfile;
+use super::daw::{DawId, DawProfile};
 use super::{
     contracts::{with_final, JsonObject, KernelTool, ToolResult},
     errors::RuntimeError,
@@ -80,6 +80,10 @@ impl KernelTool for GapTool {
             return Ok(ToolResult::error("Say what's missing."));
         }
         let mut entry = json!({"at":iso_string(now_ms()),"kumi":KUMI_VERSION,"missing":missing});
+        // The DAW it was missing in, when it isn't Live (never written for Live; kumi.db's gaps keep no DAW yet).
+        if let Some(daw) = self.profile.id.filter(|daw| *daw != DawId::Ableton) {
+            entry["daw"] = json!(daw);
+        }
         for key in ["asked", "workaround"] {
             let text = clean(input.get(key));
             if !text.is_empty() {
