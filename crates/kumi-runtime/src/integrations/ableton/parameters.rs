@@ -31,30 +31,7 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChangeOutcome {
-    pub text: String,
-    pub is_error: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub missed: Option<usize>,
-    /// Live may have made the change, or Kumi can't read Live to know: a plan stops here. An error without it is a
-    /// refusal, with nothing changed, and the plan goes on with the steps that don't depend on it (#259).
-    #[serde(skip)]
-    pub stops: bool,
-}
-impl ChangeOutcome {
-    pub fn error(text: impl Into<String>) -> Self {
-        Self { text: text.into(), is_error: true, missed: None, stops: false }
-    }
-    /// An error after which nothing more should be tried: Live may have changed, or can't be read.
-    pub fn stop(text: impl Into<String>) -> Self {
-        Self { stops: true, ..Self::error(text) }
-    }
-    pub fn tool_result(self) -> ToolResult {
-        ToolResult { text: self.text, is_error: self.is_error, ..Default::default() }
-    }
-}
+pub use crate::core::plan::ChangeOutcome;
 #[derive(Clone, Serialize)]
 pub struct Found {
     pub index: f64,

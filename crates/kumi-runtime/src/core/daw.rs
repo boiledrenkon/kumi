@@ -103,6 +103,8 @@ pub struct PromptVocab {
     pub own_undo: &'static str,
     /// Said to the model after a restructure's undo the DAW didn't confirm: Kumi's refs are retired.
     pub refs_retired: &'static str,
+    /// What a restructure adds, deletes or moves: "tracks and scenes".
+    pub structure: &'static str,
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -221,6 +223,9 @@ macro_rules! live_word {
     (refs_retired) => {
         "Live may have taken the tracks or scenes back, so Kumi's references are retired: discover again before using any."
     };
+    (structure) => {
+        "tracks and scenes"
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -319,6 +324,9 @@ macro_rules! daw_word {
     };
     ($profile:expr, refs_retired) => {
         $profile.vocab.refs_retired
+    };
+    ($profile:expr, structure) => {
+        $profile.vocab.structure
     };
 }
 
@@ -461,6 +469,7 @@ impl DawProfile {
             tutorial_words: "Music production tutorial: synth, sampler, EQ, compressor, saturation, reverb, delay, LFO, envelope, oscillator, detune, sidechain, dry/wet, Serum, Vital.",
             own_undo: "the DAW's own undo",
             refs_retired: "The DAW may have taken the tracks back, so Kumi's references are retired: discover again before using any.",
+            structure: "tracks",
         },
     };
 
@@ -535,6 +544,7 @@ impl DawProfile {
             tutorial_words: crate::live_word!(tutorial_words),
             own_undo: crate::live_word!(own_undo),
             refs_retired: crate::live_word!(refs_retired),
+            structure: crate::live_word!(structure),
         },
     };
 

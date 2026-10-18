@@ -175,10 +175,24 @@ pub trait ChangeHost: Sized {
     fn keep_soon(&self);
     /// Changes Kumi won't undo any more: the DAW lets go of their transactions (never empty).
     fn release(&self, transactions: Vec<String>);
-    /// Before an undo: the DAW's tools are known.
-    async fn ready(&self, signal: Signal);
+    /// The DAW's tools are known (before an undo, or a batch): whether they are.
+    async fn ready(&self, signal: Signal) -> bool;
     /// Whether the DAW can take a change back through its bridge now.
     fn reachable(&self) -> bool;
+    /// Whether the DAW gives a plan one undo step of its own now, so one press of its undo takes the plan back.
+    fn plan_steps(&self) -> bool {
+        false
+    }
+    /// Opens a plan's undo step: its id, to close it by.
+    async fn step_begin(&self) -> Option<String> {
+        None
+    }
+    /// Closes a plan's undo step.
+    async fn step_end(&self, _id: String) {}
+    /// Stops the DAW's playback and recording (the emergency stop): whether it's stopped.
+    async fn stop_transport(&self, _signal: Signal) -> bool {
+        false
+    }
     /// Undo a change by the way back kept with it (`Applied::revert`).
     async fn revert(
         &self,
@@ -667,6 +681,10 @@ impl<H: ChangeHost> History<H> {
         if let Some(entry) = self.entries.borrow().get(change) {
             entry.borrow_mut().material = Some(material);
         }
+    }
+    /// Stops the DAW's playback and recording: whether it's stopped.
+    pub async fn stop_everything(&self, signal: Signal) -> bool {
+        self.host.stop_transport(signal).await
     }
     pub(crate) fn undone(&self, entry: &Entry<H::Material>) -> UndoResult {
         let record = self.update(entry, ChangeState::Undone, None);

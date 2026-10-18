@@ -179,6 +179,8 @@ pub trait RefScheme: Default {
     /// Refs a discovery row names beside its own (a clip slot's clip, a rack's chains): each with its kind, and
     /// whether the DAW has registered it at its place by this read.
     fn row_refs(&self, kind: &str, row: &JsonObject) -> Vec<(String, String, bool)>;
+    /// The long ref of the track a long ref is on, if it's on one.
+    fn track_of(&self, reference: &str) -> Option<String>;
 }
 
 /// The turn's refs, by the DAW's scheme.
@@ -540,6 +542,9 @@ mod tests {
         }
         fn row_refs(&self, _kind: &str, _row: &JsonObject) -> Vec<(String, String, bool)> {
             vec![]
+        }
+        fn track_of(&self, _reference: &str) -> Option<String> {
+            None
         }
     }
 

@@ -103,11 +103,27 @@ impl ChangeHost for LiveChanges {
             });
         }
     }
-    async fn ready(&self, signal: Signal) {
-        let _ = self.connection.ensure_catalog(signal).await;
+    async fn ready(&self, signal: Signal) -> bool {
+        self.connection.ensure_catalog(signal).await.is_ok()
     }
     fn reachable(&self) -> bool {
         self.connection.available.get() && !self.connection.lost.get() && self.connection.has("live_undo")
+    }
+    fn plan_steps(&self) -> bool {
+        self.connection.has("live_undo_step_begin") && self.connection.has("live_undo_step_end")
+    }
+    async fn step_begin(&self) -> Option<String> {
+        let signal = abort::any([self.connection.lifetime.clone(), abort::timeout(10_000)]);
+        let opened =
+            self.connection.call("live_undo_step_begin", object(json!({"label":"Kumi","timeoutMs":600_000})), signal).await.ok()?;
+        context::payload(&opened).ok().and_then(|p| p.get("stepId").and_then(Value::as_str).map(str::to_owned))
+    }
+    async fn step_end(&self, id: String) {
+        let signal = abort::any([self.connection.lifetime.clone(), abort::timeout(10_000)]);
+        let _ = self.connection.call("live_undo_step_end", object(json!({"stepId":id})), signal).await;
+    }
+    async fn stop_transport(&self, signal: Signal) -> bool {
+        self.try_stop_everything(signal).await.unwrap_or(false)
     }
     async fn revert(
         &self,
@@ -484,9 +500,8 @@ impl History {
             let _ = self.connection.call("live_undo_step_end", object(json!({"stepId":step})), bound).await;
         }
     }
-    pub async fn stop_everything(&self, signal: Signal) -> bool {
-        self.try_stop_everything(signal).await.unwrap_or(false)
-    }
+}
+impl LiveChanges {
     async fn try_stop_everything(&self, signal: Signal) -> Result<bool, RuntimeError> {
         if !self.connection.available.get() || self.connection.lost.get() || self.connection.tools().is_none() {
             return Ok(false);

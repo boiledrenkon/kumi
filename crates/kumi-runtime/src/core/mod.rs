@@ -20,6 +20,8 @@ pub mod memory;
 pub mod phrases;
 pub mod picture;
 pub mod place;
+pub mod plan;
+pub mod plan_stream;
 pub mod playbook;
 pub mod presentation;
 pub mod private;

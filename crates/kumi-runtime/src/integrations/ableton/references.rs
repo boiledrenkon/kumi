@@ -70,6 +70,13 @@ impl RefScheme for LiveRefs {
         }
         found
     }
+    fn track_of(&self, reference: &str) -> Option<String> {
+        let (Some(epoch), Some(index)) = (reference.split(':').next().filter(|e| e.parse::<u64>().is_ok()), track_index_of(reference))
+        else {
+            return None;
+        };
+        Some(format!("{epoch}:track:{}", kumi_common::js::number::to_string(index)))
+    }
 }
 
 /// Whether a move or a delete of a device on one of `tracks` retires this ref: Live's registry keeps places, and every
