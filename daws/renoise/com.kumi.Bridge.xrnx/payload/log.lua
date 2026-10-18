@@ -48,8 +48,18 @@ function M.flush()
   local size = f:seek("end")
   if size and size > M.MAX_BYTES then
     f:close()
-    os.remove(path .. ".1")
-    os.rename(path, path .. ".1")
+    local on_windows = os.platform ~= nil and os.platform() == "WINDOWS"
+    if on_windows and path:find("[\128-\255]") then
+      -- (stock os.rename and os.remove take Windows' ANSI code page, not the UTF-8 of this path: move it with Renoise's own
+      -- os.move, or start the log again)
+      if not (os.move and os.move(path, path .. ".1")) then
+        local fresh = io.open(path, "wb")
+        if fresh then fresh:close() end
+      end
+    else
+      os.remove(path .. ".1")
+      os.rename(path, path .. ".1")
+    end
     f = io.open(path, "ab")
     if not f then return end
   end

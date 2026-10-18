@@ -344,6 +344,12 @@ end
 
 local real_time = os.time
 local real_popen = io.popen
+local real_rename, real_remove = os.rename, os.remove
+
+-- Windows' stock os.rename and os.remove take the ANSI code page: a path with UTF-8 letters is not found by them.
+local function ansi_blind(path)
+  return M.platform == "WINDOWS" and tostring(path):find("[\128-\255]") ~= nil
+end
 
 local function install_os_shims()
   -- Wall time follows the mock clock, from a fixed start.
@@ -363,8 +369,21 @@ local function install_os_shims()
     if ok == 0 or ok == true then return true end
     return nil, "mkdir failed"
   end
+  os.rename = function(from, to)
+    if ansi_blind(from) or ansi_blind(to) then return nil, from .. ": No such file or directory" end
+    return real_rename(from, to)
+  end
+  os.remove = function(path)
+    if ansi_blind(path) then return nil, path .. ": No such file or directory" end
+    return real_remove(path)
+  end
+  -- Renoise's own: UTF-8 paths. Whether it replaces a file at the destination is a switch (M.move_replaces).
+  os.move = function(from, to)
+    if M.move_replaces == false and real_rename(to, to) then return nil, to .. ": file exists" end
+    return real_rename(from, to)
+  end
   io.exists = function(path)
-    return os.rename(path, path) ~= nil
+    return real_rename(path, path) ~= nil
   end
   io.stat = function(path)
     if not (M.stat_modes[path] or io.exists(path)) then return nil, "no such file", 2 end
@@ -414,6 +433,7 @@ function M.reset(options)
   M.time = 0
   M.song = nil
   M.platform = options.platform or "MACINTOSH"
+  M.move_replaces = options.move_replaces ~= false
   M.fresh_wrappers = options.fresh_wrappers ~= false
   install_os_shims()
 

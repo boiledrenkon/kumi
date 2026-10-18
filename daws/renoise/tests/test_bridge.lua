@@ -48,7 +48,8 @@ local function setup(options)
   env.reference = env.bundle .. "bridge-reference.json"
   if not options.no_reference then reference(env, options.reference) end
   if options.patch then options.patch(env) end
-  mock.reset({ bundle_path = env.bundle, version = options.version, platform = options.platform, fresh_wrappers = options.fresh_wrappers })
+  mock.reset({ bundle_path = env.bundle, version = options.version, platform = options.platform, fresh_wrappers = options.fresh_wrappers,
+    move_replaces = options.move_replaces })
   for _, port in ipairs(options.busy_ports or {}) do mock.busy_ports[port] = true end
   if options.song ~= false then mock.song = mock.make_song(options.song) end
   dofile(env.bundle .. "main.lua")
@@ -897,6 +898,56 @@ test("bridge: Windows starts no process", function()
   local env = setup({ platform = "WINDOWS" })
   eq(#mock.popen_calls, 0, "no process started")
   ok(read(env.discovery_file(0)), "discovery without a pid")
+  no_dialogs()
+end)
+
+-- Windows' stock os.rename and os.remove take the ANSI code page: a user folder like "Kümi" is out of their reach.
+local function utf8_discovery(options)
+  options = options or {}
+  options.platform = "WINDOWS"
+  local dir = T.temp_dir("utf8") .. "/K\195\188mi/discovery"
+  options.reference = { discoveryDir = dir }
+  options.song = { name = "Demo song" }
+  local env = setup(options)
+  return env, dir .. "/renoise-0-" .. sha256.hex(env.resource):sub(1, 16) .. ".json"
+end
+
+test("bridge: on Windows a discovery folder with letters outside ASCII is written and replaced with Renoise's own move", function()
+  local env, file = utf8_discovery()
+  local first = read(file)
+  ok(first, "discovery written")
+  eq(json.decode(first).project.name, "Demo song")
+  mock.song.name = "Renamed"
+  tick(2)
+  eq(json.decode(read(file)).project.name, "Renamed", "replaced")
+  eq(read(file .. ".tmp"), nil, "no temporary file left")
+  no_dialogs()
+end)
+
+test("bridge: on Windows, where move doesn't replace, the discovery file is written where it goes", function()
+  local env, file = utf8_discovery({ move_replaces = false })
+  ok(read(file), "written the first time")
+  mock.song.name = "Renamed"
+  tick(2)
+  eq(json.decode(read(file)).project.name, "Renamed", "and again")
+  eq(read(file .. ".tmp"), "", "the temporary file is emptied")
+  no_dialogs()
+end)
+
+test("bridge: on Windows a log in a folder with letters outside ASCII is rotated with os.move", function()
+  local log = T.load_payload_module("log")
+  local dir = T.temp_dir("utf8log") .. "/K\195\188mi"
+  assert(os.execute("mkdir -p '" .. dir .. "'") == 0)
+  mock.reset({ platform = "WINDOWS" })
+  log.MAX_BYTES = 200
+  local file = dir .. "/renoise-bridge-pid-1.log"
+  log.configure(file)
+  for _ = 1, 12 do
+    log.write("info", string.rep("x", 60))
+    log.flush()
+  end
+  ok(read(file .. ".1"), "the full log was moved aside")
+  ok(#read(file) < 400, "and the log is kept to its size: " .. #read(file))
   no_dialogs()
 end)
 
