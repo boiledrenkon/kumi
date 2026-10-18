@@ -304,8 +304,9 @@ local function device_row(song, epoch, t, d)
     preset = (preset and preset > 0) and device:preset(preset) or json.null,
     paramCount = #device.parameters,
     plugin = path:find("^Audio/Effects/Native/") == nil,
-    isDoofer = path:find("/Doofer$") ~= nil,
-    isSplitter = path:find("/Splitter$") ~= nil,
+    -- (the native ones only: a plug-in of that name is not a container; the paths are Renoise's, measured in 3.5.4)
+    isDoofer = path == "Audio/Effects/Native/Doofer",
+    isSplitter = path == "Audio/Effects/Native/Splitter",
   }
 end
 
