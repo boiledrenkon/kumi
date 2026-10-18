@@ -1490,11 +1490,14 @@ done
         )
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let hands = persistent(helper.to_string_lossy().into(), vec![], Some(500));
+        // Answers get all the time a busy machine needs to start the helper; only the helper that never answers has a
+        // short time limit.
+        let hands = persistent(helper.to_string_lossy().into(), vec![], Some(30_000));
+        let hanging = persistent(helper.to_string_lossy().into(), vec![], Some(500));
         add(&mut texts, "Live isn't running", failure(hands.answer("no-live", None).await.unwrap_err()));
-        add(&mut texts, "no answer in time", failure(hands.keys(&["hang".into()], KeysOptions::default()).await.unwrap_err()));
+        add(&mut texts, "no answer in time", failure(hanging.keys(&["hang".into()], KeysOptions::default()).await.unwrap_err()));
         let stop = KeysOptions { signal: Some(abort::timeout(10)), gap_ms: None };
-        add(&mut texts, "stopped", failure(hands.keys(&["hang".into()], stop).await.unwrap_err()));
+        add(&mut texts, "stopped", failure(hanging.keys(&["hang".into()], stop).await.unwrap_err()));
         // The one text that differs by platform: pinned here as each platform says it.
         let untrusted = failure(hands.answer("untrusted", None).await.unwrap_err());
         if kumi_runtime::system::platform() == "darwin" {
@@ -1503,6 +1506,7 @@ done
             assert_eq!(untrusted, "Windows refused Kumi's access to Live's window. [untrusted]");
         }
         hands.close();
+        hanging.close();
     }
     // Windows has no shell helper to stand in for its own: its texts are pinned on the others.
     #[cfg(not(unix))]
