@@ -103,7 +103,7 @@ fn fx_of_hit(reaper: &Reaper, proj: Project, hit: &FxHit) -> Option<Fx> {
 
 /// The FX with the focus (`GetTouchedOrFocusedFX` mode 1): its ref and name.
 fn focused_fx(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<(String, String)> {
-    let hit = reaper.touched_or_focused_fx(1)?;
+    let hit = reads.touched_fx(reaper, 1)?;
     // Parm 1 says the window is still open but something else has the focus.
     if hit.param & 1 != 0 {
         return None;
@@ -119,7 +119,7 @@ fn focused_fx(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<(String, 
 
 /// The parameter touched last, named for the header: `{name, value, formatted, fxRef}`.
 fn touched_param(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<Value> {
-    let hit = reaper.touched_or_focused_fx(0)?;
+    let hit = reads.touched_fx(reaper, 0)?;
     let fx = fx_of_hit(reaper, proj, &hit)?;
     let guid = reaper.fx_guid(fx);
     if guid.is_empty() || hit.param < 0 || hit.param >= reaper.fx_param_count(fx) {

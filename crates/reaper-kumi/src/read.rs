@@ -58,6 +58,13 @@ pub fn failed(message: impl Into<String>) -> (String, String) {
     ("failed".into(), message.into())
 }
 
+/// Two objects of a kind have one GUID: a ref to either can't say which it means.
+fn shared_id(kind: &str) -> (String, String) {
+    failed(format!(
+        "two {kind}s in the project have that id (one was copied as text, which keeps the id): REAPER can't tell them apart, so remove the copy or recreate it"
+    ))
+}
+
 /// The list under a cursor is not the one it was made for.
 pub fn changed(message: impl Into<String>) -> (String, String) {
     (daw_bridge::wire::code::CHANGED.into(), message.into())
@@ -73,6 +80,9 @@ pub struct Reads {
     /// A Kumi project id found in a tab's project while it was unsaved: it came with the template the project was made
     /// from, so it isn't that project's own.
     inherited: RefCell<HashMap<usize, String>>,
+    /// What `GetTouchedOrFocusedFX` said (touched, focused) when the tab last changed: it names the track by its number in
+    /// whichever project is active, and takes no project, so the same answer after a switch may be another project's.
+    stale_fx: RefCell<[Option<crate::reaper::FxHit>; 2]>,
 }
 
 /// A serial number for each project open in a tab, from this REAPER's own counter: the same while the project stays open
@@ -213,6 +223,25 @@ type CursorParts = (String, Option<String>);
 impl Reads {
     pub fn epoch(&self) -> String {
         self.epoch.borrow().text()
+    }
+
+    /// The FX REAPER says was touched (mode 0) or has the focus (mode 1), unless that is still what it said before the tab
+    /// changed: REAPER names the track by its number and says nothing of its project, so it is not known to be this one's.
+    /// It counts again once REAPER says something else.
+    pub fn touched_fx(&self, reaper: &Reaper, mode: i32) -> Option<crate::reaper::FxHit> {
+        let hit = reaper.touched_or_focused_fx(mode)?;
+        let mut stale = self.stale_fx.borrow_mut();
+        let slot = &mut stale[(mode & 1) as usize];
+        if *slot == Some(hit) {
+            return None;
+        }
+        *slot = None;
+        Some(hit)
+    }
+
+    /// The tab changed: what REAPER says is touched or focused now was said about the project before.
+    pub fn forget_touched(&self, reaper: &Reaper) {
+        *self.stale_fx.borrow_mut() = [reaper.touched_or_focused_fx(0), reaper.touched_or_focused_fx(1)];
     }
 
     /// Refs stop meaning what they meant: a tab switch, or a new project in the tab.
@@ -367,17 +396,19 @@ impl Reads {
     // ----- resolving refs -----
 
     fn track_by_id(&self, reaper: &Reaper, proj: Project, id: &TrackId) -> Result<Track, (String, String)> {
-        self.registry
-            .borrow_mut()
-            .track(reaper, proj, id)
-            .ok_or_else(|| failed("that track isn't in the project (deleted, or another tab)"))
+        let mut registry = self.registry.borrow_mut();
+        registry.track(reaper, proj, id).ok_or_else(|| match id {
+            TrackId::Guid(guid) if registry.is_shared(guid) => shared_id("track"),
+            _ => failed("that track isn't in the project (deleted, or another tab)"),
+        })
     }
 
     fn item_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Item, (String, String)> {
-        self.registry
-            .borrow_mut()
-            .item(reaper, proj, guid)
-            .ok_or_else(|| failed("that item isn't in the project (deleted, or another tab)"))
+        let mut registry = self.registry.borrow_mut();
+        registry.item(reaper, proj, guid).ok_or_else(|| match registry.is_shared(guid) {
+            true => shared_id("item"),
+            false => failed("that item isn't in the project (deleted, or another tab)"),
+        })
     }
 
     fn take_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Take, (String, String)> {
@@ -388,7 +419,11 @@ impl Reads {
     }
 
     fn fx_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Fx, (String, String)> {
-        self.registry.borrow_mut().fx(reaper, proj, guid).ok_or_else(|| failed("that FX isn't in the project (deleted, or another tab)"))
+        let mut registry = self.registry.borrow_mut();
+        registry.fx(reaper, proj, guid).ok_or_else(|| match registry.is_shared(guid) {
+            true => shared_id("FX"),
+            false => failed("that FX isn't in the project (deleted, or another tab)"),
+        })
     }
 
     /// A parent ref that must be a track.
@@ -472,13 +507,14 @@ impl Reads {
                     // Sends to one place have no identity of their own: once their number changes, a ref to one of them
                     // could be any, so it names none.
                     let now = keys.iter().filter(|k| k.other == key.other).count();
+                    let sends = if now == 1 { "send" } else { "sends" };
                     let why = match (now, of) {
                         (0, _) => "the track has no such send (deleted, or it went elsewhere)".to_string(),
-                        (now, 1) => {
-                            format!("the track has {now} such sends now, and this ref was made when there was one: read them again")
+                        (_, 1) => {
+                            format!("the track has {now} such {sends} now, and this ref was made when there was one: read them again")
                         }
-                        (now, _) => {
-                            format!("the track has {now} such sends now, and this ref was made when there were {of}: read them again")
+                        (_, _) => {
+                            format!("the track has {now} such {sends} now, and this ref was made when there were {of}: read them again")
                         }
                     };
                     return Err(failed(format!("that send isn't there: {why}")));
@@ -1315,6 +1351,9 @@ mod tests {
             (&json!("midi-overdub"), &json!("on"), &json!("touch"))
         );
         assert_eq!(rows.iter().find(|r| r["name"] == "Drums").unwrap()["folderState"], "fully-collapsed");
+        // A new track follows the project's default pan mode (REAPER stores -1).
+        set_track(1, &[("I_PANMODE", -1.0)]);
+        assert_eq!(lab.rows(json!({"ref": "r:track:{BBBB}"}))[0]["panMode"], "default");
         // Audio inputs, mono and stereo and multichannel, and the virtual keyboard.
         for (value, expected) in [
             (512.0, json!({"kind": "audio", "first": 513, "layout": "mono"})),
@@ -1370,6 +1409,8 @@ mod tests {
             send.extra.insert("I_MIDIFLAGS".into(), (31) as f64);
             s.tracks[0].envelopes.push(FakeEnvelope::for_send("Send Volume: Reverb", 0, "<VOLENV", 3));
             s.tracks[0].envelopes.push(FakeEnvelope::for_send("Send Mute: Reverb", 0, "<MUTEENV", 1));
+            // REAPER hands out a pan envelope for the send too, with no points and not in use: it isn't listed.
+            s.tracks[0].envelopes.push(FakeEnvelope { active: false, ..FakeEnvelope::for_send("Send Pan: Reverb", 0, "<PANENV", 0) });
         });
         let sends = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
         let send = &sends[0];
@@ -1440,6 +1481,38 @@ mod tests {
         let body = lab.reads.focus_body(&Reaper::new(&api), &json!({"kind": "arrange"})).unwrap();
         let kick = body["tracks"].as_array().unwrap().iter().find(|t| t["name"] == "Kick").unwrap().clone();
         assert_eq!(kick["items"][0]["color"], "#ff0000");
+    }
+
+    /// REAPER keeps a GUID through a copy made as text (a script setting one track's chunk on another): the registry kept
+    /// the last object it found, and a ref read whichever that was.
+    #[test]
+    fn a_guid_two_objects_have_names_neither_until_one_is_gone() {
+        use crate::reaper::fake::FakeFx;
+        let lab = Lab::new();
+        // A track copied as text: the same GUID on its track, its items and its FX.
+        fake::with(|s| {
+            let mut copy = s.tracks[1].clone();
+            copy.name = "Kick copy".into();
+            s.tracks.push(copy);
+        });
+        for (reference, kind) in [("r:track:{BBBB}", "track"), ("r:item:{ITEM-K1}", "item")] {
+            let (code, message) = lab.read(json!({"ref": reference})).unwrap_err();
+            assert_eq!(code, "failed", "{reference}");
+            assert!(message.contains(&format!("two {kind}s in the project have that id")), "{message}");
+        }
+        // The track's own rows still list both, whatever their refs say.
+        assert_eq!(lab.rows(json!({"kind": "track"})).iter().filter(|t| t["ref"] == "r:track:{BBBB}").count(), 2);
+        // The copy is removed: the refs name the one that is left, and the registry has forgotten the clash.
+        fake::with(|s| {
+            s.tracks.pop();
+        });
+        assert_eq!(lab.rows(json!({"ref": "r:track:{BBBB}"}))[0]["name"], "Kick");
+        assert_eq!(lab.rows(json!({"ref": "r:item:{ITEM-K1}"}))[0]["name"], "kick.wav");
+        // The same FX on two tracks.
+        fake::with(|s| s.tracks[1].fx = vec![FakeFx::new("{FX-EQ}", "VST3: ReaEQ (Cockos)")]);
+        let (code, message) = lab.read(json!({"ref": "r:fx:{FX-EQ}"})).unwrap_err();
+        assert_eq!(code, "failed");
+        assert!(message.contains("two FXs in the project have that id"), "{message}");
     }
 
     #[test]
@@ -2008,7 +2081,7 @@ mod tests {
         for reference in refs {
             let (code, message) = lab.read(json!({"ref": reference})).unwrap_err();
             assert_eq!(code, "failed", "{reference}");
-            assert!(message.contains("1 such sends now") && message.contains("there were 2"), "{message}");
+            assert!(message.contains("1 such send now") && message.contains("there were 2"), "{message}");
         }
         // What is read now has the plain ref of a send alone.
         assert_eq!(lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}))[0]["ref"], "r:send:{AAAA}:0:{DDDD}");

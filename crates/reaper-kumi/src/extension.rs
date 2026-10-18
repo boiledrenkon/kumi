@@ -506,6 +506,7 @@ impl Extension {
         if switched || replaced {
             // Refs name objects of the project in this tab: they mean something else now.
             self.reads.bump_epoch();
+            self.reads.forget_touched(&reaper);
             self.focus.reset();
             if let Some(info) = info.as_ref().filter(|_| replaced) {
                 self.reads.project_replaced(info.ptr);
@@ -840,6 +841,33 @@ mod tests {
         std::thread::sleep(FOCUS_EVERY + Duration::from_millis(5));
         extension.tick(Driver::Timer);
         assert_eq!(focus_of(&extension)["changed"], 12);
+    }
+
+    /// `GetTouchedOrFocusedFX` names a track by its number, in whichever project is active: after a tab switch it can be
+    /// about the project before.
+    #[test]
+    fn the_touched_parameter_from_before_a_tab_switch_is_not_this_projects_until_reaper_says_another() {
+        let (extension, _tx, _, _) = setup();
+        fake::lab_project();
+        fake::with(|s| {
+            s.tracks[0].fx[0].params = vec![fake::FakeParam::new("Gain", 0.75, "-3.0 dB")];
+            s.touched_fx = Some((0, -1, -1, 0, 0));
+        });
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["selection"]["param"]["name"], "Gain");
+        // The producer switches to another project: REAPER still says the same.
+        fake::with(|s| s.project_id += 1);
+        extension.on_surface(Call::TrackListChange);
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["selection"].get("param"), None);
+        // It says something else once a parameter is touched there.
+        fake::with(|s| {
+            s.tracks[0].fx[0].params.push(fake::FakeParam::new("Pan", 0.5, "C"));
+            s.touched_fx = Some((0, -1, -1, 0, 1));
+        });
+        extension.on_surface(Call::TrackListChange);
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["selection"]["param"]["name"], "Pan");
     }
 
     #[test]

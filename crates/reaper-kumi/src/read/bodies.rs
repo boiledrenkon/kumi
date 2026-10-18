@@ -259,7 +259,7 @@ impl Reads {
             .enumerate()
             .filter(|(i, m)| Some(*i) == before || (m.time > from && m.time <= to))
             .take(WINDOW_TEMPO_MARKERS)
-            .map(|(_, m)| json!({"position": beats(m.time), "bpm": rows::seconds(m.bpm), "num": m.num, "den": m.denom, "linear": m.linear}))
+            .map(|(_, m)| json!({"position": beats(m.time), "bpm": rows::seconds(m.bpm), "num": signature_part(m.num), "den": signature_part(m.denom), "linear": m.linear}))
             .collect();
         body["tempoMarkers"] = shown.into();
     }
@@ -512,6 +512,16 @@ fn other_name(reaper: &Reaper, track: Track, category: i32, index: i32) -> Strin
     }
 }
 
+/// A tempo marker's part of a time signature: REAPER says -1 for a marker that only changes the tempo, which is no
+/// signature (and a marker that changes nothing but the signature keeps the tempo in force).
+fn signature_part(part: i32) -> Value {
+    if part > 0 {
+        part.into()
+    } else {
+        Value::Null
+    }
+}
+
 /// Quarter notes in a bar of this time signature.
 fn bar_beats(signature: &crate::reaper::TimeSignature) -> f64 {
     rows::seconds(signature.num as f64 * 4.0 / signature.denom.max(1) as f64)
@@ -716,6 +726,8 @@ mod tests {
                 FakeTempo { time: 6.0, bpm: 90.0, num: 3, denom: 4 },
                 FakeTempo { time: 50.0, bpm: 70.0, num: 4, denom: 4 },
             ];
+            // A marker that changes only the tempo has no time signature: REAPER says -1 and -1.
+            s.tempo_markers.insert(1, FakeTempo { time: 4.0, bpm: 100.0, num: -1, denom: -1 });
             s.tracks[1].items[1].selected = true;
             s.cursor = 3.0;
             s.loop_range = (4.0, 8.0);
@@ -758,10 +770,15 @@ mod tests {
         assert_eq!((&body["regions"][0]["position"], &body["regions"][0]["end"]), (&json!(16.0), &json!(32.0)));
         // The tempo in force when the window opens, and the change inside it; not the one far past it.
         let tempo: Vec<f64> = body["tempoMarkers"].as_array().unwrap().iter().map(|m| m["bpm"].as_f64().unwrap()).collect();
-        assert_eq!(tempo, [120.0, 90.0]);
+        assert_eq!(tempo, [120.0, 100.0, 90.0]);
         assert_eq!(
-            (&body["tempoMarkers"][1]["position"], &body["tempoMarkers"][1]["num"], &body["tempoMarkers"][1]["den"]),
+            (&body["tempoMarkers"][2]["position"], &body["tempoMarkers"][2]["num"], &body["tempoMarkers"][2]["den"]),
             (&json!(12.0), &json!(3), &json!(4))
+        );
+        // The marker that only changes the tempo has no time signature.
+        assert_eq!(
+            (&body["tempoMarkers"][1]["bpm"], &body["tempoMarkers"][1]["num"], &body["tempoMarkers"][1]["den"]),
+            (&json!(100.0), &Value::Null, &Value::Null)
         );
     }
 

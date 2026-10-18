@@ -2,7 +2,7 @@
 //! secret, prints the welcome and status, runs actions, prints the events that follow, and can quit REAPER.
 //!
 //! cargo run -p reaper-kumi --example lab_client -- <kumi home> [--action <id or name>]... [--watch <seconds>]
-//!     [--quit [--save]]
+//!     [--call <method> <json params>]... [--quit [--save]]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -21,10 +21,11 @@ use serde_json::{json, Value};
 fn main() {
     let mut args = std::env::args().skip(1);
     let home = PathBuf::from(args.next().expect("usage: lab_client <kumi home> [--action N]... [--watch S] [--quit [--save]]"));
-    let (mut actions, mut watch, mut quit, mut save) = (vec![], 0.0, false, false);
+    let (mut actions, mut calls, mut watch, mut quit, mut save) = (vec![], vec![], 0.0, false, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--action" => actions.push(args.next().expect("--action <id or name>")),
+            "--call" => calls.push((args.next().expect("--call <method> <json>"), args.next().expect("--call <method> <json>"))),
             "--watch" => watch = args.next().and_then(|s| s.parse().ok()).expect("--watch <seconds>"),
             "--quit" => quit = true,
             "--save" => save = true,
@@ -59,6 +60,9 @@ fn main() {
         let command = action.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::from(action.clone()));
         client.call("action", json!({"command": command}));
         client.watch(Duration::from_millis(400));
+    }
+    for (method, params) in calls {
+        client.call(&method, serde_json::from_str(&params).expect("the params as JSON"));
     }
     client.watch(Duration::from_secs_f64(watch));
     if quit {

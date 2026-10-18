@@ -92,6 +92,8 @@ pub struct FakeEnvelope {
     pub points: i32,
     pub armed: bool,
     pub visible: bool,
+    /// An inactive envelope is one REAPER hands out for a send that has none yet.
+    pub active: bool,
 }
 
 impl FakeEnvelope {
@@ -106,7 +108,17 @@ impl FakeEnvelope {
 
     pub fn own(name: &str, chunk: &str, points: i32) -> Self {
         let guid = format!("{{ENV-{}}}", chunk.trim_start_matches('<'));
-        FakeEnvelope { name: name.into(), guid, chunk: Some(chunk.into()), fx_param: None, send: None, points, armed: false, visible: true }
+        FakeEnvelope {
+            name: name.into(),
+            guid,
+            chunk: Some(chunk.into()),
+            fx_param: None,
+            send: None,
+            points,
+            armed: false,
+            visible: true,
+            active: true,
+        }
     }
 
     pub fn for_param(name: &str, fx: &str, param: i32, points: i32) -> Self {
@@ -120,6 +132,7 @@ impl FakeEnvelope {
             points,
             armed: false,
             visible: true,
+            active: true,
         }
     }
 }
@@ -1487,7 +1500,7 @@ unsafe extern "C" fn get_set_envelope_info_string(envelope: *mut TrackEnvelope, 
         let Some(e) = envelope_of(s, envelope as u64) else { return false };
         let flag = |on: bool| if on { "1" } else { "0" };
         match parm.as_str() {
-            "ACTIVE" => write(buf, 4096, "1"),
+            "ACTIVE" => write(buf, 4096, flag(e.active)),
             "ARM" => write(buf, 4096, flag(e.armed)),
             "VISIBLE" => write(buf, 4096, flag(e.visible)),
             "GUID" => write(buf, 4096, &e.guid),

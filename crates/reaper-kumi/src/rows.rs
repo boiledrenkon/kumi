@@ -163,8 +163,10 @@ pub fn track_row(reaper: &Reaper, track: Track) -> Value {
     row
 }
 
+/// -1, which every new track has, follows the project's default pan mode.
 fn pan_mode_name(mode: i64) -> &'static str {
     match mode {
+        -1 => "default",
         0 => "classic",
         3 => "balance",
         5 => "stereo",
@@ -483,11 +485,14 @@ pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32, key: &
     if category <= 0 {
         row["midi"] = midi_flags(reaper.send_value(track, category, index, "I_MIDIFLAGS") as i64);
     }
-    // The envelopes of a send (volume, pan, mute) are the sending track's own; a send lists the ones it has.
+    // The envelopes of a send (volume, pan, mute) are the sending track's own. REAPER hands out one of each kind for every
+    // send, active or not, and an inactive one has no GUID to keep: a send lists the ones that are in use.
     if category == 0 {
         let envelopes: Vec<Value> = ["<VOLENV", "<PANENV", "<MUTEENV"]
             .into_iter()
-            .filter_map(|chunk| reaper.send_envelope(track, index, chunk).and_then(|envelope| reaper.envelope_guid(envelope)))
+            .filter_map(|chunk| reaper.send_envelope(track, index, chunk))
+            .filter(|envelope| reaper.envelope_flag(*envelope, "ACTIVE"))
+            .filter_map(|envelope| reaper.envelope_guid(envelope))
             .map(|guid| refs::envelope_ref(&this, &EnvelopeId::Guid(guid)).into())
             .collect();
         row["envelopeRefs"] = envelopes.into();

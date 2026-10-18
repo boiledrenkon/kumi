@@ -2,7 +2,7 @@
 //! has no object lookup by GUID (only for takes), so the registry keeps GUID to handle maps, checks each hit with
 //! ValidatePtr2 and the object's own GUID, and rebuilds a map when a hit goes stale or a GUID isn't found.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::reaper::{Fx, FxOwner, Item, Project, Reaper, Take, Track, CONTAINER_FX, INPUT_FX};
@@ -250,6 +250,12 @@ pub struct Registry {
     tracks: HashMap<String, Track>,
     items: HashMap<String, Item>,
     fx: HashMap<String, Fx>,
+    /// GUIDs that two tracks, items or FX of this project have: REAPER keeps a GUID through a copy made as text (a script
+    /// setting one track's chunk on another), so a ref to one can't say which it means. Found when a map is rebuilt, and
+    /// forgotten with it.
+    shared_tracks: HashSet<String>,
+    shared_items: HashSet<String>,
+    shared_fx: HashSet<String>,
     /// When the item map and the FX map were last rebuilt, and the project's state change count then.
     items_built: Option<(i32, Instant)>,
     fx_built: Option<(i32, Instant)>,
@@ -272,6 +278,11 @@ impl Registry {
         built.is_some_and(|(at, when)| at == count && when.elapsed() < MISS_MEMORY)
     }
 
+    /// Whether two objects of a kind were found with this GUID: it names neither.
+    pub fn is_shared(&self, guid: &str) -> bool {
+        self.shared_tracks.contains(guid) || self.shared_items.contains(guid) || self.shared_fx.contains(guid)
+    }
+
     /// The track for an id; the master by name, any other by GUID.
     pub fn track(&mut self, reaper: &Reaper, proj: Project, id: &TrackId) -> Option<Track> {
         let guid = match id {
@@ -279,17 +290,25 @@ impl Registry {
             TrackId::Guid(guid) => guid,
         };
         self.follow(proj);
-        if let Some(&track) = self.tracks.get(guid) {
+        // A GUID that was found on two tracks is looked for again each time: the copy may be gone.
+        if let Some(&track) = self.tracks.get(guid).filter(|_| !self.shared_tracks.contains(guid)) {
             if reaper.track_valid(proj, track) && reaper.track_guid(track) == *guid {
                 return Some(track);
             }
         }
         // A project's tracks are few: walk them all on a miss rather than trust a count that may not have moved.
         self.tracks.clear();
+        self.shared_tracks.clear();
         for index in 0..reaper.track_count(proj) {
             if let Some(track) = reaper.track_at(proj, index) {
-                self.tracks.insert(reaper.track_guid(track), track);
+                let own = reaper.track_guid(track);
+                if self.tracks.insert(own.clone(), track).is_some() {
+                    self.shared_tracks.insert(own);
+                }
             }
+        }
+        if self.shared_tracks.contains(guid) {
+            return None;
         }
         self.tracks.get(guid).copied()
     }
@@ -308,24 +327,31 @@ impl Registry {
     /// The item for a GUID.
     pub fn item(&mut self, reaper: &Reaper, proj: Project, guid: &str) -> Option<Item> {
         self.follow(proj);
-        if let Some(&item) = self.items.get(guid) {
+        if let Some(&item) = self.items.get(guid).filter(|_| !self.shared_items.contains(guid)) {
             if reaper.item_valid(proj, item) && reaper.item_guid(item) == guid {
                 return Some(item);
             }
         }
         let count = reaper.state_change_count(proj).unwrap_or(0);
-        if Self::recently_missed(self.items_built, count) {
+        if Self::recently_missed(self.items_built, count) && !self.shared_items.contains(guid) {
             return None;
         }
         self.items.clear();
+        self.shared_items.clear();
         for track in (0..reaper.track_count(proj)).filter_map(|i| reaper.track_at(proj, i)).chain(reaper.master_track(proj)) {
             for index in 0..reaper.track_item_count(track) {
                 if let Some(item) = reaper.track_item(track, index) {
-                    self.items.insert(reaper.item_guid(item), item);
+                    let own = reaper.item_guid(item);
+                    if self.items.insert(own.clone(), item).is_some() {
+                        self.shared_items.insert(own);
+                    }
                 }
             }
         }
         self.items_built = Some((count, Instant::now()));
+        if self.shared_items.contains(guid) {
+            return None;
+        }
         self.items.get(guid).copied()
     }
 
@@ -343,7 +369,7 @@ impl Registry {
     /// The FX for a GUID, wherever it is: a track's chain, its input chain, a container, or a take's chain.
     pub fn fx(&mut self, reaper: &Reaper, proj: Project, guid: &str) -> Option<Fx> {
         self.follow(proj);
-        if let Some(&fx) = self.fx.get(guid) {
+        if let Some(&fx) = self.fx.get(guid).filter(|_| !self.shared_fx.contains(guid)) {
             if self.fx_matches(reaper, proj, fx, guid) {
                 return Some(fx);
             }
@@ -356,10 +382,11 @@ impl Registry {
             }
         }
         let count = reaper.state_change_count(proj).unwrap_or(0);
-        if Self::recently_missed(self.fx_built, count) {
+        if Self::recently_missed(self.fx_built, count) && !self.shared_fx.contains(guid) {
             return None;
         }
         self.fx.clear();
+        self.shared_fx.clear();
         // Tracks first: nearly every FX is on one. Takes only when the track chains didn't have it.
         let tracks: Vec<Track> =
             (0..reaper.track_count(proj)).filter_map(|i| reaper.track_at(proj, i)).chain(reaper.master_track(proj)).collect();
@@ -379,6 +406,9 @@ impl Registry {
             }
         }
         self.fx_built = Some((count, Instant::now()));
+        if self.shared_fx.contains(guid) {
+            return None;
+        }
         self.fx.get(guid).copied()
     }
 
@@ -407,7 +437,12 @@ impl Registry {
         if guid.is_empty() {
             return;
         }
-        self.fx.insert(guid, fx);
+        // The same FX met again while indexing is a reorder re-reading its chain; another owner's is a shared GUID.
+        if let Some(before) = self.fx.insert(guid.clone(), fx) {
+            if before.owner != fx.owner {
+                self.shared_fx.insert(guid);
+            }
+        }
         for child in reaper.fx_children(fx) {
             debug_assert!(child.index & CONTAINER_FX != 0);
             self.index_fx(reaper, child);
