@@ -2321,7 +2321,9 @@ async fn uninstall_all_says_a_folder_of_only_kumis_isnt_named_kumi() {
 }
 
 /// The DAW used last (`last-daw`) and REAPER's and Renoise's bridges' files (`bridges/`) are Kumi's: `--all` takes a
-/// folder holding them whole, as it always took a Live-only producer's.
+/// folder holding them whole, as it always took a Live-only producer's. (On Windows a detached cmd removes them once
+/// Kumi has exited; the dry run below says the same there.)
+#[cfg(not(windows))]
 #[tokio::test]
 async fn uninstall_all_takes_the_daw_used_last_and_the_other_daws_bridge_files_too() {
     let dir = tempfile::tempdir().unwrap();
@@ -2342,6 +2344,7 @@ async fn uninstall_all_takes_the_daw_used_last_and_the_other_daws_bridge_files_t
 
 /// A DAW whose folder is gone (Renoise's preferences deleted) doesn't stop the uninstall halfway: Kumi's tool comes out
 /// as its receipt says, and Kumi goes; nobody is asked to open Renoise to uninstall Kumi.
+#[cfg(not(windows))]
 #[tokio::test]
 async fn uninstall_carries_on_when_a_daws_folder_is_gone() {
     let dir = tempfile::tempdir().unwrap();
@@ -2381,4 +2384,24 @@ async fn uninstall_carries_on_when_a_daws_folder_is_gone() {
         assert!(!home.join(part).exists(), "{part}: {}", out.0.borrow());
     }
     assert!(!out.0.borrow().contains("open Renoise"), "{}", out.0.borrow());
+}
+
+/// On every system, `last-daw` and `bridges/` count as Kumi's: `--all` would take the whole folder (said by the dry run,
+/// which removes nothing, so it runs on Windows too).
+#[tokio::test]
+async fn the_daw_used_last_and_the_other_daws_bridge_files_count_as_kumis() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    for part in ["app", "bin"] {
+        fs::create_dir_all(home.join(part)).unwrap();
+    }
+    installed_kumi(home);
+    put(home.join("last-daw"), "reaper");
+    put(home.join("bridges/renoise/bridge.secret"), "secret");
+    let (io, out) = io(&env);
+    assert_eq!(uninstall_installed(io, UninstallOptions { all: true, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(said.contains("kumi uninstall --all would remove ") && !said.contains("isn't Kumi's"), "{said}");
+    assert!(home.join("last-daw").exists() && home.join("bridges").exists(), "a dry run removes nothing");
 }
