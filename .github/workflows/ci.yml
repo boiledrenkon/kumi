@@ -282,6 +282,47 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
 
+  reaper-extension:
+    # The extension as it ships: the release build, unstripped by rustc (a rustc strip can misalign its LINKEDIT
+    # string pool on macOS 27, and dyld then refuses it), then the platform's own strip, then loaded by the system's
+    # loader with REAPER's entry point found.
+    name: REAPER extension loads / ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04, windows-2025]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Stop Windows Defender scanning the workspace
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+        with:
+          key: reaper-extension
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build it as it ships, and strip it with the platform's strip
+        run: |
+          # Windows links the C runtime statically, so REAPER needs no VC++ runtime installed.
+          if [[ "$RUNNER_OS" == "Windows" ]]; then export RUSTFLAGS="-C target-feature=+crt-static"; fi
+          cargo build -p reaper-kumi --release --locked
+          case "$RUNNER_OS" in
+            macOS) file=target/release/libreaper_kumi.dylib; strip -x "$file" ;;
+            Linux) file=target/release/libreaper_kumi.so; strip --strip-unneeded "$file" ;;
+            Windows) file=target/release/reaper_kumi.dll ;;
+          esac
+          echo "REAPER_KUMI_ARTIFACT=$PWD/$file" >> "$GITHUB_ENV"
+      - name: It loads, with REAPER's entry point
+        run: cargo test -p reaper-kumi --locked --test loads
+
   scripts:
     name: Release scripts
     runs-on: ubuntu-24.04
@@ -334,7 +375,7 @@ jobs:
   required:
     name: Required CI
     if: always()
-    needs: [changes, rust-linux, rust-lint, rust-platforms, remote-script, live-extension, scripts]
+    needs: [changes, rust-linux, rust-lint, rust-platforms, remote-script, live-extension, reaper-extension, scripts]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every job above (the builds may skip a documentation-only change)
@@ -349,3 +390,4 @@ jobs:
           ok "${{ needs.rust-platforms.result }}"
           ok "${{ needs.remote-script.result }}"
           ok "${{ needs.live-extension.result }}"
+          ok "${{ needs.reaper-extension.result }}"

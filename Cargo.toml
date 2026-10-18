@@ -93,6 +93,15 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# REAPER's extension is never stripped by rustc: on macOS 27 (ld-27037) a rustc strip can leave the library's LINKEDIT
+# string pool misaligned, depending on its symbol count, and dyld then refuses to load it. It's stripped after the
+# build with the platform's own strip instead, which leaves it loadable.
+[profile.dev.package.reaper-kumi]
+strip = "none"
+
+[profile.release.package.reaper-kumi]
+strip = "none"
+
 # The Installer's builds on pull requests and main, which are installed and checked but never published: the
 # release build without whole-program optimization and with parallel code generation, to build faster. Tags, the
 # builds that are published, use `release`.
@@ -100,3 +109,6 @@ strip = true
 inherits = "release"
 lto = "off"
 codegen-units = 16
+
+[profile.ci-release.package.reaper-kumi]
+strip = "none"
