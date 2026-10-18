@@ -6,6 +6,7 @@ mod goal;
 mod groove;
 mod judge;
 mod listen;
+pub mod main_chain;
 mod pass;
 mod probe;
 mod rig;

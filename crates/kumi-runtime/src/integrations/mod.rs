@@ -14,6 +14,7 @@ pub use ableton::focus::parse_focus;
 pub use ableton::live_set;
 pub use ableton::manual as live_manual;
 pub use ableton::project::{create_project_store, Baseline, ProjectStore};
+pub use ableton::rendering::main_chain as live_main_chain;
 pub use ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
 pub use ableton::{ears, hands};
 
