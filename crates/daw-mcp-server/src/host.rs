@@ -41,6 +41,8 @@ pub struct Host {
     daw: Daw,
     paths: BridgePaths,
     current: tokio::sync::Mutex<Option<Current>>,
+    /// The bridge's events (`{name, data}`), for the MCP client: whichever instance the host is connected to.
+    events: tokio::sync::broadcast::Sender<Value>,
 }
 
 /// Which running instance a tool means, when several run.
@@ -101,7 +103,17 @@ fn no_listener(error: &std::io::Error) -> bool {
 
 impl Host {
     pub fn new(daw: Daw, kumi_home: &Path) -> Self {
-        Self { daw, paths: BridgePaths::new(kumi_home, daw), current: tokio::sync::Mutex::new(None) }
+        Self {
+            daw,
+            paths: BridgePaths::new(kumi_home, daw),
+            current: tokio::sync::Mutex::new(None),
+            events: tokio::sync::broadcast::channel(1024).0,
+        }
+    }
+
+    /// The bridge's events from now on, as `{name, data}` (a `tracks` shift, a project opened…).
+    pub fn events(&self) -> tokio::sync::broadcast::Receiver<Value> {
+        self.events.subscribe()
     }
 
     pub fn daw(&self) -> Daw {
@@ -248,6 +260,19 @@ impl Host {
             };
             match self.connect(discovery, &secret).await {
                 Some(Ok(client)) => {
+                    // The bridge's events go on to the MCP client while this connection lasts.
+                    let (mut from, to) = (client.events(), self.events.clone());
+                    tokio::spawn(async move {
+                        loop {
+                            match from.recv().await {
+                                Ok(event) => {
+                                    let _ = to.send(json!({"name": event.name, "data": event.data}));
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    });
                     *current = Some(Current { pid: discovery.pid, resource: discovery.resource.clone(), port: discovery.port, client });
                 }
                 Some(Err(why)) => return Err(why),

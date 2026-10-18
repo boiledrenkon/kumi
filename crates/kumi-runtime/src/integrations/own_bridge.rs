@@ -9,7 +9,7 @@ use crate::{
         errors::RuntimeError,
         fold::fold_tracks_with,
         place::{is_project_id, unsaved, Place},
-        refs::{Book, RefScheme},
+        refs::{Book, RefScheme, Shift},
         view::{BodyKind, BodyRequest, DawFocus, FocusBody},
     },
     integrations::none::no_access,
@@ -86,6 +86,11 @@ pub struct OwnIntegration<S: RefScheme> {
     selected: Rc<RefCell<Option<String>>>,
     /// The project's identity as last observed: another one in the same tab (or another song) is another project.
     identity: Rc<RefCell<Option<String>>>,
+    /// The layout the book's refs are at (Renoise's track shifts, each raising it): every request names it, so the
+    /// bridge carries an older ref through the shifts it hasn't seen.
+    layout: Rc<Cell<Option<u64>>>,
+    /// Stops listening to the host's events.
+    unlisten: RefCell<Option<Box<dyn Fn()>>>,
 }
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
@@ -100,6 +105,8 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         watching: Cell::new(false),
         selected: Rc::default(),
         identity: Rc::default(),
+        layout: Rc::default(),
+        unlisten: RefCell::default(),
     })
 }
 
@@ -166,6 +173,24 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             }
         };
         *self.endpoint.borrow_mut() = Some(endpoint.clone());
+        // Tracks inserted, removed or moved where refs are positions: the book's refs follow what they named.
+        let (book, layout) = (self.book.clone(), self.layout.clone());
+        let unlisten = endpoint.on_live_event(Rc::new(move |event| {
+            if event.get("name").and_then(Value::as_str) != Some("tracks") {
+                return;
+            }
+            let data = event.get("data").cloned().unwrap_or(Value::Null);
+            let places = |key: &str| -> Vec<usize> {
+                data.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).map(|n| n as usize).collect()
+            };
+            book.borrow_mut().shift(&Shift { tracks_made: places("made"), tracks_gone: places("gone"), ..Shift::default() });
+            if let Some(now) = data.get("layout").and_then(Value::as_u64) {
+                layout.set(Some(now));
+            }
+        }));
+        if let Some(before) = self.unlisten.replace(Some(unlisten)) {
+            before();
+        }
         Ok(endpoint)
     }
 
@@ -189,6 +214,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let Some(epoch) = epoch else { return };
         let changed = self.epoch.borrow().as_deref().is_some_and(|before| before != epoch);
         if changed {
+            self.layout.set(None);
             let mut book = self.book.borrow_mut();
             book.refs.clear();
             book.known.clear();
@@ -297,6 +323,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     /// The observation from the host's snapshot.
     fn observation(&self, snapshot: &Value) -> Observation {
         self.see_epoch(snapshot.get("epoch").and_then(Value::as_str));
+        if self.layout.get().is_none() {
+            self.layout.set(snapshot.get("layout").and_then(Value::as_u64));
+        }
         let profile = self.daw.profile;
         let project = snapshot.get("project").cloned().unwrap_or(Value::Null);
         let name = project.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("untitled").to_owned();
@@ -345,8 +374,12 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         }
         let identity = project.get("identity").and_then(Value::as_str).map(str::to_owned);
         *self.identity.borrow_mut() = identity.clone();
-        let tool: Rc<dyn KernelTool> =
-            Rc::new(ReadTool::<S> { daw: self.daw, endpoint: self.endpoint.borrow().clone(), book: self.book.clone() });
+        let tool: Rc<dyn KernelTool> = Rc::new(ReadTool::<S> {
+            daw: self.daw,
+            endpoint: self.endpoint.borrow().clone(),
+            book: self.book.clone(),
+            layout: self.layout.clone(),
+        });
         Observation {
             key: identity.clone().map(|identity| format!("{}:{identity}", self.daw.host_flag)).unwrap_or_else(|| place.clone()),
             revision: None,
@@ -398,6 +431,9 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         if let (BodyRequest::Timeline, Some(track)) = (request, self.selected.borrow().clone()) {
             args.insert("around".into(), track.into());
         }
+        if let Some(layout) = self.layout.get() {
+            args.insert("layout".into(), layout.into());
+        }
         let args = Value::Object(args);
         Ok(match self.call("focus_body", args, signal).await? {
             Ok(body) => (self.daw.to_body)(request, &body),
@@ -431,6 +467,9 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     }
     async fn close(&self) -> Result<(), RuntimeError> {
         self.closed.set(true);
+        if let Some(unlisten) = self.unlisten.borrow_mut().take() {
+            unlisten();
+        }
         let endpoint = self.endpoint.borrow_mut().take();
         if let Some(endpoint) = endpoint {
             endpoint.close().await?;
@@ -444,6 +483,7 @@ struct ReadTool<S: RefScheme> {
     daw: &'static OwnDaw,
     endpoint: Option<Rc<dyn McpEndpoint>>,
     book: Rc<RefCell<Book<S>>>,
+    layout: Rc<Cell<Option<u64>>>,
 }
 
 #[async_trait(?Send)]
@@ -477,7 +517,10 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
             return Ok(ToolResult::error(self.daw.profile.vocab.cant_reach));
         };
         let args = self.book.borrow().lengthen(&Value::Object(input.clone()));
-        let args = args.as_object().cloned().unwrap_or_default();
+        let mut args = args.as_object().cloned().unwrap_or_default();
+        if let Some(layout) = self.layout.get() {
+            args.insert("layout".into(), layout.into());
+        }
         let result = endpoint.call("read", args, abort::any([signal, abort::timeout(CALL_MS)])).await?;
         match answer_of(&result) {
             Ok(page) => {

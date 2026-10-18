@@ -78,6 +78,11 @@ pub fn tools(host: &Host) -> Value {
             "type": ["integer", "string"],
             "description": "For kind line: the track (its number, or its ref) whose lines of the parent pattern to read.",
         });
+        // Track refs are positions: a request names the layout its refs were made in, and older ones are carried
+        // through the tracks inserted, removed or moved since.
+        let layout = json!({"type": "integer", "minimum": 0, "description": "The layout the refs were read in (each answer and tracks event says it): refs from an older one are carried through the track shifts since."});
+        list[2]["inputSchema"]["properties"]["layout"] = layout.clone();
+        list[5]["inputSchema"]["properties"]["layout"] = layout;
     }
     list
 }

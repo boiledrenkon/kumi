@@ -53,6 +53,18 @@ impl McpEndpoint for InProcess {
     fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
         Box::new(|| {})
     }
+    /// The bridge's events as the host forwards them (`notifications/daw_event`).
+    fn on_live_event(&self, listener: Rc<dyn Fn(JsonObject)>) -> Box<dyn Fn()> {
+        let mut events = self.host.events();
+        let task = tokio::task::spawn_local(async move {
+            while let Ok(event) = events.recv().await {
+                if let Some(event) = event.as_object() {
+                    listener(event.clone());
+                }
+            }
+        });
+        Box::new(move || task.abort())
+    }
     fn stderr_status(&self) -> StderrStatus {
         StderrStatus { bytes: 0, truncated: false }
     }
@@ -229,6 +241,19 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             assert_eq!(tree.devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["EQ 5", "Doofer"]);
             assert_eq!(tree.devices[1].can_have_chains, Some(true), "a Doofer holds devices");
             assert!(renoise.can_show(BodyKind::Tracker) && !renoise.can_show(BodyKind::Timeline));
+
+            // A track inserted above Kick: the tool says so (`tracks`), the host passes it on, and track:1 follows Kick to
+            // its new place; reads name the layout their refs are at.
+            simulator.emit("tracks", json!({"count": 8, "made": [1], "gone": [], "layout": 1}));
+            for _ in 0..100 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                let _ = read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await;
+                if script.asked().last().is_some_and(|(_, params)| params["parent"] == "1:track:2") {
+                    break;
+                }
+            }
+            let asked = script.asked().last().unwrap().1.clone();
+            assert_eq!(asked, json!({"kind": "device", "parent": "1:track:2", "layout": 1}), "track:1 follows Kick");
 
             // Another song opens: the old song's refs are retired, so a stale track:1 reads nothing of the new song.
             script.switch_song();
