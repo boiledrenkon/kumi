@@ -1,0 +1,689 @@
+//! What the bridge reads of REAPER's objects: the project's timeline, tracks, items, takes, FX, sends, envelopes, MIDI and
+//! markers. Each call is REAPER's own, one for one; a function this REAPER lacks reads as empty.
+
+use std::ffi::{c_char, c_int, c_void, CString};
+use std::ptr;
+
+use super::{Envelope, Fx, FxOwner, Item, Project, Reaper, Take, Track};
+use crate::api;
+
+/// REAPER's string getters that take no size want a big buffer.
+const BIG: usize = 4096;
+/// Added to an FX index to address the track's input chain.
+pub const INPUT_FX: i32 = 0x100_0000;
+/// Added to an FX index to address a container's child.
+pub const CONTAINER_FX: i32 = 0x200_0000;
+/// `GetTrackColor`'s flag: the colour is set.
+const COLOR_SET: i32 = 0x100_0000;
+
+fn cstring(text: &str) -> CString {
+    CString::new(text.replace('\0', "")).unwrap_or_default()
+}
+
+/// Reads a string a getter writes into a big buffer.
+fn big_string(fill: impl FnOnce(*mut c_char) -> bool) -> Option<String> {
+    let mut buf = vec![0u8; BIG];
+    if !fill(buf.as_mut_ptr().cast()) {
+        return None;
+    }
+    buf[BIG - 1] = 0;
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(BIG - 1);
+    Some(String::from_utf8_lossy(&buf[..len]).into_owned())
+}
+
+/// Reads a string from a getter that takes the buffer and its size.
+fn text(mut fill: impl FnMut(*mut c_char, c_int) -> bool) -> String {
+    api::read_buffer(|buf, size| {
+        fill(buf, size);
+    })
+}
+
+/// A marker or region as `EnumProjectMarkers3` gives it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marker {
+    pub is_region: bool,
+    pub start: f64,
+    pub end: f64,
+    pub name: String,
+    /// The number REAPER shows, not the enumeration index.
+    pub number: i32,
+    pub color: i32,
+}
+
+/// A tempo or time signature marker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempoMarker {
+    pub time: f64,
+    pub bpm: f64,
+    pub num: i32,
+    pub denom: i32,
+    pub linear: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimeSignature {
+    pub num: i32,
+    pub denom: i32,
+    pub bpm: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MidiNote {
+    pub selected: bool,
+    pub muted: bool,
+    pub start_ppq: f64,
+    pub end_ppq: f64,
+    pub channel: i32,
+    pub pitch: i32,
+    pub velocity: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MidiCc {
+    pub selected: bool,
+    pub muted: bool,
+    pub ppq: f64,
+    /// The status byte without the channel: 0xB0 control change, 0xE0 pitch bend, 0xC0 program change…
+    pub kind: i32,
+    pub channel: i32,
+    pub data1: i32,
+    pub data2: i32,
+}
+
+/// Where `GetTouchedOrFocusedFX` says an FX is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FxHit {
+    /// -1 for the master.
+    pub track: i32,
+    /// -1 when the FX isn't a take's.
+    pub item: i32,
+    pub take: i32,
+    pub fx: i32,
+    /// The parameter (mode 0), or in mode 1 whether the FX is open but no longer focused (1).
+    pub param: i32,
+}
+
+impl Reaper<'_> {
+    // ----- the project's timeline -----
+
+    pub fn project_length(&self, proj: Project) -> f64 {
+        self.api.GetProjectLength().map(|f| unsafe { f(proj.0) }).unwrap_or(0.0)
+    }
+
+    pub fn cursor(&self, proj: Project) -> f64 {
+        self.api.GetCursorPositionEx().map(|f| unsafe { f(proj.0) }).unwrap_or(0.0)
+    }
+
+    /// Where the project is playing; the edit cursor's when it isn't.
+    pub fn play_position(&self, proj: Project) -> f64 {
+        self.api.GetPlayPosition2Ex().map(|f| unsafe { f(proj.0) }).unwrap_or(0.0)
+    }
+
+    fn loop_time_range(&self, proj: Project, is_loop: bool) -> (f64, f64) {
+        let (mut start, mut end) = (0.0, 0.0);
+        if let Some(f) = self.api.GetSet_LoopTimeRange2() {
+            unsafe { f(proj.0, false, is_loop, &mut start, &mut end, false) };
+        }
+        (start, end)
+    }
+
+    /// The loop points.
+    pub fn loop_points(&self, proj: Project) -> (f64, f64) {
+        self.loop_time_range(proj, true)
+    }
+
+    /// The time selection; start equals end when there is none.
+    pub fn time_selection(&self, proj: Project) -> (f64, f64) {
+        self.loop_time_range(proj, false)
+    }
+
+    /// Whether repeat (the loop button) is on.
+    pub fn repeat(&self, proj: Project) -> bool {
+        self.api.GetSetRepeatEx().is_some_and(|f| unsafe { f(proj.0, -1) } != 0)
+    }
+
+    pub fn time_signature_at(&self, proj: Project, time: f64) -> Option<TimeSignature> {
+        let f = self.api.TimeMap_GetTimeSigAtTime()?;
+        let (mut num, mut denom, mut bpm) = (4, 4, 0.0);
+        unsafe { f(proj.0, time, &mut num, &mut denom, &mut bpm) };
+        Some(TimeSignature { num, denom, bpm })
+    }
+
+    /// The time in quarter notes from the project start.
+    pub fn quarter_notes_at(&self, proj: Project, time: f64) -> Option<f64> {
+        self.api.TimeMap2_timeToQN().map(|f| unsafe { f(proj.0, time) })
+    }
+
+    /// The time of a position given in quarter notes from the project start.
+    pub fn time_at_quarter_notes(&self, proj: Project, qn: f64) -> Option<f64> {
+        self.api.TimeMap2_QNToTime().map(|f| unsafe { f(proj.0, qn) })
+    }
+
+    /// The 0-based measure and the 0-based beat in it.
+    pub fn bar_and_beat_at(&self, proj: Project, time: f64) -> Option<(i32, f64)> {
+        let f = self.api.TimeMap2_timeToBeats()?;
+        let (mut measures, mut beats_in_measure, mut full_beats, mut denom) = (0, 0, 0.0, 0);
+        let beat = unsafe { f(proj.0, time, &mut measures, &mut beats_in_measure, &mut full_beats, &mut denom) };
+        Some((measures, beat))
+    }
+
+    /// The time range the arrange view shows.
+    pub fn arrange_view(&self, proj: Project) -> Option<(f64, f64)> {
+        let f = self.api.GetSet_ArrangeView2()?;
+        let (mut start, mut end) = (0.0, 0.0);
+        unsafe { f(proj.0, false, 0, 0, &mut start, &mut end) };
+        (end > start).then_some((start, end))
+    }
+
+    /// The open project tabs.
+    pub fn tab_count(&self) -> usize {
+        self.projects().len()
+    }
+
+    pub fn project_valid(&self, proj: Project) -> bool {
+        self.projects().iter().any(|p| p.ptr == proj)
+    }
+
+    // ----- markers, regions and the tempo map -----
+
+    /// Markers and regions together, as REAPER enumerates them.
+    pub fn marker_count(&self, proj: Project) -> i32 {
+        self.api.CountProjectMarkers().map(|f| unsafe { f(proj.0, ptr::null_mut(), ptr::null_mut()) }).unwrap_or(0)
+    }
+
+    pub fn marker(&self, proj: Project, index: i32) -> Option<Marker> {
+        let f = self.api.EnumProjectMarkers3()?;
+        let (mut is_region, mut start, mut end, mut name, mut number, mut color) = (false, 0.0, 0.0, ptr::null(), 0, 0);
+        let next = unsafe { f(proj.0, index, &mut is_region, &mut start, &mut end, &mut name, &mut number, &mut color) };
+        (next != 0).then(|| Marker { is_region, start, end, name: unsafe { api::string(name) }, number, color })
+    }
+
+    pub fn tempo_marker_count(&self, proj: Project) -> i32 {
+        self.api.CountTempoTimeSigMarkers().map(|f| unsafe { f(proj.0) }).unwrap_or(0)
+    }
+
+    pub fn tempo_marker(&self, proj: Project, index: i32) -> Option<TempoMarker> {
+        let f = self.api.GetTempoTimeSigMarker()?;
+        let (mut time, mut measure, mut beat, mut bpm, mut num, mut denom, mut linear) = (0.0, 0, 0.0, 0.0, 0, 0, false);
+        let ok = unsafe { f(proj.0, index, &mut time, &mut measure, &mut beat, &mut bpm, &mut num, &mut denom, &mut linear) };
+        ok.then_some(TempoMarker { time, bpm, num, denom, linear })
+    }
+
+    // ----- tracks -----
+
+    pub fn track_at(&self, proj: Project, index: i32) -> Option<Track> {
+        let track = unsafe { self.api.GetTrack()?(proj.0, index) };
+        (!track.is_null()).then_some(Track(track))
+    }
+
+    pub fn master_track(&self, proj: Project) -> Option<Track> {
+        let track = unsafe { self.api.GetMasterTrack()?(proj.0) };
+        (!track.is_null()).then_some(Track(track))
+    }
+
+    /// A value the project carries for an extension (`kumi`/`project` is the Kumi project id).
+    pub fn project_ext_state(&self, proj: Project, section: &str, key: &str) -> Option<String> {
+        let (section, key) = (cstring(section), cstring(key));
+        let f = self.api.GetProjExtState()?;
+        let mut found = 0;
+        let value = big_string(|buf| {
+            found = unsafe { f(proj.0, section.as_ptr(), key.as_ptr(), buf, BIG as c_int) };
+            true
+        })?;
+        (found > 0).then_some(value)
+    }
+
+    /// Whether the track has an instrument plug-in.
+    pub fn track_has_instrument(&self, track: Track) -> bool {
+        self.api.TrackFX_GetInstrument().is_some_and(|f| unsafe { f(track.0) } >= 0)
+    }
+
+    /// Whether REAPER still has this track in the project (a track deleted since may have been freed).
+    pub fn track_valid(&self, proj: Project, track: Track) -> bool {
+        self.valid(proj, track.0.cast(), c"MediaTrack*")
+    }
+
+    pub fn item_valid(&self, proj: Project, item: Item) -> bool {
+        self.valid(proj, item.0.cast(), c"MediaItem*")
+    }
+
+    pub fn take_valid(&self, proj: Project, take: Take) -> bool {
+        self.valid(proj, take.0.cast(), c"MediaItem_Take*")
+    }
+
+    pub fn envelope_valid(&self, proj: Project, envelope: Envelope) -> bool {
+        self.valid(proj, envelope.0.cast(), c"TrackEnvelope*")
+    }
+
+    fn valid(&self, proj: Project, pointer: *mut c_void, class: &std::ffi::CStr) -> bool {
+        self.api.ValidatePtr2().is_some_and(|f| unsafe { f(proj.0, pointer, class.as_ptr()) })
+    }
+
+    pub fn track_value(&self, track: Track, parm: &str) -> f64 {
+        let parm = cstring(parm);
+        self.api.GetMediaTrackInfo_Value().map(|f| unsafe { f(track.0, parm.as_ptr()) }).unwrap_or(0.0)
+    }
+
+    /// How many folders deep the track sits (0 at the top level).
+    pub fn track_depth(&self, track: Track) -> i32 {
+        self.api.GetTrackDepth().map(|f| unsafe { f(track.0) }).unwrap_or(0)
+    }
+
+    pub fn track_name(&self, track: Track) -> String {
+        match self.api.GetTrackName() {
+            Some(f) => text(|buf, size| unsafe { f(track.0, buf, size) }),
+            None => String::new(),
+        }
+    }
+
+    pub fn track_guid(&self, track: Track) -> String {
+        let f = self.api.GetSetMediaTrackInfo_String();
+        f.and_then(|f| big_string(|buf| unsafe { f(track.0, c"GUID".as_ptr(), buf, false) })).unwrap_or_default()
+    }
+
+    /// The track's colour as REAPER stores it (the OS's order, 0x1000000 set), or None when it has none.
+    pub fn track_color(&self, track: Track) -> Option<i32> {
+        let color = self.api.GetTrackColor().map(|f| unsafe { f(track.0) })?;
+        (color & COLOR_SET != 0).then_some(color)
+    }
+
+    /// The selected tracks (the master included): how many there are, and the first `limit` of them.
+    pub fn selected_tracks_up_to(&self, proj: Project, limit: usize) -> (usize, Vec<Track>) {
+        let (Some(count), Some(get)) = (self.api.CountSelectedTracks2(), self.api.GetSelectedTrack2()) else { return (0, vec![]) };
+        let total = unsafe { count(proj.0, true) }.max(0) as usize;
+        let tracks = (0..total.min(limit)).map(|i| unsafe { get(proj.0, i as c_int, true) }).filter(|t| !t.is_null()).map(Track).collect();
+        (total, tracks)
+    }
+
+    /// The track the user touched last.
+    pub fn last_touched_track(&self) -> Option<Track> {
+        let track = unsafe { self.api.GetLastTouchedTrack()?() };
+        (!track.is_null()).then_some(Track(track))
+    }
+
+    // ----- items and takes -----
+
+    pub fn track_item_count(&self, track: Track) -> i32 {
+        self.api.CountTrackMediaItems().map(|f| unsafe { f(track.0) }).unwrap_or(0)
+    }
+
+    pub fn track_item(&self, track: Track, index: i32) -> Option<Item> {
+        let item = unsafe { self.api.GetTrackMediaItem()?(track.0, index) };
+        (!item.is_null()).then_some(Item(item))
+    }
+
+    pub fn item_track(&self, item: Item) -> Option<Track> {
+        let track = unsafe { self.api.GetMediaItemTrack()?(item.0) };
+        (!track.is_null()).then_some(Track(track))
+    }
+
+    pub fn item_value(&self, item: Item, parm: &str) -> f64 {
+        let parm = cstring(parm);
+        self.api.GetMediaItemInfo_Value().map(|f| unsafe { f(item.0, parm.as_ptr()) }).unwrap_or(0.0)
+    }
+
+    pub fn item_guid(&self, item: Item) -> String {
+        let f = self.api.GetSetMediaItemInfo_String();
+        f.and_then(|f| big_string(|buf| unsafe { f(item.0, c"GUID".as_ptr(), buf, false) })).unwrap_or_default()
+    }
+
+    /// The selected items: how many there are, and the first `limit` of them. REAPER walks the project for each one it is
+    /// asked for, so `limit` stays small.
+    pub fn selected_items_up_to(&self, proj: Project, limit: usize) -> (usize, Vec<Item>) {
+        let (Some(count), Some(get)) = (self.api.CountSelectedMediaItems(), self.api.GetSelectedMediaItem()) else { return (0, vec![]) };
+        let total = unsafe { count(proj.0) }.max(0) as usize;
+        let items = (0..total.min(limit)).map(|i| unsafe { get(proj.0, i as c_int) }).filter(|i| !i.is_null()).map(Item).collect();
+        (total, items)
+    }
+
+    pub fn take_count(&self, item: Item) -> i32 {
+        self.api.CountTakes().map(|f| unsafe { f(item.0) }).unwrap_or(0)
+    }
+
+    pub fn take_at(&self, item: Item, index: i32) -> Option<Take> {
+        let take = unsafe { self.api.GetMediaItemTake()?(item.0, index) };
+        (!take.is_null()).then_some(Take(take))
+    }
+
+    pub fn active_take(&self, item: Item) -> Option<Take> {
+        let take = unsafe { self.api.GetActiveTake()?(item.0) };
+        (!take.is_null()).then_some(Take(take))
+    }
+
+    pub fn take_item(&self, take: Take) -> Option<Item> {
+        let item = unsafe { self.api.GetMediaItemTake_Item()?(take.0) };
+        (!item.is_null()).then_some(Item(item))
+    }
+
+    pub fn take_guid(&self, take: Take) -> String {
+        let f = self.api.GetSetMediaItemTakeInfo_String();
+        f.and_then(|f| big_string(|buf| unsafe { f(take.0, c"GUID".as_ptr(), buf, false) })).unwrap_or_default()
+    }
+
+    /// REAPER has no lookup by GUID except for takes.
+    pub fn take_by_guid(&self, proj: Project, guid: &str) -> Option<Take> {
+        let (parse, find) = (self.api.stringToGuid()?, self.api.GetMediaItemTakeByGUID()?);
+        let text = cstring(guid);
+        let mut bytes = [0u8; 16];
+        unsafe { parse(text.as_ptr(), bytes.as_mut_ptr().cast()) };
+        let take = unsafe { find(proj.0, bytes.as_ptr().cast()) };
+        (!take.is_null()).then_some(Take(take))
+    }
+
+    pub fn take_name(&self, take: Take) -> String {
+        match self.api.GetTakeName() {
+            Some(f) => unsafe { api::string(f(take.0)) },
+            None => String::new(),
+        }
+    }
+
+    pub fn take_value(&self, take: Take, parm: &str) -> f64 {
+        let parm = cstring(parm);
+        self.api.GetMediaItemTakeInfo_Value().map(|f| unsafe { f(take.0, parm.as_ptr()) }).unwrap_or(0.0)
+    }
+
+    /// The take's source type as REAPER names it ("WAVE", "MIDI", "MP3"…); None when it has no source.
+    pub fn take_source_type(&self, take: Take) -> Option<String> {
+        let source = unsafe { self.api.GetMediaItemTake_Source()?(take.0) };
+        if source.is_null() {
+            return None;
+        }
+        let f = self.api.GetMediaSourceType()?;
+        let name = api::read_buffer(|buf, size| unsafe { f(source, buf, size) });
+        (!name.is_empty()).then_some(name)
+    }
+
+    pub fn take_is_midi(&self, take: Take) -> bool {
+        self.take_source_type(take).is_some_and(|t| t.eq_ignore_ascii_case("MIDI"))
+    }
+
+    // ----- FX -----
+
+    /// The FX in a chain (a container's children aren't counted here).
+    pub fn fx_count(&self, owner: FxOwner) -> i32 {
+        match owner {
+            FxOwner::Track(t) => self.api.TrackFX_GetCount().map(|f| unsafe { f(t.0) }),
+            FxOwner::Take(t) => self.api.TakeFX_GetCount().map(|f| unsafe { f(t.0) }),
+        }
+        .unwrap_or(0)
+    }
+
+    /// The FX in a track's input chain (the master's monitoring FX).
+    pub fn input_fx_count(&self, track: Track) -> i32 {
+        self.api.TrackFX_GetRecCount().map(|f| unsafe { f(track.0) }).unwrap_or(0)
+    }
+
+    fn fx_guid_pointer(&self, fx: Fx) -> *mut api::GUID {
+        match fx.owner {
+            FxOwner::Track(t) => self.api.TrackFX_GetFXGUID().map(|f| unsafe { f(t.0, fx.index) }),
+            FxOwner::Take(t) => self.api.TakeFX_GetFXGUID().map(|f| unsafe { f(t.0, fx.index) }),
+        }
+        .unwrap_or(ptr::null_mut())
+    }
+
+    /// The FX's GUID, which keeps its identity across reorders; empty when the address holds no FX.
+    pub fn fx_guid(&self, fx: Fx) -> String {
+        let guid = self.fx_guid_pointer(fx);
+        let Some(to_string) = self.api.guidToString() else { return String::new() };
+        if guid.is_null() {
+            return String::new();
+        }
+        let mut buf = [0 as c_char; 64];
+        unsafe { to_string(guid, buf.as_mut_ptr()) };
+        buf[63] = 0;
+        unsafe { api::string(buf.as_ptr()) }
+    }
+
+    pub fn fx_name(&self, fx: Fx) -> String {
+        let name = match fx.owner {
+            FxOwner::Track(t) => self.api.TrackFX_GetFXName().map(|f| text(|buf, size| unsafe { f(t.0, fx.index, buf, size) })),
+            FxOwner::Take(t) => self.api.TakeFX_GetFXName().map(|f| text(|buf, size| unsafe { f(t.0, fx.index, buf, size) })),
+        };
+        name.unwrap_or_default()
+    }
+
+    pub fn fx_enabled(&self, fx: Fx) -> bool {
+        match fx.owner {
+            FxOwner::Track(t) => self.api.TrackFX_GetEnabled().is_some_and(|f| unsafe { f(t.0, fx.index) }),
+            FxOwner::Take(t) => self.api.TakeFX_GetEnabled().is_some_and(|f| unsafe { f(t.0, fx.index) }),
+        }
+    }
+
+    pub fn fx_offline(&self, fx: Fx) -> bool {
+        match fx.owner {
+            FxOwner::Track(t) => self.api.TrackFX_GetOffline().is_some_and(|f| unsafe { f(t.0, fx.index) }),
+            FxOwner::Take(t) => self.api.TakeFX_GetOffline().is_some_and(|f| unsafe { f(t.0, fx.index) }),
+        }
+    }
+
+    /// The preset's name; empty when the FX has none loaded.
+    pub fn fx_preset(&self, fx: Fx) -> String {
+        let preset = match fx.owner {
+            FxOwner::Track(t) => self.api.TrackFX_GetPreset().map(|f| text(|buf, size| unsafe { f(t.0, fx.index, buf, size) })),
+            FxOwner::Take(t) => self.api.TakeFX_GetPreset().map(|f| text(|buf, size| unsafe { f(t.0, fx.index, buf, size) })),
+        };
+        preset.unwrap_or_default()
+    }
+
+    pub fn fx_param_count(&self, fx: Fx) -> i32 {
+        match fx.owner {
+            FxOwner::Track(t) => self.api.TrackFX_GetNumParams().map(|f| unsafe { f(t.0, fx.index) }),
+            FxOwner::Take(t) => self.api.TakeFX_GetNumParams().map(|f| unsafe { f(t.0, fx.index) }),
+        }
+        .unwrap_or(0)
+    }
+
+    /// A named configuration value (`parallel`, `container_count`, `fx_type`…); None when this FX has no such key.
+    pub fn fx_config(&self, fx: Fx, key: &str) -> Option<String> {
+        let key = cstring(key);
+        match fx.owner {
+            FxOwner::Track(t) => {
+                let f = self.api.TrackFX_GetNamedConfigParm()?;
+                big_string(|buf| unsafe { f(t.0, fx.index, key.as_ptr(), buf, BIG as c_int) })
+            }
+            FxOwner::Take(t) => {
+                let f = self.api.TakeFX_GetNamedConfigParm()?;
+                big_string(|buf| unsafe { f(t.0, fx.index, key.as_ptr(), buf, BIG as c_int) })
+            }
+        }
+    }
+
+    /// A container's children, in order; empty for an FX that isn't a container.
+    pub fn fx_children(&self, fx: Fx) -> Vec<Fx> {
+        let count = self.fx_config(fx, "container_count").and_then(|c| c.trim().parse::<i32>().ok()).unwrap_or(0);
+        (0..count)
+            .filter_map(|i| self.fx_config(fx, &format!("container_item.{i}")))
+            .filter_map(|index| index.trim().parse::<i32>().ok())
+            .map(|index| Fx { owner: fx.owner, index })
+            .collect()
+    }
+
+    pub fn param_name(&self, fx: Fx, param: i32) -> String {
+        let name = match fx.owner {
+            FxOwner::Track(t) => self.api.TrackFX_GetParamName().map(|f| text(|buf, size| unsafe { f(t.0, fx.index, param, buf, size) })),
+            FxOwner::Take(t) => self.api.TakeFX_GetParamName().map(|f| text(|buf, size| unsafe { f(t.0, fx.index, param, buf, size) })),
+        };
+        name.unwrap_or_default()
+    }
+
+    /// The parameter's value on its 0 to 1 scale.
+    pub fn param_normalized(&self, fx: Fx, param: i32) -> f64 {
+        match fx.owner {
+            FxOwner::Track(t) => self.api.TrackFX_GetParamNormalized().map(|f| unsafe { f(t.0, fx.index, param) }),
+            FxOwner::Take(t) => self.api.TakeFX_GetParamNormalized().map(|f| unsafe { f(t.0, fx.index, param) }),
+        }
+        .unwrap_or(0.0)
+    }
+
+    /// The value as the plug-in prints it ("-6.0 dB").
+    pub fn param_formatted(&self, fx: Fx, param: i32) -> String {
+        let text = match fx.owner {
+            FxOwner::Track(t) => {
+                self.api.TrackFX_GetFormattedParamValue().map(|f| text(|buf, size| unsafe { f(t.0, fx.index, param, buf, size) }))
+            }
+            FxOwner::Take(t) => {
+                self.api.TakeFX_GetFormattedParamValue().map(|f| text(|buf, size| unsafe { f(t.0, fx.index, param, buf, size) }))
+            }
+        };
+        text.unwrap_or_default()
+    }
+
+    /// The parameter's own range.
+    pub fn param_range(&self, fx: Fx, param: i32) -> Option<(f64, f64)> {
+        let (mut min, mut max, mut mid) = (0.0, 0.0, 0.0);
+        match fx.owner {
+            FxOwner::Track(t) => unsafe { self.api.TrackFX_GetParamEx()?(t.0, fx.index, param, &mut min, &mut max, &mut mid) },
+            FxOwner::Take(t) => unsafe { self.api.TakeFX_GetParamEx()?(t.0, fx.index, param, &mut min, &mut max, &mut mid) },
+        };
+        Some((min, max))
+    }
+
+    // ----- sends, receives and hardware outputs -----
+
+    /// How many: `category` -1 receives, 0 sends, 1 hardware outputs.
+    pub fn send_count(&self, track: Track, category: i32) -> i32 {
+        self.api.GetTrackNumSends().map(|f| unsafe { f(track.0, category) }).unwrap_or(0)
+    }
+
+    pub fn send_value(&self, track: Track, category: i32, index: i32, parm: &str) -> f64 {
+        let parm = cstring(parm);
+        self.api.GetTrackSendInfo_Value().map(|f| unsafe { f(track.0, category, index, parm.as_ptr()) }).unwrap_or(0.0)
+    }
+
+    /// The track on the other end: `P_DESTTRACK` of a send, `P_SRCTRACK` of a receive.
+    pub fn send_peer(&self, track: Track, category: i32, index: i32) -> Option<Track> {
+        let parm = if category < 0 { c"P_SRCTRACK" } else { c"P_DESTTRACK" };
+        let peer = unsafe { self.api.GetSetTrackSendInfo()?(track.0, category, index, parm.as_ptr(), ptr::null_mut()) };
+        (!peer.is_null()).then_some(Track(peer.cast()))
+    }
+
+    // ----- envelopes -----
+
+    pub fn track_envelope_count(&self, track: Track) -> i32 {
+        self.api.CountTrackEnvelopes().map(|f| unsafe { f(track.0) }).unwrap_or(0)
+    }
+
+    pub fn track_envelope(&self, track: Track, index: i32) -> Option<Envelope> {
+        let envelope = unsafe { self.api.GetTrackEnvelope()?(track.0, index) };
+        (!envelope.is_null()).then_some(Envelope(envelope))
+    }
+
+    /// A track's own envelope by its chunk name (`<VOLENV2`, `<PANENV`…).
+    pub fn track_envelope_by_chunk_name(&self, track: Track, name: &str) -> Option<Envelope> {
+        let name = cstring(name);
+        let envelope = unsafe { self.api.GetTrackEnvelopeByChunkName()?(track.0, name.as_ptr()) };
+        (!envelope.is_null()).then_some(Envelope(envelope))
+    }
+
+    /// An FX parameter's envelope, if it has one (nothing is created).
+    pub fn fx_param_envelope(&self, track: Track, fx_index: i32, param: i32) -> Option<Envelope> {
+        let envelope = unsafe { self.api.GetFXEnvelope()?(track.0, fx_index, param, false) };
+        (!envelope.is_null()).then_some(Envelope(envelope))
+    }
+
+    pub fn take_envelope_count(&self, take: Take) -> i32 {
+        self.api.CountTakeEnvelopes().map(|f| unsafe { f(take.0) }).unwrap_or(0)
+    }
+
+    pub fn take_envelope(&self, take: Take, index: i32) -> Option<Envelope> {
+        let envelope = unsafe { self.api.GetTakeEnvelope()?(take.0, index) };
+        (!envelope.is_null()).then_some(Envelope(envelope))
+    }
+
+    pub fn envelope_name(&self, envelope: Envelope) -> String {
+        match self.api.GetEnvelopeName() {
+            Some(f) => text(|buf, size| unsafe { f(envelope.0, buf, size) }),
+            None => String::new(),
+        }
+    }
+
+    pub fn envelope_point_count(&self, envelope: Envelope) -> i32 {
+        self.api.CountEnvelopePoints().map(|f| unsafe { f(envelope.0) }).unwrap_or(0)
+    }
+
+    /// An envelope's yes/no attribute: `ACTIVE`, `ARM` or `VISIBLE`.
+    pub fn envelope_flag(&self, envelope: Envelope, key: &str) -> bool {
+        let key = cstring(key);
+        let f = self.api.GetSetEnvelopeInfo_String();
+        f.and_then(|f| big_string(|buf| unsafe { f(envelope.0, key.as_ptr(), buf, false) })).is_some_and(|text| text.trim() == "1")
+    }
+
+    // ----- MIDI -----
+
+    /// A take's note, CC and text/sysex event counts.
+    pub fn midi_counts(&self, take: Take) -> Option<(i32, i32, i32)> {
+        let f = self.api.MIDI_CountEvts()?;
+        let (mut notes, mut ccs, mut texts) = (0, 0, 0);
+        let ok = unsafe { f(take.0, &mut notes, &mut ccs, &mut texts) } != 0;
+        ok.then_some((notes, ccs, texts))
+    }
+
+    pub fn midi_note(&self, take: Take, index: i32) -> Option<MidiNote> {
+        let f = self.api.MIDI_GetNote()?;
+        let (mut selected, mut muted, mut start_ppq, mut end_ppq, mut channel, mut pitch, mut velocity) = (false, false, 0.0, 0.0, 0, 0, 0);
+        let ok =
+            unsafe { f(take.0, index, &mut selected, &mut muted, &mut start_ppq, &mut end_ppq, &mut channel, &mut pitch, &mut velocity) };
+        ok.then_some(MidiNote { selected, muted, start_ppq, end_ppq, channel, pitch, velocity })
+    }
+
+    pub fn midi_cc(&self, take: Take, index: i32) -> Option<MidiCc> {
+        let f = self.api.MIDI_GetCC()?;
+        let (mut selected, mut muted, mut ppq, mut kind, mut channel, mut data1, mut data2) = (false, false, 0.0, 0, 0, 0, 0);
+        let ok = unsafe { f(take.0, index, &mut selected, &mut muted, &mut ppq, &mut kind, &mut channel, &mut data1, &mut data2) };
+        ok.then_some(MidiCc { selected, muted, ppq, kind, channel, data1, data2 })
+    }
+
+    /// Quarter notes from the project start as a position in the take's MIDI ticks.
+    pub fn quarter_notes_to_ppq(&self, take: Take, qn: f64) -> Option<f64> {
+        self.api.MIDI_GetPPQPosFromProjQN().map(|f| unsafe { f(take.0, qn) })
+    }
+
+    /// A position in the take's MIDI ticks as quarter notes from the project start.
+    pub fn ppq_to_quarter_notes(&self, take: Take, ppq: f64) -> Option<f64> {
+        self.api.MIDI_GetProjQNFromPPQPos().map(|f| unsafe { f(take.0, ppq) })
+    }
+
+    // ----- focus -----
+
+    /// The take of the MIDI editor that has the keyboard focus, if one does.
+    pub fn focused_midi_take(&self) -> Option<Take> {
+        let editor = unsafe { self.api.MIDIEditor_GetActive()?() };
+        if editor.is_null() {
+            return None;
+        }
+        let take = unsafe { self.api.MIDIEditor_GetTake()?(editor) };
+        (!take.is_null()).then_some(Take(take))
+    }
+
+    /// Whether a MIDI editor has the focus, with or without a take.
+    pub fn midi_editor_focused(&self) -> bool {
+        self.api.MIDIEditor_GetActive().is_some_and(|f| !unsafe { f() }.is_null())
+    }
+
+    /// The last touched parameter's FX (`mode` 0) or the focused FX (`mode` 1).
+    pub fn touched_or_focused_fx(&self, mode: i32) -> Option<FxHit> {
+        let f = self.api.GetTouchedOrFocusedFX()?;
+        let (mut track, mut item, mut take, mut fx, mut param) = (0, 0, 0, 0, 0);
+        let ok = unsafe { f(mode, &mut track, &mut item, &mut take, &mut fx, &mut param) };
+        ok.then_some(FxHit { track, item, take, fx, param })
+    }
+
+    /// The envelope selected in the arrange view.
+    pub fn selected_envelope(&self, proj: Project) -> Option<Envelope> {
+        let envelope = unsafe { self.api.GetSelectedEnvelope()?(proj.0) };
+        (!envelope.is_null()).then_some(Envelope(envelope))
+    }
+
+    /// 0 when the keyboard acts on tracks, 1 on items, 2 on envelopes.
+    pub fn cursor_context(&self) -> Option<i32> {
+        self.api.GetCursorContext2().map(|f| unsafe { f(true) })
+    }
+
+    /// A colour in the OS's native order as `#rrggbb`.
+    pub fn color_hex(&self, native: i32) -> Option<String> {
+        let f = self.api.ColorFromNative()?;
+        let (mut r, mut g, mut b) = (0, 0, 0);
+        unsafe { f(native & !COLOR_SET, &mut r, &mut g, &mut b) };
+        Some(format!("#{:02x}{:02x}{:02x}", r & 255, g & 255, b & 255))
+    }
+}

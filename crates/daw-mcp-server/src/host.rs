@@ -11,12 +11,29 @@ use std::time::Duration;
 pub const CLIENT_NAME: &str = concat!("daw-mcp-server/", env!("CARGO_PKG_VERSION"));
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+/// No answer of a bridge is longer than this. A bridge that sends more is asked for a smaller page, if the call has one.
+pub const MAX_ANSWER_BYTES: usize = 256 * 1024;
 
 struct Current {
     pid: u32,
     resource: String,
     port: u16,
     client: BridgeClient,
+}
+
+/// Why a call to the bridge has no result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallError {
+    /// There is no bridge to ask: not set up, not running, or the pick matches nothing.
+    NotConnected(String),
+    /// The connection went while the bridge was asked.
+    Closed(String),
+    /// The bridge answered with an error (a code from `daw_bridge::wire::code`).
+    Bridge { code: String, message: String },
+    /// The bridge didn't answer in time: the DAW is busy (a dialog, a render).
+    Timeout,
+    /// The bridge's answer passed the frame bound, and asking for less didn't help.
+    TooBig,
 }
 
 /// The host for one DAW.
@@ -208,9 +225,9 @@ impl Host {
         result
     }
 
-    /// `status`: the chosen instance's bridge (the one already connected, else the only one or the newest).
-    pub async fn status(&self, pick: &Pick) -> Value {
-        let mut current = self.current.lock().await;
+    /// Makes `current` the chosen instance's connection: the one already connected if it fits the pick, else the only
+    /// running one, the one the pick names, or the newest. Returns how many instances run, or why none can be used.
+    async fn ensure_connected(&self, current: &mut Option<Current>, pick: &Pick) -> Result<usize, String> {
         let reusable = current.as_ref().is_some_and(|open| {
             !open.client.is_closed()
                 && pick.pid.is_none_or(|pid| pid == open.pid)
@@ -221,26 +238,32 @@ impl Host {
             if let Some(open) = current.take() {
                 open.client.close().await;
             }
-            let secret = match self.secret() {
-                Ok(secret) => secret,
-                Err(why) => return self.not_connected(why),
-            };
+            let secret = self.secret()?;
             let Some(discovery) = alive.iter().find(|discovery| pick.matches(discovery)) else {
-                let why = if alive.is_empty() {
+                return Err(if alive.is_empty() {
                     format!("no {} with Kumi's bridge is running", self.daw)
                 } else {
                     format!("no running {} matches that pid or folder", self.daw)
-                };
-                return self.not_connected(why);
+                });
             };
             match self.connect(discovery, &secret).await {
                 Some(Ok(client)) => {
                     *current = Some(Current { pid: discovery.pid, resource: discovery.resource.clone(), port: discovery.port, client });
                 }
-                Some(Err(why)) => return self.not_connected(why),
-                None => return self.not_connected(format!("no {} with Kumi's bridge is running", self.daw)),
+                Some(Err(why)) => return Err(why),
+                None => return Err(format!("no {} with Kumi's bridge is running", self.daw)),
             }
         }
+        Ok(alive.len())
+    }
+
+    /// `status`: the chosen instance's bridge (the one already connected, else the only one or the newest).
+    pub async fn status(&self, pick: &Pick) -> Value {
+        let mut current = self.current.lock().await;
+        let alive = match self.ensure_connected(&mut current, pick).await {
+            Ok(alive) => alive,
+            Err(why) => return self.not_connected(why),
+        };
         let open = current.as_ref().expect("connected above");
         let identity = &open.client.welcome().identity;
         let mut result = json!({
@@ -253,7 +276,7 @@ impl Host {
             "resource": open.resource,
             "project": identity.project,
             "busy": false,
-            "instances": alive.len().max(1),
+            "instances": alive.max(1),
         });
         match open.client.request("status", json!({}), STATUS_TIMEOUT).await {
             Ok(status) => {
@@ -270,6 +293,56 @@ impl Host {
             Err(error) => result["busy"] = busy_word(&error).into(),
         }
         result
+    }
+
+    /// Asks the chosen instance's bridge for one of its answers (`read`, `snapshot`, `focus`, `focus_body`). The
+    /// connection is made if there isn't one, and isn't held while the bridge thinks: other calls go ahead beside it.
+    pub async fn call(&self, method: &str, params: Value, pick: &Pick, timeout: Duration) -> Result<Value, CallError> {
+        let (client, pid) = {
+            let mut current = self.current.lock().await;
+            self.ensure_connected(&mut current, pick).await.map_err(CallError::NotConnected)?;
+            let open = current.as_ref().expect("connected above");
+            (open.client.clone(), open.pid)
+        };
+        match client.request(method, params, timeout).await {
+            Ok(answer) => Ok(answer),
+            Err(RequestError::Bridge { code, message }) => Err(CallError::Bridge { code, message }),
+            Err(RequestError::Timeout) => Err(CallError::Timeout),
+            Err(RequestError::Closed) => {
+                let mut current = self.current.lock().await;
+                if current.as_ref().is_some_and(|open| open.pid == pid && open.client.is_closed()) {
+                    current.take();
+                }
+                Err(CallError::Closed(format!("{} closed the connection", self.daw)))
+            }
+        }
+    }
+
+    /// The JSON a tool answers when a call has no result.
+    pub fn call_error(&self, error: &CallError) -> Value {
+        let daw = self.daw;
+        match error {
+            CallError::NotConnected(reason) => json!({"error": reason, "connected": false, "daw": daw.id()}),
+            CallError::Closed(reason) => json!({"error": reason, "connected": false, "daw": daw.id()}),
+            CallError::Bridge { code, message } => {
+                let mut answer = json!({"error": message, "code": code, "connected": true, "daw": daw.id()});
+                if code == daw_bridge::wire::code::BUSY {
+                    answer["busy"] = true.into();
+                }
+                answer
+            }
+            CallError::Timeout => json!({
+                "error": format!("{daw} didn't answer in time (a dialog may be open)"),
+                "busy": true,
+                "connected": true,
+                "daw": daw.id(),
+            }),
+            CallError::TooBig => json!({
+                "error": format!("{daw} answered more than {} KiB even for a smaller page", MAX_ANSWER_BYTES / 1024),
+                "connected": true,
+                "daw": daw.id(),
+            }),
+        }
     }
 
     fn not_connected(&self, reason: String) -> Value {

@@ -1,0 +1,1644 @@
+//! A fake REAPER for tests: an API table whose functions read and write a thread-local project (tracks, items, takes,
+//! FX with containers, sends, envelopes, MIDI, markers). Handles are numbers that say what they point at, and the fake
+//! never dereferences one; a handle for something deleted answers like REAPER's `ValidatePtr2`: not valid.
+
+use super::*;
+use std::cell::RefCell;
+use std::ffi::{c_char, c_int, c_void, CStr};
+
+#[derive(Clone)]
+pub struct FakeParam {
+    pub name: String,
+    pub value: f64,
+    pub min: f64,
+    pub max: f64,
+    /// What the plug-in prints for the value.
+    pub shown: String,
+}
+
+impl FakeParam {
+    pub fn new(name: &str, value: f64, shown: &str) -> Self {
+        FakeParam { name: name.into(), value, min: 0.0, max: 1.0, shown: shown.into() }
+    }
+}
+
+#[derive(Clone)]
+pub struct FakeFx {
+    pub guid: String,
+    pub name: String,
+    pub renamed: String,
+    pub enabled: bool,
+    pub offline: bool,
+    pub preset: String,
+    pub parallel: i32,
+    pub params: Vec<FakeParam>,
+    /// Some for a container, even an empty one.
+    pub children: Option<Vec<FakeFx>>,
+    pub instrument: bool,
+}
+
+impl FakeFx {
+    pub fn new(guid: &str, name: &str) -> Self {
+        FakeFx {
+            guid: guid.into(),
+            name: name.into(),
+            renamed: String::new(),
+            enabled: true,
+            offline: false,
+            preset: String::new(),
+            parallel: 0,
+            params: vec![],
+            children: None,
+            instrument: false,
+        }
+    }
+
+    pub fn container(guid: &str, children: Vec<FakeFx>) -> Self {
+        FakeFx { children: Some(children), ..FakeFx::new(guid, "Container") }
+    }
+}
+
+#[derive(Clone)]
+pub struct FakeNote {
+    pub start_ppq: f64,
+    pub end_ppq: f64,
+    pub channel: i32,
+    pub pitch: i32,
+    pub velocity: i32,
+    pub selected: bool,
+}
+
+#[derive(Clone)]
+pub struct FakeCc {
+    pub ppq: f64,
+    pub kind: i32,
+    pub channel: i32,
+    pub data1: i32,
+    pub data2: i32,
+}
+
+#[derive(Clone)]
+pub struct FakeEnvelope {
+    pub name: String,
+    /// The chunk name (`<VOLENV2`) of a track's own envelope.
+    pub chunk: Option<String>,
+    /// The FX (by GUID) and parameter an FX envelope belongs to.
+    pub fx_param: Option<(String, i32)>,
+    pub points: i32,
+    pub armed: bool,
+    pub visible: bool,
+}
+
+impl FakeEnvelope {
+    pub fn own(name: &str, chunk: &str, points: i32) -> Self {
+        FakeEnvelope { name: name.into(), chunk: Some(chunk.into()), fx_param: None, points, armed: false, visible: true }
+    }
+
+    pub fn for_param(name: &str, fx: &str, param: i32, points: i32) -> Self {
+        FakeEnvelope { name: name.into(), chunk: None, fx_param: Some((fx.into(), param)), points, armed: false, visible: true }
+    }
+}
+
+#[derive(Clone)]
+pub struct FakeTake {
+    pub guid: String,
+    pub name: String,
+    /// "WAVE", "MIDI"…; None for a take without a source.
+    pub source: Option<String>,
+    pub fx: Vec<FakeFx>,
+    pub notes: Vec<FakeNote>,
+    pub ccs: Vec<FakeCc>,
+    pub envelopes: Vec<FakeEnvelope>,
+}
+
+impl FakeTake {
+    pub fn wave(guid: &str, name: &str) -> Self {
+        FakeTake {
+            guid: guid.into(),
+            name: name.into(),
+            source: Some("WAVE".into()),
+            fx: vec![],
+            notes: vec![],
+            ccs: vec![],
+            envelopes: vec![],
+        }
+    }
+
+    pub fn midi(guid: &str, name: &str) -> Self {
+        FakeTake { source: Some("MIDI".into()), ..FakeTake::wave(guid, name) }
+    }
+}
+
+#[derive(Clone)]
+pub struct FakeItem {
+    pub guid: String,
+    pub position: f64,
+    pub length: f64,
+    pub mute: bool,
+    pub lane: i32,
+    pub color: i32,
+    pub selected: bool,
+    pub takes: Vec<FakeTake>,
+    pub active: usize,
+}
+
+impl FakeItem {
+    pub fn new(guid: &str, position: f64, length: f64, takes: Vec<FakeTake>) -> Self {
+        FakeItem { guid: guid.into(), position, length, mute: false, lane: 0, color: 0, selected: false, takes, active: 0 }
+    }
+}
+
+#[derive(Clone)]
+pub struct FakeSend {
+    /// The destination track's index (a send), or ignored (a hardware output).
+    pub dest: usize,
+    pub mode: i32,
+    pub volume: f64,
+    pub pan: f64,
+    pub mute: bool,
+    pub src_chan: i32,
+    pub dst_chan: i32,
+}
+
+impl FakeSend {
+    pub fn to(dest: usize) -> Self {
+        FakeSend { dest, mode: 0, volume: 1.0, pan: 0.0, mute: false, src_chan: 0, dst_chan: 0 }
+    }
+}
+
+#[derive(Clone)]
+pub struct FakeTrack {
+    pub guid: String,
+    pub name: String,
+    pub volume: f64,
+    pub pan: f64,
+    pub mute: bool,
+    pub solo: i32,
+    pub arm: bool,
+    pub selected: bool,
+    /// As REAPER stores it: the OS's order with 0x1000000 set; 0 for none.
+    pub color: i32,
+    pub folder: i32,
+    pub main_send: bool,
+    pub fx: Vec<FakeFx>,
+    pub input_fx: Vec<FakeFx>,
+    pub items: Vec<FakeItem>,
+    pub sends: Vec<FakeSend>,
+    pub hw_outs: Vec<FakeSend>,
+    pub envelopes: Vec<FakeEnvelope>,
+}
+
+impl FakeTrack {
+    pub fn new(guid: &str, name: &str) -> Self {
+        FakeTrack {
+            guid: guid.into(),
+            name: name.into(),
+            volume: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: 0,
+            arm: false,
+            selected: false,
+            color: 0,
+            folder: 0,
+            main_send: true,
+            fx: vec![],
+            input_fx: vec![],
+            items: vec![],
+            sends: vec![],
+            hw_outs: vec![],
+            envelopes: vec![],
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct FakeMarker {
+    pub is_region: bool,
+    pub start: f64,
+    pub end: f64,
+    pub name: String,
+    pub number: i32,
+    pub color: i32,
+}
+
+#[derive(Clone)]
+pub struct FakeTempo {
+    pub time: f64,
+    pub bpm: f64,
+    pub num: i32,
+    pub denom: i32,
+}
+
+#[derive(Clone)]
+pub struct State {
+    pub version: String,
+    pub resource: String,
+    /// None: no project (REAPER never has none, but the bridge must not care).
+    pub project: Option<(String, String)>,
+    /// Which project object the active tab holds: a tab switch changes it, a new project in the tab doesn't.
+    pub project_id: u64,
+    /// Open tabs beyond the active one.
+    pub other_tabs: usize,
+    pub play_bits: i32,
+    pub bpm: f64,
+    pub time_signature: (i32, i32),
+    pub state_count: i32,
+    pub master: FakeTrack,
+    pub tracks: Vec<FakeTrack>,
+    pub markers: Vec<FakeMarker>,
+    pub tempo_markers: Vec<FakeTempo>,
+    pub length: f64,
+    pub cursor: f64,
+    pub play_position: f64,
+    pub loop_range: (f64, f64),
+    pub time_selection: (f64, f64),
+    pub repeat: bool,
+    pub arrange_view: (f64, f64),
+    /// The take of the MIDI editor with the focus: (track, item, take).
+    pub midi_editor: Option<(usize, usize, usize)>,
+    /// (track, item, take, fx, param) as GetTouchedOrFocusedFX gives them; track -1 is the master.
+    pub focused_fx: Option<(i32, i32, i32, i32, i32)>,
+    pub touched_fx: Option<(i32, i32, i32, i32, i32)>,
+    pub selected_envelope: Option<(usize, usize)>,
+    pub cursor_context: i32,
+    /// False while a modal dialog has the main window disabled.
+    pub main_enabled: bool,
+    pub loading: bool,
+    pub dirty: bool,
+    /// Saving leaves the project changed (a read-only folder, a plug-in refusing).
+    pub save_fails: bool,
+    pub saved: u32,
+    pub actions: Vec<i32>,
+    pub ui_refresh: i32,
+    /// A project is rendering (what EnumProjects(0x40000000) answers).
+    pub rendering: bool,
+    /// Called, with no borrow of the state held, as REAPER runs each action: a test's REAPER that quits by running
+    /// its atexit hooks inside the quit action.
+    pub on_action: Option<fn(i32)>,
+    /// What the project carries for extensions: (section, key) to value.
+    pub project_ext: std::collections::HashMap<(String, String), String>,
+    /// How many REAPER calls the bridge has made (a read's cost).
+    pub calls: u64,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State {
+            version: String::new(),
+            resource: String::new(),
+            project: None,
+            project_id: 0,
+            other_tabs: 0,
+            play_bits: 0,
+            bpm: 0.0,
+            time_signature: (4, 4),
+            state_count: 0,
+            master: FakeTrack::new("{MASTER}", "MASTER"),
+            tracks: vec![],
+            markers: vec![],
+            tempo_markers: vec![],
+            length: 0.0,
+            cursor: 0.0,
+            play_position: 0.0,
+            loop_range: (0.0, 0.0),
+            time_selection: (0.0, 0.0),
+            repeat: false,
+            arrange_view: (0.0, 30.0),
+            midi_editor: None,
+            focused_fx: None,
+            touched_fx: None,
+            selected_envelope: None,
+            cursor_context: 0,
+            main_enabled: true,
+            loading: false,
+            dirty: false,
+            save_fails: false,
+            saved: 0,
+            actions: vec![],
+            ui_refresh: 0,
+            rendering: false,
+            on_action: None,
+            project_ext: Default::default(),
+            calls: 0,
+        }
+    }
+}
+
+thread_local! {
+    pub static STATE: RefCell<State> = RefCell::new(State::default());
+}
+
+pub fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
+    STATE.with(|s| f(&mut s.borrow_mut()))
+}
+
+/// Selects exactly these tracks (by index).
+pub fn select_tracks(indexes: &[usize]) {
+    with(|s| {
+        for (i, track) in s.tracks.iter_mut().enumerate() {
+            track.selected = indexes.contains(&i);
+        }
+    });
+}
+
+// ----- handles -----
+
+const PROJECT_BASE: u64 = 0x10;
+const MASTER: u64 = 0xFFFF;
+const TRACK: u64 = 1;
+const ITEM: u64 = 2;
+const TAKE: u64 = 3;
+const ENVELOPE: u64 = 4;
+const TAKE_ENVELOPE: u64 = 5;
+const SOURCE: u64 = 6;
+const MIDI_EDITOR: u64 = 0x77;
+const MAIN_WINDOW: u64 = 0x99;
+
+fn pack(kind: u64, a: u64, b: u64, c: u64) -> u64 {
+    kind << 56 | a << 40 | b << 20 | c
+}
+
+fn unpack(handle: u64) -> (u64, u64, u64, u64) {
+    (handle >> 56, (handle >> 40) & 0xFFFF, (handle >> 20) & 0xF_FFFF, handle & 0xF_FFFF)
+}
+
+pub fn track_ptr(index: usize) -> *mut MediaTrack {
+    pack(TRACK, index as u64, 0, 0) as *mut MediaTrack
+}
+
+pub fn master_ptr() -> *mut MediaTrack {
+    pack(TRACK, MASTER, 0, 0) as *mut MediaTrack
+}
+
+fn item_ptr(track: usize, item: usize) -> *mut MediaItem {
+    pack(ITEM, track as u64, item as u64, 0) as *mut MediaItem
+}
+
+fn take_ptr(track: usize, item: usize, take: usize) -> *mut MediaItem_Take {
+    pack(TAKE, track as u64, item as u64, take as u64) as *mut MediaItem_Take
+}
+
+fn project_ptr(s: &State) -> *mut ReaProject {
+    (PROJECT_BASE + s.project_id * 16) as *mut ReaProject
+}
+
+fn track_of(s: &State, handle: u64) -> Option<&FakeTrack> {
+    let (kind, a, _, _) = unpack(handle);
+    match (kind, a) {
+        (TRACK, MASTER) => Some(&s.master),
+        (TRACK, a) => s.tracks.get(a as usize),
+        _ => None,
+    }
+}
+
+fn item_of(s: &State, handle: u64) -> Option<&FakeItem> {
+    let (kind, a, b, _) = unpack(handle);
+    if kind != ITEM {
+        return None;
+    }
+    s.tracks.get(a as usize)?.items.get(b as usize)
+}
+
+fn take_of(s: &State, handle: u64) -> Option<&FakeTake> {
+    let (kind, a, b, c) = unpack(handle);
+    if kind != TAKE && kind != SOURCE {
+        return None;
+    }
+    s.tracks.get(a as usize)?.items.get(b as usize)?.takes.get(c as usize)
+}
+
+fn envelope_of(s: &State, handle: u64) -> Option<&FakeEnvelope> {
+    let (kind, a, b, c) = unpack(handle);
+    match kind {
+        ENVELOPE => track_of(s, pack(TRACK, a, 0, 0))?.envelopes.get(b as usize),
+        TAKE_ENVELOPE => {
+            let take = s.tracks.get(a as usize)?.items.get(b as usize)?.takes.get((c >> 10) as usize)?;
+            take.envelopes.get((c & 1023) as usize)
+        }
+        _ => None,
+    }
+}
+
+/// An FX chain's owner: a track's chain, its input chain, or a take's.
+fn chain_of(s: &State, owner: u64, index: i32) -> Option<&Vec<FakeFx>> {
+    if let Some(track) = track_of(s, owner) {
+        return Some(if index & INPUT_FX != 0 { &track.input_fx } else { &track.fx });
+    }
+    take_of(s, owner).map(|take| &take.fx)
+}
+
+/// The levels of a container-addressed FX: its path of child positions, the top-level one first.
+fn fx_path(index: i32) -> Vec<usize> {
+    let bits = index & 0xFF_FFFF & !INPUT_FX;
+    if index & CONTAINER_FX == 0 {
+        return vec![bits as usize];
+    }
+    (0..4).map(|level| ((bits >> (6 * level)) & 63) as usize).take_while(|&n| n != 0).map(|n| n - 1).collect()
+}
+
+fn fx_address(path: &[usize], input: bool) -> i32 {
+    if path.len() == 1 && !input {
+        return path[0] as i32;
+    }
+    let levels = path.iter().enumerate().map(|(level, &n)| (n as i32 + 1) << (6 * level)).sum::<i32>();
+    CONTAINER_FX | levels | if input { INPUT_FX } else { 0 }
+}
+
+fn fx_of(s: &State, owner: u64, index: i32) -> Option<&FakeFx> {
+    let chain = chain_of(s, owner, index)?;
+    let path = fx_path(index);
+    let mut node = chain.get(*path.first()?)?;
+    for &child in &path[1..] {
+        node = node.children.as_ref()?.get(child)?;
+    }
+    Some(node)
+}
+
+// ----- strings -----
+
+fn write(buf: *mut c_char, size: c_int, text: &str) {
+    if buf.is_null() || size <= 0 {
+        return;
+    }
+    let n = text.len().min(size as usize - 1);
+    unsafe {
+        ptr::copy_nonoverlapping(text.as_ptr(), buf.cast(), n);
+        *buf.add(n) = 0;
+    }
+}
+
+thread_local! {
+    static STRINGS: RefCell<Vec<CString>> = const { RefCell::new(Vec::new()) };
+}
+
+fn keep(text: String) -> *const c_char {
+    STRINGS.with(|s| {
+        let mut s = s.borrow_mut();
+        s.push(CString::new(text).unwrap());
+        s.last().unwrap().as_ptr()
+    })
+}
+
+fn counted<T>(f: impl FnOnce(&mut State) -> T) -> T {
+    with(|s| {
+        s.calls += 1;
+        f(s)
+    })
+}
+
+fn name_of(name: *const c_char) -> String {
+    unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()
+}
+
+// ----- the application and the project -----
+
+unsafe extern "C" fn get_app_version() -> *const c_char {
+    keep(with(|s| s.version.clone()))
+}
+unsafe extern "C" fn get_resource_path() -> *const c_char {
+    keep(with(|s| s.resource.clone()))
+}
+unsafe extern "C" fn enum_projects(idx: c_int, buf: *mut c_char, size: c_int) -> *mut ReaProject {
+    counted(|s| {
+        let active = project_ptr(s);
+        match (&s.project, idx) {
+            (_, 0x4000_0000) if s.rendering => active,
+            (Some((path, _)), -1 | 0) => {
+                write(buf, size, path);
+                active
+            }
+            (Some((path, _)), n) if n > 0 && (n as usize) <= s.other_tabs => {
+                write(buf, size, path);
+                (active as u64 + n as u64) as *mut ReaProject
+            }
+            _ => ptr::null_mut(),
+        }
+    })
+}
+unsafe extern "C" fn get_project_name(_proj: *mut ReaProject, buf: *mut c_char, size: c_int) {
+    with(|s| write(buf, size, s.project.as_ref().map(|p| p.1.as_str()).unwrap_or("")))
+}
+unsafe extern "C" fn get_current_project_in_load_save() -> *mut ReaProject {
+    if with(|s| s.loading) {
+        with(|s| project_ptr(s))
+    } else {
+        ptr::null_mut()
+    }
+}
+unsafe extern "C" fn master_get_tempo() -> f64 {
+    with(|s| s.bpm)
+}
+unsafe extern "C" fn get_play_state_ex(_proj: *mut ReaProject) -> c_int {
+    with(|s| s.play_bits)
+}
+unsafe extern "C" fn get_project_state_change_count(_proj: *mut ReaProject) -> c_int {
+    counted(|s| s.state_count)
+}
+unsafe extern "C" fn get_project_length(_proj: *mut ReaProject) -> f64 {
+    counted(|s| s.length)
+}
+unsafe extern "C" fn get_cursor_position_ex(_proj: *mut ReaProject) -> f64 {
+    counted(|s| s.cursor)
+}
+unsafe extern "C" fn get_play_position2_ex(_proj: *mut ReaProject) -> f64 {
+    counted(|s| if s.play_bits & 1 != 0 { s.play_position } else { s.cursor })
+}
+unsafe extern "C" fn get_set_loop_time_range2(
+    _proj: *mut ReaProject,
+    set: bool,
+    is_loop: bool,
+    start: *mut f64,
+    end: *mut f64,
+    _seek: bool,
+) {
+    assert!(!set, "the fake only reads");
+    counted(|s| {
+        let (from, to) = if is_loop { s.loop_range } else { s.time_selection };
+        unsafe {
+            *start = from;
+            *end = to;
+        }
+    })
+}
+unsafe extern "C" fn get_set_repeat_ex(_proj: *mut ReaProject, _value: c_int) -> c_int {
+    counted(|s| s.repeat as c_int)
+}
+unsafe extern "C" fn time_map_get_time_sig_at_time(_proj: *mut ReaProject, time: f64, num: *mut c_int, denom: *mut c_int, bpm: *mut f64) {
+    counted(|s| {
+        let marker = s.tempo_markers.iter().rev().find(|m| m.time <= time);
+        unsafe {
+            *num = marker.map_or(s.time_signature.0, |m| m.num);
+            *denom = marker.map_or(s.time_signature.1, |m| m.denom);
+            *bpm = marker.map_or(s.bpm, |m| m.bpm);
+        }
+    })
+}
+unsafe extern "C" fn time_map2_time_to_qn(_proj: *mut ReaProject, time: f64) -> f64 {
+    counted(|s| time * s.bpm / 60.0)
+}
+unsafe extern "C" fn time_map2_qn_to_time(_proj: *mut ReaProject, qn: f64) -> f64 {
+    counted(|s| qn * 60.0 / s.bpm)
+}
+unsafe extern "C" fn time_map2_time_to_beats(
+    _proj: *mut ReaProject,
+    time: f64,
+    measures: *mut c_int,
+    beats_in_measure: *mut c_int,
+    full_beats: *mut f64,
+    denom: *mut c_int,
+) -> f64 {
+    counted(|s| {
+        let qn = time * s.bpm / 60.0;
+        let per_measure = s.time_signature.0 as f64;
+        let whole = (qn / per_measure).floor();
+        unsafe {
+            *measures = whole as c_int;
+            *beats_in_measure = s.time_signature.0;
+            *full_beats = qn;
+            *denom = s.time_signature.1;
+        }
+        qn - whole * per_measure
+    })
+}
+unsafe extern "C" fn get_set_arrange_view2(_proj: *mut ReaProject, set: bool, _x0: c_int, _x1: c_int, start: *mut f64, end: *mut f64) {
+    assert!(!set, "the fake only reads");
+    counted(|s| unsafe {
+        *start = s.arrange_view.0;
+        *end = s.arrange_view.1;
+    })
+}
+unsafe extern "C" fn is_project_dirty(_proj: *mut ReaProject) -> c_int {
+    with(|s| s.dirty as c_int)
+}
+unsafe extern "C" fn main_save_project(_proj: *mut ReaProject, _save_as: bool) {
+    with(|s| {
+        s.dirty = s.save_fails;
+        s.saved += 1;
+    });
+}
+unsafe extern "C" fn main_on_command_ex(command: c_int, _flag: c_int, _proj: *mut ReaProject) {
+    let hook = with(|s| {
+        s.actions.push(command);
+        s.on_action
+    });
+    if let Some(hook) = hook {
+        hook(command);
+    }
+}
+unsafe extern "C" fn prevent_ui_refresh(count: c_int) {
+    with(|s| s.ui_refresh += count);
+}
+unsafe extern "C" fn kbd_get_text_from_cmd(cmd: c_int, _section: *mut c_void) -> *const c_char {
+    match cmd {
+        40001 => c"Track: Insert new track".as_ptr(),
+        40004 => c"File: Quit REAPER".as_ptr(),
+        40022 => c"File: Save project as...".as_ptr(),
+        40023 => c"File: New project".as_ptr(),
+        40026 => c"File: Save project".as_ptr(),
+        40860 => c"Close current project tab".as_ptr(),
+        40886 => c"File: Close all projects".as_ptr(),
+        41824 => c"File: Render project, using the most recent render settings".as_ptr(),
+        54000 => c"Script: kumi.lua".as_ptr(),
+        _ => c"".as_ptr(),
+    }
+}
+unsafe extern "C" fn named_command_lookup(name: *const c_char) -> c_int {
+    if unsafe { CStr::from_ptr(name) } == c"_RS_kumi" {
+        54000
+    } else {
+        0
+    }
+}
+unsafe extern "C" fn get_main_hwnd() -> *mut c_void {
+    MAIN_WINDOW as *mut c_void
+}
+unsafe extern "C" fn validate_ptr2(_proj: *mut ReaProject, handle: *mut c_void, class: *const c_char) -> bool {
+    let (handle, class) = (handle as u64, name_of(class));
+    counted(|s| match class.as_str() {
+        "MediaTrack*" => track_of(s, handle).is_some(),
+        "MediaItem*" => item_of(s, handle).is_some(),
+        "MediaItem_Take*" => take_of(s, handle).is_some(),
+        "TrackEnvelope*" => envelope_of(s, handle).is_some(),
+        _ => false,
+    })
+}
+
+// ----- markers and the tempo map -----
+
+unsafe extern "C" fn count_project_markers(_proj: *mut ReaProject, markers: *mut c_int, regions: *mut c_int) -> c_int {
+    counted(|s| {
+        let regions_n = s.markers.iter().filter(|m| m.is_region).count();
+        unsafe {
+            if !markers.is_null() {
+                *markers = (s.markers.len() - regions_n) as c_int;
+            }
+            if !regions.is_null() {
+                *regions = regions_n as c_int;
+            }
+        }
+        s.markers.len() as c_int
+    })
+}
+unsafe extern "C" fn enum_project_markers3(
+    _proj: *mut ReaProject,
+    idx: c_int,
+    is_region: *mut bool,
+    start: *mut f64,
+    end: *mut f64,
+    name: *mut *const c_char,
+    number: *mut c_int,
+    color: *mut c_int,
+) -> c_int {
+    counted(|s| match s.markers.get(idx as usize) {
+        Some(m) => {
+            unsafe {
+                *is_region = m.is_region;
+                *start = m.start;
+                *end = m.end;
+                *name = keep(m.name.clone());
+                *number = m.number;
+                *color = m.color;
+            }
+            idx + 1
+        }
+        None => 0,
+    })
+}
+unsafe extern "C" fn count_tempo_time_sig_markers(_proj: *mut ReaProject) -> c_int {
+    counted(|s| s.tempo_markers.len() as c_int)
+}
+unsafe extern "C" fn get_tempo_time_sig_marker(
+    _proj: *mut ReaProject,
+    idx: c_int,
+    time: *mut f64,
+    measure: *mut c_int,
+    beat: *mut f64,
+    bpm: *mut f64,
+    num: *mut c_int,
+    denom: *mut c_int,
+    linear: *mut bool,
+) -> bool {
+    counted(|s| match s.tempo_markers.get(idx as usize) {
+        Some(m) => {
+            unsafe {
+                *time = m.time;
+                *measure = 0;
+                *beat = 0.0;
+                *bpm = m.bpm;
+                *num = m.num;
+                *denom = m.denom;
+                *linear = false;
+            }
+            true
+        }
+        None => false,
+    })
+}
+
+// ----- tracks -----
+
+unsafe extern "C" fn count_tracks(_proj: *mut ReaProject) -> c_int {
+    counted(|s| s.tracks.len() as c_int)
+}
+unsafe extern "C" fn get_track(_proj: *mut ReaProject, index: c_int) -> *mut MediaTrack {
+    counted(|s| if index >= 0 && (index as usize) < s.tracks.len() { track_ptr(index as usize) } else { ptr::null_mut() })
+}
+unsafe extern "C" fn get_master_track(_proj: *mut ReaProject) -> *mut MediaTrack {
+    master_ptr()
+}
+unsafe extern "C" fn count_selected_tracks2(_proj: *mut ReaProject, master: bool) -> c_int {
+    counted(|s| (s.tracks.iter().filter(|t| t.selected).count() + (master && s.master.selected) as usize) as c_int)
+}
+unsafe extern "C" fn get_selected_track2(_proj: *mut ReaProject, i: c_int, master: bool) -> *mut MediaTrack {
+    counted(|s| {
+        let mut selected: Vec<*mut MediaTrack> = vec![];
+        if master && s.master.selected {
+            selected.push(master_ptr());
+        }
+        selected.extend(s.tracks.iter().enumerate().filter(|(_, t)| t.selected).map(|(n, _)| track_ptr(n)));
+        selected.get(i as usize).copied().unwrap_or(ptr::null_mut())
+    })
+}
+unsafe extern "C" fn get_last_touched_track() -> *mut MediaTrack {
+    counted(|s| s.tracks.iter().position(|t| t.selected).map_or(ptr::null_mut(), track_ptr))
+}
+unsafe extern "C" fn get_media_track_info_value(track: *mut MediaTrack, parm: *const c_char) -> f64 {
+    let parm = name_of(parm);
+    counted(|s| {
+        let Some(t) = track_of(s, track as u64) else { return 0.0 };
+        match parm.as_str() {
+            "IP_TRACKNUMBER" => match unpack(track as u64).1 {
+                MASTER => -1.0,
+                n => n as f64 + 1.0,
+            },
+            "I_FOLDERDEPTH" => t.folder as f64,
+            "B_MUTE" => t.mute as i32 as f64,
+            "I_SOLO" => t.solo as f64,
+            "I_RECARM" => t.arm as i32 as f64,
+            "I_SELECTED" => t.selected as i32 as f64,
+            "D_VOL" => t.volume,
+            "D_PAN" => t.pan,
+            "B_MAINSEND" => t.main_send as i32 as f64,
+            "I_NCHAN" => 2.0,
+            _ => 0.0,
+        }
+    })
+}
+unsafe extern "C" fn get_set_media_track_info_string(track: *mut MediaTrack, parm: *const c_char, buf: *mut c_char, set: bool) -> bool {
+    assert!(!set, "the fake only reads");
+    let parm = name_of(parm);
+    counted(|s| match (track_of(s, track as u64), parm.as_str()) {
+        (Some(t), "GUID") => {
+            write(buf, 4096, &t.guid);
+            true
+        }
+        (Some(t), "P_NAME") => {
+            write(buf, 4096, &t.name);
+            true
+        }
+        _ => false,
+    })
+}
+unsafe extern "C" fn get_track_name(track: *mut MediaTrack, buf: *mut c_char, size: c_int) -> bool {
+    counted(|s| match track_of(s, track as u64) {
+        Some(t) => {
+            write(buf, size, &t.name);
+            true
+        }
+        None => false,
+    })
+}
+unsafe extern "C" fn get_proj_ext_state(
+    _proj: *mut ReaProject,
+    section: *const c_char,
+    key: *const c_char,
+    buf: *mut c_char,
+    size: c_int,
+) -> c_int {
+    let (section, key) = (name_of(section), name_of(key));
+    counted(|s| match s.project_ext.get(&(section, key)) {
+        Some(value) => {
+            write(buf, size, value);
+            value.len() as c_int
+        }
+        None => 0,
+    })
+}
+unsafe extern "C" fn track_fx_get_instrument(track: *mut MediaTrack) -> c_int {
+    counted(|s| track_of(s, track as u64).and_then(|t| t.fx.iter().position(|f| f.instrument)).map_or(-1, |n| n as c_int))
+}
+unsafe extern "C" fn get_track_depth(track: *mut MediaTrack) -> c_int {
+    counted(|s| {
+        let at = unpack(track as u64).1 as usize;
+        if track_of(s, track as u64).is_none() || unpack(track as u64).1 == MASTER {
+            return 0;
+        }
+        s.tracks.iter().take(at).map(|t| t.folder).sum::<i32>().max(0)
+    })
+}
+unsafe extern "C" fn get_track_color(track: *mut MediaTrack) -> c_int {
+    counted(|s| track_of(s, track as u64).map_or(0, |t| t.color))
+}
+unsafe extern "C" fn color_from_native(native: c_int, r: *mut c_int, g: *mut c_int, b: *mut c_int) {
+    unsafe {
+        *r = native & 255;
+        *g = (native >> 8) & 255;
+        *b = (native >> 16) & 255;
+    }
+}
+
+// ----- items and takes -----
+
+unsafe extern "C" fn count_track_media_items(track: *mut MediaTrack) -> c_int {
+    counted(|s| track_of(s, track as u64).map_or(0, |t| t.items.len() as c_int))
+}
+unsafe extern "C" fn get_track_media_item(track: *mut MediaTrack, index: c_int) -> *mut MediaItem {
+    counted(|s| match track_of(s, track as u64) {
+        Some(t) if index >= 0 && (index as usize) < t.items.len() => item_ptr(unpack(track as u64).1 as usize, index as usize),
+        _ => ptr::null_mut(),
+    })
+}
+unsafe extern "C" fn get_media_item_track(item: *mut MediaItem) -> *mut MediaTrack {
+    counted(|s| if item_of(s, item as u64).is_some() { track_ptr(unpack(item as u64).1 as usize) } else { ptr::null_mut() })
+}
+unsafe extern "C" fn get_media_item_info_value(item: *mut MediaItem, parm: *const c_char) -> f64 {
+    let parm = name_of(parm);
+    counted(|s| {
+        let Some(i) = item_of(s, item as u64) else { return 0.0 };
+        match parm.as_str() {
+            "D_POSITION" => i.position,
+            "D_LENGTH" => i.length,
+            "B_MUTE" => i.mute as i32 as f64,
+            "I_FIXEDLANE" => i.lane as f64,
+            "I_CUSTOMCOLOR" => i.color as f64,
+            "B_UISEL" => i.selected as i32 as f64,
+            "I_CURTAKE" => i.active as f64,
+            "IP_ITEMNUMBER" => unpack(item as u64).2 as f64,
+            _ => 0.0,
+        }
+    })
+}
+unsafe extern "C" fn get_set_media_item_info_string(item: *mut MediaItem, parm: *const c_char, buf: *mut c_char, set: bool) -> bool {
+    assert!(!set, "the fake only reads");
+    let parm = name_of(parm);
+    counted(|s| match (item_of(s, item as u64), parm.as_str()) {
+        (Some(i), "GUID") => {
+            write(buf, 4096, &i.guid);
+            true
+        }
+        _ => false,
+    })
+}
+unsafe extern "C" fn count_takes(item: *mut MediaItem) -> c_int {
+    counted(|s| item_of(s, item as u64).map_or(0, |i| i.takes.len() as c_int))
+}
+unsafe extern "C" fn get_media_item_take(item: *mut MediaItem, index: c_int) -> *mut MediaItem_Take {
+    counted(|s| match item_of(s, item as u64) {
+        Some(i) if index >= 0 && (index as usize) < i.takes.len() => {
+            let (_, t, n, _) = unpack(item as u64);
+            take_ptr(t as usize, n as usize, index as usize)
+        }
+        _ => ptr::null_mut(),
+    })
+}
+unsafe extern "C" fn get_active_take(item: *mut MediaItem) -> *mut MediaItem_Take {
+    counted(|s| match item_of(s, item as u64) {
+        Some(i) if i.active < i.takes.len() => {
+            let (_, t, n, _) = unpack(item as u64);
+            take_ptr(t as usize, n as usize, i.active)
+        }
+        _ => ptr::null_mut(),
+    })
+}
+unsafe extern "C" fn get_media_item_take_item(take: *mut MediaItem_Take) -> *mut MediaItem {
+    counted(|s| {
+        let (_, t, n, _) = unpack(take as u64);
+        if take_of(s, take as u64).is_some() {
+            item_ptr(t as usize, n as usize)
+        } else {
+            ptr::null_mut()
+        }
+    })
+}
+unsafe extern "C" fn get_set_media_item_take_info_string(
+    take: *mut MediaItem_Take,
+    parm: *const c_char,
+    buf: *mut c_char,
+    set: bool,
+) -> bool {
+    assert!(!set, "the fake only reads");
+    let parm = name_of(parm);
+    counted(|s| match (take_of(s, take as u64), parm.as_str()) {
+        (Some(t), "GUID") => {
+            write(buf, 4096, &t.guid);
+            true
+        }
+        (Some(t), "P_NAME") => {
+            write(buf, 4096, &t.name);
+            true
+        }
+        _ => false,
+    })
+}
+unsafe extern "C" fn get_take_name(take: *mut MediaItem_Take) -> *const c_char {
+    let name = counted(|s| take_of(s, take as u64).map(|t| t.name.clone()));
+    name.map_or(ptr::null(), keep)
+}
+unsafe extern "C" fn get_media_item_take_info_value(_take: *mut MediaItem_Take, _parm: *const c_char) -> f64 {
+    counted(|_| 0.0)
+}
+unsafe extern "C" fn get_media_item_take_source(take: *mut MediaItem_Take) -> *mut api::PCM_source {
+    counted(|s| match take_of(s, take as u64) {
+        Some(t) if t.source.is_some() => {
+            let (_, a, b, c) = unpack(take as u64);
+            pack(SOURCE, a, b, c) as *mut api::PCM_source
+        }
+        _ => ptr::null_mut(),
+    })
+}
+unsafe extern "C" fn get_media_source_type(source: *mut api::PCM_source, buf: *mut c_char, size: c_int) {
+    counted(|s| {
+        if let Some(kind) = take_of(s, source as u64).and_then(|t| t.source.clone()) {
+            write(buf, size, &kind);
+        }
+    })
+}
+/// The fake's GUID strings are handed around as C strings (a real GUID is 16 bytes): `stringToGuid` stores an index
+/// into the strings it has been given, and `guidToString` turns a pointer from the FX functions back into text.
+unsafe extern "C" fn string_to_guid(text: *const c_char, guid: *mut api::GUID) {
+    let id = keep(name_of(text)) as u64;
+    unsafe { ptr::write_unaligned(guid.cast::<u64>(), id) };
+}
+unsafe extern "C" fn guid_to_string(guid: *const api::GUID, buf: *mut c_char) {
+    write(buf, 64, &name_of(guid.cast()));
+}
+unsafe extern "C" fn get_media_item_take_by_guid(_proj: *mut ReaProject, guid: *const api::GUID) -> *mut MediaItem_Take {
+    let text = name_of(unsafe { ptr::read_unaligned(guid.cast::<u64>()) } as *const c_char);
+    counted(|s| {
+        for (t, track) in s.tracks.iter().enumerate() {
+            for (i, item) in track.items.iter().enumerate() {
+                if let Some(k) = item.takes.iter().position(|take| take.guid == text) {
+                    return take_ptr(t, i, k);
+                }
+            }
+        }
+        ptr::null_mut()
+    })
+}
+
+// ----- selection and focus -----
+
+unsafe extern "C" fn count_selected_media_items(_proj: *mut ReaProject) -> c_int {
+    counted(|s| s.tracks.iter().flat_map(|t| &t.items).filter(|i| i.selected).count() as c_int)
+}
+unsafe extern "C" fn get_selected_media_item(_proj: *mut ReaProject, n: c_int) -> *mut MediaItem {
+    counted(|s| {
+        let selected =
+            s.tracks.iter().enumerate().flat_map(|(t, track)| track.items.iter().enumerate().map(move |(i, item)| (t, i, item.selected)));
+        selected.filter(|(_, _, on)| *on).nth(n as usize).map_or(ptr::null_mut(), |(t, i, _)| item_ptr(t, i))
+    })
+}
+unsafe extern "C" fn get_selected_envelope(_proj: *mut ReaProject) -> *mut TrackEnvelope {
+    counted(|s| s.selected_envelope.map_or(ptr::null_mut(), |(t, e)| pack(ENVELOPE, t as u64, e as u64, 0) as *mut TrackEnvelope))
+}
+unsafe extern "C" fn get_cursor_context2(_last: bool) -> c_int {
+    counted(|s| s.cursor_context)
+}
+unsafe extern "C" fn midi_editor_get_active() -> *mut c_void {
+    counted(|s| if s.midi_editor.is_some() { MIDI_EDITOR as *mut c_void } else { ptr::null_mut() })
+}
+unsafe extern "C" fn midi_editor_get_take(editor: *mut c_void) -> *mut MediaItem_Take {
+    counted(|s| match s.midi_editor {
+        Some((t, i, k)) if editor as u64 == MIDI_EDITOR => take_ptr(t, i, k),
+        _ => ptr::null_mut(),
+    })
+}
+unsafe extern "C" fn get_touched_or_focused_fx(
+    mode: c_int,
+    track: *mut c_int,
+    item: *mut c_int,
+    take: *mut c_int,
+    fx: *mut c_int,
+    param: *mut c_int,
+) -> bool {
+    counted(|s| match if mode == 0 { s.touched_fx } else { s.focused_fx } {
+        Some((t, i, k, f, p)) => {
+            unsafe {
+                *track = t;
+                *item = i;
+                *take = k;
+                *fx = f;
+                *param = p;
+            }
+            true
+        }
+        None => false,
+    })
+}
+
+// ----- FX (the same for a track's chain and a take's) -----
+
+fn fx_count(owner: u64) -> c_int {
+    counted(|s| chain_of(s, owner, 0).map_or(0, |c| c.len() as c_int))
+}
+fn fx_guid(owner: u64, index: c_int) -> *mut api::GUID {
+    let guid = counted(|s| fx_of(s, owner, index).map(|f| f.guid.clone()));
+    guid.map_or(ptr::null_mut(), |g| keep(g) as *mut api::GUID)
+}
+fn fx_name(owner: u64, index: c_int, buf: *mut c_char, size: c_int) -> bool {
+    counted(|s| fx_of(s, owner, index).map(|f| write(buf, size, &f.name)).is_some())
+}
+fn fx_enabled(owner: u64, index: c_int) -> bool {
+    counted(|s| fx_of(s, owner, index).is_some_and(|f| f.enabled))
+}
+fn fx_offline(owner: u64, index: c_int) -> bool {
+    counted(|s| fx_of(s, owner, index).is_some_and(|f| f.offline))
+}
+fn fx_preset(owner: u64, index: c_int, buf: *mut c_char, size: c_int) -> bool {
+    counted(|s| match fx_of(s, owner, index) {
+        Some(f) if !f.preset.is_empty() => {
+            write(buf, size, &f.preset);
+            true
+        }
+        _ => false,
+    })
+}
+fn fx_num_params(owner: u64, index: c_int) -> c_int {
+    counted(|s| fx_of(s, owner, index).map_or(0, |f| f.params.len() as c_int))
+}
+fn fx_named_config(owner: u64, index: c_int, key: *const c_char, buf: *mut c_char, size: c_int) -> bool {
+    let key = name_of(key);
+    counted(|s| {
+        let Some(f) = fx_of(s, owner, index) else { return false };
+        let path = fx_path(index);
+        let input = index & INPUT_FX != 0;
+        let answer = match key.as_str() {
+            "container_count" => f.children.as_ref().map(|c| c.len().to_string()),
+            "parallel" => Some(f.parallel.to_string()),
+            "renamed_name" => Some(f.renamed.clone()),
+            "fx_type" => Some(f.name.split(':').next().unwrap_or("").to_string()),
+            other => other.strip_prefix("container_item.").and_then(|n| n.parse::<usize>().ok()).and_then(|n| {
+                let children = f.children.as_ref()?;
+                (n < children.len()).then(|| fx_address(&[path.as_slice(), &[n]].concat(), input).to_string())
+            }),
+        };
+        match answer {
+            Some(text) => {
+                write(buf, size, &text);
+                true
+            }
+            None => false,
+        }
+    })
+}
+fn fx_param_name(owner: u64, index: c_int, param: c_int, buf: *mut c_char, size: c_int) -> bool {
+    counted(|s| fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)).map(|p| write(buf, size, &p.name)).is_some())
+}
+fn fx_param_normalized(owner: u64, index: c_int, param: c_int) -> f64 {
+    counted(|s| fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)).map_or(0.0, |p| p.value))
+}
+fn fx_param_formatted(owner: u64, index: c_int, param: c_int, buf: *mut c_char, size: c_int) -> bool {
+    counted(|s| fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)).map(|p| write(buf, size, &p.shown)).is_some())
+}
+fn fx_param_ex(owner: u64, index: c_int, param: c_int, min: *mut f64, max: *mut f64, mid: *mut f64) -> f64 {
+    counted(|s| match fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)) {
+        Some(p) => {
+            unsafe {
+                *min = p.min;
+                *max = p.max;
+                *mid = (p.min + p.max) / 2.0;
+            }
+            p.min + p.value * (p.max - p.min)
+        }
+        None => 0.0,
+    })
+}
+
+unsafe extern "C" fn track_fx_get_count(t: *mut MediaTrack) -> c_int {
+    fx_count(t as u64)
+}
+unsafe extern "C" fn take_fx_get_count(t: *mut MediaItem_Take) -> c_int {
+    fx_count(t as u64)
+}
+unsafe extern "C" fn track_fx_get_rec_count(t: *mut MediaTrack) -> c_int {
+    counted(|s| track_of(s, t as u64).map_or(0, |t| t.input_fx.len() as c_int))
+}
+unsafe extern "C" fn track_fx_get_fxguid(t: *mut MediaTrack, fx: c_int) -> *mut api::GUID {
+    fx_guid(t as u64, fx)
+}
+unsafe extern "C" fn take_fx_get_fxguid(t: *mut MediaItem_Take, fx: c_int) -> *mut api::GUID {
+    fx_guid(t as u64, fx)
+}
+unsafe extern "C" fn track_fx_get_fx_name(t: *mut MediaTrack, fx: c_int, buf: *mut c_char, size: c_int) -> bool {
+    fx_name(t as u64, fx, buf, size)
+}
+unsafe extern "C" fn take_fx_get_fx_name(t: *mut MediaItem_Take, fx: c_int, buf: *mut c_char, size: c_int) -> bool {
+    fx_name(t as u64, fx, buf, size)
+}
+unsafe extern "C" fn track_fx_get_enabled(t: *mut MediaTrack, fx: c_int) -> bool {
+    fx_enabled(t as u64, fx)
+}
+unsafe extern "C" fn take_fx_get_enabled(t: *mut MediaItem_Take, fx: c_int) -> bool {
+    fx_enabled(t as u64, fx)
+}
+unsafe extern "C" fn track_fx_get_offline(t: *mut MediaTrack, fx: c_int) -> bool {
+    fx_offline(t as u64, fx)
+}
+unsafe extern "C" fn take_fx_get_offline(t: *mut MediaItem_Take, fx: c_int) -> bool {
+    fx_offline(t as u64, fx)
+}
+unsafe extern "C" fn track_fx_get_preset(t: *mut MediaTrack, fx: c_int, buf: *mut c_char, size: c_int) -> bool {
+    fx_preset(t as u64, fx, buf, size)
+}
+unsafe extern "C" fn take_fx_get_preset(t: *mut MediaItem_Take, fx: c_int, buf: *mut c_char, size: c_int) -> bool {
+    fx_preset(t as u64, fx, buf, size)
+}
+unsafe extern "C" fn track_fx_get_num_params(t: *mut MediaTrack, fx: c_int) -> c_int {
+    fx_num_params(t as u64, fx)
+}
+unsafe extern "C" fn take_fx_get_num_params(t: *mut MediaItem_Take, fx: c_int) -> c_int {
+    fx_num_params(t as u64, fx)
+}
+unsafe extern "C" fn track_fx_get_named_config_parm(
+    t: *mut MediaTrack,
+    fx: c_int,
+    key: *const c_char,
+    buf: *mut c_char,
+    size: c_int,
+) -> bool {
+    fx_named_config(t as u64, fx, key, buf, size)
+}
+unsafe extern "C" fn take_fx_get_named_config_parm(
+    t: *mut MediaItem_Take,
+    fx: c_int,
+    key: *const c_char,
+    buf: *mut c_char,
+    size: c_int,
+) -> bool {
+    fx_named_config(t as u64, fx, key, buf, size)
+}
+unsafe extern "C" fn track_fx_get_param_name(t: *mut MediaTrack, fx: c_int, p: c_int, buf: *mut c_char, size: c_int) -> bool {
+    fx_param_name(t as u64, fx, p, buf, size)
+}
+unsafe extern "C" fn take_fx_get_param_name(t: *mut MediaItem_Take, fx: c_int, p: c_int, buf: *mut c_char, size: c_int) -> bool {
+    fx_param_name(t as u64, fx, p, buf, size)
+}
+unsafe extern "C" fn track_fx_get_param_normalized(t: *mut MediaTrack, fx: c_int, p: c_int) -> f64 {
+    fx_param_normalized(t as u64, fx, p)
+}
+unsafe extern "C" fn take_fx_get_param_normalized(t: *mut MediaItem_Take, fx: c_int, p: c_int) -> f64 {
+    fx_param_normalized(t as u64, fx, p)
+}
+unsafe extern "C" fn track_fx_get_formatted_param_value(t: *mut MediaTrack, fx: c_int, p: c_int, buf: *mut c_char, size: c_int) -> bool {
+    fx_param_formatted(t as u64, fx, p, buf, size)
+}
+unsafe extern "C" fn take_fx_get_formatted_param_value(t: *mut MediaItem_Take, fx: c_int, p: c_int, buf: *mut c_char, size: c_int) -> bool {
+    fx_param_formatted(t as u64, fx, p, buf, size)
+}
+unsafe extern "C" fn track_fx_get_param_ex(t: *mut MediaTrack, fx: c_int, p: c_int, min: *mut f64, max: *mut f64, mid: *mut f64) -> f64 {
+    fx_param_ex(t as u64, fx, p, min, max, mid)
+}
+unsafe extern "C" fn take_fx_get_param_ex(t: *mut MediaItem_Take, fx: c_int, p: c_int, min: *mut f64, max: *mut f64, mid: *mut f64) -> f64 {
+    fx_param_ex(t as u64, fx, p, min, max, mid)
+}
+
+// ----- sends -----
+
+fn receives(s: &State, track: usize) -> Vec<(usize, usize)> {
+    s.tracks
+        .iter()
+        .enumerate()
+        .flat_map(|(t, tr)| tr.sends.iter().enumerate().filter(move |(_, send)| send.dest == track).map(move |(i, _)| (t, i)))
+        .collect()
+}
+
+unsafe extern "C" fn get_track_num_sends(track: *mut MediaTrack, category: c_int) -> c_int {
+    counted(|s| {
+        let Some(t) = track_of(s, track as u64) else { return 0 };
+        let index = unpack(track as u64).1;
+        (match category {
+            0 => t.sends.len(),
+            c if c < 0 => {
+                if index == MASTER {
+                    0
+                } else {
+                    receives(s, index as usize).len()
+                }
+            }
+            _ => t.hw_outs.len(),
+        }) as c_int
+    })
+}
+fn send_of(s: &State, track: u64, category: c_int, index: c_int) -> Option<&FakeSend> {
+    let t = track_of(s, track)?;
+    let own = unpack(track).1;
+    match category {
+        0 => t.sends.get(index as usize),
+        c if c < 0 && own != MASTER => {
+            let (src, n) = *receives(s, own as usize).get(index as usize)?;
+            s.tracks.get(src)?.sends.get(n)
+        }
+        c if c > 0 => t.hw_outs.get(index as usize),
+        _ => None,
+    }
+}
+unsafe extern "C" fn get_track_send_info_value(track: *mut MediaTrack, category: c_int, index: c_int, parm: *const c_char) -> f64 {
+    let parm = name_of(parm);
+    counted(|s| {
+        let Some(send) = send_of(s, track as u64, category, index) else { return 0.0 };
+        match parm.as_str() {
+            "D_VOL" => send.volume,
+            "D_PAN" => send.pan,
+            "B_MUTE" => send.mute as i32 as f64,
+            "I_SENDMODE" => send.mode as f64,
+            "I_SRCCHAN" => send.src_chan as f64,
+            "I_DSTCHAN" => send.dst_chan as f64,
+            _ => 0.0,
+        }
+    })
+}
+unsafe extern "C" fn get_set_track_send_info(
+    track: *mut MediaTrack,
+    category: c_int,
+    index: c_int,
+    parm: *const c_char,
+    set: *mut c_void,
+) -> *mut c_void {
+    assert!(set.is_null(), "the fake only reads");
+    let parm = name_of(parm);
+    counted(|s| {
+        let own = unpack(track as u64).1;
+        match (parm.as_str(), category) {
+            ("P_DESTTRACK", 0) => send_of(s, track as u64, 0, index).map_or(ptr::null_mut(), |send| track_ptr(send.dest).cast()),
+            ("P_SRCTRACK", c) if c < 0 && own != MASTER => {
+                receives(s, own as usize).get(index as usize).map_or(ptr::null_mut(), |&(src, _)| track_ptr(src).cast())
+            }
+            _ => ptr::null_mut(),
+        }
+    })
+}
+
+// ----- envelopes -----
+
+unsafe extern "C" fn count_track_envelopes(track: *mut MediaTrack) -> c_int {
+    counted(|s| track_of(s, track as u64).map_or(0, |t| t.envelopes.len() as c_int))
+}
+unsafe extern "C" fn get_track_envelope(track: *mut MediaTrack, index: c_int) -> *mut TrackEnvelope {
+    counted(|s| match track_of(s, track as u64) {
+        Some(t) if index >= 0 && (index as usize) < t.envelopes.len() => {
+            pack(ENVELOPE, unpack(track as u64).1, index as u64, 0) as *mut TrackEnvelope
+        }
+        _ => ptr::null_mut(),
+    })
+}
+unsafe extern "C" fn get_track_envelope_by_chunk_name(track: *mut MediaTrack, name: *const c_char) -> *mut TrackEnvelope {
+    let name = name_of(name);
+    counted(|s| {
+        let found = track_of(s, track as u64).and_then(|t| t.envelopes.iter().position(|e| e.chunk.as_deref() == Some(name.as_str())));
+        found.map_or(ptr::null_mut(), |n| pack(ENVELOPE, unpack(track as u64).1, n as u64, 0) as *mut TrackEnvelope)
+    })
+}
+unsafe extern "C" fn get_fx_envelope(track: *mut MediaTrack, fx: c_int, param: c_int, create: bool) -> *mut TrackEnvelope {
+    assert!(!create, "the fake only reads");
+    counted(|s| {
+        let Some(t) = track_of(s, track as u64) else { return ptr::null_mut() };
+        let Some(guid) = fx_of(s, track as u64, fx).map(|f| f.guid.clone()) else { return ptr::null_mut() };
+        let found = t.envelopes.iter().position(|e| e.fx_param.as_ref() == Some(&(guid.clone(), param)));
+        found.map_or(ptr::null_mut(), |n| pack(ENVELOPE, unpack(track as u64).1, n as u64, 0) as *mut TrackEnvelope)
+    })
+}
+unsafe extern "C" fn count_take_envelopes(take: *mut MediaItem_Take) -> c_int {
+    counted(|s| take_of(s, take as u64).map_or(0, |t| t.envelopes.len() as c_int))
+}
+unsafe extern "C" fn get_take_envelope(take: *mut MediaItem_Take, index: c_int) -> *mut TrackEnvelope {
+    counted(|s| match take_of(s, take as u64) {
+        Some(t) if index >= 0 && (index as usize) < t.envelopes.len() => {
+            let (_, a, b, c) = unpack(take as u64);
+            pack(TAKE_ENVELOPE, a, b, c << 10 | index as u64) as *mut TrackEnvelope
+        }
+        _ => ptr::null_mut(),
+    })
+}
+unsafe extern "C" fn get_envelope_name(envelope: *mut TrackEnvelope, buf: *mut c_char, size: c_int) -> bool {
+    counted(|s| envelope_of(s, envelope as u64).map(|e| write(buf, size, &e.name)).is_some())
+}
+unsafe extern "C" fn count_envelope_points(envelope: *mut TrackEnvelope) -> c_int {
+    counted(|s| envelope_of(s, envelope as u64).map_or(0, |e| e.points))
+}
+unsafe extern "C" fn get_set_envelope_info_string(envelope: *mut TrackEnvelope, parm: *const c_char, buf: *mut c_char, set: bool) -> bool {
+    assert!(!set, "the fake only reads");
+    let parm = name_of(parm);
+    counted(|s| {
+        let Some(e) = envelope_of(s, envelope as u64) else { return false };
+        let flag = |on: bool| if on { "1" } else { "0" };
+        match parm.as_str() {
+            "ACTIVE" => write(buf, 4096, "1"),
+            "ARM" => write(buf, 4096, flag(e.armed)),
+            "VISIBLE" => write(buf, 4096, flag(e.visible)),
+            _ => return false,
+        }
+        true
+    })
+}
+
+// ----- MIDI -----
+
+unsafe extern "C" fn midi_count_evts(take: *mut MediaItem_Take, notes: *mut c_int, ccs: *mut c_int, texts: *mut c_int) -> c_int {
+    counted(|s| match take_of(s, take as u64) {
+        Some(t) if t.source.as_deref() == Some("MIDI") => {
+            unsafe {
+                *notes = t.notes.len() as c_int;
+                *ccs = t.ccs.len() as c_int;
+                *texts = 0;
+            }
+            (t.notes.len() + t.ccs.len()) as c_int
+        }
+        _ => 0,
+    })
+}
+unsafe extern "C" fn midi_get_note(
+    take: *mut MediaItem_Take,
+    index: c_int,
+    selected: *mut bool,
+    muted: *mut bool,
+    start: *mut f64,
+    end: *mut f64,
+    channel: *mut c_int,
+    pitch: *mut c_int,
+    velocity: *mut c_int,
+) -> bool {
+    counted(|s| match take_of(s, take as u64).and_then(|t| t.notes.get(index as usize)) {
+        Some(n) => {
+            unsafe {
+                *selected = n.selected;
+                *muted = false;
+                *start = n.start_ppq;
+                *end = n.end_ppq;
+                *channel = n.channel;
+                *pitch = n.pitch;
+                *velocity = n.velocity;
+            }
+            true
+        }
+        None => false,
+    })
+}
+unsafe extern "C" fn midi_get_cc(
+    take: *mut MediaItem_Take,
+    index: c_int,
+    selected: *mut bool,
+    muted: *mut bool,
+    ppq: *mut f64,
+    kind: *mut c_int,
+    channel: *mut c_int,
+    data1: *mut c_int,
+    data2: *mut c_int,
+) -> bool {
+    counted(|s| match take_of(s, take as u64).and_then(|t| t.ccs.get(index as usize)) {
+        Some(c) => {
+            unsafe {
+                *selected = false;
+                *muted = false;
+                *ppq = c.ppq;
+                *kind = c.kind;
+                *channel = c.channel;
+                *data1 = c.data1;
+                *data2 = c.data2;
+            }
+            true
+        }
+        None => false,
+    })
+}
+/// 960 ticks to the quarter note; the take starts where its item does.
+unsafe extern "C" fn midi_get_proj_qn_from_ppq_pos(take: *mut MediaItem_Take, ppq: f64) -> f64 {
+    counted(|s| {
+        let (_, t, i, _) = unpack(take as u64);
+        let position = s.tracks.get(t as usize).and_then(|t| t.items.get(i as usize)).map_or(0.0, |i| i.position);
+        position * s.bpm / 60.0 + ppq / 960.0
+    })
+}
+
+unsafe extern "C" fn midi_get_ppq_pos_from_proj_qn(take: *mut MediaItem_Take, qn: f64) -> f64 {
+    counted(|s| {
+        let (_, t, i, _) = unpack(take as u64);
+        let position = s.tracks.get(t as usize).and_then(|t| t.items.get(i as usize)).map_or(0.0, |i| i.position);
+        (qn - position * s.bpm / 60.0) * 960.0
+    })
+}
+
+/// The fake table: only the functions above resolve.
+pub fn api() -> Api {
+    Api::load(lookup)
+}
+
+fn lookup(name: &CStr) -> *mut c_void {
+    macro_rules! table {
+        ($($name:literal => $f:expr),* $(,)?) => {
+            match name.to_bytes() {
+                $($name => $f as *mut c_void,)*
+                _ => ptr::null_mut(),
+            }
+        };
+    }
+    table! {
+        b"GetAppVersion" => get_app_version as unsafe extern "C" fn() -> *const c_char,
+        b"GetResourcePath" => get_resource_path as unsafe extern "C" fn() -> *const c_char,
+        b"EnumProjects" => enum_projects as unsafe extern "C" fn(c_int, *mut c_char, c_int) -> *mut ReaProject,
+        b"GetProjectName" => get_project_name as unsafe extern "C" fn(*mut ReaProject, *mut c_char, c_int),
+        b"GetCurrentProjectInLoadSave" => get_current_project_in_load_save as unsafe extern "C" fn() -> *mut ReaProject,
+        b"GetPlayStateEx" => get_play_state_ex as unsafe extern "C" fn(*mut ReaProject) -> c_int,
+        b"Master_GetTempo" => master_get_tempo as unsafe extern "C" fn() -> f64,
+        b"GetProjectStateChangeCount" => get_project_state_change_count as unsafe extern "C" fn(*mut ReaProject) -> c_int,
+        b"GetProjectLength" => get_project_length as unsafe extern "C" fn(*mut ReaProject) -> f64,
+        b"GetCursorPositionEx" => get_cursor_position_ex as unsafe extern "C" fn(*mut ReaProject) -> f64,
+        b"GetPlayPosition2Ex" => get_play_position2_ex as unsafe extern "C" fn(*mut ReaProject) -> f64,
+        b"GetSet_LoopTimeRange2" => get_set_loop_time_range2 as unsafe extern "C" fn(*mut ReaProject, bool, bool, *mut f64, *mut f64, bool),
+        b"GetSetRepeatEx" => get_set_repeat_ex as unsafe extern "C" fn(*mut ReaProject, c_int) -> c_int,
+        b"TimeMap_GetTimeSigAtTime" => time_map_get_time_sig_at_time as unsafe extern "C" fn(*mut ReaProject, f64, *mut c_int, *mut c_int, *mut f64),
+        b"TimeMap2_timeToQN" => time_map2_time_to_qn as unsafe extern "C" fn(*mut ReaProject, f64) -> f64,
+        b"TimeMap2_QNToTime" => time_map2_qn_to_time as unsafe extern "C" fn(*mut ReaProject, f64) -> f64,
+        b"TimeMap2_timeToBeats" => time_map2_time_to_beats as unsafe extern "C" fn(*mut ReaProject, f64, *mut c_int, *mut c_int, *mut f64, *mut c_int) -> f64,
+        b"GetSet_ArrangeView2" => get_set_arrange_view2 as unsafe extern "C" fn(*mut ReaProject, bool, c_int, c_int, *mut f64, *mut f64),
+        b"IsProjectDirty" => is_project_dirty as unsafe extern "C" fn(*mut ReaProject) -> c_int,
+        b"Main_SaveProject" => main_save_project as unsafe extern "C" fn(*mut ReaProject, bool),
+        b"Main_OnCommandEx" => main_on_command_ex as unsafe extern "C" fn(c_int, c_int, *mut ReaProject),
+        b"PreventUIRefresh" => prevent_ui_refresh as unsafe extern "C" fn(c_int),
+        b"kbd_getTextFromCmd" => kbd_get_text_from_cmd as unsafe extern "C" fn(c_int, *mut c_void) -> *const c_char,
+        b"NamedCommandLookup" => named_command_lookup as unsafe extern "C" fn(*const c_char) -> c_int,
+        b"GetMainHwnd" => get_main_hwnd as unsafe extern "C" fn() -> *mut c_void,
+        b"ValidatePtr2" => validate_ptr2 as unsafe extern "C" fn(*mut ReaProject, *mut c_void, *const c_char) -> bool,
+        b"CountProjectMarkers" => count_project_markers as unsafe extern "C" fn(*mut ReaProject, *mut c_int, *mut c_int) -> c_int,
+        b"EnumProjectMarkers3" => enum_project_markers3 as unsafe extern "C" fn(*mut ReaProject, c_int, *mut bool, *mut f64, *mut f64, *mut *const c_char, *mut c_int, *mut c_int) -> c_int,
+        b"CountTempoTimeSigMarkers" => count_tempo_time_sig_markers as unsafe extern "C" fn(*mut ReaProject) -> c_int,
+        b"GetTempoTimeSigMarker" => get_tempo_time_sig_marker as unsafe extern "C" fn(*mut ReaProject, c_int, *mut f64, *mut c_int, *mut f64, *mut f64, *mut c_int, *mut c_int, *mut bool) -> bool,
+        b"CountTracks" => count_tracks as unsafe extern "C" fn(*mut ReaProject) -> c_int,
+        b"GetTrack" => get_track as unsafe extern "C" fn(*mut ReaProject, c_int) -> *mut MediaTrack,
+        b"GetMasterTrack" => get_master_track as unsafe extern "C" fn(*mut ReaProject) -> *mut MediaTrack,
+        b"CountSelectedTracks2" => count_selected_tracks2 as unsafe extern "C" fn(*mut ReaProject, bool) -> c_int,
+        b"GetSelectedTrack2" => get_selected_track2 as unsafe extern "C" fn(*mut ReaProject, c_int, bool) -> *mut MediaTrack,
+        b"GetLastTouchedTrack" => get_last_touched_track as unsafe extern "C" fn() -> *mut MediaTrack,
+        b"GetMediaTrackInfo_Value" => get_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char) -> f64,
+        b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
+        b"GetTrackName" => get_track_name as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int) -> bool,
+        b"GetProjExtState" => get_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *mut c_char, c_int) -> c_int,
+        b"TrackFX_GetInstrument" => track_fx_get_instrument as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
+        b"GetTrackDepth" => get_track_depth as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
+        b"GetTrackColor" => get_track_color as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
+        b"ColorFromNative" => color_from_native as unsafe extern "C" fn(c_int, *mut c_int, *mut c_int, *mut c_int),
+        b"CountTrackMediaItems" => count_track_media_items as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
+        b"GetTrackMediaItem" => get_track_media_item as unsafe extern "C" fn(*mut MediaTrack, c_int) -> *mut MediaItem,
+        b"GetMediaItemTrack" => get_media_item_track as unsafe extern "C" fn(*mut MediaItem) -> *mut MediaTrack,
+        b"GetMediaItemInfo_Value" => get_media_item_info_value as unsafe extern "C" fn(*mut MediaItem, *const c_char) -> f64,
+        b"GetSetMediaItemInfo_String" => get_set_media_item_info_string as unsafe extern "C" fn(*mut MediaItem, *const c_char, *mut c_char, bool) -> bool,
+        b"CountTakes" => count_takes as unsafe extern "C" fn(*mut MediaItem) -> c_int,
+        b"GetMediaItemTake" => get_media_item_take as unsafe extern "C" fn(*mut MediaItem, c_int) -> *mut MediaItem_Take,
+        b"GetActiveTake" => get_active_take as unsafe extern "C" fn(*mut MediaItem) -> *mut MediaItem_Take,
+        b"GetMediaItemTake_Item" => get_media_item_take_item as unsafe extern "C" fn(*mut MediaItem_Take) -> *mut MediaItem,
+        b"GetSetMediaItemTakeInfo_String" => get_set_media_item_take_info_string as unsafe extern "C" fn(*mut MediaItem_Take, *const c_char, *mut c_char, bool) -> bool,
+        b"GetTakeName" => get_take_name as unsafe extern "C" fn(*mut MediaItem_Take) -> *const c_char,
+        b"GetMediaItemTakeInfo_Value" => get_media_item_take_info_value as unsafe extern "C" fn(*mut MediaItem_Take, *const c_char) -> f64,
+        b"GetMediaItemTake_Source" => get_media_item_take_source as unsafe extern "C" fn(*mut MediaItem_Take) -> *mut api::PCM_source,
+        b"GetMediaSourceType" => get_media_source_type as unsafe extern "C" fn(*mut api::PCM_source, *mut c_char, c_int),
+        b"stringToGuid" => string_to_guid as unsafe extern "C" fn(*const c_char, *mut api::GUID),
+        b"guidToString" => guid_to_string as unsafe extern "C" fn(*const api::GUID, *mut c_char),
+        b"GetMediaItemTakeByGUID" => get_media_item_take_by_guid as unsafe extern "C" fn(*mut ReaProject, *const api::GUID) -> *mut MediaItem_Take,
+        b"CountSelectedMediaItems" => count_selected_media_items as unsafe extern "C" fn(*mut ReaProject) -> c_int,
+        b"GetSelectedMediaItem" => get_selected_media_item as unsafe extern "C" fn(*mut ReaProject, c_int) -> *mut MediaItem,
+        b"GetSelectedEnvelope" => get_selected_envelope as unsafe extern "C" fn(*mut ReaProject) -> *mut TrackEnvelope,
+        b"GetCursorContext2" => get_cursor_context2 as unsafe extern "C" fn(bool) -> c_int,
+        b"MIDIEditor_GetActive" => midi_editor_get_active as unsafe extern "C" fn() -> *mut c_void,
+        b"MIDIEditor_GetTake" => midi_editor_get_take as unsafe extern "C" fn(*mut c_void) -> *mut MediaItem_Take,
+        b"GetTouchedOrFocusedFX" => get_touched_or_focused_fx as unsafe extern "C" fn(c_int, *mut c_int, *mut c_int, *mut c_int, *mut c_int, *mut c_int) -> bool,
+        b"TrackFX_GetCount" => track_fx_get_count as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
+        b"TakeFX_GetCount" => take_fx_get_count as unsafe extern "C" fn(*mut MediaItem_Take) -> c_int,
+        b"TrackFX_GetRecCount" => track_fx_get_rec_count as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
+        b"TrackFX_GetFXGUID" => track_fx_get_fxguid as unsafe extern "C" fn(*mut MediaTrack, c_int) -> *mut api::GUID,
+        b"TakeFX_GetFXGUID" => take_fx_get_fxguid as unsafe extern "C" fn(*mut MediaItem_Take, c_int) -> *mut api::GUID,
+        b"TrackFX_GetFXName" => track_fx_get_fx_name as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut c_char, c_int) -> bool,
+        b"TakeFX_GetFXName" => take_fx_get_fx_name as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut c_char, c_int) -> bool,
+        b"TrackFX_GetEnabled" => track_fx_get_enabled as unsafe extern "C" fn(*mut MediaTrack, c_int) -> bool,
+        b"TakeFX_GetEnabled" => take_fx_get_enabled as unsafe extern "C" fn(*mut MediaItem_Take, c_int) -> bool,
+        b"TrackFX_GetOffline" => track_fx_get_offline as unsafe extern "C" fn(*mut MediaTrack, c_int) -> bool,
+        b"TakeFX_GetOffline" => take_fx_get_offline as unsafe extern "C" fn(*mut MediaItem_Take, c_int) -> bool,
+        b"TrackFX_GetPreset" => track_fx_get_preset as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut c_char, c_int) -> bool,
+        b"TakeFX_GetPreset" => take_fx_get_preset as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut c_char, c_int) -> bool,
+        b"TrackFX_GetNumParams" => track_fx_get_num_params as unsafe extern "C" fn(*mut MediaTrack, c_int) -> c_int,
+        b"TakeFX_GetNumParams" => take_fx_get_num_params as unsafe extern "C" fn(*mut MediaItem_Take, c_int) -> c_int,
+        b"TrackFX_GetNamedConfigParm" => track_fx_get_named_config_parm as unsafe extern "C" fn(*mut MediaTrack, c_int, *const c_char, *mut c_char, c_int) -> bool,
+        b"TakeFX_GetNamedConfigParm" => take_fx_get_named_config_parm as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *const c_char, *mut c_char, c_int) -> bool,
+        b"TrackFX_GetParamName" => track_fx_get_param_name as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *mut c_char, c_int) -> bool,
+        b"TakeFX_GetParamName" => take_fx_get_param_name as unsafe extern "C" fn(*mut MediaItem_Take, c_int, c_int, *mut c_char, c_int) -> bool,
+        b"TrackFX_GetParamNormalized" => track_fx_get_param_normalized as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int) -> f64,
+        b"TakeFX_GetParamNormalized" => take_fx_get_param_normalized as unsafe extern "C" fn(*mut MediaItem_Take, c_int, c_int) -> f64,
+        b"TrackFX_GetFormattedParamValue" => track_fx_get_formatted_param_value as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *mut c_char, c_int) -> bool,
+        b"TakeFX_GetFormattedParamValue" => take_fx_get_formatted_param_value as unsafe extern "C" fn(*mut MediaItem_Take, c_int, c_int, *mut c_char, c_int) -> bool,
+        b"TrackFX_GetParamEx" => track_fx_get_param_ex as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *mut f64, *mut f64, *mut f64) -> f64,
+        b"TakeFX_GetParamEx" => take_fx_get_param_ex as unsafe extern "C" fn(*mut MediaItem_Take, c_int, c_int, *mut f64, *mut f64, *mut f64) -> f64,
+        b"GetTrackNumSends" => get_track_num_sends as unsafe extern "C" fn(*mut MediaTrack, c_int) -> c_int,
+        b"GetTrackSendInfo_Value" => get_track_send_info_value as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *const c_char) -> f64,
+        b"GetSetTrackSendInfo" => get_set_track_send_info as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *const c_char, *mut c_void) -> *mut c_void,
+        b"CountTrackEnvelopes" => count_track_envelopes as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
+        b"GetTrackEnvelope" => get_track_envelope as unsafe extern "C" fn(*mut MediaTrack, c_int) -> *mut TrackEnvelope,
+        b"GetTrackEnvelopeByChunkName" => get_track_envelope_by_chunk_name as unsafe extern "C" fn(*mut MediaTrack, *const c_char) -> *mut TrackEnvelope,
+        b"GetFXEnvelope" => get_fx_envelope as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, bool) -> *mut TrackEnvelope,
+        b"CountTakeEnvelopes" => count_take_envelopes as unsafe extern "C" fn(*mut MediaItem_Take) -> c_int,
+        b"GetTakeEnvelope" => get_take_envelope as unsafe extern "C" fn(*mut MediaItem_Take, c_int) -> *mut TrackEnvelope,
+        b"GetEnvelopeName" => get_envelope_name as unsafe extern "C" fn(*mut TrackEnvelope, *mut c_char, c_int) -> bool,
+        b"CountEnvelopePoints" => count_envelope_points as unsafe extern "C" fn(*mut TrackEnvelope) -> c_int,
+        b"GetSetEnvelopeInfo_String" => get_set_envelope_info_string as unsafe extern "C" fn(*mut TrackEnvelope, *const c_char, *mut c_char, bool) -> bool,
+        b"MIDI_CountEvts" => midi_count_evts as unsafe extern "C" fn(*mut MediaItem_Take, *mut c_int, *mut c_int, *mut c_int) -> c_int,
+        b"MIDI_GetNote" => midi_get_note as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut bool, *mut bool, *mut f64, *mut f64, *mut c_int, *mut c_int, *mut c_int) -> bool,
+        b"MIDI_GetCC" => midi_get_cc as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut bool, *mut bool, *mut f64, *mut c_int, *mut c_int, *mut c_int, *mut c_int) -> bool,
+        b"MIDI_GetPPQPosFromProjQN" => midi_get_ppq_pos_from_proj_qn as unsafe extern "C" fn(*mut MediaItem_Take, f64) -> f64,
+        b"MIDI_GetProjQNFromPPQPos" => midi_get_proj_qn_from_ppq_pos as unsafe extern "C" fn(*mut MediaItem_Take, f64) -> f64,
+    }
+}
+
+/// The same table as REAPER's GetFunc, for the entry point's `reaper_plugin_info_t`.
+///
+/// # Safety
+/// `name` is a NUL-terminated string.
+pub unsafe extern "C" fn get_func(name: *const c_char) -> *mut c_void {
+    lookup(unsafe { CStr::from_ptr(name) })
+}
+
+/// A typical lab state: an unsaved project with two tracks.
+pub fn reset() {
+    with(|s| {
+        *s = State {
+            version: "7.82/macOS-arm64".into(),
+            resource: "/lab/REAPER".into(),
+            project: Some((String::new(), String::new())),
+            tracks: vec![FakeTrack::new("{AAAA}", "Drums"), FakeTrack::new("{BBBB}", "Bass")],
+            bpm: 120.0,
+            ..State::default()
+        }
+    });
+}
+
+/// A colour as REAPER stores one (the OS's order, set flag): `(r, g, b)`.
+pub fn native_color(r: i32, g: i32, b: i32) -> i32 {
+    r | g << 8 | b << 16 | 0x100_0000
+}
+
+/// A small project with something of everything, for the reads' tests:
+///
+/// - Drums: a folder, with a ReaEQ, a container (ReaComp, and a container with a ReaDelay) and a volume envelope;
+///   it sends to Reverb.
+/// - Kick, Snare: Drums' children (Snare closes the folder). Kick has two audio items; Snare a MIDI item with notes.
+/// - Reverb: a track with ReaVerb that receives from Drums, and a hardware output.
+pub fn lab_project() {
+    reset();
+    with(|s| {
+        s.project = Some(("/lab/Projects/Song.rpp".into(), "Song.rpp".into()));
+        s.length = 64.0;
+        s.state_count = 11;
+        let mut eq = FakeFx::new("{FX-EQ}", "VST3: ReaEQ (Cockos)");
+        eq.params = vec![
+            FakeParam::new("Band 1 Freq", 0.25, "250 Hz"),
+            FakeParam::new("Band 1 Gain", 0.5, "0.0 dB"),
+            FakeParam::new("Wet", 1.0, "100 %"),
+        ];
+        eq.preset = "Warm".into();
+        let comp = FakeFx::new("{FX-COMP}", "VST: ReaComp (Cockos)");
+        let delay = FakeFx::new("{FX-DLY}", "VST: ReaDelay (Cockos)");
+        let inner = FakeFx::container("{FX-C2}", vec![delay]);
+        let mut outer = FakeFx::container("{FX-C}", vec![comp, inner]);
+        outer.parallel = 0;
+        let mut drums = FakeTrack::new("{AAAA}", "Drums");
+        drums.folder = 1;
+        drums.color = native_color(255, 0, 0);
+        drums.volume = 0.5;
+        drums.pan = -0.25;
+        drums.fx = vec![eq, outer];
+        drums.sends = vec![FakeSend::to(3)];
+        drums.envelopes = vec![FakeEnvelope::own("Volume", "<VOLENV2", 4), FakeEnvelope::for_param("ReaEQ: Band 1 Gain", "{FX-EQ}", 1, 2)];
+        let mut kick = FakeTrack::new("{BBBB}", "Kick");
+        kick.items = vec![
+            FakeItem::new("{ITEM-K1}", 0.0, 2.0, vec![FakeTake::wave("{TAKE-K1}", "kick.wav")]),
+            FakeItem::new("{ITEM-K2}", 2.0, 2.0, vec![FakeTake::wave("{TAKE-K2}", "kick.wav")]),
+        ];
+        let mut snare = FakeTrack::new("{CCCC}", "Snare");
+        snare.folder = -1;
+        let mut take = FakeTake::midi("{TAKE-S1}", "snare.mid");
+        take.notes = vec![
+            FakeNote { start_ppq: 0.0, end_ppq: 480.0, channel: 0, pitch: 38, velocity: 100, selected: false },
+            FakeNote { start_ppq: 960.0, end_ppq: 1440.0, channel: 9, pitch: 40, velocity: 64, selected: true },
+        ];
+        take.ccs = vec![
+            FakeCc { ppq: 0.0, kind: 0xB0, channel: 0, data1: 7, data2: 100 },
+            FakeCc { ppq: 480.0, kind: 0xB0, channel: 0, data1: 7, data2: 64 },
+        ];
+        snare.items = vec![FakeItem::new("{ITEM-S1}", 8.0, 4.0, vec![take])];
+        let mut reverb = FakeTrack::new("{DDDD}", "Reverb");
+        reverb.fx = vec![FakeFx::new("{FX-VERB}", "VST: ReaVerb (Cockos)")];
+        reverb.hw_outs = vec![FakeSend { dst_chan: 2, ..FakeSend::to(0) }];
+        s.tracks = vec![drums, kick, snare, reverb];
+        s.markers = vec![
+            FakeMarker { is_region: false, start: 4.0, end: 4.0, name: "Drop".into(), number: 1, color: 0 },
+            FakeMarker { is_region: true, start: 8.0, end: 16.0, name: "Verse".into(), number: 1, color: native_color(0, 255, 0) },
+        ];
+    });
+}

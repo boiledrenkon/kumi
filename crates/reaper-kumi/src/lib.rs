@@ -7,9 +7,13 @@
 pub mod api;
 pub mod csurf;
 pub mod extension;
+pub mod focus;
 pub mod log;
 pub mod queue;
+pub mod read;
 pub mod reaper;
+pub mod refs;
+pub mod rows;
 pub mod server;
 
 use std::cell::{Cell, RefCell};
