@@ -714,22 +714,23 @@ mod tests {
             let mut closed = false;
             for step in case["steps"].as_array().unwrap() {
                 if let Some(hex) = step["inHex"].as_str() {
+                    // Bytes meant for after the 3 s deadline: the server's own timer (a poll every 200 ms) may refuse and
+                    // close before they would land, and writing to a closed socket resets the connection, which Windows
+                    // answers by dropping the refusal still unread. Those bytes are not sent; the replay waits for the
+                    // refusal instead. The byte that triggers it is covered by daw-bridge's own replay of these vectors.
+                    let mut send = true;
                     if let Some(at) = step["atMs"].as_u64() {
-                        // Real sockets can't land on a millisecond (Windows' timers are 15 ms apart): bytes meant for
-                        // either side of the 3 s deadline are sent well to either side of it. The exact boundary is
-                        // checked by daw-bridge's own replay of these vectors.
                         let limit = wire::HANDSHAKE_TIMEOUT_MS;
-                        let at = if at >= limit {
-                            at + 150
-                        } else if at + 150 > limit {
-                            limit - 150
-                        } else {
-                            at
-                        };
+                        send = at < limit;
+                        // Real sockets can't land on a millisecond (Windows' timers are 15 ms apart): bytes meant for
+                        // just before the deadline go well before it.
+                        let at = if at + 150 > limit { limit.saturating_sub(150).min(at) } else { at };
                         thread::sleep(Duration::from_millis(at).saturating_sub(accepted.elapsed()));
                     }
-                    // A failed write is fine once the bridge closed; the expectations say what it sent before.
-                    let _ = stream.write_all(&hex::decode(hex).unwrap());
+                    if send {
+                        // A failed write is fine once the bridge closed; the expectations say what it sent before.
+                        let _ = stream.write_all(&hex::decode(hex).unwrap());
+                    }
                     thread::sleep(Duration::from_millis(20));
                 } else {
                     let tick = Duration::from_millis(step["tickMs"].as_u64().unwrap());
