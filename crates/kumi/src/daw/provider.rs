@@ -18,7 +18,9 @@ use std::{
 };
 
 use super::ableton::AbletonFactory;
+use crate::doctor::{Check, DoctorIo, InstallationIo};
 use crate::tui::app::DawSetup;
+use kumi_runtime::RuntimeError;
 
 /// Makes each registered DAW's integration from its options: the app's own, or a test's stand-in.
 #[derive(Clone)]
@@ -136,6 +138,13 @@ pub trait DawProvider {
         given: bool,
         controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
     ) -> Rc<dyn DawSetup>;
+    /// The DAW's part of `kumi doctor`: its bridge, and whether Kumi reaches the DAW through it (`node` is the doctor's
+    /// check of Kumi itself).
+    fn doctor_checks<'a>(&'a self, io: &'a DoctorIo, node: &'a Check) -> LocalBoxFuture<'a, Vec<Check>>;
+    /// What the DAW needs from this computer, for the doctor's Installation section.
+    fn installation_checks<'a>(&'a self, env: &'a Env, io: &'a InstallationIo, platform: &'a str) -> LocalBoxFuture<'a, Vec<Check>>;
+    /// What the DAW needs beyond its bridge, later in the doctor (Live: Kumi's hands in its menus).
+    fn extra_checks<'a>(&'a self, io: &'a DoctorIo) -> LocalBoxFuture<'a, Result<Vec<Check>, RuntimeError>>;
     /// Chatting without the DAW, in its words.
     fn without_daw(&self, on_connection: Rc<dyn Fn(ConnectionState)>) -> Rc<dyn Integration>;
 }

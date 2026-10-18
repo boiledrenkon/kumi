@@ -7,7 +7,7 @@ use super::{
     willington::Willington,
 };
 use crate::daw::provider::{BridgeState, DawFactory, DawProvider, DawSession, EnableStep, WatchWords};
-use crate::doctor::LiveProbe;
+use crate::doctor::{Check, DoctorIo, InstallationIo, LiveProbe};
 use crate::tui::app::DawSetup;
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::abort;
@@ -145,6 +145,15 @@ impl DawProvider for Ableton {
         controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
     ) -> Rc<dyn DawSetup> {
         Rc::new(LiveSide { env: env.clone(), run: bridge_setup::default_run(), bridge, given, controller })
+    }
+    fn doctor_checks<'a>(&'a self, io: &'a DoctorIo, node: &'a Check) -> LocalBoxFuture<'a, Vec<Check>> {
+        super::doctor::bridge_checks(io, node).boxed_local()
+    }
+    fn installation_checks<'a>(&'a self, env: &'a Env, io: &'a InstallationIo, platform: &'a str) -> LocalBoxFuture<'a, Vec<Check>> {
+        super::doctor::installation_checks(env, io, platform).boxed_local()
+    }
+    fn extra_checks<'a>(&'a self, io: &'a DoctorIo) -> LocalBoxFuture<'a, Result<Vec<Check>, RuntimeError>> {
+        super::doctor::extra_checks(io).boxed_local()
     }
     fn without_daw(&self, on_connection: Rc<dyn Fn(ConnectionState)>) -> Rc<dyn Integration> {
         kumi_runtime::integrations::create_inference_only_integration(on_connection)
