@@ -515,6 +515,10 @@ function M.reset(options)
     Track = object("renoise.Track", { TRACK_TYPE_SEQUENCER = 1, TRACK_TYPE_MASTER = 2, TRACK_TYPE_SEND = 3,
       TRACK_TYPE_GROUP = 4, MUTE_STATE_ACTIVE = 1, MUTE_STATE_OFF = 2, MUTE_STATE_MUTED = 3 }),
     Sample = object("renoise.Sample", { LOOP_MODE_OFF = 1, LOOP_MODE_FORWARD = 2, LOOP_MODE_REVERSE = 3, LOOP_MODE_PING_PONG = 4 }),
+    Instrument = object("renoise.Instrument", { LAYER_NOTE_DISABLED = 0, LAYER_NOTE_ON = 1, LAYER_NOTE_OFF = 2,
+      TAB_SAMPLES = 1, TAB_PLUGIN = 2, TAB_EXT_MIDI = 3 }),
+    InstrumentMidiOutputProperties = object("renoise.InstrumentMidiOutputProperties", { TYPE_EXTERNAL = 1, TYPE_LINE_IN_RET = 2,
+      TYPE_INTERNAL = 3 }),
     InstrumentPhrase = object("renoise.InstrumentPhrase", { KEY_TRACKING_NONE = 1, KEY_TRACKING_TRANSPOSE = 2, KEY_TRACKING_OFFSET = 3 }),
     ApplicationWindow = M.window,
   })

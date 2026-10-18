@@ -205,7 +205,7 @@ function M.make_song(options)
   local function new_instrument(spec)
     spec = spec or {}
     local instrument = {
-      name = spec.name or "", samples = {}, phrases = {}, macros = {}, plugin = spec.plugin,
+      name = spec.name or "", samples = {}, phrases = {}, macros = {}, plugin = spec.plugin, tab = spec.tab, midi = spec.midi,
       name_observable = simple_observable(), samples_observable = simple_observable(), phrases_observable = simple_observable(),
     }
     for k = 1, 8 do instrument.macros[k] = { name = "Macro " .. k, value = 0, name_observable = simple_observable(), value_observable = simple_observable() } end
@@ -267,6 +267,14 @@ function M.make_song(options)
       prefx_volume = prefx(t, "volume"), prefx_panning = prefx(t, "panning"),
       prefx_width = level(t, "width", 1, 1), postfx_volume = level(t, "post_volume", 1, 1.4125375747681),
       postfx_panning = level(t, "post_panning", 0.5, 1),
+      column_is_muted = function(_, c)
+        column_observable(t, "muted", c)
+        return (t.muted_columns or {})[c] == true
+      end,
+      column_name = function(_, c)
+        column_observable(t, "name", c)
+        return (t.column_names or {})[c] or ""
+      end,
       column_is_muted_observable = function(_, c) return column_observable(t, "muted", c) end,
       column_name_observable = function(_, c) return column_observable(t, "name", c) end,
       device = function(_, k)
@@ -428,6 +436,13 @@ function M.make_song(options)
     return object("renoise.Instrument", {
       name_observable = instrument.name_observable, samples_observable = instrument.samples_observable,
       phrases_observable = instrument.phrases_observable,
+      active_tab = instrument.tab or 1,
+      midi_output_properties = object("renoise.InstrumentMidiOutputProperties", {
+        device_name = (instrument.midi or {}).device or "", instrument_type = (instrument.midi or {}).type or 1,
+        channel = (instrument.midi or {}).channel or 1, program = (instrument.midi or {}).program or 0,
+        bank = (instrument.midi or {}).bank or 0, transpose = (instrument.midi or {}).transpose or 0,
+        delay = (instrument.midi or {}).delay or 0, duration = (instrument.midi or {}).duration or 0,
+      }),
       plugin_properties = object("renoise.InstrumentPluginProperties", {
         plugin_loaded = instrument.plugin ~= nil,
         plugin_device = instrument.plugin and device(instrument.plugin) or M.NIL,

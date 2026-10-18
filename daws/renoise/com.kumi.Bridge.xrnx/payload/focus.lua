@@ -210,6 +210,7 @@ local function fit(result, entries, from, to, cut)
       shown[t] = {
         ref = entry.ref, name = entry.name, color = entry.color, noteColumns = entry.noteColumns,
         effectColumns = entry.effectColumns, lines = array(kept), aliasOf = entry.aliasOf, aliasRef = entry.aliasRef,
+        mutedColumns = entry.mutedColumns,
       }
     end
     result.window = { from = from, to = to }
@@ -247,6 +248,7 @@ local function pattern_body(job, params, epoch)
       noteColumns = shape[t][1], effectColumns = shape[t][2], rows = {},
       aliasOf = alias > 0 and alias or nil, aliasRef = alias > 0 and refs.make(epoch, "pattern", alias) or nil,
     }
+    entries[t].mutedColumns = rows.column_state(track)
     bytes = bytes + 200 + #entries[t].name
   end
   local hidden = params.hidden == true

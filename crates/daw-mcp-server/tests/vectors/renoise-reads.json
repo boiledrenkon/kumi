@@ -483,6 +483,7 @@
           "items": [
             {
               "index": 1,
+              "kind": "sample",
               "macros": [
                 {
                   "name": "Cutoff",
@@ -525,6 +526,7 @@
             },
             {
               "index": 2,
+              "kind": "plugin",
               "macros": [
                 {
                   "name": "Macro 1",
@@ -586,7 +588,10 @@
             {
               "baseNote": 48,
               "index": 1,
+              "layer": "note-on",
               "loop": "off",
+              "mapKeyToPitch": true,
+              "mapVelocityToVolume": true,
               "muteGroup": 0,
               "name": "Sample 1",
               "noteRange": [
@@ -602,7 +607,10 @@
             {
               "baseNote": 48,
               "index": 2,
+              "layer": "note-on",
               "loop": "off",
+              "mapKeyToPitch": true,
+              "mapVelocityToVolume": true,
               "muteGroup": 0,
               "name": "Sample 2",
               "noteRange": [

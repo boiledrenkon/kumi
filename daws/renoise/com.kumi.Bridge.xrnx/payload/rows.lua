@@ -70,6 +70,13 @@ local function loop_name(mode)
   return "off"
 end
 
+local function layer_name(layer)
+  local I = renoise.Instrument
+  if layer == I.LAYER_NOTE_OFF then return "note-off" end
+  if layer == I.LAYER_NOTE_DISABLED then return "disabled" end
+  return "note-on"
+end
+
 local function key_tracking_name(mode)
   local P = renoise.InstrumentPhrase
   if mode == P.KEY_TRACKING_TRANSPOSE then return "transpose" end
@@ -125,6 +132,23 @@ local function song_row(song)
   return row
 end
 
+-- The note columns of a track that are muted (their numbers) and the ones that are named ({"2": "Pad"}); nil for none.
+local function column_state(track)
+  local muted, names
+  for c = 1, track.max_note_columns do
+    if track:column_is_muted(c) then
+      muted = muted or {}
+      muted[#muted + 1] = c
+    end
+    local name = track:column_name(c)
+    if name ~= "" then
+      names = names or {}
+      names[tostring(c)] = name
+    end
+  end
+  return muted and array(muted) or nil, names
+end
+
 local function track_row(song, epoch, i, parents)
   local track = song:track(i)
   local is_master = track.type == renoise.Track.TRACK_TYPE_MASTER
@@ -152,6 +176,7 @@ local function track_row(song, epoch, i, parents)
     row.mute = mute_name(track.mute_state)
     row.solo = track.solo_state
   end
+  row.mutedColumns, row.columnNames = column_state(track)
   return row
 end
 
@@ -193,18 +218,41 @@ local function macros_of(instrument)
   return array(macros)
 end
 
+local function midi_type_name(kind)
+  local P = renoise.InstrumentMidiOutputProperties
+  if kind == P.TYPE_LINE_IN_RET then return "line-in" end
+  if kind == P.TYPE_INTERNAL then return "internal" end
+  return "external"
+end
+
+-- What the instrument plays through: its samples, a plug-in, or a MIDI port (its settings under `midi`).
 local function instrument_row(song, epoch, i)
   local instrument = song:instrument(i)
   local plugin = instrument.plugin_properties
-  return {
+  local out = instrument.midi_output_properties
+  local kind = "sample"
+  if plugin.plugin_loaded then
+    kind = "plugin"
+  elseif instrument.active_tab == renoise.Instrument.TAB_EXT_MIDI then
+    kind = "midi"
+  end
+  local row = {
     ref = refs.make(epoch, "instrument", i),
     index = i,
     name = instrument.name,
+    kind = kind,
     sampleCount = #instrument.samples,
     phraseCount = #instrument.phrases,
     plugin = plugin.plugin_loaded and plugin.plugin_device.name or json.null,
     macros = macros_of(instrument),
   }
+  if kind == "midi" then
+    row.midi = {
+      device = out.device_name, type = midi_type_name(out.instrument_type), channel = out.channel, program = out.program,
+      bank = out.bank, transpose = out.transpose, delay = out.delay, duration = out.duration,
+    }
+  end
+  return row
 end
 
 local function range(pair)
@@ -221,6 +269,9 @@ local function sample_row(song, epoch, i, s)
     baseNote = mapping.base_note,
     noteRange = range(mapping.note_range),
     velocityRange = range(mapping.velocity_range),
+    layer = layer_name(mapping.layer),
+    mapKeyToPitch = mapping.map_key_to_pitch,
+    mapVelocityToVolume = mapping.map_velocity_to_volume,
     loop = loop_name(sample.loop_mode),
     muteGroup = sample.mute_group,
   }
@@ -344,5 +395,6 @@ M.phrase_row = phrase_row
 M.device_row = device_row
 M.param_row = param_row
 M.line_row = line_row
+M.column_state = column_state
 
 return M
