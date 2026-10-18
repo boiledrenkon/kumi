@@ -1,10 +1,12 @@
 //! The rows `read`, `snapshot` and the FOCUS bodies answer with: one JSON object per REAPER object, named in camelCase
 //! (the shapes are in the M2 contract). Times are seconds, positions in MIDI and sends in quarter notes, gains in dB.
 
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 use crate::reaper::{Envelope, Fx, FxOwner, Item, Marker, MidiNote, PlayState, Project, ProjectInfo, Reaper, Take, Track};
-use crate::refs::{self, EnvelopeId, TrackId};
+use crate::refs::{self, EnvelopeId, SendEnd, TrackId};
 
 /// Longest text a row carries from REAPER (a name, a preset): a pasted essay of a track name mustn't fill an answer.
 pub const TEXT_LIMIT: usize = 1024;
@@ -260,14 +262,40 @@ fn channels(reaper: &Reaper, track: Track, category: i32, index: i32) -> Value {
     json!({"src": source, "dst": {"first": destination & 1023, "mono": destination & 1024 != 0}})
 }
 
-/// A send (`category` 0), receive (-1) or hardware output (1) of `track`.
-pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32) -> Value {
+/// What names a send in its ref: the other end, and which of several to the same one (from 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendKey {
+    pub other: SendEnd,
+    pub repeat: u32,
+}
+
+/// The keys of all of a track's sends (`category` 0), receives (-1) or hardware outputs (1), by position.
+pub fn send_keys(reaper: &Reaper, track: Track, category: i32) -> Vec<SendKey> {
+    let mut seen: HashMap<String, u32> = HashMap::new();
+    (0..reaper.send_count(track, category))
+        .map(|index| {
+            let other = match reaper.send_peer(track, category, index) {
+                Some(peer) => SendEnd::Track(track_id(reaper, peer)),
+                None => SendEnd::Hardware(index),
+            };
+            let count = seen.entry(other.text()).or_insert(0);
+            *count += 1;
+            SendKey { other, repeat: *count }
+        })
+        .collect()
+}
+
+/// A send (`category` 0), receive (-1) or hardware output (1) of `track`, with the key `send_keys` gave it.
+pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32, key: &SendKey) -> Value {
     let this = track_id(reaper, track);
     // The other track: where a send goes, where a receive comes from; none for a hardware output.
-    let other = reaper.send_peer(track, category, index).map(|t| refs::track_ref(&track_id(reaper, t)));
+    let other = match &key.other {
+        SendEnd::Track(id) => Some(refs::track_ref(id)),
+        SendEnd::Hardware(_) => None,
+    };
     let mode = reaper.send_value(track, category, index, "I_SENDMODE") as i64;
     json!({
-        "ref": refs::send_ref(&this, category, index),
+        "ref": refs::send_ref(&this, category, &key.other, key.repeat),
         "category": category,
         "direction": match category { c if c < 0 => "receive", 0 => "send", _ => "hardware" },
         "index": index,
@@ -285,7 +313,7 @@ pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32) -> Val
 pub fn marker_row(reaper: &Reaper, proj: Project, marker: &Marker) -> Value {
     let beats = |time: f64| reaper.quarter_notes_at(proj, time).map(seconds);
     let mut row = json!({
-        "ref": if marker.is_region { refs::region_ref(marker.number) } else { refs::marker_ref(marker.number) },
+        "ref": if marker.is_region { refs::region_ref(&marker.guid) } else { refs::marker_ref(&marker.guid) },
         "number": marker.number,
         "name": clip(&marker.name),
         "position": seconds(marker.start),

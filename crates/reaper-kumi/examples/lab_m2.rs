@@ -2,7 +2,7 @@
 //! big project (the lab's 200 tracks and 2,000 items), how fast the selection is followed, a modal dialog (S5) and a new
 //! project in the same tab (S10).
 //!
-//! cargo run --release -p reaper-kumi --example lab_m2 -- <kumi home> perf|select|s5 [seconds]|s10 new|s10 open <path>|watch [seconds]
+//! cargo run --release -p reaper-kumi --example lab_m2 -- <kumi home> perf|select|s5 [seconds]|s10 new|s10 open <path>|refs|watch [seconds]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -351,6 +351,77 @@ fn s5(client: &mut Client, seconds: f64) {
     }
 }
 
+/// The refs of sends and markers before and after the lab's script removes a send between two and renumbers a marker to
+/// a number another has: each ref that should survive reads back to the same object; the removed one is gone.
+fn refs(client: &mut Client, home: &str) {
+    let m2 = std::path::Path::new(home).parent().unwrap().join("m2");
+    let tracks = read_all(client, "read track", json!({"kind": "track", "limit": 200}));
+    let track = |n: usize| tracks[n]["ref"].as_str().unwrap().to_string();
+    std::fs::write(m2.join("trigger-refs-setup"), "").unwrap();
+    thread::sleep(Duration::from_millis(1500));
+    let describe = |client: &mut Client| {
+        let sends = read_all(client, "  sends of Track 001", json!({"kind": "send", "parent": track(1)}));
+        let markers = read_all(client, "  markers", json!({"kind": "marker"}));
+        let regions = read_all(client, "  regions", json!({"kind": "region"}));
+        (sends, markers, regions)
+    };
+    let (sends, markers, regions) = describe(client);
+    for row in &sends {
+        println!("  send {} dir={} volumeDb={} destRef={}", row["ref"], row["direction"], row["volumeDb"], row["destRef"]);
+    }
+    for row in markers.iter().chain(&regions) {
+        println!("  {} number={} name={}", row["ref"], row["number"], row["name"]);
+    }
+    let before: Vec<(String, Value)> =
+        sends.iter().chain(&markers).chain(&regions).map(|r| (r["ref"].as_str().unwrap().to_string(), r["volumeDb"].clone())).collect();
+    std::fs::write(m2.join("trigger-refs-change"), "").unwrap();
+    thread::sleep(Duration::from_millis(1500));
+    println!("script: {}", std::fs::read_to_string(m2.join("refs-change.log")).unwrap_or_default().trim());
+    for (reference, volume) in &before {
+        let (answer, _, _) = client.ask("read", json!({"ref": reference}), Duration::from_secs(10));
+        match answer {
+            Ok(page) => {
+                let row = &page["items"][0];
+                println!(
+                    "  after: {reference} -> volumeDb {} (was {volume}) number {} name {}",
+                    row["volumeDb"], row["number"], row["name"]
+                );
+            }
+            Err((code, message)) => println!("  after: {reference} -> {code}: {message}"),
+        }
+    }
+    let (sends, _, _) = describe(client);
+    println!("  sends now: {}", sends.iter().map(|r| r["ref"].to_string()).collect::<Vec<_>>().join(" "));
+}
+
+/// A send to another track removed from among sends to one track leaves those sends' refs on their own sends.
+fn sends(client: &mut Client, home: &str) {
+    let m2 = std::path::Path::new(home).parent().unwrap().join("m2");
+    let tracks = read_all(client, "read track", json!({"kind": "track", "limit": 200}));
+    let first = tracks[1]["ref"].as_str().unwrap().to_string();
+    std::fs::write(m2.join("trigger-refs-setup"), "").unwrap();
+    thread::sleep(Duration::from_millis(1500));
+    let list = |client: &mut Client| -> Vec<(String, Value)> {
+        read_all(client, "  sends of Track 001", json!({"kind": "send", "parent": first}))
+            .iter()
+            .map(|r| (r["ref"].to_string(), r["volumeDb"].clone()))
+            .collect()
+    };
+    let before = list(client);
+    for (reference, volume) in &before {
+        println!("  before {reference} {volume} dB");
+    }
+    std::fs::write(m2.join("trigger-remove100"), "").unwrap();
+    thread::sleep(Duration::from_millis(1500));
+    println!("script: {}", std::fs::read_to_string(m2.join("remove100.log")).unwrap_or_default().trim());
+    let after = list(client);
+    for (reference, volume) in &after {
+        println!("  after  {reference} {volume} dB");
+    }
+    let survivors_same = before.iter().filter(|b| after.iter().any(|a| a.0 == b.0)).all(|b| after.iter().any(|a| *a == *b));
+    println!("every ref that is still there reads back to its own send: {survivors_same}; {} -> {} sends", before.len(), after.len());
+}
+
 fn watch(client: &mut Client, seconds: f64) {
     let until = Instant::now() + Duration::from_secs_f64(seconds);
     let mut last = Value::Null;
@@ -378,6 +449,8 @@ fn main() {
         "s10" => s10(&mut client, &home, &extra.clone().unwrap_or_else(|| "new".into()), args.next()),
         "s5" => s5(&mut client, seconds),
         "watch" => watch(&mut client, seconds),
+        "refs" => refs(&mut client, &home),
+        "sends" => sends(&mut client, &home),
         other => panic!("no scenario {other}"),
     }
     if std::env::var("QUIT").is_ok() {

@@ -214,6 +214,7 @@ impl FakeTrack {
 
 #[derive(Clone)]
 pub struct FakeMarker {
+    pub guid: String,
     pub is_region: bool,
     pub start: f64,
     pub end: f64,
@@ -238,8 +239,8 @@ pub struct State {
     pub project: Option<(String, String)>,
     /// Which project object the active tab holds: a tab switch changes it, a new project in the tab doesn't.
     pub project_id: u64,
-    /// Open tabs beyond the active one.
-    pub other_tabs: usize,
+    /// The project objects of the other open tabs (by `project_id`).
+    pub other_tabs: Vec<u64>,
     pub play_bits: i32,
     pub bpm: f64,
     pub time_signature: (i32, i32),
@@ -289,7 +290,7 @@ impl Default for State {
             resource: String::new(),
             project: None,
             project_id: 0,
-            other_tabs: 0,
+            other_tabs: vec![],
             play_bits: 0,
             bpm: 0.0,
             time_signature: (4, 4),
@@ -508,9 +509,9 @@ unsafe extern "C" fn enum_projects(idx: c_int, buf: *mut c_char, size: c_int) ->
                 write(buf, size, path);
                 active
             }
-            (Some((path, _)), n) if n > 0 && (n as usize) <= s.other_tabs => {
+            (Some((path, _)), n) if n > 0 && (n as usize) <= s.other_tabs.len() => {
                 write(buf, size, path);
-                (active as u64 + n as u64) as *mut ReaProject
+                (PROJECT_BASE + s.other_tabs[n as usize - 1] * 16) as *mut ReaProject
             }
             _ => ptr::null_mut(),
         }
@@ -666,43 +667,65 @@ unsafe extern "C" fn validate_ptr2(_proj: *mut ReaProject, handle: *mut c_void, 
 
 // ----- markers and the tempo map -----
 
-unsafe extern "C" fn count_project_markers(_proj: *mut ReaProject, markers: *mut c_int, regions: *mut c_int) -> c_int {
+const PROJECT_MARKER: u64 = 8;
+
+unsafe extern "C" fn get_num_regions_or_markers(_proj: *mut ReaProject) -> c_int {
+    counted(|s| s.markers.len() as c_int)
+}
+unsafe extern "C" fn get_region_or_marker(_proj: *mut ReaProject, index: c_int, guid: *const c_char) -> *mut api::ProjectMarker {
+    let guid = if guid.is_null() { None } else { Some(name_of(guid)) };
     counted(|s| {
-        let regions_n = s.markers.iter().filter(|m| m.is_region).count();
-        unsafe {
-            if !markers.is_null() {
-                *markers = (s.markers.len() - regions_n) as c_int;
+        let found = match (index, guid) {
+            (i, _) if i >= 0 => (i as usize) < s.markers.len(),
+            (_, Some(guid)) => {
+                return s
+                    .markers
+                    .iter()
+                    .position(|m| m.guid == guid)
+                    .map_or(ptr::null_mut(), |i| pack(PROJECT_MARKER, i as u64, 0, 0) as *mut api::ProjectMarker)
             }
-            if !regions.is_null() {
-                *regions = regions_n as c_int;
-            }
+            _ => false,
+        };
+        if found {
+            pack(PROJECT_MARKER, index as u64, 0, 0) as *mut api::ProjectMarker
+        } else {
+            ptr::null_mut()
         }
-        s.markers.len() as c_int
     })
 }
-unsafe extern "C" fn enum_project_markers3(
-    _proj: *mut ReaProject,
-    idx: c_int,
-    is_region: *mut bool,
-    start: *mut f64,
-    end: *mut f64,
-    name: *mut *const c_char,
-    number: *mut c_int,
-    color: *mut c_int,
-) -> c_int {
-    counted(|s| match s.markers.get(idx as usize) {
-        Some(m) => {
-            unsafe {
-                *is_region = m.is_region;
-                *start = m.start;
-                *end = m.end;
-                *name = keep(m.name.clone());
-                *number = m.number;
-                *color = m.color;
-            }
-            idx + 1
+unsafe extern "C" fn get_region_or_marker_info_value(_proj: *mut ReaProject, marker: *mut api::ProjectMarker, parm: *const c_char) -> f64 {
+    let parm = name_of(parm);
+    counted(|s| {
+        let (kind, index, _, _) = unpack(marker as u64);
+        let Some(m) = s.markers.get(index as usize).filter(|_| kind == PROJECT_MARKER) else { return 0.0 };
+        match parm.as_str() {
+            "B_ISREGION" => m.is_region as i32 as f64,
+            "D_STARTPOS" => m.start,
+            "D_ENDPOS" => m.end,
+            "I_NUMBER" => m.number as f64,
+            "I_CUSTOMCOLOR" => m.color as f64,
+            _ => 0.0,
         }
-        None => 0,
+    })
+}
+unsafe extern "C" fn get_set_region_or_marker_info_string(
+    _proj: *mut ReaProject,
+    marker: *mut api::ProjectMarker,
+    parm: *const c_char,
+    buf: *mut c_char,
+    set: bool,
+) -> bool {
+    assert!(!set, "the fake only reads");
+    let parm = name_of(parm);
+    counted(|s| {
+        let (kind, index, _, _) = unpack(marker as u64);
+        let Some(m) = s.markers.get(index as usize).filter(|_| kind == PROJECT_MARKER) else { return false };
+        match parm.as_str() {
+            "GUID" => write(buf, 4096, &m.guid),
+            "P_NAME" => write(buf, 4096, &m.name),
+            _ => return false,
+        }
+        true
     })
 }
 unsafe extern "C" fn count_tempo_time_sig_markers(_proj: *mut ReaProject) -> c_int {
@@ -1469,8 +1492,10 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"NamedCommandLookup" => named_command_lookup as unsafe extern "C" fn(*const c_char) -> c_int,
         b"GetMainHwnd" => get_main_hwnd as unsafe extern "C" fn() -> *mut c_void,
         b"ValidatePtr2" => validate_ptr2 as unsafe extern "C" fn(*mut ReaProject, *mut c_void, *const c_char) -> bool,
-        b"CountProjectMarkers" => count_project_markers as unsafe extern "C" fn(*mut ReaProject, *mut c_int, *mut c_int) -> c_int,
-        b"EnumProjectMarkers3" => enum_project_markers3 as unsafe extern "C" fn(*mut ReaProject, c_int, *mut bool, *mut f64, *mut f64, *mut *const c_char, *mut c_int, *mut c_int) -> c_int,
+        b"GetNumRegionsOrMarkers" => get_num_regions_or_markers as unsafe extern "C" fn(*mut ReaProject) -> c_int,
+        b"GetRegionOrMarker" => get_region_or_marker as unsafe extern "C" fn(*mut ReaProject, c_int, *const c_char) -> *mut api::ProjectMarker,
+        b"GetRegionOrMarkerInfo_Value" => get_region_or_marker_info_value as unsafe extern "C" fn(*mut ReaProject, *mut api::ProjectMarker, *const c_char) -> f64,
+        b"GetSetRegionOrMarkerInfo_String" => get_set_region_or_marker_info_string as unsafe extern "C" fn(*mut ReaProject, *mut api::ProjectMarker, *const c_char, *mut c_char, bool) -> bool,
         b"CountTempoTimeSigMarkers" => count_tempo_time_sig_markers as unsafe extern "C" fn(*mut ReaProject) -> c_int,
         b"GetTempoTimeSigMarker" => get_tempo_time_sig_marker as unsafe extern "C" fn(*mut ReaProject, c_int, *mut f64, *mut c_int, *mut f64, *mut f64, *mut c_int, *mut c_int, *mut bool) -> bool,
         b"CountTracks" => count_tracks as unsafe extern "C" fn(*mut ReaProject) -> c_int,
@@ -1637,8 +1662,16 @@ pub fn lab_project() {
         reverb.hw_outs = vec![FakeSend { dst_chan: 2, ..FakeSend::to(0) }];
         s.tracks = vec![drums, kick, snare, reverb];
         s.markers = vec![
-            FakeMarker { is_region: false, start: 4.0, end: 4.0, name: "Drop".into(), number: 1, color: 0 },
-            FakeMarker { is_region: true, start: 8.0, end: 16.0, name: "Verse".into(), number: 1, color: native_color(0, 255, 0) },
+            FakeMarker { guid: "{MARK-1}".into(), is_region: false, start: 4.0, end: 4.0, name: "Drop".into(), number: 1, color: 0 },
+            FakeMarker {
+                guid: "{REG-1}".into(),
+                is_region: true,
+                start: 8.0,
+                end: 16.0,
+                name: "Verse".into(),
+                number: 1,
+                color: native_color(0, 255, 0),
+            },
         ];
     });
 }

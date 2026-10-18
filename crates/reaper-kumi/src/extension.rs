@@ -462,6 +462,10 @@ impl Extension {
     fn poll_project(&self, settled: bool) {
         let reaper = self.reaper();
         let info = reaper.current_project();
+        if settled {
+            let open: Vec<usize> = reaper.projects().iter().map(|p| p.ptr.addr()).collect();
+            self.reads.keep_tabs(&open);
+        }
         let (switched, replaced) = if settled { self.watch_project(&reaper, info.as_ref()) } else { (false, false) };
         let current = info.as_ref().map(|p| (p.ptr.addr(), ProjectSummary { name: p.name.clone(), path: p.path.clone() }));
         let mut sent = self.sent.borrow_mut();
@@ -845,7 +849,11 @@ mod tests {
         extension.tick(Driver::Timer);
         let after = epoch_and_identity(&extension, &tx);
         assert_ne!(after.0, before.0);
-        assert!(after.1.starts_with(&before.1) && after.1 != before.1, "{before:?} then {after:?}");
+        // The serial goes up; the tab's pointer is not in it.
+        assert_eq!(
+            (before.1.as_str(), after.1.as_str()),
+            (format!("{}:1", std::process::id()).as_str(), format!("{}:2", std::process::id()).as_str())
+        );
         assert_eq!(recorder.take().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["project", "tracks", "selection"]);
         // A ref from the old project is not read against the new one.
         assert_eq!(ask_with(&extension, &tx, "read", json!({"ref": "r:track:{AAAA}"})).unwrap_err().0, "failed");
