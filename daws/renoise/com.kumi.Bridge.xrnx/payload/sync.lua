@@ -14,7 +14,7 @@ local M = {}
 M.__index = M
 
 -- guard(where, fn) wraps a notifier so it never raises. state: a table that outlives the song (the counters).
--- hooks: { structural = function(reason, kind, op, owner), tracks = function(op) }.
+-- hooks: { structural = function(reason, kind, op, owner, group), tracks = function(op) }.
 function M.new(guard, state, hooks)
   return setmetatable({ entries = {}, dirty = {}, last = {}, guard = guard, state = state or {}, hooks = hooks or {}, dead = 0 }, M)
 end
@@ -29,7 +29,32 @@ end
 
 local function add(self, observable, fn)
   observable:add_notifier(fn)
-  self.entries[#self.entries + 1] = { observable = observable, fn = fn }
+  self.entries[#self.entries + 1] = { observable = observable, fn = fn, a = self.owner_a, b = self.owner_b }
+end
+
+-- A group is the watchers of one object (a track, a pattern, a device...). The operation that deletes the object marks its
+-- group dead: Renoise keeps a deleted object readable from Lua, so nothing else tells. `prune` then drops the entries of
+-- dead groups (an entry belongs to up to two: an alias watcher to its pattern and its track) without calling Renoise.
+function M.group()
+  return { dead = false }
+end
+
+-- Runs fn with the watchers it adds belonging to the groups a and b.
+function M:owned(a, b, fn)
+  local before_a, before_b = self.owner_a, self.owner_b
+  self.owner_a, self.owner_b = a, b
+  fn()
+  self.owner_a, self.owner_b = before_a, before_b
+end
+
+-- Drops the watchers of deleted objects from the list (the objects are gone; nothing is asked of Renoise).
+function M:prune()
+  local kept = {}
+  for _, entry in ipairs(self.entries) do
+    if not ((entry.a and entry.a.dead) or (entry.b and entry.b.dead)) then kept[#kept + 1] = entry end
+  end
+  self.entries = kept
+  self.dead = 0
 end
 
 function M:watch(observable, key)
@@ -57,12 +82,12 @@ end
 
 -- Refs shift or vanish when this changes. `kind` names the list; `op` is the list operation, when the observable is a list;
 -- `owner` is the object that holds the list (a track, an instrument), when it has one.
-function M:watch_structural(observable, reason, kind, owner)
+function M:watch_structural(observable, reason, kind, owner, group)
   add(self, observable, self.guard("notifier " .. reason, function(op)
     count(self)
     reshape(self)
     if self.hooks.structural then
-      self.hooks.structural(reason, kind, op and { type = op.type, index = op.index, index2 = op.index2 } or nil, owner)
+      self.hooks.structural(reason, kind, op and { type = op.type, index = op.index, index2 = op.index2 } or nil, owner, group)
     end
   end))
 end
@@ -71,7 +96,7 @@ end
 function M:watch_lines(pattern)
   local fn = self.guard("line notifier", function() count(self) end)
   pattern:add_line_notifier(fn)
-  self.entries[#self.entries + 1] = { remove = function() pattern:remove_line_notifier(fn) end }
+  self.entries[#self.entries + 1] = { remove = function() pattern:remove_line_notifier(fn) end, a = self.owner_a, b = self.owner_b }
 end
 
 -- A change that moves things inside what a read steps through (a pattern's number of lines).
@@ -96,6 +121,7 @@ function M:detach()
   self.dirty = {}
   self.last = {}
   self.dead = 0
+  self.owner_a, self.owner_b = nil, nil
 end
 
 function M:attached()

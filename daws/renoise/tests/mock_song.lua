@@ -351,6 +351,7 @@ function M.make_song(options)
         for _, existing in ipairs(pattern.notifiers) do
           if existing == fn then error("the notifier was already added", 2) end
         end
+        M.notifier_adds = (M.notifier_adds or 0) + 1
         pattern.notifiers[#pattern.notifiers + 1] = fn
       end,
       remove_line_notifier = function(_, fn)
@@ -793,6 +794,12 @@ function ops.insert_phrase(i)
   instrument.phrases[#instrument.phrases + 1] = { name = "Phrase " .. (#instrument.phrases + 1), lines = 16, lpb = 4,
     key_tracking = 1, looping = true, note_columns = 1, effect_columns = 1, data = {} }
   fire(instrument.phrases_observable, { type = "insert", index = #instrument.phrases })
+end
+
+function ops.swap_instruments(a, b)
+  local instruments = M.data.instruments
+  instruments[a], instruments[b] = instruments[b], instruments[a]
+  fire(song_fields().instruments_observable, { type = "swap", index = a, index2 = b })
 end
 
 function ops.insert_instrument(spec)

@@ -86,6 +86,7 @@ function M.observable()
   fields.add_notifier = function(_, a, b)
     local i, fn, obj = find(a, b)
     if i then error("the notifier was already added", 2) end
+    M.notifier_adds = (M.notifier_adds or 0) + 1 -- (how many the code under test added: a cost that doesn't depend on the clock)
     fields.notifiers[#fields.notifiers + 1] = { fn = fn, obj = obj }
   end
   fields.remove_notifier = function(_, a, b)
