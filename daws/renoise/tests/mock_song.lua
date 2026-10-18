@@ -543,20 +543,39 @@ local function track_spec(spec)
   return t
 end
 
+-- The data of every pattern follows its track: a track made at `index` has none, those after it move up by one.
+local function move_pattern_tracks(shift)
+  for _, pattern in ipairs(M.data.patterns) do
+    local moved = {}
+    for t, data in pairs(pattern.tracks) do
+      local to = shift(t)
+      if to then moved[to] = data end
+    end
+    pattern.tracks = moved
+  end
+end
+
 function ops.insert_track(index, spec)
   table.insert(M.data.tracks, index, track_spec(spec))
+  move_pattern_tracks(function(t) return t >= index and t + 1 or t end)
   M.data.recount()
   fire(song_fields().tracks_observable, { type = "insert", index = index })
 end
 
 function ops.remove_track(index)
+  -- a group that held the track has one member fewer
+  for g, t in ipairs(M.data.tracks) do
+    if t.kind == "group" and g > index and index >= g - t.members then t.members = t.members - 1 end
+  end
   table.remove(M.data.tracks, index)
+  move_pattern_tracks(function(t) if t == index then return nil end return t > index and t - 1 or t end)
   M.data.recount()
   fire(song_fields().tracks_observable, { type = "remove", index = index })
 end
 
 function ops.swap_tracks(a, b)
   M.data.tracks[a], M.data.tracks[b] = M.data.tracks[b], M.data.tracks[a]
+  move_pattern_tracks(function(t) if t == a then return b elseif t == b then return a end return t end)
   fire(song_fields().tracks_observable, { type = "swap", index = a, index2 = b })
 end
 
@@ -612,6 +631,29 @@ end
 function ops.insert_instrument(spec)
   M.data.new_instrument(spec)
   fire(song_fields().instruments_observable, { type = "insert", index = #M.data.instruments })
+end
+
+function ops.remove_instrument(i)
+  local instruments = M.data.instruments
+  table.remove(instruments, i)
+  fire(song_fields().instruments_observable, { type = "remove", index = i })
+end
+
+function ops.remove_pattern(p)
+  table.remove(M.data.patterns, p)
+  fire(song_fields().patterns_observable, { type = "remove", index = p })
+end
+
+function ops.remove_sample(i, s)
+  local instrument = M.data.instruments[i]
+  table.remove(instrument.samples, s)
+  fire(instrument.samples_observable, { type = "remove", index = s })
+end
+
+function ops.remove_device(t, d)
+  local track = M.data.tracks[t]
+  table.remove(track.devices, d)
+  fire(track.devices_observable, { type = "remove", index = d })
 end
 
 function ops.rename_instrument(i, name)

@@ -627,12 +627,12 @@ test("bridge: track count changes are events", function()
   local fields = mock.impl(mock.song)
   fields.sequencer_track_count = 3
   fields.send_track_count = 1
-  mock.fire(mock.song.tracks_observable)
-  mock.fire(mock.song.tracks_observable)
-  tick()
+  mock.fire(mock.song.tracks_observable) -- (a change that says nothing of what it was)
   local got = events(peer, "tracks")
-  eq(#got, 1)
+  eq(#got, 1, "told at once, with no tick")
   eq(got[1].data.count, 5, "sequencer and send tracks plus the master")
+  eq(#got[1].data.made + #got[1].data.gone, 0, "nothing to shift by")
+  ok(got[1].data.epoch, "and the epoch moved")
   no_dialogs()
 end)
 

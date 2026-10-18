@@ -33,4 +33,60 @@ function M.expect(text, kind, count, epoch)
   return ref.n
 end
 
+-- Refs that name a track, or something on one (its devices and their parameters): the first number is the track.
+local TRACK_KINDS = { track = true, device = true, param = true }
+
+-- The shifts of the track list since layout `since`: each { layout, type = "insert" | "remove", index }, oldest first, one per
+-- layout. Returns the new number for the track `n`, or nil when the track is gone.
+function M.shift(n, shifts, since)
+  for _, s in ipairs(shifts) do
+    if s.layout > since then
+      if s.type == "insert" then
+        if n >= s.index then n = n + 1 end
+      else
+        if n == s.index then return nil end
+        if n > s.index then n = n - 1 end
+      end
+    end
+  end
+  return n
+end
+
+-- `params` with every track number carried through the shifts since layout `since`: refs of the current epoch that name a
+-- track (kinds track, device and param) and a number under `track`. Returns the new params, or nil and an error table
+-- (code `gone`) naming the first track that was deleted meanwhile.
+function M.carry(params, epoch, shifts, since)
+  local gone
+  local function walk(value, key)
+    if type(value) == "string" then
+      local ref = M.parse(value)
+      if ref and ref.epoch == epoch and TRACK_KINDS[ref.kind] then
+        local moved = M.shift(ref.n[1], shifts, since)
+        if not moved then
+          gone = gone or { code = "gone", message = "track " .. ref.n[1] .. " (" .. value .. ") was deleted since that ref was made" }
+          return value
+        end
+        ref.n[1] = moved
+        return M.make(ref.epoch, ref.kind, unpack(ref.n))
+      end
+      return value
+    elseif type(value) == "number" and key == "track" then
+      local moved = M.shift(value, shifts, since)
+      if not moved then
+        gone = gone or { code = "gone", message = "track " .. value .. " was deleted since that number was made" }
+        return value
+      end
+      return moved
+    elseif type(value) == "table" then
+      local copy = {}
+      for k, v in pairs(value) do copy[k] = walk(v, k) end
+      return setmetatable(copy, getmetatable(value))
+    end
+    return value
+  end
+  local carried = walk(params, nil)
+  if gone then return nil, gone end
+  return carried
+end
+
 return M

@@ -21,17 +21,22 @@ M.PAGE_BUDGET = wire.MAX_PAGE_BYTES - 4096
 
 -- Paging
 
-local function cursor_start(params, epoch)
+-- A cursor is `<epoch>.<layout>.<position>`: a position in a list means nothing once the epoch moved, or a track was
+-- inserted or removed (the rows after it moved with it).
+local function cursor_start(params, epoch, layout)
   local cursor = params.cursor
   if cursor == nil then return 1 end
-  local cursor_epoch, position = tostring(cursor):match("^([^.]+)%.(%d+)$")
+  local cursor_epoch, cursor_layout, position = tostring(cursor):match("^([^.]+)%.(%d+)%.(%d+)$")
   if not cursor_epoch then fail("bad-params", "not a cursor: " .. tostring(cursor)) end
   if cursor_epoch ~= epoch then fail("stale", "that cursor is from an earlier epoch: read again from the start") end
+  if tonumber(cursor_layout) ~= layout then
+    fail("stale", "tracks were inserted or removed since that cursor was made: read again from the start")
+  end
   return tonumber(position)
 end
 
-local function cursor_for(epoch, position)
-  return epoch .. "." .. position
+local function cursor_for(epoch, layout, position)
+  return epoch .. "." .. layout .. "." .. position
 end
 
 local function limit_of(params)
@@ -41,7 +46,7 @@ end
 -- The rows from `row_at(i)`, i from the cursor to `total`, up to the limit (nil rows are skipped, not counted), as
 -- {items, nextCursor?, epoch}, cut to the byte budget by dropping rows off the end.
 local function page(job, epoch, params, total, row_at, sparse)
-  local from = cursor_start(params, epoch)
+  local from = cursor_start(params, epoch, job.layout)
   local limit = limit_of(params)
   local items, after = {}, {}
   local i = from
@@ -69,7 +74,7 @@ local function page(job, epoch, params, total, row_at, sparse)
     local shown = {}
     for k = 1, keep do shown[k] = items[k] end
     local result = { items = array(shown), epoch = epoch }
-    if next_at then result.nextCursor = cursor_for(epoch, next_at) end
+    if next_at then result.nextCursor = cursor_for(epoch, job.layout, next_at) end
     if keep <= 1 or #json.encode(result) <= M.PAGE_BUDGET then return result end
     keep = math.max(1, math.floor(keep * 0.6))
   end

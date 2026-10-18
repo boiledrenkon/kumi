@@ -791,7 +791,7 @@ test("reads: what the tool can't map moves the epoch", function()
   moved(function() mock.ops.insert_instrument({ name = "New" }) end, "a new instrument")
   moved(function() mock.ops.insert_sample(1) end, "a new sample")
   moved(function() mock.ops.insert_device(1, { name = "Gate", params = {} }) end, "a new device")
-  failure(read(peer, "track", { cursor = old .. ".2" }), "stale")
+  failure(read(peer, "track", { cursor = old .. ".0.2" }), "stale")
   failure(read(peer, "device", { parent = old .. ":track:1" }), "stale")
   -- (and what it watched afresh still counts)
   local base = call(peer, "focus").result.changed
@@ -1038,7 +1038,7 @@ test("reads: the answers are the vectors the host's simulator replays", function
   ask("read", { kind = "nonsense" })
   ask("read", { kind = "line", track = 1 })
   ask("read", { ref = "0:track:1" })
-  ask("read", { kind = "track", cursor = "0.2" })
+  ask("read", { kind = "track", cursor = "0.0.2" })
   ask("focus_body", { kind = "pattern", window = { from = 5, to = 2 } })
   H.no_dialogs()
   local made = { epoch = E, cases = json.array(cases) }
@@ -1054,4 +1054,197 @@ test("reads: the answers are the vectors the host's simulator replays", function
   local kept = assert(json.decode(file:read("*a")))
   file:close()
   T.same(made, kept)
+end)
+
+-- No tick between a change and the next request: every answer after a change is in what the change left.
+
+test("reads: a change to what refs index into moves the epoch at once, before any tick", function()
+  local changes = {
+    { "an instrument deleted", function() mock.ops.remove_instrument(1) end, "instrument:1" },
+    { "an instrument made", function() mock.ops.insert_instrument({ name = "New" }) end, "instrument:1" },
+    { "a pattern deleted", function() mock.ops.remove_pattern(1) end, "pattern:1" },
+    { "a pattern made", function() mock.ops.insert_pattern() end, "pattern:1" },
+    { "a sequence slot inserted", function() mock.ops.insert_sequence_slot(1) end, "seq:1" },
+    { "a sample deleted", function() mock.ops.remove_sample(1, 1) end, "sample:1.1" },
+    { "a sample made", function() mock.ops.insert_sample(1) end, "sample:1.1" },
+    { "a device deleted", function() mock.ops.remove_device(1, 1) end, "device:1.1" },
+    { "a device made", function() mock.ops.insert_device(1, { name = "Gate", params = {} }) end, "device:1.1" },
+    { "two tracks swapped", function() mock.ops.swap_tracks(1, 2) end, "track:1" },
+  }
+  for _, change in ipairs(changes) do
+    local env, peer = setup()
+    fill_demo()
+    local E = epoch_of(peer)
+    change[2]()
+    -- (no tick)
+    local now = call(peer, "focus").result
+    ok(now.epoch ~= E, change[1] .. ": focus is in the new epoch at once")
+    eq(now.layout, 0, change[1] .. ": the layout starts over")
+    local response = call(peer, "read", { ref = E .. ":" .. change[3] })
+    failure(response, "stale")
+    -- and what is read now is named in the new epoch
+    local fresh = call(peer, "read", { kind = "track", limit = 1 }).result
+    eq(fresh.epoch, now.epoch, change[1])
+    H.no_dialogs()
+  end
+end)
+
+test("reads: a track inserted is told at once, and a ref made before reads the same track when its layout is named", function()
+  local env, peer = setup()
+  fill_demo()
+  local E = epoch_of(peer)
+  local f = call(peer, "focus").result
+  eq(f.layout, 0)
+  mock.ops.insert_track(1, { name = "New" })
+  -- (no tick)
+  local told = H.events(peer, "tracks")
+  eq(#told, 1, "the shift is on the wire before any tick")
+  eq(told[1].data.count, 8)
+  eq(told[1].data.made[1], 1)
+  eq(#told[1].data.gone, 0)
+  eq(told[1].data.layout, 1)
+  eq(told[1].data.epoch, E, "a shift keeps the epoch")
+  -- Hat was track 2 when the ref was made
+  local carried = call(peer, "read", { ref = E .. ":track:2", layout = 0 })
+  ok(carried.result, json.encode(carried.error or {}))
+  eq(carried.result.items[1].name, "Hat", "the same track")
+  eq(carried.result.items[1].ref, E .. ":track:3", "at its place now")
+  eq(carried.result.layout, 1, "and the answer says which layout it is in")
+  -- the layout of now reads what is at the number
+  eq(call(peer, "read", { ref = E .. ":track:2", layout = 1 }).result.items[1].name, "Kick")
+  eq(call(peer, "read", { ref = E .. ":track:2" }).result.items[1].name, "Kick", "no layout: made in the layout of now")
+  -- a parent, a device and a number under `track` are carried too
+  local devices = call(peer, "read", { kind = "device", parent = E .. ":track:1", layout = 0 }).result
+  eq(#devices.items, 2, "Kick's devices")
+  eq(devices.items[1].ref, E .. ":device:2.1", "on the track it moved to")
+  local lines = call(peer, "read", { kind = "line", parent = E .. ":pattern:1", track = 1, layout = 0 }).result
+  eq(lines.items[2].notes[1].note, "D#4", "Kick's lines")
+  local param = call(peer, "read", { ref = E .. ":param:1.1.2", layout = 0 }).result
+  eq(param.items[1].ref, E .. ":param:2.1.2")
+  eq(call(peer, "focus_body", { kind = "dsp", ref = E .. ":track:1", layout = 0 }).result.nodes[1].ref, E .. ":device:2.1")
+  -- a ref to something that isn't a track is left as it is
+  eq(call(peer, "read", { ref = E .. ":instrument:2", layout = 0 }).result.items[1].name, "Pad")
+  H.no_dialogs()
+end)
+
+test("reads: a track removed answers gone for its refs, and the tracks after it move down", function()
+  local env, peer = setup()
+  fill_demo()
+  local E = epoch_of(peer)
+  mock.ops.remove_track(2) -- Hat
+  local told = H.events(peer, "tracks")
+  eq(#told, 1)
+  eq(told[1].data.gone[1], 2)
+  eq(told[1].data.layout, 1)
+  failure(call(peer, "read", { ref = E .. ":track:2", layout = 0 }), "gone")
+  failure(call(peer, "read", { kind = "device", parent = E .. ":track:2", layout = 0 }), "gone")
+  failure(call(peer, "read", { kind = "line", parent = E .. ":pattern:1", track = 2, layout = 0 }), "gone")
+  local after = call(peer, "read", { ref = E .. ":track:3", layout = 0 })
+  ok(after.result, json.encode(after.error or {}))
+  local moved = after.result
+  eq(moved.items[1].name, "Drums")
+  eq(moved.items[1].ref, E .. ":track:2")
+  eq(call(peer, "read", { ref = E .. ":track:1", layout = 0 }).result.items[1].name, "Kick", "before the removal: unmoved")
+  H.no_dialogs()
+end)
+
+test("reads: shifts are carried one after another, up to the last 64", function()
+  local env, peer = setup()
+  local E = epoch_of(peer)
+  mock.ops.insert_track(1, { name = "A" })
+  mock.ops.insert_track(1, { name = "B" })
+  mock.ops.remove_track(1)
+  mock.ops.insert_track(4, { name = "C" })
+  H.events(peer, "tracks")
+  -- Kick was 1: B, A, Kick -> A, Kick after the removal -> A, Kick, Hat, C
+  local kick = call(peer, "read", { ref = E .. ":track:1", layout = 0 }).result
+  eq(kick.items[1].name, "Kick")
+  eq(kick.items[1].ref, E .. ":track:2")
+  eq(kick.layout, 4)
+  for _ = 1, 62 do mock.ops.insert_track(1, { name = "x" }) end -- 66 shifts in all
+  H.events(peer, "tracks")
+  failure(call(peer, "read", { ref = E .. ":track:1", layout = 0 }), "stale")
+  failure(call(peer, "read", { ref = E .. ":track:1", layout = 1 }), "stale")
+  -- (track 3 at layout 2 was Kick: B and A were above it, and the removal and 62 inserts came after)
+  local recent = call(peer, "read", { ref = E .. ":track:3", layout = 2 })
+  ok(recent.result, "64 shifts back is still carried: " .. json.encode(recent.error or {}))
+  eq(recent.result.items[1].name, "Kick")
+  eq(recent.result.items[1].ref, E .. ":track:64")
+  failure(call(peer, "read", { ref = E .. ":track:1", layout = 500 }), "stale")
+  failure(call(peer, "read", { ref = E .. ":track:1", layout = -1 }), "bad-params")
+  failure(call(peer, "read", { ref = E .. ":track:1", layout = 1.5 }), "bad-params")
+  H.no_dialogs()
+end)
+
+test("reads: a cursor made before a track was inserted or removed is refused, never read against the shifted list", function()
+  local env, peer = setup()
+  local first = call(peer, "read", { kind = "track", limit = 2 }).result
+  eq(first.nextCursor, first.epoch .. ".0.3")
+  mock.ops.insert_track(1, { name = "New" })
+  failure(call(peer, "read", { kind = "track", limit = 2, cursor = first.nextCursor }), "stale")
+  local again = call(peer, "read", { kind = "track", limit = 2 }).result
+  eq(again.nextCursor, again.epoch .. ".1.3", "made in the layout of now")
+  eq(#call(peer, "read", { kind = "track", limit = 2, cursor = again.nextCursor }).result.items, 2)
+  H.no_dialogs()
+end)
+
+test("reads: a read waiting for its first turn is ended if the song changed before it", function()
+  local env, peer = setup()
+  fill_demo()
+  local E = epoch_of(peer)
+  H.send(peer, { type = "request", id = 900, method = "read", params = { ref = E .. ":instrument:1" } })
+  mock.ops.remove_instrument(1) -- before the timer has run the job
+  local response
+  for _ = 1, 50 do
+    mock.advance(10)
+    for _, f in ipairs(H.frames(peer)) do if f.type == "response" and f.id == 900 then response = f end end
+    if response then break end
+  end
+  ok(response, "answered")
+  failure(response, "epoch-changed")
+  -- and the same for a track inserted
+  H.send(peer, { type = "request", id = 901, method = "read", params = { kind = "track" } })
+  mock.ops.insert_track(1, { name = "New" })
+  response = nil
+  for _ = 1, 50 do
+    mock.advance(10)
+    for _, f in ipairs(H.frames(peer)) do if f.type == "response" and f.id == 901 then response = f end end
+    if response then break end
+  end
+  failure(response, "changed")
+  H.no_dialogs()
+end)
+
+test("reads: tracks that change in a way the tool can't follow move the epoch and say so", function()
+  local env, peer = setup()
+  local E = epoch_of(peer)
+  -- an insert is announced but the count didn't move by one
+  mock.fire(mock.song.tracks_observable, { type = "insert", index = 1 })
+  local told = H.events(peer, "tracks")
+  eq(#told, 1)
+  eq(#told[1].data.made + #told[1].data.gone, 0, "no shift to carry")
+  ok(told[1].data.epoch ~= E, "the epoch moved")
+  eq(told[1].data.layout, 0)
+  mock.ops.swap_tracks(1, 2)
+  told = H.events(peer, "tracks")
+  eq(#told, 1)
+  ok(told[1].data.epoch ~= E)
+  H.no_dialogs()
+end)
+
+test("reads: new tracks, patterns and instruments are watched where they are made, with no tick", function()
+  local env, peer = setup()
+  local base = call(peer, "focus").result.changed
+  mock.ops.insert_track(1, { name = "New" })
+  mock.ops.rename_track(1, "Renamed")
+  ok(call(peer, "focus").result.changed > base + 1, "the new track's rename counts at once")
+  local n = mock.ops.insert_pattern()
+  base = call(peer, "focus").result.changed
+  mock.ops.set_note(n, 1, 1, 1, { note = 48 })
+  ok(call(peer, "focus").result.changed > base, "a line of the new pattern counts at once")
+  mock.ops.insert_instrument({ name = "New" })
+  base = call(peer, "focus").result.changed
+  mock.ops.rename_instrument(#mock.data.instruments, "Renamed")
+  ok(call(peer, "focus").result.changed > base, "the new instrument's rename counts at once")
+  H.no_dialogs()
 end)

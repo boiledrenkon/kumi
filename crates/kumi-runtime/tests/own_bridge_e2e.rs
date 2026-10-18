@@ -209,7 +209,10 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             let input = json!({"kind": "line", "parent": "pattern:1", "trackRef": "track:1"}).as_object().unwrap().clone();
             within_schema(&read.input_schema(), &input);
             let _ = read.execute(input, Signal::new()).await.unwrap();
-            assert_eq!(script.asked().last().unwrap().1, json!({"kind": "line", "parent": "1:pattern:1", "track": "1:track:1"}));
+            assert_eq!(
+                script.asked().last().unwrap().1,
+                json!({"kind": "line", "parent": "1:pattern:1", "track": "1:track:1", "layout": 0})
+            );
             assert!(
                 read.description().contains("line under a pattern") && read.description().contains("trackRef"),
                 "{}",
@@ -228,7 +231,7 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             let asked = script.asked();
             assert_eq!(
                 asked.iter().rev().find(|(method, _)| method == "focus_body").unwrap().1,
-                json!({"kind": "pattern", "ref": "1:pattern:1"})
+                json!({"kind": "pattern", "ref": "1:pattern:1", "layout": 0})
             );
             assert_eq!((grid.lines, grid.from, grid.cursor), (32, 0, Some(0)));
             let kick = &grid.tracks[0];
