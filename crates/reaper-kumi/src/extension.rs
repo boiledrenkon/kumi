@@ -163,6 +163,8 @@ struct Watch {
     undo: Option<i32>,
     tracks: HashSet<String>,
     tracks_at: Option<Instant>,
+    /// REAPER's count of projects loaded or made (`projectconfig`), as of the last look.
+    loads: u64,
 }
 
 fn track_guids(reaper: &Reaper, project: crate::reaper::Project) -> HashSet<String> {
@@ -536,6 +538,7 @@ impl Extension {
                 undo,
                 tracks: track_guids(reaper, info.ptr),
                 tracks_at: Some(Instant::now()),
+                loads: crate::projectconfig::loads(),
             };
         };
         match watch.project {
@@ -548,19 +551,23 @@ impl Extension {
                 (true, false)
             }
             Some(_) => {
+                // REAPER loaded a project or made one since the last look, and the tab is the same: what it holds is
+                // another project, whatever its file, its tracks or its counter say.
+                let loaded = crate::projectconfig::loads() != watch.loads;
                 let file_changed = watch.path != info.path || watch.name != info.name;
                 let counter_went_back = matches!((watch.count, count), (Some(before), Some(now)) if now < before);
                 let history_reset = matches!((watch.undo, undo), (Some(before), Some(now)) if before >= 2 && now <= 1);
                 let went_unsaved = !watch.path.is_empty() && info.path.is_empty();
                 let due = count != watch.count && watch.tracks_at.is_none_or(|at| at.elapsed() >= WATCH_REFRESH);
                 let mut replaced = false;
-                if file_changed || counter_went_back || history_reset || due {
+                if loaded || file_changed || counter_went_back || history_reset || due {
                     let now = track_guids(reaper, info.ptr);
-                    let moves = Moves { file_changed, counter_went_back, history_reset, went_unsaved };
+                    let moves = Moves { file_changed, counter_went_back, history_reset: history_reset || loaded, went_unsaved };
                     replaced = is_another_project(&watch.tracks, &now, moves);
                     watch.tracks = now;
                     watch.tracks_at = Some(Instant::now());
                 }
+                watch.loads = crate::projectconfig::loads();
                 watch.path = info.path.clone();
                 watch.name = info.name.clone();
                 watch.count = count;
@@ -1151,6 +1158,57 @@ mod tests {
         project_with_history("/lab/Templates/Kit.rpp", 1);
         extension.tick(Driver::Timer);
         assert_eq!(project_id(&extension, &tx), TEMPLATE_ID);
+    }
+
+    /// The gap in the heuristics: an unedited project made from a template, then the template's own file opened over it.
+    /// Its file changes (from none to a name), which a first save does too; its undo history stays at one entry; its
+    /// tracks are the same. Only REAPER's word that a project was loaded says it is another one.
+    #[test]
+    fn a_file_opened_over_an_unedited_template_project_is_a_load_because_reaper_says_so() {
+        let (extension, tx, _, _) = setup();
+        fake::reset();
+        project_with_history("", 1);
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        let template_born = epoch_and_identity(&extension, &tx);
+        assert_eq!(project_id(&extension, &tx), Value::Null, "an unsaved project has no id of its own");
+        // File > Open of the template's RPP in the same tab: the same tracks, one undo entry before and after.
+        project_with_history("/lab/Templates/Kit.rpp", 1);
+        crate::projectconfig::note_load();
+        extension.tick(Driver::Timer);
+        let opened = epoch_and_identity(&extension, &tx);
+        assert_ne!(opened.0, template_born.0, "a new epoch");
+        assert_ne!(opened.1, template_born.1, "a new identity");
+        assert_eq!(project_id(&extension, &tx), TEMPLATE_ID, "the template's own id is its own, not the one the project inherited");
+        // The same without REAPER's word is what the heuristics take for a first save.
+        let (extension, tx, _, _) = setup();
+        fake::reset();
+        project_with_history("", 1);
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        project_with_history("/lab/Templates/Kit.rpp", 1);
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), before, "a first save");
+    }
+
+    #[test]
+    fn a_load_reaper_reports_while_it_loads_is_noticed_once_it_has_finished() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        crate::projectconfig::note_load();
+        fake::with(|s| s.loading = true);
+        extension.tick(Driver::Timer);
+        fake::with(|s| s.loading = false);
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx).0, before.0);
+        // One load is one new project, not a new one every tick after.
+        let after = epoch_and_identity(&extension, &tx);
+        extension.tick(Driver::Timer);
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), after);
     }
 
     #[test]
