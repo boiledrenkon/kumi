@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use super::{bad, failed, take_start_qn, Pager, Reads, ANSWER_BYTES};
+use super::{bad, failed, json_len, take_start_qn, Pager, Reads, ANSWER_BYTES};
 use crate::queue::Answer;
 use crate::reaper::{Fx, FxOwner, Item, Project, Reaper, Take, Track, INPUT_FX};
 use crate::refs::{self, Ref, TrackId};
@@ -19,6 +19,8 @@ const ITEMS_PER_TRACK: usize = 400;
 /// What the first arrange page keeps for the markers, regions and tempo map.
 const ARRANGE_EXTRAS_BYTES: usize = 48 * 1024;
 const WINDOW_MARKERS: usize = 200;
+/// What the markers and regions of the window may take of the first arrange page, whatever their names.
+const MARKERS_BYTES: usize = 32 * 1024;
 const WINDOW_TEMPO_MARKERS: usize = 200;
 /// The longest arrange window asked for, in seconds.
 const MAX_WINDOW: f64 = 100.0 * 3600.0;
@@ -27,10 +29,58 @@ const DEFAULT_NOTES: usize = 500;
 const MAX_NOTES: usize = 2000;
 /// A CC lane keeps this many points; the most CC events read for the lanes.
 const LANE_POINTS: usize = 64;
-const MAX_CC_EVENTS: i32 = 20_000;
+const MAX_CC_EVENTS: usize = 8_000;
+/// A take with more notes or CC events than this is searched for its window (they are in order), not read from the first:
+/// a window over the last bar of 100,000 notes would be 100,000 calls on REAPER's main thread before the first row. Then
+/// a note that began more than `NOTE_LOOKBACK` notes before the window and still sounds at its start is not listed.
+const EXACT_SCAN: usize = 4096;
+const NOTE_LOOKBACK: usize = 1024;
+
+/// The first of `total` ordered events whose key is not below `target`, asked of `key_at`.
+fn lower_bound(total: usize, key_at: impl Fn(usize) -> Option<f64>, target: f64) -> usize {
+    let (mut low, mut high) = (0, total);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match key_at(mid) {
+            Some(key) if key < target => low = mid + 1,
+            _ => high = mid,
+        }
+    }
+    low
+}
 /// FX nodes in a tree and sends in a list.
 const MAX_FX_NODES: usize = 500;
 const MAX_SENDS: usize = 200;
+/// What one track's items may take of an arrange page, whatever their names: the page's first track always goes in, so
+/// a track of hundreds of long names must not be the whole answer.
+const ITEMS_BYTES_PER_TRACK: usize = 64 * 1024;
+/// What the FX tree and the routes of a track may take: these bodies aren't paged, and fit the frame whole.
+const FX_TREE_BYTES: usize = 160 * 1024;
+const ROUTES_BYTES: usize = 160 * 1024;
+
+/// What an FX tree may still list: nodes, and the bytes they take.
+struct FxBudget {
+    nodes: usize,
+    bytes: usize,
+    cut: bool,
+}
+
+impl FxBudget {
+    fn new() -> FxBudget {
+        FxBudget { nodes: MAX_FX_NODES, bytes: FX_TREE_BYTES, cut: false }
+    }
+
+    /// Spends a node of this size, or says the tree stops here.
+    fn take(&mut self, size: usize) -> bool {
+        if self.nodes == 0 || size > self.bytes {
+            self.cut = true;
+            return false;
+        }
+        self.nodes -= 1;
+        self.bytes -= size;
+        true
+    }
+}
 
 /// The track ref `around` names, if any.
 fn around_param(params: &Value) -> Result<Option<&str>, (String, String)> {
@@ -177,6 +227,7 @@ impl Reads {
             body["view"] = json!({"from": beats(view_from), "to": beats(view_to)});
         }
         let (mut markers, mut regions) = (Vec::new(), Vec::new());
+        let (mut bytes, mut left_out) = (0usize, 0usize);
         for index in 0..reaper.marker_count(proj) {
             let Some(marker) = reaper.marker(proj, index) else { break };
             let end = if marker.is_region { marker.end } else { marker.start };
@@ -184,16 +235,22 @@ impl Reads {
                 continue;
             }
             let list = if marker.is_region { &mut regions } else { &mut markers };
-            if list.len() < WINDOW_MARKERS {
-                let mut row = json!({"ref": if marker.is_region { refs::region_ref(&marker.guid) } else { refs::marker_ref(&marker.guid) }, "number": marker.number, "name": rows::clip(&marker.name), "position": beats(marker.start)});
-                if marker.is_region {
-                    row["end"] = beats(marker.end).into();
-                }
-                list.push(row);
+            if list.len() >= WINDOW_MARKERS || bytes >= MARKERS_BYTES {
+                left_out += 1;
+                continue;
             }
+            let mut row = json!({"ref": if marker.is_region { refs::region_ref(&marker.guid) } else { refs::marker_ref(&marker.guid) }, "number": marker.number, "name": rows::clip(&marker.name), "position": beats(marker.start)});
+            if marker.is_region {
+                row["end"] = beats(marker.end).into();
+            }
+            bytes += json_len(&row) + 1;
+            list.push(row);
         }
         body["markers"] = markers.into();
         body["regions"] = regions.into();
+        if left_out > 0 {
+            body["markersOmitted"] = left_out.into();
+        }
         // The tempo markers in the window, and the one in force when it opens.
         let tempo: Vec<_> = (0..reaper.tempo_marker_count(proj)).filter_map(|i| reaper.tempo_marker(proj, i)).collect();
         let before = tempo.iter().rposition(|m| m.time <= from);
@@ -244,14 +301,34 @@ impl Reads {
         let first_page = cursor.is_none();
         let mut pager =
             Pager::new(limit_param(params, DEFAULT_NOTES, MAX_NOTES)?, if first_page { ANSWER_BYTES - 40 * 1024 } else { ANSWER_BYTES });
-        let mut index = self.position_within(cursor, note_count.max(0) as usize)?;
+        let total = note_count.max(0) as usize;
+        let big = total > EXACT_SCAN;
+        let mut index = match cursor {
+            Some(_) => self.position_within(cursor, total)?,
+            None if big => {
+                let key = |at: usize| reaper.midi_note(take, at as i32).map(|note| note.start_ppq);
+                lower_bound(total, key, from_ppq).saturating_sub(NOTE_LOOKBACK)
+            }
+            None => 0,
+        };
         let mut next = None;
-        while index < note_count.max(0) as usize {
+        let started_at = index;
+        while index < total {
             if !pager.open() {
                 next = Some(index);
                 break;
             }
+            // Still looking for the first note of the window, and out of time: the page ends empty, to go on from here
+            // (after a few notes, so that every page makes some progress).
+            if index > started_at && index % 64 == 0 && pager.rows.is_empty() && pager.spent() {
+                next = Some(index);
+                break;
+            }
             if let Some(note) = reaper.midi_note(take, index as i32) {
+                // They are in order of start: nothing after this is in the window.
+                if big && note.start_ppq >= to_ppq {
+                    break;
+                }
                 if note.end_ppq > from_ppq
                     && note.start_ppq < to_ppq
                     && !pager.push(rows::note_row(reaper, take, item_qn, index as i32, &note))
@@ -277,7 +354,7 @@ impl Reads {
             body["nextCursor"] = self.cursor_text(&next.to_string()).into();
         }
         if first_page {
-            body["ccLanes"] = cc_lanes(reaper, take, item_qn, from_ppq, to_ppq, cc_count.min(MAX_CC_EVENTS));
+            body["ccLanes"] = cc_lanes(reaper, take, item_qn, from_ppq, to_ppq, cc_count.max(0) as usize);
         }
         Ok(body)
     }
@@ -286,20 +363,20 @@ impl Reads {
 
     fn fx_body(&self, reaper: &Reaper, proj: Project, reference: Option<&str>) -> Answer {
         let (owner, reference, name, kind) = self.chain_owner(reaper, proj, reference)?;
-        let mut budget = MAX_FX_NODES;
+        let mut budget = FxBudget::new();
         let nodes: Vec<Value> = (0..reaper.fx_count(owner))
             .map(|index| Fx { owner, index })
-            .filter_map(|fx| self.fx_node(reaper, proj, fx, &mut budget, false))
+            .filter_map(|fx| self.fx_node(reaper, proj, fx, &mut budget))
             .collect();
         let input: Vec<Value> = match owner {
             FxOwner::Track(track) => (0..reaper.input_fx_count(track))
                 .map(|index| Fx { owner, index: INPUT_FX | index })
-                .filter_map(|fx| self.fx_node(reaper, proj, fx, &mut budget, false))
+                .filter_map(|fx| self.fx_node(reaper, proj, fx, &mut budget))
                 .collect(),
             FxOwner::Take(_) => Vec::new(),
         };
         let mut body = json!({"ref": reference, "owner": kind, "ownerName": name, "nodes": nodes, "inputNodes": input});
-        if budget == 0 {
+        if budget.cut {
             body["truncated"] = true.into();
         }
         Ok(body)
@@ -339,13 +416,9 @@ impl Reads {
         }
     }
 
-    /// One node of the tree; a container carries its child nodes. `budget` counts the nodes left to list. A node is
-    /// `parallel` when it runs beside the one before it.
-    fn fx_node(&self, reaper: &Reaper, proj: Project, fx: Fx, budget: &mut usize, _nested: bool) -> Option<Value> {
-        if *budget == 0 {
-            return None;
-        }
-        *budget -= 1;
+    /// One node of the tree; a container carries its child nodes. `budget` counts the nodes and bytes left to list. A node
+    /// is `parallel` when it runs beside the one before it.
+    fn fx_node(&self, reaper: &Reaper, proj: Project, fx: Fx, budget: &mut FxBudget) -> Option<Value> {
         let guid = reaper.fx_guid(fx);
         self.registry().note_fx(proj, &guid, fx);
         let renamed = reaper.fx_config(fx, "renamed_name").unwrap_or_default();
@@ -360,13 +433,12 @@ impl Reads {
             "container": is_container,
             "parallel": reaper.fx_config(fx, "parallel").and_then(|p| p.trim().parse::<i32>().ok()).unwrap_or(0) != 0,
         });
+        if !budget.take(json_len(&node) + 1) {
+            return None;
+        }
         if is_container {
-            node["childNodes"] = reaper
-                .fx_children(fx)
-                .into_iter()
-                .filter_map(|child| self.fx_node(reaper, proj, child, budget, true))
-                .collect::<Vec<_>>()
-                .into();
+            node["childNodes"] =
+                reaper.fx_children(fx).into_iter().filter_map(|child| self.fx_node(reaper, proj, child, budget)).collect::<Vec<_>>().into();
         }
         Some(node)
     }
@@ -394,15 +466,17 @@ impl Reads {
             })
             .collect();
         let total = all.len();
-        let routes: Vec<Value> = all
-            .iter()
-            .take(MAX_SENDS)
-            .map(|(category, index, key)| {
-                let mut route = rows::send_row(reaper, track, *category, *index, key);
-                route["otherName"] = other_name(reaper, track, *category, *index).into();
-                route
-            })
-            .collect();
+        let mut routes: Vec<Value> = Vec::new();
+        let mut bytes = 0;
+        for (category, index, key) in all.iter().take(MAX_SENDS) {
+            let mut route = rows::send_row(reaper, track, *category, *index, key);
+            route["otherName"] = other_name(reaper, track, *category, *index).into();
+            bytes += json_len(&route) + 1;
+            if bytes > ROUTES_BYTES {
+                break;
+            }
+            routes.push(route);
+        }
         let mut body = json!({
             "ref": refs::track_ref(&id),
             "name": rows::clip(&reaper.track_name(track)),
@@ -414,7 +488,7 @@ impl Reads {
             body["parentSendOffset"] = (reaper.track_value(track, "C_MAINSEND_OFFS") as i64).into();
             body["parentSendChannels"] = (reaper.track_value(track, "C_MAINSEND_NCH") as i64).into();
         }
-        if total > MAX_SENDS {
+        if total > routes.len() {
             body["routeCount"] = total.into();
             body["truncated"] = true.into();
         }
@@ -454,17 +528,25 @@ fn arrange_track(reaper: &Reaper, proj: Project, track: Track, from: f64, to: f6
     let id = rows::track_id(reaper, track);
     let mut items = Vec::new();
     let mut omitted = 0usize;
+    let mut bytes = 0usize;
     for index in 0..reaper.track_item_count(track) {
         let Some(item) = reaper.track_item(track, index) else { continue };
         let position = reaper.item_value(item, "D_POSITION");
         let length = reaper.item_value(item, "D_LENGTH");
-        if position >= to || position + length <= from {
+        // A track's items are in order of position: none after this one touches the window.
+        if position >= to {
+            break;
+        }
+        if position + length <= from {
             continue;
         }
-        if items.len() >= ITEMS_PER_TRACK {
+        // Counted, not listed, once the track's items have taken their share of the page.
+        if items.len() >= ITEMS_PER_TRACK || bytes >= ITEMS_BYTES_PER_TRACK {
             omitted += 1;
         } else {
-            items.push(arrange_item(reaper, proj, item, position, length));
+            let row = arrange_item(reaper, proj, item, position, length);
+            bytes += json_len(&row) + 1;
+            items.push(row);
         }
     }
     let mut row = json!({
@@ -528,12 +610,23 @@ fn lane_value(kind: i32, data1: i32, data2: i32) -> i32 {
 
 /// The CC, pitch bend, program and pressure events in the window as lanes of at most `LANE_POINTS` points, `[beat, value]`
 /// with the beat in quarter notes from the start of the item.
-fn cc_lanes(reaper: &Reaper, take: Take, item_qn: f64, from_ppq: f64, to_ppq: f64, count: i32) -> Value {
+fn cc_lanes(reaper: &Reaper, take: Take, item_qn: f64, from_ppq: f64, to_ppq: f64, count: usize) -> Value {
     let mut lanes: BTreeMap<String, (Value, Vec<(f64, i32)>)> = BTreeMap::new();
-    for index in 0..count {
-        let Some(cc) = reaper.midi_cc(take, index) else { continue };
+    // Past `EXACT_SCAN` events, from the first one of the window (they are in order) and no further than it.
+    let big = count > EXACT_SCAN;
+    let start = if big { lower_bound(count, |at| reaper.midi_cc(take, at as i32).map(|cc| cc.ppq), from_ppq) } else { 0 };
+    let mut read = 0;
+    for index in start..count {
+        let Some(cc) = reaper.midi_cc(take, index as i32) else { continue };
+        if big && cc.ppq > to_ppq {
+            break;
+        }
         if cc.ppq < from_ppq || cc.ppq > to_ppq {
             continue;
+        }
+        read += 1;
+        if read > MAX_CC_EVENTS {
+            break;
         }
         let key = lane_key(cc.kind, cc.data1);
         let beat = reaper.ppq_to_quarter_notes(take, cc.ppq).unwrap_or(0.0) - item_qn;
@@ -1005,6 +1098,177 @@ mod tests {
         assert_eq!(body["routes"].as_array().unwrap().len(), MAX_SENDS);
         assert_eq!((&body["routeCount"], &body["truncated"]), (&json!(260), &json!(true)));
         assert!(serde_json::to_string(&body).unwrap().len() < 256 * 1024);
+    }
+
+    fn size(body: &Value) -> usize {
+        serde_json::to_string(body).unwrap().len()
+    }
+
+    /// A body of any one thing the project is full of must still fit the frame (256 KiB) whole: long names are the way
+    /// to make a count cap not enough.
+    #[test]
+    fn one_track_with_hundreds_of_long_item_names_still_makes_an_arrange_page_that_fits() {
+        use crate::reaper::fake::{FakeItem, FakeTake};
+        let reads = lab();
+        let long = "n".repeat(350);
+        fake::with(|s| {
+            s.tracks[1].items = (0..400)
+                .map(|n| FakeItem::new(&format!("{{LONG-{n}}}"), n as f64 * 0.01, 4.0, vec![FakeTake::wave(&format!("{{LT-{n}}}"), &long)]))
+                .collect();
+        });
+        let page = body(&reads, json!({"kind": "arrange", "limit": 1, "around": "r:track:{BBBB}"})).unwrap();
+        assert!(size(&page) < ANSWER_BYTES, "{} bytes", size(&page));
+        let track = &page["tracks"][0];
+        assert_eq!(track["ref"], "r:track:{BBBB}");
+        let listed = track["items"].as_array().unwrap().len();
+        assert!(listed > 20 && listed < 400, "{listed} items listed");
+        assert_eq!(track["itemsOmitted"], 400 - listed);
+    }
+
+    #[test]
+    fn an_fx_chain_of_long_names_is_cut_by_size_and_says_so() {
+        use crate::reaper::fake::FakeFx;
+        let reads = lab();
+        let long = "p".repeat(1500);
+        fake::with(|s| {
+            s.tracks[3].fx = (0..500)
+                .map(|n| {
+                    let mut fx = FakeFx::new(&format!("{{FX-{n}}}"), &long);
+                    fx.preset = long.clone();
+                    fx
+                })
+                .collect();
+        });
+        let body = body(&reads, json!({"kind": "fx", "ref": "r:track:{DDDD}"})).unwrap();
+        assert_eq!(body["truncated"], true);
+        let listed = body["nodes"].as_array().unwrap().len();
+        assert!(listed > 20 && listed < 500, "{listed} nodes");
+        assert!(size(&body) < ANSWER_BYTES, "{} bytes", size(&body));
+    }
+
+    #[test]
+    fn markers_and_regions_with_long_names_are_cut_by_size_and_counted() {
+        use crate::reaper::fake::FakeMarker;
+        let reads = lab();
+        fake::with(|s| {
+            s.markers = (0..200)
+                .map(|n| FakeMarker {
+                    guid: format!("{{MK-{n}}}"),
+                    is_region: n % 2 == 1,
+                    start: 1.0 + n as f64 * 0.01,
+                    end: 2.0 + n as f64 * 0.01,
+                    name: "m".repeat(1500),
+                    number: n,
+                    color: 0,
+                })
+                .collect();
+        });
+        let page = body(&reads, json!({"kind": "arrange"})).unwrap();
+        let listed = page["markers"].as_array().unwrap().len() + page["regions"].as_array().unwrap().len();
+        assert!(listed > 5 && listed < 200, "{listed} listed");
+        assert_eq!(page["markersOmitted"], 200 - listed);
+        assert!(size(&page) < ANSWER_BYTES, "{} bytes", size(&page));
+    }
+
+    #[test]
+    fn routes_with_long_names_are_cut_by_size_and_counted() {
+        let reads = lab();
+        fake::with(|s| {
+            s.tracks[3].name = "r".repeat(1500);
+            s.tracks[1].sends = (0..200).map(|_| FakeSend::to(3)).collect();
+        });
+        let body = body(&reads, json!({"kind": "routing", "ref": "r:track:{BBBB}"})).unwrap();
+        let listed = body["routes"].as_array().unwrap().len();
+        assert!(listed > 20 && listed < 200, "{listed} routes");
+        assert_eq!((&body["routeCount"], &body["truncated"]), (&json!(200), &json!(true)));
+        assert!(size(&body) < ANSWER_BYTES, "{} bytes", size(&body));
+    }
+
+    /// 100,000 notes, a window over the last four beats: the first note of it is searched for, not walked to.
+    fn a_hundred_thousand_notes(reads: &Reads) -> Value {
+        let _ = reads;
+        fake::with(|s| {
+            let take = &mut s.tracks[2].items[0].takes[0];
+            take.notes = (0..100_000)
+                .map(|n| FakeNote {
+                    start_ppq: n as f64 * 960.0,
+                    end_ppq: n as f64 * 960.0 + 480.0,
+                    channel: 0,
+                    pitch: 40 + n % 40,
+                    velocity: 90,
+                    selected: false,
+                })
+                .collect();
+        });
+        json!({"kind": "midi", "ref": "r:take:{TAKE-S1}", "window": {"from": 99_990.0, "to": 99_994.0}})
+    }
+
+    #[test]
+    fn a_window_over_the_end_of_a_huge_take_is_found_by_search_not_by_walking() {
+        let reads = lab();
+        let params = a_hundred_thousand_notes(&reads);
+        fake::with(|s| s.calls = 0);
+        let page = body(&reads, params).unwrap();
+        let starts: Vec<f64> = page["notes"].as_array().unwrap().iter().map(|n| n["start"].as_f64().unwrap()).collect();
+        assert_eq!(starts, [99_990.0, 99_991.0, 99_992.0, 99_993.0]);
+        assert_eq!(page.get("nextCursor"), None);
+        let calls = fake::with(|s| s.calls);
+        assert!(calls < 3000, "{calls} calls to find 4 notes among 100,000");
+    }
+
+    #[test]
+    fn a_page_still_looking_for_its_first_note_ends_empty_with_a_cursor_to_go_on_from() {
+        let reads = lab();
+        // A small take, and a page time already spent: the scan gives up after a few dozen notes, every time.
+        fake::with(|s| {
+            s.tracks[2].items[0].takes[0].notes = (0..1000)
+                .map(|n| FakeNote {
+                    start_ppq: n as f64 * 960.0,
+                    end_ppq: n as f64 * 960.0 + 480.0,
+                    channel: 0,
+                    pitch: 60,
+                    velocity: 90,
+                    selected: false,
+                })
+                .collect();
+        });
+        super::super::TEST_PAGE_TIME.with(|time| time.set(Some(std::time::Duration::ZERO)));
+        let mut cursor = Value::Null;
+        let (mut found, mut empty_pages, mut pages) = (Vec::new(), 0, 0);
+        loop {
+            let mut params = json!({"kind": "midi", "ref": "r:take:{TAKE-S1}", "window": {"from": 900.0, "to": 904.0}});
+            if !cursor.is_null() {
+                params["cursor"] = cursor.clone();
+            }
+            let page = body(&reads, params).unwrap();
+            pages += 1;
+            empty_pages += page["notes"].as_array().unwrap().is_empty() as usize;
+            found.extend(page["notes"].as_array().unwrap().iter().map(|n| n["start"].as_f64().unwrap()));
+            match page.get("nextCursor") {
+                Some(next) => cursor = next.clone(),
+                None => break,
+            }
+            assert!(pages < 100);
+        }
+        super::super::TEST_PAGE_TIME.with(|time| time.set(None));
+        assert_eq!(found, [900.0, 901.0, 902.0, 903.0]);
+        assert!(empty_pages >= 1, "no page ended empty ({pages} pages)");
+    }
+
+    #[test]
+    fn cc_lanes_of_a_huge_take_are_searched_for_too() {
+        use crate::reaper::fake::FakeCc;
+        let reads = lab();
+        fake::with(|s| {
+            s.tracks[2].items[0].takes[0].ccs =
+                (0..50_000).map(|n| FakeCc { ppq: n as f64 * 960.0, kind: 0xB0, channel: 0, data1: 7, data2: (n % 128) as i32 }).collect();
+        });
+        fake::with(|s| s.calls = 0);
+        let page = body(&reads, json!({"kind": "midi", "ref": "r:take:{TAKE-S1}", "window": {"from": 49_990.0, "to": 49_994.0}})).unwrap();
+        let lane = &page["ccLanes"][0];
+        assert_eq!((&lane["cc"], &lane["total"]), (&json!(7), &json!(5)));
+        let calls = fake::with(|s| s.calls);
+        assert!(calls < 1000, "{calls} calls");
     }
 
     #[test]

@@ -22,8 +22,26 @@ pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 200;
 /// The most one answer carries. The bridge's frame bound is 256 KiB; the rest is the envelope around the rows.
 pub const ANSWER_BYTES: usize = 224 * 1024;
-/// A page stops growing after this long on the main thread: the rest comes with the cursor.
-const PAGE_TIME: Duration = Duration::from_millis(40);
+/// A page stops growing after this long on the main thread, close to what a tick spends on requests: the rest comes with
+/// the cursor.
+const PAGE_TIME: Duration = Duration::from_millis(10);
+
+#[cfg(not(test))]
+fn page_time() -> Duration {
+    PAGE_TIME
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own page time, to make a page run out of it without a slow REAPER.
+    pub static TEST_PAGE_TIME: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn page_time() -> Duration {
+    // Slow builds and busy machines mustn't change what a test sees: a test that wants a short time sets one.
+    TEST_PAGE_TIME.with(|time| time.get()).unwrap_or(Duration::from_secs(10))
+}
 /// The most tracks and markers a snapshot carries; `read` has the rest.
 const SNAPSHOT_TRACKS: usize = 200;
 const SNAPSHOT_MARKERS: usize = 100;
@@ -111,9 +129,15 @@ impl Pager {
         Pager { limit, budget, bytes: 0, started: Instant::now(), rows: Vec::new() }
     }
 
+    /// Whether the page has had its time, whether or not it has a row yet: a page that is still looking for its first row
+    /// ends empty, with a cursor to go on from, rather than hold REAPER's main thread.
+    pub fn spent(&self) -> bool {
+        self.started.elapsed() >= page_time()
+    }
+
     /// Whether the page has room for another row.
     pub fn open(&self) -> bool {
-        self.rows.len() < self.limit && self.bytes < self.budget && (self.rows.is_empty() || self.started.elapsed() < PAGE_TIME)
+        self.rows.len() < self.limit && self.bytes < self.budget && (self.rows.is_empty() || self.started.elapsed() < page_time())
     }
 
     /// Adds a row; false when it would overflow the byte budget (a first row always goes in).
