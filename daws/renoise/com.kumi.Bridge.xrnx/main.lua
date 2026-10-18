@@ -131,11 +131,9 @@ end
 local function stop()
   if state.payload then guard("stop", state.payload.stop)(host, false) end
   state.payload = nil
+  -- Closing the server closes its clients. Closing a client ourselves ends the server and can crash Renoise.
   host.close_server()
-  for key, connection in pairs(state.connections) do
-    state.connections[key] = nil
-    pcall(function() connection.client:close() end)
-  end
+  for key in pairs(state.connections) do state.connections[key] = nil end
 end
 
 local function swap_payload()

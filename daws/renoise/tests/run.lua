@@ -85,6 +85,9 @@ local passed, failed = 0, 0
 for _, t in ipairs(T.list) do
   if not filter or t.name:find(filter, 1, true) then
     local ok, err = xpcall(t.fn, debug.traceback)
+    if ok and T.mock.crashes and #T.mock.crashes > 0 then
+      ok, err = false, "a call that ends Renoise's server or crashes Renoise: " .. table.concat(T.mock.crashes, " | ")
+    end
     if ok then
       passed = passed + 1
     else

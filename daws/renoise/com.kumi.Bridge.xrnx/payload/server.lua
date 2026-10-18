@@ -1,7 +1,12 @@
 -- Renoise's sockets on one side, wire connections on the other: loopback peers only, connection
 -- limits, requests answered in order, heartbeats, events, and an outbox that sends big frames a
--- slice at a time. Socket closes wait for the next tick, since closing inside Renoise's socket
--- callbacks can upset it.
+-- slice at a time.
+--
+-- This never closes a client's socket. In Renoise 3.5.4 closing one the server accepted (from a callback or a timer,
+-- while the peer is still connected or after it has gone) ends the server: its next select fails with "Bad file
+-- descriptor", is_running turns false, every connection is lost, and closing one the peer already closed crashes
+-- Renoise outright. A connection the bridge is done with is retired instead: refused or told goodbye, then ignored, not
+-- counted against the limits, and forgotten when the peer closes its end (a Kumi host does, on reading a refusal).
 
 local import = ...
 local wire = import("wire")
@@ -20,12 +25,29 @@ M.SEND_TICK_BYTES = 1024 * 1024
 -- closed instead; a host that is only listening says so now and then (crates/daw-mcp-server does), and one that
 -- was closed reconnects when it next needs the bridge.
 M.UNSOLICITED_LIMIT = 64 * 1024
+-- Responses waiting to be sent to one connection, beyond the one going out: a host that sends requests and doesn't read
+-- the answers is closed past this. Likewise requests waiting to be answered, and the time spent answering one
+-- connection's requests in a go (the rest wait for the next tick), so a flood can't hold Renoise's GUI thread.
+M.MAX_QUEUED_RESPONSES = 64
+M.MAX_WAITING_REQUESTS = 256
+M.REQUEST_BUDGET_MS = 8
 
 local LOOPBACK_PEERS = { ["127.0.0.1"] = true, ["::1"] = true, ["::ffff:127.0.0.1"] = true }
 
+-- A client as "address:port", read while its socket is open, or nil. Renoise answers "" and 65535 for a socket the peer
+-- has already closed, and a key made of those is nobody's.
 local function key_of(client)
-  return tostring(client.peer_address) .. ":" .. tostring(client.peer_port)
+  local ok, key = pcall(function()
+    if not client.is_open then return nil end
+    local address, port = client.peer_address, client.peer_port
+    if type(address) ~= "string" or address == "" or type(port) ~= "number" or port <= 0 or port >= 65535 then return nil end
+    return address .. ":" .. port
+  end)
+  return ok and key or nil
 end
+
+-- Connections retired but not yet closed by their peers, kept (to be ignored) up to this many; the oldest are forgotten.
+M.MAX_RETIRED = 128
 
 -- ctx: connections (kept by main.lua across payload reloads), now_ms(), unix_ms(), secret() -> secret or
 -- nil and why, identity() -> the welcome's fields, on_request(record, request) -> result or raises
@@ -34,8 +56,8 @@ function M.new(ctx)
   return setmetatable({ ctx = ctx }, M)
 end
 
+-- Whether the peer has closed its end.
 local function is_gone(record)
-  if record.gone then return true end
   local ok, open = pcall(function() return record.client.is_open end)
   return not ok or not open
 end
@@ -50,10 +72,24 @@ function M:counts()
   return waiting, authenticated
 end
 
+-- Retires a connection: whatever is queued for it still goes out, then nothing is read from it or sent to it.
 function M:close(record, reason)
   if record.closing then return end
   record.closing = true
-  self.ctx.log("info", "closing " .. record.key .. ": " .. tostring(reason))
+  record.retired_ms = self.ctx.now_ms()
+  self.ctx.log("info", "retiring " .. record.key .. ": " .. tostring(reason))
+end
+
+-- Retires an authenticated connection after telling its host (a bye): the host ends it on its side, which this side
+-- can't do for it.
+function M:dismiss(record, reason)
+  if record.closing then return end
+  if record.conn and record.conn:authenticated() then
+    record.outbox = {}
+    record.requests = {}
+    self:send(record, wire.encode_frame("bye", { reason = "overload" }))
+  end
+  self:close(record, reason)
 end
 
 local function raw_send(self, record, text)
@@ -85,6 +121,10 @@ end
 
 function M:send(record, text)
   if not text or record.gone then return end
+  if #record.outbox > M.MAX_QUEUED_RESPONSES then
+    self:dismiss(record, "too many responses waiting to be read")
+    return
+  end
   record.outbox[#record.outbox + 1] = { text = text, offset = 1 }
   if #record.outbox == 1 then self:flush(record, M.SEND_NOW_BYTES) end
 end
@@ -94,8 +134,7 @@ function M:push(record, text)
   if not text or record.gone or record.closing then return false end
   local total = (record.unsolicited or 0) + #text
   if total > M.UNSOLICITED_LIMIT then
-    record.outbox = {}
-    self:close(record, "the host stopped reading (" .. total .. " bytes of events and heartbeats unread)")
+    self:dismiss(record, "the host stopped reading (" .. total .. " bytes of events and heartbeats unread)")
     return false
   end
   record.unsolicited = total
@@ -117,11 +156,15 @@ end
 
 function M:accept(client)
   self:reap()
+  -- Peer and port are read here, once, while the socket is surely open; one already closed is nobody to talk to.
+  local key = key_of(client)
+  if not key then return nil end
+  local address = key:match("^(.*):%d+$")
   local now = self.ctx.now_ms()
-  local record = { key = key_of(client), client = client, anchor = client, outbox = {}, accepted_ms = now }
+  local record = { key = key, client = client, anchor = client, outbox = {}, requests = {}, accepted_ms = now }
   self.ctx.connections[record.key] = record
-  if not LOOPBACK_PEERS[client.peer_address] then
-    self:close(record, "peer " .. tostring(client.peer_address) .. " is not loopback")
+  if not LOOPBACK_PEERS[address] then
+    self:close(record, "peer " .. address .. " is not loopback")
     return record
   end
   local waiting, authenticated = self:counts()
@@ -149,8 +192,38 @@ function M:apply(record, actions)
       record.heartbeat_ms = self.ctx.now_ms() + wire.HEARTBEAT_MS
       if self.ctx.on_authenticated then self.ctx.on_authenticated(record) end
     elseif action.request then
-      self:answer(record, action.request)
+      local waiting = record.requests
+      waiting[#waiting + 1] = action.request
+      if #waiting > M.MAX_WAITING_REQUESTS then
+        self:dismiss(record, "too many requests waiting (" .. #waiting .. ")")
+        return
+      end
     end
+  end
+  self:run_requests(record)
+end
+
+-- Answers a connection's waiting requests in order, for as long as the budget lasts (at least one): the rest wait for
+-- the next tick.
+function M:run_requests(record)
+  local waiting = record.requests
+  if not waiting[1] then return end
+  if record.closing then
+    record.requests = {}
+    return
+  end
+  local started = self.ctx.now_ms()
+  local done = 0
+  while waiting[done + 1] and not record.closing and not record.gone do
+    done = done + 1
+    self:answer(record, waiting[done])
+    if self.ctx.now_ms() - started >= M.REQUEST_BUDGET_MS then break end
+  end
+  if done > 0 then
+    -- (One table.remove per request would make a long queue quadratic.)
+    local rest = {}
+    for i = done + 1, #waiting do rest[#rest + 1] = waiting[i] end
+    record.requests = rest
   end
 end
 
@@ -177,8 +250,12 @@ function M:answer(record, request)
 end
 
 function M:receive(client, data)
-  local record = self.ctx.connections[key_of(client)]
+  local key = key_of(client)
+  -- A socket the peer closed as it sent: its record is reaped, and there is nothing to answer.
+  if not key then return end
+  local record = self.ctx.connections[key]
   if not record then record = self:accept(client) end
+  if not record then return end
   record.client = client
   record.unsolicited = 0
   self:reap()
@@ -224,20 +301,28 @@ function M:tick()
         record.heartbeat_ms = math.max((record.heartbeat_ms or now) + wire.HEARTBEAT_MS, now + wire.HEARTBEAT_MS / 2)
       end
     end
+    if record.requests and record.requests[1] and not is_gone(record) then self:run_requests(record) end
     if record.outbox[1] then self:flush(record, M.SEND_TICK_BYTES) end
     if is_gone(record) then
       self.ctx.connections[key] = nil
-      -- (A record that is gone may still hold a socket: a failed send leaves it open.)
-      pcall(function() record.client:close() end)
       if not record.closing then self.ctx.log("info", "connection " .. key .. " went away") end
-    elseif record.closing and not record.outbox[1] then
-      self.ctx.connections[key] = nil
-      pcall(function() record.client:close() end)
     end
   end
+  self:forget_oldest_retired()
 end
 
--- Says bye to authenticated connections and closes every connection now.
+-- A peer that never closes its end of a retired connection can't make the list grow without end.
+function M:forget_oldest_retired()
+  local retired = {}
+  for key, record in pairs(self.ctx.connections) do
+    if record.closing then retired[#retired + 1] = { key = key, at = record.retired_ms or 0 } end
+  end
+  if #retired <= M.MAX_RETIRED then return end
+  table.sort(retired, function(a, b) return a.at < b.at end)
+  for i = 1, #retired - M.MAX_RETIRED do self.ctx.connections[retired[i].key] = nil end
+end
+
+-- Says bye to authenticated connections and lets go of every connection (Renoise closes them with the server).
 function M:close_all(reason)
   for key, record in pairs(self.ctx.connections) do
     if record.conn and record.conn:authenticated() and not record.closing then
@@ -248,7 +333,6 @@ function M:close_all(reason)
       self:flush(record, M.SEND_TICK_BYTES)
     end
     self.ctx.connections[key] = nil
-    pcall(function() record.client:close() end)
   end
 end
 

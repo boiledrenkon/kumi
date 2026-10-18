@@ -15,8 +15,7 @@ local M = {}
 
 M.RETRY_MS = 1000
 M.SETUP_RETRY_MS = 5000
--- Socket errors in a row (no connection accepted or message read between) after which the server is made anew.
-M.SOCKET_ERRORS_BEFORE_RESTART = 3
+
 
 -- Renoise replaces os.clock with a high-precision timer in seconds.
 function M.now_ms()
@@ -265,8 +264,10 @@ function M.tick()
   unix_ms()
   if not b.cfg then
     if M.now_ms() >= b.retry_ms and configure() then listen() end
-  elseif (not server_running() or (b.socket_errors or 0) >= M.SOCKET_ERRORS_BEFORE_RESTART) and M.now_ms() >= b.retry_ms then
-    b.socket_errors = 0
+  elseif not server_running() and M.now_ms() >= b.retry_ms then
+    -- The only reason to remake the server: it says it isn't running. Remaking it drops every connection.
+    log.write("error", "the server stopped running; listening again")
+    b.retry_ms = M.now_ms() + M.RETRY_MS
     listen()
   end
   -- One failing step mustn't skip the others: connections still need their tick.
@@ -278,21 +279,26 @@ function M.tick()
 end
 
 function M.on_accept(client)
-  b.socket_errors = 0
   conns:accept(client)
 end
 
 function M.on_message(client, data)
-  b.socket_errors = 0
   conns:receive(client, data)
 end
 
--- Only noted: closing the server inside Renoise's socket callback can upset it. The tick makes a new one when this one
--- stopped running, or when errors come one after another with nothing in between.
+-- Only noted, whatever the error: it may be one client's (a reset, a timeout) and the server serves the others. Closing
+-- the server inside Renoise's socket callback can upset it, and remaking it drops every connection, Kumi's included,
+-- for anyone who can open a connection. The tick remakes it when it says it isn't running.
 function M.on_socket_error(message)
-  log.write("error", "socket error: " .. tostring(message))
-  b.socket_errors = (b.socket_errors or 0) + 1
-  b.retry_ms = M.now_ms() + M.RETRY_MS
+  local text = tostring(message)
+  if b.last_socket_error == text then
+    b.socket_error_repeats = (b.socket_error_repeats or 0) + 1
+    if b.socket_error_repeats % 100 ~= 0 then return end
+    text = text .. " (" .. b.socket_error_repeats .. " times)"
+  else
+    b.last_socket_error, b.socket_error_repeats = text, 1
+  end
+  log.write("error", "socket error: " .. text .. " (server running: " .. tostring(server_running()) .. ")")
 end
 
 function M.on_new_document()

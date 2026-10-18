@@ -62,6 +62,7 @@ local function setup(options)
 end
 
 local function no_dialogs()
+  eq(#mock.crashes, 0, "calls that crash Renoise: " .. table.concat(mock.crashes, " | "))
   eq(#mock.errors, 0, "errors Renoise would show: " .. table.concat(mock.errors, " | "))
   eq(#mock.modals, 0, "modal calls")
 end
@@ -128,9 +129,19 @@ local function events(peer, name)
   return out
 end
 
+-- Whether the bridge is done with a connection: it never closes one (that ends Renoise's server), it retires it.
+local function retired(peer)
+  local record = KUMI_BRIDGE.connections[peer.address .. ":" .. peer.port]
+  return record ~= nil and record.closing == true
+end
+
+-- Retired with nothing said, and whatever the peer sends after is ignored.
 local function closed_silently(peer)
   tick()
-  return peer.closed_by_server and peer:take() == ""
+  if not (retired(peer) and peer:take() == "") then return false end
+  if peer.open then peer:send('{"type":"hello","protocol":"kumi-daw/1","nonce":"' .. CLIENT_NONCE .. '"}\n') end
+  tick()
+  return peer:take() == ""
 end
 
 local function refused(peer, reason)
@@ -139,7 +150,7 @@ local function refused(peer, reason)
   eq(got[1].type, "refused")
   eq(got[1].reason, reason)
   tick()
-  ok(peer.closed_by_server, "closed after the refusal")
+  ok(retired(peer), "retired after the refusal")
   return got[1]
 end
 
@@ -238,14 +249,14 @@ test("bridge: the handshake must finish within 3 seconds", function()
   frames(slow)
   local fine = connect(env)
   mock.advance(2900)
-  ok(not slow.closed_by_server)
+  ok(not retired(slow))
   mock.advance(200)
   local got = frames(slow)
   eq(got[1].type, "refused")
   eq(got[1].reason, "timeout")
   tick()
-  ok(slow.closed_by_server, "closed after the deadline")
-  ok(not fine.closed_by_server, "an authenticated connection has no deadline")
+  ok(retired(slow), "closed after the deadline")
+  ok(not retired(fine), "an authenticated connection has no deadline")
   no_dialogs()
 end)
 
@@ -323,7 +334,7 @@ test("bridge: requests after auth", function()
   reply = request(peer, "status", nil, { deadlineMs = 1000 })
   eq(reply.ok, false)
   eq(reply.error.code, "deadline")
-  ok(not peer.closed_by_server)
+  ok(not retired(peer))
   no_dialogs()
 end)
 
@@ -488,7 +499,9 @@ test("bridge: a host that stopped reading is cut off before the socket fills, ne
   frames(peer)
   peer:stop_reading()
   churn(mock.song, 1, 3000)
-  ok(peer.closed_by_server, "closed")
+  ok(retired(peer), "retired")
+  local last = frames(peer)
+  eq(last[#last].type, "bye", "told, so it ends the connection on its side")
   eq(mock.blocked_sends, 0, "sends that would have blocked Renoise")
   ok(peer.unread <= 64 * 1024, "at most 64 KiB went to a peer that wasn't reading, not " .. peer.unread)
   ok(peer.unread > 60 * 1024, "and it was allowed that much: " .. peer.unread)
@@ -508,7 +521,7 @@ test("bridge: a host that sends now and then is never cut off, however many even
     end
     eq(request(peer, "ping", {}).ok, true)
   end)
-  ok(not peer.closed_by_server, "open")
+  ok(not retired(peer), "open")
   ok(count > 2000, "the events kept coming: " .. count)
   no_dialogs()
 end)
@@ -518,9 +531,9 @@ test("bridge: a host that never says a word is closed after the heartbeats pile 
   local peer = connect(env)
   peer:stop_reading()
   mock.advance(600 * 1000)
-  ok(not peer.closed_by_server, "ten minutes of heartbeats are well within the cap")
+  ok(not retired(peer), "ten minutes of heartbeats are well within the cap")
   mock.advance(3000 * 1000)
-  ok(peer.closed_by_server, "closed")
+  ok(retired(peer), "closed")
   eq(mock.blocked_sends, 0)
   no_dialogs()
 end)
@@ -531,7 +544,7 @@ test("bridge: a send that fails closes that connection", function()
   peer.send_fails = true
   mock.song.selected_track_index = 5
   tick()
-  ok(peer.closed_by_server, "the socket is closed, not just forgotten")
+  ok(retired(peer), "the socket is closed, not just forgotten")
   local other = connect(env)
   eq(request(other, "status").ok, true, "the others go on")
   no_dialogs()
@@ -568,7 +581,8 @@ test("bridge: unloading says bye, closes everything and removes the discovery fi
   eq(got[#got].type, "bye")
   eq(got[#got].reason, "shutdown", "disabled or reloaded")
   eq(mock.server(), nil, "server closed")
-  ok(peer.closed_by_server, "connection closed")
+  ok(not peer.open, "the server took its connections with it")
+  eq(next(KUMI_BRIDGE.connections), nil, "and the bridge let go of them")
   eq(read(env.discovery_file()), nil, "discovery removed")
   eq(#mock.timers, 0, "timer removed")
   eq(mock.notifier_count(song.selected_track_index_observable), 0, "observers detached")
@@ -686,7 +700,7 @@ test("bridge: an error while welcoming closes that connection, nothing else", fu
   local challenge = frames(peer)[1]
   send(peer, { type = "auth", proof = hmac(env, "client", challenge.nonce) })
   tick()
-  ok(peer.closed_by_server, "closed")
+  ok(retired(peer), "closed")
   fields.name = saved
   eq(request(good, "status").ok, true, "the other connection still answers")
   no_dialogs()
@@ -713,7 +727,7 @@ test("bridge: an error reading the song is logged, never shown", function()
   mock.fire(playing)
   tick(25)
   ok(read(env.log_dir .. "/renoise-bridge.log"):find("not mocked"), "logged")
-  ok(not peer.closed_by_server)
+  ok(not retired(peer))
   no_dialogs()
 end)
 
@@ -794,7 +808,7 @@ test("bridge: connections whose peers left stop counting at once, with no timer 
   for i = 1, 4 do peers[i]:close() end
   local fifth = mock.connect()
   eq(#frames(fifth), 0, "taken, not refused for connections")
-  ok(not fifth.closed_by_server)
+  ok(not retired(fifth))
   no_dialogs()
 end)
 
@@ -809,35 +823,118 @@ test("bridge: a stalled handshake is refused by the next connection's callback, 
   no_dialogs()
 end)
 
-test("bridge: a socket error is only noted; the server is made anew from the tick when it stopped", function()
+test("bridge: a socket error is only noted; the server is made anew from the tick when it says it stopped", function()
   local env = setup()
   local first = mock.server()
   mock.socket_error("boom")
   ok(first.running and first.open, "nothing closed inside the callback")
+  eq(#mock.servers, 1, "and nothing remade for it")
   first.running = false
   tick()
-  eq(#mock.servers, 1, "not before the retry delay")
-  mock.advance(1100)
-  eq(#mock.servers, 2)
+  eq(#mock.servers, 2, "remade once it says it isn't running")
   ok(mock.server() ~= nil and mock.server() ~= first, "a new server listens")
   local peer = connect(env)
   eq(request(peer, "ping", {}).ok, true)
   no_dialogs()
 end)
 
-test("bridge: errors in a row make a new server even when the old one claims to run", function()
+test("bridge: an authenticated connection survives fifty rounds of churn from peers with no secret", function()
   local env = setup()
-  local first = mock.server()
-  for _ = 1, 3 do mock.socket_error("boom") end
-  ok(first.running, "still running")
-  mock.advance(1100)
-  eq(#mock.servers, 2)
-  ok(mock.server() ~= first and not first.running, "replaced")
-  local peer = connect(env)
-  mock.socket_error("one")
-  eq(request(peer, "ping", {}).ok, true, "a single error does not")
-  eq(mock.server() ~= nil, true)
+  local kumi = connect(env)
+  local server = mock.server()
+  for round = 1, 50 do
+    local kind = round % 5
+    if kind == 0 then
+      -- connect and vanish
+      local a, b = mock.connect(), mock.connect()
+      a:close()
+      b:close()
+    elseif kind == 1 then
+      -- an HTTP line, then gone
+      local peer = mock.connect()
+      peer:send("GET / HTTP/1.1\r\n\r\n")
+      peer:close()
+    elseif kind == 2 then
+      -- more than fit, each refused
+      local many = {}
+      for i = 1, 6 do many[i] = mock.connect() end
+      for _, peer in ipairs(many) do peer:close() end
+    elseif kind == 3 then
+      -- never speaks: timed out by the timer
+      local idle = {}
+      for i = 1, 3 do idle[i] = mock.connect() end
+      mock.advance(3100)
+      for _, peer in ipairs(idle) do peer:close() end
+    else
+      -- a wrong proof
+      local peer = mock.connect()
+      send(peer, { type = "hello", protocol = PROTOCOL, nonce = CLIENT_NONCE })
+      frames(peer)
+      send(peer, { type = "auth", proof = string.rep("0", 64) })
+    end
+    mock.socket_error("connection reset by peer")
+    tick(2)
+    eq(request(kumi, "ping", {}).ok, true, "Kumi still answers after round " .. round)
+  end
+  ok(not retired(kumi), "never closed")
+  eq(#mock.servers, 1, "the server was never remade")
+  ok(server.running and server.open)
   no_dialogs()
+end)
+
+test("bridge: a client that has gone before it is looked at is left alone, never closed", function()
+  local env = setup()
+  local early = mock.connect()
+  early:close() -- gone before the accept callback could read it
+  mock.advance(200)
+  local fine = connect(env)
+  eq(request(fine, "ping", {}).ok, true)
+  eq(#mock.crashes, 0)
+  no_dialogs()
+end)
+
+test("bridge: a host that sends requests and never reads the answers is cut off", function()
+  local env = setup()
+  local peer = connect(env)
+  peer:stop_reading()
+  for _ = 1, 400 do send(peer, { type = "request", id = next_id + 1, method = "status", params = {} }); next_id = next_id + 1 end
+  tick(4)
+  ok(retired(peer) or peer.unread > 0, "answered or cut off")
+  eq(mock.blocked_sends, 0)
+  no_dialogs()
+end)
+
+test("bridge: a flood of requests is answered a few at a time, in order", function()
+  local server = T.load_payload_module("server")
+  local sent = {}
+  local client = { is_open = true, send = function(_, text) sent[#sent + 1] = text; return true end }
+  local clock = 0
+  local answered = {}
+  local ctx = {
+    connections = {},
+    now_ms = function() clock = clock + 3 return clock end, -- every look at the clock costs 3 ms
+    unix_ms = function() return 0 end,
+    log = function() end,
+    on_request = function(_, request) answered[#answered + 1] = request.id return {} end,
+  }
+  local s = server.new(ctx)
+  local record = { key = "k", client = client, outbox = {}, requests = {} }
+  local actions = {}
+  for id = 1, 40 do actions[id] = { request = { id = id, method = "x", params = {} } } end
+  s:apply(record, actions)
+  ok(#answered >= 1 and #answered < 40, "a share of them: " .. #answered)
+  local first = #answered
+  s:run_requests(record)
+  ok(#answered > first, "more on the next go")
+  for _ = 1, 100 do s:run_requests(record) end
+  eq(#answered, 40)
+  for i = 1, 40 do eq(answered[i], i, "in order") end
+  -- Far too many waiting is a peer to close.
+  local big = {}
+  for id = 1, 300 do big[id] = { request = { id = id, method = "x", params = {} } } end
+  local flood = { key = "j", client = client, outbox = {}, requests = {} }
+  s:apply(flood, big)
+  ok(flood.closing, "closed")
 end)
 
 test("bridge: a deadline that is now has passed, and a code that isn't text is sent as text", function()
@@ -1035,4 +1132,26 @@ test("config: io.stat's mode is read in whichever format Renoise gives it", func
   mock.stat_modes["/dev/null"] = 438
   eq(access(256), false, "0400")
   eq(access(388), true, "0604")
+end)
+
+test("bridge: connections it has retired don't count, and a peer that never closes can't make them pile up", function()
+  local env = setup()
+  local kumi = connect(env)
+  for i = 1, 200 do
+    local peer = mock.connect()
+    peer:send("GET / HTTP/1.1\r\n\r\n") -- retired at once, the peer stays connected
+    if i % 20 == 0 then tick() end
+  end
+  tick()
+  local retired_count = 0
+  for _, record in pairs(KUMI_BRIDGE.connections) do
+    if record.closing then retired_count = retired_count + 1 end
+  end
+  ok(retired_count <= 128, "retired kept: " .. retired_count)
+  -- Retired ones leave room for the living: a new host still gets in, and Kumi is still there.
+  local fresh = connect(env)
+  eq(request(fresh, "ping", {}).ok, true)
+  eq(request(kumi, "ping", {}).ok, true)
+  eq(#mock.servers, 1, "the server was not remade")
+  no_dialogs()
 end)

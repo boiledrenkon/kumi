@@ -6,7 +6,7 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 defs=${RENOISE_DEFINITIONS:-}
 if [ -z "$defs" ]; then
-  for app in /Applications/Renoise.app "$HOME/Applications/Renoise.app" "$HOME/Downloads/rns_354_osx/Renoise.app"; do
+  for app in /Applications/Renoise.app "$HOME/Applications/Renoise.app"; do
     if [ -d "$app/Contents/Resources/Scripts/Types/renoise/library" ]; then
       defs="$app/Contents/Resources/Scripts/Types/renoise/library"
       break

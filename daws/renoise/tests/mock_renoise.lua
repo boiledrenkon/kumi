@@ -142,6 +142,8 @@ local function new_socket_api()
     server_fields.close = function()
       record.running = false
       record.open = false
+      -- Renoise closes a server's clients with it.
+      for _, peer in ipairs(record.peers) do peer.open = false end
     end
     server_fields.wait = function() error("mock: server:wait blocks Renoise's GUI") end
     record.proxy = object("renoise.Socket.SocketServer", server_fields, {
@@ -196,6 +198,15 @@ function Peer:wrap()
       return true
     end,
     close = function()
+      -- Renoise 3.5.4: closing a client its server accepted ends the server (its select fails with "Bad file
+      -- descriptor", is_running turns false and every connection is lost), and closing one the peer had already closed
+      -- crashes Renoise. Neither is ever right, so both are recorded for the tests to refuse.
+      if not peer.open then
+        M.crashes[#M.crashes + 1] = "closed a socket the peer had closed (Renoise crashes): " .. tostring(peer.port)
+      else
+        M.crashes[#M.crashes + 1] = "closed an accepted client (Renoise's server stops): " .. tostring(peer.port)
+      end
+      peer.server.running = false
       peer.open = false
       peer.closed_by_server = true
     end,
@@ -397,6 +408,8 @@ end
 function M.reset(options)
   options = options or {}
   M.errors, M.modals, M.statuses, M.popen_calls = {}, {}, {}, {}
+  -- Calls that would crash the real Renoise.
+  M.crashes = {}
   M.servers, M.busy_ports, M.timers, M.menu_entries = {}, {}, {}, {}
   M.stat_modes = {}
   -- Bytes a socket takes from a peer that doesn't read, and the sends that would have blocked because of it.
