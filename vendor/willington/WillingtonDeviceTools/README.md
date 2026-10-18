@@ -1,6 +1,6 @@
 # Willington Device Tools
 
-Experimental extensions for **Live 12.4.15b4/b5/b6, macOS ARM64**.
+Experimental extensions for **Live 12.4.15b4/b5/b6/b7, macOS ARM64**.
 They add Python Remote Script methods and expose those methods to Max's LiveAPI.
 The executable is not patched on disk. Registration lasts for the Live process;
 disconnecting this Control Surface removes its methods and disables its writes.
@@ -223,3 +223,11 @@ modulators and native signal-source checks. See [b6 evidence](../../evidence/liv
 Run the asynchronous regression through the normal ControlSurface scheduler.
 An ad hoc callback outside that scheduler can alter Live undo transaction
 boundaries after a macro-value edit and is not an equivalent test environment.
+
+## Live 12.4.15b7 macOS ARM64
+
+The exact `live-12.4.15b7-arm64` profile participates in default selection and
+normal matrix bundles. See the [b7 evidence and coverage limits](../../evidence/live-12.4.15b7-arm64/README.md).
+Single-step macro removal undo is validated from Live timers and Max LiveAPI.
+A `_Framework.ControlSurface.update_display` callback can add a separate
+Custom Action undo entry; that callback context is not validated for one-step undo.

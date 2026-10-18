@@ -87,6 +87,20 @@
         "WillingtonEditing",
         "WillingtonRackZones"
       ]
+    },
+    {
+      "id": "live-12.4.15b7-arm64",
+      "platform": "macos",
+      "architecture": "arm64",
+      "version": "12.4.15b7 (2026-10-13_4b9fa49e05)",
+      "source_sha256": "ba0a4b90a3563d18877dda7d1284590956644eb3970f5b68575e3a9d6b096518",
+      "status": "validated",
+      "components": [
+        "WillingtonBindings",
+        "WillingtonDeviceTools",
+        "WillingtonEditing",
+        "WillingtonRackZones"
+      ]
     }
   ]
 }
