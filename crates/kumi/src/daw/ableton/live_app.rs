@@ -130,18 +130,7 @@ pub async fn open_set_file(run: &Run, platform: &str, env: &Env, set: &str) -> b
 pub const MIN_LIVE_MAJOR: u32 = 12;
 
 /// What of Live is on this computer, read from its files without opening it: whether it can take the bridge yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LiveInstalled {
-    /// A Live Kumi works with (`MIN_LIVE_MAJOR` or later) has been opened here, so it has a User Library the bridge
-    /// goes in.
-    Ready,
-    /// No Live at all.
-    Missing,
-    /// Only an older Live: the newest one's version ("11.3.13").
-    Older(String),
-    /// A Live Kumi works with is installed (this app), but hasn't been opened yet, so it has no User Library.
-    NeverOpened(String),
-}
+pub use crate::daw::provider::Installed as LiveInstalled;
 
 /// Which Live is here, from files alone: the Lives installed where their installer puts them, the settings folder
 /// each version makes as it first starts ("Live 12.4.15"), and the User Library the bridge goes in.

@@ -4,7 +4,7 @@
 pub mod ableton;
 pub mod provider;
 
-pub use provider::{DawFactory, DawProvider, DawSession, WatchWords};
+pub use provider::{BridgeState, DawFactory, DawProvider, DawSession, EnableStep, Installed, WatchWords};
 
 use kumi_runtime::{
     core::{

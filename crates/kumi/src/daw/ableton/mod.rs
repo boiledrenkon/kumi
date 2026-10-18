@@ -4,6 +4,7 @@ pub mod bridge_setup;
 pub mod live_app;
 pub mod live_extension;
 pub mod provider;
+pub mod setup;
 pub mod willington;
 
 use kumi_runtime::{core::contracts::Integration, integrations::ableton::AbletonOptions};

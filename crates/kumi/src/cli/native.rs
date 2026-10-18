@@ -11,7 +11,6 @@ use crate::{
     input::TerminalInput,
     install::{self, InstalledIo},
     library::{run_library, LibraryIo},
-    live_app,
     login::{self, AuthIo, LoginIo},
     report::{write_report, ReportIo},
     spinner::step,

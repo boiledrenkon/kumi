@@ -12,7 +12,7 @@ mod live;
 mod panels;
 mod records;
 mod setup;
-pub use setup::{waveform, LiveInstalled, LiveSetup, WAVE_WIDTH};
+pub use setup::{waveform, DawSetup, Installed, LiveInstalled, LiveSetup, WAVE_WIDTH};
 mod sharing;
 mod shown;
 
@@ -86,7 +86,7 @@ pub struct TuiOptions {
     pub updates: Option<UpdateControl>,
     pub voice: Option<Rc<dyn VoiceController>>,
     /// Live's part of first-run setup; `None` when Kumi chats without Live by choice.
-    pub connect_live: Option<ConnectLive>,
+    pub connect_live: Option<ConnectDaw>,
     /// /willington, where Kumi's bridge can carry Willington.
     pub willington: Option<WillingtonControl>,
     /// /slots: which model does each listening job, swapped and taken back.
@@ -127,15 +127,18 @@ pub struct TuiOptions {
     /// Where /export and /share save; None saves in the folder Kumi was started in.
     pub folder: Option<std::path::PathBuf>,
 }
-/// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
+/// The DAW's part of first-run setup: the setup shows it when Kumi's bridge isn't in the DAW yet, or is older
 /// than Kumi's.
-pub struct ConnectLive {
+pub struct ConnectDaw {
     /// Why Live isn't connected yet, in a sentence; `None` when the bridge in Live is Kumi's own.
     pub why: Option<String>,
     /// Kumi's bridge version.
     pub bridge: String,
-    pub live: Rc<dyn LiveSetup>,
+    /// The DAW's side of setup (named `live` as it always was).
+    pub live: Rc<dyn DawSetup>,
 }
+/// The DAW's part of first-run setup, as the app and its tests have always named it.
+pub use ConnectDaw as ConnectLive;
 impl TuiOptions {
     pub fn new(controller: Rc<dyn SessionController>, input: Rc<dyn TtyInput>, output: Rc<dyn TtyOutput>, mode: impl Into<String>) -> Self {
         Self {

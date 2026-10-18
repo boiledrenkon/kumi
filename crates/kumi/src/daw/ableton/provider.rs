@@ -1,11 +1,17 @@
 //! Live as the app works with it: its bridge (the Remote Script) and its configuration, the session's integration
 //! with what only Live has (its User Library, the Set opener, whether Live runs, Willington's switch), and the words
 //! for watching it answer.
-use super::{bridge_setup, live_app, willington::Willington};
-use crate::daw::provider::{DawFactory, DawProvider, DawSession, WatchWords};
+use super::{
+    bridge_setup, live_app,
+    setup::{live_here, LiveSide},
+    willington::Willington,
+};
+use crate::daw::provider::{BridgeState, DawFactory, DawProvider, DawSession, EnableStep, WatchWords};
 use crate::doctor::LiveProbe;
+use crate::tui::app::DawSetup;
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::abort;
+use kumi_runtime::core::contracts::SessionController;
 use kumi_runtime::RuntimeError;
 use kumi_runtime::{
     core::{
@@ -17,10 +23,13 @@ use kumi_runtime::{
     system::Env,
 };
 use std::rc::Rc;
+use std::{cell::RefCell, rc::Weak};
 
 /// Live's provider.
 pub struct Ableton;
 
+/// Setup's Control Surface step: what the producer does in Live.
+const SURFACE: &str = "In Live, open Settings › Link, Tempo & MIDI and set a Control Surface to AbletonMcpBridge. Kumi notices by itself.";
 /// What Kumi says while an open Live hasn't answered yet.
 pub(crate) const LIVE_STARTING: &str = "Live is open; Kumi connects once it answers.";
 /// What Kumi says when its bridge can't reach Live.
@@ -51,6 +60,18 @@ impl DawProvider for Ableton {
     fn watch_words(&self) -> WatchWords {
         WatchWords { starting: LIVE_STARTING, unreachable: NO_LIVE, answered: "Live answered, so Kumi is connected to it now." }
     }
+    fn enable_step(&self) -> Option<EnableStep> {
+        Some(EnableStep {
+            label: "Control Surface",
+            say: SURFACE,
+            waiting: "waiting for Live",
+            later: "when Live opens",
+            put_off: "Kumi connects to Live by itself once Live answers: in Live, open Settings › Link, Tempo & MIDI and set a Control Surface to AbletonMcpBridge.",
+        })
+    }
+    fn min_major(&self) -> u32 {
+        live_app::MIN_LIVE_MAJOR
+    }
     fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration> {
         let env = session.env.clone();
         let mut options = AbletonOptions::with_context(context);
@@ -74,6 +95,56 @@ impl DawProvider for Ableton {
     }
     fn probe(&self, bridge_config: String, factory: &DawFactory) -> LocalBoxFuture<'static, LiveProbe> {
         probe_live(bridge_config, factory.ableton.clone()).boxed_local()
+    }
+    fn bridge_state(&self, env: &Env, found: bool, missing: bool, bundled: Option<&str>, command: &str) -> BridgeState {
+        // A switch from a JavaScript bridge with the same Remote Script changes only the host, which Kumi
+        // already runs natively: nothing to ask of the producer (a start with Live closed finishes it).
+        let stale = found
+            .then(|| crate::update::older_bridge(env, bundled))
+            .flatten()
+            .filter(|stale| !(stale.runtime_migration && crate::install::only_the_host_differs(env)));
+        // Plain mode has no setup to put the bridge in: the way by hand comes first.
+        let connect = kumi_runtime::command::connect_live_by_hand(command);
+        let notice = if missing {
+            live_here()
+                .then(|| format!("The Ableton bridge isn't in Live yet, so Kumi can't see your Set; chatting without it. {connect}."))
+        } else {
+            stale.as_ref().map(|stale| {
+                if stale.runtime_migration {
+                    format!("The bridge in Live still uses JavaScript. {connect}.")
+                } else {
+                    format!(
+                        "The bridge in Live is {}, older than this Kumi's ({}), so some changes aren't offered. {connect}.",
+                        stale.installed, stale.bundled
+                    )
+                }
+            })
+        };
+        // In the app, first-run setup puts the bridge in place instead, with Live restarting around it (where Live runs).
+        let why = if missing {
+            live_here().then(|| "The Ableton bridge isn't in Live yet, so Kumi can't see your Set.".to_string())
+        } else {
+            stale.as_ref().map(|stale| {
+                if stale.runtime_migration {
+                    "The bridge in Live still runs on JavaScript.".to_string()
+                } else {
+                    format!(
+                        "The bridge in Live is {}, older than Kumi's {}, so some changes aren't offered.",
+                        stale.installed, stale.bundled
+                    )
+                }
+            })
+        };
+        BridgeState { notice, why }
+    }
+    fn setup(
+        &self,
+        env: &Env,
+        bridge: Rc<RefCell<Option<String>>>,
+        given: bool,
+        controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
+    ) -> Rc<dyn DawSetup> {
+        Rc::new(LiveSide { env: env.clone(), run: bridge_setup::default_run(), bridge, given, controller })
     }
     fn without_daw(&self, on_connection: Rc<dyn Fn(ConnectionState)>) -> Rc<dyn Integration> {
         kumi_runtime::integrations::create_inference_only_integration(on_connection)
