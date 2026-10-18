@@ -1448,3 +1448,28 @@ test("reads: an internal error tells the host what failed, not the file and line
   eq(response.error.message, "track index out of range: 0")
   H.no_dialogs()
 end)
+
+test("reads: a matrix too big for a page keeps the slots around the one playing, and says where they start", function()
+  local env, peer = setup(nil, demo({
+    tracks = false, sequencer_tracks = 60, patterns = 2, sequence_length = 800, sequence = false,
+  }))
+  for s = 1, 800 do
+    for t = 1, 60 do mock.ops.mute_slot(t, s, true) end
+  end
+  for t = 1, 60 do mock.ops.alias(2, t, 1) end
+  mock.ops.select("selected_sequence_index", 600)
+  local matrix = call(peer, "focus_body", { kind = "matrix" }).result
+  ok(matrix.truncated, "cut to a page")
+  eq(matrix.slotCount, 800)
+  local first, last = matrix.from, matrix.from + #matrix.slots - 1
+  ok(first <= 600 and 600 <= last, "slot 600 is in the window: " .. first .. " to " .. last)
+  eq(matrix.current, 600)
+  eq(matrix.slots[1].ref:match(":seq:(%d+)$"), tostring(first), "the first slot is the one `from` says")
+  H.no_dialogs()
+  -- an uncut matrix has no `from`
+  local _, small_peer = setup()
+  local small = call(small_peer, "focus_body", { kind = "matrix" }).result
+  eq(small.from, nil)
+  eq(small.truncated, nil)
+  H.no_dialogs()
+end)

@@ -311,15 +311,19 @@ local function matrix_body(job, params, epoch)
     slots = array(list),
     current = transport.playing and transport.playback_pos.sequence or live.selected_sequence_index,
   }
-  -- Cut to the budget by dropping slots off the end; the rest is read as sequence and pattern rows.
-  local keep = slots
-  while #json.encode(result) > reads.PAGE_BUDGET and keep > 1 do
-    keep = math.max(1, math.floor(keep * 0.7))
+  -- Cut to the budget, keeping the slots around the current one (`from` is the first shown); the rest is read as sequence and
+  -- pattern rows.
+  local from, to = 1, slots
+  while #json.encode(result) > reads.PAGE_BUDGET and to > from do
+    local size = math.max(1, math.floor((to - from + 1) * 0.7))
+    from = math.max(1, math.min(result.current - math.floor(size / 2), slots - size + 1))
+    to = from + size - 1
     local shown = {}
-    for s = 1, keep do shown[s] = list[s] end
+    for s = from, to do shown[#shown + 1] = list[s] end
     result.slots = array(shown)
     result.truncated = true
     result.slotCount = slots
+    result.from = from
   end
   return result
 end
