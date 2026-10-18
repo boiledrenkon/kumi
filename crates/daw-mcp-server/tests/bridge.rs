@@ -139,3 +139,41 @@ async fn several_connections_each_number_their_own_events() {
     let event = tokio::time::timeout(WAIT, second_events.recv()).await.unwrap().unwrap();
     assert_eq!((event.seq, event.data), (1, json!({"count": 4})));
 }
+
+/// A listener that answers the hello with `reply` and closes.
+async fn one_reply(reply: &'static str) -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut chunk = [0u8; 1024];
+        let _ = stream.read(&mut chunk).await;
+        let _ = stream.write_all(reply.as_bytes()).await;
+    });
+    address
+}
+
+#[tokio::test]
+async fn refusals_early_closes_and_garbage_during_the_handshake() {
+    let refused = BridgeClient::connect(
+        one_reply("{\"type\":\"refused\",\"reason\":\"protocol\",\"protocol\":\"kumi-daw/2\"}\n").await,
+        secret(),
+        CLIENT,
+    )
+    .await;
+    assert!(matches!(
+        refused,
+        Err(ConnectError::Handshake(daw_bridge::handshake::HandshakeError::Refused { ref reason, protocol: Some(ref protocol) })) if reason == "protocol" && protocol == "kumi-daw/2"
+    ));
+    assert!(matches!(BridgeClient::connect(one_reply("").await, secret(), CLIENT).await, Err(ConnectError::Closed)));
+    assert!(matches!(
+        BridgeClient::connect(one_reply("HTTP/1.1 400 Bad Request\r\n\r\n").await, secret(), CLIENT).await,
+        Err(ConnectError::Handshake(_))
+    ));
+    let welcome_first = "{\"type\":\"welcome\",\"session\":\"00000000000000000000000000000000\",\"daw\":\"reaper\",\"bridge\":\"0\",\"dawVersion\":\"0\",\"pid\":1,\"resource\":\"/\",\"project\":null,\"maxFrameBytes\":1,\"heartbeatMs\":1}\n";
+    assert!(matches!(BridgeClient::connect(one_reply(welcome_first).await, secret(), CLIENT).await, Err(ConnectError::Handshake(_))));
+    // Nothing listening.
+    let closed = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap().local_addr().unwrap();
+    assert!(matches!(BridgeClient::connect(closed, secret(), CLIENT).await, Err(ConnectError::Io(_))));
+}
