@@ -205,7 +205,8 @@ fn renoises_open_panes_show_when_the_producer_works_in_them() {
     assert_eq!(touched_next(Some(&track), Some(&closed), Some(Touched::Tracker)), Some(Touched::Tracker), "no matrix open, the pattern");
 }
 
-case!(scratch_pattern_under_dsp_frame, async {
+// Renoise's lower frame shows the track DSPs most of the time: FOCUS still draws the pattern, asked for by its ref.
+case!(renoises_pattern_draws_under_an_open_dsp_frame, async {
     work_with(DawId::Renoise);
     let c = Rc::new(Control::default());
     *c.own.borrow_mut() = Some(FocusBody::Tracker(TrackerGrid {
@@ -223,10 +224,8 @@ case!(scratch_pattern_under_dsp_frame, async {
     h.connect();
     let focus = json!({"track":{"name":"Track 01","kind":"sequencer"},"trackRef":"55cef1:track:1","mainView":{"kind":"pattern-editor","label":"Pattern Editor"},"editorView":{"kind":"device-chain","label":"Track DSPs"},"item":{"kind":"pattern-track","itemRef":"55cef1:pattern:1"},"section":{"kind":"sequence-slot","index":0.0}});
     h.emit(json!({"type":"focus","focus":focus}));
-    for _ in 0..100 {
-        h.screen();
-        delay(5).await;
-    }
-    eprintln!("{}\n{:?}", h.screen().join("\n"), h.calls());
+    shows(&h, "FOCUS · Pattern").await;
+    h.has("Pattern · 64 lines");
+    assert!(h.calls().contains(&"own:Tracker { item_ref: Some(\"55cef1:pattern:1\") }".to_string()), "{:?}", h.calls());
     h.close().await;
 });
