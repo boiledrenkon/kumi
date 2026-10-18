@@ -127,50 +127,93 @@ pub fn timeline(body: &Value) -> TimelineStrip {
     }
 }
 
+/// A tracker track's columns: its note columns (with a sample effect column when any note has one) and its effect
+/// columns.
+struct Columns {
+    notes: usize,
+    fx: bool,
+    effects: usize,
+}
+
+/// The column a note or effect sits in (from 1), or its place in the list when it doesn't say.
+fn column(value: &Value, at: usize) -> usize {
+    number(value, "col").filter(|n| *n >= 1.).map_or(at + 1, |n| n as usize)
+}
+
 /// One line of a tracker track as the DAW writes it: each note column ("C-4 01 80 .. .."), then each effect column
-/// ("0A10"), in the DAW's own text.
-pub fn tracker_cell(line: &Value) -> String {
-    let field = |value: &Value, key: &str, empty: &str| {
-        value.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(empty).to_owned()
+/// ("0A10"), in the DAW's own text; an empty line or column is drawn as the DAW draws it ("--- .. .. .. ..", "....").
+fn tracker_cell(line: Option<&Value>, columns: &Columns) -> String {
+    let field = |value: Option<&Value>, key: &str, empty: &str| {
+        value.and_then(|value| value.get(key)).and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(empty).to_owned()
     };
-    let notes: Vec<String> = list(line, "notes")
-        .map(|note| {
-            [
+    let at = |key: &str, col: usize| {
+        line.and_then(|line| line.get(key))
+            .and_then(Value::as_array)
+            .and_then(|items| items.iter().enumerate().find(|(index, item)| column(item, *index) == col).map(|(_, item)| item))
+    };
+    let mut cells: Vec<String> = (1..=columns.notes)
+        .map(|col| {
+            let note = at("notes", col);
+            let mut fields = vec![
                 field(note, "note", "---"),
                 field(note, "instrument", ".."),
                 field(note, "volume", ".."),
                 field(note, "panning", ".."),
                 field(note, "delay", ".."),
-            ]
-            .join(" ")
+            ];
+            if columns.fx {
+                fields.push(field(note, "fx", "...."));
+            }
+            fields.join(" ")
         })
         .collect();
-    let effects: Vec<String> =
-        list(line, "effects").map(|effect| format!("{}{}", field(effect, "number", ".."), field(effect, "amount", ".."))).collect();
-    if effects.is_empty() {
-        notes.join(" ")
-    } else {
-        format!("{} {}", notes.join(" "), effects.join(" "))
-    }
+    cells.extend((1..=columns.effects).map(|col| {
+        let effect = at("effects", col);
+        format!("{}{}", field(effect, "number", ".."), field(effect, "amount", ".."))
+    }));
+    cells.join(" ")
 }
 
-/// A tracker's pattern or phrase around its cursor (Renoise), lines counted from 1 as the DAW shows them.
+/// A tracker's pattern or phrase around its cursor (Renoise), lines counted from 1 as the DAW shows them. The DAW
+/// sends only the lines with something in them; every line of the window is drawn.
 pub fn tracker(body: &Value) -> TrackerGrid {
     let from = number(body, "from").unwrap_or(1.).max(1.) as usize;
+    let lines = number(body, "lines").unwrap_or(0.).max(0.) as usize;
     let line = |key: &str| number(body, key).filter(|n| *n >= 1.).map(|n| n as usize - 1);
+    let listed = |track: &Value| list(track, "lines").filter_map(|row| number(row, "line")).map(|n| n as usize).max().unwrap_or(0);
+    let last = body
+        .get("window")
+        .and_then(|window| number(window, "to"))
+        .map(|to| to as usize)
+        .unwrap_or_else(|| list(body, "tracks").map(listed).max().unwrap_or(0));
+    let last = if lines > 0 { last.min(lines) } else { last };
     TrackerGrid {
         item_ref: text(body, "ref"),
         name: text(body, "name"),
-        lines: number(body, "lines").unwrap_or(0.).max(0.) as usize,
+        lines,
         from: from - 1,
         cursor: line("cursor"),
         playing: line("playing"),
         lpb: number(body, "lpb"),
         tracks: list(body, "tracks")
-            .map(|track| TrackerTrack {
-                name: text(track, "name"),
-                color: color(track),
-                cells: list(track, "lines").map(tracker_cell).collect(),
+            .map(|track| {
+                let rows: Vec<&Value> = list(track, "lines").collect();
+                let widest = |key: &str| {
+                    rows.iter().flat_map(|row| list(row, key).enumerate().map(|(index, item)| column(item, index))).max().unwrap_or(0)
+                };
+                let columns = Columns {
+                    notes: (number(track, "noteColumns").unwrap_or(1.).max(0.) as usize).max(widest("notes")),
+                    fx: rows
+                        .iter()
+                        .any(|row| list(row, "notes").any(|note| note.get("fx").and_then(Value::as_str).is_some_and(|fx| !fx.is_empty()))),
+                    effects: (number(track, "effectColumns").unwrap_or(0.).max(0.) as usize).max(widest("effects")),
+                };
+                let at = |n: usize| rows.iter().copied().find(|row| number(row, "line") == Some(n as f64));
+                TrackerTrack {
+                    name: text(track, "name"),
+                    color: color(track),
+                    cells: (from..=last).map(|n| tracker_cell(at(n), &columns)).collect(),
+                }
             })
             .collect(),
     }

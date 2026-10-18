@@ -292,7 +292,7 @@ async fn renoises_bodies_are_its_pattern_matrix_and_keyzones_in_its_own_notation
             };
             assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "pattern", "ref": "3:pattern:2"}));
             assert_eq!((grid.from, grid.cursor, grid.playing), (0, Some(1), Some(0)), "lines from 1 in Renoise, from 0 in FOCUS");
-            assert_eq!(grid.tracks[0].cells, ["C-4 01 .. .. .. 0A10", "OFF .. .. .. .."]);
+            assert_eq!(grid.tracks[0].cells, ["C-4 01 .. .. .. 0A10", "OFF .. .. .. .. ...."], "each column kept in its place");
 
             renoise.focus_body(&BodyRequest::Tracker { item_ref: Some("3:phrase:1.2".into()) }, Signal::new()).await.unwrap();
             assert_eq!(host.asked.borrow().last().unwrap().1["kind"], "phrase", "a phrase is asked for as one");

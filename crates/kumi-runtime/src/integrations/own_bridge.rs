@@ -243,13 +243,12 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             None => unsaved(self.id()).into(),
         };
         let mut book = self.book.borrow_mut();
-        let tracks: Vec<JsonObject> = snapshot
-            .get("tracks")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|row| book.shorten(row).as_object().cloned())
-            .collect();
+        let rows = snapshot.get("tracks").and_then(Value::as_array).into_iter().flatten();
+        // Each track is named in the project's order before any ref in a row (a group's, a send's) names one out of it.
+        for reference in rows.clone().filter_map(|row| row.get("ref").and_then(Value::as_str)) {
+            book.short_ref(reference);
+        }
+        let tracks: Vec<JsonObject> = rows.filter_map(|row| book.shorten(row).as_object().cloned()).collect();
         let selected: Vec<String> =
             snapshot.pointer("/selection/trackRef").and_then(Value::as_str).map(|track| book.short_ref(track)).into_iter().collect();
         let selection = book.shorten(snapshot.get("selection").unwrap_or(&Value::Null));
