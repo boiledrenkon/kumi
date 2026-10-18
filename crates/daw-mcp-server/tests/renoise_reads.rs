@@ -127,7 +127,7 @@ async fn a_song_switched_retires_the_refs_and_cursors_from_before() {
     let again = client.request("read", json!({"kind": "track", "limit": 2}), WAIT).await.unwrap();
     assert_eq!(again["epoch"], "2");
     assert_eq!(again["items"][0]["ref"], "2:track:1");
-    assert_eq!(again["nextCursor"], "2.3");
+    assert_eq!(again["nextCursor"], "2.0.3");
     let rest = client.request("read", json!({"kind": "track", "limit": 2, "cursor": again["nextCursor"]}), WAIT).await.unwrap();
     assert_eq!(rest["items"][0]["ref"], "2:track:3");
     let one = client.request("read", json!({"ref": "2:track:3"}), WAIT).await.unwrap();

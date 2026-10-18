@@ -93,6 +93,11 @@ struct Inner {
     max_unread: AtomicU64,
     /// A host that stops reading, for tests.
     paused: AtomicBool,
+    /// Credit the host has counted as given back but not yet written: a grant that could not be written in time (the writer
+    /// held, the socket full) is not lost, it is written when it can be, or the bridge would be short of it for good.
+    grant_owed: AtomicU64,
+    /// Whether a task is writing `grant_owed`.
+    grant_writer: AtomicBool,
     closed: AtomicBool,
     events: broadcast::Sender<Event>,
     welcome: Welcome,
@@ -190,13 +195,14 @@ impl BridgeClient {
             credit_window: credit.as_ref().map(Credit::window),
             max_unread: AtomicU64::new(credit.as_ref().map_or(0, Credit::unread)),
             paused: AtomicBool::new(false),
+            grant_owed: AtomicU64::new(0),
+            grant_writer: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             events,
             welcome: *welcome,
         });
         if let Some(grant) = first_grant {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-            write_before(&inner, &Frame::Credit { bytes: grant }.encode(), deadline).await.map_err(|_| ConnectError::Closed)?;
+            owe_grant(&inner, grant);
         }
         tokio::spawn(read_loop(Arc::downgrade(&inner), reader, framer, credit));
         Ok(Self { inner })
@@ -219,6 +225,18 @@ impl BridgeClient {
     /// Stops this host reading the socket (or starts it again), as a host busy elsewhere would. For tests.
     pub fn pause_reading(&self, paused: bool) {
         self.inner.paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// Holds the writer for `time`, as a write stuck on a socket without room does. For tests.
+    pub async fn hold_writer(&self, time: Duration) {
+        let writer = self.inner.writer.lock().await;
+        tokio::time::sleep(time).await;
+        drop(writer);
+    }
+
+    /// Credit counted as given back and not yet written. For tests.
+    pub fn grant_owed(&self) -> u64 {
+        self.inner.grant_owed.load(Ordering::SeqCst)
     }
 
     pub fn is_closed(&self) -> bool {
@@ -320,6 +338,49 @@ async fn write_before(inner: &Inner, line: &[u8], deadline: tokio::time::Instant
     }
 }
 
+/// The host has read `bytes` the bridge may now send again. Written by a task that keeps at it until it is written: a
+/// write that waits for the writer past its time is tried again, and what is owed is never forgotten.
+fn owe_grant(inner: &Arc<Inner>, bytes: u64) {
+    inner.grant_owed.fetch_add(bytes, Ordering::SeqCst);
+    start_grant_writer(inner);
+}
+
+fn start_grant_writer(inner: &Arc<Inner>) {
+    if inner.grant_writer.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let inner = inner.clone();
+    tokio::spawn(async move {
+        loop {
+            if inner.closed.load(Ordering::SeqCst) {
+                inner.grant_writer.store(false, Ordering::SeqCst);
+                return;
+            }
+            let owed = inner.grant_owed.swap(0, Ordering::SeqCst);
+            if owed == 0 {
+                inner.grant_writer.store(false, Ordering::SeqCst);
+                // (something may have been owed since the swap)
+                if inner.grant_owed.load(Ordering::SeqCst) > 0 && !inner.grant_writer.swap(true, Ordering::SeqCst) {
+                    continue;
+                }
+                return;
+            }
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            match write_before(&inner, &Frame::Credit { bytes: owed }.encode(), deadline).await {
+                Ok(()) => {}
+                Err(WriteFailure::Closed) => {
+                    inner.grant_writer.store(false, Ordering::SeqCst);
+                    return;
+                }
+                Err(WriteFailure::TimedOut) => {
+                    inner.grant_owed.fetch_add(owed, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    });
+}
+
 fn fail_all(inner: &Inner) {
     inner.closed.store(true, Ordering::SeqCst);
     for (_, answer) in inner.pending.lock().unwrap().drain() {
@@ -376,11 +437,7 @@ async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut
         // be read to its end otherwise.
         if let Some(credit) = credit.as_mut() {
             if let Some(grant) = credit.read(std::mem::take(&mut taken)) {
-                let inner = live.clone();
-                tokio::spawn(async move {
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-                    let _ = write_before(&inner, &Frame::Credit { bytes: grant }.encode(), deadline).await;
-                });
+                owe_grant(&live, grant);
             }
             live.max_unread.fetch_max(credit.unread(), Ordering::SeqCst);
         }

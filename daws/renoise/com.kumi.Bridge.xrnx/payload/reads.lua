@@ -21,17 +21,22 @@ M.PAGE_BUDGET = wire.MAX_PAGE_BYTES - 4096
 
 -- Paging
 
-local function cursor_start(params, epoch)
+-- A cursor is `<epoch>.<layout>.<position>`: a position in a list means nothing once the epoch moved, or a track was
+-- inserted or removed (the rows after it moved with it).
+local function cursor_start(params, epoch, layout)
   local cursor = params.cursor
   if cursor == nil then return 1 end
-  local cursor_epoch, position = tostring(cursor):match("^([^.]+)%.(%d+)$")
-  if not cursor_epoch then fail("bad-params", "not a cursor: " .. tostring(cursor)) end
+  local cursor_epoch, cursor_layout, position = tostring(cursor):match("^([^.]+)%.(%d+)%.(%d+)$")
+  if not cursor_epoch or tonumber(position) < 1 then fail("bad-params", "not a cursor: " .. tostring(cursor)) end
   if cursor_epoch ~= epoch then fail("stale", "that cursor is from an earlier epoch: read again from the start") end
+  if tonumber(cursor_layout) ~= layout then
+    fail("stale", "tracks were inserted or removed since that cursor was made: read again from the start")
+  end
   return tonumber(position)
 end
 
-local function cursor_for(epoch, position)
-  return epoch .. "." .. position
+local function cursor_for(epoch, layout, position)
+  return epoch .. "." .. layout .. "." .. position
 end
 
 local function limit_of(params)
@@ -39,9 +44,9 @@ local function limit_of(params)
 end
 
 -- The rows from `row_at(i)`, i from the cursor to `total`, up to the limit (nil rows are skipped, not counted), as
--- {items, nextCursor?, epoch}, cut to the byte budget by dropping rows off the end.
-local function page(job, epoch, params, total, row_at, sparse)
-  local from = cursor_start(params, epoch)
+-- {items, nextCursor?, epoch, ...extra}, cut to the byte budget by dropping rows off the end.
+local function page(job, epoch, params, total, row_at, sparse, extra)
+  local from = cursor_start(params, epoch, job.layout)
   local limit = limit_of(params)
   local items, after = {}, {}
   local i = from
@@ -69,10 +74,31 @@ local function page(job, epoch, params, total, row_at, sparse)
     local shown = {}
     for k = 1, keep do shown[k] = items[k] end
     local result = { items = array(shown), epoch = epoch }
-    if next_at then result.nextCursor = cursor_for(epoch, next_at) end
+    for key, value in pairs(extra or {}) do result[key] = value end
+    if next_at then result.nextCursor = cursor_for(epoch, job.layout, next_at) end
     if keep <= 1 or #json.encode(result) <= M.PAGE_BUDGET then return result end
     keep = math.max(1, math.floor(keep * 0.6))
   end
+end
+
+-- Shrinks the named lists of an answer that has no pages (a snapshot, an instrument, a chain), each from its end by about a
+-- third at a time, until it fits a page; `truncated` says it was cut.
+function M.bound(result, keys)
+  while #json.encode(result) > M.PAGE_BUDGET do
+    local cut = false
+    for _, key in ipairs(keys) do
+      local list = result[key]
+      if list and #list > 1 then
+        local shorter = {}
+        for i = 1, math.max(1, math.floor(#list * 0.7)) do shorter[i] = list[i] end
+        result[key] = array(shorter)
+        cut = true
+      end
+    end
+    if not cut then break end
+    result.truncated = true
+  end
+  return result
 end
 
 ---@return integer
@@ -164,9 +190,13 @@ function M.read(job, params, epoch)
     local track = song:track(track_at)
     local note_columns, effect_columns = track.visible_note_columns, track.visible_effect_columns
     local total = song:pattern(pattern_at).number_of_lines
+    -- An alias shows the lines of another pattern: they are that pattern's, and a write to them changes it.
+    local alias = song:pattern(pattern_at):track(track_at).alias_pattern_index
+    local extra = alias > 0 and { aliasOf = alias, aliasRef = refs.make(epoch, "pattern", alias) } or {}
+    extra.mutedColumns = rows.column_state(track)
     return page(job, epoch, params, total, function(i)
-      return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i, note_columns, effect_columns)
-    end, true)
+      return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i, note_columns, effect_columns, params.hidden == true)
+    end, true, extra)
   elseif kind == "instrument" then
     return page(job, epoch, params, #song.instruments, function(i) return instrument_row(the_song(), epoch, i) end)
   elseif kind == "sample" then

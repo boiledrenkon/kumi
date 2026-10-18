@@ -53,12 +53,13 @@ fn limit_arg(arguments: &Value) -> Result<Option<u64>, String> {
     }
 }
 
-fn window_arg(arguments: &Value) -> Result<Option<Value>, String> {
+fn window_arg(arguments: &Value, daw: Daw) -> Result<Option<Value>, String> {
     let Some(window) = arguments.get("window").filter(|w| !w.is_null()) else { return Ok(None) };
     let number = |name: &str| window.get(name).and_then(Value::as_f64).filter(|n| n.is_finite());
     match (number("from"), number("to")) {
-        (Some(from), Some(to)) if to > from => Ok(Some(json!({"from": from, "to": to}))),
-        _ => Err("window must be {from, to}: two numbers, to after from".into()),
+        (Some(from), Some(to)) if to > from || (daw == Daw::Renoise && to == from) => Ok(Some(json!({"from": from, "to": to}))),
+        // (a pattern's one line is a window in Renoise, whose lines are whole numbers; REAPER's are seconds)
+        _ => Err(format!("window must be {{from, to}}: two numbers, to {} from", if daw == Daw::Renoise { "not before" } else { "after" })),
     }
 }
 
@@ -85,6 +86,7 @@ fn read_params(arguments: &Value) -> Result<Value, String> {
         return Err("kind: what to read (or ref: one object)".into());
     }
     layout_arg(arguments, &mut params)?;
+    hidden_arg(arguments, &mut params)?;
     if let Some(limit) = limit_arg(arguments)? {
         params.insert("limit".into(), limit.into());
     }
@@ -92,7 +94,7 @@ fn read_params(arguments: &Value) -> Result<Value, String> {
 }
 
 /// The arguments a `focus_body` forwards.
-fn body_params(arguments: &Value) -> Result<Value, String> {
+fn body_params(arguments: &Value, daw: Daw) -> Result<Value, String> {
     let mut params = Map::new();
     let Some(kind) = text_arg(arguments, "kind")? else { return Err("kind: which body".into()) };
     params.insert("kind".into(), kind.into());
@@ -101,14 +103,27 @@ fn body_params(arguments: &Value) -> Result<Value, String> {
             params.insert(name.into(), text.into());
         }
     }
-    if let Some(window) = window_arg(arguments)? {
+    if let Some(window) = window_arg(arguments, daw)? {
         params.insert("window".into(), window);
     }
     if let Some(limit) = limit_arg(arguments)? {
         params.insert("limit".into(), limit.into());
     }
     layout_arg(arguments, &mut params)?;
+    hidden_arg(arguments, &mut params)?;
     Ok(Value::Object(params))
+}
+
+/// Whether to look through the columns a track doesn't show (Renoise), which costs about six times as much: off unless asked.
+fn hidden_arg(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), String> {
+    match arguments.get("hidden") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(()),
+        Some(Value::Bool(true)) => {
+            params.insert("hidden".into(), true.into());
+            Ok(())
+        }
+        Some(_) => Err("hidden must be true or false".into()),
+    }
 }
 
 /// The layout the request's refs were made in (Renoise's track shifts since): the bridge carries older refs through them.
@@ -139,14 +154,18 @@ impl Host {
     /// A call whose answer is a page: if the bridge sends one past the frame bound, the same page is asked for again
     /// with half the rows, down to one.
     async fn paged(&self, method: &str, mut params: Value, pick: &Pick, timeout: Duration) -> (Value, bool) {
+        let mut before = usize::MAX;
         for attempt in 0..=SMALLER_PAGES {
             match self.call(method, params.clone(), pick, timeout).await {
                 Ok(answer) if size_of(&answer) <= MAX_ANSWER_BYTES => return (answer, false),
-                Ok(_) => {
+                Ok(answer) => {
+                    // (An answer that doesn't page, or a bridge that ignores the limit, is no smaller for asking again.)
+                    let size = size_of(&answer);
                     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(DEFAULT_LIMIT);
-                    if limit <= 1 || attempt == SMALLER_PAGES {
+                    if limit <= 1 || attempt == SMALLER_PAGES || size >= before {
                         return (self.call_error(&CallError::TooBig), true);
                     }
+                    before = size;
                     params["limit"] = (limit / 2).into();
                 }
                 Err(error) => return (self.call_error(&error), true),
@@ -193,7 +212,7 @@ impl Host {
             Ok(pick) => pick,
             Err(answer) => return answer,
         };
-        match body_params(arguments) {
+        match body_params(arguments, self.daw()) {
             Ok(params) => self.paged("focus_body", params, &pick, READ_TIMEOUT).await,
             Err(why) => (json!({"error": why}), true),
         }
@@ -212,6 +231,21 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_is_forwarded_only_when_true() {
+        assert_eq!(
+            read_params(&json!({"kind": "line", "parent": "1:pattern:2", "track": 3, "hidden": true})).unwrap(),
+            json!({"kind": "line", "parent": "1:pattern:2", "track": 3, "hidden": true})
+        );
+        assert_eq!(
+            body_params(&json!({"kind": "pattern", "hidden": true}), Daw::Renoise).unwrap(),
+            json!({"kind": "pattern", "hidden": true})
+        );
+        assert_eq!(read_params(&json!({"kind": "line", "hidden": false})).unwrap(), json!({"kind": "line"}));
+        assert!(read_params(&json!({"kind": "line", "hidden": "yes"})).is_err());
+        assert!(body_params(&json!({"kind": "pattern", "hidden": 1}), Daw::Renoise).is_err());
+    }
 
     #[test]
     fn a_read_forwards_only_what_it_knows_checked() {
@@ -247,18 +281,25 @@ mod tests {
 
     #[test]
     fn a_body_forwards_its_window_when_it_is_a_range() {
-        let params = body_params(&json!({"kind": "arrange", "window": {"from": 0, "to": 32}, "limit": 10, "resource": "/x"})).unwrap();
+        let params =
+            body_params(&json!({"kind": "arrange", "window": {"from": 0, "to": 32}, "limit": 10, "resource": "/x"}), Daw::Reaper).unwrap();
         assert_eq!(params, json!({"kind": "arrange", "window": {"from": 0.0, "to": 32.0}, "limit": 10}));
-        let params = body_params(&json!({"kind": "arrange", "limit": 24, "around": "r:track:{A}"})).unwrap();
+        let params = body_params(&json!({"kind": "arrange", "limit": 24, "around": "r:track:{A}"}), Daw::Reaper).unwrap();
         assert_eq!(params, json!({"kind": "arrange", "around": "r:track:{A}", "limit": 24}));
-        assert!(body_params(&json!({"kind": "arrange", "around": 5})).is_err());
+        assert!(body_params(&json!({"kind": "arrange", "around": 5}), Daw::Reaper).is_err());
+        // (one line of a pattern is a window; a bridge that wants more says so)
+        assert_eq!(
+            body_params(&json!({"kind": "pattern", "window": {"from": 5, "to": 5}}), Daw::Renoise).unwrap(),
+            json!({"kind": "pattern", "window": {"from": 5.0, "to": 5.0}})
+        );
         for bad in [
             json!({}),
+            json!({"kind": "arrange", "window": {"from": 6, "to": 5}}),
             json!({"kind": "arrange", "window": {"from": 5, "to": 5}}),
             json!({"kind": "arrange", "window": "all"}),
             json!({"kind": "fx", "ref": 2}),
         ] {
-            assert!(body_params(&bad).is_err(), "{bad}");
+            assert!(body_params(&bad, Daw::Reaper).is_err(), "{bad}");
         }
     }
 

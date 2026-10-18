@@ -13,6 +13,12 @@ local function windows()
   return os.platform ~= nil and os.platform() == "WINDOWS"
 end
 
+-- Renoise's io functions take UTF-8 paths, but os.rename and os.remove are stock Lua: on Windows they take the ANSI code
+-- page, so a path with other letters (a user folder like "Kümi") is not found by them. os.move is Renoise's own.
+local function ansi_unsafe(path)
+  return windows() and path:find("[\128-\255]") ~= nil
+end
+
 -- The first 16 hex of the SHA-256 of the resource folder's path as given.
 function M.key(resource)
   return sha256.hex(resource):sub(1, 16)
@@ -43,15 +49,34 @@ function M.write(path, value)
   f:write(text, "\n")
   f:close()
   if not windows() and io.chmod then io.chmod(temp, 600) end
-  if windows() then os.remove(path) end
-  local ok, rename_err = os.rename(temp, path)
-  if not ok then
-    os.remove(temp)
-    return nil, rename_err
+  local unsafe = ansi_unsafe(path)
+  if windows() and not unsafe then os.remove(path) end -- (Windows' rename doesn't replace)
+  local ok, rename_err
+  if unsafe and os.move then
+    ok, rename_err = os.move(temp, path)
+  else
+    ok, rename_err = os.rename(temp, path)
   end
+  if not ok and unsafe then
+    -- No UTF-8 way to replace or delete a file here: the file is written where it goes (a reader that finds it half written
+    -- reads again), and the temporary one emptied.
+    local inplace = io.open(path, "wb")
+    if inplace then
+      inplace:write(text, "\n")
+      inplace:close()
+      ok = true
+    end
+    local empty = io.open(temp, "wb")
+    if empty then empty:close() end
+  elseif not ok then
+    os.remove(temp)
+  end
+  if not ok then return nil, rename_err end
   return true
 end
 
+-- Removes the file. On Windows a path with letters outside ASCII can't be deleted from here: the file stays, naming a process
+-- that is gone, and Kumi sweeps such files.
 function M.remove(path)
   if path then os.remove(path) end
 end

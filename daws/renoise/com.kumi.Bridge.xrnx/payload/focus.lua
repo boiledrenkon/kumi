@@ -18,9 +18,8 @@ local M = {}
 -- What a body is cut to, in lines, when nothing says otherwise (and at most).
 M.BODY_LINES = 33
 M.MAX_BODY_LINES = 128
--- Cells (a line of a column on a track) a pattern body reads at most: a bigger window is cut before it is read, since
--- reading is what takes the time.
-M.BODY_CELLS = 8192
+-- What the lines of a body may come to (a page, less the rest of the answer): reading stops where it is filled.
+M.BODY_BYTES = reads.PAGE_BUDGET - 8192
 -- Samples and phrases an instrument body lists at most.
 M.MAX_BODY_ROWS = 255
 -- Tracks a snapshot lists at most (`read` has the rest).
@@ -69,14 +68,6 @@ local function selection_of(song, epoch)
   return selection
 end
 
--- Quarter notes from the start of the song to a line of a sequence slot.
-local function beats_at(song, sequence, line)
-  local sequencer = song.sequencer
-  local lines = 0
-  for s = 1, sequence - 1 do lines = lines + song:pattern(sequencer:pattern(s)).number_of_lines end
-  return (lines + line - 1) / song.transport.lpb
-end
-
 -- The play position while it plays, else the edit cursor.
 local function transport_of(song)
   local transport = song.transport
@@ -86,8 +77,8 @@ local function transport_of(song)
     local at = transport.playback_pos
     sequence, line, beat = at.sequence, at.line, transport.playback_pos_beats
   else
-    sequence, line = song.selected_sequence_index, song.selected_line_index
-    beat = beats_at(song, sequence, line)
+    -- (the beat is Renoise's own: it follows the song's LPB changes (ZLxx), and costs nothing however long the sequence is)
+    sequence, line, beat = song.selected_sequence_index, song.selected_line_index, transport.edit_pos_beats
   end
   local per_bar = transport.metronome_beats_per_bar
   return {
@@ -158,6 +149,12 @@ function M.snapshot(job, epoch, changed)
     changed = changed,
   }
   if count > M.SNAPSHOT_TRACKS then result.moreTracks = true end
+  -- (a snapshot says it has more tracks than it lists with `moreTracks`, whatever the reason)
+  reads.bound(result, { "tracks" })
+  if result.truncated then
+    result.truncated = nil
+    result.moreTracks = true
+  end
   return result
 end
 
@@ -166,11 +163,13 @@ end
 local function window_of(params, default_center, total)
   local window = params.window
   local from, to
-  if type(window) == "table" then
+  if window ~= nil then
+    if type(window) ~= "table" then fail("bad-params", "window must be {from, to}") end
     from = integer(window.from, "window.from", 1, 100000)
     to = integer(window.to, "window.to", 1, 100000)
+    if not from or not to then fail("bad-params", "window needs both from and to") end
   end
-  if not from or not to then
+  if not from then
     from = math.max(1, default_center - 16)
     to = from + M.BODY_LINES - 1
   end
@@ -202,7 +201,8 @@ local function fit(result, entries, from, to, cut)
       end
       shown[t] = {
         ref = entry.ref, name = entry.name, color = entry.color, noteColumns = entry.noteColumns,
-        effectColumns = entry.effectColumns, lines = array(kept),
+        effectColumns = entry.effectColumns, lines = array(kept), aliasOf = entry.aliasOf, aliasRef = entry.aliasRef,
+        mutedColumns = entry.mutedColumns,
       }
     end
     result.window = { from = from, to = to }
@@ -224,32 +224,42 @@ local function pattern_body(job, params, epoch)
   local center = follows and transport.playback_pos.line or song.selected_line_index
   local from, to = window_of(params, center, lines)
   local tracks = track_count(song)
-  local columns = 0
+  -- Lines are read across all the tracks, one at a time, and reading stops where what was read fills a page: the window is
+  -- cut there (`truncated`), with nothing read that would be thrown away. A line is a slice, so a wide song doesn't hold
+  -- Renoise's GUI for the whole body.
+  local entries, shape = {}, {}
+  local pattern = song:pattern(pattern_at)
+  local bytes = 1024
   for t = 1, tracks do
     local track = song:track(t)
-    columns = columns + track.visible_note_columns + track.visible_effect_columns
-  end
-  local cut = false
-  local most = math.max(1, math.floor(M.BODY_CELLS / math.max(1, columns)))
-  if to - from + 1 > most then
-    to, cut = from + most - 1, true
-  end
-  local entries = {}
-  for t = 1, tracks do
-    job.slice()
-    local live = the_song()
-    local track = live:track(t)
-    local note_columns, effect_columns = track.visible_note_columns, track.visible_effect_columns
-    local pattern_track = live:pattern(pattern_at):track(t)
-    local read = {}
-    for i = from, to do
-      local row = line_row(pattern_track:line(i), i, note_columns, effect_columns)
-      if row then read[#read + 1] = row end
-    end
+    local pattern_track = pattern:track(t)
+    local alias = pattern_track.alias_pattern_index
+    shape[t] = { track.visible_note_columns, track.visible_effect_columns }
     entries[t] = {
       ref = refs.make(epoch, "track", t), name = track.name, color = hex(track.color),
-      noteColumns = note_columns, effectColumns = effect_columns, rows = read,
+      noteColumns = shape[t][1], effectColumns = shape[t][2], rows = {},
+      aliasOf = alias > 0 and alias or nil, aliasRef = alias > 0 and refs.make(epoch, "pattern", alias) or nil,
     }
+    entries[t].mutedColumns = rows.column_state(track)
+    bytes = bytes + 200 + #entries[t].name
+  end
+  local hidden = params.hidden == true
+  local cut = false
+  for i = from, to do
+    job.slice()
+    local live_pattern = the_song():pattern(pattern_at)
+    for t = 1, tracks do
+      local row = line_row(live_pattern:track(t):line(i), i, shape[t][1], shape[t][2], hidden)
+      if row then
+        local read = entries[t].rows
+        read[#read + 1] = row
+        bytes = bytes + #json.encode(row) + 1
+      end
+    end
+    if bytes > M.BODY_BYTES and i < to then
+      to, cut = math.max(from, i - 1), true
+      break
+    end
   end
   local live = the_song()
   local at = live.transport.playback_pos
@@ -307,15 +317,19 @@ local function matrix_body(job, params, epoch)
     slots = array(list),
     current = transport.playing and transport.playback_pos.sequence or live.selected_sequence_index,
   }
-  -- Cut to the budget by dropping slots off the end; the rest is read as sequence and pattern rows.
-  local keep = slots
-  while #json.encode(result) > reads.PAGE_BUDGET and keep > 1 do
-    keep = math.max(1, math.floor(keep * 0.7))
+  -- Cut to the budget, keeping the slots around the current one (`from` is the first shown); the rest is read as sequence and
+  -- pattern rows.
+  local from, to = 1, slots
+  while #json.encode(result) > reads.PAGE_BUDGET and to > from do
+    local size = math.max(1, math.floor((to - from + 1) * 0.7))
+    from = math.max(1, math.min(result.current - math.floor(size / 2), slots - size + 1))
+    to = from + size - 1
     local shown = {}
-    for s = 1, keep do shown[s] = list[s] end
+    for s = from, to do shown[#shown + 1] = list[s] end
     result.slots = array(shown)
     result.truncated = true
     result.slotCount = slots
+    result.from = from
   end
   return result
 end
@@ -335,7 +349,7 @@ local function phrase_body(job, params, epoch)
   local read = {}
   for i = from, to do
     job.slice()
-    local row = line_row(the_song():instrument(instrument_at):phrase(phrase_at):line(i), i, note_columns, effect_columns)
+    local row = line_row(the_song():instrument(instrument_at):phrase(phrase_at):line(i), i, note_columns, effect_columns, params.hidden == true)
     if row then read[#read + 1] = row end
   end
   -- The same grid as a pattern's, of one track.
@@ -389,7 +403,7 @@ local function instrument_body(job, params, epoch)
     phrases = array(phrases),
   }
   if sample_count > M.MAX_BODY_ROWS or phrase_count > M.MAX_BODY_ROWS then result.truncated = true end
-  return result
+  return reads.bound(result, { "keyzones", "phrases" })
 end
 
 -- The chain of a track. Flat until M4 reads the Doofers' and Splitters' XML: they are marked as containers.
@@ -406,7 +420,7 @@ local function dsp_body(job, params, epoch)
       container = row.isDoofer or row.isSplitter, childNodes = json.array(),
     }
   end
-  return { epoch = epoch, ref = refs.make(epoch, "track", at), name = song:track(at).name, nodes = array(nodes) }
+  return reads.bound({ epoch = epoch, ref = refs.make(epoch, "track", at), name = song:track(at).name, nodes = array(nodes) }, { "nodes" })
 end
 
 -- focus_body {kind, ref?, window?}

@@ -331,6 +331,8 @@ function M.load_song(options)
 end
 
 function M.save_song(path)
+  -- (which comes first, the file name or the announcement, is Renoise's: M.name_first sets the other order)
+  if M.name_first then impl_of[M.song].file_name = path end
   M.fire(M.tool.app_will_save_document_observable)
   impl_of[M.song].file_name = path
   M.fire(M.tool.app_saved_document_observable)
@@ -344,6 +346,12 @@ end
 
 local real_time = os.time
 local real_popen = io.popen
+local real_rename, real_remove = os.rename, os.remove
+
+-- Windows' stock os.rename and os.remove take the ANSI code page: a path with UTF-8 letters is not found by them.
+local function ansi_blind(path)
+  return M.platform == "WINDOWS" and tostring(path):find("[\128-\255]") ~= nil
+end
 
 local function install_os_shims()
   -- Wall time follows the mock clock, from a fixed start.
@@ -363,8 +371,21 @@ local function install_os_shims()
     if ok == 0 or ok == true then return true end
     return nil, "mkdir failed"
   end
+  os.rename = function(from, to)
+    if ansi_blind(from) or ansi_blind(to) then return nil, from .. ": No such file or directory" end
+    return real_rename(from, to)
+  end
+  os.remove = function(path)
+    if ansi_blind(path) then return nil, path .. ": No such file or directory" end
+    return real_remove(path)
+  end
+  -- Renoise's own: UTF-8 paths. Whether it replaces a file at the destination is a switch (M.move_replaces).
+  os.move = function(from, to)
+    if M.move_replaces == false and real_rename(to, to) then return nil, to .. ": file exists" end
+    return real_rename(from, to)
+  end
   io.exists = function(path)
-    return os.rename(path, path) ~= nil
+    return real_rename(path, path) ~= nil
   end
   io.stat = function(path)
     if not (M.stat_modes[path] or io.exists(path)) then return nil, "no such file", 2 end
@@ -413,7 +434,9 @@ function M.reset(options)
   M.socket_buffer_bytes, M.blocked_sends = options.socket_buffer_bytes or 256 * 1024, 0
   M.time = 0
   M.song = nil
+  M.name_first = false
   M.platform = options.platform or "MACINTOSH"
+  M.move_replaces = options.move_replaces ~= false
   M.fresh_wrappers = options.fresh_wrappers ~= false
   install_os_shims()
 
@@ -495,6 +518,10 @@ function M.reset(options)
     Track = object("renoise.Track", { TRACK_TYPE_SEQUENCER = 1, TRACK_TYPE_MASTER = 2, TRACK_TYPE_SEND = 3,
       TRACK_TYPE_GROUP = 4, MUTE_STATE_ACTIVE = 1, MUTE_STATE_OFF = 2, MUTE_STATE_MUTED = 3 }),
     Sample = object("renoise.Sample", { LOOP_MODE_OFF = 1, LOOP_MODE_FORWARD = 2, LOOP_MODE_REVERSE = 3, LOOP_MODE_PING_PONG = 4 }),
+    Instrument = object("renoise.Instrument", { LAYER_NOTE_DISABLED = 0, LAYER_NOTE_ON = 1, LAYER_NOTE_OFF = 2,
+      TAB_SAMPLES = 1, TAB_PLUGIN = 2, TAB_EXT_MIDI = 3 }),
+    InstrumentMidiOutputProperties = object("renoise.InstrumentMidiOutputProperties", { TYPE_EXTERNAL = 1, TYPE_LINE_IN_RET = 2,
+      TYPE_INTERNAL = 3 }),
     InstrumentPhrase = object("renoise.InstrumentPhrase", { KEY_TRACKING_NONE = 1, KEY_TRACKING_TRANSPOSE = 2, KEY_TRACKING_OFFSET = 3 }),
     ApplicationWindow = M.window,
   })

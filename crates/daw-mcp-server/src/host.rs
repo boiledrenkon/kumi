@@ -13,6 +13,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 /// No answer of a bridge is longer than this. A bridge that sends more is asked for a smaller page, if the call has one.
 pub const MAX_ANSWER_BYTES: usize = 256 * 1024;
+/// How long a silent connection gets to answer a ping before it is called dead.
+const PING_PROBE: Duration = Duration::from_millis(1500);
 
 struct Current {
     pid: u32,
@@ -332,7 +334,24 @@ impl Host {
         match client.request(method, params, timeout).await {
             Ok(answer) => Ok(answer),
             Err(RequestError::Bridge { code, message }) => Err(CallError::Bridge { code, message }),
-            Err(RequestError::Timeout) => Err(CallError::Timeout),
+            Err(RequestError::Timeout) => {
+                // A DAW behind a dialog is silent but still answers a ping (a socket callback needs no timer); a connection the
+                // bridge has let go of, or lost, answers nothing for ever. Told apart, the dead one is dropped, so the next
+                // call connects afresh instead of timing out for ever.
+                if client.busy() && client.request("ping", json!({}), PING_PROBE).await == Err(RequestError::Timeout) {
+                    let mut current = self.current.lock().await;
+                    if current.as_ref().is_some_and(|open| open.pid == pid) {
+                        if let Some(open) = current.take() {
+                            open.client.close().await;
+                        }
+                    }
+                    return Err(CallError::Closed(format!(
+                        "{} stopped answering on this connection and it was dropped; asking again connects afresh",
+                        self.daw
+                    )));
+                }
+                Err(CallError::Timeout)
+            }
             Err(RequestError::Closed) => {
                 let mut current = self.current.lock().await;
                 if current.as_ref().is_some_and(|open| open.pid == pid && open.client.is_closed()) {

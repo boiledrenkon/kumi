@@ -9,6 +9,7 @@ local jobs_module = import("jobs")
 local reads = import("reads")
 local focus = import("focus")
 local rows = import("rows")
+local refs = import("refs")
 local status = import("status")
 local config = import("config")
 local discovery = import("discovery")
@@ -32,17 +33,25 @@ end
 
 local host, st, b, conns, observers, jobs
 
--- The epoch: refs are valid within one. It moves when a song is switched, and when something happens to the song that
--- the tool can't map into the refs it handed out (instruments, patterns or the sequence restructured, devices, samples or
--- phrases inserted or removed, tracks swapped).
+-- The epoch: refs are valid within one. It moves, at once and inside the notifier that saw it, when a song is switched and
+-- when something happens to the song that the tool can't map into the refs it handed out (instruments, patterns or the
+-- sequence restructured, devices, samples or phrases inserted or removed, tracks swapped). Within an epoch the track
+-- layout counts the tracks inserted or removed: those move refs, and the tool carries them to where they went (refs.carry)
+-- for a request that says which layout its refs were made in.
 local function epoch()
   return string.format("%x", b.epoch_n)
 end
 
 local function bump_epoch(reason)
   b.epoch_n = b.epoch_n + 1
+  b.layout, b.shifts = 0, {}
   log.write("info", "epoch " .. epoch() .. ": " .. reason)
 end
+
+-- How many shifts of the track list the tool keeps to carry refs through.
+M.SHIFT_HISTORY = 64
+-- Watchers left behind by deleted objects, past which the song is watched anew.
+M.MAX_DEAD = 256
 
 function M.log_error(where, err)
   log.write("error", where .. ": " .. tostring(err))
@@ -90,7 +99,7 @@ local function write_discovery()
     protocol = wire.PROTOCOL,
     version = VERSION,
     dawVersion = renoise.RENOISE_VERSION,
-    resource = resource,
+    resource = status.resource_text(host.bundle_path),
     project = status.project(b.memory),
     startedMs = b.started_ms,
   })
@@ -165,8 +174,8 @@ local function selection(song)
   }
 end
 
-local function tracks(song)
-  return { count = song.sequencer_track_count + song.send_track_count + 1 }
+local function track_total(song)
+  return song.sequencer_track_count + song.send_track_count + 1
 end
 
 local function transport(song)
@@ -184,6 +193,77 @@ local SELECTION_OBSERVABLES = {
   "selected_track_device_observable",
 }
 
+-- What each kind of object is watched for. A new object gets its watchers where it is made (inside the notifier that saw
+-- it), so there is no turn on which it goes unseen.
+local function watch_device(device)
+  observers:watch_changes(device.is_active_observable)
+  observers:watch_changes(device.display_name_observable)
+end
+
+local function watch_track(song, i)
+  local track = song:track(i)
+  observers:watch_changes(track.name_observable)
+  observers:watch_changes(track.color_observable)
+  observers:watch_changes(track.mute_state_observable)
+  observers:watch_changes(track.solo_state_observable)
+  observers:watch_changes(track.visible_note_columns_observable)
+  observers:watch_changes(track.visible_effect_columns_observable)
+  for c = 1, track.max_note_columns do
+    observers:watch_changes(track:column_is_muted_observable(c))
+    observers:watch_changes(track:column_name_observable(c))
+  end
+  for d = 1, #track.devices do watch_device(track:device(d)) end
+  observers:watch_structural(track.devices_observable, "a track's devices changed", "devices", track)
+end
+
+-- What a pattern's track shows is another pattern's when it is an alias.
+local function watch_pattern_track(pattern, t)
+  observers:watch_changes(pattern:track(t).alias_pattern_index_observable)
+end
+
+local function watch_pattern(song, p, tracks)
+  local pattern = song:pattern(p)
+  observers:watch_lines(pattern)
+  observers:watch_changes(pattern.name_observable)
+  observers:watch_layout(pattern.number_of_lines_observable)
+  for t = 1, tracks do watch_pattern_track(pattern, t) end
+end
+
+local function watch_sample(sample)
+  observers:watch_changes(sample.name_observable)
+  local mapping = sample.sample_mapping
+  if not mapping then return end
+  observers:watch_changes(mapping.note_range_observable)
+  observers:watch_changes(mapping.velocity_range_observable)
+  observers:watch_changes(mapping.base_note_observable)
+  observers:watch_changes(mapping.layer_observable)
+  observers:watch_changes(mapping.map_key_to_pitch_observable)
+  observers:watch_changes(mapping.map_velocity_to_volume_observable)
+end
+
+local function watch_phrase(phrase)
+  observers:watch_lines(phrase)
+  observers:watch_changes(phrase.name_observable)
+  observers:watch_layout(phrase.number_of_lines_observable)
+  observers:watch_changes(phrase.lpb_observable)
+  observers:watch_changes(phrase.visible_note_columns_observable)
+  observers:watch_changes(phrase.visible_effect_columns_observable)
+end
+
+local function watch_instrument(song, i)
+  local instrument = song:instrument(i)
+  observers:watch_changes(instrument.name_observable)
+  for k = 1, #instrument.macros do
+    local macro = instrument:macro(k)
+    observers:watch_changes(macro.value_observable)
+    observers:watch_changes(macro.name_observable)
+  end
+  for s = 1, #instrument.samples do watch_sample(instrument:sample(s)) end
+  for ph = 1, #instrument.phrases do watch_phrase(instrument:phrase(ph)) end
+  observers:watch_structural(instrument.samples_observable, "an instrument's samples changed", "samples", instrument)
+  observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed", "phrases", instrument)
+end
+
 -- Everything the focus pane and the reads depend on is watched: events for what Kumi is told as it happens, a counter
 -- for the rest (`changed`), and structural marks for what moves the refs.
 local function attach(song)
@@ -192,36 +272,20 @@ local function attach(song)
   for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection") end
   for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport") end
   observers:watch(song.name_observable, "project")
-  observers:watch_list(song.tracks_observable, "tracks")
-  observers:watch_structural(song.instruments_observable, "the instruments changed")
-  observers:watch_structural(song.patterns_observable, "the patterns changed")
+  observers:watch_tracks(song.tracks_observable)
+  observers:watch_structural(song.instruments_observable, "the instruments changed", "instruments")
+  observers:watch_structural(song.patterns_observable, "the patterns changed", "patterns")
   local sequencer = song.sequencer
-  observers:watch_structural(sequencer.pattern_sequence_observable, "the sequence changed")
+  observers:watch_structural(sequencer.pattern_sequence_observable, "the sequence changed", "sequence")
   observers:watch_changes(sequencer.pattern_assignments_observable)
   observers:watch_changes(sequencer.pattern_slot_mutes_observable)
-  for p = 1, #song.patterns do
-    local pattern = song:pattern(p)
-    observers:watch_lines(pattern)
-    observers:watch_changes(pattern.name_observable)
-    observers:watch_layout(pattern.number_of_lines_observable)
-  end
-  for t = 1, song.sequencer_track_count + 1 + song.send_track_count do
-    local track = song:track(t)
-    observers:watch_changes(track.name_observable)
-    observers:watch_changes(track.color_observable)
-    observers:watch_changes(track.mute_state_observable)
-    observers:watch_changes(track.solo_state_observable)
-    observers:watch_changes(track.visible_note_columns_observable)
-    observers:watch_changes(track.visible_effect_columns_observable)
-    observers:watch_structural(track.devices_observable, "a track's devices changed")
-  end
-  for i = 1, #song.instruments do
-    local instrument = song:instrument(i)
-    observers:watch_changes(instrument.name_observable)
-    observers:watch_structural(instrument.samples_observable, "an instrument's samples changed")
-    observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed")
-  end
-  observers:changed("tracks", tracks(song))
+  observers:watch_changes(sequencer:sequence_sections_changed_observable())
+  local tracks = track_total(song)
+  for p = 1, #song.patterns do watch_pattern(song, p, tracks) end
+  for t = 1, tracks do watch_track(song, t) end
+  for i = 1, #song.instruments do watch_instrument(song, i) end
+  b.track_count = track_total(song)
+  b.reattach = false
   observers:changed("selection", selection(song))
   observers:changed("transport", transport(song))
   observers:changed("project", status.project(b.memory))
@@ -234,34 +298,73 @@ local function send_project()
   write_discovery()
 end
 
+-- A change to the lists refs index into: the epoch moves (so every answer after it is in the new epoch, and a ref from
+-- before is refused), and what was made gets its watchers. A deleted object's watchers stay until the song is watched
+-- anew, which happens once enough of them have piled up.
+local function on_structural(reason, kind, op, owner)
+  bump_epoch(reason)
+  local song = renoise.song()
+  if not song then return end
+  local made, lost = op and op.type == "insert", op and op.type == "remove"
+  if made then
+    if kind == "instruments" then
+      watch_instrument(song, op.index)
+    elseif kind == "patterns" then
+      watch_pattern(song, op.index, track_total(song))
+    elseif kind == "devices" then
+      watch_device(owner:device(op.index))
+    elseif kind == "samples" then
+      watch_sample(owner:sample(op.index))
+    elseif kind == "phrases" then
+      watch_phrase(owner:phrase(op.index))
+    end
+  elseif lost then
+    observers.dead = observers.dead + 1
+  elseif kind == "instruments" or kind == "patterns" then
+    b.reattach = true
+  end
+end
+
+-- A change to the track list. An insert or removal keeps the epoch and moves the layout: the shift is kept, so a request
+-- made in an earlier layout can be carried to the present, and it is told to Kumi at once, before any later answer. Anything
+-- else (a swap, notifications that don't add up to the count) moves the epoch.
+local function on_tracks(op)
+  local song = renoise.song()
+  if not song then return end
+  local count = track_total(song)
+  local expected = b.track_count
+  if op.type == "insert" then expected = expected + 1 elseif op.type == "remove" then expected = expected - 1 end
+  if (op.type ~= "insert" and op.type ~= "remove") or expected ~= count or type(op.index) ~= "number" then
+    bump_epoch(op.type == "swap" and "tracks were swapped" or "the tracks changed in a way the tool can't follow")
+    b.track_count = count
+    b.reattach = true
+    conns:event("tracks", { count = count, made = json.array(), gone = json.array(), layout = b.layout, epoch = epoch() })
+    return
+  end
+  b.track_count = count
+  b.layout = b.layout + 1
+  b.shifts[#b.shifts + 1] = { layout = b.layout, type = op.type, index = op.index }
+  if #b.shifts > M.SHIFT_HISTORY then table.remove(b.shifts, 1) end
+  if op.type == "insert" then
+    watch_track(song, op.index)
+    for p = 1, #song.patterns do watch_pattern_track(song:pattern(p), op.index) end
+  else
+    observers.dead = observers.dead + 1
+  end
+  conns:event("tracks", {
+    count = count,
+    made = json.array(op.type == "insert" and { op.index } or {}),
+    gone = json.array(op.type == "remove" and { op.index } or {}),
+    layout = b.layout,
+    epoch = epoch(),
+  })
+end
+
 local function flush_events()
   if not observers:attached() then return end
   local song = renoise.song()
   if not song then return end
   local dirty = observers:take_dirty()
-  -- A new track has none of the watching the others have: the song is watched anew once this is told.
-  local reattach = false
-  if dirty.tracks then
-    reattach = true
-    local count = tracks(song).count
-    local known = observers.last.tracks and observers.last.tracks.count or count
-    -- Each insert or removal is told as it happened, so Kumi can shift its refs; anything else moves the epoch.
-    local told = false
-    for _, op in ipairs(observers:take_ops("tracks")) do
-      if op.type == "insert" then
-        known = known + 1
-        conns:event("tracks", { count = known, made = json.array({ op.index }), gone = json.array() })
-        told = true
-      elseif op.type == "remove" then
-        known = known - 1
-        conns:event("tracks", { count = known, made = json.array(), gone = json.array({ op.index }) })
-        told = true
-      else
-        observers.structural = observers.structural or "tracks were swapped"
-      end
-    end
-    if not told and count ~= known then conns:event("tracks", { count = count, made = json.array(), gone = json.array() }) end
-  end
   if dirty.selection then
     local value = selection(song)
     if observers:changed("selection", value) then conns:event("selection", value) end
@@ -271,12 +374,7 @@ local function flush_events()
     if observers:changed("transport", value) then conns:event("transport", value) end
   end
   if dirty.project and observers:changed("project", status.project(b.memory)) then send_project() end
-  local reason = observers:take_structural()
-  if reason then
-    bump_epoch(reason)
-    reattach = true
-  end
-  if reattach then attach(song) end
+  if b.reattach or observers.dead > M.MAX_DEAD then attach(song) end
 end
 
 -- Requests
@@ -291,25 +389,31 @@ function handlers.status()
   return status.status(b.memory, host.bundle_path)
 end
 
--- The reads. A long one is a job, run a slice at a time from the timers (the fast one while any is pending).
+-- The reads. A long one is a job, run a slice at a time from the timers (the fast one while any is pending). Every
+-- answer names the epoch and the track layout its refs were made in.
 local function as_job(work)
   return { kumi_job = work }
 end
 
+local function stamped(result, layout)
+  if type(result) == "table" then result.layout = layout end
+  return result
+end
+
 function handlers.read(params)
-  return as_job(function(job) return reads.read(job, params, job.epoch) end)
+  return as_job(function(job) return stamped(reads.read(job, params, job.epoch), job.layout) end)
 end
 
 function handlers.snapshot()
-  return as_job(function(job) return focus.snapshot(job, job.epoch, b.changed or 0) end)
+  return as_job(function(job) return stamped(focus.snapshot(job, job.epoch, b.changed or 0), job.layout) end)
 end
 
 function handlers.focus()
-  return focus.focus(epoch(), b.changed or 0)
+  return stamped(focus.focus(epoch(), b.changed or 0), b.layout)
 end
 
 function handlers.focus_body(params)
-  return as_job(function(job) return focus.focus_body(job, params, job.epoch) end)
+  return as_job(function(job) return stamped(focus.focus_body(job, params, job.epoch), job.layout) end)
 end
 
 handlers["renoise.reload"] = function()
@@ -320,10 +424,35 @@ end
 -- (Exposed for the tests, which add methods of their own.)
 M.handlers = handlers
 
+-- A request may name the track layout its refs were made in (`layout`): the refs that name a track, or something on one,
+-- are carried through the shifts since, to where the tracks are now. A track deleted meanwhile answers `gone`; a layout the
+-- tool no longer remembers (or does not know) answers `stale`.
+local function carried(params)
+  local since = type(params) == "table" and params.layout or nil
+  if since == nil then return params end
+  if type(since) ~= "number" or since ~= math.floor(since) or since < 0 then
+    error({ code = "bad-params", message = "layout must be a whole number from 0" }, 0)
+  end
+  if since == b.layout then return params end
+  if since > b.layout then
+    error({ code = "stale", message = "that layout (" .. since .. ") is from another epoch (now " .. epoch() .. "): read again" }, 0)
+  end
+  if b.layout - since > #b.shifts then
+    error({ code = "stale", message = "that layout is too old to carry its refs to the present: read again" }, 0)
+  end
+  local moved, err = refs.carry(params, epoch(), b.shifts, since)
+  if not moved then error(err, 0) end
+  return moved
+end
+
+local CARRIED = { read = true, focus_body = true }
+
 function M.handle(_, request)
   local handler = handlers[request.method]
   if not handler then error({ code = "unknown-method", message = "no method " .. request.method }) end
-  return handler(request.params)
+  local params = request.params
+  if CARRIED[request.method] then params = carried(params) end
+  return handler(params)
 end
 
 -- Lifecycle, called by main.lua
@@ -356,18 +485,21 @@ function M.start(h, reloading)
     end,
   })
   b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
+  b.layout, b.shifts, b.shape = b.layout or 0, b.shifts or {}, b.shape or 0
   b.changed = b.changed or 0
   b.document = b.document or 1
   -- A song's id (the one in the project row) and which opening of a song this is: the same while it stays open.
   rows.song_extra = function(song)
-    return { id = status.song_id(b.memory, song), identity = (status.pid() or 0) .. ":" .. b.document }
+    -- (where the pid is unknown, when this Renoise was started stands in for it: `0:1` would be the same after every restart)
+    return { id = status.song_id(b.memory, song), identity = (status.pid() or ("t" .. b.started_ms)) .. ":" .. b.document }
   end
-  observers = sync.new(guard, b)
+  observers = sync.new(guard, b, { structural = on_structural, tracks = on_tracks })
   jobs = jobs_module.new({
     now_ms = M.now_ms,
     unix_ms = unix_ms,
     epoch = epoch,
-    layout = function() return b.layout or 0 end,
+    layout = function() return b.layout end,
+    shape = function() return b.shape end,
     finish = function(job, ok, value)
       conns:finish_job(job.record, job.request, ok, value)
     end,
@@ -461,9 +593,16 @@ function M.tick_jobs()
   if jobs and jobs:pending() > 0 then jobs:run() end
 end
 
+-- How many things the song is watched through (the tests count them to see that only what is new gets watched).
+function M.watching()
+  return observers and #observers.entries or 0
+end
+
 function M.on_new_document()
   b.quitting = false
   b.document = b.document + 1
+  b.memory.born_unsaved = nil
+  if renoise.song() then status.note_document(b.memory, renoise.song()) end
   bump_epoch("a song was opened")
   attach(renoise.song())
   send_project()
@@ -472,7 +611,7 @@ end
 function M.on_release_document()
   b.quitting = true
   observers:detach()
-  b.memory.song_id = nil
+  b.memory.song_id, b.memory.born_unsaved = nil, nil
   conns:event("project", json.null)
 end
 

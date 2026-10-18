@@ -116,9 +116,16 @@ impl SimulatorConfig {
 struct State {
     identity: Identity,
     busy: Option<String>,
+    /// Methods whose requests get no answer at all (a bridge stuck in the middle of one).
+    held: Vec<String>,
     transcript: Vec<Line>,
     connections: usize,
     flow: Flow,
+    /// Connections numbered up to this have been let go of without a word: they answer nothing, send nothing.
+    silent_upto: usize,
+    /// Connections numbered up to this are retired as the Renoise tool retires a host: the line part sent is finished, a bye
+    /// follows it, and only credit frames are taken from then on.
+    retired_upto: usize,
 }
 
 /// What a bridge that sends within credit has sent and held back, over every connection.
@@ -136,6 +143,8 @@ pub struct Simulator {
     state: Arc<Mutex<State>>,
     events: broadcast::Sender<(String, Value)>,
     stop: watch::Sender<bool>,
+    /// Raised to wake the connections when `silent_upto` or `retired_upto` moves.
+    wake: watch::Sender<u64>,
     config: SimulatorConfig,
     started_ms: u64,
 }
@@ -147,14 +156,18 @@ impl Simulator {
         let state = Arc::new(Mutex::new(State {
             identity: config.identity.clone(),
             busy: None,
+            held: vec![],
             transcript: vec![],
             connections: 0,
             flow: Flow::default(),
+            silent_upto: 0,
+            retired_upto: 0,
         }));
         let (events, _) = broadcast::channel(256);
         let (stop, stopped) = watch::channel(false);
+        let (wake, woken) = watch::channel(0u64);
         let started_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        let simulator = Self { address, state: state.clone(), events: events.clone(), stop, config: config.clone(), started_ms };
+        let simulator = Self { address, state: state.clone(), events: events.clone(), stop, wake, config: config.clone(), started_ms };
         simulator.write_discovery()?;
         tokio::spawn(async move {
             let mut stopped_accepting = stopped.clone();
@@ -170,7 +183,7 @@ impl Simulator {
                             state.connections += 1;
                             state.connections
                         };
-                        tokio::spawn(serve(stream, number, config.clone(), state.clone(), events.subscribe(), stopped.clone()));
+                        tokio::spawn(serve(stream, number, config.clone(), state.clone(), events.subscribe(), stopped.clone(), woken.clone()));
                     }
                     _ = stopped_accepting.changed() => return,
                 }
@@ -223,6 +236,34 @@ impl Simulator {
     /// Busy (`Some("rendering")`): requests are refused as busy and heartbeats stop, as in a modal dialog.
     pub fn set_busy(&self, busy: Option<&str>) {
         self.state.lock().unwrap().busy = busy.map(str::to_string);
+    }
+
+    /// Requests for this method are taken and never answered (until `release`), the rest go on as they do.
+    pub fn hold(&self, method: &str) {
+        self.state.lock().unwrap().held.push(method.to_string());
+    }
+
+    pub fn release(&self) {
+        self.state.lock().unwrap().held.clear();
+    }
+
+    /// The bridge lets go of every connection made so far without a word, as a bridge that lost track of them: they answer
+    /// nothing and send nothing (a new connection is served as before).
+    pub fn go_silent(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.silent_upto = state.connections;
+        drop(state);
+        self.wake.send_modify(|n| *n += 1);
+    }
+
+    /// The bridge retires every connection made so far as the Renoise tool retires a host that stopped reading: the line it
+    /// was part way through sending is finished (as the host grants credit), a bye follows it, nothing else is sent, and
+    /// only credit is taken.
+    pub fn retire_with_bye(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.retired_upto = state.connections;
+        drop(state);
+        self.wake.send_modify(|n| *n += 1);
     }
 
     /// What the bridge has sent within credit, and what waits for more.
@@ -322,6 +363,7 @@ async fn serve(
     state: Arc<Mutex<State>>,
     mut events: broadcast::Receiver<(String, Value)>,
     mut stopped: watch::Receiver<bool>,
+    mut woken: watch::Receiver<u64>,
 ) {
     let (mut reader, mut writer) = stream.into_split();
     let clock = Instant::now();
@@ -333,6 +375,9 @@ async fn serve(
     let mut credit = config.offer.credit_bytes.unwrap_or(0);
     let mut queue: Vec<u8> = vec![];
     let mut host_lines = Framer::new(1 << 20);
+    // Set by `retire_with_bye`: nothing is sent but what is held, and then a bye.
+    let mut retiring = false;
+    let mut bye_pending = false;
     let mut heartbeat = tokio::time::interval(Duration::from_millis(config.offer.heartbeat_ms.max(1)));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -355,7 +400,11 @@ async fn serve(
                         ServerAction::Send(bytes) => put(&mut direct, &mut out, bytes),
                         ServerAction::Close(_) => close = true,
                         ServerAction::Authenticated => {}
-                        ServerAction::Request(request) => put(&mut direct, &mut out, answer(&request, &state, &config).encode()),
+                        ServerAction::Request(request) => {
+                            if !state.lock().unwrap().held.contains(&request.method) {
+                                put(&mut direct, &mut out, answer(&request, &state, &config).encode());
+                            }
+                        }
                     }
                 }
             }
@@ -379,12 +428,37 @@ async fn serve(
                     }
                 }
             }
+            _ = woken.changed() => {}
             _ = stopped.changed() => {
                 if connection.is_authenticated() {
                     put(&mut direct, &mut out, Frame::Bye { reason: "quit".into() }.encode());
                 }
                 close = true;
             }
+        }
+        let (silent, retire) = {
+            let state = state.lock().unwrap();
+            (number <= state.silent_upto, number <= state.retired_upto)
+        };
+        if silent {
+            // Let go of: nothing it was asked or told reaches the host.
+            out.clear();
+            direct.clear();
+            close = false;
+        }
+        if retire && !retiring && connection.is_authenticated() {
+            // The line part sent is kept (up to its newline), and the bye comes after it.
+            retiring = true;
+            bye_pending = true;
+            if let Some(end) = queue.iter().position(|b| *b == b'\n') {
+                queue.truncate(end + 1);
+            } else {
+                queue.clear();
+            }
+        }
+        if retiring {
+            out.clear();
+            direct.clear();
         }
         if !out.is_empty() || !direct.is_empty() {
             // Heartbeats are left out of the transcript: their timing isn't the test's.
@@ -408,6 +482,13 @@ async fn serve(
             state.flow.waiting = queue.len() as u64;
         } else {
             send.extend(out);
+        }
+        // (a retired host's bye follows what was held, whatever credit is left)
+        if retiring && bye_pending && queue.is_empty() {
+            let bye = Frame::Bye { reason: "overload".into() }.encode();
+            record(&state, number, false, &bye);
+            send.extend(bye);
+            bye_pending = false;
         }
         if !send.is_empty() && writer.write_all(&send).await.is_err() {
             return;

@@ -70,6 +70,13 @@ local function loop_name(mode)
   return "off"
 end
 
+local function layer_name(layer)
+  local I = renoise.Instrument
+  if layer == I.LAYER_NOTE_OFF then return "note-off" end
+  if layer == I.LAYER_NOTE_DISABLED then return "disabled" end
+  return "note-on"
+end
+
 local function key_tracking_name(mode)
   local P = renoise.InstrumentPhrase
   if mode == P.KEY_TRACKING_TRANSPOSE then return "transpose" end
@@ -125,6 +132,23 @@ local function song_row(song)
   return row
 end
 
+-- The note columns of a track that are muted (their numbers) and the ones that are named ({"2": "Pad"}); nil for none.
+local function column_state(track)
+  local muted, names
+  for c = 1, track.max_note_columns do
+    if track:column_is_muted(c) then
+      muted = muted or {}
+      muted[#muted + 1] = c
+    end
+    local name = track:column_name(c)
+    if name ~= "" then
+      names = names or {}
+      names[tostring(c)] = name
+    end
+  end
+  return muted and array(muted) or nil, names
+end
+
 local function track_row(song, epoch, i, parents)
   local track = song:track(i)
   local is_master = track.type == renoise.Track.TRACK_TYPE_MASTER
@@ -135,8 +159,14 @@ local function track_row(song, epoch, i, parents)
     type = track_type(track),
     color = hex(track.color),
     colorBlend = track.color_blend,
+    -- (volumeDb and pan are the pre-FX fader and pan, as they were; the post-FX ones are the fader a producer rides)
     volumeDb = db(track.prefx_volume.value),
     pan = (track.prefx_panning.value - 0.5) * 2,
+    preVolumeDb = db(track.prefx_volume.value),
+    prePan = (track.prefx_panning.value - 0.5) * 2,
+    preWidth = track.prefx_width.value,
+    postVolumeDb = db(track.postfx_volume.value),
+    postPan = (track.postfx_panning.value - 0.5) * 2,
     deviceCount = #track.devices,
     noteColumns = track.visible_note_columns,
     effectColumns = track.visible_effect_columns,
@@ -146,6 +176,7 @@ local function track_row(song, epoch, i, parents)
     row.mute = mute_name(track.mute_state)
     row.solo = track.solo_state
   end
+  row.mutedColumns, row.columnNames = column_state(track)
   return row
 end
 
@@ -187,18 +218,41 @@ local function macros_of(instrument)
   return array(macros)
 end
 
+local function midi_type_name(kind)
+  local P = renoise.InstrumentMidiOutputProperties
+  if kind == P.TYPE_LINE_IN_RET then return "line-in" end
+  if kind == P.TYPE_INTERNAL then return "internal" end
+  return "external"
+end
+
+-- What the instrument plays through: its samples, a plug-in, or a MIDI port (its settings under `midi`).
 local function instrument_row(song, epoch, i)
   local instrument = song:instrument(i)
   local plugin = instrument.plugin_properties
-  return {
+  local out = instrument.midi_output_properties
+  local kind = "sample"
+  if plugin.plugin_loaded then
+    kind = "plugin"
+  elseif instrument.active_tab == renoise.Instrument.TAB_EXT_MIDI then
+    kind = "midi"
+  end
+  local row = {
     ref = refs.make(epoch, "instrument", i),
     index = i,
     name = instrument.name,
+    kind = kind,
     sampleCount = #instrument.samples,
     phraseCount = #instrument.phrases,
     plugin = plugin.plugin_loaded and plugin.plugin_device.name or json.null,
     macros = macros_of(instrument),
   }
+  if kind == "midi" then
+    row.midi = {
+      device = out.device_name, type = midi_type_name(out.instrument_type), channel = out.channel, program = out.program,
+      bank = out.bank, transpose = out.transpose, delay = out.delay, duration = out.duration,
+    }
+  end
+  return row
 end
 
 local function range(pair)
@@ -215,6 +269,9 @@ local function sample_row(song, epoch, i, s)
     baseNote = mapping.base_note,
     noteRange = range(mapping.note_range),
     velocityRange = range(mapping.velocity_range),
+    layer = layer_name(mapping.layer),
+    mapKeyToPitch = mapping.map_key_to_pitch,
+    mapVelocityToVolume = mapping.map_velocity_to_volume,
     loop = loop_name(sample.loop_mode),
     muteGroup = sample.mute_group,
   }
@@ -247,8 +304,9 @@ local function device_row(song, epoch, t, d)
     preset = (preset and preset > 0) and device:preset(preset) or json.null,
     paramCount = #device.parameters,
     plugin = path:find("^Audio/Effects/Native/") == nil,
-    isDoofer = path:find("/Doofer$") ~= nil,
-    isSplitter = path:find("/Splitter$") ~= nil,
+    -- (the native ones only: a plug-in of that name is not a container; the paths are Renoise's, measured in 3.5.4)
+    isDoofer = path == "Audio/Effects/Native/Doofer",
+    isSplitter = path == "Audio/Effects/Native/Splitter",
   }
 end
 
@@ -265,12 +323,12 @@ local function param_row(song, epoch, t, d, k)
   }
 end
 
--- A pattern line (or a phrase's) as the tracker shows it, in Renoise's own text; nil when it is empty. Only columns
--- with something in them are listed, each with its number, and a field the tracker shows as ".." is left out.
-local function line_row(line, number, note_columns, effect_columns)
-  if line.is_empty then return nil end
+local MAX_NOTE_COLUMNS, MAX_EFFECT_COLUMNS = 12, 8
+
+-- The columns with something in them, in Renoise's own text: note columns first..last, then effect columns.
+local function filled_columns(line, first_note, last_note, first_effect, last_effect)
   local notes, effects = {}, {}
-  for c = 1, note_columns do
+  for c = first_note, last_note do
     local column = line:note_column(c)
     if not column.is_empty then
       local note = { col = c, note = column.note_string }
@@ -288,14 +346,34 @@ local function line_row(line, number, note_columns, effect_columns)
       notes[#notes + 1] = note
     end
   end
-  for c = 1, effect_columns do
+  for c = first_effect, last_effect do
     local column = line:effect_column(c)
     if not column.is_empty then effects[#effects + 1] = { col = c, number = column.number_string, amount = column.amount_string } end
   end
-  if #notes == 0 and #effects == 0 then return nil end
+  return notes, effects
+end
+
+-- A pattern line (or a phrase's) as the tracker shows it, in Renoise's own text; nil when it is empty. Only columns
+-- with something in them are listed, each with its number, and a field the tracker shows as ".." is left out.
+-- Data in a column the track doesn't show is under `hidden` ({notes?, effects?}). A line with nothing in the shown columns
+-- is looked through for it, since the line isn't empty; one that has something is only when `scan_hidden` (reading every
+-- column of every line costs about six times as much).
+local function line_row(line, number, note_columns, effect_columns, scan_hidden)
+  if line.is_empty then return nil end
+  local notes, effects = filled_columns(line, 1, note_columns, 1, effect_columns)
   local row = { line = number }
   if #notes > 0 then row.notes = array(notes) end
   if #effects > 0 then row.effects = array(effects) end
+  if scan_hidden or (#notes == 0 and #effects == 0) then
+    local hidden_notes, hidden_effects =
+      filled_columns(line, note_columns + 1, MAX_NOTE_COLUMNS, effect_columns + 1, MAX_EFFECT_COLUMNS)
+    if #hidden_notes > 0 or #hidden_effects > 0 then
+      row.hidden = {}
+      if #hidden_notes > 0 then row.hidden.notes = array(hidden_notes) end
+      if #hidden_effects > 0 then row.hidden.effects = array(hidden_effects) end
+    end
+  end
+  if row.notes == nil and row.effects == nil and row.hidden == nil then return nil end
   return row
 end
 
@@ -318,5 +396,6 @@ M.phrase_row = phrase_row
 M.device_row = device_row
 M.param_row = param_row
 M.line_row = line_row
+M.column_state = column_state
 
 return M

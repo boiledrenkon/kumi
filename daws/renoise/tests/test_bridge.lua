@@ -48,7 +48,8 @@ local function setup(options)
   env.reference = env.bundle .. "bridge-reference.json"
   if not options.no_reference then reference(env, options.reference) end
   if options.patch then options.patch(env) end
-  mock.reset({ bundle_path = env.bundle, version = options.version, platform = options.platform, fresh_wrappers = options.fresh_wrappers })
+  mock.reset({ bundle_path = env.bundle, version = options.version, platform = options.platform, fresh_wrappers = options.fresh_wrappers,
+    move_replaces = options.move_replaces })
   for _, port in ipairs(options.busy_ports or {}) do mock.busy_ports[port] = true end
   if options.song ~= false then mock.song = mock.make_song(options.song) end
   dofile(env.bundle .. "main.lua")
@@ -627,12 +628,12 @@ test("bridge: track count changes are events", function()
   local fields = mock.impl(mock.song)
   fields.sequencer_track_count = 3
   fields.send_track_count = 1
-  mock.fire(mock.song.tracks_observable)
-  mock.fire(mock.song.tracks_observable)
-  tick()
+  mock.fire(mock.song.tracks_observable) -- (a change that says nothing of what it was)
   local got = events(peer, "tracks")
-  eq(#got, 1)
+  eq(#got, 1, "told at once, with no tick")
   eq(got[1].data.count, 5, "sequencer and send tracks plus the master")
+  eq(#got[1].data.made + #got[1].data.gone, 0, "nothing to shift by")
+  ok(got[1].data.epoch, "and the epoch moved")
   no_dialogs()
 end)
 
@@ -897,6 +898,56 @@ test("bridge: Windows starts no process", function()
   local env = setup({ platform = "WINDOWS" })
   eq(#mock.popen_calls, 0, "no process started")
   ok(read(env.discovery_file(0)), "discovery without a pid")
+  no_dialogs()
+end)
+
+-- Windows' stock os.rename and os.remove take the ANSI code page: a user folder like "Kümi" is out of their reach.
+local function utf8_discovery(options)
+  options = options or {}
+  options.platform = "WINDOWS"
+  local dir = T.temp_dir("utf8") .. "/K\195\188mi/discovery"
+  options.reference = { discoveryDir = dir }
+  options.song = { name = "Demo song" }
+  local env = setup(options)
+  return env, dir .. "/renoise-0-" .. sha256.hex(env.resource):sub(1, 16) .. ".json"
+end
+
+test("bridge: on Windows a discovery folder with letters outside ASCII is written and replaced with Renoise's own move", function()
+  local env, file = utf8_discovery()
+  local first = read(file)
+  ok(first, "discovery written")
+  eq(json.decode(first).project.name, "Demo song")
+  mock.song.name = "Renamed"
+  tick(2)
+  eq(json.decode(read(file)).project.name, "Renamed", "replaced")
+  eq(read(file .. ".tmp"), nil, "no temporary file left")
+  no_dialogs()
+end)
+
+test("bridge: on Windows, where move doesn't replace, the discovery file is written where it goes", function()
+  local env, file = utf8_discovery({ move_replaces = false })
+  ok(read(file), "written the first time")
+  mock.song.name = "Renamed"
+  tick(2)
+  eq(json.decode(read(file)).project.name, "Renamed", "and again")
+  eq(read(file .. ".tmp"), "", "the temporary file is emptied")
+  no_dialogs()
+end)
+
+test("bridge: on Windows a log in a folder with letters outside ASCII is rotated with os.move", function()
+  local log = T.load_payload_module("log")
+  local dir = T.temp_dir("utf8log") .. "/K\195\188mi"
+  assert(os.execute("mkdir -p '" .. dir .. "'") == 0)
+  mock.reset({ platform = "WINDOWS" })
+  log.MAX_BYTES = 200
+  local file = dir .. "/renoise-bridge-pid-1.log"
+  log.configure(file)
+  for _ = 1, 12 do
+    log.write("info", string.rep("x", 60))
+    log.flush()
+  end
+  ok(read(file .. ".1"), "the full log was moved aside")
+  ok(#read(file) < 400, "and the log is kept to its size: " .. #read(file))
   no_dialogs()
 end)
 
@@ -1207,6 +1258,23 @@ test("bridge: a song born from a template doesn't share the template's id", func
   no_dialogs()
 end)
 
+test("bridge: a song born from a template keeps its own id whichever comes first at its first save, the name or the announcement", function()
+  local env = setup({ song = { tool_data = '{"songId":"0123456789abcdef0123456789abcdef"}' } })
+  mock.name_first = true
+  local peer = connect(env)
+  local id = request(peer, "status").result.project.id
+  ok(id ~= "0123456789abcdef0123456789abcdef", "a new id for a song never saved: " .. tostring(id))
+  mock.save_song(env.dir .. "/b.xrns")
+  tick()
+  eq(json.decode(mock.song.tool_data).songId, id, "its own is stored, not the template's")
+  eq(request(peer, "status").result.project.id, id, "and it is still its id")
+  -- Reopened from its file, it keeps what it stored.
+  mock.load_song({ file_name = env.dir .. "/b.xrns", tool_data = mock.song and '{"songId":"' .. id .. '"}' })
+  tick()
+  eq(request(peer, "status").result.project.id, id)
+  no_dialogs()
+end)
+
 test("bridge: status says why it is busy", function()
   local env = setup()
   local peer = connect(env)
@@ -1364,6 +1432,22 @@ test("bridge: a huge song title is cut to 256 characters in the discovery file, 
   local discovery_text = read(env.discovery_file())
   ok(#discovery_text < 2048, "discovery file: " .. #discovery_text .. " bytes")
   check(json.decode(discovery_text).project, "discovery")
+  no_dialogs()
+end)
+
+test("bridge: a huge song path or resource folder is cut too, so the discovery file stays small", function()
+  local path = "/music/" .. string.rep("\230\151\165", 40000) .. ".xrns" -- 120 KB of CJK
+  local env = setup({ song = { name = "", file_name = path } })
+  local peer, welcome = connect(env)
+  eq(#welcome.project.path, 7 + 1017 * 3 + 3, "the path is cut to 1,024 characters and an ellipsis")
+  ok(welcome.project.path:sub(-3) == "\226\128\166")
+  local discovery_text = read(env.discovery_file())
+  ok(#discovery_text < 8192, "discovery file: " .. #discovery_text .. " bytes")
+  local status = T.load_payload_module("status")
+  local resource = "C:\\Users\\x\\" .. string.rep("\230\151\165", 40000) .. "\\Renoise\\V3.5.4"
+  local cut = status.resource_text(resource .. "\\Scripts\\Tools\\com.kumi.Bridge.xrnx\\")
+  eq(#cut, 11 + 1013 * 3 + 3, "the resource folder too")
+  eq(status.resource_text("/Users/a/Renoise/V3.5.4/Scripts/Tools/com.kumi.Bridge.xrnx/"), "/Users/a/Renoise/V3.5.4", "a normal one is as it was")
   no_dialogs()
 end)
 

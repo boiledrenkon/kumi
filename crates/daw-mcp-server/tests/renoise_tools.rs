@@ -151,7 +151,7 @@ async fn a_page_a_bridge_made_too_big_is_asked_for_again_with_fewer_rows() {
     let (page, is_error) = lab.tool("read", json!({"kind": "line", "parent": "1:pattern:1", "track": 1, "limit": 200})).await;
     assert!(!is_error);
     assert_eq!(page["items"].as_array().unwrap().len(), 100);
-    assert_eq!(page["nextCursor"], "1.101");
+    assert_eq!(page["nextCursor"], "1.0.101");
     let limits: Vec<Option<u64>> = lab.script.asked().iter().map(|(_, params)| params["limit"].as_u64()).collect();
     assert_eq!(limits, [Some(200), Some(100)]);
 }

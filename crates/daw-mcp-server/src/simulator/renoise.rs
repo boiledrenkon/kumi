@@ -46,7 +46,7 @@ pub struct RenoiseScript {
     state: Arc<Mutex<State>>,
 }
 
-/// The epoch a ref (`<epoch>:<kind>:…`) or a cursor (`<epoch>.<n>`) names, if the text is one.
+/// The epoch a ref (`<epoch>:<kind>:…`) or a cursor (`<epoch>.<layout>.<n>`) names, if the text is one.
 fn epoch_of(text: &str) -> Option<u32> {
     let end = text.find([':', '.'])?;
     let (digits, rest) = text.split_at(end);
@@ -182,7 +182,13 @@ impl RenoiseScript {
                 return Some(Err(stale(from)));
             }
         }
-        let asked = retag(params, epoch, VECTORS_EPOCH, None);
+        // (the simulator's song never has tracks inserted or removed: its layout is always 0, which is what a request that
+        // names one gets answered as; the vectors hold no request with it)
+        let mut without_layout = params.clone();
+        if let Some(map) = without_layout.as_object_mut() {
+            map.remove("layout");
+        }
+        let asked = retag(&without_layout, epoch, VECTORS_EPOCH, None);
         if let Some(lines) = state.bulk {
             let parent = format!("{VECTORS_EPOCH}:pattern:1");
             if method == "read" && asked["kind"] == "line" && asked["parent"] == parent && asked["track"] == 1 {
@@ -206,7 +212,7 @@ impl Default for RenoiseScript {
     }
 }
 
-/// One page of the very full pattern's lines, as the tool pages them: by limit and cursor (`<epoch>.<line>`), cut where
+/// One page of the very full pattern's lines, as the tool pages them: by limit and cursor (`<epoch>.<layout>.<line>`), cut where
 /// the next row would pass the page bound.
 fn full_page(lines: usize, params: &Value, keeps_bound: bool) -> Result<Value, (String, String)> {
     let bad = |message: &str| ("bad-params".to_string(), message.to_string());
@@ -219,10 +225,10 @@ fn full_page(lines: usize, params: &Value, keeps_bound: bool) -> Result<Value, (
     };
     let start = match params.get("cursor").and_then(Value::as_str) {
         None => 1,
-        Some(cursor) => match cursor.split_once('.') {
-            Some((epoch, position)) if epoch == EPOCH => position.parse::<usize>().map_err(|_| bad("not a cursor"))?,
-            Some(_) => return Err(("stale".into(), "that cursor is from an earlier epoch: read again from the start".into())),
-            None => return Err(bad("not a cursor")),
+        Some(cursor) => match cursor.split('.').collect::<Vec<_>>()[..] {
+            [epoch, "0", position] if epoch == EPOCH => position.parse::<usize>().map_err(|_| bad("not a cursor"))?,
+            [_, _, _] => return Err(("stale".into(), "that cursor is from an earlier epoch: read again from the start".into())),
+            _ => return Err(bad("not a cursor")),
         },
     };
     let mut items = Vec::new();
@@ -240,7 +246,7 @@ fn full_page(lines: usize, params: &Value, keeps_bound: bool) -> Result<Value, (
     }
     let mut page = json!({"items": items, "epoch": EPOCH});
     if let Some(number) = next {
-        page["nextCursor"] = format!("{EPOCH}.{number}").into();
+        page["nextCursor"] = format!("{EPOCH}.0.{number}").into();
     }
     Ok(page)
 }

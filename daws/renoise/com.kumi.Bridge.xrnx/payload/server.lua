@@ -28,8 +28,8 @@ M.MAX_FRAME_BYTES = 64 * 1024 * 1024 + 1024
 -- instead; a host that is only listening says so now and then (crates/daw-mcp-server does), and one that was
 -- retired reconnects when it next needs the bridge.
 M.UNSOLICITED_LIMIT = 64 * 1024
--- Responses waiting to be sent to one connection, beyond the one going out: a host that sends requests and doesn't read
--- the answers is closed past this. Likewise requests waiting to be answered, and the time spent answering one
+-- Responses waiting to be sent to one connection, beyond the one going out (events and heartbeats are counted in bytes, by
+-- UNSOLICITED_LIMIT, not here): a host that sends requests and doesn't read the answers is closed past this. Likewise requests waiting to be answered, and the time spent answering one
 -- connection's requests in a go (the rest wait for the next tick), so a flood can't hold Renoise's GUI thread.
 M.MAX_QUEUED_RESPONSES = 64
 M.MAX_WAITING_REQUESTS = 256
@@ -85,6 +85,10 @@ function M:close(record, reason)
   if record.closing then return end
   record.closing = true
   record.retired_ms = self.ctx.now_ms()
+  -- Its reads are of no use to anyone now.
+  record.requests = {}
+  if self.ctx.cancel_jobs then self.ctx.cancel_jobs(record) end
+  record.job = nil
   self.ctx.log("info", "retiring " .. record.key .. ": " .. tostring(reason))
 end
 
@@ -93,9 +97,15 @@ end
 function M:dismiss(record, reason)
   if record.closing then return end
   if record.conn and record.conn:authenticated() then
-    record.outbox = {}
+    -- A line already part sent is finished first (it would otherwise end in a torn line, and the bye glued to it), then the
+    -- bye, which needs no credit. What the host is waiting for from the tool but has not begun to get is dropped. A
+    -- retired connection still takes `credit` frames, so a host that reads again completes the line and gets the bye.
+    local head = record.outbox[1]
+    record.outbox = (head and head.offset > 1) and { head } or {}
     record.requests = {}
-    self:send(record, wire.encode_frame("bye", { reason = "overload" }))
+    record.latest = nil
+    record.outbox[#record.outbox + 1] = { text = wire.encode_frame("bye", { reason = "overload" }), offset = 1, uncounted = true }
+    if #record.outbox == 1 then self:flush(record, M.SEND_NOW_BYTES) end
   end
   self:close(record, reason)
 end
@@ -121,8 +131,8 @@ function M:flush(record, budget)
   local sent = 0
   while record.outbox[1] and sent < budget do
     local item = record.outbox[1]
-    -- (The welcome is not counted: the host counts what it reads after it.)
-    local credit = item ~= record.welcome_item and record.credit or nil
+    -- (The welcome and a bye are not counted: the host counts what it reads after the welcome, and a bye is the end.)
+    local credit = item ~= record.welcome_item and not item.uncounted and record.credit or nil
     if credit and credit <= 0 then break end
     local size = M.SEND_CHUNK
     if credit and credit < size then size = credit end
@@ -143,16 +153,27 @@ end
 function M:grant(record, bytes)
   if not record.credit then return end
   record.credit = math.min(record.credit + bytes, wire.CREDIT_MAX)
-  if record.outbox[1] and not record.closing then self:flush(record, M.SEND_TICK_BYTES) end
+  if record.outbox[1] then self:flush(record, M.SEND_TICK_BYTES) end
 end
 
-function M:send(record, text)
+-- The answers waiting in an outbox.
+local function responses_waiting(record)
+  local n = 0
+  for _, item in ipairs(record.outbox) do
+    if item.response then n = n + 1 end
+  end
+  return n
+end
+
+-- Queues text for a connection. `response` marks the answer to a request, which is counted against
+-- MAX_QUEUED_RESPONSES; events and heartbeats are counted in bytes by `push`.
+function M:send(record, text, response)
   if not text or record.gone then return end
-  if #record.outbox > M.MAX_QUEUED_RESPONSES then
+  if response and responses_waiting(record) > M.MAX_QUEUED_RESPONSES then
     self:dismiss(record, "too many responses waiting to be read")
     return
   end
-  record.outbox[#record.outbox + 1] = { text = text, offset = 1 }
+  record.outbox[#record.outbox + 1] = { text = text, offset = 1, response = response }
   if #record.outbox == 1 then self:flush(record, M.SEND_NOW_BYTES) end
 end
 
@@ -234,11 +255,31 @@ function M:apply(record, actions)
   self:run_requests(record)
 end
 
+-- Short methods that are answered at once, even behind a long read: the host matches answers by id, and the producer's
+-- FOCUS pane follows what they say.
+M.IMMEDIATE = { ping = true, status = true, focus = true }
+
+-- A read is running: what is short among the waiting requests is answered now, out of order; the rest waits for the job.
+function M:run_immediate(record)
+  if record.closing or record.gone then return end
+  local quick, rest = {}, {}
+  for _, request in ipairs(record.requests) do
+    if M.IMMEDIATE[request.method] then quick[#quick + 1] = request else rest[#rest + 1] = request end
+  end
+  if not quick[1] then return end
+  record.requests = rest
+  for _, request in ipairs(quick) do
+    if record.closing or record.gone then return end
+    self:answer(record, request)
+  end
+end
+
 -- Answers a connection's waiting requests in order, for as long as the budget lasts (at least one): the rest wait for
 -- the next tick.
 function M:run_requests(record)
   local waiting = record.requests
-  if not waiting[1] or record.job then return end
+  if not waiting[1] then return end
+  if record.job then return self:run_immediate(record) end
   if record.closing then
     record.requests = {}
     return
@@ -261,7 +302,7 @@ end
 function M:answer(record, request)
   local deadline = request.deadlineMs
   if type(deadline) == "number" and self.ctx.unix_ms() >= deadline then
-    return self:send(record, wire.error(request.id, "deadline", "the deadline passed before the work started"))
+    return self:send(record, wire.error(request.id, "deadline", "the deadline passed before the work started"), true)
   end
   local ok, result = xpcall(self.ctx.on_request, debug.traceback, record, request)
   -- A long read comes back as a job to be run a slice at a time; the connection's later requests wait behind it, so
@@ -289,14 +330,16 @@ function M:respond(record, request, ok, result)
       self.ctx.log("error", request.method .. ": could not encode the result: " .. tostring(err))
       text = wire.error(request.id, "internal", "could not encode the result: " .. tostring(err))
     end
-    return self:send(record, text)
+    return self:send(record, text, true)
   end
   if type(result) == "table" then
     -- (A code that isn't text would fail the host's frame check and cost it the connection.)
-    return self:send(record, wire.error(request.id, result.code ~= nil and tostring(result.code) or "failed", tostring(result.message or "")))
+    return self:send(record, wire.error(request.id, result.code ~= nil and tostring(result.code) or "failed", tostring(result.message or "")), true)
   end
   self.ctx.log("error", request.method .. " failed: " .. tostring(result))
-  self:send(record, wire.error(request.id, "internal", (tostring(result):match("^[^\n]*"))))
+  -- (the log has the traceback; the host gets the first line without the file and line it came from)
+  local first = tostring(result):match("^[^\n]*")
+  self:send(record, wire.error(request.id, "internal", (first:gsub("^[^%s:]*%.lua:%d+: ", ""))), true)
 end
 
 function M:receive(client, data)
@@ -310,8 +353,21 @@ function M:receive(client, data)
   record.unsolicited = 0
   self:reap()
   -- The rest of a big frame goes out as the host talks, not only on the next tick.
-  if record.outbox[1] and not record.closing then self:flush(record, M.SEND_TICK_BYTES) end
-  if record.closing or not record.conn then return end
+  if record.outbox[1] then self:flush(record, M.SEND_TICK_BYTES) end
+  if record.closing then
+    -- A retired connection that still has output (a line part sent, a bye) takes the host's `credit` frames, and only those:
+    -- the line is finished, and the bye reaches a host that reads again.
+    if record.conn and record.outbox[1] and not record.gone then
+      local ok, actions = xpcall(record.conn.on_bytes, debug.traceback, record.conn, data, self.ctx.now_ms(), self.ctx.identity)
+      if ok then
+        for _, action in ipairs(actions) do
+          if action.credit then self:grant(record, action.credit) end
+        end
+      end
+    end
+    return
+  end
+  if not record.conn then return end
   local ok, actions = xpcall(record.conn.on_bytes, debug.traceback, record.conn, data, self.ctx.now_ms(), self.ctx.identity)
   if not ok then
     self.ctx.log("error", "connection " .. record.key .. ": " .. tostring(actions))
@@ -320,15 +376,42 @@ function M:receive(client, data)
   self:apply(record, actions)
 end
 
+-- Events about the state of something (not about a shift, which is told one by one, in order) are worth only their latest
+-- value: while a connection's output waits (a host that has paused), only the latest of each is kept and sent after what is
+-- held, so a producer who keeps working can't fill the host's queue.
+M.LATEST_ONLY = { selection = true, transport = true, project = true }
+local LATEST_ORDER = { "selection", "transport", "project" }
+
+local function push_event(self, record, name, data)
+  local text, err = record.conn:event(name, data)
+  if text then
+    self:push(record, text)
+  else
+    self.ctx.log("error", "could not encode event " .. name .. ": " .. tostring(err))
+  end
+end
+
+-- The latest values kept while output waited, sent (in the order the events had, one each) once it has gone.
+local function send_latest(self, record)
+  local latest = record.latest
+  if not latest then return end
+  record.latest = nil
+  for _, name in ipairs(LATEST_ORDER) do
+    if latest[name] ~= nil and not record.closing then push_event(self, record, name, latest[name]) end
+  end
+end
+
 -- An event to every authenticated connection, each numbered on its own connection.
 function M:event(name, data)
   for _, record in pairs(self.ctx.connections) do
     if record.conn and not record.closing and record.conn:authenticated() then
-      local text, err = record.conn:event(name, data)
-      if text then
-        self:push(record, text)
+      if M.LATEST_ONLY[name] and record.outbox[1] then
+        record.latest = record.latest or {}
+        record.latest[name] = data
       else
-        self.ctx.log("error", "could not encode event " .. name .. ": " .. tostring(err))
+        -- (what was kept comes first: events keep the order they happened in)
+        send_latest(self, record)
+        push_event(self, record, name, data)
       end
     end
   end
@@ -356,6 +439,7 @@ function M:tick()
     end
     if record.requests and record.requests[1] and not is_gone(record) then self:run_requests(record) end
     if record.outbox[1] then self:flush(record, M.SEND_TICK_BYTES) end
+    if record.latest and not record.outbox[1] and not record.closing then send_latest(self, record) end
     if is_gone(record) then
       self.ctx.connections[key] = nil
       if self.ctx.cancel_jobs then self.ctx.cancel_jobs(record) end

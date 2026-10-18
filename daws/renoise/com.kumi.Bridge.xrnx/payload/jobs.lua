@@ -7,8 +7,8 @@ M.__index = M
 
 M.BUDGET_MS = 8
 
--- ctx: now_ms(), unix_ms(), epoch() -> text, layout() -> number (moves when tracks, patterns or lines are inserted or
--- removed), finish(job, ok, value), on_active(boolean)
+-- ctx: now_ms(), unix_ms(), epoch() -> text, layout() -> number (the track layout within the epoch), shape() -> number
+-- (moves when tracks, patterns or lines are inserted or removed), finish(job, ok, value), on_active(boolean)
 function M.new(ctx)
   return setmetatable({ ctx = ctx, list = {}, last_run_ms = 0 }, M)
 end
@@ -16,10 +16,9 @@ end
 -- fn(job) does the work, calling job.slice() between steps, and returns the answer or raises {code, message}.
 function M:add(record, request, fn)
   local ctx = self.ctx
-  local job = { record = record, request = request, epoch = ctx.epoch(), layout = ctx.layout(), deadline = 0 }
-  function job.slice()
-    -- (A job that yielded is checked as it resumes: the song may have changed while it waited.)
-    if ctx.now_ms() >= job.deadline then coroutine.yield() end
+  local job = { record = record, request = request, epoch = ctx.epoch(), layout = ctx.layout(), shape = ctx.shape(), deadline = 0 }
+  -- Whether the song is still the one the request was made against; raises the error to answer with if it isn't.
+  function job.check()
     if ctx.epoch() ~= job.epoch then
       error({ code = "epoch-changed", message = "the song changed while this was being read: read again" }, 0)
     end
@@ -27,9 +26,14 @@ function M:add(record, request, fn)
     if type(deadline) == "number" and ctx.unix_ms() >= deadline then
       error({ code = "deadline", message = "the deadline passed while this was being read" }, 0)
     end
-    if ctx.layout() ~= job.layout then
+    if ctx.shape() ~= job.shape then
       error({ code = "changed", message = "tracks, patterns or lines were inserted or removed while this was being read: read again" }, 0)
     end
+  end
+  function job.slice()
+    -- (A job that yielded is checked as it resumes: the song may have changed while it waited.)
+    if ctx.now_ms() >= job.deadline then coroutine.yield() end
+    job.check()
   end
   job.co = coroutine.create(fn)
   self.list[#self.list + 1] = job
@@ -77,11 +81,19 @@ function M:run(budget)
   for i, job in ipairs({ unpack(self.list) }) do
     if i == 1 or ctx.now_ms() - started < budget then
       job.deadline = ctx.now_ms() + budget
-      local ok, value = coroutine.resume(job.co, job)
-      if coroutine.status(job.co) == "dead" then
-        if not ok and type(value) == "string" then value = debug.traceback(job.co, value) end
-        finished[#finished + 1] = { job = job, ok = ok, value = value }
+      local ok, value, ended
+      if not job.started then
+        -- A job is made when its request is handled and first runs on a later turn: what it names is checked before it reads.
+        job.started = true
+        ok, value = pcall(job.check)
+        ended = not ok
       end
+      if not ended then
+        ok, value = coroutine.resume(job.co, job)
+        ended = coroutine.status(job.co) == "dead"
+        if ended and not ok and type(value) == "string" then value = debug.traceback(job.co, value) end
+      end
+      if ended then finished[#finished + 1] = { job = job, ok = ok, value = value } end
     end
   end
   for _, done in ipairs(finished) do
