@@ -595,7 +595,7 @@ test("reads: a long read is sliced over the timers and keeps its connection's an
   local other = H.connect(env)
   H.frames(other)
   H.send(peer, { type = "request", id = 1, method = "read", params = { kind = "track", limit = 60 } })
-  H.send(peer, { type = "request", id = 2, method = "ping" })
+  H.send(peer, { type = "request", id = 2, method = "read", params = { kind = "song" } })
   H.send(other, { type = "request", id = 3, method = "ping" })
   -- Not done at once; the other connection is not made to wait
   local answered = {}
@@ -607,7 +607,7 @@ test("reads: a long read is sliced over the timers and keeps its connection's an
     mock.advance(10)
   end
   eq(order[1], 1, "the read first")
-  eq(order[2], 2, "then the ping that waited behind it")
+  eq(order[2], 2, "then the read that waited behind it")
   eq(answered[3], 0, "the other connection's ping was answered while the read was still going")
   eq(#mock.timers, timers, "the fast timer is gone when no read is pending")
   mock.clock_step_ms = 0
@@ -688,7 +688,7 @@ test("reads: a reload ends the reads in progress, and the connection goes on", f
   H.frames(other)
   mock.clock_step_ms = 1
   H.send(peer, { type = "request", id = 1, method = "read", params = { kind = "track", limit = 60 } })
-  H.send(peer, { type = "request", id = 2, method = "ping" })
+  H.send(peer, { type = "request", id = 2, method = "read", params = { kind = "song" } })
   mock.advance(10)
   H.send(other, { type = "request", id = 3, method = "renoise.reload" })
   local got = {}
@@ -700,7 +700,8 @@ test("reads: a reload ends the reads in progress, and the connection goes on", f
   mock.clock_step_ms = 0
   ok(got[1], "the read was answered")
   failure(got[1], "reloading")
-  ok(got[2] and got[2].result, "and so was the ping that waited behind it")
+  ok(got[2], "and so was the read that waited behind it")
+  failure(got[2], "reloading")
   eq(rows(peer, "song")[1].name, "Demo", "the new payload reads")
   H.no_dialogs()
 end)

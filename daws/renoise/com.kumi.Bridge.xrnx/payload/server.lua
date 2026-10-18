@@ -255,11 +255,31 @@ function M:apply(record, actions)
   self:run_requests(record)
 end
 
+-- Short methods that are answered at once, even behind a long read: the host matches answers by id, and the producer's
+-- FOCUS pane follows what they say.
+M.IMMEDIATE = { ping = true, status = true, focus = true }
+
+-- A read is running: what is short among the waiting requests is answered now, out of order; the rest waits for the job.
+function M:run_immediate(record)
+  if record.closing or record.gone then return end
+  local quick, rest = {}, {}
+  for _, request in ipairs(record.requests) do
+    if M.IMMEDIATE[request.method] then quick[#quick + 1] = request else rest[#rest + 1] = request end
+  end
+  if not quick[1] then return end
+  record.requests = rest
+  for _, request in ipairs(quick) do
+    if record.closing or record.gone then return end
+    self:answer(record, request)
+  end
+end
+
 -- Answers a connection's waiting requests in order, for as long as the budget lasts (at least one): the rest wait for
 -- the next tick.
 function M:run_requests(record)
   local waiting = record.requests
-  if not waiting[1] or record.job then return end
+  if not waiting[1] then return end
+  if record.job then return self:run_immediate(record) end
   if record.closing then
     record.requests = {}
     return

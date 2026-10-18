@@ -161,10 +161,44 @@ test("retire: a retired connection's read is dropped, not run to the end", funct
   H.send(peer, { type = "request", id = 8, method = "test.slow", params = {} })
   eq(#mock.timers, timers + 1, "a read is pending")
   -- 260 requests wait behind it (the cap is 256)
-  for i = 1, 260 do H.send(peer, { type = "request", id = 200 + i, method = "ping", params = {} }) end
+  for i = 1, 260 do H.send(peer, { type = "request", id = 200 + i, method = "test.slow", params = {} }) end
   mock.clock_step_ms = 0
   ok(rec.closing, "retired for too many requests waiting")
   eq(#mock.timers, timers, "and its read was dropped with it")
   eq(rec.job, nil)
+  H.no_dialogs()
+end)
+
+test("focus, status and ping are answered at once behind a long read; the rest wait for it, in order", function()
+  local env = H.setup({ song = { name = "S", tracks = { { name = "A" }, { name = "B" } } } })
+  local peer = H.connect(env)
+  H.frames(peer)
+  env.payload().handlers["test.slow"] = function()
+    return { kumi_job = function(job)
+      for _ = 1, 50 do job.slice() end
+      return { slow = true }
+    end }
+  end
+  mock.clock_step_ms = 1
+  H.send(peer, { type = "request", id = 1, method = "test.slow", params = {} })
+  H.send(peer, { type = "request", id = 2, method = "test.slow", params = {} })
+  H.send(peer, { type = "request", id = 3, method = "focus", params = {} })
+  H.send(peer, { type = "request", id = 4, method = "ping", params = {} })
+  H.send(peer, { type = "request", id = 5, method = "status", params = {} })
+  mock.clock_step_ms = 0
+  local first = {}
+  for _, f in ipairs(H.frames(peer)) do
+    if f.type == "response" then first[#first + 1] = f.id end
+  end
+  eq(table.concat(first, ","), "3,4,5", "before the read ends, the short ones are answered")
+  local later = {}
+  for _ = 1, 400 do
+    H.tick()
+    for _, f in ipairs(H.frames(peer)) do
+      if f.type == "response" then later[#later + 1] = f.id end
+    end
+    if #later == 2 then break end
+  end
+  eq(table.concat(later, ","), "1,2", "the long reads keep their order")
   H.no_dialogs()
 end)
