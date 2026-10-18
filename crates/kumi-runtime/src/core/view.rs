@@ -503,3 +503,25 @@ pub struct DeviceTree {
     pub track_ref: String,
     pub devices: Vec<DeviceNode>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_device_role_sent_in_a_tree_is_read_but_never_written() {
+        let tree: DeviceTree = serde_json::from_value(json!({
+            "trackRef": "1:track:0",
+            "devices": [
+                {"ref": "d0", "name": "LFO", "role": {"signal": "unknown", "form": "modulator"}},
+                {"ref": "d1", "name": "Operator", "deviceType": "instrument"},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(tree.devices[0].role, Some(DeviceRole { signal: DeviceSignal::Unknown, form: DeviceForm::Modulator }));
+        assert_eq!(tree.devices[1].role, None);
+        let written = serde_json::to_value(&tree).unwrap();
+        assert_eq!(written["devices"][0], json!({"ref": "d0", "name": "LFO"}), "a tree serializes as the bridge described it");
+    }
+}
