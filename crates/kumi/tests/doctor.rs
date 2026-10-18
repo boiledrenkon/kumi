@@ -737,3 +737,24 @@ async fn a_reaper_only_doctor_never_speaks_lives_words() {
     assert!(fixes.iter().all(|c| c.text.contains("REAPER")), "nothing to fix for a DAW this producer doesn't use: {fixes:?}");
     kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
 }
+
+/// A Live producer who has opened Renoise once (its preferences folder is there) but never put Kumi's tool in gets a
+/// note about it, never a fix: `kumi doctor` still ends with 0, as before REAPER and Renoise.
+#[tokio::test(flavor = "current_thread")]
+async fn a_live_producer_who_opened_renoise_once_gets_a_note_not_a_fix() {
+    kumi::daw::work_with(kumi_runtime::core::daw::DawId::Ableton);
+    let s = Setup::new();
+    let mut io = s.io();
+    io.env.insert("KUMI_REAPER_RESOURCE_DIR".into(), s.root.path().join("no-reaper").display().to_string());
+    io.env.insert("KUMI_RENOISE_PREFS_DIR".into(), s.root.path().join("no-renoise").display().to_string());
+    let fixes = |checks: &[Check]| checks.iter().filter(|c| c.status == CheckStatus::Fix).map(|c| c.text.clone()).collect::<Vec<_>>();
+    let before = doctor_checks(&io).await.unwrap();
+    let prefs = s.root.path().join("Renoise");
+    fs::create_dir_all(prefs.join("V3.5.4")).unwrap();
+    io.env.insert("KUMI_RENOISE_PREFS_DIR".into(), prefs.display().to_string());
+    let after = doctor_checks(&io).await.unwrap();
+    assert_eq!(fixes(&before), fixes(&after), "no fix for a DAW never set up");
+    let note = find(&after, "Kumi's tool isn't in Renoise");
+    assert_eq!(note.status, CheckStatus::Note);
+    assert!(note.next.as_deref().is_some_and(|next| next.contains("--daw renoise bridge")), "{note:?}");
+}

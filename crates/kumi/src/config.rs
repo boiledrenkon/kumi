@@ -170,7 +170,8 @@ pub(crate) fn take_daw(args: &[String], env: &Env) -> Result<(Vec<String>, Optio
             asked = Some(known(word).ok_or_else(|| RuntimeError::plain(format!("KUMI_DAW must be one of: {}.", registered())))?);
         }
     }
-    Ok((rest, asked.filter(|daw| *daw != DawId::Ableton)))
+    // Live asked for is kept: among several bridges it decides; the configuration never writes it (as before).
+    Ok((rest, asked))
 }
 pub(crate) fn take_resume(args: &[String]) -> Result<(Vec<String>, Option<Resume>), RuntimeError> {
     let both = || {
@@ -759,7 +760,7 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         return Ok(AppConfig::Bridge {
             yes: args[1..].iter().any(|s| s == "--yes"),
             allow_dirty: args[1..].iter().any(|s| s == "--allow-dirty"),
-            daw: bridge_daw,
+            daw: bridge_daw.filter(|daw| *daw != DawId::Ableton),
         });
     }
     if first == Some("model") && args.len() <= 2 {
@@ -829,7 +830,12 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
     let at = |i: usize| args.get(i).map(String::as_str);
     let first = at(0);
     if args.len() == 1 && first == Some("--inference-only") {
-        return Ok(AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: None, resume, daw });
+        return Ok(AppConfig::InferenceOnly {
+            inference: load_inference_config(env)?,
+            bridge_missing: None,
+            resume,
+            daw: daw.filter(|daw| *daw != DawId::Ableton),
+        });
     }
     if args.is_empty() {
         // The DAW asked for, else the first whose bridge is installed; without one, chat without a DAW.

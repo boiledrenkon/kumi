@@ -250,6 +250,8 @@ async fn session(
     input.write("/quit\n");
     input.end();
     assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 0);
+    // One bridge alone: the DAW used last decides nothing, so it isn't written (uninstall and rollbacks stay clean).
+    assert!(!lab._home.path().join(".kumi/last-daw").exists(), "last-daw written with one bridge");
     let said = out.0.borrow().clone();
     said
 }
