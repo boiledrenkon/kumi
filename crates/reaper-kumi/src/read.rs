@@ -234,6 +234,21 @@ impl Reads {
         self.registry.borrow_mut()
     }
 
+    /// A request that says which epoch its refs came from (`epoch`, as an earlier answer gave it) is refused as stale
+    /// when the project in the tab has changed since: refs are GUIDs, and a copy of the project in another tab has the
+    /// same ones.
+    pub fn expect_epoch(&self, params: &Value) -> Result<(), (String, String)> {
+        match params.get("epoch") {
+            None | Some(Value::Null) => Ok(()),
+            Some(Value::String(epoch)) if *epoch == self.epoch() => Ok(()),
+            Some(Value::String(epoch)) => Err((
+                daw_bridge::wire::code::STALE.into(),
+                format!("those refs are from an earlier epoch ({epoch}; now {}): the project in the tab changed, read again", self.epoch()),
+            )),
+            Some(_) => Err(bad("epoch: the epoch an earlier answer gave, unchanged")),
+        }
+    }
+
     fn cursor_text(&self, position: &str) -> String {
         format!("c1.{}.{position}", self.epoch())
     }
@@ -333,6 +348,7 @@ impl Reads {
 
     pub fn read(&self, reaper: &Reaper, params: &Value) -> Answer {
         let request = Request::parse(params)?;
+        self.expect_epoch(params)?;
         let (proj, info) = active(reaper)?;
         if let Some(reference) = &request.reference {
             return self.read_one(reaper, proj, reference);
@@ -971,6 +987,31 @@ mod tests {
         assert!(message.contains("from before the project tab changed"), "{message}");
         assert!(lab.read(json!({"kind": "track", "cursor": "7"})).unwrap_err().1.contains("nextCursor"));
         assert!(lab.read(json!({"kind": "track", "cursor": format!("c1.{}.x", lab.reads.epoch())})).unwrap_err().1.contains("cursor"));
+    }
+
+    /// A copy of the project in another tab has the same GUIDs: a ref that says where it came from is refused there.
+    #[test]
+    fn a_request_that_names_its_epoch_is_refused_as_stale_when_the_project_in_the_tab_changed() {
+        let lab = Lab::new();
+        let epoch = lab.reads.epoch();
+        let read = |lab: &Lab, epoch: Value| lab.read(json!({"ref": "r:track:{AAAA}", "epoch": epoch}));
+        assert_eq!(read(&lab, json!(epoch)).unwrap()["items"][0]["name"], "Drums");
+        assert_eq!(read(&lab, Value::Null).unwrap()["items"][0]["name"], "Drums");
+        assert_eq!(read(&lab, json!(5)).unwrap_err().0, "bad-params");
+        // The producer switched to the Save As copy in another tab, which has the same GUIDs.
+        lab.reads.bump_epoch();
+        let (code, message) = read(&lab, json!(epoch)).unwrap_err();
+        assert_eq!(code, "stale");
+        assert!(message.contains(&epoch) && message.contains("read again"), "{message}");
+        assert_eq!(lab.read(json!({"kind": "track", "epoch": epoch})).unwrap_err().0, "stale");
+        // Without it a read answers about the project now in the tab, and says which epoch that is.
+        assert_ne!(lab.read(json!({"ref": "r:track:{AAAA}"})).unwrap()["epoch"], json!(epoch));
+        // The bodies are refused the same way.
+        let api = fake::api();
+        let body =
+            |epoch: &str| lab.reads.focus_body(&Reaper::new(&api), &json!({"kind": "routing", "ref": "r:track:{AAAA}", "epoch": epoch}));
+        assert_eq!(body(&epoch).unwrap_err().0, "stale");
+        assert_eq!(body(&lab.reads.epoch()).unwrap()["kind"], "routing");
     }
 
     #[test]

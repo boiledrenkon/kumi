@@ -64,6 +64,7 @@ fn limit_param(params: &Value, default: usize, max: usize) -> Result<usize, (Str
 impl Reads {
     pub fn focus_body(&self, reaper: &Reaper, params: &Value) -> Answer {
         let kind = params.get("kind").and_then(Value::as_str).ok_or_else(|| bad(format!("kind: one of {}", BODY_KINDS.join(", "))))?;
+        self.expect_epoch(params)?;
         let info = reaper.current_project().ok_or_else(|| failed("REAPER has no project open"))?;
         let proj = info.ptr;
         let reference = match params.get("ref") {

@@ -180,6 +180,8 @@ pub mod code {
     /// The work started and did not finish in time: it may or may not have happened.
     pub const UNCERTAIN: &str = "uncertain";
     pub const FAILED: &str = "failed";
+    /// The refs or the cursor are from before the project in the tab changed: read again.
+    pub const STALE: &str = "stale";
     pub const INTERNAL: &str = "internal";
 }
 
