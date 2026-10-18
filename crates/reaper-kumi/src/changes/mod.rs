@@ -7,6 +7,7 @@
 //! and refuses `changed` before it writes anything), and how to put it back (`restore`, which refuses `changed` if the
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
+mod marks;
 mod sends;
 mod structure;
 mod tracks;
@@ -75,6 +76,10 @@ enum Kind {
     TrackAdd,
     TrackMove,
     SendProp(&'static sends::Prop),
+    MarkProp(&'static marks::Prop),
+    MarkerAdd,
+    RegionAdd,
+    MarkerDelete,
     SendAdd,
     SendRemove,
 }
@@ -86,7 +91,13 @@ fn kind(name: &str) -> Option<Kind> {
     if let Some(prop) = sends::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::SendProp(prop));
     }
+    if let Some(prop) = marks::PROPS.iter().find(|prop| prop.kind == name) {
+        return Some(Kind::MarkProp(prop));
+    }
     match name {
+        "marker-add" => Some(Kind::MarkerAdd),
+        "region-add" => Some(Kind::RegionAdd),
+        "marker-delete" => Some(Kind::MarkerDelete),
         "send-add" => Some(Kind::SendAdd),
         "send-remove" => Some(Kind::SendRemove),
         "track-delete" => Some(Kind::TrackDelete),
@@ -106,6 +117,10 @@ impl Kind {
             Kind::SendProp(prop) => sends::prop_preview(ctx, prop, input),
             Kind::SendAdd => sends::add_preview(ctx, input),
             Kind::SendRemove => sends::remove_preview(ctx, input),
+            Kind::MarkProp(prop) => marks::prop_preview(ctx, prop, input),
+            Kind::MarkerAdd => marks::add_preview(ctx, input, false),
+            Kind::RegionAdd => marks::add_preview(ctx, input, true),
+            Kind::MarkerDelete => marks::delete_preview(ctx, input),
         }
     }
 
@@ -118,6 +133,10 @@ impl Kind {
             Kind::SendProp(prop) => sends::prop_apply(ctx, prop, input, fence),
             Kind::SendAdd => sends::add_apply(ctx, input, fence),
             Kind::SendRemove => sends::remove_apply(ctx, input, fence),
+            Kind::MarkProp(prop) => marks::prop_apply(ctx, prop, input, fence),
+            Kind::MarkerAdd => marks::add_apply(ctx, input, false),
+            Kind::RegionAdd => marks::add_apply(ctx, input, true),
+            Kind::MarkerDelete => marks::delete_apply(ctx, input, fence),
         }
     }
 
@@ -130,6 +149,9 @@ impl Kind {
             Kind::SendProp(prop) => sends::prop_restore(ctx, prop, restore),
             Kind::SendAdd => sends::add_restore(ctx, restore),
             Kind::SendRemove => sends::remove_restore(ctx, restore),
+            Kind::MarkProp(prop) => marks::prop_restore(ctx, prop, restore),
+            Kind::MarkerAdd | Kind::RegionAdd => marks::add_restore(ctx, restore),
+            Kind::MarkerDelete => marks::delete_restore(ctx, restore),
         }
     }
 }

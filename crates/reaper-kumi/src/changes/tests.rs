@@ -675,6 +675,147 @@ fn removing_a_send_keeps_its_settings_and_undo_makes_it_again() {
     assert_eq!(lab.undo("send-remove", &preview, &applied, "Kumi: undo (kund3)").unwrap_err().0, "gone");
 }
 
+// ----- markers and regions -----
+
+fn markers() -> Vec<(String, f64, f64, String, i32)> {
+    state(|s| s.markers.iter().map(|m| (m.guid.clone(), m.start, m.end, m.name.clone(), m.number)).collect())
+}
+
+#[test]
+fn a_marker_is_added_where_asked_in_beats_or_seconds_and_undo_takes_that_one_away() {
+    let lab = Lab::new();
+    let before = markers();
+    let (preview, applied) =
+        lab.make("marker-add", json!({"positionBeats": 8.0, "name": "Intro", "color": "#102030"}), "Kumi: Marker Intro at bar 3 (kma01)");
+    assert_eq!(preview["display"]["title"], "Marker Intro at bar 3");
+    assert_eq!(applied["created"]["kind"], "marker");
+    let now = markers();
+    assert_eq!(now.len(), before.len() + 1);
+    let made = now.last().unwrap();
+    assert_eq!((made.1, made.3.as_str()), (4.0, "Intro"), "8 quarter notes at 120 bpm");
+    assert_eq!(state(|s| s.markers.last().unwrap().color), 0x10 | 0x20 << 8 | 0x30 << 16 | 0x100_0000);
+    let mut params = json!({"kind": "marker-add", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo (kund1)"});
+    params["epoch"] = lab.reads.epoch().into();
+    // The producer renamed it since: undo is refused, unless discarded.
+    state(|s| s.markers.last_mut().unwrap().name = "Renamed".into());
+    assert_eq!(lab.call("change_restore", params.clone()).unwrap_err().0, "changed");
+    state(|s| s.markers.last_mut().unwrap().name = "Intro".into());
+    lab.call("change_restore", params.clone()).unwrap();
+    assert_eq!(markers(), before);
+    assert_eq!(lab.call("change_restore", params).unwrap_err().0, "gone");
+    // In seconds.
+    let (_, applied) = lab.make("marker-add", json!({"position": 12.5}), "Kumi: Marker at bar 7 beat 2 (kma02)");
+    assert_eq!(state(|s| s.markers.last().unwrap().start), 12.5);
+    assert!(applied["display"]["title"].as_str().unwrap().starts_with("Marker at bar"));
+}
+
+#[test]
+fn a_region_needs_an_end_after_its_start_and_a_marker_has_none() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make(
+        "region-add",
+        json!({"positionBeats": 16.0, "endBeats": 32.0, "name": "Chorus 2"}),
+        "Kumi: Region Chorus 2 from bar 5 to bar 9 (kra01)",
+    );
+    assert_eq!(preview["display"]["title"], "Region Chorus 2 from bar 5 to bar 9");
+    assert_eq!(applied["created"]["kind"], "region");
+    assert_eq!(
+        state(|s| (s.markers.last().unwrap().start, s.markers.last().unwrap().end, s.markers.last().unwrap().is_region)),
+        (8.0, 16.0, true)
+    );
+    for (kind, input) in [
+        ("region-add", json!({"positionBeats": 16.0})),
+        ("region-add", json!({"positionBeats": 16.0, "endBeats": 16.0})),
+        ("region-add", json!({"positionBeats": 16.0, "end": 5.0})),
+        ("marker-add", json!({})),
+        ("marker-add", json!({"positionBeats": 1.0, "position": 1.0})),
+        ("marker-add", json!({"positionBeats": -1.0})),
+        ("marker-add", json!({"position": 1.0, "name": "a\nb"})),
+        ("marker-add", json!({"position": 1.0, "color": "pink"})),
+        ("marker-move", json!({"ref": "r:marker:{MARK-1}", "position": 1.0, "end": 3.0})),
+        ("marker-move", json!({"ref": "r:track:{AAAA}", "position": 1.0})),
+        ("marker-rename", json!({"ref": "r:marker:{MARK-1}"})),
+    ] {
+        assert_eq!(lab.call("change_preview", json!({"kind": kind, "input": input})).unwrap_err().0, "bad-params", "{kind} {input}");
+    }
+    assert_eq!(
+        lab.call("change_preview", json!({"kind": "marker-move", "input": {"ref": "r:marker:{NOPE}", "position": 1.0}})).unwrap_err().0,
+        "failed"
+    );
+    // A marker ref is not a region's.
+    assert_eq!(
+        lab.call("change_preview", json!({"kind": "marker-rename", "input": {"ref": "r:region:{MARK-1}", "name": "x"}})).unwrap_err().0,
+        "failed"
+    );
+}
+
+#[test]
+fn a_marker_is_moved_renamed_and_coloured_and_each_goes_back() {
+    let lab = Lab::new();
+    // Drop is at 4 s; Verse is the region from 8 s to 16 s.
+    let (preview, applied) =
+        lab.make("marker-move", json!({"ref": "r:marker:{MARK-1}", "positionBeats": 40.0}), "Kumi: Moved marker Drop to bar 11 (kmm01)");
+    assert_eq!(preview["display"]["title"], "Moved marker Drop to bar 11");
+    assert_eq!(state(|s| s.markers[0].start), 20.0);
+    lab.undo("marker-move", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(state(|s| s.markers[0].start), 4.0);
+    // A region moved by its start keeps its length; one moved with an end is resized.
+    let (preview, applied) =
+        lab.make("marker-move", json!({"ref": "r:region:{REG-1}", "position": 20.0}), "Kumi: Moved region Verse (kmm02)");
+    assert_eq!(state(|s| (s.markers[1].start, s.markers[1].end)), (20.0, 28.0));
+    lab.undo("marker-move", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| (s.markers[1].start, s.markers[1].end)), (8.0, 16.0));
+    let (preview, applied) =
+        lab.make("marker-move", json!({"ref": "r:region:{REG-1}", "position": 6.0, "end": 12.0}), "Kumi: Moved region Verse (kmm03)");
+    assert_eq!(state(|s| (s.markers[1].start, s.markers[1].end)), (6.0, 12.0));
+    lab.undo("marker-move", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    assert_eq!(state(|s| (s.markers[1].start, s.markers[1].end)), (8.0, 16.0));
+    // Name and colour.
+    let (preview, applied) = lab.make(
+        "marker-rename",
+        json!({"ref": "r:marker:{MARK-1}", "name": "Breakdown"}),
+        "Kumi: Renamed marker Drop to Breakdown (kmr01)",
+    );
+    assert_eq!(preview["display"]["title"], "Renamed marker Drop to Breakdown");
+    assert_eq!(state(|s| s.markers[0].name.clone()), "Breakdown");
+    lab.undo("marker-rename", &preview, &applied, "Kumi: undo (kund4)").unwrap();
+    assert_eq!(state(|s| s.markers[0].name.clone()), "Drop");
+    let green = state(|s| s.markers[1].color);
+    let (preview, applied) =
+        lab.make("marker-color", json!({"ref": "r:region:{REG-1}", "color": "#ff0000"}), "Kumi: Region Verse colour changed (kmc01)");
+    assert_eq!(state(|s| s.markers[1].color), 0xff | 0x100_0000);
+    lab.undo("marker-color", &preview, &applied, "Kumi: undo (kund5)").unwrap();
+    assert_eq!(state(|s| s.markers[1].color), green);
+    // Moved since: refused.
+    let (preview, applied) = lab.make("marker-move", json!({"ref": "r:marker:{MARK-1}", "position": 9.0}), "Kumi: Moved (kmm04)");
+    state(|s| s.markers[0].start = 11.0);
+    assert_eq!(lab.undo("marker-move", &preview, &applied, "Kumi: undo (kund6)").unwrap_err().0, "changed");
+    // A change fenced by where it was is refused when it moved before the apply.
+    let preview = lab.call("change_preview", json!({"kind": "marker-rename", "input": {"ref": "r:marker:{MARK-1}", "name": "X"}})).unwrap();
+    state(|s| s.markers[0].name = "Other".into());
+    assert_eq!(lab.call("change_apply", json!({"kind": "marker-rename", "input": {"ref": "r:marker:{MARK-1}", "name": "X"}, "fence": preview["fence"], "desc": "Kumi: x (k1111)"})).unwrap_err().0, "changed");
+}
+
+#[test]
+fn deleting_a_marker_keeps_it_to_make_again_with_a_new_id_and_its_number() {
+    let lab = Lab::new();
+    state(|s| s.markers[1].number = 7);
+    let (preview, applied) = lab.make("marker-delete", json!({"ref": "r:region:{REG-1}"}), "Kumi: Deleted region Verse (kmd01)");
+    assert_eq!(preview["display"]["title"], "Deleted region Verse");
+    assert_eq!(state(|s| s.markers.len()), 1);
+    let restored = lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(restored["restored"]["was"], "r:region:{REG-1}");
+    assert!(restored["restored"]["ref"].as_str().unwrap().starts_with("r:region:{MK-NEW-"), "{restored}");
+    let (start, end, name, number, region) = state(|s| {
+        let m = s.markers.last().unwrap();
+        (m.start, m.end, m.name.clone(), m.number, m.is_region)
+    });
+    assert_eq!((start, end, name.as_str(), number, region), (8.0, 16.0, "Verse", 7, true));
+    // A second undo finds a marker like it and makes nothing again... by the old id it finds none, so it makes another:
+    // the journal only undoes once, so this is the producer's own doing.
+    assert_eq!(state(|s| s.markers.len()), 2);
+}
+
 // ----- a plan -----
 
 #[test]

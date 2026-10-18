@@ -5,7 +5,7 @@ use std::ffi::{c_char, c_int, CString};
 use std::ptr;
 
 use super::{Project, Reaper, Track};
-use crate::api;
+use crate::api::{self, ProjectMarker};
 
 /// The most a track's chunk may grow to when it is read: the plug-in states in it are what take the room.
 const MAX_CHUNK: usize = 256 << 20;
@@ -175,5 +175,53 @@ impl Reaper<'_> {
     pub fn undo_entry(&self, proj: Project, index: i32) -> Option<String> {
         let text = unsafe { api::string(self.api.Undo_GetEntryDesc()?(proj.0, index)) };
         (!text.is_empty()).then_some(text)
+    }
+}
+
+/// Markers and regions, which REAPER hands out by pointer and names by GUID.
+impl Reaper<'_> {
+    fn marker_pointer(&self, proj: Project, guid: &str) -> Option<*mut ProjectMarker> {
+        let guid = cstring(guid);
+        let marker = unsafe { self.api.GetRegionOrMarker()?(proj.0, -1, guid.as_ptr()) };
+        (!marker.is_null()).then_some(marker)
+    }
+
+    /// A marker or region made at `start` (seconds), and its GUID. `end` is the region's.
+    pub fn add_marker(&self, proj: Project, region: bool, start: f64, end: f64, name: &str, color: i32) -> Option<String> {
+        let name = cstring(name);
+        let marker = unsafe { self.api.AddRegionOrMarker()?(proj.0, region, start, end, name.as_ptr(), -1, color) };
+        if marker.is_null() {
+            return None;
+        }
+        let f = self.api.GetSetRegionOrMarkerInfo_String()?;
+        let mut buf = vec![0u8; 256];
+        let ok = unsafe { f(proj.0, marker, c"GUID".as_ptr(), buf.as_mut_ptr().cast(), false) };
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(0);
+        (ok && len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
+    }
+
+    /// A marker's number attribute: `D_STARTPOS`, `D_ENDPOS`, `I_NUMBER`, `I_CUSTOMCOLOR`.
+    pub fn set_marker_value(&self, proj: Project, guid: &str, parm: &str, value: f64) -> bool {
+        let (Some(marker), Some(f)) = (self.marker_pointer(proj, guid), self.api.SetRegionOrMarkerInfo_Value()) else { return false };
+        let parm = cstring(parm);
+        // What it returns is not documented as a success flag: the change reads the marker again.
+        unsafe { f(proj.0, marker, parm.as_ptr(), value) };
+        true
+    }
+
+    pub fn set_marker_name(&self, proj: Project, guid: &str, name: &str) -> bool {
+        let (Some(marker), Some(f)) = (self.marker_pointer(proj, guid), self.api.GetSetRegionOrMarkerInfo_String()) else { return false };
+        let mut buf = cstring(name).into_bytes_with_nul();
+        unsafe { f(proj.0, marker, c"P_NAME".as_ptr(), buf.as_mut_ptr().cast::<c_char>(), true) }
+    }
+
+    pub fn delete_marker(&self, proj: Project, guid: &str) -> bool {
+        let (Some(marker), Some(value), Some(delete)) =
+            (self.marker_pointer(proj, guid), self.api.GetRegionOrMarkerInfo_Value(), self.api.DeleteProjectMarkerByIndex())
+        else {
+            return false;
+        };
+        let index = unsafe { value(proj.0, marker, c"I_INDEX".as_ptr()) } as i32;
+        unsafe { delete(proj.0, index) }
     }
 }

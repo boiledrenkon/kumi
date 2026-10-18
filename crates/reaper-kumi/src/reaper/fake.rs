@@ -798,6 +798,7 @@ unsafe extern "C" fn get_region_or_marker_info_value(_proj: *mut ReaProject, mar
             "D_ENDPOS" => m.end,
             "I_NUMBER" => m.number as f64,
             "I_CUSTOMCOLOR" => m.color as f64,
+            "I_INDEX" => index as f64,
             _ => 0.0,
         }
     })
@@ -809,8 +810,20 @@ unsafe extern "C" fn get_set_region_or_marker_info_string(
     buf: *mut c_char,
     set: bool,
 ) -> bool {
-    assert!(!set, "the fake only reads");
     let parm = name_of(parm);
+    if set {
+        let value = name_of(buf);
+        return counted(|s| {
+            let (kind, index, _, _) = unpack(marker as u64);
+            let Some(m) = s.markers.get_mut(index as usize).filter(|_| kind == PROJECT_MARKER) else { return false };
+            if parm != "P_NAME" {
+                return false;
+            }
+            m.name = value;
+            s.undo_dirty = true;
+            true
+        });
+    }
     counted(|s| {
         let (kind, index, _, _) = unpack(marker as u64);
         let Some(m) = s.markers.get(index as usize).filter(|_| kind == PROJECT_MARKER) else { return false };
@@ -819,6 +832,71 @@ unsafe extern "C" fn get_set_region_or_marker_info_string(
             "P_NAME" => write(buf, 4096, &m.name),
             _ => return false,
         }
+        true
+    })
+}
+
+unsafe extern "C" fn add_region_or_marker(
+    _proj: *mut ReaProject,
+    region: bool,
+    start: f64,
+    end: f64,
+    name: *const c_char,
+    wanted: c_int,
+    color: c_int,
+) -> *mut api::ProjectMarker {
+    let name = name_of(name);
+    counted(|s| {
+        s.made += 1;
+        let number = if wanted >= 0 { wanted } else { s.markers.iter().map(|m| m.number).max().unwrap_or(0) + 1 };
+        s.markers.push(FakeMarker {
+            guid: format!("{{MK-NEW-{}}}", s.made),
+            is_region: region,
+            start,
+            end: if region { end } else { start },
+            name,
+            number,
+            color,
+        });
+        s.undo_dirty = true;
+        pack(PROJECT_MARKER, s.markers.len() as u64 - 1, 0, 0) as *mut api::ProjectMarker
+    })
+}
+
+unsafe extern "C" fn set_region_or_marker_info_value(
+    _proj: *mut ReaProject,
+    marker: *mut api::ProjectMarker,
+    parm: *const c_char,
+    value: f64,
+) -> f64 {
+    let parm = name_of(parm);
+    counted(|s| {
+        let (kind, index, _, _) = unpack(marker as u64);
+        let Some(m) = s.markers.get_mut(index as usize).filter(|_| kind == PROJECT_MARKER) else { return 0.0 };
+        match parm.as_str() {
+            "D_STARTPOS" => {
+                m.start = value;
+                if !m.is_region {
+                    m.end = value;
+                }
+            }
+            "D_ENDPOS" if m.is_region => m.end = value,
+            "I_NUMBER" => m.number = value as i32,
+            "I_CUSTOMCOLOR" => m.color = value as i32,
+            _ => return 0.0,
+        }
+        s.undo_dirty = true;
+        1.0
+    })
+}
+
+unsafe extern "C" fn delete_project_marker_by_index(_proj: *mut ReaProject, index: c_int) -> bool {
+    counted(|s| {
+        if index < 0 || index as usize >= s.markers.len() {
+            return false;
+        }
+        s.markers.remove(index as usize);
+        s.undo_dirty = true;
         true
     })
 }
@@ -2036,6 +2114,9 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"SetOnlyTrackSelected" => set_only_track_selected as unsafe extern "C" fn(*mut MediaTrack),
         b"SetTrackSelected" => set_track_selected as unsafe extern "C" fn(*mut MediaTrack, bool),
         b"ReorderSelectedTracks" => reorder_selected_tracks as unsafe extern "C" fn(c_int, c_int) -> bool,
+        b"AddRegionOrMarker" => add_region_or_marker as unsafe extern "C" fn(*mut ReaProject, bool, f64, f64, *const c_char, c_int, c_int) -> *mut api::ProjectMarker,
+        b"SetRegionOrMarkerInfo_Value" => set_region_or_marker_info_value as unsafe extern "C" fn(*mut ReaProject, *mut api::ProjectMarker, *const c_char, f64) -> f64,
+        b"DeleteProjectMarkerByIndex" => delete_project_marker_by_index as unsafe extern "C" fn(*mut ReaProject, c_int) -> bool,
         b"ColorToNative" => color_to_native as unsafe extern "C" fn(c_int, c_int, c_int) -> c_int,
         b"UpdateArrange" => update_arrange as unsafe extern "C" fn(),
         b"TrackList_AdjustWindows" => track_list_adjust_windows as unsafe extern "C" fn(bool),
