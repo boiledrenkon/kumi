@@ -13,7 +13,8 @@ use super::client::{McpEndpoint, MAX_BRIDGE_MESSAGE_BYTES};
 use super::types::{CallToolResult, ContentBlock, Tool};
 use crate::core::{contracts::JsonObject, errors::RuntimeError, timing};
 
-/// Tools the model may call directly: reads.
+/// Tools the model may call directly on Live's bridge: reads (another DAW's bridge has its own,
+/// `AllowedTools::with_model_tools`).
 // Not live_snapshot: a whole big Set in one answer is more than the link carries (discovery pages instead).
 pub const MODEL_TOOLS: [&str; 16] = [
     "server_status",
@@ -63,6 +64,8 @@ struct State {
 pub struct AllowedTools {
     endpoint: Rc<dyn McpEndpoint>,
     host_tools: Rc<HashSet<String>>,
+    /// The bridge's reads the model may call directly.
+    model_tools: &'static [&'static str],
     state: Rc<RefCell<State>>,
 }
 
@@ -72,8 +75,13 @@ pub struct CallOptions {
 }
 
 impl AllowedTools {
-    /// `host_tools` are called only by Kumi itself (behind its change tools), never listed for the model.
+    /// `host_tools` are called only by Kumi itself (behind its change tools), never listed for the model; the model's
+    /// own are Live's bridge's reads.
     pub fn new(endpoint: Rc<dyn McpEndpoint>, host_tools: HashSet<String>) -> Self {
+        Self::with_model_tools(endpoint, &MODEL_TOOLS, host_tools)
+    }
+    /// `new`, with the bridge's reads the model may call directly.
+    pub fn with_model_tools(endpoint: Rc<dyn McpEndpoint>, model_tools: &'static [&'static str], host_tools: HashSet<String>) -> Self {
         let state = Rc::new(RefCell::new(State::default()));
         let weak = Rc::downgrade(&state);
         let invalidate: Rc<dyn Fn()> = Rc::new(move || {
@@ -86,7 +94,7 @@ impl AllowedTools {
         });
         let listeners = vec![endpoint.on_catalog_changed(invalidate.clone()), endpoint.on_disconnect(invalidate)];
         state.borrow_mut().unlisten = listeners;
-        Self { endpoint, host_tools: Rc::new(host_tools), state }
+        Self { endpoint, host_tools: Rc::new(host_tools), model_tools, state }
     }
 
     pub fn generation(&self) -> u64 {
@@ -100,7 +108,7 @@ impl AllowedTools {
         if !self.is_valid() {
             return Vec::new();
         }
-        self.state.borrow().catalog.values().filter(|tool| MODEL_TOOLS.contains(&tool.name.as_str())).cloned().collect()
+        self.state.borrow().catalog.values().filter(|tool| self.model_tools.contains(&tool.name.as_str())).cloned().collect()
     }
     pub fn has(&self, name: &str) -> bool {
         self.is_valid() && self.allowed(name) && self.state.borrow().catalog.contains_key(name)
@@ -113,7 +121,7 @@ impl AllowedTools {
         }
     }
     fn allowed(&self, name: &str) -> bool {
-        MODEL_TOOLS.contains(&name) || self.host_tools.contains(name)
+        self.model_tools.contains(&name) || self.host_tools.contains(name)
     }
 
     /// Concurrent callers share one enumeration; a change while reading starts it over, a few times.

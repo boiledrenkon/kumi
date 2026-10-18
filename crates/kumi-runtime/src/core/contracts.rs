@@ -80,6 +80,39 @@ pub enum Reach {
 
 /// A tool the kernel offers the model. `stream` is optional: it returns None for a tool whose calls
 /// can't start before they're whole.
+/// What a tool is for, when the session needs that tool and not any other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolRole {
+    /// Makes several changes as one plan (recipes run through it; a technique is drafted beside it).
+    Plan,
+    /// Undoes one of Kumi's changes.
+    Undo,
+    /// Judges a change by ear (a judged run's rounds).
+    Judge,
+    /// Tunes knobs toward a target by ear.
+    Tune,
+    /// Finds sounds on this computer (the library's own, when Kumi has one, takes its place).
+    FindSounds,
+}
+
+impl ToolRole {
+    /// The role of one of Kumi's own tools, by its name.
+    pub fn named(name: &str) -> Option<ToolRole> {
+        match name {
+            "make_changes" => Some(ToolRole::Plan),
+            "undo_change" => Some(ToolRole::Undo),
+            "judge" => Some(ToolRole::Judge),
+            "tune" => Some(ToolRole::Tune),
+            "find_sounds" => Some(ToolRole::FindSounds),
+            _ => None,
+        }
+    }
+}
+
+/// Kumi's own tools that only read away from the DAW: several calls to them run at once.
+pub const CONCURRENT: &[&str] =
+    &["search_web", "read_web", "find_sounds", "find_presets", "my_sets", "live_manual", "search_conversations"];
+
 #[async_trait(?Send)]
 pub trait KernelTool {
     fn name(&self) -> &str;
@@ -106,6 +139,16 @@ pub trait KernelTool {
     /// it): find_tools' list points there instead of repeating this one.
     fn listed_by(&self) -> Option<&str> {
         None
+    }
+    /// What the tool is for, for the session to find it by (the plan tool, the undo, the judge…): by its name by
+    /// default, as Kumi names its own; an integration whose tools are named otherwise says.
+    fn role(&self) -> Option<ToolRole> {
+        ToolRole::named(self.name())
+    }
+    /// Whether it only reads away from the DAW, so several calls to it and tools like it can run at once: by its name
+    /// by default, for Kumi's own.
+    fn concurrent(&self) -> bool {
+        CONCURRENT.contains(&self.name())
     }
 }
 

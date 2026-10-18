@@ -20,7 +20,7 @@ use crate::{
     audio::tools::{listening_tools_for, ListeningOptions},
     core::conversations::{new_conversation_id, IMPORTED},
     kernel::budget::{transcript_of, OBSERVATION_MARKER},
-    library::{Library, LibraryToolsOptions, FIND_SOUNDS_TOOL},
+    library::{Library, LibraryToolsOptions},
     web::{
         net::WebClient,
         tool::{web_tools_for, WebToolOptions},
@@ -488,6 +488,8 @@ async fn attached(input: &str, attachments: &[Attachment]) -> Result<(String, Ve
 }
 
 pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> {
+    // A session always knows its DAW (Live's by default): only an integration that doesn't say has no profile.
+    debug_assert!(options.profile != DawProfile::UNKNOWN, "a session runs in a known DAW's words");
     let timeout_ms = options.timeout_ms.unwrap_or(120_000);
     let idle_ms = options.idle_timeout_ms.or(options.timeout_ms).unwrap_or(600_000);
     let turn_limit_ms = options.turn_limit_ms.unwrap_or(3_600_000);
@@ -1380,7 +1382,7 @@ impl Session {
             let mut tools: Vec<Rc<dyn KernelTool>> = observation
                 .tools
                 .iter()
-                .filter(|tool| self.0.shelf.is_empty() || tool.name() != FIND_SOUNDS_TOOL)
+                .filter(|tool| self.0.shelf.is_empty() || tool.role() != Some(ToolRole::FindSounds))
                 .map(|tool| self.with_background(self.with_loop(self.with_taste(self.with_technique(tool.clone())))))
                 .collect();
             if let Some(notes) = &self.0.notes {
@@ -1815,7 +1817,7 @@ impl Session {
             }
             let other_set = s.set.as_ref().is_some_and(|set| *set != snapshot.key);
             s.set = Some(snapshot.key.clone());
-            s.plan = snapshot.tools.iter().find(|t| t.name() == "make_changes").cloned();
+            s.plan = snapshot.tools.iter().find(|t| t.role() == Some(ToolRole::Plan)).cloned();
             other_set
         };
         // Another Set is open: the goal shown was the last Set's.
@@ -2084,7 +2086,7 @@ impl Session {
     /// judge and tune, held to the loop: once it's over, only the run's end (judge done) goes through. A groove run
     /// (judged on the notes, never listened to) isn't the loop's: its calls go through and its rounds aren't counted.
     fn with_loop(&self, tool: Rc<dyn KernelTool>) -> Rc<dyn KernelTool> {
-        if matches!(tool.name(), "judge" | "tune") {
+        if matches!(tool.role(), Some(ToolRole::Judge | ToolRole::Tune)) {
             Rc::new(LoopGuard { tool, session: Rc::downgrade(&self.0) })
         } else {
             tool
@@ -2092,13 +2094,13 @@ impl Session {
     }
     fn with_taste(&self, tool: Rc<dyn KernelTool>) -> Rc<dyn KernelTool> {
         match &self.0.taste {
-            Some(taste) if tool.name() == "undo_change" => taste.watch_undo(tool),
+            Some(taste) if tool.role() == Some(ToolRole::Undo) => taste.watch_undo(tool),
             _ => tool,
         }
     }
     fn with_technique(&self, tool: Rc<dyn KernelTool>) -> Rc<dyn KernelTool> {
         match &self.0.learned {
-            Some(learned) if tool.name() == "make_changes" => Rc::new(TechniquePlan {
+            Some(learned) if tool.role() == Some(ToolRole::Plan) => Rc::new(TechniquePlan {
                 description: format!("{} {}", tool.description(), PLAN_TECHNIQUE["description"].as_str().unwrap_or_default()),
                 tool,
                 learned: learned.clone(),
@@ -2130,9 +2132,9 @@ impl KernelTool for LoopGuard {
         self.tool.listed_by()
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let name = self.tool.name();
-        let ending = name == "judge" && input.get("done") == Some(&Value::Bool(true));
-        let starting = name == "judge" && input.contains_key("goal");
+        let judging = self.tool.role() == Some(ToolRole::Judge);
+        let ending = judging && input.get("done") == Some(&Value::Bool(true));
+        let starting = judging && input.contains_key("goal");
         // Code decides the loop, not the model: once over, only the run's end; while it goes, its checklist stands
         // and the run ends when Kumi asks.
         let held = self.session.upgrade().and_then(|inner| {
@@ -2156,6 +2158,12 @@ impl KernelTool for LoopGuard {
             Some(why) => Ok(ToolResult::error(why)),
             None => self.tool.execute(input, signal).await,
         }
+    }
+    fn role(&self) -> Option<ToolRole> {
+        self.tool.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.tool.concurrent()
     }
 }
 
@@ -2199,6 +2207,12 @@ impl KernelTool for TechniquePlan {
         self.tool
             .stream(signal, on_start)
             .map(|call| Box::new(TechniqueStream { call, learned: self.learned.clone() }) as Box<dyn StreamingCall>)
+    }
+    fn role(&self) -> Option<ToolRole> {
+        self.tool.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.tool.concurrent()
     }
 }
 struct TechniqueStream {

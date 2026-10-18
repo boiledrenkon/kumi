@@ -287,6 +287,7 @@ impl LiveConnection {
             bridge_config: Some(path.into()),
             allow_tools: BRIDGE_TOOLS.clone(),
             on_dispatch: dispatch,
+            bridge: Some(client::BridgeDescriptor::ABLETON),
             ..Default::default()
         })
         .await
@@ -326,7 +327,11 @@ impl LiveConnection {
     }
     fn attach(&self, endpoint: Rc<dyn McpEndpoint>) {
         *self.endpoint.borrow_mut() = Some(endpoint.clone());
-        *self.tools.borrow_mut() = Some(AllowedTools::new(endpoint.clone(), BRIDGE_TOOLS.iter().cloned().collect::<HashSet<_>>()));
+        *self.tools.borrow_mut() = Some(AllowedTools::with_model_tools(
+            endpoint.clone(),
+            &crate::mcp::allowed_tools::MODEL_TOOLS,
+            BRIDGE_TOOLS.iter().cloned().collect::<HashSet<_>>(),
+        ));
         let weak = self.weak.clone();
         self.unlisten.borrow_mut().push(endpoint.on_disconnect(Rc::new(move || {
             if let Some(this) = weak.upgrade() {

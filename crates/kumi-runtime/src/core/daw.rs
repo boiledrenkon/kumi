@@ -606,20 +606,35 @@ pub fn check_asset_phrases(value: &serde_json::Value, phrases: &[AssetPhrase]) -
     }
 }
 
-/// An asset in a DAW's words: its descriptions with each phrase said the DAW's way. Live's stay as they are.
+/// An asset in a DAW's words: its descriptions with each phrase said the DAW's way, in one pass from left to right,
+/// so what one phrase becomes is never read again for another. Live's stay as they are.
 pub fn asset_in_words(mut value: serde_json::Value, profile: &DawProfile, phrases: &[AssetPhrase]) -> serde_json::Value {
     debug_assert_eq!(check_asset_phrases(&value, phrases), Ok(()));
-    let said: Vec<(&str, String)> =
-        phrases.iter().map(|phrase| (phrase.live, (phrase.said)(profile))).filter(|(live, said)| live != said).collect();
-    if !said.is_empty() {
-        descriptions(&mut value, &mut |text| {
-            for (live, said) in &said {
-                if text.contains(live) {
-                    *text = text.replace(live, said);
+    let said: Vec<(&str, String)> = phrases.iter().map(|phrase| (phrase.live, (phrase.said)(profile))).collect();
+    if said.iter().all(|(live, said)| live == said) {
+        return value;
+    }
+    descriptions(&mut value, &mut |text| {
+        if !said.iter().any(|(live, _)| text.contains(live)) {
+            return;
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while !rest.is_empty() {
+            match said.iter().find(|(live, _)| rest.starts_with(live)) {
+                Some((live, said)) => {
+                    out.push_str(said);
+                    rest = &rest[live.len()..];
+                }
+                None => {
+                    let next = rest.chars().next().map_or(1, char::len_utf8);
+                    out.push_str(&rest[..next]);
+                    rest = &rest[next..];
                 }
             }
-        });
-    }
+        }
+        *text = out;
+    });
     value
 }
 
@@ -655,6 +670,20 @@ mod tests {
                 assert!(profile.vocab.structure_moves.iter().any(|(k, _)| k == kind), "{kind:?}");
             }
         }
+    }
+
+    #[test]
+    fn an_assets_phrases_are_said_once_each_never_again_inside_what_another_became() {
+        const PHRASES: &[AssetPhrase] = &[
+            AssetPhrase { live: "the Set", count: 1, said: |_| "the project (not the Arrangement)".into() },
+            AssetPhrase { live: "the Arrangement", count: 1, said: |_| "the timeline".into() },
+        ];
+        let asset = serde_json::json!({"description": "Hear the Set, or the Arrangement.", "properties": {"x": {"description": "From the Arrangement."}}});
+        assert_eq!(check_asset_phrases(&asset, PHRASES), Err("“the Arrangement” is in the asset 2 times, not 1".into()));
+        let asset = serde_json::json!({"description": "Hear the Set, then the Arrangement.", "enum": ["the Set"]});
+        let said = asset_in_words(asset, &DawProfile::UNKNOWN, PHRASES);
+        assert_eq!(said["description"], "Hear the project (not the Arrangement), then the timeline.");
+        assert_eq!(said["enum"][0], "the Set", "only descriptions change");
     }
 
     #[test]

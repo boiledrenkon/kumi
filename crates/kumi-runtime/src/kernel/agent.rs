@@ -1035,7 +1035,7 @@ impl Turn {
     /// every call was quiet (an empty reply: done, nothing to add) and said `final`; then no model reply
     /// follows. A call
     /// that started while it was written finishes with its whole input. Consecutive calls that only read
-    /// away from Live run together (`TOGETHER`), their results kept in the reply's order.
+    /// away from Live run together (`KernelTool::concurrent`), their results kept in the reply's order.
     ///
     /// Stopped partway, a batch keeps the calls that finished, and each of the rest gets a result saying
     /// it was stopped (every call needs one), so the next request doesn't redo what's done. A batch
@@ -1053,7 +1053,7 @@ impl Turn {
             }
             let rest = &prepared[results.len()..];
             // At most four at once: a reply can ask for many pages, and search services limit bursts.
-            let together = rest.iter().take_while(|call| TOGETHER.contains(&call.name.as_str())).take(4).count();
+            let together = rest.iter().take_while(|call| call.concurrent()).take(4).count();
             let group = &rest[..together.max(1)];
             let ran = if group.len() > 1 {
                 let began = perf_now();
@@ -1068,7 +1068,7 @@ impl Turn {
                 let outcome = match ran {
                     Ran::Stopped => {
                         // A read away from Live can't have changed it.
-                        let text = if TOGETHER.contains(&prepared.name.as_str()) {
+                        let text = if prepared.concurrent() {
                             STOPPED_READING.to_string()
                         } else {
                             stopped_while_running(&self.inner.profile.get())
@@ -1237,7 +1237,6 @@ impl Turn {
 
 /// Tools that only read, away from Live: the web, the library and its samples, Live's manual, earlier
 /// conversations. Consecutive calls to them in one reply run together.
-const TOGETHER: &[&str] = &["search_web", "read_web", "find_sounds", "find_presets", "my_sets", "live_manual", "search_conversations"];
 
 /// A call as it runs: the model's own call (its id and name stay on the result), the tool that runs (the one
 /// call_tool names, or the call's own) and its input.
@@ -1247,6 +1246,17 @@ struct Prepared<'c> {
     name: String,
     input: Option<JsonObject>,
     target: Target,
+}
+
+impl Prepared<'_> {
+    /// Whether it only reads away from the DAW, so it runs beside others like it (one that can't run is taken by its
+    /// name, as before tools said).
+    fn concurrent(&self) -> bool {
+        match &self.target {
+            Target::Tool(tool) => tool.concurrent(),
+            Target::Refused(_) => crate::core::contracts::CONCURRENT.contains(&self.name.as_str()),
+        }
+    }
 }
 
 enum Target {

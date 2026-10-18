@@ -248,6 +248,12 @@ impl KernelTool for Backgroundable {
             ))),
         }
     }
+    fn role(&self) -> Option<ToolRole> {
+        self.tool.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.tool.concurrent()
+    }
 }
 
 impl Session {
@@ -589,6 +595,12 @@ impl KernelTool for UpFront {
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         self.0.execute(input, signal).await
+    }
+    fn role(&self) -> Option<ToolRole> {
+        self.0.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.0.concurrent()
     }
 }
 

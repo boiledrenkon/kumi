@@ -361,6 +361,12 @@ impl KernelTool for UndoWatch {
         }
         Ok(result)
     }
+    fn role(&self) -> Option<crate::core::contracts::ToolRole> {
+        self.tool.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.tool.concurrent()
+    }
 }
 
 #[cfg(test)]

@@ -104,6 +104,12 @@ impl KernelTool for InDaw {
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         self.tool.execute(input, signal).await
     }
+    fn role(&self) -> Option<crate::core::contracts::ToolRole> {
+        self.tool.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.tool.concurrent()
+    }
 }
 
 fn what_schema(place: &str) -> JsonObject {
