@@ -9,7 +9,7 @@ local VERSION = import("version")
 local M = {}
 
 M.METHODS = { "ping", "status", "renoise.reload" }
-M.EVENTS = { "project", "selection", "transport" }
+M.EVENTS = { "project", "tracks", "selection", "transport" }
 
 -- Kept across payload reloads (the bridge sets it to its own state).
 M.cache = {}
@@ -88,9 +88,8 @@ function M.write_song_id(memory, song)
   end
 end
 
-local function file_title(path)
-  local name = path:match("([^/\\]+)$") or path
-  return (name:gsub("%.[xX][rR][nN][sS]$", ""))
+local function file_name(path)
+  return path:match("([^/\\]+)$") or path
 end
 
 -- The open song as the wire's project, or json.null.
@@ -102,7 +101,7 @@ function M.project(memory)
   local project = { id = M.song_id(memory, song) }
   if path ~= "" then
     project.path = path
-    project.name = file_title(path)
+    project.name = file_name(path)
   elseif title ~= "" then
     project.name = title
   end
