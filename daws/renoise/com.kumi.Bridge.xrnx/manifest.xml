@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RenoiseScriptingTool doc_version="0">
+  <ApiVersion>6.2</ApiVersion>
+  <Id>com.kumi.Bridge</Id>
+  <Version>1.00</Version>
+  <Author>Kumi [https://github.com/user1303836/kumi/issues]</Author>
+  <Name>Kumi Bridge</Name>
+  <Category>Integration</Category>
+  <Description>Connects Renoise to Kumi on this computer. Listens on 127.0.0.1 only and answers only Kumi.</Description>
+  <Platform>Windows, Mac, Linux</Platform>
+  <Homepage>https://github.com/user1303836/kumi</Homepage>
+</RenoiseScriptingTool>
