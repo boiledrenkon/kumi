@@ -472,6 +472,20 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 [[package]]
 name = "daw-bridge"
 version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "hmac",
+ "home",
+ "libc",
+ "memchr",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+]
 
 [[package]]
 name = "daw-mcp-server"
