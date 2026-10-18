@@ -27,22 +27,27 @@ use crate::tui::tty::TtyOutput;
 use crate::update::UpdateIo;
 use kumi_runtime::RuntimeError;
 
+/// How a DAW whose bridge is Kumi's own reaches Kumi's host, by DAW: a test's host in place of `daw-mcp-server`.
+pub type OwnHostFactory = Rc<dyn Fn(DawId) -> kumi_runtime::integrations::own_bridge::Connect>;
+
 /// Makes each registered DAW's integration from its options: the app's own, or a test's stand-in.
 #[derive(Clone)]
 pub struct DawFactory {
     pub ableton: AbletonFactory,
+    /// REAPER's and Renoise's host: none in production (Kumi starts `daw-mcp-server`).
+    pub own_host: Option<OwnHostFactory>,
 }
 
 impl DawFactory {
     /// Each DAW's production integration.
     pub fn native() -> Self {
-        DawFactory { ableton: Rc::new(kumi_runtime::integrations::create_ableton_integration) }
+        DawFactory { ableton: Rc::new(kumi_runtime::integrations::create_ableton_integration), own_host: None }
     }
 }
 
 impl From<AbletonFactory> for DawFactory {
     fn from(ableton: AbletonFactory) -> Self {
-        DawFactory { ableton }
+        DawFactory { ableton, own_host: None }
     }
 }
 

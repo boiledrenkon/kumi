@@ -1243,6 +1243,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "daw-bridge",
+ "daw-mcp-server",
  "fancy-regex",
  "flate2",
  "futures",

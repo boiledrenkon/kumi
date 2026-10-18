@@ -233,7 +233,8 @@ impl DawProvider for Own {
         self.min_major
     }
     fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration> {
-        (self.create)(OwnOptions { context, kumi_home: kumi_home(&session.env), connect: None })
+        let connect = session.factory.own_host.as_ref().map(|host| host(self.id));
+        (self.create)(OwnOptions { context, kumi_home: kumi_home(&session.env), connect })
     }
     fn probe(&self, _bridge_config: String, _factory: &DawFactory) -> LocalBoxFuture<'static, LiveProbe> {
         let create = self.create;

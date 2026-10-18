@@ -6,8 +6,8 @@ pub mod own;
 pub mod provider;
 
 pub use provider::{
-    BridgeCommand, BridgeRollbackStep, BridgeState, DawFactory, DawProvider, DawSession, EnableStep, Installed, RemovedBridge, Toggle,
-    ToggleWords, WatchWords,
+    BridgeCommand, BridgeRollbackStep, BridgeState, DawFactory, DawProvider, DawSession, EnableStep, Installed, OwnHostFactory,
+    RemovedBridge, Toggle, ToggleWords, WatchWords,
 };
 
 use kumi_runtime::{

@@ -506,6 +506,8 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         })
     };
     let mut options = SessionOptions::new(kernel_factory, integration_factory, emit.clone());
+    // The session speaks the words of the DAW it works with (Live's for Live).
+    options.profile = *provider.profile();
     // Live may come later in this session, once first-run setup has put the bridge in place.
     let live_possible = bridge_config.is_some() || bridge_missing;
     options.conversations = conversations.map(|store| store as Rc<dyn ConversationStore>);
