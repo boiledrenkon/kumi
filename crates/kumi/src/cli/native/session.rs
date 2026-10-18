@@ -240,7 +240,12 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
     let listener_store = store.clone();
     // Which model does each listening job: /slots shows, swaps and takes back.
     let slots_file = slots::file_in(std::path::Path::new(&crate::config::kumi_dir(&io.env)));
-    let slots_context = Rc::new(slots::SlotsContext { file: slots_file.clone(), store: store.clone(), env: io.env.clone() });
+    let slots_context = Rc::new(slots::SlotsContext {
+        file: slots_file.clone(),
+        store: store.clone(),
+        env: io.env.clone(),
+        profile: Some(provider.profile()),
+    });
     // Measured references: the reference tool keeps them, the judge works toward them by name.
     let references = Rc::new(kumi_runtime::references::store::ReferenceStore::new(load_references_dir(&io.env)?));
     let models = Rc::new(create_model_control(ModelControlOptions {

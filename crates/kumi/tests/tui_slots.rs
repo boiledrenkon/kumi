@@ -18,6 +18,7 @@ async fn slots_are_shown_swapped_and_taken_back() {
                 file: file.clone(),
                 store: Rc::new(open_credential_store(folder.path().join("auth.json"))) as Rc<dyn CredentialStore>,
                 env: Default::default(),
+                profile: None,
             });
             let h = Harness::with(140, 40, Rc::new(Control::default()), |options| options.slots = Some(context));
             h.start().await;
