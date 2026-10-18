@@ -174,7 +174,7 @@ function M.read(job, params, epoch)
     local alias = song:pattern(pattern_at):track(track_at).alias_pattern_index
     local extra = alias > 0 and { aliasOf = alias, aliasRef = refs.make(epoch, "pattern", alias) } or nil
     return page(job, epoch, params, total, function(i)
-      return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i, note_columns, effect_columns)
+      return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i, note_columns, effect_columns, params.hidden == true)
     end, true, extra)
   elseif kind == "instrument" then
     return page(job, epoch, params, #song.instruments, function(i) return instrument_row(the_song(), epoch, i) end)

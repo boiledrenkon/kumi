@@ -243,7 +243,7 @@ local function pattern_body(job, params, epoch)
     local pattern_track = live:pattern(pattern_at):track(t)
     local read = {}
     for i = from, to do
-      local row = line_row(pattern_track:line(i), i, note_columns, effect_columns)
+      local row = line_row(pattern_track:line(i), i, note_columns, effect_columns, params.hidden == true)
       if row then read[#read + 1] = row end
     end
     local alias = pattern_track.alias_pattern_index
@@ -337,7 +337,7 @@ local function phrase_body(job, params, epoch)
   local read = {}
   for i = from, to do
     job.slice()
-    local row = line_row(the_song():instrument(instrument_at):phrase(phrase_at):line(i), i, note_columns, effect_columns)
+    local row = line_row(the_song():instrument(instrument_at):phrase(phrase_at):line(i), i, note_columns, effect_columns, params.hidden == true)
     if row then read[#read + 1] = row end
   end
   -- The same grid as a pattern's, of one track.

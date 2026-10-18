@@ -1331,3 +1331,36 @@ test("reads: an aliased track says whose lines it shows, on a line page and in a
   eq(source.items[2].line, 6)
   H.no_dialogs()
 end)
+
+test("reads: data in a column the track doesn't show is not read as an empty line", function()
+  local env, peer = setup()
+  local E = epoch_of(peer)
+  -- track 1 shows one note column and one effect column
+  mock.ops.set_note(1, 1, 4, 3, { note = 52, instrument = 0 })
+  mock.ops.set_note(1, 1, 6, 1, { note = 48, instrument = 0 })
+  mock.ops.set_note(1, 1, 6, 5, { note = 55, instrument = 0 })
+  mock.ops.set_effect(1, 1, 8, 4, 10, 32)
+  local page = call(peer, "read", { kind = "line", parent = E .. ":pattern:1", track = 1 }).result
+  eq(#page.items, 3, "the lines with hidden data are listed")
+  eq(page.items[1].line, 4)
+  eq(page.items[1].notes, nil, "nothing is in the shown columns")
+  eq(page.items[1].hidden.notes[1].col, 3)
+  eq(page.items[1].hidden.notes[1].note, "E-4")
+  eq(page.items[2].line, 6)
+  eq(page.items[2].notes[1].note, "C-4")
+  eq(page.items[2].hidden, nil, "a line with something shown isn't looked through unless asked")
+  eq(page.items[3].line, 8)
+  eq(page.items[3].hidden.effects[1].col, 4)
+  eq(page.items[3].hidden.effects[1].number, "0A")
+  -- asked to, every line is
+  local all = call(peer, "read", { kind = "line", parent = E .. ":pattern:1", track = 1, hidden = true }).result
+  eq(all.items[2].hidden.notes[1].col, 5)
+  eq(all.items[2].hidden.notes[1].note, "G-4")
+  -- and so is the body
+  local body = call(peer, "focus_body", { kind = "pattern", window = { from = 1, to = 8 } }).result
+  eq(body.tracks[1].lines[1].hidden.notes[1].col, 3)
+  eq(body.tracks[1].lines[2].hidden, nil)
+  body = call(peer, "focus_body", { kind = "pattern", window = { from = 1, to = 8 }, hidden = true }).result
+  eq(body.tracks[1].lines[2].hidden.notes[1].col, 5)
+  H.no_dialogs()
+end)

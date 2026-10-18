@@ -265,12 +265,12 @@ local function param_row(song, epoch, t, d, k)
   }
 end
 
--- A pattern line (or a phrase's) as the tracker shows it, in Renoise's own text; nil when it is empty. Only columns
--- with something in them are listed, each with its number, and a field the tracker shows as ".." is left out.
-local function line_row(line, number, note_columns, effect_columns)
-  if line.is_empty then return nil end
+local MAX_NOTE_COLUMNS, MAX_EFFECT_COLUMNS = 12, 8
+
+-- The columns with something in them, in Renoise's own text: note columns first..last, then effect columns.
+local function filled_columns(line, first_note, last_note, first_effect, last_effect)
   local notes, effects = {}, {}
-  for c = 1, note_columns do
+  for c = first_note, last_note do
     local column = line:note_column(c)
     if not column.is_empty then
       local note = { col = c, note = column.note_string }
@@ -288,14 +288,34 @@ local function line_row(line, number, note_columns, effect_columns)
       notes[#notes + 1] = note
     end
   end
-  for c = 1, effect_columns do
+  for c = first_effect, last_effect do
     local column = line:effect_column(c)
     if not column.is_empty then effects[#effects + 1] = { col = c, number = column.number_string, amount = column.amount_string } end
   end
-  if #notes == 0 and #effects == 0 then return nil end
+  return notes, effects
+end
+
+-- A pattern line (or a phrase's) as the tracker shows it, in Renoise's own text; nil when it is empty. Only columns
+-- with something in them are listed, each with its number, and a field the tracker shows as ".." is left out.
+-- Data in a column the track doesn't show is under `hidden` ({notes?, effects?}). A line with nothing in the shown columns
+-- is looked through for it, since the line isn't empty; one that has something is only when `scan_hidden` (reading every
+-- column of every line costs about six times as much).
+local function line_row(line, number, note_columns, effect_columns, scan_hidden)
+  if line.is_empty then return nil end
+  local notes, effects = filled_columns(line, 1, note_columns, 1, effect_columns)
   local row = { line = number }
   if #notes > 0 then row.notes = array(notes) end
   if #effects > 0 then row.effects = array(effects) end
+  if scan_hidden or (#notes == 0 and #effects == 0) then
+    local hidden_notes, hidden_effects =
+      filled_columns(line, note_columns + 1, MAX_NOTE_COLUMNS, effect_columns + 1, MAX_EFFECT_COLUMNS)
+    if #hidden_notes > 0 or #hidden_effects > 0 then
+      row.hidden = {}
+      if #hidden_notes > 0 then row.hidden.notes = array(hidden_notes) end
+      if #hidden_effects > 0 then row.hidden.effects = array(hidden_effects) end
+    end
+  end
+  if row.notes == nil and row.effects == nil and row.hidden == nil then return nil end
   return row
 end
 

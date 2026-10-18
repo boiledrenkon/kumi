@@ -83,6 +83,11 @@ pub fn tools(host: &Host) -> Value {
         let layout = json!({"type": "integer", "minimum": 0, "description": "The layout the refs were read in (each answer and tracks event says it): refs from an older one are carried through the track shifts since."});
         list[2]["inputSchema"]["properties"]["layout"] = layout.clone();
         list[5]["inputSchema"]["properties"]["layout"] = layout;
+        // Notes in columns the track doesn't show are listed under `hidden` for a line with nothing in the shown ones; for every
+        // line when asked (about six times the reading).
+        let hidden = json!({"type": "boolean", "description": "Also list data in the note and effect columns the track doesn't show, on every line (under `hidden`). Without it only a line with nothing in the shown columns is looked through."});
+        list[2]["inputSchema"]["properties"]["hidden"] = hidden.clone();
+        list[5]["inputSchema"]["properties"]["hidden"] = hidden;
     }
     list
 }

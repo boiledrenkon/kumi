@@ -85,6 +85,7 @@ fn read_params(arguments: &Value) -> Result<Value, String> {
         return Err("kind: what to read (or ref: one object)".into());
     }
     layout_arg(arguments, &mut params)?;
+    hidden_arg(arguments, &mut params)?;
     if let Some(limit) = limit_arg(arguments)? {
         params.insert("limit".into(), limit.into());
     }
@@ -108,7 +109,20 @@ fn body_params(arguments: &Value) -> Result<Value, String> {
         params.insert("limit".into(), limit.into());
     }
     layout_arg(arguments, &mut params)?;
+    hidden_arg(arguments, &mut params)?;
     Ok(Value::Object(params))
+}
+
+/// Whether to look through the columns a track doesn't show (Renoise), which costs about six times as much: off unless asked.
+fn hidden_arg(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), String> {
+    match arguments.get("hidden") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(()),
+        Some(Value::Bool(true)) => {
+            params.insert("hidden".into(), true.into());
+            Ok(())
+        }
+        Some(_) => Err("hidden must be true or false".into()),
+    }
 }
 
 /// The layout the request's refs were made in (Renoise's track shifts since): the bridge carries older refs through them.
@@ -212,6 +226,18 @@ impl Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_is_forwarded_only_when_true() {
+        assert_eq!(
+            read_params(&json!({"kind": "line", "parent": "1:pattern:2", "track": 3, "hidden": true})).unwrap(),
+            json!({"kind": "line", "parent": "1:pattern:2", "track": 3, "hidden": true})
+        );
+        assert_eq!(body_params(&json!({"kind": "pattern", "hidden": true})).unwrap(), json!({"kind": "pattern", "hidden": true}));
+        assert_eq!(read_params(&json!({"kind": "line", "hidden": false})).unwrap(), json!({"kind": "line"}));
+        assert!(read_params(&json!({"kind": "line", "hidden": "yes"})).is_err());
+        assert!(body_params(&json!({"kind": "pattern", "hidden": 1})).is_err());
+    }
 
     #[test]
     fn a_read_forwards_only_what_it_knows_checked() {
