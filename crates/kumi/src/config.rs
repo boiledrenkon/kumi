@@ -41,6 +41,9 @@ pub enum AppConfig {
     Bridge {
         yes: bool,
         allow_dirty: bool,
+        /// The DAW whose bridge is set up, asked for with --daw or KUMI_DAW, when it isn't Live (never written for Live).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daw: Option<DawId>,
     },
     Auth {
         auth_file: String,
@@ -746,13 +749,17 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         let has = |flag: &str| args[1..].iter().any(|s| s == flag);
         return Ok(AppConfig::Uninstall { all: has("--all"), yes: has("--yes"), dry_run: has("--dry-run") });
     }
-    if first == Some("bridge") {
+    // `bridge` sets up Live's bridge, or the bridge of the DAW asked for (`--daw reaper bridge`).
+    let (bridge_args, bridge_daw) = if args.iter().any(|arg| arg == "bridge") { take_daw(args, env)? } else { (vec![], None) };
+    if bridge_args.first().map(String::as_str) == Some("bridge") {
+        let args = &bridge_args;
         if args[1..].iter().any(|s| s != "--yes" && s != "--allow-dirty") {
             return Err(RuntimeError::plain("Use: bridge [--yes] [--allow-dirty]."));
         }
         return Ok(AppConfig::Bridge {
             yes: args[1..].iter().any(|s| s == "--yes"),
             allow_dirty: args[1..].iter().any(|s| s == "--allow-dirty"),
+            daw: bridge_daw,
         });
     }
     if first == Some("model") && args.len() <= 2 {

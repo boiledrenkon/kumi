@@ -79,3 +79,20 @@ fn without_any_bridge_kumi_chats_in_lives_words() {
     let config = serde_json::to_value(load_config(&[], &env).unwrap()).unwrap();
     assert_eq!((config["mode"].as_str(), config["bridgeMissing"].as_bool(), config.get("daw")), (Some("inference-only"), Some(true), None));
 }
+
+#[test]
+fn bridge_sets_up_the_bridge_of_the_daw_asked_for_and_lives_otherwise() {
+    let env = env();
+    assert_eq!(config(&["bridge"], &env).unwrap(), r#"{"mode":"bridge","yes":false,"allowDirty":false}"#, "Live's, as always");
+    assert_eq!(config(&["--daw", "ableton", "bridge"], &env), config(&["bridge"], &env));
+    assert_eq!(
+        config(&["--daw", "reaper", "bridge", "--yes"], &env).unwrap(),
+        r#"{"mode":"bridge","yes":true,"allowDirty":false,"daw":"reaper"}"#
+    );
+    assert_eq!(config(&["bridge", "--daw=renoise"], &env), config(&["--daw", "renoise", "bridge"], &env));
+    let mut chosen = env.clone();
+    chosen.insert("KUMI_DAW".into(), "renoise".into());
+    assert!(config(&["bridge"], &chosen).unwrap().contains(r#""daw":"renoise""#));
+    assert!(config(&["--daw", "logic", "bridge"], &env).unwrap_err().starts_with("Use: --daw <daw>"));
+    assert_eq!(config(&["--daw", "reaper", "bridge", "--force"], &env).unwrap_err(), "Use: bridge [--yes] [--allow-dirty].");
+}

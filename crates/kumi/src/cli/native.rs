@@ -289,7 +289,7 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
             options.signal = Some(signal);
             run_library(options).await
         }
-        AppConfig::Bridge { yes, allow_dirty } => {
+        AppConfig::Bridge { yes, allow_dirty, daw } => {
             let wait_ms = io
                 .env
                 .get("KUMI_BRIDGE_WAIT_SECONDS")
@@ -297,7 +297,8 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(|n| n.saturating_mul(1000));
             let command = BridgeCommand { input: Some(io.input.clone()), yes: *yes, allow_dirty: *allow_dirty, wait_ms };
-            crate::daw::current().setup_bridge(io.out.clone(), &io.env, command).await
+            let provider = daw.and_then(crate::daw::provider).unwrap_or_else(crate::daw::current);
+            provider.setup_bridge(io.out.clone(), &io.env, command).await
         }
         AppConfig::Auth { .. } => {
             login::auth_status(&config, AuthIo { out: io.out.clone(), env: io.env.clone(), fetch: None }).await?;
