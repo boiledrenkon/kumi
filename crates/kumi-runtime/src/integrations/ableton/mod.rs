@@ -12,6 +12,7 @@ pub mod connection;
 pub mod context;
 pub mod cuts;
 pub mod display;
+pub mod ears;
 pub mod execution_services;
 pub mod fast;
 pub mod focus;
