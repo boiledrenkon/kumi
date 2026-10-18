@@ -965,7 +965,7 @@ mod tests {
         fake::with(|s| s.tracks[3].main_send = false);
         let reverb = body(&reads, json!({"kind": "routing", "ref": "r:track:{DDDD}"})).unwrap();
         assert_eq!((&reverb["ref"], &reverb["name"], &reverb["parentSend"]), (&json!("r:track:{DDDD}"), &json!("Reverb"), &json!(false)));
-        assert_eq!(refs_of(&reverb["routes"]), ["r:send:{DDDD}:-1:{AAAA}", "r:send:{DDDD}:1:hw0"]);
+        assert_eq!(refs_of(&reverb["routes"]), ["r:send:{DDDD}:-1:{AAAA}", "r:send:{DDDD}:1:hw2"]);
         let routes = reverb["routes"].as_array().unwrap();
         assert_eq!(
             (&routes[0]["direction"], &routes[0]["destRef"], &routes[0]["otherName"]),

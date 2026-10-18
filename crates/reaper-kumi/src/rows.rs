@@ -262,25 +262,35 @@ fn channels(reaper: &Reaper, track: Track, category: i32, index: i32) -> Value {
     json!({"src": source, "dst": {"first": destination & 1023, "mono": destination & 1024 != 0}})
 }
 
-/// What names a send in its ref: the other end, and which of several to the same one (from 1).
+/// What names a send in its ref: the other end, and which of several to the same one (`repeat`, from 1) among how
+/// many (`of`). REAPER gives a send no identity, so a ref to one of several reads nothing once their number changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendKey {
     pub other: SendEnd,
     pub repeat: u32,
+    pub of: u32,
 }
 
 /// The keys of all of a track's sends (`category` 0), receives (-1) or hardware outputs (1), by position.
 pub fn send_keys(reaper: &Reaper, track: Track, category: i32) -> Vec<SendKey> {
+    let ends: Vec<SendEnd> = (0..reaper.send_count(track, category))
+        .map(|index| match reaper.send_peer(track, category, index) {
+            Some(peer) => SendEnd::Track(track_id(reaper, peer)),
+            // The output it goes to, not its place in the list: removing another output must not rename this one.
+            None => SendEnd::Hardware(reaper.send_value(track, category, index, "I_DSTCHAN") as i32),
+        })
+        .collect();
+    let mut totals: HashMap<String, u32> = HashMap::new();
+    for end in &ends {
+        *totals.entry(end.text()).or_insert(0) += 1;
+    }
     let mut seen: HashMap<String, u32> = HashMap::new();
-    (0..reaper.send_count(track, category))
-        .map(|index| {
-            let other = match reaper.send_peer(track, category, index) {
-                Some(peer) => SendEnd::Track(track_id(reaper, peer)),
-                None => SendEnd::Hardware(index),
-            };
-            let count = seen.entry(other.text()).or_insert(0);
-            *count += 1;
-            SendKey { other, repeat: *count }
+    ends.into_iter()
+        .map(|other| {
+            let text = other.text();
+            let repeat = seen.entry(text.clone()).or_insert(0);
+            *repeat += 1;
+            SendKey { repeat: *repeat, of: totals[&text], other }
         })
         .collect()
 }
@@ -295,7 +305,7 @@ pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32, key: &
     };
     let mode = reaper.send_value(track, category, index, "I_SENDMODE") as i64;
     json!({
-        "ref": refs::send_ref(&this, category, &key.other, key.repeat),
+        "ref": refs::send_ref(&this, category, &key.other, key.repeat, key.of),
         "category": category,
         "direction": match category { c if c < 0 => "receive", 0 => "send", _ => "hardware" },
         "index": index,

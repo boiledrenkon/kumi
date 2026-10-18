@@ -382,12 +382,20 @@ impl Reads {
                 }
                 rows::param_row(reaper, fx, &guid, index)
             }
-            Ref::Send { track, category, other, repeat } => {
+            Ref::Send { track, category, other, repeat, of } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let keys = rows::send_keys(reaper, owner, category);
-                let key = rows::SendKey { other, repeat };
+                let key = rows::SendKey { other, repeat, of };
                 let Some(index) = keys.iter().position(|k| *k == key) else {
-                    return Err(failed(format!("{reference} isn't there: the track has no such send (deleted, or it went elsewhere)")));
+                    // Sends to one place have no identity of their own: once their number changes, a ref to one of them
+                    // could be any, so it names none.
+                    let now = keys.iter().filter(|k| k.other == key.other).count();
+                    let why = match (now, of) {
+                        (0, _) => "the track has no such send (deleted, or it went elsewhere)".to_string(),
+                        (now, 1) => format!("the track has {now} such sends now, and this ref was made when there was one: read them again"),
+                        (now, _) => format!("the track has {now} such sends now, and this ref was made when there were {of}: read them again"),
+                    };
+                    return Err(failed(format!("{reference} isn't there: {why}")));
                 };
                 rows::send_row(reaper, owner, category, index as i32, &key)
             }
@@ -1122,7 +1130,7 @@ mod tests {
         let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
         assert_eq!(
             reverb.iter().map(|r| r["ref"].as_str().unwrap()).collect::<Vec<_>>(),
-            ["r:send:{DDDD}:-1:{AAAA}", "r:send:{DDDD}:1:hw0"]
+            ["r:send:{DDDD}:-1:{AAAA}", "r:send:{DDDD}:1:hw2"]
         );
         // A receive's other track is where it comes from.
         assert_eq!(
@@ -1252,7 +1260,7 @@ mod tests {
             "r:fx:{NOPE}",
             "r:param:{FX-EQ}:99",
             "r:send:{AAAA}:0:{NOPE}",
-            "r:send:{AAAA}:0:{DDDD}:2",
+            "r:send:{AAAA}:0:{DDDD}:2of2",
             "r:send:{AAAA}:1:hw5",
             "r:marker:{NOPE}",
             "r:region:{NOPE}",
@@ -1475,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn several_sends_to_one_track_are_told_apart_by_a_count_from_two_and_a_reorder_keeps_them() {
+    fn several_sends_to_one_track_are_told_apart_by_which_of_how_many_and_a_reorder_keeps_them() {
         use crate::reaper::fake::FakeSend;
         let lab = Lab::new();
         let mut loud = FakeSend::to(3);
@@ -1485,14 +1493,78 @@ mod tests {
         fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(3), FakeSend::to(1), loud, louder]);
         let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
         let refs: Vec<&str> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
-        assert_eq!(refs, ["r:send:{AAAA}:0:{DDDD}", "r:send:{AAAA}:0:{BBBB}", "r:send:{AAAA}:0:{DDDD}:2", "r:send:{AAAA}:0:{DDDD}:3"]);
+        assert_eq!(
+            refs,
+            ["r:send:{AAAA}:0:{DDDD}:1of3", "r:send:{AAAA}:0:{BBBB}", "r:send:{AAAA}:0:{DDDD}:2of3", "r:send:{AAAA}:0:{DDDD}:3of3"]
+        );
         let volume = |lab: &Lab, reference: &str| lab.rows(json!({"ref": reference}))[0]["volumeDb"].clone();
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3"), json!(-12.04));
+        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3of3"), json!(-12.04));
         // A send to another track moves to the front: the others keep their refs, and so their sends.
         fake::with(|s| s.tracks[0].sends.swap(0, 1));
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:2"), json!(-6.02));
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3"), json!(-12.04));
+        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:2of3"), json!(-6.02));
+        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3of3"), json!(-12.04));
         assert_eq!(lab.rows(json!({"ref": "r:send:{AAAA}:0:{BBBB}"}))[0]["index"], 0);
+    }
+
+    /// REAPER gives a send no identity: once the number of sends to one place changes, a ref to one of them could name any,
+    /// so it names none (a position would read the other send, whose own ref would then fail).
+    #[test]
+    fn removing_one_of_two_sends_to_a_track_leaves_its_ref_and_the_others_naming_nothing() {
+        use crate::reaper::fake::FakeSend;
+        let lab = Lab::new();
+        let mut quiet = FakeSend::to(3);
+        quiet.volume = 0.25;
+        fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(3), quiet]);
+        let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
+        let refs: Vec<&str> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
+        assert_eq!(refs, ["r:send:{AAAA}:0:{DDDD}:1of2", "r:send:{AAAA}:0:{DDDD}:2of2"]);
+        assert_eq!(lab.rows(json!({"ref": refs[0]}))[0]["volumeDb"], json!(0.0));
+        // The producer deletes the 0 dB send. Its ref no longer reads the quiet one, and the quiet one's own ref says why.
+        fake::with(|s| {
+            s.tracks[0].sends.remove(0);
+        });
+        for reference in refs {
+            let (code, message) = lab.read(json!({"ref": reference})).unwrap_err();
+            assert_eq!(code, "failed", "{reference}");
+            assert!(message.contains("1 such sends now") && message.contains("there were 2"), "{message}");
+        }
+        // What is read now has the plain ref of a send alone.
+        assert_eq!(lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}))[0]["ref"], "r:send:{AAAA}:0:{DDDD}");
+        // A send added to a pair that had one: the ref made then reads nothing either.
+        fake::with(|s| s.tracks[0].sends.push(FakeSend::to(3)));
+        let (_, message) = lab.read(json!({"ref": "r:send:{AAAA}:0:{DDDD}"})).unwrap_err();
+        assert!(message.contains("2 such sends now") && message.contains("when there was one"), "{message}");
+        // Receives are told apart the same way.
+        let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
+        assert_eq!(reverb[0]["ref"], "r:send:{DDDD}:-1:{AAAA}:1of2");
+    }
+
+    /// A hardware output is named by the output it goes to, so removing another output doesn't rename it.
+    #[test]
+    fn hardware_outputs_are_named_by_the_output_not_by_their_place_in_the_list() {
+        use crate::reaper::fake::FakeSend;
+        let lab = Lab::new();
+        let out = |dst_chan: i32, volume: f64| FakeSend { dst_chan, volume, ..FakeSend::to(0) };
+        fake::with(|s| s.tracks[3].hw_outs = vec![out(0, 1.0), out(2, 0.5), out(3 | 1024, 0.25)]);
+        let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
+        let refs: Vec<&str> = rows.iter().filter(|r| r["category"] == 1).map(|r| r["ref"].as_str().unwrap()).collect();
+        assert_eq!(refs, ["r:send:{DDDD}:1:hw0", "r:send:{DDDD}:1:hw2", "r:send:{DDDD}:1:hw3m"]);
+        let volume = |reference: &str| lab.rows(json!({"ref": reference}))[0]["volumeDb"].clone();
+        assert_eq!(volume("r:send:{DDDD}:1:hw2"), json!(-6.02));
+        // The producer deletes Out 1/2. Its ref reads nothing; the others still read their own output.
+        fake::with(|s| {
+            s.tracks[3].hw_outs.remove(0);
+        });
+        let (code, _) = lab.read(json!({"ref": "r:send:{DDDD}:1:hw0"})).unwrap_err();
+        assert_eq!(code, "failed");
+        assert_eq!(volume("r:send:{DDDD}:1:hw2"), json!(-6.02));
+        assert_eq!(volume("r:send:{DDDD}:1:hw3m"), json!(-12.04));
+        // Two outputs to the same channels are told apart like sends to one track.
+        fake::with(|s| s.tracks[3].hw_outs.push(out(2, 0.125)));
+        let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
+        let refs: Vec<&str> = rows.iter().filter(|r| r["category"] == 1).map(|r| r["ref"].as_str().unwrap()).collect();
+        assert_eq!(refs, ["r:send:{DDDD}:1:hw2:1of2", "r:send:{DDDD}:1:hw3m", "r:send:{DDDD}:1:hw2:2of2"]);
+        assert_eq!(volume("r:send:{DDDD}:1:hw2:2of2"), json!(-18.06));
     }
 
     #[test]
