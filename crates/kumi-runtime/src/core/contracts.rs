@@ -294,6 +294,10 @@ pub trait Kernel {
     fn answering_fallback(&self) -> Option<String> {
         None
     }
+    /// The DAW the conversation is about, for the words the kernel's own notes use; Live's until it's told.
+    fn set_profile(&self, profile: DawProfile) {
+        let _ = profile;
+    }
 }
 
 #[derive(Clone)]

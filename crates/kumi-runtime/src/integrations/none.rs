@@ -12,7 +12,7 @@ use std::{cell::Cell, rc::Rc};
 
 /// What a turn sees without access to the DAW: who it's about (`key`, `project`), and that nothing in it is current.
 pub fn no_access(profile: &DawProfile, instructions: &str, key: &str, now: DateTime<Utc>, project: Option<ProjectRef>) -> Observation {
-    let DawWords { app, place } = profile.words;
+    let DawWords { app, place, .. } = profile.words;
     Observation {
         key: key.into(),
         revision: Some("no-live".into()),

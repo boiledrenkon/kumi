@@ -18,6 +18,66 @@ pub struct DawWords {
     pub app: &'static str,
     /// A saved place in it: "Set".
     pub place: &'static str,
+    /// More than one: "Sets".
+    pub places: &'static str,
+}
+
+/// The DAW's own things that Kumi's texts name: its devices, its ways and its limits. Live's are what the texts said
+/// before other DAWs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptVocab {}
+
+/// Live's word for each field of a profile's words and vocabulary: the one place they're spelled, so a text
+/// `daw_text!` makes in Live's words stays byte for byte what it was.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! live_word {
+    (app) => {
+        "Live"
+    };
+    (place) => {
+        "Set"
+    };
+    (places) => {
+        "Sets"
+    };
+}
+
+/// A field of a profile's words or vocabulary, by its name in `live_word!`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! daw_word {
+    ($profile:expr, app) => {
+        $profile.words.app
+    };
+    ($profile:expr, place) => {
+        $profile.words.place
+    };
+    ($profile:expr, places) => {
+        $profile.words.places
+    };
+}
+
+/// A text in a DAW's words, made from pieces: string literals, a word's name (`place`, `app`…) or `(if cap: "…")` for
+/// a clause only a DAW with that capability gets. `daw_text!(pub NAME, name: "…", place, "…")` makes the constant
+/// `NAME` in Live's words, as callers had it before other DAWs, and `name(&DawProfile)` for any DAW, from the same
+/// pieces: Live's text can't drift from what it was. (Live has every capability, so its text has every clause.)
+#[macro_export]
+macro_rules! daw_text {
+    ($(#[$meta:meta])* $vis:vis $konst:ident, $func:ident: $($piece:tt),+ $(,)?) => {
+        $(#[$meta])*
+        $vis const $konst: &str = concat!($($crate::daw_text!(@live $piece)),+);
+        $(#[$meta])*
+        $vis fn $func(profile: &$crate::core::daw::DawProfile) -> String {
+            [$($crate::daw_text!(@of profile, $piece)),+].concat()
+        }
+    };
+    (@live $text:literal) => { $text };
+    (@live $word:ident) => { $crate::live_word!($word) };
+    (@live (if $cap:ident: $text:literal)) => { $text };
+    (@of $profile:ident, $text:literal) => { $text };
+    (@of $profile:ident, $word:ident) => { $crate::daw_word!($profile, $word) };
+    (@of $profile:ident, (if $cap:ident: $text:literal)) => { if $profile.caps.$cap { $text } else { "" } };
 }
 
 /// The language a DAW runs code from Kumi in.
@@ -95,16 +155,22 @@ pub struct DawProfile {
     pub id: Option<DawId>,
     pub words: DawWords,
     pub caps: Capabilities,
+    pub vocab: PromptVocab,
 }
 
 impl DawProfile {
     /// No DAW known: plain words, and nothing it can do.
-    pub const UNKNOWN: DawProfile = DawProfile { id: None, words: DawWords { app: "the DAW", place: "project" }, caps: Capabilities::NONE };
+    pub const UNKNOWN: DawProfile = DawProfile {
+        id: None,
+        words: DawWords { app: "the DAW", place: "project", places: "projects" },
+        caps: Capabilities::NONE,
+        vocab: PromptVocab {},
+    };
 
     /// Ableton Live, as Kumi drives it today: everything above.
     pub const ABLETON: DawProfile = DawProfile {
         id: Some(DawId::Ableton),
-        words: DawWords { app: "Live", place: "Set" },
+        words: DawWords { app: crate::live_word!(app), place: crate::live_word!(place), places: crate::live_word!(places) },
         caps: Capabilities {
             undo: true,
             instant: true,
@@ -135,6 +201,7 @@ impl DawProfile {
             browser_items: true,
             configured_plugin_params: true,
         },
+        vocab: PromptVocab {},
     };
 
     /// The same DAW with nothing it can do now: its words stay (the producer still calls it by its name).
@@ -192,6 +259,18 @@ mod tests {
         assert_eq!(DawProfile::ABLETON.without_caps().word_pair(), ("Live", "Set"));
         assert_eq!(DawProfile::ABLETON.without_caps().caps, Capabilities::NONE);
         assert_eq!(Capabilities::default(), Capabilities::NONE);
+    }
+
+    crate::daw_text!(
+        /// A text for the test below.
+        SAID, said: "Save the ", place, " in ", app, (if max_for_live_devices: ", or make a device"), "."
+    );
+
+    #[test]
+    fn a_text_says_lives_words_as_its_constant_and_any_dawss_from_the_same_pieces() {
+        assert_eq!(SAID, "Save the Set in Live, or make a device.");
+        assert_eq!(said(&DawProfile::ABLETON), SAID);
+        assert_eq!(said(&DawProfile::UNKNOWN), "Save the project in the DAW.");
     }
 
     #[test]

@@ -122,6 +122,8 @@ pub struct SessionOptions {
     pub jobs: Option<JobsOptions>,
     /// A kept conversation the producer asked for as Kumi starts (`kumi -c`, `kumi -r`): where it's kept, and its id.
     pub resume: Option<(String, String)>,
+    /// The DAW the session is about, for the words in Kumi's own texts and tools: Live's unless the app chose another.
+    pub profile: DawProfile,
 }
 impl SessionOptions {
     pub fn new(kernel_factory: KernelFactory, integration_factory: IntegrationFactory, on_event: Rc<dyn Fn(SessionEvent)>) -> Self {
@@ -160,6 +162,7 @@ impl SessionOptions {
             objective_budget: None,
             jobs: None,
             resume: None,
+            profile: DawProfile::ABLETON,
         }
     }
 }
@@ -1368,6 +1371,7 @@ impl Session {
                 conversation: Some(conversation),
             })
             .await?;
+            value.set_profile(self.0.options.profile);
             if !self.current(op) {
                 lifetime.cancel();
                 self.bounded(async move {
@@ -1419,7 +1423,7 @@ impl Session {
             if self.0.learned.is_some() { TECHNIQUE_GUIDANCE.into() } else { String::new() },
             technique_instructions(&techniques),
             if self.0.gaps.is_empty() { String::new() } else { GAP_GUIDANCE.into() },
-            if self.0.jobs.is_none() { String::new() } else { crate::core::jobs::JOB_GUIDANCE.into() },
+            if self.0.jobs.is_none() { String::new() } else { crate::core::jobs::job_guidance(&self.0.options.profile) },
             addendum.into(),
             if imported { imported_guidance(noun) } else { String::new() },
         ]

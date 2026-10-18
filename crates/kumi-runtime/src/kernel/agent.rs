@@ -20,7 +20,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
-use super::budget::{fit, opening, put_away_images, transcript_of, ContextBudget, PutAway, DEFAULT_BUDGET};
+use super::budget::{fit_for, opening, put_away_images, transcript_of, ContextBudget, PutAway, DEFAULT_BUDGET};
 use super::deferred::{self, Shelf, CALL_TOOL};
 use super::failure::{
     describe_failure, plan_limit, provider_name, refused_on_the_way, reset_words, retry_reason, wait_for, PlanLimit, Wait, MAX_RETRIES,
@@ -35,6 +35,7 @@ use crate::core::contracts::{
     JsonObject, Kernel, KernelCheckpoint, KernelEmit, KernelEvent, KernelTool, OnText, Picture, StopReason, StreamingCall, ToolImage,
     TranscriptLine, TurnResult, Usage, WaitFor,
 };
+use crate::core::daw::DawProfile;
 use crate::core::errors::{FailureKind, KumiError, RuntimeError};
 
 /// A model that streams: `LanguageModelV4.doStream`, the one call Kumi makes.
@@ -194,12 +195,14 @@ const ASIDE_NOTE: &str = "(A side question while you work. Answer it briefly, in
 /// What the model is told when its answer broke off and Kumi carries on. `[Kumi]` marks it as Kumi's, not the producer's.
 pub const CARRY_ON_NOTE: &str =
     "[Kumi] The connection dropped partway through your answer. Carry on from where it stopped, without repeating what you said.";
-/// Ends a stopped turn's kept steps, for the model and in the transcript.
-pub const STOPPED_NOTE: &str =
-    "(Stopped before finishing. The steps above happened; the one in progress may have too, so check Live before carrying on.)";
+crate::daw_text!(
+    /// Ends a stopped turn's kept steps, for the model and in the transcript.
+    pub STOPPED_NOTE, stopped_note:
+    "(Stopped before finishing. The steps above happened; the one in progress may have too, so check ", app, " before carrying on.)"
+);
 /// The result of a call a stopped batch never ran, and of the one it was running.
 pub const STOPPED_BEFORE_RUNNING: &str = "Stopped before running; nothing was done.";
-pub const STOPPED_WHILE_RUNNING: &str = "Stopped while running; it may have changed Live, so check before running it again.";
+crate::daw_text!(pub STOPPED_WHILE_RUNNING, stopped_while_running: "Stopped while running; it may have changed ", app, ", so check before running it again.");
 /// The result of a read away from Live that was stopped while it ran.
 pub const STOPPED_READING: &str = "Stopped while running; nothing came back.";
 
@@ -211,6 +214,8 @@ struct Running {
 }
 
 struct Inner {
+    /// The DAW the conversation is about, for the words Kumi's own notes use: Live's until the session says.
+    profile: Cell<DawProfile>,
     /// The binding answering now: the producer's model, or their fallback while that one can't.
     binding: RefCell<Rc<ModelBinding>>,
     /// The producer's model, and the one that carries on when its plan's limit is reached or its provider is down.
@@ -317,6 +322,7 @@ pub fn create_agent_kernel(options: AgentKernelOptions) -> Result<AgentKernel, R
     let binding = Rc::new(binding);
     Ok(AgentKernel {
         inner: Rc::new(Inner {
+            profile: Cell::new(DawProfile::ABLETON),
             binding: RefCell::new(binding.clone()),
             primary: binding,
             fallback: RefCell::new(None),
@@ -397,6 +403,11 @@ impl AgentKernel {
         *self.inner.fallback.borrow_mut() = binding.map(Rc::new);
     }
 
+    /// The DAW the conversation is about, for the words Kumi's own notes use (a stopped step, a cleared result).
+    pub fn set_profile(&self, profile: DawProfile) {
+        self.inner.profile.set(profile);
+    }
+
     /// The model answering now: the producer's, or their fallback.
     pub fn answering(&self) -> String {
         self.inner.binding().id.clone()
@@ -447,7 +458,7 @@ impl AgentKernel {
             None => inner.history.borrow().clone(),
         };
         let asked = [Message::user_text(format!("{ASIDE_NOTE}\n\n{words}"))];
-        let fitted = fit(&context, &asked, &inner.budget_now());
+        let fitted = fit_for(&inner.profile.get(), &context, &asked, &inner.budget_now());
         // The conversation in plain words, its calls and their results written out: then no tools are
         // offered at all, which every provider takes (some can't be told "none" with calls in the conversation).
         let messages = plain_words(&[fitted.history.as_ref(), fitted.turn.as_ref()].concat());
@@ -587,6 +598,9 @@ impl Kernel for AgentKernel {
     }
     fn answering_fallback(&self) -> Option<String> {
         self.inner.back_at.get().map(|_| self.inner.binding().id.clone())
+    }
+    fn set_profile(&self, profile: DawProfile) {
+        AgentKernel::set_profile(self, profile);
     }
 }
 
@@ -842,7 +856,7 @@ impl Turn {
         let refitted = {
             let earlier = self.earlier.borrow();
             let messages = self.messages.borrow();
-            let fitted = fit(&earlier, &messages, &budget);
+            let fitted = fit_for(&self.inner.profile.get(), &earlier, &messages, &budget);
             // Kumi just changed what came before. Some providers bind a model's reasoning to the exact
             // conversation it saw (Anthropic's current models refuse the request otherwise), so the
             // reasoning goes, once: what was said, called and read stays.
@@ -930,8 +944,12 @@ impl Turn {
         let messages = self.messages.borrow();
         let finished = &messages[..settled_end(&messages)];
         if finished.iter().any(|message| matches!(message, Message::Tool { .. })) {
-            *self.inner.history.borrow_mut() =
-                [self.earlier.borrow().clone(), without_images(finished), vec![Message::assistant_text(STOPPED_NOTE)]].concat();
+            *self.inner.history.borrow_mut() = [
+                self.earlier.borrow().clone(),
+                without_images(finished),
+                vec![Message::assistant_text(stopped_note(&self.inner.profile.get()))],
+            ]
+            .concat();
         }
     }
 
@@ -1050,8 +1068,12 @@ impl Turn {
                 let outcome = match ran {
                     Ran::Stopped => {
                         // A read away from Live can't have changed it.
-                        let text = if TOGETHER.contains(&prepared.name.as_str()) { STOPPED_READING } else { STOPPED_WHILE_RUNNING };
-                        Outcome { text: text.into(), is_error: true, images: Vec::new() }
+                        let text = if TOGETHER.contains(&prepared.name.as_str()) {
+                            STOPPED_READING.to_string()
+                        } else {
+                            stopped_while_running(&self.inner.profile.get())
+                        };
+                        Outcome { text, is_error: true, images: Vec::new() }
                     }
                     Ran::Done { outcome, reply } => {
                         finished += 1;
