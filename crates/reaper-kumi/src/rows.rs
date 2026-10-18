@@ -235,6 +235,19 @@ fn record_input(value: i64) -> Value {
     json!({"kind": "audio", "first": (value & 1023) + 1, "layout": layout})
 }
 
+/// Whether a folder is open or collapsed; null for a track that is not a folder.
+pub fn folder_state(reaper: &Reaper, track: Track) -> Value {
+    if reaper.track_value(track, "I_FOLDERDEPTH") as i64 != 1 {
+        return Value::Null;
+    }
+    match reaper.track_value(track, "I_FOLDERCOMPACT") as i64 {
+        0 => "open",
+        1 => "collapsed",
+        _ => "fully-collapsed",
+    }
+    .into()
+}
+
 /// What a mixer strip shows beyond the fader: channels, how it pans, whether it is shown, what it records, and the lanes
 /// of a track with fixed lanes. A strip reads the same in any view.
 fn add_track_state(reaper: &Reaper, track: Track, master: bool, row: &mut Value) {
@@ -255,17 +268,7 @@ fn add_track_state(reaper: &Reaper, track: Track, master: bool, row: &mut Value)
     row["parentRef"] = reaper.track_parent(track).map(|parent| refs::track_ref(&track_id(reaper, parent))).into();
     row["shownInArrange"] = (value("B_SHOWINTCP") != 0.0).into();
     row["shownInMixer"] = (value("B_SHOWINMIXER") != 0.0).into();
-    // Only a folder can be collapsed.
-    row["folderState"] = if value("I_FOLDERDEPTH") as i64 == 1 {
-        match value("I_FOLDERCOMPACT") as i64 {
-            0 => "open",
-            1 => "collapsed",
-            _ => "fully-collapsed",
-        }
-        .into()
-    } else {
-        Value::Null
-    };
+    row["folderState"] = folder_state(reaper, track);
     row["recordInput"] = record_input(value("I_RECINPUT") as i64);
     row["recordMode"] = record_mode_name(value("I_RECMODE") as i64).into();
     row["monitoring"] = monitoring_name(value("I_RECMON") as i64).into();

@@ -560,8 +560,15 @@ fn arrange_track(reaper: &Reaper, proj: Project, track: Track, from: f64, to: f6
         "solo": reaper.track_value(track, "I_SOLO") != 0.0,
         "arm": reaper.track_value(track, "I_RECARM") != 0.0,
         "selected": reaper.track_value(track, "I_SELECTED") != 0.0,
+        // What the arrange view hides: a track the producer hid, and the tracks inside a collapsed folder.
+        "shown": id == TrackId::Master || reaper.track_value(track, "B_SHOWINTCP") != 0.0,
+        "folderState": rows::folder_state(reaper, track),
         "items": items,
     });
+    let lanes = reaper.track_value(track, "I_FREEMODE") as i64 == 2;
+    if lanes {
+        row["fixedLanes"] = (reaper.track_value(track, "I_NUMFIXEDLANES") as i64).into();
+    }
     if omitted > 0 {
         row["itemsOmitted"] = omitted.into();
     }
@@ -583,6 +590,7 @@ fn arrange_item(reaper: &Reaper, proj: Project, item: Item, position: f64, lengt
         "color": (custom & 0x100_0000 != 0).then(|| reaper.color_hex(custom)).flatten(),
         "muted": reaper.item_value(item, "B_MUTE") != 0.0,
         "lane": reaper.item_value(item, "I_FIXEDLANE") as i64,
+        "lanePlays": rows::lane_plays(reaper, item),
         "selected": reaper.item_value(item, "B_UISEL") != 0.0,
     })
 }
@@ -1269,6 +1277,25 @@ mod tests {
         assert_eq!((&lane["cc"], &lane["total"]), (&json!(7), &json!(5)));
         let calls = fake::with(|s| s.calls);
         assert!(calls < 1000, "{calls} calls");
+    }
+
+    #[test]
+    fn the_arrange_body_says_which_tracks_the_view_hides_and_which_lanes_play() {
+        let reads = lab();
+        fake::with(|s| {
+            s.tracks[0].extra.insert("I_FOLDERCOMPACT".into(), 2.0);
+            s.tracks[1].extra.insert("B_SHOWINTCP".into(), 0.0);
+            s.tracks[2].extra.insert("I_FREEMODE".into(), 2.0);
+            s.tracks[2].extra.insert("I_NUMFIXEDLANES".into(), 3.0);
+            s.tracks[2].items[0].extra.insert("C_LANEPLAYS".into(), 2.0);
+        });
+        let body = body(&reads, json!({"kind": "arrange"})).unwrap();
+        let track = |name: &str| body["tracks"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap().clone();
+        assert_eq!((&track("Drums")["shown"], &track("Drums")["folderState"]), (&json!(true), &json!("fully-collapsed")));
+        assert_eq!((&track("Kick")["shown"], &track("Kick")["folderState"]), (&json!(false), &Value::Null));
+        assert_eq!(track("Snare")["fixedLanes"], 3);
+        assert_eq!(track("Snare")["items"][0]["lanePlays"], "with-others");
+        assert_eq!(track("Kick").get("fixedLanes"), None);
     }
 
     #[test]
