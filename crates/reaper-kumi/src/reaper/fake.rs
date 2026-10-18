@@ -134,6 +134,8 @@ pub struct FakeTake {
     pub notes: Vec<FakeNote>,
     pub ccs: Vec<FakeCc>,
     pub envelopes: Vec<FakeEnvelope>,
+    /// Other `GetMediaItemTakeInfo_Value` attributes (`I_CUSTOMCOLOR`…).
+    pub extra: HashMap<String, f64>,
 }
 
 impl FakeTake {
@@ -146,6 +148,7 @@ impl FakeTake {
             notes: vec![],
             ccs: vec![],
             envelopes: vec![],
+            extra: HashMap::new(),
         }
     }
 
@@ -644,7 +647,8 @@ unsafe extern "C" fn time_map2_time_to_beats(
 ) -> f64 {
     counted(|s| {
         let qn = time * s.bpm / 60.0;
-        let per_measure = s.time_signature.0 as f64;
+        // A measure is `num` beats of 1/`denom` notes long: 3 quarter notes in 6/8, counted by eighths as REAPER does.
+        let per_measure = s.time_signature.0 as f64 * 4.0 / s.time_signature.1 as f64;
         let whole = (qn / per_measure).floor();
         unsafe {
             *measures = whole as c_int;
@@ -652,7 +656,7 @@ unsafe extern "C" fn time_map2_time_to_beats(
             *full_beats = qn;
             *denom = s.time_signature.1;
         }
-        qn - whole * per_measure
+        (qn - whole * per_measure) * s.time_signature.1 as f64 / 4.0
     })
 }
 unsafe extern "C" fn get_set_arrange_view2(_proj: *mut ReaProject, set: bool, _x0: c_int, _x1: c_int, start: *mut f64, end: *mut f64) {
@@ -1056,8 +1060,9 @@ unsafe extern "C" fn get_take_name(take: *mut MediaItem_Take) -> *const c_char {
     let name = counted(|s| take_of(s, take as u64).map(|t| t.name.clone()));
     name.map_or(ptr::null(), keep)
 }
-unsafe extern "C" fn get_media_item_take_info_value(_take: *mut MediaItem_Take, _parm: *const c_char) -> f64 {
-    counted(|_| 0.0)
+unsafe extern "C" fn get_media_item_take_info_value(take: *mut MediaItem_Take, parm: *const c_char) -> f64 {
+    let parm = name_of(parm);
+    counted(|s| take_of(s, take as u64).and_then(|t| t.extra.get(&parm).copied()).unwrap_or(0.0))
 }
 unsafe extern "C" fn get_media_item_take_source(take: *mut MediaItem_Take) -> *mut api::PCM_source {
     counted(|s| match take_of(s, take as u64) {

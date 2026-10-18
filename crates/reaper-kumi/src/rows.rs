@@ -327,9 +327,18 @@ pub fn item_row(reaper: &Reaper, proj: Project, item: Item) -> Value {
         "muted": reaper.item_value(item, "B_MUTE") != 0.0,
         "lane": reaper.item_value(item, "I_FIXEDLANE") as i64,
         "lanePlays": lane_plays(reaper, item),
-        "color": custom_color(reaper, reaper.item_value(item, "I_CUSTOMCOLOR")),
+        "color": item_color(reaper, item, take),
         "selected": reaper.item_value(item, "B_UISEL") != 0.0,
     })
+}
+
+/// The colour REAPER draws an item in: its active take's own, else the item's.
+pub fn item_color(reaper: &Reaper, item: Item, take: Option<Take>) -> Value {
+    let own = take.map(|take| reaper.take_value(take, "I_CUSTOMCOLOR") as i32).filter(|native| native & 0x100_0000 != 0);
+    match own {
+        Some(native) => color(reaper, Some(native)),
+        None => custom_color(reaper, reaper.item_value(item, "I_CUSTOMCOLOR")),
+    }
 }
 
 /// Whether the item's fixed lane plays: only on a track with fixed lanes, else null.
@@ -392,7 +401,8 @@ pub fn send_mode_name(mode: i64) -> &'static str {
     match mode {
         0 => "post-fader",
         1 => "pre-fx",
-        3 => "pre-fader",
+        // 2 is the deprecated spelling of 3.
+        2 | 3 => "pre-fader",
         8 => "pre-receive",
         _ => "other",
     }
@@ -556,6 +566,11 @@ pub fn envelope_row(reaper: &Reaper, track: &TrackId, envelope: Envelope) -> Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sends_mode_has_a_name_for_every_spelling_reaper_has() {
+        assert_eq!([0, 1, 2, 3, 8, 5].map(send_mode_name), ["post-fader", "pre-fx", "pre-fader", "pre-fader", "pre-receive", "other"]);
+    }
 
     #[test]
     fn gains_are_decibels_with_a_floor() {

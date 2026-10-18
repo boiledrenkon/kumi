@@ -166,7 +166,9 @@ impl Reaper<'_> {
         let f = self.api.TimeMap2_timeToBeats()?;
         let (mut measures, mut beats_in_measure, mut full_beats, mut denom) = (0, 0, 0.0, 0);
         let beat = unsafe { f(proj.0, time, &mut measures, &mut beats_in_measure, &mut full_beats, &mut denom) };
-        Some((measures, beat))
+        // REAPER counts the beats of the time signature (eighths in 6/8); everything else here counts quarter notes.
+        let denominator = if denom > 0 { denom as f64 } else { 4.0 };
+        Some((measures, beat * 4.0 / denominator))
     }
 
     /// The time range the arrange view shows.

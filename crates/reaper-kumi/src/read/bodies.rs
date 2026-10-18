@@ -22,7 +22,7 @@ const WINDOW_MARKERS: usize = 200;
 /// What the markers and regions of the window may take of the first arrange page, whatever their names.
 const MARKERS_BYTES: usize = 32 * 1024;
 const WINDOW_TEMPO_MARKERS: usize = 200;
-/// The longest arrange window asked for, in seconds.
+/// The longest arrange window asked for, in beats (quarter notes).
 const MAX_WINDOW: f64 = 100.0 * 3600.0;
 /// Notes in a MIDI page by default and at most.
 const DEFAULT_NOTES: usize = 500;
@@ -105,7 +105,7 @@ fn limit_param(params: &Value, default: usize, max: usize) -> Result<usize, (Str
     match params.get("limit").filter(|l| !l.is_null()) {
         None => Ok(default),
         Some(limit) => match limit.as_u64() {
-            Some(n) if n >= 1 => Ok((n as usize).min(max)),
+            Some(n) if (1..=max as u64).contains(&n) => Ok(n as usize),
             _ => Err(bad(format!("limit must be a whole number from 1 to {max}"))),
         },
     }
@@ -580,14 +580,13 @@ fn arrange_item(reaper: &Reaper, proj: Project, item: Item, position: f64, lengt
     let take = reaper.active_take(item);
     let start = reaper.quarter_notes_at(proj, position).unwrap_or(0.0);
     let end = reaper.quarter_notes_at(proj, position + length).unwrap_or(start);
-    let custom = reaper.item_value(item, "I_CUSTOMCOLOR") as i32;
     json!({
         "ref": refs::item_ref(&reaper.item_guid(item)),
         "position": rows::seconds(start),
         "length": rows::seconds(end - start),
         "name": take.map(|t| rows::clip(&reaper.take_name(t))).unwrap_or_default(),
         "source": rows::source_word(reaper, take),
-        "color": (custom & 0x100_0000 != 0).then(|| reaper.color_hex(custom)).flatten(),
+        "color": rows::item_color(reaper, item, take),
         "muted": reaper.item_value(item, "B_MUTE") != 0.0,
         "lane": reaper.item_value(item, "I_FIXEDLANE") as i64,
         "lanePlays": rows::lane_plays(reaper, item),

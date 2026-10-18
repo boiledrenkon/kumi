@@ -175,7 +175,7 @@ fn limit_param(params: &Value) -> Result<usize, (String, String)> {
     match params.get("limit") {
         None | Some(Value::Null) => Ok(DEFAULT_LIMIT),
         Some(value) => match value.as_u64() {
-            Some(n) if n >= 1 => Ok((n as usize).min(MAX_LIMIT)),
+            Some(n) if (1..=MAX_LIMIT as u64).contains(&n) => Ok(n as usize),
             _ => Err(bad(format!("limit must be a whole number from 1 to {MAX_LIMIT}"))),
         },
     }
@@ -370,28 +370,25 @@ impl Reads {
         self.registry
             .borrow_mut()
             .track(reaper, proj, id)
-            .ok_or_else(|| failed(format!("{} isn't in the project (deleted, or another tab)", refs::track_ref(id))))
+            .ok_or_else(|| failed("that track isn't in the project (deleted, or another tab)"))
     }
 
     fn item_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Item, (String, String)> {
         self.registry
             .borrow_mut()
             .item(reaper, proj, guid)
-            .ok_or_else(|| failed(format!("{} isn't in the project (deleted, or another tab)", refs::item_ref(guid))))
+            .ok_or_else(|| failed("that item isn't in the project (deleted, or another tab)"))
     }
 
     fn take_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Take, (String, String)> {
         self.registry
             .borrow_mut()
             .take(reaper, proj, guid)
-            .ok_or_else(|| failed(format!("{} isn't in the project (deleted, or another tab)", refs::take_ref(guid))))
+            .ok_or_else(|| failed("that take isn't in the project (deleted, or another tab)"))
     }
 
     fn fx_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Fx, (String, String)> {
-        self.registry
-            .borrow_mut()
-            .fx(reaper, proj, guid)
-            .ok_or_else(|| failed(format!("{} isn't in the project (deleted, or another tab)", refs::fx_ref(guid))))
+        self.registry.borrow_mut().fx(reaper, proj, guid).ok_or_else(|| failed("that FX isn't in the project (deleted, or another tab)"))
     }
 
     /// A parent ref that must be a track.
@@ -463,7 +460,7 @@ impl Reads {
             Ref::Param { fx: guid, index } => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
                 if index < 0 || index >= reaper.fx_param_count(fx) {
-                    return Err(failed(format!("{reference} isn't there: the FX has {} parameters", reaper.fx_param_count(fx))));
+                    return Err(failed(format!("that parameter isn't there: the FX has {} parameters", reaper.fx_param_count(fx))));
                 }
                 rows::param_row(reaper, fx, &guid, index)
             }
@@ -484,7 +481,7 @@ impl Reads {
                             format!("the track has {now} such sends now, and this ref was made when there were {of}: read them again")
                         }
                     };
-                    return Err(failed(format!("{reference} isn't there: {why}")));
+                    return Err(failed(format!("that send isn't there: {why}")));
                 };
                 rows::send_row(reaper, owner, category, index as i32, &key)
             }
@@ -501,7 +498,7 @@ impl Reads {
 
     fn marker_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str, region: bool) -> Result<Value, (String, String)> {
         reaper.marker_by_guid(proj, guid).filter(|m| m.is_region == region).map(|m| rows::marker_row(reaper, proj, &m)).ok_or_else(|| {
-            failed(format!("there is no {} {guid} in the project (deleted, or another tab)", if region { "region" } else { "marker" }))
+            failed(format!("that {} isn't in the project (deleted, or another tab)", if region { "region" } else { "marker" }))
         })
     }
 
@@ -901,7 +898,11 @@ impl Reads {
         }
         if let Some(next) = next_marker {
             let key = reaper.marker(proj, next as i32).map(|marker| marker.guid);
-            truncated.insert("markers".into(), json!({"total": marker_total, "nextCursor": self.cursor_text(&Self::anchored(next, key))}));
+            // Markers and regions share one list: read each kind with this cursor to get the rest of it.
+            truncated.insert(
+                "markers".into(),
+                json!({"total": marker_total, "nextCursor": self.cursor_text(&Self::anchored(next, key)), "kinds": ["marker", "region"]}),
+            );
         }
         if !truncated.is_empty() {
             answer["truncated"] = Value::Object(truncated);
@@ -1392,13 +1393,63 @@ mod tests {
         assert!(reverb[0].get("midi").is_some() && reverb[1].get("midi").is_none() && reverb[0].get("envelopeRefs").is_none());
     }
 
+    /// A time signature counts its own beats (eighths in 6/8); the transport counts quarter notes throughout.
+    #[test]
+    fn the_beat_in_a_bar_counts_quarter_notes_in_any_time_signature() {
+        let lab = Lab::new();
+        fake::with(|s| {
+            s.time_signature = (6, 8);
+            s.cursor = 0.75; // 1.5 quarter notes in at 120 bpm: three eighths
+        });
+        let transport = snapshot(&lab).unwrap()["transport"].clone();
+        assert_eq!((&transport["bar"], &transport["beatInBar"], &transport["beatsPerBar"]), (&json!(1), &json!(2.5), &json!(3.0)));
+    }
+
+    #[test]
+    fn errors_do_not_quote_the_refs_they_are_about() {
+        let lab = Lab::new();
+        for reference in [
+            "r:track:{NOPE}",
+            "r:item:{NOPE}",
+            "r:take:{NOPE}",
+            "r:fx:{NOPE}",
+            "r:param:{FX-EQ}:99",
+            "r:send:{AAAA}:0:{NOPE}",
+            "r:marker:{NOPE}",
+            "r:region:{NOPE}",
+            "r:env:{AAAA}:{NOPE}",
+        ] {
+            let (_, message) = lab.read(json!({"ref": reference})).unwrap_err();
+            assert!(!message.contains("{NOPE}") && !message.contains("r:"), "{reference}: {message}");
+        }
+    }
+
+    #[test]
+    fn an_item_is_drawn_in_its_active_takes_own_colour_when_it_has_one() {
+        let lab = Lab::new();
+        let red = fake::native_color(255, 0, 0);
+        let green = fake::native_color(0, 255, 0);
+        fake::with(|s| s.tracks[1].items[0].color = green);
+        assert_eq!(lab.rows(json!({"ref": "r:item:{ITEM-K1}"}))[0]["color"], "#00ff00");
+        fake::with(|s| {
+            s.tracks[1].items[0].takes[0].extra.insert("I_CUSTOMCOLOR".into(), red as f64);
+        });
+        assert_eq!(lab.rows(json!({"ref": "r:item:{ITEM-K1}"}))[0]["color"], "#ff0000");
+        // And in the arrange body.
+        let api = fake::api();
+        let body = lab.reads.focus_body(&Reaper::new(&api), &json!({"kind": "arrange"})).unwrap();
+        let kick = body["tracks"].as_array().unwrap().iter().find(|t| t["name"] == "Kick").unwrap().clone();
+        assert_eq!(kick["items"][0]["color"], "#ff0000");
+    }
+
     #[test]
     fn limits_default_to_fifty_and_stop_at_two_hundred() {
         let lab = Lab::new();
         fake::with(|s| s.tracks = (0..260).map(|i| FakeTrack::new(&format!("{{T{i}}}"), "t")).collect());
         assert_eq!(lab.rows(json!({"kind": "track"})).len(), DEFAULT_LIMIT);
-        assert_eq!(lab.rows(json!({"kind": "track", "limit": 500})).len(), MAX_LIMIT);
-        for bad_limit in [json!(0), json!(-1), json!("ten"), json!(1.5)] {
+        assert_eq!(lab.rows(json!({"kind": "track", "limit": 200})).len(), MAX_LIMIT);
+        // Over the most is refused, not quietly cut, as Renoise's tool does.
+        for bad_limit in [json!(0), json!(-1), json!("ten"), json!(1.5), json!(201), json!(500)] {
             assert_eq!(lab.read(json!({"kind": "track", "limit": bad_limit})).unwrap_err().0, "bad-params");
         }
     }

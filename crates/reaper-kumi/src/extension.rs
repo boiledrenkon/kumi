@@ -1192,6 +1192,21 @@ mod tests {
         assert_eq!(epoch_and_identity(&extension, &tx), before, "a first save");
     }
 
+    /// A tab closed and a project opened that REAPER gave the same address, within one tick: nothing about the pointer, the
+    /// file or the tracks need differ, and it is another project all the same.
+    #[test]
+    fn a_tab_closed_and_a_project_opened_at_its_address_within_one_tick_is_another_project() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        crate::projectconfig::note_load();
+        extension.tick(Driver::Timer);
+        let after = epoch_and_identity(&extension, &tx);
+        assert_ne!(after.0, before.0);
+        assert_ne!(after.1, before.1);
+    }
+
     #[test]
     fn a_load_reaper_reports_while_it_loads_is_noticed_once_it_has_finished() {
         let (extension, tx, _, _) = setup();
