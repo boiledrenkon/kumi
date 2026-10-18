@@ -31,6 +31,18 @@ end
 
 local next_id = 1000
 
+-- What a host does as it reads: takes what the socket holds and gives credit back for exactly those bytes (a line not
+-- yet whole too: an answer longer than the credit goes on that way), until the grant releases no more.
+local function drain(peer)
+  local total = 0
+  repeat
+    local taken = peer:take()
+    if #taken > 0 then H.send(peer, { type = "credit", bytes = #taken }) end
+    total = total + #taken
+  until #taken == 0
+  return total
+end
+
 -- Sends a request and runs the clock until its response comes, giving credit back for every line read. Returns the
 -- response, the other frames that came meanwhile, and the longest line.
 local function call(peer, method, params, ticks)
@@ -39,8 +51,8 @@ local function call(peer, method, params, ticks)
   H.send(peer, { type = "request", id = id, method = method, params = params or {} })
   local response, others, longest = nil, {}, 0
   for _ = 1, ticks or 600 do
+    drain(peer)
     for _, line in ipairs(peer:frames(nil)) do
-      H.send(peer, { type = "credit", bytes = #line + 1 })
       longest = math.max(longest, #line + 1)
       local frame = assert(json.decode(line))
       if frame.type == "response" and frame.id == id then response = frame else others[#others + 1] = frame end
@@ -703,14 +715,14 @@ test("reads: a host that stops reading is held to the credit and gets its pages 
     H.send(peer, { type = "request", id = id, method = "read", params = { kind = "line", parent = E .. ":pattern:1", track = 1, limit = 200 } })
   end
   for _ = 1, 100 do mock.advance(50) end
-  ok(peer.unread <= 512 * 1024, "no more than the window went out: " .. peer.unread)
+  ok(peer.unread <= 64 * 1024, "no more than the floor went out: " .. peer.unread)
   eq(mock.blocked_sends, 0, "nothing was sent into a full socket")
   ok(not H.retired(peer), "the host wasn't retired")
   peer:resume_reading()
   local answers = {}
   for _ = 1, 400 do
+    drain(peer)
     for _, line in ipairs(peer:frames(nil)) do
-      H.send(peer, { type = "credit", bytes = #line + 1 })
       local frame = assert(json.decode(line))
       if frame.type == "response" then answers[frame.id] = frame end
     end

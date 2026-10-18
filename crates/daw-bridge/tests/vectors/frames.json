@@ -144,7 +144,7 @@
     },
     {
       "name": "a welcome naming creditBytes",
-      "line": "{\"type\":\"welcome\",\"session\":\"00000000000000000000000000000000\",\"daw\":\"renoise\",\"bridge\":\"0.1.0\",\"dawVersion\":\"3.5.4\",\"pid\":1,\"resource\":\"/r\",\"project\":null,\"maxFrameBytes\":67108864,\"heartbeatMs\":1000,\"creditBytes\":524288}",
+      "line": "{\"type\":\"welcome\",\"session\":\"00000000000000000000000000000000\",\"daw\":\"renoise\",\"bridge\":\"0.1.0\",\"dawVersion\":\"3.5.4\",\"pid\":1,\"resource\":\"/r\",\"project\":null,\"maxFrameBytes\":67108864,\"heartbeatMs\":1000,\"creditBytes\":65536}",
       "ok": true
     },
     {

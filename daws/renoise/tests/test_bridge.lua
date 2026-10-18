@@ -109,12 +109,22 @@ local function connect(env, options)
   return peer, welcome
 end
 
+-- What a host does as it reads: takes what the socket holds and gives credit back for those bytes, until that releases
+-- no more.
+local function give_back(peer)
+  repeat
+    local taken = peer:take()
+    if #taken > 0 then send(peer, { type = "credit", bytes = #taken }) end
+  until #taken == 0
+end
+
 local next_id = 0
 local function request(peer, method, params, extra)
   next_id = next_id + 1
   local frame = { type = "request", id = next_id, method = method, params = params }
   for k, v in pairs(extra or {}) do frame[k] = v end
   send(peer, frame)
+  give_back(peer)
   local got = frames(peer)
   local reply = got[#got]
   eq(reply.type, "response")
@@ -525,6 +535,7 @@ test("bridge: a host that sends now and then is never cut off, however many even
   local peer = connect(env)
   local count = 0
   churn(mock.song, 1, 3000, 100, function()
+    give_back(peer)
     for _, f in ipairs(frames(peer)) do
       if f.type == "event" then count = count + 1 end
     end
@@ -804,56 +815,66 @@ test("bridge: a big frame goes out in slices over ticks, as the host grants cred
   no_dialogs()
 end)
 
-test("bridge: the welcome says how much may be sent before the first grant", function()
+test("bridge: the welcome gives a floor of credit, to be topped up by the host's first grant", function()
   local env = setup()
   local _, welcome = connect(env)
-  eq(welcome.creditBytes, 512 * 1024)
+  eq(welcome.creditBytes, 64 * 1024)
   no_dialogs()
 end)
 
-test("bridge: a host that pauses mid-answer is held back from, never torn, never retired, and finishes when it reads", function()
-  local env = setup()
-  local peer = connect(env)
-  frames(peer)
-  local size = 1500 * 1024
-  env.payload().handlers["test.big"] = function() return { blob = string.rep("z", size) } end
-  -- The kernel's buffers hold at least the window (macOS measured 589,200 bytes): that is what credit leans on.
-  mock.socket_buffer_bytes = 600 * 1024
-  peer:stop_reading()
-  send(peer, { type = "request", id = 7, method = "test.big", params = {} })
-  tick(4)
-  ok(peer.unread <= 512 * 1024, "no more than the window was sent: " .. peer.unread)
-  ok(peer.unread >= 500 * 1024, "but the window was used: " .. peer.unread)
-  eq(mock.blocked_sends, 0, "nothing sent into a full socket")
-  -- A long pause: heartbeats and ticks go by; the host is not retired, and nothing more is sent.
-  mock.advance(20 * 1000)
-  eq(peer.unread <= 512 * 1024, true)
-  ok(not retired(peer), "not retired")
-  eq(mock.blocked_sends, 0)
-  -- It reads again: what it read is granted back, and the answer comes to an end, whole.
-  peer:resume_reading()
-  local text = ""
-  for _ = 1, 40 do
-    local taken = peer:take()
-    text = text .. taken
-    if #taken > 0 then grant(peer, #taken) end
-    mock.advance(100)
-  end
-  text = text .. peer:take()
-  local lines = {}
-  for line in text:gmatch("[^\n]+") do lines[#lines + 1] = line end
-  local response
-  for _, line in ipairs(lines) do
-    local frame = json.decode(line)
-    ok(frame, "every line is whole JSON")
-    if frame.type == "response" and frame.id == 7 then response = frame end
-  end
-  ok(response, "the answer arrived")
-  eq(#response.result.blob, size)
-  ok(not retired(peer), "never retired")
-  eq(mock.blocked_sends, 0)
-  no_dialogs()
-end)
+-- A host's window is what its receive buffer holds: the credit it lets a bridge have unread. Its first grant tops the
+-- welcome's floor (64 KiB) up to that, and it grants back what it reads.
+for _, window in ipairs({ 64 * 1024, 256 * 1024 }) do
+  test("bridge: a host with a " .. math.floor(window / 1024) .. " KiB receive buffer that pauses mid-answer is held back from, never torn, never retired, and finishes when it reads", function()
+    local env = setup()
+    local peer = connect(env)
+    frames(peer)
+    local size = 1500 * 1024
+    env.payload().handlers["test.big"] = function() return { blob = string.rep("z", size) } end
+    -- A socket whose buffers hold no more than the host's window: a send past it would block Renoise.
+    mock.socket_buffer_bytes = window
+    if window > 64 * 1024 then grant(peer, window - 64 * 1024) end
+    peer:stop_reading()
+    send(peer, { type = "request", id = 7, method = "test.big", params = {} })
+    tick(4)
+    ok(peer.unread <= window, "no more than the window was sent: " .. peer.unread)
+    ok(peer.unread >= window - 4096, "but the window was used: " .. peer.unread)
+    eq(mock.blocked_sends, 0, "nothing sent into a full socket")
+    -- A long pause: heartbeats and ticks go by; the host is not retired, and nothing more is sent.
+    mock.advance(20 * 1000)
+    eq(peer.unread <= window, true)
+    ok(not retired(peer), "not retired")
+    eq(mock.blocked_sends, 0)
+    -- It reads again: what it read is granted back, and the answer comes to an end, whole. It grants as the bytes come
+    -- off the socket (the answer is longer than the window, so a line is never whole before the credit is given).
+    peer:resume_reading()
+    local text = ""
+    for _ = 1, 400 do
+      repeat
+        local taken = peer:take()
+        text = text .. taken
+        if #taken > 0 then grant(peer, #taken) end
+      until #taken == 0
+      mock.advance(20)
+      -- (what the host reads is never more than the window past what it granted)
+      ok(peer.unread <= window, "unread " .. peer.unread)
+    end
+    text = text .. peer:take()
+    local lines = {}
+    for line in text:gmatch("[^\n]+") do lines[#lines + 1] = line end
+    local response
+    for _, line in ipairs(lines) do
+      local frame = json.decode(line)
+      ok(frame, "every line is whole JSON")
+      if frame.type == "response" and frame.id == 7 then response = frame end
+    end
+    ok(response, "the answer arrived")
+    eq(#response.result.blob, size)
+    ok(not retired(peer), "never retired")
+    eq(mock.blocked_sends, 0)
+    no_dialogs()
+  end)
+end
 
 test("bridge: no heartbeats pile up behind output that waits for credit", function()
   local env = setup()

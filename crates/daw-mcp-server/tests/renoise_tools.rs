@@ -129,8 +129,8 @@ async fn a_whole_session_of_reads_against_a_renoise_song() {
 
 #[tokio::test]
 async fn a_pattern_too_big_for_one_page_is_read_to_the_end_inside_the_frame_bound() {
-    // 300 lines of twelve note columns and eight effect columns, all full: about 480 KB, and more than the 512 KiB
-    // window once the second read has begun, so it can only be finished by the host giving credit back.
+    // 300 lines of twelve note columns and eight effect columns, all full: about 480 KB, read twice, which the bridge
+    // sends only as the host gives credit back.
     let mut lab = Lab::start(Some(300)).await;
     let mut rows = Vec::new();
     for _ in 0..2 {

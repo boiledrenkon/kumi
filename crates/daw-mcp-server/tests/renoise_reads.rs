@@ -25,7 +25,7 @@ async fn the_read_methods_on_the_wire() {
     let simulator = Simulator::start(script.config(secret.clone(), "/lab/Renoise")).await.unwrap();
     let client = BridgeClient::connect(simulator.address(), secret, "daw-mcp-server/test").await.unwrap();
     assert_eq!(client.welcome().methods, ["ping", "status", "read", "snapshot", "focus", "focus_body"]);
-    assert_eq!(client.welcome().credit_bytes, Some(512 * 1024), "the tool sends within credit");
+    assert_eq!(client.welcome().credit_bytes, Some(64 * 1024), "the tool starts with a floor of credit");
 
     let song = client.request("read", json!({"kind": "song"}), WAIT).await.unwrap();
     assert_eq!(song["items"][0]["name"], "Demo");
@@ -67,14 +67,16 @@ async fn the_read_methods_on_the_wire() {
     simulator.stop();
 }
 
-/// A pattern of 300 full lines is far more than the credit window and each page is most of a frame: the host's client
-/// gives credit back as it reads, so a bridge that holds back at zero credit goes on.
+/// A pattern of 300 full lines is about 480 KB, and each page most of a frame. The host asked for a receive buffer of only
+/// 64 KiB, so the bridge could send no more than that ahead of the host's reading, and the pages arrive only because the
+/// host gives credit back as it reads, partial lines too.
 #[tokio::test]
 async fn pages_bigger_than_the_credit_window_arrive_as_the_host_reads() {
     let secret = secret();
     let script = RenoiseScript::with_full_pattern(300);
     let simulator = Simulator::start(script.config(secret.clone(), "/lab/Renoise")).await.unwrap();
-    let client = BridgeClient::connect(simulator.address(), secret, "daw-mcp-server/test").await.unwrap();
+    let client = BridgeClient::connect_with(simulator.address(), secret, "daw-mcp-server/test", WAIT, 64 * 1024).await.unwrap();
+    let window = client.credit_window().unwrap();
 
     let mut seen = Vec::new();
     let mut cursor: Option<Value> = None;
@@ -95,8 +97,13 @@ async fn pages_bigger_than_the_credit_window_arrive_as_the_host_reads() {
     }
     assert!(pages >= 2, "{pages} pages");
     assert_eq!(seen, (1..=300).collect::<Vec<u64>>(), "every line once, in order");
-    // 300 lines of about 1.6 KB: over the 512 KiB window, so the bridge could only have finished by being given credit.
-    let credits = simulator.transcript().iter().filter(|line| line.from_host && line.text.contains("\"type\":\"credit\"")).count();
-    assert!(credits >= 1, "the host gave credit back: {credits} grants");
+    let granted: u64 = simulator
+        .transcript()
+        .iter()
+        .filter(|line| line.from_host && line.text.contains("\"type\":\"credit\""))
+        .map(|line| serde_json::from_str::<Value>(&line.text).unwrap()["bytes"].as_u64().unwrap())
+        .sum();
+    assert!(granted > 300_000, "the pages went out on {granted} bytes of credit, past a window of {window}");
+    assert!(client.max_unread_credit() <= window);
     simulator.stop();
 }

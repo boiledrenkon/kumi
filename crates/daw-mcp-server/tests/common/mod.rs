@@ -97,6 +97,11 @@ pub fn normalized(lines: &[daw_mcp_server::simulator::Line]) -> String {
     let mut out = String::new();
     for line in lines {
         let mut value: Value = serde_json::from_str(&line.text).unwrap_or_else(|_| Value::String(line.text.clone()));
+        // Credit frames are left out, like heartbeats: how many bytes a host grants depends on the receive buffer
+        // its system gave it and on how the bytes arrived.
+        if value.get("type").and_then(Value::as_str) == Some("credit") {
+            continue;
+        }
         if let Some(object) = value.as_object_mut() {
             for key in ["nonce", "proof", "session"] {
                 if object.contains_key(key) {

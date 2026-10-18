@@ -1,5 +1,6 @@
 //! The host's connection to a bridge: connect on loopback, prove the secret both ways, then requests, events and
 //! heartbeats.
+use crate::flow::{window_from, Credit, RECV_BUFFER_BYTES};
 use daw_bridge::auth::Secret;
 use daw_bridge::frame::{Framer, MAX_FRAME_BYTES};
 use daw_bridge::handshake::{ClientHandshake, ClientStep, HandshakeError};
@@ -16,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{broadcast, oneshot};
 
 /// Lines the bridge sends before its welcome: larger than the bridge's own 1024-byte limit, since a welcome carries
@@ -86,8 +87,12 @@ struct Inner {
     last_frame: Mutex<Instant>,
     /// Bytes read since this host last wrote anything.
     unacked: AtomicU64,
-    /// The bytes the bridge may send before the first grant, when it sends within credit (the welcome said so).
+    /// What the host lets a bridge that sends within credit (its welcome said so) run ahead of its reading.
     credit_window: Option<u64>,
+    /// The most bytes the bridge was ever entitled to send that the host had not read.
+    max_unread: AtomicU64,
+    /// A host that stops reading, for tests.
+    paused: AtomicBool,
     closed: AtomicBool,
     events: broadcast::Sender<Event>,
     welcome: Welcome,
@@ -111,23 +116,41 @@ impl BridgeClient {
     /// `TimedOut` (Windows keeps retrying the SYN to a closed loopback port for about 2 s before it refuses), a handshake
     /// that doesn't finish is `Timeout`.
     pub async fn connect_within(address: SocketAddr, secret: Secret, client: &str, timeout: Duration) -> Result<Self, ConnectError> {
+        Self::connect_with(address, secret, client, timeout, RECV_BUFFER_BYTES).await
+    }
+
+    /// As [`connect_within`], asking the system for a receive buffer of `recv_buffer` bytes (a test gives a small one).
+    ///
+    /// [`connect_within`]: BridgeClient::connect_within
+    pub async fn connect_with(
+        address: SocketAddr,
+        secret: Secret,
+        client: &str,
+        timeout: Duration,
+        recv_buffer: u32,
+    ) -> Result<Self, ConnectError> {
         if !peer_allowed(&address) {
             return Err(ConnectError::NotLoopback(address));
         }
         let deadline = tokio::time::Instant::now() + timeout;
-        let stream = match tokio::time::timeout_at(deadline, TcpStream::connect(address)).await {
+        let socket = if address.is_ipv4() { TcpSocket::new_v4() } else { TcpSocket::new_v6() }.map_err(ConnectError::Io)?;
+        // Asked for before the connect, so the window the host advertises can grow to it; what the system gave is read back,
+        // because that is how much a bridge can send ahead of the host's reading without filling the socket.
+        let _ = socket.set_recv_buffer_size(recv_buffer);
+        let held = socket.recv_buffer_size().unwrap_or(0) as usize;
+        let stream = match tokio::time::timeout_at(deadline, socket.connect(address)).await {
             Ok(stream) => stream.map_err(ConnectError::Io)?,
             Err(_) => {
                 return Err(ConnectError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "nothing accepted the connection in time")))
             }
         };
-        match tokio::time::timeout_at(deadline, Self::handshake(stream, secret, client)).await {
+        match tokio::time::timeout_at(deadline, Self::handshake(stream, secret, client, held)).await {
             Ok(result) => result,
             Err(_) => Err(ConnectError::Timeout),
         }
     }
 
-    async fn handshake(stream: TcpStream, secret: Secret, client: &str) -> Result<Self, ConnectError> {
+    async fn handshake(stream: TcpStream, secret: Secret, client: &str, held: usize) -> Result<Self, ConnectError> {
         stream.set_nodelay(true).map_err(ConnectError::Io)?;
         let (mut reader, mut writer) = stream.into_split();
         let (mut handshake, hello) = ClientHandshake::start(secret, client);
@@ -150,23 +173,52 @@ impl BridgeClient {
         };
         framer.set_max_bytes(MAX_FRAME_BYTES);
         let (events, _) = broadcast::channel(1024);
+        // A bridge that sends within credit starts with its floor: the first grant tops it up to what the receive buffer holds.
+        let (credit, first_grant) = match welcome.credit_bytes {
+            Some(floor) => {
+                let (credit, first) = Credit::new(floor, window_from(held));
+                (Some(credit), first)
+            }
+            None => (None, None),
+        };
         let inner = Arc::new(Inner {
             writer: tokio::sync::Mutex::new(writer),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             last_frame: Mutex::new(Instant::now()),
             unacked: AtomicU64::new(0),
-            credit_window: welcome.credit_bytes,
+            credit_window: credit.as_ref().map(Credit::window),
+            max_unread: AtomicU64::new(credit.as_ref().map_or(0, Credit::unread)),
+            paused: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             events,
             welcome: *welcome,
         });
-        tokio::spawn(read_loop(Arc::downgrade(&inner), reader, framer));
+        if let Some(grant) = first_grant {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            write_before(&inner, &Frame::Credit { bytes: grant }.encode(), deadline).await.map_err(|_| ConnectError::Closed)?;
+        }
+        tokio::spawn(read_loop(Arc::downgrade(&inner), reader, framer, credit));
         Ok(Self { inner })
     }
 
     pub fn welcome(&self) -> &Welcome {
         &self.inner.welcome
+    }
+
+    /// The bytes a bridge that sends within credit may run ahead of this host's reading (None for one that sends freely).
+    pub fn credit_window(&self) -> Option<u64> {
+        self.inner.credit_window
+    }
+
+    /// The most bytes such a bridge was ever entitled to send that this host had not read: never over the window.
+    pub fn max_unread_credit(&self) -> u64 {
+        self.inner.max_unread.load(Ordering::SeqCst)
+    }
+
+    /// Stops this host reading the socket (or starts it again), as a host busy elsewhere would. For tests.
+    pub fn pause_reading(&self, paused: bool) {
+        self.inner.paused.store(paused, Ordering::SeqCst);
     }
 
     pub fn is_closed(&self) -> bool {
@@ -275,10 +327,10 @@ fn fail_all(inner: &Inner) {
     }
 }
 
-async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut framer: Framer) {
+async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut framer: Framer, mut credit: Option<Credit>) {
     let mut chunk = vec![0u8; READ_CHUNK];
-    // Bytes of whole lines taken in since the last grant of credit.
-    let mut consumed = 0u64;
+    // What the welcome's read carried beyond the welcome counts as read.
+    let mut taken = framer.pending_bytes() as u64;
     loop {
         let Some(live) = inner.upgrade() else { return };
         // Lines already fed (the welcome's read may have carried more).
@@ -287,7 +339,6 @@ async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut
                 fail_all(&live);
                 return;
             };
-            consumed += line.len() as u64 + 1;
             *live.last_frame.lock().unwrap() = Instant::now();
             match Frame::parse(&line) {
                 Ok(Frame::Response(response)) => {
@@ -320,18 +371,25 @@ async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut
             }
         }
         // A bridge that sends within credit holds back once it has used what it was granted: it gets back what was read,
-        // in steps of a quarter of the window, as the host takes the lines in (a host that stops reading stops granting).
-        if let Some(window) = live.credit_window {
-            if consumed >= window / 4 {
-                let grant = std::mem::take(&mut consumed);
+        // in steps of a quarter of the window, as the host takes the bytes in (a host that stops reading stops granting).
+        // Bytes count when they come off the socket, whole lines or not: an answer longer than the window could not
+        // be read to its end otherwise.
+        if let Some(credit) = credit.as_mut() {
+            if let Some(grant) = credit.read(std::mem::take(&mut taken)) {
                 let inner = live.clone();
                 tokio::spawn(async move {
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
                     let _ = write_before(&inner, &Frame::Credit { bytes: grant }.encode(), deadline).await;
                 });
             }
+            live.max_unread.fetch_max(credit.unread(), Ordering::SeqCst);
         }
+        let paused = live.paused.load(Ordering::SeqCst);
         drop(live);
+        if paused {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            continue;
+        }
         let read = reader.read(&mut chunk).await;
         let Some(live) = inner.upgrade() else { return };
         match read {
@@ -340,6 +398,7 @@ async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut
                 return;
             }
             Ok(count) => {
+                taken = count as u64;
                 framer.feed(&chunk[..count]);
                 // Listening without saying anything: tell the bridge this host is still reading.
                 if live.unacked.fetch_add(count as u64, Ordering::SeqCst) + count as u64 >= ACK_AFTER_BYTES {

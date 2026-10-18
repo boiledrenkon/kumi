@@ -218,7 +218,7 @@ function M:apply(record, actions)
     elseif action.credit then
       self:grant(record, action.credit)
     elseif action.authenticated then
-      record.credit = wire.CREDIT_WINDOW
+      record.credit = wire.CREDIT_FLOOR
       record.welcome_item = record.outbox[#record.outbox] -- the welcome just queued, if it is not all out yet
       record.heartbeat_ms = self.ctx.now_ms() + wire.HEARTBEAT_MS
       if self.ctx.on_authenticated then self.ctx.on_authenticated(record) end

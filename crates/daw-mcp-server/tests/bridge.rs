@@ -20,6 +20,11 @@ pub fn normalized(lines: &[Line]) -> String {
     let mut out = String::new();
     for line in lines {
         let mut value: Value = serde_json::from_str(&line.text).unwrap_or_else(|_| Value::String(line.text.clone()));
+        // Credit frames are left out, like heartbeats: how many bytes a host grants depends on the receive buffer
+        // its system gave it and on how the bytes arrived.
+        if value.get("type").and_then(Value::as_str) == Some("credit") {
+            continue;
+        }
         if let Some(object) = value.as_object_mut() {
             for key in ["nonce", "proof", "session"] {
                 if object.contains_key(key) {
@@ -351,10 +356,13 @@ async fn a_request_carries_the_time_the_host_gives_up() {
 }
 
 #[tokio::test]
-async fn a_host_gives_back_what_it_reads_to_a_bridge_that_sends_within_credit() {
+async fn a_host_tops_a_bridge_up_to_its_receive_buffer_then_gives_back_what_it_reads() {
     let simulator = Simulator::start(SimulatorConfig::renoise(secret(), "/lab/Renoise/V3.5.4")).await.unwrap();
     let client = BridgeClient::connect(simulator.address(), secret(), CLIENT).await.unwrap();
-    assert_eq!(client.welcome().credit_bytes, Some(daw_bridge::wire::CREDIT_WINDOW_BYTES));
+    let floor = daw_bridge::wire::CREDIT_FLOOR_BYTES;
+    assert_eq!(client.welcome().credit_bytes, Some(floor));
+    let window = client.credit_window().expect("the bridge sends within credit");
+    assert!(window >= floor, "{window}");
     let mut events = client.events();
     let credit = || -> u64 {
         simulator
@@ -364,25 +372,35 @@ async fn a_host_gives_back_what_it_reads_to_a_bridge_that_sends_within_credit() 
             .map(|line| serde_json::from_str::<Value>(&line.text).unwrap()["bytes"].as_u64().unwrap())
             .sum()
     };
-    assert_eq!(credit(), 0, "nothing read yet");
-    // Twelve events of about 20 KB: past a quarter of the window (128 KiB) after the seventh.
-    for i in 0..12 {
-        simulator.emit("tracks", json!({"pad": "x".repeat(20_000), "i": i}));
-        events.recv().await.unwrap();
-    }
-    let mut granted = 0;
+    // The first grant, before anything is read: what tops the floor up to the buffer.
     for _ in 0..100 {
-        granted = credit();
-        if granted >= 128 * 1024 {
+        if credit() >= window - floor {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(granted >= 128 * 1024, "granted {granted}: a quarter of the window is read");
-    // Never more than it has read.
+    assert_eq!(credit(), window - floor, "the floor topped up to the window");
+    let first = credit();
+    // Events of about 20 KB until a quarter of the window has been read.
+    let quarter = window / 4;
+    for i in 0..(quarter / 20_000 + 2) {
+        simulator.emit("tracks", json!({"pad": "x".repeat(20_000), "i": i}));
+        events.recv().await.unwrap();
+    }
+    let mut back = 0;
+    for _ in 0..100 {
+        back = credit() - first;
+        if back >= quarter {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(back >= quarter, "granted back {back}: a quarter of the window ({quarter}) is read");
+    // Never more than it has read (heartbeats are read too, and left out of the transcript).
     let read: u64 =
         simulator.transcript().iter().filter(|l| !l.from_host && l.text.contains("\"event\"")).map(|l| l.text.len() as u64 + 1).sum();
-    assert!(granted <= read, "granted {granted} of {read} read");
+    assert!(back <= read + 4096, "granted back {back} of {read} read");
+    assert!(client.max_unread_credit() <= window, "{} over the window {window}", client.max_unread_credit());
     // A bridge that doesn't ask for credit is sent none.
     let reaper = Simulator::start(SimulatorConfig::reaper(secret(), "/lab/REAPER")).await.unwrap();
     let plain = BridgeClient::connect(reaper.address(), secret(), CLIENT).await.unwrap();

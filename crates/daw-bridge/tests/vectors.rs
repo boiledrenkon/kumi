@@ -236,7 +236,7 @@ fn frame_vectors() {
         ("a credit written 1.0", "{\"type\":\"credit\",\"bytes\":1.0}".to_string()),
         ("a credit of 2^53", "{\"type\":\"credit\",\"bytes\":9007199254740992}".to_string()),
         ("a credit without bytes", "{\"type\":\"credit\"}".to_string()),
-        ("a welcome naming creditBytes", welcome_with("524288")),
+        ("a welcome naming creditBytes", welcome_with("65536")),
         ("a welcome naming creditBytes written 1.5", welcome_with("1.5")),
         ("a name with a surrogate pair", "{\"type\":\"event\",\"seq\":1,\"name\":\"\\ud83d\\ude00\"}".to_string()),
         ("a name with a lone high surrogate", "{\"type\":\"event\",\"seq\":1,\"name\":\"\\ud800x\"}".to_string()),

@@ -14,10 +14,12 @@ M.PROTOCOL = "kumi-daw/1"
 M.MAX_PREAUTH_LINE = 1024
 M.MAX_FRAME = 64 * 1024 * 1024
 -- What this bridge may send before the host's first grant of credit (the welcome says so), and the most credit it
--- will hold: it sends only within the credit the host grants as it reads, so output never outruns a reader.
-M.CREDIT_WINDOW = 512 * 1024
+-- will hold. It sends only within the credit the host grants, so output never outruns a reader: it cannot know how much
+-- a host's socket holds, so it starts with a floor, the host's first grant tops that up to its receive buffer, and the
+-- host then grants what it reads.
+M.CREDIT_FLOOR = 64 * 1024
 M.CREDIT_MAX = 4 * 1024 * 1024
--- No answer is longer than this: pages under a half of the window.
+-- No answer is longer than this. It may be longer than the credit at the moment: it goes out as the host grants.
 M.MAX_PAGE_BYTES = 256 * 1024
 M.HANDSHAKE_TIMEOUT_MS = 3000
 M.HEARTBEAT_MS = 1000
@@ -338,7 +340,7 @@ function Connection:on_bytes(bytes, now_ms, identity)
       welcome.session = self.session
       welcome.maxFrameBytes = M.MAX_FRAME
       welcome.heartbeatMs = welcome.heartbeatMs or M.HEARTBEAT_MS
-      welcome.creditBytes = welcome.creditBytes or M.CREDIT_WINDOW
+      welcome.creditBytes = welcome.creditBytes or M.CREDIT_FLOOR
       welcome.methods = json.array(welcome.methods or {})
       welcome.events = json.array(welcome.events or {})
       local text, encode_err = M.encode_frame("welcome", welcome)

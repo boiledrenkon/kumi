@@ -4,7 +4,7 @@ use daw_bridge::auth::Secret;
 use daw_bridge::files::{write_discovery, Discovery, DISCOVERY_SCHEMA};
 use daw_bridge::frame::Framer;
 use daw_bridge::handshake::{Offer, ServerAction, ServerConnection};
-use daw_bridge::wire::{code, event, Frame, Identity, Project, Request, CREDIT_WINDOW_BYTES, PROTOCOL};
+use daw_bridge::wire::{code, event, Frame, Identity, Project, Request, CREDIT_FLOOR_BYTES, PROTOCOL};
 use daw_bridge::Daw;
 use serde_json::{json, Map, Value};
 use std::net::SocketAddr;
@@ -103,7 +103,7 @@ impl SimulatorConfig {
             offer: Offer {
                 events: vec![event::PROJECT.into(), event::TRANSPORT.into(), event::TRACKS.into(), event::SELECTION.into()],
                 // Like the Renoise tool: it sends only within the credit the host grants.
-                credit_bytes: Some(CREDIT_WINDOW_BYTES),
+                credit_bytes: Some(CREDIT_FLOOR_BYTES),
                 ..Offer::default()
             },
             status_extra,
@@ -118,6 +118,16 @@ struct State {
     busy: Option<String>,
     transcript: Vec<Line>,
     connections: usize,
+    flow: Flow,
+}
+
+/// What a bridge that sends within credit has sent and held back, over every connection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flow {
+    /// Bytes sent that credit had to cover (the handshake and the bye are not counted).
+    pub sent: u64,
+    /// Bytes waiting for credit.
+    pub waiting: u64,
 }
 
 /// A running simulated bridge on 127.0.0.1 (an ephemeral port).
@@ -134,7 +144,13 @@ impl Simulator {
     pub async fn start(config: SimulatorConfig) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let address = listener.local_addr()?;
-        let state = Arc::new(Mutex::new(State { identity: config.identity.clone(), busy: None, transcript: vec![], connections: 0 }));
+        let state = Arc::new(Mutex::new(State {
+            identity: config.identity.clone(),
+            busy: None,
+            transcript: vec![],
+            connections: 0,
+            flow: Flow::default(),
+        }));
         let (events, _) = broadcast::channel(256);
         let (stop, stopped) = watch::channel(false);
         let started_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -207,6 +223,11 @@ impl Simulator {
     /// Busy (`Some("rendering")`): requests are refused as busy and heartbeats stop, as in a modal dialog.
     pub fn set_busy(&self, busy: Option<&str>) {
         self.state.lock().unwrap().busy = busy.map(str::to_string);
+    }
+
+    /// What the bridge has sent within credit, and what waits for more.
+    pub fn flow(&self) -> Flow {
+        self.state.lock().unwrap().flow
     }
 
     /// Every line so far, in order.
@@ -369,6 +390,9 @@ async fn serve(
             let allowed = (queue.len() as u64).min(credit) as usize;
             credit -= allowed as u64;
             send.extend(queue.drain(..allowed));
+            let mut state = state.lock().unwrap();
+            state.flow.sent += allowed as u64;
+            state.flow.waiting = queue.len() as u64;
         } else {
             send.extend(out);
         }

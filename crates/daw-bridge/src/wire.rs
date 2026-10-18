@@ -20,10 +20,12 @@ pub const CLIENT_HANDSHAKE_TIMEOUT_MS: u64 = 5000;
 pub const MAX_JSON_DEPTH: usize = 64;
 /// The same limit for a value that sits in a frame's field (params, a result, an event's data).
 pub const MAX_PAYLOAD_DEPTH: usize = MAX_JSON_DEPTH - 1;
-/// The credit a bridge that uses flow control starts with, and the most the host lets run unread: the host grants back
-/// what it has read, in steps of a quarter of this. A page from the bridge stays under [`MAX_PAGE_BYTES`], half of it.
-pub const CREDIT_WINDOW_BYTES: u64 = 512 * 1024;
-/// No answer from a bridge that pages (the Renoise tool's reads) is longer than this.
+/// The credit a bridge that uses flow control starts with (its welcome's `creditBytes`): a floor the host's first grant
+/// tops up to what its receive buffer holds, then grants back what it reads. A bridge cannot know that buffer, and a
+/// fixed guess larger than a paused host's would fill the socket and block a bridge that must not block.
+pub const CREDIT_FLOOR_BYTES: u64 = 64 * 1024;
+/// No answer from a bridge that pages (the Renoise tool's reads) is longer than this. It may be longer than the credit
+/// at that moment: the bridge sends it as the host grants.
 pub const MAX_PAGE_BYTES: usize = 256 * 1024;
 /// Connections a bridge holds at once, before and after they authenticate.
 pub const MAX_UNAUTHENTICATED: usize = 4;
@@ -59,7 +61,7 @@ pub enum Frame {
         ms: u64,
     },
     /// Host to bridge: the host has read this many more bytes, so the bridge may send that many more (flow control; see
-    /// [`CREDIT_WINDOW_BYTES`]). Only a bridge that names `creditBytes` in its welcome sends within credit.
+    /// [`CREDIT_FLOOR_BYTES`]). Only a bridge that names `creditBytes` in its welcome sends within credit.
     Credit {
         bytes: u64,
     },
