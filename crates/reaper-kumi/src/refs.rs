@@ -140,7 +140,9 @@ impl Ref {
                         .split_once("of")
                         .and_then(|(k, n)| Some((k.parse::<u32>().ok()?, n.parse::<u32>().ok()?)))
                         .filter(|&(k, n)| n >= 2 && (1..=n).contains(&k))
-                        .ok_or_else(|| format!("{text:?} isn't a repeat such as 2of3: which of the sends to the same place, of how many"))?,
+                        .ok_or_else(|| {
+                            format!("{text:?} isn't a repeat such as 2of3: which of the sends to the same place, of how many")
+                        })?,
                 };
                 let other = match other.strip_prefix("hw") {
                     Some(_) if category == 1 => SendEnd::parse_hardware(other).ok_or_else(bad)?,

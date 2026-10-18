@@ -392,8 +392,12 @@ impl Reads {
                     let now = keys.iter().filter(|k| k.other == key.other).count();
                     let why = match (now, of) {
                         (0, _) => "the track has no such send (deleted, or it went elsewhere)".to_string(),
-                        (now, 1) => format!("the track has {now} such sends now, and this ref was made when there was one: read them again"),
-                        (now, _) => format!("the track has {now} such sends now, and this ref was made when there were {of}: read them again"),
+                        (now, 1) => {
+                            format!("the track has {now} such sends now, and this ref was made when there was one: read them again")
+                        }
+                        (now, _) => {
+                            format!("the track has {now} such sends now, and this ref was made when there were {of}: read them again")
+                        }
                     };
                     return Err(failed(format!("{reference} isn't there: {why}")));
                 };
