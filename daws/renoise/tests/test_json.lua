@@ -118,12 +118,28 @@ test("json: rejects what isn't JSON", function()
   end
 end)
 
-test("json: nesting is bounded", function()
-  local deep = string.rep("[", 300) .. string.rep("]", 300)
-  local value, err = json.decode(deep)
+test("json: nesting is bounded at the wire's limit, on the way in and out", function()
+  eq(json.MAX_DEPTH, 64)
+  local function brackets(levels) return string.rep("[", levels) .. string.rep("]", levels) end
+  ok(json.decode(brackets(64)), "64 levels")
+  local value, err = json.decode(brackets(65))
   eq(value, nil)
-  ok(err:find("deeply"))
-  ok(json.decode(string.rep("[", 100) .. string.rep("]", 100)))
+  ok(err:find("deeply"), "65 levels")
+  value, err = json.decode(brackets(300))
+  eq(value, nil)
+  ok(err:find("deeply"), "300 levels")
+  -- A scalar at the bottom is not a level of its own.
+  ok(json.decode(string.rep("[", 64) .. "1" .. string.rep("]", 64)), "64 levels around a number")
+  ok(not json.decode(string.rep("{\"a\":", 65) .. "1" .. string.rep("}", 65)), "65 objects around a number")
+  local function nested(levels)
+    local t = json.array({})
+    for _ = 2, levels do t = json.array({ t }) end
+    return t
+  end
+  eq(enc(nested(64)), brackets(64), "64 levels encode")
+  local text, enc_err = json.encode(nested(65))
+  eq(text, nil)
+  ok(enc_err:find("deeply"), "65 levels don't")
 end)
 
 test("json: the sliced encoder gives the same text in many small steps", function()

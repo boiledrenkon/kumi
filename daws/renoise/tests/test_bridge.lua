@@ -336,6 +336,42 @@ test("bridge: after auth a line that isn't a frame closes without a reply", func
   no_dialogs()
 end)
 
+test("bridge: a result nested too deep is answered with an error, not sent and not fatal", function()
+  local server = T.load_payload_module("server")
+  local sent = {}
+  local client = { is_open = true, send = function(_, text) sent[#sent + 1] = text; return true end }
+  local logged = {}
+  local result
+  local ctx = {
+    connections = {},
+    unix_ms = function() return 0 end,
+    log = function(level, message) logged[#logged + 1] = level .. ": " .. message end,
+    on_request = function() return result end,
+  }
+  local s = server.new(ctx)
+  local record = { key = "k", client = client, outbox = {} }
+  local function nested(levels)
+    local t = json.array({})
+    for _ = 2, levels do t = json.array({ t }) end
+    return t
+  end
+  local function answer(levels)
+    result = nested(levels)
+    s:answer(record, { id = 5, method = "x", params = {} })
+    return assert(json.decode(sent[#sent]:sub(1, -2)))
+  end
+  local reply = answer(json.MAX_DEPTH - 1)
+  eq(reply.ok, true, "a result at the limit is sent")
+  reply = answer(json.MAX_DEPTH)
+  eq(reply.ok, false)
+  eq(reply.id, 5)
+  eq(reply.error.code, "internal")
+  ok(reply.error.message:find("deeply"), reply.error.message)
+  ok(not record.closing and not record.gone, "the connection goes on")
+  ok(logged[1] and logged[1]:find("could not encode the result"), "logged")
+  eq(answer(1).ok, true, "and answers the next request")
+end)
+
 test("bridge: selection changes are one event per tick, numbered per connection", function()
   local env = setup()
   local peer = connect(env)

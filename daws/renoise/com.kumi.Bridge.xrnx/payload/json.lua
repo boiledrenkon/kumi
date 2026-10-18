@@ -27,7 +27,9 @@ function M.is_array(t)
   return getmetatable(t) == array_mt
 end
 
-M.MAX_DEPTH = 200
+-- The deepest a document nests, the outermost object or array counting as the first level: the same limit as
+-- crates/daw-bridge (MAX_JSON_DEPTH), so a line one side writes is never one the other refuses.
+M.MAX_DEPTH = 64
 
 local REPLACEMENT = "\239\191\189"
 
@@ -210,7 +212,7 @@ local function new_encoder(options)
   end
 
   return function(value)
-    encode_value(value, 0)
+    encode_value(value, 1)
     return concat(buf, "", 1, n)
   end
 end
@@ -396,11 +398,14 @@ local function parse_object(s, i, depth, null)
   end
 end
 
+-- depth: the nesting level a container at i would have (the document's outermost is 1).
 parse_value = function(s, i, depth, null)
-  if depth > M.MAX_DEPTH then decode_error(s, i, "too deeply nested") end
   local c = byte(s, i)
-  if c == 123 then return parse_object(s, i, depth, null) end
-  if c == 91 then return parse_array(s, i, depth, null) end
+  if c == 123 or c == 91 then
+    if depth > M.MAX_DEPTH then decode_error(s, i, "too deeply nested") end
+    if c == 123 then return parse_object(s, i, depth, null) end
+    return parse_array(s, i, depth, null)
+  end
   if c == 34 then return parse_string(s, i) end
   if c == 45 or (c and c >= 48 and c <= 57) then return parse_number(s, i) end
   if c == 116 and sub(s, i, i + 3) == "true" then return true, i + 4 end
@@ -415,7 +420,7 @@ function M.decode(s, options)
   if type(s) ~= "string" then return nil, "not a string" end
   local null = (not (options and options.null_as_nil)) and M.null or nil
   local ok, value = pcall(function()
-    local v, j = parse_value(s, skip(s, 1), 0, null)
+    local v, j = parse_value(s, skip(s, 1), 1, null)
     j = skip(s, j)
     if j <= #s then decode_error(s, j, "trailing characters") end
     return v, j

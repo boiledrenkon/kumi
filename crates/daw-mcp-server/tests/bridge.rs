@@ -192,3 +192,58 @@ async fn a_bridge_that_never_speaks_is_a_handshake_timeout() {
     ));
     silent.abort();
 }
+
+#[tokio::test]
+async fn params_nested_past_the_limit_are_refused_before_sending() {
+    let simulator = Simulator::start(SimulatorConfig::reaper(secret(), "/lab/REAPER")).await.unwrap();
+    let client = BridgeClient::connect(simulator.address(), secret(), CLIENT).await.unwrap();
+    let nest = |levels: usize| (1..levels).fold(json!({}), |inner, _| json!({"a": inner}));
+    assert_eq!(client.request("ping", nest(daw_bridge::wire::MAX_PAYLOAD_DEPTH), WAIT).await.unwrap(), json!({}));
+    let refused = client.request("ping", nest(daw_bridge::wire::MAX_PAYLOAD_DEPTH + 1), WAIT).await;
+    assert!(matches!(refused, Err(RequestError::Bridge { ref code, .. }) if code == "bad-params"), "{refused:?}");
+    assert!(!client.is_closed());
+    assert_eq!(client.request("ping", json!({}), WAIT).await.unwrap(), json!({}));
+    // Two pings reached the bridge, not three.
+    assert_eq!(simulator.transcript().iter().filter(|line| line.from_host && line.text.contains("\"ping\"")).count(), 2);
+}
+
+#[tokio::test]
+async fn an_answer_nested_past_the_limit_costs_that_answer_not_the_connection() {
+    use daw_bridge::handshake::{ServerAction, ServerConnection};
+    use daw_bridge::wire::Frame;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // A bridge that answers the first request with a line nested 70 levels deep, and the rest properly.
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let config = SimulatorConfig::reaper(secret(), "/lab/REAPER");
+        let mut connection = ServerConnection::new(secret(), 0);
+        let mut chunk = vec![0u8; 4096];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap_or(0);
+            if read == 0 {
+                return;
+            }
+            for action in connection.on_bytes(&chunk[..read], 0, &mut || (config.identity.clone(), config.offer.clone())) {
+                match action {
+                    ServerAction::Send(bytes) => stream.write_all(&bytes).await.unwrap(),
+                    ServerAction::Request(request) if request.id == 1 => {
+                        let line =
+                            format!("{{\"type\":\"response\",\"id\":1,\"ok\":true,\"result\":{}{}}}\n", "[".repeat(70), "]".repeat(70));
+                        stream.write_all(line.as_bytes()).await.unwrap();
+                    }
+                    ServerAction::Request(request) => {
+                        stream.write_all(&Frame::ok(request.id, json!({"n": request.id})).encode()).await.unwrap()
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    let client = BridgeClient::connect(address, secret(), CLIENT).await.unwrap();
+    // The too-deep answer is dropped alone: that request gets no answer.
+    assert!(matches!(client.request("ping", json!({}), Duration::from_millis(300)).await, Err(RequestError::Timeout)));
+    assert!(!client.is_closed());
+    assert_eq!(client.request("ping", json!({}), WAIT).await.unwrap(), json!({"n": 2}));
+}

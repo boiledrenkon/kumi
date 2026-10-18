@@ -4,7 +4,10 @@ use daw_bridge::auth::Secret;
 use daw_bridge::frame::{Framer, MAX_FRAME_BYTES};
 use daw_bridge::handshake::{ClientHandshake, ClientStep, HandshakeError};
 use daw_bridge::loopback::peer_allowed;
-use daw_bridge::wire::{Event, Frame, Request, Welcome, CLIENT_HANDSHAKE_TIMEOUT_MS, HEARTBEATS_BEFORE_BUSY, MAX_SAFE_INTEGER};
+use daw_bridge::wire::{
+    code, nests_within, Event, Frame, Request, Welcome, WireError, CLIENT_HANDSHAKE_TIMEOUT_MS, HEARTBEATS_BEFORE_BUSY, MAX_PAYLOAD_DEPTH,
+    MAX_SAFE_INTEGER,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -176,6 +179,10 @@ impl BridgeClient {
         if self.is_closed() {
             return Err(RequestError::Closed);
         }
+        if !nests_within(&params, MAX_PAYLOAD_DEPTH) {
+            let message = format!("the params nest deeper than {MAX_PAYLOAD_DEPTH} levels");
+            return Err(RequestError::Bridge { code: code::BAD_PARAMS.into(), message });
+        }
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         if id > MAX_SAFE_INTEGER {
             return Err(RequestError::Closed);
@@ -243,6 +250,9 @@ async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut
                     return;
                 }
                 Ok(_) => {}
+                // No bridge sends a frame nested this deep (they refuse to encode one): the frame is dropped alone, and
+                // the request it answered times out, instead of the whole connection going.
+                Err(WireError::TooDeep) => {}
                 Err(_) => {
                     fail_all(&live);
                     return;

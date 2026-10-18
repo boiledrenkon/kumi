@@ -117,6 +117,10 @@ impl Hub {
 
 impl Outbox for Hub {
     fn event(&self, name: &str, data: Value) {
+        if !wire::nests_within(&data, wire::MAX_PAYLOAD_DEPTH) {
+            log::line(&format!("event {name} isn't sent: its data nests deeper than {} levels", wire::MAX_PAYLOAD_DEPTH));
+            return;
+        }
         for conn in self.conns().iter().filter(|c| c.authenticated.load(Ordering::Acquire)) {
             let seq = conn.next_seq.fetch_add(1, Ordering::Relaxed);
             self.send(conn, Frame::Event(Event { seq, name: name.into(), data: data.clone() }).encode());
@@ -826,6 +830,17 @@ mod tests {
         let _stream = host.join().unwrap();
         // The reader was parsing for most of that time; an event from the main thread must not have waited for it.
         assert!(worst < Duration::from_millis(100), "an event took {worst:?} (of {calls} calls)");
+    }
+
+    #[test]
+    fn an_event_nested_past_the_limit_is_not_sent_and_takes_no_number() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (_stream, mut reader, _) = lab.authenticated();
+        let deep = (0..wire::MAX_PAYLOAD_DEPTH + 1).fold(json!(1), |inner, _| json!([inner]));
+        lab.hub.event("tracks", deep);
+        lab.hub.event("tracks", json!({"count": 2}));
+        let event = read_frame(&mut reader);
+        assert_eq!((event["seq"].as_u64(), event["data"].clone()), (Some(1), json!({"count": 2})));
     }
 
     #[test]

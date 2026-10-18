@@ -5,7 +5,7 @@ use daw_bridge::auth::{hmac_sha256_hex, proof, proof_message, sha256_hex, Role, 
 use daw_bridge::files::{discovery_file_name, discovery_key};
 use daw_bridge::frame::{Framer, MAX_PREAUTH_LINE_BYTES};
 use daw_bridge::handshake::{CloseReason, Offer, ServerAction, ServerConnection};
-use daw_bridge::wire::{Identity, Project, PROTOCOL};
+use daw_bridge::wire::{Frame, Identity, Project, Response, MAX_JSON_DEPTH, MAX_PAYLOAD_DEPTH, PROTOCOL};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -179,6 +179,53 @@ fn framing_vectors() {
         json!({
             "about": "Feed each chunk in order and take lines until none; an error ends the stream. maxBytes bounds a line without its newline (and a trailing carriage return) together with the blank lines skipped before it, their carriage returns and newlines included; blank lines alone, and a line not yet ended, are bounded the same way.",
             "cases": made,
+        }),
+    );
+}
+
+/// `levels` arrays inside one another, the innermost empty.
+fn nest(levels: usize) -> String {
+    format!("{}{}", "[".repeat(levels), "]".repeat(levels))
+}
+
+/// A request line whose params are `levels` objects inside one another.
+fn request_nested(levels: usize) -> String {
+    format!(
+        "{{\"type\":\"request\",\"id\":1,\"method\":\"ping\",\"params\":{}{{}}{}}}\n",
+        "{\"a\":".repeat(levels - 1),
+        "}".repeat(levels - 1)
+    )
+}
+
+#[test]
+fn frame_vectors() {
+    let event = |data: &str| format!("{{\"type\":\"event\",\"seq\":1,\"name\":\"x\",\"data\":{data}}}");
+    let lines = [
+        ("an event whose data nests to the limit", event(&nest(MAX_PAYLOAD_DEPTH))),
+        ("an event whose data nests one level past the limit", event(&nest(MAX_PAYLOAD_DEPTH + 1))),
+        ("an event whose data nests past serde_json's own limit", event(&nest(300))),
+        ("a request whose params nest to the limit", request_nested(MAX_PAYLOAD_DEPTH).trim_end().to_string()),
+        ("a request whose params nest one level past the limit", request_nested(MAX_PAYLOAD_DEPTH + 1).trim_end().to_string()),
+        ("brackets that never close", format!("{{\"type\":\"event\",\"data\":{}", "[".repeat(10_000))),
+    ];
+    let parse: Vec<Value> =
+        lines.iter().map(|(name, line)| json!({"name": name, "line": line, "ok": Frame::parse(line).is_ok()})).collect();
+    // A response whose result is `depth` arrays inside one another: sent as it is, or answered with an error.
+    let encode: Vec<Value> = [1, 2, MAX_PAYLOAD_DEPTH - 1, MAX_PAYLOAD_DEPTH, MAX_PAYLOAD_DEPTH + 1, 100]
+        .into_iter()
+        .map(|depth| {
+            let result = serde_json::from_str::<Value>(&nest(depth)).unwrap();
+            let sent = matches!(Frame::ok(1, result), Frame::Response(Response { ok: true, .. }));
+            json!({"resultDepth": depth, "sent": sent})
+        })
+        .collect();
+    check(
+        "frames.json",
+        json!({
+            "about": "Frame limits. maxJsonDepth: a frame nests at most this deep, its own object counting as the first level, on every reader and writer. parse: Frame::parse on line accepts it (ok) or refuses it. encode: a response whose result is resultDepth arrays inside one another is sent (sent), or answered with an error response instead; a bridge never writes a line it would refuse to read.",
+            "maxJsonDepth": MAX_JSON_DEPTH,
+            "parse": parse,
+            "encode": encode,
         }),
     );
 }

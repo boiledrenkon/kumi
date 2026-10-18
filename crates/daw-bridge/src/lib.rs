@@ -51,8 +51,11 @@
 //! ## After auth
 //!
 //! One JSON object per line, UTF-8, at most 64 MiB ([`frame::MAX_FRAME_BYTES`]); a trailing `\r` is dropped and empty
-//! lines are skipped (counted toward the next line's limit). A line too long, not UTF-8 or not a frame closes the connection; unknown frame types and fields
-//! are ignored. Frames ([`wire::Frame`]):
+//! lines are skipped (counted toward the next line's limit). A frame nests at most [`wire::MAX_JSON_DEPTH`] (64)
+//! levels, its own object the first: a writer answers with an error instead of encoding a result or event deeper than
+//! that, and the host refuses such params. A line too long, not UTF-8, nested deeper or not a frame closes the
+//! connection (the host drops a too-deep frame from a bridge alone); unknown frame types and fields are ignored.
+//! Frames ([`wire::Frame`]):
 //!
 //! - request `{"type":"request","id":n,"method":…,"params":{…},"deadlineMs":unix ms?}`, ids increasing, at most 2^53−1;
 //! - response `{"type":"response","id":n,"ok":true,"result":…}` or `{…,"ok":false,"error":{"code":…,"message":…}}`

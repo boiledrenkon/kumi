@@ -49,6 +49,20 @@ test("vectors: framing", function()
   end
 end)
 
+test("vectors: frame limits", function()
+  local v = vectors("frames.json")
+  eq(v.maxJsonDepth, json.MAX_DEPTH)
+  ok(#v.parse > 0 and #v.encode > 0)
+  for _, case in ipairs(v.parse) do
+    eq(wire.parse_frame(case.line) ~= nil, case.ok, case.name)
+  end
+  for _, case in ipairs(v.encode) do
+    local result = json.array({})
+    for _ = 2, case.resultDepth do result = json.array({ result }) end
+    eq(wire.ok(1, result) ~= nil, case.sent, "a result " .. case.resultDepth .. " levels deep")
+  end
+end)
+
 test("vectors: handshake proofs and secret files", function()
   local v = vectors("handshake.json")
   eq(v.protocol, wire.PROTOCOL)

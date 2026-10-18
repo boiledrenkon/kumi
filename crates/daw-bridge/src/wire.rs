@@ -14,6 +14,12 @@ pub const HEARTBEATS_BEFORE_BUSY: u64 = 3;
 pub const HANDSHAKE_TIMEOUT_MS: u64 = 3000;
 /// How long the host waits for the handshake.
 pub const CLIENT_HANDSHAKE_TIMEOUT_MS: u64 = 5000;
+/// The deepest a frame may nest, its own object counting as the first level. One limit for every reader and writer:
+/// serde_json's own (128) and the Lua tool's JSON used to differ, so a frame one side wrote the other took for garbage
+/// and closed the connection.
+pub const MAX_JSON_DEPTH: usize = 64;
+/// The same limit for a value that sits in a frame's field (params, a result, an event's data).
+pub const MAX_PAYLOAD_DEPTH: usize = MAX_JSON_DEPTH - 1;
 /// Connections a bridge holds at once, before and after they authenticate.
 pub const MAX_UNAUTHENTICATED: usize = 4;
 pub const MAX_AUTHENTICATED: usize = 4;
@@ -183,6 +189,8 @@ pub mod event {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireError {
     NotJson(String),
+    /// Nested deeper than [`MAX_JSON_DEPTH`].
+    TooDeep,
     NotObject,
     Invalid(String),
 }
@@ -191,6 +199,7 @@ impl std::fmt::Display for WireError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WireError::NotJson(why) => write!(f, "not JSON: {why}"),
+            WireError::TooDeep => write!(f, "nested deeper than {MAX_JSON_DEPTH} levels"),
             WireError::NotObject => f.write_str("not a JSON object"),
             WireError::Invalid(why) => write!(f, "invalid frame: {why}"),
         }
@@ -203,10 +212,38 @@ fn empty_object() -> Value {
     Value::Object(Map::new())
 }
 
+/// Whether `value` nests at most `levels` deep: a scalar is 0, an array or object is one more than its deepest member.
+/// Looks with a stack of its own, so a value built in code can't overflow the thread's.
+pub fn nests_within(value: &Value, levels: usize) -> bool {
+    let mut pending = vec![(value, 0usize)];
+    while let Some((value, depth)) = pending.pop() {
+        match value {
+            Value::Array(items) => pending.extend(items.iter().map(|item| (item, depth + 1))),
+            Value::Object(members) => pending.extend(members.values().map(|member| (member, depth + 1))),
+            _ => continue,
+        }
+        if depth + 1 > levels {
+            return false;
+        }
+    }
+    true
+}
+
 impl Frame {
     /// One line read from the wire (without its newline).
     pub fn parse(line: &str) -> Result<Frame, WireError> {
-        let value: Value = serde_json::from_str(line).map_err(|error| WireError::NotJson(error.to_string()))?;
+        let value: Value = serde_json::from_str(line).map_err(|error| {
+            let why = error.to_string();
+            // serde's own limit, which comes first for a line nested past 128 levels.
+            if why.starts_with("recursion limit exceeded") {
+                WireError::TooDeep
+            } else {
+                WireError::NotJson(why)
+            }
+        })?;
+        if !nests_within(&value, MAX_JSON_DEPTH) {
+            return Err(WireError::TooDeep);
+        }
         if !value.is_object() {
             return Err(WireError::NotObject);
         }
@@ -253,7 +290,11 @@ impl Frame {
         bytes
     }
 
+    /// A successful response; a result nested past [`MAX_PAYLOAD_DEPTH`] can't be sent, so the response says so instead.
     pub fn ok(id: u64, result: Value) -> Frame {
+        if !nests_within(&result, MAX_PAYLOAD_DEPTH) {
+            return Frame::error(id, code::INTERNAL, format!("could not encode the result: nested deeper than {MAX_PAYLOAD_DEPTH} levels"));
+        }
         Frame::Response(Response { id, ok: true, result: Some(result), error: None })
     }
 
@@ -292,6 +333,33 @@ mod tests {
         assert!(Frame::parse(r#"{"type":"request","id":1,"method":"ping","params":[]}"#).is_err());
         assert!(Frame::parse(r#"{"type":"response","id":1,"ok":false}"#).is_err());
         assert!(Frame::parse(r#"{"type":"event","seq":0,"name":"project"}"#).is_err());
+    }
+
+    fn nested(levels: usize) -> Value {
+        (1..levels).fold(json!([]), |inner, _| json!([inner]))
+    }
+
+    #[test]
+    fn nesting_is_limited_to_one_depth_everywhere() {
+        assert!(nests_within(&json!(1), 0));
+        assert!(nests_within(&json!({"a": [1, {"b": []}]}), 4));
+        assert!(!nests_within(&json!({"a": [1, {"b": []}]}), 3));
+        assert!(nests_within(&nested(MAX_PAYLOAD_DEPTH), MAX_PAYLOAD_DEPTH));
+        assert!(!nests_within(&nested(MAX_PAYLOAD_DEPTH + 1), MAX_PAYLOAD_DEPTH));
+        // A result at the limit is sent; one level more is answered with an error, not dropped or sent.
+        assert!(matches!(Frame::ok(1, nested(MAX_PAYLOAD_DEPTH)), Frame::Response(Response { ok: true, .. })));
+        let Frame::Response(refused) = Frame::ok(1, nested(MAX_PAYLOAD_DEPTH + 1)) else { panic!() };
+        assert_eq!((refused.ok, refused.error.map(|e| e.code)), (false, Some(code::INTERNAL.into())));
+        // The line a frame becomes parses back at the limit and not past it, up to and past serde's own limit.
+        let line = |levels: usize| {
+            format!("{{\"type\":\"event\",\"seq\":1,\"name\":\"x\",\"data\":{}{}}}", "[".repeat(levels), "]".repeat(levels))
+        };
+        assert!(Frame::parse(&line(MAX_PAYLOAD_DEPTH)).is_ok());
+        for levels in [MAX_PAYLOAD_DEPTH + 1, 100, 127, 128, 129, 5000] {
+            assert_eq!(Frame::parse(&line(levels)), Err(WireError::TooDeep), "{levels} levels");
+        }
+        // Brackets alone, with nothing closing them, are too deep too, and not a panic or a stack overflow.
+        assert_eq!(Frame::parse(&format!("{{\"type\":{}", "[".repeat(100_000))), Err(WireError::TooDeep));
     }
 
     #[test]
