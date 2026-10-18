@@ -247,7 +247,7 @@ async fn serve(
                 let count = match read { Ok(0) | Err(_) => return, Ok(count) => count };
                 record(&state, number, true, &chunk[..count]);
                 let mut identity = || (state.lock().unwrap().identity.clone(), config.offer.clone());
-                for action in connection.on_bytes(&chunk[..count], &mut identity) {
+                for action in connection.on_bytes(&chunk[..count], clock.elapsed().as_millis() as u64, &mut identity) {
                     match action {
                         ServerAction::Send(bytes) => out.extend(bytes),
                         ServerAction::Close(_) => close = true,

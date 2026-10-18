@@ -20,9 +20,11 @@ M.MAX_AUTHENTICATED = 4
 M.MAX_SAFE_INTEGER = 2 ^ 53 - 1
 
 -- Framing: lines without "\n" or a trailing "\r", empty lines skipped. An error ends the stream.
+-- Empty lines count toward the limit of the line after them: a line and the empty lines before
+-- it are at most max bytes together (the empty lines' "\r" and "\n" in, the line's own out).
 
 function M.framer(max_bytes)
-  return { max = max_bytes, chunks = {}, first = 1, last = 0, pos = 1, parts = {}, count = 0, size = 0 }
+  return { max = max_bytes, chunks = {}, first = 1, last = 0, pos = 1, parts = {}, count = 0, size = 0, blank = 0 }
 end
 
 function M.feed(framer, bytes)
@@ -51,19 +53,24 @@ function M.next_line(framer)
         framer.chunks[framer.first] = nil
         framer.first, framer.pos = framer.first + 1, 1
       end
-      local length = framer.size + #piece
+      local raw = framer.size + #piece
       local ends_cr = (#piece > 0 and byte(piece, -1) == 13) or (#piece == 0 and framer.count > 0 and byte(framer.parts[framer.count], -1) == 13)
-      if ends_cr then length = length - 1 end
-      if length > framer.max then return fail(framer, "oversized") end
-      local line = piece
-      if framer.count > 0 then
-        framer.count = framer.count + 1
-        framer.parts[framer.count] = piece
-        line = concat(framer.parts, "", 1, framer.count)
+      local length = ends_cr and raw - 1 or raw
+      if length == 0 then
         framer.parts, framer.count, framer.size = {}, 0, 0
-      end
-      if ends_cr then line = sub(line, 1, -2) end
-      if line ~= "" then
+        framer.blank = framer.blank + raw + 1
+        if framer.blank > framer.max then return fail(framer, "oversized") end
+      else
+        if framer.blank + length > framer.max then return fail(framer, "oversized") end
+        framer.blank = 0
+        local line = piece
+        if framer.count > 0 then
+          framer.count = framer.count + 1
+          framer.parts[framer.count] = piece
+          line = concat(framer.parts, "", 1, framer.count)
+          framer.parts, framer.count, framer.size = {}, 0, 0
+        end
+        if ends_cr then line = sub(line, 1, -2) end
         if not json.valid_utf8(line) then return fail(framer, "invalid-utf8") end
         return line
       end
@@ -78,7 +85,7 @@ function M.next_line(framer)
   end
   local held = framer.size
   if held > 0 and byte(framer.parts[framer.count], -1) == 13 then held = held - 1 end
-  if held > framer.max then return fail(framer, "oversized") end
+  if framer.blank + held > framer.max then return fail(framer, "oversized") end
   return nil
 end
 
@@ -265,10 +272,12 @@ function Connection:refuse(actions, reason, protocol)
   return self:close(actions, "refused:" .. reason)
 end
 
--- identity() gives the welcome's fields besides type, session and maxFrameBytes; it's called only
--- once the host has proved it knows the secret.
-function Connection:on_bytes(bytes, identity)
-  local actions = {}
+-- What to do with bytes read at now_ms (the clock the connection was made with). The handshake's
+-- deadline is checked first, so a peer that keeps sending can't outlast it. identity() gives the
+-- welcome's fields besides type, session and maxFrameBytes; it's called only once the host has
+-- proved it knows the secret.
+function Connection:on_bytes(bytes, now_ms, identity)
+  local actions = self:on_tick(now_ms)
   if self.state == "closed" or bytes == "" then return actions end
   if not self.first_byte_seen then
     self.first_byte_seen = true
@@ -318,7 +327,7 @@ function Connection:on_bytes(bytes, identity)
   return actions
 end
 
--- The handshake's deadline; call it from the timer.
+-- The handshake's deadline, for the timer (a peer that sends nothing); on_bytes checks it too.
 function Connection:on_tick(now_ms)
   if (self.state == "hello" or self.state == "auth") and now_ms - self.accepted_ms >= M.HANDSHAKE_TIMEOUT_MS then
     return self:refuse({}, "timeout")

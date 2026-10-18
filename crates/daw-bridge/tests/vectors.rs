@@ -138,6 +138,10 @@ fn framing_vectors() {
         ("two lines in one read", 64, vec![b"{\"a\":1}\n{\"b\":2}\n".to_vec()]),
         ("a line split across reads", 64, vec![b"{\"a\"".to_vec(), b":1}".to_vec(), b"\n".to_vec()]),
         ("carriage return dropped, blank lines skipped", 64, vec![b"\n\r\n{\"a\":1}\r\n\n".to_vec()]),
+        ("blank lines count toward the next line's limit", 8, vec![b"\n\r\n{\"a\":1}\n".to_vec()]),
+        ("a line and the blank lines before it at exactly the limit", 8, vec![b"\n{\"a\":1}\n\n\n{}\n".to_vec()]),
+        ("blank lines alone over the limit", 8, vec![b"\n\n\n\n".to_vec(), b"\n\n\n\n".to_vec(), b"\n".to_vec()]),
+        ("blank lines and a held line over the limit", 8, vec![b"\n\n\n\n\n{\"a\":".to_vec()]),
         ("a line of exactly the limit", 8, vec![b"{\"a\":12}\n".to_vec()]),
         ("one byte over the limit with its newline", 8, vec![b"{\"a\":123}\n".to_vec()]),
         ("over the limit before any newline", 8, vec![b"{\"a\":1234".to_vec()]),
@@ -173,7 +177,7 @@ fn framing_vectors() {
     check(
         "framing.json",
         json!({
-            "about": "Feed each chunk in order and take lines until none; an error ends the stream. maxBytes bounds a line without its newline (and a trailing carriage return).",
+            "about": "Feed each chunk in order and take lines until none; an error ends the stream. maxBytes bounds a line without its newline (and a trailing carriage return) together with the blank lines skipped before it, their carriage returns and newlines included; blank lines alone, and a line not yet ended, are bounded the same way.",
             "cases": made,
         }),
     );
@@ -207,10 +211,18 @@ fn run(steps: &[Step]) -> Vec<Value> {
     let secret = Secret::new(SECRET).unwrap();
     let mut server = ServerConnection::with_nonces(secret, SERVER_NONCE.into(), SESSION.into(), 0);
     let mut out = vec![];
+    let mut clock = 0;
     for step in steps {
         let (input, actions) = match step {
-            Step::Bytes(bytes) => (json!({"inHex": hex::encode(bytes)}), server.on_bytes(bytes, &mut identity)),
-            Step::Tick(ms) => (json!({"tickMs": ms}), server.on_tick(*ms)),
+            Step::Bytes(bytes) => (json!({"inHex": hex::encode(bytes)}), server.on_bytes(bytes, clock, &mut identity)),
+            Step::BytesAt(ms, bytes) => {
+                clock = *ms;
+                (json!({"inHex": hex::encode(bytes), "atMs": ms}), server.on_bytes(bytes, clock, &mut identity))
+            }
+            Step::Tick(ms) => {
+                clock = *ms;
+                (json!({"tickMs": ms}), server.on_tick(clock))
+            }
         };
         let expect: Vec<Value> = actions
             .into_iter()
@@ -237,11 +249,17 @@ fn run(steps: &[Step]) -> Vec<Value> {
 
 enum Step {
     Bytes(Vec<u8>),
+    /// Bytes read at a later time.
+    BytesAt(u64, Vec<u8>),
     Tick(u64),
 }
 
 fn bytes(text: impl AsRef<[u8]>) -> Step {
     Step::Bytes(text.as_ref().to_vec())
+}
+
+fn bytes_at(ms: u64, text: impl AsRef<[u8]>) -> Step {
+    Step::BytesAt(ms, text.as_ref().to_vec())
 }
 
 #[test]
@@ -278,6 +296,22 @@ fn server_vectors() {
         ]),
         ("an uppercase proof", vec![bytes(&good_hello), bytes(auth_line(SECRET).to_uppercase().replace("TYPE", "type").replace("AUTH", "auth").replace("PROOF", "proof"))]),
         ("the handshake timeout", vec![bytes(&good_hello), Step::Tick(2999), Step::Tick(3000)]),
+        ("bytes that keep coming don't stretch the handshake", vec![
+            bytes(&good_hello),
+            bytes_at(1000, "\n"),
+            bytes_at(2000, "\n"),
+            bytes_at(2999, "\n"),
+            bytes_at(3000, "\n"),
+        ]),
+        ("blank lines before auth count toward the line limit", vec![
+            bytes(&good_hello),
+            bytes("\n".repeat(MAX_PREAUTH_LINE_BYTES)),
+            bytes("\n"),
+        ]),
+        ("blank lines and the auth after them over the line limit", vec![
+            bytes(&good_hello),
+            bytes(format!("{}{}", "\r\n".repeat(470), auth_line(SECRET))),
+        ]),
         ("after auth a line that isn't JSON closes without a reply", vec![bytes(&good_hello), bytes(auth_line(SECRET)), bytes("nope\n")]),
         ("after auth invalid UTF-8 closes without a reply", vec![bytes(&good_hello), bytes(auth_line(SECRET)), bytes(b"{\"a\":\"\xff\"}\n")]),
         ("after auth a request with id 0 closes", vec![bytes(&good_hello), bytes(auth_line(SECRET)), bytes("{\"type\":\"request\",\"id\":0,\"method\":\"ping\"}\n")]),
@@ -287,7 +321,7 @@ fn server_vectors() {
     check(
         "server.json",
         json!({
-            "about": "A bridge's side of a connection. Accept it at time 0 with the secret, serverNonce and session below; for each step feed inHex (or advance the clock to tickMs) and expect, in order: send (compare as JSON; for a welcome compare type, session, maxFrameBytes and heartbeatMs, the rest is the bridge's own), close (silent: no reply; refused:<reason>: after the refusal; protocol: a bad line after auth, no reply), authenticated, request (the request to answer). Nothing is read after a close. overCapacity: what a bridge sends, before reading, to a connection over its limits, then closes.",
+            "about": "A bridge's side of a connection. Accept it at time 0 with the secret, serverNonce and session below; for each step feed inHex at the clock's time (first moving the clock to atMs when given), or move the clock to tickMs and run the timer, and expect, in order: send (compare as JSON; for a welcome compare type, session, maxFrameBytes and heartbeatMs, the rest is the bridge's own), close (silent: no reply; refused:<reason>: after the refusal; protocol: a bad line after auth, no reply), authenticated, request (the request to answer). Nothing is read after a close. overCapacity: what a bridge sends, before reading, to a connection over its limits, then closes.",
             "secret": SECRET,
             "serverNonce": SERVER_NONCE,
             "session": SESSION,

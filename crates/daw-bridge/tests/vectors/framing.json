@@ -1,5 +1,5 @@
 {
-  "about": "Feed each chunk in order and take lines until none; an error ends the stream. maxBytes bounds a line without its newline (and a trailing carriage return).",
+  "about": "Feed each chunk in order and take lines until none; an error ends the stream. maxBytes bounds a line without its newline (and a trailing carriage return) together with the blank lines skipped before it, their carriage returns and newlines included; blank lines alone, and a line not yet ended, are bounded the same way.",
   "cases": [
     {
       "name": "two lines in one read",
@@ -39,6 +39,59 @@
       "expect": [
         {
           "line": "{\"a\":1}"
+        }
+      ]
+    },
+    {
+      "name": "blank lines count toward the next line's limit",
+      "maxBytes": 8,
+      "chunksHex": [
+        "0a0d0a7b2261223a317d0a"
+      ],
+      "expect": [
+        {
+          "error": "oversized"
+        }
+      ]
+    },
+    {
+      "name": "a line and the blank lines before it at exactly the limit",
+      "maxBytes": 8,
+      "chunksHex": [
+        "0a7b2261223a317d0a0a0a7b7d0a"
+      ],
+      "expect": [
+        {
+          "line": "{\"a\":1}"
+        },
+        {
+          "line": "{}"
+        }
+      ]
+    },
+    {
+      "name": "blank lines alone over the limit",
+      "maxBytes": 8,
+      "chunksHex": [
+        "0a0a0a0a",
+        "0a0a0a0a",
+        "0a"
+      ],
+      "expect": [
+        {
+          "error": "oversized"
+        }
+      ]
+    },
+    {
+      "name": "blank lines and a held line over the limit",
+      "maxBytes": 8,
+      "chunksHex": [
+        "0a0a0a0a0a7b2261223a"
+      ],
+      "expect": [
+        {
+          "error": "oversized"
         }
       ]
     },

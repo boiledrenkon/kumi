@@ -129,6 +129,7 @@ pub mod testing {
                 let (secret, identity) = (secret.clone(), identity.clone());
                 std::thread::spawn(move || {
                     let mut stream = stream;
+                    let clock = std::time::Instant::now();
                     let mut connection = ServerConnection::new(secret, 0);
                     let mut chunk = [0u8; 4096];
                     while let Ok(count) = stream.read(&mut chunk) {
@@ -136,7 +137,7 @@ pub mod testing {
                             return;
                         }
                         let mut who = || (identity.clone(), Offer::default());
-                        for action in connection.on_bytes(&chunk[..count], &mut who) {
+                        for action in connection.on_bytes(&chunk[..count], clock.elapsed().as_millis() as u64, &mut who) {
                             let bytes = match action {
                                 ServerAction::Send(bytes) => bytes,
                                 ServerAction::Request(request) => {

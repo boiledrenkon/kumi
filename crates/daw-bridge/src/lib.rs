@@ -30,7 +30,8 @@
 //! - Peers other than loopback are closed at once ([`loopback::peer_allowed`]); at most 4 connections wait to
 //!   authenticate and 4 are authenticated.
 //! - The first byte must be `{`, so an HTTP request (a browser, a DNS-rebinding page) is closed without a reply.
-//! - Lines are at most 1024 bytes ([`frame::MAX_PREAUTH_LINE_BYTES`]); the handshake must finish within 3 s.
+//! - Lines are at most 1024 bytes ([`frame::MAX_PREAUTH_LINE_BYTES`]), the empty lines before a line counted in it.
+//! - The handshake must finish within 3 s of the accept, checked on every read as well as on the bridge's timer.
 //!
 //! ## Handshake (host first; mutual HMAC-SHA256 challenge)
 //!
@@ -50,7 +51,7 @@
 //! ## After auth
 //!
 //! One JSON object per line, UTF-8, at most 64 MiB ([`frame::MAX_FRAME_BYTES`]); a trailing `\r` is dropped and empty
-//! lines are skipped. A line too long, not UTF-8 or not a frame closes the connection; unknown frame types and fields
+//! lines are skipped (counted toward the next line's limit). A line too long, not UTF-8 or not a frame closes the connection; unknown frame types and fields
 //! are ignored. Frames ([`wire::Frame`]):
 //!
 //! - request `{"type":"request","id":n,"method":…,"params":{…},"deadlineMs":unix ms?}`, ids increasing, at most 2^53−1;

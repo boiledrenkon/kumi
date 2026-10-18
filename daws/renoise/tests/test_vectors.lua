@@ -92,15 +92,17 @@ test("vectors: the server side of a connection", function()
   same(assert(json.decode(wire.over_capacity():sub(1, -2))), v.overCapacity, "over capacity")
   for _, case in ipairs(v.cases) do
     local conn = wire.connection(v.secret, 0, v.serverNonce, v.session)
-    local closed = false
+    local closed, clock = false, 0
     for s, step in ipairs(case.steps) do
       local where = case.name .. ", step " .. s
       ok(not closed, where .. ": nothing is read after a close")
       local actions
       if step.inHex then
-        actions = conn:on_bytes(unhex(step.inHex), function() return welcome_fields(v.welcomeIdentity) end)
+        clock = step.atMs or clock
+        actions = conn:on_bytes(unhex(step.inHex), clock, function() return welcome_fields(v.welcomeIdentity) end)
       else
-        actions = conn:on_tick(step.tickMs)
+        clock = step.tickMs
+        actions = conn:on_tick(clock)
       end
       eq(#actions, #step.expect, where .. ": actions")
       for i, expected in ipairs(step.expect) do

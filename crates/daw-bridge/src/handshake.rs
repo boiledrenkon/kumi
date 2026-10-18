@@ -106,9 +106,11 @@ impl ServerConnection {
         &self.session
     }
 
-    /// What to do with bytes the socket read. `identity` is asked for only when the host has authenticated.
-    pub fn on_bytes(&mut self, bytes: &[u8], identity: &mut dyn FnMut() -> (Identity, Offer)) -> Vec<ServerAction> {
-        let mut actions = vec![];
+    /// What to do with bytes the socket read at `now_ms` (the clock [`ServerConnection::new`] took). The handshake's
+    /// deadline is checked first, so a peer that keeps sending can't outlast it. `identity` is asked for only when the
+    /// host has authenticated.
+    pub fn on_bytes(&mut self, bytes: &[u8], now_ms: u64, identity: &mut dyn FnMut() -> (Identity, Offer)) -> Vec<ServerAction> {
+        let mut actions = self.on_tick(now_ms);
         if self.state == ServerState::Closed || bytes.is_empty() {
             return actions;
         }
@@ -180,7 +182,8 @@ impl ServerConnection {
         actions
     }
 
-    /// The handshake's deadline: call it from the bridge's timer.
+    /// The handshake's deadline, for the bridge's timer (a peer that sends nothing); [`ServerConnection::on_bytes`]
+    /// checks it too.
     pub fn on_tick(&mut self, now_ms: u64) -> Vec<ServerAction> {
         if matches!(self.state, ServerState::AwaitHello | ServerState::AwaitAuth)
             && now_ms.saturating_sub(self.accepted_ms) >= HANDSHAKE_TIMEOUT_MS
@@ -344,14 +347,14 @@ mod tests {
         let mut server = ServerConnection::new(secret(), 0);
         let (mut client, hello) = ClientHandshake::start(secret(), "test/1");
         assert!(server.event("project", Value::Null).is_none());
-        let actions = server.on_bytes(&hello, &mut identity);
+        let actions = server.on_bytes(&hello, 0, &mut identity);
         let ClientStep::Send(auth) = client.on_line(&sends(&actions)[0]).unwrap() else { panic!() };
-        let actions = server.on_bytes(&auth, &mut identity);
+        let actions = server.on_bytes(&auth, 0, &mut identity);
         assert_eq!(actions.last(), Some(&ServerAction::Authenticated));
         let ClientStep::Welcome(welcome) = client.on_line(&sends(&actions)[0]).unwrap() else { panic!() };
         assert_eq!(welcome.identity, identity().0);
         assert_eq!(welcome.session, server.session());
-        let actions = server.on_bytes(b"{\"type\":\"request\",\"id\":1,\"method\":\"status\"}\n{\"type\":\"other\"}\n", &mut identity);
+        let actions = server.on_bytes(b"{\"type\":\"request\",\"id\":1,\"method\":\"status\"}\n{\"type\":\"other\"}\n", 0, &mut identity);
         assert!(matches!(&actions[..], [ServerAction::Request(Request { id: 1, .. })]));
         assert!(String::from_utf8(server.event("project", Value::Null).unwrap()).unwrap().contains("\"seq\":1"));
         assert!(String::from_utf8(server.event("project", Value::Null).unwrap()).unwrap().contains("\"seq\":2"));
@@ -362,38 +365,39 @@ mod tests {
         let other = Secret::new("o".repeat(40)).unwrap();
         let mut server = ServerConnection::new(other.clone(), 0);
         let (mut client, hello) = ClientHandshake::start(secret(), "test/1");
-        let actions = server.on_bytes(&hello, &mut identity);
+        let actions = server.on_bytes(&hello, 0, &mut identity);
         assert!(matches!(client.on_line(&sends(&actions)[0]), Err(HandshakeError::BadProof)));
 
         let mut server = ServerConnection::new(secret(), 0);
         let (mut client, hello) = ClientHandshake::start(secret(), "test/1");
-        let challenge = sends(&server.on_bytes(&hello, &mut identity))[0].clone();
+        let challenge = sends(&server.on_bytes(&hello, 0, &mut identity))[0].clone();
         let Frame::Challenge { nonce, .. } = Frame::parse(&challenge).unwrap() else { panic!() };
         let _ = client.on_line(&challenge).unwrap();
         let forged = Frame::Auth { proof: auth::proof(&other, Role::Client, "0".repeat(32).as_str(), &nonce) }.encode();
-        let actions = server.on_bytes(&forged, &mut identity);
+        let actions = server.on_bytes(&forged, 0, &mut identity);
         assert_eq!(sends(&actions), vec![r#"{"type":"refused","reason":"auth"}"#]);
         assert_eq!(actions.last(), Some(&ServerAction::Close(CloseReason::Refused("auth"))));
-        assert!(server.is_closed() && server.on_bytes(b"{}\n", &mut identity).is_empty());
+        assert!(server.is_closed() && server.on_bytes(b"{}\n", 0, &mut identity).is_empty());
     }
 
     #[test]
     fn refusals_before_auth() {
         let mut server = ServerConnection::new(secret(), 0);
-        assert_eq!(server.on_bytes(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n", &mut identity), vec![ServerAction::Close(CloseReason::Http)]);
+        assert_eq!(server.on_bytes(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n", 0, &mut identity), vec![ServerAction::Close(CloseReason::Http)]);
         let mut server = ServerConnection::new(secret(), 0);
-        assert_eq!(server.on_bytes(b"\xEF\xBB\xBF{}\n", &mut identity), vec![ServerAction::Close(CloseReason::NotJson)]);
+        assert_eq!(server.on_bytes(b"\xEF\xBB\xBF{}\n", 0, &mut identity), vec![ServerAction::Close(CloseReason::NotJson)]);
         let mut server = ServerConnection::new(secret(), 0);
-        let actions = server.on_bytes(format!("{{\"type\":\"hello\",\"pad\":\"{}\"}}\n", "x".repeat(1100)).as_bytes(), &mut identity);
+        let actions = server.on_bytes(format!("{{\"type\":\"hello\",\"pad\":\"{}\"}}\n", "x".repeat(1100)).as_bytes(), 0, &mut identity);
         assert_eq!(sends(&actions), vec![r#"{"type":"refused","reason":"limit"}"#]);
         let mut server = ServerConnection::new(secret(), 0);
         let actions = server.on_bytes(
             format!("{{\"type\":\"hello\",\"protocol\":\"kumi-daw/2\",\"nonce\":\"{}\"}}\n", "a".repeat(32)).as_bytes(),
+            0,
             &mut identity,
         );
         assert_eq!(sends(&actions), vec![r#"{"type":"refused","reason":"protocol","protocol":"kumi-daw/1"}"#]);
         let mut server = ServerConnection::new(secret(), 0);
-        let actions = server.on_bytes(b"{\"type\":\"request\",\"id\":1,\"method\":\"status\"}\n", &mut identity);
+        let actions = server.on_bytes(b"{\"type\":\"request\",\"id\":1,\"method\":\"status\"}\n", 0, &mut identity);
         assert_eq!(sends(&actions), vec![r#"{"type":"refused","reason":"handshake"}"#]);
         let mut server = ServerConnection::new(secret(), 100);
         assert!(server.on_tick(3099).is_empty());
@@ -401,14 +405,27 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_that_keeps_sending_is_timed_out_all_the_same() {
+        let mut server = ServerConnection::new(secret(), 100);
+        let (_, hello) = ClientHandshake::start(secret(), "test/1");
+        assert_eq!(sends(&server.on_bytes(&hello, 100, &mut identity)).len(), 1);
+        for at in (200..3100).step_by(100) {
+            assert!(server.on_bytes(b"\n", at, &mut identity).is_empty(), "{at}");
+        }
+        let actions = server.on_bytes(b"\n", 3100, &mut identity);
+        assert_eq!(sends(&actions), vec![r#"{"type":"refused","reason":"timeout"}"#]);
+        assert_eq!(actions.last(), Some(&ServerAction::Close(CloseReason::Refused("timeout"))));
+    }
+
+    #[test]
     fn after_auth_a_bad_line_closes_without_a_reply() {
         let mut server = ServerConnection::new(secret(), 0);
         let (mut client, hello) = ClientHandshake::start(secret(), "test/1");
-        let challenge = sends(&server.on_bytes(&hello, &mut identity))[0].clone();
+        let challenge = sends(&server.on_bytes(&hello, 0, &mut identity))[0].clone();
         let ClientStep::Send(auth) = client.on_line(&challenge).unwrap() else { panic!() };
-        server.on_bytes(&auth, &mut identity);
+        server.on_bytes(&auth, 0, &mut identity);
         assert!(server.on_tick(10_000).is_empty());
-        let actions = server.on_bytes(b"not json\n", &mut identity);
+        let actions = server.on_bytes(b"not json\n", 0, &mut identity);
         assert!(matches!(&actions[..], [ServerAction::Close(CloseReason::Protocol(_))]));
     }
 }

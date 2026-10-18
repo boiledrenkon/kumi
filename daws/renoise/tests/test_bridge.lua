@@ -248,6 +248,34 @@ test("bridge: the handshake must finish within 3 seconds", function()
   no_dialogs()
 end)
 
+test("bridge: a peer that keeps sending is timed out at 3 seconds, timer or not", function()
+  setup()
+  local slow = mock.connect()
+  send(slow, { type = "hello", protocol = PROTOCOL, nonce = CLIENT_NONCE })
+  frames(slow)
+  for _ = 1, 29 do
+    mock.time = mock.time + 100 -- the clock moves, no timer runs
+    slow:send("\n")
+  end
+  eq(#frames(slow), 0, "still waiting at 2.9 s")
+  mock.time = mock.time + 100
+  slow:send("\n")
+  refused(slow, "timeout")
+  no_dialogs()
+end)
+
+test("bridge: blank lines before auth count toward the 1024-byte limit", function()
+  setup()
+  local peer = mock.connect()
+  send(peer, { type = "hello", protocol = PROTOCOL, nonce = CLIENT_NONCE })
+  frames(peer)
+  peer:send(string.rep("\n", 1024))
+  eq(#frames(peer), 0)
+  peer:send("\n")
+  refused(peer, "limit")
+  no_dialogs()
+end)
+
 test("bridge: a first line over 1024 bytes is refused", function()
   setup()
   local peer = mock.connect()

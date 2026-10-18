@@ -404,7 +404,7 @@ fn serve(conn: &Arc<Conn>, mut stream: TcpStream, started: Instant, shared: &Sha
     loop {
         let actions = match stream.read(&mut buf) {
             Ok(0) => return,
-            Ok(n) => lock(&conn.state).on_bytes(&buf[..n], &mut || shared.identity()),
+            Ok(n) => lock(&conn.state).on_bytes(&buf[..n], started.elapsed().as_millis() as u64, &mut || shared.identity()),
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
                 lock(&conn.state).on_tick(started.elapsed().as_millis() as u64)
             }
@@ -566,6 +566,9 @@ mod tests {
             let mut closed = false;
             for step in case["steps"].as_array().unwrap() {
                 if let Some(hex) = step["inHex"].as_str() {
+                    if let Some(at) = step["atMs"].as_u64() {
+                        thread::sleep(Duration::from_millis(at).saturating_sub(accepted.elapsed()));
+                    }
                     // A failed write is fine once the bridge closed; the expectations say what it sent before.
                     let _ = stream.write_all(&hex::decode(hex).unwrap());
                     thread::sleep(Duration::from_millis(20));
