@@ -203,6 +203,7 @@ function Peer:wrap()
       -- crashes Renoise. Neither is ever right, so both are recorded for the tests to refuse.
       if not peer.open then
         M.crashes[#M.crashes + 1] = "closed a socket the peer had closed (Renoise crashes): " .. tostring(peer.port)
+        error("mock: Renoise crashed (SIGSEGV in TLuaSocketBase::Close)", 2)
       else
         M.crashes[#M.crashes + 1] = "closed an accepted client (Renoise's server stops): " .. tostring(peer.port)
       end
@@ -298,9 +299,11 @@ end
 
 -- Timers
 
+-- Time passes; with M.stall_timers set no timer runs meanwhile, as when Renoise's timers are held behind a modal dialog
+-- or slowed in the background while its sockets go on calling in.
 function M.advance(ms)
   local target = M.time + ms
-  while true do
+  while not M.stall_timers do
     local next_timer
     for _, t in ipairs(M.timers) do
       if t.due <= target and (not next_timer or t.due < next_timer.due) then next_timer = t end
@@ -368,6 +371,7 @@ local function shell_quote(s)
 end
 
 local real_time = os.time
+local real_popen = io.popen
 
 local function install_os_shims()
   -- Wall time follows the mock clock, from a fixed start.
@@ -388,7 +392,22 @@ local function install_os_shims()
   end
   io.stat = function(path)
     if not (M.stat_modes[path] or io.exists(path)) then return nil, "no such file", 2 end
-    return { type = "file", mode = M.stat_modes[path] or 33152, size = 0 }
+    return { type = "file", mode = M.stat_modes[path] or 33152, size = 0, mtime = M.stat_mtimes[path] or os.time() }
+  end
+  -- Names (not paths) of the files in a folder, optionally only those matching {"*.log", ...}.
+  os.filenames = function(dir, extensions)
+    local names = {}
+    local listing = assert(real_popen("ls -1 '" .. dir:gsub("'", "'\\''") .. "' 2>/dev/null"))
+    for name in listing:lines() do
+      local wanted = extensions == nil
+      for _, pattern in ipairs(extensions or {}) do
+        local lua = "^" .. pattern:gsub("[%^%$%(%)%%%.%[%]%+%-%?]", "%%%0"):gsub("%*", ".*") .. "$"
+        if name:find(lua) then wanted = true end
+      end
+      if wanted then names[#names + 1] = name end
+    end
+    listing:close()
+    return names
   end
   io.popen = function(command)
     M.popen_calls[#M.popen_calls + 1] = command
@@ -411,7 +430,8 @@ function M.reset(options)
   -- Calls that would crash the real Renoise.
   M.crashes = {}
   M.servers, M.busy_ports, M.timers, M.menu_entries = {}, {}, {}, {}
-  M.stat_modes = {}
+  M.stat_modes, M.stat_mtimes = {}, {}
+  M.stall_timers = false
   -- Bytes a socket takes from a peer that doesn't read, and the sends that would have blocked because of it.
   M.socket_buffer_bytes, M.blocked_sends = options.socket_buffer_bytes or 256 * 1024, 0
   M.time = 0
