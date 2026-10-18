@@ -74,22 +74,36 @@ fn connections(simulator: &Simulator) -> usize {
     simulator.transcript().iter().map(|line| line.connection).max().unwrap_or(0)
 }
 
-/// A connection the bridge let go of without a word answers nothing for ever and heartbeats nothing. The host says so,
-/// drops it, and the next call connects afresh.
+/// A connection the bridge let go of without a word answers nothing for ever and heartbeats nothing, while the DAW
+/// answers a new one. The host sees that, replaces the connection, and the call it was making is asked again on the new one.
 #[tokio::test]
-async fn a_connection_the_bridge_lost_track_of_is_dropped_and_the_next_call_connects_afresh() {
+async fn a_connection_the_bridge_lost_track_of_is_replaced_by_a_fresh_one_that_answers() {
     let (_home, host, simulator) = lab(100).await;
     host.call("snapshot", json!({}), &anyone(), WAIT).await.unwrap();
     assert_eq!(connections(&simulator), 1);
     simulator.go_silent();
-    let error = host.call("snapshot", json!({}), &anyone(), Duration::from_millis(600)).await.unwrap_err();
-    match &error {
-        CallError::Closed(reason) => assert!(reason.contains("dropped"), "{reason}"),
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(host.call_error(&error)["connected"], false);
-    host.call("snapshot", json!({}), &anyone(), WAIT).await.expect("the next call is on a new connection");
+    let answer = host.call("snapshot", json!({}), &anyone(), Duration::from_millis(600)).await;
+    assert!(answer.is_ok(), "asked again on the new connection: {answer:?}");
+    assert_eq!(connections(&simulator), 2, "a fresh handshake, and the old connection let go");
+    host.call("snapshot", json!({}), &anyone(), WAIT).await.expect("and the next call uses it");
     assert_eq!(connections(&simulator), 2);
+    simulator.stop();
+}
+
+/// A frozen DAW (a plug-in loading, a long script) answers neither the old connection nor a new handshake: that is busy, not
+/// a lost connection. Nothing is dropped, and when it thaws the same connection answers.
+#[tokio::test]
+async fn a_frozen_bridge_is_busy_and_keeps_its_connection() {
+    let (_home, host, simulator) = lab(100).await;
+    host.call("snapshot", json!({}), &anyone(), WAIT).await.unwrap();
+    simulator.freeze();
+    let error = host.call("snapshot", json!({}), &anyone(), Duration::from_millis(600)).await.unwrap_err();
+    assert_eq!(error, CallError::Timeout, "told the DAW is busy, not that the connection was lost");
+    let said = host.call_error(&error);
+    assert_eq!((said["busy"].clone(), said["connected"].clone()), (json!(true), json!(true)), "{said}");
+    simulator.thaw();
+    host.call("snapshot", json!({}), &anyone(), WAIT).await.expect("the old connection answers again");
+    assert_eq!(connections(&simulator), 2, "only the handshake that went unanswered was made besides the first");
     simulator.stop();
 }
 
