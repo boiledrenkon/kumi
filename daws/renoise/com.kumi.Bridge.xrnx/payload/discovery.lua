@@ -1,19 +1,37 @@
--- The discovery file Kumi reads to find this bridge: written when the server listens, rewritten
--- when the song changes, removed when the tool unloads.
+-- The discovery file Kumi reads to find this bridge: <dir>/renoise-<pid>-<key>.json, written once the
+-- server listens, rewritten when the song changes, removed when the tool unloads.
 
 local import = ...
 local json = import("json")
+local sha256 = import("sha256")
 
 local M = {}
+
+M.SCHEMA = "kumi-daw-discovery/1"
+
+local function windows()
+  return os.platform ~= nil and os.platform() == "WINDOWS"
+end
+
+-- The first 16 hex of the SHA-256 of the resource folder's path as given.
+function M.key(resource)
+  return sha256.hex(resource):sub(1, 16)
+end
+
+function M.file_name(pid, resource)
+  return "renoise-" .. string.format("%d", pid) .. "-" .. M.key(resource) .. ".json"
+end
 
 local function ensure_dir(path)
   if io.exists(path) then return true end
   local parent = path:match("^(.*)[/\\][^/\\]+[/\\]?$")
   if parent and parent ~= "" and not io.exists(parent) then ensure_dir(parent) end
-  return os.mkdir(path)
+  local ok = os.mkdir(path)
+  if ok and not windows() and io.chmod then io.chmod(path, 700) end
+  return ok
 end
 
--- Writes value as JSON to path through a temporary file, so a reader never sees half of it.
+-- Writes value as JSON through a temporary file, owner-only, so a reader never sees half of it.
 function M.write(path, value)
   local text, err = json.encode(value)
   if not text then return nil, err end
@@ -24,7 +42,8 @@ function M.write(path, value)
   if not f then return nil, open_err end
   f:write(text, "\n")
   f:close()
-  if os.platform and os.platform() == "WINDOWS" then os.remove(path) end
+  if not windows() and io.chmod then io.chmod(temp, 600) end
+  if windows() then os.remove(path) end
   local ok, rename_err = os.rename(temp, path)
   if not ok then
     os.remove(temp)

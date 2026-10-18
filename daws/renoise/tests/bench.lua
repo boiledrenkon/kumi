@@ -9,7 +9,7 @@ local function import(name)
   end
   return loaded[name]
 end
-local sha256, net = import("sha256"), import("net")
+local sha256, wire = import("sha256"), import("wire")
 
 local function time(fn, min_seconds)
   local runs, start = 0, os.clock()
@@ -24,10 +24,10 @@ local secret = string.rep("k", 43)
 local client_nonce, server_nonce = string.rep("ab", 16), string.rep("cd", 16)
 print(string.format("jit: %s", jit and jit.status() and "on" or "off"))
 local handshake = time(function()
-  local n = net.nonce(secret)
-  local proof = net.client_proof(secret, server_nonce, client_nonce)
-  assert(sha256.equal(proof, proof) and n)
-  net.server_proof(secret, client_nonce, server_nonce)
+  local n = wire.nonce(secret)
+  local proof = wire.proof(secret, "server", client_nonce, server_nonce)
+  assert(wire.verify_proof(secret, "client", client_nonce, server_nonce, wire.proof(secret, "client", client_nonce, server_nonce)))
+  assert(n and proof)
 end)
 print(string.format("per connection (nonce + both proofs): %.3f ms", handshake * 1000))
 

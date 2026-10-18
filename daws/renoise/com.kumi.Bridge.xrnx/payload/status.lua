@@ -1,16 +1,20 @@
--- What the bridge says about itself and the song: hello/status, and the song's Kumi id.
+-- Who this bridge is and what song is open: the welcome's identity, status, and the song's Kumi id.
 
 local import = ...
 local json = import("json")
-local net = import("net")
+local sha256 = import("sha256")
+local wire = import("wire")
 local VERSION = import("version")
 
 local M = {}
 
+M.METHODS = { "ping", "status", "renoise.reload" }
+M.EVENTS = { "project", "selection", "transport" }
+
 local cached_pid, pid_looked_up = nil, false
 
--- Renoise's pid, where Lua can learn it without a console window: /proc on Linux, the parent of a
--- shell on macOS. nil on Windows (the host can find the port's owner).
+-- Renoise's pid where Lua can learn it without a console window: /proc on Linux, a shell's parent on
+-- macOS. nil on Windows.
 function M.pid()
   if pid_looked_up then return cached_pid end
   pid_looked_up = true
@@ -33,76 +37,101 @@ function M.pid()
   return cached_pid
 end
 
-function M.dawVersion()
-  return (renoise.RENOISE_VERSION:gsub("%s*[Dd]emo%s*$", ""))
-end
-
 function M.demo()
   return renoise.RENOISE_VERSION:find("[Dd]emo") ~= nil
 end
 
--- The V<x.y.z> preferences folder this tool is installed in.
-function M.resource_path(bundle_path)
-  return bundle_path:match("^(.*)[/\\]Scripts[/\\]Tools[/\\][^/\\]+[/\\]?$") or ""
+-- The V<x.y.z> preferences folder the tool is installed in.
+function M.resource(bundle_path)
+  return bundle_path:match("^(.*)[/\\]Scripts[/\\]Tools[/\\][^/\\]+[/\\]?$") or bundle_path
 end
 
--- Song ids live in song.tool_data, which Renoise saves with the song for this tool's Id.
+-- Song ids: 32 hex in song.tool_data, which Renoise saves with the song under this tool's Id.
 local function stored_id(song)
   local data = song.tool_data
   if type(data) ~= "string" or data == "" then return nil end
   local value = json.decode(data)
-  if type(value) == "table" and type(value.songId) == "string" and value.songId:match("^%x+$") and #value.songId == 32 then
+  if type(value) == "table" and type(value.songId) == "string" and #value.songId == 32 and value.songId:match("^%x+$") then
     return value.songId:lower()
   end
   return nil
 end
 
--- The id for the current song: the stored one, or a new one kept until the song is saved.
+-- The current song's id: the stored one; for a saved song without one, one made from its path (so
+-- reopening it gives the same id until a save stores it); for an unsaved song, a new one kept until
+-- it's saved.
 function M.song_id(memory, song)
   local id = stored_id(song)
-  if id then
-    memory.song_id = id
-    return id
+  if not id then
+    local path = song.file_name or ""
+    if memory.song_id then
+      id = memory.song_id
+    elseif path ~= "" then
+      id = sha256.hex("renoise-song:" .. path):sub(1, 32)
+    else
+      id = wire.nonce()
+    end
   end
-  memory.song_id = memory.song_id or net.nonce()
-  return memory.song_id
+  memory.song_id = id
+  return id
 end
 
 function M.write_song_id(memory, song)
   local id = M.song_id(memory, song)
   local data = json.decode(song.tool_data or "")
   if type(data) ~= "table" or json.is_array(data) then data = {} end
-  data.songId = id
-  song.tool_data = json.encode(data)
+  if data.songId ~= id then
+    data.songId = id
+    song.tool_data = json.encode(data)
+  end
 end
 
+local function file_title(path)
+  local name = path:match("([^/\\]+)$") or path
+  return (name:gsub("%.[xX][rR][nN][sS]$", ""))
+end
+
+-- The open song as the wire's project, or json.null.
 function M.project(memory)
   local song = renoise.song()
   if not song then return json.null end
   local path = song.file_name or ""
+  local title = song.name or ""
+  local project = { id = M.song_id(memory, song) }
+  if path ~= "" then
+    project.path = path
+    project.name = file_title(path)
+  elseif title ~= "" then
+    project.name = title
+  end
+  if title ~= "" then project.title = title end
+  return project
+end
+
+-- The welcome's fields besides session and maxFrameBytes.
+function M.identity(memory, bundle_path)
   return {
-    id = M.song_id(memory, song),
-    name = song.name or "",
-    path = path,
-    unsaved = path == "",
+    daw = "renoise",
+    bridge = VERSION,
+    dawVersion = renoise.RENOISE_VERSION,
+    pid = M.pid() or 0,
+    resource = M.resource(bundle_path),
+    project = M.project(memory),
+    demo = M.demo(),
+    apiVersion = renoise.API_VERSION,
+    heartbeatMs = wire.HEARTBEAT_MS,
+    methods = json.array({ unpack(M.METHODS) }),
+    events = json.array({ unpack(M.EVENTS) }),
   }
 end
 
-function M.hello(memory, bundle_path, port)
+-- status: the identity plus busy.
+function M.status(memory, bundle_path)
+  local status = M.identity(memory, bundle_path)
+  status.heartbeatMs, status.methods, status.events = nil, nil, nil
   local song = renoise.song()
-  return {
-    daw = "renoise",
-    protocol = net.PROTOCOL,
-    bridgeVersion = VERSION,
-    dawVersion = M.dawVersion(),
-    apiVersion = renoise.API_VERSION,
-    demo = M.demo(),
-    pid = M.pid() or json.null,
-    port = port or json.null,
-    resourcePath = M.resource_path(bundle_path),
-    project = M.project(memory),
-    playing = song ~= nil and song.transport.playing or false,
-  }
+  status.busy = (song ~= nil and song.rendering) and "rendering" or false
+  return status
 end
 
 return M

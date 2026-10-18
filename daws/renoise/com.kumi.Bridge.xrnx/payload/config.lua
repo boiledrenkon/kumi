@@ -1,19 +1,36 @@
--- Reads bridge-reference.json, which Kumi's installer writes into the bundle, and the secret it
--- points to. The reference holds no secret itself.
+-- Reads bridge-reference.json, which Kumi's lifecycle writes into the bundle, and the secret it
+-- names. The reference never holds the secret itself.
 
 local import = ...
 local json = import("json")
+local wire = import("wire")
 
 local M = {}
 
 M.REFERENCE = "bridge-reference.json"
-M.MIN_SECRET = 32
+M.SCHEMA = "kumi-daw-reference/1"
+M.MAX_SMALL_FILE = 64 * 1024
+M.FIRST_PORT = 9780
+M.PORTS = 10
 
-local function read_file(path)
+local function windows()
+  return os.platform ~= nil and os.platform() == "WINDOWS"
+end
+
+-- A small regular file's text, or nil and why.
+local function read_small(path)
+  if io.stat then
+    local stat = io.stat(path)
+    if not stat then return nil, "missing" end
+    if stat.type and stat.type ~= "file" then return nil, "not a regular file" end
+    if stat.size and stat.size > M.MAX_SMALL_FILE then return nil, "too large" end
+  end
   local f, err = io.open(path, "rb")
   if not f then return nil, err end
-  local text = f:read("*a")
+  local text = f:read(M.MAX_SMALL_FILE + 1) or ""
   f:close()
+  if #text > M.MAX_SMALL_FILE then return nil, "too large" end
+  if not json.valid_utf8(text) then return nil, "not UTF-8" end
   return text
 end
 
@@ -21,24 +38,48 @@ local function absolute(path)
   return type(path) == "string" and (path:match("^/") or path:match("^%a:[/\\]") or path:match("^\\\\")) ~= nil
 end
 
--- Returns {port, secret_file, state_dir}, or nil and why.
+-- Returns {secret_file, discovery_dir, port, log_dir}, or nil and why.
 function M.load(bundle_path)
-  local text, err = read_file(bundle_path .. M.REFERENCE)
-  if not text then return nil, "no " .. M.REFERENCE .. " (" .. tostring(err) .. ")" end
+  local text, err = read_small(bundle_path .. M.REFERENCE)
+  if not text then return nil, M.REFERENCE .. ": " .. tostring(err) end
   local value, decode_err = json.decode(text)
-  if type(value) ~= "table" then return nil, M.REFERENCE .. " is not JSON: " .. tostring(decode_err) end
-  if value.version ~= 1 then return nil, M.REFERENCE .. " has an unknown version" end
-  local port = value.port
-  if type(port) ~= "number" or port ~= math.floor(port) or port < 1 or port > 65535 then
-    return nil, M.REFERENCE .. " has no valid port"
+  if type(value) ~= "table" or json.is_array(value) then
+    return nil, M.REFERENCE .. " is not a reference: " .. tostring(decode_err or "not an object")
   end
-  if not absolute(value.secretFile) then return nil, M.REFERENCE .. " has no absolute secretFile" end
-  if not absolute(value.stateDir) then return nil, M.REFERENCE .. " has no absolute stateDir" end
-  return { port = port, secret_file = value.secretFile, state_dir = value.stateDir }
+  if value.schema ~= M.SCHEMA then return nil, M.REFERENCE .. " has an unknown schema " .. tostring(value.schema) end
+  if value.daw ~= "renoise" then return nil, M.REFERENCE .. " is for " .. tostring(value.daw) end
+  if not absolute(value.secretFile) or not absolute(value.discoveryDir) then
+    return nil, M.REFERENCE .. " paths must be absolute"
+  end
+  local port = value.port
+  if port ~= nil and port ~= json.null and not (type(port) == "number" and port == math.floor(port) and port >= 0 and port <= 65535) then
+    return nil, M.REFERENCE .. " has an invalid port"
+  end
+  local log_dir = value.logDir
+  if log_dir ~= nil and log_dir ~= json.null and type(log_dir) ~= "string" then
+    return nil, M.REFERENCE .. " has an invalid logDir"
+  end
+  return {
+    secret_file = value.secretFile,
+    discovery_dir = value.discoveryDir,
+    port = type(port) == "number" and port or nil,
+    log_dir = type(log_dir) == "string" and log_dir ~= "" and log_dir or nil,
+  }
 end
 
--- Group or other access on a Unix mode, when the mode is readable either as st_mode or as octal
--- digits written in decimal; nil when it can't tell.
+-- The ports to try, in order: from the reference's port to the end of Renoise's range, then the
+-- range's start up to it. A port outside the range is ignored.
+function M.candidate_ports(start)
+  local ports, first = {}, 0
+  if start and start >= M.FIRST_PORT and start < M.FIRST_PORT + M.PORTS then first = start - M.FIRST_PORT end
+  for i = 0, M.PORTS - 1 do
+    ports[#ports + 1] = M.FIRST_PORT + (first + i) % M.PORTS
+  end
+  return ports
+end
+
+-- Group or other access in a Unix mode, read either as st_mode or as octal digits written in
+-- decimal; nil when it can't tell.
 local function group_or_other_access(mode)
   if type(mode) ~= "number" then return nil end
   if mode >= 32768 then return mode % 64 ~= 0 end
@@ -47,21 +88,18 @@ local function group_or_other_access(mode)
 end
 M.group_or_other_access = group_or_other_access
 
--- Reads the secret fresh each time, so a rotated secret takes effect on the next connection.
+-- Reads the secret fresh for each connection, so a new one takes effect without a reload.
 function M.secret(cfg)
-  if not cfg then return nil, "not configured" end
-  local path = cfg.secret_file
-  if io.stat and not (os.platform and os.platform() == "WINDOWS") then
-    local stat = io.stat(path)
-    if not stat then return nil, "secret file is missing" end
-    if stat.type and stat.type ~= "file" then return nil, "secret file is not a regular file" end
-    if group_or_other_access(stat.mode) then return nil, "secret file is readable by others" end
+  if not cfg then return nil, "not set up" end
+  local text, err = read_small(cfg.secret_file)
+  if not text then return nil, "secret file: " .. tostring(err) end
+  local stat = not windows() and io.stat and io.stat(cfg.secret_file)
+  if stat and group_or_other_access(stat.mode) then
+    return nil, "secret file: other accounts can read it"
   end
-  local text = read_file(path)
-  if not text then return nil, "secret file is missing" end
-  if text:sub(-1) == "\n" then text = text:sub(1, -2) end
-  if #text < M.MIN_SECRET or text:find("%s") then return nil, "secret is invalid" end
-  return text
+  local secret, why = wire.secret_from_file_text(text)
+  if not secret then return nil, "secret: " .. why end
+  return secret
 end
 
 return M

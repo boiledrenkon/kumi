@@ -331,6 +331,8 @@ local function install_os_shims()
     if t then return real_time(t) end
     return 1800000000 + math.floor(M.time / 1000)
   end
+  -- Renoise's os.clock is a high-precision timer in seconds.
+  os.clock = function() return M.time / 1000 end
   os.platform = function() return M.platform end
   os.mkdir = function(path)
     local ok = os.execute("mkdir " .. shell_quote(path) .. " 2>/dev/null")

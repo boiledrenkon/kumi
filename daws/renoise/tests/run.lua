@@ -62,8 +62,9 @@ function T.temp_dir(name)
   return dir
 end
 
+-- Payload modules share one instance each, as they do in main.lua.
+local loaded = {}
 function T.load_payload_module(name)
-  local loaded = {}
   local function import(module)
     if loaded[module] == nil then
       loaded[module] = assert(loadfile(T.tool_dir .. "payload/" .. module .. ".lua"))(import)
@@ -75,7 +76,7 @@ end
 
 T.mock = assert(loadfile(tests_dir .. "mock_renoise.lua"))(tests_dir)
 
-for _, file in ipairs({ "test_json.lua", "test_sha256.lua", "test_net.lua", "test_bridge.lua", "test_vectors.lua" }) do
+for _, file in ipairs({ "test_json.lua", "test_sha256.lua", "test_wire.lua", "test_vectors.lua", "test_bridge.lua" }) do
   local chunk = loadfile(tests_dir .. file)
   if chunk then chunk(T) end
 end
