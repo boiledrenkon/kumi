@@ -2,8 +2,9 @@ pub mod classify;
 pub mod features;
 pub mod learn;
 pub mod learner;
-pub mod manual;
 pub mod measure_worker;
+/// Live's manual, at the path it always had.
+pub use crate::integrations::live_manual as manual;
 pub mod plan;
 pub mod presets;
 pub mod search;
@@ -552,14 +553,18 @@ impl Library {
     /// The library's tools in the DAW's words; the DAW's manual only for a DAW whose manual Kumi reads (Live's).
     pub fn tools_for(self: &Rc<Self>, profile: &DawProfile, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
         let mut tools = tools::library_tools_for(profile, self.clone(), options.clone());
-        if profile.caps.manual {
-            tools.push(manual::manual_tool(manual::ManualOptions {
-                dir: self.dir.clone(),
-                client: self.options.web.as_ref().map(|w| w.client.clone()),
-                base: self.options.web.as_ref().and_then(|w| w.base.clone()),
-                on_event: options.on_event,
-                now: None,
-            }));
+        if let Some(daw) = profile.id.filter(|_| profile.caps.manual) {
+            let manual = crate::integrations::manual_tool(
+                daw,
+                manual::ManualOptions {
+                    dir: self.dir.clone(),
+                    client: self.options.web.as_ref().map(|w| w.client.clone()),
+                    base: self.options.web.as_ref().and_then(|w| w.base.clone()),
+                    on_event: options.on_event,
+                    now: None,
+                },
+            );
+            tools.extend(manual);
         }
         tools
     }

@@ -11,6 +11,7 @@ use crate::core::view::ViewPresentation;
 
 pub use ableton::devices as live_devices;
 pub use ableton::focus::parse_focus;
+pub use ableton::manual as live_manual;
 pub use ableton::project::{create_project_store, Baseline, ProjectStore};
 pub use ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
 pub use ableton::{ears, hands};
@@ -35,6 +36,14 @@ pub fn presentation(id: DawId) -> Option<&'static ToolPresentation> {
 pub fn view(id: DawId) -> Option<&'static ViewPresentation> {
     match id {
         DawId::Ableton => Some(&ableton::presentation::VIEW),
+        _ => None,
+    }
+}
+
+/// A registered DAW's manual as a tool, for a DAW whose manual Kumi reads (Live's).
+pub fn manual_tool(id: DawId, options: live_manual::ManualOptions) -> Option<std::rc::Rc<dyn crate::core::contracts::KernelTool>> {
+    match id {
+        DawId::Ableton => Some(live_manual::manual_tool(options)),
         _ => None,
     }
 }

@@ -1,5 +1,5 @@
 //! Live's manual, cached locally and searched by section with cited passages.
-use super::{
+use crate::library::{
     store::{read_json, write_json},
     tools::{definition, tell, OnEvent},
 };
