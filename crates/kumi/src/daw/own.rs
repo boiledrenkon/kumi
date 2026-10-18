@@ -205,6 +205,9 @@ impl DawProvider for Own {
         }
         .boxed_local()
     }
+    fn running_now(&self) -> bool {
+        !detect::running(self.daw).is_empty()
+    }
     fn app_open(&self, _env: &Env) -> LocalBoxFuture<'static, bool> {
         let daw = self.daw;
         async move { tokio::task::spawn_blocking(move || !detect::running(daw).is_empty()).await.unwrap_or(false) }.boxed_local()

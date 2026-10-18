@@ -157,9 +157,12 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         AppConfig::Live { inference, bridge_config, resume, daw } => (inference, Some(bridge_config), false, resume, daw),
         _ => unreachable!(),
     };
-    // The DAW this session works with: the one asked for, else Live (the only one registered so far).
+    // The DAW this session works with: the one chosen (config), else Live.
     let provider = crate::daw::provider(daw.unwrap_or(kumi_runtime::core::daw::DawId::Ableton)).expect("a chosen DAW is registered");
     crate::daw::work_with(provider.id());
+    if bridge_config.is_some() {
+        crate::daw::remember_used(provider.id(), &io.env);
+    }
     let mode = if bridge_config.is_some() { "live" } else { "inference-only" };
     let store = Rc::new(open_credential_store(&inference.auth_file));
     for credential in store.list().await.unwrap_or_default().values() {

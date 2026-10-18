@@ -80,3 +80,43 @@ async fn the_doctor_says_nothing_of_a_daw_this_user_never_used() {
     let checks = own::RENOISE.installation_checks(&renoise_env, &io, "darwin").await;
     assert_eq!(checks.len(), 1);
 }
+
+/// With several DAWs' bridges installed and none asked for: the one running now, else the one used last, else Live,
+/// else the first. A producer with Live's bridge alone starts in Live, whatever runs.
+#[tokio::test(flavor = "current_thread")]
+async fn among_several_bridges_the_running_daw_then_the_last_used_is_chosen() {
+    use kumi::daw::{chosen_with, remember_used};
+    let (dir, mut env) = renoise_home();
+    let out = Rc::new(Out::default());
+    assert_eq!(own::RENOISE.setup_bridge(out.clone(), &env, Default::default()).await.unwrap(), 0, "{}", out.0.borrow());
+    // Kumi's extension in REAPER too, as its receipt says.
+    let resource = dir.path().join("REAPER");
+    env.insert("KUMI_REAPER_RESOURCE_DIR".into(), resource.to_string_lossy().into_owned());
+    let paths = daw_bridge::paths::BridgePaths::new(&dir.path().join(".kumi"), daw_bridge::daw::Daw::Reaper);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let receipt = daw_bridge::lifecycle::Receipt {
+        schema: daw_bridge::lifecycle::RECEIPT_SCHEMA.into(),
+        daw: "reaper".into(),
+        status: "installed".into(),
+        target: resource.join("UserPlugins/reaper_kumi.dylib").to_string_lossy().into_owned(),
+        reference: resource.join("UserPlugins/kumi-bridge-reference.json").to_string_lossy().into_owned(),
+        generation: Some("g1".into()),
+        version: Some("0.1.0".into()),
+        sha256: None,
+        previous: vec![],
+        updated_ms: 0,
+        history: vec![],
+    };
+    std::fs::write(paths.receipt(), serde_json::to_string(&receipt).unwrap()).unwrap();
+    assert!(own::REAPER.bridge_installed(&env));
+    let only = |id: DawId| move |provider: &dyn DawProvider| provider.id() == id;
+    assert_eq!(chosen_with(None, &env, &only(DawId::Renoise)).0.id(), DawId::Renoise, "the one running");
+    assert_eq!(chosen_with(None, &env, &only(DawId::Reaper)).0.id(), DawId::Reaper, "the one running");
+    let none = |_: &dyn DawProvider| false;
+    assert_eq!(chosen_with(None, &env, &none).0.id(), DawId::Reaper, "none running, none used: the first installed");
+    remember_used(DawId::Renoise, &env);
+    assert_eq!(chosen_with(None, &env, &none).0.id(), DawId::Renoise, "none running: the one used last");
+    let both = |provider: &dyn DawProvider| provider.id() != DawId::Ableton;
+    assert_eq!(chosen_with(None, &env, &both).0.id(), DawId::Renoise, "both running: the one used last");
+    assert_eq!(chosen_with(Some(DawId::Reaper), &env, &none).0.id(), DawId::Reaper, "asked for, always");
+}

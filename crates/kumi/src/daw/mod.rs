@@ -30,19 +30,63 @@ pub fn provider(id: DawId) -> Option<&'static dyn DawProvider> {
     providers().into_iter().find(|provider| provider.id() == id)
 }
 
-/// The DAW a session works with, and where Kumi's bridge for it says how to reach it: the one asked for (with --daw
-/// or KUMI_DAW); else the first registered DAW whose bridge is installed (Live first); else, chatting without a DAW,
-/// Live's words: Live stays the DAW Kumi starts with.
+/// The DAW a session works with, and where Kumi's bridge for it says how to reach it:
+/// 1. the one asked for (with --daw or KUMI_DAW);
+/// 2. the only DAW whose bridge is installed (a producer who uses Live alone starts in Live, as always);
+/// 3. with several installed: the one running now, else the one used last, else Live, else the first;
+/// 4. with none installed, chatting without a DAW in Live's words.
 pub fn chosen(asked: Option<DawId>, env: &Env) -> (&'static dyn DawProvider, Option<String>) {
+    chosen_with(asked, env, &|provider| provider.running_now())
+}
+
+/// `chosen`, with whether each DAW runs now given (a test's answer, or one process listing each).
+pub fn chosen_with(
+    asked: Option<DawId>,
+    env: &Env,
+    running: &dyn Fn(&dyn DawProvider) -> bool,
+) -> (&'static dyn DawProvider, Option<String>) {
     if let Some(provider) = asked.and_then(provider) {
         return (provider, provider.bridge_config(env));
     }
-    for provider in providers() {
-        if let Some(config) = provider.bridge_config(env) {
-            return (provider, Some(config));
+    let installed: Vec<(&'static dyn DawProvider, String)> =
+        providers().into_iter().filter_map(|provider| provider.bridge_config(env).map(|config| (provider, config))).collect();
+    let pick = |provider: &'static dyn DawProvider, config: &str| (provider, Some(config.to_string()));
+    match installed.as_slice() {
+        [] => (&ableton::provider::Ableton, None),
+        [(provider, config)] => pick(*provider, config),
+        several => {
+            let running: Vec<&(&'static dyn DawProvider, String)> = several.iter().filter(|(provider, _)| running(*provider)).collect();
+            let among = if running.is_empty() { several.iter().collect::<Vec<_>>() } else { running };
+            if let [(provider, config)] = among.as_slice() {
+                return pick(*provider, config);
+            }
+            let last = last_used(env);
+            let found = among
+                .iter()
+                .find(|(provider, _)| Some(provider.id()) == last)
+                .or_else(|| among.iter().find(|(provider, _)| provider.id() == DawId::Ableton))
+                .unwrap_or(&among[0]);
+            pick(found.0, &found.1)
         }
     }
-    (&ableton::provider::Ableton, None)
+}
+
+/// Where Kumi keeps the DAW a session last worked with.
+fn last_used_file(env: &Env) -> std::path::PathBuf {
+    std::path::Path::new(&crate::config::kumi_dir(env)).join("last-daw")
+}
+
+/// The DAW a session last worked with, when Kumi knows.
+pub fn last_used(env: &Env) -> Option<DawId> {
+    DawId::parse(std::fs::read_to_string(last_used_file(env)).ok()?.trim())
+}
+
+/// Keeps the DAW a session works with, for choosing among several next time. Best effort, and written only when it
+/// changes.
+pub fn remember_used(id: DawId, env: &Env) {
+    if last_used(env) != Some(id) {
+        let _ = std::fs::write(last_used_file(env), format!("{}\n", id.as_str()));
+    }
 }
 
 thread_local! {

@@ -62,6 +62,18 @@ impl DawProvider for Ableton {
         async move { live_app::open_live(&bridge_setup::default_run(), kumi_runtime::system::platform(), &env).await.is_some() }
             .boxed_local()
     }
+    fn running_now(&self) -> bool {
+        let listing = if cfg!(windows) {
+            std::process::Command::new("tasklist").args(["/FO", "CSV", "/NH"]).output()
+        } else {
+            std::process::Command::new("ps").args(["-axo", "pid=,comm="]).output()
+        };
+        let Ok(output) = listing else { return false };
+        daw_bridge::detect::parse_processes(&String::from_utf8_lossy(&output.stdout), cfg!(windows)).iter().any(|(_, name)| {
+            let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+            name == "Live" || (name.starts_with("Ableton Live") && name.ends_with(".exe"))
+        })
+    }
     fn watch_words(&self) -> WatchWords {
         WatchWords { starting: LIVE_STARTING, unreachable: NO_LIVE, answered: "Live answered, so Kumi is connected to it now." }
     }
