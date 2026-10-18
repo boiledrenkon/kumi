@@ -1045,6 +1045,8 @@ test("reads: the answers are the vectors the host's simulator replays", function
   ask("read", { kind = "pattern" })
   ask("read", { kind = "line", parent = E .. ":pattern:1", track = 1 })
   ask("read", { kind = "line", parent = E .. ":pattern:1", track = 1, limit = 1 })
+  ask("read", { kind = "line", parent = E .. ":pattern:1", track = E .. ":track:1" }) -- the shape Kumi sends: a ref'd track
+  ask("read", { kind = "line", parent = E .. ":pattern:1", track = E .. ":track:4", layout = 0 })
   ask("read", { kind = "instrument" })
   ask("read", { kind = "sample", parent = E .. ":instrument:1" })
   ask("read", { kind = "phrase", parent = E .. ":instrument:1" })
