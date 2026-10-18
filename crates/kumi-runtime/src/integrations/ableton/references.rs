@@ -1,50 +1,75 @@
-//! Current-turn reference authority, short names, and discovery cursor bindings.
+//! Live's refs: how its bridge spells them (`<epoch>:<kind>:<places>`, positions that a restructure moves), the place
+//! its registry reads one again at, its discovery parents and the fields its changes take refs in. The book of the
+//! turn's refs is core's (core/refs.rs).
 use super::{
-    changes::{hex_color, KnownTrack, REFERENCE_FIELDS},
-    context::{payload, query_key, ObservationError, PARENTS},
+    changes::REFERENCE_FIELDS,
+    context::{payload, PARENTS},
     mutations::track_index_of,
 };
+pub use crate::core::refs::{Book, KeptRefs, KnownParameter, Moved, RefScheme, ReferenceError, Shift};
 use crate::{
     core::contracts::{JsonObject, ToolResult},
     mcp::types::CallToolResult,
 };
-use indexmap::{IndexMap, IndexSet};
-use kumi_common::js::{
-    json::stringify,
-    string::{head, utf16_len},
-};
+use kumi_common::js::{json::stringify, string::utf16_len};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
+
+/// The turn's refs, Live's.
+pub type References = Book<LiveRefs>;
+
+/// Live's refs, as its bridge spells them.
 #[derive(Default)]
-pub struct References {
-    pub refs: IndexMap<String, String>,
-    pub cursors: IndexMap<String, String>,
-    pub known: IndexMap<String, KnownTrack>,
-    /// Parameters as discovery last read them, by ref: a picture of one's automation is drawn to its range.
-    pub parameters: IndexMap<String, KnownParameter>,
-    short: IndexMap<String, String>,
-    long: IndexMap<String, String>,
-    counts: IndexMap<String, u64>,
-    /// Refs a restructure moved to a place Live hasn't been read at since. Live's registry (the Remote Script's) keeps
-    /// objects by these strings, so under each it still holds what was at that place when it was last read there. The
-    /// bridge reads a place again before it acts there; Kumi's own Python has the places it names read again first
-    /// (`moved_places`), or it would act on what used to be there.
-    moved: IndexSet<String>,
-}
-/// A parameter's name and range, as discovery read them.
-#[derive(Clone, Debug, PartialEq)]
-pub struct KnownParameter {
-    pub name: String,
-    pub min: f64,
-    pub max: f64,
-}
-const KNOWN_PARAMETERS: usize = 4096;
-/// Device, chain, parameter and drum pad refs on some tracks (`References::keep`), to put back.
-#[derive(Default)]
-pub struct KeptRefs {
-    refs: Vec<(String, String)>,
-    names: Vec<(String, String)>,
+pub struct LiveRefs;
+
+impl RefScheme for LiveRefs {
+    fn positional(&self) -> bool {
+        true
+    }
+    fn kind_of<'a>(&self, reference: &'a str) -> Option<&'a str> {
+        static LIVE_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9]+:([a-z][a-z_]{0,31}):").unwrap());
+        LIVE_REF.captures(reference).and_then(|captures| captures.get(1)).map(|kind| kind.as_str())
+    }
+    fn moved(&self, shift: &Shift, reference: &str) -> Moved {
+        live_moved(shift, reference, 0)
+    }
+    fn place_of(&self, reference: &str) -> String {
+        place_of(reference)
+    }
+    fn refs_in<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        static REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9]+:[a-z_]+:[0-9a-z_:-]+").unwrap());
+        REF.find_iter(text).map(|found| found.as_str().trim_end_matches(':')).collect()
+    }
+    fn reference_fields(&self) -> &[String] {
+        &REFERENCE_FIELDS
+    }
+    fn parents(&self, kind: &str) -> Option<Vec<String>> {
+        PARENTS.get(kind).and_then(Value::as_array).map(|kinds| kinds.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+    }
+    fn parent_hint(&self, kind: &str, parent: &str) -> &'static str {
+        if kind == "session-clip" && parent == "track" {
+            ": discover the track's clip-slots, each gives its clipRef"
+        } else {
+            ""
+        }
+    }
+    fn row_refs(&self, kind: &str, row: &JsonObject) -> Vec<(String, String, bool)> {
+        let mut found = vec![];
+        if kind == "clip-slot" {
+            if let Some(clip) = row.get("clipRef").and_then(Value::as_str).filter(|s| utf16_len(s) <= 256) {
+                found.push((clip.to_owned(), "session-clip".to_owned(), true));
+            }
+        }
+        if kind == "device" {
+            for chain in row.get("chainList").and_then(Value::as_array).into_iter().flatten() {
+                if let Some(reference) = chain.get("ref").and_then(Value::as_str).filter(|s| utf16_len(s) <= 256) {
+                    found.push((reference.to_owned(), "chain".to_owned(), false));
+                }
+            }
+        }
+        found
+    }
 }
 
 /// Whether a move or a delete of a device on one of `tracks` retires this ref: Live's registry keeps places, and every
@@ -54,151 +79,70 @@ pub fn retired_by_shift(reference: &str, tracks: &[f64]) -> bool {
     DEVICE.is_match(reference) && !reference.contains(":mixer:") && track_index_of(reference).is_some_and(|index| tracks.contains(&index))
 }
 
-/// Overflow also requires the owner to invalidate its observation lease.
-#[derive(Debug, Clone)]
-pub struct ReferenceError {
-    pub error: ObservationError,
-    pub invalidate: bool,
-}
-impl From<ObservationError> for ReferenceError {
-    fn from(error: ObservationError) -> Self {
-        Self { error, invalidate: false }
-    }
-}
-impl std::fmt::Display for ReferenceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(f)
-    }
-}
-impl std::error::Error for ReferenceError {}
-fn error(message: impl Into<String>) -> ObservationError {
-    ObservationError(message.into())
-}
-fn js_string(value: Option<&Value>) -> String {
-    match value {
-        None => "undefined".into(),
-        Some(Value::Null) => "null".into(),
-        Some(Value::String(v)) => v.clone(),
-        Some(Value::Array(v)) => {
-            v.iter().map(|v| if v.is_null() { String::new() } else { js_string(Some(v)) }).collect::<Vec<_>>().join(",")
-        }
-        Some(Value::Object(_)) => "[object Object]".into(),
-        Some(value) => stringify(value),
-    }
-}
-fn ref_key(key: &str) -> bool {
-    key == "ref" || key == "parent" || key.ends_with("Ref") || key.ends_with("Refs")
-}
-/// Where a restructure moved the Set's tracks and scenes, so the refs past it follow what they named rather than
-/// being dropped (#261, #253). Refs are positions: a track's index counts the regular and group tracks, then the
-/// returns, then Main, so a track added or deleted moves everything after it, returns and Main among them.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Shift {
-    /// Tracks made, at their places once made.
-    pub tracks_made: Vec<usize>,
-    /// Tracks deleted, at their places before.
-    pub tracks_gone: Vec<usize>,
-    pub scenes_made: Vec<usize>,
-    pub scenes_gone: Vec<usize>,
-    /// Returns were added or deleted: every track's sends are renumbered with them, so their refs are retired.
-    pub sends: bool,
-}
 impl Shift {
-    /// The shift that undoes this one: what it made is gone again, and what it deleted is back at its place.
-    pub fn inverse(&self) -> Shift {
-        Shift {
-            tracks_made: self.tracks_gone.clone(),
-            tracks_gone: self.tracks_made.clone(),
-            scenes_made: self.scenes_gone.clone(),
-            scenes_gone: self.scenes_made.clone(),
-            sends: self.sends,
-        }
-    }
-    pub fn is_empty(&self) -> bool {
-        self.tracks_made.is_empty() && self.tracks_gone.is_empty() && self.scenes_made.is_empty() && self.scenes_gone.is_empty()
-    }
-    /// Where the track at `index` before the change is after it, or None for one deleted.
-    pub fn track(&self, index: usize) -> Option<usize> {
-        moved_index(index, &self.tracks_gone, &self.tracks_made)
-    }
-    pub fn scene(&self, index: usize) -> Option<usize> {
-        moved_index(index, &self.scenes_gone, &self.scenes_made)
-    }
-    /// Where a ref points after the change: the same, another place, or nowhere (what it named was deleted).
+    /// Where a Live ref points after the change: the same, another place, or nowhere (what it named was deleted).
     pub fn reference(&self, reference: &str) -> Moved {
-        self.moved(reference, 0)
+        live_moved(self, reference, 0)
     }
-    fn moved(&self, reference: &str, depth: usize) -> Moved {
-        let mut parts: Vec<String> = reference.split(':').map(str::to_owned).collect();
-        if parts.len() < 3 || depth > 8 {
-            return Moved::Same;
-        }
-        // A ref whose path is another ref (a parameter's device, a chain's rack): that one decides.
-        if parts.len() >= 4 && parts[2] == parts[0] && !parts[3].is_empty() && !parts[3].bytes().all(|b| b.is_ascii_digit()) {
-            return match self.moved(&parts[2..].join(":"), depth + 1) {
-                Moved::To(inner) => Moved::To(format!("{}:{}:{inner}", parts[0], parts[1])),
-                other => other,
-            };
-        }
-        // A track's selected-device ref (device:view:N) isn't read again by place on the Remote Script's side, so it
-        // can't follow its track: once the track moves, it's retired.
-        if parts[1] == "device" && parts[2] == "view" {
-            return match parts.get(3).and_then(|part| part.parse::<usize>().ok()).map(|index| (index, self.track(index))) {
-                Some((index, Some(now))) if now == index => Moved::Same,
-                Some(_) => Moved::Gone,
-                None => Moved::Same,
-            };
-        }
-        // Which parts hold a track's and a scene's index.
-        let (track, scene) = match parts[1].as_str() {
-            "track" | "device" | "chain" | "drum_pad" | "take_lane" | "take_lane_clip" | "routing_choice" | "mixer" => (Some(2), None),
-            "clip" | "clip_slot" => (Some(2), Some(3)),
-            // One part is a Song-level Arrangement clip, on no track.
-            "arrangement_clip" if parts.len() == 4 => (Some(2), None),
-            "scene" => (None, Some(2)),
-            "parameter" if parts[2] == "mixer" => {
-                if self.sends && parts.get(4).is_some_and(|part| part == "sends") {
-                    return Moved::Gone;
-                }
-                (Some(3), None)
-            }
-            _ => (None, None),
+}
+/// Where a Live ref points after a restructure: refs are positions, a track's index counting the regular and group
+/// tracks, then the returns, then Main, so a track added or deleted moves everything after it.
+fn live_moved(shift: &Shift, reference: &str, depth: usize) -> Moved {
+    let mut parts: Vec<String> = reference.split(':').map(str::to_owned).collect();
+    if parts.len() < 3 || depth > 8 {
+        return Moved::Same;
+    }
+    // A ref whose path is another ref (a parameter's device, a chain's rack): that one decides.
+    if parts.len() >= 4 && parts[2] == parts[0] && !parts[3].is_empty() && !parts[3].bytes().all(|b| b.is_ascii_digit()) {
+        return match live_moved(shift, &parts[2..].join(":"), depth + 1) {
+            Moved::To(inner) => Moved::To(format!("{}:{}:{inner}", parts[0], parts[1])),
+            other => other,
         };
-        let mut changed = false;
-        for (at, place) in [(track, Shift::track as fn(&Self, usize) -> Option<usize>), (scene, Shift::scene)] {
-            let Some(at) = at else { continue };
-            let Some(index) = parts.get(at).and_then(|part| part.parse::<usize>().ok()) else { continue };
-            match place(self, index) {
-                None => return Moved::Gone,
-                Some(now) if now != index => {
-                    changed = true;
-                    parts[at] = now.to_string();
-                }
-                Some(_) => {}
+    }
+    // A track's selected-device ref (device:view:N) isn't read again by place on the Remote Script's side, so it
+    // can't follow its track: once the track moves, it's retired.
+    if parts[1] == "device" && parts[2] == "view" {
+        return match parts.get(3).and_then(|part| part.parse::<usize>().ok()).map(|index| (index, shift.track(index))) {
+            Some((index, Some(now))) if now == index => Moved::Same,
+            Some(_) => Moved::Gone,
+            None => Moved::Same,
+        };
+    }
+    // Which parts hold a track's and a scene's index.
+    let (track, scene) = match parts[1].as_str() {
+        "track" | "device" | "chain" | "drum_pad" | "take_lane" | "take_lane_clip" | "routing_choice" | "mixer" => (Some(2), None),
+        "clip" | "clip_slot" => (Some(2), Some(3)),
+        // One part is a Song-level Arrangement clip, on no track.
+        "arrangement_clip" if parts.len() == 4 => (Some(2), None),
+        "scene" => (None, Some(2)),
+        "parameter" if parts[2] == "mixer" => {
+            if shift.sends && parts.get(4).is_some_and(|part| part == "sends") {
+                return Moved::Gone;
             }
+            (Some(3), None)
         }
-        if changed {
-            Moved::To(parts.join(":"))
-        } else {
-            Moved::Same
+        _ => (None, None),
+    };
+    let mut changed = false;
+    for (at, place) in [(track, Shift::track as fn(&Shift, usize) -> Option<usize>), (scene, Shift::scene)] {
+        let Some(at) = at else { continue };
+        let Some(index) = parts.get(at).and_then(|part| part.parse::<usize>().ok()) else { continue };
+        match place(shift, index) {
+            None => return Moved::Gone,
+            Some(now) if now != index => {
+                changed = true;
+                parts[at] = now.to_string();
+            }
+            Some(_) => {}
         }
     }
-}
-/// What a restructure did to a ref.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Moved {
-    Same,
-    To(String),
-    Gone,
-}
-/// Where a ref is after a shift, or None for what was deleted.
-fn shifted(shift: &Shift, reference: &str) -> Option<String> {
-    match shift.reference(reference) {
-        Moved::Same => Some(reference.to_owned()),
-        Moved::To(now) => Some(now),
-        Moved::Gone => None,
+    if changed {
+        Moved::To(parts.join(":"))
+    } else {
+        Moved::Same
     }
 }
+
 /// The track a ref is on, as the Remote Script's `_ref_track_index` reads it: refs are positions (clip:3:5,
 /// device:3:0:2, parameter:mixer:3:volume), and a ref whose path is another ref (a parameter's device, a return
 /// chain's rack) is on that one's track. None for one on no track (a scene, the Set, a track's view, a Song-level
@@ -233,39 +177,7 @@ fn place_of(reference: &str) -> String {
         None => reference.to_owned(),
     }
 }
-/// An index after `gone` (places before) are deleted and `made` (places after) are made.
-fn moved_index(index: usize, gone: &[usize], made: &[usize]) -> Option<usize> {
-    if gone.contains(&index) {
-        return None;
-    }
-    let mut at = index - gone.iter().filter(|place| **place < index).count();
-    let mut made = made.to_vec();
-    made.sort_unstable();
-    made.dedup();
-    for place in made {
-        if place <= at {
-            at += 1;
-        }
-    }
-    Some(at)
-}
-impl References {
-    /// Retired names never acquire a different object; counters continue across retirement.
-    pub fn clear_names(&mut self) {
-        self.short.clear();
-        self.long.clear();
-    }
-    pub fn unname(&mut self, reference: &str) {
-        if let Some(short) = self.short.shift_remove(reference) {
-            self.long.shift_remove(&short);
-        }
-    }
-    pub fn retire(&mut self, reference: &str) {
-        self.refs.shift_remove(reference);
-        self.known.shift_remove(reference);
-        self.parameters.shift_remove(reference);
-        self.unname(reference);
-    }
+impl Book<LiveRefs> {
     /// What a move or a delete of a device on `track` retires (`retired_by_shift`), with its short names: kept to put
     /// back once the track's devices are where they were again.
     pub fn keep(&self, track: &str) -> KeptRefs {
@@ -276,281 +188,6 @@ impl References {
             refs: self.refs.iter().filter(|(reference, _)| on(reference)).map(|(a, b)| (a.clone(), b.clone())).collect(),
             names: self.short.iter().filter(|(reference, _)| on(reference)).map(|(a, b)| (a.clone(), b.clone())).collect(),
         }
-    }
-    /// Puts back refs `keep` kept, with their short names: a name given to one of them since (Kumi's own reads and
-    /// steps meanwhile, which the model never saw) gives way to the one the model knows.
-    pub fn put_back(&mut self, kept: KeptRefs) {
-        for (reference, kind) in kept.refs {
-            self.refs.entry(reference).or_insert(kind);
-        }
-        for (reference, short) in kept.names {
-            // A retired name never names anything else, so this only guards against a cleared book.
-            if self.long.get(&short).is_some_and(|other| *other != reference) {
-                continue;
-            }
-            if let Some(since) = self.short.insert(reference.clone(), short.clone()).filter(|since| *since != short) {
-                self.long.shift_remove(&since);
-            }
-            self.long.insert(short, reference);
-        }
-    }
-    pub fn named_references(&self) -> Vec<String> {
-        self.short.keys().cloned().collect()
-    }
-    /// After a restructure: every ref past it follows what it named to its new place, short names and all, and those
-    /// to what was deleted are retired. A name keeps naming one object, so a plan's later steps still find theirs.
-    /// Discovery cursors were for the old places, so they go.
-    pub fn shift(&mut self, shift: &Shift) {
-        // What was marked moved goes with the shift too: a place not read again since is still stale.
-        let mut moved: IndexSet<String> =
-            std::mem::take(&mut self.moved).into_iter().filter_map(|reference| shifted(shift, &reference)).collect();
-        let mut to = |reference: &str| {
-            let now = shifted(shift, reference)?;
-            if now != reference {
-                moved.insert(now.clone());
-            }
-            Some(now)
-        };
-        self.refs = std::mem::take(&mut self.refs).into_iter().filter_map(|(reference, kind)| Some((to(&reference)?, kind))).collect();
-        self.known = std::mem::take(&mut self.known).into_iter().filter_map(|(reference, track)| Some((to(&reference)?, track))).collect();
-        self.parameters =
-            std::mem::take(&mut self.parameters).into_iter().filter_map(|(reference, known)| Some((to(&reference)?, known))).collect();
-        let names = std::mem::take(&mut self.short);
-        self.long.clear();
-        for (reference, name) in names {
-            if let Some(reference) = to(&reference) {
-                self.long.insert(name.clone(), reference.clone());
-                self.short.insert(reference, name);
-            }
-        }
-        self.moved = moved;
-        self.cursors.clear();
-    }
-    /// Refs moved by a restructure outside the book (a change's undo in HISTORY), to read again before Python uses them.
-    pub fn mark_moved(&mut self, references: impl IntoIterator<Item = String>) {
-        self.moved.extend(references);
-    }
-    /// A ref Live has just registered at its place (a read, or a change that made it): nothing to read again.
-    pub fn registered(&mut self, reference: &str) {
-        self.moved.shift_remove(reference);
-    }
-    /// The places to read again before Live runs Python that names these texts (its code, its `ref`): one for each
-    /// moved ref they name. A place is what the Remote Script's `_refresh` reads again: a track, with everything on it
-    /// but its Arrangement clips (`E:track:N`); a track's Arrangement clips (any one of them); a scene.
-    pub fn moved_places(&self, texts: &[&str]) -> Vec<String> {
-        static REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9]+:[a-z_]+:[0-9a-z_:-]+").unwrap());
-        let mut places: Vec<String> = Vec::new();
-        if self.moved.is_empty() {
-            return places;
-        }
-        for text in texts {
-            for found in REF.find_iter(text) {
-                let reference = found.as_str().trim_end_matches(':');
-                if self.moved.contains(reference) {
-                    let place = place_of(reference);
-                    if !places.contains(&place) {
-                        places.push(place);
-                    }
-                }
-            }
-        }
-        places
-    }
-    /// Live read these places again (`moved_places`): what's on them is registered as it is now.
-    pub fn read_again(&mut self, places: &[String]) {
-        self.moved.retain(|reference| !places.iter().any(|place| *place == place_of(reference)));
-    }
-    pub fn invalidate(&mut self) {
-        self.refs.clear();
-        self.cursors.clear();
-        self.known.clear();
-        self.parameters.clear();
-    }
-    pub fn register_rows(
-        &mut self,
-        kind: &str,
-        rows: &[JsonObject],
-        args: &JsonObject,
-        next_cursor: Option<&str>,
-    ) -> Result<(), ReferenceError> {
-        for row in rows {
-            if args.contains_key("parent") && !same_primitive(row.get("parentRef"), args.get("parent")) {
-                return Err(error("Discovery returned a different parent; result discarded").into());
-            }
-            if let Some(reference) = row.get("ref").and_then(Value::as_str).filter(|s| !s.is_empty() && utf16_len(s) <= 256) {
-                self.refs.insert(reference.into(), kind.into());
-                self.moved.shift_remove(reference);
-                if kind == "clip-slot" {
-                    if let Some(clip) = row.get("clipRef").and_then(Value::as_str).filter(|s| utf16_len(s) <= 256) {
-                        self.refs.insert(clip.into(), "session-clip".into());
-                        self.moved.shift_remove(clip);
-                    }
-                }
-                if kind == "device" {
-                    if let Some(chains) = row.get("chainList").and_then(Value::as_array) {
-                        for chain in chains {
-                            if let Some(reference) = chain.get("ref").and_then(Value::as_str).filter(|s| utf16_len(s) <= 256) {
-                                self.refs.insert(reference.into(), "chain".into());
-                            }
-                        }
-                    }
-                }
-                if kind == "parameter" {
-                    self.know_parameter(reference, row);
-                }
-                if kind.ends_with("track") {
-                    if let Some(name) = row.get("name").and_then(Value::as_str) {
-                        self.known
-                            .insert(reference.into(), KnownTrack { name: head(name, 256), color: row.get("color").and_then(hex_color) });
-                    }
-                }
-            }
-        }
-        if self.refs.len() > 1_000_000 {
-            self.invalidate();
-            return Err(ReferenceError { error: error("Too many current references; refresh and narrow the request"), invalidate: true });
-        }
-        if let Some(cursor) = next_cursor.filter(|s| !s.is_empty()) {
-            if args.get("cursor").and_then(Value::as_str) == Some(cursor) {
-                return Err(error("Discovery cursor repeated; narrow the request").into());
-            }
-            self.cursors.insert(cursor.into(), query_key(args));
-            if self.cursors.len() > 100_000 {
-                self.invalidate();
-                return Err(ReferenceError { error: error("Too many page cursors; refresh and narrow the request"), invalidate: true });
-            }
-        }
-        Ok(())
-    }
-    /// Keeps a parameter's name and range when its row has them; a row naming it otherwise forgets what was kept.
-    fn know_parameter(&mut self, reference: &str, row: &JsonObject) {
-        let Some(name) = row.get("name").and_then(Value::as_str).map(|name| head(name, 256)) else { return };
-        let (min, max) = (row.get("min").and_then(Value::as_f64), row.get("max").and_then(Value::as_f64));
-        match (min, max) {
-            (Some(min), Some(max)) if min.is_finite() && max.is_finite() && max > min => {
-                if !self.parameters.contains_key(reference) && self.parameters.len() >= KNOWN_PARAMETERS {
-                    self.parameters.shift_remove_index(0);
-                }
-                self.parameters.insert(reference.into(), KnownParameter { name, min, max });
-            }
-            _ if self.parameters.get(reference).is_some_and(|known| known.name != name) => {
-                self.parameters.shift_remove(reference);
-            }
-            _ => {}
-        }
-    }
-    pub fn validate_parent_and_cursor(&self, args: &JsonObject) -> Result<(), ObservationError> {
-        let kind = js_string(args.get("kind"));
-        let parent_kinds = PARENTS.get(&kind).and_then(Value::as_array);
-        if parent_kinds.is_some() || args.contains_key("parent") {
-            let parent = args.get("parent").and_then(Value::as_str).and_then(|s| self.refs.get(s));
-            let takes = parent_kinds.map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>()).unwrap_or_else(|| vec!["set"]);
-            let parent = parent.ok_or_else(|| {
-                if !args.contains_key("parent") {
-                    error(format!("{kind} needs a parent: a {} from this turn", takes.join(" or ")))
-                } else {
-                    error("A fresh authoritative parent is required; discover the parent in this turn, not from history")
-                }
-            })?;
-            if !takes.contains(&parent.as_str()) {
-                return Err(error(format!(
-                    "{kind} takes a {} as its parent, not a {parent}{}",
-                    takes.join(" or "),
-                    if kind == "session-clip" && parent == "track" {
-                        ": discover the track's clip-slots, each gives its clipRef"
-                    } else {
-                        ""
-                    }
-                )));
-            }
-        }
-        if let Some(cursor) = args.get("cursor") {
-            if cursor.as_str().and_then(|s| self.cursors.get(s)) != Some(&query_key(args)) {
-                return Err(error("Cursor is stale or belongs to another query; rediscover without it"));
-            }
-        }
-        Ok(())
-    }
-    pub fn short_ref(&mut self, reference: &str) -> String {
-        static LIVE_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9]+:([a-z][a-z_]{0,31}):").unwrap());
-        let Some(captures) = LIVE_REF.captures(reference) else { return reference.into() };
-        if let Some(name) = self.short.get(reference) {
-            return name.clone();
-        }
-        if self.short.len() >= 10_000_000 {
-            self.short.clear();
-            self.long.clear();
-        }
-        let kind = &captures[1];
-        let count = self.counts.entry(kind.into()).or_insert(0);
-        *count += 1;
-        let name = format!("{kind}:{count}");
-        self.short.insert(reference.into(), name.clone());
-        self.long.insert(name.clone(), reference.into());
-        name
-    }
-    pub fn shorten(&mut self, value: &Value) -> Value {
-        self.shorten_at(value, "", 0)
-    }
-    fn shorten_at(&mut self, value: &Value, key: &str, depth: usize) -> Value {
-        if depth > 32 {
-            return value.clone();
-        }
-        match value {
-            Value::String(s) if ref_key(key) => json!(self.short_ref(s)),
-            Value::Array(items) => Value::Array(items.iter().map(|v| self.shorten_at(v, key, depth + 1)).collect()),
-            Value::Object(row) => {
-                Value::Object(row.iter().map(|(key, value)| (key.clone(), self.shorten_at(value, key, depth + 1))).collect())
-            }
-            _ => value.clone(),
-        }
-    }
-    pub fn lengthen(&self, value: &Value) -> Value {
-        self.lengthen_at(value, "", 0)
-    }
-    fn lengthen_at(&self, value: &Value, key: &str, depth: usize) -> Value {
-        if depth > 32 {
-            return value.clone();
-        }
-        match value {
-            Value::String(s) if ref_key(key) => json!(self.long.get(s).unwrap_or(s)),
-            Value::Array(items) => Value::Array(items.iter().map(|v| self.lengthen_at(v, key, depth + 1)).collect()),
-            Value::Object(row) => {
-                Value::Object(row.iter().map(|(key, value)| (key.clone(), self.lengthen_at(value, key, depth + 1))).collect())
-            }
-            _ => value.clone(),
-        }
-    }
-    pub fn require_fresh_references(&self, args: &JsonObject) -> Result<(), ObservationError> {
-        self.require_at(args, 0)
-    }
-    fn require_at(&self, args: &JsonObject, depth: usize) -> Result<(), ObservationError> {
-        for field in REFERENCE_FIELDS.iter() {
-            if let Some(value) = args.get(field) {
-                if !value.as_str().is_some_and(|s| self.refs.contains_key(s)) {
-                    return Err(error(format!(
-                        "{field} must come from discovery in this turn; discover it again{}",
-                        if field == "parameterRef" {
-                            " (or name the parameter instead, with parameter \"Filter Freq\", and the device's deviceRef from this turn's observation)"
-                        } else {
-                            ""
-                        }
-                    )));
-                }
-            }
-        }
-        if depth < 2 {
-            for value in args.values() {
-                if let Some(items) = value.as_array() {
-                    for item in items {
-                        if let Some(row) = item.as_object() {
-                            self.require_at(row, depth + 1)?;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
     }
     pub fn encode(&mut self, result: &CallToolResult, epoch: f64, slim: bool, observed_at: &str, generation: &str) -> ToolResult {
         if result.is_error == Some(true) {
@@ -599,16 +236,6 @@ pub fn slim_mixers(content: &JsonObject) -> JsonObject {
     let mut result = content.clone();
     result.insert("items".into(), json!(items));
     result
-}
-
-fn same_primitive(a: Option<&Value>, b: Option<&Value>) -> bool {
-    match (a, b) {
-        (None, None) | (Some(Value::Null), Some(Value::Null)) => true,
-        (Some(Value::Number(a)), Some(Value::Number(b))) => a.as_f64() == b.as_f64(),
-        (Some(Value::String(a)), Some(Value::String(b))) => a == b,
-        (Some(Value::Bool(a)), Some(Value::Bool(b))) => a == b,
-        _ => false,
-    }
 }
 
 #[cfg(test)]

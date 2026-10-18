@@ -3,18 +3,13 @@ use crate::{
     core::{contracts::JsonObject, errors::RuntimeError},
     mcp::types::{CallToolResult, ContentBlock},
 };
-use kumi_common::js::{
-    json::stringify,
-    string::{locale_compare, utf16_len},
-};
+use kumi_common::js::{json::stringify, string::utf16_len};
 use serde_json::{json, Value};
 use std::sync::LazyLock;
 pub const INSTRUCTIONS: &str = include_str!("assets/instructions.txt");
 pub static FIELDS: LazyLock<JsonObject> = LazyLock::new(|| serde_json::from_str(include_str!("assets/fields.json")).unwrap());
 pub static PARENTS: LazyLock<JsonObject> = LazyLock::new(|| serde_json::from_str(include_str!("assets/parents.json")).unwrap());
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct ObservationError(pub String);
+pub use crate::core::refs::{query_key, ObservationError};
 impl From<ObservationError> for RuntimeError {
     fn from(error: ObservationError) -> Self {
         RuntimeError::Observation(error.0)
@@ -109,20 +104,4 @@ pub fn discovery_args(input: &JsonObject) -> Result<JsonObject, ObservationError
         args.insert("fields".into(), Value::Array(fields));
     }
     Ok(args)
-}
-pub fn query_key(args: &JsonObject) -> String {
-    fn ordered(value: &Value) -> Value {
-        match value {
-            Value::Object(map) => {
-                let mut fields: Vec<_> = map.iter().collect();
-                fields.sort_by(|a, b| locale_compare(a.0, b.0));
-                Value::Object(fields.into_iter().map(|(k, v)| (k.clone(), ordered(v))).collect())
-            }
-            Value::Array(items) => Value::Array(items.iter().map(ordered).collect()),
-            other => other.clone(),
-        }
-    }
-    let mut query = args.clone();
-    query.shift_remove("cursor");
-    stringify(&ordered(&Value::Object(query)))
 }

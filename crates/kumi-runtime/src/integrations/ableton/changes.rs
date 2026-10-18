@@ -147,9 +147,7 @@ pub fn note_name(note: f64) -> String {
     let name = if index >= 0.0 && index < 12.0 && index.fract() == 0.0 { notes[index as usize] } else { "undefined" };
     format!("{name}{}", number::to_string((note / 12.0).floor() - 2.0))
 }
-pub fn hex_color(value: &Value) -> Option<String> {
-    value.as_f64().filter(|v| v.fract() == 0.0 && (0.0..=16777215.0).contains(v)).map(|v| format!("#{:06x}", v as u32))
-}
+pub use crate::core::refs::hex_color;
 pub(crate) fn record(value: Option<&Value>) -> &JsonObject {
     static EMPTY: LazyLock<JsonObject> = LazyLock::new(JsonObject::new);
     value.and_then(Value::as_object).unwrap_or(&EMPTY)
