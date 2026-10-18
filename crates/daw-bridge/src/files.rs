@@ -158,12 +158,14 @@ pub fn discovery_file_name(daw: &str, pid: u32, resource: &str) -> String {
 }
 
 /// Writes a bridge's discovery file whole (what the REAPER extension calls; the Renoise tool does the same in Lua).
+/// The lifecycle made the folder owner-only; the file holds no secret, so it's written without Windows' ACL step,
+/// which would start PowerShell from inside the DAW.
 pub fn write_discovery(dir: &Path, discovery: &Discovery) -> std::io::Result<PathBuf> {
-    owner::create_owner_only_dir(dir)?;
+    std::fs::create_dir_all(dir)?;
     let path = dir.join(discovery.file_name());
     let mut text = serde_json::to_string(discovery).expect("discovery serializes");
     text.push('\n');
-    owner::write_owner_only(&path, text.as_bytes())?;
+    owner::write_atomic(&path, text.as_bytes())?;
     Ok(path)
 }
 

@@ -380,6 +380,9 @@ impl Lifecycle {
     /// secret is made if missing, the reference written, and the version before kept to roll back to.
     pub fn install(&self, source: &Path, version: &str) -> Result<Receipt, LifecycleError> {
         owner::create_owner_only_dir(&self.paths.root)?;
+        // The bridge writes into these but may not be able to make them (Renoise's Lua can't make folders).
+        owner::create_owner_only_dir(&self.paths.discovery())?;
+        owner::create_owner_only_dir(&self.paths.logs())?;
         self.recover()?;
         let before = self.receipt()?.filter(|receipt| receipt.status == "installed");
         let (generation, _) = self.stage(source, version)?;
@@ -502,6 +505,7 @@ mod tests {
         assert_eq!((installed.status.as_str(), installed.version.as_deref()), ("installed", Some("1.0")));
         let status = life.status().unwrap();
         assert!(status.present && status.matches && status.reference && status.secret, "{status:?}");
+        assert!(life.paths.discovery().is_dir() && life.paths.logs().is_dir());
         let secret = std::fs::read(life.paths.secret()).unwrap();
 
         // The tool's own preferences survive upgrades and aren't part of its hash.
