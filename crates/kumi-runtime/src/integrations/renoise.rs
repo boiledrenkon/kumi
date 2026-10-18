@@ -32,14 +32,17 @@ pub const DAW: OwnDaw = OwnDaw {
     to_body,
 };
 
-/// What the producer looks at in Renoise: the pattern or phrase editor, the pattern matrix, an instrument, the mixer,
-/// or a track's DSP chain; the selected track, pattern (or phrase, or instrument), sequence slot and device.
+/// What the producer looks at in Renoise: the middle frame (the pattern or phrase editor, an instrument, the mixer),
+/// with the track DSPs below it and the pattern matrix beside it when they're open; the selected track, pattern (or
+/// phrase, or instrument), sequence slot and device. Renoise can't say which pane has the keyboard, so FOCUS picks by
+/// what changes.
 fn fill_focus(focus: &Value) -> DawFocus {
     let selection = focus.get("selection").cloned().unwrap_or(Value::Null);
     let shown = focus.get("view").and_then(Value::as_str).unwrap_or("pattern");
+    let open = |key: &str| focus.get(key) == Some(&Value::Bool(true));
+    let transport = focus.get("transport").cloned().unwrap_or(Value::Null);
     let main = match shown {
         "phrase" => view(ViewKind::PatternEditor, "Phrase Editor"),
-        "matrix" => view(ViewKind::Sequencer, "Pattern Matrix"),
         "instrument" => view(ViewKind::Instrument, "Instrument"),
         "sample" => view(ViewKind::Instrument, "Sample Editor"),
         "mixer" => view(ViewKind::Mixer, "Mixer"),
@@ -72,9 +75,13 @@ fn fill_focus(focus: &Value) -> DawFocus {
         device_ref: selected(&selection, "deviceRef"),
         device: name("deviceName"),
         main_view: Some(main),
-        editor_view: (shown == "dsp").then(|| view(ViewKind::DeviceChain, "Track DSPs")),
+        editor_view: open("dspVisible").then(|| view(ViewKind::DeviceChain, "Track DSPs")),
         item,
         section,
+        panes: open("matrixVisible").then(|| vec![view(ViewKind::Sequencer, "Pattern Matrix")]),
+        section_follows: (transport.get("playing") == Some(&Value::Bool(true))
+            && transport.get("followPlayer") == Some(&Value::Bool(true)))
+        .then_some(true),
         ..Default::default()
     }
 }

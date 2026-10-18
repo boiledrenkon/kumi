@@ -107,6 +107,12 @@ pub struct DawFocus {
     /// The section selected (a scene, a marker, a sequence slot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<FocusSection>,
+    /// Views open beside the main one (Renoise's pattern matrix), which FOCUS shows when the producer works in them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panes: Option<Vec<FocusView>>,
+    /// The section moves with the playhead (Renoise following the player): a new one is playback's, not the producer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_follows: Option<bool>,
 }
 
 /// What the producer is looking at, as Live's integration has always sent it.

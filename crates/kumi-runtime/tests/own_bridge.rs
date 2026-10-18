@@ -322,3 +322,38 @@ async fn renoises_bodies_are_its_pattern_matrix_and_keyzones_in_its_own_notation
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn renoises_focus_is_its_middle_frame_with_the_panes_open_beside_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use kumi_runtime::core::view::ViewKind;
+            let focus = json!({
+                "epoch": "3", "view": "pattern", "matrixVisible": true, "dspVisible": true, "changed": 2,
+                "selection": {"trackRef": "3:track:2", "track": {"name": "Bass", "type": "sequencer"}, "patternRef": "3:pattern:4", "patternName": "Drop", "sequence": 3, "deviceRef": "3:device:2.2", "deviceName": "Delay"},
+                "transport": {"playing": true, "followPlayer": true, "beat": 8.0, "tempo": 128, "beatsPerBar": 4},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("focus", focus, false)]),
+                asked: RefCell::default(),
+            });
+            let seen: Rc<RefCell<Vec<Option<kumi_runtime::core::view::DawFocus>>>> = Rc::default();
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            let into = seen.clone();
+            options.context.on_focus = Some(Rc::new(move |focus| into.borrow_mut().push(focus)));
+            options.context.focus_interval_ms = Some(50);
+            let renoise = create_renoise_integration(options);
+            renoise.start(Signal::new()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let focus = seen.borrow().first().cloned().flatten().expect("the focus");
+            let kind = |view: Option<&kumi_runtime::core::view::FocusView>| view.map(|v| v.kind);
+            assert_eq!(kind(focus.main_view.as_ref()), Some(ViewKind::PatternEditor), "the middle frame");
+            assert_eq!(focus.editor_view.as_ref().map(|v| v.label.as_str()), Some("Track DSPs"), "the DSP frame below it");
+            assert_eq!(focus.panes.iter().flatten().map(|v| v.kind).collect::<Vec<_>>(), [ViewKind::Sequencer], "the matrix beside it");
+            assert_eq!(focus.section_follows, Some(true), "playing and following: the sequence slot is playback's");
+            assert_eq!(focus.section.as_ref().and_then(|s| s.index), Some(2.), "slots from 1 in Renoise, from 0 in FOCUS");
+            assert_eq!(focus.item.as_ref().and_then(|i| i.item_ref.as_deref()), Some("3:pattern:4"));
+            renoise.close().await.unwrap();
+        })
+        .await;
+}

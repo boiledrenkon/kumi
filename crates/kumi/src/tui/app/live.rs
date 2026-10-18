@@ -240,7 +240,12 @@ impl TuiApp {
         }
         let request = match state.touched? {
             Touched::Tracker if main_kind(focus) == Some(ViewKind::PatternEditor) => BodyRequest::Tracker { item_ref: item_ref(focus) },
-            Touched::Matrix if main_kind(focus) == Some(ViewKind::Sequencer) => BodyRequest::Matrix,
+            Touched::Matrix
+                if main_kind(focus) == Some(ViewKind::Sequencer)
+                    || focus.panes.iter().flatten().any(|pane| pane.kind == ViewKind::Sequencer) =>
+            {
+                BodyRequest::Matrix
+            }
             Touched::Keyzones if main_kind(focus) == Some(ViewKind::Instrument) => BodyRequest::Keyzones { item_ref: item_ref(focus)? },
             Touched::Routing if editor_kind(focus) == Some(ViewKind::Routing) => {
                 BodyRequest::Routing { track_ref: focus.track_ref.clone().filter(|s| !s.is_empty())? }

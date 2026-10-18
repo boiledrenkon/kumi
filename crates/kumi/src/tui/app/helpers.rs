@@ -117,10 +117,11 @@ pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Op
     let on_timeline = main(&after) == Some(ViewKind::Timeline);
     // A DAW whose note editor over the timeline shows a take's notes (REAPER) reads them, not the timeline.
     let notes = if on_timeline && !view.timeline_notes { Touched::Timeline } else { Touched::Notes };
-    // A tracker's views, an instrument and a track's routing have bodies of their own.
+    // A tracker's views, an instrument and a track's routing have bodies of their own (a tracker's pattern stays
+    // under its DSP frame).
     let own_of = |focus: &DawFocus| match (main(focus), editor(focus)) {
         (_, Some(ViewKind::Routing)) => Some(Touched::Routing),
-        (Some(ViewKind::PatternEditor), None) => Some(Touched::Tracker),
+        (Some(ViewKind::PatternEditor), _) => Some(Touched::Tracker),
         (Some(ViewKind::Sequencer), _) => Some(Touched::Matrix),
         (Some(ViewKind::Instrument), _) => Some(Touched::Keyzones),
         _ => None,
@@ -130,10 +131,16 @@ pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Op
     let Some(before) = before.map(|before| filled(view, before)) else {
         return Some(match editor(&after) {
             Some(ViewKind::NoteEditor) => notes,
-            Some(ViewKind::DeviceChain) => Touched::Tree,
+            Some(ViewKind::DeviceChain) if own.is_none() => Touched::Tree,
             _ => shown,
         });
     };
+    // A pane beside the main view (Renoise's pattern matrix) shows when the producer moves in it, not playback.
+    let pane_open = |kind: ViewKind| after.panes.iter().flatten().any(|pane| pane.kind == kind);
+    let producer_moved = index(&after) != index(&before) && after.section_follows != Some(true);
+    // Beside a body of its own, a device chain shows for another device on the same track: moving to another track
+    // is moving in the tracker.
+    let same_track = own.is_none() || after.track_ref == before.track_ref;
     // Coming into a view with a body of its own, or leaving one, shows what's there now.
     let own_moved = (own.is_some() || own_of(&before).is_some()) && own != own_of(&before);
     Some(if after.main_view != before.main_view || own_moved {
@@ -144,11 +151,11 @@ pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Op
         && (editor(&before) != Some(ViewKind::NoteEditor) || item(&after) != item(&before))
     {
         notes
+    } else if pane_open(ViewKind::Sequencer) && producer_moved {
+        Touched::Matrix
     } else if editor(&after) == Some(ViewKind::DeviceChain)
         && (editor(&before) != Some(ViewKind::DeviceChain)
-            || after.device != before.device
-            || after.chain != before.chain
-            || after.track_ref != before.track_ref)
+            || (same_track && (after.device != before.device || after.chain != before.chain || after.track_ref != before.track_ref)))
     {
         Touched::Tree
     } else if let Some(own) = own.filter(|_| item(&after) != item(&before) || after.track_ref != before.track_ref) {

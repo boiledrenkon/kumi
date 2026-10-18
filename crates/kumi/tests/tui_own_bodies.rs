@@ -164,3 +164,42 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
     h.has("2 zones · 1 macros");
     h.close().await;
 });
+
+/// Renoise can't say which pane has the keyboard, so FOCUS follows what changes: the pattern under the DSP frame, the
+/// DSP chain for another device on the same track, the matrix when the producer moves through the sequence (never
+/// when playback does), and the pattern again on another track.
+#[test]
+fn renoises_open_panes_show_when_the_producer_works_in_them() {
+    use kumi::tui::app::{touched_next, Touched};
+    use kumi_runtime::core::view::DawFocus;
+    work_with(DawId::Renoise);
+    let focus = |track: u32, device: &str, slot: f64, follows: bool| -> DawFocus {
+        serde_json::from_value(json!({
+            "track": {"name": format!("Track {track}")}, "trackRef": format!("3:track:{track}"), "device": device,
+            "mainView": {"kind": "pattern-editor", "label": "Pattern Editor"},
+            "editorView": {"kind": "device-chain", "label": "Track DSPs"},
+            "panes": [{"kind": "sequencer", "label": "Pattern Matrix"}],
+            "item": {"kind": "pattern-track", "itemRef": format!("3:pattern:{}", slot as u32 + 1)},
+            "section": {"kind": "sequence-slot", "index": slot},
+            "sectionFollows": follows,
+        }))
+        .unwrap()
+    };
+    let start = focus(1, "Mixer", 0., false);
+    assert_eq!(touched_next(None, Some(&start), None), Some(Touched::Tracker), "the pattern, though the DSP frame is open");
+    let device = focus(1, "Delay", 0., false);
+    assert_eq!(touched_next(Some(&start), Some(&device), Some(Touched::Tracker)), Some(Touched::Tree), "another device, same track");
+    let track = focus(2, "Mixer", 0., false);
+    assert_eq!(touched_next(Some(&device), Some(&track), Some(Touched::Tree)), Some(Touched::Tracker), "another track is the tracker's");
+    let slot = focus(2, "Mixer", 1., false);
+    assert_eq!(touched_next(Some(&track), Some(&slot), Some(Touched::Tracker)), Some(Touched::Matrix), "moving through the sequence");
+    assert_eq!(touched_next(Some(&slot), Some(&slot), Some(Touched::Matrix)), Some(Touched::Matrix), "nothing changed, nothing moves");
+    let played = focus(2, "Mixer", 2., true);
+    assert_eq!(
+        touched_next(Some(&track), Some(&played), Some(Touched::Tracker)),
+        Some(Touched::Tracker),
+        "playback moved it, not the producer"
+    );
+    let closed = DawFocus { panes: None, ..focus(2, "Mixer", 1., false) };
+    assert_eq!(touched_next(Some(&track), Some(&closed), Some(Touched::Tracker)), Some(Touched::Tracker), "no matrix open, the pattern");
+}
