@@ -61,10 +61,10 @@ pub use core::techniques::{
 };
 pub use ears::device::{install_ears, EARS_NAME};
 pub use hands::{can_build_hands, open_hands, Hands};
-pub use integrations::ableton::focus::parse_focus;
-pub use integrations::ableton::project::{create_project_store, Baseline, ProjectStore};
-pub use integrations::ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
 pub use integrations::fallback::with_fallback;
+pub use integrations::{
+    create_ableton_integration, create_inference_only_integration, create_project_store, parse_focus, Baseline, ProjectStore, BRIDGE_TOOLS,
+};
 pub use kernel::agent::{create_agent_kernel, AgentKernel, AgentKernelOptions, Checkpoint, ModelBinding, ModelRequest};
 pub use kernel::budget::{budget_for, ContextBudget, DEFAULT_BUDGET};
 pub use library::{
