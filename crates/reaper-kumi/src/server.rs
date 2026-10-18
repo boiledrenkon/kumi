@@ -1114,6 +1114,38 @@ mod tests {
         drop(waiting);
     }
 
+    // Bytes that keep coming reset the read timeout, so only the clock handed to the handshake with each read can end it:
+    // this fails if the extension passes a stale one.
+    #[test]
+    fn a_peer_that_keeps_sending_is_refused_at_the_deadline_by_the_real_clock() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader) = lab.connect();
+        let accepted = Instant::now();
+        let refused_at = Arc::new(Mutex::new(None));
+        let seen = refused_at.clone();
+        // Read as it comes: a write after the bridge closed resets the connection, and a refusal not yet read is lost
+        // on Windows.
+        let watcher = thread::spawn(move || {
+            while let Some(line) = read_line(&mut reader) {
+                if line.contains("\"refused\"") {
+                    *seen.lock().unwrap() = Some((accepted.elapsed(), line));
+                    return;
+                }
+            }
+        });
+        let (_, hello) = ClientHandshake::start(Secret::new(VECTOR_SECRET).unwrap(), "test");
+        stream.write_all(&hello).unwrap();
+        while refused_at.lock().unwrap().is_none() && accepted.elapsed() < Duration::from_secs(6) {
+            let _ = stream.write_all(b"\n");
+            thread::sleep(Duration::from_millis(100));
+        }
+        watcher.join().unwrap();
+        let (after, line) = refused_at.lock().unwrap().clone().expect("never refused");
+        assert!(line.contains("\"timeout\""), "{line}");
+        let limit = Duration::from_millis(wire::HANDSHAKE_TIMEOUT_MS);
+        assert!(after >= limit - Duration::from_millis(100) && after < limit + Duration::from_millis(1500), "refused after {after:?}");
+    }
+
     #[test]
     fn a_wrong_secret_never_gets_a_welcome() {
         let mut lab = Lab::start(&"o".repeat(40), ServerConnection::new);
