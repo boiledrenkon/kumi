@@ -138,9 +138,7 @@ pub static REFERENCE_FIELDS: LazyLock<Vec<String>> = LazyLock::new(|| serde_json
 pub static UNDO_DESCRIPTION: LazyLock<String> = LazyLock::new(|| DATA["undoDescription"].as_str().unwrap().into());
 pub const UNDO_TOOL: &str = "undo_change";
 pub const EMERGENCY_STOP: &str = "live_session_emergency_stop";
-pub fn format_number(value: f64, digits: Option<usize>) -> String {
-    number::to_string(number::parse(&number::to_fixed(value, digits.unwrap_or(2))).unwrap_or(f64::NAN))
-}
+pub use crate::core::picture::format_number;
 pub fn note_name(note: f64) -> String {
     let index = note % 12.0;
     let notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
