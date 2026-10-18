@@ -44,8 +44,8 @@ local function limit_of(params)
 end
 
 -- The rows from `row_at(i)`, i from the cursor to `total`, up to the limit (nil rows are skipped, not counted), as
--- {items, nextCursor?, epoch}, cut to the byte budget by dropping rows off the end.
-local function page(job, epoch, params, total, row_at, sparse)
+-- {items, nextCursor?, epoch, ...extra}, cut to the byte budget by dropping rows off the end.
+local function page(job, epoch, params, total, row_at, sparse, extra)
   local from = cursor_start(params, epoch, job.layout)
   local limit = limit_of(params)
   local items, after = {}, {}
@@ -74,6 +74,7 @@ local function page(job, epoch, params, total, row_at, sparse)
     local shown = {}
     for k = 1, keep do shown[k] = items[k] end
     local result = { items = array(shown), epoch = epoch }
+    for key, value in pairs(extra or {}) do result[key] = value end
     if next_at then result.nextCursor = cursor_for(epoch, job.layout, next_at) end
     if keep <= 1 or #json.encode(result) <= M.PAGE_BUDGET then return result end
     keep = math.max(1, math.floor(keep * 0.6))
@@ -169,9 +170,12 @@ function M.read(job, params, epoch)
     local track = song:track(track_at)
     local note_columns, effect_columns = track.visible_note_columns, track.visible_effect_columns
     local total = song:pattern(pattern_at).number_of_lines
+    -- An alias shows the lines of another pattern: they are that pattern's, and a write to them changes it.
+    local alias = song:pattern(pattern_at):track(track_at).alias_pattern_index
+    local extra = alias > 0 and { aliasOf = alias, aliasRef = refs.make(epoch, "pattern", alias) } or nil
     return page(job, epoch, params, total, function(i)
       return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i, note_columns, effect_columns)
-    end, true)
+    end, true, extra)
   elseif kind == "instrument" then
     return page(job, epoch, params, #song.instruments, function(i) return instrument_row(the_song(), epoch, i) end)
   elseif kind == "sample" then

@@ -1305,3 +1305,29 @@ test("reads: a device, sample or phrase made later is watched too, with no tick 
   eq(env.payload().watching(), made, "and a tick watched nothing anew")
   H.no_dialogs()
 end)
+
+test("reads: an aliased track says whose lines it shows, on a line page and in a pattern body", function()
+  local env, peer = setup()
+  fill_demo() -- track 2 of pattern 2 is an alias of pattern 1; pattern 1's track 1 has notes
+  mock.ops.set_note(1, 2, 4, 1, { note = 55, instrument = 0 })
+  local E = epoch_of(peer)
+  -- the lines of the alias are the source's (as Renoise answers)
+  local page = call(peer, "read", { kind = "line", parent = E .. ":pattern:2", track = 2 }).result
+  eq(page.aliasOf, 1)
+  eq(page.aliasRef, E .. ":pattern:1")
+  eq(page.items[1].line, 4)
+  eq(page.items[1].notes[1].note, "G-4")
+  local own = call(peer, "read", { kind = "line", parent = E .. ":pattern:1", track = 2 }).result
+  eq(own.aliasOf, nil, "a track that isn't an alias says nothing")
+  eq(own.aliasRef, nil)
+  local body = call(peer, "focus_body", { kind = "pattern", ref = E .. ":pattern:2", window = { from = 1, to = 8 } }).result
+  eq(body.tracks[2].aliasOf, 1)
+  eq(body.tracks[2].aliasRef, E .. ":pattern:1")
+  eq(#body.tracks[2].lines, 1, "and the lines in the body are pattern 1's")
+  eq(body.tracks[1].aliasOf, nil)
+  -- a note written through the alias is the source's
+  mock.ops.set_note(2, 2, 6, 1, { note = 57, instrument = 0 })
+  local source = call(peer, "read", { kind = "line", parent = E .. ":pattern:1", track = 2 }).result
+  eq(source.items[2].line, 6)
+  H.no_dialogs()
+end)

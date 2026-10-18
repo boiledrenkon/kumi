@@ -202,7 +202,7 @@ local function fit(result, entries, from, to, cut)
       end
       shown[t] = {
         ref = entry.ref, name = entry.name, color = entry.color, noteColumns = entry.noteColumns,
-        effectColumns = entry.effectColumns, lines = array(kept),
+        effectColumns = entry.effectColumns, lines = array(kept), aliasOf = entry.aliasOf, aliasRef = entry.aliasRef,
       }
     end
     result.window = { from = from, to = to }
@@ -246,9 +246,11 @@ local function pattern_body(job, params, epoch)
       local row = line_row(pattern_track:line(i), i, note_columns, effect_columns)
       if row then read[#read + 1] = row end
     end
+    local alias = pattern_track.alias_pattern_index
     entries[t] = {
       ref = refs.make(epoch, "track", t), name = track.name, color = hex(track.color),
       noteColumns = note_columns, effectColumns = effect_columns, rows = read,
+      aliasOf = alias > 0 and alias or nil, aliasRef = alias > 0 and refs.make(epoch, "pattern", alias) or nil,
     }
   end
   local live = the_song()
