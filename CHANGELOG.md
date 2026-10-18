@@ -3,6 +3,20 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.19.0 — 2026-10-17
+
+Ships with bridge 1.0.92, as 1.18.0 did.
+
+- Share a conversation, or keep it. `/export` copies it as Markdown, or saves it as Markdown, a web
+  page, or a file another Kumi can carry on from (`kumi import`). `/share` saves the web page and
+  shows where it is, ready to open or send. From the shell: `kumi export [id or name]
+  [--md|--html|--json] [--full]`. Keys, tokens, your home folder and your account name are taken out.
+  Live's details, your notes and the model's reasoning never leave. The web page needs nothing else:
+  it opens anywhere, light or dark, on a phone too.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.18.0 — 2026-10-15
 
 Ships with bridge 1.0.92, as 1.17.1 did.
