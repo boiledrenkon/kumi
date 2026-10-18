@@ -1641,6 +1641,15 @@ pub enum SessionEvent {
     #[serde(untagged)]
     Memory(MemoryEvent),
 }
+impl SessionEvent {
+    /// What the app is told of an observation: its label, and the project's name as the DAW gives it.
+    pub fn observed(observation: &Observation) -> SessionEvent {
+        SessionEvent::Observation {
+            label: observation.label.clone(),
+            name: observation.identity.as_ref().map(|identity| identity.name.clone()),
+        }
+    }
+}
 
 impl From<KernelEvent> for SessionEvent {
     fn from(event: KernelEvent) -> Self {
