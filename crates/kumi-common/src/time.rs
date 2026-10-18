@@ -4,6 +4,25 @@
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+/// How long ago `saved_at` was at `now` (both in milliseconds), in words: "just now", "50 minutes ago", "1 hour ago",
+/// "3 days ago".
+pub fn since(saved_at: f64, now: f64) -> String {
+    use crate::js::number::{round, to_string};
+    let minutes = round((now - saved_at) / 60_000.0).max(0.0);
+    if minutes < 2.0 {
+        return "just now".into();
+    }
+    if minutes < 60.0 {
+        return format!("{} minutes ago", to_string(minutes));
+    }
+    let hours = round(minutes / 60.0);
+    if hours < 24.0 {
+        return format!("{} {} ago", to_string(hours), if hours == 1.0 { "hour" } else { "hours" });
+    }
+    let days = round(hours / 24.0);
+    format!("{} {} ago", to_string(days), if days == 1.0 { "day" } else { "days" })
+}
+
 /// `Date.now()`: milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)

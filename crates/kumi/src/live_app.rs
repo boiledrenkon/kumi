@@ -126,22 +126,31 @@ pub async fn open_set_file(run: &Run, platform: &str, env: &Env, set: &str) -> b
     start(run, platform, env, Some(&live.app), Some(set)).await
 }
 
+/// The oldest Live Kumi works with, by its major version: setup, the doctor and what's installed here read it.
+pub const MIN_LIVE_MAJOR: u32 = 12;
+
 /// What of Live is on this computer, read from its files without opening it: whether it can take the bridge yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveInstalled {
-    /// Live 12 or later has been opened here, so it has a User Library the bridge goes in.
+    /// A Live Kumi works with (`MIN_LIVE_MAJOR` or later) has been opened here, so it has a User Library the bridge
+    /// goes in.
     Ready,
     /// No Live at all.
     Missing,
     /// Only an older Live: the newest one's version ("11.3.13").
     Older(String),
-    /// Live 12 is installed (this app), but hasn't been opened yet, so it has no User Library.
+    /// A Live Kumi works with is installed (this app), but hasn't been opened yet, so it has no User Library.
     NeverOpened(String),
 }
 
 /// Which Live is here, from files alone: the Lives installed where their installer puts them, the settings folder
 /// each version makes as it first starts ("Live 12.4.15"), and the User Library the bridge goes in.
 pub fn installed(env: &Env, platform: &str) -> LiveInstalled {
+    installed_with(env, platform, &installed_lives(env, platform))
+}
+
+/// `installed`, with the Lives installed here read already (the doctor lists them too).
+pub fn installed_with(env: &Env, platform: &str, lives: &[InstalledLive]) -> LiveInstalled {
     let var = |name: &str| system::env_var(env, name, platform).unwrap_or_default().to_string();
     // The producer said where Live's Remote Scripts are: that's Live's to have made.
     if !var("KUMI_REMOTE_SCRIPTS_DIR").is_empty() {
@@ -154,7 +163,7 @@ pub fn installed(env: &Env, platform: &str) -> LiveInstalled {
             .into(),
         _ => return LiveInstalled::Missing,
     };
-    decide(&installed_lives(env, platform), &opened_versions(&crate::config::live_preferences_dir(env)), &libraries)
+    decide(lives, &opened_versions(&crate::config::live_preferences_dir(env)), &libraries)
 }
 
 /// The versions Live has been opened as here, from its settings folders ("Live 12.4.15b6"): newest major first.
@@ -182,11 +191,11 @@ fn major(live: &InstalledLive) -> Option<u32> {
 
 /// What setup can do with the Lives installed and opened here, and the User Libraries Live makes.
 fn decide(lives: &[InstalledLive], opened: &[(u32, String)], libraries: &[String]) -> LiveInstalled {
-    if opened.iter().any(|(major, _)| *major >= 12) {
+    if opened.iter().any(|(major, _)| *major >= MIN_LIVE_MAJOR) {
         return LiveInstalled::Ready;
     }
     let newest = lives.iter().filter_map(|live| Some((major(live)?, live))).max_by_key(|(major, _)| *major);
-    if let Some((_, live)) = newest.filter(|(major, _)| *major >= 12) {
+    if let Some((_, live)) = newest.filter(|(major, _)| *major >= MIN_LIVE_MAJOR) {
         return LiveInstalled::NeverOpened(live.app.clone());
     }
     if let Some((_, version)) = opened.first() {

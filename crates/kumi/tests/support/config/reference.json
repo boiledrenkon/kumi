@@ -42,7 +42,18 @@
         "doctor"
       ],
       "expected": {
-        "mode": "doctor"
+        "mode": "doctor",
+        "json": false
+      }
+    },
+    {
+      "args": [
+        "doctor",
+        "--json"
+      ],
+      "expected": {
+        "mode": "doctor",
+        "json": true
       }
     },
     {
@@ -111,7 +122,7 @@
         "update",
         "--now"
       ],
-      "error": "Use: update [--check | --rollback]."
+      "error": "Use: update [--check | --rollback | --version <x.y.z>]."
     },
     {
       "args": [
@@ -119,7 +130,60 @@
         "--check",
         "--rollback"
       ],
-      "error": "Use: update [--check | --rollback]."
+      "error": "Use: update [--check | --rollback | --version <x.y.z>]."
+    },
+    {
+      "args": [
+        "update",
+        "--version",
+        "v1.15.0"
+      ],
+      "expected": {
+        "mode": "update",
+        "rollback": false,
+        "check": false,
+        "version": "1.15.0"
+      }
+    },
+    {
+      "args": [
+        "update",
+        "--version",
+        "01.15.00"
+      ],
+      "expected": {
+        "mode": "update",
+        "rollback": false,
+        "check": false,
+        "version": "1.15.0"
+      }
+    },
+    {
+      "args": [
+        "update",
+        "--version",
+        "latest"
+      ],
+      "expected": {
+        "mode": "update",
+        "rollback": false,
+        "check": false
+      }
+    },
+    {
+      "args": [
+        "update",
+        "--version",
+        "1.15"
+      ],
+      "error": "Use: update --version <x.y.z>, such as update --version 1.15.0."
+    },
+    {
+      "args": [
+        "update",
+        "--version"
+      ],
+      "error": "Use: update --version <x.y.z>, such as update --version 1.15.0."
     },
     {
       "args": [
@@ -183,7 +247,8 @@
       "expected": {
         "mode": "uninstall",
         "all": false,
-        "yes": false
+        "yes": false,
+        "dryRun": false
       }
     },
     {
@@ -195,7 +260,8 @@
       "expected": {
         "mode": "uninstall",
         "all": true,
-        "yes": true
+        "yes": true,
+        "dryRun": false
       }
     },
     {
@@ -207,7 +273,20 @@
       "expected": {
         "mode": "uninstall",
         "all": true,
-        "yes": false
+        "yes": false,
+        "dryRun": false
+      }
+    },
+    {
+      "args": [
+        "uninstall",
+        "--dry-run"
+      ],
+      "expected": {
+        "mode": "uninstall",
+        "all": false,
+        "yes": false,
+        "dryRun": true
       }
     },
     {
@@ -215,7 +294,7 @@
         "uninstall",
         "--force"
       ],
-      "error": "Use: uninstall [--all] [--yes]."
+      "error": "Use: uninstall [--all] [--yes] [--dry-run]."
     },
     {
       "args": [

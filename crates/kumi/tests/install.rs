@@ -73,7 +73,7 @@ fn manifest(version: &str) -> Value {
 }
 fn env(dir: &Path) -> Env {
     [
-        ("KUMI_HOME".into(), dir.join("home").display().to_string()),
+        ("KUMI_HOME".into(), dir.join(".kumi").display().to_string()),
         ("KUMI_RELEASES".into(), "https://example.test/r".into()),
         ("KUMI_REMOTE_SCRIPTS_DIR".into(), dir.join("Remote Scripts").display().to_string()),
         ("HOME".into(), dir.join("user").display().to_string()),
@@ -126,6 +126,10 @@ async fn release_check_distinguishes_newer_and_unreachable() {
     assert!(check_release(&env, Some(Rc::new(offline))).await.unwrap_err().message().contains("couldn't reach GitHub"));
 }
 fn fake_release(dir: &Path, version: &str) -> Vec<u8> {
+    fake_release_with(dir, version, None)
+}
+/// A release bundle whose `kumi --version` says `version`, carrying `bridge` when given.
+fn fake_release_with(dir: &Path, version: &str, bridge: Option<&str>) -> Vec<u8> {
     let stage = dir.join(format!("stage-{version}"));
     fs::create_dir_all(&stage).unwrap();
     let code = dir.join("main.rs");
@@ -139,7 +143,11 @@ fn fake_release(dir: &Path, version: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
-    put(stage.join("package.json"), json!({"version":version}).to_string());
+    put(stage.join("package.json"), json!({"version":version,"bridge":bridge}).to_string());
+    put(
+        stage.join("CHANGELOG.md"),
+        format!("# Changelog\n\n## {version} — 2026-10-13\n\n- Kumi plays your Set back to you. It listens as it goes.\n- Faster starts.\n\n## {KUMI_VERSION} — 2026-10-12\n\n- This one.\n"),
+    );
     let file = dir.join("kumi.tar.gz");
     assert!(std::process::Command::new(system::system_program_default(SystemProgram::Tar))
         .args(["-czf", file.to_str().unwrap(), "-C", stage.to_str().unwrap(), "."])
@@ -147,6 +155,33 @@ fn fake_release(dir: &Path, version: &str) -> Vec<u8> {
         .unwrap()
         .success());
     fs::read(file).unwrap()
+}
+/// tar.exe reads its arguments in Windows' code page, which can't spell every folder name: an update unpacks in
+/// KUMI_HOME, so the paths tar gets are plain ASCII however the folders above it are named.
+#[tokio::test]
+async fn an_update_unpacks_in_a_home_named_in_letters_a_code_page_lacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(&dir.path().join("John Smith ホーム é"));
+    let home = Path::new(&env["KUMI_HOME"]);
+    put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "earlier");
+    let bytes = fake_release(dir.path(), "99.0.0");
+    let mut good = manifest("99.0.0");
+    good["sha256"] = json!(hex::encode(Sha256::digest(&bytes)));
+    let (mut updated, out) = io(&env);
+    updated.fetcher = Some(Rc::new(Serve { manifest: good, bytes, status: 200, offline: false, calls: RefCell::new(vec![]) }));
+    let calls = Rc::new(RefCell::new(vec![]));
+    let seen = calls.clone();
+    updated.run = Some(Rc::new(move |command, args, cwd| {
+        seen.borrow_mut().push((command.clone(), args.clone(), cwd.clone()));
+        async move { run_program(&command, &args, cwd.as_deref()).await }.boxed_local()
+    }));
+    assert_eq!(update_installed(updated).await.unwrap(), 0, "{}", out.0.borrow());
+    assert_eq!(version_of(home.join("app")), "99.0.0");
+    let tar = system::system_program_default(SystemProgram::Tar);
+    let (_, args, cwd) = calls.borrow().iter().find(|(command, _, _)| command == &tar).cloned().unwrap();
+    assert_eq!(cwd.as_deref(), Some(home.to_str().unwrap()));
+    assert!(args.iter().all(|arg| arg.is_ascii() && !Path::new(arg).is_absolute()), "{args:?}");
 }
 #[tokio::test]
 async fn checked_executable_update_swap_and_rollback() {
@@ -177,6 +212,7 @@ async fn checked_executable_update_swap_and_rollback() {
     assert!(out.0.borrow().contains("Run the installer again for this computer"));
     let (mut updated, out) = io(&env);
     updated.fetcher = Some(serve(good.clone()));
+    updated.others = Some(Rc::new(|| async { 1 }.boxed_local()));
     let calls = Rc::new(RefCell::new(vec![]));
     let seen = calls.clone();
     updated.run = Some(Rc::new(move |command, args, cwd| {
@@ -184,8 +220,15 @@ async fn checked_executable_update_swap_and_rollback() {
         async move { run_program(&command, &args, cwd.as_deref()).await }.boxed_local()
     }));
     assert_eq!(update_installed(updated).await.unwrap(), 0, "{}", out.0.borrow());
-    assert!(out.0.borrow().contains("Kumi is now 99.0.0"));
-    assert_eq!(out.0.borrow().contains(&format!("Kumi windows opened before the update keep running {KUMI_VERSION}")), !cfg!(windows));
+    // What changed, from the new Kumi's own changelog, and the window still running this one.
+    for line in [
+        format!("Kumi {KUMI_VERSION} → 99.0.0. "),
+        format!("update --rollback goes back to {KUMI_VERSION}."),
+        "What's new:\n  Kumi plays your Set back to you.\n  Faster starts.\n  The whole notes: /changelog in Kumi\n".into(),
+        format!("A Kumi window opened before the update keeps running {KUMI_VERSION} until you restart it."),
+    ] {
+        assert!(out.0.borrow().contains(&line), "{line}: {}", out.0.borrow());
+    }
     assert!(calls.borrow().iter().any(|(cmd, _)| cmd == &system::system_program_default(SystemProgram::Tar)));
     assert!(calls.borrow().iter().any(|(cmd, args)| cmd.ends_with(&executable_name("kumi")) && args == &["--version"]));
     assert_eq!(
@@ -199,10 +242,15 @@ async fn checked_executable_update_swap_and_rollback() {
     // What this Kumi kept in its database is written back for the older Kumi to read.
     let (database, _) = StoreClient::open(home.join("kumi.db"), json_files(&env).unwrap(), 1).await.unwrap();
     SqliteMemoryStore::new(database).remember(MemoryScope::Producer, None, "Mixes on headphones", None, 2).await.unwrap();
-    let (rollback, out) = io(&env);
+    let (mut rollback, out) = io(&env);
+    rollback.others = Some(Rc::new(|| async { 2 }.boxed_local()));
     assert_eq!(rollback_installed(rollback).await.unwrap(), 0);
     assert!(!out.0.borrow().contains("won't see"), "{}", out.0.borrow());
-    assert_eq!(out.0.borrow().contains(&format!("Kumi windows still open keep running {KUMI_VERSION}")), !cfg!(windows));
+    assert!(
+        out.0.borrow().contains(&format!("2 Kumi windows still open keep running {KUMI_VERSION} until you close them;")),
+        "{}",
+        out.0.borrow()
+    );
     let written: Value = serde_json::from_slice(&fs::read(home.join("memory.json")).unwrap()).unwrap();
     assert_eq!(written["notes"][0]["text"], "Mixes on headphones");
     assert_eq!(serde_json::from_slice::<Value>(&fs::read(home.join("app/package.json")).unwrap()).unwrap()["version"], KUMI_VERSION);
@@ -224,6 +272,8 @@ async fn checked_executable_update_swap_and_rollback() {
         "{}",
         out.0.borrow()
     );
+    // No other Kumi runs it: nothing said about windows.
+    assert!(!out.0.borrow().contains("windows still open"), "{}", out.0.borrow());
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -247,7 +297,7 @@ async fn an_update_in_place_is_an_update_even_when_its_download_cant_be_removed(
     let code = update_installed(updated).await;
     fs::set_permissions(&downloads, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(code.unwrap(), 0, "{}", out.0.borrow());
-    assert!(out.0.borrow().contains("Kumi is now 99.0.0"), "{}", out.0.borrow());
+    assert!(out.0.borrow().contains(&format!("Kumi {KUMI_VERSION} → 99.0.0.")), "{}", out.0.borrow());
     // The update goes on to its bridge step, which has something to say where Live runs.
     says_no_bridge_yet(&out.0.borrow());
 }
@@ -279,6 +329,26 @@ async fn failed_unpack_or_probe_preserves_current_app() {
         assert!(out.0.borrow().contains(if unpack != 0 { "Unpacking it failed: last" } else { "new Kumi didn't start" }));
     }
 }
+/// Kumi's folder as the installer leaves it: its launcher and its app, which an uninstall looks for before anything.
+fn installed_kumi(home: &Path) {
+    put(home.join("bin").join(if cfg!(windows) { "kumi.cmd" } else { "kumi" }), launcher(cfg!(windows)));
+    put(home.join("app/package.json"), json!({"name":"kumi","version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "kumi");
+}
+/// Every file under `folder`, with what it holds.
+fn files_in(folder: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = vec![];
+    for entry in fs::read_dir(folder).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(files_in(&path));
+        } else {
+            files.push((path.display().to_string(), fs::read(&path).unwrap()));
+        }
+    }
+    files.sort();
+    files
+}
 #[tokio::test]
 #[cfg(not(windows))]
 async fn uninstall_preserves_producer_files_until_all_requested() {
@@ -288,18 +358,23 @@ async fn uninstall_preserves_producer_files_until_all_requested() {
     for part in ["app", "app.previous", "node", "bin", "projects"] {
         fs::create_dir_all(home.join(part)).unwrap();
     }
+    installed_kumi(home);
     put(home.join("auth.json"), "{}");
     let (mut refused, _) = io(&env);
     refused.confirm = Some(Rc::new(|_| async { false }.boxed_local()));
     assert_eq!(uninstall_installed(refused, UninstallOptions::default()).await.unwrap(), 1);
     assert!(home.join("app").exists());
-    assert_eq!(uninstall_installed(io(&env).0, UninstallOptions { all: false, yes: true }).await.unwrap(), 0);
+    assert_eq!(uninstall_installed(io(&env).0, UninstallOptions { all: false, yes: true, ..Default::default() }).await.unwrap(), 0);
     for part in ["app", "app.previous", "node", "bin"] {
         assert!(!home.join(part).exists());
     }
     assert!(home.join("auth.json").exists());
     assert!(home.join("projects").exists());
-    assert_eq!(uninstall_installed(io(&env).0, UninstallOptions { all: true, yes: true }).await.unwrap(), 0);
+    // Without Kumi in it, the folder is the producer's to delete; installed again, --all takes everything.
+    assert_eq!(uninstall_installed(io(&env).0, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 1);
+    assert!(home.join("auth.json").exists());
+    installed_kumi(home);
+    assert_eq!(uninstall_installed(io(&env).0, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
     assert!(!home.exists());
 }
 fn with_bridge(dir: &Path) -> Env {
@@ -308,6 +383,7 @@ fn with_bridge(dir: &Path) -> Env {
     for part in ["app", "node", "bin"] {
         fs::create_dir_all(home.join(part)).unwrap();
     }
+    installed_kumi(home);
     let package = home.join("bridge/1.0.52-1/package");
     put(package.join("package.json"), json!({"version":"1.0.52"}).to_string());
     put(package.join(executable_name("ableton-mcp-server")), "fixture");
@@ -345,7 +421,7 @@ async fn bridge_files_stay_while_live_uses_them() {
             async move { Ran { code: if kind == "uninstaller-refused" { 1 } else { 0 }, stdout: "".into(), stderr: "".into() } }
                 .boxed_local()
         }));
-        assert_eq!(uninstall_installed(io, UninstallOptions { all: kind != "removed", yes: true }).await.unwrap(), 0);
+        assert_eq!(uninstall_installed(io, UninstallOptions { all: kind != "removed", yes: true, ..Default::default() }).await.unwrap(), 0);
         if kind == "removed" {
             assert!(calls
                 .borrow()
@@ -374,15 +450,16 @@ async fn path_removal_honors_zdotdir_and_preserves_unrelated_lines() {
     let home = Path::new(&env["KUMI_HOME"]);
     let user = Path::new(&env["HOME"]);
     let zdot = dir.path().join("zdot");
-    fs::create_dir_all(home.join("app")).unwrap();
+    installed_kumi(home);
     put(zdot.join(".zshrc"), format!("alias ll='ls -l'\n\n{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", home.display()));
     put(user.join(".profile"), format!("{PATH_MARKER}\nexport EDITOR=vim\n"));
     put(user.join(".config/fish/conf.d/kumi.fish"), PATH_MARKER);
     let profile = user.join(".profile");
     let fish = user.join(".config/fish/conf.d/kumi.fish");
     env.insert("ZDOTDIR".into(), zdot.display().to_string());
-    uninstall_installed(io(&env).0, UninstallOptions { all: false, yes: true }).await.unwrap();
-    assert_eq!(fs::read_to_string(zdot.join(".zshrc")).unwrap(), "alias ll='ls -l'\n\n");
+    uninstall_installed(io(&env).0, UninstallOptions { all: false, yes: true, ..Default::default() }).await.unwrap();
+    // The installer's blank line above its marker goes too.
+    assert_eq!(fs::read_to_string(zdot.join(".zshrc")).unwrap(), "alias ll='ls -l'\n");
     assert_eq!(fs::read_to_string(profile).unwrap(), "export EDITOR=vim\n");
     assert!(!fish.exists());
 }
@@ -392,10 +469,10 @@ async fn no_release_is_distinct_from_offline_or_invalid() {
     let env = env(dir.path());
     let notfound = || Rc::new(Serve { status: 404, ..Rc::try_unwrap(Serve::new(Value::Null)).ok().unwrap() });
     assert_eq!(ask_release(&env, Some(notfound())).await, AskedRelease::None);
-    assert_eq!(
+    assert!(matches!(
         ask_release(&env, Some(Rc::new(Serve { offline: true, ..Rc::try_unwrap(Serve::new(Value::Null)).ok().unwrap() }))).await,
-        AskedRelease::Offline
-    );
+        AskedRelease::Offline(..)
+    ));
     assert_eq!(ask_release(&env, Some(Serve::new(json!("<html>")))).await, AskedRelease::Invalid);
     assert!(check_release(&env, Some(notfound())).await.unwrap_err().message().contains("no Kumi release to get at example.test/r yet"));
     let (mut io, out) = io(&env);
@@ -633,7 +710,7 @@ async fn rollback_to_legacy_requires_closed_live_and_retained_legacy_bridge_gene
 /// where the old Remote Script would answer.
 fn legacy_bridge(dir: &Path, port: u16) -> (Env, String) {
     let env = env(dir);
-    let home = dir.join("home");
+    let home = dir.join(".kumi");
     put(home.join("app/package.json"), json!({"version":"1.7.6","bridge":"1.0.74","runtime":"rust-native"}).to_string());
     put(home.join("app").join(executable_name("ableton-mcp-server")), "native bridge");
     let package = dir.join("old bridge/package");
@@ -669,7 +746,7 @@ async fn startup_switch_failure_never_stops_kumi_and_leaves_no_partial_bridge() 
     // Unwritable: the bridge folder can't be made.
     let dir = tempfile::tempdir().unwrap();
     let (env, config) = legacy_bridge(dir.path(), free_port());
-    put(dir.path().join("home/bridge"), "a file where the bridge folder goes");
+    put(dir.path().join(".kumi/bridge"), "a file where the bridge folder goes");
     let (mut installed, out) = io(&env);
     installed.live_running = Some(Rc::new(|| async { false }.boxed_local()));
     finish_legacy_transition(&installed).await;
@@ -689,7 +766,7 @@ async fn startup_switch_failure_never_stops_kumi_and_leaves_no_partial_bridge() 
         out.0.borrow()
     );
     let left: Vec<_> =
-        fs::read_dir(dir.path().join("home/bridge")).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
+        fs::read_dir(dir.path().join(".kumi/bridge")).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
     assert!(left.is_empty(), "{left:?}");
     assert_eq!(fs::read_to_string(dir.path().join("state/bridge-config.json")).unwrap(), config);
 }
@@ -699,7 +776,7 @@ async fn startup_switch_with_the_same_remote_script_is_quiet_and_never_moves_a_l
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let (env, config) = legacy_bridge(dir.path(), listener.local_addr().unwrap().port());
     // The app's prepared bridge, whose Remote Script is byte for byte the one Live has loaded.
-    let prepared = dir.path().join("home/app/bridge");
+    let prepared = dir.path().join(".kumi/app/bridge");
     let artifact = b"native bridge artifact";
     put(prepared.join("bridge.tar.gz"), artifact);
     put(prepared.join("prepared.json"), json!({"artifact":"bridge.tar.gz","sha256":hex::encode(Sha256::digest(artifact))}).to_string());
@@ -1145,4 +1222,1100 @@ fn with_no_bridge_in_live_an_update_says_how_to_connect_it_only_where_live_runs(
         assert_eq!(kumi::install::no_bridge_yet(platform).as_deref(), Some(words.as_str()), "{platform}");
     }
     assert_eq!(kumi::install::no_bridge_yet("linux"), None, "no Live for Linux");
+}
+
+/// Everything a producer keeps in Kumi's folder, which no uninstall without --all may touch.
+const THEIRS: [&str; 17] = [
+    "auth.json",
+    "settings.json",
+    "kumi.db",
+    "kumi.db-wal",
+    "memory.json",
+    "techniques.json",
+    "playbook.json",
+    "gaps.jsonl",
+    "timings.jsonl",
+    "input-history",
+    "whats-new.json",
+    "audition-restore.json",
+    "projects/0123456789abcdef/conversations/night-drive.json",
+    "recipes/warm-pad.json",
+    "library/state.json",
+    "references/autechre.wav",
+    "goals/mix.json",
+];
+/// Kumi's own: itself, what updates and the installer leave, and what it fetched.
+fn kumi_s_own(home: &Path) {
+    for (part, bytes) in [
+        ("app/kumi", 4000),
+        ("app.previous/kumi", 3000),
+        ("app.previous.old/kumi", 10),
+        ("app.rollback/kumi", 10),
+        ("app.new/kumi", 10),
+        ("app.replaced/kumi", 10),
+        ("node/bin/node", 10),
+        ("bin/kumi", 10),
+        ("downloads/kumi.tar.gz", 10),
+        ("tools/ffmpeg", 500_000),
+        ("models/basic-pitch.onnx", 400_000),
+        ("videos/youtube-dqw4w9wgxcq/frames/1.jpg", 90_000),
+        (".install.Xy12Ab/kumi.tar.gz", 10),
+    ] {
+        put(home.join(part), vec![b'k'; bytes]);
+    }
+    put(home.join("app/package.json"), json!({"name":"kumi","version":KUMI_VERSION}).to_string());
+}
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_dry_run_says_what_would_go_and_removes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    kumi_s_own(home);
+    for file in THEIRS {
+        put(home.join(file), "theirs");
+    }
+    let rc = format!("alias ll='ls -l'\n\n{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", home.display());
+    put(user.join(".zshrc"), &rc);
+    put(user.join(".config/fish/conf.d/kumi.fish"), PATH_MARKER);
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    for line in [
+        "kumi uninstall would remove from ",
+        "(1 MB): app, app.previous, app.previous.old, app.new, app.replaced, app.rollback, node, bin, downloads, tools, models, videos, .install.Xy12Ab.",
+        "It would also take Kumi out of ",
+        ".zshrc and ",
+        "kumi.fish.",
+        "Your conversations, notes, recipes, sign-ins, library and references would stay in ",
+        "Nothing was removed (--dry-run).",
+    ] {
+        assert!(said.contains(line), "{line}: {said}");
+    }
+    assert!(home.join("app/kumi").exists() && home.join("tools/ffmpeg").exists() && home.join(".install.Xy12Ab").exists());
+    assert_eq!(fs::read_to_string(user.join(".zshrc")).unwrap(), rc);
+    assert!(user.join(".config/fish/conf.d/kumi.fish").exists());
+    let (all, out) = io(&env);
+    assert_eq!(uninstall_installed(all, UninstallOptions { all: true, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    assert!(out.0.borrow().contains("with your conversations, notes, recipes, sign-ins, library and references."), "{}", out.0.borrow());
+    assert!(home.join("auth.json").exists());
+}
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_removes_kumi_and_what_it_fetched_but_never_the_producers_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    kumi_s_own(home);
+    for file in THEIRS {
+        put(home.join(file), "theirs");
+    }
+    put(user.join(".config/fish/conf.d/kumi.fish"), PATH_MARKER);
+    put(user.join(".profile"), format!("export EDITOR=vim\n\n{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", home.display()));
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0);
+    for part in KUMI_S_OWN.iter().chain(&[".install.Xy12Ab"]) {
+        assert!(!home.join(part).exists(), "{part} is still there");
+    }
+    for file in THEIRS {
+        assert_eq!(fs::read_to_string(home.join(file)).unwrap(), "theirs", "{file}");
+    }
+    let said = out.0.borrow().clone();
+    assert!(said.contains("Took Kumi out of fish (") && said.contains("kumi.fish is gone)."), "{said}");
+    assert!(said.contains("Took Kumi out of ~/.profile.") || said.contains(".profile."), "{said}");
+    assert!(
+        said.contains("Kumi is removed, freeing 1 MB. Your conversations, notes, recipes, sign-ins, library and references are still in "),
+        "{said}"
+    );
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "export EDITOR=vim\n");
+    assert!(!user.join(".config/fish/conf.d/kumi.fish").exists());
+}
+#[tokio::test]
+async fn update_version_installs_that_release_and_keeps_this_one_to_go_back_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = with_bridge(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "this one");
+    // 1.15.0 brings bridge 1.0.50, older than the 1.0.52 in Live.
+    let bytes = fake_release_with(dir.path(), "1.15.0", Some("1.0.50"));
+    let mut older = manifest("1.15.0");
+    older["sha256"] = json!(hex::encode(Sha256::digest(&bytes)));
+    let serve = |value: Value, status: u16| -> Rc<Serve> {
+        Rc::new(Serve { manifest: value, bytes: bytes.clone(), status, offline: false, calls: RefCell::new(vec![]) })
+    };
+    // Before going back, what the database keeps is written back for the older Kumi...
+    let (database, _) = StoreClient::open(home.join("kumi.db"), json_files(&env).unwrap(), 1).await.unwrap();
+    SqliteMemoryStore::new(database).remember(MemoryScope::Producer, None, "Sidechains with Ableton's Compressor", None, 2).await.unwrap();
+    // ...but only once it has unpacked and started: one that doesn't start leaves the files as they were.
+    let (mut broken, out) = io(&env);
+    broken.version = Some("1.15.0".into());
+    broken.fetcher = Some(serve(older.clone(), 200));
+    broken.run = Some(Rc::new(|command, _, _| {
+        async move { Ran { code: i32::from(command.ends_with(&executable_name("kumi"))), stdout: "".into(), stderr: "".into() } }
+            .boxed_local()
+    }));
+    assert_eq!(update_installed(broken).await.unwrap(), 1);
+    assert!(out.0.borrow().contains("The new Kumi didn't start, so this one stays."), "{}", out.0.borrow());
+    assert!(!home.join("memory.json").exists(), "nothing written back for a Kumi that didn't go in");
+    let (mut pinned, out) = io(&env);
+    pinned.version = Some("1.15.0".into());
+    pinned.fetcher = Some(serve(older.clone(), 200));
+    assert_eq!(update_installed(pinned).await.unwrap(), 0, "{}", out.0.borrow());
+    let said = out.0.borrow().clone();
+    assert!(said.contains(&format!("Kumi {KUMI_VERSION} → 1.15.0, an earlier one. ")), "{said}");
+    assert!(said.contains(&format!("update --rollback goes back to {KUMI_VERSION}.")), "{said}");
+    assert!(said.contains("The bridge in Live stays 1.0.52, which works with 1.15.0."), "{said}");
+    assert!(!said.contains("What's new"), "{said}");
+    assert_eq!(version_of(home.join("app")), "1.15.0");
+    assert_eq!(version_of(home.join("app.previous")), KUMI_VERSION);
+    let written: Value = serde_json::from_slice(&fs::read(home.join("memory.json")).unwrap()).unwrap();
+    assert_eq!(written["notes"][0]["text"], "Sidechains with Ableton's Compressor");
+    // update --rollback returns to the Kumi that was there.
+    let (mut rollback, out) = io(&env);
+    rollback.live_running = Some(Rc::new(|| async { false }.boxed_local()));
+    rollback.update_bridge = Some(Rc::new(|_| async { 0 }.boxed_local()));
+    rollback.others = Some(Rc::new(|| async { 1 }.boxed_local()));
+    assert_eq!(rollback_installed(rollback).await.unwrap(), 0, "{}", out.0.borrow());
+    assert!(
+        out.0.borrow().contains(&format!("A Kumi window still open keeps running {KUMI_VERSION} until you close it;")),
+        "{}",
+        out.0.borrow()
+    );
+    assert_eq!(version_of(home.join("app")), KUMI_VERSION);
+    // A version that isn't there, one another release answers for, one before native releases, and this one.
+    for (version, answer, status, words) in [
+        (
+            "9.9.9",
+            older.clone(),
+            404,
+            "There's no Kumi 9.9.9 to get (github.com/user1303836/kumi/releases lists every release). Nothing was changed.",
+        ),
+        ("1.14.0", older.clone(), 200, "There's no Kumi 1.14.0 at example.test; it has 1.15.0. Nothing was changed."),
+        ("1.7.5", older.clone(), 200, "Kumi 1.7.5 came before Kumi's native releases, so kumi update can't install it"),
+        ("1.14.0", json!({"nonsense":true}), 200, "Kumi 1.14.0's description didn't make sense; try again later. Nothing was changed."),
+        (KUMI_VERSION, manifest(KUMI_VERSION), 200, "already."),
+    ] {
+        let (mut pinned, out) = io(&env);
+        pinned.version = Some(version.into());
+        let served = serve(answer, status);
+        pinned.fetcher = Some(served.clone());
+        pinned.live_running = Some(Rc::new(|| async { true }.boxed_local()));
+        let code = update_installed(pinned).await.unwrap();
+        assert!(out.0.borrow().contains(words), "{version}: {}", out.0.borrow());
+        assert_eq!(code, if version == KUMI_VERSION { 0 } else { 1 }, "{version}");
+        let asked = version != "1.7.5" && version != KUMI_VERSION;
+        assert_eq!(served.calls.borrow().len(), usize::from(asked), "{version}: only its description is asked for");
+        assert_eq!(version_of(home.join("app")), KUMI_VERSION);
+    }
+    // This version is known without asking, offline too.
+    let (mut current, out) = io(&env);
+    current.version = Some(KUMI_VERSION.into());
+    current.fetcher = Some(Rc::new(Serve { offline: true, ..Rc::try_unwrap(Serve::new(Value::Null)).ok().unwrap() }));
+    current.live_running = Some(Rc::new(|| async { true }.boxed_local()));
+    assert_eq!(update_installed(current).await.unwrap(), 0, "{}", out.0.borrow());
+    assert!(out.0.borrow().contains(&format!("Kumi is {KUMI_VERSION} already.")), "{}", out.0.borrow());
+    // Pinned without KUMI_RELEASES: the release's own downloads on GitHub.
+    assert_eq!(release_base_for(&Env::new(), Some("1.15.0")), "https://github.com/user1303836/kumi/releases/download/v1.15.0");
+    assert_eq!(release_base_for(&env, Some("1.15.0")), "https://example.test/r");
+    // An earlier Kumi whose bridge is newer than the one in Live brings it up to date, as any update does.
+    let bytes = fake_release_with(dir.path(), "1.15.0", Some("1.0.60"));
+    let mut newer_bridge = manifest("1.15.0");
+    newer_bridge["sha256"] = json!(hex::encode(Sha256::digest(&bytes)));
+    let (mut pinned, out) = io(&env);
+    pinned.version = Some("1.15.0".into());
+    pinned.fetcher = Some(Rc::new(Serve { manifest: newer_bridge, bytes, status: 200, offline: false, calls: RefCell::new(vec![]) }));
+    pinned.live_running = Some(Rc::new(|| async { true }.boxed_local()));
+    assert_eq!(update_installed(pinned).await.unwrap(), 0, "{}", out.0.borrow());
+    let said = out.0.borrow().clone();
+    assert!(said.contains("The bridge in Live is 1.0.52; this Kumi's is 1.0.60.") && !said.contains("stays"), "{said}");
+}
+#[tokio::test]
+async fn an_update_without_room_or_a_connection_changes_nothing_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "earlier");
+    let unchanged = || {
+        assert_eq!(fs::read_to_string(home.join("app").join(executable_name("kumi"))).unwrap(), "earlier");
+        assert!(!home.join("app.previous").exists() && !home.join("app.new").exists());
+    };
+    // Low on space: said before the download.
+    let (mut low, out) = io(&env);
+    let serve = Serve::new(manifest("99.0.0"));
+    low.fetcher = Some(serve.clone());
+    low.free = Some(Rc::new(|_| async { Some(120e6) }.boxed_local()));
+    assert_eq!(update_installed(low).await.unwrap(), 1);
+    assert!(out.0.borrow().contains("Kumi needs about 250 MB free to update, and the disk with "), "{}", out.0.borrow());
+    assert!(out.0.borrow().contains("has 120 MB.") && out.0.borrow().ends_with("Nothing was changed.\n"), "{}", out.0.borrow());
+    assert_eq!(serve.calls.borrow().len(), 1, "only the release's description was asked for");
+    unchanged();
+    // No connection, and a sign-in page answering instead of the release.
+    let (mut offline, out) = io(&env);
+    offline.fetcher = Some(Rc::new(Serve { offline: true, ..Rc::try_unwrap(Serve::new(Value::Null)).ok().unwrap() }));
+    assert_eq!(update_installed(offline).await.unwrap(), 1);
+    assert!(
+        out.0.borrow().contains("Kumi couldn't reach example.test.") && out.0.borrow().contains("Nothing was changed."),
+        "{}",
+        out.0.borrow()
+    );
+    // The cause, from what the connection said: a name that didn't resolve.
+    let (mut lost, out) = io(&env);
+    lost.fetcher = Some(Rc::new(Unresolved));
+    assert_eq!(update_installed(lost).await.unwrap(), 1);
+    assert!(out.0.borrow().contains("Kumi couldn't reach example.test: its address couldn't be looked up (DNS)."), "{}", out.0.borrow());
+    assert!(out.0.borrow().ends_with("Nothing was changed.\n"), "{}", out.0.borrow());
+    // A proxy that isn't answering, told apart from one that turned Kumi away (web::cause's words).
+    let (mut proxied, out) = io(&env);
+    proxied.fetcher = Some(Rc::new(DeadProxy));
+    assert_eq!(update_installed(proxied).await.unwrap(), 1);
+    assert!(out.0.borrow().contains("Kumi couldn't reach example.test: the proxy isn't answering."), "{}", out.0.borrow());
+    let (mut portal, out) = io(&env);
+    portal.fetcher = Some(Rc::new(Page));
+    assert_eq!(update_installed(portal).await.unwrap(), 1);
+    assert!(out.0.borrow().contains("A Wi-Fi sign-in page or a proxy answered instead of example.test"), "{}", out.0.borrow());
+    // The bundle refused, or cut off partway.
+    for (status, broken, words) in [
+        (403, false, "The download failed (it answered 403), so nothing was changed."),
+        (407, false, "The download stopped: the proxy didn't let Kumi through, so nothing was changed."),
+        (200, true, "The download stopped partway: the connection failed, so nothing was changed."),
+    ] {
+        let (mut cut, out) = io(&env);
+        cut.fetcher = Some(Rc::new(Cut { manifest: manifest("99.0.0"), status, broken }));
+        assert_eq!(update_installed(cut).await.unwrap(), 1);
+        assert!(out.0.borrow().contains(words) && out.0.borrow().contains("nothing was changed"), "{}", out.0.borrow());
+        unchanged();
+    }
+}
+/// A connection whose name doesn't resolve.
+struct Unresolved;
+#[async_trait(?Send)]
+impl Fetch for Unresolved {
+    async fn fetch(&self, url: &str, _: FetchInit) -> Result<Response, LanguageModelError> {
+        Err(LanguageModelError::other(format!(
+            "error sending request for url ({url}): client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known"
+        )))
+    }
+}
+/// A proxy whose address refuses the connection.
+struct DeadProxy;
+#[async_trait(?Send)]
+impl Fetch for DeadProxy {
+    async fn fetch(&self, url: &str, _: FetchInit) -> Result<Response, LanguageModelError> {
+        Err(LanguageModelError::other(format!(
+            "error sending request for url ({url}): client error (Connect): tunnel error: proxy 127.0.0.1:9 connection refused"
+        )))
+    }
+}
+/// A Wi-Fi sign-in page, answering every address.
+struct Page;
+#[async_trait(?Send)]
+impl Fetch for Page {
+    async fn fetch(&self, _: &str, _: FetchInit) -> Result<Response, LanguageModelError> {
+        Ok(Response::text_response(200, "<!DOCTYPE html><html><body>Sign in to Café Wi-Fi</body></html>"))
+    }
+}
+/// The release's description, then a bundle refused with `status` or cut off partway.
+struct Cut {
+    manifest: Value,
+    status: u16,
+    broken: bool,
+}
+#[async_trait(?Send)]
+impl Fetch for Cut {
+    async fn fetch(&self, url: &str, _: FetchInit) -> Result<Response, LanguageModelError> {
+        if url.ends_with(".json") {
+            return Ok(Response::json_response(200, self.manifest.clone()));
+        }
+        let chunks: Vec<Result<Vec<u8>, LanguageModelError>> =
+            if self.broken { vec![Ok(vec![1; 64]), Err(LanguageModelError::other("connection reset by peer"))] } else { vec![] };
+        Ok(Response { body: Some(Box::pin(futures::stream::iter(chunks))), ..Response::text_response(self.status, "") })
+    }
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn an_update_in_a_folder_another_account_owns_says_whose_before_anything_moves() {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    // /usr stands in for a ~/.kumi an install run with sudo left to root.
+    let (mut theirs, out) = io(&Env::from([("KUMI_HOME".into(), "/usr".into())]));
+    let serve = Serve::new(manifest("99.0.0"));
+    theirs.fetcher = Some(serve.clone());
+    assert_eq!(update_installed(theirs).await.unwrap(), 1);
+    assert_eq!(*out.0.borrow(), "/usr isn't yours (installed with sudo?): sudo chown -R $USER /usr Nothing was changed.\n");
+    assert!(serve.calls.borrow().is_empty());
+}
+/// GitHub right after a release: its API names `newest` (or answers `api` instead), that release has its own
+/// description when `described`, and `releases/latest` still leads to the one before (98.0.0).
+struct Hub {
+    api: u16,
+    newest: &'static str,
+    described: bool,
+    bundle: Vec<u8>,
+    sha256: String,
+    calls: RefCell<Vec<String>>,
+}
+impl Hub {
+    fn new(api: u16, described: bool) -> Rc<Self> {
+        Rc::new(Self { api, newest: "99.0.0", described, bundle: vec![], sha256: "a".repeat(64), calls: RefCell::new(vec![]) })
+    }
+}
+#[async_trait(?Send)]
+impl Fetch for Hub {
+    async fn fetch(&self, url: &str, init: FetchInit) -> Result<Response, LanguageModelError> {
+        assert!(!init.headers.keys().any(|key| key.eq_ignore_ascii_case("authorization")), "no token is ever sent");
+        self.calls.borrow_mut().push(url.into());
+        let own = format!("https://github.com/user1303836/kumi/releases/download/v{}", self.newest);
+        if url == "https://api.github.com/repos/user1303836/kumi/releases/latest" {
+            assert!(init.headers.contains_key("user-agent"), "GitHub's API wants a user agent");
+            return Ok(Response::json_response(self.api, json!({"tag_name":format!("v{}", self.newest)})));
+        }
+        if url == format!("{own}/kumi-release.json") {
+            let mut newest = manifest(self.newest);
+            newest["sha256"] = json!(self.sha256);
+            return Ok(if self.described { Response::json_response(200, newest) } else { Response::text_response(404, "Not Found") });
+        }
+        if url == format!("{own}/kumi.tar.gz") {
+            return Ok(Response {
+                body: Some(Box::pin(futures::stream::iter(vec![Ok(self.bundle.clone())]))),
+                ..Response::text_response(200, "")
+            });
+        }
+        assert_eq!(url, "https://github.com/user1303836/kumi/releases/latest/download/kumi-release.json");
+        Ok(Response::json_response(200, manifest("98.0.0")))
+    }
+}
+#[tokio::test]
+async fn an_asked_for_update_takes_the_release_githubs_api_names_and_the_usual_way_without_it() {
+    let env = Env::new();
+    // Right after a release: the API names it while releases/latest still leads to the one before.
+    let fresh = Hub::new(200, true);
+    assert_eq!(check_release(&env, Some(fresh.clone())).await.unwrap().as_deref(), Some("99.0.0"));
+    assert_eq!(fresh.calls.borrow().len(), 2);
+    // The API's rate limit, or a release without its description yet: the usual way, without a word about it.
+    for (api, described) in [(403, true), (429, true), (200, false)] {
+        assert_eq!(check_release(&env, Some(Hub::new(api, described))).await.unwrap().as_deref(), Some("98.0.0"), "{api} {described}");
+    }
+    // KUMI_RELEASES is used as it is.
+    let set = Env::from([("KUMI_RELEASES".into(), "https://example.test/r".into())]);
+    let serve = Serve::new(manifest("97.0.0"));
+    assert_eq!(check_release(&set, Some(serve.clone())).await.unwrap().as_deref(), Some("97.0.0"));
+    assert_eq!(*serve.calls.borrow(), ["https://example.test/r/kumi-release.json"]);
+    // The daily check asks once, the usual way.
+    let daily = Hub::new(200, true);
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("update-check.json");
+    assert_eq!(newer_release(cache.to_str().unwrap(), &env, Some(1000.), Some(daily.clone())).await.as_deref(), Some("98.0.0"));
+    assert_eq!(*daily.calls.borrow(), ["https://github.com/user1303836/kumi/releases/latest/download/kumi-release.json"]);
+    // kumi update downloads from the release the API named, checked against that release's own checksum.
+    let home = dir.path().join("home");
+    put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "earlier");
+    let bundle = fake_release(dir.path(), "99.0.0");
+    let hub = Rc::new(Hub { sha256: hex::encode(Sha256::digest(&bundle)), bundle, ..Rc::try_unwrap(Hub::new(200, true)).ok().unwrap() });
+    let installed: Env = [
+        ("KUMI_HOME".into(), home.display().to_string()),
+        ("HOME".into(), dir.path().join("user").display().to_string()),
+        ("KUMI_REMOTE_SCRIPTS_DIR".into(), dir.path().join("Remote Scripts").display().to_string()),
+    ]
+    .into();
+    let (mut updating, out) = io(&installed);
+    updating.fetcher = Some(hub.clone());
+    assert_eq!(update_installed(updating).await.unwrap(), 0, "{}", out.0.borrow());
+    assert!(out.0.borrow().contains(&format!("Kumi {KUMI_VERSION} → 99.0.0.")), "{}", out.0.borrow());
+    assert_eq!(hub.calls.borrow().last().unwrap(), "https://github.com/user1303836/kumi/releases/download/v99.0.0/kumi.tar.gz");
+}
+/// Kumi's PATH line as the installer writes it, or edited to start from $HOME, ${HOME} or ~: each is Kumi's under its
+/// marker, as install.sh counts it. Another Kumi's line, and Kumi's folder named outside a marker, stay.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_takes_out_kumis_path_line_however_it_is_spelled_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = dir.path().join("user");
+    let home = user.join(".kumi");
+    let mut env = env(dir.path());
+    env.insert("KUMI_HOME".into(), home.display().to_string());
+    installed_kumi(&home);
+    let rc = |name: &str, kumi: &str| (name.to_string(), format!("alias ll='ls -l'\n\n{PATH_MARKER}\n{kumi}\n"));
+    let ours = [
+        rc(".zshrc", &format!("export PATH=\"{}/bin:$PATH\"", home.display())),
+        rc(".zprofile", "export PATH=\"$HOME/.kumi/bin:$PATH\""),
+        rc(".bashrc", "export PATH=\"${HOME}/.kumi/bin:$PATH\""),
+        rc(".bash_profile", "export PATH=~/.kumi/bin:$PATH"),
+    ];
+    for (name, text) in &ours {
+        put(user.join(name), text);
+    }
+    // Another Kumi's, under its own marker, and this Kumi's folder named by hand under none.
+    let theirs = format!("{PATH_MARKER}\nexport PATH=\"/opt/other-kumi/bin:$PATH\"\nexport PATH=\"$HOME/.kumi/bin:$PATH\"\n");
+    put(user.join(".profile"), &theirs);
+    let other_fish = format!("{PATH_MARKER}\ncontains -- \"/opt/other-kumi/bin\" $PATH; or set -gx PATH \"/opt/other-kumi/bin\" $PATH\n");
+    let fish = user.join(".config/fish/conf.d/kumi.fish");
+    put(&fish, format!("\n{PATH_MARKER}\ncontains -- \"~/.kumi/bin\" $PATH; or set -gx PATH \"~/.kumi/bin\" $PATH\n{other_fish}"));
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    for (name, _) in &ours {
+        assert!(said.contains(&format!("/{name}")), "{name}: {said}");
+    }
+    assert!(said.contains("kumi.fish") && !said.contains(".profile"), "{said}");
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0);
+    for (name, _) in &ours {
+        assert_eq!(fs::read_to_string(user.join(name)).unwrap(), "alias ll='ls -l'\n", "{name}: {}", out.0.borrow());
+    }
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), theirs);
+    // The other Kumi's fish lines stay, so the file does.
+    assert_eq!(fs::read_to_string(&fish).unwrap(), other_fish);
+    assert!(out.0.borrow().contains("Took Kumi out of ~/.config/fish/conf.d/kumi.fish."), "{}", out.0.borrow());
+}
+/// A folder that isn't Kumi's own keeps everything in it, asked or not: the home folder (a scratch one, as HOME and
+/// KUMI_HOME both), a disk's root and where a disk is mounted (dry runs only), a relative path, a folder that isn't
+/// there, and one without Kumi's launcher and app.
+#[tokio::test]
+async fn uninstall_refuses_a_folder_that_isnt_kumis_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let user = dir.path().join("user");
+    // Kumi installed into the home folder itself, among the producer's own folders and startup file.
+    installed_kumi(&user);
+    for theirs in ["Downloads/song.wav", "Videos/clip.mov", "models/mine.onnx", "tools/mixdown.sh", "bin/backup.sh"] {
+        put(user.join(theirs), "theirs");
+    }
+    put(user.join(".profile"), format!("alias ll='ls -l'\n\n{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", user.display()));
+    let before = files_in(&user);
+    let mut env = env(dir.path());
+    env.insert("HOME".into(), user.display().to_string());
+    env.insert("KUMI_HOME".into(), user.display().to_string());
+    assert_eq!(not_kumis_own(&env["KUMI_HOME"], &env), Some(NotKumis::Home));
+    for options in [
+        UninstallOptions { dry_run: true, ..Default::default() },
+        UninstallOptions { yes: true, ..Default::default() },
+        UninstallOptions { all: true, yes: true, ..Default::default() },
+    ] {
+        let (io, out) = io(&env);
+        assert_eq!(uninstall_installed(io, options).await.unwrap(), 1);
+        let said = out.0.borrow().clone();
+        assert!(
+            said.starts_with("Kumi won't uninstall from ~: it's your home folder, so the names Kumi uses there (bin, downloads, tools…) could be your own. Nothing was removed."),
+            "{said}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            said.contains(&format!(
+                "Kumi's own there, to take out by hand: ~/app and ~/bin/kumi, and the two lines under \"{PATH_MARKER}\""
+            )),
+            "{said}"
+        );
+        assert_eq!(files_in(&user), before);
+    }
+    // A disk's root, and where a disk is mounted: dry runs only.
+    let root = if cfg!(windows) { "C:\\" } else { "/" };
+    assert_eq!(not_kumis_own(root, &env), Some(NotKumis::Root));
+    #[cfg(unix)]
+    assert_eq!(not_kumis_own("/dev", &env), Some(NotKumis::Root));
+    let mut at_root = env.clone();
+    at_root.insert("KUMI_HOME".into(), root.into());
+    for all in [false, true] {
+        let (io, out) = io(&at_root);
+        assert_eq!(uninstall_installed(io, UninstallOptions { all, dry_run: true, ..Default::default() }).await.unwrap(), 1);
+        let said = out.0.borrow().clone();
+        assert!(
+            said.starts_with(&format!("Kumi won't uninstall from {root}: it's the root of a disk")) && !said.contains("would remove"),
+            "{said}"
+        );
+    }
+    // A relative path, a folder that isn't there, and one without Kumi's launcher and app.
+    let elsewhere = dir.path().join("elsewhere");
+    for theirs in ["downloads/song.wav", "tools/mixdown.sh", "bin/backup.sh", "app/notes.txt"] {
+        put(elsewhere.join(theirs), "theirs");
+    }
+    let unmarked = files_in(&elsewhere);
+    for (folder, why, words) in [
+        ("relkumi".to_string(), NotKumis::Relative, "Kumi won't uninstall from \"relkumi\": KUMI_HOME is a relative path"),
+        (
+            "~".to_string(),
+            NotKumis::Relative,
+            "Kumi won't uninstall from \"~\": KUMI_HOME starts with ~, which only a shell turns into your home folder.",
+        ),
+        ("~/.kumi".to_string(), NotKumis::Relative, "KUMI_HOME starts with ~, which only a shell turns into your home folder."),
+        (
+            dir.path().join("nowhere").display().to_string(),
+            NotKumis::Missing,
+            "(Kumi's folder) to uninstall Kumi from. Nothing was removed.",
+        ),
+        (elsewhere.display().to_string(), NotKumis::Unmarked, "it holds no Kumi launcher (bin/kumi) and app"),
+    ] {
+        assert_eq!(not_kumis_own(&folder, &env), Some(why), "{folder}");
+        let mut there = env.clone();
+        there.insert("KUMI_HOME".into(), folder.clone());
+        let (io, out) = io(&there);
+        assert_eq!(uninstall_installed(io, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 1);
+        assert!(out.0.borrow().contains(words), "{folder}: {}", out.0.borrow());
+    }
+    assert_eq!(files_in(&elsewhere), unmarked);
+    assert!(!dir.path().join("nowhere").exists());
+}
+/// Kumi's parts are taken by their exact names, so a Downloads beside them stays; from a fetched folder (tools, models,
+/// videos) only what Kumi put there goes, and the folder too once nothing else is left in it.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_takes_kumis_names_by_their_case_and_leaves_folders_holding_more() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    installed_kumi(home);
+    for (file, text) in [
+        ("Downloads/song.wav", "theirs"),
+        ("videos/youtube-dqw4w9wgxcq/meta.json", "{}"),
+        ("videos/holiday.mov", "theirs"),
+        ("tools/ffmpeg/ffmpeg", "Kumi's"),
+        ("tools/mixdown.sh", "theirs"),
+        ("models/basic-pitch.onnx", "Kumi's"),
+        ("models/slots/0123456789ab/model.onnx", "Kumi's"),
+    ] {
+        put(home.join(file), text);
+    }
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains("): app, bin, tools/ffmpeg, models, videos/youtube-dqw4w9wgxcq.")
+            && said.contains("/tools and ")
+            && said.contains("/videos stay: they hold more than Kumi put there."),
+        "{said}"
+    );
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    for kept in ["Downloads/song.wav", "videos/holiday.mov", "tools/mixdown.sh"] {
+        assert!(home.join(kept).exists(), "{kept}");
+    }
+    for gone in ["videos/youtube-dqw4w9wgxcq", "tools/ffmpeg", "models", "app", "bin"] {
+        assert!(!home.join(gone).exists(), "{gone}");
+    }
+}
+/// A part that can't go doesn't leave Kumi half removed with a bare error: every other part is tried, what stayed is
+/// said with why, and Kumi itself (app, bin and its PATH line) stays so kumi uninstall can run again.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_tries_every_part_says_what_stayed_and_keeps_kumi_to_run_again() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root removes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    kumi_s_own(home);
+    for file in THEIRS {
+        put(home.join(file), "theirs");
+    }
+    let rc = format!("{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", home.display());
+    put(user.join(".profile"), &rc);
+    // A folder in app.previous this account can't empty.
+    let stuck = home.join("app.previous/locked");
+    put(stuck.join("file"), "x");
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o555)).unwrap();
+    let (removing, out) = io(&env);
+    let code = uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(&stuck, fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains("Kumi is partly removed: ")
+            && said.contains("/app.previous couldn't go (Permission denied (os error 13)). Kumi itself stays, so you can run kumi uninstall again once that's sorted (if another account owns it: sudo chown -R $USER "),
+        "{said}"
+    );
+    assert!(!said.contains("Took Kumi out of"), "{said}");
+    for part in
+        ["app.previous.old", "app.new", "app.replaced", "app.rollback", "node", "downloads", "tools", "models", "videos", ".install.Xy12Ab"]
+    {
+        assert!(!home.join(part).exists(), "{part} is still there");
+    }
+    assert!(home.join("app/kumi").exists() && home.join("bin/kumi").exists());
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), rc);
+    for file in THEIRS {
+        assert_eq!(fs::read_to_string(home.join(file)).unwrap(), "theirs", "{file}");
+    }
+    // Sorted, it runs again and finishes, the PATH line last.
+    let (again, out) = io(&env);
+    assert_eq!(uninstall_installed(again, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    assert!(!home.join("app").exists() && !home.join("app.previous").exists() && !home.join("bin").exists());
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "");
+}
+/// A startup file uninstall can't change is named with the lines to take out by hand, in the dry run too.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_names_a_startup_file_it_cant_change_and_the_lines_to_take_out() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root writes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    installed_kumi(home);
+    let line = format!("export PATH=\"{}/bin:$PATH\"", home.display());
+    let rc = format!("alias ll='ls -l'\n\n{PATH_MARKER}\n{line}\n");
+    let profile = user.join(".profile");
+    put(&profile, &rc);
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o444)).unwrap();
+    let lines = format!("lines 3–4: {PATH_MARKER} / {line}");
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(said.contains(&format!("It couldn't change ~/.profile (it isn't writable): take out {lines} by hand.")), "{said}");
+    assert!(!said.contains("take Kumi out of"), "{said}");
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 1);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!("Couldn't take Kumi out of ~/.profile (Permission denied (os error 13)): take out {lines} by hand.")),
+        "{said}"
+    );
+    assert_eq!(fs::read_to_string(&profile).unwrap(), rc);
+    assert!(!home.join("app").exists());
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o644)).unwrap();
+}
+/// Kumi's block is found as install.sh finds it (CRLF endings, spaces after the marker), and one inside an if, for or
+/// function body is left alone and named: taking it out could leave an empty body, which the shell refuses.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_finds_kumis_block_as_install_sh_does_and_leaves_one_in_a_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    installed_kumi(home);
+    let line = format!("export PATH=\"{}/bin:$PATH\"", home.display());
+    put(user.join(".zshrc"), format!("alias ll='ls -l'\r\n\r\n{PATH_MARKER}\r\n{line}\r\n"));
+    put(user.join(".zprofile"), format!("alias ll='ls -l'\n\n{PATH_MARKER}   \n{line}\n"));
+    let in_if = format!("if [ -d /opt ]; then\n{PATH_MARKER}\n{line}\nfi\n");
+    let in_function = format!("setup() {{\n  # Kumi\n  {PATH_MARKER}\n  {line}\n}}\n");
+    put(user.join(".bashrc"), &in_if);
+    put(user.join(".profile"), &in_function);
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    for words in [
+        "It would also take Kumi out of ~/.zshrc and ~/.zprofile.".to_string(),
+        format!("It would leave Kumi's PATH line in ~/.bashrc alone (lines 2–3: {PATH_MARKER} / {line}): it sits inside an if, for or function there."),
+        "It would leave Kumi's PATH line in ~/.profile alone (lines 3–4: ".into(),
+    ] {
+        assert!(said.contains(&words), "{words}: {said}");
+    }
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    assert_eq!(fs::read_to_string(user.join(".zshrc")).unwrap(), "alias ll='ls -l'\r\n");
+    assert_eq!(fs::read_to_string(user.join(".zprofile")).unwrap(), "alias ll='ls -l'\n");
+    assert_eq!(fs::read_to_string(user.join(".bashrc")).unwrap(), in_if);
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), in_function);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!("Left Kumi's PATH line in ~/.bashrc alone (lines 2–3: {PATH_MARKER} / {line}): it sits inside an if, for or function there; take it out by hand if you like.")),
+        "{said}"
+    );
+}
+/// sudo sets HOME to root's own while Kumi's launcher still finds Kumi's folder beside it: in the home folder of the
+/// account that ran sudo, when an earlier installer put Kumi there. The account database's home folders count too,
+/// and root leaves a folder that isn't root's alone (su sets no SUDO_USER).
+#[tokio::test]
+async fn uninstall_as_root_spares_the_home_folder_the_account_database_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let theirs = dir.path().join("home-me");
+    let roots = dir.path().join("root");
+    installed_kumi(&theirs);
+    put(theirs.join("bin/backup.sh"), "theirs");
+    put(theirs.join("notes.txt"), "theirs");
+    fs::create_dir_all(&roots).unwrap();
+    let before = files_in(&theirs);
+    let mut env = env(dir.path());
+    env.insert("HOME".into(), roots.display().to_string());
+    env.insert("KUMI_HOME".into(), theirs.display().to_string());
+    // Under sudo: root, with root's home folder and that of the account that ran sudo.
+    let sudo = Runner { root: true, homes: vec![roots.display().to_string(), theirs.display().to_string()] };
+    assert_eq!(not_kumis_own_for(&env["KUMI_HOME"], &env, &sudo), Some(NotKumis::Home));
+    for options in [UninstallOptions { yes: true, ..Default::default() }, UninstallOptions { all: true, yes: true, ..Default::default() }] {
+        let (mut io, out) = io(&env);
+        io.runner = Some(sudo.clone());
+        assert_eq!(uninstall_installed(io, options).await.unwrap(), 1);
+        assert!(out.0.borrow().contains(": it's your home folder, so the names Kumi uses there"), "{}", out.0.borrow());
+        assert_eq!(files_in(&theirs), before);
+    }
+    // Root, on a folder that isn't root's, wherever it is.
+    #[cfg(unix)]
+    // SAFETY: geteuid has no preconditions. As root, the test's own folders are root's.
+    if unsafe { libc::geteuid() } != 0 {
+        let kumi = dir.path().join("elsewhere/.kumi");
+        installed_kumi(&kumi);
+        let before = files_in(&kumi);
+        let mut there = env.clone();
+        there.insert("KUMI_HOME".into(), kumi.display().to_string());
+        let root = Runner { root: true, homes: vec![] };
+        assert_eq!(not_kumis_own_for(&there["KUMI_HOME"], &there, &root), Some(NotKumis::NotRoots));
+        assert_eq!(not_kumis_own_for(&there["KUMI_HOME"], &there, &Runner::default()), None);
+        let (mut io, out) = io(&there);
+        io.runner = Some(root);
+        assert_eq!(uninstall_installed(io, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 1);
+        assert!(
+            out.0.borrow().contains("as root (sudo): it belongs to another account. Run kumi uninstall without sudo. Nothing was removed."),
+            "{}",
+            out.0.borrow()
+        );
+        assert_eq!(files_in(&kumi), before);
+    }
+    // The account database answers for whoever runs this.
+    let me = Runner::current(&Env::new());
+    #[cfg(unix)]
+    // SAFETY: geteuid has no preconditions.
+    assert_eq!(me.root, unsafe { libc::geteuid() } == 0);
+    assert!(me.homes.iter().all(|home| Path::new(home).is_absolute()), "{me:?}");
+}
+/// A Kumi folder the producer also uses (KUMI_HOME=~/.local, so the launcher is ~/.local/bin/kumi): with or without
+/// --all, only Kumi's own entries go. Theirs in bin and downloads and beside them stay, Kumi's data stays (its names,
+/// such as projects, could be theirs there), and so does the folder.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_from_a_folder_the_producer_also_uses_takes_only_kumis_own() {
+    let theirs = ["bin/uv-tool", "downloads/mine.zip", "share/applications/x.desktop", "lib/python3/site.py", "state/history"];
+    let data = ["auth.json", "kumi.db", "projects/0123456789abcdef0123456789abcdef/conversations/a.json"];
+    for all in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env(dir.path());
+        let user = Path::new(&env["HOME"]).to_path_buf();
+        let local = user.join(".local");
+        env.insert("KUMI_HOME".into(), local.display().to_string());
+        installed_kumi(&local);
+        put(local.join("app.previous/kumi"), "Kumi's");
+        put(local.join("downloads/kumi-aarch64-apple-darwin.tar.gz"), "Kumi's");
+        put(local.join("tools/ffmpeg/ffmpeg"), "Kumi's");
+        for file in theirs {
+            put(local.join(file), "theirs");
+        }
+        for file in data {
+            put(local.join(file), "Kumi's data");
+        }
+        put(user.join(".profile"), format!("alias ll='ls -l'\n\n{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", local.display()));
+        let kept = "conversations, notes, recipes, sign-ins, library and references";
+        let (dry, out) = io(&env);
+        assert_eq!(uninstall_installed(dry, UninstallOptions { all, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+        let said = out.0.borrow().clone();
+        for words in [
+            "): app, app.previous, bin/kumi, downloads/kumi-aarch64-apple-darwin.tar.gz, tools.".to_string(),
+            "~/.local/bin and ~/.local/downloads stay: they hold more than Kumi put there.".into(),
+            if all {
+                format!("~/.local also holds what isn't Kumi's, so --all would leave your {kept} there too (auth.json, kumi.db and projects): delete them by hand.")
+            } else {
+                format!("Your {kept} would stay in ~/.local, beside what isn't Kumi's (auth.json, kumi.db and projects).")
+            },
+        ] {
+            assert!(said.contains(&words), "{words}: {said}");
+        }
+        let (removing, out) = io(&env);
+        assert_eq!(
+            uninstall_installed(removing, UninstallOptions { all, yes: true, ..Default::default() }).await.unwrap(),
+            0,
+            "{}",
+            out.0.borrow()
+        );
+        for file in theirs {
+            assert_eq!(fs::read_to_string(local.join(file)).unwrap(), "theirs", "{file}");
+        }
+        for file in data {
+            assert_eq!(fs::read_to_string(local.join(file)).unwrap(), "Kumi's data", "{file}");
+        }
+        for gone in ["app", "app.previous", "bin/kumi", "downloads/kumi-aarch64-apple-darwin.tar.gz", "tools"] {
+            assert!(!local.join(gone).exists(), "{gone}");
+        }
+        assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "alias ll='ls -l'\n");
+        let said = out.0.borrow().clone();
+        assert!(
+            said.contains(&format!(
+                "Your {kept} are still in ~/.local, beside what isn't Kumi's (auth.json, kumi.db and projects): delete them by hand to remove them too."
+            )) && !said.contains("delete that folder"),
+            "{said}"
+        );
+    }
+}
+/// When Kumi's app itself can't go, its launcher and PATH lines stay too: a second run then works, and what it says
+/// is still there is.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_keeps_the_launcher_and_path_lines_while_the_app_stays() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root removes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let user = Path::new(&env["HOME"]);
+    installed_kumi(home);
+    put(home.join("app.previous/kumi"), "Kumi's");
+    put(home.join("downloads/kumi-aarch64-apple-darwin.tar.gz"), "Kumi's");
+    let rc = format!("{PATH_MARKER}\nexport PATH=\"{}/bin:$PATH\"\n", home.display());
+    put(user.join(".profile"), &rc);
+    // An app folder this account can't empty.
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o555)).unwrap();
+    let (removing, out) = io(&env);
+    let code = uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains("/app couldn't go (Permission denied (os error 13)). Kumi's launcher (")
+            && said.contains(
+                "/bin/kumi) and PATH lines stay until then: once that's sorted (if another account owns it: sudo chown -R $USER "
+            )
+            && said.contains("run kumi uninstall again, or take out "),
+        "{said}"
+    );
+    assert!(home.join("bin/kumi").exists() && home.join("app/package.json").exists());
+    assert!(!home.join("app.previous").exists() && !home.join("downloads").exists());
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), rc);
+    // Sorted, the second run finishes.
+    let (again, out) = io(&env);
+    assert_eq!(uninstall_installed(again, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    assert!(!home.join("app").exists() && !home.join("bin").exists());
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "");
+}
+/// An installer given a HOME ending in / wrote the PATH line with …//.kumi/bin: it's Kumi's all the same.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_knows_a_path_line_written_from_a_home_ending_in_a_slash() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let user = dir.path().join("user");
+    let home = user.join(".kumi");
+    env.insert("HOME".into(), format!("{}/", user.display()));
+    env.insert("KUMI_HOME".into(), home.display().to_string());
+    installed_kumi(&home);
+    put(user.join(".zshrc"), format!("alias ll='ls -l'\n\n{PATH_MARKER}\nexport PATH=\"{}//.kumi/bin:$PATH\"\n", user.display()));
+    put(user.join(".profile"), format!("{PATH_MARKER}\nexport PATH=\"$HOME/.kumi//bin:$PATH\"\n"));
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap(), 0, "{}", out.0.borrow());
+    assert_eq!(fs::read_to_string(user.join(".zshrc")).unwrap(), "alias ll='ls -l'\n");
+    assert_eq!(fs::read_to_string(user.join(".profile")).unwrap(), "");
+}
+/// A folder counts as Kumi's alone only by its own name, .kumi, once links are followed; what's in it can't tell, as
+/// Kumi's names (bin, projects…) are everyone's. And even there, only Kumi's entries go from bin, downloads and the
+/// rest, and the folder only once it's empty.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_all_takes_a_folder_whole_only_when_it_is_kumis_alone() {
+    let kept = "conversations, notes, recipes, sign-ins, library and references";
+    // A ~/.local that held only the producer's own scripts in bin before Kumi, and a ~/.kumi that is a link to it.
+    for linked in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env(dir.path());
+        let user = Path::new(&env["HOME"]).to_path_buf();
+        let local = user.join(".local");
+        installed_kumi(&local);
+        put(local.join("bin/uv-tool"), "theirs");
+        put(local.join("bin/my-script"), "theirs");
+        put(local.join("auth.json"), "Kumi's data");
+        let home = if linked {
+            std::os::unix::fs::symlink(&local, user.join(".kumi")).unwrap();
+            user.join(".kumi")
+        } else {
+            local.clone()
+        };
+        env.insert("KUMI_HOME".into(), home.display().to_string());
+        let (dry, out) = io(&env);
+        assert_eq!(uninstall_installed(dry, UninstallOptions { all: true, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+        let said = out.0.borrow().clone();
+        assert!(said.contains("): app, bin/kumi.") && said.contains("/bin stays: it holds more than Kumi put there."), "{said}");
+        assert!(said.contains(&format!("--all would leave your {kept} there too (auth.json)")), "{said}");
+        let (removing, out) = io(&env);
+        assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+        for file in ["bin/uv-tool", "bin/my-script"] {
+            assert_eq!(fs::read_to_string(local.join(file)).unwrap(), "theirs", "{file} ({linked})");
+        }
+        assert!(local.join("auth.json").exists() && !local.join("app").exists() && !local.join("bin/kumi").exists());
+        assert!(!out.0.borrow().contains("delete that folder"), "{}", out.0.borrow());
+    }
+    // ~/.kumi itself: --all takes Kumi's data too, but a file of the producer's in its bin keeps that, and the folder.
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    installed_kumi(home);
+    put(home.join("bin/mine.sh"), "theirs");
+    put(home.join("downloads/kumiko.zip"), "theirs");
+    put(home.join("downloads/kumi-photos.zip"), "theirs");
+    put(home.join("downloads/kumi-aarch64-apple-darwin.tar.gz"), "Kumi's");
+    put(home.join("auth.json"), "Kumi's data");
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert_eq!(
+        files_in(home).into_iter().map(|(file, _)| file).collect::<Vec<_>>(),
+        [
+            home.join("bin/mine.sh").display().to_string(),
+            home.join("downloads/kumi-photos.zip").display().to_string(),
+            home.join("downloads/kumiko.zip").display().to_string()
+        ]
+    );
+    assert!(
+        said.contains("Kumi is removed, with everything it kept, freeing ") && said.contains(" stays, with what isn't Kumi's in it."),
+        "{said}"
+    );
+    // With nothing else in it, it goes whole.
+    fs::remove_dir_all(home).unwrap();
+    installed_kumi(home);
+    put(home.join("auth.json"), "Kumi's data");
+    let (removing, _) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    assert!(!home.exists());
+}
+/// On Windows, PATH names Kumi's bin folder itself: while that stays, holding the producer's own (uv's .local\bin,
+/// say), so does its PATH entry. Elsewhere Kumi's own lines in the startup files go, as they're only Kumi's.
+#[tokio::test]
+async fn a_bin_folder_that_stays_keeps_its_windows_path_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let local = Path::new(&env["HOME"]).join(".local");
+    env.insert("KUMI_HOME".into(), local.display().to_string());
+    installed_kumi(&local);
+    put(local.join("bin").join(executable_name("uv")), "theirs");
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(said.contains("bin stays: it holds more than Kumi put there."), "{said}");
+    if cfg!(windows) {
+        assert!(
+            said.contains("would stay in your PATH, as it holds more than Kumi put there.") && !said.contains("take Kumi out of your PATH"),
+            "{said}"
+        );
+    } else {
+        assert!(!said.contains("your PATH"), "{said}");
+    }
+}
+/// What's left of an app that lost its program doesn't run, so neither would kumi uninstall: only the way by hand is
+/// offered then.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_offers_a_second_run_only_while_the_app_still_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root removes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    installed_kumi(home);
+    fs::remove_file(home.join("app/kumi")).unwrap();
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o555)).unwrap();
+    let (removing, out) = io(&env);
+    let code = uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 1, "{said}");
+    assert!(
+        said.contains("and PATH lines stay, but what's left can't uninstall itself: take out ")
+            && said.contains(", the launcher and the two lines under ")
+            && !said.contains("run kumi uninstall again"),
+        "{said}"
+    );
+}
+/// Even in a folder named .kumi, --all takes only Kumi's names: what the producer put there themselves stays, named,
+/// and keeps the folder.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_all_keeps_what_the_producer_put_in_kumis_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let home = Path::new(&env["HOME"]).join("Studio/.kumi");
+    env.insert("KUMI_HOME".into(), home.display().to_string());
+    installed_kumi(&home);
+    for (file, text) in
+        [("my-notes.txt", "theirs"), ("my-stems/kick.wav", "theirs"), ("auth.json", "Kumi's data"), ("projects/x.json", "Kumi's data")]
+    {
+        put(home.join(file), text);
+    }
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { all: true, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(said.contains("kumi uninstall --all would remove everything of Kumi's from ~/Studio/.kumi ("), "{said}");
+    assert!(said.contains("my-notes.txt and my-stems stay in ~/Studio/.kumi: they aren't Kumi's."), "{said}");
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert_eq!(
+        files_in(&home).into_iter().map(|(file, _)| file).collect::<Vec<_>>(),
+        [home.join("my-notes.txt").display().to_string(), home.join("my-stems/kick.wav").display().to_string()]
+    );
+    assert!(said.contains("my-notes.txt and my-stems stay in ~/Studio/.kumi: they aren't Kumi's."), "{said}");
+    assert!(said.contains("~/Studio/.kumi stays, with what isn't Kumi's in it."), "{said}");
+}
+/// A second run is offered only while it would run: Kumi's program still in app, in a folder that still passes as
+/// Kumi's. Here the app keeps its program but the folder has lost what marks it as Kumi's (its package.json went
+/// with app.previous), so only the way by hand is offered.
+#[cfg(unix)]
+#[tokio::test]
+async fn uninstall_offers_a_second_run_only_while_kumi_would_still_take_it() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions. Root removes anything.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    installed_kumi(home);
+    fs::rename(home.join("app/package.json"), home.join("app.previous.json")).unwrap();
+    put(home.join("app.previous/package.json"), fs::read(home.join("app.previous.json")).unwrap());
+    fs::remove_file(home.join("app.previous.json")).unwrap();
+    put(home.join("app.previous/kumi"), "Kumi's");
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o555)).unwrap();
+    let (removing, out) = io(&env);
+    let code = uninstall_installed(removing, UninstallOptions { yes: true, ..Default::default() }).await.unwrap();
+    fs::set_permissions(home.join("app"), fs::Permissions::from_mode(0o755)).unwrap();
+    let said = out.0.borrow().clone();
+    assert_eq!(code, 1, "{said}");
+    assert!(home.join("app/kumi").is_file() && !home.join("app.previous").exists(), "{said}");
+    assert!(
+        said.contains("and PATH lines stay, but what's left can't uninstall itself: take out ")
+            && !said.contains("run kumi uninstall again"),
+        "{said}"
+    );
+}
+/// A folder holding only Kumi's, but not named .kumi (KUMI_HOME=~/Music/kumi): --all leaves Kumi's data, and says why
+/// as it is, not that the folder holds what isn't Kumi's.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn uninstall_all_says_a_folder_of_only_kumis_isnt_named_kumi() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let home = Path::new(&env["HOME"]).join("Music/kumi");
+    env.insert("KUMI_HOME".into(), home.display().to_string());
+    installed_kumi(&home);
+    put(home.join("auth.json"), "Kumi's data");
+    let kept = "conversations, notes, recipes, sign-ins, library and references";
+    let (dry, out) = io(&env);
+    assert_eq!(uninstall_installed(dry, UninstallOptions { all: true, dry_run: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!(
+            "~/Music/kumi isn't named .kumi, so --all would leave your {kept} there too (auth.json): delete them by hand."
+        )),
+        "{said}"
+    );
+    let (removing, out) = io(&env);
+    assert_eq!(uninstall_installed(removing, UninstallOptions { all: true, yes: true, ..Default::default() }).await.unwrap(), 0);
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!("Your {kept} are still in ~/Music/kumi (auth.json): delete them by hand to remove them too.")),
+        "{said}"
+    );
+    assert!(!said.contains("what isn't Kumi's") && home.join("auth.json").exists() && !home.join("app").exists(), "{said}");
 }

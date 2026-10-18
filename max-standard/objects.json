@@ -42,6 +42,14 @@
     "about": "Objects that send later (another scheduler tick, or the low-priority queue), so what they send isn't ordered against the message that reached them.",
     "classes": ["defer", "deferlow", "delay", "pipe", "qlim"]
   },
+  "low_priority": {
+    "about": "Objects that send on Max's low-priority thread, whatever reached them: what a clock times through them reaches MIDI out late and unevenly.",
+    "classes": ["defer", "deferlow", "js", "jsui", "live.object", "live.observer", "live.path", "qlim", "qmetro", "v8", "v8ui"]
+  },
+  "midi_out": {
+    "about": "Objects that send MIDI out of a device.",
+    "classes": ["bendout", "ctlout", "midiout", "noteout", "pgmout", "polyout", "sysexout", "touchout", "xbendout", "xnoteout"]
+  },
   "audio_with_messages": {
     "about": "Audio objects (named with ~) that answer a message with a message at once; every other ~ object ends a chain of messages.",
     "classes": ["buffer~", "info~", "peek~", "polybuffer~", "snapshot~"]

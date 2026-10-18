@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use indexmap::{IndexMap, IndexSet};
 use kumi_common::js::{
     json::stringify,
-    number::{round, to_string},
     string::{head, trim, utf16_len},
 };
 use regex::Regex;
@@ -269,21 +268,6 @@ impl ProjectStore for FileProjectStore {
             keepers.iter().take(MAX_KEEPERS).map(|(id, identity)| (id.clone(), json!(identity))).collect();
         write_privately(&self.directory.join(project), "track-ids.json", &stringify(&json!({"version":1,"keepers":kept}))).await
     }
-}
-pub fn since(saved_at: f64, now: f64) -> String {
-    let minutes = round((now - saved_at) / 60_000.0).max(0.0);
-    if minutes < 2.0 {
-        return "just now".into();
-    }
-    if minutes < 60.0 {
-        return format!("{} minutes ago", to_string(minutes));
-    }
-    let hours = round(minutes / 60.0);
-    if hours < 24.0 {
-        return format!("{} {} ago", to_string(hours), if hours == 1.0 { "hour" } else { "hours" });
-    }
-    let days = round(hours / 24.0);
-    format!("{} {} ago", to_string(days), if days == 1.0 { "day" } else { "days" })
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DescribedDiff {

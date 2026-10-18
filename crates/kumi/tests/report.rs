@@ -1,7 +1,7 @@
 //! `kumi report`, with full redaction oracle results.
 use futures::FutureExt;
 use kumi::{
-    doctor::{DoctorIo, TerminalInfo, VideoPrograms},
+    doctor::{DoctorIo, InstallationIo, TerminalInfo, VideoPrograms},
     report::*,
     tui::tty::TtyOutput,
 };
@@ -38,6 +38,16 @@ fn doctor(out: Rc<Out>, env: Env) -> DoctorIo {
     doctor.voice = Some(Rc::new(|| {
         async { Ok(serde_json::from_value(json!({"model":{"name":"ggml-small.en-q5_1.bin"},"fetches":true})).unwrap()) }.boxed_local()
     }));
+    // The Installation section's look at this computer, answered: no ports tried, no programs run, no Live looked for.
+    doctor.installation = InstallationIo {
+        platform: Some("darwin".into()),
+        lives: Some(Rc::new(Vec::new)),
+        free: Some(Rc::new(|_| async { Some(50e9) }.boxed_local())),
+        port: Some(Rc::new(|_| async { None }.boxed_local())),
+        live_running: Some(Rc::new(|| async { false }.boxed_local())),
+        live_extension_host: Some(Rc::new(|| async { false }.boxed_local())),
+        now: None,
+    };
     doctor
 }
 #[test]

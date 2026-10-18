@@ -433,6 +433,59 @@ exit $status
         self.assertIn(f'export PATH="{here}/relkumi/bin:$PATH"', (home / ".profile").read_text())
         self.assertIn(f'(or after: export PATH="{here}/relkumi/bin:$PATH"): kumi', run.stdout)
 
+    def test_a_kumi_home_that_is_the_home_folder_or_the_root_is_refused(self):
+        # kumi uninstall takes Kumi's names (bin, downloads, tools…) out of its folder: there they'd be the producer's.
+        home = self.home()
+        self.serve(self.release("1.0.0"))
+        link = self.root / "link to home"
+        link.symlink_to(home)
+        # A link into a folder of the home folder, then ..: the home folder, though not as written.
+        (home / "sub").mkdir()
+        into = self.root / "link into home"
+        into.symlink_to(home / "sub")
+        spellings = [str(home), f"{home}/", f"{home}/.", f"{home}/new/..", "~", str(link), f"{into}/.."]
+        # Other case on a disk that ignores it, and macOS's own path to the data volume.
+        if Path(str(home).swapcase()).exists():
+            spellings.append(str(home).swapcase())
+        if Path(f"/System/Volumes/Data{home.resolve()}").exists():
+            spellings.append(f"/System/Volumes/Data{home.resolve()}")
+        for kumi_home in spellings:
+            run = self.install(home, KUMI_HOME=kumi_home)
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("KUMI_HOME is your home folder; Kumi needs a folder of its own, such as ~/.kumi.", run.stderr)
+            self.assertEqual([path.name for path in home.iterdir()], ["sub"], kumi_home)
+        # As root, a refusal that failed would install into / or /dev: those runs are left to everyone else.
+        if os.geteuid() != 0:
+            run = self.install(home, KUMI_HOME="/")
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("KUMI_HOME is /, the root of the disk; Kumi needs a folder of its own", run.stderr)
+            # Where a disk is mounted, as kumi uninstall would refuse it: /dev is one on macOS and Linux.
+            run = self.install(home, KUMI_HOME="/dev")
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("KUMI_HOME is /dev, where a disk is mounted; Kumi needs a folder of its own there, such as /dev/kumi.", run.stderr)
+            # Through a link to it, too.
+            mounted = self.root / "to dev"
+            mounted.symlink_to("/dev")
+            run = self.install(home, KUMI_HOME=str(mounted))
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn(", where a disk is mounted; Kumi needs a folder of its own there", run.stderr)
+
+    @unittest.skipUnless(shutil.which("zsh"), "no zsh here")
+    def test_run_by_zsh_it_reads_paths_as_sh_does(self):
+        # curl … | zsh: zsh splits no words unless told to, which reading . and .. counts on.
+        home = self.home()
+        self.serve(self.release("1.0.0"))
+        cases = [(f"{home}/new/..", "KUMI_HOME is your home folder")]
+        # As root, a refusal that failed would install into /private or /: that run is left to everyone else.
+        if os.geteuid() != 0:
+            cases.append(("/tmp/..", "KUMI_HOME is /, the root of the disk"))
+        for kumi_home, said in cases:
+            run = subprocess.run(["zsh"], input=INSTALL_SH.read_text(), env=self.environment(home, KUMI_HOME=kumi_home),
+                                 capture_output=True, text=True, encoding="utf-8", timeout=120)
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn(said, run.stderr)
+            self.assertEqual(list(home.iterdir()), [], kumi_home)
+
     def test_the_zsh_line_goes_where_zsh_reads_it_once(self):
         home = self.home()
         zdot = home / "zsh config"
@@ -456,6 +509,24 @@ exit $status
             elsewhere = "elsewhere" in spelled
             self.assertEqual((home / ".zshrc").read_text().count("# Added by the Kumi installer"), 2 if elsewhere else 1, spelled)
             self.assertIn(f'export PATH="{home}/.kumi/bin:$PATH"' if elsewhere else "PATH                done\n", (home / ".zshrc").read_text() if elsewhere else run.stdout)
+
+    def test_a_home_ending_in_a_slash_gets_one_slash_and_one_block(self):
+        # With HOME=/home/me/, the line was …//.kumi/bin, which kumi uninstall didn't know as Kumi's. An earlier
+        # installer's line, written so, still counts: no second block.
+        self.serve(self.release("1.0.0"))
+        home = self.home("slash")
+        for _ in range(2):
+            run = self.install(home, HOME=f"{home}/", SHELL="/bin/zsh", KUMI_NO_MODIFY_PATH="")
+            self.assertEqual(run.returncode, 0, run.stderr)
+        text = (home / ".zshrc").read_text()
+        self.assertEqual(text.count("# Added by the Kumi installer"), 1, text)
+        self.assertIn(f'export PATH="{home}/.kumi/bin:$PATH"', text)
+        self.assertNotIn("//", text)
+        earlier = self.home("earlier slash")
+        (earlier / ".zshrc").write_text(f'# Added by the Kumi installer\nexport PATH="{earlier}//.kumi/bin:$PATH"\n')
+        run = self.install(earlier, HOME=f"{earlier}/", SHELL="/bin/zsh", KUMI_NO_MODIFY_PATH="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((earlier / ".zshrc").read_text().count("# Added by the Kumi installer"), 1)
 
     # ── This computer ──────────────────────────────────────────────────────
     def test_sudo_is_told_kumi_would_install_for_root(self):
