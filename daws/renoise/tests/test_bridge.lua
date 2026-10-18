@@ -515,6 +515,25 @@ test("bridge: renoise.reload swaps the payload and keeps the port and the connec
   local selection = events(peer, "selection")[1]
   eq(selection.data.track, 9)
   eq(selection.seq, 2, "the connection's numbering goes on")
+  ok(read(env.log_dir .. "/renoise-bridge.log"):find("reloaded bridge"), "the new payload logs")
+  eq(#mock.popen_calls, 1, "the pid isn't looked up again")
+  no_dialogs()
+end)
+
+test("bridge: an error while welcoming closes that connection, nothing else", function()
+  local env = setup()
+  local good = connect(env)
+  local fields = mock.impl(mock.song)
+  local saved = fields.name
+  fields.name = nil
+  local peer = mock.connect()
+  send(peer, { type = "hello", protocol = PROTOCOL, nonce = CLIENT_NONCE })
+  local challenge = frames(peer)[1]
+  send(peer, { type = "auth", proof = hmac(env, "client", challenge.nonce) })
+  tick()
+  ok(peer.closed_by_server, "closed")
+  fields.name = saved
+  eq(request(good, "status").ok, true, "the other connection still answers")
   no_dialogs()
 end)
 

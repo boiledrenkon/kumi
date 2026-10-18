@@ -224,6 +224,8 @@ function M.start(h, reloading)
     log = log.write,
   })
   observers = sync.new(guard)
+  status.cache = b
+  if b.cfg and b.cfg.log_dir then log.configure(b.cfg.log_dir .. "/renoise-bridge.log") end
   if not reloading or not server_running() then
     if configure() then listen() end
   end

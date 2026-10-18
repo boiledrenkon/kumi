@@ -141,7 +141,12 @@ function M:receive(client, data)
   if not record then record = self:accept(client) end
   record.client = client
   if record.closing or not record.conn then return end
-  self:apply(record, record.conn:on_bytes(data, self.ctx.identity))
+  local ok, actions = xpcall(record.conn.on_bytes, debug.traceback, record.conn, data, self.ctx.identity)
+  if not ok then
+    self.ctx.log("error", "connection " .. record.key .. ": " .. tostring(actions))
+    return self:close(record, "internal error")
+  end
+  self:apply(record, actions)
 end
 
 -- An event to every authenticated connection, each numbered on its own connection.

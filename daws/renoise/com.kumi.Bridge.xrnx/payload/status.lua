@@ -11,30 +11,32 @@ local M = {}
 M.METHODS = { "ping", "status", "renoise.reload" }
 M.EVENTS = { "project", "selection", "transport" }
 
-local cached_pid, pid_looked_up = nil, false
+-- Kept across payload reloads (the bridge sets it to its own state).
+M.cache = {}
 
 -- Renoise's pid where Lua can learn it without a console window: /proc on Linux, a shell's parent on
 -- macOS. nil on Windows.
 function M.pid()
-  if pid_looked_up then return cached_pid end
-  pid_looked_up = true
+  local cache = M.cache
+  if cache.pid_looked_up then return cache.pid end
+  cache.pid_looked_up = true
   local platform = os.platform and os.platform() or ""
   pcall(function()
     if platform == "LINUX" then
       local f = io.open("/proc/self/stat", "rb")
       if f then
-        cached_pid = tonumber((f:read("*l") or ""):match("^(%d+)"))
+        cache.pid = tonumber((f:read("*l") or ""):match("^(%d+)"))
         f:close()
       end
     elseif platform == "MACINTOSH" then
       local p = io.popen("echo $PPID")
       if p then
-        cached_pid = tonumber((p:read("*l") or ""):match("^%s*(%d+)"))
+        cache.pid = tonumber((p:read("*l") or ""):match("^%s*(%d+)"))
         p:close()
       end
     end
   end)
-  return cached_pid
+  return cache.pid
 end
 
 function M.demo()
