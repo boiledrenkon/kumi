@@ -2,6 +2,7 @@
 //! queued requests within a budget, then turns what the control surface reported into events.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -139,6 +140,38 @@ struct Sent {
     transport: Option<Value>,
 }
 
+/// How long the set of track GUIDs a project had may be before it is read again when the project changes.
+const WATCH_REFRESH: Duration = Duration::from_millis(250);
+/// The most track GUIDs kept to tell one project from another.
+const WATCH_TRACKS: i32 = 2000;
+
+/// What the bridge remembers of the project in the active tab, to tell a new project from the same one changed. A
+/// project opened in the tab where another was (File > Open, New project) keeps the tab's pointer, so the pointer alone
+/// doesn't say; the file, the state change count and the tracks' GUIDs do.
+#[derive(Default)]
+struct Watch {
+    project: Option<usize>,
+    path: String,
+    name: String,
+    count: Option<i32>,
+    tracks: HashSet<String>,
+    tracks_at: Option<Instant>,
+}
+
+fn track_guids(reaper: &Reaper, project: crate::reaper::Project) -> HashSet<String> {
+    (0..reaper.track_count(project).min(WATCH_TRACKS)).filter_map(|i| reaper.track_at(project, i)).map(|t| reaper.track_guid(t)).collect()
+}
+
+/// Whether the tracks now are another project's than the tracks before: they share none; or one side has none and
+/// the file changed or the counter went back; or neither has any and the file changed.
+fn is_another_project(before: &HashSet<String>, now: &HashSet<String>, file_changed: bool, counter_went_back: bool) -> bool {
+    match (before.is_empty(), now.is_empty()) {
+        (false, false) => before.is_disjoint(now),
+        (true, true) => file_changed,
+        _ => file_changed || counter_went_back,
+    }
+}
+
 // Ticks per second for each driver, measured over the last second.
 #[derive(Default)]
 struct Rates {
@@ -166,6 +199,7 @@ pub struct Extension {
     budget: Budget,
     pending: RefCell<Pending>,
     sent: RefCell<Sent>,
+    watch: RefCell<Watch>,
     rates: RefCell<Rates>,
     in_tick: Cell<bool>,
     quit: Cell<Quit>,
@@ -186,6 +220,7 @@ impl Extension {
             budget: Budget::default(),
             pending: RefCell::default(),
             sent: RefCell::default(),
+            watch: RefCell::default(),
             rates: RefCell::default(),
             in_tick: Cell::new(false),
             quit: Cell::new(Quit::No),
@@ -259,7 +294,7 @@ impl Extension {
         if busy.is_none() {
             self.run_jobs();
         }
-        self.poll_project();
+        self.poll_project(busy.is_none());
         if busy.is_none() {
             self.poll_focus();
         }
@@ -391,25 +426,81 @@ impl Extension {
         status
     }
 
-    // A tab switch, a project opened or closed, or saved under another name.
-    fn poll_project(&self) {
-        let current = self.reaper().current_project().map(|p| (p.ptr.addr(), ProjectSummary { name: p.name, path: p.path }));
+    // A tab switch, a project opened or closed, or saved under another name; and what a project's pointer can't show: a new
+    // project opened in the tab where another was. `settled` is false while REAPER loads or renders.
+    fn poll_project(&self, settled: bool) {
+        let reaper = self.reaper();
+        let info = reaper.current_project();
+        let (switched, replaced) = if settled { self.watch_project(&reaper, info.as_ref()) } else { (false, false) };
+        let current = info.as_ref().map(|p| (p.ptr.addr(), ProjectSummary { name: p.name.clone(), path: p.path.clone() }));
         let mut sent = self.sent.borrow_mut();
-        if sent.project == current {
-            return;
-        }
+        let changed = sent.project != current;
         let first = sent.project.is_none();
-        sent.project = current.clone();
+        if changed {
+            sent.project = current.clone();
+        }
         drop(sent);
-        if !first {
-            self.out.event("project", current.map(|(_, p)| p.to_json()).unwrap_or(Value::Null));
+        if switched || replaced {
             // Refs name objects of the project in this tab: they mean something else now.
             self.reads.bump_epoch();
             self.focus.reset();
+            if let Some(info) = info.as_ref().filter(|_| replaced) {
+                self.reads.project_replaced(info.ptr);
+            }
+        }
+        if (changed && !first) || replaced {
+            self.out.event("project", current.map(|(_, p)| p.to_json()).unwrap_or(Value::Null));
             let mut pending = self.pending.borrow_mut();
             pending.tracks = true;
             pending.selection = true;
             pending.focus = true;
+        }
+    }
+
+    // Compares the active tab's project with what it was: (the tab changed, another project took its place in the tab).
+    fn watch_project(&self, reaper: &Reaper, info: Option<&ProjectInfo>) -> (bool, bool) {
+        let mut watch = self.watch.borrow_mut();
+        let Some(info) = info else {
+            *watch = Watch::default();
+            return (false, false);
+        };
+        let addr = info.ptr.addr();
+        let count = reaper.state_change_count(info.ptr);
+        let fresh = |watch: &mut Watch| {
+            *watch = Watch {
+                project: Some(addr),
+                path: info.path.clone(),
+                name: info.name.clone(),
+                count,
+                tracks: track_guids(reaper, info.ptr),
+                tracks_at: Some(Instant::now()),
+            };
+        };
+        match watch.project {
+            None => {
+                fresh(&mut watch);
+                (false, false)
+            }
+            Some(before) if before != addr => {
+                fresh(&mut watch);
+                (true, false)
+            }
+            Some(_) => {
+                let file_changed = watch.path != info.path || watch.name != info.name;
+                let counter_went_back = matches!((watch.count, count), (Some(before), Some(now)) if now < before);
+                let due = count != watch.count && watch.tracks_at.is_none_or(|at| at.elapsed() >= WATCH_REFRESH);
+                let mut replaced = false;
+                if file_changed || counter_went_back || due {
+                    let now = track_guids(reaper, info.ptr);
+                    replaced = is_another_project(&watch.tracks, &now, file_changed, counter_went_back);
+                    watch.tracks = now;
+                    watch.tracks_at = Some(Instant::now());
+                }
+                watch.path = info.path.clone();
+                watch.name = info.name.clone();
+                watch.count = count;
+                (false, replaced)
+            }
         }
     }
 
@@ -685,6 +776,159 @@ mod tests {
         let after = focus_of(&extension)["epoch"].clone();
         assert_ne!(before, after);
         assert_eq!(after, extension.reads.epoch());
+    }
+
+    /// The epoch and the project's identity as a read gives them.
+    fn epoch_and_identity(extension: &Extension, tx: &std::sync::mpsc::Sender<Job>) -> (String, String) {
+        let read = ask_with(extension, tx, "read", json!({"kind": "project"})).unwrap();
+        (read["epoch"].as_str().unwrap().to_string(), read["items"][0]["identity"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn saving_a_project_under_another_name_keeps_the_epoch_and_the_identity() {
+        let (extension, tx, recorder, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        recorder.take();
+        fake::with(|s| s.project = Some(("/lab/Projects/Copy.rpp".into(), "Copy.rpp".into())));
+        extension.tick(Driver::Timer);
+        // The project event goes out (its name changed), but every ref still means what it did.
+        assert_eq!(recorder.take().first().map(|(name, _)| name.as_str()), Some("project"));
+        assert_eq!(epoch_and_identity(&extension, &tx), before);
+    }
+
+    #[test]
+    fn a_new_project_opened_in_the_same_tab_is_a_new_epoch_and_a_new_identity() {
+        let (extension, tx, recorder, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        recorder.take();
+        // The tab keeps its project object; the file, the tracks and the state counter are another project's.
+        fake::with(|s| {
+            s.project = Some(("/lab/Projects/Other.rpp".into(), "Other.rpp".into()));
+            s.tracks = vec![fake::FakeTrack::new("{OTHER-1}", "Pad")];
+            s.state_count = 1;
+        });
+        extension.tick(Driver::Timer);
+        let after = epoch_and_identity(&extension, &tx);
+        assert_ne!(after.0, before.0);
+        assert!(after.1.starts_with(&before.1) && after.1 != before.1, "{before:?} then {after:?}");
+        assert_eq!(recorder.take().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["project", "tracks", "selection"]);
+        // A ref from the old project is not read against the new one.
+        assert_eq!(ask_with(&extension, &tx, "read", json!({"ref": "r:track:{AAAA}"})).unwrap_err().0, "failed");
+        assert_eq!(focus_of(&extension)["epoch"], after.0);
+    }
+
+    #[test]
+    fn a_new_unsaved_project_in_an_unsaved_tab_is_noticed_by_its_tracks() {
+        let (extension, tx, _, _) = setup();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        // Nothing about the file changed (there is none); the counter moved on, and none of the old tracks is left.
+        fake::with(|s| {
+            s.tracks = vec![fake::FakeTrack::new("{NEW-1}", "Keys")];
+            s.state_count = 5;
+        });
+        extension.watch.borrow_mut().tracks_at = None;
+        extension.tick(Driver::Timer);
+        let after = epoch_and_identity(&extension, &tx);
+        assert_ne!(after.0, before.0);
+        assert_ne!(after.1, before.1);
+    }
+
+    #[test]
+    fn editing_the_project_is_not_a_new_project() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        // A track added, one removed, an undo: the counter moves, the tracks overlap.
+        for step in 0..3 {
+            fake::with(|s| {
+                match step {
+                    0 => s.tracks.push(fake::FakeTrack::new("{EXTRA}", "Extra")),
+                    1 => {
+                        s.tracks.remove(0);
+                    }
+                    _ => {
+                        s.tracks.pop();
+                    }
+                }
+                s.state_count += 1;
+            });
+            extension.watch.borrow_mut().tracks_at = None;
+            extension.tick(Driver::Timer);
+            assert_eq!(epoch_and_identity(&extension, &tx), before, "step {step}");
+        }
+        // The first track of an empty project is no new project either.
+        fake::with(|s| {
+            s.tracks.clear();
+            s.state_count += 1;
+        });
+        extension.watch.borrow_mut().tracks_at = None;
+        extension.tick(Driver::Timer);
+        fake::with(|s| {
+            s.tracks.push(fake::FakeTrack::new("{FIRST}", "First"));
+            s.state_count += 1;
+        });
+        extension.watch.borrow_mut().tracks_at = None;
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), before);
+    }
+
+    #[test]
+    fn a_fresh_empty_project_in_the_tab_is_noticed_when_the_counter_goes_back() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        fake::with(|s| {
+            s.tracks.clear();
+            s.state_count = 0;
+        });
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx).0, before.0);
+    }
+
+    #[test]
+    fn the_classifier_weighs_tracks_then_file_then_counter() {
+        let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<HashSet<_>>();
+        let (a, ab, c, none) = (set(&["a"]), set(&["a", "b"]), set(&["c"]), set(&[]));
+        assert!(!is_another_project(&a, &ab, false, false));
+        assert!(!is_another_project(&ab, &a, true, true), "a file saved under another name keeps its tracks");
+        assert!(is_another_project(&a, &c, false, false), "no track in common is another project, whatever the file");
+        assert!(!is_another_project(&none, &a, false, false), "the first track of an empty project");
+        assert!(is_another_project(&a, &none, false, true), "tracks gone and the counter back");
+        assert!(!is_another_project(&a, &none, false, false), "tracks gone by editing");
+        assert!(is_another_project(&none, &none, true, false), "another file, nothing to compare");
+        assert!(!is_another_project(&none, &none, false, true));
+    }
+
+    #[test]
+    fn nothing_is_concluded_while_reaper_loads_a_project() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        // A load into the tab: the file and the tracks change while REAPER is busy, and nothing is judged then.
+        fake::with(|s| {
+            s.loading = true;
+            s.project = Some(("/lab/Projects/Other.rpp".into(), "Other.rpp".into()));
+            s.tracks = vec![fake::FakeTrack::new("{OTHER-1}", "Pad")];
+            s.state_count = 1;
+        });
+        extension.tick(Driver::Timer);
+        extension.tick(Driver::Timer);
+        assert_eq!(extension.reads.epoch(), before.0);
+        // When REAPER is done, it is the new project that is looked at, once.
+        fake::with(|s| s.loading = false);
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx).0, before.0);
+        let settled = epoch_and_identity(&extension, &tx);
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), settled);
     }
 
     #[test]
