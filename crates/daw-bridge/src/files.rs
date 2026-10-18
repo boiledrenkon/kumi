@@ -211,7 +211,10 @@ pub fn scan_discovery(dir: &Path, daw: Daw) -> Vec<Found> {
             Some(Found { path, discovery, alive: process_alive(pid) })
         })
         .collect();
-    found.sort_by_key(|found| std::cmp::Reverse(found.discovery.as_ref().map(|d| d.started_ms).unwrap_or(0)));
+    found.sort_by(|a, b| {
+        let started = |found: &Found| found.discovery.as_ref().map(|d| d.started_ms).unwrap_or(0);
+        started(b).cmp(&started(a)).then_with(|| a.path.cmp(&b.path))
+    });
     found
 }
 
