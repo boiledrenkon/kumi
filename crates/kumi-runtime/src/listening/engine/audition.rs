@@ -85,6 +85,14 @@ impl Listening {
         match pass.rendered {
             Ok(rendered) => {
                 beats = rendered.beats;
+                // The producer hears an audition as Kumi does: a DAW that captured every candidate without playing it
+                // says so, and the producer is told it wasn't played out loud.
+                if !rendered.sources.is_empty() && rendered.sources.iter().all(|source| !source.audible) {
+                    notes.push(format!(
+                        "The producer didn't hear this round: {} captured it without playing it out loud.",
+                        self.host.profile().words.app
+                    ));
+                }
                 for (index, source) in rendered.sources.iter().enumerate() {
                     let at = takes.iter().position(|take| take.track == source.track || take.track == source.name).unwrap_or(index);
                     let take = &mut takes[at];
