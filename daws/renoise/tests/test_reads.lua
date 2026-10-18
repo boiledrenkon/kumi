@@ -1029,6 +1029,7 @@ test("reads: the answers are the vectors the host's simulator replays", function
   ask("snapshot", {})
   ask("focus", {})
   ask("focus_body", { kind = "pattern" })
+  ask("focus_body", { kind = "pattern", ref = E .. ":pattern:1" })
   ask("focus_body", { kind = "pattern", window = { from = 3, to = 6 } })
   ask("focus_body", { kind = "matrix" })
   ask("focus_body", { kind = "phrase", ref = E .. ":phrase:1.1" })
