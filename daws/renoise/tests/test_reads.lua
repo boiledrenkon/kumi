@@ -842,20 +842,40 @@ test("reads: 64 tracks and 100 patterns", function()
   H.no_dialogs()
 end)
 
-test("reads: a window of more cells than the budget is cut before it is read", function()
+test("reads: a window of a sparse pattern isn't cut, however many cells it has", function()
   local tracks = {}
   for i = 1, 64 do tracks[i] = { name = "T" .. i, note_columns = 4, effect_columns = 1 } end
   local env, peer = setup(nil, demo({ tracks = tracks, send_tracks = 0, pattern_lines = 128 }))
   mock.ops.set_note(1, 3, 2, 1, { note = 48 })
-  local columns = 64 * 5 + 2 -- the master has one of each
-  local most = math.floor(8192 / columns)
+  mock.lines_read = 0
   local body = call(peer, "focus_body", { kind = "pattern", window = { from = 1, to = 100 } }).result
   eq(body.window.from, 1)
-  eq(body.window.to, most)
-  eq(body.truncated, true)
+  eq(body.window.to, 100)
+  eq(body.truncated, nil)
   eq(body.tracks[3].lines[1].line, 2, "what is inside the window is there")
-  body = call(peer, "focus_body", { kind = "pattern", window = { from = 1, to = most } }).result
-  eq(body.truncated, nil, "a window that fits isn't marked")
+  eq(mock.lines_read, 65 * 100, "every line of the window, on every track and the master")
+  H.no_dialogs()
+end)
+
+test("reads: a window of a dense pattern is read only as far as a page holds, line by line", function()
+  local tracks = {}
+  for i = 1, 64 do tracks[i] = { name = "T" .. i, note_columns = 4, effect_columns = 1 } end
+  local env, peer = setup(nil, demo({ tracks = tracks, send_tracks = 0, pattern_lines = 128 }))
+  for line = 1, 100 do
+    for t = 1, 64 do
+      for column = 1, 4 do
+        mock.ops.set_note(1, t, line, column, { note = 48, instrument = 1, volume = 64, panning = 40, delay = 16, fxn = 10, fxa = 32 })
+      end
+    end
+  end
+  mock.lines_read = 0
+  local response = call(peer, "focus_body", { kind = "pattern", window = { from = 1, to = 100 } })
+  local body = response.result
+  eq(body.truncated, true)
+  ok(body.window.to >= 1 and body.window.to < 100, "the window was cut: " .. body.window.to)
+  ok(#json.encode(response) <= MAX_LINE, "and it fits a page")
+  eq(#body.tracks[64].lines, body.window.to, "every line of the window is there on the last track too")
+  ok(mock.lines_read <= 65 * (body.window.to + 1), "and no line was read past the one that filled the page: " .. mock.lines_read)
   H.no_dialogs()
 end)
 

@@ -18,9 +18,8 @@ local M = {}
 -- What a body is cut to, in lines, when nothing says otherwise (and at most).
 M.BODY_LINES = 33
 M.MAX_BODY_LINES = 128
--- Cells (a line of a column on a track) a pattern body reads at most: a bigger window is cut before it is read, since
--- reading is what takes the time.
-M.BODY_CELLS = 8192
+-- What the lines of a body may come to (a page, less the rest of the answer): reading stops where it is filled.
+M.BODY_BYTES = reads.PAGE_BUDGET - 8192
 -- Samples and phrases an instrument body lists at most.
 M.MAX_BODY_ROWS = 255
 -- Tracks a snapshot lists at most (`read` has the rest).
@@ -226,34 +225,41 @@ local function pattern_body(job, params, epoch)
   local center = follows and transport.playback_pos.line or song.selected_line_index
   local from, to = window_of(params, center, lines)
   local tracks = track_count(song)
-  local columns = 0
+  -- Lines are read across all the tracks, one at a time, and reading stops where what was read fills a page: the window is
+  -- cut there (`truncated`), with nothing read that would be thrown away. A line is a slice, so a wide song doesn't hold
+  -- Renoise's GUI for the whole body.
+  local entries, shape = {}, {}
+  local pattern = song:pattern(pattern_at)
+  local bytes = 1024
   for t = 1, tracks do
     local track = song:track(t)
-    columns = columns + track.visible_note_columns + track.visible_effect_columns
-  end
-  local cut = false
-  local most = math.max(1, math.floor(M.BODY_CELLS / math.max(1, columns)))
-  if to - from + 1 > most then
-    to, cut = from + most - 1, true
-  end
-  local entries = {}
-  for t = 1, tracks do
-    job.slice()
-    local live = the_song()
-    local track = live:track(t)
-    local note_columns, effect_columns = track.visible_note_columns, track.visible_effect_columns
-    local pattern_track = live:pattern(pattern_at):track(t)
-    local read = {}
-    for i = from, to do
-      local row = line_row(pattern_track:line(i), i, note_columns, effect_columns, params.hidden == true)
-      if row then read[#read + 1] = row end
-    end
+    local pattern_track = pattern:track(t)
     local alias = pattern_track.alias_pattern_index
+    shape[t] = { track.visible_note_columns, track.visible_effect_columns }
     entries[t] = {
       ref = refs.make(epoch, "track", t), name = track.name, color = hex(track.color),
-      noteColumns = note_columns, effectColumns = effect_columns, rows = read,
+      noteColumns = shape[t][1], effectColumns = shape[t][2], rows = {},
       aliasOf = alias > 0 and alias or nil, aliasRef = alias > 0 and refs.make(epoch, "pattern", alias) or nil,
     }
+    bytes = bytes + 200 + #entries[t].name
+  end
+  local hidden = params.hidden == true
+  local cut = false
+  for i = from, to do
+    job.slice()
+    local live_pattern = the_song():pattern(pattern_at)
+    for t = 1, tracks do
+      local row = line_row(live_pattern:track(t):line(i), i, shape[t][1], shape[t][2], hidden)
+      if row then
+        local read = entries[t].rows
+        read[#read + 1] = row
+        bytes = bytes + #json.encode(row) + 1
+      end
+    end
+    if bytes > M.BODY_BYTES and i < to then
+      to, cut = math.max(from, i - 1), true
+      break
+    end
   end
   local live = the_song()
   local at = live.transport.playback_pos

@@ -314,6 +314,7 @@ function M.make_song(options)
       -- an alias shows (and writes to) the lines of the pattern it is an alias of
       line = function(_, k)
         if type(k) ~= "number" or k < 1 or k > pattern.lines then out_of_range("line", k) end
+        M.lines_read = (M.lines_read or 0) + 1
         local source = data.alias > 0 and d.patterns[data.alias] and d.patterns[data.alias].tracks[t] or data
         return line(source.lines[k])
       end,
