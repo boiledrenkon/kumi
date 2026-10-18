@@ -32,9 +32,20 @@ fn nothing_outside_lives_integration_and_the_registry_names_it() {
             continue;
         }
         let text = std::fs::read_to_string(&file).unwrap();
+        let mut using: Option<usize> = None;
         for (n, line) in text.lines().enumerate() {
-            if code(line).contains("ableton::") || code(line).contains("mod ableton") {
+            let code = code(line);
+            // A `use` names Live's integration however it's written: `integrations::{ableton as live}` too, across
+            // lines.
+            if using.is_none() && code.trim_start().trim_start_matches("pub ").trim_start_matches("pub(crate) ").starts_with("use ") {
+                using = Some(n);
+            }
+            let named = code.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|word| word == "ableton");
+            if code.contains("ableton::") || code.contains("mod ableton") || (using.is_some() && named) {
                 found.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+            if code.contains(';') {
+                using = None;
             }
         }
     }
