@@ -4,14 +4,15 @@ use super::{
     contracts::*,
     errors::{FailureKind, KumiError, RuntimeError},
     file_sync::FileSync,
-    gaps::{gap_tools, GAP_GUIDANCE},
+    gaps::{gap_guidance, gap_tools_for},
     memory::{memory_instructions_for, memory_tools_for, MemoryTools, MemoryToolsOptions},
     recall::{recall_tool_for, RecallOptions},
     recipes::{recipe_instructions, recipe_tools_for, RecipeStore, RecipeToolsOptions, RUN_RECIPE_TOOL},
     store_client::StoreClient,
     taste_log::{TasteLog, UndoneBy, Whereabouts},
     techniques::{
-        technique_instructions, technique_tools, TechniqueStore, TechniqueTools, TechniqueToolsOptions, PLAN_TECHNIQUE, TECHNIQUE_GUIDANCE,
+        technique_guidance, technique_instructions_for, technique_tools_for, TechniqueStore, TechniqueTools, TechniqueToolsOptions,
+        PLAN_TECHNIQUE,
     },
     timing,
 };
@@ -559,10 +560,10 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
         });
         let learned = options.techniques.as_ref().map(|store| {
             let emit = emit.clone();
-            Rc::new(technique_tools(TechniqueToolsOptions {
-                store: store.clone(),
-                on_event: Rc::new(move |e| emit(SessionEvent::Technique(e))),
-            }))
+            Rc::new(technique_tools_for(
+                options.profile,
+                TechniqueToolsOptions { store: store.clone(), on_event: Rc::new(move |e| emit(SessionEvent::Technique(e))) },
+            ))
         });
         let listening = if options.listen {
             let resolve = weak.clone();
@@ -638,7 +639,7 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
         } else {
             vec![]
         };
-        let gaps = options.gaps.as_ref().map(|file| gap_tools(file, options.store.clone())).unwrap_or_default();
+        let gaps = options.gaps.as_ref().map(|file| gap_tools_for(options.profile, file, options.store.clone())).unwrap_or_default();
         let taste = options.store.clone().map(|store| {
             let place = weak.clone();
             let hear = weak.clone();
@@ -1432,9 +1433,9 @@ impl Session {
                 .unwrap_or_default(),
             habits,
             recipe_instructions(&recipes),
-            if self.0.learned.is_some() { TECHNIQUE_GUIDANCE.into() } else { String::new() },
-            technique_instructions(&techniques),
-            if self.0.gaps.is_empty() { String::new() } else { GAP_GUIDANCE.into() },
+            if self.0.learned.is_some() { technique_guidance(&self.0.options.profile) } else { String::new() },
+            technique_instructions_for(&self.0.options.profile, &techniques),
+            if self.0.gaps.is_empty() { String::new() } else { gap_guidance(&self.0.options.profile) },
             if self.0.jobs.is_none() { String::new() } else { crate::core::jobs::job_guidance(&self.0.options.profile) },
             addendum.into(),
             if imported { imported_guidance(noun) } else { String::new() },

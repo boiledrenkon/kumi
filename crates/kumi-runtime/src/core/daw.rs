@@ -32,6 +32,8 @@ pub struct PromptVocab {
     pub ref_example: &'static str,
     /// A plan step setting a device a recipe loads by parameter name, for the recipe tool's example.
     pub recipe_step_example: &'static str,
+    /// A capability scripts can't reach, for note_gap's example: "setting Operator's voice count".
+    pub missing_example: &'static str,
 }
 
 /// Live's word for each field of a profile's words and vocabulary: the one place they're spelled, so a text
@@ -57,6 +59,9 @@ macro_rules! live_word {
     (recipe_step_example) => {
         "set_device_parameter with deviceRef \"@sat\" and parameter \"Drive\""
     };
+    (missing_example) => {
+        "setting Operator's voice count"
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -80,6 +85,9 @@ macro_rules! daw_word {
     };
     ($profile:expr, recipe_step_example) => {
         $profile.vocab.recipe_step_example
+    };
+    ($profile:expr, missing_example) => {
+        $profile.vocab.missing_example
     };
 }
 
@@ -193,6 +201,7 @@ impl DawProfile {
             plan_tool: "make_changes",
             ref_example: "track:3",
             recipe_step_example: "a parameter set by its name on a device an earlier step loaded",
+            missing_example: "setting a synth's voice count",
         },
     };
 
@@ -234,6 +243,7 @@ impl DawProfile {
             plan_tool: crate::live_word!(plan_tool),
             ref_example: crate::live_word!(ref_example),
             recipe_step_example: crate::live_word!(recipe_step_example),
+            missing_example: crate::live_word!(missing_example),
         },
     };
 
