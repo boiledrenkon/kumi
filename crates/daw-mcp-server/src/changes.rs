@@ -74,6 +74,11 @@ impl Record {
     }
 }
 
+/// An answer a key already got, and whether it was an error.
+pub type Answered = (Value, bool);
+/// What a call may go on with: the record (and the restore's description), or the answer a key already got.
+pub type Begun<T> = Result<Result<T, Answered>, Refusal>;
+
 /// Why the journal refuses a call, with the code the tool answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
@@ -192,13 +197,7 @@ impl Journal {
     }
 
     /// Before an apply is sent: the answer a key already got, or the record (now applying) and its step description.
-    pub fn begin_apply(
-        &self,
-        id: &str,
-        confirmation: &str,
-        key: &str,
-        title: Option<&str>,
-    ) -> Result<Result<Record, (Value, bool)>, Refusal> {
+    pub fn begin_apply(&self, id: &str, confirmation: &str, key: &str, title: Option<&str>) -> Begun<Record> {
         let mut inner = self.inner.lock().expect("journal lock");
         let record = inner.records.get_mut(id).ok_or_else(|| refuse("unknown", format!("no change {id} here: preview it again")))?;
         if let Some(answer) = record.apply_answers.get(key) {
@@ -264,7 +263,7 @@ impl Journal {
     }
 
     /// Before an undo is sent: the answer a key already got, or the record (now undoing) and the restore's description.
-    pub fn begin_undo(&self, id: &str, key: &str) -> Result<Result<(Record, String), (Value, bool)>, Refusal> {
+    pub fn begin_undo(&self, id: &str, key: &str) -> Begun<(Record, String)> {
         let mut inner = self.inner.lock().expect("journal lock");
         inner.next += 1;
         let seed = inner.next ^ now_ms();
@@ -330,6 +329,133 @@ impl Journal {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// How long a change may take the DAW (it bounds each of its own steps; a big project takes a while).
+const CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn refusal(refusal: Refusal) -> (Value, bool) {
+    (json!({"error": refusal.message, "code": refusal.code}), true)
+}
+
+fn text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, (Value, bool)> {
+    arguments
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty() && text.len() <= 256)
+        .ok_or_else(|| (json!({"error": format!("{name} must be a string"), "code": "bad-params"}), true))
+}
+
+/// What the bridge is told of a change's place: the epoch it was read in, and the layout (Renoise) its refs are at.
+fn place(params: &mut Value, epoch: Option<&str>, layout: Option<u64>) {
+    if let Some(epoch) = epoch {
+        params["epoch"] = epoch.into();
+    }
+    if let Some(layout) = layout {
+        params["layout"] = layout.into();
+    }
+}
+
+impl crate::host::Host {
+    /// `change_preview`: what a change would do, and the id and confirmation to apply it by. Nothing changes.
+    pub async fn change_preview(&self, arguments: &Value) -> (Value, bool) {
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        let kind = match text(arguments, "kind") {
+            Ok(kind) => kind.to_string(),
+            Err(answer) => return answer,
+        };
+        let Some(input) = arguments.get("input").filter(|input| input.is_object()) else {
+            return (json!({"error": "input must be an object", "code": "bad-params"}), true);
+        };
+        let mut params = json!({"kind": kind, "input": input});
+        let layout = arguments.get("layout").and_then(Value::as_u64);
+        place(&mut params, arguments.get("epoch").and_then(Value::as_str), layout);
+        let answer = match self.call("change_preview", params, &pick, CHANGE_TIMEOUT).await {
+            Ok(answer) => answer,
+            Err(error) => return (self.call_error(&error), true),
+        };
+        match self.journal().previewed(&kind, input, &answer, layout) {
+            Ok(record) => {
+                let mut reply = json!({"transactionId": record.id, "confirmation": record.confirmation, "prior": record.prior, "display": record.display, "target": record.target});
+                place(&mut reply, record.epoch.as_deref(), record.layout);
+                (reply, false)
+            }
+            Err(why) => refusal(why),
+        }
+    }
+
+    /// `change_apply`: the previewed change, made in one named DAW step. A key sent again gets the same answer.
+    pub async fn change_apply(&self, arguments: &Value) -> (Value, bool) {
+        let (id, confirmation, key) =
+            match (text(arguments, "transactionId"), text(arguments, "confirmation"), text(arguments, "idempotencyKey")) {
+                (Ok(id), Ok(confirmation), Ok(key)) => (id.to_string(), confirmation.to_string(), key.to_string()),
+                (Err(answer), _, _) | (_, Err(answer), _) | (_, _, Err(answer)) => return answer,
+            };
+        let title = arguments.get("title").and_then(Value::as_str);
+        let record = match self.journal().begin_apply(&id, &confirmation, &key, title) {
+            Ok(Ok(record)) => record,
+            Ok(Err(answered)) => return answered,
+            Err(why) => return refusal(why),
+        };
+        let mut params = json!({"kind": record.kind, "input": record.input, "fence": record.fence, "desc": record.desc});
+        place(&mut params, record.epoch.as_deref(), record.layout);
+        match self.call("change_apply", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
+            Ok(answer) => self.journal().end_apply(&id, &key, Ok(&answer)),
+            // Answered, or never sent: nothing was written, and the change can be previewed again.
+            Err(error @ (crate::host::CallError::Bridge { .. } | crate::host::CallError::NotConnected(_))) => {
+                self.journal().end_apply(&id, &key, Err((&self.call_error(&error), false)))
+            }
+            // Sent, and no answer came: the DAW may have changed.
+            Err(error) => self.journal().end_apply(&id, &key, Err((&self.call_error(&error), true))),
+        }
+    }
+
+    /// `change_undo`: the change taken back as a new named step, its values put back exactly; refused if they changed since.
+    pub async fn change_undo(&self, arguments: &Value) -> (Value, bool) {
+        let (id, key) = match (text(arguments, "transactionId"), text(arguments, "idempotencyKey")) {
+            (Ok(id), Ok(key)) => (id.to_string(), key.to_string()),
+            (Err(answer), _) | (_, Err(answer)) => return answer,
+        };
+        if arguments.get("confirmation").and_then(Value::as_str) != Some("undo") {
+            return (json!({"error": "confirmation must be \"undo\"", "code": "confirmation"}), true);
+        }
+        let (record, desc) = match self.journal().begin_undo(&id, &key) {
+            Ok(Ok(found)) => found,
+            Ok(Err(answered)) => return answered,
+            Err(why) => return refusal(why),
+        };
+        let mut params =
+            json!({"kind": record.kind, "target": record.target, "prior": record.prior, "applied": record.applied, "desc": desc});
+        if let Some(created) = &record.created {
+            params["created"] = created.clone();
+        }
+        if let Some(material) = &record.material {
+            params["material"] = material.clone();
+        }
+        if arguments.get("discard") == Some(&Value::Bool(true)) {
+            params["discard"] = true.into();
+        }
+        place(&mut params, record.epoch.as_deref(), record.layout);
+        match self.call("change_restore", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
+            Ok(answer) => self.journal().end_undo(&id, &key, Ok(&answer)),
+            Err(error) => self.journal().end_undo(&id, &key, Err(&self.call_error(&error))),
+        }
+    }
+
+    /// `change_release`: changes Kumi won't undo any more, forgotten.
+    pub fn change_release(&self, arguments: &Value) -> (Value, bool) {
+        let Some(ids) = arguments.get("transactionIds").and_then(Value::as_array) else {
+            return (json!({"error": "transactionIds must be a list", "code": "bad-params"}), true);
+        };
+        if ids.is_empty() || ids.len() > MAX_RELEASE || ids.iter().any(|id| !id.is_string()) {
+            return (json!({"error": format!("transactionIds must be 1 to {MAX_RELEASE} ids"), "code": "bad-params"}), true);
+        }
+        let ids: Vec<String> = ids.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+        (json!({"released": self.journal().release(&ids)}), false)
     }
 }
 
@@ -417,7 +543,8 @@ mod tests {
         let record = preview(&journal);
         let Ok(Ok(applying)) = journal.begin_apply(&record.id, &record.confirmation, "a", Some("Bass −6 dB")) else { panic!() };
         journal.end_apply(&record.id, "a", Ok(&json!({"applied": {}})));
-        assert_eq!(journal.by_descs(&[applying.desc.clone().unwrap()]), [record.id.clone()]);
+        let found = journal.by_descs(std::slice::from_ref(applying.desc.as_ref().unwrap()));
+        assert_eq!(found, vec![record.id.clone()]);
         assert!(journal.by_descs(&["Kumi: something else (kzzzz)".into()]).is_empty());
     }
 }

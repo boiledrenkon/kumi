@@ -45,6 +45,8 @@ pub struct Host {
     current: tokio::sync::Mutex<Option<Current>>,
     /// The bridge's events (`{name, data}`), for the MCP client: whichever instance the host is connected to.
     events: tokio::sync::broadcast::Sender<Value>,
+    /// The changes previewed, applied and undone through this host (M3).
+    journal: crate::changes::Journal,
 }
 
 /// Which running instance a tool means, when several run.
@@ -110,7 +112,12 @@ impl Host {
             paths: BridgePaths::new(kumi_home, daw),
             current: tokio::sync::Mutex::new(None),
             events: tokio::sync::broadcast::channel(1024).0,
+            journal: crate::changes::Journal::default(),
         }
+    }
+
+    pub(crate) fn journal(&self) -> &crate::changes::Journal {
+        &self.journal
     }
 
     /// The bridge's events from now on, as `{name, data}` (a `tracks` shift, a project opened…).

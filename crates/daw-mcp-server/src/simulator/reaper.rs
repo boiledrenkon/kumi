@@ -24,6 +24,8 @@ struct State {
     keeps_bound: bool,
     /// What the sim was asked, in order: method and params.
     asked: Vec<(String, Value)>,
+    /// The undo history's descriptions, oldest first (the changes applied and restored).
+    undo: Vec<String>,
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -66,7 +68,9 @@ impl ReaperScript {
                 track_row(index, &name)
             })
             .collect();
-        ReaperScript { state: Arc::new(Mutex::new(State { epoch: 1, tracks: rows, changed: 7, keeps_bound: true, asked: vec![] })) }
+        ReaperScript {
+            state: Arc::new(Mutex::new(State { epoch: 1, tracks: rows, changed: 7, keeps_bound: true, asked: vec![], undo: vec![] })),
+        }
     }
 
     /// The project switched tabs: refs and cursors from before are stale.
@@ -81,6 +85,22 @@ impl ReaperScript {
         self.state.lock().unwrap().keeps_bound = false;
     }
 
+    /// The producer moves a track's fader (`index` counts the master as 0).
+    pub fn set_volume(&self, index: usize, db: f64) {
+        let mut state = self.state.lock().unwrap();
+        state.tracks[index]["volumeDb"] = db.into();
+        state.changed += 1;
+    }
+
+    pub fn volume(&self, index: usize) -> f64 {
+        self.state.lock().unwrap().tracks[index]["volumeDb"].as_f64().unwrap()
+    }
+
+    /// REAPER's undo history, as the changes named their steps.
+    pub fn undo_history(&self) -> Vec<String> {
+        self.state.lock().unwrap().undo.clone()
+    }
+
     /// Every request the sim answered, in order.
     pub fn asked(&self) -> Vec<(String, Value)> {
         self.state.lock().unwrap().asked.clone()
@@ -93,7 +113,64 @@ impl ReaperScript {
 
     /// The simulator's config for REAPER with this project behind it.
     pub fn config(&self, secret: Secret, resource: &str) -> SimulatorConfig {
-        SimulatorConfig::reaper(secret, resource).with_methods(&["read", "snapshot", "focus", "focus_body"], self.respond())
+        SimulatorConfig::reaper(secret, resource)
+            .with_methods(&["read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore"], self.respond())
+    }
+
+    /// The one change kind the sim makes, `track-volume {ref, volumeDb}`, the way the contract has every kind made:
+    /// a preview that writes nothing, an apply fenced by what the preview saw, a restore fenced by what the apply wrote.
+    fn change(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let bad = |message: &str| ("bad-params".to_string(), message.to_string());
+        if params["kind"] != "track-volume" {
+            return Err(bad("the simulator makes only track-volume"));
+        }
+        let (reference, input) = match method {
+            "change_restore" => (params["target"]["ref"].as_str(), &params["prior"]),
+            _ => (params["input"]["ref"].as_str(), &params["input"]),
+        };
+        let index = state
+            .tracks
+            .iter()
+            .position(|track| Some(track["ref"].as_str().unwrap_or_default()) == reference)
+            .ok_or(("failed".to_string(), "that track isn't in the project".to_string()))?;
+        let now = state.tracks[index]["volumeDb"].as_f64().unwrap_or(0.0);
+        let name = state.tracks[index]["name"].as_str().unwrap_or_default().to_string();
+        let wanted = input["volumeDb"].as_f64().ok_or(bad("volumeDb must be a number"))?;
+        let display = json!({"title": format!("{name} volume {wanted} dB")});
+        match method {
+            "change_preview" => Ok(json!({
+                "epoch": epoch,
+                "target": {"ref": reference, "kind": "track"},
+                "prior": {"volumeDb": now},
+                "fence": {"volumeDb": now},
+                "display": display,
+            })),
+            "change_apply" => {
+                if params["fence"]["volumeDb"].as_f64() != Some(now) {
+                    return Err(("changed".into(), format!("{name}'s volume changed since the preview")));
+                }
+                let desc = params["desc"].as_str().ok_or(bad("desc must be a string"))?.to_string();
+                state.tracks[index]["volumeDb"] = wanted.into();
+                state.changed += 1;
+                state.undo.push(desc.clone());
+                Ok(
+                    json!({"epoch": epoch, "applied": {"volumeDb": wanted}, "display": display, "undo": {"desc": desc, "entry": true, "stateCount": state.changed}}),
+                )
+            }
+            _ => {
+                let applied = params["applied"]["volumeDb"].as_f64();
+                if applied != Some(now) && params["discard"] != true {
+                    return Err(("changed".into(), format!("{name}'s volume changed since Kumi set it")));
+                }
+                let desc = params["desc"].as_str().ok_or(bad("desc must be a string"))?.to_string();
+                state.tracks[index]["volumeDb"] = wanted.into();
+                state.changed += 1;
+                state.undo.push(desc);
+                Ok(
+                    json!({"epoch": epoch, "restored": {"volumeDb": wanted}, "display": {"title": format!("{name} volume back to {wanted} dB")}}),
+                )
+            }
+        }
     }
 
     fn epoch_text(state: &State) -> String {
@@ -105,7 +182,7 @@ impl ReaperScript {
         state.asked.push((method.to_string(), params.clone()));
         let epoch = Self::epoch_text(&state);
         // Refs that say which epoch they came from are refused once the project in the tab is another.
-        if matches!(method, "read" | "focus_body") {
+        if matches!(method, "read" | "focus_body" | "change_preview" | "change_apply" | "change_restore") {
             if let Some(sent) = params.get("epoch").and_then(Value::as_str).filter(|sent| *sent != epoch) {
                 let message =
                     format!("those refs are from an earlier epoch ({sent}; now {epoch}): the project in the tab changed, read again");
@@ -113,6 +190,7 @@ impl ReaperScript {
             }
         }
         Some(match method {
+            "change_preview" | "change_apply" | "change_restore" => Self::change(&mut state, &epoch, method, params),
             "read" => Self::read(&state, &epoch, params),
             "snapshot" => {
                 let tracks: Vec<Value> = state.tracks.iter().take(MAX_LIMIT).cloned().collect();

@@ -71,6 +71,50 @@ pub fn tools(host: &Host) -> Value {
             })), "required": ["kind"], "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
         },
+        {
+            "name": "change_preview",
+            "title": format!("Preview a {daw} change"),
+            "description": format!("What one change would do in {daw}, without making it: {{transactionId, confirmation, prior, display, target, epoch}}. Apply it with change_apply."),
+            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                "kind": {"type": "string", "description": "The change kind."},
+                "input": {"type": "object", "description": "What the kind takes."},
+                "epoch": {"type": "string", "description": "The epoch the refs in input came from."},
+            })), "required": ["kind", "input"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": true, "idempotentHint": false, "openWorldHint": false},
+        },
+        {
+            "name": "change_apply",
+            "title": format!("Apply a {daw} change"),
+            "description": format!("Makes a previewed change in {daw}, as one named step of {daw}'s undo. The same idempotencyKey again returns the first answer and changes nothing. state is applied, or uncertain when {daw} didn't answer."),
+            "inputSchema": {"type": "object", "properties": {
+                "transactionId": {"type": "string"},
+                "confirmation": {"type": "string", "description": "The confirmation change_preview gave."},
+                "idempotencyKey": {"type": "string"},
+                "title": {"type": "string", "description": format!("The change's name in {daw}'s undo history.")},
+            }, "required": ["transactionId", "confirmation", "idempotencyKey"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        },
+        {
+            "name": "change_undo",
+            "title": format!("Undo a {daw} change"),
+            "description": format!("Takes a change back as a new named step in {daw}: exactly what it changed is put back. Refused (code changed) if those values changed since, unless discard."),
+            "inputSchema": {"type": "object", "properties": {
+                "transactionId": {"type": "string"},
+                "confirmation": {"const": "undo"},
+                "idempotencyKey": {"type": "string"},
+                "discard": {"type": "boolean", "description": "Put the values back even if they changed since."},
+            }, "required": ["transactionId", "confirmation", "idempotencyKey"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false},
+        },
+        {
+            "name": "change_release",
+            "title": "Forget changes",
+            "description": "Changes that won't be undone any more: the host forgets them (at most 64 at a time).",
+            "inputSchema": {"type": "object", "properties": {
+                "transactionIds": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 64},
+            }, "required": ["transactionIds"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        },
     ]);
     if daw == Daw::Reaper {
         // REAPER's refs are GUIDs, which a copy of the project in another tab shares: the epoch says which project they came from.
@@ -91,7 +135,8 @@ pub fn tools(host: &Host) -> Value {
         // through the tracks inserted, removed or moved since.
         let layout = json!({"type": "integer", "minimum": 0, "description": "The layout the refs were read in (each answer and tracks event says it): refs from an older one are carried through the track shifts since."});
         list[2]["inputSchema"]["properties"]["layout"] = layout.clone();
-        list[5]["inputSchema"]["properties"]["layout"] = layout;
+        list[5]["inputSchema"]["properties"]["layout"] = layout.clone();
+        list[6]["inputSchema"]["properties"]["layout"] = layout;
         // Notes in columns the track doesn't show are listed under `hidden` for a line with nothing in the shown ones; for every
         // line when asked (about six times the reading).
         let hidden = json!({"type": "boolean", "description": "Also list data in the note and effect columns the track doesn't show, on every line (under `hidden`). Without it only a line with nothing in the shown columns is looked through."});
@@ -185,6 +230,15 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                         "snapshot" => host.snapshot(&arguments).await,
                         "focus" => host.focus(&arguments).await,
                         _ => host.focus_body(&arguments).await,
+                    };
+                    result(id, tool_result(answer, is_error))
+                }
+                "change_preview" | "change_apply" | "change_undo" | "change_release" => {
+                    let (answer, is_error) = match name {
+                        "change_preview" => host.change_preview(&arguments).await,
+                        "change_apply" => host.change_apply(&arguments).await,
+                        "change_undo" => host.change_undo(&arguments).await,
+                        _ => host.change_release(&arguments),
                     };
                     result(id, tool_result(answer, is_error))
                 }

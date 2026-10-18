@@ -18,7 +18,10 @@ async fn the_read_methods_on_the_wire() {
     let script = ReaperScript::new(3, 0);
     let simulator = Simulator::start(script.config(secret.clone(), "/lab/REAPER")).await.unwrap();
     let client = BridgeClient::connect(simulator.address(), secret, "daw-mcp-server/test").await.unwrap();
-    assert_eq!(client.welcome().methods, ["ping", "status", "read", "snapshot", "focus", "focus_body"]);
+    assert_eq!(
+        client.welcome().methods,
+        ["ping", "status", "read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore"]
+    );
 
     let page = client.request("read", json!({"kind": "track", "limit": 2}), WAIT).await.unwrap();
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
