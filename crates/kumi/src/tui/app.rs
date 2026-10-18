@@ -260,6 +260,15 @@ struct Strip {
     key: Option<String>,
     reading: bool,
 }
+/// A body of a DAW's own view (a tracker's pattern or matrix, an instrument's keyzones, a track's routing), the one
+/// FOCUS shows when the producer is there, with what it was read for.
+#[derive(Default)]
+struct OwnBody {
+    body: Option<FocusBody>,
+    key: Option<String>,
+    reading: bool,
+    again: bool,
+}
 struct State {
     /// The web page saved last for this conversation (by /share or /export), with its key: /share shows it again while
     /// nothing in the conversation changed.
@@ -357,6 +366,7 @@ struct State {
     clip_again: bool,
     touched: Option<Touched>,
     strip: Strip,
+    own: OwnBody,
     tree_cursor: Option<usize>,
     pinned: Option<Pin>,
     /// Files the producer added, which go with the next message, and whether the clipboard is being read.
@@ -480,6 +490,7 @@ impl State {
             clip_again: false,
             touched: None,
             strip: Strip::default(),
+            own: OwnBody::default(),
             tree_cursor: None,
             pinned: None,
             attachments: vec![],

@@ -1,15 +1,17 @@
 //! Renoise, through Kumi's tool and host: its refs (positions, as Renoise numbers them, under the song's epoch), its
 //! read tool and its instructions. The integration itself is the one every bridge of Kumi's own shares (`own_bridge`).
 use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
+use super::own_views::{self, focus_track, selected, view};
 use crate::core::{
     contracts::{Integration, JsonObject},
     daw::DawProfile,
     presentation::{ToolActivity, ToolPresentation},
     refs::{moved_index, Moved, RefScheme, Shift},
-    view::ViewPresentation,
+    view::{BodyKind, BodyRequest, DawFocus, FocusBody, FocusItem, FocusSection, ItemKind, SectionKind, ViewKind, ViewPresentation},
 };
 use crate::mcp::client::BridgeDescriptor;
 use regex::Regex;
+use serde_json::Value;
 use std::{rc::Rc, sync::LazyLock};
 
 /// The instructions Renoise's turns carry (M7 brings the full instruction pack).
@@ -24,7 +26,81 @@ pub const DAW: OwnDaw = OwnDaw {
     read_description: "Read Renoise: the song, its tracks, and what's in them (the sequence, patterns and their lines, instruments, samples, phrases, devices and parameters), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more.",
     read_kinds: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],
     project_kind: "song",
+    fill_focus,
+    bodies: &[BodyKind::Tree, BodyKind::Tracker, BodyKind::Matrix, BodyKind::Keyzones],
+    body_request,
+    to_body,
 };
+
+/// What the producer looks at in Renoise: the pattern or phrase editor, the pattern matrix, an instrument, the mixer,
+/// or a track's DSP chain; the selected track, pattern (or phrase, or instrument), sequence slot and device.
+fn fill_focus(focus: &Value) -> DawFocus {
+    let selection = focus.get("selection").cloned().unwrap_or(Value::Null);
+    let shown = focus.get("view").and_then(Value::as_str).unwrap_or("pattern");
+    let main = match shown {
+        "phrase" => view(ViewKind::PatternEditor, "Phrase Editor"),
+        "matrix" => view(ViewKind::Sequencer, "Pattern Matrix"),
+        "instrument" => view(ViewKind::Instrument, "Instrument"),
+        "sample" => view(ViewKind::Instrument, "Sample Editor"),
+        "mixer" => view(ViewKind::Mixer, "Mixer"),
+        _ => view(ViewKind::PatternEditor, "Pattern Editor"),
+    };
+    let name = |key: &str| selection.get(key).and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_owned);
+    let item = match shown {
+        "phrase" => {
+            selected(&selection, "phraseRef").map(|reference| FocusItem { kind: ItemKind::Phrase, item_ref: Some(reference), name: None })
+        }
+        "instrument" | "sample" => selected(&selection, "instrumentRef").map(|reference| FocusItem {
+            kind: ItemKind::Sample,
+            item_ref: Some(reference),
+            name: name("instrumentName"),
+        }),
+        _ => selected(&selection, "patternRef").map(|reference| FocusItem {
+            kind: ItemKind::PatternTrack,
+            item_ref: Some(reference),
+            name: name("patternName"),
+        }),
+    };
+    let section = selection.get("sequence").and_then(Value::as_f64).filter(|n| *n >= 1.).map(|n| FocusSection {
+        kind: SectionKind::SequenceSlot,
+        index: Some(n - 1.),
+        name: name("section"),
+    });
+    DawFocus {
+        track: focus_track(&selection),
+        track_ref: selected(&selection, "trackRef"),
+        device_ref: selected(&selection, "deviceRef"),
+        device: name("deviceName"),
+        main_view: Some(main),
+        editor_view: (shown == "dsp").then(|| view(ViewKind::DeviceChain, "Track DSPs")),
+        item,
+        section,
+        ..Default::default()
+    }
+}
+
+fn body_request(request: &BodyRequest) -> Option<(&'static str, Option<String>)> {
+    Some(match request {
+        BodyRequest::Tree { track_ref } => ("dsp", Some(track_ref.clone())),
+        BodyRequest::Tracker { item_ref } => {
+            let phrase = item_ref.as_deref().and_then(|r| RenoiseRefs.kind_of(r)) == Some("phrase");
+            (if phrase { "phrase" } else { "pattern" }, item_ref.clone())
+        }
+        BodyRequest::Matrix => ("matrix", None),
+        BodyRequest::Keyzones { item_ref } => ("instrument", Some(item_ref.clone())),
+        _ => return None,
+    })
+}
+
+fn to_body(request: &BodyRequest, body: &Value) -> Option<FocusBody> {
+    Some(match request {
+        BodyRequest::Tree { track_ref } => FocusBody::Tree(own_views::tree(track_ref, body)),
+        BodyRequest::Tracker { .. } => FocusBody::Tracker(own_views::tracker(body)),
+        BodyRequest::Matrix => FocusBody::Matrix(own_views::matrix(body)),
+        BodyRequest::Keyzones { item_ref } => FocusBody::Keyzones(own_views::keyzones(item_ref, body)),
+        _ => return None,
+    })
+}
 
 /// Renoise's refs: `<epoch>:<kind>:<numbers>`, numbered as Renoise shows them (from 1). A track inserted or deleted
 /// moves the tracks after it, and the devices and parameters on them.
@@ -118,8 +194,17 @@ pub const PRESENTATION: ToolPresentation = ToolPresentation {
     read_prefix: Some("renoise_"),
 };
 
-/// How the app reads Renoise's focus and devices (FOCUS's bodies come with M2's views).
-pub const VIEW: ViewPresentation = ViewPresentation::NONE;
+/// How the app reads Renoise's focus and devices: the focus comes neutral.
+pub const VIEW: ViewPresentation = ViewPresentation {
+    heading: |kind| match kind {
+        BodyKind::Tree => "DSP",
+        BodyKind::Tracker => "Pattern",
+        BodyKind::Matrix => "Pattern Matrix",
+        BodyKind::Keyzones => "Keyzones",
+        other => (ViewPresentation::NONE.heading)(other),
+    },
+    ..ViewPresentation::NONE
+};
 
 /// Renoise's integration.
 pub fn create_renoise_integration(options: OwnOptions) -> Rc<dyn Integration> {

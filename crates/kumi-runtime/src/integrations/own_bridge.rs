@@ -10,6 +10,7 @@ use crate::{
         fold::fold_tracks_with,
         place::{is_project_id, unsaved, Place},
         refs::{Book, RefScheme},
+        view::{BodyKind, BodyRequest, DawFocus, FocusBody},
     },
     integrations::none::no_access,
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
@@ -21,6 +22,7 @@ use futures::future::LocalBoxFuture;
 use kumi_common::{
     abort::{self, Signal, SignalExt},
     js::json::stringify,
+    time::perf_now,
 };
 use serde_json::{json, Value};
 use std::{
@@ -31,6 +33,8 @@ use std::{
 
 /// How long a call to Kumi's host waits.
 const CALL_MS: u64 = 30_000;
+/// How often FOCUS's focus is read while the app shows it, unless the app says.
+const FOCUS_MS: u64 = 150;
 /// The most a page of the model's read asks for.
 const MOST_ROWS: u64 = 200;
 
@@ -48,6 +52,12 @@ pub struct OwnDaw {
     pub read_kinds: &'static [&'static str],
     /// The project row's word in the read tool ("project", "song").
     pub project_kind: &'static str,
+    /// What the producer is looking at, from the host's `focus` (contract §4).
+    pub fill_focus: fn(&Value) -> DawFocus,
+    /// The bodies FOCUS can draw for this DAW, each as the host's `focus_body` kind with its ref, and read back.
+    pub bodies: &'static [BodyKind],
+    pub body_request: fn(&BodyRequest) -> Option<(&'static str, Option<String>)>,
+    pub to_body: fn(&BodyRequest, &Value) -> Option<FocusBody>,
 }
 
 /// Starts Kumi's host for a DAW: the production one runs `daw-mcp-server`; a test's stand-in answers in its place.
@@ -66,22 +76,24 @@ pub struct OwnOptions {
 pub struct OwnIntegration<S: RefScheme> {
     daw: &'static OwnDaw,
     options: OwnOptions,
-    endpoint: RefCell<Option<Rc<dyn McpEndpoint>>>,
+    endpoint: Rc<RefCell<Option<Rc<dyn McpEndpoint>>>>,
     book: Rc<RefCell<Book<S>>>,
     epoch: RefCell<Option<String>>,
     connected: Cell<bool>,
-    closed: Cell<bool>,
+    closed: Rc<Cell<bool>>,
+    watching: Cell<bool>,
 }
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
     Rc::new(OwnIntegration::<S> {
         daw,
         options,
-        endpoint: RefCell::new(None),
+        endpoint: Rc::new(RefCell::new(None)),
         book: Rc::new(RefCell::new(Book::default())),
         epoch: RefCell::new(None),
         connected: Cell::new(false),
-        closed: Cell::new(false),
+        closed: Rc::new(Cell::new(false)),
+        watching: Cell::new(false),
     })
 }
 
@@ -159,6 +171,52 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             book.clear_names();
         }
         *self.epoch.borrow_mut() = Some(epoch.to_owned());
+    }
+
+    /// Reads the host's focus while the app shows FOCUS, telling the app what changed: what the producer looks at and
+    /// the transport (for the beat light, every read while it plays).
+    fn watch_focus(&self) {
+        let (on_focus, on_transport) = (self.options.context.on_focus.clone(), self.options.context.on_transport.clone());
+        if self.watching.replace(true) || (on_focus.is_none() && on_transport.is_none()) {
+            return;
+        }
+        let (endpoint, closed, daw) = (self.endpoint.clone(), self.closed.clone(), self.daw);
+        let period = self.options.context.focus_interval_ms.unwrap_or(FOCUS_MS).max(50);
+        tokio::task::spawn_local(async move {
+            let (mut last, mut last_transport): (Option<Value>, Option<Value>) = (None, None);
+            while !closed.get() {
+                tokio::time::sleep(std::time::Duration::from_millis(period)).await;
+                let Some(host) = endpoint.borrow().clone() else { continue };
+                let read =
+                    host.call("focus", JsonObject::new(), abort::timeout(2_000)).await.ok().and_then(|result| answer_of(&result).ok());
+                if closed.get() {
+                    break;
+                }
+                let Some(focus) = read.filter(|focus| focus.is_object()) else {
+                    if last.take().is_some() {
+                        if let Some(on_focus) = &on_focus {
+                            on_focus(None);
+                        }
+                    }
+                    continue;
+                };
+                let seen = json!({"view": focus.get("view"), "selection": focus.get("selection"), "epoch": focus.get("epoch")});
+                if last.as_ref() != Some(&seen) {
+                    if let Some(on_focus) = &on_focus {
+                        on_focus(Some((daw.fill_focus)(&focus)));
+                    }
+                    last = Some(seen);
+                }
+                let transport = focus.get("transport").cloned();
+                let playing = transport.as_ref().and_then(|t| t.get("playing")) == Some(&Value::Bool(true));
+                if playing || transport != last_transport {
+                    if let Some(on_transport) = &on_transport {
+                        on_transport(crate::integrations::own_views::transport(&focus, perf_now()));
+                    }
+                    last_transport = transport;
+                }
+            }
+        });
     }
 
     fn no_access(&self, why: Option<&str>) -> Observation {
@@ -255,7 +313,21 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         (self.options.context.on_connection)(ConnectionState::Connecting, None);
         let status = self.call("status", json!({}), signal).await?;
         self.set_connected(status.is_ok_and(|status| status.get("connected") != Some(&Value::Bool(false))));
+        self.watch_focus();
         Ok(())
+    }
+    fn can_show(&self, kind: BodyKind) -> bool {
+        self.daw.bodies.contains(&kind)
+    }
+    async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
+        let Some((kind, reference)) = (self.daw.body_request)(request).filter(|_| self.daw.bodies.contains(&request.kind())) else {
+            return Ok(None);
+        };
+        let args = Value::Object(crate::integrations::own_views::body_args(kind, reference.as_deref()));
+        Ok(match self.call("focus_body", args, signal).await? {
+            Ok(body) => (self.daw.to_body)(request, &body),
+            Err(_) => None,
+        })
     }
     async fn observe(&self, signal: Signal, _hints: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
         signal.check()?;

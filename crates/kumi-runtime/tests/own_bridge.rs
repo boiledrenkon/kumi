@@ -198,3 +198,127 @@ async fn renoises_refs_are_positions_under_the_songs_epoch_and_a_new_song_retire
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn reapers_focus_is_read_while_focus_shows_and_its_bodies_come_neutral() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let focus = json!({
+                "epoch": "1", "view": "midi", "changed": 7,
+                "selection": {"trackRef": BASS, "track": {"name": "Bass", "color": "#3c7cf5", "type": "midi"}, "itemRef": "r:item:{I1}", "takeRef": "r:take:{T1}", "itemName": "Bass take", "fxRef": "r:fx:{F1}", "fxName": "ReaComp", "param": {"name": "Thresh", "value": "-12.0 dB"}},
+                "transport": {"playing": true, "beat": 33.5, "tempo": 124, "beatsPerBar": 4},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("focus", focus, false)]),
+                asked: RefCell::default(),
+            });
+            let seen: Rc<RefCell<Vec<Option<kumi_runtime::core::view::DawFocus>>>> = Rc::default();
+            let beats: Rc<RefCell<Vec<Option<f64>>>> = Rc::default();
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            let (into, ticks) = (seen.clone(), beats.clone());
+            options.context.on_focus = Some(Rc::new(move |focus| into.borrow_mut().push(focus)));
+            options.context.on_transport = Some(Rc::new(move |transport| ticks.borrow_mut().push(transport.and_then(|t| t.beat))));
+            options.context.focus_interval_ms = Some(50);
+            let reaper = create_reaper_integration(options);
+            reaper.start(Signal::new()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+            let focus = seen.borrow().first().cloned().flatten().expect("the focus, read once it shows");
+            assert_eq!(seen.borrow().len(), 1, "told again only when it changes");
+            assert!(beats.borrow().len() >= 2, "the beat light follows every read while playing");
+            assert_eq!(beats.borrow()[0], Some(33.5));
+            assert_eq!(focus.track.as_ref().map(|t| t.name.as_str()), Some("Bass"));
+            assert_eq!(focus.track_ref.as_deref(), Some(BASS));
+            assert_eq!(focus.item.as_ref().and_then(|i| i.item_ref.as_deref()), Some("r:take:{T1}"), "the MIDI editor's notes are the take's");
+            assert_eq!(focus.editor_view.as_ref().map(|v| v.label.as_str()), Some("MIDI editor"));
+            assert_eq!(focus.device.as_deref(), Some("ReaComp"));
+            assert_eq!(focus.parameter.as_ref().map(|p| p.name.as_str()), Some("Thresh"));
+
+            use kumi_runtime::core::view::{BodyKind, BodyRequest, FocusBody, RouteKind};
+            assert!(reaper.can_show(BodyKind::Notes) && reaper.can_show(BodyKind::Routing) && !reaper.can_show(BodyKind::Tracker));
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"nodes": [
+                    {"ref": "r:fx:{F1}", "name": "ReaComp", "enabled": true},
+                    {"ref": "r:fx:{C1}", "name": "Container", "container": true, "childNodes": [
+                        {"ref": "r:fx:{A}", "name": "ReaEQ"}, {"ref": "r:fx:{B}", "name": "ReaDelay", "parallel": true}
+                    ]}
+                ]}),
+                false,
+            ));
+            let Some(FocusBody::Tree(tree)) = reaper.focus_body(&BodyRequest::Tree { track_ref: BASS.into() }, Signal::new()).await.unwrap() else {
+                panic!("a tree")
+            };
+            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "fx", "ref": BASS}));
+            let chains = tree.devices[1].chains.as_ref().unwrap();
+            assert_eq!(chains.len(), 2, "a parallel FX starts its own chain");
+            assert_eq!(chains[1].devices.as_ref().unwrap()[0].name, "ReaDelay");
+
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"routes": [{"category": 0, "otherName": "Reverb Bus", "volumeDb": -12.0, "mode": 0}, {"category": -1, "otherName": "Kick", "mode": 3, "mute": true}], "parentSend": true}),
+                false,
+            ));
+            let Some(FocusBody::Routing(routing)) = reaper.focus_body(&BodyRequest::Routing { track_ref: BASS.into() }, Signal::new()).await.unwrap() else {
+                panic!("routing")
+            };
+            assert_eq!((routing.routes[0].kind, routing.routes[0].tap.as_deref()), (RouteKind::Send, Some("post-fader")));
+            assert_eq!((routing.routes[1].kind, routing.routes[1].muted), (RouteKind::Receive, true));
+            assert_eq!(routing.parent_send, Some(true));
+            reaper.close().await.unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn renoises_bodies_are_its_pattern_matrix_and_keyzones_in_its_own_notation() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use kumi_runtime::core::view::{BodyRequest, FocusBody};
+            let host = Rc::new(Host { answers: RefCell::new(vec![("status", json!({"connected": true}), false)]), asked: RefCell::default() });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"ref": "3:pattern:2", "name": "Drop", "lines": 64, "from": 1, "cursor": 2, "playing": 1, "lpb": 4, "tracks": [
+                    {"ref": "3:track:1", "name": "Kick", "lines": [
+                        {"line": 1, "notes": [{"note": "C-4", "instrument": "01"}], "effects": [{"number": "0A", "amount": "10"}]},
+                        {"line": 2, "notes": [{"note": "OFF"}]}
+                    ]}
+                ]}),
+                false,
+            ));
+            let Some(FocusBody::Tracker(grid)) = renoise.focus_body(&BodyRequest::Tracker { item_ref: Some("3:pattern:2".into()) }, Signal::new()).await.unwrap() else {
+                panic!("a pattern")
+            };
+            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "pattern", "ref": "3:pattern:2"}));
+            assert_eq!((grid.from, grid.cursor, grid.playing), (0, Some(1), Some(0)), "lines from 1 in Renoise, from 0 in FOCUS");
+            assert_eq!(grid.tracks[0].cells, ["C-4 01 .. .. .. 0A10", "OFF .. .. .. .."]);
+
+            renoise.focus_body(&BodyRequest::Tracker { item_ref: Some("3:phrase:1.2".into()) }, Signal::new()).await.unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["kind"], "phrase", "a phrase is asked for as one");
+
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"tracks": ["Kick", "Bass"], "slots": [{"pattern": 1, "section": "Intro"}, {"pattern": 2, "mutedTracks": [2]}], "current": 2}),
+                false,
+            ));
+            let Some(FocusBody::Matrix(matrix)) = renoise.focus_body(&BodyRequest::Matrix, Signal::new()).await.unwrap() else { panic!("the matrix") };
+            assert_eq!((matrix.current, matrix.slots[1].muted.as_slice()), (Some(1), &[1][..]));
+            assert_eq!(matrix.slots[0].section.as_deref(), Some("Intro"));
+
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"name": "Drumkit", "keyzones": [{"sample": "Kick", "noteRange": [60, 60], "velocityRange": [0, 127], "baseNote": 60}], "macros": [{"name": "Drive", "value": 0.4}], "phrases": ["Fill"]}),
+                false,
+            ));
+            let Some(FocusBody::Keyzones(map)) =
+                renoise.focus_body(&BodyRequest::Keyzones { item_ref: "3:instrument:1".into() }, Signal::new()).await.unwrap()
+            else {
+                panic!("keyzones")
+            };
+            assert_eq!((map.zones[0].notes, map.macros.len(), map.phrases.len()), ((60, 60), 1, 1));
+            assert!(renoise.focus_body(&BodyRequest::Timeline, Signal::new()).await.unwrap().is_none(), "Renoise has no timeline strip");
+            renoise.close().await.unwrap();
+        })
+        .await;
+}

@@ -94,6 +94,18 @@ pub enum Touched {
     /// The timeline (where an item in the note editor is read as the timeline's too).
     #[serde(rename = "arrangement")]
     Timeline,
+    /// A tracker's pattern or phrase editor.
+    #[serde(rename = "tracker")]
+    Tracker,
+    /// A tracker's pattern matrix.
+    #[serde(rename = "matrix")]
+    Matrix,
+    /// An instrument's keyzones.
+    #[serde(rename = "keyzones")]
+    Keyzones,
+    /// A track's routing.
+    #[serde(rename = "routing")]
+    Routing,
 }
 pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Option<Touched>) -> Option<Touched> {
     let view = crate::daw::view();
@@ -103,8 +115,18 @@ pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Op
     let index = |focus: &DawFocus| focus.section.as_ref().and_then(|section| section.index);
     let item = |focus: &DawFocus| focus.item.as_ref().map(|item| (item.item_ref.clone(), item.name.clone())).unwrap_or_default();
     let on_timeline = main(&after) == Some(ViewKind::Timeline);
-    let notes = if on_timeline { Touched::Timeline } else { Touched::Notes };
-    let shown = if on_timeline { Touched::Timeline } else { Touched::Grid };
+    // A DAW whose note editor over the timeline shows a take's notes (REAPER) reads them, not the timeline.
+    let notes = if on_timeline && !view.timeline_notes { Touched::Timeline } else { Touched::Notes };
+    // A tracker's views, an instrument and a track's routing have bodies of their own.
+    let own_of = |focus: &DawFocus| match (main(focus), editor(focus)) {
+        (_, Some(ViewKind::Routing)) => Some(Touched::Routing),
+        (Some(ViewKind::PatternEditor), None) => Some(Touched::Tracker),
+        (Some(ViewKind::Sequencer), _) => Some(Touched::Matrix),
+        (Some(ViewKind::Instrument), _) => Some(Touched::Keyzones),
+        _ => None,
+    };
+    let own = own_of(&after);
+    let shown = own.unwrap_or(if on_timeline { Touched::Timeline } else { Touched::Grid });
     let Some(before) = before.map(|before| filled(view, before)) else {
         return Some(match editor(&after) {
             Some(ViewKind::NoteEditor) => notes,
@@ -112,7 +134,9 @@ pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Op
             _ => shown,
         });
     };
-    Some(if after.main_view != before.main_view {
+    // Coming into a view with a body of its own, or leaving one, shows what's there now.
+    let own_moved = (own.is_some() || own_of(&before).is_some()) && own != own_of(&before);
+    Some(if after.main_view != before.main_view || own_moved {
         shown
     } else if index(&after) != index(&before) && main(&after) == Some(ViewKind::Launcher) {
         Touched::Grid
@@ -127,6 +151,8 @@ pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Op
             || after.track_ref != before.track_ref)
     {
         Touched::Tree
+    } else if let Some(own) = own.filter(|_| item(&after) != item(&before) || after.track_ref != before.track_ref) {
+        own
     } else {
         was.unwrap_or(shown)
     })

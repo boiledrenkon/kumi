@@ -1,15 +1,17 @@
 //! REAPER, through Kumi's extension and host: its refs (REAPER's GUIDs, which hold across reloads), its read tool and
 //! its instructions. The integration itself is the one every bridge of Kumi's own shares (`own_bridge`).
 use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
+use super::own_views::{self, focus_track, selected, view};
 use crate::core::{
     contracts::{Integration, JsonObject},
     daw::DawProfile,
     presentation::{ToolActivity, ToolPresentation},
     refs::{Moved, RefScheme, Shift},
-    view::ViewPresentation,
+    view::{BodyKind, BodyRequest, DawFocus, FocusBody, FocusItem, FocusParameter, ItemKind, ViewKind, ViewPresentation},
 };
 use crate::mcp::client::BridgeDescriptor;
 use regex::Regex;
+use serde_json::Value;
 use std::{rc::Rc, sync::LazyLock};
 
 /// The instructions REAPER's turns carry (M7 brings the full instruction pack).
@@ -22,9 +24,69 @@ pub const DAW: OwnDaw = OwnDaw {
     instructions: INSTRUCTIONS,
     read_tool: "reaper_read",
     read_description: "Read REAPER: the project, its tracks, and what's in them (items, FX, parameters, sends, markers, regions, MIDI notes, envelopes), a page at a time. Rows carry refs to pass back as parent; a page with nextCursor has more.",
-    read_kinds: &["project", "track", "item", "fx", "param", "send", "marker", "region", "note", "envelope"],
+    read_kinds: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"],
     project_kind: "project",
+    fill_focus,
+    bodies: &[BodyKind::Tree, BodyKind::Notes, BodyKind::Timeline, BodyKind::Routing],
+    body_request,
+    to_body,
 };
+
+/// What the producer looks at in REAPER: the arrange view always, with the MIDI editor, an FX chain or a track's
+/// routing over it when focused; the selected track, item (by its take, whose notes the MIDI editor shows) and FX.
+fn fill_focus(focus: &Value) -> DawFocus {
+    let selection = focus.get("selection").cloned().unwrap_or(Value::Null);
+    let editor = match focus.get("view").and_then(Value::as_str) {
+        Some("midi") => Some(view(ViewKind::NoteEditor, "MIDI editor")),
+        Some("fx") => Some(view(ViewKind::DeviceChain, "FX chain")),
+        Some("routing") => Some(view(ViewKind::Routing, "Routing")),
+        _ => None,
+    };
+    let item = selected(&selection, "takeRef").or_else(|| selected(&selection, "itemRef")).map(|reference| FocusItem {
+        kind: if selected(&selection, "takeRef").is_some() { ItemKind::Take } else { ItemKind::Item },
+        item_ref: Some(reference),
+        name: selection.get("itemName").and_then(Value::as_str).map(str::to_owned),
+    });
+    let fx = selection.get("fxName").and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_owned);
+    let parameter = selection.get("param").and_then(|param| {
+        Some(FocusParameter {
+            name: param.get("name")?.as_str()?.to_owned(),
+            value: param.get("value").map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string())),
+            owner: fx.clone(),
+        })
+    });
+    DawFocus {
+        track: focus_track(&selection),
+        track_ref: selected(&selection, "trackRef"),
+        device_ref: selected(&selection, "fxRef"),
+        device: fx,
+        parameter,
+        main_view: Some(view(ViewKind::Timeline, "Arrange")),
+        editor_view: editor,
+        item,
+        ..Default::default()
+    }
+}
+
+fn body_request(request: &BodyRequest) -> Option<(&'static str, Option<String>)> {
+    Some(match request {
+        BodyRequest::Tree { track_ref } => ("fx", Some(track_ref.clone())),
+        BodyRequest::Notes { item_ref } => ("midi", Some(item_ref.clone())),
+        BodyRequest::Timeline => ("arrange", None),
+        BodyRequest::Routing { track_ref } => ("routing", Some(track_ref.clone())),
+        _ => return None,
+    })
+}
+
+fn to_body(request: &BodyRequest, body: &Value) -> Option<FocusBody> {
+    Some(match request {
+        BodyRequest::Tree { track_ref } => FocusBody::Tree(own_views::tree(track_ref, body)),
+        BodyRequest::Notes { item_ref } => FocusBody::Notes(own_views::notes(item_ref, body)),
+        BodyRequest::Timeline => FocusBody::Timeline(own_views::timeline(body)),
+        BodyRequest::Routing { track_ref } => FocusBody::Routing(own_views::routing(track_ref, body)),
+        _ => return None,
+    })
+}
 
 /// REAPER's refs: `r:<kind>:<GUID or number>`. They name the same object across reloads, so a restructure moves none.
 #[derive(Default)]
@@ -92,8 +154,18 @@ pub const PRESENTATION: ToolPresentation = ToolPresentation {
     read_prefix: Some("reaper_"),
 };
 
-/// How the app reads REAPER's focus and FX (FOCUS's bodies come with M2's views).
-pub const VIEW: ViewPresentation = ViewPresentation::NONE;
+/// How the app reads REAPER's focus and FX: the focus comes neutral, and a take in the MIDI editor shows its notes.
+pub const VIEW: ViewPresentation = ViewPresentation {
+    heading: |kind| match kind {
+        BodyKind::Tree => "FX",
+        BodyKind::Notes => "MIDI",
+        BodyKind::Timeline => "Arrange",
+        BodyKind::Routing => "Routing",
+        other => (ViewPresentation::NONE.heading)(other),
+    },
+    timeline_notes: true,
+    ..ViewPresentation::NONE
+};
 
 /// REAPER's integration.
 pub fn create_reaper_integration(options: OwnOptions) -> Rc<dyn Integration> {
