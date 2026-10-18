@@ -1261,7 +1261,7 @@ mod tests {
         let reads = lab();
         fake::with(|s| {
             s.tracks[2].items[0].takes[0].ccs =
-                (0..50_000).map(|n| FakeCc { ppq: n as f64 * 960.0, kind: 0xB0, channel: 0, data1: 7, data2: (n % 128) as i32 }).collect();
+                (0..50_000).map(|n| FakeCc { ppq: n as f64 * 960.0, kind: 0xB0, channel: 0, data1: 7, data2: n % 128 }).collect();
         });
         fake::with(|s| s.calls = 0);
         let page = body(&reads, json!({"kind": "midi", "ref": "r:take:{TAKE-S1}", "window": {"from": 49_990.0, "to": 49_994.0}})).unwrap();

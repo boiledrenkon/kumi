@@ -24,6 +24,7 @@ pub const MAX_LIMIT: usize = 200;
 pub const ANSWER_BYTES: usize = 224 * 1024;
 /// A page stops growing after this long on the main thread, close to what a tick spends on requests: the rest comes with
 /// the cursor.
+#[cfg(not(test))]
 const PAGE_TIME: Duration = Duration::from_millis(10);
 
 #[cfg(not(test))]
