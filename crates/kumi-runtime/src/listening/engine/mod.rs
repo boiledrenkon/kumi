@@ -1,6 +1,7 @@
 //! The listening tools' engines, apart from any DAW: a judged run (the judge, and the tune that picks its numbers) over
 //! what the DAW can do (`Renderer`). The DAW hears, changes and undoes; the engines decide.
 mod form;
+mod groove;
 mod judge;
 mod probe;
 mod roles;
@@ -34,6 +35,8 @@ pub struct Listening {
     on_judge: Option<Rc<dyn Fn(Round)>>,
     /// The judged run under way (or the last one).
     pub(crate) judge: RefCell<Option<JudgeRun>>,
+    /// The groove run under way (or the last one).
+    groove: RefCell<Option<groove::GrooveRun>>,
     listener_source: Option<ListenerSource>,
     /// Measured references, read by name for the judge.
     references: Option<Rc<ReferenceStore>>,
@@ -57,6 +60,7 @@ impl Listening {
             host,
             on_judge,
             judge: RefCell::new(None),
+            groove: RefCell::new(None),
             listener_source,
             references,
             embedding_wanted: Cell::new((false, false)),
@@ -69,6 +73,11 @@ impl Listening {
     /// take back, so its changes count from `ids` (the changes applied now). If that changed the sound, the run's
     /// numbers are out of date: its next judge hears its bars again first.
     pub fn new_answer(&self, ids: Vec<String>) {
+        // A groove run's changes are the ones since its last round: only its checkpoint moves (its rounds re-read the
+        // notes).
+        if let Some(run) = self.groove.borrow_mut().as_mut() {
+            run.carry_on(ids.clone());
+        }
         let mut guard = self.judge.borrow_mut();
         if let Some(run) = guard.as_mut() {
             let audible = |id: &String| self.host.audible(id) == Some(true);
@@ -93,6 +102,9 @@ impl Listening {
     pub fn steered(&self, applied: Vec<String>) {
         if let Some(run) = self.judge.borrow_mut().as_mut() {
             run.steered.get_or_insert_with(|| applied.clone());
+        }
+        if let Some(run) = self.groove.borrow_mut().as_mut() {
+            run.steered(applied);
         }
     }
 

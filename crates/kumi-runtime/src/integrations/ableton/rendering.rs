@@ -92,8 +92,6 @@ pub struct LiveRenderer {
     told_length: Cell<bool>,
     reference_cache: RefCell<IndexMap<String, Analysis>>,
     best_steps: RefCell<Vec<String>>,
-    /// The groove run under way (or the last one).
-    groove: RefCell<Option<groove::GrooveRun>>,
 }
 /// The listening tools over Live: the tools and their state are `Listening`'s (a judged run, a tune), Live is what they
 /// listen through. A tool call comes in here and goes to `Listening`; what only Live has is `LiveRenderer`'s.
@@ -181,7 +179,6 @@ impl LiveRenderer {
             told_length: Cell::new(false),
             reference_cache: RefCell::new(IndexMap::new()),
             best_steps: RefCell::new(vec![]),
-            groove: RefCell::new(None),
         })
     }
     pub fn round_count(&self) -> usize {
@@ -342,23 +339,13 @@ impl Rendering {
         if !continuing {
             self.rounds.set(0);
             self.best.set(None);
-            let ids = self.applied_ids();
-            // A groove run's changes are the ones since its last round: only its checkpoint moves (its rounds re-read the
-            // notes).
-            if let Some(run) = self.groove.borrow_mut().as_mut() {
-                run.carry_on(ids.clone());
-            }
-            self.listening.new_answer(ids);
+            self.listening.new_answer(self.applied_ids());
         }
     }
     /// The producer's words came into the answer under way: a judged or groove run's changes from here may be theirs,
     /// so they aren't a round's to take back.
     pub fn steered(&self) {
-        let applied = self.applied_ids();
-        self.listening.steered(applied.clone());
-        if let Some(run) = self.groove.borrow_mut().as_mut() {
-            run.steered(applied);
-        }
+        self.listening.steered(self.applied_ids());
     }
     pub async fn judge(&self, request: &JudgeRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
         self.listening.judge(request, original).await
@@ -374,6 +361,9 @@ impl Rendering {
     /// The names a run's track and focus go by now.
     pub fn names_now(&self, named: &Named) -> (Option<String>, Option<String>) {
         self.listening.names_now(named)
+    }
+    pub async fn groove(&self, request: &GrooveRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
+        self.listening.groove(request, original).await
     }
     pub async fn form(&self, request: &FormRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
         self.listening.form(request, original).await

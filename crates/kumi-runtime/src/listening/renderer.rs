@@ -7,7 +7,13 @@ use crate::{
         daw::DawProfile,
         errors::RuntimeError,
     },
-    listening::{checklist::MainState, fit::Band, judging::Placed, knobs::Scale},
+    listening::{
+        checklist::MainState,
+        fit::Band,
+        judging::Placed,
+        knobs::Scale,
+        notes::{Kit, Note},
+    },
     plugins::roles::Seen,
 };
 use async_trait::async_trait;
@@ -116,6 +122,27 @@ impl DeviceKnob {
 pub struct EqFit {
     pub values: Vec<(String, f64)>,
     pub settings: Vec<&'static str>,
+}
+
+/// A clip's notes as the DAW plays them: each with its id (-1 when the DAW gave none), and where its time starts.
+pub struct ClipNotes {
+    pub name: String,
+    pub notes: Vec<(i64, Note)>,
+    /// The song beat of the clip's own time zero, for a clip on the timeline.
+    pub song_zero: Option<f64>,
+    /// Where what the DAW plays of the clip ends, in its own time (its loop's end, say).
+    pub to: f64,
+    /// Where the clip's notes have to end, in its own time: the DAW refuses a note past it.
+    pub end: f64,
+}
+
+/// A note's change: where it starts now, how hard, and a shorter length when it would end past the clip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotePatch {
+    pub id: i64,
+    pub start: f64,
+    pub velocity: f64,
+    pub duration: Option<f64>,
 }
 
 /// Scratch copies of a device's track, made for one search or probe and taken away after it.
@@ -244,6 +271,21 @@ pub trait Renderer {
     fn eq_bands(&self, knobs: &[DeviceKnob]) -> Vec<(u8, f64, bool, bool)>;
     /// The devices on the run's track (the master without one) as tune sees them, before their parameters are read.
     async fn devices_seen(&self, track: Option<&str>, signal: Signal) -> Option<Vec<Seen>>;
+
+    /// A clip's notes the DAW plays, each with its id; why not, when it can't be read or holds none.
+    async fn clip_notes(&self, clip: &str, signal: Signal) -> Result<ClipNotes, String>;
+    /// How a clip's notes fall into lanes: by its track's drum rack, when it has one.
+    async fn lanes_of(&self, clip: &str, signal: Signal) -> Kit;
+    /// The clip read again, so this answer may change it.
+    async fn reread_clip(&self, clip: &str, signal: Signal) -> Result<(), RuntimeError>;
+    /// Moves notes in one change, so the DAW takes all of it or none and the history takes it back as one.
+    async fn change_notes(&self, clip: &str, patches: &[NotePatch], signal: Signal) -> Result<(), RuntimeError>;
+    /// The clip's long reference, as the history keeps it.
+    fn clip_id(&self, clip: &str) -> Option<String>;
+    /// The changes applied since a checkpoint, split into the note edits on a clip (by its long reference) and the rest.
+    fn note_changes(&self, checkpoint: &[String], clip: Option<&str>) -> (Vec<(String, String)>, Vec<(String, String)>);
+    /// The track a drum stem's clip is on, by name; why not, when it isn't one on the timeline.
+    async fn stem_track(&self, audio: &str, signal: Signal) -> Result<String, String>;
 
     /// Each track's clips on the timeline, by track name (the first 64 tracks): where each that plays starts and ends, in
     /// beats. A muted clip doesn't play; a looped clip ends where it stops playing, not where its loop does.

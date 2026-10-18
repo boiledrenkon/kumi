@@ -11,7 +11,8 @@ use crate::{
         checklist::MainState,
         fit::Band,
         judging::Placed,
-        renderer::{Captured, Copies, DeviceKnob, EqFit, ListenFlag, Pass, Renderer, Window},
+        notes::Kit,
+        renderer::{Captured, ClipNotes, Copies, DeviceKnob, EqFit, ListenFlag, NotePatch, Pass, Renderer, Window},
     },
     plugins::roles::Seen,
 };
@@ -197,6 +198,28 @@ impl Renderer for Rc<LiveRenderer> {
     }
     async fn devices_seen(&self, track: Option<&str>, signal: Signal) -> Option<Vec<Seen>> {
         self.devices_on(track, signal).await
+    }
+
+    async fn clip_notes(&self, clip: &str, signal: Signal) -> Result<ClipNotes, String> {
+        self.clip_notes_of(clip, signal).await
+    }
+    async fn lanes_of(&self, clip: &str, signal: Signal) -> Kit {
+        LiveRenderer::lanes_of(self, clip, signal).await
+    }
+    async fn reread_clip(&self, clip: &str, signal: Signal) -> Result<(), RuntimeError> {
+        self.read_again(clip, signal).await
+    }
+    async fn change_notes(&self, clip: &str, patches: &[NotePatch], signal: Signal) -> Result<(), RuntimeError> {
+        self.change_note_patches(clip, patches, signal).await
+    }
+    fn clip_id(&self, clip: &str) -> Option<String> {
+        self.clip_long(clip)
+    }
+    fn note_changes(&self, checkpoint: &[String], clip: Option<&str>) -> (Vec<(String, String)>, Vec<(String, String)>) {
+        self.note_changes_since(checkpoint, clip)
+    }
+    async fn stem_track(&self, audio: &str, signal: Signal) -> Result<String, String> {
+        self.stem_track_name(audio, signal).await
     }
 
     async fn clips_by_track(&self, signal: Signal) -> Vec<(String, Vec<(f64, f64)>)> {
