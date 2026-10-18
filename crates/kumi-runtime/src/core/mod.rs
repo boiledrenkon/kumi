@@ -21,6 +21,7 @@ pub mod place;
 pub mod playbook;
 pub mod presentation;
 pub mod private;
+pub mod project;
 pub mod recall;
 pub mod recipes;
 pub mod session;
