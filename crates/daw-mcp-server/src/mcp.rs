@@ -63,6 +63,7 @@ pub fn tools(host: &Host) -> Value {
             "inputSchema": {"type": "object", "properties": merged(&pick, json!({
                 "kind": {"type": "string", "enum": kinds.bodies, "description": "Which view."},
                 "ref": {"type": "string", "description": "The ref of what the view is about."},
+                "around": {"type": "string", "description": "The ref of a track to centre the first page of tracks on (the arrange view): the page starts half a page above it, and says where in `from`."},
                 "window": {"type": "object", "properties": {"from": {"type": "number"}, "to": {"type": "number"}}, "required": ["from", "to"], "additionalProperties": false, "description": "The range to show, in the view's own units."},
                 "cursor": {"type": "string", "description": "The nextCursor an earlier page gave, unchanged."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "description": "Rows in a page."},

@@ -100,6 +100,10 @@ async fn a_whole_session_of_reads_against_a_reaper_project() {
     session.tool(12, "focus", json!({})).await;
     session.tool(13, "focus_body", json!({"kind": "arrange", "window": {"from": 0, "to": 32}})).await;
     session.tool(14, "focus_body", json!({"kind": "midi", "ref": "r:take:{T-1}", "limit": 10})).await;
+    // The arrange page centred on a track, and the page after it.
+    let around = session.tool(24, "focus_body", json!({"kind": "arrange", "limit": 2, "around": "r:track:{T0003}"})).await;
+    assert_eq!((around["from"].clone(), around["trackCount"].clone()), (json!(1), json!(3)));
+    session.tool(25, "focus_body", json!({"kind": "arrange", "limit": 2, "around": "r:track:{T0001}"})).await;
 
     // What the host refuses before it asks, and what the bridge refuses.
     for (id, tool, arguments) in [
@@ -216,6 +220,8 @@ async fn arguments_are_checked_before_the_bridge_is_asked() {
         ("read", json!({"kind": "track", "pid": "x"})),
         ("focus_body", json!({"kind": "arrange", "window": [0, 4]})),
         ("focus_body", json!({"kind": ["arrange"]})),
+        ("focus_body", json!({"kind": "arrange", "around": 12})),
+        ("focus_body", json!({"kind": "arrange", "around": ""})),
         ("focus", json!({"resource": 4})),
     ] {
         let (answer, is_error) = lab.tool(tool, arguments.clone()).await;
@@ -280,4 +286,24 @@ async fn every_answer_the_host_hands_over_names_refs_the_way_the_contract_says()
         let misplaced = daw_bridge::contract::misplaced_refs(answer);
         assert!(misplaced.is_empty(), "{tool}: {misplaced:?}");
     }
+}
+
+#[tokio::test]
+async fn an_arrange_page_centred_on_a_track_starts_half_a_page_above_it() {
+    let mut lab = Lab::start(60, 0).await;
+    let (page, is_error) = lab.tool("focus_body", json!({"kind": "arrange", "limit": 10, "around": "r:track:{T0040}"})).await;
+    assert!(!is_error, "{page}");
+    // Track 40 is the 40th of the 60 (the master isn't one): its place is 39, so the page starts at 34.
+    assert_eq!((page["from"].clone(), page["trackCount"].clone()), (json!(34), json!(60)));
+    let tracks = page["tracks"].as_array().unwrap();
+    assert_eq!((tracks.len(), tracks[0]["ref"].clone()), (10, json!("r:track:{T0035}")));
+    assert!(tracks.iter().any(|t| t["ref"] == "r:track:{T0040}"));
+    assert!(page["nextCursor"].is_string());
+    // The last page ends at the last track; a track that isn't there is refused by the bridge in words.
+    let (end, _) = lab.tool("focus_body", json!({"kind": "arrange", "limit": 10, "around": "r:track:{T0060}"})).await;
+    assert_eq!((end["from"].clone(), end.get("nextCursor").cloned()), (json!(50), None));
+    let (gone, is_error) = lab.tool("focus_body", json!({"kind": "arrange", "around": "r:track:{NOPE}"})).await;
+    assert!(is_error && gone["code"] == "failed", "{gone}");
+    // `around` reached the bridge as asked.
+    assert_eq!(lab.script.asked()[0], ("focus_body".to_string(), json!({"kind": "arrange", "around": "r:track:{T0040}", "limit": 10})));
 }

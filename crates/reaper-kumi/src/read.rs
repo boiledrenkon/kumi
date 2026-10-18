@@ -318,6 +318,14 @@ impl Reads {
         }
     }
 
+    /// A ref that must be a track, named in the error by the parameter it came in.
+    fn parent_track_named(&self, reaper: &Reaper, proj: Project, reference: &str, parameter: &str) -> Result<Track, (String, String)> {
+        match Ref::parse(reference).map_err(bad)? {
+            Ref::Track(id) => self.track_by_id(reaper, proj, &id),
+            other => Err(bad(format!("{parameter}: a track ref, not r:{}", other.kind()))),
+        }
+    }
+
     fn parent_fx(&self, reaper: &Reaper, proj: Project, parent: &str) -> Result<Fx, (String, String)> {
         match Ref::parse(parent).map_err(bad)? {
             Ref::Fx(guid) => self.fx_by_guid(reaper, proj, &guid),
