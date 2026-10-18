@@ -88,7 +88,8 @@ end
 local function write_discovery()
   if not (b.cfg and b.port) then return end
   local pid = status.pid() or 0
-  local resource = status.resource(host.bundle_path)
+  -- (the file's name is made from the resource as written in it, cut or not: that is what a host hashes)
+  local resource = status.resource_text(host.bundle_path)
   local path = b.cfg.discovery_dir .. "/" .. discovery.file_name(pid, resource)
   local ok, err = discovery.write(path, {
     schema = discovery.SCHEMA,
@@ -99,7 +100,7 @@ local function write_discovery()
     protocol = wire.PROTOCOL,
     version = VERSION,
     dawVersion = renoise.RENOISE_VERSION,
-    resource = status.resource_text(host.bundle_path),
+    resource = resource,
     project = status.project(b.memory),
     startedMs = b.started_ms,
   })
