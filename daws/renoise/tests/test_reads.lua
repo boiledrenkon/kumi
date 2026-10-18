@@ -1387,3 +1387,28 @@ test("reads: a track row says the pre-FX and the post-FX fader and pan apart", f
   eq(kick.preWidth, 1)
   H.no_dialogs()
 end)
+
+test("reads: a pattern, a track or an instrument made later is the only thing watched anew", function()
+  local env, peer = setup()
+  fill_demo()
+  H.tick(2)
+  local total = env.payload().watching()
+  ok(total > 150, "a song of this size is watched through many things: " .. total)
+  local before = env.payload().watching()
+  mock.ops.insert_pattern()
+  local pattern = env.payload().watching() - before
+  ok(pattern > 0 and pattern < 30, "a pattern: its lines, name, length and one alias per track: " .. pattern)
+  before = env.payload().watching()
+  mock.ops.insert_track(1, { name = "New" })
+  local track = env.payload().watching() - before
+  ok(track > 0 and track < 60, "a track: its own, and one alias per pattern: " .. track)
+  before = env.payload().watching()
+  mock.ops.insert_instrument({ name = "New", samples = 2 })
+  local instrument = env.payload().watching() - before
+  ok(instrument > 0 and instrument < 60, "an instrument: its name, macros and samples: " .. instrument)
+  mock.ops.remove_device(1, 1)
+  mock.ops.remove_pattern(1)
+  H.tick(3)
+  ok(env.payload().watching() >= total, "removals leave their watchers until enough pile up")
+  H.no_dialogs()
+end)
