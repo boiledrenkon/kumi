@@ -102,6 +102,8 @@ pub struct Control {
     pub clip: RefCell<Option<ClipView>>,
     pub session: RefCell<Option<SessionStrip>>,
     pub arrangement: RefCell<Option<ArrangementStrip>>,
+    /// The body of a DAW's own view (a tracker's pattern, its matrix, keyzones, routing), for any request of its kind.
+    pub own: RefCell<Option<FocusBody>>,
     /// What /export and /share get as the conversation going on now.
     pub export: RefCell<Option<ConversationToExport>>,
 }
@@ -126,6 +128,7 @@ impl Default for Control {
             clip: RefCell::default(),
             session: RefCell::default(),
             arrangement: RefCell::default(),
+            own: RefCell::default(),
             export: RefCell::default(),
         }
     }
@@ -518,6 +521,40 @@ impl SessionController for Control {
     async fn arrangement_strip(&self) -> Result<Option<ArrangementStrip>, RuntimeError> {
         self.call("arrangement");
         Ok(self.arrangement.borrow().clone())
+    }
+    fn can_show(&self, kind: BodyKind) -> bool {
+        match kind {
+            BodyKind::Tree => self.has_device_tree(),
+            BodyKind::Notes => self.has_clip_view(),
+            BodyKind::Grid => self.has_session_strip(),
+            BodyKind::Timeline => self.has_arrangement_strip(),
+            other => self.own.borrow().as_ref().is_some_and(|own| own_kind(own) == other),
+        }
+    }
+    async fn focus_body(&self, request: &BodyRequest) -> Result<Option<FocusBody>, RuntimeError> {
+        Ok(match request {
+            BodyRequest::Tree { track_ref } => self.device_tree(track_ref).await?.map(FocusBody::Tree),
+            BodyRequest::Notes { item_ref } => self.clip_view(item_ref).await?.map(FocusBody::Notes),
+            BodyRequest::Grid { track_ref, index } => self.session_strip(track_ref, *index).await?.map(FocusBody::Grid),
+            BodyRequest::Timeline => self.arrangement_strip().await?.map(FocusBody::Timeline),
+            other => {
+                self.call(format!("own:{other:?}"));
+                self.own.borrow().clone().filter(|own| own_kind(own) == other.kind())
+            }
+        })
+    }
+}
+/// The kind of a DAW's own body.
+fn own_kind(body: &FocusBody) -> BodyKind {
+    match body {
+        FocusBody::Tracker(_) => BodyKind::Tracker,
+        FocusBody::Matrix(_) => BodyKind::Matrix,
+        FocusBody::Keyzones(_) => BodyKind::Keyzones,
+        FocusBody::Routing(_) => BodyKind::Routing,
+        FocusBody::Tree(_) => BodyKind::Tree,
+        FocusBody::Notes(_) => BodyKind::Notes,
+        FocusBody::Grid(_) => BodyKind::Grid,
+        _ => BodyKind::Timeline,
     }
 }
 pub struct Harness {

@@ -1,0 +1,359 @@
+//! REAPER's and Renoise's integrations over Kumi's host, with a stand-in host that answers as the M2 contract says:
+//! the observation carries the project as the DAW names it, its tracks in short refs, and the conversation's place;
+//! the model's read pages in short refs and passes them back long; a DAW that isn't there is said in its words.
+use async_trait::async_trait;
+use futures::FutureExt;
+use kumi_common::abort::Signal;
+use kumi_runtime::core::{context::IntegrationContext, contracts::*, errors::RuntimeError};
+use kumi_runtime::integrations::{
+    own_bridge::{Connect, OwnOptions},
+    reaper::create_reaper_integration,
+    renoise::create_renoise_integration,
+};
+use kumi_runtime::mcp::client::{McpEndpoint, StderrStatus};
+use kumi_runtime::mcp::types::{CallToolResult, Implementation, ListToolsResult};
+use serde_json::{json, Value};
+use std::{cell::RefCell, rc::Rc};
+
+/// A host that answers each tool from a table, and remembers what it was asked.
+struct Host {
+    answers: RefCell<Vec<(&'static str, Value, bool)>>,
+    asked: RefCell<Vec<(String, Value)>>,
+}
+#[async_trait(?Send)]
+impl McpEndpoint for Host {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+    fn server_info(&self) -> Option<Implementation> {
+        None
+    }
+    async fn list(&self, _: Option<&str>, _: Signal) -> Result<ListToolsResult, RuntimeError> {
+        Ok(serde_json::from_value(json!({"tools": []})).unwrap())
+    }
+    async fn call(&self, name: &str, args: JsonObject, _: Signal) -> Result<CallToolResult, RuntimeError> {
+        self.asked.borrow_mut().push((name.into(), Value::Object(args)));
+        let answers = self.answers.borrow();
+        let (_, answer, error) = answers.iter().rev().find(|(tool, _, _)| *tool == name).cloned().expect("an answer for each tool asked");
+        Ok(serde_json::from_value(json!({"content": [{"type": "text", "text": answer.to_string()}], "isError": error})).unwrap())
+    }
+    fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn stderr_status(&self) -> StderrStatus {
+        StderrStatus { bytes: 0, truncated: false }
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+fn options(host: Rc<Host>, states: Rc<RefCell<Vec<ConnectionState>>>) -> OwnOptions {
+    let connect: Connect = Rc::new(move |_| {
+        let host = host.clone();
+        async move { Ok(host as Rc<dyn McpEndpoint>) }.boxed_local()
+    });
+    OwnOptions {
+        context: IntegrationContext::new(Rc::new(move |state, _| states.borrow_mut().push(state))),
+        kumi_home: std::env::temp_dir(),
+        connect: Some(connect),
+    }
+}
+
+const PROJECT_ID: &str = "0123456789abcdef0123456789abcdef";
+const BASS: &str = "r:track:{8A5D2C1E-0000-4000-8000-000000000002}";
+
+fn reaper_snapshot() -> Value {
+    json!({
+        "epoch": "1",
+        "project": {"id": PROJECT_ID, "identity": "4242:0x7f01", "name": "Night Drive", "tempo": 124, "timeSignature": [4, 4]},
+        "transport": {"playing": false, "position": 0},
+        "tracks": [
+            {"ref": "r:track:{8A5D2C1E-0000-4000-8000-000000000001}", "index": 1, "name": "Drums", "depth": 0, "folder": 1},
+            {"ref": BASS, "index": 2, "name": "Bass", "depth": 0, "folder": 0, "selected": true},
+        ],
+        "selection": {"trackRef": BASS},
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reapers_observation_is_its_project_in_short_refs_at_its_place() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", reaper_snapshot(), false)]),
+                asked: RefCell::default(),
+            });
+            let states = Rc::new(RefCell::new(vec![]));
+            let reaper = create_reaper_integration(options(host.clone(), states.clone()));
+            reaper.start(Signal::new()).await.unwrap();
+            assert_eq!(*states.borrow(), [ConnectionState::Connecting, ConnectionState::Connected]);
+            let seen = reaper.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(seen.label, "REAPER — Night Drive");
+            assert_eq!(seen.project.as_ref().map(|p| p.id.as_str()), Some(format!("reaper-{PROJECT_ID}").as_str()));
+            assert_eq!(seen.set.as_deref(), Some("4242:0x7f01"));
+            assert_eq!(seen.tracks.as_deref(), Some(&["Drums".to_string(), "Bass".to_string()][..]));
+            let context: Value = serde_json::from_str(&seen.context).unwrap();
+            assert_eq!(context["daw"], "REAPER");
+            assert_eq!(context["project"]["name"], "Night Drive");
+            assert_eq!(context["tracks"][1]["ref"], "track:2");
+            assert_eq!(context["selection"]["trackRef"], "track:2");
+            assert!(!seen.context.contains("{8A5D"), "no GUID reaches the model: {}", seen.context);
+            assert_eq!(seen.tools.iter().map(|tool| tool.name().to_string()).collect::<Vec<_>>(), ["reaper_read"]);
+
+            // The model reads the Bass track's items in short refs; the host is asked in long ones.
+            host.answers.borrow_mut().push((
+                "read",
+                json!({"items": [{"ref": "r:item:{FF00-1}", "position": 4.0, "length": 8.0, "name": "Bass DI", "takeRef": "r:take:{FF00-2}"}], "epoch": "1"}),
+                false,
+            ));
+            let read = seen.tools[0].clone();
+            let page = read.execute(json!({"kind": "item", "parent": "track:2"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert!(!page.is_error, "{}", page.text);
+            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "item", "parent": BASS}));
+            let page: Value = serde_json::from_str(&page.text).unwrap();
+            assert_eq!(page["items"][0]["ref"], "item:1");
+            assert_eq!(page["items"][0]["takeRef"], "take:1");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_unsaved_project_is_the_dawss_unsaved_place_and_a_daw_not_there_is_said_in_its_words() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut snapshot = reaper_snapshot();
+            snapshot["project"]["id"] = Value::Null;
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let states = Rc::new(RefCell::new(vec![]));
+            let reaper = create_reaper_integration(options(host.clone(), states.clone()));
+            reaper.start(Signal::new()).await.unwrap();
+            let seen = reaper.observe(Signal::new(), None).await.unwrap();
+            assert!(seen.project.is_none());
+            assert_eq!(seen.set.as_deref(), Some("4242:0x7f01"));
+
+            // REAPER quits: the host says so, and Kumi carries on without it, in REAPER's words.
+            host.answers.borrow_mut().push((
+                "snapshot",
+                json!({"error": "no REAPER with Kumi's bridge is running", "connected": false}),
+                true,
+            ));
+            let away = reaper.observe(Signal::new(), None).await.unwrap();
+            assert!(away.label.contains("No REAPER access"), "{}", away.label);
+            assert!(away.label.contains("no REAPER with Kumi's bridge is running"), "{}", away.label);
+            assert!(away.tools.is_empty());
+            assert_eq!(states.borrow().last(), Some(&ConnectionState::Disconnected));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn renoises_refs_are_positions_under_the_songs_epoch_and_a_new_song_retires_them() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let snapshot = |epoch: &str, name: &str| {
+                json!({
+                    "epoch": epoch,
+                    "project": {"id": null, "identity": format!("99:{epoch}"), "name": name, "bpm": 140, "lpb": 4},
+                    "transport": {"playing": true},
+                    "tracks": [{"ref": format!("{epoch}:track:1"), "index": 1, "name": "Kick", "type": "sequencer"}],
+                    "selection": {"trackRef": format!("{epoch}:track:1")},
+                })
+            };
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot("3", "Acid"), false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            let seen = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(seen.label, "Renoise — Acid");
+            let context: Value = serde_json::from_str(&seen.context).unwrap();
+            assert_eq!(context["song"]["bpm"], 140, "Renoise's project is its song");
+            assert_eq!(context["tracks"][0]["ref"], "track:1");
+
+            // Another song opens: the old refs are retired, and the new song's tracks get names never used before, so
+            // a stale track:1 in the conversation can't read the new song's first track.
+            host.answers.borrow_mut().push(("snapshot", snapshot("4", "Breaks"), false));
+            let next = renoise.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&next.context).unwrap();
+            assert_eq!(context["tracks"][0]["ref"], "track:2");
+            host.answers.borrow_mut().push(("read", json!({"items": [], "epoch": "4"}), false));
+            next.tools[0]
+                .execute(json!({"kind": "device", "parent": "track:2"}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "4:track:1", "the new name reads the new song's track");
+            next.tools[0]
+                .execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "track:1", "the retired name reads nothing of the new song");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reapers_focus_is_read_while_focus_shows_and_its_bodies_come_neutral() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let focus = json!({
+                "epoch": "1", "view": "midi", "changed": 7,
+                "selection": {"trackRef": BASS, "track": {"name": "Bass", "color": "#3c7cf5", "type": "midi"}, "itemRef": "r:item:{I1}", "takeRef": "r:take:{T1}", "itemName": "Bass take", "fxRef": "r:fx:{F1}", "fxName": "ReaComp", "param": {"name": "Thresh", "value": "-12.0 dB"}},
+                "transport": {"playing": true, "beat": 33.5, "tempo": 124, "beatsPerBar": 4},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("focus", focus, false)]),
+                asked: RefCell::default(),
+            });
+            let seen: Rc<RefCell<Vec<Option<kumi_runtime::core::view::DawFocus>>>> = Rc::default();
+            let beats: Rc<RefCell<Vec<Option<f64>>>> = Rc::default();
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            let (into, ticks) = (seen.clone(), beats.clone());
+            options.context.on_focus = Some(Rc::new(move |focus| into.borrow_mut().push(focus)));
+            options.context.on_transport = Some(Rc::new(move |transport| ticks.borrow_mut().push(transport.and_then(|t| t.beat))));
+            options.context.focus_interval_ms = Some(50);
+            let reaper = create_reaper_integration(options);
+            reaper.start(Signal::new()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+            let focus = seen.borrow().first().cloned().flatten().expect("the focus, read once it shows");
+            assert_eq!(seen.borrow().len(), 1, "told again only when it changes");
+            assert!(beats.borrow().len() >= 2, "the beat light follows every read while playing");
+            assert_eq!(beats.borrow()[0], Some(33.5));
+            assert_eq!(focus.track.as_ref().map(|t| t.name.as_str()), Some("Bass"));
+            assert_eq!(focus.track_ref.as_deref(), Some(BASS));
+            assert_eq!(focus.item.as_ref().and_then(|i| i.item_ref.as_deref()), Some("r:take:{T1}"), "the MIDI editor's notes are the take's");
+            assert_eq!(focus.editor_view.as_ref().map(|v| v.label.as_str()), Some("MIDI editor"));
+            assert_eq!(focus.device.as_deref(), Some("ReaComp"));
+            assert_eq!(focus.parameter.as_ref().map(|p| p.name.as_str()), Some("Thresh"));
+
+            use kumi_runtime::core::view::{BodyKind, BodyRequest, FocusBody, RouteKind};
+            assert!(reaper.can_show(BodyKind::Notes) && reaper.can_show(BodyKind::Routing) && !reaper.can_show(BodyKind::Tracker));
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"nodes": [
+                    {"ref": "r:fx:{F1}", "name": "ReaComp", "enabled": true},
+                    {"ref": "r:fx:{C1}", "name": "Container", "container": true, "childNodes": [
+                        {"ref": "r:fx:{A}", "name": "ReaEQ"}, {"ref": "r:fx:{B}", "name": "ReaDelay", "parallel": true}
+                    ]}
+                ]}),
+                false,
+            ));
+            let Some(FocusBody::Tree(tree)) = reaper.focus_body(&BodyRequest::Tree { track_ref: BASS.into() }, Signal::new()).await.unwrap() else {
+                panic!("a tree")
+            };
+            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "fx", "ref": BASS}));
+            let chains = tree.devices[1].chains.as_ref().unwrap();
+            assert_eq!(chains.len(), 2, "a parallel FX starts its own chain");
+            assert_eq!(chains[1].devices.as_ref().unwrap()[0].name, "ReaDelay");
+
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"routes": [{"category": 0, "otherName": "Reverb Bus", "volumeDb": -12.0, "mode": 0}, {"category": -1, "otherName": "Kick", "mode": 3, "mute": true}], "parentSend": true}),
+                false,
+            ));
+            let Some(FocusBody::Routing(routing)) = reaper.focus_body(&BodyRequest::Routing { track_ref: BASS.into() }, Signal::new()).await.unwrap() else {
+                panic!("routing")
+            };
+            assert_eq!((routing.routes[0].kind, routing.routes[0].tap.as_deref()), (RouteKind::Send, Some("post-fader")));
+            assert_eq!((routing.routes[1].kind, routing.routes[1].muted), (RouteKind::Receive, true));
+            assert_eq!(routing.parent_send, Some(true));
+            reaper.close().await.unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn renoises_bodies_are_its_pattern_matrix_and_keyzones_in_its_own_notation() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use kumi_runtime::core::view::{BodyRequest, FocusBody};
+            let host = Rc::new(Host { answers: RefCell::new(vec![("status", json!({"connected": true}), false)]), asked: RefCell::default() });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"ref": "3:pattern:2", "name": "Drop", "lines": 64, "from": 1, "cursor": 2, "playing": 1, "lpb": 4, "tracks": [
+                    {"ref": "3:track:1", "name": "Kick", "lines": [
+                        {"line": 1, "notes": [{"note": "C-4", "instrument": "01"}], "effects": [{"number": "0A", "amount": "10"}]},
+                        {"line": 2, "notes": [{"note": "OFF"}]}
+                    ]}
+                ]}),
+                false,
+            ));
+            let Some(FocusBody::Tracker(grid)) = renoise.focus_body(&BodyRequest::Tracker { item_ref: Some("3:pattern:2".into()) }, Signal::new()).await.unwrap() else {
+                panic!("a pattern")
+            };
+            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "pattern", "ref": "3:pattern:2"}));
+            assert_eq!((grid.from, grid.cursor, grid.playing), (0, Some(1), Some(0)), "lines from 1 in Renoise, from 0 in FOCUS");
+            assert_eq!(grid.tracks[0].cells, ["C-4 01 .. .. .. 0A10", "OFF .. .. .. .."]);
+
+            renoise.focus_body(&BodyRequest::Tracker { item_ref: Some("3:phrase:1.2".into()) }, Signal::new()).await.unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["kind"], "phrase", "a phrase is asked for as one");
+
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"tracks": ["Kick", "Bass"], "slots": [{"pattern": 1, "section": "Intro"}, {"pattern": 2, "mutedTracks": [2]}], "current": 2}),
+                false,
+            ));
+            let Some(FocusBody::Matrix(matrix)) = renoise.focus_body(&BodyRequest::Matrix, Signal::new()).await.unwrap() else { panic!("the matrix") };
+            assert_eq!((matrix.current, matrix.slots[1].muted.as_slice()), (Some(1), &[1][..]));
+            assert_eq!(matrix.slots[0].section.as_deref(), Some("Intro"));
+
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"name": "Drumkit", "keyzones": [{"sample": "Kick", "noteRange": [60, 60], "velocityRange": [0, 127], "baseNote": 60}], "macros": [{"name": "Drive", "value": 0.4}], "phrases": ["Fill"]}),
+                false,
+            ));
+            let Some(FocusBody::Keyzones(map)) =
+                renoise.focus_body(&BodyRequest::Keyzones { item_ref: "3:instrument:1".into() }, Signal::new()).await.unwrap()
+            else {
+                panic!("keyzones")
+            };
+            assert_eq!((map.zones[0].notes, map.macros.len(), map.phrases.len()), ((60, 60), 1, 1));
+            assert!(renoise.focus_body(&BodyRequest::Timeline, Signal::new()).await.unwrap().is_none(), "Renoise has no timeline strip");
+            renoise.close().await.unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn renoises_focus_is_its_middle_frame_with_the_panes_open_beside_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use kumi_runtime::core::view::ViewKind;
+            let focus = json!({
+                "epoch": "3", "view": "pattern", "matrixVisible": true, "dspVisible": true, "changed": 2,
+                "selection": {"trackRef": "3:track:2", "track": {"name": "Bass", "type": "sequencer"}, "patternRef": "3:pattern:4", "patternName": "Drop", "sequence": 3, "deviceRef": "3:device:2.2", "deviceName": "Delay"},
+                "transport": {"playing": true, "followPlayer": true, "beat": 8.0, "tempo": 128, "beatsPerBar": 4},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("focus", focus, false)]),
+                asked: RefCell::default(),
+            });
+            let seen: Rc<RefCell<Vec<Option<kumi_runtime::core::view::DawFocus>>>> = Rc::default();
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            let into = seen.clone();
+            options.context.on_focus = Some(Rc::new(move |focus| into.borrow_mut().push(focus)));
+            options.context.focus_interval_ms = Some(50);
+            let renoise = create_renoise_integration(options);
+            renoise.start(Signal::new()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let focus = seen.borrow().first().cloned().flatten().expect("the focus");
+            let kind = |view: Option<&kumi_runtime::core::view::FocusView>| view.map(|v| v.kind);
+            assert_eq!(kind(focus.main_view.as_ref()), Some(ViewKind::PatternEditor), "the middle frame");
+            assert_eq!(focus.editor_view.as_ref().map(|v| v.label.as_str()), Some("Track DSPs"), "the DSP frame below it");
+            assert_eq!(focus.panes.iter().flatten().map(|v| v.kind).collect::<Vec<_>>(), [ViewKind::Sequencer], "the matrix beside it");
+            assert_eq!(focus.section_follows, Some(true), "playing and following: the sequence slot is playback's");
+            assert_eq!(focus.section.as_ref().and_then(|s| s.index), Some(2.), "slots from 1 in Renoise, from 0 in FOCUS");
+            assert_eq!(focus.item.as_ref().and_then(|i| i.item_ref.as_deref()), Some("3:pattern:4"));
+            renoise.close().await.unwrap();
+        })
+        .await;
+}

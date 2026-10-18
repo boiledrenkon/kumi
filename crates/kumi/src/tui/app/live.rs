@@ -77,8 +77,11 @@ impl TuiApp {
             let Some(focus) = &state.focus else {
                 return;
             };
-            // An item's notes are read in the note editor over the launcher grid, through the item's reference.
-            if editor_kind(focus) != Some(ViewKind::NoteEditor) || main_kind(focus) != Some(ViewKind::Launcher) {
+            // An item's notes are read in the note editor over the launcher grid, through the item's reference (or over
+            // the timeline, for a DAW whose takes there show their notes).
+            let over = main_kind(focus) == Some(ViewKind::Launcher)
+                || (crate::daw::view().timeline_notes && main_kind(focus) == Some(ViewKind::Timeline));
+            if editor_kind(focus) != Some(ViewKind::NoteEditor) || !over {
                 return;
             }
             let Some(reference) = item_ref(focus).filter(|s| !s.is_empty()) else {
@@ -197,7 +200,11 @@ impl TuiApp {
             if state.tree_refresh.is_none() {
                 let weak = Rc::downgrade(&self.0);
                 state.tree_refresh = Some(tokio::task::spawn_local(async move {
-                    let period = Duration::from_millis(if shown == BodyKind::Timeline { 1500 } else { 4000 });
+                    // What moves as the DAW plays (the timeline, a tracker's lines and sequence) is read more often.
+                    let period = Duration::from_millis(match shown {
+                        BodyKind::Timeline | BodyKind::Tracker | BodyKind::Matrix => 1500,
+                        _ => 4000,
+                    });
                     let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
                     loop {
                         interval.tick().await;
@@ -213,7 +220,8 @@ impl TuiApp {
                         match shown {
                             BodyKind::Tree => app.read_tree(true),
                             BodyKind::Notes => app.read_clip(true),
-                            _ => app.read_strip(true),
+                            BodyKind::Grid | BodyKind::Timeline => app.read_strip(true),
+                            _ => app.read_own(true),
                         }
                     }
                 }));
@@ -221,6 +229,80 @@ impl TuiApp {
         } else if let Some(timer) = state.tree_refresh.take() {
             timer.abort();
         }
+    }
+    /// The body of a DAW's own view FOCUS shows now: what the producer touched last, where they are, when the DAW
+    /// can draw it; with the request that reads it.
+    pub(super) fn own_request(&self) -> Option<BodyRequest> {
+        let state = self.0.state.borrow();
+        let focus = state.focus.as_ref()?;
+        if state.connection != ConnectionState::Connected {
+            return None;
+        }
+        let request = match state.touched? {
+            Touched::Tracker if main_kind(focus) == Some(ViewKind::PatternEditor) => BodyRequest::Tracker { item_ref: item_ref(focus) },
+            Touched::Matrix
+                if main_kind(focus) == Some(ViewKind::Sequencer)
+                    || focus.panes.iter().flatten().any(|pane| pane.kind == ViewKind::Sequencer) =>
+            {
+                BodyRequest::Matrix
+            }
+            Touched::Keyzones if main_kind(focus) == Some(ViewKind::Instrument) => BodyRequest::Keyzones { item_ref: item_ref(focus)? },
+            Touched::Routing if editor_kind(focus) == Some(ViewKind::Routing) => {
+                BodyRequest::Routing { track_ref: focus.track_ref.clone().filter(|s| !s.is_empty())? }
+            }
+            _ => return None,
+        };
+        drop(state);
+        self.0.options.controller.can_show(request.kind()).then_some(request)
+    }
+    /// Reads that body again when what it's for changed (or `again`).
+    pub(super) fn read_own(&self, again: bool) {
+        let Some(request) = self.own_request() else {
+            self.0.state.borrow_mut().own.body = None;
+            return;
+        };
+        let key = format!("{request:?}");
+        {
+            let mut state = self.0.state.borrow_mut();
+            if !again && state.own.key.as_ref() == Some(&key) {
+                return;
+            }
+            if state.own.key.as_ref() != Some(&key) {
+                state.own.body = None;
+            }
+            state.own.key = Some(key.clone());
+            if state.own.reading {
+                state.own.again = true;
+                return;
+            }
+            state.own.reading = true;
+        }
+        self.task(move |app| async move {
+            let result = app.0.options.controller.focus_body(&request).await;
+            let again = {
+                let mut state = app.0.state.borrow_mut();
+                if state.own.key.as_ref() == Some(&key) {
+                    if let Ok(body) = result {
+                        state.own.body = body;
+                    }
+                }
+                state.own.reading = false;
+                std::mem::take(&mut state.own.again)
+            };
+            if again {
+                app.read_own(true);
+            }
+            if !app.0.state.borrow().closing {
+                app.0.scheduler.request();
+            }
+            Ok(())
+        });
+    }
+    /// The DAW's own body FOCUS draws now, read for where the producer is.
+    pub(super) fn own_shown(&self) -> Option<FocusBody> {
+        let request = self.own_request()?;
+        let state = self.0.state.borrow();
+        (state.own.key.as_deref() == Some(format!("{request:?}").as_str())).then(|| state.own.body.clone()).flatten()
     }
     pub(super) fn clip_shown(&self) -> Option<NoteView> {
         let state = self.0.state.borrow();

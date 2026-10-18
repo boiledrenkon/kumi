@@ -19,7 +19,7 @@ use kumi_runtime::core::export::{
     file_name, html, html_text, import, importable, json, markdown, Format, Options, Source, IMPORT_MAX_BYTES,
 };
 use kumi_runtime::system::{self, Env};
-use kumi_runtime::{create_conversation_store_keeping, gone_words, RuntimeError, IMPORTED, KUMI_VERSION};
+use kumi_runtime::{gone_words, RuntimeError, IMPORTED, KUMI_VERSION};
 
 use crate::config::{load_projects_dir, load_settings_file, read_settings};
 use crate::report::{known_secrets, redactor, username};
@@ -383,7 +383,11 @@ pub struct ExportRequest {
 /// The kept conversations, kept as the settings say.
 fn kept(env: &Env) -> Result<Rc<FileConversationStore>, RuntimeError> {
     let settings = read_settings(&load_settings_file(env)?);
-    Ok(create_conversation_store_keeping(load_projects_dir(env)?, settings.conversations.as_ref().and_then(|c| c.keep_days)))
+    Ok(kumi_runtime::core::conversations::create_conversation_store_in(
+        load_projects_dir(env)?,
+        settings.conversations.as_ref().and_then(|c| c.keep_days),
+        kumi_runtime::integrations::PLACES,
+    ))
 }
 
 /// Words from a file or the store, for the terminal: without control characters.
