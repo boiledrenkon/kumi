@@ -2,6 +2,7 @@
 //! (`kumi-daw/1`, see daw-bridge). One binary serves either DAW: `daw-mcp-server --daw reaper|renoise`.
 
 pub mod client;
+pub mod flow;
 pub mod host;
 pub mod mcp;
 pub mod simulator;

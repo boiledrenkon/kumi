@@ -1,6 +1,7 @@
 //! MCP over JSON-RPC: initialize, ping, tools/list and tools/call for the host's tools.
 use crate::host::{Host, Pick};
 use crate::tools::{kinds, DEFAULT_LIMIT, MAX_LIMIT};
+use daw_bridge::Daw;
 use serde_json::{json, Value};
 
 pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -14,7 +15,7 @@ pub fn tools(host: &Host) -> Value {
         "pid": {"type": "integer", "minimum": 1, "description": format!("The {daw} process to use, from discover, when several run.")},
         "resource": {"type": "string", "description": format!("The {daw} resource or preferences folder to use, from discover, when several run.")},
     });
-    json!([
+    let mut list = json!([
         {
             "name": "status",
             "title": format!("{daw} status"),
@@ -69,7 +70,15 @@ pub fn tools(host: &Host) -> Value {
             })), "required": ["kind"], "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
         },
-    ])
+    ]);
+    if daw == Daw::Renoise {
+        // A pattern's lines are read one track at a time.
+        list[2]["inputSchema"]["properties"]["track"] = json!({
+            "type": ["integer", "string"],
+            "description": "For kind line: the track (its number, or its ref) whose lines of the parent pattern to read.",
+        });
+    }
+    list
 }
 
 /// The properties of a tool: the instance pick, then its own.

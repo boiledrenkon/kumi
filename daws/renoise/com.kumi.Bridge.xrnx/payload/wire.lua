@@ -13,6 +13,14 @@ local M = {}
 M.PROTOCOL = "kumi-daw/1"
 M.MAX_PREAUTH_LINE = 1024
 M.MAX_FRAME = 64 * 1024 * 1024
+-- What this bridge may send before the host's first grant of credit (the welcome says so), and the most credit it
+-- will hold. It sends only within the credit the host grants, so output never outruns a reader: it cannot know how much
+-- a host's socket holds, so it starts with a floor, the host's first grant tops that up to its receive buffer, and the
+-- host then grants what it reads.
+M.CREDIT_FLOOR = 64 * 1024
+M.CREDIT_MAX = 4 * 1024 * 1024
+-- No answer is longer than this. It may be longer than the credit at the moment: it goes out as the host grants.
+M.MAX_PAGE_BYTES = 256 * 1024
 M.HANDSHAKE_TIMEOUT_MS = 3000
 M.HEARTBEAT_MS = 1000
 M.MAX_UNAUTHENTICATED = 4
@@ -200,6 +208,7 @@ local CHECKS = {
     return is_string(f.session) and is_string(f.daw) and is_string(f.bridge) and is_string(f.dawVersion)
       and uint(n, "pid", 4294967295) and is_string(f.resource) and project_ok(f.project)
       and uint(n, "maxFrameBytes") and uint(n, "heartbeatMs") and strings(f.methods) and strings(f.events)
+      and (f.creditBytes == nil or f.creditBytes == null or uint(n, "creditBytes"))
   end,
   refused = function(f) return is_string(f.reason) and optional_string(f.protocol) end,
   request = function(f, n)
@@ -214,6 +223,7 @@ local CHECKS = {
   end,
   event = function(f, n) return safe(n, "seq") and is_string(f.name) end,
   heartbeat = function(f, n) return safe(n, "ms", true) end,
+  credit = function(f, n) return safe(n, "bytes") end,
   bye = function(f) return is_string(f.reason) end,
 }
 
@@ -330,6 +340,7 @@ function Connection:on_bytes(bytes, now_ms, identity)
       welcome.session = self.session
       welcome.maxFrameBytes = M.MAX_FRAME
       welcome.heartbeatMs = welcome.heartbeatMs or M.HEARTBEAT_MS
+      welcome.creditBytes = welcome.creditBytes or M.CREDIT_FLOOR
       welcome.methods = json.array(welcome.methods or {})
       welcome.events = json.array(welcome.events or {})
       local text, encode_err = M.encode_frame("welcome", welcome)
@@ -340,7 +351,11 @@ function Connection:on_bytes(bytes, now_ms, identity)
       actions[#actions + 1] = { authenticated = true }
     else
       if not frame then return self:close(actions, "protocol:" .. tostring(why)) end
-      if frame.type == "request" then actions[#actions + 1] = { request = frame } end
+      if frame.type == "request" then
+        actions[#actions + 1] = { request = frame }
+      elseif frame.type == "credit" then
+        actions[#actions + 1] = { credit = frame.bytes }
+      end
     end
   end
   return actions

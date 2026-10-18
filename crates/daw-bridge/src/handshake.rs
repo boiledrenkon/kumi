@@ -44,11 +44,13 @@ pub struct Offer {
     pub methods: Vec<String>,
     pub events: Vec<String>,
     pub heartbeat_ms: u64,
+    /// See [`crate::wire::Welcome::credit_bytes`].
+    pub credit_bytes: Option<u64>,
 }
 
 impl Default for Offer {
     fn default() -> Self {
-        Self { methods: vec!["ping".into(), "status".into()], events: vec![], heartbeat_ms: HEARTBEAT_MS }
+        Self { methods: vec!["ping".into(), "status".into()], events: vec![], heartbeat_ms: HEARTBEAT_MS, credit_bytes: None }
     }
 }
 
@@ -163,6 +165,7 @@ impl ServerConnection {
                             heartbeat_ms: offer.heartbeat_ms,
                             methods: offer.methods,
                             events: offer.events,
+                            credit_bytes: offer.credit_bytes,
                         };
                         self.state = ServerState::Ready;
                         self.framer.set_max_bytes(MAX_FRAME_BYTES);
