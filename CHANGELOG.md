@@ -3,6 +3,15 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.19.1 — 2026-10-18
+
+Ships with bridge 1.0.92, as 1.19.0 did.
+
+- In the plain terminal, /status's conversation line no longer prints after the goodbye.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.19.0 — 2026-10-17
 
 Ships with bridge 1.0.92, as 1.18.0 did.
