@@ -332,6 +332,18 @@ impl Journal {
     }
 }
 
+/// The producer undid (or redid) Kumi's changes with the DAW's own undo: the bridge names their step descriptions, and
+/// Kumi is told the changes' ids. Any other event goes on as it came.
+pub fn undone_in_daw(journal: &Journal, name: &str, mut data: Value) -> Value {
+    if name != "undone_in_daw" {
+        return data;
+    }
+    let descs: Vec<String> =
+        data.get("descs").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+    data["transactionIds"] = json!(journal.by_descs(&descs));
+    data
+}
+
 /// How long a change may take the DAW (it bounds each of its own steps; a big project takes a while).
 const CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -446,6 +458,36 @@ impl crate::host::Host {
         }
     }
 
+    /// `transport_stop`: the DAW stops playing and recording (the emergency stop).
+    pub async fn transport_stop(&self, arguments: &Value) -> (Value, bool) {
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        match self.call("transport_stop", json!({}), &pick, CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
+    /// `undo_step_begin` / `undo_step_end`: one DAW undo step around a plan's changes, where the DAW gives one.
+    pub async fn undo_step(&self, method: &str, arguments: &Value) -> (Value, bool) {
+        let params = match method {
+            "undo_step_begin" => match text(arguments, "label") {
+                Ok(label) => json!({"label": label}),
+                Err(answer) => return answer,
+            },
+            _ => match text(arguments, "stepId") {
+                Ok(step) => json!({"stepId": step}),
+                Err(answer) => return answer,
+            },
+        };
+        match self.call(method, params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
     /// `change_release`: changes Kumi won't undo any more, forgotten.
     pub fn change_release(&self, arguments: &Value) -> (Value, bool) {
         let Some(ids) = arguments.get("transactionIds").and_then(Value::as_array) else {
@@ -535,6 +577,18 @@ mod tests {
         assert_eq!(journal.previewed("track-volume", &json!({}), &answer, None).unwrap_err().code, "full");
         assert_eq!(journal.release(&ids[..MAX_RELEASE]), MAX_RELEASE);
         assert!(journal.previewed("track-volume", &json!({}), &answer, None).is_ok());
+    }
+
+    #[test]
+    fn the_daws_undo_event_names_kumis_changes_and_other_events_go_on_as_they_came() {
+        let journal = Journal::default();
+        let record = preview(&journal);
+        let Ok(Ok(applying)) = journal.begin_apply(&record.id, &record.confirmation, "a", None) else { panic!() };
+        journal.end_apply(&record.id, "a", Ok(&json!({"applied": {}})));
+        let data =
+            undone_in_daw(&journal, "undone_in_daw", json!({"descs": [applying.desc.unwrap(), "Adjust track volume"], "how": "undo"}));
+        assert_eq!((&data["transactionIds"], &data["how"]), (&json!([record.id]), &json!("undo")));
+        assert_eq!(undone_in_daw(&journal, "tracks", json!({"count": 3})), json!({"count": 3}));
     }
 
     #[test]

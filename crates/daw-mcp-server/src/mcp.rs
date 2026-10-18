@@ -107,6 +107,27 @@ pub fn tools(host: &Host) -> Value {
             "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false},
         },
         {
+            "name": "transport_stop",
+            "title": format!("Stop {daw}"),
+            "description": format!("Stops {daw}'s playback and recording at once."),
+            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        },
+        {
+            "name": "undo_step_begin",
+            "title": format!("Begin one {daw} undo step"),
+            "description": format!("Opens one step of {daw}'s undo around the changes that follow, where {daw} gives one: {{stepId}}. Close it with undo_step_end."),
+            "inputSchema": {"type": "object", "properties": {"label": {"type": "string"}}, "required": ["label"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+        },
+        {
+            "name": "undo_step_end",
+            "title": format!("End the {daw} undo step"),
+            "description": "Closes the step undo_step_begin opened.",
+            "inputSchema": {"type": "object", "properties": {"stepId": {"type": "string"}}, "required": ["stepId"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        },
+        {
             "name": "change_release",
             "title": "Forget changes",
             "description": "Changes that won't be undone any more: the host forgets them (at most 64 at a time).",
@@ -233,11 +254,14 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     };
                     result(id, tool_result(answer, is_error))
                 }
-                "change_preview" | "change_apply" | "change_undo" | "change_release" => {
+                "change_preview" | "change_apply" | "change_undo" | "change_release" | "transport_stop" | "undo_step_begin"
+                | "undo_step_end" => {
                     let (answer, is_error) = match name {
                         "change_preview" => host.change_preview(&arguments).await,
                         "change_apply" => host.change_apply(&arguments).await,
                         "change_undo" => host.change_undo(&arguments).await,
+                        "transport_stop" => host.transport_stop(&arguments).await,
+                        "undo_step_begin" | "undo_step_end" => host.undo_step(name, &arguments).await,
                         _ => host.change_release(&arguments),
                     };
                     result(id, tool_result(answer, is_error))

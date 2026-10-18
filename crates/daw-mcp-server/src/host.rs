@@ -46,7 +46,7 @@ pub struct Host {
     /// The bridge's events (`{name, data}`), for the MCP client: whichever instance the host is connected to.
     events: tokio::sync::broadcast::Sender<Value>,
     /// The changes previewed, applied and undone through this host (M3).
-    journal: crate::changes::Journal,
+    journal: std::sync::Arc<crate::changes::Journal>,
 }
 
 /// Which running instance a tool means, when several run.
@@ -112,7 +112,7 @@ impl Host {
             paths: BridgePaths::new(kumi_home, daw),
             current: tokio::sync::Mutex::new(None),
             events: tokio::sync::broadcast::channel(1024).0,
-            journal: crate::changes::Journal::default(),
+            journal: std::sync::Arc::default(),
         }
     }
 
@@ -270,12 +270,13 @@ impl Host {
             match self.connect(discovery, &secret).await {
                 Some(Ok(client)) => {
                     // The bridge's events go on to the MCP client while this connection lasts.
-                    let (mut from, to) = (client.events(), self.events.clone());
+                    let (mut from, to, journal) = (client.events(), self.events.clone(), self.journal.clone());
                     tokio::spawn(async move {
                         loop {
                             match from.recv().await {
                                 Ok(event) => {
-                                    let _ = to.send(json!({"name": event.name, "data": event.data}));
+                                    let data = crate::changes::undone_in_daw(&journal, &event.name, event.data);
+                                    let _ = to.send(json!({"name": event.name, "data": data}));
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
