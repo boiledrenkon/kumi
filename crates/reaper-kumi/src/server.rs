@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use daw_bridge::auth::Secret;
 use daw_bridge::files::{self, Discovery, Reference, DISCOVERY_SCHEMA};
 use daw_bridge::handshake::{self, Offer, ServerAction, ServerConnection};
-use daw_bridge::wire::{self, code, Frame, Identity, Project, Request, MAX_AUTHENTICATED, MAX_UNAUTHENTICATED, PROTOCOL};
+use daw_bridge::wire::{self, code, Event, Frame, Identity, Project, Request, MAX_AUTHENTICATED, MAX_UNAUTHENTICATED, PROTOCOL};
 use daw_bridge::{install, loopback, Daw};
 use serde_json::{json, Value};
 
@@ -61,12 +61,16 @@ struct HubInner {
     started: Instant,
 }
 
+/// What the main thread may touch of a connection. The handshake's state machine isn't here: the reader thread owns
+/// it, so parsing a big frame never holds anything the main thread (events, heartbeats) waits for.
 struct Conn {
     id: u64,
-    state: Mutex<ServerConnection>,
     out: SyncSender<Vec<u8>>,
     stream: TcpStream,
+    /// Set once the welcome is queued: events and heartbeats go out only after it.
     authenticated: AtomicBool,
+    /// The next event's number on this connection (only the main thread sends events).
+    next_seq: AtomicU64,
 }
 
 impl Default for Hub {
@@ -113,11 +117,9 @@ impl Hub {
 
 impl Outbox for Hub {
     fn event(&self, name: &str, data: Value) {
-        for conn in self.conns() {
-            let bytes = lock(&conn.state).event(name, data.clone());
-            if let Some(bytes) = bytes {
-                self.send(&conn, bytes);
-            }
+        for conn in self.conns().iter().filter(|c| c.authenticated.load(Ordering::Acquire)) {
+            let seq = conn.next_seq.fetch_add(1, Ordering::Relaxed);
+            self.send(conn, Frame::Event(Event { seq, name: name.into(), data: data.clone() }).encode());
         }
     }
 
@@ -417,7 +419,7 @@ fn spawn_connection(id: u64, stream: TcpStream, state: ServerConnection, started
     // Writes wake as often as reads do: a blocked send isn't woken by shutting the socket on every OS.
     stream.set_write_timeout(Some(READ_POLL))?;
     let (out, rx) = mpsc::sync_channel::<Vec<u8>>(OUTBOX_FRAMES);
-    let conn = Arc::new(Conn { id, state: Mutex::new(state), out, stream: stream.try_clone()?, authenticated: AtomicBool::new(false) });
+    let conn = Arc::new(Conn { id, out, stream: stream.try_clone()?, authenticated: AtomicBool::new(false), next_seq: AtomicU64::new(1) });
     let mut writer = stream.try_clone()?;
     let closer = stream.try_clone()?;
     let stopping = shared.stopping.clone();
@@ -433,7 +435,7 @@ fn spawn_connection(id: u64, stream: TcpStream, state: ServerConnection, started
     let reader_shared = shared.clone();
     let read = thread::Builder::new().name("kumi-read".into()).spawn(move || {
         let shared = reader_shared;
-        crate::guard("connection", (), || serve(&conn, stream, started, &shared));
+        crate::guard("connection", (), || serve(&conn, state, stream, started, &shared));
         shared.hub.remove(conn.id);
     })?;
     Ok(Spawned { reader: read, writer: write, stream: closer })
@@ -462,7 +464,7 @@ fn write_frame(stream: &mut TcpStream, mut bytes: &[u8], stopping: &AtomicBool) 
     true
 }
 
-fn serve(conn: &Arc<Conn>, mut stream: TcpStream, started: Instant, shared: &Shared) {
+fn serve(conn: &Arc<Conn>, mut state: ServerConnection, mut stream: TcpStream, started: Instant, shared: &Shared) {
     let mut buf = vec![0u8; 64 * 1024];
     let _ = stream.set_read_timeout(Some(READ_POLL));
     loop {
@@ -471,9 +473,9 @@ fn serve(conn: &Arc<Conn>, mut stream: TcpStream, started: Instant, shared: &Sha
         }
         let actions = match stream.read(&mut buf) {
             Ok(0) => return,
-            Ok(n) => lock(&conn.state).on_bytes(&buf[..n], started.elapsed().as_millis() as u64, &mut || shared.identity()),
+            Ok(n) => state.on_bytes(&buf[..n], started.elapsed().as_millis() as u64, &mut || shared.identity()),
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
-                lock(&conn.state).on_tick(started.elapsed().as_millis() as u64)
+                state.on_tick(started.elapsed().as_millis() as u64)
             }
             Err(_) => return,
         };
@@ -597,6 +599,10 @@ mod tests {
             Ok(0) | Err(_) => None,
             Ok(_) => Some(line.trim_end().to_string()),
         }
+    }
+
+    fn read_frame_of_any_kind(reader: &mut BufReader<TcpStream>) -> Value {
+        serde_json::from_str(&read_line(reader).expect("a frame")).unwrap()
     }
 
     fn read_frame(reader: &mut BufReader<TcpStream>) -> Value {
@@ -789,6 +795,37 @@ mod tests {
         let started = Instant::now();
         lab.server.take().unwrap().stop("quit");
         assert!(started.elapsed() < Duration::from_secs(3), "stop took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn parsing_a_big_frame_never_holds_up_the_main_threads_events() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        // Notes by the hundred thousand: parsed into a Value, the slow shape (strings parse fast).
+        let mut bytes = br#"{"type":"request","id":7,"method":"ping","params":{"notes":["#.to_vec();
+        while bytes.len() < (8 << 20) {
+            bytes.extend_from_slice(br#"{"pitch":60,"vel":100,"start":0.25,"len":0.5},"#);
+        }
+        bytes.extend_from_slice(b"{}]}}\n");
+        let answered = Arc::new(AtomicBool::new(false));
+        let done = answered.clone();
+        let host = thread::spawn(move || {
+            stream.write_all(&bytes).unwrap();
+            while read_frame_of_any_kind(&mut reader)["id"] != 7 {}
+            done.store(true, Ordering::Release);
+            stream
+        });
+        let (mut worst, mut calls) = (Duration::ZERO, 0);
+        while !answered.load(Ordering::Acquire) {
+            let started = Instant::now();
+            lab.hub.event("tracks", json!({"call": calls}));
+            worst = worst.max(started.elapsed());
+            calls += 1;
+            thread::sleep(Duration::from_millis(1));
+        }
+        let _stream = host.join().unwrap();
+        // The reader was parsing for most of that time; an event from the main thread must not have waited for it.
+        assert!(worst < Duration::from_millis(100), "an event took {worst:?} (of {calls} calls)");
     }
 
     #[test]
