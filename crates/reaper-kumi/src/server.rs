@@ -14,7 +14,7 @@ use daw_bridge::auth::Secret;
 use daw_bridge::files::{self, Discovery, Reference, DISCOVERY_SCHEMA};
 use daw_bridge::handshake::{Offer, ServerAction, ServerConnection};
 use daw_bridge::wire::{self, code, Frame, Identity, Project, Request, MAX_AUTHENTICATED, MAX_UNAUTHENTICATED, PROTOCOL};
-use daw_bridge::{loopback, Daw};
+use daw_bridge::{install, loopback, Daw};
 use serde_json::{json, Value};
 
 use crate::extension::{Outbox, ProjectSummary, Snapshot, BRIDGE_VERSION};
@@ -22,8 +22,6 @@ use crate::log;
 use crate::queue::{self, Job, Outcome};
 use crate::reaper::Busy;
 
-/// The reference file Kumi's lifecycle writes beside the extension.
-pub const REFERENCE_FILE: &str = "kumi-bridge-reference.json";
 /// How long a request may wait for the main thread when it names no deadline.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
 /// No tick for this long: the main thread is held (a modal dialog, a long load or render).
@@ -39,7 +37,7 @@ const EVENTS: [&str; 4] = [wire::event::PROJECT, wire::event::TRANSPORT, wire::e
 
 /// Where the reference file lives for a resource folder.
 pub fn reference_path(resource: &Path) -> PathBuf {
-    resource.join("UserPlugins").join(REFERENCE_FILE)
+    resource.join("UserPlugins").join(install::REAPER_REFERENCE)
 }
 
 /// The connections, shared by the socket threads and the main thread.
@@ -471,8 +469,8 @@ mod tests {
         fn start(secret: &str, connection: fn(Secret, u64) -> ServerConnection) -> Lab {
             let dir = tempfile::tempdir().unwrap();
             let bridge = dir.path().join("bridges").join("reaper");
-            owner::create_owner_only_dir(&bridge).unwrap();
-            owner::write_owner_only(&bridge.join("bridge.secret"), format!("{secret}\n").as_bytes()).unwrap();
+            std::fs::create_dir_all(&bridge).unwrap();
+            owner::write_atomic(&bridge.join("bridge.secret"), format!("{secret}\n").as_bytes()).unwrap();
             let config = Config {
                 secret_file: bridge.join("bridge.secret"),
                 discovery_dir: bridge.join("discovery"),
