@@ -4,6 +4,7 @@
 //! the structural leaps, every few generations or when the search stalls. A goal is kept on disk as it
 //! goes, so it survives a restart and /goal picks it up again.
 
+use super::daw::DawProfile;
 use serde::{Deserialize, Serialize};
 
 use super::contracts::AuditionRequest;
@@ -206,9 +207,27 @@ impl GoalStore for FileGoalStore {
     }
 }
 pub fn goal_setup(goal: &str) -> String {
-    format!("[Kumi goal] {goal}\n\nThis is a goal: Kumi keeps searching until it gets there. Set the search up: listen to the reference, then build 3–4 genuinely different candidates, each on a new track named \"Kumi · Goal · <idea>\" (different base instruments such as Operator, Wavetable, Drift, Collision or a Simpler sample; serial chains against parallel racks), with the part on each, and audition them together against the reference once. Then stop: Kumi's own search takes over from there, trying knob settings on your candidates by the hundred, and comes back to you for bigger ideas.\n\nWhen the producer gave nothing to compare with (no audio file, clip in the Set or video), there's nothing to search toward: do what they asked as an ordinary request instead, completely (every tool is yours: set the knobs, add rack chains, load devices into them, rename), and don't audition.")
+    goal_setup_for(&DawProfile::ABLETON, goal)
+}
+
+/// `goal_setup`, in the DAW's words.
+pub fn goal_setup_for(profile: &DawProfile, goal: &str) -> String {
+    let (vocab, place) = (&profile.vocab, profile.words.place);
+    format!("[Kumi goal] {goal}\n\nThis is a goal: Kumi keeps searching until it gets there. Set the search up: listen to the reference, then build 3–4 genuinely different candidates, each on a new track named \"Kumi · Goal · <idea>\" (different base instruments such as {}; {}), with the part on each, and audition them together against the reference once. Then stop: Kumi's own search takes over from there, trying knob settings on your candidates by the hundred, and comes back to you for bigger ideas.\n\nWhen the producer gave nothing to compare with (no audio file, clip in the {place} or video), there's nothing to search toward: do what they asked as an ordinary request instead, completely (every tool is yours: set the knobs, {}, rename), and don't audition.", vocab.goal_instruments, vocab.serial_parallel, vocab.build_chains)
 }
 pub fn goal_leap(
+    state: &GoalState,
+    best: Option<&Best>,
+    gaps: &[String],
+    stalled: bool,
+    structural: Option<&super::contracts::StructuralMove>,
+) -> String {
+    goal_leap_for(&DawProfile::ABLETON, state, best, gaps, stalled, structural)
+}
+
+/// `goal_leap`, in the DAW's words: a device Kumi makes only where the DAW has them.
+pub fn goal_leap_for(
+    profile: &DawProfile,
     state: &GoalState,
     best: Option<&Best>,
     gaps: &[String],
@@ -227,5 +246,10 @@ pub fn goal_leap(
         "Time for a bigger idea.".into()
     };
     let labels = state.slots.iter().map(|s| s.label.as_str()).collect::<Vec<_>>().join(", ");
-    format!("[Kumi goal] {}\nGeneration {}, {} candidates rendered. Best {best}; lately {lately}.{gaps}\n{reason} Make a structural leap: 1–2 new candidates on new tracks named \"Kumi · Goal · <idea>\" that differ from the ones in the search ({labels}): another base instrument or topology, parallel against serial, resampling, or a Max for Live device via make_device when nothing native gets there. Audition them with the leader, then stop; Kumi's search picks them up. End with one line starting \"Tried:\" that says what you tried.",state.goal,state.generation,state.rendered)
+    let made = if profile.caps.max_for_live_devices {
+        "resampling, or a Max for Live device via make_device when nothing native gets there"
+    } else {
+        "or resampling"
+    };
+    format!("[Kumi goal] {}\nGeneration {}, {} candidates rendered. Best {best}; lately {lately}.{gaps}\n{reason} Make a structural leap: 1–2 new candidates on new tracks named \"Kumi · Goal · <idea>\" that differ from the ones in the search ({labels}): another base instrument or topology, parallel against serial, {made}. Audition them with the leader, then stop; Kumi's search picks them up. End with one line starting \"Tried:\" that says what you tried.",state.goal,state.generation,state.rendered)
 }

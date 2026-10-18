@@ -4,6 +4,7 @@
 //! trying something genuinely different, or the budget spent) or sends the model back in with the
 //! score, what's left of the budget and the biggest gaps. A first draft can't end a run.
 
+use super::daw::DawProfile;
 use serde::{Deserialize, Serialize};
 
 use super::goal::Best;
@@ -105,8 +106,14 @@ pub struct MatchRun {
     pub history: Vec<Best>,
     budget: MatchBudget,
     now: Rc<dyn Fn() -> i64>,
+    /// The DAW its prompts speak of: Live's unless `in_daw` says.
+    profile: DawProfile,
 }
 impl MatchRun {
+    /// The same run, its prompts in the DAW's words.
+    pub fn in_daw(self, profile: DawProfile) -> Self {
+        Self { profile, ..self }
+    }
     pub fn new(request: impl Into<String>, budget: MatchBudget) -> Self {
         Self::with_clock(request, budget, Rc::new(now_ms))
     }
@@ -129,10 +136,12 @@ impl MatchRun {
             changed_since: false,
             reference: None,
             history: vec![],
+            profile: DawProfile::ABLETON,
         }
     }
     pub fn carry_on(previous: &Self, budget: MatchBudget, now: Rc<dyn Fn() -> i64>) -> Self {
         let mut run = Self::with_clock(&previous.request, budget, now);
+        run.profile = previous.profile;
         run.history = previous.history.clone();
         run.first = previous.first;
         run.best = previous.best.clone();
@@ -235,7 +244,7 @@ impl MatchRun {
         self.next(rounds, minutes, stalled)
     }
     pub fn wrap_up(&self, why: &str) -> String {
-        format!("[Kumi] {why} Tidy up, then give your final answer. Put the winner where the producer asked for it: when they asked for it on a track (\"this track\", one they named or had selected) and it won elsewhere, rebuild it there (the same devices, the settings you gave them, its clip) and audition it once to check it scores the same; otherwise keep it on its own. Mute every other candidate track you made (don't undo them: Live removes a track only from the last one back, and not one changed since). Then say the score before and after ({}% → {}%), which candidate won and why, what still differs, and which muted tracks hold the others for the producer to A/B or delete. Call it the closest you got.",self.first.map(to_string).unwrap_or("undefined".into()),self.best.as_ref().map(|b|to_string(b.score)).unwrap_or("undefined".into()))
+        format!("[Kumi] {why} Tidy up, then give your final answer. Put the winner where the producer asked for it: when they asked for it on a track (\"this track\", one they named or had selected) and it won elsewhere, rebuild it there (the same devices, the settings you gave them, its clip) and audition it once to check it scores the same; otherwise keep it on its own. Mute every other candidate track you made ({}). Then say the score before and after ({}% → {}%), which candidate won and why, what still differs, and which muted tracks hold the others for the producer to A/B or delete. Call it the closest you got.",self.profile.vocab.keep_candidates,self.first.map(to_string).unwrap_or("undefined".into()),self.best.as_ref().map(|b|to_string(b.score)).unwrap_or("undefined".into()))
     }
     fn next(&mut self, rounds: i64, minutes: f64, stalled: bool) -> MatchDecision {
         let Some(best) = self.best.as_ref() else {
@@ -264,7 +273,8 @@ impl MatchRun {
             self.explored = true;
             self.checks.clear();
             self.checks.push(best.score);
-            return MatchDecision::Next {next:format!("[Kumi] Score {scores}, and refining has stalled.{budget}{gaps} Try something genuinely different now: 2–4 new candidates on new tracks with other base instruments or another topology (parallel against serial, a rack of layers, resampling), audition them with the best so far, then refine the winner.")};
+            let layers = self.profile.vocab.layers;
+            return MatchDecision::Next {next:format!("[Kumi] Score {scores}, and refining has stalled.{budget}{gaps} Try something genuinely different now: 2–4 new candidates on new tracks with other base instruments or another topology (parallel against serial, {layers}, resampling), audition them with the best so far, then refine the winner.")};
         }
         if let Some(structural) = self.last.as_ref().and_then(|l| l.event.structural.as_ref()) {
             return MatchDecision::Next {next:format!("[Kumi] Score {scores} (best: {}).{budget} Knobs can't close this: {}. Change the structure: {}. Build it on a copy or a new track, audition it with the best, then refine.",best.label,structural.gap,structural.r#move)};

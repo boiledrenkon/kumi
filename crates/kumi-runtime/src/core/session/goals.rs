@@ -3,7 +3,7 @@ use super::matching::{add_usage, generation_trials, knob_key};
 use super::*;
 use crate::core::{
     evolve::{Evolution, NewSlot, Slot},
-    goal::{goal_leap, goal_setup, Best, GoalPhase, GoalRun, GoalState, GoalStatus, GOAL_BUDGET},
+    goal::{goal_leap_for, goal_setup_for, Best, GoalPhase, GoalRun, GoalState, GoalStatus, GOAL_BUDGET},
     playbook::{lesson_from_goal, lesson_line, playbook_brief, GoalLeader},
 };
 use indexmap::IndexMap;
@@ -199,7 +199,7 @@ impl Session {
                 text.as_ref().unwrap(),
                 5,
             );
-            let mut prompt = goal_setup(text.as_ref().unwrap());
+            let mut prompt = goal_setup_for(&self.0.options.profile, text.as_ref().unwrap());
             if !brief.is_empty() {
                 prompt.push_str("\n\n");
                 prompt.push_str(&brief);
@@ -390,7 +390,7 @@ impl Session {
                     let leap = self
                         .goal_ask(
                             &op,
-                            &goal_leap(&state, best.as_ref(), &gaps.iter().take(3).cloned().collect::<Vec<_>>(), stalled, structural.as_ref()),
+                            &goal_leap_for(&self.0.options.profile, &state, best.as_ref(), &gaps.iter().take(3).cloned().collect::<Vec<_>>(), stalled, structural.as_ref()),
                             &mut usage,
                             &said,
                         )

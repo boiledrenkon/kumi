@@ -34,6 +34,16 @@ pub struct PromptVocab {
     pub recipe_step_example: &'static str,
     /// A capability scripts can't reach, for note_gap's example: "setting Operator's voice count".
     pub missing_example: &'static str,
+    /// Base instruments a sound-matching search tries apart: "Operator, Wavetable, Drift, Collision or a Simpler sample".
+    pub goal_instruments: &'static str,
+    /// Topologies to try apart: "serial chains against parallel racks".
+    pub serial_parallel: &'static str,
+    /// Building in parallel inside a device container: "add rack chains, load devices into them".
+    pub build_chains: &'static str,
+    /// Why a match run mutes its other candidates instead of undoing them: Live undoes tracks only from the last one back.
+    pub keep_candidates: &'static str,
+    /// A layered sound inside one device container: "a rack of layers".
+    pub layers: &'static str,
 }
 
 /// Live's word for each field of a profile's words and vocabulary: the one place they're spelled, so a text
@@ -62,6 +72,21 @@ macro_rules! live_word {
     (missing_example) => {
         "setting Operator's voice count"
     };
+    (goal_instruments) => {
+        "Operator, Wavetable, Drift, Collision or a Simpler sample"
+    };
+    (serial_parallel) => {
+        "serial chains against parallel racks"
+    };
+    (build_chains) => {
+        "add rack chains, load devices into them"
+    };
+    (keep_candidates) => {
+        "don't undo them: Live removes a track only from the last one back, and not one changed since"
+    };
+    (layers) => {
+        "a rack of layers"
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -88,6 +113,21 @@ macro_rules! daw_word {
     };
     ($profile:expr, missing_example) => {
         $profile.vocab.missing_example
+    };
+    ($profile:expr, goal_instruments) => {
+        $profile.vocab.goal_instruments
+    };
+    ($profile:expr, serial_parallel) => {
+        $profile.vocab.serial_parallel
+    };
+    ($profile:expr, build_chains) => {
+        $profile.vocab.build_chains
+    };
+    ($profile:expr, keep_candidates) => {
+        $profile.vocab.keep_candidates
+    };
+    ($profile:expr, layers) => {
+        $profile.vocab.layers
     };
 }
 
@@ -202,6 +242,11 @@ impl DawProfile {
             ref_example: "track:3",
             recipe_step_example: "a parameter set by its name on a device an earlier step loaded",
             missing_example: "setting a synth's voice count",
+            goal_instruments: "different synths or a sampler",
+            serial_parallel: "serial chains against parallel ones",
+            build_chains: "add parallel chains, load devices into them",
+            keep_candidates: "don't undo them: the producer may want to A/B them",
+            layers: "layered parallel chains",
         },
     };
 
@@ -244,6 +289,11 @@ impl DawProfile {
             ref_example: crate::live_word!(ref_example),
             recipe_step_example: crate::live_word!(recipe_step_example),
             missing_example: crate::live_word!(missing_example),
+            goal_instruments: crate::live_word!(goal_instruments),
+            serial_parallel: crate::live_word!(serial_parallel),
+            build_chains: crate::live_word!(build_chains),
+            keep_candidates: crate::live_word!(keep_candidates),
+            layers: crate::live_word!(layers),
         },
     };
 

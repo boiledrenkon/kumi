@@ -4,8 +4,8 @@
 use super::matching::add_usage;
 use super::*;
 use crate::core::goal_mode::{
-    after_turn, audit_against, command_word, error_check, gap_closed, measured_check, objective_audit, objective_first, objective_next,
-    read_audit, Check, Objective, ObjectiveState, Verdict, OBJECTIVE_BUDGET,
+    after_turn, audit_against, command_word, error_check_for, gap_closed, measured_check, objective_audit_for, objective_first,
+    objective_next, read_audit, Check, Objective, ObjectiveState, Verdict, OBJECTIVE_BUDGET,
 };
 
 /// A goal run's hold on the session's objective flags, released however the run ends.
@@ -198,7 +198,8 @@ impl Session {
         self.assert_current(op)?;
         op.phase.set(Phase::Inference);
         self.0.state.borrow_mut().checking = true;
-        let result = self.ask(op, &objective_audit(objective), &snapshot.context, Some(said.clone()), vec![], "").await;
+        let result =
+            self.ask(op, &objective_audit_for(&self.0.options.profile, objective), &snapshot.context, Some(said.clone()), vec![], "").await;
         self.0.state.borrow_mut().checking = false;
         let result = result?;
         add_usage(usage, result.usage.as_ref());
@@ -214,7 +215,7 @@ impl Session {
     fn objective_failed(&self, place: &mut Place, objective: &mut Objective, started: i64, error: &RuntimeError) {
         objective.state = ObjectiveState::Paused;
         objective.elapsed_ms = now() - started;
-        objective.last = Some(error_check(error));
+        objective.last = Some(error_check_for(&self.0.options.profile, error));
         self.persist_running(place, objective);
         self.emit_objective(objective, now() - started);
     }
