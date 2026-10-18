@@ -82,6 +82,8 @@ pub struct OwnIntegration<S: RefScheme> {
     connected: Cell<bool>,
     closed: Rc<Cell<bool>>,
     watching: Cell<bool>,
+    /// The track the producer has selected, as the last focus said: the timeline's page is centred on it.
+    selected: Rc<RefCell<Option<String>>>,
 }
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
@@ -94,6 +96,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         connected: Cell::new(false),
         closed: Rc::new(Cell::new(false)),
         watching: Cell::new(false),
+        selected: Rc::default(),
     })
 }
 
@@ -180,7 +183,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         if self.watching.replace(true) || (on_focus.is_none() && on_transport.is_none()) {
             return;
         }
-        let (endpoint, closed, daw) = (self.endpoint.clone(), self.closed.clone(), self.daw);
+        let (endpoint, closed, daw, selected) = (self.endpoint.clone(), self.closed.clone(), self.daw, self.selected.clone());
         let period = self.options.context.focus_interval_ms.unwrap_or(FOCUS_MS).max(50);
         tokio::task::spawn_local(async move {
             let (mut last, mut last_transport): (Option<Value>, Option<Value>) = (None, None);
@@ -200,6 +203,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                     }
                     continue;
                 };
+                *selected.borrow_mut() = focus.pointer("/selection/trackRef").and_then(Value::as_str).map(str::to_owned);
                 let seen = json!({"view": focus.get("view"), "selection": focus.get("selection"), "epoch": focus.get("epoch")});
                 if last.as_ref() != Some(&seen) {
                     if let Some(on_focus) = &on_focus {
@@ -319,9 +323,13 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         self.daw.bodies.contains(&kind)
     }
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
-        let Some(args) = (self.daw.body_request)(request).filter(|_| self.daw.bodies.contains(&request.kind())) else {
+        let Some(mut args) = (self.daw.body_request)(request).filter(|_| self.daw.bodies.contains(&request.kind())) else {
             return Ok(None);
         };
+        // The timeline's tracks around the one the producer works on, not the first of a big project's.
+        if let (BodyRequest::Timeline, Some(track)) = (request, self.selected.borrow().clone()) {
+            args.insert("around".into(), track.into());
+        }
         let args = Value::Object(args);
         Ok(match self.call("focus_body", args, signal).await? {
             Ok(body) => (self.daw.to_body)(request, &body),

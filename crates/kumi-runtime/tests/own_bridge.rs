@@ -272,7 +272,7 @@ async fn reapers_focus_is_read_while_focus_shows_and_its_bodies_come_neutral() {
                 false,
             ));
             let Some(FocusBody::Timeline(strip)) = reaper.focus_body(&BodyRequest::Timeline, Signal::new()).await.unwrap() else { panic!("the arrange view") };
-            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "arrange", "limit": 24}));
+            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "arrange", "limit": 24, "around": BASS}), "centred on the selected track");
             assert_eq!((strip.lanes.as_ref().map(Vec::len), strip.track_count), (Some(1), Some(200)));
             reaper.close().await.unwrap();
         })

@@ -124,6 +124,9 @@ async fn reapers_integration_reads_what_kumis_host_answers() {
                     "{request:?}: {body:?}"
                 );
             }
+            let arrange =
+                script.asked().into_iter().rev().find(|(method, params)| method == "focus_body" && params["kind"] == "arrange").unwrap();
+            assert_eq!(arrange.1["around"].as_str(), Some(track.as_str()), "the page is centred on the selected track");
             reaper.close().await.unwrap();
             simulator.stop();
         })
