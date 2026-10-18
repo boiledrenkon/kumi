@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::api::{self, Api};
 use crate::csurf::Call;
 use crate::queue::{self, Answer, Budget, Job};
-use crate::reaper::{PlayState, ProjectInfo, Reaper, ACTION_QUIT};
+use crate::reaper::{Busy, PlayState, ProjectInfo, Reaper, ACTION_QUIT};
 
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const HEARTBEAT: Duration = Duration::from_millis(1000);
@@ -30,7 +30,7 @@ pub struct Snapshot {
     pub project: Option<ProjectSummary>,
     pub last_tick: Option<Instant>,
     /// Loading, saving or rendering, as of the last tick.
-    pub busy: Option<String>,
+    pub busy: Option<Busy>,
     /// `status`'s fields read on the main thread: transport, track count, tick rates.
     pub status: Value,
 }
@@ -304,7 +304,7 @@ impl Extension {
         }
     }
 
-    fn refresh_snapshot(&self, busy: Option<&'static str>) {
+    fn refresh_snapshot(&self, busy: Option<Busy>) {
         let reaper = self.reaper();
         let project = reaper.current_project();
         let status = self.status(project.as_ref());
@@ -314,7 +314,7 @@ impl Extension {
             snapshot.resource = reaper.resource_path();
         }
         snapshot.project = project.map(|p| ProjectSummary { name: p.name, path: p.path });
-        snapshot.busy = busy.map(String::from);
+        snapshot.busy = busy;
         snapshot.status = status;
         snapshot.last_tick = Some(Instant::now());
     }
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(snapshot.status["api"], json!({"resolved": 20, "total": 877}));
         fake::with(|s| s.loading = true);
         extension.tick(Driver::Timer);
-        assert!(extension.snapshot().busy.unwrap().contains("loading"));
+        assert_eq!(extension.snapshot().busy, Some(Busy::Loading));
     }
 
     #[test]

@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use crate::extension::{Outbox, ProjectSummary, Snapshot, BRIDGE_VERSION};
 use crate::log;
 use crate::queue::{self, Job, Outcome};
+use crate::reaper::Busy;
 
 /// The reference file Kumi's lifecycle writes beside the extension.
 pub const REFERENCE_FILE: &str = "kumi-bridge-reference.json";
@@ -206,7 +207,8 @@ impl Server {
         }
     }
 
-    /// Says bye, closes every connection, removes the discovery file and waits for the threads.
+    /// Says bye (`quit`, `reload` or `shutdown`), closes every connection, removes the discovery file and waits for
+    /// the threads.
     pub fn stop(mut self, reason: &str) {
         self.stopping.store(true, Ordering::Release);
         // Wakes the blocking accept.
@@ -264,14 +266,12 @@ impl Shared {
     }
 
     /// Why the main thread can't take work now, if it can't.
-    fn busy(&self) -> Option<String> {
+    fn busy(&self) -> Option<Busy> {
         let snapshot = lock(&self.snapshot);
         match snapshot.last_tick {
-            Some(tick) if tick.elapsed() > STALL => {
-                Some("REAPER isn't answering: a dialog may be open, or it is loading or rendering".into())
-            }
-            None => Some("REAPER is starting".into()),
-            _ => snapshot.busy.clone(),
+            Some(tick) if tick.elapsed() > STALL => Some(snapshot.busy.unwrap_or(Busy::Modal)),
+            None => Some(Busy::Starting),
+            _ => snapshot.busy,
         }
     }
 
@@ -280,9 +280,9 @@ impl Shared {
         let snapshot = lock(&self.snapshot).clone();
         let mut status = serde_json::to_value(identity).unwrap_or_else(|_| json!({}));
         let busy = self.busy();
-        status["busy"] = busy.is_some().into();
-        if let Some(why) = busy {
-            status["busyReason"] = why.into();
+        status["busy"] = busy.map_or(Value::Bool(false), |b| b.code().into());
+        if let Some(busy) = busy {
+            status["busyReason"] = busy.reason().into();
         }
         status["lastTickMs"] = snapshot.last_tick.map(|t| t.elapsed().as_millis() as u64).into();
         status["connections"] = self.hub.connections().into();
@@ -320,7 +320,7 @@ impl Shared {
                 Frame::error(id, code::DEADLINE, "the deadline passed before REAPER got to it; nothing changed")
             }
             Outcome::Cancelled => {
-                let why = self.busy().unwrap_or_else(|| "REAPER didn't get to it in time".into());
+                let why = self.busy().map_or("REAPER didn't get to it in time", Busy::reason);
                 Frame::error(id, code::BUSY, format!("{why}; nothing changed"))
             }
             Outcome::Uncertain => {
@@ -656,7 +656,7 @@ mod tests {
         // No tick for a while: a dialog holds the main thread. Queued work is refused as busy, nothing changed.
         lab.snapshot.lock().unwrap().last_tick = Some(Instant::now() - Duration::from_secs(5));
         let status = request(&mut stream, &mut reader, 2, "status")["result"].clone();
-        assert_eq!(status["busy"], true);
+        assert_eq!(status["busy"], "modal");
         assert!(status["busyReason"].as_str().unwrap().contains("dialog"));
         let deadline = unix_ms() + 50;
         stream
@@ -685,8 +685,8 @@ mod tests {
         assert_eq!(found[0].discovery.as_ref().unwrap().project, Some(Project::default()));
 
         let (_stream, mut reader, _) = lab.authenticated();
-        lab.server.take().unwrap().stop("REAPER is quitting");
-        assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "REAPER is quitting"}));
+        lab.server.take().unwrap().stop("quit");
+        assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
         assert_eq!(read_line(&mut reader), None);
         assert!(files::scan_discovery(&dir, Daw::Reaper).is_empty());
     }

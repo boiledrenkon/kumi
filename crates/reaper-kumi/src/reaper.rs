@@ -39,6 +39,36 @@ pub struct ProjectInfo {
     pub name: String,
 }
 
+/// Why REAPER can't take work: `status`'s `busy`, and the reason given with a busy error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Busy {
+    Loading,
+    Rendering,
+    /// The main thread stopped ticking: a modal dialog, or a long load or render.
+    Modal,
+    Starting,
+}
+
+impl Busy {
+    pub fn code(self) -> &'static str {
+        match self {
+            Busy::Loading => "loading",
+            Busy::Rendering => "rendering",
+            Busy::Modal => "modal",
+            Busy::Starting => "starting",
+        }
+    }
+
+    pub fn reason(self) -> &'static str {
+        match self {
+            Busy::Loading => "REAPER is loading or saving a project",
+            Busy::Rendering => "REAPER is rendering",
+            Busy::Modal => "REAPER isn't answering: a dialog may be open",
+            Busy::Starting => "REAPER is starting",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PlayState {
     pub playing: bool,
@@ -111,13 +141,14 @@ impl<'a> Reaper<'a> {
         }
     }
 
-    /// Whether a project is loading or saving, or one is rendering: no edits then.
-    pub fn busy(&self) -> Option<&'static str> {
+    /// Whether a project is loading or saving, or one is rendering: no edits then. REAPER reports loading and saving
+    /// as one state, so both read as `loading`.
+    pub fn busy(&self) -> Option<Busy> {
         if self.api.GetCurrentProjectInLoadSave().is_some_and(|f| !unsafe { f() }.is_null()) {
-            return Some("REAPER is loading or saving a project");
+            return Some(Busy::Loading);
         }
         if self.api.EnumProjects().is_some_and(|f| !unsafe { f(0x4000_0000, ptr::null_mut(), 0) }.is_null()) {
-            return Some("REAPER is rendering");
+            return Some(Busy::Rendering);
         }
         None
     }
@@ -430,7 +461,7 @@ mod tests {
         assert_eq!(reaper.track_json(selected[0]), json!({"index": 2, "guid": "{BBBB}", "name": "Bass"}));
         assert_eq!(reaper.busy(), None);
         fake::with(|s| s.loading = true);
-        assert!(reaper.busy().is_some());
+        assert_eq!(reaper.busy(), Some(Busy::Loading));
     }
 
     #[test]

@@ -158,7 +158,7 @@ fn on_surface(call: Call) -> i32 {
 extern "C" fn on_exit() {
     guard("atexit", (), || {
         if let Some(loaded) = loaded() {
-            loaded.stop("REAPER is quitting");
+            loaded.stop("quit");
         }
     })
 }
@@ -202,7 +202,7 @@ fn load(info: &PluginInfo) -> c_int {
 
 fn unload() {
     if let Some(loaded) = LOADED.with(|l| l.borrow_mut().take()) {
-        loaded.stop("REAPER unloaded the extension");
+        loaded.stop("shutdown");
     }
 }
 
