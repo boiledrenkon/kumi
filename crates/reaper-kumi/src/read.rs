@@ -1601,4 +1601,40 @@ mod tests {
             assert!(kinds.contains(kind), "no {kind} ref walked: {kinds:?}");
         }
     }
+
+    /// REAPER stores a colour even when it isn't used: only the 0x1000000 flag says it is. Without it a track is the default
+    /// colour (null), never black.
+    #[test]
+    fn a_colour_counts_only_with_reapers_set_flag_so_default_tracks_are_not_black() {
+        let lab = Lab::new();
+        fake::with(|s| {
+            s.tracks[0].color = 0; // no custom colour
+            s.tracks[1].color = fake::native_color(0, 0, 0); // a custom colour that is black
+            s.tracks[2].color = 0x0000FF; // a colour kept but not used (no flag)
+            s.tracks[3].color = fake::native_color(255, 0, 0);
+            s.tracks[1].items[0].color = 0;
+            s.tracks[1].items[1].color = fake::native_color(0, 255, 0);
+            s.tracks[2].items[0].color = 0x00FF00; // kept, not used
+            s.markers[0].color = 0x0000FF; // kept, not used
+            s.markers[1].color = fake::native_color(0, 0, 0);
+        });
+        let colours = |rows: Vec<Value>| rows.iter().map(|r| r["color"].clone()).collect::<Vec<_>>();
+        let tracks = lab.rows(json!({"kind": "track"}));
+        assert_eq!(colours(tracks[1..].to_vec()), [Value::Null, json!("#000000"), Value::Null, json!("#ff0000")]);
+        assert_eq!(colours(lab.rows(json!({"kind": "item", "parent": "r:track:{BBBB}"}))), [Value::Null, json!("#00ff00")]);
+        assert_eq!(colours(lab.rows(json!({"kind": "item", "parent": "r:track:{CCCC}"}))), [Value::Null]);
+        assert_eq!(colours(lab.rows(json!({"kind": "marker"}))), [Value::Null]);
+        assert_eq!(colours(lab.rows(json!({"kind": "region"}))), [json!("#000000")]);
+        // The same in what FOCUS draws: the selection's header and the arrange window.
+        fake::select_tracks(&[0]);
+        let api = fake::api();
+        let reaper = Reaper::new(&api);
+        let snapshot = lab.reads.snapshot(&reaper).unwrap();
+        assert_eq!(snapshot["selection"]["track"]["color"], Value::Null);
+        fake::select_tracks(&[1]);
+        assert_eq!(lab.reads.snapshot(&reaper).unwrap()["selection"]["track"]["color"], "#000000");
+        let arrange = lab.reads.focus_body(&reaper, &json!({"kind": "arrange"})).unwrap();
+        assert_eq!(colours(arrange["tracks"].as_array().unwrap().clone()), [Value::Null, json!("#000000"), Value::Null, json!("#ff0000")]);
+        assert_eq!(colours(arrange["tracks"][1]["items"].as_array().unwrap().clone()), [Value::Null, json!("#00ff00")]);
+    }
 }
