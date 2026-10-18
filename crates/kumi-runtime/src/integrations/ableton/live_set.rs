@@ -10,8 +10,8 @@ use std::io::Read;
 
 use flate2::read::MultiGzDecoder;
 
-use super::xml::{self, Element};
-use super::FormatError;
+use crate::plugins::formats::xml::{self, Element};
+use crate::plugins::formats::FormatError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginFormat {

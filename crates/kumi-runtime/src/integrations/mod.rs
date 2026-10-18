@@ -11,6 +11,7 @@ use crate::core::view::ViewPresentation;
 
 pub use ableton::devices as live_devices;
 pub use ableton::focus::parse_focus;
+pub use ableton::live_set;
 pub use ableton::manual as live_manual;
 pub use ableton::project::{create_project_store, Baseline, ProjectStore};
 pub use ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
