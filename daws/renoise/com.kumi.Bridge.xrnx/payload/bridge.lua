@@ -99,7 +99,7 @@ local function write_discovery()
     protocol = wire.PROTOCOL,
     version = VERSION,
     dawVersion = renoise.RENOISE_VERSION,
-    resource = resource,
+    resource = status.resource_text(host.bundle_path),
     project = status.project(b.memory),
     startedMs = b.started_ms,
   })

@@ -50,6 +50,12 @@ function M.resource(bundle_path)
   return bundle_path:match("^(.*)[/\\]Scripts[/\\]Tools[/\\][^/\\]+[/\\]?$") or bundle_path
 end
 
+-- The resource folder as the wire carries it: a path is long on Windows (extended paths run to 32,767 characters), so it is cut
+-- like a title. (The discovery file's name is made from the whole path.)
+function M.resource_text(bundle_path)
+  return M.cap(M.resource(bundle_path), M.MAX_PATH_CHARS)
+end
+
 -- Song ids: 32 hex in song.tool_data, which Renoise saves with the song under this tool's Id.
 local function stored_id(song)
   local data = song.tool_data
@@ -99,6 +105,8 @@ end
 -- A song's title is whatever the user typed, and hosts skip a discovery file over 64 KiB: the title in every project row
 -- (the discovery file, the welcome, status, events) is cut to this many characters, and ends in "…" when it was.
 M.MAX_TITLE_CHARS = 256
+-- The same for the song's path and the resource folder, which are longer for good reason.
+M.MAX_PATH_CHARS = 1024
 
 function M.cap(text, max)
   max = max or M.MAX_TITLE_CHARS
@@ -121,7 +129,7 @@ function M.project(memory)
   local title = M.cap(song.name or "")
   local project = { id = M.song_id(memory, song) }
   if path ~= "" then
-    project.path = path
+    project.path = M.cap(path, M.MAX_PATH_CHARS)
     project.name = M.cap(file_name(path))
   elseif title ~= "" then
     project.name = title
@@ -137,7 +145,7 @@ function M.identity(memory, bundle_path)
     bridge = VERSION,
     dawVersion = renoise.RENOISE_VERSION,
     pid = M.pid() or 0,
-    resource = M.resource(bundle_path),
+    resource = M.resource_text(bundle_path),
     project = M.project(memory),
     demo = M.demo(),
     apiVersion = renoise.API_VERSION,

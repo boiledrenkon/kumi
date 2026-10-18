@@ -1418,6 +1418,22 @@ test("bridge: a huge song title is cut to 256 characters in the discovery file, 
   no_dialogs()
 end)
 
+test("bridge: a huge song path or resource folder is cut too, so the discovery file stays small", function()
+  local path = "/music/" .. string.rep("\230\151\165", 40000) .. ".xrns" -- 120 KB of CJK
+  local env = setup({ song = { name = "", file_name = path } })
+  local peer, welcome = connect(env)
+  eq(#welcome.project.path, 7 + 1017 * 3 + 3, "the path is cut to 1,024 characters and an ellipsis")
+  ok(welcome.project.path:sub(-3) == "\226\128\166")
+  local discovery_text = read(env.discovery_file())
+  ok(#discovery_text < 8192, "discovery file: " .. #discovery_text .. " bytes")
+  local status = T.load_payload_module("status")
+  local resource = "C:\\Users\\x\\" .. string.rep("\230\151\165", 40000) .. "\\Renoise\\V3.5.4"
+  local cut = status.resource_text(resource .. "\\Scripts\\Tools\\com.kumi.Bridge.xrnx\\")
+  eq(#cut, 11 + 1013 * 3 + 3, "the resource folder too")
+  eq(status.resource_text("/Users/a/Renoise/V3.5.4/Scripts/Tools/com.kumi.Bridge.xrnx/"), "/Users/a/Renoise/V3.5.4", "a normal one is as it was")
+  no_dialogs()
+end)
+
 test("bridge: a cut title never splits a character", function()
   local status = T.load_payload_module("status")
   local json_ = T.load_payload_module("json")
