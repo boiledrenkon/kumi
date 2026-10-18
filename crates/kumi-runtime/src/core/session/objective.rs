@@ -430,7 +430,8 @@ impl Session {
             if pending.as_deref() != Some(words) {
                 self.0.state.borrow_mut().pending_goal = Some(words.to_owned());
                 return Ok(GoalCommand::Say(format!(
-                    "This Set has an unfinished goal: “{}” ({} turn{} so far). Send the same /goal again, or /goal new: and the words, to replace it; /goal resume carries it on.",
+                    "This {} has an unfinished goal: “{}” ({} turn{} so far). Send the same /goal again, or /goal new: and the words, to replace it; /goal resume carries it on.",
+                    self.0.options.profile.words.place,
                     kept.objective,
                     kept.turns,
                     if kept.turns == 1 { "" } else { "s" }

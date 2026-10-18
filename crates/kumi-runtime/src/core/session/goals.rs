@@ -144,10 +144,14 @@ impl Session {
     }
     pub(super) async fn run_goal(&self, op: Rc<Operation>, text: Option<String>) -> Result<Option<TurnResult>, RuntimeError> {
         let _hold = GoalHold::begin(self, &op);
-        let integration =
-            self.0.state.borrow().integration.clone().filter(|i| i.has_goal()).ok_or_else(|| {
-                KumiError::new(FailureKind::Request, "Goals need Live connected, with the Ableton bridge 1.0.49 or later.")
-            })?;
+        let integration = self
+            .0
+            .state
+            .borrow()
+            .integration
+            .clone()
+            .filter(|i| i.has_goal())
+            .ok_or_else(|| KumiError::new(FailureKind::Request, self.0.options.profile.vocab.goal_needs))?;
         // The Set this goal belongs to: it's picked up from, and saved under, this place.
         let place = self.goal_where();
         let mut state = if text.is_some() { None } else { self.goal_kept(&place).filter(|s| s.status == GoalRun::Paused) };
@@ -223,7 +227,7 @@ impl Session {
                     status.clone()
                 };
                 self.emit(status.into());
-                self.notice("A sound-match search needs something to reach: with no reference, Kumi did this as a regular request. To search, give /loop a reference too (an audio file, a clip in the Set, or a video).");
+                self.notice(format!("A sound-match search needs something to reach: with no reference, Kumi did this as a regular request. To search, give /loop a reference too (an audio file, a clip in the {}, or a video).", self.0.options.profile.words.place));
                 return Ok(Some(TurnResult { stop_reason: StopReason::Completed, usage: Some(usage) }));
             }
             let heard = heard.unwrap();
@@ -459,11 +463,7 @@ impl Session {
         let leader = reported(&evolution, &full, screening);
         let mut notes = closed_notes;
         if open {
-            notes.extend(
-                rig.close()
-                    .await
-                    .unwrap_or_else(|_| vec!["Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand.".into()]),
-            );
+            notes.extend(rig.close().await.unwrap_or_else(|_| vec![self.0.options.profile.vocab.render_leftovers.into()]));
         }
         if state.status == GoalRun::Done {
             let mut ranked = evolution.slots.iter().filter(|s| s.score.is_some()).collect::<Vec<_>>();

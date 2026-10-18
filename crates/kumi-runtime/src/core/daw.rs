@@ -44,6 +44,16 @@ pub struct PromptVocab {
     pub keep_candidates: &'static str,
     /// A layered sound inside one device container: "a rack of layers".
     pub layers: &'static str,
+    /// What Kumi says when the DAW stays out of reach: how to let Kumi in.
+    pub cant_reach: &'static str,
+    /// What a crash may have cost, and how the DAW gives it back.
+    pub crash_note: &'static str,
+    /// What a sound-match goal needs from the DAW when it isn't there.
+    pub goal_needs: &'static str,
+    /// What to clean up by hand when Kumi couldn't remove what it rendered with.
+    pub render_leftovers: &'static str,
+    /// The device that ends a kept sound's chain for safety: "a Limiter".
+    pub safety_limiter: &'static str,
 }
 
 /// Live's word for each field of a profile's words and vocabulary: the one place they're spelled, so a text
@@ -87,6 +97,21 @@ macro_rules! live_word {
     (layers) => {
         "a rack of layers"
     };
+    (cant_reach) => {
+        "Kumi can't reach Live. Is it open, with AbletonMcpBridge chosen as a Control Surface (Settings → Link, Tempo & MIDI)?"
+    };
+    (crash_note) => {
+        "If it crashed, your unsaved changes may be lost: Live offers to recover them when it opens."
+    };
+    (goal_needs) => {
+        "Goals need Live connected, with the Ableton bridge 1.0.49 or later."
+    };
+    (render_leftovers) => {
+        "Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand."
+    };
+    (safety_limiter) => {
+        "a Limiter"
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -128,6 +153,21 @@ macro_rules! daw_word {
     };
     ($profile:expr, layers) => {
         $profile.vocab.layers
+    };
+    ($profile:expr, cant_reach) => {
+        $profile.vocab.cant_reach
+    };
+    ($profile:expr, crash_note) => {
+        $profile.vocab.crash_note
+    };
+    ($profile:expr, goal_needs) => {
+        $profile.vocab.goal_needs
+    };
+    ($profile:expr, render_leftovers) => {
+        $profile.vocab.render_leftovers
+    };
+    ($profile:expr, safety_limiter) => {
+        $profile.vocab.safety_limiter
     };
 }
 
@@ -247,6 +287,11 @@ impl DawProfile {
             build_chains: "add parallel chains, load devices into them",
             keep_candidates: "don't undo them: the producer may want to A/B them",
             layers: "layered parallel chains",
+            cant_reach: "Kumi can't reach the DAW. Is it open, with Kumi's bridge in it?",
+            crash_note: "If it crashed, your unsaved changes may be lost.",
+            goal_needs: "Goals need the DAW connected, with Kumi's bridge.",
+            render_leftovers: "Kumi couldn't clean up after rendering; remove what it left in the project by hand.",
+            safety_limiter: "a limiter",
         },
     };
 
@@ -294,6 +339,11 @@ impl DawProfile {
             build_chains: crate::live_word!(build_chains),
             keep_candidates: crate::live_word!(keep_candidates),
             layers: crate::live_word!(layers),
+            cant_reach: crate::live_word!(cant_reach),
+            crash_note: crate::live_word!(crash_note),
+            goal_needs: crate::live_word!(goal_needs),
+            render_leftovers: crate::live_word!(render_leftovers),
+            safety_limiter: crate::live_word!(safety_limiter),
         },
     };
 

@@ -474,7 +474,7 @@ impl Session {
             let mut notes = rig
                 .close()
                 .await
-                .unwrap_or_else(|_| vec!["Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand.".into()]);
+                .unwrap_or_else(|_| vec![self.0.options.profile.vocab.render_leftovers.into()]);
 
             let (final_knobs, final_values) = kept.as_ref().map(|(k, v)| (k.as_slice(), v.as_slice())).unwrap_or((&knobs, &start));
 
@@ -519,7 +519,7 @@ impl Session {
                 })
                 .collect();
 
-            Ok(Some(format!("[Kumi] {heard}: {}% → {}% at full length, kept on the track (and a Limiter ends its chain for safety). The knobs it moved: {}{}. Use these values if you rebuild it elsewhere.{notes}", to_string(round(from)), to_string(round(to.unwrap())), changed.iter().take(30).cloned().collect::<Vec<_>>().join("; "), if changed.len()>30 {
+            Ok(Some(format!("[Kumi] {heard}: {}% → {}% at full length, kept on the track (and {} ends its chain for safety). The knobs it moved: {}{}. Use these values if you rebuild it elsewhere.{notes}", to_string(round(from)), to_string(round(to.unwrap())), self.0.options.profile.vocab.safety_limiter, changed.iter().take(30).cloned().collect::<Vec<_>>().join("; "), if changed.len()>30 {
          format!("; and {} more",changed.len()-30)
         } else {
          String::new()
