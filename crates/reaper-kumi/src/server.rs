@@ -41,6 +41,8 @@ const STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// A failed attempt to write the discovery file is tried again after this, not on every tick.
 const DISCOVERY_RETRY: Duration = Duration::from_secs(5);
+/// How often the accept loop looks for a connection, and at whether the server is stopping.
+const ACCEPT_POLL: Duration = Duration::from_millis(10);
 /// The accept loop waits this long after a failed accept (out of file descriptors, say) rather than spin.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
@@ -314,10 +316,14 @@ impl Server {
         if let Some((path, _)) = self.discovery.take() {
             let _ = std::fs::remove_file(path);
         }
-        // Wakes the blocking accept.
-        let _ = TcpStream::connect_timeout(&(loopback::BIND_ADDRESS, self.port).into(), Duration::from_millis(200));
         if let Some(accept) = self.accept.take() {
-            let _ = accept.join();
+            // It looks at `stopping` every few milliseconds. A wait with an end, not a join without one.
+            wait_until(|| accept.is_finished());
+            if accept.is_finished() {
+                let _ = accept.join();
+            } else {
+                log::line("the accept thread didn't stop; leaving it");
+            }
         }
         let spawned = std::mem::take(&mut *lock(&self.threads));
         for conn in std::mem::take(&mut *lock(&self.hub.inner.conns)) {
@@ -465,15 +471,27 @@ impl Shared {
 fn accept_loop(listener: TcpListener, shared: Arc<Shared>, threads: Arc<Mutex<Vec<Spawned>>>) {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let started = Instant::now();
-    for stream in listener.incoming() {
+    // Polled, not blocked in accept: stopping looks at the flag, and doesn't depend on a connection arriving (or being
+    // made, and getting through) to wake the thread.
+    let _ = listener.set_nonblocking(true);
+    loop {
         if shared.stopping.load(Ordering::Acquire) {
             break;
         }
-        let Ok(mut stream) = stream else {
-            // Out of descriptors, say: retrying at once would spin a core.
-            thread::sleep(ACCEPT_BACKOFF);
-            continue;
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(ACCEPT_POLL);
+                continue;
+            }
+            Err(_) => {
+                // Out of descriptors, say: retrying at once would spin a core.
+                thread::sleep(ACCEPT_BACKOFF);
+                continue;
+            }
         };
+        // (What a non-blocking listener accepts may be non-blocking itself.)
+        let _ = stream.set_nonblocking(false);
         let Ok(peer) = stream.peer_addr() else { continue };
         if !loopback::peer_allowed(&peer) {
             continue;
@@ -985,6 +1003,22 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3), "stop took {:?}", started.elapsed());
         assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
         drop(held);
+    }
+
+    #[test]
+    fn the_accept_thread_ends_by_itself_once_stopping_with_no_connection_to_wake_it() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let port = lab.server().port();
+        let mut server = lab.server.take().unwrap();
+        let closing = server.begin_stop();
+        let until = Instant::now() + Duration::from_secs(2);
+        while !server.accept.as_ref().unwrap().is_finished() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(server.accept.as_ref().unwrap().is_finished(), "the accept thread is still waiting for a connection");
+        server.finish_stop(closing, "quit");
+        // And its port is free: nothing listens any more.
+        assert!(TcpStream::connect((loopback::BIND_ADDRESS, port)).is_err());
     }
 
     #[test]
