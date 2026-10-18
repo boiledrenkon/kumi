@@ -291,6 +291,7 @@ impl Extension {
             "quit" => self.quit(params),
             "read" => self.reads.read(&self.reaper(), params),
             "snapshot" => self.reads.snapshot(&self.reaper()),
+            "focus_body" => self.reads.focus_body(&self.reaper(), params),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),
         }
     }
@@ -619,6 +620,12 @@ mod tests {
         assert_eq!(snapshot["tracks"].as_array().unwrap().len(), 5);
         assert_eq!(snapshot["epoch"], read["epoch"]);
         assert_eq!(ask_with(&extension, &tx, "read", json!({})).unwrap_err().0, "bad-params");
+        let body = ask_with(&extension, &tx, "focus_body", json!({"kind": "routing", "ref": "r:track:{AAAA}"})).unwrap();
+        assert_eq!(
+            (&body["kind"], &body["epoch"], &body["sends"][0]["destRef"]),
+            (&json!("routing"), &read["epoch"], &json!("r:track:{DDDD}"))
+        );
+        assert_eq!(ask_with(&extension, &tx, "focus_body", json!({"kind": "mixer"})).unwrap_err().0, "bad-params");
     }
 
     fn focus_of(extension: &Extension) -> Value {

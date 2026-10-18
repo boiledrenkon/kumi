@@ -14,6 +14,10 @@ use crate::reaper::{Envelope, Fx, FxOwner, Item, Project, Reaper, Take, Track, I
 use crate::refs::{self, EnvelopeId, Epoch, Ref, Registry, TrackId};
 use crate::rows;
 
+mod bodies;
+
+pub use bodies::BODY_KINDS;
+
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 200;
 /// The most one answer carries. The bridge's frame bound is 256 KiB; the rest is the envelope around the rows.

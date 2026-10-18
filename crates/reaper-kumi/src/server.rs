@@ -54,7 +54,7 @@ const CLOSING: &str = "REAPER is closing; nothing changed";
 
 /// Methods served off the main thread: they answer even while REAPER shows a dialog.
 const SOCKET_METHODS: [&str; 3] = ["ping", "status", "focus"];
-const MAIN_METHODS: [&str; 4] = ["action", "quit", "read", "snapshot"];
+const MAIN_METHODS: [&str; 5] = ["action", "quit", "read", "snapshot", "focus_body"];
 const EVENTS: [&str; 4] = [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION];
 
 /// Where the reference file lives for a resource folder.
@@ -903,7 +903,7 @@ mod tests {
         let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
         let (mut stream, mut reader, welcome) = lab.authenticated();
         let methods: Vec<&str> = welcome["methods"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-        assert!(["read", "snapshot"].iter().all(|m| methods.contains(m)), "{methods:?}");
+        assert!(["read", "snapshot", "focus_body"].iter().all(|m| methods.contains(m)), "{methods:?}");
         let jobs = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
         let main = thread::spawn(move || {
             for _ in 0..2 {
