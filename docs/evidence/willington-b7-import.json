@@ -1193,7 +1193,8 @@
     "No Rust host/MCP history end-to-end claim.",
     "Windows remains b5-only; no Windows b7 runtime claim.",
     "Single-step mapping undo passes Live.Base.Timer and Max LiveAPI; a control-surface update callback can add an extra Custom Action undo entry.",
-    "CI-bundle engine audio was not remeasured; upstream engine coverage was obtained with the locally compiled libraries."
+    "CI-bundle engine audio was not remeasured; upstream engine coverage was obtained with the locally compiled libraries.",
+    "The official rebuild changes the Windows b5 DeviceTools binary and its digest despite unchanged native/shared-source and profile hashes. That binary was not runtime-tested on this Mac; the import retains the exact official artifact."
   ],
   "superseded_setup_attempts": [
     {
