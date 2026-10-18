@@ -38,7 +38,6 @@ pub async fn remembered_folders(dir: &str) -> Vec<String> {
 }
 /// Only the record's first 2048 bytes are read, matching the bounded source lookup.
 pub async fn kumi_sets(projects_dir: Option<&str>) -> Vec<String> {
-    static ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{32}$").unwrap());
     static PATH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""path":"((?:[^"\\]|\\.)*)""#).unwrap());
     let Some(dir) = projects_dir.filter(|s| !s.is_empty()) else { return vec![] };
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return vec![] };
@@ -49,7 +48,7 @@ pub async fn kumi_sets(projects_dir: Option<&str>) -> Vec<String> {
     // Node's readdir (unlike opendir) returns names in lexical order.
     names.sort();
     let mut found = vec![];
-    for name in names.into_iter().filter(|name| ID.is_match(name)) {
+    for name in names.into_iter().filter(|name| crate::core::place::is_project_id(name)) {
         let Ok(mut handle) = tokio::fs::File::open(join(&join(dir, &name), "last-seen.json")).await else { continue };
         let mut buffer = [0; 2048];
         let Ok(bytes) = handle.read(&mut buffer).await else { continue };

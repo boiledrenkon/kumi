@@ -576,6 +576,11 @@ pub trait ConversationStore {
     async fn list(&self, place: &str) -> Result<Vec<ConversationSummary>, RuntimeError>;
     /// A conversation moves with its Set (an unsaved Set's, when the Set is first saved).
     async fn move_conversation(&self, id: &str, from: &str, to: &str) -> Result<(), RuntimeError>;
+    /// What a saved place is called, by the DAW it's in: kept beside its conversations, so a list can name it.
+    async fn note_place(&self, place: &str, daw: DawId, name: &str) -> Result<(), RuntimeError> {
+        let _ = (place, daw, name);
+        Ok(())
+    }
     /// Exchanges in every place's kept conversations that hold at least `needed` of `words`
     /// (lowercase), most words first, then newest; at most `limit`. `skip` (place, id) is left out:
     /// the conversation going on now.

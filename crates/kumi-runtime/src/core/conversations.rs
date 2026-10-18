@@ -4,6 +4,8 @@
 //! conversation. `conversation-index.json` lists every place's conversations, to find one by its id or name: it's
 //! read again from the files wherever they changed, and made again from them when it's gone.
 
+use super::daw::DawId;
+use super::place::{Place, Places};
 use crate::{
     core::{
         contracts::{
@@ -107,8 +109,17 @@ pub fn new_conversation_id(at: i64) -> String {
     format!("{}{}", digits.into_iter().rev().collect::<String>(), hex::encode(bytes))
 }
 /// Where `kumi import` keeps conversations from files: made on another computer, they carry on in a copy.
-pub const IMPORTED: &str = "imported";
-static PLACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([0-9a-f]{32}|unsaved|imported)$").unwrap());
+pub use super::place::IMPORTED;
+/// What a place is called, kept beside its conversations (its DAW's baseline is its DAW's own).
+const PLACE_FILE: &str = "place.json";
+/// `place.json`: the place's name, and its DAW when it isn't Live.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PlaceFile {
+    version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daw: Option<DawId>,
+    name: String,
+}
 static CONVERSATION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-z]{6,24}$").unwrap());
 /// The Set's name in a baseline file: its first key `name`, which comes before the pages.
 static BASELINE_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"[{,]"name":("(?:[^"\\]|\\.)*")"#).unwrap());
@@ -125,6 +136,8 @@ pub(crate) async fn modified_ms(path: &Path) -> f64 {
 }
 pub struct FileConversationStore {
     directory: PathBuf,
+    /// The DAWs whose places it keeps conversations in.
+    places: Places,
     /// The days settings say to keep conversations past each place's 20 newest; None when they don't say.
     keep_days: Option<u32>,
     /// The conversations this Kumi has open (place, id), and how it holds each: another Kumi asking for one carries on in
@@ -148,9 +161,14 @@ pub fn create_conversation_store(directory: impl Into<PathBuf>) -> Rc<FileConver
 /// A store that keeps conversations `keep_days` after they were last used (0: every one, however old), as settings say.
 /// None when they don't: as they said last, and 90 days at least.
 pub fn create_conversation_store_keeping(directory: impl Into<PathBuf>, keep_days: Option<u32>) -> Rc<FileConversationStore> {
+    create_conversation_store_in(directory, keep_days, Places::LIVE)
+}
+/// `create_conversation_store_keeping`, taking the places of these DAWs (Live's and the others this Kumi integrates).
+pub fn create_conversation_store_in(directory: impl Into<PathBuf>, keep_days: Option<u32>, places: Places) -> Rc<FileConversationStore> {
     Rc::new(FileConversationStore {
         directory: directory.into(),
         keep_days,
+        places,
         held: RefCell::default(),
         file_locks: Cell::new(true),
         looking: tokio::sync::Mutex::new(()),
@@ -383,7 +401,7 @@ fn stamp_of(metadata: &std::fs::Metadata) -> u64 {
 }
 impl FileConversationStore {
     fn folder(&self, place: &str) -> Result<PathBuf, RuntimeError> {
-        if !PLACE.is_match(place) {
+        if self.places.parse(place).is_none() {
             return Err(error("invalid place"));
         }
         Ok(self.directory.join(place))
@@ -449,10 +467,16 @@ impl FileConversationStore {
         names.sort();
         names
     }
-    /// A saved Set's name, read from the start of its baseline (the pages after it can be megabytes).
+    /// A saved place's name: as `note_place` kept it, else (a Set from before) read from the start of Live's baseline
+    /// (the pages after it can be megabytes).
     async fn set_name(&self, place: &str) -> Option<String> {
-        if place == "unsaved" {
+        if matches!(self.places.parse(place), Some(Place::Unsaved(_)) | None) {
             return None;
+        }
+        if let Ok(text) = tokio::fs::read_to_string(self.folder(place).ok()?.join(PLACE_FILE)).await {
+            if let Some(name) = serde_json::from_str::<PlaceFile>(&text).ok().map(|file| file.name).filter(|name| !trim(name).is_empty()) {
+                return Some(name);
+            }
         }
         let file = tokio::fs::File::open(self.folder(place).ok()?.join("last-seen.json")).await.ok()?;
         let mut start = Vec::with_capacity(16 * 1024);
@@ -516,7 +540,7 @@ impl FileConversationStore {
         let mut places = tokio::fs::read_dir(&self.directory).await.ok()?;
         while let Ok(Some(entry)) = places.next_entry().await {
             let other = entry.file_name().to_string_lossy().into_owned();
-            if other == place || !PLACE.is_match(&other) {
+            if other == place || self.places.parse(&other).is_none() {
                 continue;
             }
             let kept = entry.path().join("conversations");
@@ -592,7 +616,7 @@ impl FileConversationStore {
         let mut found = BTreeMap::new();
         let Ok(mut places) = tokio::fs::read_dir(&self.directory).await else { return found };
         while let Ok(Some(place)) = places.next_entry().await {
-            let Some(place) = place.file_name().to_str().filter(|p| PLACE.is_match(p)).map(str::to_owned) else { continue };
+            let Some(place) = place.file_name().to_str().filter(|p| self.places.parse(p).is_some()).map(str::to_owned) else { continue };
             let Ok(kept) = self.kept(&place) else { continue };
             let Ok(mut dir) = tokio::fs::read_dir(&kept).await else { continue };
             let mut metas = HashMap::new();
@@ -880,6 +904,19 @@ impl ConversationStore for FileConversationStore {
         }
         Ok(())
     }
+    async fn note_place(&self, place: &str, daw: DawId, name: &str) -> Result<(), RuntimeError> {
+        if !matches!(self.places.parse(place), Some(Place::Saved { .. })) || trim(name).is_empty() {
+            return Ok(());
+        }
+        let folder = self.folder(place)?;
+        let kept = PlaceFile { version: 1, daw: (daw != DawId::Ableton).then_some(daw), name: name.into() };
+        let had =
+            tokio::fs::read_to_string(folder.join(PLACE_FILE)).await.ok().and_then(|text| serde_json::from_str::<PlaceFile>(&text).ok());
+        if had.as_ref() == Some(&kept) {
+            return Ok(());
+        }
+        write_privately(&folder, PLACE_FILE, &stringify(&serde_json::to_value(&kept).map_err(error)?)).await
+    }
     async fn move_conversation(&self, id: &str, from: &str, to: &str) -> Result<(), RuntimeError> {
         let file = self.file(from, id)?;
         self.file(to, id)?;
@@ -916,7 +953,9 @@ impl ConversationStore for FileConversationStore {
         let mut files = vec![];
         if let Ok(mut places) = tokio::fs::read_dir(&self.directory).await {
             while let Ok(Some(entry)) = places.next_entry().await {
-                let Some(place) = entry.file_name().to_str().filter(|p| PLACE.is_match(p)).map(str::to_owned) else { continue };
+                let Some(place) = entry.file_name().to_str().filter(|p| self.places.parse(p).is_some()).map(str::to_owned) else {
+                    continue;
+                };
                 for name in self.names(&place).await {
                     let path = self.kept(&place)?.join(&name);
                     let at = modified_ms(&path).await;

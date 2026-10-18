@@ -6,6 +6,7 @@ use super::{
         ToolResult,
     },
     errors::RuntimeError,
+    place::Places,
 };
 use async_trait::async_trait;
 use kumi_common::{
@@ -27,7 +28,6 @@ pub const MAX_NOTES: usize = 24;
 pub const MAX_NOTE: usize = 240;
 pub const REMEMBER_TOOL: &str = "remember";
 pub const FORGET_TOOL: &str = "forget";
-static PROJECT_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{32}$").unwrap());
 static SPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\s\u{feff}]+").unwrap());
 static SUSPECT: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
@@ -68,16 +68,22 @@ pub struct MemoryStoreOptions {
 }
 pub struct FileMemoryStore {
     options: MemoryStoreOptions,
+    /// The DAWs whose saved projects it keeps notes about.
+    places: Places,
 }
 pub fn create_memory_store(options: MemoryStoreOptions) -> Rc<FileMemoryStore> {
-    Rc::new(FileMemoryStore { options })
+    create_memory_store_in(options, Places::LIVE)
+}
+/// `create_memory_store`, keeping notes about these DAWs' saved projects.
+pub fn create_memory_store_in(options: MemoryStoreOptions, places: Places) -> Rc<FileMemoryStore> {
+    Rc::new(FileMemoryStore { options, places })
 }
 impl FileMemoryStore {
     fn file_of(&self, scope: MemoryScope, project: Option<&str>) -> Result<PathBuf, RuntimeError> {
         if scope == MemoryScope::Producer {
             return Ok(self.options.producer_file.clone());
         }
-        let project = project.filter(|p| PROJECT_ID.is_match(p)).ok_or_else(|| RuntimeError::plain("invalid project id"))?;
+        let project = project.filter(|p| self.places.is_project(p)).ok_or_else(|| RuntimeError::plain("invalid project id"))?;
         Ok(self.options.projects_dir.join(project).join("memory.json"))
     }
     /// The notes in a file; none when there's no file. A file that couldn't be read is an error, so a change isn't
@@ -180,7 +186,7 @@ pub(crate) fn add_in(notes: &mut Vec<MemoryNote>, scope: MemoryScope, texts: &[S
 impl MemoryStore for FileMemoryStore {
     async fn load(&self, project: Option<&str>) -> Result<Memory, RuntimeError> {
         let producer = Self::read(&self.options.producer_file, 'p').await?;
-        let set = match project.filter(|p| PROJECT_ID.is_match(p)) {
+        let set = match project.filter(|p| self.places.is_project(p)) {
             Some(project) => Self::read(&self.file_of(MemoryScope::Set, Some(project))?, 's').await?,
             None => vec![],
         };

@@ -523,7 +523,7 @@ impl Session {
 
     /// Where this Set's jobs are kept between sessions.
     fn jobs_place(&self) -> String {
-        self.0.state.borrow().project.clone().unwrap_or_else(|| UNSAVED.into())
+        self.0.state.borrow().project.clone().unwrap_or_else(|| self.unsaved().into())
     }
 
     /// A Set's jobs from the last time Kumi ran come back, once a session: interrupted ones to run again, and reports the

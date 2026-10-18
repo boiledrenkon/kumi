@@ -215,7 +215,9 @@ struct Recall(RecallOptions, DawProfile, String);
 fn where_of(hit: &FoundExchange, here: Option<&str>, place: &str) -> String {
     let set = match &hit.set {
         Some(name) => format!("“{}”", plain(name, 80)),
-        None if hit.place == "unsaved" => format!("a {place} not saved yet"),
+        None if matches!(crate::core::place::Place::parse(&hit.place), Some(crate::core::place::Place::Unsaved(_))) => {
+            format!("a {place} not saved yet")
+        }
         None if hit.place == super::conversations::IMPORTED => "a conversation imported from a file".into(),
         None => format!("a saved {place}"),
     };

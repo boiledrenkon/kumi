@@ -61,7 +61,6 @@ pub use jobs::JobsOptions;
 
 /// How long a stopped answer waits for its tool calls to finish putting Live back before it ends anyway.
 const SETTLE_MS: u64 = 60_000;
-const UNSAVED: &str = "unsaved";
 /// What the system text tells the model about a conversation from a file, with the DAW's word for a place in it ("Set"): it
 /// stays for as long as the conversation does, whatever the budget clears.
 fn imported_guidance(noun: &str) -> String {
@@ -263,6 +262,8 @@ struct SystemText {
 }
 
 struct State {
+    /// The saved place and name last kept beside its conversations.
+    noted: Option<(String, String)>,
     matching: Option<Rc<RefCell<MatchRun>>>,
     last_run: Option<Rc<RefCell<MatchRun>>>,
     last_lesson: Option<matching::LastLesson>,
@@ -804,12 +805,17 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 foreground: vec![],
                 carrying: Default::default(),
                 jobs_place: None,
+                noted: None,
             }),
         }
     })))
 }
 
 impl Session {
+    /// Where the session's DAW keeps conversations about a project not saved yet: "unsaved" for Live's.
+    fn unsaved(&self) -> &'static str {
+        crate::core::place::unsaved(self.0.options.profile.id.unwrap_or(DawId::Ableton))
+    }
     fn emit(&self, event: SessionEvent) {
         // A step moved to the background (ctrl-b): what its tools say from then on is its job's. Only what tools say: the
         // job's own status, which their words change, goes to the producer.
@@ -1152,7 +1158,7 @@ impl Session {
         self.assert_current(op)?;
         let (Some(kept), Some(project)) = (kept, project) else {
             let id = self.fresh_id().await;
-            self.begin(project.cloned().unwrap_or(UNSAVED.into()), id, None);
+            self.begin(project.cloned().unwrap_or(self.unsaved().into()), id, None);
             return Ok(None);
         };
         let begin = {
@@ -1176,7 +1182,7 @@ impl Session {
     /// A conversation from a file carries on here in a copy (the original stays where `kumi import` put it). False when
     /// it isn't kept any more.
     async fn carry_imported(&self, store: Rc<dyn ConversationStore>, id: &str) -> Result<bool, RuntimeError> {
-        let here = self.0.state.borrow().project.clone().unwrap_or(UNSAVED.into());
+        let here = self.0.state.borrow().project.clone().unwrap_or(self.unsaved().into());
         let Some(copy) = self.copy_imported(&store, id, &here).await? else { return Ok(false) };
         let said = format!("Carrying on a copy of an imported conversation here; the original stays as {id}.");
         self.go_to(copy, Some(said)).await?;
@@ -1202,7 +1208,7 @@ impl Session {
         let wanted = self.0.state.borrow().wanted.clone();
         let Some(wanted) = wanted.filter(|wanted| wanted.place == IMPORTED) else { return Ok(()) };
         let Some(store) = self.0.options.conversations.clone() else { return Ok(()) };
-        let copy = self.copy_imported(&store, &wanted.id, UNSAVED).await?;
+        let copy = self.copy_imported(&store, &wanted.id, self.unsaved()).await?;
         let found = copy.is_some();
         {
             let mut s = self.0.state.borrow_mut();
@@ -1499,7 +1505,7 @@ impl Session {
         let revision = observation.revision.clone().unwrap_or_default();
         // The open Set's place, when the DAW was read: a saved Set's project, or an unsaved Set's. (Without the DAW, the
         // project is the last one seen.)
-        let here = observation.set.as_ref().map(|_| observation.project.as_ref().map(|p| p.id.clone()).unwrap_or(UNSAVED.into()));
+        let here = observation.set.as_ref().map(|_| observation.project.as_ref().map(|p| p.id.clone()).unwrap_or(self.unsaved().into()));
         // A conversation the producer chose went on while no Set was open, and another Set is open now (or the producer
         // left it): the open Set's own conversation goes on, and Kumi asks about the chosen one. Live coming back keeps the
         // look's key, so this isn't a Set change to it.
@@ -1507,7 +1513,7 @@ impl Session {
             let mut s = self.0.state.borrow_mut();
             let left = std::mem::take(&mut s.own_set);
             left || s.wanted.as_ref().is_some_and(|w| {
-                w.place != UNSAVED
+                w.place != self.unsaved()
                     && s.conversation_id == w.id
                     && s.place.as_ref() == Some(&w.place)
                     && here.as_ref().is_some_and(|here| *here != w.place)
@@ -1547,18 +1553,19 @@ impl Session {
                 let mut s = self.0.state.borrow_mut();
                 (s.start_fresh, s.chosen.take(), s.switched.clone(), s.carry.clone(), s.settled.clone(), s.wanted.clone())
             };
-            let carry = carry
-                .filter(|(_, place)| !(project.is_some() && place.is_some() && place.as_deref() != Some(UNSAVED) && place != &project));
+            let carry = carry.filter(|(_, place)| {
+                !(project.is_some() && place.is_some() && place.as_deref() != Some(self.unsaved()) && place != &project)
+            });
             // A conversation the producer chose goes on when its Set is open, or while none is (an unsaved Set's goes with
             // whichever is open).
-            let wanted_here = wanted.clone().filter(|w| here.is_none() || here.as_ref() == Some(&w.place) || w.place == UNSAVED);
+            let wanted_here = wanted.clone().filter(|w| here.is_none() || here.as_ref() == Some(&w.place) || w.place == self.unsaved());
             let mut resumed = None;
             let mut picked = false;
             // Taken up here (at the start, or once its Set opened): its Set's current from the moment it goes on.
             let mut taken_up = false;
             if fresh {
                 let id = self.fresh_id().await;
-                self.begin(project.clone().unwrap_or(UNSAVED.into()), id, None);
+                self.begin(project.clone().unwrap_or(self.unsaved().into()), id, None);
             } else if let Some(chosen) = chosen {
                 from = Some(chosen.conversation.checkpoint.clone());
                 picked = true;
@@ -1643,7 +1650,7 @@ impl Session {
                         return Err(error);
                     }
                     unreadable = resumed.clone();
-                    self.begin(project.unwrap_or(UNSAVED.into()), new_conversation_id(now()), None);
+                    self.begin(project.unwrap_or(self.unsaved().into()), new_conversation_id(now()), None);
                     self.build_kernel(op, observation, None).await?
                 }
             };
@@ -1824,6 +1831,16 @@ impl Session {
         if other_set {
             self.emit(SessionEvent::ObjectiveCleared);
         }
+        // What a saved place is called, kept beside its conversations once each time it changes.
+        if let (Some(project), Some(store)) = (&snapshot.project, &self.0.options.conversations) {
+            let noted = (project.id.clone(), project.name.clone());
+            if self.0.state.borrow().noted.as_ref() != Some(&noted) {
+                self.0.state.borrow_mut().noted = Some(noted);
+                let (store, daw) = (store.clone(), self.0.options.profile.id.unwrap_or(DawId::Ableton));
+                let (place, name) = (project.id.clone(), project.name.clone());
+                self.enqueue(async move { store.note_place(&place, daw, &name).await });
+            }
+        }
         if snapshot.project.is_some() && self.0.notes.is_some() {
             let this = self.clone();
             tokio::task::spawn_local(async move {
@@ -1844,7 +1861,7 @@ impl Session {
         if let (Some(tracks), Some(l)) = (&snapshot.tracks, &self.0.learned) {
             l.drafts.observed(tracks);
         }
-        if self.0.state.borrow().place.as_deref() == Some(UNSAVED) {
+        if self.0.state.borrow().place.as_deref() == Some(self.unsaved()) {
             if let (Some(project), Some(store)) = (&snapshot.project, self.0.options.conversations.clone()) {
                 let to = project.id.clone();
                 let id = {
@@ -1852,7 +1869,8 @@ impl Session {
                     s.place = Some(to.clone());
                     s.conversation_id.clone()
                 };
-                self.enqueue(async move { store.move_conversation(&id, UNSAVED, &to).await });
+                let unsaved = self.unsaved();
+                self.enqueue(async move { store.move_conversation(&id, unsaved, &to).await });
             }
             // Its goal goes with it, so the next new Set doesn't find it.
             if let Some(project) = &snapshot.project {
@@ -2451,7 +2469,7 @@ impl SessionController for Session {
     async fn conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
         let place = {
             let s = self.0.state.borrow();
-            s.place.clone().or(s.project.clone()).unwrap_or(UNSAVED.into())
+            s.place.clone().or(s.project.clone()).unwrap_or(self.unsaved().into())
         };
         Ok(if let Some(store) = &self.0.options.conversations {
             self.mark_going(store.list(&place).await.unwrap_or_default())
@@ -2469,7 +2487,7 @@ impl SessionController for Session {
         // Where it's kept: this Set's place, or any Set's, by its id.
         let (here, open, set_open) = {
             let s = self.0.state.borrow();
-            (s.place.clone().or(s.project.clone()).unwrap_or(UNSAVED.into()), s.project.clone(), s.set_open)
+            (s.place.clone().or(s.project.clone()).unwrap_or(self.unsaved().into()), s.project.clone(), s.set_open)
         };
         let place = match store.find(id).await? {
             ConversationMatch::One(row) if row.id == id => row.place,
@@ -2488,7 +2506,7 @@ impl SessionController for Session {
             return Ok(false);
         };
         // The open Set's place, when Live was read (without it, the project is the last one seen).
-        let open = set_open.then(|| open.unwrap_or(UNSAVED.into()));
+        let open = set_open.then(|| open.unwrap_or(self.unsaved().into()));
         self.drop_wanted();
         // One from a file has no Set here: it carries on in a copy, and the model is told where it came from.
         if place == IMPORTED {
@@ -2496,7 +2514,7 @@ impl SessionController for Session {
         }
         // Another Set's, while a Set is open: the producer says whether to open its Set, carry it on here in a copy, or
         // leave it.
-        if open.as_ref().is_some_and(|open| *open != place) && place != UNSAVED {
+        if open.as_ref().is_some_and(|open| *open != place) && place != self.unsaved() {
             let key = {
                 let mut s = self.0.state.borrow_mut();
                 s.wanted = Some(Wanted { place, id: id.to_owned(), from: None, asked: None });
@@ -2507,7 +2525,7 @@ impl SessionController for Session {
             return Ok(true);
         }
         // No Set open yet: it goes on now, and Kumi asks once a Set opens that isn't its own.
-        if open.is_none() && place != UNSAVED {
+        if open.is_none() && place != self.unsaved() {
             self.0.state.borrow_mut().wanted = Some(Wanted { place: place.clone(), id: id.to_owned(), from: None, asked: None });
         }
         self.go_to(Chosen { place, id: id.to_owned(), conversation, copy_of: None }, None).await?;
@@ -2529,7 +2547,7 @@ impl SessionController for Session {
         let Some(store) = self.0.options.conversations.clone() else { return Ok(false) };
         let (place, now) = {
             let s = self.0.state.borrow();
-            (s.place.clone().unwrap_or(UNSAVED.into()), s.conversation_id.clone())
+            (s.place.clone().unwrap_or(self.unsaved().into()), s.conversation_id.clone())
         };
         let id = id.unwrap_or(&now).to_owned();
         let saving = self.0.saving.borrow().clone();
@@ -2569,7 +2587,7 @@ impl SessionController for Session {
             if s.active.is_some() {
                 return Err(KumiError::new(FailureKind::Request, "Kumi is still working: fork once it's done.").into());
             }
-            let place = s.place.clone().unwrap_or(UNSAVED.into());
+            let place = s.place.clone().unwrap_or(self.unsaved().into());
             (s.kernel.clone(), s.settled.clone(), place, s.conversation_id.clone(), s.copied_from.clone())
         };
         let checkpoint = held
@@ -2663,7 +2681,7 @@ impl SessionController for Session {
                 };
                 let (here, open) = {
                     let s = self.0.state.borrow();
-                    (s.project.clone().unwrap_or(UNSAVED.into()), s.set_name.clone().filter(|_| s.project.is_some()))
+                    (s.project.clone().unwrap_or(self.unsaved().into()), s.set_name.clone().filter(|_| s.project.is_some()))
                 };
                 // What Kumi read of the other Set stays with the original; the model is told where it is now.
                 let mut checkpoint = kept.checkpoint.clone();

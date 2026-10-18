@@ -42,9 +42,9 @@ struct Place {
     conversation: String,
 }
 
-/// An unsaved Set's own place: Live's identity for it.
-fn unsaved_place(identity: &str) -> String {
-    format!("{UNSAVED}:{identity}")
+/// An unsaved project's own place: the DAW's unsaved place and its identity for the project.
+fn unsaved_place(unsaved: &str, identity: &str) -> String {
+    format!("{unsaved}:{identity}")
 }
 
 impl Session {
@@ -55,8 +55,8 @@ impl Session {
         let s = self.0.state.borrow();
         match (&s.project, &s.set_identity) {
             (Some(project), _) => project.clone(),
-            (None, Some(identity)) => unsaved_place(identity),
-            (None, None) => UNSAVED.into(),
+            (None, Some(identity)) => unsaved_place(self.unsaved(), identity),
+            (None, None) => self.unsaved().into(),
         }
     }
     fn objective_running(&self) -> bool {
@@ -73,7 +73,7 @@ impl Session {
             Some(held) => Some(held),
             None => self.0.options.objectives.clone()?.load(&place).await.ok().flatten(),
         }
-        .filter(|objective| place != UNSAVED || objective.conversation.as_deref() == Some(conversation.as_str()));
+        .filter(|objective| place != self.unsaved() || objective.conversation.as_deref() == Some(conversation.as_str()));
         if let Some(objective) = kept.as_mut().filter(|objective| objective.state == ObjectiveState::Running) {
             if !self.objective_running() {
                 objective.state = ObjectiveState::Paused;
@@ -90,12 +90,13 @@ impl Session {
     }
     /// Saves the running goal where it belongs, following its Set's first save.
     fn persist_running(&self, place: &mut Place, objective: &Objective) {
+        let unsaved = self.unsaved();
         let saved = {
             let s = self.0.state.borrow();
             // Still the Set it began in: the same Live identity, or (without one) the same conversation.
             let same = match &s.set_identity {
-                _ if place.at == UNSAVED => s.conversation_id == place.conversation,
-                Some(identity) => place.at == unsaved_place(identity),
+                _ if place.at == unsaved => s.conversation_id == place.conversation,
+                Some(identity) => place.at == unsaved_place(unsaved, identity),
                 None => false,
             };
             s.project.clone().filter(|_| same)
@@ -112,11 +113,12 @@ impl Session {
     /// The unsaved Set's goal, moved to the Set's own place when it's first saved. Only its own: a goal another unsaved
     /// Set left stays where it is.
     pub(super) fn move_unsaved_objective(&self, to: &str) {
+        let unsaved = self.unsaved();
         let (from, conversation) = {
             let mut s = self.0.state.borrow_mut();
-            let from = s.set_identity.as_deref().map(unsaved_place).unwrap_or(UNSAVED.into());
+            let from = s.set_identity.as_deref().map(|identity| unsaved_place(unsaved, identity)).unwrap_or(unsaved.into());
             let conversation = s.conversation_id.clone();
-            let shared = from == UNSAVED;
+            let shared = from == unsaved;
             if let Some((at, _)) = s
                 .objective
                 .as_mut()
@@ -129,7 +131,7 @@ impl Session {
         if let Some(store) = self.0.options.objectives.clone() {
             let to = to.to_owned();
             self.enqueue(async move {
-                let shared = from == UNSAVED;
+                let shared = from == unsaved;
                 if let Some(goal) = store.load(&from).await?.filter(|goal| !shared || goal.conversation.as_ref() == Some(&conversation)) {
                     store.save(&to, &goal).await?;
                     store.clear(&from).await?;

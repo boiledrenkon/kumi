@@ -15,6 +15,7 @@ pub mod match_run;
 pub mod memory;
 pub mod phrases;
 pub mod picture;
+pub mod place;
 pub mod playbook;
 pub mod presentation;
 pub mod private;

@@ -74,7 +74,7 @@ impl Drop for GoalHold {
 }
 impl Session {
     fn goal_where(&self) -> String {
-        self.0.state.borrow().project.clone().unwrap_or(UNSAVED.into())
+        self.0.state.borrow().project.clone().unwrap_or(self.unsaved().into())
     }
     /// The goal kept in memory for `place`, if the last one run or stopped was there.
     fn goal_kept(&self, place: &str) -> Option<GoalState> {
