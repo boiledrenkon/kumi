@@ -50,10 +50,10 @@ impl DawProvider for Ableton {
     fn bundled_bridge_version(&self) -> Option<String> {
         bridge_setup::bundled_bridge_version()
     }
-    fn installed_bridge_version(&self, bridge_config: &str) -> Option<String> {
+    fn installed_bridge_version(&self, bridge_config: &str, _env: &Env) -> Option<String> {
         crate::doctor::read_bridge_server(bridge_config).ok().and_then(|s| s.version)
     }
-    fn bridge_answers(&self, bridge_config: &str) -> LocalBoxFuture<'static, bool> {
+    fn bridge_answers(&self, bridge_config: &str, _env: &Env) -> LocalBoxFuture<'static, bool> {
         let config = bridge_config.to_string();
         async move { bridge_setup::remote_script_answers(&config).await }.boxed_local()
     }
@@ -110,7 +110,7 @@ impl DawProvider for Ableton {
         options.willington = Some(Rc::new(move || Willington::find(&env).map(|willington| willington.switch())));
         (session.factory.ableton)(options)
     }
-    fn probe(&self, bridge_config: String, factory: &DawFactory) -> LocalBoxFuture<'static, LiveProbe> {
+    fn probe(&self, bridge_config: String, factory: &DawFactory, _env: &Env) -> LocalBoxFuture<'static, LiveProbe> {
         probe_live(bridge_config, factory.ableton.clone()).boxed_local()
     }
     fn bridge_state(&self, env: &Env, found: bool, missing: bool, bundled: Option<&str>, command: &str) -> BridgeState {

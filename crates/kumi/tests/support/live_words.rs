@@ -3,8 +3,12 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 /// Live's words, whole.
-pub static LIVE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(Live|Ableton|Sets?|Session view|Arrangement|[Cc]lip slots?|Max for Live|M4L)\b").unwrap());
+pub static LIVE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+            r"\b(Live|Ableton|Sets?|Session|Arrangement|Main|[Ss]cenes?|[Rr]acks?|[Cc]lip slots?|Control Surfaces?|Remote Scripts?|Max for Live|M4L)\b",
+        )
+        .unwrap()
+});
 
 /// Where a Live word is right for any producer, and why.
 pub const ALLOWED: &[(&str, &str)] = &[

@@ -34,7 +34,8 @@ pub struct CliIo {
     pub env: Env,
     pub args: Vec<String>,
     pub signals: bool,
-    pub reopen: Option<Rc<dyn Fn() -> LocalBoxFuture<'static, i32>>>,
+    /// Opens Kumi again with these arguments, in place of starting the program (tests).
+    pub reopen: Option<Rc<dyn Fn(Vec<String>) -> LocalBoxFuture<'static, i32>>>,
     exit_after_reopen: Rc<Cell<bool>>,
 }
 impl CliIo {
@@ -162,9 +163,10 @@ fn doctor_io(io: &CliIo, factory: DawFactory) -> DoctorIo {
     // Live's checks probe Live and judge its bridge by Live's version, whichever DAW the doctor speaks for.
     let live = crate::daw::provider(kumi_runtime::core::daw::DawId::Ableton).expect("Live is registered");
     doctor.bundled_bridge_version = live.bundled_bridge_version();
+    let env = io.env.clone();
     doctor.probe_live = Some(Rc::new(move |config| {
-        let factory = factory.clone();
-        async move { Ok(live.probe(config, &factory).await) }.boxed_local()
+        let probe = live.probe(config, &factory, &env);
+        async move { Ok(probe.await) }.boxed_local()
     }));
     doctor
 }
@@ -214,15 +216,15 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
             io.out.write(&format!("Kumi {KUMI_VERSION}\n"));
             Ok(0)
         }
-        AppConfig::Doctor { json } => {
-            // The doctor speaks in the words of the DAW this producer works with (Live's, for Live).
-            crate::daw::work_with(crate::daw::chosen(None, &io.env).0.id());
+        AppConfig::Doctor { json, daw } => {
+            // The doctor speaks in the words of the DAW asked for, else the one this producer works with (Live's, for Live).
+            crate::daw::work_with(crate::daw::chosen(*daw, &io.env).0.id());
             let mut doctor = doctor_io(io, factory);
             doctor.json = *json;
             doctor::run_doctor(doctor).await
         }
-        AppConfig::Report => {
-            crate::daw::work_with(crate::daw::chosen(None, &io.env).0.id());
+        AppConfig::Report { daw } => {
+            crate::daw::work_with(crate::daw::chosen(*daw, &io.env).0.id());
             write_report(ReportIo::new(doctor_io(io, factory))).await
         }
         AppConfig::Export { conversation, format, out, full, raw } => {
@@ -432,7 +434,7 @@ async fn reopen_after_update(io: &CliIo) -> Result<i32, RuntimeError> {
 async fn reopen(io: &CliIo) -> Result<i32, RuntimeError> {
     io.input.pause();
     if let Some(reopen) = &io.reopen {
-        return Ok(reopen().await);
+        return Ok(reopen(io.args.clone()).await);
     }
     let exe = if io.installed() {
         std::path::Path::new(&install::kumi_home(&io.env)).join("app").join(crate::process::executable_name("kumi"))

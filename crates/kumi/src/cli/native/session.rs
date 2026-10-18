@@ -351,6 +351,7 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
     let restart_said = Rc::new(Cell::new(false));
     // Where the session finds Live: first-run setup sets it once the bridge is in place.
     let live_config = Rc::new(RefCell::new(bridge_config.clone()));
+    let full_screen = io.input.is_tty() && io.out.is_tty() && io.env.get("KUMI_UI").map(String::as_str) != Some("plain");
     let integration_factory: IntegrationFactory = {
         let watching_live = watching_live.clone();
         let restart_said = restart_said.clone();
@@ -367,6 +368,8 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
             // What the session gives any DAW's integration; the DAW's provider adds what only it has.
             let mut options = IntegrationContext::new(on_connection.clone());
             options.restore_file = Some(restore_file.clone());
+            // Plain mode has no FOCUS: a polled DAW is asked about once a second, for busy and gone.
+            options.focus_drawn = full_screen;
             options.on_focus = Some({
                 let emit = emit.clone();
                 Rc::new(move |focus| emit(SessionEvent::Focus { focus }))
@@ -476,7 +479,7 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
                 }),
                 Rc::new(move |failure: &KumiError| {
                     let message = failure.message.clone();
-                    let installed = provider.installed_bridge_version(&bridge_config);
+                    let installed = provider.installed_bridge_version(&bridge_config, &env);
                     let current = installed.is_some() && installed == bundled;
                     // Live still runs the bridge it loaded before an update: restarting Live is the fix whether or not
                     // the installed bridge is current (right after kumi bridge it is). Said once; the watch then
@@ -490,9 +493,9 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
                     } else if !watching_live.replace(true) {
                         // Said once, by the watch: its own retries fall back here too, quietly.
                         let config = bridge_config.clone();
-                        let env = env.clone();
+                        let (env, answers_env) = (env.clone(), env.clone());
                         tokio::task::spawn_local(connect_when_daw_answers(
-                            move || provider.bridge_answers(&config),
+                            move || provider.bridge_answers(&config, &answers_env),
                             move || provider.app_open(&env),
                             provider.watch_words(),
                             controller.clone(),
@@ -598,9 +601,31 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         (Some(notice), Some(resume)) => Some(format!("{notice} {resume}")),
         (notice, resume) => notice.or(resume),
     };
+    // Several DAWs open and none asked for: which one Kumi works with, and how to switch.
+    let asked = crate::config::take_daw(&io.args, &io.env).ok().and_then(|(_, asked)| asked);
+    let also = if asked.is_none() {
+        let others = crate::daw::also_running(provider.id(), &io.env, &|other| other.running_now());
+        crate::daw::also_running_words(provider.id(), &others, &io.env)
+    } else {
+        None
+    };
+    let notice = match (notice, also) {
+        (Some(notice), Some(also)) => Some(format!("{notice} {also}")),
+        (notice, also) => notice.or(also),
+    };
     // In the app, first-run setup puts the bridge in place instead, with the DAW restarting around it (where it runs).
     let connect_why = bridge.why;
     let update_after = Rc::new(Cell::new(false));
+    // /daw <name>: Kumi closes and opens again with that DAW. Offered once the producer works with more than Live.
+    let daw_after: Rc<Cell<Option<kumi_runtime::core::daw::DawId>>> = Rc::default();
+    let offers_daw = provider.id() != kumi_runtime::core::daw::DawId::Ableton
+        || crate::daw::providers()
+            .into_iter()
+            .any(|other| other.id() != kumi_runtime::core::daw::DawId::Ableton && other.bridge_installed(&io.env));
+    let switch_daw = offers_daw.then(|| {
+        let daw_after = daw_after.clone();
+        Rc::new(move |daw| daw_after.set(Some(daw))) as Rc<dyn Fn(kumi_runtime::core::daw::DawId)>
+    });
     let updates = update::UpdateControl {
         current: KUMI_VERSION.into(),
         check: {
@@ -624,7 +649,6 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         },
     };
     let history = Rc::new(RefCell::new(open_input_history(Some(load_input_history_file(&io.env)?.into()), secrets.clone())));
-    let full_screen = io.input.is_tty() && io.out.is_tty() && io.env.get("KUMI_UI").map(String::as_str) != Some("plain");
     // What's new is for someone reading it: the full screen, or plain lines at a terminal (a screen reader).
     // A script piping Kumi neither sees it nor uses it up.
     let whats_new = if full_screen || io.input.is_tty() {
@@ -673,6 +697,7 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
             })
         });
         options.updates = Some(updates);
+        options.switch_daw = switch_daw;
         options.willington = provider.toggle(&io.env);
         options.slots = Some(slots_context);
         options.voice = Some(Rc::new(create_voice_control(VoiceControlOptions {
@@ -709,6 +734,7 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         options.secrets = secrets.clone();
         options.history = Some(history);
         options.updates = Some(updates);
+        options.switch_daw = switch_daw;
         options.willington = provider.toggle(&io.env);
         Rc::new(create_terminal(options))
     };
@@ -786,6 +812,11 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
     }
     terminal.borrow_mut().take();
     controller.borrow_mut().take();
+    if let Some(daw) = daw_after.get() {
+        let mut again = io.clone();
+        again.args = switched_args(&io.args, daw);
+        return super::reopen(&again).await;
+    }
     if update_after.get() {
         let mut again = io.clone();
         again.args = reopened_args(&io.args, going.as_deref());
@@ -806,9 +837,25 @@ fn reopened_args(args: &[String], going: Option<&str>) -> Vec<String> {
     }
 }
 
+/// What Kumi opens again with after /daw: the same arguments, with that DAW asked for and no conversation (each DAW's
+/// project has its own).
+fn switched_args(args: &[String], daw: kumi_runtime::core::daw::DawId) -> Vec<String> {
+    let rest = crate::config::take_resume(args).map(|(rest, _)| rest).unwrap_or_else(|_| args.to_vec());
+    let rest = crate::config::take_daw(&rest, &Env::new()).map(|(rest, _)| rest).unwrap_or(rest);
+    ["--daw".to_string(), daw.as_str().to_string()].into_iter().chain(rest).collect()
+}
+
 #[cfg(test)]
 mod reopen_tests {
-    use super::reopened_args;
+    use super::{reopened_args, switched_args};
+    use kumi_runtime::core::daw::DawId;
+    #[test]
+    fn opened_again_with_another_daw_kumi_asks_for_it_and_no_conversation() {
+        let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(switched_args(&args(&[]), DawId::Renoise), args(&["--daw", "renoise"]));
+        assert_eq!(switched_args(&args(&["--daw", "reaper", "-r", "night"]), DawId::Ableton), args(&["--daw", "ableton"]));
+        assert_eq!(switched_args(&args(&["--daw=renoise", "-c"]), DawId::Reaper), args(&["--daw", "reaper"]));
+    }
     #[test]
     fn opened_again_after_an_update_kumi_carries_on_with_the_conversation_going_on() {
         let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();

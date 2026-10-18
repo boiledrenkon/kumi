@@ -50,6 +50,8 @@ pub struct TerminalOptions {
     pub close_timeout_ms: Option<u64>,
     pub history: Option<Rc<RefCell<InputHistory>>>,
     pub updates: Option<UpdateControl>,
+    /// /daw <name>: Kumi closes and opens again with that DAW. None where the producer works with Live alone.
+    pub switch_daw: Option<Rc<dyn Fn(kumi_runtime::core::daw::DawId)>>,
     /// /willington, where Kumi's bridge can carry Willington.
     pub willington: Option<crate::daw::Toggle>,
     /// What's new since the producer last opened Kumi, said once as it starts.
@@ -87,6 +89,7 @@ impl TerminalOptions {
             close_timeout_ms: None,
             history: None,
             updates: None,
+            switch_daw: None,
             willington: None,
             whats_new: None,
             instant: true,
@@ -98,8 +101,8 @@ impl TerminalOptions {
         }
     }
 }
-fn help() -> String {
-    format!("/help · /status · /undo · /stop · /refresh · /reconnect (connect to {app} again, keeping the conversation) · /new [name] (start a fresh conversation; the last one is kept) · /resume [number, id or name] (list kept conversations, or go back to one; /conversations too) · /rename <name> · /fork [name] (carry on in a copy) · /export [md|html|json] (save this conversation; keys and paths taken out) · /share (save it as a web page) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes{willington} · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: {kumi} login <provider>.", app = crate::daw::words().app, kumi = *KUMI, willington = if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton { " · /willington (Willington's bindings on or off)" } else { "" })
+fn help(daw: bool) -> String {
+    format!("/help · /status · /undo · /stop · /refresh · /reconnect (connect to {app} again, keeping the conversation){daw} · /new [name] (start a fresh conversation; the last one is kept) · /resume [number, id or name] (list kept conversations, or go back to one; /conversations too) · /rename <name> · /fork [name] (carry on in a copy) · /export [md|html|json] (save this conversation; keys and paths taken out) · /share (save it as a web page) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes{willington} · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: {kumi} login <provider>.", app = crate::daw::words().app, daw = if daw { " · /daw [name] (which DAW Kumi works with, or open Kumi again with another)" } else { "" }, kumi = *KUMI, willington = if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton { " · /willington (Willington's bindings on or off)" } else { "" })
 }
 fn head(text: &str, limit: usize) -> String {
     String::from_utf16_lossy(&text.encode_utf16().take(limit).collect::<Vec<_>>())
@@ -601,7 +604,21 @@ impl PlainTerminal {
             return Ok(());
         }
         if command == "/help" {
-            self.notice(&help());
+            self.notice(&help(self.0.options.switch_daw.is_some()));
+            return Ok(());
+        }
+        if let Some(switch) = self.0.options.switch_daw.clone().filter(|_| command == "/daw" || command.starts_with("/daw ")) {
+            match crate::daw::daw_command(&command["/daw".len()..]) {
+                crate::daw::DawCommand::Say(words) => self.notice(&format!("[daw] {words}")),
+                crate::daw::DawCommand::Switch(_, _) if self.busy() => {
+                    self.notice("[daw] Kumi is working; /daw once it's done (Ctrl-C stops it).");
+                }
+                crate::daw::DawCommand::Switch(daw, words) => {
+                    self.notice(&format!("[daw] {words}"));
+                    switch(daw);
+                    self.finish(0).await;
+                }
+            }
             return Ok(());
         }
         if command == "/changelog" {

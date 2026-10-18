@@ -132,6 +132,7 @@ impl AbletonOptions {
             on_pointed: self.on_pointed.clone(),
             on_transport: self.on_transport.clone(),
             focus_interval_ms: self.focus_interval_ms,
+            focus_drawn: true,
             on_change: self.on_change.clone(),
             on_action: self.on_action.clone(),
             low_disk: self.low_disk.clone(),

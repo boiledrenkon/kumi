@@ -69,8 +69,8 @@ const BASS: &str = "r:track:{8A5D2C1E-0000-4000-8000-000000000002}";
 fn reaper_snapshot() -> Value {
     json!({
         "epoch": "1",
-        "project": {"id": PROJECT_ID, "identity": "4242:0x7f01", "name": "Night Drive", "tempo": 124, "timeSignature": [4, 4]},
-        "transport": {"playing": false, "position": 0},
+        "project": {"id": PROJECT_ID, "identity": "4242:0x7f01", "name": "Night Drive", "path": "/Users/someone/Music/Night Drive.rpp", "tempo": 124, "timeSignature": [4, 4], "playState": "stopped", "loop": {"on": false}},
+        "transport": {"playing": false, "position": 0, "loop": {"on": false}},
         "tracks": [
             {"ref": "r:track:{8A5D2C1E-0000-4000-8000-000000000001}", "index": 1, "name": "Drums", "depth": 0, "folder": 1},
             {"ref": BASS, "index": 2, "name": "Bass", "depth": 0, "folder": 0, "selected": true},
@@ -99,6 +99,12 @@ async fn reapers_observation_is_its_project_in_short_refs_at_its_place() {
             let context: Value = serde_json::from_str(&seen.context).unwrap();
             assert_eq!(context["daw"], "REAPER");
             assert_eq!(context["project"]["name"], "Night Drive");
+            // Kumi's identity for the project, the folders it's in and the transport's second copy stay out.
+            assert_eq!(context["project"]["file"], "Night Drive.rpp");
+            for key in ["identity", "path", "playState", "loop"] {
+                assert!(context["project"].get(key).is_none(), "{key}: {}", context["project"]);
+            }
+            assert!(!seen.context.contains("/Users/someone"), "{}", seen.context);
             assert_eq!(context["tracks"][1]["ref"], "track:2");
             assert_eq!(context["selection"]["trackRef"], "track:2");
             assert!(!seen.context.contains("{8A5D"), "no GUID reaches the model: {}", seen.context);
@@ -190,11 +196,39 @@ async fn renoises_refs_are_positions_under_the_songs_epoch_and_a_new_song_retire
                 .await
                 .unwrap();
             assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "4:track:1", "the new name reads the new song's track");
-            next.tools[0]
+            let asked_before = host.asked.borrow().len();
+            let retired = next.tools[0]
                 .execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new())
                 .await
                 .unwrap();
-            assert_eq!(host.asked.borrow().last().unwrap().1["parent"], "track:1", "the retired name reads nothing of the new song");
+            assert!(retired.is_error && retired.text.contains("isn't one of this turn's refs"), "{}", retired.text);
+            assert_eq!(host.asked.borrow().len(), asked_before, "the retired name reads nothing of the new song: Renoise isn't asked");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn with_nothing_drawing_the_focus_the_daw_is_asked_about_once_a_second() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let focus = json!({"epoch": "1", "view": "arrange", "selection": {}, "transport": {"playing": false}});
+            let mut calls = vec![];
+            for drawn in [true, false] {
+                let host = Rc::new(Host {
+                    answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("focus", focus.clone(), false)]),
+                    asked: RefCell::default(),
+                });
+                let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+                options.context.on_focus = Some(Rc::new(|_| {}));
+                options.context.focus_drawn = drawn;
+                let reaper = create_reaper_integration(options);
+                reaper.start(Signal::new()).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(3_050)).await;
+                reaper.close().await.unwrap();
+                calls.push(host.asked.borrow().iter().filter(|(tool, _)| tool == "focus").count());
+            }
+            assert!(calls[0] >= 15, "FOCUS on screen follows the DAW closely: {calls:?}");
+            assert_eq!(calls[1], 3, "plain mode asks once a second: {calls:?}");
         })
         .await;
 }
@@ -435,6 +469,77 @@ async fn a_failed_look_keeps_the_songs_key_and_project() {
             let gone = renoise.observe(Signal::new(), None).await.unwrap();
             assert_eq!((gone.key.as_str(), gone.project.as_ref()), (seen.key.as_str(), Some(&project)), "away isn't another song");
             assert_eq!(states.borrow().last(), Some(&ConnectionState::Disconnected));
+        })
+        .await;
+}
+
+/// The model's reads stay readable and its refs plain: an error names objects in short refs, REAPER's names hold
+/// through an epoch change (its refs are GUIDs), a page too big for the model is asked for again with fewer rows (its
+/// nextCursor kept), markers come within the look's budget, and what the producer pinned in FOCUS is in the look.
+#[tokio::test(flavor = "current_thread")]
+async fn reads_and_looks_stay_plain_short_and_whole() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut snapshot = reaper_snapshot();
+            snapshot["markers"] = json!((1..=40)
+                .map(|n| json!({"ref": format!("r:marker:{{M{n}}}"), "name": format!("M{n}"), "position": n}))
+                .collect::<Vec<_>>());
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot.clone(), false)]),
+                asked: RefCell::default(),
+            });
+            let reaper = create_reaper_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            reaper.start(Signal::new()).await.unwrap();
+            let pin = PinnedNode {
+                track_ref: BASS.into(),
+                r#ref: "r:fx:{F1}".into(),
+                node: PinKind::Device,
+                name: "ReaComp".into(),
+                trail: vec![],
+                siblings: vec![],
+                track: Some("Bass".into()),
+                live: None,
+                time: None,
+            };
+            let seen = reaper.observe(Signal::new(), Some(ObserveHints { pinned: Some(pin), continuing: None })).await.unwrap();
+            let context: Value = serde_json::from_str(&seen.context).unwrap();
+            assert_eq!(context["markers"].as_array().unwrap().len(), 30);
+            assert_eq!(context["moreMarkers"], "10 more markers; reaper_read kind marker pages through every one");
+            assert_eq!(context["pinned"]["name"], "ReaComp");
+            assert!(!seen.context.contains("r:fx:") && !seen.context.contains("r:track:"), "{}", seen.context);
+            let bass = context["tracks"][1]["ref"].as_str().unwrap().to_owned();
+
+            // An error naming an object: in the turn's short ref.
+            host.answers.borrow_mut().push((
+                "read",
+                json!({"error": format!("{BASS} isn't in the project (deleted, or another tab)"), "code": "failed", "connected": true}),
+                true,
+            ));
+            let failed =
+                seen.tools[0].execute(json!({"kind": "item", "parent": bass}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert!(failed.is_error && failed.text.starts_with(&bass) && !failed.text.contains("r:track:"), "{}", failed.text);
+
+            // A page past the kernel's cut is asked for again with half the rows, keeping its nextCursor.
+            let row = |n: usize| json!({"ref": format!("r:item:{{I{n}}}"), "name": "x".repeat(400)});
+            host.answers.borrow_mut().push((
+                "read",
+                json!({"items": (0..200).map(row).collect::<Vec<_>>(), "nextCursor": "c1.1.200", "epoch": "1"}),
+                false,
+            ));
+            let asked_before = host.asked.borrow().len();
+            let _ = seen.tools[0]
+                .execute(json!({"kind": "item", "parent": bass, "limit": 200}).as_object().unwrap().clone(), Signal::new())
+                .await;
+            let limits: Vec<Value> = host.asked.borrow()[asked_before..].iter().map(|(_, args)| args["limit"].clone()).collect();
+            assert_eq!(limits[..2], [json!(200), json!(100)], "asked again with half the rows");
+            assert!(limits.len() <= 5, "a few times at most: {limits:?}");
+
+            // Another epoch (a tab switched back and forth): REAPER's GUID refs keep their names.
+            let mut later = snapshot.clone();
+            later["epoch"] = json!("2");
+            host.answers.borrow_mut().push(("snapshot", later, false));
+            let again: Value = serde_json::from_str(&reaper.observe(Signal::new(), None).await.unwrap().context).unwrap();
+            assert_eq!(again["tracks"][1]["ref"], json!(bass), "the same track, the same name");
         })
         .await;
 }

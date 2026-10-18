@@ -67,8 +67,15 @@ pub enum AppConfig {
     },
     Doctor {
         json: bool,
+        /// The DAW asked for with --daw or KUMI_DAW, whose words the doctor speaks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daw: Option<DawId>,
     },
-    Report,
+    Report {
+        /// As the doctor's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daw: Option<DawId>,
+    },
     Update {
         rollback: bool,
         check: bool,
@@ -708,8 +715,17 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         match first {
             Some("--version" | "-v" | "-V" | "version") => return Ok(AppConfig::Version),
             Some("auth") => return Ok(AppConfig::Auth { auth_file: load_auth_file(env)?, settings_file: load_settings_file(env)? }),
-            Some("doctor") => return Ok(AppConfig::Doctor { json: false }),
-            Some("report") => return Ok(AppConfig::Report),
+            _ => {}
+        }
+    }
+    // The doctor and the report speak of the DAW asked for (`--daw reaper doctor`, KUMI_DAW), else of the one a session
+    // would work with.
+    if args.iter().any(|arg| arg == "doctor" || arg == "report") {
+        let (rest, daw) = take_daw(args, env)?;
+        match rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+            ["doctor"] => return Ok(AppConfig::Doctor { json: false, daw }),
+            ["doctor", "--json"] => return Ok(AppConfig::Doctor { json: true, daw }),
+            ["report"] => return Ok(AppConfig::Report { daw }),
             _ => {}
         }
     }
@@ -727,9 +743,6 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
             [file] if !file.is_empty() && !file.starts_with('-') && !controls(file, true) => Ok(AppConfig::Import { file: file.clone() }),
             _ => Err(RuntimeError::plain("Use: import <file> (a conversation saved with: export --json).")),
         };
-    }
-    if first == Some("doctor") && args.len() == 2 && at(1) == Some("--json") {
-        return Ok(AppConfig::Doctor { json: true });
     }
     if first == Some("update") {
         if at(1) == Some("--version") {

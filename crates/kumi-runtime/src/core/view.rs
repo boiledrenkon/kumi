@@ -405,15 +405,21 @@ pub struct ArrangementStrip {
     /// none for Live's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lanes: Option<Vec<TimelineLane>>,
-    /// Every track the timeline has, when `lanes` holds only the first of them.
+    /// Every track the timeline has, when `lanes` holds only some of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_count: Option<usize>,
+    /// Where `lanes` start among every track (0 for the first), when they're a page of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lanes_from: Option<usize>,
 }
 
 /// A track on the timeline with its items, in beats. Names are data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimelineLane {
     pub name: String,
+    /// The track's ref, as the DAW's focus names the selected one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     /// How deep in folders it is (0 at the top).

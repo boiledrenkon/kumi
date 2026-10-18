@@ -71,6 +71,68 @@ pub fn chosen_with(
     }
 }
 
+/// The DAWs with a bridge in that run now beside `chosen`: a session that chose among them says so, and how to switch.
+pub fn also_running(chosen: DawId, env: &Env, running: &dyn Fn(&dyn DawProvider) -> bool) -> Vec<&'static dyn DawProvider> {
+    let installed: Vec<&'static dyn DawProvider> =
+        providers().into_iter().filter(|provider| provider.bridge_config(env).is_some()).collect();
+    if installed.len() < 2 {
+        return vec![];
+    }
+    installed.into_iter().filter(|provider| provider.id() != chosen && running(*provider)).collect()
+}
+
+/// What a session says when it chose `chosen` while `others` run too.
+pub fn also_running_words(chosen: DawId, others: &[&'static dyn DawProvider], env: &Env) -> Option<String> {
+    let first = others.first()?;
+    let names: Vec<&str> = others.iter().map(|provider| provider.profile().words.app).collect();
+    let chosen_name = provider(chosen)?.profile().words.app;
+    let why = if last_used(env) == Some(chosen) { ", the one you used last" } else { "" };
+    let (open, switch) = match names.as_slice() {
+        [one] => (format!("{one} is open too"), format!("/daw {} switches to {one}", command_name(first.id()))),
+        many => (format!("{} are open too", many.join(" and ")), "/daw <name> switches".into()),
+    };
+    Some(format!("{open}: Kumi works with {chosen_name}{why}. {switch}."))
+}
+
+/// A DAW as `/daw` takes it: "live", "reaper", "renoise".
+pub fn command_name(id: DawId) -> String {
+    provider(id).map(|provider| provider.profile().words.app.to_lowercase()).unwrap_or_else(|| id.as_str().into())
+}
+
+/// What `/daw` does: says which DAW Kumi works with, or opens Kumi again with another.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DawCommand {
+    Say(String),
+    Switch(DawId, String),
+}
+
+/// `/daw` with `typed` after it ("", "renoise", "live").
+pub fn daw_command(typed: &str) -> DawCommand {
+    let current = current().id();
+    let app = |id: DawId| provider(id).map(|provider| provider.profile().words.app).unwrap_or_default();
+    let ids = providers().map(|provider| provider.id());
+    let word = typed.trim().to_lowercase();
+    if word.is_empty() {
+        let others: Vec<DawId> = ids.into_iter().filter(|id| *id != current).collect();
+        let commands: Vec<String> = others.iter().map(|id| format!("/daw {}", command_name(*id))).collect();
+        let names: Vec<&str> = others.iter().map(|id| app(*id)).collect();
+        return DawCommand::Say(format!(
+            "Kumi works with {}. {} opens Kumi again with {}.",
+            app(current),
+            commands.join(" or "),
+            names.join(" or ")
+        ));
+    }
+    let Some(asked) = ids.into_iter().find(|id| command_name(*id) == word || id.as_str() == word) else {
+        let commands: Vec<String> = ids.iter().map(|id| format!("/daw {}", command_name(*id))).collect();
+        return DawCommand::Say(format!("Kumi doesn't know {}: {}.", typed.trim(), commands.join(", ")));
+    };
+    if asked == current {
+        return DawCommand::Say(format!("Kumi works with {} already.", app(current)));
+    }
+    DawCommand::Switch(asked, format!("Kumi closes and opens again with {}.", app(asked)))
+}
+
 /// Where Kumi keeps the DAW a session last worked with.
 fn last_used_file(env: &Env) -> std::path::PathBuf {
     std::path::Path::new(&crate::config::kumi_dir(env)).join("last-daw")

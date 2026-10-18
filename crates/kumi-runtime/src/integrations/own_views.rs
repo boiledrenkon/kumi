@@ -92,6 +92,7 @@ pub fn timeline(body: &Value) -> TimelineStrip {
     let lanes = list(body, "tracks")
         .map(|track| TimelineLane {
             name: text(track, "name"),
+            track_ref: track.get("ref").and_then(Value::as_str).map(str::to_owned),
             color: color(track),
             depth: number(track, "depth").unwrap_or(0.).max(0.) as u32,
             items: list(track, "items")
@@ -125,6 +126,7 @@ pub fn timeline(body: &Value) -> TimelineStrip {
         beats_per_bar: number(body, "beatsPerBar"),
         lanes: Some(lanes),
         track_count: number(body, "trackCount").map(|n| n.max(0.) as usize),
+        lanes_from: number(body, "from").map(|n| n.max(0.) as usize),
     }
 }
 

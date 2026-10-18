@@ -162,7 +162,15 @@ impl TuiApp {
             };
             let reference = focus.track_ref.clone().unwrap_or_default();
             let scene = section_index(focus).unwrap_or(0.);
-            let key = if kind == BodyKind::Grid { format!("s\0{reference}\0{}", number::to_string(scene)) } else { "a".into() };
+            // Live's Arrangement strip is the same whatever is selected; another DAW's lanes centre on the selected track,
+            // so another selection reads them again at once.
+            let key = if kind == BodyKind::Grid {
+                format!("s\0{reference}\0{}", number::to_string(scene))
+            } else if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
+                "a".into()
+            } else {
+                format!("a\0{reference}")
+            };
             if (!again && state.strip.key.as_ref() == Some(&key)) || state.strip.reading {
                 return;
             }

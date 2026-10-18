@@ -24,17 +24,21 @@ use kumi_common::{
     js::json::stringify,
     time::perf_now,
 };
+use regex::Regex;
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
     rc::Rc,
+    sync::LazyLock,
 };
 
 /// How long a call to Kumi's host waits.
 const CALL_MS: u64 = 30_000;
 /// How often FOCUS's focus is read while the app shows it, unless the app says.
 const FOCUS_MS: u64 = 150;
+/// How often the focus is polled when nothing draws it (plain mode).
+const UNDRAWN_FOCUS_MS: u64 = 1_000;
 /// The most a page of the model's read asks for.
 const MOST_ROWS: u64 = 200;
 
@@ -113,6 +117,13 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         previous: RefCell::default(),
     })
 }
+
+/// The markers a look shows; more are read.
+const MARKERS_SHOWN: usize = 30;
+/// The most a read's page can hold for the model: the kernel cuts a tool's result at 64 KB.
+const PAGE_TEXT_BYTES: usize = 60 * 1024;
+/// A turn's short ref (`track:3`): the shape of a name this turn gave.
+static SHORT_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z]+:[0-9]+$").unwrap());
 
 /// Why a host tool answered an error: its words, and whether the DAW is there at all (it quit, or its bridge did).
 struct Refused {
@@ -223,6 +234,13 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         if changed {
             self.layout.set(None);
             let mut book = self.book.borrow_mut();
+            // Refs that hold through anything (REAPER's GUIDs) keep their names; positions retire with their epoch.
+            if !book.scheme.positional() {
+                book.cursors.clear();
+                drop(book);
+                *self.epoch.borrow_mut() = Some(epoch.to_owned());
+                return;
+            }
             book.refs.clear();
             book.known.clear();
             book.cursors.clear();
@@ -241,7 +259,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let (endpoint, closed, daw, selected) = (self.endpoint.clone(), self.closed.clone(), self.daw, self.selected.clone());
         let (connected, identity, on_connection) =
             (self.connected.clone(), self.identity.clone(), self.options.context.on_connection.clone());
-        let period = self.options.context.focus_interval_ms.unwrap_or(FOCUS_MS).max(50);
+        let drawn = if self.options.context.focus_drawn { FOCUS_MS } else { UNDRAWN_FOCUS_MS };
+        let period = self.options.context.focus_interval_ms.unwrap_or(drawn).max(50);
         tokio::task::spawn_local(async move {
             let (mut last, mut last_transport, mut last_epoch): (Option<Value>, Option<Value>, Option<String>) = (None, None, None);
             let lose_focus = |last: &mut Option<Value>| {
@@ -330,7 +349,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     /// The observation from the host's snapshot.
-    fn observation(&self, snapshot: &Value) -> Observation {
+    fn observation(&self, snapshot: &Value, pinned: Option<&PinnedNode>) -> Observation {
         self.see_epoch(snapshot.get("epoch").and_then(Value::as_str));
         if self.layout.get().is_none() {
             self.layout.set(snapshot.get("layout").and_then(Value::as_u64));
@@ -368,7 +387,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             "observedAt": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             "daw": profile.words.app,
         });
-        context[profile.words.place] = project.clone();
+        context[profile.words.place] = shown_project(&project, snapshot.get("transport"));
         context["transport"] = snapshot.get("transport").cloned().unwrap_or(Value::Null);
         context["tracks"] = json!(folded.tracks);
         context["selection"] = selection;
@@ -390,8 +409,21 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         } else if snapshot.get("moreTracks") == Some(&Value::Bool(true)) {
             context["moreTracks"] = json!(format!("Not every track is listed here; {read_tool} kind track pages through every one"));
         }
-        if !markers.is_null() {
+        // Markers within the look's budget: the rest are read.
+        if let Some(all) = markers.as_array() {
+            if all.len() > MARKERS_SHOWN {
+                context["markers"] = json!(all[..MARKERS_SHOWN]);
+                context["moreMarkers"] =
+                    json!(format!("{} more markers; {read_tool} kind marker pages through every one", all.len() - MARKERS_SHOWN));
+            } else {
+                context["markers"] = markers;
+            }
+        } else if !markers.is_null() {
             context["markers"] = markers;
+        }
+        // What the producer pinned in FOCUS (an FX, a DSP device), in the turn's short refs.
+        if let Some(pin) = pinned {
+            context["pinned"] = self.book.borrow_mut().shorten(&serde_json::to_value(pin).unwrap_or(Value::Null));
         }
         let identity = project.get("identity").and_then(Value::as_str).map(str::to_owned);
         *self.identity.borrow_mut() = identity.clone();
@@ -468,7 +500,8 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
             Err(_) => None,
         })
     }
-    async fn observe(&self, signal: Signal, _hints: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
+    async fn observe(&self, signal: Signal, hints: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
+        let pinned = hints.as_ref().and_then(|hints| hints.pinned.as_ref());
         signal.check()?;
         if self.closed.get() {
             return Err(RuntimeError::plain("Integration is closed"));
@@ -476,7 +509,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         match self.call("snapshot", json!({}), signal.clone()).await {
             Ok(Ok(snapshot)) => {
                 self.set_connected(true);
-                Ok(self.observation(&snapshot))
+                Ok(self.observation(&snapshot, pinned))
             }
             // Busy (a dialog, a load): still there, and still connected. Kumi waits a little for it and looks once more
             // (as Live's #256); still busy, the look keeps the project, and the focus says why it waits.
@@ -490,7 +523,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
                     }
                 }
                 match self.call("snapshot", json!({}), signal).await {
-                    Ok(Ok(snapshot)) => Ok(self.observation(&snapshot)),
+                    Ok(Ok(snapshot)) => Ok(self.observation(&snapshot, pinned)),
                     Ok(Err(refused)) => Ok(self.no_access(Some(&refused.why))),
                     Err(error) if error.is_aborted() => Err(error),
                     Err(_) => Ok(self.no_access(None)),
@@ -534,6 +567,26 @@ struct ReadTool<S: RefScheme> {
 }
 
 /// The read tool's description: what it reads, and for each kind read inside something, its parent.
+/// The project as the model sees it: its name and state, without Kumi's identity for it or the folders it's in (its file
+/// name stays), and without what the transport tells once already.
+fn shown_project(project: &Value, transport: Option<&Value>) -> Value {
+    let mut shown = project.clone();
+    if let Some(row) = shown.as_object_mut() {
+        row.remove("identity");
+        if let Some(path) = row.remove("path").and_then(|path| path.as_str().map(str::to_owned)).filter(|path| !path.is_empty()) {
+            let file = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned();
+            row.insert("file".into(), json!(file));
+        }
+        if transport.is_some_and(|transport| transport.get("playing").is_some()) {
+            row.remove("playState");
+        }
+        if transport.is_some_and(|transport| transport.get("loop").is_some()) {
+            row.remove("loop");
+        }
+    }
+    shown
+}
+
 fn read_description(daw: &OwnDaw, scheme: &impl RefScheme) -> String {
     let parents: Vec<String> = daw
         .read_kinds
@@ -583,6 +636,18 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
         };
         let args = self.book.borrow().lengthen(&Value::Object(input.clone()));
         let mut args = args.as_object().cloned().unwrap_or_default();
+        // A short ref this turn doesn't know (an earlier song's, or made up) is refused in Kumi's words, not the DAW's.
+        for key in ["ref", "parent", "trackRef"] {
+            let (Some(asked), Some(sent)) = (input.get(key).and_then(Value::as_str), args.get(key).and_then(Value::as_str)) else {
+                continue;
+            };
+            if asked == sent && SHORT_REF.is_match(asked) {
+                let place = self.daw.profile.words.place;
+                return Ok(ToolResult::error(format!(
+                    "{asked} isn't one of this turn's refs (it may be from before the {place} changed): read again for a current one"
+                )));
+            }
+        }
         // The host's name for the track whose lines are read.
         if let Some(track) = args.remove("trackRef") {
             args.insert("track".into(), track);
@@ -590,13 +655,34 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
         if let Some(layout) = self.layout.get() {
             args.insert("layout".into(), layout.into());
         }
-        let result = endpoint.call("read", args, abort::any([signal, abort::timeout(CALL_MS)])).await?;
-        match answer_of(&result) {
-            Ok(page) => {
-                let shortened = self.book.borrow_mut().shorten(&page);
-                Ok(ToolResult::text(stringify(&shortened)))
+        // A page the model can take whole: past the kernel's cut its nextCursor would be lost, so fewer rows are asked for
+        // (a few times at most, should the bridge not take fewer).
+        let mut tries = 0;
+        loop {
+            let result = endpoint.call("read", args.clone(), abort::any([signal.clone(), abort::timeout(CALL_MS)])).await?;
+            match answer_of(&result) {
+                Ok(page) => {
+                    let text = stringify(&self.book.borrow_mut().shorten(&page));
+                    let rows = page.get("items").and_then(Value::as_array).map_or(0, Vec::len);
+                    let asked = args.get("limit").and_then(Value::as_u64).map_or(rows, |limit| (limit as usize).min(rows));
+                    tries += 1;
+                    if text.len() > PAGE_TEXT_BYTES && asked > 1 && tries < 5 {
+                        args.insert("limit".into(), (asked / 2).into());
+                        continue;
+                    }
+                    return Ok(ToolResult::text(text));
+                }
+                // The DAW's words, with its long refs in this turn's short ones.
+                Err(refused) => {
+                    let mut why = refused.why;
+                    let mut book = self.book.borrow_mut();
+                    for reference in book.scheme.refs_in(&why.clone()) {
+                        let short = book.short_ref(reference);
+                        why = why.replace(reference, &short);
+                    }
+                    return Ok(ToolResult::error(why));
+                }
             }
-            Err(refused) => Ok(ToolResult::error(refused.why)),
         }
     }
     fn reach(&self) -> Reach {

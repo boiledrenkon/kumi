@@ -27,6 +27,9 @@ pub struct IntegrationContext {
     pub on_pointed: Option<Rc<dyn Fn(PinnedNode)>>,
     pub on_transport: Option<Rc<dyn Fn(Option<Transport>)>>,
     pub focus_interval_ms: Option<u64>,
+    /// Whether something draws the focus as it moves (the full screen's FOCUS). Without it, a DAW whose focus is
+    /// polled is asked about once a second: enough to see it go, come back or turn busy.
+    pub focus_drawn: bool,
     pub on_change: Option<Rc<dyn Fn(ChangeRecord)>>,
     pub on_action: Option<Rc<dyn Fn(ActionEvent)>>,
     pub low_disk: Option<LowDisk>,
@@ -55,6 +58,7 @@ impl IntegrationContext {
             on_pointed: None,
             on_transport: None,
             focus_interval_ms: None,
+            focus_drawn: true,
             on_change: None,
             on_action: None,
             low_disk: None,

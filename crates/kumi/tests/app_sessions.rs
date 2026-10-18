@@ -208,6 +208,9 @@ impl AppLab {
     }
     /// Kumi started as main() starts it: the full screen in a terminal (`tty`), else plain lines.
     fn start(&self, tty: bool) -> (Rc<Input>, Rc<Output>, tokio::task::JoinHandle<i32>) {
+        self.start_with(tty, |_| {})
+    }
+    fn start_with(&self, tty: bool, edit: impl FnOnce(&mut CliIo)) -> (Rc<Input>, Rc<Output>, tokio::task::JoinHandle<i32>) {
         let input = Rc::new(Input { tty, ..Input::default() });
         let (out, err) = (Rc::new(Output(RefCell::default(), tty)), Rc::new(Output::default()));
         let mut env = self.env.clone();
@@ -216,6 +219,7 @@ impl AppLab {
         }
         let mut io = CliIo::new(input.clone(), out.clone(), err, env);
         io.args = vec!["--daw".into(), self.daw.as_str().into()];
+        edit(&mut io);
         (input, out, tokio::task::spawn_local(run(io, self.factory.clone())))
     }
 }
@@ -369,4 +373,28 @@ case!(renoises_full_screen_made_as_the_app_makes_it_shows_busy_another_song_and_
     let gone = &seen.iter().find(|(at, _)| at == "gone").unwrap().1;
     assert!(gone.contains("Renoise isn't connected"), "the status bar and FOCUS agree: {gone}");
     assert!(seen.last().unwrap().1.contains("Each song's conversation continues next time"), "{:?}", seen.last());
+});
+
+case!(daw_in_a_reaper_session_says_which_daw_and_opens_kumi_again_with_another, async {
+    let script = ReaperScript::new(3, 0);
+    let lab = AppLab::new(DawId::Reaper, Daw::Reaper, move |secret| script.config(secret, "/lab/REAPER")).await;
+    let reopened: Rc<RefCell<Option<Vec<String>>>> = Rc::default();
+    let into = reopened.clone();
+    let (input, out, task) = lab.start_with(false, move |io| {
+        io.reopen = Some(Rc::new(move |args| {
+            *into.borrow_mut() = Some(args);
+            async { 7 }.boxed_local()
+        }))
+    });
+    wait_for("the first look", &out, |text| text.lines().any(|l| l.starts_with("[observation] "))).await;
+    let help = command(&input, &out, "/help").await;
+    assert!(help.contains("/daw [name]"), "{help}");
+    let said = command(&input, &out, "/daw").await;
+    assert!(said.contains("[daw] Kumi works with REAPER. /daw live or /daw renoise opens Kumi again with Live or Renoise."), "{said}");
+    let said = command(&input, &out, "/daw reaper").await;
+    assert!(said.contains("[daw] Kumi works with REAPER already."), "{said}");
+    input.write("/daw renoise\n");
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 7, "{}", out.0.borrow());
+    assert!(out.0.borrow().contains("[daw] Kumi closes and opens again with Renoise."), "{}", out.0.borrow());
+    assert_eq!(reopened.borrow().clone(), Some(vec!["--daw".to_string(), "renoise".to_string()]));
 });

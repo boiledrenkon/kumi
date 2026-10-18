@@ -167,9 +167,9 @@ pub trait DawProvider {
     /// The version of the bridge this Kumi brings for the DAW.
     fn bundled_bridge_version(&self) -> Option<String>;
     /// The version of the bridge installed where a configuration says.
-    fn installed_bridge_version(&self, bridge_config: &str) -> Option<String>;
+    fn installed_bridge_version(&self, bridge_config: &str, env: &Env) -> Option<String>;
     /// Whether the DAW's bridge answers now.
-    fn bridge_answers(&self, bridge_config: &str) -> LocalBoxFuture<'static, bool>;
+    fn bridge_answers(&self, bridge_config: &str, env: &Env) -> LocalBoxFuture<'static, bool>;
     /// Whether the DAW is open.
     fn app_open(&self, env: &Env) -> LocalBoxFuture<'static, bool>;
     /// Whether the DAW runs now, from one process listing: for choosing among several DAWs whose bridges are installed.
@@ -184,7 +184,7 @@ pub trait DawProvider {
     /// The session's integration with the DAW: the app's neutral context, and what the DAW finds for itself.
     fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration>;
     /// For the doctor: whether Kumi reaches the DAW through a bridge configuration, and what it says.
-    fn probe(&self, bridge_config: String, factory: &DawFactory) -> LocalBoxFuture<'static, crate::doctor::LiveProbe>;
+    fn probe(&self, bridge_config: String, factory: &DawFactory, env: &Env) -> LocalBoxFuture<'static, crate::doctor::LiveProbe>;
     /// What the session says of the DAW's bridge: `missing` when it isn't installed; `found` when a configuration was,
     /// which may be older than this Kumi's (`bundled`); `command` starts Kumi in the way by hand.
     fn bridge_state(&self, env: &Env, found: bool, missing: bool, bundled: Option<&str>, command: &str) -> BridgeState;

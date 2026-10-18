@@ -982,6 +982,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                 beats_per_bar: None,
                 lanes: None,
                 track_count: None,
+                lanes_from: None,
             },
             ArrangementStrip {
                 length: 0.0,
@@ -992,6 +993,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                 beats_per_bar: None,
                 lanes: None,
                 track_count: None,
+                lanes_from: None,
             },
             ArrangementStrip {
                 length: 32.0,
@@ -1002,6 +1004,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                 beats_per_bar: None,
                 lanes: None,
                 track_count: None,
+                lanes_from: None,
             },
         ],
         connection_states: CONNECTION_STATES.to_vec(),
