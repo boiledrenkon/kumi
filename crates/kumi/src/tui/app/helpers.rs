@@ -199,7 +199,7 @@ pub fn catch_up_text(catch: &CatchUp, now: f64) -> String {
     let when = since(catch.last_seen_at as f64, now);
     let more = if catch.more != 0 { format!("; and {} more", catch.more) } else { String::new() };
     if catch.after_reconnect == Some(true) {
-        format!("While Live was away, {} changed: {}{more}.", catch.set, catch.lines.join("; "))
+        format!("While {} was away, {} changed: {}{more}.", crate::daw::words().app, catch.set, catch.lines.join("; "))
     } else if catch.lines.is_empty() {
         format!("Nothing changed in {} since you were last here, {when}.", catch.set)
     } else {

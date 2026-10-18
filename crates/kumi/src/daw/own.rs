@@ -508,6 +508,9 @@ impl DawSetup for OwnSetup {
         // Kumi never scripts the DAW's menus: the producer quits it, and saves first if it asks.
         false
     }
+    fn can_ask_to_quit(&self) -> bool {
+        false
+    }
     async fn closed(&self, stop: &Signal) -> bool {
         let daw = self.own().daw;
         loop {

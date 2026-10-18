@@ -362,7 +362,10 @@ impl TuiApp {
     pub(super) fn open_jobs(&self) {
         let jobs = self.0.options.controller.jobs();
         let items = if jobs.is_empty() {
-            vec![inert("None yet: Kumi starts jobs for slow work that doesn't change Live, such as research or a tutorial")]
+            vec![inert(&format!(
+                "None yet: Kumi starts jobs for slow work that doesn't change {}, such as research or a tutorial",
+                crate::daw::words().app
+            ))]
         } else {
             let mut jobs = jobs;
             jobs.sort_by_key(|status| (status.state.ended(), std::cmp::Reverse(status.id)));

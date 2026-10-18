@@ -356,7 +356,7 @@ impl TuiApp {
                 }
             }
             "remembered" => {
-                let set = self.0.state.borrow().set_name.clone().unwrap_or_else(|| "this Set".into());
+                let set = self.0.state.borrow().set_name.clone().unwrap_or_else(|| format!("this {}", crate::daw::words().place));
                 let about = if get("scope") == "producer" {
                     "about you".into()
                 } else if value["pending"] == true {

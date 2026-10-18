@@ -749,13 +749,12 @@ impl TuiApp {
                 change.score.map(|n| format!("{}%", number::to_string(n))).unwrap_or_else(|| "heard".into())
             } else {
                 match change.state {
-                    ChangeState::Applied => "undo",
-                    ChangeState::Undone => "undone",
-                    ChangeState::Kept => "kept",
-                    ChangeState::Expired => "no undo",
-                    _ => "check Live",
+                    ChangeState::Applied => "undo".into(),
+                    ChangeState::Undone => "undone".into(),
+                    ChangeState::Kept => "kept".into(),
+                    ChangeState::Expired => "no undo".into(),
+                    _ => format!("check {}", crate::daw::words().app),
                 }
-                .into()
             };
             let action_style = if heard {
                 st::DIM

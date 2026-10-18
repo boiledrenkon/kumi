@@ -108,6 +108,26 @@ pub fn profile() -> &'static DawProfile {
     current().profile()
 }
 
+/// The DAW's words for what the app says ("Live", "Set", "Sets"): Live's for Live, so its screens keep their bytes.
+pub fn words() -> &'static kumi_runtime::core::daw::DawWords {
+    &profile().words
+}
+
+/// Where the DAW is downloaded from, as setup names it.
+pub fn site() -> &'static str {
+    match current().id() {
+        DawId::Reaper => "reaper.fm",
+        DawId::Renoise => "renoise.com",
+        _ => "ableton.com",
+    }
+}
+
+/// A word as a sentence starts it: "Set", "Project", "Song".
+pub fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
 /// How the app shows the DAW's own tools.
 pub fn presentation() -> &'static ToolPresentation {
     current().presentation()
