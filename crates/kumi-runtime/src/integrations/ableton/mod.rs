@@ -11,6 +11,7 @@ mod concurrent;
 pub mod connection;
 pub mod context;
 pub mod cuts;
+pub mod devices;
 pub mod display;
 pub mod ears;
 pub mod execution_services;
