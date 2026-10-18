@@ -378,7 +378,7 @@ impl<H: ChangeHost> History<H> {
             self.emit(&record);
         }
     }
-    pub(crate) fn update(&self, entry: &Entry<H::Material>, state: ChangeState, note: Option<String>) -> ChangeRecord {
+    pub fn update(&self, entry: &Entry<H::Material>, state: ChangeState, note: Option<String>) -> ChangeRecord {
         let record = {
             let mut entry = entry.borrow_mut();
             entry.record.state = state;
@@ -686,7 +686,7 @@ impl<H: ChangeHost> History<H> {
     pub async fn stop_everything(&self, signal: Signal) -> bool {
         self.host.stop_transport(signal).await
     }
-    pub(crate) fn undone(&self, entry: &Entry<H::Material>) -> UndoResult {
+    pub fn undone(&self, entry: &Entry<H::Material>) -> UndoResult {
         let record = self.update(entry, ChangeState::Undone, None);
         let text = stringify(&json!({"undone":record.title,"change":record.id}));
         UndoResult::with(record, text, false)
