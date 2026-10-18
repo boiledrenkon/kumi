@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod live_app;
 pub mod live_extension;
 pub mod provider;
+pub mod report;
 pub mod setup;
 pub mod willington;
 

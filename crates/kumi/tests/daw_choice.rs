@@ -54,10 +54,7 @@ fn only_a_daw_this_kumi_integrates_can_be_chosen() {
 #[test]
 fn without_any_bridge_kumi_chats_in_lives_words_while_live_is_the_only_daw() {
     use kumi::daw::{chosen, providers};
-    use kumi_runtime::core::{
-        contracts::Integration,
-        daw::{DawId, DawProfile},
-    };
+    use kumi_runtime::core::daw::{DawId, DawProfile};
     let env = env();
     assert_eq!(providers().map(|provider| provider.id()), [DawId::Ableton], "a second DAW decides the fallback on purpose");
     let (provider, found) = chosen(None, &env);

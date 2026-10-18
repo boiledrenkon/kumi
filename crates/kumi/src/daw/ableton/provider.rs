@@ -8,6 +8,7 @@ use super::{
 };
 use crate::daw::provider::{BridgeState, DawFactory, DawProvider, DawSession, EnableStep, WatchWords};
 use crate::doctor::{Check, DoctorIo, InstallationIo, LiveProbe};
+use crate::report::LogFiles;
 use crate::tui::app::DawSetup;
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::abort;
@@ -154,6 +155,16 @@ impl DawProvider for Ableton {
     }
     fn extra_checks<'a>(&'a self, io: &'a DoctorIo) -> LocalBoxFuture<'a, Result<Vec<Check>, RuntimeError>> {
         super::doctor::extra_checks(io).boxed_local()
+    }
+    fn report_log<'a>(&'a self, env: &'a Env, home: &'a str, logs: Option<&'a LogFiles>) -> LocalBoxFuture<'a, (String, String)> {
+        async move {
+            let logs = match logs {
+                Some(logs) => Some(logs().await.unwrap_or_default()),
+                None => None,
+            };
+            super::report::log_section(env, home, logs).await
+        }
+        .boxed_local()
     }
     fn without_daw(&self, on_connection: Rc<dyn Fn(ConnectionState)>) -> Rc<dyn Integration> {
         kumi_runtime::integrations::create_inference_only_integration(on_connection)

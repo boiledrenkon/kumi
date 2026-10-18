@@ -19,6 +19,7 @@ use std::{
 
 use super::ableton::AbletonFactory;
 use crate::doctor::{Check, DoctorIo, InstallationIo};
+use crate::report::LogFiles;
 use crate::tui::app::DawSetup;
 use kumi_runtime::RuntimeError;
 
@@ -145,6 +146,9 @@ pub trait DawProvider {
     fn installation_checks<'a>(&'a self, env: &'a Env, io: &'a InstallationIo, platform: &'a str) -> LocalBoxFuture<'a, Vec<Check>>;
     /// What the DAW needs beyond its bridge, later in the doctor (Live: Kumi's hands in its menus).
     fn extra_checks<'a>(&'a self, io: &'a DoctorIo) -> LocalBoxFuture<'a, Result<Vec<Check>, RuntimeError>>;
+    /// The DAW's log for `kumi report`: its heading, and its bridge's lines and errors (`logs`: a test's log files in
+    /// place of the DAW's own).
+    fn report_log<'a>(&'a self, env: &'a Env, home: &'a str, logs: Option<&'a LogFiles>) -> LocalBoxFuture<'a, (String, String)>;
     /// Chatting without the DAW, in its words.
     fn without_daw(&self, on_connection: Rc<dyn Fn(ConnectionState)>) -> Rc<dyn Integration>;
 }
