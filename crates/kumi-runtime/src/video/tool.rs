@@ -140,11 +140,14 @@ pub fn video_tools(options: VideoToolOptions) -> Vec<Rc<dyn KernelTool>> {
 }
 
 /// What watch_video's data says in Live's words, and how many times.
-pub(crate) const VIDEO_PHRASES: &[AssetPhrase] = &[AssetPhrase {
-    live: "(bottom holds Live's devices and their values)",
-    count: 1,
-    said: |p| format!("(bottom holds {}'s devices and their values)", p.words.app),
-}];
+pub(crate) const VIDEO_PHRASES: &[AssetPhrase] = &[
+    AssetPhrase {
+        live: "(bottom holds Live's devices and their values)",
+        count: 1,
+        said: |p| format!("(bottom holds {}'s devices and their values)", p.words.app),
+    },
+    AssetPhrase { live: "(bottom for Live's devices)", count: 1, said: |p| format!("(bottom for {}'s devices)", p.words.app) },
+];
 
 /// `video_tools`, saying the DAW's words.
 pub fn video_tools_for(profile: &DawProfile, options: VideoToolOptions) -> Vec<Rc<dyn KernelTool>> {
