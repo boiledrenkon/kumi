@@ -182,6 +182,9 @@ fn active(reaper: &Reaper) -> Result<(Project, crate::reaper::ProjectInfo), (Str
     Ok((info.ptr, info))
 }
 
+/// What a cursor says: the position, and the key of the row at it.
+type CursorParts = (String, Option<String>);
+
 impl Reads {
     pub fn epoch(&self) -> String {
         self.epoch.borrow().text()
@@ -261,7 +264,7 @@ impl Reads {
     }
 
     /// The position and, if it has one, the key of the row a cursor points at; None for no cursor.
-    fn cursor_parts(&self, cursor: Option<&str>) -> Result<Option<(String, Option<String>)>, (String, String)> {
+    fn cursor_parts(&self, cursor: Option<&str>) -> Result<Option<CursorParts>, (String, String)> {
         let Some(cursor) = cursor else { return Ok(None) };
         let mut parts = cursor.splitn(3, '.');
         match (parts.next(), parts.next(), parts.next()) {
