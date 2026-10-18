@@ -25,6 +25,17 @@ use kumi_runtime::mcp::types::{CallToolResult, Implementation, ListToolsResult};
 use serde_json::{json, Value};
 use std::{cell::Cell, cell::RefCell, rc::Rc, sync::Arc};
 
+/// Every key of `input` is one the tool's schema offers (it takes no others), and what it requires is there.
+fn within_schema(schema: &JsonObject, input: &JsonObject) {
+    let properties = schema["properties"].as_object().unwrap();
+    for key in input.keys() {
+        assert!(properties.contains_key(key), "{key} isn't in the schema: {schema:?}");
+    }
+    for key in schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        assert!(input.contains_key(key), "{key} is required");
+    }
+}
+
 /// The host's MCP, called in process.
 struct InProcess {
     host: Arc<Host>,
@@ -194,11 +205,16 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
                 read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
             assert!(!devices.is_error && devices.text.contains("EQ 5") && devices.text.contains("device:"), "{}", devices.text);
             assert!(!devices.text.contains("1:device:"), "{}", devices.text);
-            let lines = read
-                .execute(json!({"kind": "line", "parent": "pattern:1", "track": 1}).as_object().unwrap().clone(), Signal::new())
-                .await
-                .unwrap();
-            assert!(!lines.is_error && lines.text.contains("D#4"), "{}", lines.text);
+            // A pattern's lines, asked as the model can ask through the tool's schema: the track by its ref, lengthened.
+            let input = json!({"kind": "line", "parent": "pattern:1", "trackRef": "track:1"}).as_object().unwrap().clone();
+            within_schema(&read.input_schema(), &input);
+            let _ = read.execute(input, Signal::new()).await.unwrap();
+            assert_eq!(script.asked().last().unwrap().1, json!({"kind": "line", "parent": "1:pattern:1", "track": "1:track:1"}));
+            assert!(
+                read.description().contains("line under a pattern") && read.description().contains("trackRef"),
+                "{}",
+                read.description()
+            );
 
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let focus = seen.borrow().iter().flatten().next().cloned().expect("the focus, as the host reads it");

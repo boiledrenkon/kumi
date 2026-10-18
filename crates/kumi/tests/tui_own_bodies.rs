@@ -229,3 +229,32 @@ case!(renoises_pattern_draws_under_an_open_dsp_frame, async {
     assert!(h.calls().contains(&"own:Tracker { item_ref: Some(\"55cef1:pattern:1\") }".to_string()), "{:?}", h.calls());
     h.close().await;
 });
+
+// The DAW sends lines well around the cursor (16 above it): FOCUS draws the rows around the cursor, so line 40 of 64
+// is on screen, not cut off below the first 16.
+case!(renoises_cursor_line_stays_in_view_deep_in_a_pattern, async {
+    work_with(DawId::Renoise);
+    let c = Rc::new(Control::default());
+    let mut cells: Vec<String> = (0..33).map(|_| "--- .. .. .. ..".to_string()).collect();
+    cells[16] = "OFF 01 .. .. ..".into();
+    *c.own.borrow_mut() = Some(FocusBody::Tracker(TrackerGrid {
+        item_ref: "3:pattern:2".into(),
+        name: "Drop".into(),
+        lines: 64,
+        from: 23,
+        cursor: Some(39),
+        playing: None,
+        lpb: Some(4.),
+        tracks: vec![TrackerTrack { name: "Bass".into(), color: None, cells }],
+    }));
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    let focus = json!({"track":{"name":"Bass","kind":"sequencer"},"trackRef":"3:track:2","mainView":{"kind":"pattern-editor","label":"Pattern Editor"},"item":{"kind":"pattern-track","itemRef":"3:pattern:2","name":"Drop"}});
+    h.emit(json!({"type":"focus","focus":focus}));
+    shows(&h, "FOCUS · Pattern").await;
+    let lines = h.screen();
+    let cursor = lines.iter().find(|line| line.contains(" 40 ")).unwrap_or_else(|| panic!("line 40 on screen:\n{}", lines.join("\n")));
+    assert!(cursor.contains("OFF 01"), "{cursor}");
+    h.close().await;
+});

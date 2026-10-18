@@ -91,6 +91,9 @@ pub struct OwnIntegration<S: RefScheme> {
     layout: Rc<Cell<Option<u64>>>,
     /// Stops listening to the host's events.
     unlisten: RefCell<Option<Box<dyn Fn()>>>,
+    /// The last look that read the project: its key and project, kept by a look that can't (as Live's are), so the
+    /// conversation stays with the project while the DAW is busy or away.
+    previous: RefCell<Option<(String, Option<ProjectRef>)>>,
 }
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
@@ -107,6 +110,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         identity: Rc::default(),
         layout: Rc::default(),
         unlisten: RefCell::default(),
+        previous: RefCell::default(),
     })
 }
 
@@ -114,6 +118,8 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
 struct Refused {
     why: String,
     there: bool,
+    /// Busy for now (a dialog, a load, a render): worth waiting for.
+    busy: bool,
 }
 
 /// The JSON a host tool answered with, or why it couldn't.
@@ -132,6 +138,7 @@ fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
         return Err(Refused {
             why: value.get("error").and_then(Value::as_str).map(str::to_owned).unwrap_or(text),
             there: value.get("connected") != Some(&Value::Bool(false)),
+            busy: value.get("code").and_then(Value::as_str) == Some("busy"),
         });
     }
     Ok(value)
@@ -309,7 +316,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     fn no_access(&self, why: Option<&str>) -> Observation {
-        let mut observation = no_access(self.daw.profile, self.daw.instructions, unsaved(self.id()), Utc::now(), None);
+        // The last project read keeps its key: a busy or quit DAW isn't another project.
+        let (key, project) = self.previous.borrow().clone().unwrap_or_else(|| (unsaved(self.id()).into(), None));
+        let mut observation = no_access(self.daw.profile, self.daw.instructions, &key, Utc::now(), project);
         if let Some(why) = why {
             observation.label = format!("{} — {why}", observation.label);
         }
@@ -369,19 +378,38 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         if let Some(more) = folded.more_tracks {
             context["moreTracks"] = json!(more);
         }
+        // A project bigger than the snapshot (REAPER names the total; Renoise says only that there are more): the model
+        // is told, and how to read the rest.
+        let listed = context["tracks"].as_array().map_or(0, Vec::len);
+        let total = snapshot.pointer("/truncated/tracks/total").and_then(Value::as_u64);
+        if let Some(total) = total.filter(|total| *total as usize > listed) {
+            context["moreTracks"] = json!(format!(
+                "{} tracks in all, {listed} listed here; {read_tool} kind track pages through every one",
+                crate::notation::thousands(total as usize)
+            ));
+        } else if snapshot.get("moreTracks") == Some(&Value::Bool(true)) {
+            context["moreTracks"] = json!(format!("Not every track is listed here; {read_tool} kind track pages through every one"));
+        }
         if !markers.is_null() {
             context["markers"] = markers;
         }
         let identity = project.get("identity").and_then(Value::as_str).map(str::to_owned);
         *self.identity.borrow_mut() = identity.clone();
+        // A saved project is its id, through a restart of the DAW; an unsaved one is this run's identity for it.
+        let key = saved
+            .map(|id| format!("{}:{id}", self.daw.host_flag))
+            .or_else(|| identity.clone().map(|identity| format!("{}:{identity}", self.daw.host_flag)))
+            .unwrap_or_else(|| place.clone());
+        *self.previous.borrow_mut() = Some((key.clone(), saved.map(|_| ProjectRef { id: place.clone(), name: name.clone() })));
         let tool: Rc<dyn KernelTool> = Rc::new(ReadTool::<S> {
             daw: self.daw,
             endpoint: self.endpoint.borrow().clone(),
             book: self.book.clone(),
             layout: self.layout.clone(),
+            description: read_description(self.daw, &self.book.borrow().scheme),
         });
         Observation {
-            key: identity.clone().map(|identity| format!("{}:{identity}", self.daw.host_flag)).unwrap_or_else(|| place.clone()),
+            key: key.clone(),
             revision: None,
             label: format!("{} — {name}", profile.words.app),
             context: stringify(&context),
@@ -445,12 +473,29 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         if self.closed.get() {
             return Err(RuntimeError::plain("Integration is closed"));
         }
-        match self.call("snapshot", json!({}), signal).await {
+        match self.call("snapshot", json!({}), signal.clone()).await {
             Ok(Ok(snapshot)) => {
                 self.set_connected(true);
                 Ok(self.observation(&snapshot))
             }
-            // Busy (a dialog, a load): still there, and still connected; the focus says why it waits.
+            // Busy (a dialog, a load): still there, and still connected. Kumi waits a little for it and looks once more
+            // (as Live's #256); still busy, the look keeps the project, and the focus says why it waits.
+            Ok(Err(refused)) if refused.there && refused.busy => {
+                for _ in 0..20 {
+                    signal.check()?;
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    let busy = matches!(self.call("status", json!({}), signal.clone()).await, Ok(Ok(status)) if status.get("busy").is_some_and(|b| b != &Value::Bool(false)));
+                    if !busy {
+                        break;
+                    }
+                }
+                match self.call("snapshot", json!({}), signal).await {
+                    Ok(Ok(snapshot)) => Ok(self.observation(&snapshot)),
+                    Ok(Err(refused)) => Ok(self.no_access(Some(&refused.why))),
+                    Err(error) if error.is_aborted() => Err(error),
+                    Err(_) => Ok(self.no_access(None)),
+                }
+            }
             Ok(Err(refused)) if refused.there => Ok(self.no_access(Some(&refused.why))),
             Ok(Err(refused)) => {
                 if self.connected.replace(false) {
@@ -484,6 +529,24 @@ struct ReadTool<S: RefScheme> {
     endpoint: Option<Rc<dyn McpEndpoint>>,
     book: Rc<RefCell<Book<S>>>,
     layout: Rc<Cell<Option<u64>>>,
+    /// The description, with which kinds are read under which parent.
+    description: String,
+}
+
+/// The read tool's description: what it reads, and for each kind read inside something, its parent.
+fn read_description(daw: &OwnDaw, scheme: &impl RefScheme) -> String {
+    let parents: Vec<String> = daw
+        .read_kinds
+        .iter()
+        .filter_map(|kind| scheme.parents(kind).map(|parents| format!("{kind} under a {}", parents.join(" or "))))
+        .collect();
+    let line =
+        if daw.read_kinds.contains(&"line") { " A pattern's lines need the pattern as parent and the track as trackRef." } else { "" };
+    format!(
+        "{} Pass ref alone to read one object again. Read inside something with its ref as parent: {}.{line}",
+        daw.read_description,
+        parents.join("; ")
+    )
 }
 
 #[async_trait(?Send)]
@@ -492,24 +555,26 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
         self.daw.read_tool
     }
     fn description(&self) -> &str {
-        self.daw.read_description
+        &self.description
     }
     fn input_schema(&self) -> JsonObject {
         let app = self.daw.profile.words.app;
-        json!({
+        let mut schema = json!({
             "type": "object",
             "additionalProperties": false,
-            "required": ["kind"],
             "properties": {
-                "kind": {"type": "string", "enum": self.daw.read_kinds, "description": format!("What to read in {app}")},
+                "kind": {"type": "string", "enum": self.daw.read_kinds, "description": format!("What to read in {app} (or pass ref alone)")},
+                "ref": {"type": "string", "description": "One object's ref, from this turn: reads it alone, as it is now"},
                 "parent": {"type": "string", "description": "The ref of what it's in (a track's items, an FX's parameters…), from this turn"},
                 "cursor": {"type": "string", "description": "The cursor an earlier page gave, for the next page"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": MOST_ROWS, "description": "How many rows (50 by default)"},
             },
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default()
+        });
+        // A tracker's lines are read one track at a time.
+        if self.daw.read_kinds.contains(&"line") {
+            schema["properties"]["trackRef"] = json!({"type": "string", "description": "For kind line: the track (its ref, from this turn) whose lines of the parent pattern to read"});
+        }
+        schema.as_object().cloned().unwrap_or_default()
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         signal.check()?;
@@ -518,6 +583,10 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
         };
         let args = self.book.borrow().lengthen(&Value::Object(input.clone()));
         let mut args = args.as_object().cloned().unwrap_or_default();
+        // The host's name for the track whose lines are read.
+        if let Some(track) = args.remove("trackRef") {
+            args.insert("track".into(), track);
+        }
         if let Some(layout) = self.layout.get() {
             args.insert("layout".into(), layout.into());
         }
