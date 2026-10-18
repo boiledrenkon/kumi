@@ -21,10 +21,12 @@ M.SEND_NOW_BYTES = 256 * 1024
 M.SEND_TICK_BYTES = 1024 * 1024
 M.MAX_FRAME_BYTES = 64 * 1024 * 1024 + 1024
 -- Output the host didn't ask for (events, heartbeats) queued to a connection since the host last sent anything. Past
--- it the host has stopped reading (suspended, stopped in a debugger), and the socket's buffers would fill: Renoise's
--- documentation doesn't say what a send to a full socket does, and a block would freeze the GUI. The connection is
--- closed instead; a host that is only listening says so now and then (crates/daw-mcp-server does), and one that
--- was closed reconnects when it next needs the bridge.
+-- it the host has stopped reading (suspended, stopped in a debugger), and the socket's buffers would fill. Measured on
+-- macOS, Renoise 3.5.4: a send to a full socket writes what fits and returns false, with no block and no queue. Renoise's
+-- documentation says nothing of it, and Windows is unmeasured (to be measured in the Windows testing): a block there
+-- would freeze the GUI, so output is held well short of a full socket on every platform. The connection is retired
+-- instead; a host that is only listening says so now and then (crates/daw-mcp-server does), and one that was
+-- retired reconnects when it next needs the bridge.
 M.UNSOLICITED_LIMIT = 64 * 1024
 -- Responses waiting to be sent to one connection, beyond the one going out: a host that sends requests and doesn't read
 -- the answers is closed past this. Likewise requests waiting to be answered, and the time spent answering one
@@ -347,7 +349,8 @@ function M:close_all(reason)
       local head = record.outbox[1]
       record.outbox = (head and head.offset > 1) and { head } or {}
       self:send(record, wire.encode_frame("bye", { reason = reason }))
-      -- All of it, a line part sent included however big: a send fails rather than blocks, and the bye is the last thing.
+      -- All of it, a line part sent included however big, then the bye. Measured on macOS, Renoise 3.5.4: a send to a
+      -- full socket writes what fits, then returns false (no block, no queue). Unmeasured on Windows.
       self:flush(record, M.MAX_FRAME_BYTES)
     end
     self.ctx.connections[key] = nil
