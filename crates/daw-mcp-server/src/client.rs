@@ -190,12 +190,35 @@ impl BridgeClient {
         let (answer, answered) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, answer);
         let frame = Frame::Request(Request { id, method: method.into(), params, deadline_ms: None }).encode();
-        if self.inner.writer.lock().await.write_all(&frame).await.is_err() {
-            self.inner.pending.lock().unwrap().remove(&id);
-            fail_all(&self.inner);
-            return Err(RequestError::Closed);
+        // The timeout covers the write too: a bridge that stopped reading fills the socket, and a write that waits for
+        // room would hold the writer (and every request behind it) past their timeouts.
+        let deadline = tokio::time::Instant::now() + timeout;
+        let writing = AtomicBool::new(false);
+        let written = tokio::time::timeout_at(deadline, async {
+            let mut writer = self.inner.writer.lock().await;
+            writing.store(true, Ordering::SeqCst);
+            writer.write_all(&frame).await
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                self.inner.pending.lock().unwrap().remove(&id);
+                fail_all(&self.inner);
+                return Err(RequestError::Closed);
+            }
+            Err(_) => {
+                self.inner.pending.lock().unwrap().remove(&id);
+                if writing.load(Ordering::SeqCst) {
+                    // Part of the frame may be out: the stream can't carry another line, so the connection goes.
+                    fail_all(&self.inner);
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(200), async { self.inner.writer.lock().await.shutdown().await }).await;
+                }
+                return Err(RequestError::Timeout);
+            }
         }
-        match tokio::time::timeout(timeout, answered).await {
+        match tokio::time::timeout_at(deadline, answered).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(RequestError::Closed),
             Err(_) => {

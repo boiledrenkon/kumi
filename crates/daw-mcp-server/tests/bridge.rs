@@ -247,3 +247,55 @@ async fn an_answer_nested_past_the_limit_costs_that_answer_not_the_connection() 
     assert!(!client.is_closed());
     assert_eq!(client.request("ping", json!({}), WAIT).await.unwrap(), json!({"n": 2}));
 }
+
+/// A bridge that welcomes the host and then never reads another byte (a Lua script that never returns, a dialog).
+async fn a_bridge_that_stops_reading() -> std::net::SocketAddr {
+    use daw_bridge::handshake::{ServerAction, ServerConnection};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let config = SimulatorConfig::reaper(secret(), "/lab/REAPER");
+        let mut connection = ServerConnection::new(secret(), 0);
+        let mut chunk = vec![0u8; 4096];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap_or(0);
+            if read == 0 {
+                return;
+            }
+            for action in connection.on_bytes(&chunk[..read], 0, &mut || (config.identity.clone(), config.offer.clone())) {
+                match action {
+                    ServerAction::Send(bytes) => stream.write_all(&bytes).await.unwrap(),
+                    ServerAction::Authenticated => {
+                        // Held open, unread.
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    address
+}
+
+#[tokio::test]
+async fn a_bridge_that_stopped_reading_cant_hold_a_request_past_its_timeout() {
+    let client = BridgeClient::connect(a_bridge_that_stops_reading().await, secret(), CLIENT).await.unwrap();
+    let started = std::time::Instant::now();
+    // Far more than the socket buffers take: the write blocks for room that never comes.
+    let big = client.clone();
+    let writing = tokio::spawn(async move { big.request("big", json!({"pad": "x".repeat(32 << 20)}), Duration::from_secs(1)).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Behind it, a small request has its own, shorter timeout.
+    let behind = client.request("status", json!({}), Duration::from_millis(300)).await;
+    assert!(matches!(behind, Err(RequestError::Timeout)), "{behind:?}");
+    assert!(started.elapsed() < Duration::from_millis(900), "{:?}", started.elapsed());
+    let first = writing.await.unwrap();
+    assert!(matches!(first, Err(RequestError::Timeout)), "{first:?}");
+    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    // Part of a frame went out, so the connection is gone rather than carrying a corrupt stream.
+    assert!(client.is_closed());
+    assert!(matches!(client.request("ping", json!({}), WAIT).await, Err(RequestError::Closed)));
+}
