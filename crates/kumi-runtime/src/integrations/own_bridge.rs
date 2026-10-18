@@ -94,6 +94,9 @@ pub struct OwnIntegration<S: RefScheme> {
     /// The layout the book's refs are at (Renoise's track shifts, each raising it): every request names it, so the
     /// bridge carries an older ref through the shifts it hasn't seen.
     layout: Rc<Cell<Option<u64>>>,
+    /// When the DAW last came back (or first answered): a DAW starting on its empty song and then loading the file
+    /// isn't taken for a switch while it settles.
+    back_at: Rc<Cell<Option<tokio::time::Instant>>>,
     /// The epoch each long ref was last read in: a read names its ref's, so a DAW whose refs hold across projects
     /// (REAPER's GUIDs, which a Save As copy in another tab shares) refuses one read in another project.
     seen_in: Rc<RefCell<HashMap<String, String>>>,
@@ -118,6 +121,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         identity: Rc::default(),
         layout: Rc::default(),
         seen_in: Rc::default(),
+        back_at: Rc::default(),
         unlisten: RefCell::default(),
         previous: RefCell::default(),
     })
@@ -125,6 +129,8 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
 
 /// The markers a look shows; more are read.
 const MARKERS_SHOWN: usize = 30;
+/// How long a DAW that just came back may take to load the file it was opened with (it starts on its empty song).
+const SETTLE_MS: u64 = 3_000;
 /// The most a read's page can hold for the model: the kernel cuts a tool's result at 64 KB.
 const PAGE_TEXT_BYTES: usize = 60 * 1024;
 /// A turn's short ref (`track:3`): the shape of a name this turn gave.
@@ -267,6 +273,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let (endpoint, closed, daw, selected) = (self.endpoint.clone(), self.closed.clone(), self.daw, self.selected.clone());
         let (connected, identity, on_connection) =
             (self.connected.clone(), self.identity.clone(), self.options.context.on_connection.clone());
+        let back_at = self.back_at.clone();
         let drawn = if self.options.context.focus_drawn { FOCUS_MS } else { UNDRAWN_FOCUS_MS };
         let period = self.options.context.focus_interval_ms.unwrap_or(drawn).max(50);
         tokio::task::spawn_local(async move {
@@ -292,6 +299,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                         if connected.replace(false) {
                             on_connection(ConnectionState::Disconnected, Some(DisconnectCause::Live));
                         }
+                        // A DAW started again is another process: its project's identity is found afresh.
+                        identity.borrow_mut().take();
                         last_epoch = None;
                         lose_focus(&mut last);
                         continue;
@@ -301,8 +310,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                         continue;
                     }
                 };
-                // Back after it went away: the session looks again.
+                // Back after it went away: the session looks again, once the DAW has loaded what it opened.
                 if !connected.replace(true) {
+                    back_at.set(Some(tokio::time::Instant::now()));
                     on_connection(ConnectionState::Connected, None);
                 }
                 // Another project in the same tab, or another song: the epoch moved, and the project's identity with it.
@@ -340,6 +350,24 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                 }
             }
         });
+    }
+
+    /// The snapshot once a DAW that just came back has loaded what it opened: it starts on an empty unsaved song and
+    /// loads the file a moment later, and that first song is no switch. A song still unsaved after a while is one.
+    async fn settled(&self, mut snapshot: Value, signal: &Signal) -> Result<Value, RuntimeError> {
+        let unsaved = |snapshot: &Value| snapshot.pointer("/project/path").and_then(Value::as_str).is_none_or(str::is_empty);
+        let Some(back) = self.back_at.get() else { return Ok(snapshot) };
+        while unsaved(&snapshot) && back.elapsed() < std::time::Duration::from_millis(SETTLE_MS) {
+            signal.check()?;
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            match self.call("snapshot", json!({}), signal.clone()).await {
+                Ok(Ok(now)) => snapshot = now,
+                Err(error) if error.is_aborted() => return Err(error),
+                _ => break,
+            }
+        }
+        self.back_at.set(None);
+        Ok(snapshot)
     }
 
     fn no_access(&self, why: Option<&str>) -> Observation {
@@ -518,6 +546,10 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
         match self.call("snapshot", json!({}), signal.clone()).await {
             Ok(Ok(snapshot)) => {
+                if !self.connected.get() {
+                    self.back_at.set(Some(tokio::time::Instant::now()));
+                }
+                let snapshot = self.settled(snapshot, &signal).await?;
                 self.set_connected(true);
                 Ok(self.observation(&snapshot, pinned))
             }
@@ -544,6 +576,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
                 if self.connected.replace(false) {
                     (self.options.context.on_connection)(ConnectionState::Disconnected, Some(DisconnectCause::Live));
                 }
+                self.identity.borrow_mut().take();
                 Ok(self.no_access(Some(&refused.why)))
             }
             Err(error) if error.is_aborted() => Err(error),

@@ -565,3 +565,50 @@ async fn reads_and_looks_stay_plain_short_and_whole() {
         })
         .await;
 }
+
+/// Renoise quit and started again on the same song: it opens on its empty song first and loads the file a moment later.
+/// The look waits for the file, so the conversation stays the song's; a song still unsaved after a while is a new one.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_song_reopened_after_a_restart_keeps_its_conversation_not_the_empty_song_renoise_starts_on() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let song = |identity: &str| {
+                json!({"epoch": "1", "layout": 0, "project": {"id": PROJECT_ID, "identity": identity, "name": "Acid", "path": "/songs/Acid.xrns", "bpm": 140}, "tracks": [], "selection": {}})
+            };
+            let empty = |identity: &str| {
+                json!({"epoch": "1", "layout": 0, "project": {"id": "9999999999999999999999999999abcd", "identity": identity, "name": "", "path": null, "bpm": 120}, "tracks": [], "selection": {}})
+            };
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", song("t1:1"), false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            let before = renoise.observe(Signal::new(), None).await.unwrap().key;
+            // Renoise quits.
+            host.answers.borrow_mut().push(("snapshot", json!({"error": "Renoise closed", "connected": false}), true));
+            renoise.observe(Signal::new(), None).await.unwrap();
+            // Started again: its empty song first, the file half a second later.
+            host.answers.borrow_mut().push(("snapshot", empty("t2:1"), false));
+            let later = host.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                later.answers.borrow_mut().push(("snapshot", song("t2:2"), false));
+            });
+            let after = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(after.key, before, "the same song, the same conversation");
+            // A song still unsaved once Renoise has settled is a new one.
+            host.answers.borrow_mut().push(("snapshot", json!({"error": "Renoise closed", "connected": false}), true));
+            renoise.observe(Signal::new(), None).await.unwrap();
+            host.answers.borrow_mut().push(("snapshot", empty("t3:1"), false));
+            let started = tokio::time::Instant::now();
+            let fresh = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_ne!(fresh.key, before);
+            assert!(started.elapsed() >= std::time::Duration::from_millis(2_500), "waited for a file that never came");
+            // Settled: the next look doesn't wait.
+            let started = tokio::time::Instant::now();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        })
+        .await;
+}

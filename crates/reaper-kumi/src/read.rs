@@ -71,6 +71,11 @@ pub fn changed(message: impl Into<String>) -> (String, String) {
 }
 
 /// The refs' registry and the epoch they live in.
+/// A saved project's id while it has none of its own: made from its path, as Renoise's tool and Live make theirs.
+pub fn path_id(path: &str) -> String {
+    daw_bridge::auth::sha256_hex(format!("reaper-project:{path}").as_bytes())[..32].to_string()
+}
+
 #[derive(Default)]
 pub struct Reads {
     registry: RefCell<Registry>,
@@ -274,14 +279,20 @@ impl Reads {
                 inherited.insert(tab, id);
                 None
             }
-            (Some(id), false) if inherited.get(&tab) == Some(&id) => None,
+            // Saved, with no id of its own yet (none, or its template's): named by its path, so a restart reopening the
+            // same file is the same project. The id Kumi writes later (M6) is this one.
+            (Some(id), false) if inherited.get(&tab) == Some(&id) => Some(path_id(&info.path)),
             (Some(id), false) => {
                 inherited.remove(&tab);
                 Some(id)
             }
-            (None, _) => {
+            (None, true) => {
                 inherited.remove(&tab);
                 None
+            }
+            (None, false) => {
+                inherited.remove(&tab);
+                Some(path_id(&info.path))
             }
         }
     }
@@ -1024,8 +1035,9 @@ mod tests {
         assert_eq!(project["playState"], "stopped");
         assert_eq!(project["timeSelection"], Value::Null);
         assert_eq!(project["tabCount"], 1);
-        // The Kumi project id the project carries, once it has one; and what names it while it stays open.
-        assert_eq!(project["id"], Value::Null);
+        // The Kumi project id the project carries, once it has one (named by its path until then); and what names it
+        // while it stays open.
+        assert_eq!(project["id"], path_id("/lab/Projects/Song.rpp"));
         assert_eq!(project["identity"], lab.reads.identity(Project::first()));
         assert!(!project["identity"].as_str().unwrap().contains('x'));
         fake::with(|s| {
