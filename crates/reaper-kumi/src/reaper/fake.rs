@@ -1588,6 +1588,11 @@ pub fn api() -> Api {
     Api::load(lookup)
 }
 
+/// The fake table of a REAPER without these functions, as an older one is.
+pub fn api_without(missing: &[&str]) -> Api {
+    Api::load(|name| if missing.iter().any(|m| m.as_bytes() == name.to_bytes()) { ptr::null_mut() } else { lookup(name) })
+}
+
 fn lookup(name: &CStr) -> *mut c_void {
     macro_rules! table {
         ($($name:literal => $f:expr),* $(,)?) => {

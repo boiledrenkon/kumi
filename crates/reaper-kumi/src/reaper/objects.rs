@@ -666,6 +666,19 @@ impl Reaper<'_> {
             .filter(|guid| !guid.is_empty())
     }
 
+    /// What this REAPER is too old for: the features the bridge reads with functions it lacks, and the version that has them.
+    /// Nothing else says why a project then shows no markers, or why a project loaded over another goes unnoticed.
+    pub fn missing_features(&self) -> Vec<(&'static str, &'static str)> {
+        let mut missing = Vec::new();
+        if self.api.GetRegionOrMarker().is_none() || self.api.GetNumRegionsOrMarkers().is_none() {
+            missing.push(("markers and regions", "7.62"));
+        }
+        if self.api.Undo_GetNumEntries().is_none() {
+            missing.push(("noticing that a project was loaded over another in its tab, without REAPER's load signal", "7.79"));
+        }
+        missing
+    }
+
     /// The track an envelope is on and, for an FX parameter's envelope, the FX (as `TrackFX_` addresses it) and the
     /// parameter; -1 and -1 for any other.
     pub fn envelope_owner(&self, envelope: Envelope) -> Option<(Track, i32, i32)> {

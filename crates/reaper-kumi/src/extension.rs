@@ -470,6 +470,11 @@ impl Extension {
             "api": {"resolved": self.api.resolved(), "total": api::FUNCTION_COUNT},
             "ticksPerSecond": {"timer": rates.timer_hz, "surface": rates.surface_hz},
         });
+        let missing = reaper.missing_features();
+        if !missing.is_empty() {
+            status["missing"] =
+                missing.iter().map(|(feature, needs)| json!({"feature": feature, "needs": needs})).collect::<Vec<_>>().into();
+        }
         if let Some(project) = project {
             status["transport"] = transport_json(reaper.play_state(project.ptr), reaper.tempo());
             status["tracks"] = reaper.track_count(project.ptr).into();
@@ -734,6 +739,27 @@ mod tests {
         fake::with(|s| s.loading = true);
         extension.tick(Driver::Timer);
         assert_eq!(extension.snapshot().busy, Some(Busy::Loading));
+    }
+
+    #[test]
+    fn a_reaper_too_old_for_a_feature_says_so_in_its_status() {
+        let (extension, _tx, _, snapshot) = setup();
+        extension.tick(Driver::Timer);
+        assert_eq!(snapshot.lock().unwrap().status.get("missing"), None, "nothing is missing from a complete API");
+        fake::reset();
+        let (_tx2, rx) = queue::channel();
+        let old = Extension::new(
+            fake::api_without(&["GetRegionOrMarker", "Undo_GetNumEntries"]),
+            rx,
+            Box::new(Recorder::default()),
+            Arc::new(Mutex::new(Snapshot::default())),
+        );
+        old.tick(Driver::Timer);
+        let status = old.snapshot().status;
+        let missing: Vec<(&str, &str)> =
+            status["missing"].as_array().unwrap().iter().map(|m| (m["feature"].as_str().unwrap(), m["needs"].as_str().unwrap())).collect();
+        assert_eq!(missing.iter().map(|m| m.1).collect::<Vec<_>>(), ["7.62", "7.79"]);
+        assert!(missing[0].0.contains("markers"), "{missing:?}");
     }
 
     #[test]
