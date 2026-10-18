@@ -1,6 +1,8 @@
 //! REAPER's and Renoise's providers: Kumi's bridge goes into the DAW's own folder through the shared lifecycle, is
 //! found again (and chosen when it's the only bridge installed), and comes out; the doctor says nothing of a DAW this
 //! user has never used.
+#[path = "support/live_words.rs"]
+mod live_words;
 use kumi::daw::{chosen, own, DawProvider, RemovedBridge};
 use kumi_runtime::{core::daw::DawId, system::Env};
 use std::rc::Rc;
@@ -119,4 +121,37 @@ async fn among_several_bridges_the_running_daw_then_the_last_used_is_chosen() {
     let both = |provider: &dyn DawProvider| provider.id() != DawId::Ableton;
     assert_eq!(chosen_with(None, &env, &both).0.id(), DawId::Renoise, "both running: the one used last");
     assert_eq!(chosen_with(Some(DawId::Reaper), &env, &none).0.id(), DawId::Reaper, "asked for, always");
+}
+
+/// What `kumi --daw reaper|renoise bridge`, uninstall and update say for REAPER and Renoise: their own words, never
+/// Live's, and the command that sets up their bridge (`--daw`), not Live's.
+#[tokio::test(flavor = "current_thread")]
+async fn reapers_and_renoises_bridge_messages_never_speak_lives_words() {
+    let (dir, mut env) = renoise_home();
+    env.insert("KUMI_REAPER_RESOURCE_DIR".into(), dir.path().join("REAPER").to_string_lossy().into_owned());
+    std::fs::create_dir_all(dir.path().join("REAPER/UserPlugins")).unwrap();
+    for provider in [&own::REAPER as &dyn DawProvider, &own::RENOISE] {
+        let out = Rc::new(Out::default());
+        provider.setup_bridge(out.clone(), &env, Default::default()).await.unwrap();
+        let io = kumi::install::InstalledIo::new(out.clone(), env.clone());
+        let run: kumi::process::Run = Rc::new(|_, _, _| panic!("removing the bridge runs no program"));
+        let _ = provider.remove_bridge(&io, run).await;
+        let state = provider.bridge_state(&env, false, true, None, "kumi");
+        let watch = provider.watch_words();
+        let said = [
+            out.0.borrow().clone(),
+            provider.removal_question().to_string(),
+            provider.files_stay("~/folder"),
+            state.notice.clone().unwrap_or_default(),
+            state.why.unwrap_or_default(),
+            watch.starting.into(),
+            watch.unreachable.into(),
+            watch.answered.into(),
+        ]
+        .join("\n");
+        let leaks = live_words::leaks(&said);
+        assert!(leaks.is_empty(), "{:?} says Live's words:\n{}\n\nin:\n{said}", provider.id(), leaks.join("\n"));
+        let command = format!("kumi --daw {} bridge", provider.id().as_str());
+        assert!(state.notice.unwrap().contains(&command) && watch.unreachable.contains(&command), "{said}");
+    }
 }

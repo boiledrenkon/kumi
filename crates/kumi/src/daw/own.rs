@@ -216,12 +216,12 @@ impl DawProvider for Own {
         match self.daw {
             Daw::Reaper => WatchWords {
                 starting: "REAPER is open; Kumi connects once its extension answers.",
-                unreachable: "Kumi couldn't reach REAPER, so this is chat without it. Open REAPER with Kumi's extension installed (kumi bridge); Kumi connects by itself once it answers.",
+                unreachable: "Kumi couldn't reach REAPER, so this is chat without it. Open REAPER with Kumi's extension installed (kumi --daw reaper bridge); Kumi connects by itself once it answers.",
                 answered: "REAPER answered, so Kumi is connected to it now.",
             },
             Daw::Renoise => WatchWords {
                 starting: "Renoise is open; Kumi connects once its tool answers.",
-                unreachable: "Kumi couldn't reach Renoise, so this is chat without it. Open Renoise with Kumi's tool installed (kumi bridge); Kumi connects by itself once it answers.",
+                unreachable: "Kumi couldn't reach Renoise, so this is chat without it. Open Renoise with Kumi's tool installed (kumi --daw renoise bridge); Kumi connects by itself once it answers.",
                 answered: "Renoise answered, so Kumi is connected to it now.",
             },
         }
@@ -259,13 +259,13 @@ impl DawProvider for Own {
         }
         .boxed_local()
     }
-    fn bridge_state(&self, _env: &Env, _found: bool, missing: bool, _bundled: Option<&str>, _command: &str) -> BridgeState {
+    fn bridge_state(&self, _env: &Env, _found: bool, missing: bool, _bundled: Option<&str>, command: &str) -> BridgeState {
         if !missing {
             return BridgeState::default();
         }
         let missing = self.missing_words();
         BridgeState {
-            notice: Some(format!("{missing}; chatting without it. Run kumi bridge to put it in.")),
+            notice: Some(format!("{missing}; chatting without it. Run {command} --daw {} bridge to put it in.", self.id.as_str())),
             why: Some(format!("{missing}.")),
         }
     }
@@ -356,7 +356,12 @@ impl DawProvider for Own {
         async move {
             if self.receipt(&io.env).is_some() {
                 if let Err(why) = self.install(&io.env) {
-                    io.out.write(&format!("{} wasn't brought up to date: {why}. Run kumi bridge to try again.\n", self.bridge));
+                    io.out.write(&format!(
+                        "{} wasn't brought up to date: {why}. Run {} --daw {} bridge to try again.\n",
+                        self.bridge,
+                        *kumi_runtime::KUMI,
+                        self.id.as_str()
+                    ));
                 }
             }
             0

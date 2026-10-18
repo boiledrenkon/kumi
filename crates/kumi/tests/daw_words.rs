@@ -2,6 +2,8 @@
 //! (connecting, idle, the DAW gone, no model, FOCUS of each view, the command menu, /help, /status, the panels, the
 //! goodbye), the plain terminal's lines, and the commands' messages (bridge, doctor, report, update, uninstall). Live's
 //! own screens keep their bytes: the pins say so.
+#[path = "support/live_words.rs"]
+mod live_words;
 #[path = "support/models.rs"]
 mod models;
 #[path = "support/tui_app.rs"]
@@ -11,40 +13,14 @@ use kumi::daw::work_with;
 use kumi::tui::app::{ConnectLive, DawSetup, Installed};
 use kumi_common::abort::Signal;
 use kumi_runtime::core::{contracts::*, daw::DawId};
+use live_words::leaks;
 use regex::Regex;
 use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::LazyLock,
 };
 use support::*;
-
-/// Live's vocabulary, whole words.
-static LIVE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(Live|Ableton|Sets?|Session view|Arrangement|[Cc]lip slots?|Max for Live|M4L)\b").unwrap());
-
-/// Where a Live word is right for any producer, and why.
-const ALLOWED: &[(&str, &str)] = &[
-    // An example request a producer might type: "Set" is the verb.
-    ("Set the tempo to 124", "a verb"),
-    // A Live Set dropped into the box is one: its chip says so.
-    ("Live Set ·", "an .als file is Live's"),
-];
-
-/// The lines in `text` that speak Live's words, outside what's allowed.
-fn leaks(text: &str) -> Vec<String> {
-    text.lines()
-        .filter(|line| {
-            let mut line = line.to_string();
-            for (allowed, _) in ALLOWED {
-                line = line.replace(allowed, "");
-            }
-            LIVE.is_match(&line)
-        })
-        .map(|line| line.trim().to_string())
-        .collect()
-}
 
 /// Every leak found, by where it was seen; and all that was seen, to check the DAW's own words are there.
 #[derive(Default)]

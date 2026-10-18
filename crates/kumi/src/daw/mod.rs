@@ -113,6 +113,29 @@ pub fn words() -> &'static kumi_runtime::core::daw::DawWords {
     &profile().words
 }
 
+/// Whether the doctor speaks of `provider` on this computer: Live's checks always, unless the producer uses other DAWs
+/// alone (Live's bridge isn't in, and another DAW's is); another DAW's say nothing until its folders are there.
+pub fn in_use(provider: &dyn DawProvider, env: &Env) -> bool {
+    provider.id() != DawId::Ableton
+        || provider.bridge_installed(env)
+        || !providers().into_iter().any(|other| other.id() != DawId::Ableton && other.bridge_installed(env))
+}
+
+/// The DAWs the producer works with here, by name, for the doctor's heading: those whose bridge is in (Live when none
+/// is).
+pub fn used_names(env: &Env) -> String {
+    let names: Vec<&str> = providers()
+        .into_iter()
+        .filter(|provider| provider.bridge_installed(env) || (provider.id() == DawId::Ableton && in_use(*provider, env)))
+        .map(|provider| provider.profile().words.app)
+        .collect();
+    if names.is_empty() {
+        "Live".into()
+    } else {
+        names.join(", ")
+    }
+}
+
 /// Where the DAW is downloaded from, as setup names it.
 pub fn site() -> &'static str {
     match current().id() {
