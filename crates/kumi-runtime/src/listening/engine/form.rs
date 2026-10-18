@@ -1,49 +1,56 @@
-//! The form tool: the song played, heard and read bar by bar, which tracks play where (from the Arrangement), and a
+//! The form tool: the song played, heard and read bar by bar, which tracks play where (from the timeline), and a
 //! reference's form beside it.
 
-use super::super::connection::NO_CURRENT_LIVE;
-use super::rig::Window;
-use super::*;
-use crate::listening::engine::JudgeHeard;
-use crate::listening::{
-    form::{compare, file_grid, form, form_from, Form},
-    measure::{measure_file, MeasureOptions},
-    notes::Grid,
+use super::{judge::JudgeHeard, Listening};
+use crate::{
+    core::errors::RuntimeError,
+    listening::{
+        form::{compare, file_grid, form, form_from, Form},
+        measure::{measure_file, MeasureOptions},
+        notes::Grid,
+        renderer::Window,
+        tools::FormRequest,
+    },
+    references::tool::MEASURED,
 };
-use crate::references::tool::MEASURED;
-use kumi_common::js::string::head;
+use kumi_common::{
+    abort::{self, Signal},
+    js::string::head,
+};
+use serde_json::{json, Value};
+use std::rc::Rc;
 
-impl Rendering {
+impl Listening {
     pub async fn form(self: &Rc<Self>, request: &FormRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
         let formed = self.form_now(request, original).await;
         // form hears through the judge's listen, which keeps its takes in judge/: they go now, a judged run's own stay.
-        self.listening.prune_kept().await;
+        self.prune_kept().await;
         formed
     }
 
     async fn form_now(self: &Rc<Self>, request: &FormRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
-        if !self.available() {
-            return Ok(Err(NO_CURRENT_LIVE.into()));
+        if let Some(why) = self.host.refusal() {
+            return Ok(Err(why));
         }
-        let Some(tempo) = self.observer.tempo.get().filter(|tempo| *tempo > 0.) else {
-            return Ok(Err("Kumi doesn't know the Set's tempo yet; try again.".into()));
+        let Some(tempo) = self.host.tempo().filter(|tempo| *tempo > 0.) else {
+            return Ok(Err(self.no_tempo()));
         };
-        if self.rendering.is_on() {
+        if self.host.flag().is_on() {
             return Ok(Err("Kumi is already listening to something; wait for it.".into()));
         }
-        let signal = abort::any([original, self.connection().lifetime.clone()]);
-        let meter = self.observer.beats_per_bar.get().max(1.);
+        let signal = abort::any([original, self.host.lifetime()]);
+        let meter = self.host.beats_per_bar().max(1.);
         // Whole bars: the form is read a bar at a time.
         let from = (request.from_beat.unwrap_or(0.) / meter).floor() * meter;
         let beats = match request.beats {
             Some(beats) => beats,
-            None => match self.song_end(signal.clone()).await {
+            None => match self.host.song_end(signal.clone()).await {
                 Some(end) => end - from,
                 None => return Ok(Err("Kumi couldn't tell where the song ends; give from_beat and beats.".into())),
             },
         };
         let span = Window { from, beats: (beats / meter).ceil().max(1.) * meter };
-        if let Some(why) = super::listen::too_long(span.beats, tempo, "read its form in parts: give from_beat and beats") {
+        if let Some(why) = super::too_long(span.beats, tempo, "read its form in parts: give from_beat and beats") {
             return Ok(Err(why));
         }
         let bar = meter * 60. / tempo;
@@ -61,7 +68,7 @@ impl Rendering {
                     Err(error) => return Ok(Err(format!("Kumi couldn't hear the reference: {}", head(&error.to_string(), 200)))),
                 };
                 // In its own bars: a reference at another tempo cut into this Set's bars gains or loses bars.
-                let grid = file_grid(&file, meter, self.observer.tempo.get(), signal.clone()).await;
+                let grid = file_grid(&file, meter, self.host.tempo(), signal.clone()).await;
                 Some(match grid {
                     Some(grid) => (form_from(&heard, meter * 60. / grid.tempo, grid.downbeat), Some(grid)),
                     None => (form(&heard, bar), None),
@@ -69,43 +76,24 @@ impl Rendering {
             }
             None => None,
         };
-        let heard = match self.listening.judge_hear(None, None, span, "the song, read bar by bar", signal.clone()).await? {
+        let heard = match self.judge_hear(None, None, span, "the song, read bar by bar", signal.clone()).await? {
             Ok(JudgeHeard { silent: Some(why), .. }) | Err(why) => return Ok(Err(why)),
             Ok(heard) => heard,
         };
         let shape = form(&heard.main, bar);
         let first = (from / meter) as usize;
         let elements = self.elements(span, meter, signal.clone()).await;
-        Ok(Ok(reply(&shape, first, &elements, reference.as_ref())))
+        Ok(Ok(reply(self.host.profile().words.place, &shape, first, &elements, reference.as_ref())))
     }
 
-    /// Which tracks play where in the span, from the Arrangement's clips: each track's runs of bars (song bars, from
-    /// 1), clips that touch merged.
+    /// Which tracks play where in the span, from the timeline's clips: each track's runs of bars (song bars, from 1),
+    /// clips that touch merged.
     async fn elements(&self, span: Window, meter: f64, signal: Signal) -> Vec<(String, Vec<(usize, usize)>)> {
-        let Ok(tracks) = self.rows("track", json!({"fields":["name"]}), signal.clone()).await else { return vec![] };
         let mut found = vec![];
-        for track in tracks.iter().take(64) {
-            let (Some(reference), Some(name)) = (track.get("ref").and_then(Value::as_str), track.get("name").and_then(Value::as_str))
-            else {
-                continue;
-            };
-            let Ok(clips) = self
-                .rows("arrangement-clip", json!({"parent":reference,"fields":["start","endTime","length","muted"]}), signal.clone())
-                .await
-            else {
-                continue;
-            };
+        for (name, clips) in self.host.clips_by_track(signal).await {
             let mut runs: Vec<(usize, usize)> = clips
                 .iter()
-                // A muted clip doesn't play.
-                .filter(|clip| clip.get("muted").and_then(Value::as_bool) != Some(true))
-                .filter_map(|clip| {
-                    let start = clip.get("start").and_then(Value::as_f64)?;
-                    // Where it stops playing: a looped clip's length is its loop's, not how far it runs.
-                    let end = match clip.get("endTime").and_then(Value::as_f64) {
-                        Some(end) => end,
-                        None => start + clip.get("length").and_then(Value::as_f64)?,
-                    };
+                .filter_map(|(start, end)| {
                     let (start, end) = (start.max(span.from), end.min(span.from + span.beats));
                     (end > start).then(|| ((start / meter).floor() as usize + 1, (end / meter).ceil() as usize))
                 })
@@ -119,7 +107,7 @@ impl Rendering {
                 }
             }
             if !merged.is_empty() {
-                found.push((name.to_string(), merged));
+                found.push((name, merged));
             }
         }
         found
@@ -127,7 +115,13 @@ impl Rendering {
 }
 
 /// The form as the model reads it: bar numbers as the song's (from `first`, its first bar, counted from 0).
-fn reply(shape: &Form, first: usize, elements: &[(String, Vec<(usize, usize)>)], reference: Option<&(Form, Option<Grid>)>) -> Value {
+fn reply(
+    place: &str,
+    shape: &Form,
+    first: usize,
+    elements: &[(String, Vec<(usize, usize)>)],
+    reference: Option<&(Form, Option<Grid>)>,
+) -> Value {
     let bars = |from: usize, to: usize| format!("{}–{}", first + from + 1, first + to);
     let sections: Vec<Value> = shape
         .sections
@@ -167,7 +161,7 @@ fn reply(shape: &Form, first: usize, elements: &[(String, Vec<(usize, usize)>)],
             "bars": reference.bars.len(),
             "readIn": match grid {
                 Some(grid) => format!("its own bars: {} BPM, beat one {} s in", (grid.tempo * 10.).round() / 10., (grid.downbeat * 100.).round() / 100.),
-                None => "this Set's bars, from its start (its tempo couldn't be told)".into(),
+                None => format!("this {place}'s bars, from its start (its tempo couldn't be told)"),
             },
             "differences": compare(shape, reference),
         });

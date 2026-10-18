@@ -212,6 +212,42 @@ impl LiveRenderer {
             .collect()
     }
 
+    /// Each track's Arrangement clips that play, by track name (the first 64 tracks): where each starts and ends, in beats.
+    pub(super) async fn arrangement_clips(&self, signal: Signal) -> Vec<(String, Vec<(f64, f64)>)> {
+        let Ok(tracks) = self.rows("track", json!({"fields":["name"]}), signal.clone()).await else { return vec![] };
+        let mut found = vec![];
+        for track in tracks.iter().take(64) {
+            let (Some(reference), Some(name)) = (track.get("ref").and_then(Value::as_str), track.get("name").and_then(Value::as_str))
+            else {
+                continue;
+            };
+            let Ok(clips) = self
+                .rows("arrangement-clip", json!({"parent":reference,"fields":["start","endTime","length","muted"]}), signal.clone())
+                .await
+            else {
+                continue;
+            };
+            let spans: Vec<(f64, f64)> = clips
+                .iter()
+                // A muted clip doesn't play.
+                .filter(|clip| clip.get("muted").and_then(Value::as_bool) != Some(true))
+                .filter_map(|clip| {
+                    let start = clip.get("start").and_then(Value::as_f64)?;
+                    // Where it stops playing: a looped clip's length is its loop's, not how far it runs.
+                    let end = match clip.get("endTime").and_then(Value::as_f64) {
+                        Some(end) => end,
+                        None => start + clip.get("length").and_then(Value::as_f64)?,
+                    };
+                    Some((start, end))
+                })
+                .collect();
+            if !spans.is_empty() {
+                found.push((name.to_string(), spans));
+            }
+        }
+        found
+    }
+
     /// The long ref of a track (from its ref or its name), as HISTORY keeps refs: positions.
     pub(super) async fn track_ref_long(self: &Rc<Self>, named: &str, signal: Signal) -> Option<String> {
         let short = self.scope_ref(Some(named), signal).await.ok();

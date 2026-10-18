@@ -198,4 +198,8 @@ impl Renderer for Rc<LiveRenderer> {
     async fn devices_seen(&self, track: Option<&str>, signal: Signal) -> Option<Vec<Seen>> {
         self.devices_on(track, signal).await
     }
+
+    async fn clips_by_track(&self, signal: Signal) -> Vec<(String, Vec<(f64, f64)>)> {
+        self.arrangement_clips(signal).await
+    }
 }

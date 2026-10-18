@@ -1,24 +1,30 @@
 //! The sound tool: tracks heard side by side in one pass, each sound measured, a kit judged as one, how each
 //! part ducks under and interlocks with another, and how far its notes sit from a key.
 
-use super::super::connection::NO_CURRENT_LIVE;
-use super::rig::Window;
-use super::*;
-use crate::listening::{
-    effects::{self, effects, note_value},
-    measure::Heard,
-    sound::{against_key, bandwidth, ducking, harmonics, interlock, key_classes, kit, noise_floor, problems, tail, width},
+use super::Listening;
+use crate::{
+    core::errors::RuntimeError,
+    listening::{
+        effects::{self, effects, note_value},
+        measure::Heard,
+        renderer::Window,
+        sound::{against_key, bandwidth, ducking, harmonics, interlock, key_classes, kit, noise_floor, problems, tail, width},
+        tools::SoundRequest,
+    },
 };
+use kumi_common::abort::{self, Signal};
+use serde_json::{json, Value};
+use std::rc::Rc;
 
-impl Rendering {
+impl Listening {
     pub async fn sound(self: &Rc<Self>, request: &SoundRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
-        if !self.available() {
-            return Ok(Err(NO_CURRENT_LIVE.into()));
+        if let Some(why) = self.host.refusal() {
+            return Ok(Err(why));
         }
-        let Some(tempo) = self.observer.tempo.get().filter(|tempo| *tempo > 0.) else {
-            return Ok(Err("Kumi doesn't know the Set's tempo yet; try again.".into()));
+        let Some(tempo) = self.host.tempo().filter(|tempo| *tempo > 0.) else {
+            return Ok(Err(self.no_tempo()));
         };
-        if self.rendering.is_on() {
+        if self.host.flag().is_on() {
             return Ok(Err("Kumi is already listening to something; wait for it.".into()));
         }
         let key = match &request.key {
@@ -30,23 +36,23 @@ impl Rendering {
             },
             None => None,
         };
-        let signal = abort::any([original, self.connection().lifetime.clone()]);
-        let meter = self.observer.beats_per_bar.get().max(1.);
+        let signal = abort::any([original, self.host.lifetime()]);
+        let meter = self.host.beats_per_bar().max(1.);
         // Eight bars from where it starts, unless asked.
         let window = Window { from: request.from_beat.unwrap_or(0.).max(0.), beats: request.beats.unwrap_or(8. * meter).max(meter) };
-        if let Some(why) = super::listen::too_long(window.beats, self.observer.tempo.get().unwrap_or(120.), "hear a shorter part") {
+        if let Some(why) = super::too_long(window.beats, self.host.tempo().unwrap_or(120.), "hear a shorter part") {
             return Ok(Err(why));
         }
         // The tracks by name, and the one the others duck under (heard in the same pass).
         let mut names: Vec<String> = vec![];
         for named in &request.tracks {
-            let name = self.track_name(named, signal.clone()).await.unwrap_or_else(|| named.clone());
+            let name = self.host.track_name(named, signal.clone()).await.unwrap_or_else(|| named.clone());
             if !names.contains(&name) {
                 names.push(name);
             }
         }
         let against = match &request.against {
-            Some(named) => Some(self.track_name(named, signal.clone()).await.unwrap_or_else(|| named.clone())),
+            Some(named) => Some(self.host.track_name(named, signal.clone()).await.unwrap_or_else(|| named.clone())),
             None => None,
         };
         let mut heard_names = names.clone();
@@ -54,7 +60,7 @@ impl Rendering {
             heard_names.push(against.clone());
         }
         let what = format!("measuring {}", heard_names.join(", "));
-        let heard = match self.listening.hear_takes(&heard_names, window, &what, signal).await? {
+        let heard = match self.hear_takes(&heard_names, window, &what, signal).await? {
             Ok(heard) => heard,
             Err(why) => return Ok(Err(why)),
         };

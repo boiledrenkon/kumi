@@ -1,7 +1,6 @@
 //! Render rigs, listening devices, auditions, and held goal passes: Live's side of the listening tools.
 mod ears;
 mod ears_pass;
-mod form;
 mod goal;
 mod groove;
 mod host;
@@ -12,7 +11,6 @@ mod pass;
 mod probe;
 mod rig;
 mod roles;
-mod sound;
 mod tune;
 use super::{
     audition::{restore_store, RestoreStore},
@@ -376,6 +374,12 @@ impl Rendering {
     /// The names a run's track and focus go by now.
     pub fn names_now(&self, named: &Named) -> (Option<String>, Option<String>) {
         self.listening.names_now(named)
+    }
+    pub async fn form(&self, request: &FormRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
+        self.listening.form(request, original).await
+    }
+    pub async fn sound(&self, request: &SoundRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
+        self.listening.sound(request, original).await
     }
     pub async fn tune(&self, request: &TuneRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
         self.listening.tune(request, original).await

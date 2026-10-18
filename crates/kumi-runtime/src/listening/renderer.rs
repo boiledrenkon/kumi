@@ -244,4 +244,8 @@ pub trait Renderer {
     fn eq_bands(&self, knobs: &[DeviceKnob]) -> Vec<(u8, f64, bool, bool)>;
     /// The devices on the run's track (the master without one) as tune sees them, before their parameters are read.
     async fn devices_seen(&self, track: Option<&str>, signal: Signal) -> Option<Vec<Seen>>;
+
+    /// Each track's clips on the timeline, by track name (the first 64 tracks): where each that plays starts and ends, in
+    /// beats. A muted clip doesn't play; a looped clip ends where it stops playing, not where its loop does.
+    async fn clips_by_track(&self, signal: Signal) -> Vec<(String, Vec<(f64, f64)>)>;
 }
