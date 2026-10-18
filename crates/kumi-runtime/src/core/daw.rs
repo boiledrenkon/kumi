@@ -336,6 +336,10 @@ pub struct Capabilities {
     pub audition: bool,
     /// A goal's render rig, kept open across generations.
     pub goal_rig: bool,
+    /// Splitting a track into stems inside the DAW (Live 12's own splitter).
+    pub stems: bool,
+    /// Turning audio into MIDI inside the DAW (Live's conversions).
+    pub audio_to_midi: bool,
     /// Stop clips, the transport and recording at once.
     pub stop_transport: bool,
     /// A short line in the DAW's own window, never a dialog.
@@ -443,6 +447,8 @@ impl DawProfile {
             hear: true,
             audition: true,
             goal_rig: true,
+            stems: true,
+            audio_to_midi: true,
             stop_transport: true,
             status_line: true,
             recording_state: true,
@@ -534,6 +540,8 @@ impl Capabilities {
         hear: false,
         audition: false,
         goal_rig: false,
+        stems: false,
+        audio_to_midi: false,
         stop_transport: false,
         status_line: false,
         recording_state: false,

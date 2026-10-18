@@ -619,7 +619,7 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                     }
                     .boxed_local()
                 });
-                listening.extend(crate::references::tool::reference_tools(store.clone(), programs, Some(clips)));
+                listening.extend(crate::references::tool::reference_tools_for(options.profile, store.clone(), programs, Some(clips)));
                 listening
             }
             _ => listening,

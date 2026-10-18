@@ -6,6 +6,7 @@ use super::{
     sources::{stamp, Choice, Kind, Resolved, Sources, Wanted},
     store::{KeptReference, KeptTrack, ReferenceStore, KEPT_VERSION},
 };
+use crate::core::daw::DawProfile;
 use crate::{
     audio::tools::ResolveAudio,
     core::{
@@ -29,7 +30,15 @@ use serde_json::{json, Value};
 use std::rc::Rc;
 
 pub const REFERENCE_TOOL: &str = "reference";
-const DESCRIPTION: &str = "Turn a reference into measured targets, once: an audio file or a folder of them, a YouTube video or playlist, a Spotify link (track, album, playlist or artist), or words: an artist (\"bladee\"), an album (\"Kid A\") or a genre or style (\"dub techno\"). Kumi finds example tracks (for words, the artist's most listened recordings, an album's tracks or a genre's main artists, through MusicBrainz and ListenBrainz; the audio from a YouTube search, matched by length), measures each, and keeps a profile with each measure's typical value and the range the tracks keep to: loudness, dynamics, punch, tonal balance by region, stereo below 120 Hz and brightness. Silent or quiet tracks (under −45 LUFS), and (in a folder or a search) ones under 30 seconds, are passed over. It's kept, so asking again costs nothing (a file or folder is measured again once its files change). When the words could mean more than one thing it answers with a question and options: ask the producer that one question, then call again with the `what` of the option they pick. Work toward the profile with judge (goal.reference: what the reply's note says). For one element of a reference (its bass, its drums), put the track in the Set, separate its stems (live_command separate_stems) and give a stem's clipRef. Fetching and measuring takes a minute or two.";
+/// What the reference tool says it does; how to take one element of a reference only for a DAW that splits stems.
+fn description(profile: &DawProfile) -> String {
+    let stems = if profile.caps.stems {
+        format!("For one element of a reference (its bass, its drums), put the track in the {}, separate its stems (live_command separate_stems) and give a stem's clipRef. ", profile.words.place)
+    } else {
+        String::new()
+    };
+    format!("Turn a reference into measured targets, once: an audio file or a folder of them, a YouTube video or playlist, a Spotify link (track, album, playlist or artist), or words: an artist (\"bladee\"), an album (\"Kid A\") or a genre or style (\"dub techno\"). Kumi finds example tracks (for words, the artist's most listened recordings, an album's tracks or a genre's main artists, through MusicBrainz and ListenBrainz; the audio from a YouTube search, matched by length), measures each, and keeps a profile with each measure's typical value and the range the tracks keep to: loudness, dynamics, punch, tonal balance by region, stereo below 120 Hz and brightness. Silent or quiet tracks (under −45 LUFS), and (in a folder or a search) ones under 30 seconds, are passed over. It's kept, so asking again costs nothing (a file or folder is measured again once its files change). When the words could mean more than one thing it answers with a question and options: ask the producer that one question, then call again with the `what` of the option they pick. Work toward the profile with judge (goal.reference: what the reply's note says). {stems}Fetching and measuring takes a minute or two.")
+}
 /// How long a track is heard for its profile: long enough for its loud and quiet parts.
 pub const MEASURED: f64 = 360.;
 /// A track measured for a style is a finished track: at least this long (but one file the producer gives is taken as
@@ -47,8 +56,70 @@ pub struct ReferenceTool {
 }
 
 pub fn reference_tools(store: Rc<ReferenceStore>, programs: ProgramOptions, resolve: Option<ResolveAudio>) -> Vec<Rc<dyn KernelTool>> {
+    reference_tools_for(DawProfile::ABLETON, store, programs, resolve)
+}
+
+/// `reference_tools`, saying the DAW's words.
+pub fn reference_tools_for(
+    profile: DawProfile,
+    store: Rc<ReferenceStore>,
+    programs: ProgramOptions,
+    resolve: Option<ResolveAudio>,
+) -> Vec<Rc<dyn KernelTool>> {
     let fetcher = Rc::new(Fetcher::new(store.audio_folder(), programs));
-    vec![Rc::new(ReferenceTool { store, sources: Rc::new(Sources::default()), fetcher, resolve })]
+    let tool = ReferenceTool { store, sources: Rc::new(Sources::default()), fetcher, resolve };
+    if profile == DawProfile::ABLETON {
+        return vec![Rc::new(tool)];
+    }
+    vec![Rc::new(InDaw { tool, description: description(&profile), place: profile.words.place })]
+}
+
+/// Live's description, as the reference tool gives it.
+static LIVE_DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| description(&DawProfile::ABLETON));
+
+/// The reference tool for another DAW: its description and schema in that DAW's words, the work the same.
+struct InDaw {
+    tool: ReferenceTool,
+    description: String,
+    place: &'static str,
+}
+
+#[async_trait(?Send)]
+impl KernelTool for InDaw {
+    fn name(&self) -> &str {
+        self.tool.name()
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn input_schema(&self) -> JsonObject {
+        what_schema(self.place)
+    }
+    fn reach(&self) -> crate::core::contracts::Reach {
+        self.tool.reach()
+    }
+    fn deferred(&self) -> bool {
+        self.tool.deferred()
+    }
+    async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
+        self.tool.execute(input, signal).await
+    }
+}
+
+fn what_schema(place: &str) -> JsonObject {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["what"],
+        "properties": {
+            "what": {"type": "string", "minLength": 1, "maxLength": 1024, "description": format!("The reference: a file or folder path, a clip in the {place} (its clipRef), a YouTube or Spotify link, an artist, album or genre in plain words, or a question's answer (its option's what: artist:<id> or album:<id>)")},
+            "tracks": {"type": "integer", "minimum": 3, "maximum": 10, "description": "How many example tracks to measure (6 when left out)"},
+            "again": {"type": "boolean", "description": "Measure it again even though it's kept"}
+        }
+    })
+    .as_object()
+    .unwrap()
+    .clone()
 }
 
 #[async_trait(?Send)]
@@ -57,26 +128,14 @@ impl KernelTool for ReferenceTool {
         REFERENCE_TOOL
     }
     fn description(&self) -> &str {
-        DESCRIPTION
+        &LIVE_DESCRIPTION
     }
     /// Rarely needed: find_tools reaches it.
     fn deferred(&self) -> bool {
         true
     }
     fn input_schema(&self) -> JsonObject {
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["what"],
-            "properties": {
-                "what": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "The reference: a file or folder path, a clip in the Set (its clipRef), a YouTube or Spotify link, an artist, album or genre in plain words, or a question's answer (its option's what: artist:<id> or album:<id>)"},
-                "tracks": {"type": "integer", "minimum": 3, "maximum": 10, "description": "How many example tracks to measure (6 when left out)"},
-                "again": {"type": "boolean", "description": "Measure it again even though it's kept"}
-            }
-        })
-        .as_object()
-        .unwrap()
-        .clone()
+        what_schema(DawProfile::ABLETON.words.place)
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let mut what = input.get("what").and_then(Value::as_str).unwrap_or("").trim().to_string();
