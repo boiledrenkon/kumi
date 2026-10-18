@@ -67,14 +67,21 @@ local function stored_id(song)
   return nil
 end
 
+-- Whether the song was opened without a file (a new song, or one made from a template): remembered when it is opened, not
+-- worked out at a save, since what the file name is while Renoise announces the save is Renoise's to decide.
+function M.note_document(memory, song)
+  memory.born_unsaved = (song.file_name or "") == ""
+end
+
 -- The current song's id: the stored one; for a saved song without one, one made from its path (so
 -- reopening it gives the same id until a save stores it); for an unsaved song, a new one kept until
 -- it's saved.
 function M.song_id(memory, song)
   local path = song.file_name or ""
+  if memory.born_unsaved == nil then M.note_document(memory, song) end
   -- A song never saved has no id of its own yet: one stored in it was inherited from the template it was made from,
-  -- and every song made from that template would share it.
-  local id = path ~= "" and stored_id(song) or nil
+  -- and every song made from that template would share it. (After its first save the id it got is its own.)
+  local id = path ~= "" and not memory.born_unsaved and stored_id(song) or nil
   if not id then
     if memory.song_id then
       id = memory.song_id

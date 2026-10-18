@@ -1258,6 +1258,23 @@ test("bridge: a song born from a template doesn't share the template's id", func
   no_dialogs()
 end)
 
+test("bridge: a song born from a template keeps its own id whichever comes first at its first save, the name or the announcement", function()
+  local env = setup({ song = { tool_data = '{"songId":"0123456789abcdef0123456789abcdef"}' } })
+  mock.name_first = true
+  local peer = connect(env)
+  local id = request(peer, "status").result.project.id
+  ok(id ~= "0123456789abcdef0123456789abcdef", "a new id for a song never saved: " .. tostring(id))
+  mock.save_song(env.dir .. "/b.xrns")
+  tick()
+  eq(json.decode(mock.song.tool_data).songId, id, "its own is stored, not the template's")
+  eq(request(peer, "status").result.project.id, id, "and it is still its id")
+  -- Reopened from its file, it keeps what it stored.
+  mock.load_song({ file_name = env.dir .. "/b.xrns", tool_data = mock.song and '{"songId":"' .. id .. '"}' })
+  tick()
+  eq(request(peer, "status").result.project.id, id)
+  no_dialogs()
+end)
+
 test("bridge: status says why it is busy", function()
   local env = setup()
   local peer = connect(env)

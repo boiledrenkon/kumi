@@ -331,6 +331,8 @@ function M.load_song(options)
 end
 
 function M.save_song(path)
+  -- (which comes first, the file name or the announcement, is Renoise's: M.name_first sets the other order)
+  if M.name_first then impl_of[M.song].file_name = path end
   M.fire(M.tool.app_will_save_document_observable)
   impl_of[M.song].file_name = path
   M.fire(M.tool.app_saved_document_observable)
@@ -432,6 +434,7 @@ function M.reset(options)
   M.socket_buffer_bytes, M.blocked_sends = options.socket_buffer_bytes or 256 * 1024, 0
   M.time = 0
   M.song = nil
+  M.name_first = false
   M.platform = options.platform or "MACINTOSH"
   M.move_replaces = options.move_replaces ~= false
   M.fresh_wrappers = options.fresh_wrappers ~= false

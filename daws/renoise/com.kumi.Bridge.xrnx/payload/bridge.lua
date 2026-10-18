@@ -601,6 +601,8 @@ end
 function M.on_new_document()
   b.quitting = false
   b.document = b.document + 1
+  b.memory.born_unsaved = nil
+  if renoise.song() then status.note_document(b.memory, renoise.song()) end
   bump_epoch("a song was opened")
   attach(renoise.song())
   send_project()
@@ -609,7 +611,7 @@ end
 function M.on_release_document()
   b.quitting = true
   observers:detach()
-  b.memory.song_id = nil
+  b.memory.song_id, b.memory.born_unsaved = nil, nil
   conns:event("project", json.null)
 end
 
