@@ -99,6 +99,10 @@ pub struct PromptVocab {
     pub voice_devices: &'static str,
     /// What a tutorial video talks about, for the speech recogniser's hint.
     pub tutorial_words: &'static str,
+    /// The DAW's own undo, which takes back what Kumi's can't: "Live's own undo (Cmd-Z in Live)".
+    pub own_undo: &'static str,
+    /// Said to the model after a restructure's undo the DAW didn't confirm: Kumi's refs are retired.
+    pub refs_retired: &'static str,
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -211,6 +215,12 @@ macro_rules! live_word {
     (tutorial_words) => {
         "Ableton Live tutorial: Operator, Wavetable, Drift, Simpler, Sampler, Drum Rack, Instrument Rack, Saturator, Dynamic Tube, EQ Eight, EQ Three, Glue Compressor, OTT, Roar, Auto Filter, Utility, reverb, delay, LFO, envelope, oscillator, detune, sidechain, dry/wet, Serum, Vital."
     };
+    (own_undo) => {
+        "Live's own undo (Cmd-Z in Live)"
+    };
+    (refs_retired) => {
+        "Live may have taken the tracks or scenes back, so Kumi's references are retired: discover again before using any."
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -303,6 +313,12 @@ macro_rules! daw_word {
     };
     ($profile:expr, tutorial_words) => {
         $profile.vocab.tutorial_words
+    };
+    ($profile:expr, own_undo) => {
+        $profile.vocab.own_undo
+    };
+    ($profile:expr, refs_retired) => {
+        $profile.vocab.refs_retired
     };
 }
 
@@ -443,6 +459,8 @@ impl DawProfile {
             voice_project: "project",
             voice_devices: "synths, samplers, EQs, compressors and filters",
             tutorial_words: "Music production tutorial: synth, sampler, EQ, compressor, saturation, reverb, delay, LFO, envelope, oscillator, detune, sidechain, dry/wet, Serum, Vital.",
+            own_undo: "the DAW's own undo",
+            refs_retired: "The DAW may have taken the tracks back, so Kumi's references are retired: discover again before using any.",
         },
     };
 
@@ -515,6 +533,8 @@ impl DawProfile {
             voice_project: crate::live_word!(voice_project),
             voice_devices: crate::live_word!(voice_devices),
             tutorial_words: crate::live_word!(tutorial_words),
+            own_undo: crate::live_word!(own_undo),
+            refs_retired: crate::live_word!(refs_retired),
         },
     };
 

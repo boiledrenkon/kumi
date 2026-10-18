@@ -12,13 +12,7 @@ use kumi_common::js::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{
-    collections::HashSet,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        LazyLock,
-    },
-};
+use std::{collections::HashSet, sync::LazyLock};
 pub type KnownTrack = TrackChip;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleFile {
@@ -787,10 +781,7 @@ pub fn undo_note(message: &str) -> String {
         .unwrap_or("Live didn't accept the undo, so Kumi left it as it is.")
         .into()
 }
-pub fn next_change_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!("c{}", COUNTER.fetch_add(1, Ordering::Relaxed) + 1)
-}
+pub use crate::core::history::next_change_id;
 pub fn new_record(kind: &ChangeKind, summary: ChangeSummary, state: ChangeState, at: i64) -> ChangeRecord {
     ChangeRecord {
         id: next_change_id(),
