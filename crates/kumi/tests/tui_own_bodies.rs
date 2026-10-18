@@ -174,11 +174,15 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
             SequenceSlot { pattern: 2, section: None, muted: vec![1] },
         ],
         current: Some(1),
+        // A long sequence comes as the slots around the current one: they keep their numbers.
+        first: 40,
     }));
     let matrix = json!({"track":track,"trackRef":"3:track:2","mainView":{"kind":"sequencer","label":"Pattern Matrix"},"section":{"kind":"sequence-slot","index":1.0}});
     h.emit(json!({"type":"focus","focus":matrix}));
     shows(&h, "FOCUS · Pattern Matrix").await;
     h.has("— Intro");
+    h.has(" 41 ");
+    h.has(" 42 ");
     // Columns by width: a wide name takes the cells it needs, and the next column stays in place.
     h.has("Kic ベ  Bas");
 

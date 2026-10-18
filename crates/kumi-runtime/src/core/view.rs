@@ -481,8 +481,16 @@ pub struct TrackerTrack {
 pub struct SequenceMatrix {
     pub tracks: Vec<String>,
     pub slots: Vec<SequenceSlot>,
+    /// Among `slots`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<usize>,
+    /// Where `slots` start in the sequence (0 for the first): a long sequence comes as the slots around the current one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub first: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// One slot of the sequence: the pattern it plays (numbered as the DAW shows it), its section, and its muted tracks

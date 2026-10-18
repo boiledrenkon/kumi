@@ -475,7 +475,7 @@ impl TuiApp {
             if Some(index) == matrix.current {
                 screen.fill(Rect::new(x - 1, y + row, width + 2, 1), &st::RAISED);
             }
-            screen.put(x, y + row, &format!("{:>3} ", index + 1), &st::FAINT);
+            screen.put(x, y + row, &format!("{:>3} ", matrix.first + index + 1), &st::FAINT);
             for track in 0..matrix.tracks.len().min(fit) {
                 let muted = slot.muted.contains(&track);
                 screen.put(

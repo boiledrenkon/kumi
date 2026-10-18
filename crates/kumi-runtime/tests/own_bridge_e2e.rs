@@ -217,6 +217,11 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
                 script.asked().last().unwrap().1,
                 json!({"kind": "line", "parent": "1:pattern:1", "track": "1:track:1", "layout": 0})
             );
+            // The columns the track hides, asked for as the schema allows.
+            let input = json!({"kind": "line", "parent": "pattern:1", "trackRef": "track:1", "hidden": true}).as_object().unwrap().clone();
+            within_schema(&read.input_schema(), &input);
+            let _ = read.execute(input, Signal::new()).await.unwrap();
+            assert_eq!(script.asked().last().unwrap().1["hidden"], true);
             assert!(
                 read.description().contains("line under a pattern") && read.description().contains("trackRef"),
                 "{}",

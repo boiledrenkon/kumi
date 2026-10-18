@@ -614,8 +614,11 @@ fn read_description(daw: &OwnDaw, scheme: &impl RefScheme) -> String {
         .iter()
         .filter_map(|kind| scheme.parents(kind).map(|parents| format!("{kind} under a {}", parents.join(" or "))))
         .collect();
-    let line =
-        if daw.read_kinds.contains(&"line") { " A pattern's lines need the pattern as parent and the track as trackRef." } else { "" };
+    let line = if daw.read_kinds.contains(&"line") {
+        " A pattern's lines need the pattern as parent and the track as trackRef; hidden: true reads the columns the track hides too."
+    } else {
+        ""
+    };
     format!(
         "{} Pass ref alone to read one object again. Read inside something with its ref as parent: {}.{line}",
         daw.read_description,
@@ -647,6 +650,7 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
         // A tracker's lines are read one track at a time.
         if self.daw.read_kinds.contains(&"line") {
             schema["properties"]["trackRef"] = json!({"type": "string", "description": "For kind line: the track (its ref, from this turn) whose lines of the parent pattern to read"});
+            schema["properties"]["hidden"] = json!({"type": "boolean", "description": "For kind line: also read the note and effect columns the track hides (a row says hidden when they hold something)"});
         }
         schema.as_object().cloned().unwrap_or_default()
     }

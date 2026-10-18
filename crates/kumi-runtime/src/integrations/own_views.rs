@@ -238,8 +238,10 @@ pub fn tracker(body: &Value) -> TrackerGrid {
     }
 }
 
-/// A tracker's sequence (Renoise's pattern matrix).
+/// A tracker's sequence (Renoise's pattern matrix). A long one comes as the slots around the current one, from slot
+/// `from` (counted from 1, as `current` is).
 pub fn matrix(body: &Value) -> SequenceMatrix {
+    let first = number(body, "from").filter(|n| *n >= 1.).map_or(0, |n| n as usize - 1);
     SequenceMatrix {
         tracks: list(body, "tracks").filter_map(Value::as_str).map(str::to_owned).collect(),
         slots: list(body, "slots")
@@ -249,7 +251,8 @@ pub fn matrix(body: &Value) -> SequenceMatrix {
                 muted: list(slot, "mutedTracks").filter_map(Value::as_f64).filter(|n| *n >= 1.).map(|n| n as usize - 1).collect(),
             })
             .collect(),
-        current: number(body, "current").filter(|n| *n >= 1.).map(|n| n as usize - 1),
+        current: number(body, "current").filter(|n| *n >= 1.).and_then(|n| (n as usize - 1).checked_sub(first)),
+        first,
     }
 }
 
@@ -391,5 +394,16 @@ mod tests {
         );
         assert_eq!(lanes[3].track_ref.as_deref(), Some("r:track:{B}"));
         assert_eq!((strip.lanes_from, strip.track_count), (Some(40), Some(200)));
+    }
+
+    #[test]
+    fn a_matrix_cut_to_a_page_keeps_its_slot_numbers_and_finds_the_current_one() {
+        let slot = |pattern: u32| json!({"pattern": pattern, "mutedTracks": []});
+        let body = json!({"tracks": ["Kick"], "slots": [slot(7), slot(8), slot(9)], "current": 42, "from": 41, "slotCount": 300});
+        let matrix = matrix(&body);
+        assert_eq!((matrix.first, matrix.current), (40, Some(1)), "slot 42 is the second of those shown from slot 41");
+        assert_eq!(matrix.slots[matrix.current.unwrap()].pattern, 8);
+        let whole = super::matrix(&json!({"tracks": ["Kick"], "slots": [slot(1), slot(2)], "current": 2}));
+        assert_eq!((whole.first, whole.current), (0, Some(1)));
     }
 }

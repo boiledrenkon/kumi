@@ -265,7 +265,7 @@ impl Integration for FakeIntegration {
     ) -> Result<Option<kumi_runtime::core::view::FocusBody>, RuntimeError> {
         use kumi_runtime::core::view::*;
         Ok((request == &BodyRequest::Matrix)
-            .then(|| FocusBody::Matrix(SequenceMatrix { tracks: vec!["Kick".into()], slots: vec![], current: None })))
+            .then(|| FocusBody::Matrix(SequenceMatrix { tracks: vec!["Kick".into()], slots: vec![], current: None, first: 0 })))
     }
 }
 
