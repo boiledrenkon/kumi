@@ -95,7 +95,7 @@ fn body_params(arguments: &Value) -> Result<Value, String> {
     let mut params = Map::new();
     let Some(kind) = text_arg(arguments, "kind")? else { return Err("kind: which body".into()) };
     params.insert("kind".into(), kind.into());
-    for name in ["ref", "cursor"] {
+    for name in ["ref", "cursor", "around"] {
         if let Some(text) = text_arg(arguments, name)? {
             params.insert(name.into(), text.into());
         }
@@ -235,6 +235,9 @@ mod tests {
     fn a_body_forwards_its_window_when_it_is_a_range() {
         let params = body_params(&json!({"kind": "arrange", "window": {"from": 0, "to": 32}, "limit": 10, "resource": "/x"})).unwrap();
         assert_eq!(params, json!({"kind": "arrange", "window": {"from": 0.0, "to": 32.0}, "limit": 10}));
+        let params = body_params(&json!({"kind": "arrange", "limit": 24, "around": "r:track:{A}"})).unwrap();
+        assert_eq!(params, json!({"kind": "arrange", "around": "r:track:{A}", "limit": 24}));
+        assert!(body_params(&json!({"kind": "arrange", "around": 5})).is_err());
         for bad in [
             json!({}),
             json!({"kind": "arrange", "window": {"from": 5, "to": 5}}),

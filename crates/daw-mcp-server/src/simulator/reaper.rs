@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 const PAGE_BYTES: usize = 224 * 1024;
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
+/// The arrange body's page, in tracks.
+const MAX_ARRANGE: usize = 500;
 const KINDS: [&str; 11] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"];
 const BODIES: [&str; 4] = ["arrange", "midi", "fx", "routing"];
 
@@ -129,6 +131,7 @@ impl ReaperScript {
                 "ageMs": 12,
             })),
             "focus_body" => match params.get("kind").and_then(Value::as_str) {
+                Some("arrange") => Self::arrange(&state, &epoch, params),
                 Some(kind) if BODIES.contains(&kind) => {
                     Ok(json!({"kind": kind, "epoch": epoch, "ref": params.get("ref"), "window": params.get("window")}))
                 }
@@ -136,6 +139,59 @@ impl ReaperScript {
             },
             _ => return None,
         })
+    }
+
+    /// The arrange body's tracks, paged like the extension's: from the top, from a cursor, or centred on the `around` track.
+    fn arrange(state: &State, epoch: &str, params: &Value) -> Result<Value, (String, String)> {
+        let bad = |message: &str| ("bad-params".to_string(), message.to_string());
+        // The tracks without the master, which is the first row.
+        let tracks = &state.tracks[1..];
+        let limit = params.get("limit").and_then(Value::as_u64).map_or(MAX_ARRANGE, |n| (n as usize).clamp(1, MAX_ARRANGE));
+        let start = match (params.get("cursor").and_then(Value::as_str), params.get("around")) {
+            (Some(cursor), _) => match cursor.splitn(3, '.').collect::<Vec<_>>().as_slice() {
+                ["c1", from, position] if *from == epoch => position.parse::<usize>().map_err(|_| bad("cursor: not one this read gave"))?,
+                ["c1", _, _] => return Err(bad("that cursor is from before the project tab changed: read again from the start")),
+                _ => return Err(bad("cursor: pass the nextCursor an earlier read gave, unchanged")),
+            },
+            (None, Some(around)) => {
+                let around = around.as_str().filter(|a| !a.is_empty()).ok_or_else(|| bad("around: a track ref"))?;
+                if !around.starts_with("r:track:") {
+                    return Err(bad("around: a track ref"));
+                }
+                let place = if around == "r:track:master" {
+                    0
+                } else {
+                    tracks
+                        .iter()
+                        .position(|row| row["ref"] == around)
+                        .ok_or_else(|| ("failed".to_string(), format!("{around} isn't in the project (deleted, or another tab)")))?
+                };
+                place.saturating_sub(limit / 2).min(tracks.len().saturating_sub(limit))
+            }
+            (None, None) => 0,
+        };
+        let shown: Vec<Value> = tracks
+            .iter()
+            .skip(start)
+            .take(limit)
+            .cloned()
+            .map(|mut row| {
+                row["items"] = json!([]);
+                row
+            })
+            .collect();
+        let mut body = json!({
+            "kind": "arrange",
+            "epoch": epoch,
+            "window": params.get("window").cloned().unwrap_or(json!({"from": 0.0, "to": 16.0})),
+            "tracks": shown,
+            "trackCount": tracks.len(),
+            "from": start,
+        });
+        if start + limit < tracks.len() {
+            body["nextCursor"] = format!("c1.{epoch}.{}", start + limit).into();
+        }
+        Ok(body)
     }
 
     fn read(state: &State, epoch: &str, params: &Value) -> Result<Value, (String, String)> {

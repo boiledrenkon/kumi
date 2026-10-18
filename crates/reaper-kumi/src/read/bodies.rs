@@ -32,6 +32,15 @@ const MAX_CC_EVENTS: i32 = 20_000;
 const MAX_FX_NODES: usize = 500;
 const MAX_SENDS: usize = 200;
 
+/// The track ref `around` names, if any.
+fn around_param(params: &Value) -> Result<Option<&str>, (String, String)> {
+    match params.get("around") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if !text.is_empty() => Ok(Some(text)),
+        Some(_) => Err(bad("around: a track ref")),
+    }
+}
+
 fn window_param(params: &Value) -> Result<Option<(f64, f64)>, (String, String)> {
     let Some(window) = params.get("window").filter(|w| !w.is_null()) else { return Ok(None) };
     let number = |name: &str| window.get(name).and_then(Value::as_f64).filter(|n| n.is_finite());
@@ -85,11 +94,16 @@ impl Reads {
         let (from_seconds, to_seconds) = (seconds_at(reaper, proj, from), seconds_at(reaper, proj, to));
         let signature = reaper.time_signature_at(proj, from_seconds);
         let first_page = cursor.is_none();
-        let start = self.position_number(cursor)?;
         let limit = limit_param(params, ARRANGE_TRACKS, ARRANGE_TRACKS)?;
+        let total = reaper.track_count(proj) as usize;
+        // Where the page starts: a cursor goes on from where the last page stopped; `around` centres the first page on a
+        // track; else the top.
+        let start = match (cursor, around_param(params)?) {
+            (None, Some(around)) => self.around_start(reaper, proj, around, limit, total)?,
+            _ => self.position_number(cursor)?,
+        };
         let budget = if first_page { ANSWER_BYTES - ARRANGE_EXTRAS_BYTES } else { ANSWER_BYTES };
         let mut pager = Pager::new(limit, budget);
-        let total = reaper.track_count(proj) as usize;
         let mut position = start;
         let mut next = None;
         while position < total {
@@ -113,6 +127,8 @@ impl Reads {
             "beatsPerBar": signature.map(|s| bar_beats(&s)),
             "tracks": pager.rows,
             "trackCount": total,
+            // The place of the first track listed among all of them (0-based; its row's `index` is one more).
+            "from": start,
         });
         if let Some(next) = next {
             body["nextCursor"] = self.cursor_text(&next.to_string()).into();
@@ -121,6 +137,15 @@ impl Reads {
             self.arrange_extras(reaper, proj, from_seconds, to_seconds, &mut body);
         }
         Ok(body)
+    }
+
+    /// The place a page of `limit` tracks starts to be centred on the track `around` names: half the page above it, kept
+    /// within the first track and the last page.
+    fn around_start(&self, reaper: &Reaper, proj: Project, around: &str, limit: usize, total: usize) -> Result<usize, (String, String)> {
+        let track = self.parent_track_named(reaper, proj, around, "around")?;
+        // IP_TRACKNUMBER is 1-based, and -1 for the master, which sits above them all.
+        let place = (reaper.track_value(track, "IP_TRACKNUMBER") as i64 - 1).max(0) as usize;
+        Ok(place.saturating_sub(limit / 2).min(total.saturating_sub(limit)))
     }
 
     /// The parts of the window that aren't tracks: the playhead, the loop, the selection, markers and the tempo map. All
@@ -685,6 +710,64 @@ mod tests {
         assert_eq!(second["tracks"][0]["ref"], "r:track:{T500}");
         assert_eq!(second.get("nextCursor"), None);
         assert_eq!(second.get("markers"), None);
+    }
+
+    fn tracks(n: usize) {
+        fake::with(|s| s.tracks = (0..n).map(|i| FakeTrack::new(&format!("{{T{i}}}"), &format!("Track {i}"))).collect());
+    }
+
+    fn first_and_last(body: &Value) -> (String, String) {
+        let tracks = body["tracks"].as_array().unwrap();
+        (tracks[0]["ref"].as_str().unwrap().to_string(), tracks[tracks.len() - 1]["ref"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn arrange_centres_its_page_on_a_track_and_says_where_the_page_starts() {
+        let reads = lab();
+        tracks(200);
+        let page = |reads: &Reads, params: Value| {
+            let mut all = json!({"kind": "arrange", "window": {"from": 0.0, "to": 8.0}});
+            all.as_object_mut().unwrap().extend(params.as_object().unwrap().clone());
+            body(reads, all)
+        };
+        // Track 150 (position 149) with 24 to a page: 12 above it, 11 below.
+        let middle = page(&reads, json!({"limit": 24, "around": "r:track:{T149}"})).unwrap();
+        assert_eq!(
+            (middle["from"].clone(), middle["trackCount"].clone(), middle["tracks"].as_array().unwrap().len()),
+            (json!(137), json!(200), 24)
+        );
+        assert_eq!(first_and_last(&middle), ("r:track:{T137}".to_string(), "r:track:{T160}".to_string()));
+        assert_eq!(middle["tracks"][0]["index"], 138);
+        assert!(middle["nextCursor"].is_string());
+        // The page goes on from there with its cursor, and says where that one starts.
+        let next = page(&reads, json!({"limit": 24, "cursor": middle["nextCursor"]})).unwrap();
+        assert_eq!((next["from"].clone(), first_and_last(&next).0), (json!(161), "r:track:{T161}".to_string()));
+        // Near the top the page starts at the first track; near the end it is the last page.
+        assert_eq!(page(&reads, json!({"limit": 24, "around": "r:track:{T2}"})).unwrap()["from"], 0);
+        let end = page(&reads, json!({"limit": 24, "around": "r:track:{T198}"})).unwrap();
+        assert_eq!((end["from"].clone(), first_and_last(&end).1), (json!(176), "r:track:{T199}".to_string()));
+        assert_eq!(end.get("nextCursor"), None);
+        // An odd page centres as well as it can; the master sits above them all; more room than tracks starts at the top.
+        assert_eq!(page(&reads, json!({"limit": 5, "around": "r:track:{T50}"})).unwrap()["from"], 48);
+        assert_eq!(page(&reads, json!({"limit": 24, "around": "r:track:master"})).unwrap()["from"], 0);
+        assert_eq!(page(&reads, json!({"around": "r:track:{T149}"})).unwrap()["from"], 0);
+        assert_eq!(page(&reads, json!({"limit": 24})).unwrap()["from"], 0);
+        // A cursor goes on from where it was: around is for the first page.
+        assert_eq!(page(&reads, json!({"limit": 24, "around": "r:track:{T10}", "cursor": middle["nextCursor"]})).unwrap()["from"], 161);
+        // The first page still carries the markers and the rest of the window.
+        assert!(middle["markers"].is_array() && middle["playhead"].is_number());
+    }
+
+    #[test]
+    fn arrange_around_a_track_that_is_gone_or_not_a_track_is_refused() {
+        let reads = lab();
+        let ask = |around: Value| body(&reads, json!({"kind": "arrange", "limit": 2, "around": around}));
+        assert_eq!(ask(json!("r:track:{GONE}")).unwrap_err().0, "failed");
+        assert_eq!(ask(json!("r:fx:{FX-EQ}")).unwrap_err().0, "bad-params");
+        assert_eq!(ask(json!("track:3")).unwrap_err().0, "bad-params");
+        assert_eq!(ask(json!(7)).unwrap_err().0, "bad-params");
+        assert_eq!(ask(json!("")).unwrap_err().0, "bad-params");
+        assert!(ask(json!("r:track:{BBBB}")).is_ok());
     }
 
     #[test]
