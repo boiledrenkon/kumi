@@ -1,5 +1,7 @@
 //! The DAW this Kumi works with: Live, the only one registered so far. What the app says of the DAW and shows of its
 //! tools, its focus and its devices comes from here.
+pub mod ableton;
+
 use kumi_runtime::core::{
     daw::{DawId, DawProfile},
     presentation::ToolPresentation,

@@ -1,5 +1,4 @@
 pub mod awake;
-pub mod bridge_setup;
 pub mod cli;
 pub mod config;
 pub mod daw;
@@ -9,10 +8,9 @@ pub mod history;
 pub mod input;
 pub mod install;
 pub mod library;
-pub mod live_app;
-pub mod live_extension;
 pub mod login;
 pub mod models;
+pub mod process;
 pub mod report;
 pub mod spinner;
 pub mod terminal;
@@ -21,4 +19,5 @@ pub mod tui;
 pub mod update;
 pub mod voice;
 pub mod whats_new;
-pub mod willington;
+// Live's own parts of the app, at the paths they always had.
+pub use daw::ableton::{bridge_setup, live_app, live_extension, willington};

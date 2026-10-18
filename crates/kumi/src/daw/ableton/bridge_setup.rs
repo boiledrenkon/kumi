@@ -1,67 +1,11 @@
 //! `kumi bridge`: installs and updates the native bridge.
+pub use crate::process::{ask_yes_no, copy_tree, default_run, executable_dir, executable_name, repository_dir, run_program, Ran, Run};
 use crate::{input::TerminalInput, tui::tty::TtyOutput};
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::{abort::Signal, js::string::trim};
 use kumi_runtime::system::{self, Env, SystemProgram};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    rc::Rc,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
-use tokio::io::AsyncReadExt;
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Ran {
-    pub code: i32,
-    pub stdout: String,
-    pub stderr: String,
-}
-pub type Run = Rc<dyn Fn(String, Vec<String>, Option<String>) -> LocalBoxFuture<'static, Ran>>;
-pub fn default_run() -> Run {
-    Rc::new(|command, args, cwd| async move { run_program(&command, &args, cwd.as_deref()).await }.boxed_local())
-}
-/// Run one command, preserving partial output on timeout and limiting each output stream to 16 MiB.
-pub async fn run_program(command: &str, args: &[String], cwd: Option<&str>) -> Ran {
-    let mut process = tokio::process::Command::new(command);
-    process.args(args);
-    if let Some(cwd) = cwd {
-        process.current_dir(cwd);
-    }
-    process.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
-    #[cfg(windows)]
-    process.creation_flags(0x0800_0000);
-    let Ok(mut child) = process.spawn() else { return Ran { code: 1, ..Default::default() } };
-    let stdout = Arc::new(Mutex::new(vec![]));
-    let stderr = Arc::new(Mutex::new(vec![]));
-    let full = Signal::new();
-    async fn read(mut source: impl tokio::io::AsyncRead + Unpin, data: Arc<Mutex<Vec<u8>>>, full: Signal) {
-        let mut buffer = [0; 65536];
-        loop {
-            let Ok(n) = source.read(&mut buffer).await else { return };
-            if n == 0 {
-                return;
-            }
-            let mut data = data.lock().unwrap();
-            let left = (16 * 1024 * 1024usize).saturating_sub(data.len());
-            data.extend_from_slice(&buffer[..n.min(left)]);
-            if n > left {
-                full.cancel();
-                return;
-            }
-        }
-    }
-    let out = tokio::spawn(read(child.stdout.take().unwrap(), stdout.clone(), full.clone()));
-    let err = tokio::spawn(read(child.stderr.take().unwrap(), stderr.clone(), full.clone()));
-    let status = tokio::select! {status=child.wait()=>status.ok(),_=full.cancelled()=>{let _=child.kill().await;None},_=tokio::time::sleep(Duration::from_secs(600))=>{let _=child.kill().await;None}};
-    let _ = tokio::join!(out, err);
-    let result = Ran {
-        code: status.and_then(|s| s.code()).unwrap_or(1),
-        stdout: String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned(),
-    };
-    result
-}
+use std::{rc::Rc, time::Duration};
 pub async fn remote_script_answers(config_path: &str) -> bool {
     let Some(value) = tokio::fs::read(config_path).await.ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return true };
     let Some(host) = value["bridge"]["host"].as_str().filter(|host| ["127.0.0.1", "::1"].contains(host)) else { return true };
@@ -106,57 +50,6 @@ pub async fn is_live_running_on(run: Run, platform: &str, env: &Env) -> bool {
         .contains("ableton live");
     }
     false
-}
-struct InputGuard(Option<Rc<dyn TerminalInput>>);
-impl Drop for InputGuard {
-    fn drop(&mut self) {
-        if let Some(input) = &self.0 {
-            input.pause();
-        }
-    }
-}
-/// Read a yes/no line in the terminal's normal line mode. Without a terminal nobody can answer, so it's no: the
-/// question is still said, with `ahead` (how to answer it beforehand, "add --yes") when there's a way.
-pub async fn ask_yes_no(input: Option<Rc<dyn TerminalInput>>, out: Rc<dyn TtyOutput>, question: &str, ahead: Option<&str>) -> bool {
-    let Some(input) = input.filter(|input| input.is_tty()) else {
-        out.write(&format!("{question} (no terminal to answer in{})\n", ahead.map(|how| format!("; {how}")).unwrap_or_default()));
-        return false;
-    };
-    out.write(&format!("{question} [y/N] "));
-    let _guard = InputGuard(Some(input.clone()));
-    let (send, receive) = tokio::sync::oneshot::channel();
-    let send = Rc::new(std::cell::RefCell::new(Some(send)));
-    let bytes = Rc::new(std::cell::RefCell::new(vec![]));
-    input.on_end(Rc::new({
-        let send = send.clone();
-        let bytes = bytes.clone();
-        let input = Rc::downgrade(&input);
-        move || {
-            if let Some(send) = send.borrow_mut().take() {
-                if let Some(input) = input.upgrade() {
-                    input.pause();
-                }
-                let _ = send.send(String::from_utf8_lossy(&bytes.borrow()).into_owned());
-            }
-        }
-    }));
-    input.resume(Rc::new({
-        let send = send.clone();
-        let input = Rc::downgrade(&input);
-        move |chunk| {
-            let end = chunk.iter().position(|b| matches!(b, b'\n' | b'\r'));
-            bytes.borrow_mut().extend_from_slice(&chunk[..end.unwrap_or(chunk.len())]);
-            if end.is_some() {
-                if let Some(send) = send.borrow_mut().take() {
-                    if let Some(input) = input.upgrade() {
-                        input.pause();
-                    }
-                    let _ = send.send(String::from_utf8_lossy(&bytes.borrow()).into_owned());
-                }
-            }
-        }
-    }));
-    receive.await.is_ok_and(|answer| matches!(trim(&answer).to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 use crate::{
     config::{find_bridge_config, kumi_dir, remote_scripts_dir},
@@ -219,20 +112,6 @@ impl BridgeSetupIo {
 fn error(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::plain(e.to_string())
 }
-pub fn executable_name(name: &str) -> String {
-    format!("{name}{}", if cfg!(windows) { ".exe" } else { "" })
-}
-pub fn executable_dir() -> String {
-    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.display().to_string())).unwrap_or(".".into())
-}
-pub fn repository_dir() -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-        .display()
-        .to_string()
-}
 /// The folder of the bridge this Kumi brings: an installed app's (its package.json is beside the
 /// executable), or, for a checkout's build, the checkout's apps folder, whose live-extension it places.
 pub fn bundled_bridge_dir() -> String {
@@ -272,36 +151,6 @@ fn prepared_bridge(dir: &str) -> Option<Prepared> {
     let root = join(dir, "package");
     (Path::new(&join(dir, artifact)).exists() && Path::new(&join(&root, &executable_name("ableton-mcp-server"))).exists())
         .then(|| Prepared { artifact: artifact.into(), sha256: sha256.into(), root })
-}
-pub async fn copy_tree(from: &str, to: &str) -> std::io::Result<()> {
-    let from = from.to_string();
-    let to = to.to_string();
-    tokio::task::spawn_blocking(move || {
-        let mut stack = vec![(std::path::PathBuf::from(from), std::path::PathBuf::from(to))];
-        while let Some((from, to)) = stack.pop() {
-            let metadata = fs::symlink_metadata(&from)?;
-            if metadata.is_symlink() {
-                return Err(std::io::Error::other("native bridge packages cannot contain symbolic links"));
-            }
-            if metadata.is_dir() {
-                fs::create_dir_all(&to)?;
-                for entry in fs::read_dir(&from)? {
-                    let entry = entry?;
-                    stack.push((entry.path(), to.join(entry.file_name())));
-                }
-            } else if metadata.is_file() {
-                if let Some(parent) = to.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::copy(&from, &to)?;
-            } else {
-                return Err(std::io::Error::other("native bridge packages cannot contain special files"));
-            }
-        }
-        Ok(())
-    })
-    .await
-    .map_err(std::io::Error::other)?
 }
 fn digest(file: &str) -> std::io::Result<String> {
     Ok(hex::encode(Sha256::digest(fs::read(file)?)))
