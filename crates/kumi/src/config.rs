@@ -2,6 +2,7 @@ use kumi_common::js::{
     json::file_text,
     string::{trim, utf16_len},
 };
+use kumi_runtime::core::daw::DawId;
 use kumi_runtime::{
     core::errors::RuntimeError,
     library::sources::{is_absolute, join},
@@ -109,6 +110,9 @@ pub enum AppConfig {
         bridge_missing: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume: Option<Resume>,
+        /// The DAW chosen with --daw or KUMI_DAW, when it isn't Live (never written for Live).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daw: Option<DawId>,
     },
     Live {
         #[serde(flatten)]
@@ -116,6 +120,9 @@ pub enum AppConfig {
         bridge_config: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume: Option<Resume>,
+        /// The DAW chosen with --daw or KUMI_DAW, when it isn't Live (never written for Live).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daw: Option<DawId>,
     },
 }
 /// Which kept conversation Kumi takes up as it starts.
@@ -131,6 +138,37 @@ pub enum Resume {
 }
 /// `-c`/`--continue` and `-r`/`--resume [id or name]` taken out of a session's arguments: what's left, and which
 /// conversation to take up.
+/// The DAW asked for with `--daw <id>` (or `--daw=<id>`), else KUMI_DAW: one this Kumi integrates, None for Live.
+pub(crate) fn take_daw(args: &[String], env: &Env) -> Result<(Vec<String>, Option<DawId>), RuntimeError> {
+    let registered =
+        || kumi_runtime::integrations::REGISTERED.iter().filter_map(|profile| profile.id).map(DawId::as_str).collect::<Vec<_>>().join(", ");
+    let known = |text: &str| DawId::parse(text).filter(|daw| kumi_runtime::integrations::profile(*daw).is_some());
+    let (mut rest, mut asked) = (vec![], None);
+    let mut at = 0;
+    while at < args.len() {
+        let arg = args[at].as_str();
+        let word = if arg == "--daw" {
+            at += 1;
+            Some(args.get(at).map(String::as_str).unwrap_or(""))
+        } else {
+            arg.strip_prefix("--daw=")
+        };
+        match word {
+            Some(word) => {
+                let daw = known(word).ok_or_else(|| RuntimeError::plain(format!("Use: --daw <daw>, with daw one of {}.", registered())))?;
+                asked = Some(daw);
+            }
+            None => rest.push(args[at].clone()),
+        }
+        at += 1;
+    }
+    if asked.is_none() {
+        if let Some(word) = env.get("KUMI_DAW").filter(|s| !s.is_empty()) {
+            asked = Some(known(word).ok_or_else(|| RuntimeError::plain(format!("KUMI_DAW must be one of: {}.", registered())))?);
+        }
+    }
+    Ok((rest, asked.filter(|daw| *daw != DawId::Ableton)))
+}
 pub(crate) fn take_resume(args: &[String]) -> Result<(Vec<String>, Option<Resume>), RuntimeError> {
     let both = || {
         RuntimeError::plain(format!(
@@ -780,16 +818,20 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         });
     }
     let (args, resume) = take_resume(args)?;
+    let (args, daw) = take_daw(&args, env)?;
     let at = |i: usize| args.get(i).map(String::as_str);
     let first = at(0);
     if args.len() == 1 && first == Some("--inference-only") {
-        return Ok(AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: None, resume });
+        return Ok(AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: None, resume, daw });
     }
     if args.is_empty() {
-        return Ok(if let Some(bridge_config) = find_bridge_config(env) {
-            AppConfig::Live { inference: load_inference_config(env)?, bridge_config, resume }
+        // The DAW asked for, else the first whose bridge is installed; without one, chat without a DAW.
+        let (provider, found) = crate::daw::chosen(daw, env);
+        let daw = Some(provider.id()).filter(|daw| *daw != DawId::Ableton);
+        return Ok(if let Some(bridge_config) = found {
+            AppConfig::Live { inference: load_inference_config(env)?, bridge_config, resume, daw }
         } else {
-            AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: Some(true), resume }
+            AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: Some(true), resume, daw }
         });
     }
     if !matches!(first, Some("--bridge-config" | "--inference-only")) {
@@ -810,7 +852,7 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
             "Bridge configuration must be an existing readable file; its contents are validated by the MCP server.",
         ));
     }
-    Ok(AppConfig::Live { inference: load_inference_config(env)?, bridge_config: bridge.into(), resume })
+    Ok(AppConfig::Live { inference: load_inference_config(env)?, bridge_config: bridge.into(), resume, daw })
 }
 /// Node's stripVTControlCharacters expression, for the same diagnostic and terminal input treatment.
 pub fn strip_vt(text: &str) -> String {

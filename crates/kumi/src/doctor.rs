@@ -1,9 +1,9 @@
 //! `kumi doctor`; native installs also diagnose legacy bridge configurations.
 mod installation;
+/// Live's checks, where the doctor has always had them.
+pub use crate::daw::ableton::doctor::{missing_bridge, older_bridge, port_owner};
 use crate::{
     config::*,
-    live_app::{LiveInstalled, MIN_LIVE_MAJOR},
-    live_extension::*,
     models::OFFER_ORDER,
     spinner::step,
     tui::{
@@ -13,7 +13,7 @@ use crate::{
     voice::system_language,
 };
 use futures::future::{join_all, LocalBoxFuture};
-pub use installation::{installation_checks, kumi_on_path, port_owner, InstallationIo, PortOwner};
+pub use installation::{installation_checks, kumi_on_path, InstallationIo, PortOwner};
 use kumi_common::{
     js::{
         number,
@@ -27,7 +27,6 @@ use kumi_runtime::{
         store::{open_credential_store, Credential, CredentialStore},
     },
     core::errors::RuntimeError,
-    hands::{can_build_hands, open_hands, HandsErrorKind, OpenHandsOptions},
     library::{
         learn::LearnPhase,
         sources::{dirname, join},
@@ -42,7 +41,7 @@ use kumi_runtime::{
     system::{self, Env},
     video::programs::{ffmpeg_hint, find_ffmpeg, find_whisper, whisper_hint, FfmpegOptions, ProgramOptions},
     voice::{microphone::terminal_app, voice_readiness, ReadinessOptions, VoiceReadiness},
-    CONNECT_LIVE, INSTALLED, KUMI, KUMI_REPAIR, KUMI_START, KUMI_VERSION,
+    INSTALLED, KUMI, KUMI_REPAIR, KUMI_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -153,7 +152,7 @@ pub struct ServerFinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<ModelInfo>>,
 }
-fn tilde(path: &str) -> String {
+pub(crate) fn tilde(path: &str) -> String {
     let home = home::home_dir().unwrap_or_default().display().to_string();
     if !home.is_empty() {
         path.strip_prefix(&home).map(|tail| format!("~{tail}")).unwrap_or_else(|| path.into())
@@ -161,10 +160,10 @@ fn tilde(path: &str) -> String {
         path.into()
     }
 }
-fn major(version: &str) -> f64 {
+pub(crate) fn major(version: &str) -> f64 {
     number::parse(version.strip_prefix('v').unwrap_or(version).split('.').next().unwrap_or("")).unwrap_or(f64::NAN)
 }
-fn newer(left: &str, right: &str) -> bool {
+pub(crate) fn newer(left: &str, right: &str) -> bool {
     let a: Vec<_> = left.split('.').map(|s| number::parse(s).unwrap_or(f64::NAN)).collect();
     let b: Vec<_> = right.split('.').map(|s| number::parse(s).unwrap_or(f64::NAN)).collect();
     for i in 0..3 {
@@ -316,104 +315,6 @@ pub fn read_bridge_server(config_path: &str) -> Result<BridgeServer, RuntimeErro
     }
     Ok(server)
 }
-async fn extension_check(env: &Env, config: &str, server: &BridgeServer, live: &LiveProbe) -> Option<Check> {
-    let folder = live_extensions_dir(env, system::platform())?;
-    let version = live.live_version.as_deref().unwrap_or("");
-    let parts: Vec<_> = version
-        .split('.')
-        .map(|p| p.bytes().take_while(u8::is_ascii_digit).collect::<Vec<_>>())
-        .map(|p| String::from_utf8_lossy(&p).parse::<f64>().unwrap_or(0.))
-        .collect();
-    let m = parts.first().copied().unwrap_or(0.);
-    let minor = parts.get(1).copied().unwrap_or(0.);
-    if !version.is_empty() && (m < 12. || (m == 12. && minor < 4.)) {
-        return Some(Check::note(
-            format!("Live {version} runs no extensions (12.4 and later do), so Kumi can't render tracks without playing them"),
-            None,
-        ));
-    }
-    let carried = server.package_root().and_then(|p| extension_source(&p)).and_then(|p| read_extension(&p));
-    let installed = installed_extension(&folder);
-    let again = Some(format!("Run: {} bridge, then restart Live", *KUMI));
-    let Some(installed) = installed else {
-        return carried.map(|_| {
-            Check::fix(
-                "Kumi's extension isn't in Live (it renders tracks without playing them and writes MIDI clips in the Arrangement)",
-                again,
-            )
-        });
-    };
-    if carried.as_ref().is_some_and(|c| c.digest != installed.digest) {
-        return Some(Check::fix("Kumi's extension in Live is from another bridge", again));
-    }
-    let in_live = extension_data_dir(&folder);
-    let running = running_extension(&in_live).or_else(|| running_extension(&join(&dirname(config), "live-extension")));
-    if let Some(running) = running {
-        return Some(if !extension_answers(running.port, 2000).await {
-            Check::fix("Kumi's extension is running but doesn't answer", Some("Restart Live".into()))
-        } else {
-            Check::ok(if running.folder == in_live {
-                "Kumi's extension is running in Live"
-            } else {
-                "Kumi's extension is running (Kumi started it: Live's Developer Mode is on)"
-            })
-        });
-    }
-    Some(if live.connected == Some(true) {
-        Check::note("Live hasn't started Kumi's extension",Some("Restart Live: it starts extensions when it opens. With Developer Mode on (Settings → Extensions), Kumi starts it itself while Kumi runs".into()))
-    } else {
-        Check::ok(format!("Kumi's extension {} is in Live; it starts with Live", installed.version))
-    })
-}
-async fn hands_check() -> Option<Check> {
-    if system::platform() == "win32" {
-        // Read Live's menu bar as live_command does: it said "ok" while Live's menus were out of reach (#192).
-        let hands = open_hands(OpenHandsOptions { timeout_ms: Some(15_000), ..Default::default() }).await.ok().flatten()?;
-        let menus = hands.menus(None).await;
-        hands.close();
-        return Some(match menus {
-            Ok(items)
-                if ["File", "Edit", "Create"].iter().all(|top| items.iter().any(|item| item.path.first().is_some_and(|t| t == top))) =>
-            {
-                Check::ok("Uses Live's own menus for what Live's scripting can't do (grouping, freezing, bouncing, saving)")
-            }
-            Err(error) if error.kind == HandsErrorKind::NoLive => {
-                Check::ok("Uses Live's own menus for what Live's scripting can't do (checked once Live is open)")
-            }
-            Ok(_) => Check::fix(
-                "Kumi can't read Live's menus (grouping, freezing, bouncing, saving won't work)",
-                Some("Run kumi report and send it: Live's menu bar didn't have File, Edit and Create".into()),
-            ),
-            Err(error) => Check::fix(format!("Kumi can't use Live's menus: {error}"), Some("Run kumi report and send it".into())),
-        });
-    }
-    if system::platform() != "darwin" {
-        return None;
-    }
-    let hands = open_hands(OpenHandsOptions { build: Some(false), timeout_ms: Some(3000), ..Default::default() }).await.ok().flatten();
-    let Some(hands) = hands else {
-        return Some(if can_build_hands() {
-            Check::ok("Uses Live's own menus (Kumi builds its helper the first time it needs it)")
-        } else {
-            Check::note(
-                "Kumi can't use Live's own menus here yet (grouping, freezing, bouncing, saving)",
-                Some("Install Xcode's command line tools (xcode-select --install), or update Kumi".into()),
-            )
-        });
-    };
-    let result = hands.trusted(false).await.ok().map(|trusted| {
-        if trusted {
-            Check::ok("Uses Live's own menus (Accessibility is on for this terminal)")
-        } else {
-            Check::fix(
-                "Kumi can't use Live's own menus until Accessibility is on for this terminal",
-                Some("System Settings › Privacy & Security › Accessibility: turn on the app Kumi runs in".into()),
-            )
-        }
-    });
-    hands.close();
-    result
-}
 fn grouped(n: usize) -> String {
     let raw = n.to_string();
     raw.chars().enumerate().map(|(i, c)| if i > 0 && (raw.len() - i) % 3 == 0 { format!(",{c}") } else { c.to_string() }).collect()
@@ -554,31 +455,6 @@ pub fn voice_check(voice: &VoiceReadiness, env: &Env, platform: &str) -> Check {
     }
     Check::ok("Talking to Kumi (ctrl+t): ffmpeg hears the microphone, whisper.cpp writes down what you say, on this computer")
 }
-/// No bridge in Live: something to fix where a Live 12 can take it. No Live to put one in (Linux, where Live's folders
-/// aren't read at all, or no Live 12 here) is a note.
-pub fn missing_bridge(platform: &str, installed: impl FnOnce() -> LiveInstalled) -> Check {
-    let live_12 = || Some(format!("Kumi works with Live {MIN_LIVE_MAJOR}: once it's installed and opened once, run: {}", *KUMI_START));
-    match crate::live_app::runs_on(platform).then(installed) {
-        None => Check::note("There's no Live for this system, so Kumi chats without it", None),
-        Some(LiveInstalled::Missing) => {
-            Check::note(format!("Live {MIN_LIVE_MAJOR} isn't on this computer, so Kumi chats without Live"), live_12())
-        }
-        Some(LiveInstalled::Older(version)) => {
-            Check::note(format!("Only Live {version} is on this computer, so Kumi chats without Live"), live_12())
-        }
-        Some(_) => Check::fix("The Ableton bridge isn't installed, so Kumi can't see Live", Some(CONNECT_LIVE.to_string())),
-    }
-}
-/// A bridge older than this Kumi's: to bring up to date where Live runs, the one way. Where it doesn't (Linux) there's
-/// no Live to load it, so it's a note, with what this system can do: bring the bridge's files up to date.
-pub fn older_bridge(platform: &str, installed: &str, bundled: &str) -> Check {
-    let text = format!("The installed bridge ({installed}) is older than this Kumi's ({bundled})");
-    if crate::live_app::runs_on(platform) {
-        Check::fix(text, Some(CONNECT_LIVE.to_string()))
-    } else {
-        Check::note(text, Some(format!("{} bridge --yes brings its files up to date", *KUMI)))
-    }
-}
 pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     let env = &io.env;
     // A native Kumi's version and folder head the Installation section; an earlier Node Kumi's Node is checked here.
@@ -592,103 +468,9 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     let said = servers.iter().find(|s| sign_in.text.starts_with(&format!("{} isn't running", s.server.name))).map(|s| s.server.id.as_str());
     let mut checks = io.node_version.is_some().then(|| node.clone()).into_iter().chain([sign_in]).collect::<Vec<_>>();
     checks.extend(server_checks(&servers, env, said));
-    if let Some(config) = find_bridge_config(env) {
-        let server = read_bridge_server(&config).unwrap_or_default();
-        let version = server.version.as_ref().map(|s| format!(" {s}")).unwrap_or_default();
-        checks.push(Check::ok(format!("Ableton bridge{version} ({})", tilde(&config))));
-        if let (Some(installed), Some(bundled)) = (&server.version, &io.bundled_bridge_version) {
-            if newer(bundled, installed) {
-                checks.push(older_bridge(system::platform(), installed, bundled))
-            }
-        }
-        let later = if server.native() {
-            format!("Run {} bridge to record Kumi's bridge executable", *KUMI)
-        } else if *INSTALLED {
-            format!("Kumi isn't affected. The next {} bridge records Kumi's own Node", *KUMI)
-        } else {
-            format!("Kumi isn't affected. Install Node 24 LTS (nodejs.org); the next {} bridge records it", *KUMI)
-        };
-        if let Some(command) = &server.command {
-            if !access(command, true) {
-                checks.push(Check::note(
-                    if server.native() {
-                        format!("Other MCP apps would start the bridge with an executable that's missing ({})", tilde(command))
-                    } else {
-                        format!("Other MCP apps would start the bridge with a Node that's missing ({})", tilde(command))
-                    },
-                    Some(later),
-                ))
-            } else {
-                if !server.native() {
-                    let bridge_node =
-                        if let Some(version) = &io.node_version_of { version(command.clone()).await } else { node_version(command).await };
-                    if let Some(version) = bridge_node {
-                        if ![22., 24.].contains(&major(&version)) {
-                            checks.push(Check::note(
-                                format!(
-                                    "Other MCP apps would start the bridge with Node.js {}, which it doesn't support",
-                                    version.strip_prefix('v').unwrap_or(&version)
-                                ),
-                                Some(later.clone()),
-                            ))
-                        }
-                    }
-                }
-                if regex::Regex::new(r"(?i)[\\/](_npx|\.npm[\\/]_npx|tmp|Temp)[\\/]").unwrap().is_match(command) {
-                    checks.push(Check::note(
-                        if server.native() {
-                            "Other MCP apps would start the bridge with an executable from a temporary folder, which can disappear"
-                        } else {
-                            "Other MCP apps would start the bridge with a Node from a temporary folder, which can disappear"
-                        },
-                        Some(later),
-                    ))
-                }
-            }
-        } else {
-            checks.push(Check::note("The bridge configuration names no Node for other MCP apps", Some(later)))
-        }
-        let live = if let Some(probe) = &io.probe_live { probe(config.clone()).await.unwrap_or_default() } else { LiveProbe::default() };
-        if !live.started && live.said.as_deref().is_some_and(|said| said.contains(kumi_common::bridge::ANOTHER_BRIDGE)) {
-            checks.push(Check::fix(
-                "Live is running another version of Kumi's bridge",
-                Some(format!(
-                    "Restart Live: it loads its bridge when it starts. If it still says this, quit Live and run {} bridge. Then: {} doctor",
-                    *KUMI, *KUMI
-                )),
-            ))
-        } else if !live.started {
-            let current = server
-                .version
-                .as_ref()
-                .zip(io.bundled_bridge_version.as_ref())
-                .is_some_and(|(installed, bundled)| !newer(bundled, installed));
-            checks.push(if node.status==CheckStatus::Fix{Check::note("The bridge didn't start; it needs Node 22 or 24 too",None)}else if current{Check::fix("Kumi's bridge couldn't reach Live",Some(format!("Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it first. Then: {} doctor",*KUMI)))}else{Check::fix("The bridge didn't start",Some(format!("{}, and bring Live's part up to date: quit Live, then run {} bridge. Then: {} doctor",if *INSTALLED{format!("Run {} to repair Kumi",*KUMI_REPAIR)}else{format!("Build it ({})",*KUMI_REPAIR)},*KUMI,*KUMI)))})
-        } else if live.connected != Some(true) {
-            checks.push(Check::fix(
-                "Live isn't connected",
-                Some("Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI)".into()),
-            ))
-        } else {
-            let location = format!(
-                "{} connected{}",
-                live.live_version.as_ref().filter(|s| !s.is_empty()).map(|s| format!("Live {s}")).unwrap_or("Live".into()),
-                live.set.as_ref().filter(|s| !s.is_empty()).map(|s| format!(" · {s}")).unwrap_or_default()
-            );
-            checks.push(if live.real_live == Some(false) {
-                Check::note(format!("{location} (a simulator, not real Live)"), None)
-            } else {
-                Check::ok(location)
-            })
-        }
-        if live.real_live != Some(false) {
-            if let Some(extension) = extension_check(env, &config, &server, &live).await {
-                checks.push(extension)
-            }
-        }
-    } else {
-        let platform = system::platform();
-        checks.push(missing_bridge(platform, || crate::live_app::installed(env, platform)))
+    // Each DAW's bridge and whether Kumi reaches the DAW through it.
+    for provider in crate::daw::providers() {
+        checks.extend(provider.doctor_checks(io, &node).await);
     }
     if let Ok(projects) = load_projects_dir(env) {
         checks.push(if access(&projects, false) || access(&dirname(&projects), false) {
@@ -737,9 +519,9 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     } else {
         Check::ok("Watches videos: frames with ffmpeg, speech with whisper.cpp")
     });
-    let hands = if let Some(hands) = &io.hands { hands().await? } else { hands_check().await };
-    if let Some(hands) = hands {
-        checks.push(hands)
+    // What each DAW needs of this computer beyond its bridge (Live: Kumi's hands in its menus).
+    for provider in crate::daw::providers() {
+        checks.extend(provider.extra_checks(io).await?);
     }
     let voice = if let Some(voice) = &io.voice {
         voice().await.ok()
@@ -784,7 +566,7 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     }
     Ok(checks)
 }
-fn access(path: &str, execute: bool) -> bool {
+pub(crate) fn access(path: &str, execute: bool) -> bool {
     #[cfg(unix)]
     {
         let Ok(path) = std::ffi::CString::new(path) else { return false };
@@ -795,7 +577,7 @@ fn access(path: &str, execute: bool) -> bool {
         fs::metadata(path).is_ok_and(|m| execute || !m.permissions().readonly())
     }
 }
-async fn node_version(command: &str) -> Option<String> {
+pub(crate) async fn node_version(command: &str) -> Option<String> {
     let mut process = tokio::process::Command::new(command);
     process.arg("--version").env_clear().env("PATH", dirname(command)).kill_on_drop(true);
     #[cfg(windows)]

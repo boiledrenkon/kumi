@@ -111,6 +111,7 @@ fn context(folder: &std::path::Path, env: &[(&str, &str)]) -> SlotsContext {
         file: slots::file_in(folder),
         store: Rc::new(open_credential_store(folder.join("auth.json"))) as Rc<dyn CredentialStore>,
         env: env.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect::<HashMap<_, _>>(),
+        profile: None,
     }
 }
 

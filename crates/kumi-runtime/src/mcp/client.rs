@@ -98,13 +98,40 @@ impl LinearReadBuffer {
     }
 }
 
+/// How Kumi starts and hears a DAW's bridge: its program (beside Kumi's own), the variables that tell it which tools
+/// it may expose, the notification its events come in, and the DAW's name for what Kumi says when the link fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeDescriptor {
+    pub program: &'static str,
+    pub policy_variable: &'static str,
+    pub allow_variable: &'static str,
+    pub events: &'static str,
+    pub daw: &'static str,
+}
+
+impl BridgeDescriptor {
+    /// Live's bridge: `ableton-mcp-server`.
+    pub const ABLETON: BridgeDescriptor = BridgeDescriptor {
+        program: "ableton-mcp-server",
+        policy_variable: "ABLETON_MCP_TOOL_POLICY",
+        allow_variable: "ABLETON_MCP_TOOL_ALLOW",
+        events: "notifications/live_event",
+        daw: "Live",
+    };
+
+    /// Its program beside Kumi's own.
+    pub fn entry(&self) -> PathBuf {
+        let name = if cfg!(windows) { format!("{}.exe", self.program) } else { self.program.to_string() };
+        match std::env::current_exe().ok().and_then(|exe| exe.parent().map(|folder| folder.join(&name))) {
+            Some(path) => path,
+            None => PathBuf::from(name),
+        }
+    }
+}
+
 /// The bridge Kumi starts: the `ableton-mcp-server` binary beside Kumi's own.
 pub fn bridge_entry() -> PathBuf {
-    let name = if cfg!(windows) { "ableton-mcp-server.exe" } else { "ableton-mcp-server" };
-    match std::env::current_exe().ok().and_then(|exe| exe.parent().map(|folder| folder.join(name))) {
-        Some(path) => path,
-        None => PathBuf::from(name),
-    }
+    BridgeDescriptor::ABLETON.entry()
 }
 
 /// `dirname(path)`: "." for a bare name, as Node answers.
@@ -163,6 +190,8 @@ pub struct Options {
     pub allow_tools: Vec<String>,
     /// Where the bridge runs; the bridge binary's folder by default. TS: the repository root, where it finds the protocol registry.
     pub cwd: Option<PathBuf>,
+    /// Which DAW's bridge to start and hear; Live's when not given.
+    pub bridge: Option<BridgeDescriptor>,
 }
 
 /// How long the transport waits, after the bridge exits, for its output to end before it counts as closed anyway.
@@ -192,7 +221,7 @@ const DEFAULT_INHERITED_ENV_VARS: [&str; 12] = [
 ];
 
 /// The child's whole environment, in the order it is built (a later key replaces an earlier one in place).
-fn child_environment(entry: &Path, allow_tools: &[String]) -> Vec<(String, String)> {
+fn child_environment(bridge: &BridgeDescriptor, entry: &Path, allow_tools: &[String]) -> Vec<(String, String)> {
     let mut environment: Vec<(String, String)> = Vec::new();
     let mut set = |key: &str, value: String| match environment.iter_mut().find(|(name, _)| name == key) {
         Some(entry) => entry.1 = value,
@@ -214,11 +243,11 @@ fn child_environment(entry: &Path, allow_tools: &[String]) -> Vec<(String, Strin
     set("TERM", "dumb".into());
     set("PATH", dirname(entry).to_string_lossy().into_owned());
     if allow_tools.is_empty() {
-        set("ABLETON_MCP_TOOL_POLICY", "read-only".into());
+        set(bridge.policy_variable, "read-only".into());
     } else {
         let unique: BTreeSet<&str> = allow_tools.iter().map(String::as_str).collect();
-        set("ABLETON_MCP_TOOL_POLICY", "full".into());
-        set("ABLETON_MCP_TOOL_ALLOW", unique.into_iter().collect::<Vec<_>>().join(","));
+        set(bridge.policy_variable, "full".into());
+        set(bridge.allow_variable, unique.into_iter().collect::<Vec<_>>().join(","));
     }
     // Windows runtime variables are not inference credentials. No complete process.env inheritance. PROGRAMDATA is
     // where the bridge finds Live's Extension Host, on whichever drive Windows is.
@@ -238,19 +267,20 @@ pub async fn connect_mcp(options: Options) -> Result<Rc<dyn McpEndpoint>, Runtim
     if !valid_timeout(timeout) || !valid_timeout(connect_timeout) {
         return Err(RuntimeError::plain("Invalid MCP timeout"));
     }
-    let entry = options.entry.clone().unwrap_or_else(bridge_entry);
+    let bridge = options.bridge.unwrap_or(BridgeDescriptor::ABLETON);
+    let entry = options.entry.clone().unwrap_or_else(|| bridge.entry());
     let mut command = Command::new(&entry);
     if let Some(config) = &options.bridge_config {
         command.arg("--config").arg(config);
     }
     command.args(&options.args);
-    command.env_clear().envs(child_environment(&entry, &options.allow_tools));
+    command.env_clear().envs(child_environment(&bridge, &entry, &options.allow_tools));
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     // The standalone bridge resolves protocol assets from the repository root.
-    command.current_dir(options.cwd.clone().unwrap_or_else(|| dirname(&bridge_entry())));
+    command.current_dir(options.cwd.clone().unwrap_or_else(|| dirname(&bridge.entry())));
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: the SDK's windowsHide.
-    let endpoint = Endpoint::new(timeout, options.on_dispatch.clone());
+    let endpoint = Endpoint::new(timeout, options.on_dispatch.clone(), bridge);
     match endpoint.connect(command, connect_timeout, &options.signal).await {
         Ok(()) => Ok(endpoint),
         Err(_) => {
@@ -259,7 +289,7 @@ pub async fn connect_mcp(options: Options) -> Result<Rc<dyn McpEndpoint>, Runtim
             // where to look.
             Err(RuntimeError::plain(match endpoint.bridge_said() {
                 Some(said) => format!("Kumi's bridge didn't start: {said}"),
-                None => "MCP connection failed; check the built bridge, config and Live setup".into(),
+                None => format!("MCP connection failed; check the built bridge, config and {} setup", bridge.daw),
             }))
         }
     }
@@ -657,13 +687,15 @@ struct Endpoint {
     catalog_listeners: Listeners<dyn Fn()>,
     disconnect_listeners: Listeners<dyn Fn()>,
     live_event_listeners: Listeners<dyn Fn(JsonObject)>,
+    /// The bridge: the notification its events come in, and the DAW's name.
+    bridge: BridgeDescriptor,
     ready: Cell<bool>,
     disconnected: Cell<bool>,
     closing: RefCell<Option<Shared<LocalBoxFuture<'static, Result<(), RuntimeError>>>>>,
 }
 
 impl Endpoint {
-    fn new(timeout: u64, on_dispatch: Option<Rc<dyn Fn(&str)>>) -> Rc<Self> {
+    fn new(timeout: u64, on_dispatch: Option<Rc<dyn Fn(&str)>>, bridge: BridgeDescriptor) -> Rc<Self> {
         Rc::new_cyclic(|me| Self {
             me: me.clone(),
             timeout,
@@ -676,6 +708,7 @@ impl Endpoint {
             catalog_listeners: Listeners::new(),
             disconnect_listeners: Listeners::new(),
             live_event_listeners: Listeners::new(),
+            bridge,
             ready: Cell::new(false),
             disconnected: Cell::new(false),
             closing: RefCell::new(None),
@@ -876,8 +909,8 @@ impl Endpoint {
                     listener();
                 }
             }
-            // Live's events: a method the SDK has no schema for, so it comes through the fallback handler.
-            "notifications/live_event" => {
+            // The DAW's events: a method the SDK has no schema for, so it comes through the fallback handler.
+            method if method == self.bridge.events => {
                 if let Some(params) = &notification.params {
                     let event = payload_object(params);
                     for listener in self.live_event_listeners.snapshot() {
@@ -926,7 +959,8 @@ impl Endpoint {
     fn require_ready(&self, signal: &Signal) -> Result<(), RuntimeError> {
         signal.check()?;
         if !self.ready.get() || self.closing.borrow().is_some() {
-            return Err(RuntimeError::plain("Kumi's link to Live is down; it reconnects when Live is back."));
+            let daw = self.bridge.daw;
+            return Err(RuntimeError::plain(format!("Kumi's link to {daw} is down; it reconnects when {daw} is back.")));
         }
         Ok(())
     }

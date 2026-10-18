@@ -1,0 +1,8 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[since last time · 3 hours ago] Tempo 120 → 124 BPM; Added track “Pad”; Renamed 2-MIDI to Lead; and 2 more
+[since last time · 3 hours ago] Nothing changed.
+[since last time · 3 hours ago] Muted Drums
+Kumi closed. Each Set's conversation continues next time.

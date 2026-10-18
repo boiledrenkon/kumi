@@ -1,0 +1,9 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+/help · /status · /undo · /stop · /refresh · /reconnect (connect to Live again, keeping the conversation) · /new [name] (start a fresh conversation; the last one is kept) · /resume [number, id or name] (list kept conversations, or go back to one; /conversations too) · /rename <name> · /fork [name] (carry on in a copy) · /export [md|html|json] (save this conversation; keys and paths taken out) · /share (save it as a web page) · /model [provider/model] · /effort [level|default] · /logout <provider> · /memory · /forget <id> · /note <id> <new words> · /pin <id> · /unpin <id> · /recipes · /willington (Willington's bindings on or off) · /update (get the newest Kumi) · /changelog (what's new in it) · /quit | Ctrl-C: cancel work; idle: exit. EOF exits. Sign in with: cargo run -p kumi -- login <provider>.
+[status] idle; MCP/Live: connected; turns 0/30; No current Live observation; Your library: 1,020 sounds · 40 presets · 3 Sets
+[status] Conversation: Bass ideas · now001
+Kumi closed. Each Set's conversation continues next time.
+Continue this conversation: cargo run -p kumi -- -r now001

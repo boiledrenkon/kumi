@@ -1,6 +1,6 @@
 use super::{
     learn::{plugin_preset_folders, set_folders, LearnPlan},
-    sources::{below, current_platform, homedir, join, library_sources, recent_sets, SourceKind, SourceOptions},
+    sources::{below, current_platform, homedir, join, SourceKind, SourceOptions},
     store::read_json,
 };
 use indexmap::IndexSet;
@@ -38,7 +38,6 @@ pub async fn remembered_folders(dir: &str) -> Vec<String> {
 }
 /// Only the record's first 2048 bytes are read, matching the bounded source lookup.
 pub async fn kumi_sets(projects_dir: Option<&str>) -> Vec<String> {
-    static ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9a-f]{32}$").unwrap());
     static PATH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""path":"((?:[^"\\]|\\.)*)""#).unwrap());
     let Some(dir) = projects_dir.filter(|s| !s.is_empty()) else { return vec![] };
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return vec![] };
@@ -49,7 +48,7 @@ pub async fn kumi_sets(projects_dir: Option<&str>) -> Vec<String> {
     // Node's readdir (unlike opendir) returns names in lexical order.
     names.sort();
     let mut found = vec![];
-    for name in names.into_iter().filter(|name| ID.is_match(name)) {
+    for name in names.into_iter().filter(|name| crate::core::place::is_project_id(name)) {
         let Ok(mut handle) = tokio::fs::File::open(join(&join(dir, &name), "last-seen.json")).await else { continue };
         let mut buffer = [0; 2048];
         let Ok(bytes) = handle.read(&mut buffer).await else { continue };
@@ -72,7 +71,7 @@ pub async fn plan_learning(options: PlanOptions) -> LearnPlan {
     let platform = original_sources.platform.clone().unwrap_or_else(|| current_platform().into());
     let mut source_options = original_sources.clone();
     source_options.folders = Some(options.folders.unwrap_or_default().into_iter().chain(remembered).collect());
-    let sources = library_sources(&source_options);
+    let sources = crate::integrations::library_sources(&source_options);
     let others: Vec<_> = sources
         .iter()
         .filter(|s| matches!(s.kind, SourceKind::Pack | SourceKind::Core | SourceKind::Splice))
@@ -80,7 +79,7 @@ pub async fn plan_learning(options: PlanOptions) -> LearnPlan {
         .collect();
     let find_sets = options.find_sets != Some(false);
     let recent: Vec<_> = if find_sets {
-        recent_sets(&original_sources)
+        crate::integrations::recent_projects(&original_sources)
             .into_iter()
             .chain(kumi_sets(options.projects_dir.as_deref()).await)
             .collect::<IndexSet<_>>()

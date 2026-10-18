@@ -162,44 +162,6 @@ pub(super) fn parameter_values(preview: &JsonObject, input: &JsonObject, applied
         .collect()
 }
 
-/// What was asked, as words, when it isn't what Live set: a number off by more than rounding, or words (“2 dB”) whose
-/// amount or unit differ from what Live shows.
-fn asked_apart(asked: &Value, set: Option<f64>, shown: Option<&str>) -> Option<String> {
-    match asked {
-        Value::Number(number) => {
-            let asked = number.as_f64()?;
-            let set = set?;
-            ((asked - set).abs() > 1e-4 * asked.abs().max(1.)).then(|| format_number(asked, None))
-        }
-        Value::String(text) => {
-            let text = trim(text);
-            let shown = shown?;
-            let same = match (amount(text), amount(shown)) {
-                (Some(a), Some(b)) => (a - b).abs() <= 0.005 * a.abs().max(b.abs()).max(1.) && unit(text) == unit(shown),
-                _ => text.eq_ignore_ascii_case(trim(shown)),
-            };
-            (!same && !text.is_empty()).then(|| head(text, 32))
-        }
-        _ => None,
-    }
-}
-
-/// The amount in words such as "-7.50 dB", "3.21 kHz" (3210), "4.00 : 1" (4), "18.0": None for "-inf dB" and words.
-pub(super) fn amount(text: &str) -> Option<f64> {
-    let text = trim(text);
-    let start = text.find(|c: char| c.is_ascii_digit() || c == '-' || c == '+' || c == '.')?;
-    let rest = &text[start..];
-    let end = rest.char_indices().skip(1).find(|(_, c)| !(c.is_ascii_digit() || *c == '.')).map_or(rest.len(), |(at, _)| at);
-    let number: f64 = rest[..end].parse().ok()?;
-    let unit = trim(&rest[end..]).to_ascii_lowercase();
-    let scaled = if unit.starts_with("khz") { number * 1000. } else { number };
-    scaled.is_finite().then_some(scaled)
-}
-
-fn unit(text: &str) -> String {
-    text.trim_start_matches(|c: char| c.is_ascii_digit() || "+-., ".contains(c)).to_ascii_lowercase().replace(' ', "")
-}
-
 fn new_clip(preview: &JsonObject, input: &JsonObject) -> Option<ChangePicture> {
     let proposed = record(preview.get("proposed"));
     let source = if proposed.get("notes").is_some_and(Value::is_array) { array(proposed.get("notes")) } else { array(input.get("notes")) };
@@ -245,17 +207,6 @@ fn edited_notes(kind: &ChangeKind, preview: &JsonObject, input: &JsonObject) -> 
 }
 
 /// A clip's automation: Live's points before; after, those with what was drawn laid over them (or erased).
-/// Names an automation lane's parameter and draws the lane to the parameter's range, as discovery read them; a lane
-/// with a point outside that range keeps its own.
-pub(crate) fn name_lane(picture: &mut ChangePicture, name: &str, low: f64, high: f64) {
-    if let ChangePicture::Automation { parameter, min, max, before, after } = picture {
-        name.clone_into(parameter);
-        if before.iter().chain(after.iter()).all(|point| (low..=high).contains(&point[1])) {
-            (*min, *max) = (low, high);
-        }
-    }
-}
-
 fn automation(preview: &JsonObject, input: &JsonObject) -> Option<ChangePicture> {
     let points = |items: &[Value]| {
         items
@@ -303,15 +254,7 @@ fn automation(preview: &JsonObject, input: &JsonObject) -> Option<ChangePicture>
     Some(ChangePicture::Automation { parameter: String::new(), min, max, before, after })
 }
 
-/// One of a device's parameters, as read: its name, value, range and how Live shows it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ParameterRow {
-    pub name: String,
-    pub value: f64,
-    pub min: f64,
-    pub max: f64,
-    pub text: Option<String>,
-}
+pub use crate::core::picture::{amount, asked_apart, name_lane, CurveReader, ParameterRow};
 
 impl ParameterRow {
     pub fn from_row(row: &JsonObject) -> Option<ParameterRow> {
@@ -325,6 +268,34 @@ impl ParameterRow {
     }
 }
 
+/// Live's equalisers (EQ Eight, Channel EQ) and compressors, by their parameters' names.
+pub struct LiveCurves;
+
+impl CurveReader for LiveCurves {
+    fn eq_bands(&self, rows: &[ParameterRow]) -> Option<Vec<EqBand>> {
+        eq_bands(rows)
+    }
+    fn dynamics(&self, rows: &[ParameterRow]) -> Option<Dynamics> {
+        dynamics(rows)
+    }
+}
+
+/// Each change's curve on a Live device (core's `curves`), as the unit tests below draw it.
+#[cfg(test)]
+pub fn curves(read: &[ParameterRow], changes: &[(String, Vec<PictureValue>)]) -> Vec<(String, ChangePicture)> {
+    crate::core::picture::curves(&LiveCurves, read, changes)
+}
+
+/// The curves one read of a Live device gives the changes it was for (core's `curves_for`).
+pub fn curves_for(
+    read: &[ParameterRow],
+    ours: &[(String, Vec<PictureValue>)],
+    newer: &[(String, Vec<PictureValue>)],
+    applied: impl Fn(&str) -> bool,
+) -> Vec<(String, ChangePicture)> {
+    crate::core::picture::curves_for(&LiveCurves, read, ours, newer, applied)
+}
+
 /// Whether a parameter of this name may be an equaliser's or a compressor's: worth reading its device's others for
 /// the curve (the device's own names then say whether it is one).
 pub fn curve_parameter(name: &str) -> bool {
@@ -333,61 +304,6 @@ pub fn curve_parameter(name: &str) -> bool {
     BAND.is_match(name)
         || ["Scale", "Low Gain", "Mid Gain", "Mid Freq", "High Gain", "Highpass On", "Threshold", "Ratio", "Knee", "Output Gain", "Makeup"]
             .contains(&name)
-}
-
-/// Each change's curve, from one read of its device made after the last of them (`changes` oldest first, each with
-/// the values it moved). Walking back from the newest: a change's after is the state before the one that followed
-/// it, and its before puts back the values it moved. None for a device that draws no curve.
-pub fn curves(read: &[ParameterRow], changes: &[(String, Vec<PictureValue>)]) -> Vec<(String, ChangePicture)> {
-    let mut state = read.to_vec();
-    let mut drawn = Vec::new();
-    for (id, moved) in changes.iter().rev() {
-        let before = with_priors(&state, moved);
-        if let Some(curve) = curve_between(&before, &state, moved) {
-            drawn.push((id.clone(), curve));
-        }
-        state = before;
-    }
-    drawn.reverse();
-    drawn
-}
-
-/// The curves one read gives the changes it was for (`ours`, oldest first, each with every value it moved). Only
-/// changes still applied are in what was read: the others are left out, and get none. Changes made while it read
-/// (`newer`) may be in it too: they're walked back first, and get theirs from a read of their own. None at all when a
-/// moved parameter isn't on the device read: another device sits in its place.
-pub fn curves_for(
-    read: &[ParameterRow],
-    ours: &[(String, Vec<PictureValue>)],
-    newer: &[(String, Vec<PictureValue>)],
-    applied: impl Fn(&str) -> bool,
-) -> Vec<(String, ChangePicture)> {
-    let walk: Vec<(String, Vec<PictureValue>)> = ours.iter().chain(newer).filter(|(id, _)| applied(id)).cloned().collect();
-    let names: std::collections::HashSet<&str> = read.iter().map(|row| row.name.as_str()).collect();
-    if !walk.iter().all(|(_, values)| values.iter().all(|value| names.contains(value.name.as_str()))) {
-        return Vec::new();
-    }
-    curves(read, &walk).into_iter().filter(|(id, _)| ours.iter().any(|(ours, _)| ours == id)).collect()
-}
-
-/// The parameters with the values a change moved put back as they were.
-fn with_priors(rows: &[ParameterRow], moved: &[PictureValue]) -> Vec<ParameterRow> {
-    rows.iter()
-        .map(|row| match moved.iter().find(|value| value.name == row.name) {
-            Some(value) => ParameterRow { value: value.from.unwrap_or(row.value), text: value.from_text.clone(), ..row.clone() },
-            None => row.clone(),
-        })
-        .collect()
-}
-
-fn curve_between(before: &[ParameterRow], after: &[ParameterRow], moved: &[PictureValue]) -> Option<ChangePicture> {
-    if let (Some(was), Some(now)) = (eq_bands(before), eq_bands(after)) {
-        return Some(ChangePicture::Eq { before: was, after: now, values: moved.to_vec() });
-    }
-    if let (Some(was), Some(now)) = (dynamics(before), dynamics(after)) {
-        return Some(ChangePicture::Dynamics { before: was, after: now, values: moved.to_vec() });
-    }
-    None
 }
 
 /// EQ Eight's bands (the A channel), or Channel EQ's three, by their parameters.

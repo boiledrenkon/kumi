@@ -27,7 +27,7 @@ pub struct ReportIo {
     pub home: Option<String>,
     pub user: Option<String>,
     pub now: Option<Rc<dyn Fn() -> DateTime<Utc>>>,
-    pub live_logs: Option<Rc<dyn Fn() -> LocalBoxFuture<'static, Result<Vec<String>, RuntimeError>>>>,
+    pub live_logs: Option<LogFiles>,
 }
 impl ReportIo {
     pub fn new(doctor: DoctorIo) -> Self {
@@ -147,7 +147,7 @@ fn strings(value: &Value, out: &mut Vec<String>) {
 fn head(text: &str, most: usize) -> String {
     String::from_utf16_lossy(&text.encode_utf16().take(most).collect::<Vec<_>>())
 }
-fn clip(text: &str, most: usize) -> String {
+pub(crate) fn clip(text: &str, most: usize) -> String {
     let len = utf16_len(text);
     if len > most {
         format!("{}… ({} more characters)", head(text, most), len - most)
@@ -166,10 +166,10 @@ fn string(value: Option<&Value>) -> String {
         Some(Value::Object(_)) => "[object Object]".into(),
     }
 }
-async fn read(file: &str) -> Option<String> {
+pub(crate) async fn read(file: &str) -> Option<String> {
     tokio::fs::read(file).await.ok().map(|b| String::from_utf8_lossy(&b).into_owned())
 }
-async fn names(folder: &str) -> Vec<String> {
+pub(crate) async fn names(folder: &str) -> Vec<String> {
     let Ok(mut reader) = tokio::fs::read_dir(folder).await else { return vec![] };
     let mut result = vec![];
     while let Ok(Some(entry)) = reader.next_entry().await {
@@ -178,7 +178,7 @@ async fn names(folder: &str) -> Vec<String> {
     result.sort();
     result
 }
-async fn modified(file: &str) -> Option<f64> {
+pub(crate) async fn modified(file: &str) -> Option<f64> {
     let time = tokio::fs::metadata(file).await.ok()?.modified().ok()?;
     match time.duration_since(UNIX_EPOCH) {
         Ok(time) => Some(time.as_secs_f64() * 1000.),
@@ -352,44 +352,6 @@ fn summarize_timings(lines: &[&str]) -> String {
         }
     }
     summary
-}
-async fn find_live_logs(env: &Env, home: &str) -> Vec<String> {
-    let root = if system::platform() == "win32" {
-        join(env.get("APPDATA").map(String::as_str).unwrap_or(&join(home, "AppData/Roaming")), "Ableton")
-    } else {
-        join(home, "Library/Preferences/Ableton")
-    };
-    let mut found = vec![];
-    for version in names(&root).await {
-        for file in [join(&root, &format!("{version}/Log.txt")), join(&root, &format!("{version}/Preferences/Log.txt"))] {
-            if let Some(at) = modified(&file).await {
-                found.push((file, at))
-            }
-        }
-    }
-    found.sort_by(|a, b| b.1.total_cmp(&a.1));
-    found.into_iter().map(|p| p.0).collect()
-}
-async fn live_log_lines(file: &str) -> Vec<String> {
-    let text = read(file).await.unwrap_or_default();
-    let units: Vec<_> = text.encode_utf16().collect();
-    let text = String::from_utf16_lossy(&units[units.len().saturating_sub(4 * 1024 * 1024)..]);
-    let pick = regex::Regex::new(r"AbletonMcp|Traceback|RemoteScriptError|Python:.*(?-u:\b\w*)(Error|Exception)(?-u:\b)").unwrap();
-    let follow = regex::Regex::new(r"^[\s\u{feff}]|Python:|^(?-u:\w*)(Error|Exception)(?-u:\b)").unwrap();
-    let mut picked = vec![];
-    let mut trailing = 0;
-    for line in text.split('\n').map(|line| line.strip_suffix('\r').unwrap_or(line)) {
-        if pick.is_match(line) {
-            picked.push(line);
-            trailing = if line.contains("Traceback") { 12 } else { 0 }
-        } else if trailing > 0 && follow.is_match(line) {
-            picked.push(line);
-            trailing -= 1
-        } else {
-            trailing = 0
-        }
-    }
-    picked.into_iter().rev().take(150).collect::<Vec<_>>().into_iter().rev().map(|s| clip(s, 400)).collect()
 }
 pub fn username() -> String {
     #[cfg(unix)]
@@ -570,15 +532,11 @@ async fn compose(io: &ReportIo, redact: &dyn Fn(&str) -> String, home: &str, now
             format!("{}\n\n{}", summarize_timings(timings), timings.iter().map(|s| clip(s, 500)).collect::<Vec<_>>().join("\n"))
         },
     );
-    let logs = if let Some(logs) = &io.live_logs { logs().await.unwrap_or_default() } else { find_live_logs(env, home).await };
-    section(
-        "Live's log (the bridge's lines and errors)",
-        if let Some(log) = logs.first() {
-            format!("From {log}\n\n{}", live_log_lines(log).await.join("\n"))
-        } else {
-            "Live's log wasn't found".into()
-        },
-    );
+    // Each DAW's log: its bridge's lines and errors.
+    for provider in crate::daw::providers() {
+        let (heading, body) = provider.report_log(env, home, io.live_logs.as_ref()).await;
+        section(&heading, body);
+    }
     let text=redact(&format!("# Kumi report\n\nSend this file with a few words about what happened. Keys and tokens are taken out; your home folder shows as ~.\n\n{}\n",sections.join("\n\n")));
     let stamp = now.format("%Y-%m-%dT%H-%M-%S");
     let file = join(io.folder.as_deref().unwrap_or(home), &format!("kumi-report-{stamp}.txt"));
@@ -593,3 +551,5 @@ async fn compose(io: &ReportIo, redact: &dyn Fn(&str) -> String, home: &str, now
     output.flush().await.map_err(|e| RuntimeError::plain(e.to_string()))?;
     Ok(file)
 }
+/// The DAW's log files, newest first: a test's, in place of the DAW's own.
+pub type LogFiles = Rc<dyn Fn() -> LocalBoxFuture<'static, Result<Vec<String>, RuntimeError>>>;

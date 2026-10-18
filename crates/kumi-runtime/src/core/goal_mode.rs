@@ -4,6 +4,7 @@
 //! (never discarding what's done), and is kept on disk so it survives a restart. The listen, assess, adjust loop is one
 //! of its tools: a turn that starts a judged run runs the loop inside it.
 
+use super::daw::DawProfile;
 use super::errors::{FailureKind, RuntimeError};
 use crate::listening::round::{Round, RoundKind};
 use async_trait::async_trait;
@@ -147,7 +148,13 @@ pub fn objective_next(objective: &Objective) -> String {
 
 /// The forced self-audit: no changes, one line that ends in complete, blocked or continue.
 pub fn objective_audit(objective: &str) -> String {
-    format!("[Kumi goal check] Don't change anything now. Is this goal met: {objective}? Judge it by what you measured or can see in the Set, not by what you meant to do. Answer with one line and nothing else: COMPLETE: <the evidence>, or BLOCKED: <what the producer must do first>, or CONTINUE: <the next step>.")
+    objective_audit_for(&DawProfile::ABLETON, objective)
+}
+
+/// `objective_audit`, in the DAW's words.
+pub fn objective_audit_for(profile: &DawProfile, objective: &str) -> String {
+    let place = profile.words.place;
+    format!("[Kumi goal check] Don't change anything now. Is this goal met: {objective}? Judge it by what you measured or can see in the {place}, not by what you meant to do. Answer with one line and nothing else: COMPLETE: <the evidence>, or BLOCKED: <what the producer must do first>, or CONTINUE: <the next step>.")
 }
 
 static AUDIT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?im)^\W*(COMPLETE|BLOCKED|CONTINUE)\W*[:\-–—]?\s*(.*)$").unwrap());
@@ -336,13 +343,19 @@ pub fn gap_closed(before: Option<&Round>, after: Option<&Round>) -> Option<f64> 
 /// A turn's or a check's error as the goal's last check: one the producer must fix first (sign in, billing, the model,
 /// Kumi's settings, Live) stops it as blocked, naming what to do; any other pauses it, for /goal resume.
 pub fn error_check(error: &RuntimeError) -> Check {
+    error_check_for(&DawProfile::ABLETON, error)
+}
+
+/// `error_check`, with the DAW's fix in its words.
+pub fn error_check_for(profile: &DawProfile, error: &RuntimeError) -> Check {
+    let open = format!("check that {} is open with Kumi's bridge", profile.words.app);
     let reason = kumi_common::js::string::head(&error.message(), 200);
     let fix = match error.kumi().map(|kumi| kumi.kind) {
         Some(FailureKind::Auth) => Some("sign in again (/login)"),
         Some(FailureKind::Billing) => Some("sort out the provider account's billing or credits, or choose another model (/model)"),
         Some(FailureKind::Model) => Some("choose another model (/model)"),
         Some(FailureKind::Config) => Some("fix the setting the error names"),
-        Some(FailureKind::Live) => Some("check that Live is open with Kumi's bridge"),
+        Some(FailureKind::Daw) => Some(open.as_str()),
         Some(FailureKind::UsageLimit) => Some("choose a fallback model (ctrl+f in /model), or wait for the plan's limit to reset"),
         _ => None,
     };

@@ -7,7 +7,7 @@ use crate::{
         JOB_MS, START_JOB_TOOL, WORKER_INSTRUCTIONS,
     },
     kernel::budget::job_report_block,
-    video::tool::{video_tools, VideoToolOptions},
+    video::tool::{video_tools_for, VideoToolOptions},
 };
 use kumi_common::js::number::to_string;
 use std::{collections::VecDeque, sync::LazyLock};
@@ -22,21 +22,35 @@ pub struct JobsOptions {
     pub store: Option<Rc<dyn crate::core::jobs::JobStore>>,
 }
 
-static START_JOB_SCHEMA: LazyLock<JsonObject> = LazyLock::new(|| {
+crate::daw_text!(
+    #[allow(dead_code)]
+    START_JOB_TASK, start_job_task:
+    "A worker's task. It can't see the DAW: give it every fact about the ", place, " it needs (track and device names, key, tempo, what the producer wants)."
+);
+crate::daw_text!(
+    #[allow(dead_code)]
+    START_JOB_ONE_TOOL, start_job_one_tool:
+    "Instead of task: one tool that works away from the DAW (the web, the producer's library", (if manual: ", the manual"), ", earlier conversations, a video", (if max_for_live_devices: ", a device's file"), "), run once with args and no model."
+);
+fn start_job_schema(profile: &DawProfile) -> JsonObject {
     serde_json::from_value(json!({
         "type": "object",
         "properties": {
             "title": {"type": "string", "description": "A few words for the producer's JOBS tab, such as \"Burial vocal chops\"."},
-            "task": {"type": "string", "description": "A worker's task. It can't see the DAW: give it every fact about the Set it needs (track and device names, key, tempo, what the producer wants)."},
-            "tool": {"type": "string", "description": "Instead of task: one tool that works away from the DAW (the web, the producer's library, the manual, earlier conversations, a video, a device's file), run once with args and no model."},
+            "task": {"type": "string", "description": start_job_task(profile)},
+            "tool": {"type": "string", "description": start_job_one_tool(profile)},
             "args": {"type": "object", "description": "The tool's arguments, with tool."},
             "when_done": {"type": "string", "enum": ["tell", "continue"], "description": "tell (the default): the producer sees a card and the report reaches you at the next turn. continue: the request you're working on needs the result, so you carry on with it as soon as the job is done; end your answer now."}
         },
         "required": ["title"]
     }))
     .expect("start_job schema")
-});
-const START_JOB_DESCRIPTION: &str = "Start work in the background for anything that takes more than about 30 seconds and doesn't change the DAW: research on the web, a tutorial video, the manual, the producer's library or earlier conversations, or a device's file. It returns at once: say in one line what's running, then keep going or end your answer. A worker (task) has only tools away from the DAW and can't see or change it; whatever it finds comes back to you as words, and only you change the Set. Independent jobs run together. Never for an ordinary edit.";
+}
+crate::daw_text!(
+    #[allow(dead_code)]
+    START_JOB_DESCRIPTION, start_job_description:
+    "Start work in the background for anything that takes more than about 30 seconds and doesn't change the DAW: research on the web, a tutorial video", (if manual: ", the manual"), ", the producer's library or earlier conversations", (if max_for_live_devices: ", or a device's file"), ". It returns at once: say in one line what's running, then keep going or end your answer. A worker (task) has only tools away from the DAW and can't see or change it; whatever it finds comes back to you as words, and only you change the ", place, ". Independent jobs run together. Never for an ordinary edit."
+);
 static JOBS_SCHEMA: LazyLock<JsonObject> = LazyLock::new(|| {
     serde_json::from_value(json!({
         "type": "object",
@@ -234,6 +248,12 @@ impl KernelTool for Backgroundable {
             ))),
         }
     }
+    fn role(&self) -> Option<ToolRole> {
+        self.tool.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.tool.concurrent()
+    }
 }
 
 impl Session {
@@ -252,7 +272,11 @@ impl Session {
             return vec![];
         }
         vec![
-            Rc::new(StartJobTool { session: Rc::downgrade(&self.0) }) as Rc<dyn KernelTool>,
+            Rc::new(StartJobTool {
+                session: Rc::downgrade(&self.0),
+                description: start_job_description(&self.0.options.profile),
+                schema: start_job_schema(&self.0.options.profile),
+            }) as Rc<dyn KernelTool>,
             Rc::new(JobsTool { session: Rc::downgrade(&self.0) }),
         ]
     }
@@ -263,24 +287,26 @@ impl Session {
         let options = &self.0.options;
         let mut tools: Vec<Rc<dyn KernelTool>> = vec![];
         if options.web || options.web_client.is_some() {
-            tools.extend(web_tools(WebToolOptions {
-                on_event: on_event.clone(),
-                client: options.web_client.clone(),
-                ..Default::default()
-            }));
+            tools.extend(crate::web::tool::web_tools_for(
+                &options.profile,
+                WebToolOptions { on_event: on_event.clone(), client: options.web_client.clone(), ..Default::default() },
+            ));
         }
         if let Some(library) = &options.library {
-            tools.extend(library.tools(LibraryToolsOptions { on_event: Some(on_event.clone()), resolve: None }));
+            tools.extend(library.tools_for(&options.profile, LibraryToolsOptions { on_event: Some(on_event.clone()), resolve: None }));
         }
         tools.extend(self.0.recall.clone());
         if let Some(dirs) = &options.watch {
-            tools.extend(video_tools(VideoToolOptions {
-                videos_dir: dirs.videos_dir.clone(),
-                tools_dir: dirs.tools_dir.clone(),
-                env: None,
-                on_event: on_event.clone(),
-                answer: None,
-            }));
+            tools.extend(video_tools_for(
+                &options.profile,
+                VideoToolOptions {
+                    videos_dir: dirs.videos_dir.clone(),
+                    tools_dir: dirs.tools_dir.clone(),
+                    env: None,
+                    on_event: on_event.clone(),
+                    answer: None,
+                },
+            ));
         }
         let integration = self.0.state.borrow().integration.clone();
         if let Some(integration) = integration {
@@ -340,7 +366,9 @@ impl Session {
             conversation: Some(format!("{conversation}:job-{}", handle.id())),
         })
         .await?;
-        let set = set.map(|name| format!("\n\nThe producer's Set is “{name}”.")).unwrap_or_default();
+        let profile = self.0.options.profile;
+        kernel.set_profile(profile);
+        let set = set.map(|name| format!("\n\nThe producer's {} is “{name}”.", profile.words.place)).unwrap_or_default();
         let input = format!("Task: {}{set}", spec.task.unwrap_or_default());
         let said = Rc::new(RefCell::new(String::new()));
         handle.doing("thinking");
@@ -495,7 +523,7 @@ impl Session {
 
     /// Where this Set's jobs are kept between sessions.
     fn jobs_place(&self) -> String {
-        self.0.state.borrow().project.clone().unwrap_or_else(|| UNSAVED.into())
+        self.0.state.borrow().project.clone().unwrap_or_else(|| self.unsaved().into())
     }
 
     /// A Set's jobs from the last time Kumi ran come back, once a session: interrupted ones to run again, and reports the
@@ -568,10 +596,18 @@ impl KernelTool for UpFront {
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         self.0.execute(input, signal).await
     }
+    fn role(&self) -> Option<ToolRole> {
+        self.0.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.0.concurrent()
+    }
 }
 
 struct StartJobTool {
     session: std::rc::Weak<Inner>,
+    description: String,
+    schema: JsonObject,
 }
 
 #[async_trait(?Send)]
@@ -580,10 +616,10 @@ impl KernelTool for StartJobTool {
         START_JOB_TOOL
     }
     fn description(&self) -> &str {
-        START_JOB_DESCRIPTION
+        &self.description
     }
     fn input_schema(&self) -> JsonObject {
-        START_JOB_SCHEMA.clone()
+        self.schema.clone()
     }
     async fn execute(&self, input: JsonObject, _signal: Signal) -> Result<ToolResult, RuntimeError> {
         let Some(inner) = self.session.upgrade() else { return Ok(ToolResult::error("Kumi is closing.")) };

@@ -1,0 +1,11 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Make the kick punchier.\n\n<current_observation_untrusted>\n{\"observedAt\":\"<now>\",\"mode\":\"inference-only\",\"access\":\"No Live access; do not describe remembered Set data as current. Kumi reconnects on its own when Live is back, and the conversation carries on.\"}\n</current_observation_untrusted>"
+      }
+    ]
+  }
+]

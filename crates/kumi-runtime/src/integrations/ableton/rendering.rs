@@ -1,16 +1,16 @@
-//! Render rigs, listening devices, auditions, and held goal passes.
+//! Render rigs, listening devices, auditions, and held goal passes: Live's side of the listening tools.
 mod ears;
 mod ears_pass;
-mod form;
 mod goal;
 mod groove;
+mod host;
 mod judge;
 mod listen;
+pub mod main_chain;
 mod pass;
 mod probe;
 mod rig;
 mod roles;
-mod sound;
 mod tune;
 use super::{
     audition::{restore_store, RestoreStore},
@@ -22,14 +22,14 @@ use super::{
     views::ViewHost,
 };
 use crate::{
-    audio::{
-        self,
-        analyze::{Analysis, AnalyzeOptions},
-        matching::Focus,
-        tools::ResolveAudio,
-    },
+    audio::{self, matching::Focus, tools::ResolveAudio},
     core::{contracts::*, errors::RuntimeError},
     ears::link::EarsLink,
+    listening::{
+        engine::{Listening, Named},
+        renderer::{ListenFlag, ListenNow},
+        round::Round,
+    },
 };
 use futures::{
     future::{LocalBoxFuture, Shared},
@@ -53,7 +53,9 @@ use std::{
 pub type RenderStep = Rc<dyn Fn(String, JsonObject, Signal) -> LocalBoxFuture<'static, Result<JsonObject, RuntimeError>>>;
 type OpeningEars = Rc<dyn Fn() -> LocalBoxFuture<'static, Result<Rc<dyn EarsLink>, RuntimeError>>>;
 type EarsFuture = Shared<LocalBoxFuture<'static, Option<Rc<dyn EarsLink>>>>;
-pub struct Rendering {
+/// Live as the listening tools meet it: its bridge, its render rigs and Kumi Ears. The tools themselves are
+/// `Listening`'s; this answers them (see `host.rs`).
+pub struct LiveRenderer {
     pub history: Rc<History>,
     pub observer: Rc<Observer>,
     step: RenderStep,
@@ -64,8 +66,6 @@ pub struct Rendering {
     /// The prefixes of copies a search of this process is using right now: never swept.
     copies_live: RefCell<Vec<String>>,
     on_action: Option<Rc<dyn Fn(ActionEvent)>>,
-    on_audition: Option<Rc<dyn Fn(AuditionEvent)>>,
-    on_judge: Option<Rc<dyn Fn(crate::listening::round::Round)>>,
     change_timeout_ms: u64,
     user_library: Option<String>,
     ears_disabled: bool,
@@ -76,61 +76,37 @@ pub struct Rendering {
     /// audition in the next EARS_RETRY_MS records instead, rather than waiting for the same failure.
     ears_failed_at: Cell<Option<i64>>,
     ears_folder: PathBuf,
-    rendering: Cell<bool>,
+    rendering: ListenFlag,
     /// Held for the whole of each Live tool call. A stopped answer's call goes on putting Live back (taking a round
     /// back, closing a render, removing copies), and the next call, or the next answer, waits for it.
     busy: tokio::sync::Mutex<()>,
-    rounds: Cell<usize>,
-    best: Cell<Option<f64>>,
-    /// Whether an audition said how long its rounds take.
-    told_length: Cell<bool>,
-    reference_cache: RefCell<IndexMap<String, Analysis>>,
     best_steps: RefCell<Vec<String>>,
-    /// The judged run under way (or the last one).
-    judge: RefCell<Option<judge::JudgeRun>>,
-    /// The groove run under way (or the last one).
-    groove: RefCell<Option<groove::GrooveRun>>,
-    listener_source: Option<super::options::ListenerSource>,
-    /// Measured references, read by name for the judge.
-    references: Option<Rc<crate::references::store::ReferenceStore>>,
-    /// The listening model, once looked for (None inside: there's none).
-    /// Whether the run's listens are heard by the learned models too: the style model, the effects model.
-    embedding_wanted: Cell<(bool, bool)>,
-    /// The style model a judge run hears with, fixed when it starts: the embeddings slot's file then (None: Kumi's
-    /// own) and its identity. A slot swapped during a run doesn't change it.
-    style_model: RefCell<Option<(Option<PathBuf>, String)>>,
-    /// The listening model as last looked up (found, a definite none, or why the lookup failed), and when.
-    listener: RefCell<Option<(Result<Option<Rc<dyn crate::listening::listener::Listener>>, String>, i64)>>,
 }
-pub use form::FormRequest;
-pub use groove::GrooveRequest;
-pub use judge::{gain_device, gain_parameter, GoalRequest, JudgeRequest, Named};
-pub use sound::SoundRequest;
-pub use tune::{TuneHow, TuneRequest};
-/// Kumi playing the Set to listen. Main stays as the producer has it, so they hear what Kumi hears (and steer from it).
-/// However the render ends, a panic included, dropping it ends it. One taken while another render runs changes nothing.
-pub struct RenderingNow<'a> {
-    rendering: &'a Rendering,
-    began: bool,
+/// The listening tools over Live: the tools and their state are `Listening`'s (a judged run, a tune), Live is what they
+/// listen through. A tool call comes in here and goes to `Listening`; what only Live has is `LiveRenderer`'s.
+pub struct Rendering {
+    live: Rc<LiveRenderer>,
+    listening: Rc<Listening>,
 }
-
-impl Drop for RenderingNow<'_> {
-    fn drop(&mut self) {
-        if self.began {
-            self.rendering.rendering.set(false);
-        }
+impl std::ops::Deref for Rendering {
+    type Target = LiveRenderer;
+    fn deref(&self) -> &LiveRenderer {
+        &self.live
     }
 }
+pub use crate::listening::tools::{FormRequest, GoalRequest, GrooveRequest, JudgeRequest, SoundRequest, TuneHow, TuneRequest};
+pub use judge::{gain_device, gain_parameter};
+/// Kumi playing the Set to listen (see `ListenNow`).
+pub type RenderingNow<'a> = ListenNow<'a>;
 
-impl Rendering {
+impl LiveRenderer {
     /// Kumi starts playing the Set to listen (see `RenderingNow`).
     pub fn rendering_now(&self) -> RenderingNow<'_> {
-        let began = !self.rendering.replace(true);
-        RenderingNow { rendering: self, began }
+        self.rendering.begin()
     }
     /// Whether Kumi is playing the Set to listen now.
     pub fn is_rendering(&self) -> bool {
-        self.rendering.get()
+        self.rendering.is_on()
     }
     /// Live, for one tool call: once a stopped answer's call has finished putting Live back, and Esc while waiting
     /// stops this one before it starts.
@@ -173,8 +149,6 @@ impl Rendering {
             copies_journal: options.restore_file.as_ref().map(|file| PathBuf::from(format!("{file}.copies"))),
             copies_live: RefCell::new(vec![]),
             on_action: options.on_action.clone(),
-            on_audition: options.on_audition.clone(),
-            on_judge: options.on_judge.clone(),
             change_timeout_ms: options.change_timeout_ms.unwrap_or(30_000),
             user_library: options.user_library.clone(),
             ears_disabled: matches!(options.ears, Some(EarsSetup::Disabled)),
@@ -186,67 +160,10 @@ impl Rendering {
             ears_refused: Cell::new(false),
             ears_failed_at: Cell::new(None),
             ears_folder,
-            rendering: Cell::new(false),
+            rendering: ListenFlag::default(),
             busy: tokio::sync::Mutex::new(()),
-            rounds: Cell::new(0),
-            best: Cell::new(None),
-            told_length: Cell::new(false),
-            reference_cache: RefCell::new(IndexMap::new()),
             best_steps: RefCell::new(vec![]),
-            judge: RefCell::new(None),
-            groove: RefCell::new(None),
-            listener_source: options.listener.clone(),
-            references: options.references.clone(),
-            listener: RefCell::new(None),
-            embedding_wanted: Cell::new((false, false)),
-            style_model: RefCell::new(None),
         })
-    }
-    pub fn round_count(&self) -> usize {
-        self.rounds.get()
-    }
-    /// A match run continues the answer's rounds; a new answer starts a fresh score history.
-    pub fn reset_turn(&self, continuing: bool) {
-        if !continuing {
-            self.rounds.set(0);
-            self.best.set(None);
-            // A judged run's changes are the ones since its last round: what the producer asked for in between isn't
-            // a round's to take back. If that changed the sound, the run's numbers are out of date: its next judge hears
-            // its bars again first.
-            // An undo in between counts too: a change the run's numbers took in that isn't in the Set any more.
-            let ids = self.applied_ids();
-            // A groove run's the same: its rounds re-read the notes, so only its checkpoint moves.
-            if let Some(run) = self.groove.borrow_mut().as_mut() {
-                run.carry_on(ids.clone());
-            }
-            let mut guard = self.judge.borrow_mut();
-            if let Some(run) = guard.as_mut() {
-                let audible = |id: &String| self.history.entries.borrow().get(id).is_some_and(|entry| entry.borrow().audible());
-                let made = self.applied_since(&run.checkpoint).iter().any(|(id, _)| audible(id));
-                let undone = run.checkpoint.iter().any(|id| !ids.contains(id) && audible(id));
-                // Python run in Live, a command or Live's own undo may have changed it too, outside HISTORY.
-                let outside = !self.history.outside_since(run.outside).is_empty();
-                if made || undone || outside {
-                    run.stale = true;
-                }
-                run.checkpoint = ids;
-                run.outside = self.history.outside.borrow().len();
-                // The steer was this answer's: the new answer's changes are its own again.
-                run.steered = None;
-            }
-        }
-    }
-    /// The producer's words came into the answer under way: a judged or groove run's changes from here may be theirs,
-    /// so they aren't a round's to take back. The first steer marks where; the run's next round takes back only what
-    /// came before it, then starts again from what's in Live.
-    pub fn steered(&self) {
-        let applied = self.applied_ids();
-        if let Some(run) = self.judge.borrow_mut().as_mut() {
-            run.steered.get_or_insert_with(|| applied.clone());
-        }
-        if let Some(run) = self.groove.borrow_mut().as_mut() {
-            run.steered(applied);
-        }
     }
     /// A restart of Live may make Max for Live available; bridge-only disconnects leave refusal intact.
     pub fn reset_live(&self) {
@@ -310,7 +227,7 @@ impl Rendering {
     pub async fn restore_after_crash(&self, identity: &str, path: Option<&str>, signal: Signal) -> Result<Option<String>, RuntimeError> {
         self.sweep_copies(identity, path, signal.clone()).await;
         let Some(pending) = self.restore.as_ref().and_then(RestoreStore::load) else { return Ok(None) };
-        if self.rendering.get() {
+        if self.rendering.is_on() {
             return Ok(None);
         }
         let saved_path = pending.get("path").and_then(Value::as_str).filter(|s| !s.is_empty());
@@ -339,40 +256,6 @@ impl Rendering {
         self.tell(&text, None);
         Ok(Some(text))
     }
-    /// The audio file a reference names: a clip's, else the name itself as a file. A clipRef that's stale, gone or a
-    /// MIDI clip's says so, rather than reading as a file that isn't there.
-    async fn reference_file(&self, named: &str, signal: Signal) -> Result<Result<String, String>, RuntimeError> {
-        match (self.clip_file)(named.into(), signal).await {
-            Ok(file) => Ok(Ok(file.unwrap_or_else(|| audio::audio_path(named)))),
-            Err(RuntimeError::Aborted) => Err(RuntimeError::Aborted),
-            Err(error) => Ok(Err(error.to_string())),
-        }
-    }
-    async fn heard_reference(&self, named: &str, request: &AuditionRequest, signal: Signal) -> Result<Analysis, RuntimeError> {
-        let file = self.reference_file(named, signal.clone()).await?.map_err(RuntimeError::Observation)?;
-        let key = stringify(&json!([file, request.reference_from.unwrap_or(0.), request.reference_seconds, request.focus]));
-        if let Some(known) = self.reference_cache.borrow().get(&key) {
-            return Ok(known.clone());
-        }
-        let heard = audio::hear(
-            &file,
-            AnalyzeOptions {
-                start: request.reference_from,
-                seconds: request.reference_seconds,
-                focus: analysis_focus(request.focus),
-                signal: Some(signal),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| RuntimeError::plain(e.to_string()))?;
-        let mut cache = self.reference_cache.borrow_mut();
-        cache.insert(key, heard.clone());
-        if cache.len() > 32 {
-            cache.shift_remove_index(0);
-        }
-        Ok(heard)
-    }
     pub async fn close(&self) {
         let setup = self.ears_setup.borrow().clone();
         if let Some(link) = match setup {
@@ -382,6 +265,87 @@ impl Rendering {
             link.close().await;
         }
         let _ = tokio::fs::remove_dir_all(&self.ears_folder).await;
+    }
+}
+impl Rendering {
+    pub fn new(
+        history: Rc<History>,
+        observer: Rc<Observer>,
+        options: &AbletonOptions,
+        step: RenderStep,
+        clip_file: ResolveAudio,
+    ) -> Rc<Self> {
+        let live = LiveRenderer::new(history, observer, options, step, clip_file);
+        // The tools reach Live through its renderer; they hold no more of Rendering than that.
+        let host: Rc<dyn crate::listening::renderer::Renderer> = Rc::new(live.clone());
+        let listening = Listening::new(
+            host,
+            options.on_judge.clone(),
+            options.on_audition.clone(),
+            options.listener.clone(),
+            options.references.clone(),
+        );
+        Rc::new(Self { live, listening })
+    }
+    /// A match run continues the answer's rounds; a new answer starts a fresh score history.
+    pub fn reset_turn(&self, continuing: bool) {
+        if !continuing {
+            self.listening.new_answer(self.applied_ids());
+        }
+    }
+    /// The producer's words came into the answer under way: a judged or groove run's changes from here may be theirs,
+    /// so they aren't a round's to take back.
+    pub fn steered(&self) {
+        self.listening.steered(self.applied_ids());
+    }
+    /// One of the listening tools (judge, tune, sound, form, groove, audition, render) as the model calls it; None for
+    /// any other tool.
+    pub async fn call(&self, name: &str, input: JsonObject, signal: Signal) -> Option<Result<ToolResult, RuntimeError>> {
+        self.listening.call(name, input, signal).await
+    }
+    pub async fn judge(&self, request: &JudgeRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
+        self.listening.judge(request, original).await
+    }
+    /// The last round of the current (or last) judged run.
+    pub fn judged(&self) -> Option<Round> {
+        self.listening.judged()
+    }
+    /// A run's track and focus as it starts (see `Named`).
+    pub async fn named(&self, track: Option<&str>, focus: Option<&str>, signal: Signal) -> Named {
+        self.listening.named(track, focus, signal).await
+    }
+    /// The names a run's track and focus go by now.
+    pub fn names_now(&self, named: &Named) -> (Option<String>, Option<String>) {
+        self.listening.names_now(named)
+    }
+    pub async fn groove(&self, request: &GrooveRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
+        self.listening.groove(request, original).await
+    }
+    pub async fn form(&self, request: &FormRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
+        self.listening.form(request, original).await
+    }
+    pub async fn sound(&self, request: &SoundRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
+        self.listening.sound(request, original).await
+    }
+    pub async fn tune(&self, request: &TuneRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
+        self.listening.tune(request, original).await
+    }
+    /// A round's next fix names a mapped plug-in's role when one on the run's track does the job.
+    pub async fn name_plugin_roles(&self, round: &mut Round, signal: Signal) {
+        self.listening.name_plugin_roles(round, signal).await
+    }
+    pub async fn audition(&self, request: &AuditionRequest, original: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
+        self.listening.audition(request, original).await
+    }
+    /// How many auditions the answer has made.
+    pub fn round_count(&self) -> usize {
+        self.listening.round_count()
+    }
+    pub async fn hear_in_set(&self, request: &HearRequest, original: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
+        self.live.hear_in_set(request, original).await
+    }
+    pub async fn open_goal(&self, request: &AuditionRequest, original: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
+        self.live.open_goal(&self.listening, request, original).await
     }
 }
 fn object(value: Value) -> JsonObject {
@@ -404,9 +368,6 @@ fn fader_db(volume: f64) -> String {
     } else {
         format!("{} dB", to_fixed(20. * (volume / 0.85).log10() * if volume > 0.85 { 0.3 } else { 1. }, 1))
     }
-}
-fn analysis_focus(focus: Option<Focus>) -> Option<String> {
-    focus.map(|focus| if focus == Focus::Section { "mix" } else { "sound" }.into())
 }
 async fn delay(ms: f64, signal: Signal) -> Result<(), RuntimeError> {
     signal.check()?;

@@ -245,9 +245,9 @@ fn sync(c: &Connection, source: &Source, rows: &Rows, now: i64) -> Result<Import
     Ok(done)
 }
 
-/// A project folder's name: the 32 lowercase hex digits Kumi names a Set's folder with.
+/// A project folder's name from before kumi.db: a Set's, 32 lowercase hex digits.
 fn project_id(name: &str) -> bool {
-    name.len() == 32 && name.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    super::place::is_project_id(name)
 }
 
 /// The gaps a gaps log holds: a line that isn't a whole entry (time and what was missing) is left out.

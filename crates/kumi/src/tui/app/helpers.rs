@@ -34,42 +34,28 @@ pub struct FocusPath {
     pub value: Option<String>,
     pub context: String,
 }
-pub fn focus_path(focus: &LiveFocus) -> FocusPath {
+pub fn focus_path(focus: &DawFocus) -> FocusPath {
+    let focus = filled(crate::daw::view(), focus);
+    let editor = focus.editor_view.as_ref().map(|view| view.kind);
     let mut crumbs = vec![];
     let mut value = None;
     if let Some(track) = &focus.track {
         crumbs.push(track.name.clone());
     }
-    if focus.detail == Some(LiveDetail::Clip) && focus.clip.is_some() {
-        crumbs.push(focus.clip.as_ref().filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| "Untitled clip".into()));
-    } else if focus.detail == Some(LiveDetail::Device) && focus.device.as_ref().is_some_and(|s| !s.is_empty()) {
+    let item = focus.item.as_ref().filter(|item| item.name.is_some());
+    if let (Some(ViewKind::NoteEditor), Some(item)) = (editor, item) {
+        crumbs.push(item.name.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| format!("Untitled {}", item.kind.word())));
+    } else if editor == Some(ViewKind::DeviceChain) && focus.device.as_ref().is_some_and(|s| !s.is_empty()) {
         crumbs.push(focus.device.clone().unwrap());
         if let Some(p) = focus.parameter.as_ref().filter(|p| p.owner.as_ref().is_none_or(|s| s.is_empty()) || p.owner == focus.device) {
             crumbs.push(p.name.clone());
             value = p.value.clone().filter(|s| !s.is_empty());
         }
-    } else if let Some(scene) = focus.scene.as_ref().filter(|s| !s.is_empty()) {
-        crumbs.push(scene.clone());
+    } else if let Some(section) = focus.section.as_ref().and_then(|section| section.name.as_ref()).filter(|s| !s.is_empty()) {
+        crumbs.push(section.clone());
     }
-    let mut context = vec![];
-    if let Some(view) = focus.view {
-        context.push(
-            match view {
-                LiveView::Session => "Session",
-                LiveView::Arrangement => "Arrangement",
-            }
-            .into(),
-        );
-    }
-    if let Some(detail) = focus.detail {
-        context.push(
-            match detail {
-                LiveDetail::Clip => "Clip view",
-                LiveDetail::Device => "Device view",
-            }
-            .into(),
-        );
-    }
+    // The views in the DAW's own words.
+    let mut context: Vec<String> = [&focus.main_view, &focus.editor_view].into_iter().flatten().map(|view| view.label.clone()).collect();
     if let Some(n) = focus.selected_notes.filter(|n| *n != 0) {
         context.push(format!("{n} {} selected", if n == 1 { "note" } else { "notes" }));
     }
@@ -93,43 +79,70 @@ pub fn fit_crumbs(crumbs: &[String], width: i32) -> Vec<String> {
         vec![truncate(&crumbs[0], width)]
     }
 }
+/// What the producer touched last in the DAW, for which body FOCUS shows (the names are Live's, as kept).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum Touched {
-    Device,
-    Clip,
-    Session,
-    Arrangement,
+    /// The device chain: the tree.
+    #[serde(rename = "device")]
+    Tree,
+    /// The item in the note editor: its notes.
+    #[serde(rename = "clip")]
+    Notes,
+    /// The launcher grid.
+    #[serde(rename = "session")]
+    Grid,
+    /// The timeline (where an item in the note editor is read as the timeline's too).
+    #[serde(rename = "arrangement")]
+    Timeline,
 }
-pub fn touched_next(before: Option<&LiveFocus>, after: Option<&LiveFocus>, was: Option<Touched>) -> Option<Touched> {
-    let after = after?;
-    let clip = if after.view == Some(LiveView::Arrangement) { Touched::Arrangement } else { Touched::Clip };
-    let view = if after.view == Some(LiveView::Arrangement) { Touched::Arrangement } else { Touched::Session };
-    let Some(before) = before else {
-        return Some(match after.detail {
-            Some(LiveDetail::Clip) => clip,
-            Some(LiveDetail::Device) => Touched::Device,
-            None => view,
+pub fn touched_next(before: Option<&DawFocus>, after: Option<&DawFocus>, was: Option<Touched>) -> Option<Touched> {
+    let view = crate::daw::view();
+    let after = filled(view, after?);
+    let editor = |focus: &DawFocus| focus.editor_view.as_ref().map(|view| view.kind);
+    let main = |focus: &DawFocus| focus.main_view.as_ref().map(|view| view.kind);
+    let index = |focus: &DawFocus| focus.section.as_ref().and_then(|section| section.index);
+    let item = |focus: &DawFocus| focus.item.as_ref().map(|item| (item.item_ref.clone(), item.name.clone())).unwrap_or_default();
+    let on_timeline = main(&after) == Some(ViewKind::Timeline);
+    let notes = if on_timeline { Touched::Timeline } else { Touched::Notes };
+    let shown = if on_timeline { Touched::Timeline } else { Touched::Grid };
+    let Some(before) = before.map(|before| filled(view, before)) else {
+        return Some(match editor(&after) {
+            Some(ViewKind::NoteEditor) => notes,
+            Some(ViewKind::DeviceChain) => Touched::Tree,
+            _ => shown,
         });
     };
-    Some(if after.view != before.view {
-        view
-    } else if after.scene_index != before.scene_index && after.view == Some(LiveView::Session) {
-        Touched::Session
-    } else if after.detail == Some(LiveDetail::Clip)
-        && (before.detail != Some(LiveDetail::Clip) || after.slot_ref != before.slot_ref || after.clip != before.clip)
+    Some(if after.main_view != before.main_view {
+        shown
+    } else if index(&after) != index(&before) && main(&after) == Some(ViewKind::Launcher) {
+        Touched::Grid
+    } else if editor(&after) == Some(ViewKind::NoteEditor)
+        && (editor(&before) != Some(ViewKind::NoteEditor) || item(&after) != item(&before))
     {
-        clip
-    } else if after.detail == Some(LiveDetail::Device)
-        && (before.detail != Some(LiveDetail::Device)
+        notes
+    } else if editor(&after) == Some(ViewKind::DeviceChain)
+        && (editor(&before) != Some(ViewKind::DeviceChain)
             || after.device != before.device
             || after.chain != before.chain
             || after.track_ref != before.track_ref)
     {
-        Touched::Device
+        Touched::Tree
     } else {
-        was.unwrap_or(view)
+        was.unwrap_or(shown)
     })
+}
+/// The project's name an observation event gives, as the app shows it: the DAW's name for it, or the label's words
+/// when an older event has none.
+pub fn observed_name(event: &serde_json::Value) -> Option<String> {
+    event["name"].as_str().and_then(shown_name).or_else(|| set_name_from(event["label"].as_str().unwrap_or("")))
+}
+/// A project's name as the app shows it: trimmed, and none for one that's empty or runs over lines.
+pub fn shown_name(name: &str) -> Option<String> {
+    if name.contains(['\n', '\r', '\u{2028}', '\u{2029}']) {
+        return None;
+    }
+    let name = string::trim(name);
+    (!name.is_empty()).then(|| name.into())
 }
 pub fn set_name_from(label: &str) -> Option<String> {
     let (name, suffix) = label.strip_prefix("Current open Set: ")?.rsplit_once(" — ")?;

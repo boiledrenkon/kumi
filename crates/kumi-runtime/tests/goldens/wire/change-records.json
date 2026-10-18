@@ -1,0 +1,887 @@
+[
+  {
+    "id": "c1",
+    "family": "tempo",
+    "title": "Tempo 120 → 124 BPM",
+    "from": 120.0,
+    "to": 124.0,
+    "range": [
+      20.0,
+      999.0
+    ],
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "values",
+      "values": [
+        {
+          "name": "Tempo",
+          "from": 120.0,
+          "to": 124.0,
+          "min": 20.0,
+          "max": 999.0,
+          "fromText": "120.00 BPM",
+          "toText": "124.00 BPM",
+          "asked": "124 BPM"
+        },
+        {
+          "name": "Swing"
+        }
+      ]
+    }
+  },
+  {
+    "id": "c2",
+    "family": "mixer",
+    "title": "Bass volume 0.0 → -3.0 dB",
+    "track": {
+      "name": "Bass",
+      "color": "#f59a3c"
+    },
+    "from": 0.85,
+    "to": 0.7,
+    "range": [
+      0.0,
+      1.0
+    ],
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "mix",
+      "before": {
+        "volume": 0.0,
+        "volumeText": "0 dB",
+        "pan": -0.25,
+        "panText": "13L",
+        "sends": [
+          {
+            "name": "A-Reverb",
+            "level": 0.3,
+            "text": "-12.0 dB"
+          },
+          {
+            "name": "B-Delay",
+            "level": 0.0
+          }
+        ],
+        "mute": false,
+        "solo": false
+      },
+      "after": {
+        "volume": -3.0,
+        "volumeText": "-3 dB",
+        "pan": -0.25,
+        "panText": "13L",
+        "sends": [
+          {
+            "name": "A-Reverb",
+            "level": 0.3,
+            "text": "-12.0 dB"
+          },
+          {
+            "name": "B-Delay",
+            "level": 0.0
+          }
+        ],
+        "mute": true,
+        "solo": false
+      }
+    }
+  },
+  {
+    "id": "c3",
+    "family": "parameter",
+    "title": "EQ Eight on Vox: 2 bands",
+    "track": {
+      "name": "Vox"
+    },
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "eq",
+      "before": [
+        {
+          "shape": "low-cut",
+          "freq": 80.0,
+          "gainDb": 0.0,
+          "q": 0.71,
+          "on": true,
+          "slope": 24.0
+        },
+        {
+          "shape": "low-shelf",
+          "freq": 200.0,
+          "gainDb": -1.5,
+          "q": 0.71,
+          "on": true
+        },
+        {
+          "shape": "bell",
+          "freq": 2500.0,
+          "gainDb": 0.0,
+          "q": 0.71,
+          "on": true
+        },
+        {
+          "shape": "notch",
+          "freq": 6300.0,
+          "gainDb": 0.0,
+          "q": 8.0,
+          "on": false
+        },
+        {
+          "shape": "high-shelf",
+          "freq": 10000.0,
+          "gainDb": 2.0,
+          "q": 0.71,
+          "on": true
+        },
+        {
+          "shape": "high-cut",
+          "freq": 18000.0,
+          "gainDb": 0.0,
+          "q": 0.71,
+          "on": true,
+          "slope": 12.0
+        }
+      ],
+      "after": [
+        {
+          "shape": "low-cut",
+          "freq": 100.0,
+          "gainDb": 0.0,
+          "q": 0.71,
+          "on": true,
+          "slope": 48.0
+        },
+        {
+          "shape": "bell",
+          "freq": 2500.0,
+          "gainDb": -2.0,
+          "q": 0.71,
+          "on": true
+        }
+      ],
+      "values": [
+        {
+          "name": "1 Frequency A",
+          "from": 0.25,
+          "to": 0.3,
+          "min": 0.0,
+          "max": 1.0,
+          "fromText": "0.25",
+          "toText": "0.3"
+        }
+      ]
+    }
+  },
+  {
+    "id": "c4",
+    "family": "parameter",
+    "title": "EQ Three on Keys: Mid +3 dB",
+    "state": "undone",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "eq",
+      "before": [
+        {
+          "shape": "bell",
+          "freq": 1000.0,
+          "gainDb": 0.0,
+          "q": 0.71,
+          "on": true
+        }
+      ],
+      "after": [
+        {
+          "shape": "bell",
+          "freq": 1000.0,
+          "gainDb": 3.0,
+          "q": 0.71,
+          "on": true
+        }
+      ]
+    }
+  },
+  {
+    "id": "c5",
+    "family": "parameter",
+    "title": "Compressor on Drums: threshold -12 → -18 dB",
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "dynamics",
+      "before": {
+        "thresholdDb": -12.0,
+        "ratio": 2.0,
+        "kneeDb": 6.0,
+        "makeupDb": 0.0
+      },
+      "after": {
+        "thresholdDb": -18.0,
+        "ratio": 4.0,
+        "kneeDb": 0.0,
+        "makeupDb": 3.5
+      },
+      "values": [
+        {
+          "name": "Threshold",
+          "from": 0.6,
+          "to": 0.45,
+          "min": 0.0,
+          "max": 1.0,
+          "fromText": "0.6",
+          "toText": "0.45"
+        }
+      ]
+    }
+  },
+  {
+    "id": "c6",
+    "family": "parameter",
+    "title": "Limiter on Main: ceiling -1 dB",
+    "state": "kept",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "dynamics",
+      "before": {
+        "thresholdDb": 0.0,
+        "ratio": 1000.0,
+        "kneeDb": 0.0,
+        "makeupDb": 0.0
+      },
+      "after": {
+        "thresholdDb": -1.0,
+        "ratio": 1000.0,
+        "kneeDb": 0.0,
+        "makeupDb": 0.0
+      }
+    }
+  },
+  {
+    "id": "c7",
+    "family": "clip",
+    "title": "New clip “Bassline” on Bass",
+    "track": {
+      "name": "Bass",
+      "color": "#f59a3c"
+    },
+    "clip": {
+      "length": 4.0,
+      "notes": [
+        {
+          "pitch": 36.0,
+          "start": 0.0,
+          "duration": 0.5,
+          "velocity": 100.0
+        },
+        {
+          "pitch": 38.0,
+          "start": 1.5,
+          "duration": 0.25,
+          "velocity": 87.5
+        }
+      ]
+    },
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "notes",
+      "length": 4.0,
+      "before": [],
+      "after": [
+        [
+          0,
+          36,
+          0.5,
+          100
+        ],
+        [
+          1.5,
+          38,
+          0.25,
+          87.5
+        ],
+        [
+          3.125,
+          43,
+          0.333,
+          64
+        ]
+      ],
+      "partial": true
+    }
+  },
+  {
+    "id": "c8",
+    "family": "clip",
+    "title": "Notes in “Lead”: 1 changed",
+    "state": "undone",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "notes",
+      "length": 2.0,
+      "before": [
+        [
+          0,
+          60,
+          1,
+          100
+        ]
+      ],
+      "after": [
+        [
+          0,
+          60,
+          0.5,
+          90
+        ]
+      ]
+    }
+  },
+  {
+    "id": "c9",
+    "family": "parameter",
+    "title": "Automation: Filter Freq on Lead",
+    "state": "applied",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "automation",
+      "parameter": "Filter Freq",
+      "min": 20.0,
+      "max": 20000.0,
+      "before": [],
+      "after": [
+        [
+          0.0,
+          200.0
+        ],
+        [
+          16.0,
+          8000.0
+        ],
+        [
+          32.0,
+          200.0
+        ]
+      ]
+    }
+  },
+  {
+    "id": "c10",
+    "family": "mixer",
+    "title": "Automation: Volume on Pads",
+    "state": "unsure",
+    "at": 1760000000000,
+    "picture": {
+      "kind": "automation",
+      "min": 0.0,
+      "max": 1.0,
+      "before": [
+        [
+          0.0,
+          0.5
+        ]
+      ],
+      "after": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          4.0,
+          1.0
+        ]
+      ]
+    }
+  },
+  {
+    "id": "c11",
+    "family": "device",
+    "title": "Saturator on Drums › Drum Rack › Kick",
+    "track": {
+      "name": "Drums",
+      "color": "#ffa500"
+    },
+    "devices": {
+      "devices": [
+        "Simpler",
+        "Saturator",
+        "EQ Eight"
+      ],
+      "index": 1.0,
+      "rack": "Drum Rack",
+      "chains": [
+        {
+          "name": "Kick",
+          "devices": [
+            "Simpler",
+            "Saturator",
+            "EQ Eight"
+          ]
+        },
+        {
+          "name": "Snare",
+          "devices": []
+        }
+      ],
+      "chain": 0.0
+    },
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c12",
+    "family": "device",
+    "title": "Reverb on Keys",
+    "devices": {
+      "devices": [
+        "Operator",
+        "Reverb"
+      ],
+      "index": 1.0
+    },
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c13",
+    "family": "color",
+    "title": "Pads colour",
+    "track": {
+      "name": "Pads",
+      "color": "#00bfaf"
+    },
+    "colors": {
+      "from": "#ff5a00",
+      "to": "#00bfaf"
+    },
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c14",
+    "family": "color",
+    "title": "Clip “Intro” colour",
+    "colors": {
+      "to": "#1e90ff"
+    },
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c15",
+    "family": "device",
+    "title": "Auditioned 3 candidates against the reference",
+    "track": {
+      "name": "Bass"
+    },
+    "state": "heard",
+    "score": 87.5,
+    "at": 1760000000000
+  },
+  {
+    "id": "c16",
+    "family": "locators",
+    "title": "Locator “Drop” at bar 17",
+    "state": "unsure",
+    "note": "Live didn't confirm it; check Live.",
+    "at": 1760000000000
+  },
+  {
+    "id": "c17",
+    "family": "rename",
+    "title": "Renamed “Lead” to “Lead 2”",
+    "track": {
+      "name": "Lead 2"
+    },
+    "state": "kept",
+    "note": "Live can't undo a rename made while it played.",
+    "at": 1760000000000
+  },
+  {
+    "id": "c18",
+    "family": "structure",
+    "title": "Added track “Pads”",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c19",
+    "family": "tempo",
+    "title": "A change",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c20",
+    "family": "tempo",
+    "title": "A change",
+    "state": "undone",
+    "at": 1760000000000
+  },
+  {
+    "id": "c21",
+    "family": "tempo",
+    "title": "A change",
+    "state": "kept",
+    "at": 1760000000000
+  },
+  {
+    "id": "c22",
+    "family": "tempo",
+    "title": "A change",
+    "state": "unsure",
+    "at": 1760000000000
+  },
+  {
+    "id": "c23",
+    "family": "tempo",
+    "title": "A change",
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c24",
+    "family": "tempo",
+    "title": "A change",
+    "state": "heard",
+    "at": 1760000000000
+  },
+  {
+    "id": "c25",
+    "family": "mixer",
+    "title": "A change",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c26",
+    "family": "mixer",
+    "title": "A change",
+    "state": "undone",
+    "at": 1760000000000
+  },
+  {
+    "id": "c27",
+    "family": "mixer",
+    "title": "A change",
+    "state": "kept",
+    "at": 1760000000000
+  },
+  {
+    "id": "c28",
+    "family": "mixer",
+    "title": "A change",
+    "state": "unsure",
+    "at": 1760000000000
+  },
+  {
+    "id": "c29",
+    "family": "mixer",
+    "title": "A change",
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c30",
+    "family": "mixer",
+    "title": "A change",
+    "state": "heard",
+    "at": 1760000000000
+  },
+  {
+    "id": "c31",
+    "family": "rename",
+    "title": "A change",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c32",
+    "family": "rename",
+    "title": "A change",
+    "state": "undone",
+    "at": 1760000000000
+  },
+  {
+    "id": "c33",
+    "family": "rename",
+    "title": "A change",
+    "state": "kept",
+    "at": 1760000000000
+  },
+  {
+    "id": "c34",
+    "family": "rename",
+    "title": "A change",
+    "state": "unsure",
+    "at": 1760000000000
+  },
+  {
+    "id": "c35",
+    "family": "rename",
+    "title": "A change",
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c36",
+    "family": "rename",
+    "title": "A change",
+    "state": "heard",
+    "at": 1760000000000
+  },
+  {
+    "id": "c37",
+    "family": "structure",
+    "title": "A change",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c38",
+    "family": "structure",
+    "title": "A change",
+    "state": "undone",
+    "at": 1760000000000
+  },
+  {
+    "id": "c39",
+    "family": "structure",
+    "title": "A change",
+    "state": "kept",
+    "at": 1760000000000
+  },
+  {
+    "id": "c40",
+    "family": "structure",
+    "title": "A change",
+    "state": "unsure",
+    "at": 1760000000000
+  },
+  {
+    "id": "c41",
+    "family": "structure",
+    "title": "A change",
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c42",
+    "family": "structure",
+    "title": "A change",
+    "state": "heard",
+    "at": 1760000000000
+  },
+  {
+    "id": "c43",
+    "family": "clip",
+    "title": "A change",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c44",
+    "family": "clip",
+    "title": "A change",
+    "state": "undone",
+    "at": 1760000000000
+  },
+  {
+    "id": "c45",
+    "family": "clip",
+    "title": "A change",
+    "state": "kept",
+    "at": 1760000000000
+  },
+  {
+    "id": "c46",
+    "family": "clip",
+    "title": "A change",
+    "state": "unsure",
+    "at": 1760000000000
+  },
+  {
+    "id": "c47",
+    "family": "clip",
+    "title": "A change",
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c48",
+    "family": "clip",
+    "title": "A change",
+    "state": "heard",
+    "at": 1760000000000
+  },
+  {
+    "id": "c49",
+    "family": "device",
+    "title": "A change",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c50",
+    "family": "device",
+    "title": "A change",
+    "state": "undone",
+    "at": 1760000000000
+  },
+  {
+    "id": "c51",
+    "family": "device",
+    "title": "A change",
+    "state": "kept",
+    "at": 1760000000000
+  },
+  {
+    "id": "c52",
+    "family": "device",
+    "title": "A change",
+    "state": "unsure",
+    "at": 1760000000000
+  },
+  {
+    "id": "c53",
+    "family": "device",
+    "title": "A change",
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c54",
+    "family": "device",
+    "title": "A change",
+    "state": "heard",
+    "at": 1760000000000
+  },
+  {
+    "id": "c55",
+    "family": "parameter",
+    "title": "A change",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c56",
+    "family": "parameter",
+    "title": "A change",
+    "state": "undone",
+    "at": 1760000000000
+  },
+  {
+    "id": "c57",
+    "family": "parameter",
+    "title": "A change",
+    "state": "kept",
+    "at": 1760000000000
+  },
+  {
+    "id": "c58",
+    "family": "parameter",
+    "title": "A change",
+    "state": "unsure",
+    "at": 1760000000000
+  },
+  {
+    "id": "c59",
+    "family": "parameter",
+    "title": "A change",
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c60",
+    "family": "parameter",
+    "title": "A change",
+    "state": "heard",
+    "at": 1760000000000
+  },
+  {
+    "id": "c61",
+    "family": "locators",
+    "title": "A change",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c62",
+    "family": "locators",
+    "title": "A change",
+    "state": "undone",
+    "at": 1760000000000
+  },
+  {
+    "id": "c63",
+    "family": "locators",
+    "title": "A change",
+    "state": "kept",
+    "at": 1760000000000
+  },
+  {
+    "id": "c64",
+    "family": "locators",
+    "title": "A change",
+    "state": "unsure",
+    "at": 1760000000000
+  },
+  {
+    "id": "c65",
+    "family": "locators",
+    "title": "A change",
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c66",
+    "family": "locators",
+    "title": "A change",
+    "state": "heard",
+    "at": 1760000000000
+  },
+  {
+    "id": "c67",
+    "family": "color",
+    "title": "A change",
+    "state": "applied",
+    "at": 1760000000000
+  },
+  {
+    "id": "c68",
+    "family": "color",
+    "title": "A change",
+    "state": "undone",
+    "at": 1760000000000
+  },
+  {
+    "id": "c69",
+    "family": "color",
+    "title": "A change",
+    "state": "kept",
+    "at": 1760000000000
+  },
+  {
+    "id": "c70",
+    "family": "color",
+    "title": "A change",
+    "state": "unsure",
+    "at": 1760000000000
+  },
+  {
+    "id": "c71",
+    "family": "color",
+    "title": "A change",
+    "state": "expired",
+    "at": 1760000000000
+  },
+  {
+    "id": "c72",
+    "family": "color",
+    "title": "A change",
+    "state": "heard",
+    "at": 1760000000000
+  }
+]

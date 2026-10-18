@@ -64,7 +64,7 @@ class NativeRelease(unittest.TestCase):
         self.assertEqual(next(p["version"] for p in cargo_lock if p["name"] == "ableton-mcp-server"), bridge)
 
     def helper_source(self):
-        source = self.root / "crates/kumi-runtime/src/hands/KumiHands.swift"
+        source = self.root / "crates/kumi-runtime/src/integrations/ableton/hands/KumiHands.swift"
         source.parent.mkdir(parents=True)
         source.write_text("source fixture")
         return "kumi-hands-" + release.digest(source)[:12]
@@ -126,7 +126,7 @@ class NativeRelease(unittest.TestCase):
             self.assertIn("apps/kumi/bin/kumi.mjs", names)
             # Others' code Kumi carries is under their licenses, said beside Kumi's own.
             self.assertIn("THIRD_PARTY_NOTICES.md", names)
-            helper_name = "kumi-hands-" + release.digest(release.ROOT / "crates/kumi-runtime/src/hands/KumiHands.swift")[:12]
+            helper_name = "kumi-hands-" + release.digest(release.ROOT / "crates/kumi-runtime/src/integrations/ableton/hands/KumiHands.swift")[:12]
             source_helper = release.ROOT / "target/hands" / helper_name
             if source_helper.is_file():
                 helper_path = "packages/runtime/hands/" + helper_name

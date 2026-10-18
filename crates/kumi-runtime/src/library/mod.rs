@@ -2,8 +2,9 @@ pub mod classify;
 pub mod features;
 pub mod learn;
 pub mod learner;
-pub mod manual;
 pub mod measure_worker;
+/// Live's manual, at the path it always had.
+pub use crate::integrations::live_manual as manual;
 pub mod plan;
 pub mod presets;
 pub mod search;
@@ -15,6 +16,7 @@ pub mod taste;
 pub mod tools;
 pub mod xml;
 
+use crate::core::daw::DawProfile;
 use crate::{
     core::{
         contracts::{KernelTool, LibraryState as StatusState, LibraryStatus},
@@ -49,8 +51,8 @@ use std::{
     time::Duration,
 };
 use store::{read_json, write_json, LogReader};
+use taste::Taste;
 pub use taste::TasteLine;
-use taste::{taste_instructions, Taste};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -58,7 +60,7 @@ use tokio::{
     task::JoinHandle,
 };
 pub use tools::LibraryToolsOptions;
-use tools::{library_tools, LearningState, LibraryAccess};
+use tools::{LearningState, LibraryAccess};
 pub use tools::{FIND_PRESETS_TOOL, FIND_SOUNDS_TOOL, MY_SETS_TOOL};
 #[derive(Clone)]
 pub struct LibraryWebOptions {
@@ -210,7 +212,7 @@ impl Library {
                 .chain(self.remembered.borrow().clone().unwrap_or_default())
                 .collect(),
         );
-        let Ok(sources) = tokio::task::spawn_blocking(move || library_sources(&options)).await else {
+        let Ok(sources) = tokio::task::spawn_blocking(move || crate::integrations::library_sources(&options)).await else {
             return self.source_cache.borrow().as_ref().map(|(_, sources)| sources.clone()).unwrap_or_default();
         };
         *self.source_cache.borrow_mut() = Some((now_ms(), sources.clone()));
@@ -518,8 +520,12 @@ impl Library {
         (taste, forgotten)
     }
     pub async fn instructions(&self) -> Result<String, RuntimeError> {
+        self.instructions_for(&DawProfile::ABLETON).await
+    }
+    /// The producer's ways, learned from their projects, in the DAW's words: only for the DAW they were learned from.
+    pub async fn instructions_for(&self, profile: &DawProfile) -> Result<String, RuntimeError> {
         let (taste, forgotten) = self.read_taste().await;
-        Ok(taste.map(|taste| taste_instructions(&taste, &forgotten)).unwrap_or_default())
+        Ok(taste.map(|taste| taste::taste_instructions_for(profile, &taste, &forgotten)).unwrap_or_default())
     }
     pub async fn taste(&self) -> Result<Vec<TasteLine>, RuntimeError> {
         let (taste, forgotten) = self.read_taste().await;
@@ -542,14 +548,24 @@ impl Library {
         Ok(true)
     }
     pub fn tools(self: &Rc<Self>, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
-        let mut tools = library_tools(self.clone(), options.clone());
-        tools.push(manual::manual_tool(manual::ManualOptions {
-            dir: self.dir.clone(),
-            client: self.options.web.as_ref().map(|w| w.client.clone()),
-            base: self.options.web.as_ref().and_then(|w| w.base.clone()),
-            on_event: options.on_event,
-            now: None,
-        }));
+        self.tools_for(&DawProfile::ABLETON, options)
+    }
+    /// The library's tools in the DAW's words; the DAW's manual only for a DAW whose manual Kumi reads (Live's).
+    pub fn tools_for(self: &Rc<Self>, profile: &DawProfile, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
+        let mut tools = tools::library_tools_for(profile, self.clone(), options.clone());
+        if let Some(daw) = profile.id.filter(|_| profile.caps.manual) {
+            let manual = crate::integrations::manual_tool(
+                daw,
+                manual::ManualOptions {
+                    dir: self.dir.clone(),
+                    client: self.options.web.as_ref().map(|w| w.client.clone()),
+                    base: self.options.web.as_ref().and_then(|w| w.base.clone()),
+                    on_event: options.on_event,
+                    now: None,
+                },
+            );
+            tools.extend(manual);
+        }
         tools
     }
     pub async fn close(&self) {

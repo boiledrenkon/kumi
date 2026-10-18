@@ -1,0 +1,42 @@
+{
+  "live setup failure": {
+    "first lines": [
+      "Kumi · anthropic/claude-sonnet-5-5 · MCP connecting / Live unverified",
+      "Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.",
+      "[connection] MCP/Live: disconnected; no verified current Live observation",
+      "[connection] MCP/Live: disconnected; no verified current Live observation",
+      "Live isn't open; open it first.",
+      "[observation] Inference-only — No Live access"
+    ],
+    "notices": [
+      "Live isn't open; open it first.",
+      "Live isn't open; open it first.",
+      "Live isn't open; open it first."
+    ],
+    "starts": 3,
+    "status": [
+      "[status] idle; MCP/Live: disconnected; turns 0; Inference-only — No Live access",
+      "[status] Conversation: new (kept once you ask something)"
+    ],
+    "last line": "Kumi closed. Each Set's conversation continues next time."
+  },
+  "another bridge": {
+    "first lines": [
+      "Kumi · anthropic/claude-sonnet-5-5 · MCP connecting / Live unverified",
+      "Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.",
+      "[connection] MCP/Live: disconnected; no verified current Live observation",
+      "[connection] MCP/Live: disconnected; no verified current Live observation",
+      "Live is running another version of Kumi's bridge than the one installed (Live loads it when it starts): restart Live. If Kumi was updated while it ran, start Kumi again; if it still says this, quit Live and run kumi bridge",
+      "[observation] Inference-only — No Live access"
+    ],
+    "notices": [
+      "Live is running another version of Kumi's bridge than the one installed (Live loads it when it starts): restart Live. If Kumi was updated while it ran, start Kumi again; if it still says this, quit Live and run kumi bridge"
+    ],
+    "starts": "3 or more",
+    "status": [
+      "[status] idle; MCP/Live: disconnected; turns 0; Inference-only — No Live access",
+      "[status] Conversation: new (kept once you ask something)"
+    ],
+    "last line": "Kumi closed. Each Set's conversation continues next time."
+  }
+}

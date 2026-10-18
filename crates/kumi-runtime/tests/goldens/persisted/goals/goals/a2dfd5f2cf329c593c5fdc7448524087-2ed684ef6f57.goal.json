@@ -1,0 +1,1 @@
+{"version":2,"objective":"make the drop hit harder","state":"paused","turns":4,"budget":{"turns":10,"ms":1800000,"idle":2},"elapsedMs":600000,"last":{"verdict":"blocked","reason":"the kick has no room","next":"cut 60 Hz on the bass","measured":true},"idle":1,"conversation":"mgj6k3cw0a0b0c"}

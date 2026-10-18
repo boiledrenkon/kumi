@@ -71,6 +71,7 @@ impl Integration for TestIntegration {
             set: None,
             tracks: None,
             saved_at: None,
+            identity: None,
         })
     }
     async fn close(&self) -> Result<(), RuntimeError> {

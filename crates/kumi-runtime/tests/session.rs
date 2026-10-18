@@ -237,6 +237,7 @@ fn harness(run: Option<Run>, config: impl FnOnce(&mut SessionOptions)) -> Harnes
         set: None,
         tracks: None,
         saved_at: None,
+        identity: None,
     }));
     let events = Rc::new(RefCell::new(vec![]));
     let out = events.clone();
@@ -1173,59 +1174,6 @@ local_test!(a_rebuilt_kernel_keeps_the_conversations_system_text_until_the_produ
     assert!(!last.contains("Prefers short reverbs") && last.contains("The Reese is the main bass"), "{last}");
     h.session.close().await.unwrap();
 });
-local_test!(willington_instructions_follow_the_switch_each_time_the_kernel_is_made, {
-    use kumi_runtime::integrations::ableton::willington::WillingtonSwitch;
-    let switch = Rc::new(Cell::new(WillingtonSwitch::Off));
-    let read = switch.clone();
-    let h = harness(None, move |o| o.willington = Some(Rc::new(move || Some(read.get()))));
-    // Kumi can change the Set (make_changes): the instructions say what the bindings would add.
-    h.observation.borrow_mut().tools = vec![Rc::new(Plan { received: Rc::new(RefCell::new(vec![])) })];
-    h.session.start().await.unwrap();
-    assert!(h.record.created.borrow()[0].instructions.contains("/willington turns the bindings on"));
-    // Turned on a moment ago, before the bridge offers their tools: nothing said about them yet.
-    switch.set(WillingtonSwitch::JustOn);
-    h.session.reconfigure().await.unwrap();
-    h.session.refresh().await.unwrap();
-    let instructions = h.record.created.borrow().last().unwrap().instructions.clone();
-    assert!(!instructions.contains("Willington"), "{instructions}");
-    // On for a while, for a Live they have no bindings for: the next kernel says so, without pointing at /willington.
-    switch.set(WillingtonSwitch::On);
-    h.session.reconfigure().await.unwrap();
-    h.session.refresh().await.unwrap();
-    let instructions = h.record.created.borrow().last().unwrap().instructions.clone();
-    assert!(instructions.contains("none fit the Live that's open") && !instructions.contains("/willington"));
-    // On, with Willington's mapping and Python in Live offered: the next kernel says modulators map, and how,
-    // rather than that they can't (a tutorial's LFOs were rebuilt with automation when it said so).
-    {
-        let tools = &mut h.observation.borrow_mut().tools;
-        tools.push(Rc::new(Offered("edit_rack_mapping")));
-        tools.push(Rc::new(Offered("run_python")));
-    }
-    h.session.reconfigure().await.unwrap();
-    h.session.refresh().await.unwrap();
-    let instructions = h.record.created.borrow().last().unwrap().instructions.clone();
-    assert!(instructions.contains("map with map_modulator") && !instructions.contains("can't be mapped"), "{instructions}");
-    h.session.close().await.unwrap();
-});
-
-/// A tool the integration offers, by name only: what the instructions say depends on which are offered.
-struct Offered(&'static str);
-#[async_trait(?Send)]
-impl KernelTool for Offered {
-    fn name(&self) -> &str {
-        self.0
-    }
-    fn description(&self) -> &str {
-        "Offered."
-    }
-    fn input_schema(&self) -> JsonObject {
-        JsonObject::new()
-    }
-    async fn execute(&self, _: JsonObject, _: Signal) -> Result<ToolResult, RuntimeError> {
-        panic!("only offered")
-    }
-}
-
 #[derive(Clone)]
 struct Plan {
     received: Rc<RefCell<Vec<JsonObject>>>,

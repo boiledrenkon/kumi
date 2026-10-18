@@ -1,4 +1,5 @@
 pub mod microphone;
+use crate::core::daw::DawProfile;
 use crate::{
     system::{self, Env},
     video::{
@@ -112,6 +113,8 @@ pub struct VoiceOptions {
     pub signal: Option<Signal>,
     pub on_fetch: Option<OnFetch>,
     pub on_progress: Option<OnFetch>,
+    /// The DAW the producer works in, for the speech recogniser's hint; Live when not given.
+    pub profile: Option<DawProfile>,
 }
 #[derive(Clone, Default)]
 pub struct ListenOptions {
@@ -325,6 +328,10 @@ pub fn wav_file(pcm: &[u8]) -> Vec<u8> {
 }
 static SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\s\u{feff}]+").unwrap());
 pub fn voice_prompt(names: &[String]) -> String {
+    voice_prompt_for(&DawProfile::ABLETON, names)
+}
+/// `voice_prompt`, with the DAW's project and devices.
+pub fn voice_prompt_for(profile: &DawProfile, names: &[String]) -> String {
     let mut own = Vec::new();
     for name in names {
         let name = trim(&SPACES.replace_all(name, " ")).to_string();
@@ -335,7 +342,12 @@ pub fn voice_prompt(names: &[String]) -> String {
             }
         }
     }
-    format!("A producer talks to Kumi about the bass, the kick, the hats and the pad in their Ableton Live Set{}, with Operator, Wavetable, Drift, Simpler, Drum Rack, Saturator, Roar, EQ Eight, Glue Compressor and Auto Filter.",if own.is_empty(){String::new()}else{format!(" ({})",own.join(", "))})
+    format!(
+        "A producer talks to Kumi about the bass, the kick, the hats and the pad in their {}{}, with {}.",
+        profile.vocab.voice_project,
+        if own.is_empty() { String::new() } else { format!(" ({})", own.join(", ")) },
+        profile.vocab.voice_devices
+    )
 }
 pub fn clean_words(text: &str) -> String {
     static MARKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[^\]]*\]|\*[^*]*\*").unwrap());
@@ -477,7 +489,7 @@ pub async fn write_down(heard: Heard, options: WriteDownOptions) -> Result<Strin
                     audio_context: Some(audio_context_for(heard.seconds)),
                     timeout_ms: Some(120_000),
                     prompt: if !language.is_empty() && speech_model_for(Some(language)).contains(".en") {
-                        Some(voice_prompt(&options.names))
+                        Some(voice_prompt_for(options.voice.profile.as_ref().unwrap_or(&DawProfile::ABLETON), &options.names))
                     } else {
                         None
                     },

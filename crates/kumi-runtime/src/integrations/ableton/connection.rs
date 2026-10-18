@@ -11,7 +11,7 @@ use crate::{
     command::KUMI,
     core::{
         contracts::*,
-        errors::{FailureKind, KumiError, RuntimeError},
+        errors::{FailureKind, KumiError, RuntimeError, SetupFailure},
     },
     mcp::{
         allowed_tools::{AllowedTools, CallOptions},
@@ -287,6 +287,7 @@ impl LiveConnection {
             bridge_config: Some(path.into()),
             allow_tools: BRIDGE_TOOLS.clone(),
             on_dispatch: dispatch,
+            bridge: Some(client::BridgeDescriptor::ABLETON),
             ..Default::default()
         })
         .await
@@ -315,19 +316,22 @@ impl LiveConnection {
             // Live still running the bridge it loaded before an update: restart Live, not another update, in the
             // bridge's own words. Anything else gets the usual way back after an update, with what the bridge said.
             let said = error.to_string();
-            let message = if said.contains(kumi_common::bridge::ANOTHER_BRIDGE) {
-                said
-            } else {
-                let cause = said.strip_prefix("Kumi's bridge didn't start: ").map(|cause| format!(" ({cause})")).unwrap_or_default();
-                format!("Kumi couldn't start its bridge to Live{cause}. After updating Kumi, Live's part needs updating too: quit Live, then run {} bridge. Otherwise: {} doctor",*KUMI,*KUMI)
-            };
-            return Err(KumiError::new(FailureKind::Live, message).into());
+            if said.contains(kumi_common::bridge::ANOTHER_BRIDGE) {
+                return Err(KumiError::new(FailureKind::Daw, said).with_setup(SetupFailure::RestartDaw).into());
+            }
+            let cause = said.strip_prefix("Kumi's bridge didn't start: ").map(|cause| format!(" ({cause})")).unwrap_or_default();
+            let message = format!("Kumi couldn't start its bridge to Live{cause}. After updating Kumi, Live's part needs updating too: quit Live, then run {} bridge. Otherwise: {} doctor",*KUMI,*KUMI);
+            return Err(KumiError::new(FailureKind::Daw, message).into());
         }
         Ok(())
     }
     fn attach(&self, endpoint: Rc<dyn McpEndpoint>) {
         *self.endpoint.borrow_mut() = Some(endpoint.clone());
-        *self.tools.borrow_mut() = Some(AllowedTools::new(endpoint.clone(), BRIDGE_TOOLS.iter().cloned().collect::<HashSet<_>>()));
+        *self.tools.borrow_mut() = Some(AllowedTools::with_model_tools(
+            endpoint.clone(),
+            &crate::mcp::allowed_tools::MODEL_TOOLS,
+            BRIDGE_TOOLS.iter().cloned().collect::<HashSet<_>>(),
+        ));
         let weak = self.weak.clone();
         self.unlisten.borrow_mut().push(endpoint.on_disconnect(Rc::new(move || {
             if let Some(this) = weak.upgrade() {
@@ -359,7 +363,16 @@ impl LiveConnection {
                     async move { endpoint.call("live_discover", views::object(json!({"kind":"selection","limit":1})), signal).await }
                         .boxed_local()
                 }),
-                on_focus: on_focus.clone(),
+                // The app reads the neutral fields: Live's presentation fills them from what the feed read.
+                on_focus: {
+                    let on_focus = on_focus.clone();
+                    Rc::new(move |focus: Option<LiveFocus>| {
+                        on_focus(focus.map(|mut focus| {
+                            super::presentation::fill_focus(&mut focus);
+                            focus
+                        }))
+                    })
+                },
                 on_failure: Some(on_failure),
                 interval_ms: self.options.focus_interval_ms.filter(|n| *n != 0),
                 timeout_ms: None,

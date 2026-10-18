@@ -1,0 +1,7 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[conversations] “Bass ideas” is about “Morning Run”, and Live has “Night Drive” open. 1. Open “Morning Run” in Live (Live may ask whether to save “Night Drive” first) · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.
+[conversations] This conversation is about its Set, and Live has a Set not saved yet open. 1. Open its Set in Live (Live may ask whether to save a Set not saved yet first) · 2. Carry it on here, as a copy · 3. Cancel. Type 1, 2 or 3.
+Kumi closed. Each Set's conversation continues next time.

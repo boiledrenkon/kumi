@@ -20,11 +20,7 @@ pub(super) struct Held {
     pub recording: bool,
     pub rearm: Vec<String>,
 }
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct Window {
-    pub from: f64,
-    pub beats: f64,
-}
+pub(super) use crate::listening::renderer::Window;
 #[derive(Default)]
 pub(super) struct Transport {
     pub position: Option<f64>,
@@ -74,17 +70,10 @@ impl Rig {
         self.window.unwrap_or(Window { from: self.from, beats: self.beats })
     }
 }
-impl Rendering {
+impl LiveRenderer {
     /// The bars `window` covers, as said while Live plays them: "bars 17–24", or "bar 17".
     pub(super) fn bars_of(&self, window: Window) -> String {
-        let meter = self.observer.beats_per_bar.get().max(1.);
-        let bar = |beat: f64| (beat / meter).floor() as i64 + 1;
-        let (first, last) = (bar(window.from), bar(window.from + window.beats - 1e-6));
-        if first >= last {
-            format!("bar {first}")
-        } else {
-            format!("bars {first}–{last}")
-        }
+        crate::listening::renderer::bars_of(self.observer.beats_per_bar.get(), window)
     }
     pub(super) async fn transport_now(&self, signal: Signal) -> Transport {
         let rows = self.rows("set", json!({"fields":["position","loop"]}), signal).await.unwrap_or_default();

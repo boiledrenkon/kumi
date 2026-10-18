@@ -18,7 +18,7 @@ pub(super) fn kumi_recording(file: &std::path::Path, tracks: &[String]) -> bool 
             .is_some_and(|name| tracks.iter().any(|track| name.starts_with(&format!("{track} "))))
 }
 
-impl Rendering {
+impl LiveRenderer {
     pub(super) async fn render_pass(self: &Rc<Self>, rig: &mut Rig, signal: Signal) -> Result<IndexMap<String, Render>, RuntimeError> {
         // A pass writes each take before it's read: with too little room for them, it's refused before Live plays.
         if let Some(why) = self.no_room_for(rig).await {

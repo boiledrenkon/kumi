@@ -1,0 +1,32 @@
+{
+  "toolsKey": "fHDyo7TNYk_Ks8bjR22A0k",
+  "fixed": 52192,
+  "fixedByHand": 52192,
+  "sent": [
+    "live_discover",
+    "live_browser_search",
+    "live_song_state",
+    "find_sounds",
+    "read_notes",
+    "make_device",
+    "set_tempo",
+    "set_mixer",
+    "rename",
+    "add_tracks_and_scenes",
+    "write_midi_clip",
+    "load_device",
+    "set_device_parameter",
+    "edit_rack",
+    "duplicate_clip",
+    "set_automation",
+    "change_structure",
+    "play",
+    "make_changes",
+    "undo_change",
+    "audition",
+    "run_python",
+    "find_tools",
+    "call_tool"
+  ],
+  "requests": 1
+}

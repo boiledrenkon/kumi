@@ -1,0 +1,22 @@
+{
+  "audit": "[Kumi goal check] Don't change anything now. Is this goal met: make the drop hit harder? Judge it by what you measured or can see in the Set, not by what you meant to do. Answer with one line and nothing else: COMPLETE: <the evidence>, or BLOCKED: <what the producer must do first>, or CONTINUE: <the next step>.",
+  "audit against the judge": "continue: the judge last measured it short of its checklist / next: measure it again with judge, then say whether it's met",
+  "audit read: blocked": "blocked: open the Set with the drop / next: open the Set with the drop",
+  "audit read: complete": "complete: the kick peaks 3 dB higher",
+  "audit read: continue": "continue: not met yet, by the model's own check / next: raise the kick",
+  "audit read: no answer": "continue: the check got no clear answer / next: I think it's going well.",
+  "error check: auth": "blocked: Something went wrong. / next: sign in again (/login), then /goal resume",
+  "error check: billing": "blocked: Something went wrong. / next: sort out the provider account's billing or credits, or choose another model (/model), then /goal resume",
+  "error check: config": "blocked: Something went wrong. / next: fix the setting the error names, then /goal resume",
+  "error check: live": "blocked: Something went wrong. / next: check that Live is open with Kumi's bridge, then /goal resume",
+  "error check: model": "blocked: Something went wrong. / next: choose another model (/model), then /goal resume",
+  "error check: network": "continue: Something went wrong.",
+  "error check: usage-limit": "blocked: Something went wrong. / next: choose a fallback model (ctrl+f in /model), or wait for the plan's limit to reset, then /goal resume",
+  "first": "[Kumi goal] make the drop hit harder\n\nThis is a goal: Kumi keeps you on it, turn after turn, until it's met. Work toward it now. Where it's about how something sounds, prove it with the judge (judge with a goal that measures it), so Kumi can check the numbers. End each answer by saying what you did and what's left.",
+  "measured: ended short": "continue: the judged run ended short of its checklist / next: loudness (-10.5 now, wants -9 LUFS ±0.5)",
+  "measured: met": "complete: the judge's checklist is met",
+  "measured: short": "continue: the judge's checklist isn't met: loudness (-10.5 now, wants -9 LUFS ±0.5) / next: loudness (-10.5 now, wants -9 LUFS ±0.5)",
+  "next after a continue": "[Kumi goal] make the drop hit harder\nNot there yet: not met yet, by the model's own check. Next: raise the kick. Budget left: 11 turns. Carry on toward it.",
+  "next before any check": "[Kumi goal] make the drop hit harder\nNot there yet. Budget left: 12 turns. Carry on toward it.",
+  "stuck": "stuck: 3 turns in a row got no closer / next: try again"
+}

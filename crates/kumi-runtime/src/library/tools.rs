@@ -6,13 +6,14 @@ use super::{
     sources::basename,
     store::unpack_vector,
 };
+use crate::core::daw::{asset_in_words, AssetPhrase, DawProfile, DawWords};
 use crate::{
     audio::audio_path,
     core::{
         contracts::{JsonObject, KernelTool, Reach, SessionEvent, ToolResult},
         errors::RuntimeError,
     },
-    integrations::ableton::samples::{default_sample_folders, find_samples, folder_path, FindSamplesOptions},
+    integrations::shared::samples::{default_sample_folders, find_samples, folder_path, FindSamplesOptions},
 };
 use async_trait::async_trait;
 use futures::future::LocalBoxFuture;
@@ -65,6 +66,50 @@ pub(crate) struct Definition {
 pub(crate) fn definition(name: &str) -> &'static Definition {
     static DEFINITIONS: LazyLock<Vec<Definition>> = LazyLock::new(|| serde_json::from_str(include_str!("tool-definitions.json")).unwrap());
     DEFINITIONS.iter().find(|d| d.name == name).unwrap()
+}
+
+/// What the library tools' definitions say in Live's words, and how many times.
+pub(crate) const LIBRARY_PHRASES: &[AssetPhrase] = &[
+    AssetPhrase { live: "Live's User Library and Places", count: 1, said: |p| p.vocab.library_places.into() },
+    AssetPhrase { live: "an audio clip in the Set (its clipRef)", count: 1, said: |p| format!("an audio clip in the {} (its clipRef)", p.words.place) },
+    AssetPhrase {
+        live: "Live's presets and racks (in the User Library, Places and packs, and Live's own), Max for Live devices, and plug-ins' own presets",
+        count: 1,
+        said: |p| p.vocab.preset_sources.into(),
+    },
+    AssetPhrase { live: "(\"Wavetable\", \"Drum Rack\", \"Serum\")", count: 1, said: |p| p.vocab.preset_examples.into() },
+    AssetPhrase {
+        live: "; one in Live's Browser also gives browser, the item load_device takes as itemId",
+        count: 1,
+        said: |p| {
+            if p.caps.browser_items {
+                "; one in Live's Browser also gives browser, the item load_device takes as itemId".into()
+            } else {
+                String::new()
+            }
+        },
+    },
+    AssetPhrase {
+        live: "The device it's for, or a rack holding it: \"Operator\", \"Drum Rack\", \"Pro-Q 3\"",
+        count: 1,
+        said: |p| p.vocab.preset_device_hint.into(),
+    },
+    AssetPhrase { live: "The producer's own Live Sets", count: 1, said: |p| format!("The producer's own {} {}", p.words.app, p.words.places) },
+    AssetPhrase { live: "Find Sets by words (a Set's name", count: 1, said: |p| format!("Find {} by words (a {}'s name", p.words.places, p.words.place) },
+    AssetPhrase {
+        live: "or give set (a path from a result, or a Set's name) for that Set:",
+        count: 1,
+        said: |p| format!("or give set (a path from a result, or a {0}'s name) for that {0}:", p.words.place),
+    },
+    AssetPhrase { live: "the bass from my Night Drive Set", count: 1, said: |p| format!("the bass from my Night Drive {}", p.words.place) },
+    AssetPhrase { live: "Every word must be in the Set: its name", count: 1, said: |p| format!("Every word must be in the {}: its name", p.words.place) },
+    AssetPhrase { live: "A Set's path (from a result) or name", count: 1, said: |p| format!("A {}'s path (from a result) or name", p.words.place) },
+];
+
+/// The library tools' definitions in the DAW's words.
+fn definitions_in(profile: &DawProfile) -> Vec<Definition> {
+    let value: Value = serde_json::from_str(include_str!("tool-definitions.json")).unwrap();
+    serde_json::from_value(asset_in_words(value, profile, LIBRARY_PHRASES)).unwrap()
 }
 pub(crate) fn tell(callback: &Option<OnEvent>, text: String) {
     if let Some(callback) = callback {
@@ -142,6 +187,9 @@ struct LibraryTool {
     name: &'static str,
     library: Rc<dyn LibraryAccess>,
     options: LibraryToolsOptions,
+    description: String,
+    schema: JsonObject,
+    profile: DawProfile,
 }
 impl LibraryTool {
     async fn everywhere(&self) -> Vec<String> {
@@ -323,7 +371,11 @@ impl LibraryTool {
         }
         // The library's notes call 60 C4 and Live's call it C3: said, so the two aren't mixed.
         if rows.iter().any(|row| row.get("note").is_some()) {
-            response["octaves"] = json!("a sound's note calls MIDI 60 C4, where Live, listen and the notation call it C3");
+            response["octaves"] = json!(if self.profile.vocab.middle_c_octave == 3 {
+                format!("a sound's note calls MIDI 60 C4, where {}, listen and the notation call it C3", self.profile.words.app)
+            } else {
+                format!("a sound's note calls MIDI 60 C4, as {} and listen do; the notation calls it C3", self.profile.words.app)
+            });
         }
         if !uncovered.is_empty() {
             response["note"] = json!(format!(
@@ -356,7 +408,7 @@ impl LibraryTool {
         Ok(ToolResult::text(stringify(&response)))
     }
     async fn my_sets(&self, input: JsonObject) -> Result<ToolResult, RuntimeError> {
-        tell(&self.options.on_event, "looking through your Sets".into());
+        tell(&self.options.on_event, format!("looking through your {}", self.profile.words.places));
         let entries: Vec<_> = self.library.sets().await?.into_iter().filter(|e| e.set.is_some()).collect();
         if let Some(wanted) = input.get("set").and_then(Value::as_str).map(trim).filter(|s| !s.is_empty()) {
             let path = folder_path(wanted, None);
@@ -379,10 +431,11 @@ impl LibraryTool {
             };
             let entry = entries.iter().find(|e| Some(&e.path) == path.as_ref()).or_else(|| newest(true)).or_else(|| newest(false));
             let Some(entry) = entry else {
+                let DawWords { place, places, .. } = self.profile.words;
                 return Ok(ToolResult::error(format!(
-                    "Kumi doesn't know a Set called “{}”{}; search with words to find it.",
+                    "Kumi doesn't know a {place} called “{}”{}; search with words to find it.",
                     head(wanted, 80),
-                    if self.library.learning().learning { " (it's still learning your Sets)" } else { "" }
+                    if self.library.learning().learning { format!(" (it's still learning your {places})") } else { String::new() }
                 )));
             };
             let set = entry.set.as_ref().unwrap();
@@ -426,7 +479,7 @@ impl LibraryTool {
         );
         let mut response = json!({"matched":result.matched,"known":entries.len(),"sets":result.hits.into_iter().map(|hit|{let entry=hit.entry;let set=entry.set.as_ref().unwrap();let mut row=json!({"name":set.name,"path":entry.path,"saved":day(entry.mtime),"tracks":set.tracks.len()});if let Some(tempo)=set.tempo.filter(|n|*n!=0.){row["tempo"]=json!(tempo);}if let Some(key)=set.key.as_ref().filter(|s|!s.is_empty()){row["key"]=json!(key);}if !hit.why.is_empty(){row["why"]=json!(hit.why[..hit.why.len().min(4)].join("; "));}row}).collect::<Vec<_>>()});
         if self.library.learning().learning {
-            response["learning"] = json!("Kumi is still learning your Sets: more may match later.");
+            response["learning"] = json!(format!("Kumi is still learning your {}: more may match later.", self.profile.words.places));
         }
         Ok(ToolResult::text(stringify(&response)))
     }
@@ -445,10 +498,10 @@ impl KernelTool for LibraryTool {
         self.name
     }
     fn description(&self) -> &str {
-        &definition(self.name).description
+        &self.description
     }
     fn input_schema(&self) -> JsonObject {
-        definition(self.name).input_schema.clone()
+        self.schema.clone()
     }
     /// Sounds are looked for all the time; presets and earlier Sets now and then, through find_tools.
     fn deferred(&self) -> bool {
@@ -463,8 +516,46 @@ impl KernelTool for LibraryTool {
     }
 }
 pub fn library_tools(library: Rc<dyn LibraryAccess>, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
+    library_tools_for(&DawProfile::ABLETON, library, options)
+}
+
+/// `library_tools`, saying the DAW's words.
+pub fn library_tools_for(profile: &DawProfile, library: Rc<dyn LibraryAccess>, options: LibraryToolsOptions) -> Vec<Rc<dyn KernelTool>> {
+    let definitions = definitions_in(profile);
+    // Presets are found in Live's Browser and its preset files: only for a DAW with Browser items.
     [FIND_SOUNDS_TOOL, FIND_PRESETS_TOOL, MY_SETS_TOOL]
         .into_iter()
-        .map(|name| Rc::new(LibraryTool { name, library: library.clone(), options: options.clone() }) as Rc<dyn KernelTool>)
+        .filter(|name| *name != FIND_PRESETS_TOOL || profile.caps.browser_items)
+        .map(|name| {
+            let definition = definitions.iter().find(|d| d.name == name).unwrap();
+            Rc::new(LibraryTool {
+                name,
+                library: library.clone(),
+                options: options.clone(),
+                description: definition.description.clone(),
+                schema: definition.input_schema.clone(),
+                profile: *profile,
+            }) as Rc<dyn KernelTool>
+        })
         .collect()
+}
+
+#[cfg(test)]
+mod phrases {
+    use super::*;
+
+    #[test]
+    fn the_library_tools_phrases_are_all_there_and_lives_words_stay() {
+        let value: Value = serde_json::from_str(include_str!("tool-definitions.json")).unwrap();
+        assert_eq!(crate::core::daw::check_asset_phrases(&value, LIBRARY_PHRASES), Ok(()));
+        assert_eq!(
+            asset_in_words(value.clone(), &DawProfile::ABLETON, LIBRARY_PHRASES),
+            value,
+            "Live's definitions are the asset as it is"
+        );
+        let said = asset_in_words(value.clone(), &DawProfile::UNKNOWN, LIBRARY_PHRASES).to_string();
+        for phrase in LIBRARY_PHRASES {
+            assert!(!said.contains(phrase.live), "{}", phrase.live);
+        }
+    }
 }

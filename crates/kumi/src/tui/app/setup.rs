@@ -12,7 +12,10 @@ use super::super::{
 };
 use super::drawing::{sp, st};
 use super::*;
-pub use crate::live_app::{LiveInstalled, MIN_LIVE_MAJOR};
+use crate::daw::EnableStep;
+pub use crate::daw::Installed;
+/// What of Live is on this computer, as setup has always named it.
+pub use crate::daw::Installed as LiveInstalled;
 use async_trait::async_trait;
 use kumi_common::abort;
 use kumi_runtime::{
@@ -21,9 +24,10 @@ use kumi_runtime::{
 };
 use tokio::sync::oneshot;
 
-/// Live's side of setup, which the app can't do on its own: Live the app, and the bridge in it.
+/// The DAW's side of setup, which the app can't do on its own: the DAW the app, and Kumi's bridge in it. Its methods
+/// keep Live's names (the app's Live side and setup's tests implement them).
 #[async_trait(?Send)]
-pub trait LiveSetup {
+pub trait DawSetup {
     /// The open Live's app (a `.app` on macOS, an `.exe` on Windows), if Live is open.
     async fn open_live(&self) -> Option<String>;
     /// Ask Live to quit as its own menu does, so unsaved work makes it ask to save first. Returns once asked; false
@@ -40,8 +44,8 @@ pub trait LiveSetup {
     /// Live's version ("12.4"), when it can be read from its app.
     async fn version(&self, app: Option<String>) -> Option<String>;
     /// Which Live is on this computer, from its files: whether one can take the bridge yet.
-    async fn installed(&self) -> LiveInstalled {
-        LiveInstalled::Ready
+    async fn installed(&self) -> Installed {
+        Installed::Ready
     }
     /// The saved Set open in Live, when the session has read it (through a bridge already there).
     fn open_set(&self) -> Option<String> {
@@ -69,6 +73,9 @@ pub trait LiveSetup {
         Duration::from_secs(45)
     }
 }
+
+/// Live's side of setup, as the app and its tests have always named it.
+pub use DawSetup as LiveSetup;
 
 /// How long Kumi keeps watching, after the producer put the Live step off, for Live to quit on the
 /// request Kumi already sent (its save dialog still up), so it can open Live again.
@@ -199,7 +206,6 @@ fn local_choice(running: &[String]) -> Choice {
 }
 
 const CHOOSE_HINT: &str = "↑↓ choose · enter select · esc later";
-const SURFACE: &str = "In Live, open Settings › Link, Tempo & MIDI and set a Control Surface to AbletonMcpBridge. Kumi notices by itself.";
 /// The browser's sign-in link, copied whole, or a code for a browser on another device.
 const BROWSER_HINT: &str = "c copies the link · d uses a code · esc back";
 const CODE_HINT: &str = "c copies the code · b uses the browser · esc back";
@@ -215,7 +221,7 @@ fn major_of(version: &str) -> Option<u32> {
 
 /// Open Live again, with the Set it had open when Kumi knows it. A Set that won't open (moved, or on a drive that's
 /// gone) doesn't keep Live closed: Live opens without it. Whether Live opened, and whether with its Set.
-async fn reopen(live: &Rc<dyn LiveSetup>, app: Option<String>, set: Option<String>) -> (bool, bool) {
+async fn reopen(live: &Rc<dyn DawSetup>, app: Option<String>, set: Option<String>) -> (bool, bool) {
     if set.is_some() && live.start(app.clone(), set).await {
         return (true, true);
     }
@@ -310,8 +316,11 @@ impl TuiApp {
                 LiveStep::Done(app) => app,
                 LiveStep::Later(also) => return self.end_setup(Some(Step::Live), also).await,
             };
-            if !self.setup_surface(live, app).await {
-                return self.end_setup(Some(Step::Surface), None).await;
+            // The DAW told to use Kumi's bridge, by the producer, when it needs telling (Live's Control Surface).
+            if let Some(enable) = crate::daw::current().enable_step() {
+                if !self.setup_surface(live, app, enable).await {
+                    return self.end_setup(Some(Step::Surface), None).await;
+                }
             }
         } else if let Some((live, None)) = live {
             // The bridge was already in place: Live connects as it stands, and later runs need nothing more.
@@ -549,7 +558,8 @@ impl TuiApp {
     /// place and Live opens again, with the Set it had open when Kumi knows it. Once Kumi has asked Live to
     /// quit, or waits for the producer to quit it, every way out of this step leaves Live open again. A Live
     /// that isn't open is looked for first: Live 12 has to be here, and opened once, to take the bridge.
-    async fn setup_live(&self, live: Rc<dyn LiveSetup>, why: String) -> LiveStep {
+    async fn setup_live(&self, live: Rc<dyn DawSetup>, why: String) -> LiveStep {
+        let min_major = crate::daw::current().min_major();
         self.setup_show(|s| {
             s.step = Step::Live;
             s.problem = None;
@@ -573,14 +583,13 @@ impl TuiApp {
                 // Open (again): nothing is held until the producer says how it closes.
                 self.setup_show(|s| s.holding = false);
                 // A Live older than 12 can't take Kumi's bridge: said before it's asked to quit, and it stays open.
-                let older =
-                    live.version(open.clone()).await.filter(|version| major_of(version).is_some_and(|major| major < MIN_LIVE_MAJOR));
+                let older = live.version(open.clone()).await.filter(|version| major_of(version).is_some_and(|major| major < min_major));
                 if let Some(version) = older {
                     let say = vec![format!(
-                        "Kumi works with Live {MIN_LIVE_MAJOR}: the Live that's open is {version}. Open Live {MIN_LIVE_MAJOR} instead (ableton.com has it), then choose Look again."
+                        "Kumi works with Live {min_major}: the Live that's open is {version}. Open Live {min_major} instead (ableton.com has it), then choose Look again."
                     )];
                     let again = vec![choice("Look again", "", "again"), choice("Later", "chat without Live for now", "later")];
-                    if self.setup_choose(&format!("Live {MIN_LIVE_MAJOR} needed"), say, again).await.as_deref() != Some("again") {
+                    if self.setup_choose(&format!("Live {min_major} needed"), say, again).await.as_deref() != Some("again") {
                         return LiveStep::Later(None);
                     }
                     continue;
@@ -627,14 +636,14 @@ impl TuiApp {
                     missing => {
                         let say = vec![match missing {
                             LiveInstalled::Older(version) => format!(
-                                "Kumi works with Live {MIN_LIVE_MAJOR}: this computer has Live {version}. Install Live {MIN_LIVE_MAJOR} (ableton.com) and open it once, then choose Look again."
+                                "Kumi works with Live {min_major}: this computer has Live {version}. Install Live {min_major} (ableton.com) and open it once, then choose Look again."
                             ),
                             _ => format!(
-                                "Kumi works with Live {MIN_LIVE_MAJOR}: install it (ableton.com), or open it once if it's here, then choose Look again."
+                                "Kumi works with Live {min_major}: install it (ableton.com), or open it once if it's here, then choose Look again."
                             ),
                         }];
                         let again = vec![choice("Look again", "", "again"), choice("Later", "chat without Live for now", "later")];
-                        if self.setup_choose(&format!("Live {MIN_LIVE_MAJOR} not found"), say, again).await.as_deref() != Some("again") {
+                        if self.setup_choose(&format!("Live {min_major} not found"), say, again).await.as_deref() != Some("again") {
                             return LiveStep::Later(None);
                         }
                         continue;
@@ -693,9 +702,10 @@ impl TuiApp {
 
     /// Live 12 (`app`) is here but has never been opened, so it has no User Library for the bridge yet: Kumi opens it
     /// once and waits for it to make one. True once it has: Live is open then, and the step restarts it with the bridge.
-    async fn first_open(&self, live: &Rc<dyn LiveSetup>, app: String) -> bool {
+    async fn first_open(&self, live: &Rc<dyn DawSetup>, app: String) -> bool {
+        let min_major = crate::daw::current().min_major();
         let say = vec![format!(
-            "Live {MIN_LIVE_MAJOR} hasn't been opened here yet, so it has no User Library for the bridge. Kumi opens it once, then restarts it with the bridge."
+            "Live {min_major} hasn't been opened here yet, so it has no User Library for the bridge. Kumi opens it once, then restarts it with the bridge."
         )];
         let open = vec![choice("Open Live", "", "open"), choice("Later", "chat without Live for now", "later")];
         if self.setup_choose("Live hasn't been opened yet", say, open).await.as_deref() != Some("open") {
@@ -726,7 +736,7 @@ impl TuiApp {
     /// asked it to quit and it's still open a while later (its save dialog cancelled, say), Kumi says
     /// so and offers to ask again, still watching for it to close meanwhile. `refused`: the system didn't
     /// let Kumi ask, said in place of the usual words while the producer quits Live.
-    async fn wait_closed(&self, live: &Rc<dyn LiveSetup>, mut asked: bool, mut refused: Option<String>) -> bool {
+    async fn wait_closed(&self, live: &Rc<dyn DawSetup>, mut asked: bool, mut refused: Option<String>) -> bool {
         let stop = self.setup_wait();
         loop {
             let yourself = refused
@@ -773,7 +783,7 @@ impl TuiApp {
     /// Out of the Live step without the bridge in place. When Kumi had Live closed (or closing), Live
     /// opens again, with `set` when Kumi knows it: now, if it has closed, or, when a quit Kumi asked for is
     /// still being decided (Live's save dialog up), once it closes in the next couple of minutes.
-    async fn leave_live(&self, live: &Rc<dyn LiveSetup>, held: Option<String>, set: Option<String>, asked: bool) -> LiveStep {
+    async fn leave_live(&self, live: &Rc<dyn DawSetup>, held: Option<String>, set: Option<String>, asked: bool) -> LiveStep {
         self.setup_show(|s| {
             s.holding = false;
             s.waiting = false;
@@ -803,13 +813,13 @@ impl TuiApp {
     /// Live connects through the bridge once it has it as a Control Surface: Kumi watches for that. Still not
     /// chosen a while later, Kumi adds where Live's Settings are, and that a dialog in Live comes first: still
     /// one instruction, carried out in Live by the producer, never by Kumi.
-    async fn setup_surface(&self, live: Rc<dyn LiveSetup>, app: Option<String>) -> bool {
+    async fn setup_surface(&self, live: Rc<dyn DawSetup>, app: Option<String>, enable: EnableStep) -> bool {
         let stop = self.setup_wait();
         let note = self.0.state.borrow().setup.as_ref().and_then(|s| s.set_note.clone());
         self.setup_show(move |s| {
             s.step = Step::Surface;
-            s.status = "waiting for Live".into();
-            s.say = std::iter::once(SURFACE.to_string()).chain(note).collect();
+            s.status = enable.waiting.into();
+            s.say = std::iter::once(enable.say.to_string()).chain(note).collect();
             s.hint = "esc later".into();
             s.waiting = true;
         });
@@ -889,10 +899,11 @@ impl TuiApp {
                 NoticeTone::Info,
             ),
             // The bridge is current, so no setup shows next time: the session connects as soon as Live answers.
-            Some(Step::Surface) => self.notice(
-                "Kumi connects to Live by itself once Live answers: in Live, open Settings › Link, Tempo & MIDI and set a Control Surface to AbletonMcpBridge.",
-                NoticeTone::Info,
-            ),
+            Some(Step::Surface) => {
+                if let Some(enable) = crate::daw::current().enable_step() {
+                    self.notice(enable.put_off, NoticeTone::Info);
+                }
+            }
             _ => {}
         }
         if later != Some(Step::Sign) {
@@ -956,8 +967,15 @@ impl TuiApp {
         y += 1;
         // Where Live doesn't run (Linux), signing in is all there is.
         let live_here = self.0.options.connect_live.as_ref().is_some_and(|l| l.live.here());
-        let names = [(Step::Sign, "Sign in"), (Step::Live, "Connect to Live"), (Step::Surface, "Control Surface")];
-        let names = if live_here { &names[..] } else { &names[..1] };
+        // The steps in the DAW's words; the enable step only for a DAW that needs one.
+        let daw = crate::daw::current();
+        let enable = daw.enable_step();
+        let connect = format!("Connect to {}", daw.profile().words.app);
+        let mut names = vec![(Step::Sign, "Sign in")];
+        if live_here {
+            names.push((Step::Live, connect.as_str()));
+            names.extend(enable.map(|enable| (Step::Surface, enable.label)));
+        }
         let column = if width >= 40 { 20 } else { 17 };
         let signing = panel.as_ref().and_then(|p| match &*p.borrow() {
             Panel::Key { checking, .. } => Some(if *checking { "checking the key…" } else { "paste a key" }),
@@ -965,7 +983,7 @@ impl TuiApp {
             Panel::ChatGpt { .. } => Some("waiting for the browser"),
             _ => None,
         });
-        for (step, name) in names {
+        for (step, name) in &names {
             let done = match step {
                 Step::Sign => setup.signed.clone(),
                 Step::Live => setup.bridge.clone(),
@@ -984,10 +1002,10 @@ impl TuiApp {
                 let status = match (step, done) {
                     (Step::Surface, Some(done)) => done,
                     (_, Some(done)) => format!("{done} · done"),
-                    (Step::Surface, None) => "when Live opens".into(),
+                    (Step::Surface, None) => enable.map(|enable| enable.later).unwrap_or("later").into(),
                     (_, None) => "later".into(),
                 };
-                let style = if status == "later" || status == "when Live opens" { st::FAINT } else { st::ACCENT };
+                let style = if status == "later" || enable.is_some_and(|enable| status == enable.later) { st::FAINT } else { st::ACCENT };
                 (style, status, style)
             } else {
                 (st::FAINT, String::new(), st::FAINT)

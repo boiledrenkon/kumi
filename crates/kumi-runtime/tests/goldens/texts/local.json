@@ -1,0 +1,4 @@
+{
+  "note": "gemma3:4b can't use tools, so Kumi can talk with it about your Set but can't change anything. qwen3:8b on Ollama can: /model chooses it.",
+  "system text": "Kumi's instructions.\n\nThis model can't use tools here: you see the Set only as it's described above, and can't read more of it or change anything. When asked for a change, say so plainly, and that /model chooses a model that can make it."
+}

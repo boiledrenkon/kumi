@@ -12,7 +12,7 @@ mod live;
 mod panels;
 mod records;
 mod setup;
-pub use setup::{waveform, LiveInstalled, LiveSetup, WAVE_WIDTH};
+pub use setup::{waveform, DawSetup, Installed, LiveInstalled, LiveSetup, WAVE_WIDTH};
 mod sharing;
 mod shown;
 
@@ -39,7 +39,6 @@ use crate::{
     terminal::Terminal,
     text::{sanitize_text, StreamingText},
     update::UpdateControl,
-    willington::WillingtonControl,
 };
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::{
@@ -86,9 +85,9 @@ pub struct TuiOptions {
     pub updates: Option<UpdateControl>,
     pub voice: Option<Rc<dyn VoiceController>>,
     /// Live's part of first-run setup; `None` when Kumi chats without Live by choice.
-    pub connect_live: Option<ConnectLive>,
+    pub connect_live: Option<ConnectDaw>,
     /// /willington, where Kumi's bridge can carry Willington.
-    pub willington: Option<WillingtonControl>,
+    pub willington: Option<crate::daw::Toggle>,
     /// /slots: which model does each listening job, swapped and taken back.
     pub slots: Option<Rc<kumi_runtime::slots::SlotsContext>>,
     /// What's new since the producer last opened Kumi, shown once as it starts.
@@ -127,15 +126,18 @@ pub struct TuiOptions {
     /// Where /export and /share save; None saves in the folder Kumi was started in.
     pub folder: Option<std::path::PathBuf>,
 }
-/// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
+/// The DAW's part of first-run setup: the setup shows it when Kumi's bridge isn't in the DAW yet, or is older
 /// than Kumi's.
-pub struct ConnectLive {
+pub struct ConnectDaw {
     /// Why Live isn't connected yet, in a sentence; `None` when the bridge in Live is Kumi's own.
     pub why: Option<String>,
     /// Kumi's bridge version.
     pub bridge: String,
-    pub live: Rc<dyn LiveSetup>,
+    /// The DAW's side of setup (named `live` as it always was).
+    pub live: Rc<dyn DawSetup>,
 }
+/// The DAW's part of first-run setup, as the app and its tests have always named it.
+pub use ConnectDaw as ConnectLive;
 impl TuiOptions {
     pub fn new(controller: Rc<dyn SessionController>, input: Rc<dyn TtyInput>, output: Rc<dyn TtyOutput>, mode: impl Into<String>) -> Self {
         Self {
@@ -253,8 +255,8 @@ struct Used {
 }
 #[derive(Default)]
 struct Strip {
-    session: Option<SessionStrip>,
-    arrangement: Option<ArrangementStrip>,
+    grid: Option<LauncherStrip>,
+    timeline: Option<TimelineStrip>,
     key: Option<String>,
     reading: bool,
 }
@@ -270,7 +272,7 @@ struct State {
     used: Used,
     connection: ConnectionState,
     set_name: Option<String>,
-    focus: Option<LiveFocus>,
+    focus: Option<DawFocus>,
     catch_up: Option<CatchUp>,
     newer: Option<String>,
     library: Option<LibraryStatus>,
@@ -318,7 +320,7 @@ struct State {
     held: Vec<Held>,
     last_stop: Option<String>,
     asides: Vec<Rc<RefCell<Aside>>>,
-    transport: Option<LiveTransport>,
+    transport: Option<Transport>,
     activity: String,
     panel: Option<PanelRef>,
     /// The picker asking whether to keep a technique: closing it is a no.
@@ -349,7 +351,7 @@ struct State {
     tree_key: Option<String>,
     tree_reading: bool,
     tree_again: bool,
-    clip: Option<ClipView>,
+    clip: Option<NoteView>,
     clip_key: Option<String>,
     clip_reading: bool,
     clip_again: bool,
@@ -360,7 +362,7 @@ struct State {
     /// Files the producer added, which go with the next message, and whether the clipboard is being read.
     attachments: Vec<Attachment>,
     pasting: bool,
-    refreshing: Option<&'static str>,
+    refreshing: Option<BodyKind>,
     tree_refresh: Option<JoinHandle<()>>,
     wake_timer: Option<JoinHandle<()>>,
     wake_time: Option<f64>,
@@ -984,7 +986,6 @@ pub(crate) fn continue_hint(now: Option<ConversationNow>) -> Option<String> {
 const CHANGE_FLASH_MS: f64 = 4000.;
 /// Steps the conversation doesn't show: what Kumi keeps on its own, and finding a tool that wasn't sent up front.
 const QUIET_TOOLS: &[&str] = &["remember", "forget", "save_recipe", "forget_recipe", "reaction", "find_tools"];
-const ACTION_TOOLS: &[&str] = &["play", "fire_scene", "launch_clip", "record", "jump_to_locator", "select", "show"];
 fn head(text: &str, count: usize) -> String {
     String::from_utf16_lossy(&text.encode_utf16().take(count).collect::<Vec<_>>())
 }

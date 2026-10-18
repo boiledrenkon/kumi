@@ -9,6 +9,7 @@ use crate::{
 };
 use base64::Engine;
 use kumi_common::time::since;
+use kumi_runtime::core::place::Place;
 use kumi_runtime::kernel::failure::reset_words;
 use kumi_runtime::{
     core::{contracts::Picked, errors::FailureKind},
@@ -372,7 +373,7 @@ impl TuiApp {
             let title = if parts.len() > 30 { format!("{}…", string::trim_end(&parts[..29].concat())) } else { title };
             let set = match row.set.as_deref() {
                 Some(name) => self.clean(name, 20),
-                None if row.place == "unsaved" => "A Set not saved yet".into(),
+                None if matches!(Place::parse(&row.place), Some(Place::Unsaved(_))) => "A Set not saved yet".into(),
                 None if row.place == kumi_runtime::IMPORTED => "Imported".into(),
                 None => "A saved Set".into(),
             };
@@ -1923,7 +1924,7 @@ impl TuiApp {
             state.set_name.as_ref(),
             focus.and_then(|f| f.track.as_ref()).map(|t| &t.name),
             focus.and_then(|f| f.device.as_ref()),
-            focus.and_then(|f| f.clip.as_ref()),
+            focus.and_then(|f| f.item.as_ref()).and_then(|item| item.name.as_ref()),
             state.pinned.as_ref().map(|p| &p.pin.name),
         ]
         .into_iter()

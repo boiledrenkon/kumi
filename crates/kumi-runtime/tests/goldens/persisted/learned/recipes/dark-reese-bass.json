@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "name": "Dark Reese bass",
+  "about": "A detuned Reese with a slow filter",
+  "params": [
+    {
+      "name": "track",
+      "about": "The bass track"
+    },
+    {
+      "name": "cutoff",
+      "about": "Where the filter sits"
+    }
+  ],
+  "steps": [
+    {
+      "tool": "load_device",
+      "trackRef": "$track",
+      "name": "Wavetable"
+    },
+    {
+      "tool": "set_parameter",
+      "trackRef": "$track",
+      "device": "Wavetable",
+      "name": "Filter Freq",
+      "value": "$cutoff"
+    }
+  ],
+  "created": 1759913600000,
+  "used": 3,
+  "lastUsed": 1760000000000
+}

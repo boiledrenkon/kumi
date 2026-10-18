@@ -5,6 +5,7 @@
 //! its own (Kumi judging that a request needs the loop); a judged run that only measured doesn't start one.
 
 use super::contracts::JsonObject;
+use super::daw::DawProfile;
 use crate::listening::round::{Round, RoundKind};
 use kumi_common::{js::number::to_string, time::now_ms};
 use regex::Regex;
@@ -323,7 +324,13 @@ fn wrap_up(why: &str) -> String {
 
 /// A loop's request as the first turn of an explicit /loop: what the producer asked, and how to work in rounds.
 pub fn loop_setup(request: &str) -> String {
-    format!("[Kumi loop] {request}\n\nWork in rounds. Start a judged run: judge with the goal that fits (loudness and a ceiling for a master, a reference when there's one, focus on the element that must cut through), hearing the mix or the track the request is about. Then make one change toward the next target with Live's devices and judge it with change. Kumi decides when the loop stops: don't end the run with done until it asks.")
+    loop_setup_for(&DawProfile::ABLETON, request)
+}
+
+/// `loop_setup`, in the DAW's words.
+pub fn loop_setup_for(profile: &DawProfile, request: &str) -> String {
+    let app = profile.words.app;
+    format!("[Kumi loop] {request}\n\nWork in rounds. Start a judged run: judge with the goal that fits (loudness and a ceiling for a master, a reference when there's one, focus on the element that must cut through), hearing the mix or the track the request is about. Then make one change toward the next target with {app}'s devices and judge it with change. Kumi decides when the loop stops: don't end the run with done until it asks.")
 }
 
 /// A judged round as the session keeps it with a run's status (for tests and the app).

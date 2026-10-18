@@ -11,6 +11,7 @@ use super::{
     measure::{fine_hz, percentile, Heard, Measures, FINE_BINS, THIRDS},
     sound,
 };
+use crate::core::daw::{with_article, DawProfile};
 use serde::{Deserialize, Serialize};
 
 /// The regions tonal balance is judged in: third-octave bands, first to last.
@@ -567,6 +568,18 @@ pub struct Checklist {
 }
 
 impl Checklist {
+    /// The fixes it names, in the DAW's words. Live's are what they were.
+    pub fn in_words(&mut self, profile: &DawProfile) {
+        for item in &mut self.items {
+            if let Some(fix) = item.fix.take() {
+                item.fix = Some(detect::fix_in_words(&fix, profile).replace(
+                    "an EQ Eight toward the reference's shape",
+                    &format!("{} toward the reference's shape", with_article(profile.vocab.eq)),
+                ));
+            }
+        }
+    }
+
     /// The goal's targets and reference, the problems found in the first listen (and in the focus element against
     /// the mix), and the guards.
     pub fn new(goal: &Goal, heard: &Heard, problems: &[Problem]) -> Self {
@@ -1193,77 +1206,8 @@ impl Checklist {
     }
 }
 
-/// One of Main's devices as masking needs it: its name and class, whether it's on, and (a Utility's) its parameters
-/// by name and the text Live shows.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MainDevice {
-    pub name: String,
-    pub class: String,
-    pub on: bool,
-    pub parameters: Vec<(String, String)>,
-}
-
-/// Main's chain as masking reads it: the devices that change the mix in a way the focus element (heard before Main)
-/// doesn't share, and the gain of the Utilities that only turn the level (the focus is heard that much louder too).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct MainState {
-    pub unfair: Vec<String>,
-    pub gain: f64,
-}
-
-/// Main's chain, read: devices that are off, Spectrum and Tuner change nothing; a Utility that only turns the level is
-/// a gain the focus is heard with too; anything else makes masking unreadable there.
-pub fn main_chain(devices: &[MainDevice]) -> MainState {
-    let mut state = MainState::default();
-    for device in devices.iter().filter(|device| device.on) {
-        if matches!(device.class.as_str(), "SpectrumAnalyzer" | "Tuner") || device.name.starts_with("Kumi Ears") {
-            continue;
-        }
-        match utility_gain(device) {
-            Some(gain) => state.gain += gain,
-            None => state.unfair.push(device.name.clone()),
-        }
-    }
-    state.gain = round1(state.gain);
-    state
-}
-
-/// A Utility's gain (dB) when that's all it changes, read by name from what Live shows. Every parameter has to be one
-/// Kumi knows, at its neutral setting: both channels as they are (no invert, mono or mute, Channel Mode Stereo),
-/// Balance and Mid/Side Balance at the centre. Live 12.4 calls the gain Output; before, Gain beside a Stereo Width (at
-/// 100 %). None for anything else: a parameter Kumi doesn't know, text it can't read, or no gain at all.
-pub fn utility_gain(device: &MainDevice) -> Option<f64> {
-    if !matches!(device.class.as_str(), "StereoGain" | "Utility") {
-        return None;
-    }
-    let mut gain = None;
-    for (name, shown) in &device.parameters {
-        let shown = shown.trim();
-        let number = || {
-            let text: String = shown.chars().filter(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
-            text.parse::<f64>().ok()
-        };
-        let neutral = match name.as_str() {
-            "Output" | "Gain" => {
-                gain = Some(number().filter(|_| !shown.starts_with("-inf"))?);
-                true
-            }
-            "Device On" => shown == "On",
-            // The bass's frequency matters only with Bass Mono on, a DC filter only below what's heard.
-            "Bass Freq" | "DC Filter" => true,
-            "Left Inv" | "Right Inv" | "Mono" | "Bass Mono" | "Mute" => shown == "Off",
-            "Channel Mode" => shown == "Stereo",
-            "Balance" => shown == "C",
-            "Mid/Side Balance" => shown == "0",
-            "Stereo Width" => shown.ends_with('%') && number().is_some_and(|width| (width - 100.).abs() < 0.5),
-            _ => false,
-        };
-        if !neutral {
-            return None;
-        }
-    }
-    gain
-}
+/// Main's chain as masking reads it, Live's (it lives with Live's integration), at the path it always had.
+pub use crate::integrations::live_main_chain::{main_chain, utility_gain, MainDevice, MainState};
 
 /// Why masking can't be read fairly on a run over the mix, when it can't: without Kumi Ears' tap first on Main, the mix
 /// is heard after Main's chain but `focus` before it, so a device there (a limiter's gain, its limiting, an EQ) moves
@@ -1271,13 +1215,20 @@ pub fn utility_gain(device: &MainDevice) -> Option<f64> {
 /// `devices` are Main's (`MainState`); `missed` is why that tap wasn't heard when Kumi Ears tried (None: no Max for
 /// Live).
 pub fn masking_unfair(focus: &str, devices: &[String], missed: Option<&str>) -> Option<String> {
+    masking_unfair_in(&DawProfile::ABLETON, focus, devices, missed)
+}
+
+/// `masking_unfair`, in the DAW's words.
+pub fn masking_unfair_in(profile: &DawProfile, focus: &str, devices: &[String], missed: Option<&str>) -> Option<String> {
+    let master = profile.words.master;
     (!devices.is_empty()).then(|| {
-        let instead = match missed {
-            Some(why) => format!("Kumi couldn't hear the mix as it comes into Main's chain this time ({why})"),
-            None => "With Max for Live, Kumi hears the mix as it comes into Main's chain and reads masking there".into(),
+        let instead = match (missed, profile.caps.ears) {
+            (Some(why), _) => format!(" Kumi couldn't hear the mix as it comes into {master}'s chain this time ({why})"),
+            (None, true) => format!(" With Max for Live, Kumi hears the mix as it comes into {master}'s chain and reads masking there"),
+            (None, false) => String::new(),
         };
         format!(
-            "Masking can't be read through Main's chain ({}): it's left off the checklist. To work on {focus} cutting through, judge it with Main's devices switched off, then the master's loudness and peaks on their own. {instead}",
+            "Masking can't be read through {master}'s chain ({}): it's left off the checklist. To work on {focus} cutting through, judge it with {master}'s devices switched off, then the master's loudness and peaks on their own.{instead}",
             devices.join(", ")
         )
     })
@@ -1548,7 +1499,7 @@ fn round2(value: f64) -> f64 {
     (value * 100.).round() / 100.
 }
 
-fn round1(value: f64) -> f64 {
+pub(crate) fn round1(value: f64) -> f64 {
     (value * 10.).round() / 10.
 }
 
@@ -1588,5 +1539,41 @@ pub fn plan_cut(heard: &Heard, low: f64, high: f64, steady: bool, wanted: f64, q
     match best {
         Some((_, band, predicted)) => (band, predicted),
         None => deepest.unwrap_or((Band { shape: Shape::Bell, hz: center, db: 0., q }, region_excess(heard, low, high, steady))),
+    }
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::*;
+
+    #[test]
+    fn the_fixes_name_the_dawss_devices_and_lives_stay_as_they_were() {
+        let fixes = [
+            "an EQ Eight toward the reference's shape (tune with how: fit)",
+            "mono below about 120 Hz (Utility's Bass Mono) (tune with how: fit calculates the cut)",
+            "a high pass at about 25–30 Hz",
+        ];
+        let checklist = || Checklist {
+            items: fixes
+                .iter()
+                .map(|fix| Item {
+                    fix: Some((*fix).into()),
+                    ..item("x", "X", Role::Guard, "dB", Quantity::Integrated, Target::AtMost { value: 0. }, 1.)
+                })
+                .collect(),
+        };
+        let mut live = checklist();
+        live.in_words(&DawProfile::ABLETON);
+        assert_eq!(live.items.iter().map(|item| item.fix.as_deref().unwrap()).collect::<Vec<_>>(), fixes);
+        let mut other = checklist();
+        other.in_words(&DawProfile::UNKNOWN);
+        assert_eq!(
+            other.items.iter().map(|item| item.fix.as_deref().unwrap()).collect::<Vec<_>>(),
+            [
+                "an EQ toward the reference's shape (tune with how: fit)",
+                "mono below about 120 Hz (tune with how: fit calculates the cut)",
+                "a high pass at about 25–30 Hz"
+            ]
+        );
     }
 }

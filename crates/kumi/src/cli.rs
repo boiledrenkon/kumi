@@ -2,7 +2,7 @@
 mod native;
 pub use native::{help, main_with, run, AbletonFactory, CliIo};
 
-/// Run the terminal application with the production Ableton integration.
+/// Run the terminal application with each DAW's production integration.
 pub fn main() -> i32 {
-    main_with(std::rc::Rc::new(kumi_runtime::integrations::ableton::create_ableton_integration))
+    main_with(crate::daw::DawFactory::native())
 }

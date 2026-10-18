@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "notes": [
+    {
+      "id": "p1",
+      "text": "Likes short, dark reverbs on drums",
+      "at": 1760000000000,
+      "pinned": true
+    },
+    {
+      "id": "p2",
+      "text": "Works in A minor mostly",
+      "at": 1760000001000
+    }
+  ]
+}

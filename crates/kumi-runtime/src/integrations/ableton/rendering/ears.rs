@@ -65,7 +65,7 @@ impl From<RuntimeError> for TapError {
         Self { error, silent: false }
     }
 }
-impl Rendering {
+impl LiveRenderer {
     pub(super) async fn ears_ready(self: &Rc<Self>, signal: Signal) -> Result<Option<Rc<dyn EarsLink>>, RuntimeError> {
         if self.ears_disabled || std::env::var("KUMI_EARS").ok().as_deref() == Some("0") || self.ears_refused.get() {
             return Ok(None);
@@ -472,10 +472,10 @@ mod tests {
             std::fs::write(&path, b"take").unwrap();
             path
         });
-        super::super::judge::prune_unstored(folder.path(), &[span.clone(), excerpt.clone()]).await;
+        crate::listening::engine::prune_unstored(folder.path(), &[span.clone(), excerpt.clone()]).await;
         assert!(span.exists() && excerpt.exists() && !dropped.exists());
         // A new run, or none, stores none of the old run's takes.
-        super::super::judge::prune_unstored(folder.path(), &[]).await;
+        crate::listening::engine::prune_unstored(folder.path(), &[]).await;
         assert!(!span.exists() && !excerpt.exists());
     }
     #[test]

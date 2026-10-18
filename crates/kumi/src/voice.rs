@@ -125,6 +125,7 @@ impl VoiceControl {
             signal: Some(io.signal.clone()),
             on_fetch: Some(io.on_fetch.clone()),
             on_progress: Some(io.on_progress.clone()),
+            profile: None,
         }
     }
     fn prepare(&self, io: &VoiceIo, language: String) {

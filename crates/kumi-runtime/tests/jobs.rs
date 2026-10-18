@@ -127,6 +127,7 @@ impl Integration for Plain {
             set: None,
             tracks: None,
             saved_at: None,
+            identity: None,
         })
     }
     async fn close(&self) -> Result<(), RuntimeError> {

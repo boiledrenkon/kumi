@@ -339,7 +339,7 @@ async fn walk(
                 continue;
             }
             // Formats Live accepts as samples, intentionally narrower than the general audio decoder.
-            let list = if kinds.sounds && crate::integrations::ableton::samples::SAMPLE_EXTENSIONS.contains(&ext.as_str()) {
+            let list = if kinds.sounds && crate::integrations::shared::samples::SAMPLE_EXTENSIONS.contains(&ext.as_str()) {
                 &mut found.sounds
             } else if kinds.presets && PRESET_EXTENSIONS.contains(&ext.as_str()) {
                 &mut found.presets

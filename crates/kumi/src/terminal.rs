@@ -12,7 +12,6 @@ use crate::{
         width::{cell_width, graphemes},
     },
     update::UpdateControl,
-    willington::WillingtonControl,
 };
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::{
@@ -52,7 +51,7 @@ pub struct TerminalOptions {
     pub history: Option<Rc<RefCell<InputHistory>>>,
     pub updates: Option<UpdateControl>,
     /// /willington, where Kumi's bridge can carry Willington.
-    pub willington: Option<WillingtonControl>,
+    pub willington: Option<crate::daw::Toggle>,
     /// What's new since the producer last opened Kumi, said once as it starts.
     pub whats_new: Option<crate::whats_new::News>,
     /// Fixed phrases ("tempo 124", "mute drums") change Live at once, with no model call (`instantPhrases`).
@@ -265,6 +264,8 @@ struct State {
     shared: Option<(u64, std::path::PathBuf)>,
     started: bool,
     closing: bool,
+    /// Kumi said goodbye: nothing more is said after it (a command still under way when /quit came).
+    closed: bool,
     cancelling: bool,
     newer: Option<String>,
     taste: Vec<KeptLine>,
@@ -298,6 +299,8 @@ struct Inner {
     parser: RefCell<Option<InputParser>>,
     keys: RefCell<Option<Rc<KeyInput>>>,
     done: tokio::sync::watch::Sender<Option<i32>>,
+    /// Commands still saying something (a /status working out its conversation): the goodbye waits for them.
+    saying: tokio::sync::watch::Sender<usize>,
 }
 #[derive(Clone)]
 pub struct PlainTerminal(Rc<Inner>);
@@ -309,6 +312,7 @@ pub fn create_terminal(options: TerminalOptions) -> PlainTerminal {
             shared: None,
             started: false,
             closing: false,
+            closed: false,
             cancelling: false,
             newer: None,
             taste: vec![],
@@ -334,6 +338,7 @@ pub fn create_terminal(options: TerminalOptions) -> PlainTerminal {
         parser: RefCell::new(None),
         keys: RefCell::new(None),
         done: tokio::sync::watch::channel(None).0,
+        saying: tokio::sync::watch::channel(0).0,
     }))
 }
 impl PlainTerminal {
@@ -372,7 +377,7 @@ impl PlainTerminal {
     }
     fn notice(&self, message: &str) {
         let mut state = self.0.state.borrow_mut();
-        if state.output_failed {
+        if state.output_failed || state.closed {
             return;
         }
         let text = head(&sanitize_text(message, &self.0.options.secrets).replace('\n', " "), 2048);
@@ -416,6 +421,9 @@ impl PlainTerminal {
             .await
             .unwrap_or_else(|_| Err(RuntimeError::plain("Shutdown deadline exceeded")));
             let hint = this.0.options.controller.conversation_now().await;
+            // What a command under way still has to say comes before the goodbye (a little while at most).
+            let mut saying = this.0.saying.subscribe();
+            let _ = tokio::time::timeout(Duration::from_millis(2000), saying.wait_for(|count| *count == 0)).await;
             if result.is_err() {
                 code = 1;
             }
@@ -443,6 +451,7 @@ impl PlainTerminal {
                         p.notice(this.0.options.output.as_ref(), &text, true);
                     }
                 }
+                state.closed = true;
             }
             if let Some(parser) = this.0.parser.borrow_mut().take() {
                 parser.dispose();
@@ -659,6 +668,15 @@ impl PlainTerminal {
                 status.observation.as_deref().unwrap_or("No current Live observation"),
                 library.map(|s| format!("; {s}")).unwrap_or_default()
             ));
+            // Its second line comes before Kumi's goodbye, should /quit come while it works out the conversation.
+            struct Saying(PlainTerminal);
+            impl Drop for Saying {
+                fn drop(&mut self) {
+                    self.0 .0.saying.send_modify(|count| *count -= 1);
+                }
+            }
+            self.0.saying.send_modify(|count| *count += 1);
+            let _saying = Saying(self.clone());
             if let Some(now) = controller.conversation_now().await {
                 let secrets = self.0.options.secrets.clone();
                 self.notice(&format!(
@@ -977,7 +995,9 @@ impl Terminal for PlainTerminal {
             self.news(news, crate::whats_new::more_line(news));
         }
         if self.0.options.willington.as_ref().is_some_and(|w| (w.on)() == Some(false)) {
-            self.notice(&format!("[willington] {}", crate::willington::OFF_AT_START));
+            if let Some(words) = crate::daw::current().toggle_words() {
+                self.notice(&format!("[{}] {}", words.tag, words.off_at_start));
+            }
         }
         let weak = Rc::downgrade(&self.0);
         active.resume(Rc::new(move |bytes| {

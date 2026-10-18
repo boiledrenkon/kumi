@@ -71,42 +71,44 @@ impl TuiApp {
         let rows = self.tree_shown();
         let clip = if rows.is_none() { self.clip_shown() } else { None };
         let strip = if rows.is_none() && clip.is_none() { self.strip_kind() } else { None };
-        let (session, arrangement) = {
+        let (grid, timeline) = {
             let state = self.0.state.borrow();
             (
-                if strip == Some("session") {
-                    state.strip.session.clone().filter(|s| state.focus.as_ref().and_then(|f| f.track_ref.as_ref()) == Some(&s.track_ref))
+                if strip == Some(BodyKind::Grid) {
+                    state.strip.grid.clone().filter(|s| state.focus.as_ref().and_then(|f| f.track_ref.as_ref()) == Some(&s.track_ref))
                 } else {
                     None
                 },
-                if strip == Some("arrangement") { state.strip.arrangement.clone() } else { None },
+                if strip == Some(BodyKind::Timeline) { state.strip.timeline.clone() } else { None },
             )
         };
         self.keep_tree_fresh(if rows.is_some() {
-            Some("tree")
+            Some(BodyKind::Tree)
         } else if clip.is_some() {
-            Some("clip")
-        } else if session.is_some() {
-            Some("session")
-        } else if arrangement.is_some() {
-            Some("arrangement")
+            Some(BodyKind::Notes)
+        } else if grid.is_some() {
+            Some(BodyKind::Grid)
+        } else if timeline.is_some() {
+            Some(BodyKind::Timeline)
         } else {
             strip
         });
+        // Each body's heading is the DAW's word for it.
+        let heading = |kind| format!(" · {}", (crate::daw::view().heading)(kind));
         let mut now_at = 6;
         if let Some(rows) = rows {
-            screen.put(x + 5, area.y + 1, " · Device", &st::FAINT);
+            screen.put(x + 5, area.y + 1, &heading(BodyKind::Tree), &st::FAINT);
             now_at =
                 4 + self.draw_tree(screen, x, area.y + 2, width, &rows, (area.height - Self::bottom_height(area.height) - 10).clamp(2, 12));
         } else if let Some(clip) = clip {
-            screen.put(x + 5, area.y + 1, " · Clip", &st::FAINT);
-            now_at = 4 + self.draw_clip(screen, x, area.y + 2, width, &clip);
-        } else if let Some(session) = session {
-            screen.put(x + 5, area.y + 1, " · Session", &st::FAINT);
-            now_at = 4 + self.draw_session(screen, x, area.y + 2, width, &session);
-        } else if let Some(arrangement) = arrangement {
-            screen.put(x + 5, area.y + 1, " · Arrangement", &st::FAINT);
-            now_at = 4 + self.draw_arrangement(screen, x, area.y + 2, width, &arrangement);
+            screen.put(x + 5, area.y + 1, &heading(BodyKind::Notes), &st::FAINT);
+            now_at = 4 + self.draw_notes(screen, x, area.y + 2, width, &clip);
+        } else if let Some(grid) = grid {
+            screen.put(x + 5, area.y + 1, &heading(BodyKind::Grid), &st::FAINT);
+            now_at = 4 + self.draw_grid(screen, x, area.y + 2, width, &grid);
+        } else if let Some(timeline) = timeline {
+            screen.put(x + 5, area.y + 1, &heading(BodyKind::Timeline), &st::FAINT);
+            now_at = 4 + self.draw_timeline(screen, x, area.y + 2, width, &timeline);
         } else if !self.draw_focus_path(screen, x, area.y + 2, width, true) {
             for (index, (text, style)) in self.focus_lines().iter().enumerate() {
                 screen.put(x, area.y + 2 + index as i32, &truncate(text, width), style);
@@ -165,7 +167,7 @@ impl TuiApp {
         screen.put(x + 3, y, &truncate(&track.name, (width - 3).max(1)), &st::TEXT);
         track
     }
-    fn draw_clip(&self, screen: &mut Screen, x: i32, y: i32, width: i32, clip: &ClipView) -> i32 {
+    fn draw_notes(&self, screen: &mut Screen, x: i32, y: i32, width: i32, clip: &NoteView) -> i32 {
         let track = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.clone()).unwrap();
         let kind = track.kind.map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_string());
         let mark = icon(track_kind(kind.as_deref()), self.0.icons, Some(chip_color(track.color.as_deref())));
@@ -210,7 +212,7 @@ impl TuiApp {
         );
         2 + picture_rows
     }
-    fn draw_session(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &SessionStrip) -> i32 {
+    fn draw_grid(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &LauncherStrip) -> i32 {
         self.track_header(screen, x, y, width);
         for (index, slot) in strip.slots.iter().enumerate() {
             let row = y + 1 + index as i32;
@@ -252,7 +254,7 @@ impl TuiApp {
         }
         1 + strip.slots.len() as i32
     }
-    fn draw_arrangement(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &ArrangementStrip) -> i32 {
+    fn draw_timeline(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &TimelineStrip) -> i32 {
         self.track_header(screen, x, y, width);
         let cells = width.max(8);
         let span = strip.locators.iter().map(|l| l.position + 4.).fold(strip.length.max(strip.position + 4.), f64::max);

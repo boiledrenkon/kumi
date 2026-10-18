@@ -326,7 +326,9 @@ impl TuiApp {
             add(line, st::FAINT);
         }
         if state.willington_off {
-            add(crate::willington::OFF_AT_START.into(), st::FAINT);
+            if let Some(words) = crate::daw::current().toggle_words() {
+                add(words.off_at_start.into(), st::FAINT);
+            }
         }
         if let Some(newer) = &state.newer {
             add(String::new(), st::TEXT);
@@ -453,15 +455,14 @@ impl TuiApp {
             if let Some(action) = action.filter(|a| flash.is_none() || a.at > state.last_change.as_ref().unwrap().1) {
                 if action.memory
                     || running.is_none()
-                    || running.is_some_and(|s| {
-                        matches!(s.tool.as_deref(), Some("make_changes" | "arrange"))
-                            || ACTION_TOOLS.contains(&s.tool.as_deref().unwrap_or(""))
-                    })
+                    || running.is_some_and(|s| (crate::daw::presentation().acts)(s.tool.as_deref().unwrap_or("")))
                 {
                     return NowLine { dot, label, detail: format!("{} {}", action.glyph, action.title), style: st::BRIGHT, activity: None };
                 }
             }
-            if let Some(flash) = flash.filter(|_| running.is_none() || running.is_some_and(|s| s.tool.as_deref() == Some("make_changes"))) {
+            if let Some(flash) = flash.filter(|_| {
+                running.is_none() || running.is_some_and(|s| (crate::daw::presentation().plan)(s.tool.as_deref().unwrap_or("")))
+            }) {
                 return NowLine {
                     dot,
                     label,

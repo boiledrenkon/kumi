@@ -1,4 +1,5 @@
 //! Capabilities the producer needed that Kumi or Live does not offer, logged locally for developers.
+use super::daw::{DawId, DawProfile};
 use super::{
     contracts::{with_final, JsonObject, KernelTool, ToolResult},
     errors::RuntimeError,
@@ -22,10 +23,18 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 pub const GAP_TOOL: &str = "note_gap";
-pub const GAP_GUIDANCE:&str="When a request needs something Kumi's tools or Live's scripting don't offer, take the way round first (another tool, a plan of several, a recording, a device you make) and do it, cleanup included; then note the gap with note_gap beside your answer (final: true once nothing is left to do), and say in a sentence what you did instead.";
+crate::daw_text!(
+    pub GAP_GUIDANCE, gap_guidance:
+    "When a request needs something Kumi's tools or ", app, "'s scripting don't offer, take the way round first (another tool, a plan of several, a recording, a device you make) and do it, cleanup included; then note the gap with note_gap beside your answer (final: true once nothing is left to do), and say in a sentence what you did instead."
+);
 const MAX_BYTES: u64 = 256 * 1024;
 const KEEP_LINES: usize = 500;
-const DESCRIPTION:&str=concat!("When the producer asks for something you can't do because Kumi's tools or Live's API lack it (a device setting scripts can't reach, an operation no tool offers), note it here for Kumi's developers, then tell the producer and offer the way round. ","Not for things you chose not to do, or that failed for another reason. The producer doesn't see this, and it isn't a memory.");
+crate::daw_text!(
+    #[allow(dead_code)]
+    DESCRIPTION, description:
+    "When the producer asks for something you can't do because Kumi's tools or ", app, "'s API lack it (a device setting scripts can't reach, an operation no tool offers), note it here for Kumi's developers, then tell the producer and offer the way round. ",
+    "Not for things you chose not to do, or that failed for another reason. The producer doesn't see this, and it isn't a memory."
+);
 fn clean(value: Option<&Value>) -> String {
     let text: String = value
         .and_then(Value::as_str)
@@ -37,11 +46,18 @@ fn clean(value: Option<&Value>) -> String {
 }
 /// The gap tool, logging to Kumi's database when there is one, otherwise to `file`.
 pub fn gap_tools(file: impl Into<PathBuf>, store: Option<StoreClient>) -> Vec<Rc<dyn KernelTool>> {
-    vec![Rc::new(GapTool { file: file.into(), store })]
+    gap_tools_for(DawProfile::ABLETON, file, store)
+}
+
+/// `gap_tools`, saying the DAW's words.
+pub fn gap_tools_for(profile: DawProfile, file: impl Into<PathBuf>, store: Option<StoreClient>) -> Vec<Rc<dyn KernelTool>> {
+    vec![Rc::new(GapTool { file: file.into(), store, description: description(&profile), profile })]
 }
 struct GapTool {
     file: PathBuf,
     store: Option<StoreClient>,
+    description: String,
+    profile: DawProfile,
 }
 #[async_trait(?Send)]
 impl KernelTool for GapTool {
@@ -49,11 +65,11 @@ impl KernelTool for GapTool {
         GAP_TOOL
     }
     fn description(&self) -> &str {
-        DESCRIPTION
+        &self.description
     }
     fn input_schema(&self) -> JsonObject {
         with_final(json!({"type":"object","additionalProperties":false,"required":["missing"],"properties":{
-        "missing":{"type":"string","minLength":1,"maxLength":300,"description":"What's missing, as a capability (\"setting Operator's voice count\")"},
+        "missing":{"type":"string","minLength":1,"maxLength":300,"description":format!("What's missing, as a capability (\"{}\")", self.profile.vocab.missing_example)},
         "asked":{"type":"string","maxLength":300,"description":"What the producer asked for that needed it"},
         "workaround":{"type":"string","maxLength":300,"description":"What you did or suggested instead"}
     }}).as_object().unwrap().clone())
@@ -64,6 +80,10 @@ impl KernelTool for GapTool {
             return Ok(ToolResult::error("Say what's missing."));
         }
         let mut entry = json!({"at":iso_string(now_ms()),"kumi":KUMI_VERSION,"missing":missing});
+        // The DAW it was missing in, when it isn't Live (never written for Live; kumi.db's gaps keep no DAW yet).
+        if let Some(daw) = self.profile.id.filter(|daw| *daw != DawId::Ableton) {
+            entry["daw"] = json!(daw);
+        }
         for key in ["asked", "workaround"] {
             let text = clean(input.get(key));
             if !text.is_empty() {

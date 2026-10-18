@@ -3,7 +3,7 @@ use super::*;
 use crate::core::{
     evolve::{Evolution, NewSlot, TrialHow, EVOLVE},
     goal_mode::command_word,
-    loop_run::{loop_setup, wants_loop, LoopRun, LOOP_BUDGET, LOOP_HINT},
+    loop_run::{loop_setup_for, wants_loop, LoopRun, LOOP_BUDGET, LOOP_HINT},
     match_run::{starts_match, MatchBudget, MatchDecision, MatchRun, MatchState, MatchStop, KEEP_GOING, MATCH_BUDGET},
     playbook::{lesson_from, lesson_line, playbook_brief, PlaybookStore, Reaction},
     techniques::{waiting_note, NEGATIVE, POSITIVE},
@@ -221,7 +221,7 @@ impl Session {
         let run = if !self.0.options.matching {
             None
         } else if matched {
-            Some(Rc::new(RefCell::new(MatchRun::new(&text, budget))))
+            Some(Rc::new(RefCell::new(MatchRun::new(&text, budget).in_daw(self.0.options.profile))))
         } else if carried {
             let previous = self.0.state.borrow().last_run.clone().unwrap();
             {
@@ -254,7 +254,7 @@ impl Session {
             taste.turn_started(explicit.as_deref().unwrap_or(&text), run.is_none());
         }
         let text = match &explicit {
-            Some(request) => loop_setup(request),
+            Some(request) => loop_setup_for(&self.0.options.profile, request),
             None => text,
         };
         let brief = if run.is_some() && !carried {
@@ -474,7 +474,7 @@ impl Session {
             let mut notes = rig
                 .close()
                 .await
-                .unwrap_or_else(|_| vec!["Kumi couldn't remove its render tracks; delete the “Kumi · render” tracks by hand.".into()]);
+                .unwrap_or_else(|_| vec![self.0.options.profile.vocab.render_leftovers.into()]);
 
             let (final_knobs, final_values) = kept.as_ref().map(|(k, v)| (k.as_slice(), v.as_slice())).unwrap_or((&knobs, &start));
 
@@ -519,7 +519,7 @@ impl Session {
                 })
                 .collect();
 
-            Ok(Some(format!("[Kumi] {heard}: {}% → {}% at full length, kept on the track (and a Limiter ends its chain for safety). The knobs it moved: {}{}. Use these values if you rebuild it elsewhere.{notes}", to_string(round(from)), to_string(round(to.unwrap())), changed.iter().take(30).cloned().collect::<Vec<_>>().join("; "), if changed.len()>30 {
+            Ok(Some(format!("[Kumi] {heard}: {}% → {}% at full length, kept on the track (and {} ends its chain for safety). The knobs it moved: {}{}. Use these values if you rebuild it elsewhere.{notes}", to_string(round(from)), to_string(round(to.unwrap())), self.0.options.profile.vocab.safety_limiter, changed.iter().take(30).cloned().collect::<Vec<_>>().join("; "), if changed.len()>30 {
          format!("; and {} more",changed.len()-30)
         } else {
          String::new()

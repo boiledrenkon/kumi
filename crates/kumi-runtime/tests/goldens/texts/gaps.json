@@ -1,0 +1,6 @@
+{
+  "GAP_GUIDANCE": "When a request needs something Kumi's tools or Live's scripting don't offer, take the way round first (another tool, a plan of several, a recording, a device you make) and do it, cleanup included; then note the gap with note_gap beside your answer (final: true once nothing is left to do), and say in a sentence what you did instead.",
+  "a secret": "[error] That holds something that reads as a secret, so it wasn't logged.",
+  "noted": "[quiet] {\"noted\":\"setting Operator's voice count\"}",
+  "nothing missing": "[error] Say what's missing."
+}

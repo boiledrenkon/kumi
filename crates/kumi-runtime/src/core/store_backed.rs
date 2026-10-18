@@ -2,6 +2,7 @@
 //! A row a full list sets aside is archived, not dropped; a forgotten one is deleted, and its id kept so
 //! no import brings it back.
 
+use super::place::Places;
 use super::{
     contracts::{Memory, MemoryNote, MemoryScope, MemoryStore, NoteChange, Remembering},
     errors::RuntimeError,
@@ -18,31 +19,33 @@ use kumi_store::{lessons, notes, techniques, Scope, StoreError};
 fn error(why: StoreError) -> RuntimeError {
     RuntimeError::plain(why.to_string())
 }
-/// A saved Set's project id: the 32 lowercase hex digits its folder is named with.
-fn project_id(project: &str) -> bool {
-    project.len() == 32 && project.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-fn scope_of(scope: MemoryScope, project: Option<&str>) -> Result<Scope, RuntimeError> {
+fn scope_of(places: &Places, scope: MemoryScope, project: Option<&str>) -> Result<Scope, RuntimeError> {
     match scope {
         MemoryScope::Producer => Ok(Scope::Global),
-        MemoryScope::Set => {
-            project.filter(|p| project_id(p)).map(|p| Scope::Project(p.into())).ok_or_else(|| RuntimeError::plain("invalid project id"))
-        }
+        MemoryScope::Set => project
+            .filter(|p| places.is_project(p))
+            .map(|p| Scope::Project(p.into()))
+            .ok_or_else(|| RuntimeError::plain("invalid project id")),
     }
 }
 
 pub struct SqliteMemoryStore {
     client: StoreClient,
+    places: Places,
 }
 impl SqliteMemoryStore {
     pub fn new(client: StoreClient) -> SqliteMemoryStore {
-        SqliteMemoryStore { client }
+        Self::with_places(client, Places::LIVE)
+    }
+    /// `new`, keeping notes about these DAWs' saved projects.
+    pub fn with_places(client: StoreClient, places: Places) -> SqliteMemoryStore {
+        SqliteMemoryStore { client, places }
     }
 }
 #[async_trait(?Send)]
 impl MemoryStore for SqliteMemoryStore {
     async fn load(&self, project: Option<&str>) -> Result<Memory, RuntimeError> {
-        let set = project.filter(|p| project_id(p)).map(|p| Scope::Project(p.into()));
+        let set = project.filter(|p| self.places.is_project(p)).map(|p| Scope::Project(p.into()));
         let (producer, set) = self
             .client
             .read(move |c| {
@@ -67,7 +70,7 @@ impl MemoryStore for SqliteMemoryStore {
     ) -> Result<Remembering, RuntimeError> {
         // Read, decide and write in one transaction, so two Kumis keeping notes at once can't take one
         // label or make room with the same note.
-        let (kind, text, replaces) = (scope_of(scope, project)?, text.to_string(), replaces.map(str::to_string));
+        let (kind, text, replaces) = (scope_of(&self.places, scope, project)?, text.to_string(), replaces.map(str::to_string));
         self.client
             .write(move |c| {
                 let mut list: Vec<MemoryNote> = notes::in_use(c, &kind)?.into_iter().map(note_of).collect();
@@ -97,7 +100,7 @@ impl MemoryStore for SqliteMemoryStore {
         change: NoteChange,
         at: i64,
     ) -> Result<Option<MemoryNote>, RuntimeError> {
-        let (kind, label) = (scope_of(scope, project)?, id.to_string());
+        let (kind, label) = (scope_of(&self.places, scope, project)?, id.to_string());
         self.client
             .write(move |c| {
                 let Some(mut note) = notes::in_use(c, &kind)?.into_iter().find(|n| n.label == label) else { return Ok(None) };
@@ -115,7 +118,7 @@ impl MemoryStore for SqliteMemoryStore {
             .map_err(error)
     }
     async fn add(&self, scope: MemoryScope, project: Option<&str>, texts: &[String], at: i64) -> Result<(), RuntimeError> {
-        let (kind, texts) = (scope_of(scope, project)?, texts.to_vec());
+        let (kind, texts) = (scope_of(&self.places, scope, project)?, texts.to_vec());
         self.client
             .write(move |c| {
                 let mut list: Vec<MemoryNote> = notes::in_use(c, &kind)?.into_iter().map(note_of).collect();
@@ -128,14 +131,14 @@ impl MemoryStore for SqliteMemoryStore {
             .map_err(error)
     }
     async fn save(&self, scope: MemoryScope, project: Option<&str>, notes: &[MemoryNote]) -> Result<(), RuntimeError> {
-        let scope = scope_of(scope, project)?;
+        let scope = scope_of(&self.places, scope, project)?;
         let mut kept = notes.to_vec();
         fit(&mut kept);
         let rows: Vec<notes::Note> = kept.iter().map(note_row).collect();
         self.client.write(move |c| notes::keep(c, &scope, &rows, now_ms())).await.map_err(error)
     }
     async fn forget(&self, scope: MemoryScope, project: Option<&str>, id: &str) -> Result<Option<MemoryNote>, RuntimeError> {
-        let scope = scope_of(scope, project)?;
+        let scope = scope_of(&self.places, scope, project)?;
         let label = id.to_string();
         self.client
             .write(move |c| {

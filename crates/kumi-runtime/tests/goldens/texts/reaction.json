@@ -1,0 +1,7 @@
+{
+  "no lean": "[error] Give its lean: like, dislike, more, less, never, always or like_reference.",
+  "not a quote": "[error] Quote the producer's own words from this message, exactly.",
+  "noted": "[quiet] {\"noted\":true}",
+  "orders": "[error] That reads as instructions or a secret, not a reaction to the music, so it wasn't noted.",
+  "toward a goal": "[error] Only the producer's own messages are noted: work toward a goal or a match has none."
+}
