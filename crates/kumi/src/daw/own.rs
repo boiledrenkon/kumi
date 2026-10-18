@@ -15,7 +15,7 @@ use daw_bridge::{
     detect::{self, Os},
     doctor::{self, Bundled, Level},
     files,
-    install::{reaper_extension_name, reaper_target, renoise_target, RENOISE_TOOL_FOLDER},
+    install::{reaper_extension_name, reaper_target, renoise_target, TargetError, RENOISE_TOOL_FOLDER},
     lifecycle::{Lifecycle, Receipt, Target},
     paths::BridgePaths,
 };
@@ -93,13 +93,18 @@ impl Own {
 
     /// Where the bridge goes in the DAW, or why it can't go yet.
     fn target(&self, env: &Env) -> Result<Target, String> {
+        self.placed(env).map_err(|why| why.map(|why| why.to_string()).unwrap_or_else(|| format!("{} isn't installed", self.name())))
+    }
+
+    /// `target`, with why it can't go yet as detection says it; None when the DAW isn't installed.
+    fn placed(&self, env: &Env) -> Result<Target, Option<TargetError>> {
         match self.daw {
             Daw::Reaper => {
                 let installs = detected(env, detect::detect_reaper);
-                let install = installs.iter().find(|install| install.opened).or(installs.first()).ok_or("REAPER isn't installed")?;
-                reaper_target(install, Os::current()).map_err(|why| why.to_string())
+                let install = installs.iter().find(|install| install.opened).or(installs.first()).ok_or(None)?;
+                reaper_target(install, Os::current()).map_err(Some)
             }
-            Daw::Renoise => renoise_target(&detected(env, detect::detect_renoise)).map_err(|why| why.to_string()),
+            Daw::Renoise => renoise_target(&detected(env, detect::detect_renoise)).map_err(Some),
         }
     }
 
@@ -109,31 +114,37 @@ impl Own {
         serde_json::from_str::<Receipt>(&text).ok().filter(|receipt| receipt.status == "installed")
     }
 
-    /// The bridge this Kumi brings: beside Kumi in a release (`daws/<daw>/`), or this checkout's own build.
+    /// The bridge the Kumi in `app` (its app folder) brings, laid out as a release lays it out (`daws/<daw>/`).
+    fn carried_by(&self, app: &Path) -> Option<PathBuf> {
+        let path = match self.daw {
+            Daw::Reaper => app.join("daws").join("reaper").join(reaper_extension_name(Os::current())),
+            Daw::Renoise => app.join("daws").join("renoise").join(RENOISE_TOOL_FOLDER),
+        };
+        path.exists().then_some(path)
+    }
+
+    /// The bridge this Kumi brings: beside Kumi in a release, or this checkout's own build.
     fn bundled_source(&self) -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
         let beside = exe.parent()?.to_path_buf();
         let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let candidates: Vec<PathBuf> = match self.daw {
+        let built = match self.daw {
             Daw::Reaper => {
                 let name = reaper_extension_name(Os::current());
-                let built = if cfg!(windows) { name.to_string() } else { format!("lib{name}") };
-                vec![beside.join("daws").join("reaper").join(name), beside.join(built)]
+                beside.join(if cfg!(windows) { name.to_string() } else { format!("lib{name}") })
             }
-            Daw::Renoise => {
-                vec![
-                    beside.join("daws").join("renoise").join(RENOISE_TOOL_FOLDER),
-                    checkout.join("daws").join("renoise").join(RENOISE_TOOL_FOLDER),
-                ]
-            }
+            Daw::Renoise => checkout.join("daws").join("renoise").join(RENOISE_TOOL_FOLDER),
         };
-        candidates.into_iter().find(|path| path.exists())
+        self.carried_by(&beside).or_else(|| built.exists().then_some(built))
     }
 
     /// The bundled bridge's version, where it says one (Renoise's tool does; REAPER's build gets a version file with
     /// the release pipeline).
     fn bundled_version(&self) -> Option<String> {
-        let source = self.bundled_source()?;
+        self.bundled_source().and_then(|source| self.version_of(&source))
+    }
+
+    fn version_of(&self, source: &Path) -> Option<String> {
         let text = match self.daw {
             Daw::Renoise => std::fs::read_to_string(source.join("payload").join("version.lua")).ok()?,
             Daw::Reaper => std::fs::read_to_string(source.with_extension("version")).ok()?,
@@ -144,13 +155,31 @@ impl Own {
 
     /// Puts the bridge in the DAW, or brings it up to date: its version, or what stopped it, in words.
     fn install(&self, env: &Env) -> Result<String, String> {
-        let target = self.target(env)?;
         let source = self
             .bundled_source()
             .ok_or_else(|| format!("this Kumi doesn't carry {} for {}: build it, or install a release", self.bridge, self.name()))?;
-        let version = self.bundled_version().unwrap_or_else(|| "dev".into());
-        Lifecycle::new(&kumi_home(env), target).install(&source, &version).map_err(|why| why.to_string())?;
+        self.install_from(env, &source)
+    }
+
+    fn install_from(&self, env: &Env, source: &Path) -> Result<String, String> {
+        let target = self.target(env)?;
+        let version = self.version_of(source).unwrap_or_else(|| "dev".into());
+        Lifecycle::new(&kumi_home(env), target).install(source, &version).map_err(|why| why.to_string())?;
         Ok(version)
+    }
+
+    /// What to tell the producer when the Kumi in `app` (`version`) doesn't bring this DAW's bridge: it stays in the DAW,
+    /// and that Kumi neither uses nor removes it.
+    fn left_behind(&self, env: &Env, app: &Path, version: &str) -> Option<String> {
+        let receipt = self.receipt(env).filter(|_| self.carried_by(app).is_none())?;
+        Some(format!(
+            "{} stays in {} ({}): Kumi {version} doesn't know {}, so it won't use it or remove it. Delete that {} to take it out.\n",
+            self.bridge,
+            self.name(),
+            receipt.target,
+            self.name(),
+            if self.daw == Daw::Renoise { "folder" } else { "file" },
+        ))
     }
 
     /// Whether this user has used the DAW (it has made its own folder: REAPER's resource folder, Renoise's preferences)
@@ -180,16 +209,14 @@ impl DawProvider for Own {
     fn bundled_bridge_version(&self) -> Option<String> {
         self.bundled_version()
     }
-    fn installed_bridge_version(&self, bridge_config: &str) -> Option<String> {
+    fn installed_bridge_version(&self, bridge_config: &str, env: &Env) -> Option<String> {
         let _ = bridge_config;
-        let env: Env = std::env::vars().collect();
-        self.receipt(&env).and_then(|receipt| receipt.version)
+        self.receipt(env).and_then(|receipt| receipt.version)
     }
-    fn bridge_answers(&self, bridge_config: &str) -> LocalBoxFuture<'static, bool> {
+    fn bridge_answers(&self, bridge_config: &str, env: &Env) -> LocalBoxFuture<'static, bool> {
         let _ = bridge_config;
         let daw = self.daw;
-        let env: Env = std::env::vars().collect();
-        let home = kumi_home(&env);
+        let home = kumi_home(env);
         async move {
             tokio::task::spawn_blocking(move || {
                 let paths = BridgePaths::new(&home, daw);
@@ -236,12 +263,11 @@ impl DawProvider for Own {
         let connect = session.factory.own_host.as_ref().map(|host| host(self.id));
         (self.create)(OwnOptions { context, kumi_home: kumi_home(&session.env), connect })
     }
-    fn probe(&self, _bridge_config: String, _factory: &DawFactory) -> LocalBoxFuture<'static, LiveProbe> {
+    fn probe(&self, _bridge_config: String, _factory: &DawFactory, env: &Env) -> LocalBoxFuture<'static, LiveProbe> {
         let create = self.create;
-        let env: Env = std::env::vars().collect();
+        let home = kumi_home(env);
         async move {
-            let integration =
-                create(OwnOptions { context: IntegrationContext::new(Rc::new(|_, _| {})), kumi_home: kumi_home(&env), connect: None });
+            let integration = create(OwnOptions { context: IntegrationContext::new(Rc::new(|_, _| {})), kumi_home: home, connect: None });
             if let Err(error) = integration.start(abort::timeout(20_000)).await {
                 let _ = integration.close().await;
                 return LiveProbe { started: false, said: Some(error.to_string()), ..Default::default() };
@@ -355,23 +381,25 @@ impl DawProvider for Own {
         }
         .boxed_local()
     }
-    fn after_update<'a>(
-        &'a self,
-        io: &'a InstalledIo,
-        _home: &'a str,
-        _app: &'a str,
-        _back_to: Option<&'a str>,
-    ) -> LocalBoxFuture<'a, i32> {
+    fn after_update<'a>(&'a self, io: &'a InstalledIo, _home: &'a str, app: &'a str, back_to: Option<&'a str>) -> LocalBoxFuture<'a, i32> {
         async move {
-            if self.receipt(&io.env).is_some() {
-                if let Err(why) = self.install(&io.env) {
-                    io.out.write(&format!(
-                        "{} wasn't brought up to date: {why}. Run {} --daw {} bridge to try again.\n",
-                        self.bridge,
-                        *kumi_runtime::KUMI,
-                        self.id.as_str()
-                    ));
+            if self.receipt(&io.env).is_none() {
+                return 0;
+            }
+            // The bridge the new Kumi brings, from its app folder: the running Kumi may already be the old one's.
+            let Some(source) = self.carried_by(Path::new(app)) else {
+                if let Some(said) = back_to.and_then(|version| self.left_behind(&io.env, Path::new(app), version)) {
+                    io.out.write(&said);
                 }
+                return 0;
+            };
+            if let Err(why) = self.install_from(&io.env, &source) {
+                io.out.write(&format!(
+                    "{} wasn't brought up to date: {why}. Run {} --daw {} bridge to try again.\n",
+                    self.bridge,
+                    *kumi_runtime::KUMI,
+                    self.id.as_str()
+                ));
             }
             0
         }
@@ -395,7 +423,7 @@ impl DawProvider for Own {
         _legacy: bool,
     ) -> LocalBoxFuture<'a, Result<Box<dyn BridgeRollbackStep>, RuntimeError>> {
         // An earlier Kumi leaves this DAW's bridge where it is: it never touches what it doesn't know.
-        async { Ok(Box::new(KeepBridge) as Box<dyn BridgeRollbackStep>) }.boxed_local()
+        async move { Ok(Box::new(KeepBridge(self.id)) as Box<dyn BridgeRollbackStep>) }.boxed_local()
     }
     fn finish_transition<'a>(&'a self, _io: &'a InstalledIo) -> LocalBoxFuture<'a, ()> {
         async {}.boxed_local()
@@ -404,24 +432,38 @@ impl DawProvider for Own {
         &self,
         out: Rc<dyn TtyOutput>,
         env: &Env,
-        _command: BridgeCommand,
+        command: BridgeCommand,
     ) -> LocalBoxFuture<'static, Result<i32, RuntimeError>> {
-        let said = match self.install(env) {
-            Ok(version) => (
-                0,
-                format!(
-                    "{} {version} is in {}. {} loads it when it starts: restart {} if it's open.\n",
-                    self.bridge,
-                    self.name(),
-                    self.name(),
-                    self.name()
-                ),
-            ),
-            Err(why) => (1, format!("{} couldn't go in {}: {why}.\n", self.bridge, self.name())),
-        };
+        let (own, env) = (own_of(self.id), env.clone());
         async move {
-            out.write(&said.1);
-            Ok(said.0)
+            // Asked before anything is written into the DAW's folder (--yes answers beforehand). Without a place yet,
+            // the install below says why.
+            if let (false, Ok(target)) = (command.yes, own.target(&env)) {
+                let question = format!("Put {} in {} ({})?", own.bridge, own.name(), target.path().display());
+                if !crate::process::ask_yes_no(command.input.clone(), out.clone(), &question, Some("add --yes")).await {
+                    out.write(&format!(
+                        "Nothing was changed. To put it in later: {} --daw {} bridge\n",
+                        *kumi_runtime::KUMI,
+                        own.id.as_str()
+                    ));
+                    return Ok(1);
+                }
+            }
+            let (code, said) = match own.install(&env) {
+                Ok(version) => (
+                    0,
+                    format!(
+                        "{} {version} is in {}. {} loads it when it starts: restart {} if it's open.\n",
+                        own.bridge,
+                        own.name(),
+                        own.name(),
+                        own.name()
+                    ),
+                ),
+                Err(why) => (1, format!("{} couldn't go in {}: {why}.\n", own.bridge, own.name())),
+            };
+            out.write(&said);
+            Ok(code)
         }
         .boxed_local()
     }
@@ -483,7 +525,7 @@ impl DawProvider for Own {
 }
 
 /// An earlier Kumi doesn't know this DAW's bridge, so a rollback leaves it as it is.
-struct KeepBridge;
+struct KeepBridge(DawId);
 
 #[async_trait(?Send)]
 impl BridgeRollbackStep for KeepBridge {
@@ -493,8 +535,18 @@ impl BridgeRollbackStep for KeepBridge {
     async fn swap_failed(&self) -> Option<String> {
         None
     }
-    async fn after_swap(&self, _io: &InstalledIo, _home: &str, _app: &str, _version: &str, _native: bool) -> i32 {
+    async fn after_swap(&self, io: &InstalledIo, _home: &str, app: &str, version: &str, _native: bool) -> i32 {
+        if let Some(said) = own_of(self.0).left_behind(&io.env, Path::new(app), version) {
+            io.out.write(&said);
+        }
         0
+    }
+}
+
+fn own_of(id: DawId) -> &'static Own {
+    match id {
+        DawId::Reaper => &REAPER,
+        _ => &RENOISE,
     }
 }
 
@@ -506,10 +558,7 @@ struct OwnSetup {
 
 impl OwnSetup {
     fn own(&self) -> &'static Own {
-        match self.own {
-            DawId::Reaper => &REAPER,
-            _ => &RENOISE,
-        }
+        own_of(self.own)
     }
     fn app(&self) -> Option<PathBuf> {
         match self.own().daw {
@@ -567,10 +616,10 @@ impl DawSetup for OwnSetup {
         }
     }
     async fn installed(&self) -> Installed {
-        match self.own().target(&self.env) {
+        match self.own().placed(&self.env) {
             Ok(_) => Installed::Ready,
-            Err(why) if why.contains("open") => Installed::NeverOpened(String::new()),
-            Err(_) => Installed::Missing,
+            Err(Some(TargetError::NeverOpened(_))) => Installed::NeverOpened(String::new()),
+            Err(None) => Installed::Missing,
         }
     }
 }

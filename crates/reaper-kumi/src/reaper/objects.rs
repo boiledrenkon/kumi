@@ -166,7 +166,9 @@ impl Reaper<'_> {
         let f = self.api.TimeMap2_timeToBeats()?;
         let (mut measures, mut beats_in_measure, mut full_beats, mut denom) = (0, 0, 0.0, 0);
         let beat = unsafe { f(proj.0, time, &mut measures, &mut beats_in_measure, &mut full_beats, &mut denom) };
-        Some((measures, beat))
+        // REAPER counts the beats of the time signature (eighths in 6/8); everything else here counts quarter notes.
+        let denominator = if denom > 0 { denom as f64 } else { 4.0 };
+        Some((measures, beat * 4.0 / denominator))
     }
 
     /// The time range the arrange view shows.
@@ -299,6 +301,20 @@ impl Reaper<'_> {
     pub fn track_value(&self, track: Track, parm: &str) -> f64 {
         let parm = cstring(parm);
         self.api.GetMediaTrackInfo_Value().map(|f| unsafe { f(track.0, parm.as_ptr()) }).unwrap_or(0.0)
+    }
+
+    /// The folder track this track is inside, if it is inside one.
+    pub fn track_parent(&self, track: Track) -> Option<Track> {
+        let f = self.api.GetSetMediaTrackInfo()?;
+        let parent = unsafe { f(track.0, c"P_PARTRACK".as_ptr(), ptr::null_mut()) };
+        (!parent.is_null()).then_some(Track(parent.cast()))
+    }
+
+    /// A track's text attribute (`P_LANENAME:2`…), None when REAPER has none.
+    pub fn track_string(&self, track: Track, parm: &str) -> Option<String> {
+        let parm = cstring(parm);
+        let f = self.api.GetSetMediaTrackInfo_String()?;
+        big_string(|buf| unsafe { f(track.0, parm.as_ptr(), buf, false) })
     }
 
     /// How many folders deep the track sits (0 at the top level).
@@ -587,6 +603,13 @@ impl Reaper<'_> {
         self.api.GetTrackSendInfo_Value().map(|f| unsafe { f(track.0, category, index, parm.as_ptr()) }).unwrap_or(0.0)
     }
 
+    /// A send's own envelope of this kind (`<VOLENV`, `<PANENV`, `<MUTEENV`), if it has one.
+    pub fn send_envelope(&self, track: Track, index: i32, chunk: &str) -> Option<Envelope> {
+        let parm = cstring(&format!("P_ENV:{chunk}"));
+        let envelope = unsafe { self.api.GetSetTrackSendInfo()?(track.0, 0, index, parm.as_ptr(), ptr::null_mut()) };
+        (!envelope.is_null()).then_some(Envelope(envelope.cast()))
+    }
+
     /// The track on the other end: `P_DESTTRACK` of a send, `P_SRCTRACK` of a receive.
     pub fn send_peer(&self, track: Track, category: i32, index: i32) -> Option<Track> {
         let parm = if category < 0 { c"P_SRCTRACK" } else { c"P_DESTTRACK" };
@@ -605,7 +628,7 @@ impl Reaper<'_> {
         (!envelope.is_null()).then_some(Envelope(envelope))
     }
 
-    /// A track's own envelope by its chunk name (`<VOLENV2`, `<PANENV`…).
+    /// A track's envelope by its chunk name (`<VOLENV2`, `<PANENV`…) or its GUID.
     pub fn track_envelope_by_chunk_name(&self, track: Track, name: &str) -> Option<Envelope> {
         let name = cstring(name);
         let envelope = unsafe { self.api.GetTrackEnvelopeByChunkName()?(track.0, name.as_ptr()) };
@@ -632,6 +655,37 @@ impl Reaper<'_> {
             Some(f) => text(|buf, size| unsafe { f(envelope.0, buf, size) }),
             None => String::new(),
         }
+    }
+
+    /// An envelope's GUID, which stays with it through a save, an undo and the others being added or removed.
+    pub fn envelope_guid(&self, envelope: Envelope) -> Option<String> {
+        let key = cstring("GUID");
+        let f = self.api.GetSetEnvelopeInfo_String()?;
+        big_string(|buf| unsafe { f(envelope.0, key.as_ptr(), buf, false) })
+            .map(|guid| guid.trim().to_string())
+            .filter(|guid| !guid.is_empty())
+    }
+
+    /// What this REAPER is too old for: the features the bridge reads with functions it lacks, and the version that has them.
+    /// Nothing else says why a project then shows no markers, or why a project loaded over another goes unnoticed.
+    pub fn missing_features(&self) -> Vec<(&'static str, &'static str)> {
+        let mut missing = Vec::new();
+        if self.api.GetRegionOrMarker().is_none() || self.api.GetNumRegionsOrMarkers().is_none() {
+            missing.push(("markers and regions", "7.62"));
+        }
+        if self.api.Undo_GetNumEntries().is_none() {
+            missing.push(("noticing that a project was loaded over another in its tab, without REAPER's load signal", "7.79"));
+        }
+        missing
+    }
+
+    /// The track an envelope is on and, for an FX parameter's envelope, the FX (as `TrackFX_` addresses it) and the
+    /// parameter; -1 and -1 for any other.
+    pub fn envelope_owner(&self, envelope: Envelope) -> Option<(Track, i32, i32)> {
+        let f = self.api.Envelope_GetParentTrack()?;
+        let (mut fx, mut param) = (-1, -1);
+        let track = unsafe { f(envelope.0, &mut fx, &mut param) };
+        (!track.is_null()).then_some((Track(track.cast()), fx, param))
     }
 
     pub fn envelope_point_count(&self, envelope: Envelope) -> i32 {

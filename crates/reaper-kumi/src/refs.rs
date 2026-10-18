@@ -2,7 +2,7 @@
 //! has no object lookup by GUID (only for takes), so the registry keeps GUID to handle maps, checks each hit with
 //! ValidatePtr2 and the object's own GUID, and rebuilds a map when a hit goes stale or a GUID isn't found.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::reaper::{Fx, FxOwner, Item, Project, Reaper, Take, Track, CONTAINER_FX, INPUT_FX};
@@ -20,19 +20,20 @@ pub enum TrackId {
 /// Which envelope of a track.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvelopeId {
-    /// A track's own: the chunk name (`VOLENV2`).
+    /// The envelope's own GUID: what every envelope is named by.
+    Guid(String),
+    /// A track's built-in one by its chunk name (`VOLENV2`): an alias, read back as the GUID's ref.
     Chunk(String),
-    /// An FX parameter's.
+    /// An FX parameter's: an alias too.
     Param { fx: String, index: i32 },
-    /// By position in the track's envelope list, for an envelope neither of the others names.
-    Position(i32),
 }
 
 /// What is at the other end of a send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendEnd {
     Track(TrackId),
-    /// A hardware output, by its number.
+    /// A hardware output, by the output it goes to: REAPER's `I_DSTCHAN` (the first channel, plus 1024 for a mono one).
+    /// Never by its place among the track's outputs, which removing another output moves.
     Hardware(i32),
 }
 
@@ -40,8 +41,16 @@ impl SendEnd {
     pub fn text(&self) -> String {
         match self {
             SendEnd::Track(id) => id.text().to_string(),
-            SendEnd::Hardware(n) => format!("hw{n}"),
+            SendEnd::Hardware(n) if n & 1024 != 0 => format!("hw{}m", n & 1023),
+            SendEnd::Hardware(n) => format!("hw{}", n & 1023),
         }
+    }
+
+    fn parse_hardware(text: &str) -> Option<SendEnd> {
+        let digits = text.strip_prefix("hw")?;
+        let (digits, mono) = digits.strip_suffix('m').map_or((digits, 0), |digits| (digits, 1024));
+        let first = digits.parse::<i32>().ok().filter(|first| (0..1024).contains(first) && digits.bytes().all(|b| b.is_ascii_digit()))?;
+        Some(SendEnd::Hardware(first | mono))
     }
 }
 
@@ -55,13 +64,16 @@ pub enum Ref {
         fx: String,
         index: i32,
     },
-    /// A send or receive of `track`, named by the track at its other end (and which of several, from 2), or a hardware
-    /// output by its number: never by position, which a reorder moves.
+    /// A send or receive of `track`, named by the track at its other end, or a hardware output by the output it goes to:
+    /// never by position, which a reorder moves. Two or more to the same place are told apart by which of them this is
+    /// (`repeat`, from 1) among how many there are (`of`): the ref stops reading anything once that count changes,
+    /// since REAPER gives a send no identity of its own to follow.
     Send {
         track: TrackId,
         category: i32,
         other: SendEnd,
         repeat: u32,
+        of: u32,
     },
     Marker(String),
     Region(String),
@@ -122,27 +134,33 @@ impl Ref {
             ("param", [guid, index]) => Ref::Param { fx: guid_of(guid, "an FX id")?, index: number(index, "a parameter index")? },
             ("send", [track, category, other]) | ("send", [track, category, other, _]) => {
                 let category = number(category, "a send category")?;
-                let repeat = match rest.get(3) {
-                    None => 1,
-                    Some(k) => k.parse::<u32>().ok().filter(|&k| k >= 2).ok_or_else(|| format!("{k:?} isn't a repeat count: from 2"))?,
+                let (repeat, of) = match rest.get(3) {
+                    None => (1, 1),
+                    Some(text) => text
+                        .split_once("of")
+                        .and_then(|(k, n)| Some((k.parse::<u32>().ok()?, n.parse::<u32>().ok()?)))
+                        .filter(|&(k, n)| n >= 2 && (1..=n).contains(&k))
+                        .ok_or_else(|| {
+                            format!("{text:?} isn't a repeat such as 2of3: which of the sends to the same place, of how many")
+                        })?,
                 };
-                let other = match other.strip_prefix("hw").map(|n| n.parse::<i32>()) {
-                    Some(Ok(n)) if n >= 0 && category == 1 && repeat == 1 => SendEnd::Hardware(n),
+                let other = match other.strip_prefix("hw") {
+                    Some(_) if category == 1 => SendEnd::parse_hardware(other).ok_or_else(bad)?,
                     Some(_) => return Err(bad()),
                     None if matches!(category, -1 | 0) => SendEnd::Track(TrackId::parse(other)?),
                     None => return Err(bad()),
                 };
-                Ref::Send { track: TrackId::parse(track)?, category, other, repeat }
+                Ref::Send { track: TrackId::parse(track)?, category, other, repeat, of }
             }
             ("marker", [guid]) => Ref::Marker(guid_of(guid, "a marker id")?),
             ("region", [guid]) => Ref::Region(guid_of(guid, "a region id")?),
             ("env", [track, name]) => {
-                let which = match name.strip_prefix('i').and_then(|n| n.parse::<i32>().ok()) {
-                    Some(position) => EnvelopeId::Position(position),
-                    None if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
-                        EnvelopeId::Chunk(name.to_string())
-                    }
-                    None => return Err(bad()),
+                let which = if looks_like_guid(name) {
+                    EnvelopeId::Guid(name.to_string())
+                } else if !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+                    EnvelopeId::Chunk(name.to_string())
+                } else {
+                    return Err(bad());
                 };
                 Ref::Envelope { track: TrackId::parse(track)?, which }
             }
@@ -176,7 +194,7 @@ impl Ref {
             Ref::Take(guid) => take_ref(guid),
             Ref::Fx(guid) => fx_ref(guid),
             Ref::Param { fx, index } => param_ref(fx, *index),
-            Ref::Send { track, category, other, repeat } => send_ref(track, *category, other, *repeat),
+            Ref::Send { track, category, other, repeat, of } => send_ref(track, *category, other, *repeat, *of),
             Ref::Marker(guid) => marker_ref(guid),
             Ref::Region(guid) => region_ref(guid),
             Ref::Envelope { track, which } => envelope_ref(track, which),
@@ -199,10 +217,10 @@ pub fn fx_ref(guid: &str) -> String {
 pub fn param_ref(fx_guid: &str, index: i32) -> String {
     format!("{PREFIX}:param:{fx_guid}:{index}")
 }
-pub fn send_ref(track: &TrackId, category: i32, other: &SendEnd, repeat: u32) -> String {
+pub fn send_ref(track: &TrackId, category: i32, other: &SendEnd, repeat: u32, of: u32) -> String {
     let base = format!("{PREFIX}:send:{}:{category}:{}", track.text(), other.text());
-    if repeat >= 2 {
-        format!("{base}:{repeat}")
+    if of >= 2 {
+        format!("{base}:{repeat}of{of}")
     } else {
         base
     }
@@ -215,9 +233,9 @@ pub fn region_ref(guid: &str) -> String {
 }
 pub fn envelope_ref(track: &TrackId, which: &EnvelopeId) -> String {
     match which {
+        EnvelopeId::Guid(guid) => format!("{PREFIX}:env:{}:{guid}", track.text()),
         EnvelopeId::Chunk(name) => format!("{PREFIX}:env:{}:{name}", track.text()),
         EnvelopeId::Param { fx, index } => format!("{PREFIX}:env:{}:{fx}:{index}", track.text()),
-        EnvelopeId::Position(position) => format!("{PREFIX}:env:{}:i{position}", track.text()),
     }
 }
 
@@ -232,6 +250,12 @@ pub struct Registry {
     tracks: HashMap<String, Track>,
     items: HashMap<String, Item>,
     fx: HashMap<String, Fx>,
+    /// GUIDs that two tracks, items or FX of this project have: REAPER keeps a GUID through a copy made as text (a script
+    /// setting one track's chunk on another), so a ref to one can't say which it means. Found when a map is rebuilt, and
+    /// forgotten with it.
+    shared_tracks: HashSet<String>,
+    shared_items: HashSet<String>,
+    shared_fx: HashSet<String>,
     /// When the item map and the FX map were last rebuilt, and the project's state change count then.
     items_built: Option<(i32, Instant)>,
     fx_built: Option<(i32, Instant)>,
@@ -254,6 +278,11 @@ impl Registry {
         built.is_some_and(|(at, when)| at == count && when.elapsed() < MISS_MEMORY)
     }
 
+    /// Whether two objects of a kind were found with this GUID: it names neither.
+    pub fn is_shared(&self, guid: &str) -> bool {
+        self.shared_tracks.contains(guid) || self.shared_items.contains(guid) || self.shared_fx.contains(guid)
+    }
+
     /// The track for an id; the master by name, any other by GUID.
     pub fn track(&mut self, reaper: &Reaper, proj: Project, id: &TrackId) -> Option<Track> {
         let guid = match id {
@@ -261,17 +290,25 @@ impl Registry {
             TrackId::Guid(guid) => guid,
         };
         self.follow(proj);
-        if let Some(&track) = self.tracks.get(guid) {
+        // A GUID that was found on two tracks is looked for again each time: the copy may be gone.
+        if let Some(&track) = self.tracks.get(guid).filter(|_| !self.shared_tracks.contains(guid)) {
             if reaper.track_valid(proj, track) && reaper.track_guid(track) == *guid {
                 return Some(track);
             }
         }
         // A project's tracks are few: walk them all on a miss rather than trust a count that may not have moved.
         self.tracks.clear();
+        self.shared_tracks.clear();
         for index in 0..reaper.track_count(proj) {
             if let Some(track) = reaper.track_at(proj, index) {
-                self.tracks.insert(reaper.track_guid(track), track);
+                let own = reaper.track_guid(track);
+                if self.tracks.insert(own.clone(), track).is_some() {
+                    self.shared_tracks.insert(own);
+                }
             }
+        }
+        if self.shared_tracks.contains(guid) {
+            return None;
         }
         self.tracks.get(guid).copied()
     }
@@ -290,24 +327,31 @@ impl Registry {
     /// The item for a GUID.
     pub fn item(&mut self, reaper: &Reaper, proj: Project, guid: &str) -> Option<Item> {
         self.follow(proj);
-        if let Some(&item) = self.items.get(guid) {
+        if let Some(&item) = self.items.get(guid).filter(|_| !self.shared_items.contains(guid)) {
             if reaper.item_valid(proj, item) && reaper.item_guid(item) == guid {
                 return Some(item);
             }
         }
         let count = reaper.state_change_count(proj).unwrap_or(0);
-        if Self::recently_missed(self.items_built, count) {
+        if Self::recently_missed(self.items_built, count) && !self.shared_items.contains(guid) {
             return None;
         }
         self.items.clear();
+        self.shared_items.clear();
         for track in (0..reaper.track_count(proj)).filter_map(|i| reaper.track_at(proj, i)).chain(reaper.master_track(proj)) {
             for index in 0..reaper.track_item_count(track) {
                 if let Some(item) = reaper.track_item(track, index) {
-                    self.items.insert(reaper.item_guid(item), item);
+                    let own = reaper.item_guid(item);
+                    if self.items.insert(own.clone(), item).is_some() {
+                        self.shared_items.insert(own);
+                    }
                 }
             }
         }
         self.items_built = Some((count, Instant::now()));
+        if self.shared_items.contains(guid) {
+            return None;
+        }
         self.items.get(guid).copied()
     }
 
@@ -325,7 +369,7 @@ impl Registry {
     /// The FX for a GUID, wherever it is: a track's chain, its input chain, a container, or a take's chain.
     pub fn fx(&mut self, reaper: &Reaper, proj: Project, guid: &str) -> Option<Fx> {
         self.follow(proj);
-        if let Some(&fx) = self.fx.get(guid) {
+        if let Some(&fx) = self.fx.get(guid).filter(|_| !self.shared_fx.contains(guid)) {
             if self.fx_matches(reaper, proj, fx, guid) {
                 return Some(fx);
             }
@@ -338,10 +382,11 @@ impl Registry {
             }
         }
         let count = reaper.state_change_count(proj).unwrap_or(0);
-        if Self::recently_missed(self.fx_built, count) {
+        if Self::recently_missed(self.fx_built, count) && !self.shared_fx.contains(guid) {
             return None;
         }
         self.fx.clear();
+        self.shared_fx.clear();
         // Tracks first: nearly every FX is on one. Takes only when the track chains didn't have it.
         let tracks: Vec<Track> =
             (0..reaper.track_count(proj)).filter_map(|i| reaper.track_at(proj, i)).chain(reaper.master_track(proj)).collect();
@@ -361,6 +406,9 @@ impl Registry {
             }
         }
         self.fx_built = Some((count, Instant::now()));
+        if self.shared_fx.contains(guid) {
+            return None;
+        }
         self.fx.get(guid).copied()
     }
 
@@ -389,7 +437,12 @@ impl Registry {
         if guid.is_empty() {
             return;
         }
-        self.fx.insert(guid, fx);
+        // The same FX met again while indexing is a reorder re-reading its chain; another owner's is a shared GUID.
+        if let Some(before) = self.fx.insert(guid.clone(), fx) {
+            if before.owner != fx.owner {
+                self.shared_fx.insert(guid);
+            }
+        }
         for child in reaper.fx_children(fx) {
             debug_assert!(child.index & CONTAINER_FX != 0);
             self.index_fx(reaper, child);
@@ -447,14 +500,16 @@ mod tests {
             Ref::Take(guid.into()),
             Ref::Fx(fx.into()),
             Ref::Param { fx: fx.into(), index: 7 },
-            Ref::Send { track: track.clone(), category: -1, other: SendEnd::Track(TrackId::Guid(fx.into())), repeat: 1 },
-            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 3 },
-            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2), repeat: 1 },
+            Ref::Send { track: track.clone(), category: -1, other: SendEnd::Track(TrackId::Guid(fx.into())), repeat: 1, of: 1 },
+            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 3, of: 3 },
+            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 1, of: 2 },
+            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2), repeat: 1, of: 1 },
+            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2 | 1024), repeat: 2, of: 2 },
             Ref::Marker(guid.into()),
             Ref::Region(fx.into()),
+            Ref::Envelope { track: track.clone(), which: EnvelopeId::Guid(guid.into()) },
             Ref::Envelope { track: track.clone(), which: EnvelopeId::Chunk("VOLENV2".into()) },
-            Ref::Envelope { track: track.clone(), which: EnvelopeId::Param { fx: fx.into(), index: 4 } },
-            Ref::Envelope { track, which: EnvelopeId::Position(5) },
+            Ref::Envelope { track, which: EnvelopeId::Param { fx: fx.into(), index: 4 } },
         ] {
             let text = reference.text();
             assert_eq!(Ref::parse(&text).as_ref(), Ok(&reference), "{text}");
@@ -473,14 +528,24 @@ mod tests {
             ("r:item:42", "GUID"),
             ("r:param:{A}:x", "parameter index"),
             ("r:send:{A}:0", "well-formed"),
-            ("r:send:{A}:0:{B}:1", "repeat count"),
+            // A repeat says which one of how many: "2" alone, or one that is no more than the count, is not one.
+            ("r:send:{A}:0:{B}:1", "isn't a repeat"),
+            ("r:send:{A}:0:{B}:2", "isn't a repeat"),
+            ("r:send:{A}:0:{B}:1of1", "isn't a repeat"),
+            ("r:send:{A}:0:{B}:3of2", "isn't a repeat"),
+            ("r:send:{A}:0:{B}:0of2", "isn't a repeat"),
             ("r:send:{A}:0:hw1", "well-formed"),
             ("r:send:{A}:1:{B}", "well-formed"),
-            ("r:send:{A}:1:hw1:2", "well-formed"),
+            ("r:send:{A}:1:hw1:2", "isn't a repeat"),
+            ("r:send:{A}:1:hw", "well-formed"),
+            ("r:send:{A}:1:hw1x", "well-formed"),
+            ("r:send:{A}:1:hw2000", "well-formed"),
             ("r:marker:3", "GUID"),
             ("r:pattern:3", "no ref kind"),
             ("r:env:{A}:", "well-formed"),
             ("r:env:{A}:VOL ENV", "well-formed"),
+            // A position in the envelope list names a different envelope once the list changes: no ref has one.
+            ("r:env:{A}:i3", "well-formed"),
         ] {
             let error = Ref::parse(text).unwrap_err();
             assert!(error.contains(needle), "{text}: {error}");

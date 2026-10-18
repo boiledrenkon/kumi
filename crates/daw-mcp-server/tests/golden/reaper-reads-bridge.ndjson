@@ -16,5 +16,13 @@
 1 < {"type":"response","id":6,"ok":true,"result":{"kind":"routing","epoch":"sim-1","ref":"r:track:{T0001}","window":null}}
 1 > {"type":"request","id":7,"method":"read","params":{"kind":"pattern"},"deadlineMs":"<deadline>"}
 1 < {"type":"response","id":7,"ok":false,"error":{"code":"bad-params","message":"REAPER has no kind \"pattern\" to read"}}
-1 > {"type":"request","id":8,"method":"read","params":{"kind":"track","cursor":"c1.sim-1.2"},"deadlineMs":"<deadline>"}
-1 < {"type":"response","id":8,"ok":false,"error":{"code":"bad-params","message":"that cursor is from before the project tab changed: read again from the start"}}
+1 > {"type":"request","id":8,"method":"read","params":{"ref":"r:track:{T0001}","epoch":"sim-1"},"deadlineMs":"<deadline>"}
+1 < {"type":"response","id":8,"ok":true,"result":{"items":[{"ref":"r:track:{T0001}","index":1,"name":"Track 1","depth":0,"folder":0,"color":null,"mute":false,"solo":false,"arm":false,"volumeDb":0.0,"pan":0.0,"fxCount":0,"itemCount":1,"sends":0,"receives":0,"selected":true}],"epoch":"sim-1"}}
+1 > {"type":"request","id":9,"method":"focus_body","params":{"kind":"routing","ref":"r:track:{T0001}","epoch":"sim-1"},"deadlineMs":"<deadline>"}
+1 < {"type":"response","id":9,"ok":true,"result":{"kind":"routing","epoch":"sim-1","ref":"r:track:{T0001}","window":null}}
+1 > {"type":"request","id":10,"method":"read","params":{"kind":"track","cursor":"c1.sim-1.2"},"deadlineMs":"<deadline>"}
+1 < {"type":"response","id":10,"ok":false,"error":{"code":"bad-params","message":"that cursor is from before the project tab changed: read again from the start"}}
+1 > {"type":"request","id":11,"method":"read","params":{"ref":"r:track:{T0001}","epoch":"sim-1"},"deadlineMs":"<deadline>"}
+1 < {"type":"response","id":11,"ok":false,"error":{"code":"stale","message":"those refs are from an earlier epoch (sim-1; now sim-2): the project in the tab changed, read again"}}
+1 > {"type":"request","id":12,"method":"focus_body","params":{"kind":"routing","ref":"r:track:{T0001}","epoch":"sim-1"},"deadlineMs":"<deadline>"}
+1 < {"type":"response","id":12,"ok":false,"error":{"code":"stale","message":"those refs are from an earlier epoch (sim-1; now sim-2): the project in the tab changed, read again"}}

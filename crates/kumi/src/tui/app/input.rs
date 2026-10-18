@@ -395,6 +395,7 @@ impl TuiApp {
                         "/reconnect" => c.has_reconnect(),
                         "/stop" => c.has_stop_live(),
                         "/update" => self.0.options.updates.is_some(),
+                        "/daw" => self.0.options.switch_daw.is_some(),
                         "/btw" => c.has_aside(),
                         "/voice" => self.0.voice.is_some(),
                         "/willington" => self.willington().is_some(),
@@ -444,7 +445,7 @@ impl TuiApp {
         }
         if command == "/help" {
             self.clear_editor();
-            self.notice(&help(), NoticeTone::Info);
+            self.notice(&help(self.0.options.switch_daw.is_some()), NoticeTone::Info);
             return Ok(());
         }
         if command == "/changelog" {
@@ -649,6 +650,21 @@ impl TuiApp {
             }
             if !controller.stop_live().await? {
                 self.notice("Kumi couldn't stop Live just now; press space in Live to stop it.", NoticeTone::Warn);
+            }
+            return Ok(());
+        }
+        if let Some(switch) = self.0.options.switch_daw.clone().filter(|_| command == "/daw" || command.starts_with("/daw ")) {
+            self.clear_editor();
+            match crate::daw::daw_command(&command["/daw".len()..]) {
+                crate::daw::DawCommand::Say(words) => self.notice(&words, NoticeTone::Info),
+                crate::daw::DawCommand::Switch(_, _) if self.busy() => {
+                    self.notice("Kumi is working; /daw once it's done (esc stops it).", NoticeTone::Info);
+                }
+                crate::daw::DawCommand::Switch(daw, words) => {
+                    self.notice(&words, NoticeTone::Info);
+                    switch(daw);
+                    self.finish(0, None).await;
+                }
             }
             return Ok(());
         }
@@ -1220,8 +1236,9 @@ impl Command {
 }
 
 /// Keys and commands, in the DAW's words (Live's, as it always said them, for Live).
-pub(super) fn help() -> String {
+pub(super) fn help(daw: bool) -> String {
     let words = crate::daw::words();
+    let daw = if daw { " · /daw says which DAW Kumi works with, and /daw <name> opens Kumi again with another" } else { "" };
     let (app, place, places) = (words.app, words.place, words.places);
     // Willington's bindings are Live's.
     let willington = if crate::daw::current().id() == kumi_runtime::core::daw::DawId::Ableton {
@@ -1230,7 +1247,7 @@ pub(super) fn help() -> String {
         ""
     };
     format!(
-        "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · ctrl+b moves a slow step that doesn't use {app} (a video, pages) to the background (press it twice in tmux), and /jobs shows, stops or reruns background jobs · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, /resume goes back to one kept (this {place}'s, or any {place}'s by its id or name), /rename names this one, and /fork carries on in a copy · /reconnect connects to {app} again, keeping the conversation · /copy copies the last answer, /export copies or saves the whole conversation, and /share saves it as a web page to send; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one;{willington} /slots shows which model does each listening job (stems, transcription, listening, embeddings), swaps one in plain words after a quick test, and /slots back <job> takes a swap back; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your {places}), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands"
+        "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · ctrl+b moves a slow step that doesn't use {app} (a video, pages) to the background (press it twice in tmux), and /jobs shows, stops or reruns background jobs · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, /resume goes back to one kept (this {place}'s, or any {place}'s by its id or name), /rename names this one, and /fork carries on in a copy · /reconnect connects to {app} again, keeping the conversation{daw} · /copy copies the last answer, /export copies or saves the whole conversation, and /share saves it as a web page to send; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one;{willington} /slots shows which model does each listening job (stems, transcription, listening, embeddings), swaps one in plain words after a quick test, and /slots back <job> takes a swap back; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your {places}), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands"
     )
 }
 pub(super) const COMMANDS: &[Command] = &[
@@ -1242,6 +1259,7 @@ pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/rename", about: "Name this conversation: /rename <name>" },
     Command { name: "/fork", about: "Carry on in a copy of this conversation; the original stays" },
     Command { name: "/reconnect", about: "Connect to Live again, keeping the conversation" },
+    Command { name: "/daw", about: "Which DAW Kumi works with; /daw <name> opens Kumi again with another" },
     Command { name: "/undo", about: "Undo Kumi's last change" },
     Command { name: "/stop", about: "Stop Live: clips, the transport and recording" },
     Command { name: "/refresh", about: "Read your Live Set again" },

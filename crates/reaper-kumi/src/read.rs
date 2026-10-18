@@ -22,17 +22,32 @@ pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 200;
 /// The most one answer carries. The bridge's frame bound is 256 KiB; the rest is the envelope around the rows.
 pub const ANSWER_BYTES: usize = 224 * 1024;
-/// A page stops growing after this long on the main thread: the rest comes with the cursor.
-const PAGE_TIME: Duration = Duration::from_millis(40);
+/// A page stops growing after this long on the main thread, close to what a tick spends on requests: the rest comes with
+/// the cursor.
+#[cfg(not(test))]
+const PAGE_TIME: Duration = Duration::from_millis(10);
+
+#[cfg(not(test))]
+fn page_time() -> Duration {
+    PAGE_TIME
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own page time, to make a page run out of it without a slow REAPER.
+    pub static TEST_PAGE_TIME: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn page_time() -> Duration {
+    // Slow builds and busy machines mustn't change what a test sees: a test that wants a short time sets one.
+    TEST_PAGE_TIME.with(|time| time.get()).unwrap_or(Duration::from_secs(10))
+}
 /// The most tracks and markers a snapshot carries; `read` has the rest.
 const SNAPSHOT_TRACKS: usize = 200;
 const SNAPSHOT_MARKERS: usize = 100;
 /// The snapshot's own share of the answer, so the tracks leave room for the markers and the selection.
 const SNAPSHOT_TRACK_BYTES: usize = 150 * 1024;
-/// A track's own envelopes, by the chunk name `GetTrackEnvelopeByChunkName` takes.
-const OWN_ENVELOPES: [&str; 8] = ["VOLENV", "VOLENV2", "VOLENV3", "PANENV", "PANENV2", "WIDTHENV", "WIDTHENV2", "MUTEENV"];
-/// The parameters probed for an envelope in one call, so a plug-in with thousands doesn't hold the main thread.
-const PARAM_PROBES: usize = 6000;
 const KINDS: [&str; 11] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"];
 
 pub fn bad(message: impl Into<String>) -> (String, String) {
@@ -41,6 +56,18 @@ pub fn bad(message: impl Into<String>) -> (String, String) {
 
 pub fn failed(message: impl Into<String>) -> (String, String) {
     ("failed".into(), message.into())
+}
+
+/// Two objects of a kind have one GUID: a ref to either can't say which it means.
+fn shared_id(kind: &str) -> (String, String) {
+    failed(format!(
+        "two {kind}s in the project have that id (one was copied as text, which keeps the id): REAPER can't tell them apart, so remove the copy or recreate it"
+    ))
+}
+
+/// The list under a cursor is not the one it was made for.
+pub fn changed(message: impl Into<String>) -> (String, String) {
+    (daw_bridge::wire::code::CHANGED.into(), message.into())
 }
 
 /// The refs' registry and the epoch they live in.
@@ -53,6 +80,9 @@ pub struct Reads {
     /// A Kumi project id found in a tab's project while it was unsaved: it came with the template the project was made
     /// from, so it isn't that project's own.
     inherited: RefCell<HashMap<usize, String>>,
+    /// What `GetTouchedOrFocusedFX` said (touched, focused) when the tab last changed: it names the track by its number in
+    /// whichever project is active, and takes no project, so the same answer after a switch may be another project's.
+    stale_fx: RefCell<[Option<crate::reaper::FxHit>; 2]>,
 }
 
 /// A serial number for each project open in a tab, from this REAPER's own counter: the same while the project stays open
@@ -110,9 +140,15 @@ impl Pager {
         Pager { limit, budget, bytes: 0, started: Instant::now(), rows: Vec::new() }
     }
 
+    /// Whether the page has had its time, whether or not it has a row yet: a page that is still looking for its first row
+    /// ends empty, with a cursor to go on from, rather than hold REAPER's main thread.
+    pub fn spent(&self) -> bool {
+        self.started.elapsed() >= page_time()
+    }
+
     /// Whether the page has room for another row.
     pub fn open(&self) -> bool {
-        self.rows.len() < self.limit && self.bytes < self.budget && (self.rows.is_empty() || self.started.elapsed() < PAGE_TIME)
+        self.rows.len() < self.limit && self.bytes < self.budget && (self.rows.is_empty() || self.started.elapsed() < page_time())
     }
 
     /// Adds a row; false when it would overflow the byte budget (a first row always goes in).
@@ -149,7 +185,7 @@ fn limit_param(params: &Value) -> Result<usize, (String, String)> {
     match params.get("limit") {
         None | Some(Value::Null) => Ok(DEFAULT_LIMIT),
         Some(value) => match value.as_u64() {
-            Some(n) if n >= 1 => Ok((n as usize).min(MAX_LIMIT)),
+            Some(n) if (1..=MAX_LIMIT as u64).contains(&n) => Ok(n as usize),
             _ => Err(bad(format!("limit must be a whole number from 1 to {MAX_LIMIT}"))),
         },
     }
@@ -181,9 +217,31 @@ fn active(reaper: &Reaper) -> Result<(Project, crate::reaper::ProjectInfo), (Str
     Ok((info.ptr, info))
 }
 
+/// What a cursor says: the position, and the key of the row at it.
+type CursorParts = (String, Option<String>);
+
 impl Reads {
     pub fn epoch(&self) -> String {
         self.epoch.borrow().text()
+    }
+
+    /// The FX REAPER says was touched (mode 0) or has the focus (mode 1), unless that is still what it said before the tab
+    /// changed: REAPER names the track by its number and says nothing of its project, so it is not known to be this one's.
+    /// It counts again once REAPER says something else.
+    pub fn touched_fx(&self, reaper: &Reaper, mode: i32) -> Option<crate::reaper::FxHit> {
+        let hit = reaper.touched_or_focused_fx(mode)?;
+        let mut stale = self.stale_fx.borrow_mut();
+        let slot = &mut stale[(mode & 1) as usize];
+        if *slot == Some(hit) {
+            return None;
+        }
+        *slot = None;
+        Some(hit)
+    }
+
+    /// The tab changed: what REAPER says is touched or focused now was said about the project before.
+    pub fn forget_touched(&self, reaper: &Reaper) {
+        *self.stale_fx.borrow_mut() = [reaper.touched_or_focused_fx(0), reaper.touched_or_focused_fx(1)];
     }
 
     /// Refs stop meaning what they meant: a tab switch, or a new project in the tab.
@@ -238,31 +296,86 @@ impl Reads {
         self.registry.borrow_mut()
     }
 
+    /// A request that says which epoch its refs came from (`epoch`, as an earlier answer gave it) is refused as stale
+    /// when the project in the tab has changed since: refs are GUIDs, and a copy of the project in another tab has the
+    /// same ones.
+    pub fn expect_epoch(&self, params: &Value) -> Result<(), (String, String)> {
+        match params.get("epoch") {
+            None | Some(Value::Null) => Ok(()),
+            Some(Value::String(epoch)) if *epoch == self.epoch() => Ok(()),
+            Some(Value::String(epoch)) => Err((
+                daw_bridge::wire::code::STALE.into(),
+                format!("those refs are from an earlier epoch ({epoch}; now {}): the project in the tab changed, read again", self.epoch()),
+            )),
+            Some(_) => Err(bad("epoch: the epoch an earlier answer gave, unchanged")),
+        }
+    }
+
+    /// A cursor is `c1.<epoch>.<position>`, with `~<key>` after the position when the row it points at has an identity:
+    /// a page goes on from that row wherever it is by then, not from a position an edit between two pages has moved.
     fn cursor_text(&self, position: &str) -> String {
         format!("c1.{}.{position}", self.epoch())
     }
 
-    /// The position a cursor names, or an error when it isn't this project's.
-    fn cursor_position(&self, cursor: Option<&str>) -> Result<Option<String>, (String, String)> {
+    /// The position and, if it has one, the key of the row a cursor points at; None for no cursor.
+    fn cursor_parts(&self, cursor: Option<&str>) -> Result<Option<CursorParts>, (String, String)> {
         let Some(cursor) = cursor else { return Ok(None) };
         let mut parts = cursor.splitn(3, '.');
         match (parts.next(), parts.next(), parts.next()) {
-            (Some("c1"), Some(epoch), Some(position)) if !position.is_empty() => {
-                if epoch == self.epoch() {
-                    Ok(Some(position.to_string()))
-                } else {
-                    Err(bad("that cursor is from before the project tab changed: read again from the start"))
+            (Some("c1"), Some(epoch), Some(rest)) if !rest.is_empty() => {
+                if epoch != self.epoch() {
+                    return Err(bad("that cursor is from before the project tab changed: read again from the start"));
                 }
+                Ok(Some(match rest.split_once('~') {
+                    Some((position, key)) if !position.is_empty() && !key.is_empty() => (position.to_string(), Some(key.to_string())),
+                    Some(_) => return Err(bad("cursor: pass the nextCursor an earlier read gave, unchanged")),
+                    None => (rest.to_string(), None),
+                }))
             }
             _ => Err(bad("cursor: pass the nextCursor an earlier read gave, unchanged")),
         }
     }
 
-    fn position_number(&self, cursor: Option<&str>) -> Result<usize, (String, String)> {
-        match self.cursor_position(cursor)? {
-            None => Ok(0),
-            Some(position) => position.parse::<usize>().map_err(|_| bad("cursor: not one this kind of read gave")),
+    /// The position of a cursor into a list of `total` rows that has no identity to follow (a parameter, a note): from
+    /// the start without one, and refused when it points past the end, since the list is shorter than it was.
+    fn position_within(&self, cursor: Option<&str>, total: usize) -> Result<usize, (String, String)> {
+        self.resume_number(cursor, total, |_| None)
+    }
+
+    /// Where the next page of a list of `total` rows starts. A cursor made with a key goes on from the row that has it,
+    /// where it is now; if no row has it any more the list changed under the cursor. One without a key goes on from its
+    /// position. Either way a position past the end is refused.
+    fn resume_number(
+        &self,
+        cursor: Option<&str>,
+        total: usize,
+        key_at: impl Fn(usize) -> Option<String>,
+    ) -> Result<usize, (String, String)> {
+        let Some((position, key)) = self.cursor_parts(cursor)? else { return Ok(0) };
+        let position: usize = position.parse().map_err(|_| bad("cursor: not one this kind of read gave"))?;
+        if position > total {
+            return Err(changed("that cursor points past the end of a list that is shorter now: read again from the start"));
         }
+        let Some(key) = key else { return Ok(position) };
+        if key_at(position).as_deref() == Some(key.as_str()) {
+            return Ok(position);
+        }
+        (0..total)
+            .find(|&at| key_at(at).as_deref() == Some(key.as_str()))
+            .ok_or_else(|| changed("what that cursor pointed at is gone: the list changed between pages, read again from the start"))
+    }
+
+    /// A position and the key of its row, as a cursor carries them.
+    fn anchored(position: impl std::fmt::Display, key: Option<String>) -> String {
+        match key {
+            Some(key) => format!("{position}~{key}"),
+            None => position.to_string(),
+        }
+    }
+
+    /// A page of a list whose rows have keys: its cursor points at the row after the last, and carries that row's key.
+    fn page_keyed(&self, pager: Pager, next: Option<usize>, total: Option<usize>, key_at: impl Fn(usize) -> Option<String>) -> Answer {
+        self.page_at(pager, next.map(|at| Self::anchored(at, key_at(at))), total)
     }
 
     fn page(&self, pager: Pager, next: Option<usize>, total: Option<usize>) -> Answer {
@@ -283,31 +396,34 @@ impl Reads {
     // ----- resolving refs -----
 
     fn track_by_id(&self, reaper: &Reaper, proj: Project, id: &TrackId) -> Result<Track, (String, String)> {
-        self.registry
-            .borrow_mut()
-            .track(reaper, proj, id)
-            .ok_or_else(|| failed(format!("{} isn't in the project (deleted, or another tab)", refs::track_ref(id))))
+        let mut registry = self.registry.borrow_mut();
+        registry.track(reaper, proj, id).ok_or_else(|| match id {
+            TrackId::Guid(guid) if registry.is_shared(guid) => shared_id("track"),
+            _ => failed("that track isn't in the project (deleted, or another tab)"),
+        })
     }
 
     fn item_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Item, (String, String)> {
-        self.registry
-            .borrow_mut()
-            .item(reaper, proj, guid)
-            .ok_or_else(|| failed(format!("{} isn't in the project (deleted, or another tab)", refs::item_ref(guid))))
+        let mut registry = self.registry.borrow_mut();
+        registry.item(reaper, proj, guid).ok_or_else(|| match registry.is_shared(guid) {
+            true => shared_id("item"),
+            false => failed("that item isn't in the project (deleted, or another tab)"),
+        })
     }
 
     fn take_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Take, (String, String)> {
         self.registry
             .borrow_mut()
             .take(reaper, proj, guid)
-            .ok_or_else(|| failed(format!("{} isn't in the project (deleted, or another tab)", refs::take_ref(guid))))
+            .ok_or_else(|| failed("that take isn't in the project (deleted, or another tab)"))
     }
 
     fn fx_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Fx, (String, String)> {
-        self.registry
-            .borrow_mut()
-            .fx(reaper, proj, guid)
-            .ok_or_else(|| failed(format!("{} isn't in the project (deleted, or another tab)", refs::fx_ref(guid))))
+        let mut registry = self.registry.borrow_mut();
+        registry.fx(reaper, proj, guid).ok_or_else(|| match registry.is_shared(guid) {
+            true => shared_id("FX"),
+            false => failed("that FX isn't in the project (deleted, or another tab)"),
+        })
     }
 
     /// A parent ref that must be a track.
@@ -337,6 +453,7 @@ impl Reads {
 
     pub fn read(&self, reaper: &Reaper, params: &Value) -> Answer {
         let request = Request::parse(params)?;
+        self.expect_epoch(params)?;
         let (proj, info) = active(reaper)?;
         if let Some(reference) = &request.reference {
             return self.read_one(reaper, proj, reference);
@@ -378,16 +495,29 @@ impl Reads {
             Ref::Param { fx: guid, index } => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
                 if index < 0 || index >= reaper.fx_param_count(fx) {
-                    return Err(failed(format!("{reference} isn't there: the FX has {} parameters", reaper.fx_param_count(fx))));
+                    return Err(failed(format!("that parameter isn't there: the FX has {} parameters", reaper.fx_param_count(fx))));
                 }
                 rows::param_row(reaper, fx, &guid, index)
             }
-            Ref::Send { track, category, other, repeat } => {
+            Ref::Send { track, category, other, repeat, of } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let keys = rows::send_keys(reaper, owner, category);
-                let key = rows::SendKey { other, repeat };
+                let key = rows::SendKey { other, repeat, of };
                 let Some(index) = keys.iter().position(|k| *k == key) else {
-                    return Err(failed(format!("{reference} isn't there: the track has no such send (deleted, or it went elsewhere)")));
+                    // Sends to one place have no identity of their own: once their number changes, a ref to one of them
+                    // could be any, so it names none.
+                    let now = keys.iter().filter(|k| k.other == key.other).count();
+                    let sends = if now == 1 { "send" } else { "sends" };
+                    let why = match (now, of) {
+                        (0, _) => "the track has no such send (deleted, or it went elsewhere)".to_string(),
+                        (_, 1) => {
+                            format!("the track has {now} such {sends} now, and this ref was made when there was one: read them again")
+                        }
+                        (_, _) => {
+                            format!("the track has {now} such {sends} now, and this ref was made when there were {of}: read them again")
+                        }
+                    };
+                    return Err(failed(format!("that send isn't there: {why}")));
                 };
                 rows::send_row(reaper, owner, category, index as i32, &key)
             }
@@ -396,7 +526,7 @@ impl Reads {
             Ref::Envelope { track, which } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let envelope = self.envelope_of(reaper, proj, owner, &which)?;
-                rows::envelope_row(reaper, &track, &which, envelope)
+                rows::envelope_row(reaper, &track, envelope)
             }
         };
         Ok(json!({"items": [row], "epoch": self.epoch()}))
@@ -404,12 +534,18 @@ impl Reads {
 
     fn marker_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str, region: bool) -> Result<Value, (String, String)> {
         reaper.marker_by_guid(proj, guid).filter(|m| m.is_region == region).map(|m| rows::marker_row(reaper, proj, &m)).ok_or_else(|| {
-            failed(format!("there is no {} {guid} in the project (deleted, or another tab)", if region { "region" } else { "marker" }))
+            failed(format!("that {} isn't in the project (deleted, or another tab)", if region { "region" } else { "marker" }))
         })
     }
 
     fn envelope_of(&self, reaper: &Reaper, proj: Project, track: Track, which: &EnvelopeId) -> Result<Envelope, (String, String)> {
         let found = match which {
+            EnvelopeId::Guid(guid) => reaper
+                .track_envelope_by_chunk_name(track, guid)
+                .or_else(|| {
+                    self.track_envelopes(reaper, track).into_iter().find(|(id, _)| id.as_deref() == Some(guid.as_str())).map(|(_, e)| e)
+                })
+                .filter(|envelope| reaper.envelope_owner(*envelope).is_some_and(|(owner, _, _)| owner == track)),
             EnvelopeId::Chunk(name) => reaper.track_envelope_by_chunk_name(track, &format!("<{name}")),
             EnvelopeId::Param { fx, index } => {
                 let fx = self.fx_by_guid(reaper, proj, fx)?;
@@ -418,9 +554,8 @@ impl Reads {
                     _ => None,
                 }
             }
-            EnvelopeId::Position(position) => reaper.track_envelope(track, *position),
         };
-        found.ok_or_else(|| failed("that track has no such envelope"))
+        found.ok_or_else(|| failed("that track has no such envelope (deleted, or on another track)"))
     }
 
     // ----- tracks -----
@@ -444,10 +579,20 @@ impl Reads {
         None
     }
 
+    /// The key of the row at a position of the master-then-tracks list.
+    pub fn track_key(&self, reaper: &Reaper, proj: Project, position: usize) -> Option<String> {
+        match position {
+            0 => Some("master".into()),
+            n => reaper.track_at(proj, n as i32 - 1).map(|track| reaper.track_guid(track)),
+        }
+    }
+
     fn read_tracks(&self, reaper: &Reaper, proj: Project, mut pager: Pager, cursor: Option<&str>) -> Answer {
-        let start = self.position_number(cursor)?;
+        let total = reaper.track_count(proj) as usize + 1;
+        let key = |position: usize| self.track_key(reaper, proj, position);
+        let start = self.resume_number(cursor, total, key)?;
         let next = self.track_page(reaper, proj, &mut pager, start);
-        self.page(pager, next, Some(reaper.track_count(proj) as usize + 1))
+        self.page_keyed(pager, next, Some(total), key)
     }
 
     // ----- items and takes -----
@@ -456,7 +601,8 @@ impl Reads {
         if let Some(parent) = parent {
             let track = self.parent_track(reaper, proj, parent)?;
             let total = reaper.track_item_count(track) as usize;
-            let mut position = self.position_number(cursor)?;
+            let key = |position: usize| reaper.track_item(track, position as i32).map(|item| reaper.item_guid(item));
+            let mut position = self.resume_number(cursor, total, key)?;
             let mut next = None;
             while position < total {
                 if !pager.open() {
@@ -471,32 +617,48 @@ impl Reads {
                 }
                 position += 1;
             }
-            return self.page(pager, next, Some(total));
+            return self.page_keyed(pager, next, Some(total), key);
         }
-        // Every item in the project: the cursor is `track.item`.
-        let (mut track_at, mut item_at) = match self.cursor_position(cursor)? {
+        // Every item in the project: the cursor is `track.item`, and the GUID of that item.
+        let not_a_cursor = || bad("cursor: not one this kind of read gave");
+        let tracks = reaper.track_count(proj) as usize;
+        let item_key = |track_at: usize, item_at: usize| {
+            let item = reaper.track_at(proj, track_at as i32).and_then(|track| reaper.track_item(track, item_at as i32))?;
+            Some(reaper.item_guid(item))
+        };
+        let (mut track_at, mut item_at) = match self.cursor_parts(cursor)? {
             None => (0usize, 0usize),
-            Some(position) => {
-                let (t, i) = position.split_once('.').ok_or_else(|| bad("cursor: not one this kind of read gave"))?;
-                (
-                    t.parse().map_err(|_| bad("cursor: not one this kind of read gave"))?,
-                    i.parse().map_err(|_| bad("cursor: not one this kind of read gave"))?,
-                )
+            Some((position, key)) => {
+                let (t, i) = position.split_once('.').ok_or_else(not_a_cursor)?;
+                let (t, i): (usize, usize) = (t.parse().map_err(|_| not_a_cursor())?, i.parse().map_err(|_| not_a_cursor())?);
+                match key {
+                    None if t <= tracks => (t, i),
+                    // The item the cursor points at, where it is now (or gone).
+                    Some(key) if t < tracks && item_key(t, i).as_deref() == Some(key.as_str()) => (t, i),
+                    Some(key) => (0..tracks)
+                        .find_map(|t| {
+                            let count = reaper.track_at(proj, t as i32).map_or(0, |track| reaper.track_item_count(track)) as usize;
+                            (0..count).find(|&i| item_key(t, i).as_deref() == Some(key.as_str())).map(|i| (t, i))
+                        })
+                        .ok_or_else(|| {
+                            changed("the item that cursor pointed at is gone: the items changed between pages, read again from the start")
+                        })?,
+                    None => return Err(changed("that cursor points past the last track: read again from the start")),
+                }
             }
         };
-        let tracks = reaper.track_count(proj) as usize;
         let mut next = None;
         'tracks: while track_at < tracks {
             if let Some(track) = reaper.track_at(proj, track_at as i32) {
                 let count = reaper.track_item_count(track) as usize;
                 while item_at < count {
                     if !pager.open() {
-                        next = Some(format!("{track_at}.{item_at}"));
+                        next = Some(Self::anchored(format!("{track_at}.{item_at}"), item_key(track_at, item_at)));
                         break 'tracks;
                     }
                     if let Some(item) = reaper.track_item(track, item_at as i32) {
                         if !pager.push(rows::item_row(reaper, proj, item)) {
-                            next = Some(format!("{track_at}.{item_at}"));
+                            next = Some(Self::anchored(format!("{track_at}.{item_at}"), item_key(track_at, item_at)));
                             break 'tracks;
                         }
                     }
@@ -517,7 +679,8 @@ impl Reads {
         };
         let total = reaper.take_count(item) as usize;
         let active = reaper.active_take(item);
-        let mut position = self.position_number(cursor)?;
+        let key = |position: usize| reaper.take_at(item, position as i32).map(|take| reaper.take_guid(take));
+        let mut position = self.resume_number(cursor, total, key)?;
         let mut next = None;
         while position < total {
             if !pager.open() {
@@ -532,7 +695,7 @@ impl Reads {
             }
             position += 1;
         }
-        self.page(pager, next, Some(total))
+        self.page_keyed(pager, next, Some(total), key)
     }
 
     // ----- FX and parameters -----
@@ -557,7 +720,8 @@ impl Reads {
             other => return Err(bad(format!("parent: a track, take or FX ref, not r:{}", other.kind()))),
         };
         let total = chain.len();
-        let mut position = self.position_number(cursor)?;
+        let key = |position: usize| chain.get(position).map(|fx| reaper.fx_guid(*fx));
+        let mut position = self.resume_number(cursor, total, key)?;
         let mut next = None;
         while position < total {
             if !pager.open() {
@@ -572,7 +736,7 @@ impl Reads {
             }
             position += 1;
         }
-        self.page(pager, next, Some(total))
+        self.page_keyed(pager, next, Some(total), key)
     }
 
     fn read_params(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
@@ -580,7 +744,7 @@ impl Reads {
         let fx = self.parent_fx(reaper, proj, parent)?;
         let guid = reaper.fx_guid(fx);
         let total = reaper.fx_param_count(fx).max(0) as usize;
-        let mut position = self.position_number(cursor)?;
+        let mut position = self.position_within(cursor, total)?;
         let mut next = None;
         while position < total {
             if !pager.open() {
@@ -608,7 +772,10 @@ impl Reads {
                 rows::send_keys(reaper, track, category).into_iter().enumerate().map(move |(index, key)| (category, index as i32, key))
             })
             .collect();
-        let mut position = self.position_number(cursor)?;
+        let this = rows::track_id(reaper, track);
+        let key =
+            |position: usize| all.get(position).map(|(category, _, key)| refs::send_ref(&this, *category, &key.other, key.repeat, key.of));
+        let mut position = self.resume_number(cursor, all.len(), key)?;
         let mut next = None;
         while position < all.len() {
             if !pager.open() {
@@ -622,30 +789,31 @@ impl Reads {
             }
             position += 1;
         }
-        self.page(pager, next, Some(all.len()))
+        self.page_keyed(pager, next, Some(all.len()), key)
     }
 
     // ----- markers and regions -----
 
     fn read_markers(&self, reaper: &Reaper, proj: Project, mut pager: Pager, regions: bool, cursor: Option<&str>) -> Answer {
-        let total = reaper.marker_count(proj);
-        let mut position = self.position_number(cursor)? as i32;
+        let total = reaper.marker_count(proj).max(0) as usize;
+        let key = |position: usize| reaper.marker(proj, position as i32).map(|marker| marker.guid);
+        let mut position = self.resume_number(cursor, total, key)?;
         let mut next = None;
         while position < total {
-            let Some(marker) = reaper.marker(proj, position) else { break };
+            let Some(marker) = reaper.marker(proj, position as i32) else { break };
             if marker.is_region == regions {
                 if !pager.open() {
-                    next = Some(position as usize);
+                    next = Some(position);
                     break;
                 }
                 if !pager.push(rows::marker_row(reaper, proj, &marker)) {
-                    next = Some(position as usize);
+                    next = Some(position);
                     break;
                 }
             }
             position += 1;
         }
-        self.page(pager, next, None)
+        self.page_keyed(pager, next, None, key)
     }
 
     // ----- MIDI notes -----
@@ -662,7 +830,7 @@ impl Reads {
         };
         let (notes, _, _) = reaper.midi_counts(take).ok_or_else(|| bad("that take isn't MIDI"))?;
         let item_qn = take_start_qn(reaper, proj, take);
-        let mut position = self.position_number(cursor)?;
+        let mut position = self.position_within(cursor, notes.max(0) as usize)?;
         let mut next = None;
         while position < notes.max(0) as usize {
             if !pager.open() {
@@ -682,88 +850,55 @@ impl Reads {
 
     // ----- envelopes -----
 
-    /// A track's envelopes with the id their refs use: own ones by chunk name, FX ones by FX and parameter.
-    fn track_envelopes(&self, reaper: &Reaper, proj: Project, track: Track) -> Vec<(EnvelopeId, Envelope)> {
-        let own: Vec<(&str, Envelope)> = OWN_ENVELOPES
-            .iter()
-            .filter_map(|name| reaper.track_envelope_by_chunk_name(track, &format!("<{name}")).map(|e| (*name, e)))
-            .collect();
-        let mut fx_params: Option<HashMap<Envelope, (String, i32)>> = None;
-        let mut found = Vec::new();
-        for position in 0..reaper.track_envelope_count(track) {
-            let Some(envelope) = reaper.track_envelope(track, position) else { continue };
-            let which = if let Some((name, _)) = own.iter().find(|(_, e)| *e == envelope) {
-                EnvelopeId::Chunk((*name).to_string())
-            } else {
-                let map = fx_params.get_or_insert_with(|| self.fx_param_envelopes(reaper, proj, track));
-                match map.get(&envelope) {
-                    Some((fx, index)) => EnvelopeId::Param { fx: fx.clone(), index: *index },
-                    None => EnvelopeId::Position(position),
-                }
-            };
-            found.push((which, envelope));
-        }
-        found
-    }
-
-    /// Every parameter envelope on a track's FX, found by asking each parameter (REAPER can't list them by FX).
-    fn fx_param_envelopes(&self, reaper: &Reaper, proj: Project, track: Track) -> HashMap<Envelope, (String, i32)> {
-        let mut map = HashMap::new();
-        let mut probes = 0usize;
-        let mut pending: Vec<Fx> = {
-            let owner = FxOwner::Track(track);
-            (0..reaper.fx_count(owner)).map(|index| Fx { owner, index }).collect()
-        };
-        while let Some(fx) = pending.pop() {
-            let guid = reaper.fx_guid(fx);
-            self.registry.borrow_mut().note_fx(proj, &guid, fx);
-            pending.extend(reaper.fx_children(fx));
-            for param in 0..reaper.fx_param_count(fx) {
-                probes += 1;
-                if probes > PARAM_PROBES {
-                    return map;
-                }
-                if let Some(envelope) = reaper.fx_param_envelope(track, fx.index, param) {
-                    map.insert(envelope, (guid.clone(), param));
-                }
-            }
-        }
-        map
+    /// A track's envelopes, each with the GUID its ref is made of (none if REAPER gives it none): in the order REAPER lists
+    /// them, which changes as the producer shows and adds envelopes, so a ref never holds a position.
+    fn track_envelopes(&self, reaper: &Reaper, track: Track) -> Vec<(Option<String>, Envelope)> {
+        (0..reaper.track_envelope_count(track))
+            .filter_map(|position| reaper.track_envelope(track, position))
+            .map(|envelope| (reaper.envelope_guid(envelope), envelope))
+            .collect()
     }
 
     fn read_envelopes(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
         let parent = parent.ok_or_else(|| bad("envelope: pass the track or FX as parent"))?;
-        let found: Vec<(TrackId, EnvelopeId, Envelope)> = match Ref::parse(parent).map_err(bad)? {
+        let found: Vec<(TrackId, Envelope)> = match Ref::parse(parent).map_err(bad)? {
             Ref::Track(id) => {
                 let track = self.track_by_id(reaper, proj, &id)?;
-                self.track_envelopes(reaper, proj, track).into_iter().map(|(which, e)| (id.clone(), which, e)).collect()
+                self.track_envelopes(reaper, track).into_iter().map(|(_, e)| (id.clone(), e)).collect()
             }
             Ref::Fx(guid) => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
                 let FxOwner::Track(track) = fx.owner else { return Err(bad("take FX envelopes aren't read yet")) };
                 let id = rows::track_id(reaper, track);
-                (0..reaper.fx_param_count(fx))
-                    .filter_map(|param| reaper.fx_param_envelope(track, fx.index, param).map(|e| (param, e)))
-                    .map(|(param, e)| (id.clone(), EnvelopeId::Param { fx: guid.clone(), index: param }, e))
+                // The track's envelopes that are for this FX: asked of each envelope, not of every parameter of the FX.
+                self.track_envelopes(reaper, track)
+                    .into_iter()
+                    .filter(|(_, e)| {
+                        reaper
+                            .envelope_owner(*e)
+                            .is_some_and(|(_, index, _)| index >= 0 && reaper.fx_guid(Fx { owner: fx.owner, index }) == guid)
+                    })
+                    .map(|(_, e)| (id.clone(), e))
                     .collect()
             }
             other => return Err(bad(format!("parent: a track or FX ref, not r:{}", other.kind()))),
         };
-        let mut position = self.position_number(cursor)?;
+        let key = |position: usize| found.get(position).and_then(|(_, envelope)| reaper.envelope_guid(*envelope));
+        let mut position = self.resume_number(cursor, found.len(), key)?;
         let mut next = None;
         while position < found.len() {
             if !pager.open() {
                 next = Some(position);
                 break;
             }
-            let (track, which, envelope) = &found[position];
-            if !pager.push(rows::envelope_row(reaper, track, which, *envelope)) {
+            let (track, envelope) = &found[position];
+            if !pager.push(rows::envelope_row(reaper, track, *envelope)) {
                 next = Some(position);
                 break;
             }
             position += 1;
         }
-        self.page(pager, next, Some(found.len()))
+        self.page_keyed(pager, next, Some(found.len()), key)
     }
 
     // ----- snapshot -----
@@ -794,11 +929,16 @@ impl Reads {
         });
         let mut truncated = serde_json::Map::new();
         if let Some(next) = next_track {
-            truncated
-                .insert("tracks".into(), json!({"total": reaper.track_count(proj) + 1, "nextCursor": self.cursor_text(&next.to_string())}));
+            let cursor = self.cursor_text(&Self::anchored(next, self.track_key(reaper, proj, next)));
+            truncated.insert("tracks".into(), json!({"total": reaper.track_count(proj) + 1, "nextCursor": cursor}));
         }
         if let Some(next) = next_marker {
-            truncated.insert("markers".into(), json!({"total": marker_total, "nextCursor": self.cursor_text(&next.to_string())}));
+            let key = reaper.marker(proj, next as i32).map(|marker| marker.guid);
+            // Markers and regions share one list: read each kind with this cursor to get the rest of it.
+            truncated.insert(
+                "markers".into(),
+                json!({"total": marker_total, "nextCursor": self.cursor_text(&Self::anchored(next, key)), "kinds": ["marker", "region"]}),
+            );
         }
         if !truncated.is_empty() {
             answer["truncated"] = Value::Object(truncated);
@@ -994,13 +1134,395 @@ mod tests {
         assert!(lab.read(json!({"kind": "track", "cursor": format!("c1.{}.x", lab.reads.epoch())})).unwrap_err().1.contains("cursor"));
     }
 
+    /// A copy of the project in another tab has the same GUIDs: a ref that says where it came from is refused there.
+    #[test]
+    fn a_request_that_names_its_epoch_is_refused_as_stale_when_the_project_in_the_tab_changed() {
+        let lab = Lab::new();
+        let epoch = lab.reads.epoch();
+        let read = |lab: &Lab, epoch: Value| lab.read(json!({"ref": "r:track:{AAAA}", "epoch": epoch}));
+        assert_eq!(read(&lab, json!(epoch)).unwrap()["items"][0]["name"], "Drums");
+        assert_eq!(read(&lab, Value::Null).unwrap()["items"][0]["name"], "Drums");
+        assert_eq!(read(&lab, json!(5)).unwrap_err().0, "bad-params");
+        // The producer switched to the Save As copy in another tab, which has the same GUIDs.
+        lab.reads.bump_epoch();
+        let (code, message) = read(&lab, json!(epoch)).unwrap_err();
+        assert_eq!(code, "stale");
+        assert!(message.contains(&epoch) && message.contains("read again"), "{message}");
+        assert_eq!(lab.read(json!({"kind": "track", "epoch": epoch})).unwrap_err().0, "stale");
+        // Without it a read answers about the project now in the tab, and says which epoch that is.
+        assert_ne!(lab.read(json!({"ref": "r:track:{AAAA}"})).unwrap()["epoch"], json!(epoch));
+        // The bodies are refused the same way.
+        let api = fake::api();
+        let body =
+            |epoch: &str| lab.reads.focus_body(&Reaper::new(&api), &json!({"kind": "routing", "ref": "r:track:{AAAA}", "epoch": epoch}));
+        assert_eq!(body(&epoch).unwrap_err().0, "stale");
+        assert_eq!(body(&lab.reads.epoch()).unwrap()["kind"], "routing");
+    }
+
+    fn names(rows: &Value) -> Vec<String> {
+        rows["items"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// A cursor is a position, so an edit between two pages used to repeat a row or skip one without a word.
+    #[test]
+    fn a_cursor_goes_on_from_its_row_wherever_it_is_after_tracks_come_and_go() {
+        let lab = Lab::new();
+        let eight = || (1..=8).map(|n| FakeTrack::new(&format!("{{T{n}}}"), &format!("T{n}"))).collect::<Vec<_>>();
+        fake::with(|s| s.tracks = eight());
+        // The master, then T1, T2; the cursor points at T3.
+        let first = lab.read(json!({"kind": "track", "limit": 3})).unwrap();
+        assert_eq!(names(&first), ["MASTER", "T1", "T2"]);
+        let cursor = first["nextCursor"].clone();
+        let next = |lab: &Lab| lab.read(json!({"kind": "track", "limit": 3, "cursor": cursor.clone()}));
+        // A track inserted at the top: T2 isn't read twice, T3 isn't skipped.
+        fake::with(|s| s.tracks.insert(0, FakeTrack::new("{NEW}", "New")));
+        assert_eq!(names(&next(&lab).unwrap()), ["T3", "T4", "T5"]);
+        // The first track deleted instead (put back, then taken out): T3 is still next.
+        fake::with(|s| s.tracks = eight());
+        fake::with(|s| {
+            s.tracks.remove(0);
+        });
+        assert_eq!(names(&next(&lab).unwrap()), ["T3", "T4", "T5"]);
+        // The row the cursor points at is deleted: the list changed under it, and the page says so.
+        fake::with(|s| s.tracks.retain(|t| t.guid != "{T3}"));
+        let (code, message) = next(&lab).unwrap_err();
+        assert_eq!(code, "changed");
+        assert!(message.contains("read again from the start"), "{message}");
+    }
+
+    #[test]
+    fn items_fx_markers_and_sends_go_on_from_their_row_too() {
+        use crate::reaper::fake::{FakeFx, FakeItem, FakeMarker, FakeSend};
+        let lab = Lab::new();
+        fake::with(|s| {
+            s.tracks = vec![FakeTrack::new("{A}", "A"), FakeTrack::new("{B}", "B")];
+            let item = |n: u32, at: f64| FakeItem::new(&format!("{{I{n}}}"), at, 1.0, vec![]);
+            s.tracks[0].items = (1..=4).map(|n| item(n, n as f64)).collect();
+            s.tracks[1].items = vec![item(5, 1.0), item(6, 2.0)];
+            s.tracks[0].fx = (1..=4).map(|n| FakeFx::new(&format!("{{F{n}}}"), &format!("fx{n}"))).collect();
+            s.markers = (1..=4)
+                .map(|n| FakeMarker {
+                    guid: format!("{{M{n}}}"),
+                    is_region: false,
+                    start: n as f64,
+                    end: n as f64,
+                    name: format!("m{n}"),
+                    number: n,
+                    color: 0,
+                })
+                .collect();
+        });
+        let refs =
+            |rows: &Value| rows["items"].as_array().unwrap().iter().map(|r| r["ref"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        // The items of the whole project: two on a page, the cursor points at I3. An item added before it, in front of the
+        // track's others, doesn't make I2 come again.
+        let first = lab.read(json!({"kind": "item", "limit": 2})).unwrap();
+        assert_eq!(refs(&first), ["r:item:{I1}", "r:item:{I2}"]);
+        fake::with(|s| s.tracks[0].items.insert(0, FakeItem::new("{I0}", 0.0, 1.0, vec![])));
+        let second = lab.read(json!({"kind": "item", "limit": 2, "cursor": first["nextCursor"]})).unwrap();
+        assert_eq!(refs(&second), ["r:item:{I3}", "r:item:{I4}"]);
+        // The same under one track.
+        let first = lab.read(json!({"kind": "item", "parent": "r:track:{A}", "limit": 2})).unwrap();
+        assert_eq!(refs(&first), ["r:item:{I0}", "r:item:{I1}"]);
+        fake::with(|s| {
+            s.tracks[0].items.remove(0);
+        });
+        let second = lab.read(json!({"kind": "item", "parent": "r:track:{A}", "limit": 2, "cursor": first["nextCursor"]})).unwrap();
+        assert_eq!(refs(&second), ["r:item:{I2}", "r:item:{I3}"]);
+        // An item deleted that the cursor pointed at.
+        fake::with(|s| s.tracks[0].items.retain(|i| i.guid != "{I2}"));
+        let gone = lab.read(json!({"kind": "item", "parent": "r:track:{A}", "limit": 2, "cursor": first["nextCursor"]})).unwrap_err();
+        assert_eq!(gone.0, "changed");
+        // FX.
+        let first = lab.read(json!({"kind": "fx", "parent": "r:track:{A}", "limit": 2})).unwrap();
+        fake::with(|s| s.tracks[0].fx.insert(0, FakeFx::new("{F0}", "fx0")));
+        let second = lab.read(json!({"kind": "fx", "parent": "r:track:{A}", "limit": 2, "cursor": first["nextCursor"]})).unwrap();
+        assert_eq!(refs(&second), ["r:fx:{F3}", "r:fx:{F4}"]);
+        // Markers.
+        let first = lab.read(json!({"kind": "marker", "limit": 2})).unwrap();
+        fake::with(|s| s.markers.insert(0, FakeMarker { guid: "{M0}".into(), name: "m0".into(), ..s.markers[0].clone() }));
+        let second = lab.read(json!({"kind": "marker", "limit": 2, "cursor": first["nextCursor"]})).unwrap();
+        assert_eq!(refs(&second), ["r:marker:{M3}", "r:marker:{M4}"]);
+        // Sends: two to one track, then one more is made before the cursor.
+        fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(1), FakeSend::to(1)]);
+        let first = lab.read(json!({"kind": "send", "parent": "r:track:{A}", "limit": 1})).unwrap();
+        fake::with(|s| s.tracks[0].sends.push(FakeSend::to(1)));
+        // The pair has three now: the cursor named the first of two, which is no row any more.
+        let (code, _) = lab.read(json!({"kind": "send", "parent": "r:track:{A}", "limit": 1, "cursor": first["nextCursor"]})).unwrap_err();
+        assert_eq!(code, "changed");
+    }
+
+    /// A position past the count wrapped to a negative i32 and ran REAPER's main thread through tens of thousands of
+    /// calls; a cursor that points past the end of a list is refused instead.
+    #[test]
+    fn a_cursor_past_the_end_is_refused_not_walked() {
+        let lab = Lab::new();
+        let epoch = lab.reads.epoch();
+        let far = format!("c1.{epoch}.{}", u32::MAX as u64 - 3);
+        let farther = format!("c1.{epoch}.{}", 1u64 << 31);
+        fake::with(|s| s.calls = 0);
+        for cursor in [&far, &farther] {
+            for params in [
+                json!({"kind": "marker", "cursor": cursor}),
+                json!({"kind": "track", "cursor": cursor}),
+                json!({"kind": "note", "parent": "r:take:{TAKE-S1}", "cursor": cursor}),
+                json!({"kind": "param", "parent": "r:fx:{FX-EQ}", "cursor": cursor}),
+            ] {
+                let (code, _) = lab.read(params.clone()).unwrap_err();
+                assert_eq!(code, "changed", "{params}");
+            }
+        }
+        // The MIDI body too, and the arrange body.
+        let api = fake::api();
+        let body = |params: Value| lab.reads.focus_body(&Reaper::new(&api), &params);
+        assert_eq!(body(json!({"kind": "midi", "ref": "r:take:{TAKE-S1}", "cursor": far})).unwrap_err().0, "changed");
+        assert_eq!(body(json!({"kind": "arrange", "cursor": farther})).unwrap_err().0, "changed");
+        let calls = fake::with(|s| s.calls);
+        assert!(calls < 200, "{calls} calls to refuse a cursor");
+    }
+
+    fn set_track(index: usize, values: &[(&str, f64)]) {
+        fake::with(|s| {
+            for (key, value) in values {
+                s.tracks[index].extra.insert((*key).into(), *value);
+            }
+        });
+    }
+
+    /// What a mixer strip shows beyond the fader, and what a power user checks before they change a track.
+    #[test]
+    fn a_track_row_says_how_it_pans_records_and_is_shown_and_which_folder_it_is_in() {
+        let lab = Lab::new();
+        let rows = lab.rows(json!({"kind": "track"}));
+        let row = |n: usize| &rows[n];
+        // The defaults of a new track; Kick is in Drums' folder, Drums is open, and the master has no parent.
+        let kick = rows.iter().find(|r| r["name"] == "Kick").unwrap();
+        assert_eq!(
+            (&kick["channels"], &kick["panMode"], &kick["width"], &kick["panLaw"], &kick["dualPan"]),
+            (&json!(2), &json!("balance"), &json!(1.0), &Value::Null, &Value::Null)
+        );
+        assert_eq!(
+            (&kick["phaseInverted"], &kick["fxEnabled"], &kick["shownInArrange"], &kick["shownInMixer"], &kick["folderState"]),
+            (&json!(false), &json!(true), &json!(true), &json!(true), &Value::Null)
+        );
+        assert_eq!(
+            (&kick["parentRef"], &kick["recordInput"], &kick["recordMode"], &kick["monitoring"]),
+            (&json!("r:track:{AAAA}"), &json!({"kind": "none"}), &json!("input"), &json!("off"))
+        );
+        assert_eq!((&kick["automationMode"], &kick["itemLayout"], kick.get("lanes")), (&json!("trim"), &json!("normal"), None));
+        assert_eq!(rows.iter().find(|r| r["name"] == "Drums").unwrap()["parentRef"], Value::Null);
+        assert_eq!(rows.iter().find(|r| r["name"] == "Drums").unwrap()["folderState"], "open");
+        assert_eq!(row(0)["master"], true);
+        assert_eq!(row(0).get("parentRef"), None);
+        // A dual-pan track, narrowed, with a pan law, inverted, its FX chain bypassed, hidden in the arrange view, a
+        // collapsed folder, recording MIDI from every device on channel 3, monitoring, overdubbing, in touch mode.
+        set_track(
+            1,
+            &[
+                ("I_PANMODE", 6.0),
+                ("D_DUALPANL", -1.0),
+                ("D_DUALPANR", 0.5),
+                ("D_WIDTH", 0.25),
+                ("D_PANLAW", 0.5),
+                ("B_PHASE", 1.0),
+                ("I_FXEN", 0.0),
+                ("B_SHOWINTCP", 0.0),
+                ("I_NCHAN", 6.0),
+                ("I_RECINPUT", (4096 | (63 << 5) | 3) as f64),
+                ("I_RECMODE", 7.0),
+                ("I_RECMON", 1.0),
+                ("I_AUTOMODE", 2.0),
+            ],
+        );
+        set_track(0, &[("I_FOLDERCOMPACT", 2.0)]);
+        let rows = lab.rows(json!({"kind": "track"}));
+        let kick = rows.iter().find(|r| r["name"] == "Kick").unwrap();
+        assert_eq!(
+            (&kick["panMode"], &kick["dualPan"], &kick["width"], &kick["panLaw"], &kick["channels"]),
+            (&json!("dual"), &json!({"left": -1.0, "right": 0.5}), &json!(0.25), &json!(0.5), &json!(6))
+        );
+        assert_eq!(
+            (&kick["phaseInverted"], &kick["fxEnabled"], &kick["shownInArrange"], &kick["shownInMixer"]),
+            (&json!(true), &json!(false), &json!(false), &json!(true))
+        );
+        assert_eq!(kick["recordInput"], json!({"kind": "midi", "channel": 3, "device": "all"}));
+        assert_eq!(
+            (&kick["recordMode"], &kick["monitoring"], &kick["automationMode"]),
+            (&json!("midi-overdub"), &json!("on"), &json!("touch"))
+        );
+        assert_eq!(rows.iter().find(|r| r["name"] == "Drums").unwrap()["folderState"], "fully-collapsed");
+        // A new track follows the project's default pan mode (REAPER stores -1).
+        set_track(1, &[("I_PANMODE", -1.0)]);
+        assert_eq!(lab.rows(json!({"ref": "r:track:{BBBB}"}))[0]["panMode"], "default");
+        // Audio inputs, mono and stereo and multichannel, and the virtual keyboard.
+        for (value, expected) in [
+            (512.0, json!({"kind": "audio", "first": 513, "layout": "mono"})),
+            ((1024 | 2) as f64, json!({"kind": "audio", "first": 3, "layout": "stereo"})),
+            ((2048 | 4) as f64, json!({"kind": "audio", "first": 5, "layout": "multichannel"})),
+            ((4096 | (62 << 5)) as f64, json!({"kind": "midi", "channel": 0, "device": "virtual-keyboard"})),
+            ((4096 | (3 << 5) | 16) as f64, json!({"kind": "midi", "channel": 16, "device": "3"})),
+        ] {
+            set_track(1, &[("I_RECINPUT", value)]);
+            assert_eq!(lab.rows(json!({"ref": "r:track:{BBBB}"}))[0]["recordInput"], expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_track_with_fixed_lanes_names_them_says_which_play_and_its_items_say_if_theirs_does() {
+        let lab = Lab::new();
+        set_track(
+            1,
+            &[("I_FREEMODE", 2.0), ("I_NUMFIXEDLANES", 3.0), ("C_LANEPLAYS:0", 0.0), ("C_LANEPLAYS:1", 1.0), ("C_LANEPLAYS:2", 2.0)],
+        );
+        fake::with(|s| {
+            s.tracks[1].lane_names = vec!["Take 1".into(), "Take 2".into(), "Take 3".into()];
+            s.tracks[1].items[0].lane = 1;
+            s.tracks[1].items[0].extra.insert("C_LANEPLAYS".into(), 1.0);
+            s.tracks[1].items[1].extra.insert("C_LANEPLAYS".into(), -1.0);
+        });
+        let track = &lab.rows(json!({"ref": "r:track:{BBBB}"}))[0];
+        assert_eq!(track["itemLayout"], "lanes");
+        assert_eq!(
+            track["lanes"],
+            json!([
+                {"index": 0, "name": "Take 1", "plays": "no"},
+                {"index": 1, "name": "Take 2", "plays": "only"},
+                {"index": 2, "name": "Take 3", "plays": "with-others"},
+            ])
+        );
+        let items = lab.rows(json!({"kind": "item", "parent": "r:track:{BBBB}"}));
+        assert_eq!((&items[0]["lane"], &items[0]["lanePlays"], &items[1]["lanePlays"]), (&json!(1), &json!("only"), &json!("hidden")));
+        // Items on a track without fixed lanes have no lane to play.
+        let drums = lab.rows(json!({"kind": "item", "parent": "r:track:{CCCC}"}));
+        assert_eq!(drums[0]["lanePlays"], Value::Null);
+    }
+
+    #[test]
+    fn a_send_says_its_phase_mono_midi_and_automation_and_links_its_envelopes() {
+        use crate::reaper::fake::FakeEnvelope;
+        let lab = Lab::new();
+        fake::with(|s| {
+            let send = &mut s.tracks[0].sends[0];
+            send.extra.insert("B_PHASE".into(), 1.0);
+            send.extra.insert("B_MONO".into(), 1.0);
+            send.extra.insert("I_AUTOMODE".into(), 3.0);
+            send.extra.insert("I_MIDIFLAGS".into(), (31) as f64);
+            s.tracks[0].envelopes.push(FakeEnvelope::for_send("Send Volume: Reverb", 0, "<VOLENV", 3));
+            s.tracks[0].envelopes.push(FakeEnvelope::for_send("Send Mute: Reverb", 0, "<MUTEENV", 1));
+            // REAPER hands out a pan envelope for the send too, with no points and not in use: it isn't listed.
+            s.tracks[0].envelopes.push(FakeEnvelope { active: false, ..FakeEnvelope::for_send("Send Pan: Reverb", 0, "<PANENV", 0) });
+        });
+        let sends = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
+        let send = &sends[0];
+        assert_eq!((&send["phaseInverted"], &send["mono"], &send["automationMode"]), (&json!(true), &json!(true), &json!("write")));
+        assert_eq!(send["midi"], json!({"enabled": false, "srcChannel": 0, "dstChannel": 0, "srcBus": 0, "dstBus": 0, "faders": false}));
+        assert_eq!(send["envelopeRefs"], json!(["r:env:{AAAA}:{ENV-SEND0-VOLENV}", "r:env:{AAAA}:{ENV-SEND0-MUTEENV}"]));
+        // The ref reads the envelope.
+        assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:{ENV-SEND0-VOLENV}"}))[0]["name"], "Send Volume: Reverb");
+        // The defaults of a send: MIDI on, from every channel to the original, the track's own automation mode.
+        fake::with(|s| s.tracks[0].sends[0].extra.clear());
+        let send = &lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}))[0];
+        assert_eq!(send["midi"]["enabled"], true);
+        assert_eq!((&send["automationMode"], &send["phaseInverted"], &send["mono"]), (&json!("track"), &json!(false), &json!(false)));
+        // Channels 3 to 5, buses 2 and 3, the faders sending MIDI volume and pan.
+        let flags = 3 | (5 << 5) | 1024 | (2 << 14) | (3 << 22);
+        fake::with(|s| s.tracks[0].sends[0].extra.insert("I_MIDIFLAGS".into(), flags as f64));
+        let send = &lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}))[0];
+        assert_eq!(send["midi"], json!({"enabled": true, "srcChannel": 3, "dstChannel": 5, "srcBus": 2, "dstBus": 3, "faders": true}));
+        // A receive has MIDI flags too; a hardware output has no MIDI to speak of.
+        let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
+        assert!(reverb[0].get("midi").is_some() && reverb[1].get("midi").is_none() && reverb[0].get("envelopeRefs").is_none());
+    }
+
+    /// A time signature counts its own beats (eighths in 6/8); the transport counts quarter notes throughout.
+    #[test]
+    fn the_beat_in_a_bar_counts_quarter_notes_in_any_time_signature() {
+        let lab = Lab::new();
+        fake::with(|s| {
+            s.time_signature = (6, 8);
+            s.cursor = 0.75; // 1.5 quarter notes in at 120 bpm: three eighths
+        });
+        let transport = snapshot(&lab).unwrap()["transport"].clone();
+        assert_eq!((&transport["bar"], &transport["beatInBar"], &transport["beatsPerBar"]), (&json!(1), &json!(2.5), &json!(3.0)));
+    }
+
+    #[test]
+    fn errors_do_not_quote_the_refs_they_are_about() {
+        let lab = Lab::new();
+        for reference in [
+            "r:track:{NOPE}",
+            "r:item:{NOPE}",
+            "r:take:{NOPE}",
+            "r:fx:{NOPE}",
+            "r:param:{FX-EQ}:99",
+            "r:send:{AAAA}:0:{NOPE}",
+            "r:marker:{NOPE}",
+            "r:region:{NOPE}",
+            "r:env:{AAAA}:{NOPE}",
+        ] {
+            let (_, message) = lab.read(json!({"ref": reference})).unwrap_err();
+            assert!(!message.contains("{NOPE}") && !message.contains("r:"), "{reference}: {message}");
+        }
+    }
+
+    #[test]
+    fn an_item_is_drawn_in_its_active_takes_own_colour_when_it_has_one() {
+        let lab = Lab::new();
+        let red = fake::native_color(255, 0, 0);
+        let green = fake::native_color(0, 255, 0);
+        fake::with(|s| s.tracks[1].items[0].color = green);
+        assert_eq!(lab.rows(json!({"ref": "r:item:{ITEM-K1}"}))[0]["color"], "#00ff00");
+        fake::with(|s| {
+            s.tracks[1].items[0].takes[0].extra.insert("I_CUSTOMCOLOR".into(), red as f64);
+        });
+        assert_eq!(lab.rows(json!({"ref": "r:item:{ITEM-K1}"}))[0]["color"], "#ff0000");
+        // And in the arrange body.
+        let api = fake::api();
+        let body = lab.reads.focus_body(&Reaper::new(&api), &json!({"kind": "arrange"})).unwrap();
+        let kick = body["tracks"].as_array().unwrap().iter().find(|t| t["name"] == "Kick").unwrap().clone();
+        assert_eq!(kick["items"][0]["color"], "#ff0000");
+    }
+
+    /// REAPER keeps a GUID through a copy made as text (a script setting one track's chunk on another): the registry kept
+    /// the last object it found, and a ref read whichever that was.
+    #[test]
+    fn a_guid_two_objects_have_names_neither_until_one_is_gone() {
+        use crate::reaper::fake::FakeFx;
+        let lab = Lab::new();
+        // A track copied as text: the same GUID on its track, its items and its FX.
+        fake::with(|s| {
+            let mut copy = s.tracks[1].clone();
+            copy.name = "Kick copy".into();
+            s.tracks.push(copy);
+        });
+        for (reference, kind) in [("r:track:{BBBB}", "track"), ("r:item:{ITEM-K1}", "item")] {
+            let (code, message) = lab.read(json!({"ref": reference})).unwrap_err();
+            assert_eq!(code, "failed", "{reference}");
+            assert!(message.contains(&format!("two {kind}s in the project have that id")), "{message}");
+        }
+        // The track's own rows still list both, whatever their refs say.
+        assert_eq!(lab.rows(json!({"kind": "track"})).iter().filter(|t| t["ref"] == "r:track:{BBBB}").count(), 2);
+        // The copy is removed: the refs name the one that is left, and the registry has forgotten the clash.
+        fake::with(|s| {
+            s.tracks.pop();
+        });
+        assert_eq!(lab.rows(json!({"ref": "r:track:{BBBB}"}))[0]["name"], "Kick");
+        assert_eq!(lab.rows(json!({"ref": "r:item:{ITEM-K1}"}))[0]["name"], "kick.wav");
+        // The same FX on two tracks.
+        fake::with(|s| s.tracks[1].fx = vec![FakeFx::new("{FX-EQ}", "VST3: ReaEQ (Cockos)")]);
+        let (code, message) = lab.read(json!({"ref": "r:fx:{FX-EQ}"})).unwrap_err();
+        assert_eq!(code, "failed");
+        assert!(message.contains("two FXs in the project have that id"), "{message}");
+    }
+
     #[test]
     fn limits_default_to_fifty_and_stop_at_two_hundred() {
         let lab = Lab::new();
         fake::with(|s| s.tracks = (0..260).map(|i| FakeTrack::new(&format!("{{T{i}}}"), "t")).collect());
         assert_eq!(lab.rows(json!({"kind": "track"})).len(), DEFAULT_LIMIT);
-        assert_eq!(lab.rows(json!({"kind": "track", "limit": 500})).len(), MAX_LIMIT);
-        for bad_limit in [json!(0), json!(-1), json!("ten"), json!(1.5)] {
+        assert_eq!(lab.rows(json!({"kind": "track", "limit": 200})).len(), MAX_LIMIT);
+        // Over the most is refused, not quietly cut, as Renoise's tool does.
+        for bad_limit in [json!(0), json!(-1), json!("ten"), json!(1.5), json!(201), json!(500)] {
             assert_eq!(lab.read(json!({"kind": "track", "limit": bad_limit})).unwrap_err().0, "bad-params");
         }
     }
@@ -1122,7 +1644,7 @@ mod tests {
         let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
         assert_eq!(
             reverb.iter().map(|r| r["ref"].as_str().unwrap()).collect::<Vec<_>>(),
-            ["r:send:{DDDD}:-1:{AAAA}", "r:send:{DDDD}:1:hw0"]
+            ["r:send:{DDDD}:-1:{AAAA}", "r:send:{DDDD}:1:hw2"]
         );
         // A receive's other track is where it comes from.
         assert_eq!(
@@ -1187,39 +1709,80 @@ mod tests {
     }
 
     #[test]
-    fn envelopes_are_named_by_chunk_or_by_fx_and_parameter() {
+    fn envelopes_are_named_by_their_guid_and_an_fx_ones_say_which_fx_and_parameter() {
         let lab = Lab::new();
         let envelopes = lab.rows(json!({"kind": "envelope", "parent": "r:track:{AAAA}"}));
         assert_eq!(
             envelopes.iter().map(|r| r["ref"].as_str().unwrap()).collect::<Vec<_>>(),
-            ["r:env:{AAAA}:VOLENV2", "r:env:{AAAA}:{FX-EQ}:1"]
+            ["r:env:{AAAA}:{ENV-VOLENV2}", "r:env:{AAAA}:{ENV-FX-EQ-1}"]
         );
         assert_eq!(
             (&envelopes[0]["name"], &envelopes[0]["pointCount"], &envelopes[0]["armed"], &envelopes[0]["visible"]),
             (&json!("Volume"), &json!(4), &json!(false), &json!(true))
         );
+        assert_eq!((&envelopes[0]["fxRef"], &envelopes[0]["param"]), (&Value::Null, &Value::Null));
+        assert_eq!((&envelopes[1]["fxRef"], &envelopes[1]["param"]), (&json!("r:fx:{FX-EQ}"), &json!(1)));
         // An FX lists its own.
         let of_fx = lab.rows(json!({"kind": "envelope", "parent": "r:fx:{FX-EQ}"}));
         assert_eq!(of_fx.len(), 1);
-        assert_eq!(of_fx[0]["ref"], "r:env:{AAAA}:{FX-EQ}:1");
-        // And a ref reads back to the same row.
+        assert_eq!(of_fx[0]["ref"], "r:env:{AAAA}:{ENV-FX-EQ-1}");
+        // And a ref reads back to the same row; the chunk name and the FX-and-parameter forms are aliases of it.
+        assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:{ENV-VOLENV2}"}))[0], envelopes[0]);
+        assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:{ENV-FX-EQ-1}"}))[0], envelopes[1]);
         assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:VOLENV2"}))[0], envelopes[0]);
         assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:{FX-EQ}:1"}))[0], envelopes[1]);
+        // The GUID is the track's own to name: another track's envelope isn't read through it.
+        assert_eq!(lab.read(json!({"ref": "r:env:{BBBB}:{ENV-VOLENV2}"})).unwrap_err().0, "failed");
+    }
+
+    /// Send, dual-pan, tempo and the like have no chunk name a ref could use, and an FX envelope was found by probing the
+    /// parameters: every envelope was named by its place in the track's list, which others coming and going change.
+    #[test]
+    fn an_envelope_ref_holds_when_other_envelopes_come_and_go() {
+        use crate::reaper::fake::FakeEnvelope;
+        let lab = Lab::new();
+        let send = |name: &str, guid: &str, points: i32| FakeEnvelope {
+            chunk: None,
+            fx_param: None,
+            guid: guid.into(),
+            ..FakeEnvelope::own(name, "", points)
+        };
+        fake::with(|s| {
+            s.tracks[1].envelopes =
+                vec![send("Send Volume: Delay", "{ENV-SEND-DELAY}", 3), send("Send Volume: Reverb", "{ENV-SEND-REVERB}", 9)]
+        });
+        let rows = lab.rows(json!({"kind": "envelope", "parent": "r:track:{BBBB}"}));
+        assert_eq!(
+            rows.iter().map(|r| r["ref"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["r:env:{BBBB}:{ENV-SEND-DELAY}", "r:env:{BBBB}:{ENV-SEND-REVERB}"]
+        );
+        let name_of = |reference: &str| lab.rows(json!({"ref": reference}))[0]["name"].clone();
+        assert_eq!(name_of("r:env:{BBBB}:{ENV-SEND-REVERB}"), json!("Send Volume: Reverb"));
+        // The producer shows the track's own Volume envelope, which REAPER lists first.
+        fake::with(|s| s.tracks[1].envelopes.insert(0, FakeEnvelope::own("Volume", "<VOLENV2", 0)));
+        assert_eq!(name_of("r:env:{BBBB}:{ENV-SEND-REVERB}"), json!("Send Volume: Reverb"));
+        // The producer removes the Delay send and its envelope: its ref names nothing, and Reverb's still reads Reverb.
+        fake::with(|s| s.tracks[1].envelopes.retain(|e| e.guid != "{ENV-SEND-DELAY}"));
+        assert_eq!(lab.read(json!({"ref": "r:env:{BBBB}:{ENV-SEND-DELAY}"})).unwrap_err().0, "failed");
+        assert_eq!(name_of("r:env:{BBBB}:{ENV-SEND-REVERB}"), json!("Send Volume: Reverb"));
     }
 
     #[test]
-    fn an_envelope_nothing_names_falls_back_to_its_position() {
+    fn an_fx_with_thousands_of_parameters_is_not_probed_parameter_by_parameter() {
+        use crate::reaper::fake::{FakeEnvelope, FakeFx, FakeParam};
         let lab = Lab::new();
         fake::with(|s| {
-            s.tracks[1].envelopes.push(crate::reaper::fake::FakeEnvelope {
-                chunk: None,
-                fx_param: None,
-                ..crate::reaper::fake::FakeEnvelope::own("Mystery", "", 1)
-            })
+            let mut big = FakeFx::new("{FX-BIG}", "VST3: Big (Vendor)");
+            big.params = (0..8000).map(|i| FakeParam::new(&format!("Param {i}"), 0.5, "0.5")).collect();
+            s.tracks[1].fx = vec![big];
+            s.tracks[1].envelopes = vec![FakeEnvelope::for_param("Param 7000", "{FX-BIG}", 7000, 2)];
         });
-        let envelopes = lab.rows(json!({"kind": "envelope", "parent": "r:track:{BBBB}"}));
-        assert_eq!(envelopes[0]["ref"], "r:env:{BBBB}:i0");
-        assert_eq!(lab.rows(json!({"ref": "r:env:{BBBB}:i0"}))[0]["name"], "Mystery");
+        fake::with(|s| s.calls = 0);
+        let rows = lab.rows(json!({"kind": "envelope", "parent": "r:track:{BBBB}"}));
+        assert_eq!(rows[0]["ref"], "r:env:{BBBB}:{ENV-FX-BIG-7000}");
+        assert_eq!((&rows[0]["fxRef"], &rows[0]["param"]), (&json!("r:fx:{FX-BIG}"), &json!(7000)));
+        let calls = fake::with(|s| s.calls);
+        assert!(calls < 100, "{calls} calls to find one envelope");
     }
 
     #[test]
@@ -1252,7 +1815,7 @@ mod tests {
             "r:fx:{NOPE}",
             "r:param:{FX-EQ}:99",
             "r:send:{AAAA}:0:{NOPE}",
-            "r:send:{AAAA}:0:{DDDD}:2",
+            "r:send:{AAAA}:0:{DDDD}:2of2",
             "r:send:{AAAA}:1:hw5",
             "r:marker:{NOPE}",
             "r:region:{NOPE}",
@@ -1475,7 +2038,7 @@ mod tests {
     }
 
     #[test]
-    fn several_sends_to_one_track_are_told_apart_by_a_count_from_two_and_a_reorder_keeps_them() {
+    fn several_sends_to_one_track_are_told_apart_by_which_of_how_many_and_a_reorder_keeps_them() {
         use crate::reaper::fake::FakeSend;
         let lab = Lab::new();
         let mut loud = FakeSend::to(3);
@@ -1485,14 +2048,78 @@ mod tests {
         fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(3), FakeSend::to(1), loud, louder]);
         let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
         let refs: Vec<&str> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
-        assert_eq!(refs, ["r:send:{AAAA}:0:{DDDD}", "r:send:{AAAA}:0:{BBBB}", "r:send:{AAAA}:0:{DDDD}:2", "r:send:{AAAA}:0:{DDDD}:3"]);
+        assert_eq!(
+            refs,
+            ["r:send:{AAAA}:0:{DDDD}:1of3", "r:send:{AAAA}:0:{BBBB}", "r:send:{AAAA}:0:{DDDD}:2of3", "r:send:{AAAA}:0:{DDDD}:3of3"]
+        );
         let volume = |lab: &Lab, reference: &str| lab.rows(json!({"ref": reference}))[0]["volumeDb"].clone();
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3"), json!(-12.04));
+        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3of3"), json!(-12.04));
         // A send to another track moves to the front: the others keep their refs, and so their sends.
         fake::with(|s| s.tracks[0].sends.swap(0, 1));
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:2"), json!(-6.02));
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3"), json!(-12.04));
+        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:2of3"), json!(-6.02));
+        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3of3"), json!(-12.04));
         assert_eq!(lab.rows(json!({"ref": "r:send:{AAAA}:0:{BBBB}"}))[0]["index"], 0);
+    }
+
+    /// REAPER gives a send no identity: once the number of sends to one place changes, a ref to one of them could name any,
+    /// so it names none (a position would read the other send, whose own ref would then fail).
+    #[test]
+    fn removing_one_of_two_sends_to_a_track_leaves_its_ref_and_the_others_naming_nothing() {
+        use crate::reaper::fake::FakeSend;
+        let lab = Lab::new();
+        let mut quiet = FakeSend::to(3);
+        quiet.volume = 0.25;
+        fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(3), quiet]);
+        let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
+        let refs: Vec<&str> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
+        assert_eq!(refs, ["r:send:{AAAA}:0:{DDDD}:1of2", "r:send:{AAAA}:0:{DDDD}:2of2"]);
+        assert_eq!(lab.rows(json!({"ref": refs[0]}))[0]["volumeDb"], json!(0.0));
+        // The producer deletes the 0 dB send. Its ref no longer reads the quiet one, and the quiet one's own ref says why.
+        fake::with(|s| {
+            s.tracks[0].sends.remove(0);
+        });
+        for reference in refs {
+            let (code, message) = lab.read(json!({"ref": reference})).unwrap_err();
+            assert_eq!(code, "failed", "{reference}");
+            assert!(message.contains("1 such send now") && message.contains("there were 2"), "{message}");
+        }
+        // What is read now has the plain ref of a send alone.
+        assert_eq!(lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}))[0]["ref"], "r:send:{AAAA}:0:{DDDD}");
+        // A send added to a pair that had one: the ref made then reads nothing either.
+        fake::with(|s| s.tracks[0].sends.push(FakeSend::to(3)));
+        let (_, message) = lab.read(json!({"ref": "r:send:{AAAA}:0:{DDDD}"})).unwrap_err();
+        assert!(message.contains("2 such sends now") && message.contains("when there was one"), "{message}");
+        // Receives are told apart the same way.
+        let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
+        assert_eq!(reverb[0]["ref"], "r:send:{DDDD}:-1:{AAAA}:1of2");
+    }
+
+    /// A hardware output is named by the output it goes to, so removing another output doesn't rename it.
+    #[test]
+    fn hardware_outputs_are_named_by_the_output_not_by_their_place_in_the_list() {
+        use crate::reaper::fake::FakeSend;
+        let lab = Lab::new();
+        let out = |dst_chan: i32, volume: f64| FakeSend { dst_chan, volume, ..FakeSend::to(0) };
+        fake::with(|s| s.tracks[3].hw_outs = vec![out(0, 1.0), out(2, 0.5), out(3 | 1024, 0.25)]);
+        let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
+        let refs: Vec<&str> = rows.iter().filter(|r| r["category"] == 1).map(|r| r["ref"].as_str().unwrap()).collect();
+        assert_eq!(refs, ["r:send:{DDDD}:1:hw0", "r:send:{DDDD}:1:hw2", "r:send:{DDDD}:1:hw3m"]);
+        let volume = |reference: &str| lab.rows(json!({"ref": reference}))[0]["volumeDb"].clone();
+        assert_eq!(volume("r:send:{DDDD}:1:hw2"), json!(-6.02));
+        // The producer deletes Out 1/2. Its ref reads nothing; the others still read their own output.
+        fake::with(|s| {
+            s.tracks[3].hw_outs.remove(0);
+        });
+        let (code, _) = lab.read(json!({"ref": "r:send:{DDDD}:1:hw0"})).unwrap_err();
+        assert_eq!(code, "failed");
+        assert_eq!(volume("r:send:{DDDD}:1:hw2"), json!(-6.02));
+        assert_eq!(volume("r:send:{DDDD}:1:hw3m"), json!(-12.04));
+        // Two outputs to the same channels are told apart like sends to one track.
+        fake::with(|s| s.tracks[3].hw_outs.push(out(2, 0.125)));
+        let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
+        let refs: Vec<&str> = rows.iter().filter(|r| r["category"] == 1).map(|r| r["ref"].as_str().unwrap()).collect();
+        assert_eq!(refs, ["r:send:{DDDD}:1:hw2:1of2", "r:send:{DDDD}:1:hw3m", "r:send:{DDDD}:1:hw2:2of2"]);
+        assert_eq!(volume("r:send:{DDDD}:1:hw2:2of2"), json!(-18.06));
     }
 
     #[test]

@@ -103,7 +103,7 @@ fn fx_of_hit(reaper: &Reaper, proj: Project, hit: &FxHit) -> Option<Fx> {
 
 /// The FX with the focus (`GetTouchedOrFocusedFX` mode 1): its ref and name.
 fn focused_fx(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<(String, String)> {
-    let hit = reaper.touched_or_focused_fx(1)?;
+    let hit = reads.touched_fx(reaper, 1)?;
     // Parm 1 says the window is still open but something else has the focus.
     if hit.param & 1 != 0 {
         return None;
@@ -117,9 +117,20 @@ fn focused_fx(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<(String, 
     Some((refs::fx_ref(&guid), rows::clip(&reaper.fx_name(fx))))
 }
 
+/// The track a floating routing and I/O window is about, when that window has the keyboard focus: REAPER titles it
+/// `Routing for track 2: Lead` (View > Routing and I/O for a track). None when it isn't the window in front, or the
+/// platform can't say. (REAPER in another language titles it in that language, and then the view stays `arrange`.)
+fn routing_window(reaper: &Reaper, proj: Project) -> Option<Option<String>> {
+    let title = crate::window::front_title()?;
+    let rest = title.strip_prefix("Routing for track ")?;
+    let number: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let track = number.parse::<i32>().ok().filter(|&n| n >= 1).and_then(|n| reaper.track_at(proj, n - 1));
+    Some(track.map(|track| refs::track_ref(&rows::track_id(reaper, track))))
+}
+
 /// The parameter touched last, named for the header: `{name, value, formatted, fxRef}`.
 fn touched_param(reads: &Reads, reaper: &Reaper, proj: Project) -> Option<Value> {
-    let hit = reaper.touched_or_focused_fx(0)?;
+    let hit = reads.touched_fx(reaper, 0)?;
     let fx = fx_of_hit(reaper, proj, &hit)?;
     let guid = reaper.fx_guid(fx);
     if guid.is_empty() || hit.param < 0 || hit.param >= reaper.fx_param_count(fx) {
@@ -182,10 +193,13 @@ impl Focus {
         let midi = reaper.focused_midi_take();
         let midi_focused = midi.is_some() || reaper.midi_editor_focused();
         let focused_fx = if midi_focused { None } else { focused_fx(reads, reaper, proj) };
+        let routing = if midi_focused || focused_fx.is_some() { None } else { routing_window(reaper, proj) };
         let view = if midi_focused {
             "midi"
         } else if focused_fx.is_some() {
             "fx"
+        } else if routing.is_some() {
+            "routing"
         } else {
             "arrange"
         };
@@ -208,6 +222,8 @@ impl Focus {
         if let Some(param) = touched_param(reads, reaper, proj) {
             selection["param"] = param;
         }
+        // The routing window's own track, which is not always the selected one.
+        selection["routingTrackRef"] = routing.flatten().into();
         if let Some(take) = midi {
             add_midi_take(reads, reaper, proj, &mut selection, take);
         }
@@ -293,6 +309,44 @@ mod tests {
         let value = Focus::default().poll(&reads, &reaper, proj, true);
         assert_eq!(value["view"], "arrange");
         assert_eq!(value["selection"]["fxRef"], Value::Null);
+    }
+
+    #[test]
+    fn a_tracks_routing_window_with_the_keyboard_focus_is_the_view_and_names_its_track() {
+        let (reads, proj) = project();
+        let api = fake::api();
+        let reaper = Reaper::new(&api);
+        fake::select_tracks(&[0]);
+        // REAPER titles the window with the track's number and name.
+        fake::with(|s| s.front_title = Some("Routing for track 2: Lead \"vox\" é".into()));
+        let value = Focus::default().poll(&reads, &reaper, proj, true);
+        assert_eq!(value["view"], "routing");
+        assert_eq!(value["selection"]["routingTrackRef"], "r:track:{BBBB}");
+        // The selection is still the selection.
+        assert_eq!(value["selection"]["trackRef"], "r:track:{AAAA}");
+        // No name, or a track that isn't there any more: still the routing view, with no track to name.
+        fake::with(|s| s.front_title = Some("Routing for track 1".into()));
+        assert_eq!(Focus::default().poll(&reads, &reaper, proj, true)["selection"]["routingTrackRef"], "r:track:{AAAA}");
+        fake::with(|s| s.front_title = Some("Routing for track 40: Gone".into()));
+        let value = Focus::default().poll(&reads, &reaper, proj, true);
+        assert_eq!((&value["view"], &value["selection"]["routingTrackRef"]), (&json!("routing"), &Value::Null));
+        // The main window in front, another window, or a platform that can't say: the arrange view.
+        for title in [Some("[unsaved project] - REAPER v7.82"), Some("Routing Matrix"), Some("Mixer"), None] {
+            fake::with(|s| s.front_title = title.map(String::from));
+            let value = Focus::default().poll(&reads, &reaper, proj, true);
+            assert_eq!((&value["view"], &value["selection"]["routingTrackRef"]), (&json!("arrange"), &Value::Null), "{title:?}");
+        }
+        // A MIDI editor or an FX window with the focus wins: it is the one in front.
+        fake::with(|s| {
+            s.front_title = Some("Routing for track 1".into());
+            s.focused_fx = Some((0, -1, -1, 0, 0));
+        });
+        assert_eq!(Focus::default().poll(&reads, &reaper, proj, true)["view"], "fx");
+        fake::with(|s| {
+            s.focused_fx = None;
+            s.midi_editor = Some((1, 0, 0));
+        });
+        assert_eq!(Focus::default().poll(&reads, &reaper, proj, true)["view"], "midi");
     }
 
     #[test]

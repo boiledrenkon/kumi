@@ -39,6 +39,11 @@ fn renoise_home() -> (tempfile::TempDir, Env) {
     (dir, env)
 }
 
+/// `kumi --daw <daw> bridge --yes`.
+fn yes() -> kumi::daw::BridgeCommand {
+    kumi::daw::BridgeCommand { yes: true, ..Default::default() }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn renoises_tool_goes_in_is_found_and_chosen_and_comes_out() {
     let (dir, env) = renoise_home();
@@ -46,8 +51,16 @@ async fn renoises_tool_goes_in_is_found_and_chosen_and_comes_out() {
     assert!(!renoise.bridge_installed(&env));
     assert_eq!(chosen(None, &env).0.id(), DawId::Ableton, "nothing installed: Live's words");
 
+    // Asked first: with nobody to answer (no --yes, no terminal), nothing goes in Renoise's folder.
     let out = Rc::new(Out::default());
-    let code = renoise.setup_bridge(out.clone(), &env, Default::default()).await.unwrap();
+    assert_eq!(renoise.setup_bridge(out.clone(), &env, Default::default()).await.unwrap(), 1);
+    let said = out.0.borrow().clone();
+    assert!(said.contains("Put Kumi's tool in Renoise (") && said.contains("add --yes"), "{said}");
+    assert!(said.contains("Nothing was changed. To put it in later: ") && said.contains(" --daw renoise bridge\n"), "{said}");
+    assert!(!renoise.bridge_installed(&env) && !dir.path().join("Renoise/V3.5.4/Scripts/Tools/com.kumi.Bridge.xrnx").exists());
+
+    let out = Rc::new(Out::default());
+    let code = renoise.setup_bridge(out.clone(), &env, yes()).await.unwrap();
     assert_eq!(code, 0, "{}", out.0.borrow());
     assert!(out.0.borrow().contains("Kumi's tool 1.0.0 is in Renoise"), "{}", out.0.borrow());
     let tool = dir.path().join("Renoise/V3.5.4/Scripts/Tools/com.kumi.Bridge.xrnx");
@@ -90,7 +103,7 @@ async fn among_several_bridges_the_running_daw_then_the_last_used_is_chosen() {
     use kumi::daw::{chosen_with, remember_used};
     let (dir, mut env) = renoise_home();
     let out = Rc::new(Out::default());
-    assert_eq!(own::RENOISE.setup_bridge(out.clone(), &env, Default::default()).await.unwrap(), 0, "{}", out.0.borrow());
+    assert_eq!(own::RENOISE.setup_bridge(out.clone(), &env, yes()).await.unwrap(), 0, "{}", out.0.borrow());
     // Kumi's extension in REAPER too, as its receipt says.
     let resource = dir.path().join("REAPER");
     env.insert("KUMI_REAPER_RESOURCE_DIR".into(), resource.to_string_lossy().into_owned());
@@ -121,6 +134,32 @@ async fn among_several_bridges_the_running_daw_then_the_last_used_is_chosen() {
     let both = |provider: &dyn DawProvider| provider.id() != DawId::Ableton;
     assert_eq!(chosen_with(None, &env, &both).0.id(), DawId::Renoise, "both running: the one used last");
     assert_eq!(chosen_with(Some(DawId::Reaper), &env, &none).0.id(), DawId::Reaper, "asked for, always");
+    // Both running and none asked for: the session says which one it works with, and how to switch.
+    use kumi::daw::{also_running, also_running_words};
+    let others = also_running(DawId::Renoise, &env, &both);
+    assert_eq!(others.iter().map(|provider| provider.id()).collect::<Vec<_>>(), vec![DawId::Reaper]);
+    assert_eq!(
+        also_running_words(DawId::Renoise, &others, &env).as_deref(),
+        Some("REAPER is open too: Kumi works with Renoise, the one you used last. /daw reaper switches to REAPER.")
+    );
+    assert!(also_running(DawId::Renoise, &env, &only(DawId::Renoise)).is_empty(), "alone: nothing to say");
+}
+
+/// `/daw` says which DAW Kumi works with, and takes the DAW by the producer's name for it ("live") or Kumi's id.
+#[test]
+fn daw_says_which_daw_kumi_works_with_and_switches_by_name() {
+    use kumi::daw::{daw_command, work_with, DawCommand};
+    work_with(DawId::Reaper);
+    assert_eq!(
+        daw_command(""),
+        DawCommand::Say("Kumi works with REAPER. /daw live or /daw renoise opens Kumi again with Live or Renoise.".into())
+    );
+    for typed in [" Live", "live", "ableton"] {
+        assert_eq!(daw_command(typed), DawCommand::Switch(DawId::Ableton, "Kumi closes and opens again with Live.".into()), "{typed}");
+    }
+    assert_eq!(daw_command("reaper"), DawCommand::Say("Kumi works with REAPER already.".into()));
+    assert_eq!(daw_command("bitwig"), DawCommand::Say("Kumi doesn't know bitwig: /daw live, /daw reaper, /daw renoise.".into()));
+    work_with(DawId::Ableton);
 }
 
 /// What `kumi --daw reaper|renoise bridge`, uninstall and update say for REAPER and Renoise: their own words, never
@@ -132,7 +171,7 @@ async fn reapers_and_renoises_bridge_messages_never_speak_lives_words() {
     std::fs::create_dir_all(dir.path().join("REAPER/UserPlugins")).unwrap();
     for provider in [&own::REAPER as &dyn DawProvider, &own::RENOISE] {
         let out = Rc::new(Out::default());
-        provider.setup_bridge(out.clone(), &env, Default::default()).await.unwrap();
+        provider.setup_bridge(out.clone(), &env, yes()).await.unwrap();
         let io = kumi::install::InstalledIo::new(out.clone(), env.clone());
         let run: kumi::process::Run = Rc::new(|_, _, _| panic!("removing the bridge runs no program"));
         let _ = provider.remove_bridge(&io, run).await;

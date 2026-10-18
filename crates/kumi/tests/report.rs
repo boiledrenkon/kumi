@@ -155,6 +155,8 @@ async fn report_contains_versions_doctor_latest_conversation_gaps_live_log_witho
     }
     assert!(out.0.borrow().contains(&format!("Kumi's report is in ~{}kumi-report-2026-09-29T20-00-00.txt", std::path::MAIN_SEPARATOR)));
     let text = fs::read_to_string(file).unwrap();
+    // A Live producer's report has no sections for DAWs they never set up.
+    assert!(!text.contains("REAPER's bridge log") && !text.contains("Renoise's bridge log"), "{text}");
     for heading in [
         "## Versions",
         "## Doctor",

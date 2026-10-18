@@ -535,8 +535,14 @@ async fn compose(io: &ReportIo, redact: &dyn Fn(&str) -> String, home: &str, now
         },
     );
     // Each DAW's log: its bridge's lines and errors.
-    for provider in crate::daw::providers().into_iter().filter(|provider| crate::daw::in_use(*provider, env)) {
-        let (heading, body) = provider.report_log(env, home, io.live_logs.as_ref()).await;
+    // Each DAW's log the producer has: Live's as always, another DAW's once its bridge is in (none for a Live-only
+    // producer). Live's logs (a test's stand-in for them) are Live's alone.
+    let has_log = |provider: &&dyn crate::daw::DawProvider| {
+        crate::daw::in_use(*provider, env) && (provider.id() == kumi_runtime::core::daw::DawId::Ableton || provider.bridge_installed(env))
+    };
+    for provider in crate::daw::providers().into_iter().filter(has_log) {
+        let logs = if provider.id() == kumi_runtime::core::daw::DawId::Ableton { io.live_logs.as_ref() } else { None };
+        let (heading, body) = provider.report_log(env, home, logs).await;
         section(&heading, body);
     }
     let text=redact(&format!("# Kumi report\n\nSend this file with a few words about what happened. Keys and tokens are taken out; your home folder shows as ~.\n\n{}\n",sections.join("\n\n")));

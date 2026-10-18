@@ -9,6 +9,7 @@ pub mod csurf;
 pub mod extension;
 pub mod focus;
 pub mod log;
+pub mod projectconfig;
 pub mod queue;
 pub mod read;
 pub mod reaper;
@@ -135,6 +136,7 @@ impl Loaded {
             return;
         }
         self.register(c"-timer", on_timer as *mut c_void);
+        self.register(c"-projectconfig", projectconfig::REGISTRATION.as_ptr());
         if let Some(surface) = self.surface.borrow_mut().take() {
             self.register(c"-csurf_inst", surface.as_ptr());
             drop(surface);
@@ -204,6 +206,8 @@ fn load(info: &PluginInfo) -> c_int {
     });
     loaded.register(c"ext_name", c"Kumi".as_ptr() as *mut c_void);
     loaded.register(c"csurf_inst", surface.as_ptr());
+    // REAPER's own word that a project was loaded or made in some tab (the pointer and the file can't always say).
+    loaded.register(c"projectconfig", projectconfig::REGISTRATION.as_ptr());
     *loaded.surface.borrow_mut() = Some(surface);
     loaded.register(c"timer", on_timer as *mut c_void);
     // REAPER 7.55+; older ones still call the entry point to unload.
@@ -301,11 +305,11 @@ mod tests {
         assert!(registered().is_empty());
 
         assert_eq!(unsafe { ReaperPluginEntry(null_mut(), &mut info(api::REAPER_PLUGIN_VERSION)) }, 1);
-        assert_eq!(registered(), ["ext_name", "csurf_inst", "timer", "atexit"]);
+        assert_eq!(registered(), ["ext_name", "csurf_inst", "projectconfig", "timer", "atexit"]);
         assert_eq!(discovery_files(&discovery), 0, "no server before the first tick");
         // Loading again registers nothing more.
         assert_eq!(unsafe { ReaperPluginEntry(null_mut(), &mut info(api::REAPER_PLUGIN_VERSION)) }, 1);
-        assert_eq!(registered().len(), 4);
+        assert_eq!(registered().len(), 5);
 
         hook("timer")();
         assert_eq!(discovery_files(&discovery), 1);
@@ -313,11 +317,11 @@ mod tests {
 
         // Unloading says goodbye to REAPER and to Kumi; the quit hook coming after it does nothing more.
         assert_eq!(unsafe { ReaperPluginEntry(null_mut(), null_mut()) }, 0);
-        assert_eq!(registered()[4..], ["-timer", "-csurf_inst"]);
+        assert_eq!(registered()[5..], ["-timer", "-projectconfig", "-csurf_inst"]);
         assert_eq!(discovery_files(&discovery), 0);
         hook("atexit")();
         on_timer();
-        assert_eq!(registered().len(), 6);
+        assert_eq!(registered().len(), 8);
     }
 
     thread_local! {

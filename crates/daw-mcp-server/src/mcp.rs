@@ -72,6 +72,15 @@ pub fn tools(host: &Host) -> Value {
             "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
         },
     ]);
+    if daw == Daw::Reaper {
+        // REAPER's refs are GUIDs, which a copy of the project in another tab shares: the epoch says which project they came from.
+        let epoch = json!({
+            "type": "string",
+            "description": "The epoch of the answer the ref, parent or cursor came from. If the project in the tab has changed since, the call is refused as stale instead of reading the other project.",
+        });
+        list[2]["inputSchema"]["properties"]["epoch"] = epoch.clone();
+        list[5]["inputSchema"]["properties"]["epoch"] = epoch;
+    }
     if daw == Daw::Renoise {
         // A pattern's lines are read one track at a time.
         list[2]["inputSchema"]["properties"]["track"] = json!({

@@ -496,28 +496,27 @@ impl Shared {
         if !MAIN_METHODS.contains(&request.method.as_str()) {
             return Frame::error(id, code::UNKNOWN_METHOD, format!("the REAPER bridge has no method {:?}", request.method));
         }
-        // The main thread isn't ticking (a long load), or a dialog has the main window: the work would sit until the wait
-        // ran out, and then be cancelled. Say so now.
-        if let Some(busy) = self.stalled().or_else(|| lock(&self.snapshot).busy.filter(|busy| *busy == Busy::Modal)) {
+        // REAPER can't take work (a dialog has the main window, it loads, saves or renders, or the main thread isn't
+        // ticking): the work would sit until the wait ran out, and then be cancelled. Say so now, and why.
+        if let Some(busy) = self.busy() {
             return Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason()));
         }
         let (job, waiter) = queue::job(&request.method, request.params);
         if lock(&self.jobs).send(job).is_err() {
             return Frame::error(id, code::FAILED, CLOSING);
         }
-        // A dialog that opens while the request waits ends the wait: nothing would run it until the dialog closes.
-        let in_dialog = || lock(&self.snapshot).busy == Some(Busy::Modal);
-        match waiter.wait_unless(wait.min(MAX_WAIT), &self.stopping, &in_dialog) {
+        // Whatever stops REAPER taking work while the request waits ends the wait: nothing would run it until that is over.
+        let cannot_run = || self.busy().is_some();
+        match waiter.wait_unless(wait.min(MAX_WAIT), &self.stopping, &cannot_run) {
             Outcome::Answered(Ok(result)) => Frame::ok(id, result),
             Outcome::Answered(Err((code, message))) => Frame::error(id, &code, message),
-            Outcome::Cancelled if in_dialog() => Frame::error(id, code::BUSY, format!("{}; nothing changed", Busy::Modal.reason())),
-            Outcome::Cancelled if request.deadline_ms.is_some() => {
-                Frame::error(id, code::DEADLINE, "the deadline passed before REAPER got to it; nothing changed")
-            }
-            Outcome::Cancelled => {
-                let why = self.busy().map_or("REAPER didn't get to it in time", Busy::reason);
-                Frame::error(id, code::BUSY, format!("{why}; nothing changed"))
-            }
+            Outcome::Cancelled => match self.busy() {
+                Some(busy) => Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason())),
+                None if request.deadline_ms.is_some() => {
+                    Frame::error(id, code::DEADLINE, "the deadline passed before REAPER got to it; nothing changed")
+                }
+                None => Frame::error(id, code::BUSY, "REAPER didn't get to it in time; nothing changed"),
+            },
             Outcome::Uncertain => {
                 Frame::error(id, code::UNCERTAIN, "REAPER started this but didn't finish in time; it may or may not have happened")
             }
@@ -1007,12 +1006,58 @@ mod tests {
         // status says why, and goes on answering.
         let status = request(&mut stream, &mut reader, 2, "status")["result"].clone();
         assert_eq!((&status["busy"], status["busyReason"].as_str().is_some_and(|r| r.contains("dialog"))), (&json!("modal"), true));
-        // Loading is different: the work waits for the load (REAPER is back soon), as before.
-        lab.snapshot.lock().unwrap().busy = Some(Busy::Loading);
-        let job_rx = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
-        let request_frame = Request { id: 3, method: "quit".into(), params: json!({}), deadline_ms: Some(unix_ms() + 400) };
-        stream.write_all(&Frame::Request(request_frame).encode()).unwrap();
-        assert!(job_rx.recv_timeout(Duration::from_secs(2)).is_ok(), "a request during a load is queued");
+        // A load, a save and a render hold work the same way, and each says its own reason: not "a dialog may be open".
+        for (n, (busy, reason)) in [(Busy::Loading, "loading or saving"), (Busy::Rendering, "rendering")].into_iter().enumerate() {
+            lab.snapshot.lock().unwrap().busy = Some(busy);
+            let started = Instant::now();
+            // The host's own wait, far longer than the test: a read that waited it out would end as a deadline.
+            let frame = Request {
+                id: 3 + n as u64,
+                method: "read".into(),
+                params: json!({"kind": "track"}),
+                deadline_ms: Some(unix_ms() + 15_000),
+            };
+            stream.write_all(&Frame::Request(frame).encode()).unwrap();
+            let response = read_frame(&mut reader);
+            assert_eq!(response["error"]["code"], code::BUSY, "{response}");
+            let message = response["error"]["message"].as_str().unwrap();
+            assert!(message.contains(reason) && !message.contains("dialog") && message.contains("nothing changed"), "{message}");
+            assert!(started.elapsed() < Duration::from_millis(500), "{busy:?}: queued instead of refused");
+            let status = request(&mut stream, &mut reader, 10 + n as u64, "status")["result"].clone();
+            assert_eq!(status["busy"], busy.code());
+        }
+    }
+
+    #[test]
+    fn a_request_waiting_when_a_render_starts_or_the_main_thread_stops_ticking_is_answered_busy_at_once() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        for (id, why) in [(1u64, "rendering"), (2, "dialog")] {
+            let snapshot = lab.snapshot.clone();
+            let later = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(150));
+                let mut snapshot = snapshot.lock().unwrap();
+                if id == 1 {
+                    snapshot.busy = Some(Busy::Rendering);
+                } else {
+                    // A long load or a plug-in scan: no more ticks, and nobody has said why.
+                    snapshot.busy = None;
+                    snapshot.last_tick = Some(Instant::now() - Duration::from_secs(5));
+                }
+            });
+            let started = Instant::now();
+            let frame = Request { id, method: "read".into(), params: json!({"kind": "track"}), deadline_ms: Some(unix_ms() + 20_000) };
+            stream.write_all(&Frame::Request(frame).encode()).unwrap();
+            let response = read_frame(&mut reader);
+            later.join().unwrap();
+            assert_eq!(response["error"]["code"], code::BUSY, "{response}");
+            assert!(response["error"]["message"].as_str().unwrap().contains(why), "{response}");
+            assert!(started.elapsed() < Duration::from_secs(3), "waited {:?} for a deadline 20 s away", started.elapsed());
+            // Back to normal for the next round.
+            let mut snapshot = lab.snapshot.lock().unwrap();
+            snapshot.busy = None;
+            snapshot.last_tick = Some(Instant::now());
+        }
     }
 
     #[test]

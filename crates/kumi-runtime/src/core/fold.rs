@@ -28,9 +28,23 @@ pub fn track_line(track: &JsonObject, names: bool) -> String {
     if let Some(group) = track.get("group").and_then(Value::as_str) {
         location.push(format!("in {group}"));
     }
+    // REAPER's folders (a folder track, and how deep a track is in them) and Renoise's groups: keys Live's rows don't have.
+    if track.get("folder").and_then(Value::as_i64) == Some(1) {
+        location.push("folder".into());
+    }
+    if let Some(depth) = track.get("depth").and_then(Value::as_i64).filter(|depth| *depth > 0) {
+        location.push(format!("depth {depth}"));
+    }
+    if let Some(group) = track.get("groupRef").and_then(Value::as_str) {
+        location.push(format!("in {group}"));
+    }
     let devices = devices(track);
+    // REAPER's and Renoise's rows count their FX and devices instead of listing them.
+    let counted = |key: &str, one: &str, many: &str| {
+        track.get(key).and_then(Value::as_u64).filter(|n| *n > 0).map(|n| format!(" · {n} {}", if n == 1 { one } else { many }))
+    };
     let list = if devices.is_empty() {
-        String::new()
+        counted("fxCount", "FX", "FX").or_else(|| counted("deviceCount", "device", "devices")).unwrap_or_default()
     } else if names {
         let first = devices
             .iter()
@@ -128,4 +142,31 @@ pub fn fold_tracks_with(
         }
     }
     FoldedTracks { tracks: kept, folded: Some(note.into()), more_tracks: (left > 0).then(|| more(left)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// REAPER's folders and Renoise's groups, and their FX and devices counted, stay in a folded line.
+    #[test]
+    fn a_folded_line_keeps_folders_groups_and_counts() {
+        let row = |value: Value| value.as_object().cloned().unwrap();
+        assert_eq!(
+            track_line(&row(json!({"ref": "track:1", "name": "Drums", "folder": 1, "depth": 0, "fxCount": 2})), false),
+            "track:1 Drums (folder) · 2 FX"
+        );
+        assert_eq!(
+            track_line(&row(json!({"ref": "track:2", "name": "Kick", "depth": 1, "fxCount": 1})), false),
+            "track:2 Kick (depth 1) · 1 FX"
+        );
+        assert_eq!(
+            track_line(
+                &row(json!({"ref": "track:3", "name": "Bass", "type": "sequencer", "groupRef": "track:5", "deviceCount": 3})),
+                false
+            ),
+            "track:3 Bass (sequencer, in track:5) · 3 devices"
+        );
+    }
 }

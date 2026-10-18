@@ -122,11 +122,16 @@ pub mod testing {
     }
 
     pub fn serve(secret: Secret, identity: Identity) -> ThreadBridge {
+        serve_with(secret, identity, serde_json::json!({}))
+    }
+
+    /// `serve`, its status carrying `more`'s fields too.
+    pub fn serve_with(secret: Secret, identity: Identity, more: serde_json::Value) -> ThreadBridge {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let (secret, identity) = (secret.clone(), identity.clone());
+                let (secret, identity, more) = (secret.clone(), identity.clone(), more.clone());
                 std::thread::spawn(move || {
                     let mut stream = stream;
                     let clock = std::time::Instant::now();
@@ -143,6 +148,9 @@ pub mod testing {
                                 ServerAction::Request(request) => {
                                     let mut status = serde_json::to_value(&identity).unwrap();
                                     status["busy"] = false.into();
+                                    for (key, value) in more.as_object().into_iter().flatten() {
+                                        status[key] = value.clone();
+                                    }
                                     Frame::ok(request.id, if request.method == "status" { status } else { serde_json::json!({}) }).encode()
                                 }
                                 ServerAction::Close(_) => return,

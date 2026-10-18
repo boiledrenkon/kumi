@@ -87,7 +87,42 @@ case!(reapers_midi_editor_arrange_view_and_routing_draw_in_focus, async {
     h.has("Drums");
     h.has("  Bass");
     h.has("▬▬");
-    h.has("198 more tracks");
+    h.has("198 more tracks below");
+
+    // A page of lanes from track 101 of 200, two tracks named Bass: the selected one (by its ref) is centred, and the
+    // rest are counted above and below.
+    let lane = |i: usize| {
+        let name = if i == 1 || i == 8 { "Bass".to_string() } else { format!("T{i}") };
+        json!({"name": name, "track_ref": format!("r:track:{{{i}}}"), "depth": 0, "items": []})
+    };
+    *c.arrangement.borrow_mut() = Some(
+        serde_json::from_value(json!({"length":64.0,"position":8.0,"playing":false,"locators":[],"track_count":200,"lanes_from":100,
+            "lanes":(0..10).map(lane).collect::<Vec<_>>()}))
+        .unwrap(),
+    );
+    let arrange = json!({"track":{"name":"Bass"},"trackRef":"r:track:{8}","mainView":{"kind":"timeline","label":"Arrange"}});
+    h.emit(json!({"type":"focus","focus":arrange}));
+    shows(&h, "102 more tracks above · 90 below").await;
+
+    // What REAPER doesn't draw, FOCUS doesn't either: a hidden track, and the tracks of a folder collapsed all the way
+    // (marked ▸); they're counted, not drawn.
+    *c.arrangement.borrow_mut() = Some(
+        serde_json::from_value(json!({"length":64.0,"position":0.0,"playing":false,"locators":[],"track_count":5,"lanes":[
+            {"name":"Drums","depth":0,"collapsed":true,"items":[]},
+            {"name":"Kick","depth":1,"hidden":true,"items":[]},
+            {"name":"Guide","depth":0,"hidden":true,"items":[]},
+            {"name":"Keys","depth":0,"items":[]},
+            {"name":"Vox","depth":0,"items":[]}
+        ]}))
+        .unwrap(),
+    );
+    let arrange = json!({"track":{"name":"Vox"},"trackRef":"r:track:{V}","mainView":{"kind":"timeline","label":"Arrange"}});
+    h.emit(json!({"type":"focus","focus":arrange}));
+    shows(&h, "2 hidden").await;
+    h.has("▸ Drums");
+    h.has("Keys");
+    let screen = h.screen().join("\n");
+    assert!(!screen.contains("Kick") && !screen.contains("Guide"), "{screen}");
     h.close().await;
 });
 
@@ -133,7 +168,7 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
 
     // The pattern matrix: the sequence under each track, muted slots dimmed, sections between.
     *c.own.borrow_mut() = Some(FocusBody::Matrix(SequenceMatrix {
-        tracks: vec!["Kick".into(), "Bass".into()],
+        tracks: vec!["Kick".into(), "ベース".into(), "Bass".into()],
         slots: vec![
             SequenceSlot { pattern: 1, section: Some("Intro".into()), muted: vec![] },
             SequenceSlot { pattern: 2, section: None, muted: vec![1] },
@@ -144,7 +179,8 @@ case!(renoises_pattern_editor_matrix_and_keyzones_draw_in_focus, async {
     h.emit(json!({"type":"focus","focus":matrix}));
     shows(&h, "FOCUS · Pattern Matrix").await;
     h.has("— Intro");
-    h.has("Kic Bas");
+    // Columns by width: a wide name takes the cells it needs, and the next column stays in place.
+    h.has("Kic ベ  Bas");
 
     // An instrument's keyzones: each sample's notes, in Renoise's names (MIDI 60 is C-5's octave).
     *c.own.borrow_mut() = Some(FocusBody::Keyzones(KeyzoneMap {

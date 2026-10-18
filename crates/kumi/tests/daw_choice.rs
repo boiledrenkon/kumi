@@ -96,3 +96,21 @@ fn bridge_sets_up_the_bridge_of_the_daw_asked_for_and_lives_otherwise() {
     assert!(config(&["--daw", "logic", "bridge"], &env).unwrap_err().starts_with("Use: --daw <daw>"));
     assert_eq!(config(&["--daw", "reaper", "bridge", "--force"], &env).unwrap_err(), "Use: bridge [--yes] [--allow-dirty].");
 }
+
+/// `kumi --daw reaper doctor` (or KUMI_DAW) asks the doctor and the report to speak of that DAW; without it they read as
+/// they always did.
+#[test]
+fn doctor_and_report_take_the_daw_asked_for() {
+    let env = env();
+    assert_eq!(config(&["doctor"], &env).unwrap(), r#"{"mode":"doctor","json":false}"#);
+    assert_eq!(config(&["doctor", "--json"], &env).unwrap(), r#"{"mode":"doctor","json":true}"#);
+    assert_eq!(config(&["report"], &env).unwrap(), r#"{"mode":"report"}"#);
+    assert_eq!(config(&["--daw", "reaper", "doctor"], &env).unwrap(), r#"{"mode":"doctor","json":false,"daw":"reaper"}"#);
+    assert_eq!(config(&["doctor", "--json", "--daw=renoise"], &env).unwrap(), r#"{"mode":"doctor","json":true,"daw":"renoise"}"#);
+    assert_eq!(config(&["--daw", "ableton", "report"], &env).unwrap(), r#"{"mode":"report","daw":"ableton"}"#, "Live asked for decides");
+    let mut chosen = env.clone();
+    chosen.insert("KUMI_DAW".into(), "renoise".into());
+    assert_eq!(config(&["report"], &chosen).unwrap(), r#"{"mode":"report","daw":"renoise"}"#);
+    assert!(config(&["--daw", "logic", "doctor"], &env).unwrap_err().starts_with("Use: --daw <daw>"));
+    assert!(config(&["doctor", "--verbose"], &env).is_err());
+}

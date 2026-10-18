@@ -5,7 +5,7 @@ use super::super::{
     screen::Screen,
     style::Style,
     tree::{tree_window, TreeRole},
-    width::{text_width, truncate},
+    width::{text_width, truncate, truncate_with},
     wrap::wrap,
 };
 use super::drawing::{num, sp, spans, st};
@@ -321,16 +321,31 @@ impl TuiApp {
         let name_width = (width / 3).clamp(6, 16);
         let cells = (width - name_width - 1).max(4);
         let at = |beats: f64| (beats / span * cells as f64).floor().clamp(0., (cells - 1) as f64) as usize;
-        let selected = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.as_ref().map(|t| t.name.clone()));
-        let shown = lanes.len().min(8);
-        let first = selected
-            .and_then(|name| lanes.iter().position(|lane| lane.name == name))
-            .map(|at| at.saturating_sub(shown / 2).min(lanes.len() - shown))
+        // The selected track by its ref (two tracks can share a name), by name where the DAW gives no refs.
+        let (selected_ref, selected_name) = {
+            let state = self.0.state.borrow();
+            let focus = state.focus.as_ref();
+            (focus.and_then(|f| f.track_ref.clone()), focus.and_then(|f| f.track.as_ref().map(|t| t.name.clone())))
+        };
+        // What REAPER draws: tracks the producer hid, and those in a folder collapsed all the way, aren't.
+        let visible: Vec<usize> = (0..lanes.len()).filter(|at| !lanes[*at].hidden).collect();
+        if visible.is_empty() {
+            return 0;
+        }
+        let shown = visible.len().min(8);
+        let first = visible
+            .iter()
+            .position(|at| lanes[*at].track_ref.is_some() && lanes[*at].track_ref == selected_ref)
+            .or_else(|| {
+                selected_name.and_then(|name| visible.iter().position(|at| lanes[*at].track_ref.is_none() && lanes[*at].name == name))
+            })
+            .map(|at| at.saturating_sub(shown / 2).min(visible.len() - shown))
             .unwrap_or(0);
-        for (row, lane) in lanes.iter().skip(first).take(shown).enumerate() {
+        for (row, lane) in visible[first..first + shown].iter().map(|at| &lanes[*at]).enumerate() {
             let row = y + row as i32;
             let indent = "  ".repeat(lane.depth.min(4) as usize);
-            screen.put(x, row, &truncate(&format!("{indent}{}", lane.name), name_width), &st::DIM);
+            let sign = if lane.collapsed { "▸ " } else { "" };
+            screen.put(x, row, &truncate(&format!("{indent}{sign}{}", lane.name), name_width), &st::DIM);
             let mut line = vec![sp(" ", st::FAINT); cells as usize];
             for item in &lane.items {
                 let style = if item.selected {
@@ -346,13 +361,28 @@ impl TuiApp {
             }
             spans(screen, x + name_width + 1, row, &line, None);
         }
-        // The DAW sends the first tracks' lanes and says how many it has in all.
-        let more = strip.track_count.unwrap_or(lanes.len()).max(lanes.len()) - shown;
-        if more > 0 {
-            screen.put(x, y + shown as i32, &truncate(&format!("{more} more tracks"), width), &st::FAINT);
-            return shown as i32 + 1;
+        // The DAW sends a page of lanes, says where it starts and how many tracks it has in all: the rest are above or
+        // below.
+        let (top, bottom) = (visible[first], visible[first + shown - 1]);
+        let above = strip.lanes_from.unwrap_or(0) + top;
+        let total = strip.track_count.unwrap_or(0).max(strip.lanes_from.unwrap_or(0) + lanes.len());
+        let below = total.saturating_sub(strip.lanes_from.unwrap_or(0) + bottom + 1);
+        let hidden = lanes[top..=bottom].iter().filter(|lane| lane.hidden).count();
+        let mut more = match (above, below) {
+            (0, 0) => vec![],
+            (0, below) => vec![format!("{below} more tracks below")],
+            (above, 0) => vec![format!("{above} more tracks above")],
+            (above, below) => vec![format!("{above} more tracks above"), format!("{below} below")],
+        };
+        if hidden > 0 {
+            more.push(format!("{hidden} hidden"));
         }
-        shown as i32
+        if more.is_empty() {
+            return shown as i32;
+        }
+        let more = more.join(" · ");
+        screen.put(x, y + shown as i32, &truncate(&more, width), &st::FAINT);
+        shown as i32 + 1
     }
     /// A tracker's pattern or phrase around its cursor: line numbers (beats brighter), then each track's cells, the
     /// focused track first, as many tracks as fit.
@@ -422,7 +452,9 @@ impl TuiApp {
         let fit = ((width - 5) / column).max(1) as usize;
         let mut head = String::from("     ");
         for track in matrix.tracks.iter().take(fit) {
-            head.push_str(&format!("{:<4}", track.chars().take(3).collect::<String>()));
+            // Padded by width, not characters: a wide name (CJK) takes two cells a character.
+            let name = truncate_with(track, column - 1, "");
+            head.push_str(&format!("{name}{}", " ".repeat((column - text_width(&name)).max(1) as usize)));
         }
         screen.put(x, y, &truncate(&head, width), &st::DIM);
         let rows = (most.max(2) - 1) as usize;

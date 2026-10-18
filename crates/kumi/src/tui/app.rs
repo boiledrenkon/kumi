@@ -83,6 +83,8 @@ pub struct TuiOptions {
     pub tabs: Vec<Rc<dyn Tab>>,
     pub panel_tab: Option<PanelTab>,
     pub updates: Option<UpdateControl>,
+    /// /daw <name>: Kumi closes and opens again with that DAW. None where the producer works with Live alone.
+    pub switch_daw: Option<Rc<dyn Fn(kumi_runtime::core::daw::DawId)>>,
     pub voice: Option<Rc<dyn VoiceController>>,
     /// Live's part of first-run setup; `None` when Kumi chats without Live by choice.
     pub connect_live: Option<ConnectDaw>,
@@ -157,6 +159,7 @@ impl TuiOptions {
             tabs: vec![],
             panel_tab: None,
             updates: None,
+            switch_daw: None,
             voice: None,
             connect_live: None,
             willington: None,

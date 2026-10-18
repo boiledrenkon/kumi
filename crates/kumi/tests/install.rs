@@ -130,8 +130,15 @@ fn fake_release(dir: &Path, version: &str) -> Vec<u8> {
 }
 /// A release bundle whose `kumi --version` says `version`, carrying `bridge` when given.
 fn fake_release_with(dir: &Path, version: &str, bridge: Option<&str>) -> Vec<u8> {
+    fake_release_carrying(dir, version, bridge, &[])
+}
+/// The same, with more files in it (`daws/…`).
+fn fake_release_carrying(dir: &Path, version: &str, bridge: Option<&str>, files: &[(&str, &str)]) -> Vec<u8> {
     let stage = dir.join(format!("stage-{version}"));
     fs::create_dir_all(&stage).unwrap();
+    for (path, text) in files {
+        put(stage.join(path), text);
+    }
     let code = dir.join("main.rs");
     put(&code, format!("fn main() {{ println!(\"Kumi {version}\"); }}"));
     let built = std::process::Command::new("rustc")
@@ -2404,4 +2411,55 @@ async fn the_daw_used_last_and_the_other_daws_bridge_files_count_as_kumis() {
     let said = out.0.borrow().clone();
     assert!(said.contains("kumi uninstall --all would remove ") && !said.contains("isn't Kumi's"), "{said}");
     assert!(home.join("last-daw").exists() && home.join("bridges").exists(), "a dry run removes nothing");
+}
+
+/// `kumi update` brings Renoise's tool from the new Kumi's own folder, not from the Kumi that runs the update; going back
+/// to a Kumi that doesn't carry it says the tool stays, where, and how to take it out.
+#[tokio::test]
+async fn an_update_brings_renoises_tool_from_the_new_kumi_and_going_back_says_it_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]).to_path_buf();
+    put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "earlier");
+    // One component at a time, as Kumi builds the paths it shows: Windows shows `\` throughout.
+    let prefs = dir.path().join("Renoise").join("V3.5.4");
+    let tools = prefs.join("Scripts").join("Tools");
+    fs::create_dir_all(&tools).unwrap();
+    env.insert("KUMI_RENOISE_PREFS_DIR".into(), prefs.display().to_string());
+    let tool = |version: &str| format!("return \"{version}\"\n");
+    let folder = daw_bridge::install::RENOISE_TOOL_FOLDER;
+    // The tool the Kumi before the update put in Renoise.
+    let before = dir.path().join("before").join(folder);
+    put(before.join("payload/version.lua"), tool("1.0.0"));
+    let target = daw_bridge::lifecycle::Target {
+        daw: daw_bridge::daw::Daw::Renoise,
+        dir: tools.clone(),
+        name: folder.into(),
+        folder: true,
+        reference: tools.join(folder).join(daw_bridge::install::RENOISE_REFERENCE),
+    };
+    daw_bridge::lifecycle::Lifecycle::new(&home, target).install(&before, "1.0.0").unwrap();
+    let version_lua = format!("daws/renoise/{folder}/payload/version.lua");
+    let bytes = fake_release_carrying(dir.path(), "99.0.0", None, &[(&version_lua, &tool("2.0.0"))]);
+    let mut good = manifest("99.0.0");
+    good["sha256"] = json!(hex::encode(Sha256::digest(&bytes)));
+    let (mut updated, out) = io(&env);
+    updated.fetcher = Some(Rc::new(Serve { manifest: good, bytes, status: 200, offline: false, calls: RefCell::new(vec![]) }));
+    updated.others = Some(Rc::new(|| async { 0 }.boxed_local()));
+    updated.run = Some(Rc::new(|command, args, cwd| async move { run_program(&command, &args, cwd.as_deref()).await }.boxed_local()));
+    assert_eq!(update_installed(updated).await.unwrap(), 0, "{}", out.0.borrow());
+    assert_eq!(fs::read_to_string(tools.join(folder).join("payload/version.lua")).unwrap(), tool("2.0.0"), "{}", out.0.borrow());
+    let (rollback, out) = io(&env);
+    assert_eq!(rollback_installed(rollback).await.unwrap(), 0, "{}", out.0.borrow());
+    let said = out.0.borrow().clone();
+    assert!(
+        said.contains(&format!(
+            "Kumi's tool stays in Renoise ({}): Kumi {KUMI_VERSION} doesn't know Renoise",
+            tools.join(folder).display()
+        )),
+        "{said}"
+    );
+    assert!(said.contains("Delete that folder to take it out."), "{said}");
+    assert!(tools.join(folder).exists(), "going back leaves the tool where it is");
 }

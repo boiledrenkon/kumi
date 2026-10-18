@@ -33,9 +33,23 @@ async fn the_read_methods_on_the_wire() {
         client.request("read", json!({"kind": "pattern"}), WAIT).await,
         Err(RequestError::Bridge { code: "bad-params".into(), message: "REAPER has no kind \"pattern\" to read".into() })
     );
+    // The epoch an answer gave, sent back with a ref, is accepted while the project stays and refused once it changes.
+    let epoch = page["epoch"].clone();
+    client.request("read", json!({"ref": "r:track:{T0001}", "epoch": epoch}), WAIT).await.unwrap();
+    client.request("focus_body", json!({"kind": "routing", "ref": "r:track:{T0001}", "epoch": epoch}), WAIT).await.unwrap();
     script.switch_tab();
     let stale = client.request("read", json!({"kind": "track", "cursor": page["nextCursor"]}), WAIT).await.unwrap_err();
     assert!(matches!(stale, RequestError::Bridge { code, .. } if code == "bad-params"));
+    for (method, params) in [
+        ("read", json!({"ref": "r:track:{T0001}", "epoch": epoch})),
+        ("focus_body", json!({"kind": "routing", "ref": "r:track:{T0001}", "epoch": epoch})),
+    ] {
+        let stale = client.request(method, params, WAIT).await.unwrap_err();
+        assert!(
+            matches!(&stale, RequestError::Bridge { code, message } if code == "stale" && message.contains("earlier epoch")),
+            "{stale:?}"
+        );
+    }
 
     golden("reaper-reads-bridge.ndjson", &normalized(&simulator.transcript()));
     simulator.stop();

@@ -126,6 +126,10 @@ async fn reapers_integration_reads_what_kumis_host_answers() {
                 .unwrap();
             assert!(!page.is_error, "{}", page.text);
             assert!(!page.text.contains("r:item:") && page.text.contains("item:"), "{}", page.text);
+            // What folders, send modes and times read as.
+            for words in ["folder 1 starts a folder and -1 or less closes", "0 post-fader, 1 pre-FX, 3 pre-fader", "quarter notes"] {
+                assert!(read.description().contains(words), "{words}: {}", read.description());
+            }
 
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let focus = seen.borrow().iter().flatten().next().cloned().expect("the focus, as the host reads it");
@@ -218,6 +222,10 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
                 "{}",
                 read.description()
             );
+            // What the lines' hex columns mean, so the model reads them without guessing.
+            for words in ["volume (hex 00-80, 80 full", "panning (hex 00-80, 40 centre)", "delay (hex 00-FF"] {
+                assert!(read.description().contains(words), "{words}: {}", read.description());
+            }
 
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let focus = seen.borrow().iter().flatten().next().cloned().expect("the focus, as the host reads it");
