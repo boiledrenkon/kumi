@@ -19,6 +19,7 @@ M.__index = M
 M.SEND_CHUNK = 64 * 1024
 M.SEND_NOW_BYTES = 256 * 1024
 M.SEND_TICK_BYTES = 1024 * 1024
+M.MAX_FRAME_BYTES = 64 * 1024 * 1024 + 1024
 -- Output the host didn't ask for (events, heartbeats) queued to a connection since the host last sent anything. Past
 -- it the host has stopped reading (suspended, stopped in a debugger), and the socket's buffers would fill: Renoise's
 -- documentation doesn't say what a send to a full socket does, and a block would freeze the GUI. The connection is
@@ -346,7 +347,8 @@ function M:close_all(reason)
       local head = record.outbox[1]
       record.outbox = (head and head.offset > 1) and { head } or {}
       self:send(record, wire.encode_frame("bye", { reason = reason }))
-      self:flush(record, M.SEND_TICK_BYTES)
+      -- All of it, a line part sent included however big: a send fails rather than blocks, and the bye is the last thing.
+      self:flush(record, M.MAX_FRAME_BYTES)
     end
     self.ctx.connections[key] = nil
   end

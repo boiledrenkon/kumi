@@ -11,7 +11,7 @@ end
 
 function M:watch(observable, key)
   local fn = self.guard("notifier " .. key, function() self.dirty[key] = true end)
-  if not observable:has_notifier(fn) then observable:add_notifier(fn) end
+  observable:add_notifier(fn)
   self.entries[#self.entries + 1] = { observable = observable, fn = fn }
 end
 

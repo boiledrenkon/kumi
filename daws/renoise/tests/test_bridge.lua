@@ -55,6 +55,7 @@ local function setup(options)
   env.payload = function() return KUMI_BRIDGE.payload end
   mock.fire(mock.tool.tool_finished_loading_observable)
   if mock.song then mock.fire(mock.tool.app_new_document_observable) end
+  env.log_file = function() return env.log_dir .. "/renoise-bridge-pid-4242.log" end
   env.discovery_file = function(pid)
     return env.discovery_dir .. "/renoise-" .. (pid or 4242) .. "-" .. sha256.hex(env.resource):sub(1, 16) .. ".json"
   end
@@ -173,7 +174,7 @@ test("bridge: listens on 127.0.0.1:9780 and writes the discovery file", function
   ok(discovery.project.id and discovery.project.path == nil, "an unsaved song has no path")
   ok(discovery.startedMs > 1.7e12, "unix ms")
   eq(#mock.popen_calls, 1, "the pid is looked up once")
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("listening on 127.0.0.1:9780"), "logged")
+  ok(read(env.log_file()):find("listening on 127.0.0.1:9780"), "logged")
   no_dialogs()
 end)
 
@@ -265,13 +266,15 @@ test("bridge: a peer that keeps sending is timed out at 3 seconds, timer or not"
   local slow = mock.connect()
   send(slow, { type = "hello", protocol = PROTOCOL, nonce = CLIENT_NONCE })
   frames(slow)
+  mock.stall_timers = true -- the clock moves, no timer runs
   for _ = 1, 29 do
-    mock.time = mock.time + 100 -- the clock moves, no timer runs
+    mock.advance(100)
     slow:send("\n")
   end
   eq(#frames(slow), 0, "still waiting at 2.9 s")
-  mock.time = mock.time + 100
+  mock.advance(100)
   slow:send("\n")
+  mock.stall_timers = false
   refused(slow, "timeout")
   no_dialogs()
 end)
@@ -505,7 +508,7 @@ test("bridge: a host that stopped reading is cut off before the socket fills, ne
   eq(mock.blocked_sends, 0, "sends that would have blocked Renoise")
   ok(peer.unread <= 64 * 1024, "at most 64 KiB went to a peer that wasn't reading, not " .. peer.unread)
   ok(peer.unread > 60 * 1024, "and it was allowed that much: " .. peer.unread)
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("the host stopped reading"), "logged")
+  ok(read(env.log_file()):find("the host stopped reading"), "logged")
   local other = connect(env)
   eq(request(other, "status").ok, true, "a new connection works")
   no_dialogs()
@@ -586,7 +589,7 @@ test("bridge: unloading says bye, closes everything and removes the discovery fi
   eq(read(env.discovery_file()), nil, "discovery removed")
   eq(#mock.timers, 0, "timer removed")
   eq(mock.notifier_count(song.selected_track_index_observable), 0, "observers detached")
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("stopped"), "logged")
+  ok(read(env.log_file()):find("stopped"), "logged")
   no_dialogs()
 end)
 
@@ -684,7 +687,7 @@ test("bridge: renoise.reload swaps the payload and keeps the port and the connec
   local selection = events(peer, "selection")[1]
   eq(selection.data.track, 9)
   eq(selection.seq, 2, "the connection's numbering goes on")
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("reloaded bridge"), "the new payload logs")
+  ok(read(env.log_file()):find("reloaded bridge"), "the new payload logs")
   eq(#mock.popen_calls, 1, "the pid isn't looked up again")
   no_dialogs()
 end)
@@ -715,7 +718,7 @@ test("bridge: a broken payload on reload keeps the running one", function()
   tick()
   ok(env.payload() == old_payload, "kept")
   eq(request(peer, "status").ok, true)
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("reload failed"), "logged")
+  ok(read(env.log_file()):find("reload failed"), "logged")
   no_dialogs()
 end)
 
@@ -726,7 +729,7 @@ test("bridge: an error reading the song is logged, never shown", function()
   mock.impl(mock.song).transport = nil
   mock.fire(playing)
   tick(25)
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("not mocked"), "logged")
+  ok(read(env.log_file()):find("not mocked"), "logged")
   ok(not retired(peer))
   no_dialogs()
 end)
@@ -738,7 +741,7 @@ test("bridge: a secret file others can read refuses connections", function()
   send(peer, { type = "hello", protocol = PROTOCOL, nonce = CLIENT_NONCE })
   ok(closed_silently(peer))
   tick(20)
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("other accounts can read it"), "logged")
+  ok(read(env.log_file()):find("other accounts can read it"), "logged")
   no_dialogs()
 end)
 
@@ -816,7 +819,9 @@ test("bridge: a stalled handshake is refused by the next connection's callback, 
   setup()
   local idle = {}
   for i = 1, 4 do idle[i] = mock.connect() end
-  mock.time = mock.time + 3500 -- the clock moves, no timer runs
+  mock.stall_timers = true
+  mock.advance(3500) -- the clock moves, no timer runs
+  mock.stall_timers = false
   local late = mock.connect()
   eq(#frames(late), 0, "the slots were free by then")
   for i = 1, 4 do eq(frames(idle[i])[1].reason, "timeout", "idle peer " .. i) end
@@ -1004,7 +1009,7 @@ test("bridge: an error reading the song for events costs that step, not the conn
     if f.type == "heartbeat" then beats = beats + 1 end
   end
   ok(beats >= 1, "heartbeats go on: " .. beats)
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("events:"), "logged")
+  ok(read(env.log_file()):find("events:"), "logged")
   eq(#mock.errors, 0, "nothing for Renoise to show")
 end)
 
@@ -1040,7 +1045,7 @@ test("bridge: a reload whose new payload can't start puts the old one back, conn
   tick()
   ok(env.payload() == old, "the old payload is serving again")
   eq(request(peer, "ping", {}).ok, true, "the same connection answers")
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("reload failed"), "logged")
+  ok(read(env.log_file()):find("reload failed"), "logged")
   no_dialogs()
 end)
 
@@ -1061,14 +1066,14 @@ test("bridge: a reload reads the reference again", function()
   request(peer, "renoise.reload")
   tick()
   mock.advance(1100)
-  ok(read(moved .. "/renoise-bridge.log"), "the log is in the new folder now")
+  ok(read(moved .. "/renoise-bridge-pid-4242.log"), "the log is in the new folder now")
   no_dialogs()
 end)
 
 test("bridge: log lines say which Renoise wrote them", function()
   local env = setup()
   connect(env)
-  local text = read(env.log_dir .. "/renoise-bridge.log")
+  local text = read(env.log_file())
   ok(text:find("info %[pid 4242%] listening"), text)
   no_dialogs()
 end)
@@ -1179,11 +1184,62 @@ test("bridge: refused connections held open past the bound make the server anew,
   local got = frames(kumi)
   eq(got[#got].type, "bye", "but it was told")
   eq(next(KUMI_BRIDGE.connections), nil, "nothing of the old connections is kept")
-  ok(read(env.log_dir .. "/renoise-bridge.log"):find("making the server anew"), "logged")
+  ok(read(env.log_file()):find("making the server anew"), "logged")
   local again = connect(env)
   eq(request(again, "ping", {}).ok, true, "and Kumi gets back in")
   -- A bridge that has been remade doesn't go on remaking: nothing is held open now.
   mock.advance(3000)
   eq(#mock.servers, 2)
   no_dialogs()
+end)
+
+test("bridge: each Renoise logs to a file of its own, and logs of other launches a week old go", function()
+  local env = setup({ name = "logs" })
+  local ours = env.log_file()
+  ok(read(ours), "this Renoise's log: " .. ours)
+  -- Left by other launches (one the old shared name), one fresh, one that is not a bridge log.
+  local old_one, old_shared, fresh, other = env.log_dir .. "/renoise-bridge-pid-111.log", env.log_dir .. "/renoise-bridge.log",
+    env.log_dir .. "/renoise-bridge-pid-222.log", env.log_dir .. "/notes.log"
+  for _, path in ipairs({ old_one, old_shared, fresh, other }) do write(path, "x\n") end
+  local week_and_a_day = os.time() - 8 * 24 * 60 * 60
+  mock.stat_mtimes[old_one], mock.stat_mtimes[old_shared], mock.stat_mtimes[other] = week_and_a_day, week_and_a_day, week_and_a_day
+  request(connect(env), "renoise.reload")
+  tick()
+  eq(read(old_one), nil, "an old launch's log is removed")
+  eq(read(old_shared), nil, "so is the old shared one")
+  ok(read(fresh), "a recent one stays")
+  ok(read(other), "and a file that is not a bridge log")
+  ok(read(ours), "and its own")
+  no_dialogs()
+end)
+
+test("bridge: a reload follows a changed discovery folder", function()
+  local env = setup()
+  local peer = connect(env)
+  ok(read(env.discovery_file()), "written in the first folder")
+  local moved = env.dir .. "/elsewhere-discovery"
+  assert(os.execute("mkdir -p '" .. moved .. "'") == 0)
+  reference(env, { discoveryDir = moved })
+  request(peer, "renoise.reload")
+  tick()
+  eq(read(env.discovery_file()), nil, "removed from the old folder")
+  local name = env.discovery_file():match("[^/]+$")
+  ok(read(moved .. "/" .. name), "and written in the new one")
+  no_dialogs()
+end)
+
+test("bridge: the bye goes out even behind a response of nearly two megabytes already part sent", function()
+  local server = T.load_payload_module("server")
+  local wire = T.load_payload_module("wire")
+  local sent = {}
+  local client = { is_open = true, send = function(_, text) sent[#sent + 1] = text; return true end }
+  local big = string.rep("x", 1800 * 1024) .. "\n"
+  local record = {
+    key = "k", client = client, conn = { authenticated = function() return true end },
+    outbox = { { text = big, offset = 1000 }, { text = "never-started\n", offset = 1 } },
+  }
+  local s = server.new({ connections = { k = record }, log = function() end, now_ms = function() return 0 end })
+  s:close_all("quit")
+  local all = table.concat(sent)
+  eq(all, big:sub(1000) .. wire.encode_frame("bye", { reason = "quit" }), "the rest of the line, then the bye, nothing between")
 end)

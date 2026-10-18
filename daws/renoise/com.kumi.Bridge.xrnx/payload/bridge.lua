@@ -82,6 +82,18 @@ local function write_discovery()
   end
 end
 
+-- Each Renoise has a log of its own (named by its pid, or by when it started where the pid is unknown).
+local function log_file(dir)
+  local id = status.pid() and ("pid-" .. status.pid()) or ("started-" .. math.floor(b.started_ms / 1000))
+  return dir .. "/renoise-bridge-" .. id .. ".log"
+end
+
+local function configure_log(dir)
+  local path = log_file(dir)
+  log.configure(path)
+  log.prune(dir, path)
+end
+
 local function configure()
   local cfg, err = config.load(host.bundle_path)
   if not cfg then
@@ -94,7 +106,7 @@ local function configure()
     return false
   end
   b.cfg, b.setup_error = cfg, nil
-  if cfg.log_dir then log.configure(cfg.log_dir .. "/renoise-bridge.log") end
+  if cfg.log_dir then configure_log(cfg.log_dir) end
   return true
 end
 
@@ -239,12 +251,17 @@ function M.start(h, reloading)
   })
   observers = sync.new(guard)
   status.cache = b
-  if b.cfg and b.cfg.log_dir then log.configure(b.cfg.log_dir .. "/renoise-bridge.log") end
+  if b.cfg and b.cfg.log_dir then configure_log(b.cfg.log_dir) end
   -- Two Renoises write to one log: each line says whose it is.
   log.set_tag(status.pid() and ("pid " .. status.pid()) or ("started " .. math.floor(b.started_ms / 1000)))
   -- The reference is read again on a reload (new log or discovery folders); the server is not remade for it.
   local configured = configure()
-  if configured and (not reloading or not server_running()) then listen() end
+  if configured and (not reloading or not server_running()) then
+    listen()
+  elseif configured then
+    -- Kept: the server. A changed discovery folder is followed: the file moves there.
+    write_discovery()
+  end
   attach(renoise.song())
   log.write("info", (reloading and "reloaded" or "started") .. " bridge " .. VERSION)
   log.flush()

@@ -23,6 +23,24 @@ function M.set_tag(text)
   tag = text
 end
 
+M.KEEP_SECONDS = 7 * 24 * 60 * 60
+
+-- Each Renoise writes a log of its own in the folder (two writing one file would interleave and race on rotating it),
+-- so logs of other launches pile up: those not touched for a week go. `keep` is this one's path.
+function M.prune(dir, keep)
+  pcall(function()
+    if not (os.filenames and io.stat) then return end
+    local now = os.time()
+    for _, name in ipairs(os.filenames(dir, { "*.log", "*.log.1" })) do
+      local path = dir .. "/" .. name
+      if name:find("^renoise%-bridge") and path ~= keep and path ~= keep .. ".1" then
+        local stat = io.stat(path)
+        if stat and stat.mtime and now - stat.mtime > M.KEEP_SECONDS then os.remove(path) end
+      end
+    end
+  end)
+end
+
 function M.flush()
   if not path or count == 0 then return end
   local f = io.open(path, "ab")
