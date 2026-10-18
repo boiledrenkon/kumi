@@ -248,7 +248,14 @@ fn virtuals(source: &str, class: &str) -> Vec<String> {
 fn build_shim(shim: &Path) {
     let mut build = cc::Build::new();
     build.cpp(true).file(shim).warnings(true);
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // REAPER's C++ interfaces need the MSVC ABI; a static CRT means no VC++ runtime to install. cc follows the
+        // target feature (/MT), so the release build passes -C target-feature=+crt-static.
+        let features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+        if !features.split(',').any(|f| f == "crt-static") {
+            println!("cargo:warning=reaper_kumi.dll links the VC++ runtime dynamically; release builds use -C target-feature=+crt-static");
+        }
+    } else {
         build.flag("-std=c++11").flag("-fno-exceptions").flag("-fno-rtti").flag("-fvisibility=hidden").flag("-Wno-unused-parameter");
     }
     build.compile("reaper_kumi_shim");
