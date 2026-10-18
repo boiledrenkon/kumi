@@ -16,6 +16,7 @@ M.MAX_FRAME = 64 * 1024 * 1024
 M.MAX_PREAUTH_CONNECTIONS = 4
 M.AUTH_TIMEOUT_S = 5
 M.SEND_CHUNK = 64 * 1024
+M.SEND_NOW_BYTES = 256 * 1024
 M.SEND_BUDGET_BYTES = 1024 * 1024
 
 local LOOPBACK_PEERS = { ["127.0.0.1"] = true, ["::1"] = true, ["::ffff:127.0.0.1"] = true }
@@ -184,7 +185,7 @@ end
 function M:send_text(conn, text)
   if conn.phase == "closing" and not conn.flush_before_close then return end
   conn.outbox[#conn.outbox + 1] = { text = text .. "\n", offset = 1 }
-  if #conn.outbox == 1 and #text < M.SEND_CHUNK then self:flush(conn, M.SEND_CHUNK) end
+  if #conn.outbox == 1 then self:flush(conn, M.SEND_NOW_BYTES) end
 end
 
 function M:send(conn, message)
