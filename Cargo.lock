@@ -1869,6 +1869,11 @@ dependencies = [
 [[package]]
 name = "reaper-kumi"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "daw-bridge",
+ "serde_json",
+]
 
 [[package]]
 name = "redox_syscall"

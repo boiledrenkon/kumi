@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
+build = "build.rs"
 
 [lib]
 name = "reaper_kumi"
@@ -14,3 +15,8 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
+daw-bridge = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+cc = "1"
