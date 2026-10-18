@@ -5,9 +5,9 @@ use super::{
     errors::{FailureKind, KumiError, RuntimeError},
     file_sync::FileSync,
     gaps::{gap_tools, GAP_GUIDANCE},
-    memory::{memory_instructions, memory_tools, MemoryTools, MemoryToolsOptions},
-    recall::{recall_tool, RecallOptions},
-    recipes::{recipe_instructions, recipe_tools, RecipeStore, RecipeToolsOptions, RUN_RECIPE_TOOL},
+    memory::{memory_instructions_for, memory_tools_for, MemoryTools, MemoryToolsOptions},
+    recall::{recall_tool_for, RecallOptions},
+    recipes::{recipe_instructions, recipe_tools_for, RecipeStore, RecipeToolsOptions, RUN_RECIPE_TOOL},
     store_client::StoreClient,
     taste_log::{TasteLog, UndoneBy, Whereabouts},
     techniques::{
@@ -515,12 +515,15 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             let project = weak.clone();
             let set = weak.clone();
             let emit = emit.clone();
-            memory_tools(MemoryToolsOptions {
-                store: store.clone(),
-                project: Rc::new(move || project.upgrade().and_then(|i| i.state.borrow().project.clone())),
-                set: Some(Rc::new(move || set.upgrade().and_then(|i| i.state.borrow().set.clone()))),
-                on_event: Rc::new(move |e| emit(e.into())),
-            })
+            memory_tools_for(
+                options.profile,
+                MemoryToolsOptions {
+                    store: store.clone(),
+                    project: Rc::new(move || project.upgrade().and_then(|i| i.state.borrow().project.clone())),
+                    set: Some(Rc::new(move || set.upgrade().and_then(|i| i.state.borrow().set.clone()))),
+                    on_event: Rc::new(move |e| emit(e.into())),
+                },
+            )
         });
         let recipes = options
             .recipes
@@ -528,25 +531,31 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             .map(|store| {
                 let weak = weak.clone();
                 let emit = emit.clone();
-                recipe_tools(RecipeToolsOptions {
-                    store: store.clone(),
-                    plan: Rc::new(move || weak.upgrade().and_then(|i| i.state.borrow().plan.clone())),
-                    on_event: Rc::new(move |e| emit(SessionEvent::Recipe(e))),
-                })
+                recipe_tools_for(
+                    options.profile,
+                    RecipeToolsOptions {
+                        store: store.clone(),
+                        plan: Rc::new(move || weak.upgrade().and_then(|i| i.state.borrow().plan.clone())),
+                        on_event: Rc::new(move |e| emit(SessionEvent::Recipe(e))),
+                    },
+                )
             })
             .unwrap_or_default();
         let recall = options.conversations.as_ref().map(|store| {
             let weak = weak.clone();
-            recall_tool(RecallOptions {
-                conversations: Some(store.clone()),
-                techniques: options.techniques.clone(),
-                recipes: options.recipes.clone(),
-                current: Rc::new(move || {
-                    let inner = weak.upgrade()?;
-                    let s = inner.state.borrow();
-                    Some((s.place.clone()?, s.conversation_id.clone()))
-                }),
-            })
+            recall_tool_for(
+                options.profile,
+                RecallOptions {
+                    conversations: Some(store.clone()),
+                    techniques: options.techniques.clone(),
+                    recipes: options.recipes.clone(),
+                    current: Rc::new(move || {
+                        let inner = weak.upgrade()?;
+                        let s = inner.state.borrow();
+                        Some((s.place.clone()?, s.conversation_id.clone()))
+                    }),
+                },
+            )
         });
         let learned = options.techniques.as_ref().map(|store| {
             let emit = emit.clone();
@@ -1417,7 +1426,10 @@ impl Session {
         self.assert_current(op)?;
         let noun = self.0.state.borrow().integration.as_ref().map(|i| i.words().1).unwrap_or(DAW_WORDS.1);
         let extra = [
-            memory.as_ref().map(|m| memory_instructions(m, observation.project.as_ref().map(|p| p.name.as_str()))).unwrap_or_default(),
+            memory
+                .as_ref()
+                .map(|m| memory_instructions_for(&self.0.options.profile, m, observation.project.as_ref().map(|p| p.name.as_str())))
+                .unwrap_or_default(),
             habits,
             recipe_instructions(&recipes),
             if self.0.learned.is_some() { TECHNIQUE_GUIDANCE.into() } else { String::new() },

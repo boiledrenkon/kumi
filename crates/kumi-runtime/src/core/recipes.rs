@@ -1,4 +1,5 @@
 //! Repeatable plans of changes with named blanks, saved privately and replayed through make_changes.
+use super::daw::{DawProfile, DawWords};
 use super::{
     contracts::{with_final, JsonObject, KernelTool, RecipeAction, RecipeEvent, ToolResult},
     errors::RuntimeError,
@@ -266,27 +267,48 @@ fn fill(value: &Value, values: &JsonObject) -> Value {
 pub const SAVE_RECIPE_TOOL: &str = "save_recipe";
 pub const RUN_RECIPE_TOOL: &str = "run_recipe";
 pub const FORGET_RECIPE_TOOL: &str = "forget_recipe";
-const SAVE_DESCRIPTION:&str=concat!(
+crate::daw_text!(
+    #[allow(dead_code)]
+    SAVE_DESCRIPTION, save_description:
     "Save a way of working as a recipe the producer can replay any time, in any project: a chain on a track, a drum bus, a vocal chain, a sidechain, a resampling loop, a session layout. ",
-    "Steps are make_changes steps; put $name where something should be chosen when it runs (the track to work on, say) and declare it in params. Earlier steps' results work as in make_changes (as and @name); a device a step loads is set by parameter names (set_device_parameter with deviceRef \"@sat\" and parameter \"Drive\"). References from now (track:3) mean nothing later, so a recipe can't keep them. ",
+    "Steps are ", plan_tool, " steps; put $name where something should be chosen when it runs (the track to work on, say) and declare it in params. Earlier steps' results work as in ", plan_tool, " (as and @name); a device a step loads is set by parameter names (", recipe_step_example, "). References from now (", ref_example, ") mean nothing later, so a recipe can't keep them. ",
     "Save one when the producer asks to keep something as a recipe, describes a routine they repeat, has just had you do a routine they'll clearly want again, or showed you one while you watched (watch_me); then say it's saved, in a few words. ",
-    "Saving under an existing name replaces it.");
-const RUN_DESCRIPTION:&str="Run a saved recipe: its steps as one plan, the blanks filled from with ({\"track\": \"track:3\"}). Faster than planning the same changes again. With final: true and every step done, Kumi tells the producer what changed.";
+    "Saving under an existing name replaces it."
+);
+crate::daw_text!(
+    #[allow(dead_code)]
+    RUN_DESCRIPTION, run_description:
+    "Run a saved recipe: its steps as one plan, the blanks filled from with ({\"track\": \"", ref_example, "\"}). Faster than planning the same changes again. With final: true and every step done, Kumi tells the producer what changed."
+);
 pub struct RecipeToolsOptions {
     pub store: Rc<dyn RecipeStore>,
     pub plan: Rc<dyn Fn() -> Option<Rc<dyn KernelTool>>>,
     pub on_event: Rc<dyn Fn(RecipeEvent)>,
 }
 pub fn recipe_tools(options: RecipeToolsOptions) -> Vec<Rc<dyn KernelTool>> {
+    recipe_tools_for(DawProfile::ABLETON, options)
+}
+
+/// `recipe_tools`, saying the DAW's words.
+pub fn recipe_tools_for(profile: DawProfile, options: RecipeToolsOptions) -> Vec<Rc<dyn KernelTool>> {
     let options = Rc::new(options);
     [RecipeAction::Saved, RecipeAction::Running, RecipeAction::Forgotten]
         .into_iter()
-        .map(|action| Rc::new(RecipeTool { options: options.clone(), action }) as Rc<dyn KernelTool>)
+        .map(|action| {
+            let description = match action {
+                RecipeAction::Saved => save_description(&profile),
+                RecipeAction::Running => run_description(&profile),
+                _ => "Remove a saved recipe, when the producer asks.".into(),
+            };
+            Rc::new(RecipeTool { options: options.clone(), action, profile, description }) as Rc<dyn KernelTool>
+        })
         .collect()
 }
 struct RecipeTool {
     options: Rc<RecipeToolsOptions>,
     action: RecipeAction,
+    profile: DawProfile,
+    description: String,
 }
 fn quiet(value: Value) -> ToolResult {
     ToolResult { text: json::stringify(&value), reply: Some(String::new()), ..Default::default() }
@@ -313,11 +335,7 @@ impl KernelTool for RecipeTool {
         }
     }
     fn description(&self) -> &str {
-        match self.action {
-            RecipeAction::Saved => SAVE_DESCRIPTION,
-            RecipeAction::Running => RUN_DESCRIPTION,
-            _ => "Remove a saved recipe, when the producer asks.",
-        }
+        &self.description
     }
     /// Saving, running and forgetting recipes are asked for: find_tools reaches them.
     fn deferred(&self) -> bool {
@@ -371,8 +389,9 @@ impl RecipeTool {
                 || known.is_some_and(|known| !known.is_empty() && !known.contains(step.get("tool").unwrap_or(&Value::Null)))
         }) {
             return Ok(ToolResult::error(format!(
-                "{} isn't one of Kumi's change tools; a recipe is made of make_changes steps.",
-                string::head(&js_string(step.get("tool")), 64)
+                "{} isn't one of Kumi's change tools; a recipe is made of {} steps.",
+                string::head(&js_string(step.get("tool")), 64),
+                self.profile.vocab.plan_tool
             )));
         }
         let mut params = params(input.get("params"), false);
@@ -436,7 +455,8 @@ impl RecipeTool {
             )));
         }
         let Some(plan) = (self.options.plan)() else {
-            return Ok(ToolResult::error("Recipes run in a Live Set: connect Live first."));
+            let DawWords { app, place, .. } = self.profile.words;
+            return Ok(ToolResult::error(format!("Recipes run in a {app} {place}: connect {app} first.")));
         };
         (self.options.on_event)(RecipeEvent { action: RecipeAction::Running, name: recipe.name.clone(), steps: recipe.steps.len() });
         let mut request = json!({"steps":fill(&json!(recipe.steps),&values)});

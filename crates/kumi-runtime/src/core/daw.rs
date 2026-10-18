@@ -25,7 +25,14 @@ pub struct DawWords {
 /// The DAW's own things that Kumi's texts name: its devices, its ways and its limits. Live's are what the texts said
 /// before other DAWs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PromptVocab {}
+pub struct PromptVocab {
+    /// The tool that makes several changes as one plan: "make_changes".
+    pub plan_tool: &'static str,
+    /// A reference to a track as a turn gives it, for examples: "track:3".
+    pub ref_example: &'static str,
+    /// A plan step setting a device a recipe loads by parameter name, for the recipe tool's example.
+    pub recipe_step_example: &'static str,
+}
 
 /// Live's word for each field of a profile's words and vocabulary: the one place they're spelled, so a text
 /// `daw_text!` makes in Live's words stays byte for byte what it was.
@@ -41,6 +48,15 @@ macro_rules! live_word {
     (places) => {
         "Sets"
     };
+    (plan_tool) => {
+        "make_changes"
+    };
+    (ref_example) => {
+        "track:3"
+    };
+    (recipe_step_example) => {
+        "set_device_parameter with deviceRef \"@sat\" and parameter \"Drive\""
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -55,6 +71,15 @@ macro_rules! daw_word {
     };
     ($profile:expr, places) => {
         $profile.words.places
+    };
+    ($profile:expr, plan_tool) => {
+        $profile.vocab.plan_tool
+    };
+    ($profile:expr, ref_example) => {
+        $profile.vocab.ref_example
+    };
+    ($profile:expr, recipe_step_example) => {
+        $profile.vocab.recipe_step_example
     };
 }
 
@@ -164,7 +189,11 @@ impl DawProfile {
         id: None,
         words: DawWords { app: "the DAW", place: "project", places: "projects" },
         caps: Capabilities::NONE,
-        vocab: PromptVocab {},
+        vocab: PromptVocab {
+            plan_tool: "make_changes",
+            ref_example: "track:3",
+            recipe_step_example: "a parameter set by its name on a device an earlier step loaded",
+        },
     };
 
     /// Ableton Live, as Kumi drives it today: everything above.
@@ -201,7 +230,11 @@ impl DawProfile {
             browser_items: true,
             configured_plugin_params: true,
         },
-        vocab: PromptVocab {},
+        vocab: PromptVocab {
+            plan_tool: crate::live_word!(plan_tool),
+            ref_example: crate::live_word!(ref_example),
+            recipe_step_example: crate::live_word!(recipe_step_example),
+        },
     };
 
     /// The same DAW with nothing it can do now: its words stay (the producer still calls it by its name).
