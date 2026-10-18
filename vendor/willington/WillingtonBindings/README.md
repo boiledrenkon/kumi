@@ -1,6 +1,6 @@
 # Willington follow-action bindings
 
-Experimental native Clip properties for **Live 12.4.15b4/b5/b6, macOS ARM64**. All ten properties below are registered on `Live.Clip.Clip` and exposed to Max for Live. Each supports get, set and observation, plus Python's usual `add_<property>_listener`, `remove_<property>_listener`, and `<property>_has_listener` methods.
+Experimental native Clip properties for **Live 12.4.15b4/b5/b6/b7, macOS ARM64**. All ten properties below are registered on `Live.Clip.Clip` and exposed to Max for Live. Each supports get, set and observation, plus Python's usual `add_<property>_listener`, `remove_<property>_listener`, and `<property>_has_listener` methods.
 
 | Property | Values / units |
 | --- | --- |
@@ -130,3 +130,8 @@ executable and included in matrix bundles. Build explicitly with
 `build.sh --profile profiles/live-12.4.15b6-arm64.json`. The legacy single-build
 default remains b4. Both Python and actual Max getter/setter/observer suites pass
 26 cases; see the [b6 evidence](../../evidence/live-12.4.15b6-arm64/README.md).
+
+## Live 12.4.15b7 macOS ARM64
+
+The exact `live-12.4.15b7-arm64` profile participates in default selection and
+normal matrix bundles. See the [b7 evidence and coverage limits](../../evidence/live-12.4.15b7-arm64/README.md).
