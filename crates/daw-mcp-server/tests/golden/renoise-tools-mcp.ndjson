@@ -36,7 +36,7 @@
 > {"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"read","arguments":{"kind":"track","limit":0}}}
 < {"jsonrpc":"2.0","id":18,"result":{"content":[{"type":"text","text":"{\"error\":\"limit must be a whole number from 1 to 200\"}"}],"structuredContent":{"error":"limit must be a whole number from 1 to 200"},"isError":true}}
 > {"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"focus_body","arguments":{"kind":"pattern","window":{"from":4,"to":4}}}}
-< {"jsonrpc":"2.0","id":19,"result":{"content":[{"type":"text","text":"{\"error\":\"window must be {from, to}: two numbers, to after from\"}"}],"structuredContent":{"error":"window must be {from, to}: two numbers, to after from"},"isError":true}}
+< {"jsonrpc":"2.0","id":19,"result":{"content":[{"type":"text","text":"{\"error\":\"the simulator has no answer scripted for focus_body {\\\"kind\\\":\\\"pattern\\\",\\\"window\\\":{\\\"from\\\":4.0,\\\"to\\\":4.0}}\",\"code\":\"bad-params\",\"connected\":true,\"daw\":\"renoise\"}"}],"structuredContent":{"error":"the simulator has no answer scripted for focus_body {\"kind\":\"pattern\",\"window\":{\"from\":4.0,\"to\":4.0}}","code":"bad-params","connected":true,"daw":"renoise"},"isError":true}}
 > {"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"focus_body","arguments":{}}}
 < {"jsonrpc":"2.0","id":20,"result":{"content":[{"type":"text","text":"{\"error\":\"kind: which body\"}"}],"structuredContent":{"error":"kind: which body"},"isError":true}}
 > {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"read","arguments":{"kind":"nonsense"}}}

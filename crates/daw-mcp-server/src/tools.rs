@@ -53,13 +53,13 @@ fn limit_arg(arguments: &Value) -> Result<Option<u64>, String> {
     }
 }
 
-fn window_arg(arguments: &Value) -> Result<Option<Value>, String> {
+fn window_arg(arguments: &Value, daw: Daw) -> Result<Option<Value>, String> {
     let Some(window) = arguments.get("window").filter(|w| !w.is_null()) else { return Ok(None) };
     let number = |name: &str| window.get(name).and_then(Value::as_f64).filter(|n| n.is_finite());
     match (number("from"), number("to")) {
-        // (a bridge that wants a longer window says so: a pattern's one line is one)
-        (Some(from), Some(to)) if to >= from => Ok(Some(json!({"from": from, "to": to}))),
-        _ => Err("window must be {from, to}: two numbers, to not before from".into()),
+        (Some(from), Some(to)) if to > from || (daw == Daw::Renoise && to == from) => Ok(Some(json!({"from": from, "to": to}))),
+        // (a pattern's one line is a window in Renoise, whose lines are whole numbers; REAPER's are seconds)
+        _ => Err(format!("window must be {{from, to}}: two numbers, to {} from", if daw == Daw::Renoise { "not before" } else { "after" })),
     }
 }
 
@@ -94,7 +94,7 @@ fn read_params(arguments: &Value) -> Result<Value, String> {
 }
 
 /// The arguments a `focus_body` forwards.
-fn body_params(arguments: &Value) -> Result<Value, String> {
+fn body_params(arguments: &Value, daw: Daw) -> Result<Value, String> {
     let mut params = Map::new();
     let Some(kind) = text_arg(arguments, "kind")? else { return Err("kind: which body".into()) };
     params.insert("kind".into(), kind.into());
@@ -103,7 +103,7 @@ fn body_params(arguments: &Value) -> Result<Value, String> {
             params.insert(name.into(), text.into());
         }
     }
-    if let Some(window) = window_arg(arguments)? {
+    if let Some(window) = window_arg(arguments, daw)? {
         params.insert("window".into(), window);
     }
     if let Some(limit) = limit_arg(arguments)? {
@@ -208,7 +208,7 @@ impl Host {
             Ok(pick) => pick,
             Err(answer) => return answer,
         };
-        match body_params(arguments) {
+        match body_params(arguments, self.daw()) {
             Ok(params) => self.paged("focus_body", params, &pick, READ_TIMEOUT).await,
             Err(why) => (json!({"error": why}), true),
         }
@@ -234,10 +234,13 @@ mod tests {
             read_params(&json!({"kind": "line", "parent": "1:pattern:2", "track": 3, "hidden": true})).unwrap(),
             json!({"kind": "line", "parent": "1:pattern:2", "track": 3, "hidden": true})
         );
-        assert_eq!(body_params(&json!({"kind": "pattern", "hidden": true})).unwrap(), json!({"kind": "pattern", "hidden": true}));
+        assert_eq!(
+            body_params(&json!({"kind": "pattern", "hidden": true}), Daw::Renoise).unwrap(),
+            json!({"kind": "pattern", "hidden": true})
+        );
         assert_eq!(read_params(&json!({"kind": "line", "hidden": false})).unwrap(), json!({"kind": "line"}));
         assert!(read_params(&json!({"kind": "line", "hidden": "yes"})).is_err());
-        assert!(body_params(&json!({"kind": "pattern", "hidden": 1})).is_err());
+        assert!(body_params(&json!({"kind": "pattern", "hidden": 1}), Daw::Renoise).is_err());
     }
 
     #[test]
@@ -274,23 +277,25 @@ mod tests {
 
     #[test]
     fn a_body_forwards_its_window_when_it_is_a_range() {
-        let params = body_params(&json!({"kind": "arrange", "window": {"from": 0, "to": 32}, "limit": 10, "resource": "/x"})).unwrap();
+        let params =
+            body_params(&json!({"kind": "arrange", "window": {"from": 0, "to": 32}, "limit": 10, "resource": "/x"}), Daw::Reaper).unwrap();
         assert_eq!(params, json!({"kind": "arrange", "window": {"from": 0.0, "to": 32.0}, "limit": 10}));
-        let params = body_params(&json!({"kind": "arrange", "limit": 24, "around": "r:track:{A}"})).unwrap();
+        let params = body_params(&json!({"kind": "arrange", "limit": 24, "around": "r:track:{A}"}), Daw::Reaper).unwrap();
         assert_eq!(params, json!({"kind": "arrange", "around": "r:track:{A}", "limit": 24}));
-        assert!(body_params(&json!({"kind": "arrange", "around": 5})).is_err());
+        assert!(body_params(&json!({"kind": "arrange", "around": 5}), Daw::Reaper).is_err());
         // (one line of a pattern is a window; a bridge that wants more says so)
         assert_eq!(
-            body_params(&json!({"kind": "pattern", "window": {"from": 5, "to": 5}})).unwrap(),
+            body_params(&json!({"kind": "pattern", "window": {"from": 5, "to": 5}}), Daw::Renoise).unwrap(),
             json!({"kind": "pattern", "window": {"from": 5.0, "to": 5.0}})
         );
         for bad in [
             json!({}),
             json!({"kind": "arrange", "window": {"from": 6, "to": 5}}),
+            json!({"kind": "arrange", "window": {"from": 5, "to": 5}}),
             json!({"kind": "arrange", "window": "all"}),
             json!({"kind": "fx", "ref": 2}),
         ] {
-            assert!(body_params(&bad).is_err(), "{bad}");
+            assert!(body_params(&bad, Daw::Reaper).is_err(), "{bad}");
         }
     }
 
