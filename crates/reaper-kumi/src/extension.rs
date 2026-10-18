@@ -14,12 +14,51 @@ use crate::queue::{self, Answer, Budget, Job};
 use crate::reaper::{Busy, PlayState, ProjectInfo, Reaper, ACTION_QUIT};
 
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const HEARTBEAT: Duration = Duration::from_millis(1000);
+const HEARTBEAT: Duration = Duration::from_millis(daw_bridge::wire::HEARTBEAT_MS);
+
+// Actions that close or replace the project, and so ask "Save changes?" in a dialog inside the request when it has any.
+const CLOSES_CURRENT_PROJECT: [i32; 2] = [40860, 40023];
+const CLOSES_ALL_PROJECTS: [i32; 1] = [40886];
+// Actions that render with a progress window of their own, which holds the main thread for the whole render.
+const RENDERS: [i32; 2] = [41824, 42230];
+const SAVE_PROJECT: i32 = 40026;
 
 /// Where the main thread's events and heartbeats go: the socket server, or a test's list.
 pub trait Outbox {
     fn event(&self, name: &str, data: Value);
     fn heartbeat(&self);
+}
+
+/// Clears the flag when dropped.
+struct ClearOnDrop<'a>(&'a Cell<bool>);
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+/// REAPER's UI refresh held (PreventUIRefresh +1) from the first `hold`, and let go when dropped.
+struct RefreshHold<'a> {
+    reaper: &'a Reaper<'a>,
+    held: bool,
+}
+
+impl RefreshHold<'_> {
+    fn hold(&mut self) {
+        if !self.held {
+            self.reaper.prevent_ui_refresh(1);
+            self.held = true;
+        }
+    }
+}
+
+impl Drop for RefreshHold<'_> {
+    fn drop(&mut self) {
+        if self.held {
+            self.reaper.prevent_ui_refresh(-1);
+        }
+    }
 }
 
 /// What the socket threads may read without the main thread: who this bridge is, and when it last ticked.
@@ -165,12 +204,15 @@ impl Extension {
         if self.in_tick.replace(true) {
             return;
         }
+        // Cleared on the way out whatever happens, so one panic caught above doesn't skip every later tick.
+        let _in_tick = ClearOnDrop(&self.in_tick);
         self.count_tick(driver);
-        if self.quit.get() == Quit::Answered {
+        // Only the timer quits: REAPER may unload the extension inside the action, and the control surface's Run()
+        // would then be running inside the surface being deleted.
+        if self.quit.get() == Quit::Answered && driver == Driver::Timer {
             // REAPER may unload the extension inside this call; nothing more this tick.
             self.quit.set(Quit::No);
             self.reaper().run_action(ACTION_QUIT);
-            self.in_tick.set(false);
             return;
         }
         let busy = self.reaper().busy();
@@ -185,25 +227,20 @@ impl Extension {
             self.last_heartbeat.set(Some(now));
             self.out.heartbeat();
         }
-        self.in_tick.set(false);
     }
 
     fn run_jobs(&self) {
         let reaper = self.reaper();
-        let mut refresh_held = false;
+        // Held by the first request, released on the way out even if something unwinds: an unbalanced hold leaves
+        // REAPER's arrange view frozen.
+        let mut refresh = RefreshHold { reaper: &reaper, held: false };
         queue::drain(&self.jobs, self.budget, |job| {
-            if !refresh_held {
-                reaper.prevent_ui_refresh(1);
-                refresh_held = true;
-            }
+            refresh.hold();
             let answer = crate::guard("request", Err(("internal".into(), "the request failed inside the bridge".into())), || {
                 self.handle(&job.method, &job.params)
             });
             job.answer(answer);
         });
-        if refresh_held {
-            reaper.prevent_ui_refresh(-1);
-        }
     }
 
     fn handle(&self, method: &str, params: &Value) -> Answer {
@@ -230,6 +267,26 @@ impl Extension {
         if id == ACTION_QUIT {
             return Err(bad_params("use quit, which checks for unsaved changes first"));
         }
+        if RENDERS.contains(&id) {
+            return Err(bad_params(&format!("{name:?} renders with a progress window that holds REAPER's main thread")));
+        }
+        // These would ask "Save changes?" in a dialog, inside this request, if a project they close has changes.
+        let closing = if CLOSES_ALL_PROJECTS.contains(&id) {
+            reaper.projects()
+        } else if CLOSES_CURRENT_PROJECT.contains(&id) {
+            reaper.current_project().into_iter().collect()
+        } else {
+            vec![]
+        };
+        let dirty: Vec<&str> = closing.iter().filter(|p| reaper.is_dirty(p.ptr)).map(|p| p.name.as_str()).collect();
+        if !dirty.is_empty() {
+            let names = dirty.iter().map(|name| if name.is_empty() { "(unsaved project)" } else { name }).collect::<Vec<_>>();
+            return Err(("failed".into(), format!("{name:?} would ask about unsaved changes in {}: save them first", names.join(", "))));
+        }
+        // Saving a project that was never saved opens Save As.
+        if id == SAVE_PROJECT && reaper.current_project().is_some_and(|p| p.path.is_empty()) {
+            return Err(("failed".into(), "this project was never saved, so Save would open Save As: save it in REAPER first".into()));
+        }
         reaper.run_action(id);
         Ok(json!({"command": id, "name": name}))
     }
@@ -239,6 +296,12 @@ impl Extension {
     fn quit(&self, params: &Value) -> Answer {
         let reaper = self.reaper();
         let save = params["save"].as_bool().unwrap_or(false);
+        if reaper.projects().iter().any(|p| reaper.play_state(p.ptr).recording) {
+            return Err((
+                "failed".into(),
+                "REAPER is recording: quitting would ask what to do with the recorded files; stop it first".into(),
+            ));
+        }
         let dirty: Vec<ProjectInfo> = reaper.projects().into_iter().filter(|p| reaper.is_dirty(p.ptr)).collect();
         if dirty.iter().any(|p| p.path.is_empty()) {
             return Err(("failed".into(), "a project that was never saved has changes: save it in REAPER first".into()));
@@ -478,6 +541,96 @@ mod tests {
             Ok(json!({"quitting": true, "saved": ["/lab/Projects/a.rpp"]}))
         );
         assert_eq!(fake::with(|s| s.saved), 1);
+    }
+
+    #[test]
+    fn actions_that_would_ask_to_save_or_hold_the_main_thread_are_refused() {
+        let (extension, tx, _, _) = setup();
+        let refused = |command: i32| ask_with(&extension, &tx, "action", json!({"command": command})).unwrap_err();
+        // A render holds the main thread for as long as it takes.
+        assert!(refused(41824).1.contains("renders"));
+        // Closing or replacing a project with changes asks "Save changes?" inside the request.
+        fake::with(|s| {
+            s.project = Some(("/lab/Projects/a.rpp".into(), "a.rpp".into()));
+            s.dirty = true;
+        });
+        for command in [40860, 40023, 40886] {
+            let (code, message) = refused(command);
+            assert_eq!(code, "failed");
+            assert!(message.contains("a.rpp"), "{message}");
+        }
+        assert!(fake::with(|s| s.actions.is_empty()));
+        // Without changes they run; and Save on a project never saved would open Save As.
+        fake::with(|s| s.dirty = false);
+        assert!(ask_with(&extension, &tx, "action", json!({"command": 40860})).is_ok());
+        fake::with(|s| s.project = Some((String::new(), String::new())));
+        assert!(refused(SAVE_PROJECT).1.contains("Save As"));
+        fake::with(|s| s.project = Some(("/lab/Projects/a.rpp".into(), "a.rpp".into())));
+        assert!(ask_with(&extension, &tx, "action", json!({"command": SAVE_PROJECT})).is_ok());
+        assert_eq!(fake::with(|s| s.actions.clone()), [40860, SAVE_PROJECT]);
+    }
+
+    #[test]
+    fn quit_waits_for_a_recording_to_stop() {
+        let (extension, tx, _, _) = setup();
+        fake::with(|s| s.play_bits = 4);
+        assert!(ask_with(&extension, &tx, "quit", json!({})).unwrap_err().1.contains("recording"));
+        fake::with(|s| s.play_bits = 0);
+        assert!(ask_with(&extension, &tx, "quit", json!({})).is_ok());
+    }
+
+    #[test]
+    fn only_the_timer_quits_never_the_control_surfaces_run() {
+        let (extension, tx, _, _) = setup();
+        ask(&extension, &tx, "quit");
+        extension.on_surface(Call::Run);
+        extension.on_surface(Call::Run);
+        assert!(fake::with(|s| s.actions.is_empty()), "REAPER quit inside the surface's own Run()");
+        extension.tick(Driver::Timer);
+        assert_eq!(fake::with(|s| s.actions.clone()), [ACTION_QUIT]);
+    }
+
+    #[test]
+    fn rendering_shows_in_the_snapshot_and_holds_requests() {
+        let (extension, tx, _, _) = setup();
+        fake::with(|s| s.rendering = true);
+        extension.tick(Driver::Timer);
+        assert_eq!(extension.snapshot().busy, Some(Busy::Rendering));
+        let (job, waiter) = queue::job("action", json!({"command": 40001}));
+        tx.send(job).unwrap();
+        extension.tick(Driver::Timer);
+        assert_eq!(waiter.wait(Duration::from_millis(1), &OPEN), Outcome::Cancelled);
+        assert!(fake::with(|s| s.actions.is_empty()));
+        fake::with(|s| s.rendering = false);
+        extension.tick(Driver::Timer);
+        assert_eq!(extension.snapshot().busy, None);
+    }
+
+    // An outbox whose heartbeat panics once: the kind of fault that gets past `guard` around one request.
+    struct Panicky(Cell<bool>);
+
+    impl Outbox for Panicky {
+        fn event(&self, _: &str, _: Value) {}
+        fn heartbeat(&self) {
+            if self.0.replace(false) {
+                panic!("a heartbeat failed");
+            }
+        }
+    }
+
+    #[test]
+    fn a_panic_in_a_tick_doesnt_skip_every_tick_after_it() {
+        fake::reset();
+        let (tx, rx) = queue::channel();
+        let extension = Extension::new(fake::api(), rx, Box::new(Panicky(Cell::new(true))), Arc::new(Mutex::new(Snapshot::default())));
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extension.tick(Driver::Timer)));
+        assert!(first.is_err());
+        let (job, waiter) = queue::job("action", json!({"command": 40001}));
+        tx.send(job).unwrap();
+        extension.tick(Driver::Timer);
+        assert!(matches!(waiter.wait(Duration::from_secs(1), &OPEN), Outcome::Answered(Ok(_))));
+        // And the UI refresh hold is balanced when something unwinds while it is held.
+        assert_eq!(fake::with(|s| s.ui_refresh), 0);
     }
 
     #[test]

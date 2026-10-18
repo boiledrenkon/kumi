@@ -77,6 +77,11 @@ impl Loaded {
             return;
         }
         self.extension.tick(driver);
+        // REAPER may have unloaded the extension inside that tick (the quit action runs the atexit hooks): nothing
+        // started now would ever be stopped.
+        if self.stopped.get() {
+            return;
+        }
         self.ensure_server();
         if let Some(server) = self.server.borrow_mut().as_mut() {
             server.publish(&self.extension.snapshot());
@@ -84,7 +89,7 @@ impl Loaded {
     }
 
     fn ensure_server(&self) {
-        if self.server.borrow().is_some() || self.last_try.get().is_some_and(|t| t.elapsed() < SERVER_RETRY) {
+        if self.stopped.get() || self.server.borrow().is_some() || self.last_try.get().is_some_and(|t| t.elapsed() < SERVER_RETRY) {
             return;
         }
         self.last_try.set(Some(Instant::now()));
@@ -198,7 +203,8 @@ fn load(info: &PluginInfo) -> c_int {
     // REAPER 7.55+; older ones still call the entry point to unload.
     loaded.register(c"atexit", on_exit as *mut c_void);
     LOADED.with(|l| *l.borrow_mut() = Some(loaded.clone()));
-    loaded.ensure_server();
+    // The server starts from the first tick: once registered, REAPER keeps calling this module, so nothing after the
+    // registrations may fail the entry (a panic there would have REAPER unload a module it still has callbacks into).
     1
 }
 
@@ -221,4 +227,128 @@ pub unsafe extern "C" fn ReaperPluginEntry(_instance: *mut c_void, info: *mut Pl
             0
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reaper::fake;
+    use daw_bridge::files::{Reference, REFERENCE_SCHEMA};
+    use std::path::PathBuf;
+    use std::ptr::null_mut;
+    use std::sync::atomic::AtomicBool;
+
+    // What REAPER was asked to register, in order, on this test's thread (the extension is thread-local too).
+    thread_local! {
+        static REGISTERED: RefCell<Vec<(String, usize)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    unsafe extern "C" fn register(name: *const c_char, info: *mut c_void) -> c_int {
+        let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
+        REGISTERED.with(|r| r.borrow_mut().push((name, info as usize)));
+        1
+    }
+
+    fn registered() -> Vec<String> {
+        REGISTERED.with(|r| r.borrow().iter().map(|(name, _)| name.clone()).collect())
+    }
+
+    fn hook(name: &str) -> extern "C" fn() {
+        let pointer = REGISTERED.with(|r| r.borrow().iter().rev().find(|(n, _)| n == name).map(|(_, p)| *p)).expect("registered");
+        unsafe { std::mem::transmute::<usize, extern "C" fn()>(pointer) }
+    }
+
+    fn info(caller_version: c_int) -> PluginInfo {
+        PluginInfo { caller_version, hwnd_main: null_mut(), register: Some(register), get_func: Some(fake::get_func) }
+    }
+
+    /// A fake REAPER whose resource folder holds a reference file, so the bridge can serve: returns the discovery folder.
+    fn reaper_with_a_reference() -> (tempfile::TempDir, PathBuf) {
+        fake::reset();
+        REGISTERED.with(|r| r.borrow_mut().clear());
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("REAPER");
+        std::fs::create_dir_all(resource.join("UserPlugins")).unwrap();
+        let discovery = dir.path().join("kumi/discovery");
+        let reference = Reference {
+            schema: REFERENCE_SCHEMA.into(),
+            daw: "reaper".into(),
+            secret_file: dir.path().join("kumi/bridge.secret").to_string_lossy().into_owned(),
+            discovery_dir: discovery.to_string_lossy().into_owned(),
+            port: None,
+            log_dir: Some(dir.path().join("kumi/logs").to_string_lossy().into_owned()),
+        };
+        std::fs::write(resource.join("UserPlugins/kumi-bridge-reference.json"), reference.to_json()).unwrap();
+        fake::with(|s| s.resource = resource.to_string_lossy().into_owned());
+        (dir, discovery)
+    }
+
+    fn discovery_files(dir: &Path) -> usize {
+        daw_bridge::files::scan_discovery(dir, daw_bridge::Daw::Reaper).len()
+    }
+
+    #[test]
+    fn the_entry_registers_once_serves_from_the_first_tick_and_unregisters_on_unload() {
+        let (_dir, discovery) = reaper_with_a_reference();
+        // A REAPER from another SDK version is refused before anything is registered.
+        assert_eq!(unsafe { ReaperPluginEntry(null_mut(), &mut info(0x1)) }, 0);
+        assert!(registered().is_empty());
+
+        assert_eq!(unsafe { ReaperPluginEntry(null_mut(), &mut info(api::REAPER_PLUGIN_VERSION)) }, 1);
+        assert_eq!(registered(), ["ext_name", "csurf_inst", "timer", "atexit"]);
+        assert_eq!(discovery_files(&discovery), 0, "no server before the first tick");
+        // Loading again registers nothing more.
+        assert_eq!(unsafe { ReaperPluginEntry(null_mut(), &mut info(api::REAPER_PLUGIN_VERSION)) }, 1);
+        assert_eq!(registered().len(), 4);
+
+        hook("timer")();
+        assert_eq!(discovery_files(&discovery), 1);
+        assert!(loaded().unwrap().server.borrow().is_some());
+
+        // Unloading says goodbye to REAPER and to Kumi; the quit hook coming after it does nothing more.
+        assert_eq!(unsafe { ReaperPluginEntry(null_mut(), null_mut()) }, 0);
+        assert_eq!(registered()[4..], ["-timer", "-csurf_inst"]);
+        assert_eq!(discovery_files(&discovery), 0);
+        hook("atexit")();
+        on_timer();
+        assert_eq!(registered().len(), 6);
+    }
+
+    thread_local! {
+        static QUIT_RUNS_ATEXIT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn reaper_runs_atexit_inside_the_quit_action(command: i32) {
+        if command == reaper::ACTION_QUIT && QUIT_RUNS_ATEXIT.get() {
+            hook("atexit")();
+        }
+    }
+
+    #[test]
+    fn a_quit_that_unloads_inside_the_tick_leaves_no_server_behind() {
+        let (_dir, discovery) = reaper_with_a_reference();
+        assert_eq!(unsafe { ReaperPluginEntry(null_mut(), &mut info(api::REAPER_PLUGIN_VERSION)) }, 1);
+        hook("timer")();
+        assert_eq!(discovery_files(&discovery), 1);
+
+        // REAPER has run a while: the last start of a server is old enough that a tick would try again.
+        let loaded_now = loaded().unwrap();
+        loaded_now.last_try.set(None);
+        QUIT_RUNS_ATEXIT.set(true);
+        fake::with(|s| s.on_action = Some(reaper_runs_atexit_inside_the_quit_action));
+        let (job, waiter) = queue::job("quit", serde_json::json!({}));
+        loaded_now.jobs.send(job).unwrap();
+        hook("timer")();
+        let wait = AtomicBool::new(false);
+        assert!(matches!(waiter.wait(Duration::from_secs(1), &wait), queue::Outcome::Answered(Ok(_))));
+        // The next tick runs the quit action, and REAPER's atexit hooks run inside it.
+        hook("timer")();
+        assert!(loaded_now.stopped.get());
+        assert!(loaded_now.server.borrow().is_none(), "a server was started after the extension stopped");
+        assert_eq!(discovery_files(&discovery), 0);
+        assert_eq!(registered().iter().filter(|name| *name == "-timer").count(), 1);
+        // The unload call that follows finds nothing left to do.
+        assert_eq!(unsafe { ReaperPluginEntry(null_mut(), null_mut()) }, 0);
+        assert_eq!(registered().iter().filter(|name| *name == "-timer").count(), 1);
+    }
 }

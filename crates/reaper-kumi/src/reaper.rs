@@ -268,6 +268,11 @@ pub mod fake {
         pub saved: u32,
         pub actions: Vec<i32>,
         pub ui_refresh: i32,
+        /// A project is rendering (what EnumProjects(0x40000000) answers).
+        pub rendering: bool,
+        /// Called, with no borrow of the state held, as REAPER runs each action: a test's REAPER that quits by running
+        /// its atexit hooks inside the quit action.
+        pub on_action: Option<fn(i32)>,
     }
 
     thread_local! {
@@ -319,6 +324,7 @@ pub mod fake {
     }
     unsafe extern "C" fn enum_projects(idx: c_int, buf: *mut c_char, size: c_int) -> *mut ReaProject {
         with(|s| match (&s.project, idx) {
+            (_, 0x4000_0000) if s.rendering => PROJECT,
             (Some((path, _)), -1 | 0) => {
                 write(buf, size, path);
                 PROJECT
@@ -370,7 +376,13 @@ pub mod fake {
         with(|s| write(buf, 64, &s.tracks[index].0));
     }
     unsafe extern "C" fn main_on_command_ex(command: c_int, _flag: c_int, _proj: *mut ReaProject) {
-        with(|s| s.actions.push(command));
+        let hook = with(|s| {
+            s.actions.push(command);
+            s.on_action
+        });
+        if let Some(hook) = hook {
+            hook(command);
+        }
     }
     unsafe extern "C" fn prevent_ui_refresh(count: c_int) {
         with(|s| s.ui_refresh += count);
@@ -389,6 +401,11 @@ pub mod fake {
             40001 => c"Track: Insert new track".as_ptr(),
             40004 => c"File: Quit REAPER".as_ptr(),
             40022 => c"File: Save project as...".as_ptr(),
+            40023 => c"File: New project".as_ptr(),
+            40026 => c"File: Save project".as_ptr(),
+            40860 => c"Close current project tab".as_ptr(),
+            40886 => c"File: Close all projects".as_ptr(),
+            41824 => c"File: Render project, using the most recent render settings".as_ptr(),
             54000 => c"Script: kumi.lua".as_ptr(),
             _ => c"".as_ptr(),
         }
@@ -403,33 +420,42 @@ pub mod fake {
 
     /// The fake table: only the functions above resolve.
     pub fn api() -> Api {
-        Api::load(|name| {
-            let f: *mut c_void = match name.to_bytes() {
-                b"GetAppVersion" => get_app_version as *mut c_void,
-                b"GetResourcePath" => get_resource_path as *mut c_void,
-                b"EnumProjects" => enum_projects as *mut c_void,
-                b"GetProjectName" => get_project_name as *mut c_void,
-                b"GetCurrentProjectInLoadSave" => get_current_project_in_load_save as *mut c_void,
-                b"GetPlayStateEx" => get_play_state_ex as *mut c_void,
-                b"Master_GetTempo" => master_get_tempo as *mut c_void,
-                b"GetProjectStateChangeCount" => get_project_state_change_count as *mut c_void,
-                b"CountTracks" => count_tracks as *mut c_void,
-                b"CountSelectedTracks2" => count_selected_tracks2 as *mut c_void,
-                b"GetSelectedTrack2" => get_selected_track2 as *mut c_void,
-                b"GetMediaTrackInfo_Value" => get_media_track_info_value as *mut c_void,
-                b"GetTrackName" => get_track_name as *mut c_void,
-                b"GetTrackGUID" => get_track_guid as *mut c_void,
-                b"guidToString" => guid_to_string as *mut c_void,
-                b"Main_OnCommandEx" => main_on_command_ex as *mut c_void,
-                b"PreventUIRefresh" => prevent_ui_refresh as *mut c_void,
-                b"IsProjectDirty" => is_project_dirty as *mut c_void,
-                b"Main_SaveProject" => main_save_project as *mut c_void,
-                b"kbd_getTextFromCmd" => kbd_get_text_from_cmd as *mut c_void,
-                b"NamedCommandLookup" => named_command_lookup as *mut c_void,
-                _ => ptr::null_mut(),
-            };
-            f
-        })
+        Api::load(lookup)
+    }
+
+    fn lookup(name: &CStr) -> *mut c_void {
+        match name.to_bytes() {
+            b"GetAppVersion" => get_app_version as *mut c_void,
+            b"GetResourcePath" => get_resource_path as *mut c_void,
+            b"EnumProjects" => enum_projects as *mut c_void,
+            b"GetProjectName" => get_project_name as *mut c_void,
+            b"GetCurrentProjectInLoadSave" => get_current_project_in_load_save as *mut c_void,
+            b"GetPlayStateEx" => get_play_state_ex as *mut c_void,
+            b"Master_GetTempo" => master_get_tempo as *mut c_void,
+            b"GetProjectStateChangeCount" => get_project_state_change_count as *mut c_void,
+            b"CountTracks" => count_tracks as *mut c_void,
+            b"CountSelectedTracks2" => count_selected_tracks2 as *mut c_void,
+            b"GetSelectedTrack2" => get_selected_track2 as *mut c_void,
+            b"GetMediaTrackInfo_Value" => get_media_track_info_value as *mut c_void,
+            b"GetTrackName" => get_track_name as *mut c_void,
+            b"GetTrackGUID" => get_track_guid as *mut c_void,
+            b"guidToString" => guid_to_string as *mut c_void,
+            b"Main_OnCommandEx" => main_on_command_ex as *mut c_void,
+            b"PreventUIRefresh" => prevent_ui_refresh as *mut c_void,
+            b"IsProjectDirty" => is_project_dirty as *mut c_void,
+            b"Main_SaveProject" => main_save_project as *mut c_void,
+            b"kbd_getTextFromCmd" => kbd_get_text_from_cmd as *mut c_void,
+            b"NamedCommandLookup" => named_command_lookup as *mut c_void,
+            _ => ptr::null_mut(),
+        }
+    }
+
+    /// The same table as REAPER's GetFunc, for the entry point's `reaper_plugin_info_t`.
+    ///
+    /// # Safety
+    /// `name` is a NUL-terminated string.
+    pub unsafe extern "C" fn get_func(name: *const c_char) -> *mut c_void {
+        lookup(unsafe { CStr::from_ptr(name) })
     }
 
     /// A typical lab state: an unsaved project with two tracks.
