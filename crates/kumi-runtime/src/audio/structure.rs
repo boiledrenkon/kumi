@@ -50,6 +50,13 @@ pub struct FormOptions {
     pub beats_per_bar: Option<f64>,
     pub signal: Option<Signal>,
 }
+/// How a form says the song's length at the project's tempo, in Live's words.
+const AT_THE_SET: &str = "at the Set's";
+/// A form as the DAW's words say it: "at the Set's 124 BPM" with the DAW's word for its project.
+pub fn form_in_words(mut form: Form, place: &str) -> Form {
+    form.at_set_tempo = form.at_set_tempo.map(|said| said.replacen(AT_THE_SET, &format!("at the {place}'s"), 1));
+    form
+}
 pub async fn hear_form(path: &str, options: FormOptions) -> Result<Form, AudioError> {
     // The form hears the first 900 s at most.
     let mut source = open_audio_to(path, options.signal.clone(), Some(901.0)).await?;
@@ -417,7 +424,7 @@ impl FormMeter {
             to_string(form.tempo.bpm)
         );
         form.at_set_tempo = set_tempo
-            .map(|tempo| format!("{} at the Set's {} BPM", clock(count as f64 * beats_per_bar * 60.0 / tempo), to_string(round(tempo, 2))));
+            .map(|tempo| format!("{} {AT_THE_SET} {} BPM", clock(count as f64 * beats_per_bar * 60.0 / tempo), to_string(round(tempo, 2))));
         form
     }
 }

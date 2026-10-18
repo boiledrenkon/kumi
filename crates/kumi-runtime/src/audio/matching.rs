@@ -94,7 +94,11 @@ pub const STRUCTURE_MOVES:&[(StructuralKind,&str)]=&[
 (StructuralKind::Width,"widen or narrow it: Utility width, Chorus-Ensemble, or parallel chains panned apart"),
 (StructuralKind::Density,"change the MIDI: more or fewer notes, another rhythm")];
 pub fn structure_move(kind: StructuralKind) -> &'static str {
-    STRUCTURE_MOVES.iter().find(|(k, _)| *k == kind).unwrap().1
+    structure_move_for(&crate::core::daw::DawProfile::ABLETON, kind)
+}
+/// The structural change for a gap, with the DAW's own devices.
+pub fn structure_move_for(profile: &crate::core::daw::DawProfile, kind: StructuralKind) -> &'static str {
+    profile.vocab.structure_moves.iter().find(|(k, _)| *k == kind).unwrap().1
 }
 fn near(distance: f64, scale: f64) -> f64 {
     (-distance.abs() / scale).exp()

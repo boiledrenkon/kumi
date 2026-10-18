@@ -19,7 +19,6 @@ use kumi_common::{
     abort::{self, Signal, SignalExt},
     js::{json::stringify, string::head},
 };
-use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -27,21 +26,7 @@ use std::{
     path::Path,
 };
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ActionOutcome {
-    pub text: String,
-    pub is_error: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub maybe: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub done: Option<ActionSummary>,
-}
-impl ActionOutcome {
-    fn error(text: impl Into<String>) -> Self {
-        Self { text: text.into(), is_error: true, maybe: None, done: None }
-    }
-}
+pub use crate::core::plan::ActionOutcome;
 impl Mutations {
     pub fn emit_action(&self, done: &ActionSummary) {
         if let Some(listener) = &self.options.on_action {

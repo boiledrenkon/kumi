@@ -1,14 +1,4 @@
+//! Max for Live devices: the .amxd format, read and written wherever Kumi meets one, and Live's device builder
+//! (make_device), which lives with Live's integration and keeps its paths here.
 pub mod amxd;
-pub mod face;
-pub mod findings;
-pub mod gen;
-pub mod harness;
-pub mod harness_child;
-pub mod kit;
-pub mod look;
-pub mod mapping;
-pub mod midi;
-pub mod patch;
-pub mod patched;
-pub mod spec;
-pub mod tool;
+pub use crate::integrations::live_devices::*;

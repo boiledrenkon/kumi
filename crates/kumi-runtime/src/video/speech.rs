@@ -65,7 +65,11 @@ pub fn cues_from_whisper(text: &str) -> Vec<Cue> {
         .collect()
 }
 pub fn speech_prompt(title: &str) -> String {
-    format!("{}. Ableton Live tutorial: Operator, Wavetable, Drift, Simpler, Sampler, Drum Rack, Instrument Rack, Saturator, Dynamic Tube, EQ Eight, EQ Three, Glue Compressor, OTT, Roar, Auto Filter, Utility, reverb, delay, LFO, envelope, oscillator, detune, sidechain, dry/wet, Serum, Vital.",head(title,200))
+    speech_prompt_for(&crate::core::daw::DawProfile::ABLETON, title)
+}
+/// `speech_prompt`, with what a tutorial for the DAW talks about.
+pub fn speech_prompt_for(profile: &crate::core::daw::DawProfile, title: &str) -> String {
+    format!("{}. {}", head(title, 200), profile.vocab.tutorial_words)
 }
 async fn cancelled(signal: &Option<Signal>) {
     if let Some(signal) = signal {

@@ -1,0 +1,11 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[judged] Round 2 · true peak
+[judged]   change: Limiter ceiling -1 → -3.5 dB
+[judged]   reverted: it hurt punch (crest)
+[judged]   4 listens · 0:42
+[matching] 58% → 81% (Low shelf +3 dB), stopped: reached
+[completed] first text unavailable; total 90000 ms; usage unavailable; cost unavailable
+Kumi closed. Each Set's conversation continues next time.

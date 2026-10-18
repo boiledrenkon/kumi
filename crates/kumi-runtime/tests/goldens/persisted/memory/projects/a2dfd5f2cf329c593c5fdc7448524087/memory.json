@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "notes": [
+    {
+      "id": "s2",
+      "text": "Drop at bar 33",
+      "at": 1760000004000
+    },
+    {
+      "id": "s1",
+      "text": "The Reese and the sub are the bass",
+      "at": 1760000005000
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "conversations": [
+    {
+      "id": "mgj6k3cw0a0b0c",
+      "savedAt": 1760000000000,
+      "first": "make the kick punchier",
+      "turns": 4,
+      "current": true,
+      "place": "a2dfd5f2cf329c593c5fdc7448524087",
+      "name": "Kick work",
+      "set": "Night Drive",
+      "pinned": true,
+      "forkedFrom": "mgj6wybk1a2b3c",
+      "created": 1759996400000,
+      "imported": true
+    },
+    {
+      "id": "mgj79ta82b3c4d",
+      "savedAt": 1759999940000,
+      "first": "warmer pads",
+      "turns": 1,
+      "current": false,
+      "place": "unsaved",
+      "created": 0
+    }
+  ],
+  "now": {
+    "id": "mgj6k3cw0a0b0c",
+    "title": "Kick work",
+    "kept": true,
+    "touched": false
+  },
+  "setChoices": [
+    "open",
+    "copy",
+    "cancel"
+  ],
+  "memory": {
+    "producer": [
+      {
+        "id": "p1",
+        "text": "Works in D minor a lot",
+        "at": 1760000000000
+      }
+    ],
+    "set": [
+      {
+        "id": "s2",
+        "text": "Likes the kick dry and short",
+        "at": 1760000000000,
+        "pinned": true
+      }
+    ],
+    "setName": "Night Drive",
+    "saved": true
+  },
+  "status": [
+    {
+      "state": "running",
+      "connection": "connected",
+      "turns": 3,
+      "maxTurns": 40,
+      "observation": "Night Drive · 8 tracks · 124 BPM"
+    },
+    {
+      "state": "idle",
+      "connection": "disconnected",
+      "turns": 0
+    }
+  ]
+}

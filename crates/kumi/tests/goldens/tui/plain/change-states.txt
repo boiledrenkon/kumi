@@ -1,0 +1,13 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[change] Tempo 120 → 124 BPM (/undo takes it back)
+[change] Kept: Added return track “Drum Bus”. Live's own undo can take it back.
+[change] Check Live: Loaded Glue Compressor on Drums. Live didn't confirm it.
+[change] Check Live: Loaded Operator on Bass. Live didn't confirm it.
+[change] No undo anymore: New MIDI clip “Hook”. Live opened another Set.
+[heard] Tried 3 pads against the reference · 82%
+[heard] Listened to the drop
+[change] No undo anymore for 1 more change: New MIDI clip “Verse”. Live opened another Set.
+Kumi closed. Each Set's conversation continues next time.

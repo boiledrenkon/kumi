@@ -1,0 +1,1971 @@
+[
+  {
+    "type": "focus",
+    "focus": {
+      "track": {
+        "name": "Bass",
+        "color": "#f59a3c",
+        "kind": "midi"
+      },
+      "trackRef": "7:track:0",
+      "slotRef": "7:clip_slot:0:1",
+      "sceneIndex": 1.0,
+      "deviceRef": "7:device:0:0",
+      "scene": "Verse",
+      "clip": "Bassline",
+      "device": "Operator",
+      "parameter": {
+        "name": "Filter Freq",
+        "value": "1.20 kHz",
+        "owner": "Operator"
+      },
+      "chain": "Sub",
+      "view": "Session",
+      "detail": "Clip",
+      "browser": true,
+      "selectedNotes": 3
+    }
+  },
+  {
+    "type": "focus",
+    "focus": {
+      "clip": "",
+      "view": "Arrangement",
+      "detail": "Device",
+      "browser": false
+    }
+  },
+  {
+    "type": "focus",
+    "focus": {}
+  },
+  {
+    "type": "focus",
+    "focus": null
+  },
+  {
+    "type": "focus",
+    "focus": {
+      "track": {
+        "name": "Keys",
+        "kind": "midi"
+      }
+    }
+  },
+  {
+    "type": "focus",
+    "focus": {
+      "track": {
+        "name": "Vox",
+        "kind": "audio"
+      }
+    }
+  },
+  {
+    "type": "focus",
+    "focus": {
+      "track": {
+        "name": "Drums",
+        "kind": "group"
+      }
+    }
+  },
+  {
+    "type": "focus",
+    "focus": {
+      "track": {
+        "name": "A-Reverb",
+        "kind": "return"
+      }
+    }
+  },
+  {
+    "type": "focus",
+    "focus": {
+      "track": {
+        "name": "Main",
+        "kind": "main"
+      }
+    }
+  },
+  {
+    "type": "pointed",
+    "pin": {
+      "trackRef": "7:track:0",
+      "ref": "7:device:0:0:0:0",
+      "node": "device",
+      "name": "Simpler",
+      "trail": [
+        "Drum Rack",
+        "Kick"
+      ],
+      "siblings": [
+        "Saturator",
+        "EQ Eight"
+      ],
+      "track": "Drums",
+      "live": true
+    }
+  },
+  {
+    "type": "pointed",
+    "pin": {
+      "trackRef": "7:track:0",
+      "ref": "7:chain:0:0:1",
+      "node": "chain",
+      "name": "Snare",
+      "trail": [
+        "Drum Rack"
+      ],
+      "siblings": []
+    }
+  },
+  {
+    "type": "pointed",
+    "pin": {
+      "trackRef": "7:track:0",
+      "ref": "7:track:0",
+      "node": "track",
+      "name": "Drums",
+      "trail": [],
+      "siblings": [],
+      "track": "Drums",
+      "live": true
+    }
+  },
+  {
+    "type": "pointed",
+    "pin": {
+      "trackRef": "7:track:0",
+      "ref": "7:clip:0:1",
+      "node": "clip",
+      "name": "Bassline",
+      "trail": [],
+      "siblings": [],
+      "live": false
+    }
+  },
+  {
+    "type": "pointed",
+    "pin": {
+      "trackRef": "",
+      "ref": "7:scene:1",
+      "node": "scene",
+      "name": "Verse",
+      "trail": [],
+      "siblings": [],
+      "live": true
+    }
+  },
+  {
+    "type": "pointed",
+    "pin": {
+      "trackRef": "7:track:0",
+      "ref": "7:clip_slot:0:2",
+      "node": "clip-slot",
+      "name": "",
+      "trail": [],
+      "siblings": [],
+      "live": true
+    }
+  },
+  {
+    "type": "pointed",
+    "pin": {
+      "trackRef": "7:track:0",
+      "ref": "",
+      "node": "selection",
+      "name": "bars 5–8",
+      "trail": [],
+      "siblings": [],
+      "track": "Drums",
+      "live": true,
+      "time": {
+        "fromBeat": 16.0,
+        "toBeat": 32.5
+      }
+    }
+  },
+  {
+    "type": "change",
+    "change": {
+      "id": "c1",
+      "family": "tempo",
+      "title": "Tempo 120 → 124 BPM",
+      "from": 120.0,
+      "to": 124.0,
+      "range": [
+        20.0,
+        999.0
+      ],
+      "state": "applied",
+      "at": 1760000000000,
+      "picture": {
+        "kind": "values",
+        "values": [
+          {
+            "name": "Tempo",
+            "from": 120.0,
+            "to": 124.0,
+            "min": 20.0,
+            "max": 999.0,
+            "fromText": "120.00 BPM",
+            "toText": "124.00 BPM",
+            "asked": "124 BPM"
+          },
+          {
+            "name": "Swing"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "catch-up",
+    "catchUp": {
+      "set": "Night Drive",
+      "lastSeenAt": 1759913600000,
+      "lines": [
+        "Tempo 120 → 124 BPM",
+        "Added track “Pads”"
+      ],
+      "more": 2,
+      "afterReconnect": true
+    }
+  },
+  {
+    "type": "catch-up",
+    "catchUp": {
+      "set": "Night Drive",
+      "lastSeenAt": 1760000000000,
+      "lines": [],
+      "more": 0
+    }
+  },
+  {
+    "type": "resumed",
+    "savedAt": 1760000000000,
+    "lines": [
+      {
+        "role": "user",
+        "text": "make the kick punchier"
+      },
+      {
+        "role": "assistant",
+        "text": "Shortened the kick's decay.",
+        "tools": [
+          "make_changes",
+          "listen"
+        ]
+      }
+    ],
+    "changes": [
+      {
+        "id": "c1",
+        "family": "parameter",
+        "title": "Decay 400 → 250 ms",
+        "state": "expired",
+        "at": 1760000000000
+      }
+    ],
+    "chosen": true,
+    "unreadable": false
+  },
+  {
+    "type": "resumed",
+    "savedAt": 1760000000000,
+    "lines": [],
+    "unreadable": true
+  },
+  {
+    "type": "set-asked",
+    "ask": {
+      "id": "mgj6k3cw0a0b0c",
+      "title": "make the kick punchier",
+      "set": "Night Drive",
+      "open": "Sunrise",
+      "daw": "Live",
+      "noun": "Set"
+    }
+  },
+  {
+    "type": "set-asked",
+    "ask": {
+      "id": "mgj6wybk1a2b3c",
+      "title": "warmer pads",
+      "daw": "Live",
+      "noun": "Set"
+    }
+  },
+  {
+    "type": "set-asked"
+  },
+  {
+    "type": "resend",
+    "text": "make the kick punchier"
+  },
+  {
+    "type": "state",
+    "state": "idle"
+  },
+  {
+    "type": "state",
+    "state": "running"
+  },
+  {
+    "type": "state",
+    "state": "cancelling"
+  },
+  {
+    "type": "state",
+    "state": "closed"
+  },
+  {
+    "type": "connection",
+    "state": "disconnected"
+  },
+  {
+    "type": "connection",
+    "state": "connecting"
+  },
+  {
+    "type": "connection",
+    "state": "connected"
+  },
+  {
+    "type": "connection",
+    "state": "error"
+  },
+  {
+    "type": "observation",
+    "label": "Night Drive · 8 tracks · 124 BPM"
+  },
+  {
+    "type": "notice",
+    "message": "Kumi lost Live for a moment; it's back."
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "auth",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "billing",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "model",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "config",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "live",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "rate-limit",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "usage-limit",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "request",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "provider",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "network",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "protocol",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "The model said no.",
+    "kind": "output",
+    "provider": "openai"
+  },
+  {
+    "type": "error",
+    "message": "Something went wrong."
+  },
+  {
+    "type": "turn-complete",
+    "result": {
+      "stopReason": "completed",
+      "usage": {
+        "inputTokens": 12400.0,
+        "outputTokens": 830.0,
+        "cacheReadTokens": 9000.0,
+        "cacheWriteTokens": 1200.0
+      }
+    },
+    "elapsedMs": 4250
+  },
+  {
+    "type": "turn-complete",
+    "result": {
+      "stopReason": "completed"
+    },
+    "elapsedMs": 0
+  },
+  {
+    "type": "turn-complete",
+    "result": {
+      "stopReason": "cancelled"
+    },
+    "elapsedMs": 0
+  },
+  {
+    "type": "turn-complete",
+    "result": {
+      "stopReason": "max-steps"
+    },
+    "elapsedMs": 0
+  },
+  {
+    "type": "lesson",
+    "action": "learned",
+    "id": "l3",
+    "line": "Reese bass: two saws detuned 12 cents, then a low-pass at 800 Hz"
+  },
+  {
+    "type": "lesson",
+    "action": "updated",
+    "id": "l3",
+    "line": "Reese bass: two saws detuned 12 cents, then a low-pass at 800 Hz"
+  },
+  {
+    "type": "lesson",
+    "action": "forgot",
+    "id": "l3",
+    "line": "Reese bass: two saws detuned 12 cents, then a low-pass at 800 Hz"
+  },
+  {
+    "type": "match",
+    "state": "running",
+    "check": 2,
+    "first": 54.0,
+    "best": {
+      "label": "B",
+      "score": 81.5
+    },
+    "elapsedMs": 120000,
+    "roundsLeft": 10
+  },
+  {
+    "type": "match",
+    "state": "done",
+    "check": 4,
+    "elapsedMs": 0,
+    "roundsLeft": 0,
+    "stop": "reached"
+  },
+  {
+    "type": "match",
+    "state": "done",
+    "check": 4,
+    "elapsedMs": 0,
+    "roundsLeft": 0,
+    "stop": "plateau"
+  },
+  {
+    "type": "match",
+    "state": "done",
+    "check": 4,
+    "elapsedMs": 0,
+    "roundsLeft": 0,
+    "stop": "budget"
+  },
+  {
+    "type": "match",
+    "state": "done",
+    "check": 4,
+    "elapsedMs": 0,
+    "roundsLeft": 0,
+    "stop": "no-audition"
+  },
+  {
+    "type": "goal",
+    "state": "running",
+    "goal": "match the reference's lead",
+    "generation": 6,
+    "rendered": 48,
+    "best": {
+      "label": "B",
+      "score": 81.5
+    },
+    "first": 41.0,
+    "trend": [
+      41.0,
+      55.5,
+      63.0,
+      81.5
+    ],
+    "leader": "Lead 2",
+    "idea": "add a second oscillator an octave up",
+    "elapsedMs": 900000,
+    "candidates": 8,
+    "bestTrack": "Kumi · Goal best",
+    "why": "closest on brightness and attack"
+  },
+  {
+    "type": "goal",
+    "state": "running",
+    "goal": "match the reference's lead",
+    "generation": 0,
+    "rendered": 0,
+    "trend": [],
+    "elapsedMs": 0,
+    "candidates": 0
+  },
+  {
+    "type": "goal",
+    "state": "paused",
+    "goal": "match the reference's lead",
+    "generation": 0,
+    "rendered": 0,
+    "trend": [],
+    "elapsedMs": 0,
+    "candidates": 0
+  },
+  {
+    "type": "goal",
+    "state": "done",
+    "goal": "match the reference's lead",
+    "generation": 0,
+    "rendered": 0,
+    "trend": [],
+    "elapsedMs": 0,
+    "candidates": 0
+  },
+  {
+    "type": "goal",
+    "state": "starting",
+    "goal": "match the reference's lead",
+    "generation": 0,
+    "rendered": 0,
+    "trend": [],
+    "elapsedMs": 0,
+    "candidates": 0
+  },
+  {
+    "type": "objective",
+    "objective": "master to -14 LUFS without harshness",
+    "state": "running",
+    "turns": 3,
+    "turnBudget": 12,
+    "elapsedMs": 600000,
+    "budgetMs": 3600000,
+    "measured": false
+  },
+  {
+    "type": "objective",
+    "objective": "master to -14 LUFS without harshness",
+    "state": "paused",
+    "turns": 3,
+    "turnBudget": 12,
+    "elapsedMs": 600000,
+    "budgetMs": 3600000,
+    "measured": false
+  },
+  {
+    "type": "objective",
+    "objective": "master to -14 LUFS without harshness",
+    "state": "done",
+    "turns": 3,
+    "turnBudget": 12,
+    "elapsedMs": 600000,
+    "budgetMs": 3600000,
+    "measured": false
+  },
+  {
+    "type": "objective",
+    "objective": "master to -14 LUFS without harshness",
+    "state": "running",
+    "turns": 3,
+    "turnBudget": 12,
+    "elapsedMs": 600000,
+    "budgetMs": 3600000,
+    "verdict": "complete",
+    "reason": "loudness is at -15.2 LUFS",
+    "next": "raise the limiter's gain by 1 dB",
+    "measured": true
+  },
+  {
+    "type": "objective",
+    "objective": "master to -14 LUFS without harshness",
+    "state": "running",
+    "turns": 3,
+    "turnBudget": 12,
+    "elapsedMs": 600000,
+    "budgetMs": 3600000,
+    "verdict": "continue",
+    "reason": "loudness is at -15.2 LUFS",
+    "next": "raise the limiter's gain by 1 dB",
+    "measured": true
+  },
+  {
+    "type": "objective",
+    "objective": "master to -14 LUFS without harshness",
+    "state": "running",
+    "turns": 3,
+    "turnBudget": 12,
+    "elapsedMs": 600000,
+    "budgetMs": 3600000,
+    "verdict": "blocked",
+    "reason": "loudness is at -15.2 LUFS",
+    "next": "raise the limiter's gain by 1 dB",
+    "measured": true
+  },
+  {
+    "type": "objective",
+    "objective": "master to -14 LUFS without harshness",
+    "state": "running",
+    "turns": 3,
+    "turnBudget": 12,
+    "elapsedMs": 600000,
+    "budgetMs": 3600000,
+    "verdict": "stuck",
+    "reason": "loudness is at -15.2 LUFS",
+    "next": "raise the limiter's gain by 1 dB",
+    "measured": true
+  },
+  {
+    "type": "objective",
+    "objective": "master to -14 LUFS without harshness",
+    "state": "running",
+    "turns": 3,
+    "turnBudget": 12,
+    "elapsedMs": 600000,
+    "budgetMs": 3600000,
+    "verdict": "budget",
+    "reason": "loudness is at -15.2 LUFS",
+    "next": "raise the limiter's gain by 1 dB",
+    "measured": true
+  },
+  {
+    "type": "objective-cleared"
+  },
+  {
+    "type": "heard",
+    "file": "renders/Bass.wav",
+    "summary": "C2 · warm, round · attack 12 ms",
+    "bands": [
+      -12.5,
+      -8.0,
+      -6.25,
+      -9.0,
+      -14.0,
+      -20.5
+    ],
+    "compared": {
+      "reference": "references/night-drive.wav",
+      "summary": "darker than the reference",
+      "differences": [
+        1.5,
+        0.0,
+        -2.0,
+        -3.5,
+        -4.0,
+        -6.0
+      ],
+      "headlines": [
+        "less top end",
+        "softer attack"
+      ]
+    }
+  },
+  {
+    "type": "heard",
+    "file": "renders/Mix.wav",
+    "summary": "full mix",
+    "bands": []
+  },
+  {
+    "type": "auditioned",
+    "round": 2,
+    "best": {
+      "label": "B",
+      "score": 81.5
+    },
+    "previous": 74.0,
+    "takes": [
+      {
+        "label": "B",
+        "score": 81.5,
+        "where": {
+          "track": "Bass",
+          "clip": "scene:2"
+        }
+      },
+      {
+        "label": "A",
+        "silent": true,
+        "where": {
+          "track": "Lead"
+        }
+      }
+    ],
+    "gaps": [
+      "less low end",
+      "a slower attack"
+    ],
+    "request": {
+      "candidates": [
+        {
+          "track": "Bass",
+          "clip": "scene:2",
+          "label": "A"
+        },
+        {
+          "track": "the whole mix",
+          "label": "B",
+          "mix": true
+        }
+      ],
+      "fromBeat": 64.0,
+      "beats": 16.0,
+      "reference": "references/night-drive.wav",
+      "referenceFrom": 12.5,
+      "referenceSeconds": 8.0,
+      "focus": "sound"
+    },
+    "structural": {
+      "gap": "missing low",
+      "move": "add a sub oscillator"
+    },
+    "reference": "C2 · bright, rich · attack 15 ms"
+  },
+  {
+    "type": "auditioned",
+    "round": 1,
+    "takes": [],
+    "gaps": [],
+    "request": {
+      "candidates": [
+        {
+          "track": "Bass",
+          "clip": "scene:2",
+          "label": "A"
+        },
+        {
+          "track": "the whole mix",
+          "label": "B",
+          "mix": true
+        }
+      ],
+      "fromBeat": 64.0,
+      "beats": 16.0,
+      "reference": "references/night-drive.wav",
+      "referenceFrom": 12.5,
+      "referenceSeconds": 8.0,
+      "focus": "section"
+    }
+  },
+  {
+    "type": "judged",
+    "round": 3,
+    "kind": "start",
+    "heard": "bars 49–56, the loudest part",
+    "target": "Harshness",
+    "change": "cut 6.3 kHz by 2 dB on the Vox EQ",
+    "changes": [
+      "EQ Eight Band 4 Gain 0.0 → -2.0 dB"
+    ],
+    "rows": [
+      {
+        "id": "loudness",
+        "label": "Loudness",
+        "unit": "LUFS",
+        "wanted": "-14 ± 1",
+        "before": -16.2,
+        "after": -14.4,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "better"
+      },
+      {
+        "id": "harshness",
+        "label": "Harshness",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": 4.5,
+        "after": 4.5,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "same"
+      },
+      {
+        "id": "width",
+        "label": "Width",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": 0.8,
+        "after": 0.6,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "worse"
+      },
+      {
+        "id": "punch",
+        "label": "Punch",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": null,
+        "after": null,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "same"
+      }
+    ],
+    "kept": true,
+    "why": "it closed the harshness gap",
+    "rebalanced": "Vox +0.5 dB",
+    "listener": "brighter, less biting",
+    "problems": [
+      {
+        "kind": "harshness",
+        "id": "harshness 6.3 kHz",
+        "what": "harshness 6.3 kHz over the rest",
+        "hz": [
+          5600.0,
+          7100.0
+        ],
+        "at": [
+          [
+            12.5,
+            14.0
+          ],
+          [
+            30.0,
+            31.25
+          ]
+        ],
+        "excess": 3.0,
+        "steady": true,
+        "fix": "a cut",
+        "source": "Vox"
+      },
+      {
+        "kind": "resonance",
+        "id": "resonance 180 Hz",
+        "what": "resonance 180 Hz over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "stereo-lows",
+        "id": "stereo lows",
+        "what": "stereo lows over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "rumble",
+        "id": "rumble",
+        "what": "rumble over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "dc-offset",
+        "id": "dc offset",
+        "what": "dc offset over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "loud-note",
+        "id": "loud note G1",
+        "what": "loud note G1 over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "overs",
+        "id": "overs",
+        "what": "overs over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "clipping",
+        "id": "clipping",
+        "what": "clipping over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "masking",
+        "id": "masking Vox",
+        "what": "masking Vox over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      }
+    ],
+    "next": {
+      "id": "width",
+      "label": "Width",
+      "gap": 0.2,
+      "wanted": "0.8",
+      "now": 0.6,
+      "fix": "widen the pads"
+    },
+    "met": false,
+    "listens": 4,
+    "elapsedMs": 95000
+  },
+  {
+    "type": "judged",
+    "round": 3,
+    "kind": "judged",
+    "heard": "bars 49–56, the loudest part",
+    "target": "Harshness",
+    "change": "cut 6.3 kHz by 2 dB on the Vox EQ",
+    "changes": [
+      "EQ Eight Band 4 Gain 0.0 → -2.0 dB"
+    ],
+    "rows": [
+      {
+        "id": "loudness",
+        "label": "Loudness",
+        "unit": "LUFS",
+        "wanted": "-14 ± 1",
+        "before": -16.2,
+        "after": -14.4,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "better"
+      },
+      {
+        "id": "harshness",
+        "label": "Harshness",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": 4.5,
+        "after": 4.5,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "same"
+      },
+      {
+        "id": "width",
+        "label": "Width",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": 0.8,
+        "after": 0.6,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "worse"
+      },
+      {
+        "id": "punch",
+        "label": "Punch",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": null,
+        "after": null,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "same"
+      }
+    ],
+    "kept": true,
+    "why": "it closed the harshness gap",
+    "rebalanced": "Vox +0.5 dB",
+    "listener": "brighter, less biting",
+    "problems": [
+      {
+        "kind": "harshness",
+        "id": "harshness 6.3 kHz",
+        "what": "harshness 6.3 kHz over the rest",
+        "hz": [
+          5600.0,
+          7100.0
+        ],
+        "at": [
+          [
+            12.5,
+            14.0
+          ],
+          [
+            30.0,
+            31.25
+          ]
+        ],
+        "excess": 3.0,
+        "steady": true,
+        "fix": "a cut",
+        "source": "Vox"
+      },
+      {
+        "kind": "resonance",
+        "id": "resonance 180 Hz",
+        "what": "resonance 180 Hz over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "stereo-lows",
+        "id": "stereo lows",
+        "what": "stereo lows over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "rumble",
+        "id": "rumble",
+        "what": "rumble over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "dc-offset",
+        "id": "dc offset",
+        "what": "dc offset over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "loud-note",
+        "id": "loud note G1",
+        "what": "loud note G1 over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "overs",
+        "id": "overs",
+        "what": "overs over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "clipping",
+        "id": "clipping",
+        "what": "clipping over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "masking",
+        "id": "masking Vox",
+        "what": "masking Vox over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      }
+    ],
+    "next": {
+      "id": "width",
+      "label": "Width",
+      "gap": 0.2,
+      "wanted": "0.8",
+      "now": 0.6,
+      "fix": "widen the pads"
+    },
+    "met": false,
+    "listens": 4,
+    "elapsedMs": 95000
+  },
+  {
+    "type": "judged",
+    "round": 3,
+    "kind": "done",
+    "heard": "bars 49–56, the loudest part",
+    "target": "Harshness",
+    "change": "cut 6.3 kHz by 2 dB on the Vox EQ",
+    "changes": [
+      "EQ Eight Band 4 Gain 0.0 → -2.0 dB"
+    ],
+    "rows": [
+      {
+        "id": "loudness",
+        "label": "Loudness",
+        "unit": "LUFS",
+        "wanted": "-14 ± 1",
+        "before": -16.2,
+        "after": -14.4,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "better"
+      },
+      {
+        "id": "harshness",
+        "label": "Harshness",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": 4.5,
+        "after": 4.5,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "same"
+      },
+      {
+        "id": "width",
+        "label": "Width",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": 0.8,
+        "after": 0.6,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "worse"
+      },
+      {
+        "id": "punch",
+        "label": "Punch",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": null,
+        "after": null,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "same"
+      }
+    ],
+    "kept": true,
+    "why": "it closed the harshness gap",
+    "rebalanced": "Vox +0.5 dB",
+    "listener": "brighter, less biting",
+    "problems": [
+      {
+        "kind": "harshness",
+        "id": "harshness 6.3 kHz",
+        "what": "harshness 6.3 kHz over the rest",
+        "hz": [
+          5600.0,
+          7100.0
+        ],
+        "at": [
+          [
+            12.5,
+            14.0
+          ],
+          [
+            30.0,
+            31.25
+          ]
+        ],
+        "excess": 3.0,
+        "steady": true,
+        "fix": "a cut",
+        "source": "Vox"
+      },
+      {
+        "kind": "resonance",
+        "id": "resonance 180 Hz",
+        "what": "resonance 180 Hz over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "stereo-lows",
+        "id": "stereo lows",
+        "what": "stereo lows over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "rumble",
+        "id": "rumble",
+        "what": "rumble over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "dc-offset",
+        "id": "dc offset",
+        "what": "dc offset over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "loud-note",
+        "id": "loud note G1",
+        "what": "loud note G1 over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "overs",
+        "id": "overs",
+        "what": "overs over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "clipping",
+        "id": "clipping",
+        "what": "clipping over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      },
+      {
+        "kind": "masking",
+        "id": "masking Vox",
+        "what": "masking Vox over the rest",
+        "excess": 3.0,
+        "fix": "a cut"
+      }
+    ],
+    "next": {
+      "id": "width",
+      "label": "Width",
+      "gap": 0.2,
+      "wanted": "0.8",
+      "now": 0.6,
+      "fix": "widen the pads"
+    },
+    "met": false,
+    "listens": 4,
+    "elapsedMs": 95000
+  },
+  {
+    "type": "judged",
+    "round": 3,
+    "kind": "judged",
+    "heard": "bars 49–56, the loudest part",
+    "rows": [
+      {
+        "id": "loudness",
+        "label": "Loudness",
+        "unit": "LUFS",
+        "wanted": "-14 ± 1",
+        "before": -16.2,
+        "after": -14.4,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "better"
+      },
+      {
+        "id": "harshness",
+        "label": "Harshness",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": 4.5,
+        "after": 4.5,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "same"
+      },
+      {
+        "id": "width",
+        "label": "Width",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": 0.8,
+        "after": 0.6,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "worse"
+      },
+      {
+        "id": "punch",
+        "label": "Punch",
+        "unit": "",
+        "wanted": "-14 ± 1",
+        "before": null,
+        "after": null,
+        "gapBefore": 1.5,
+        "gapAfter": 0.5,
+        "change": "same"
+      }
+    ],
+    "kept": false,
+    "why": "it made the vocal harsher",
+    "next": {
+      "id": "loudness",
+      "label": "Loudness",
+      "gap": 1.0,
+      "wanted": "-14"
+    },
+    "met": true,
+    "listens": 4,
+    "elapsedMs": 95000
+  },
+  {
+    "type": "loop",
+    "state": "running",
+    "request": "make the mix less muddy",
+    "rounds": 5,
+    "kept": 3,
+    "reverted": 2,
+    "listens": 7,
+    "elapsedMs": 420000,
+    "roundsLeft": 11,
+    "next": "low mids",
+    "last": "kept: cut 250 Hz on the pads"
+  },
+  {
+    "type": "loop",
+    "state": "paused",
+    "request": "make the mix less muddy",
+    "rounds": 5,
+    "kept": 3,
+    "reverted": 2,
+    "listens": 7,
+    "elapsedMs": 420000,
+    "roundsLeft": 11,
+    "next": "low mids",
+    "last": "kept: cut 250 Hz on the pads"
+  },
+  {
+    "type": "loop",
+    "state": "done",
+    "request": "make the mix less muddy",
+    "rounds": 5,
+    "kept": 3,
+    "reverted": 2,
+    "listens": 7,
+    "elapsedMs": 420000,
+    "roundsLeft": 11,
+    "next": "low mids",
+    "last": "kept: cut 250 Hz on the pads"
+  },
+  {
+    "type": "loop",
+    "state": "done",
+    "request": "make the mix less muddy",
+    "rounds": 5,
+    "kept": 3,
+    "reverted": 2,
+    "listens": 7,
+    "elapsedMs": 420000,
+    "roundsLeft": 11,
+    "last": "kept: cut 250 Hz on the pads",
+    "stop": "met"
+  },
+  {
+    "type": "loop",
+    "state": "done",
+    "request": "make the mix less muddy",
+    "rounds": 5,
+    "kept": 3,
+    "reverted": 2,
+    "listens": 7,
+    "elapsedMs": 420000,
+    "roundsLeft": 11,
+    "last": "kept: cut 250 Hz on the pads",
+    "stop": "stalled"
+  },
+  {
+    "type": "loop",
+    "state": "done",
+    "request": "make the mix less muddy",
+    "rounds": 5,
+    "kept": 3,
+    "reverted": 2,
+    "listens": 7,
+    "elapsedMs": 420000,
+    "roundsLeft": 11,
+    "last": "kept: cut 250 Hz on the pads",
+    "stop": "budget"
+  },
+  {
+    "type": "loop",
+    "state": "done",
+    "request": "make the mix less muddy",
+    "rounds": 5,
+    "kept": 3,
+    "reverted": 2,
+    "listens": 7,
+    "elapsedMs": 420000,
+    "roundsLeft": 11,
+    "last": "kept: cut 250 Hz on the pads",
+    "stop": "unjudged"
+  },
+  {
+    "type": "loop",
+    "state": "done",
+    "request": "make the mix less muddy",
+    "rounds": 5,
+    "kept": 3,
+    "reverted": 2,
+    "listens": 7,
+    "elapsedMs": 420000,
+    "roundsLeft": 11,
+    "last": "kept: cut 250 Hz on the pads",
+    "stop": "ended"
+  },
+  {
+    "type": "watched",
+    "title": "Reese bass in 5 minutes",
+    "channel": "Sound Design Club",
+    "url": "https://www.youtube.com/watch?v=abc123",
+    "duration": 312.0,
+    "from": 60.0,
+    "to": 125.5,
+    "chapters": [
+      "Oscillators",
+      "Filter"
+    ],
+    "words": "captions",
+    "lines": 42,
+    "frames": [
+      {
+        "at": 72.5,
+        "zoom": "the filter section",
+        "thumb": {
+          "width": 2,
+          "height": 1,
+          "rgb": [
+            255,
+            0,
+            0,
+            0,
+            0,
+            255
+          ]
+        }
+      },
+      {
+        "at": 90.0,
+        "thumb": {
+          "width": 1,
+          "height": 1,
+          "rgb": [
+            16,
+            32,
+            48
+          ]
+        }
+      }
+    ],
+    "sound": {
+      "from": 80.0,
+      "to": 95.0
+    },
+    "notes": [
+      "The captions were automatic."
+    ]
+  },
+  {
+    "type": "watched",
+    "title": "Mixing drums",
+    "url": "https://www.youtube.com/watch?v=def456",
+    "from": 0.0,
+    "to": 30.0,
+    "chapters": [],
+    "words": "captions",
+    "lines": 0,
+    "frames": [],
+    "notes": []
+  },
+  {
+    "type": "watched",
+    "title": "Mixing drums",
+    "url": "https://www.youtube.com/watch?v=def456",
+    "from": 0.0,
+    "to": 30.0,
+    "chapters": [],
+    "words": "automatic",
+    "lines": 0,
+    "frames": [],
+    "notes": []
+  },
+  {
+    "type": "watched",
+    "title": "Mixing drums",
+    "url": "https://www.youtube.com/watch?v=def456",
+    "from": 0.0,
+    "to": 30.0,
+    "chapters": [],
+    "words": "transcribed",
+    "lines": 0,
+    "frames": [],
+    "notes": []
+  },
+  {
+    "type": "watched",
+    "title": "Mixing drums",
+    "url": "https://www.youtube.com/watch?v=def456",
+    "from": 0.0,
+    "to": 30.0,
+    "chapters": [],
+    "words": "none",
+    "lines": 0,
+    "frames": [],
+    "notes": []
+  },
+  {
+    "type": "web",
+    "action": "searched",
+    "title": "reese bass ableton",
+    "where": "web",
+    "via": "Exa",
+    "results": 8
+  },
+  {
+    "type": "web",
+    "action": "searched",
+    "title": "max for live lfo",
+    "where": "github",
+    "results": 0
+  },
+  {
+    "type": "web",
+    "action": "read",
+    "title": "Operator reference",
+    "url": "https://example.com/operator",
+    "via": "Parallel",
+    "kind": "a GitHub repository",
+    "files": 12
+  },
+  {
+    "type": "library",
+    "status": {
+      "state": "learning",
+      "sounds": 1200,
+      "presets": 340,
+      "sets": 25,
+      "todo": 80,
+      "done": 12,
+      "learnedAt": 1760000000000
+    }
+  },
+  {
+    "type": "library",
+    "status": {
+      "state": "new",
+      "sounds": 0,
+      "presets": 0,
+      "sets": 0
+    }
+  },
+  {
+    "type": "library",
+    "status": {
+      "state": "learning",
+      "sounds": 0,
+      "presets": 0,
+      "sets": 0
+    }
+  },
+  {
+    "type": "library",
+    "status": {
+      "state": "paused",
+      "sounds": 0,
+      "presets": 0,
+      "sets": 0
+    }
+  },
+  {
+    "type": "library",
+    "status": {
+      "state": "ready",
+      "sounds": 0,
+      "presets": 0,
+      "sets": 0
+    }
+  },
+  {
+    "type": "recipe",
+    "action": "saved",
+    "name": "sidechain-pump",
+    "steps": 3
+  },
+  {
+    "type": "recipe",
+    "action": "updated",
+    "name": "sidechain-pump",
+    "steps": 3
+  },
+  {
+    "type": "recipe",
+    "action": "running",
+    "name": "sidechain-pump",
+    "steps": 3
+  },
+  {
+    "type": "recipe",
+    "action": "forgotten",
+    "name": "sidechain-pump",
+    "steps": 3
+  },
+  {
+    "type": "technique",
+    "action": "offered",
+    "technique": {
+      "id": "",
+      "name": "Parallel drum bus",
+      "fits": "drums that need weight",
+      "source": "https://www.youtube.com/watch?v=abc123"
+    }
+  },
+  {
+    "type": "technique",
+    "action": "offered",
+    "technique": {
+      "id": "t2",
+      "name": "Parallel drum bus",
+      "fits": "drums"
+    }
+  },
+  {
+    "type": "technique",
+    "action": "kept",
+    "technique": {
+      "id": "t2",
+      "name": "Parallel drum bus",
+      "fits": "drums"
+    }
+  },
+  {
+    "type": "technique",
+    "action": "updated",
+    "technique": {
+      "id": "t2",
+      "name": "Parallel drum bus",
+      "fits": "drums"
+    }
+  },
+  {
+    "type": "technique",
+    "action": "used",
+    "technique": {
+      "id": "t2",
+      "name": "Parallel drum bus",
+      "fits": "drums"
+    }
+  },
+  {
+    "type": "technique",
+    "action": "forgot",
+    "technique": {
+      "id": "t2",
+      "name": "Parallel drum bus",
+      "fits": "drums"
+    }
+  },
+  {
+    "type": "doing",
+    "text": "looking at 2:05"
+  },
+  {
+    "type": "action",
+    "title": "Playing from bar 17",
+    "playing": true,
+    "recording": false
+  },
+  {
+    "type": "action",
+    "title": "Showed the Clip view"
+  },
+  {
+    "type": "transport",
+    "transport": {
+      "playing": true,
+      "tempo": 124.0,
+      "beat": 65.25,
+      "at": 1234.5,
+      "beatsPerBar": 4.0
+    }
+  },
+  {
+    "type": "transport",
+    "transport": {
+      "playing": false,
+      "at": 0.0
+    }
+  },
+  {
+    "type": "transport",
+    "transport": null
+  },
+  {
+    "type": "watching",
+    "on": true
+  },
+  {
+    "type": "watching",
+    "on": false
+  },
+  {
+    "type": "job",
+    "id": 1,
+    "kind": "worker",
+    "title": "Read the Operator manual",
+    "state": "running",
+    "whenDone": "continue",
+    "doing": "reading page 3",
+    "tool": "read_web",
+    "startedAt": 1760000000000,
+    "steps": 2,
+    "sources": 1,
+    "usage": {
+      "inputTokens": 12400.0,
+      "outputTokens": 830.0,
+      "cacheReadTokens": 9000.0,
+      "cacheWriteTokens": 1200.0
+    },
+    "moved": true
+  },
+  {
+    "type": "job",
+    "id": 2,
+    "kind": "tool",
+    "title": "Read the Operator manual",
+    "state": "done",
+    "whenDone": "tell",
+    "startedAt": 1760000000000,
+    "endedAt": 1760000030000,
+    "steps": 2,
+    "sources": 1,
+    "line": "Found three Reese bass recipes."
+  },
+  {
+    "type": "job",
+    "id": 3,
+    "kind": "worker",
+    "title": "Read the Operator manual",
+    "state": "running",
+    "whenDone": "tell",
+    "startedAt": 1760000000000,
+    "steps": 2,
+    "sources": 1
+  },
+  {
+    "type": "job",
+    "id": 3,
+    "kind": "worker",
+    "title": "Read the Operator manual",
+    "state": "done",
+    "whenDone": "tell",
+    "startedAt": 1760000000000,
+    "steps": 2,
+    "sources": 1
+  },
+  {
+    "type": "job",
+    "id": 3,
+    "kind": "worker",
+    "title": "Read the Operator manual",
+    "state": "failed",
+    "whenDone": "tell",
+    "startedAt": 1760000000000,
+    "steps": 2,
+    "sources": 1
+  },
+  {
+    "type": "job",
+    "id": 3,
+    "kind": "worker",
+    "title": "Read the Operator manual",
+    "state": "stopped",
+    "whenDone": "tell",
+    "startedAt": 1760000000000,
+    "steps": 2,
+    "sources": 1
+  },
+  {
+    "type": "job",
+    "id": 3,
+    "kind": "worker",
+    "title": "Read the Operator manual",
+    "state": "interrupted",
+    "whenDone": "tell",
+    "startedAt": 1760000000000,
+    "steps": 2,
+    "sources": 1
+  },
+  {
+    "type": "carry-on",
+    "job": 1,
+    "title": "Read the Operator manual"
+  },
+  {
+    "type": "text",
+    "text": "Shortened the kick's decay."
+  },
+  {
+    "type": "tool-input",
+    "id": "call_1",
+    "name": "make_changes"
+  },
+  {
+    "type": "tool-start",
+    "id": "call_1",
+    "name": "make_changes"
+  },
+  {
+    "type": "tool-end",
+    "id": "call_1",
+    "name": "make_changes",
+    "isError": false,
+    "elapsedMs": 850
+  },
+  {
+    "type": "tool-end",
+    "id": "call_2",
+    "name": "listen",
+    "isError": true,
+    "elapsedMs": 0
+  },
+  {
+    "type": "steer",
+    "text": "and keep the snare"
+  },
+  {
+    "type": "retry",
+    "reason": "The provider is busy.",
+    "waitMs": 2000
+  },
+  {
+    "type": "retry",
+    "reason": "Your plan's limit is reached.",
+    "waitMs": 3600000,
+    "wait": "limit"
+  },
+  {
+    "type": "model-switch",
+    "model": "openai/gpt-5.5",
+    "reason": "the plan's limit",
+    "back": false
+  },
+  {
+    "type": "model-switch",
+    "model": "openai/gpt-5.4",
+    "reason": "it's back",
+    "back": true
+  },
+  {
+    "type": "retry",
+    "reason": "No connection.",
+    "waitMs": 5000,
+    "wait": "offline",
+    "cause": "dns"
+  },
+  {
+    "type": "retry",
+    "reason": "No connection.",
+    "waitMs": 5000,
+    "wait": "offline",
+    "cause": "tls"
+  },
+  {
+    "type": "retry",
+    "reason": "No connection.",
+    "waitMs": 5000,
+    "wait": "offline",
+    "cause": "proxy",
+    "proxyDown": true
+  },
+  {
+    "type": "retry",
+    "reason": "No connection.",
+    "waitMs": 5000,
+    "wait": "offline",
+    "cause": "timeout"
+  },
+  {
+    "type": "retry",
+    "reason": "No connection.",
+    "waitMs": 5000,
+    "wait": "offline",
+    "cause": "offline"
+  },
+  {
+    "type": "remembered",
+    "scope": "producer",
+    "note": {
+      "id": "p2",
+      "text": "Likes the kick dry and short",
+      "at": 1760000000000,
+      "pinned": true
+    },
+    "replaced": {
+      "id": "p2",
+      "text": "Likes the kick dry",
+      "at": 1759999999000
+    },
+    "pending": false
+  },
+  {
+    "type": "remembered",
+    "scope": "producer",
+    "note": {
+      "id": "p2",
+      "text": "Likes the kick dry and short",
+      "at": 1760000000000
+    }
+  },
+  {
+    "type": "forgot",
+    "scope": "producer",
+    "note": {
+      "id": "p2",
+      "text": "Likes the kick dry and short",
+      "at": 1760000000000,
+      "pinned": true
+    }
+  },
+  {
+    "type": "remembered",
+    "scope": "set",
+    "note": {
+      "id": "s2",
+      "text": "Likes the kick dry and short",
+      "at": 1760000000000,
+      "pinned": true
+    },
+    "replaced": {
+      "id": "s2",
+      "text": "Likes the kick dry",
+      "at": 1759999999000
+    },
+    "pending": true
+  },
+  {
+    "type": "remembered",
+    "scope": "set",
+    "note": {
+      "id": "s2",
+      "text": "Likes the kick dry and short",
+      "at": 1760000000000
+    }
+  },
+  {
+    "type": "forgot",
+    "scope": "set",
+    "note": {
+      "id": "s2",
+      "text": "Likes the kick dry and short",
+      "at": 1760000000000,
+      "pinned": true
+    }
+  }
+]

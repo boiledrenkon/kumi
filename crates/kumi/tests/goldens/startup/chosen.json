@@ -1,0 +1,30 @@
+{
+  "no bridge in Live": {
+    "mode": "inference-only",
+    "authFile": "<home>/auth.json",
+    "bridgeMissing": true
+  },
+  "--inference-only": {
+    "mode": "inference-only",
+    "authFile": "<home>/auth.json"
+  },
+  "--bridge-config": {
+    "mode": "live",
+    "authFile": "<home>/auth.json",
+    "bridgeConfig": "<home>/bridge-config.json"
+  },
+  "the bridge's configuration gone": {
+    "mode": "inference-only",
+    "authFile": "<home>/auth.json",
+    "bridgeMissing": true
+  },
+  "the bridge in Live": {
+    "mode": "live",
+    "authFile": "<home>/auth.json",
+    "bridgeConfig": "<home>/bridge-config.json"
+  },
+  "the bridge in Live, --inference-only": {
+    "mode": "inference-only",
+    "authFile": "<home>/auth.json"
+  }
+}

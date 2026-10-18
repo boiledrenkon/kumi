@@ -34,6 +34,12 @@ pub struct Lesson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reaction: Option<Reaction>,
 }
+impl Lesson {
+    /// The DAW it was learned in: Live's, since kumi.db keeps no DAW for it yet (another DAW's tag comes with that DAW).
+    pub fn daw(&self) -> crate::core::daw::DawId {
+        crate::core::daw::DawId::Ableton
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LessonSummary {
     pub id: String,

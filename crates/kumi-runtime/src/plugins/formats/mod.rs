@@ -8,7 +8,8 @@
 //! is read from its published source, without copying it.
 
 pub mod cbor;
-pub mod live_set;
+/// Plug-in state as Live saves it, at the path it always had.
+pub use crate::integrations::live_set;
 pub mod ozone12;
 pub mod serum2;
 pub mod structure;

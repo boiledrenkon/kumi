@@ -1,0 +1,11 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Task: Find three reference tracks with a punchy kick at 124 BPM."
+      }
+    ]
+  }
+]

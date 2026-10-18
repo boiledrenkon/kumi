@@ -6,9 +6,9 @@ pub mod auth;
 pub mod command;
 pub mod core;
 pub mod devices;
-pub mod ears;
-pub mod hands;
 pub mod integrations;
+// Live's own parts, at the paths they always had.
+pub use integrations::{ears, hands};
 pub mod kernel;
 pub mod library;
 pub mod listening;
@@ -43,7 +43,7 @@ pub use core::contracts::{
     TranscriptLine, TurnResult, TurnState, Usage, WatchedEvent, WebEvent,
 };
 pub use core::conversations::{create_conversation_store, create_conversation_store_keeping, gone_words, IMPORTED, KEEP_DAYS};
-pub use core::errors::{FailureKind, KumiError, RuntimeError};
+pub use core::errors::{FailureKind, KumiError, RuntimeError, SetupFailure};
 pub use core::gaps::{gap_tools, GAP_GUIDANCE, GAP_TOOL};
 pub use core::goal::{create_goal_store, GoalBudget, GoalState, GoalStatus, GoalStore, GOAL_BUDGET};
 pub use core::goal_mode::{create_objective_store, Objective, ObjectiveBudget, ObjectiveStatus, ObjectiveStore, OBJECTIVE_BUDGET};
@@ -61,10 +61,10 @@ pub use core::techniques::{
 };
 pub use ears::device::{install_ears, EARS_NAME};
 pub use hands::{can_build_hands, open_hands, Hands};
-pub use integrations::ableton::focus::parse_focus;
-pub use integrations::ableton::project::{create_project_store, Baseline, ProjectStore};
-pub use integrations::ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
-pub use integrations::fallback::with_fallback;
+pub use integrations::fallback::{with_fallback, with_fallback_failure};
+pub use integrations::{
+    create_ableton_integration, create_inference_only_integration, create_project_store, parse_focus, Baseline, ProjectStore, BRIDGE_TOOLS,
+};
 pub use kernel::agent::{create_agent_kernel, AgentKernel, AgentKernelOptions, Checkpoint, ModelBinding, ModelRequest};
 pub use kernel::budget::{budget_for, ContextBudget, DEFAULT_BUDGET};
 pub use library::{

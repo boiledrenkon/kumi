@@ -141,6 +141,57 @@ pub fn resolve(pick: &TrackPick, names: &[&str]) -> Option<usize> {
     }
 }
 
+/// A track as a fixed phrase finds it: its ref and name, whether it counts by place among the project's own tracks
+/// (not a return or the master), and whether it's the master (never one a phrase names).
+pub struct PhraseTrack<'a> {
+    pub reference: &'a str,
+    pub name: &'a str,
+    pub own: bool,
+    pub master: bool,
+}
+
+/// How a DAW makes each fixed phrase's one change: the make_changes step for it.
+pub trait InstantVocab {
+    fn tempo(&self, bpm: f64) -> serde_json::Value;
+    fn track(&self, reference: &str, switch: Switch, on: bool) -> serde_json::Value;
+    /// A loop from `start` for `length` beats.
+    fn loop_on(&self, start: f64, length: f64) -> serde_json::Value;
+    fn loop_off(&self) -> serde_json::Value;
+    fn metronome(&self, on: bool) -> serde_json::Value;
+}
+
+/// The make_changes plan for an intent: one step, so it lands in HISTORY with its undo and Kumi says what changed,
+/// with no model call. None when it can't run as asked (a track the phrase names isn't there, or two fit), so the
+/// request goes to the model.
+pub fn instant_steps(vocab: &dyn InstantVocab, intent: &Intent, tracks: &[PhraseTrack], beats_per_bar: f64) -> Option<serde_json::Value> {
+    let step = match intent {
+        Intent::Tempo { bpm } => vocab.tempo(*bpm),
+        Intent::Track { track, switch, on } => vocab.track(&phrase_track(track, tracks)?, *switch, *on),
+        Intent::Loop { from_bar, to_bar } => {
+            let bar = if beats_per_bar.is_finite() && beats_per_bar > 0.0 { beats_per_bar } else { 4.0 };
+            let start = f64::from(from_bar - 1) * bar;
+            let length = f64::from(to_bar - from_bar + 1) * bar;
+            vocab.loop_on(start, length)
+        }
+        Intent::LoopOff => vocab.loop_off(),
+        Intent::Metronome { on } => vocab.metronome(*on),
+    };
+    Some(serde_json::json!({"steps": [step], "final": true}))
+}
+
+/// The track a phrase means: by name among every track but the master, or by place among the project's own tracks.
+fn phrase_track(track: &TrackPick, tracks: &[PhraseTrack]) -> Option<String> {
+    let tracks: Vec<_> = tracks
+        .iter()
+        .filter(|node| match track {
+            TrackPick::Position(_) => node.own,
+            TrackPick::Name(_) => !node.master,
+        })
+        .collect();
+    let names: Vec<&str> = tracks.iter().map(|node| node.name).collect();
+    resolve(track, &names).map(|at| tracks[at].reference.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

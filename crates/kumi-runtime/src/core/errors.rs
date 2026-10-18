@@ -11,7 +11,9 @@ pub enum FailureKind {
     Billing,
     Model,
     Config,
-    Live,
+    /// The DAW or Kumi's bridge to it (its name in JSON stays "live", as before other DAWs).
+    #[serde(rename = "live")]
+    Daw,
     RateLimit,
     /// A plan's usage limit, reached until it resets (ChatGPT's five-hour or weekly window).
     UsageLimit,
@@ -22,26 +24,47 @@ pub enum FailureKind {
     Output,
 }
 
+impl FailureKind {
+    /// The DAW's kind by the name it had before other DAWs.
+    #[allow(non_upper_case_globals)]
+    pub const Live: FailureKind = FailureKind::Daw;
+}
+
+/// A DAW setup failure with a fix of its own, beyond its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SetupFailure {
+    /// The DAW still runs the copy of Kumi's bridge it loaded before an update: restarting the DAW is the fix.
+    RestartDaw,
+}
+
 /// A failure whose message Kumi wrote itself: safe to display, never a credential or raw provider
 /// payload. `provider` says which provider it concerns, so an app can offer the fix (sign in there,
-/// choose another model).
+/// choose another model); `setup`, a DAW setup failure's own fix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KumiError {
     pub kind: FailureKind,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<SetupFailure>,
 }
 
 impl KumiError {
     pub const NAME: &'static str = "KumiError";
 
     pub fn new(kind: FailureKind, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into(), provider: None }
+        Self { kind, message: message.into(), provider: None, setup: None }
     }
 
     pub fn with_provider(kind: FailureKind, message: impl Into<String>, provider: impl Into<String>) -> Self {
-        Self { kind, message: message.into(), provider: Some(provider.into()) }
+        Self { kind, message: message.into(), provider: Some(provider.into()), setup: None }
+    }
+
+    /// The same failure, with the setup fix it has.
+    pub fn with_setup(self, setup: SetupFailure) -> Self {
+        Self { setup: Some(setup), ..self }
     }
 }
 

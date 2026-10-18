@@ -4,17 +4,13 @@
 //! the daily check's note, and the bridge's ports are tried on this computer (127.0.0.1) only.
 use super::{tilde, Check};
 use crate::{
-    bridge_setup::{default_run, is_live_running, repository_dir, AsyncBool},
-    config::{find_bridge_config, kumi_dir, live_user_library, load_settings_file, read_settings, remote_scripts_dir},
+    config::{kumi_dir, load_settings_file, read_settings},
     install::{app_version, chown_line, has_app, not_yours, startup_files, PATH_MARKER, UPDATE_SPACE},
-    live_app::{installed_lives, installed_with, runs_on, InstalledLive, LiveInstalled},
-    live_extension::{extension_data_dir, installed_extension, live_extensions_dir, running_extension},
+    live_app::InstalledLive,
+    process::{repository_dir, AsyncBool},
     update::newer,
 };
-use futures::{
-    future::{join_all, LocalBoxFuture},
-    FutureExt,
-};
+use futures::future::LocalBoxFuture;
 use kumi_common::time::{now_ms, since};
 use kumi_runtime::{
     core::disk::{free_bytes, size},
@@ -23,7 +19,7 @@ use kumi_runtime::{
     KUMI, KUMI_VERSION,
 };
 use serde_json::Value;
-use std::{path::Path, rc::Rc, time::Duration};
+use std::{path::Path, rc::Rc};
 
 /// Who listens on one of this computer's ports: nobody (None), or a program, named when the system says.
 pub type PortOwner = Option<Option<String>>;
@@ -155,166 +151,9 @@ fn space_check(free: Option<f64>, home: &str) -> Option<Check> {
     })
 }
 
-/// The Lives installed here and, once one Kumi works with can take the bridge (setup's own verdict,
-/// `live_app::installed`), its User Library. No such Live (none, an older one, one never opened) is said with its
-/// next step by the bridge's check below, so here it's information, never a fix: Kumi chats without Live, and a
-/// computer without it (a build machine, say) isn't broken.
-fn live_checks(env: &Env, platform: &str, lives: &[InstalledLive], running: bool) -> Vec<Check> {
-    if !runs_on(platform) {
-        return vec![];
-    }
-    let ready = installed_with(env, platform, lives) == LiveInstalled::Ready || running;
-    let mut checks = vec![if !lives.is_empty() {
-        let named: Vec<_> =
-            lives.iter().map(|live| format!("{} ({})", live.version.as_deref().unwrap_or("version unknown"), live.name)).collect();
-        Check::ok(format!("Live installed: {}", named.join(", ")))
-    } else if ready {
-        Check::ok("Live has been opened on this account (its app isn't in the usual folder)")
-    } else {
-        Check::note("Live isn't installed here", None)
-    }];
-    if !ready {
-        return checks;
-    }
-    if let Some(folder) = env.get("KUMI_REMOTE_SCRIPTS_DIR").filter(|s| !s.is_empty()) {
-        checks.push(if Path::new(folder).is_dir() {
-            Check::ok(format!("Remote Scripts folder: {} (KUMI_REMOTE_SCRIPTS_DIR)", tilde(folder)))
-        } else {
-            Check::fix(
-                format!("KUMI_REMOTE_SCRIPTS_DIR names {}, which isn't there", tilde(folder)),
-                Some("Make that folder, or unset KUMI_REMOTE_SCRIPTS_DIR".into()),
-            )
-        });
-        return checks;
-    }
-    let library = live_user_library(env);
-    let found = library.clone().unwrap_or_else(|| dirname(&remote_scripts_dir(env)));
-    if !Path::new(&found).is_dir() {
-        checks.push(match library {
-            Some(library) => Check::fix(
-                format!("Live's User Library is set to {}, which isn't there", tilde(&library)),
-                Some("Connect the drive it's on, or choose it again in Live's Settings → Library".into()),
-            ),
-            None => Check::note(
-                "Kumi can't find Live's User Library",
-                Some("Live's Settings → Library shows where it is: set KUMI_REMOTE_SCRIPTS_DIR to the Remote Scripts folder in it".into()),
-            ),
-        });
-        return checks;
-    }
-    checks.push(Check::ok(format!("User Library: {}", tilde(&found))));
-    if platform == "win32" && found.to_ascii_lowercase().contains("onedrive") {
-        checks.push(Check::note(
-            "Live's User Library is in OneDrive, which can keep files online only",
-            Some("In File Explorer, right-click Documents\\Ableton and choose Always keep on this device".into()),
-        ));
-    }
-    checks
-}
-
-/// The bridge's ports: its configuration's, or the ones it installs with.
-fn bridge_ports(env: &Env) -> Vec<u16> {
-    let config = find_bridge_config(env).and_then(|file| serde_json::from_slice::<Value>(&std::fs::read(file).ok()?).ok());
-    let port = |key: &str, default: u16| {
-        config.as_ref().and_then(|c| c["bridge"][key].as_u64()).and_then(|p| u16::try_from(p).ok()).unwrap_or(default)
-    };
-    let mut ports = vec![port("port", 9765), port("realtimePort", 9766)];
-    ports.dedup();
-    ports
-}
-
-/// Whether something listens on `port` of this computer, by connecting to it (never by listening), and if so,
-/// which program, when the system says.
-pub async fn port_owner(port: u16, platform: &str) -> PortOwner {
-    let connected = tokio::time::timeout(Duration::from_millis(400), tokio::net::TcpStream::connect(("127.0.0.1", port))).await;
-    if !connected.is_ok_and(|c| c.is_ok()) {
-        return None;
-    }
-    let run = default_run();
-    // A lookup that hangs (a stuck lsof, a slow PowerShell) leaves the owner unnamed rather than the doctor waiting.
-    let run = move |program: String, args: Vec<String>| {
-        let run = run.clone();
-        async move { tokio::time::timeout(Duration::from_secs(2), run(program, args, None)).await.unwrap_or_default() }
-    };
-    let named = match platform {
-        "darwin" | "linux" => {
-            let lsof = ["/usr/sbin/lsof", "/usr/bin/lsof"].into_iter().find(|p| Path::new(p).exists()).unwrap_or("lsof");
-            let args = ["+c", "0", "-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fc"];
-            let ran = run(lsof.into(), args.map(str::to_string).into()).await;
-            ran.stdout.lines().find_map(|line| line.strip_prefix('c')).map(str::to_string)
-        }
-        "win32" => {
-            let script = format!(
-                "Get-NetTCPConnection -State Listen -LocalPort {port} -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess | ForEach-Object {{ (Get-Process -Id $_ -ErrorAction SilentlyContinue).ProcessName }}"
-            );
-            let powershell = system::system_program_default(system::SystemProgram::Powershell);
-            let ran = run(powershell, vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), script]).await;
-            Some(ran.stdout.trim().to_string()).filter(|s| !s.is_empty())
-        }
-        _ => None,
-    };
-    Some(named)
-}
-
-fn is_live(program: &str) -> bool {
-    program == "Live" || program.starts_with("Ableton Live")
-}
-
-/// The bridge's ports: free, or held by Live's bridge while Live is open, are both fine; another program
-/// holding one keeps the bridge from starting.
-fn ports_check(held: &[(u16, PortOwner)], live_running: bool) -> Check {
-    let ports = |list: &[u16]| match list {
-        [one] => format!("port {one}"),
-        many => format!("ports {}", many.iter().map(u16::to_string).collect::<Vec<_>>().join(" and ")),
-    };
-    let taken: Vec<_> = held.iter().filter_map(|(port, owner)| owner.as_ref().map(|name| (*port, name.clone()))).collect();
-    if taken.is_empty() {
-        let all: Vec<_> = held.iter().map(|(port, _)| *port).collect();
-        return Check::ok(format!("{} free for Live's bridge", capitalized(&ports(&all))));
-    }
-    let other = taken.iter().find(|(_, name)| name.as_deref().is_some_and(|name| !is_live(name)) || (name.is_none() && !live_running));
-    match other {
-        Some((port, Some(name))) => {
-            Check::fix(format!("{name} holds port {port}, which Live's bridge needs"), Some(format!("Quit {name}, then restart Live")))
-        }
-        Some((port, None)) => Check::fix(
-            format!("Another program holds port {port}, which Live's bridge needs"),
-            Some(format!(
-                "Quit it, then restart Live ({} names it)",
-                if cfg!(windows) { format!("netstat -ano | findstr :{port}") } else { format!("lsof -nP -iTCP:{port} -sTCP:LISTEN") }
-            )),
-        ),
-        None => Check::ok(format!("Live's bridge has {} (Live is open)", ports(&taken.iter().map(|(port, _)| *port).collect::<Vec<_>>()))),
-    }
-}
-
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
-}
-
-/// Live's Developer Mode, when it shows: who started Kumi's extension, or, with Live open, whether Live runs
-/// its own Extension Host (it doesn't with Developer Mode on). None while it can't be told.
-async fn developer_mode(env: &Env, platform: &str, io: &InstallationIo, live_running: bool) -> Option<Check> {
-    let extensions = live_extensions_dir(env, platform)?;
-    let off = || Check::ok("Live's Developer Mode is off: Live starts Kumi's extension when it opens");
-    let on = || Check::ok("Live's Developer Mode is on: Kumi's bridge starts Kumi's extension while Kumi runs");
-    if running_extension(&extension_data_dir(&extensions)).is_some() {
-        return Some(off());
-    }
-    let config = find_bridge_config(env);
-    if config.as_ref().is_some_and(|config| running_extension(&join(&dirname(config), "live-extension")).is_some()) {
-        return Some(on());
-    }
-    if !live_running || installed_extension(&extensions).is_none() {
-        return None;
-    }
-    let own_host = match &io.live_extension_host {
-        Some(host) => host().await,
-        None => ableton_mcp_server::bridge::extension_launcher::running_extension_hosts().await.live,
-    };
-    Some(if own_host { off() } else { on() })
-}
+// What the unit tests below drive: Live's check of the bridge's ports.
+#[cfg(test)]
+use crate::daw::ableton::doctor::ports_check;
 
 pub async fn installation_checks(env: &Env, io: &InstallationIo) -> Vec<Check> {
     let platform = io.platform.clone().unwrap_or_else(|| system::platform().into());
@@ -345,35 +184,10 @@ pub async fn installation_checks(env: &Env, io: &InstallationIo) -> Vec<Check> {
         None => free_bytes(Path::new(&home)).await,
     };
     checks.extend(space_check(free, &home));
-    // Where Live doesn't run (Linux), nothing below applies; the bridge's check says Kumi chats without Live.
-    if !runs_on(&platform) {
-        return checks;
+    // What each DAW needs from this computer.
+    for provider in crate::daw::providers() {
+        checks.extend(provider.installation_checks(env, io, &platform).await);
     }
-    let lives = match &io.lives {
-        Some(lives) => lives(),
-        None => installed_lives(env, &platform),
-    };
-    let ports = bridge_ports(env);
-    let (held, live_running) = futures::join!(
-        join_all(ports.iter().map(|port| {
-            let port = *port;
-            let platform = platform.clone();
-            match &io.port {
-                Some(owner) => owner(port),
-                None => async move { port_owner(port, &platform).await }.boxed_local(),
-            }
-            .map(move |owner| (port, owner))
-        })),
-        async {
-            match &io.live_running {
-                Some(running) => running().await,
-                None => is_live_running(default_run()).await,
-            }
-        }
-    );
-    checks.extend(live_checks(env, &platform, &lives, live_running));
-    checks.push(ports_check(&held, live_running));
-    checks.extend(developer_mode(env, &platform, io, live_running).await);
     checks
 }
 

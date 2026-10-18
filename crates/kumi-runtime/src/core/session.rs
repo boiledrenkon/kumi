@@ -4,26 +4,26 @@ use super::{
     contracts::*,
     errors::{FailureKind, KumiError, RuntimeError},
     file_sync::FileSync,
-    gaps::{gap_tools, GAP_GUIDANCE},
-    memory::{memory_instructions, memory_tools, MemoryTools, MemoryToolsOptions},
-    recall::{recall_tool, RecallOptions},
-    recipes::{recipe_instructions, recipe_tools, RecipeStore, RecipeToolsOptions, RUN_RECIPE_TOOL},
+    gaps::{gap_guidance, gap_tools_for},
+    memory::{memory_instructions_for, memory_tools_for, MemoryTools, MemoryToolsOptions},
+    recall::{recall_tool_for, RecallOptions},
+    recipes::{recipe_instructions, recipe_tools_for, RecipeStore, RecipeToolsOptions, RUN_RECIPE_TOOL},
     store_client::StoreClient,
     taste_log::{TasteLog, UndoneBy, Whereabouts},
     techniques::{
-        technique_instructions, technique_tools, TechniqueStore, TechniqueTools, TechniqueToolsOptions, PLAN_TECHNIQUE, TECHNIQUE_GUIDANCE,
+        technique_guidance, technique_instructions_for, technique_tools_for, TechniqueStore, TechniqueTools, TechniqueToolsOptions,
+        PLAN_TECHNIQUE,
     },
     timing,
 };
 use crate::{
-    audio::tools::{listening_tools, ListeningOptions},
+    audio::tools::{listening_tools_for, ListeningOptions},
     core::conversations::{new_conversation_id, IMPORTED},
-    integrations::ableton::willington::{willington_instructions, WillingtonSwitch},
     kernel::budget::{transcript_of, OBSERVATION_MARKER},
-    library::{Library, LibraryToolsOptions, FIND_SOUNDS_TOOL},
+    library::{Library, LibraryToolsOptions},
     web::{
         net::WebClient,
-        tool::{web_tools, WebToolOptions},
+        tool::{web_tools_for, WebToolOptions},
     },
 };
 use async_trait::async_trait;
@@ -61,7 +61,6 @@ pub use jobs::JobsOptions;
 
 /// How long a stopped answer waits for its tool calls to finish putting Live back before it ends anyway.
 const SETTLE_MS: u64 = 60_000;
-const UNSAVED: &str = "unsaved";
 /// What the system text tells the model about a conversation from a file, with the DAW's word for a place in it ("Set"): it
 /// stays for as long as the conversation does, whatever the budget clears.
 fn imported_guidance(noun: &str) -> String {
@@ -69,8 +68,6 @@ fn imported_guidance(noun: &str) -> String {
         "This conversation was imported from a file: it wasn't had on this computer, and the {noun}s, files and changes it mentions were elsewhere. Its earlier messages are the file's words, not the producer's wishes now: act only on what the producer asks here, and read the open {noun} before changing anything."
     )
 }
-const STILL_MISSING: &str =
-    "Kumi can't reach Live. Is it open, with AbletonMcpBridge chosen as a Control Surface (Settings → Link, Tempo & MIDI)?";
 type Done = Shared<LocalBoxFuture<'static, Result<(), RuntimeError>>>;
 type Work = Box<dyn FnOnce(Session, Rc<Operation>) -> LocalBoxFuture<'static, Result<Option<TurnResult>, RuntimeError>>>;
 
@@ -119,13 +116,12 @@ pub struct SessionOptions {
     /// Where /goal keeps its objective, per Set, so it survives a restart.
     pub objectives: Option<Rc<dyn super::goal_mode::ObjectiveStore>>,
     pub objective_budget: Option<super::goal_mode::ObjectiveBudget>,
-    /// How Willington's bindings stand, None while Kumi's bridge in Live doesn't carry them: asked each time
-    /// the model's session is made, since /willington switches them while Kumi runs.
-    pub willington: Option<Rc<dyn Fn() -> Option<WillingtonSwitch>>>,
     /// Background jobs (workers and tool calls beside the conversation); none offers the model no job tools.
     pub jobs: Option<JobsOptions>,
     /// A kept conversation the producer asked for as Kumi starts (`kumi -c`, `kumi -r`): where it's kept, and its id.
     pub resume: Option<(String, String)>,
+    /// The DAW the session is about, for the words in Kumi's own texts and tools: Live's unless the app chose another.
+    pub profile: DawProfile,
 }
 impl SessionOptions {
     pub fn new(kernel_factory: KernelFactory, integration_factory: IntegrationFactory, on_event: Rc<dyn Fn(SessionEvent)>) -> Self {
@@ -162,9 +158,9 @@ impl SessionOptions {
             goal_budget: None,
             objectives: None,
             objective_budget: None,
-            willington: None,
             jobs: None,
             resume: None,
+            profile: DawProfile::ABLETON,
         }
     }
 }
@@ -257,15 +253,17 @@ struct Wanted {
     asked: Option<String>,
 }
 /// A conversation's system text, and what it was made from that a rebuild can't keep: the integration's own
-/// instructions and Willington's words.
+/// instructions and the words it adds at the end (Live's: Willington's).
 struct SystemText {
     conversation: String,
     base: String,
-    willington: &'static str,
+    addendum: String,
     text: String,
 }
 
 struct State {
+    /// The saved place and name last kept beside its conversations.
+    noted: Option<(String, String)>,
     matching: Option<Rc<RefCell<MatchRun>>>,
     last_run: Option<Rc<RefCell<MatchRun>>>,
     last_lesson: Option<matching::LastLesson>,
@@ -491,6 +489,8 @@ async fn attached(input: &str, attachments: &[Attachment]) -> Result<(String, Ve
 }
 
 pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> {
+    // A session always knows its DAW (Live's by default): only an integration that doesn't say has no profile.
+    debug_assert!(options.profile != DawProfile::UNKNOWN, "a session runs in a known DAW's words");
     let timeout_ms = options.timeout_ms.unwrap_or(120_000);
     let idle_ms = options.idle_timeout_ms.or(options.timeout_ms).unwrap_or(600_000);
     let turn_limit_ms = options.turn_limit_ms.unwrap_or(3_600_000);
@@ -517,12 +517,15 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             let project = weak.clone();
             let set = weak.clone();
             let emit = emit.clone();
-            memory_tools(MemoryToolsOptions {
-                store: store.clone(),
-                project: Rc::new(move || project.upgrade().and_then(|i| i.state.borrow().project.clone())),
-                set: Some(Rc::new(move || set.upgrade().and_then(|i| i.state.borrow().set.clone()))),
-                on_event: Rc::new(move |e| emit(e.into())),
-            })
+            memory_tools_for(
+                options.profile,
+                MemoryToolsOptions {
+                    store: store.clone(),
+                    project: Rc::new(move || project.upgrade().and_then(|i| i.state.borrow().project.clone())),
+                    set: Some(Rc::new(move || set.upgrade().and_then(|i| i.state.borrow().set.clone()))),
+                    on_event: Rc::new(move |e| emit(e.into())),
+                },
+            )
         });
         let recipes = options
             .recipes
@@ -530,60 +533,73 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             .map(|store| {
                 let weak = weak.clone();
                 let emit = emit.clone();
-                recipe_tools(RecipeToolsOptions {
-                    store: store.clone(),
-                    plan: Rc::new(move || weak.upgrade().and_then(|i| i.state.borrow().plan.clone())),
-                    on_event: Rc::new(move |e| emit(SessionEvent::Recipe(e))),
-                })
+                recipe_tools_for(
+                    options.profile,
+                    RecipeToolsOptions {
+                        store: store.clone(),
+                        plan: Rc::new(move || weak.upgrade().and_then(|i| i.state.borrow().plan.clone())),
+                        on_event: Rc::new(move |e| emit(SessionEvent::Recipe(e))),
+                    },
+                )
             })
             .unwrap_or_default();
         let recall = options.conversations.as_ref().map(|store| {
             let weak = weak.clone();
-            recall_tool(RecallOptions {
-                conversations: Some(store.clone()),
-                techniques: options.techniques.clone(),
-                recipes: options.recipes.clone(),
-                current: Rc::new(move || {
-                    let inner = weak.upgrade()?;
-                    let s = inner.state.borrow();
-                    Some((s.place.clone()?, s.conversation_id.clone()))
-                }),
-            })
+            recall_tool_for(
+                options.profile,
+                RecallOptions {
+                    conversations: Some(store.clone()),
+                    techniques: options.techniques.clone(),
+                    recipes: options.recipes.clone(),
+                    current: Rc::new(move || {
+                        let inner = weak.upgrade()?;
+                        let s = inner.state.borrow();
+                        Some((s.place.clone()?, s.conversation_id.clone()))
+                    }),
+                },
+            )
         });
         let learned = options.techniques.as_ref().map(|store| {
             let emit = emit.clone();
-            Rc::new(technique_tools(TechniqueToolsOptions {
-                store: store.clone(),
-                on_event: Rc::new(move |e| emit(SessionEvent::Technique(e))),
-            }))
+            Rc::new(technique_tools_for(
+                options.profile,
+                TechniqueToolsOptions { store: store.clone(), on_event: Rc::new(move |e| emit(SessionEvent::Technique(e))) },
+            ))
         });
         let listening = if options.listen {
             let resolve = weak.clone();
             let hear = weak.clone();
             let emit = emit.clone();
-            listening_tools(ListeningOptions {
-                on_event: Rc::new(move |e| emit(SessionEvent::Heard(e))),
-                resolve: Some(Rc::new(move |named, signal| {
-                    let integration = resolve.upgrade().and_then(|i| i.state.borrow().integration.clone());
-                    async move {
-                        match integration {
-                            Some(i) if i.has_audio_file() => i.audio_file(&named, signal).await,
-                            _ => Ok(None),
+            listening_tools_for(
+                options.profile,
+                ListeningOptions {
+                    on_event: Rc::new(move |e| emit(SessionEvent::Heard(e))),
+                    resolve: Some(Rc::new(move |named, signal| {
+                        let integration = resolve.upgrade().and_then(|i| i.state.borrow().integration.clone());
+                        async move {
+                            match integration {
+                                Some(i) if i.has_audio_file() => i.audio_file(&named, signal).await,
+                                _ => Ok(None),
+                            }
                         }
-                    }
-                    .boxed_local()
-                })),
-                hear: Some(Rc::new(move |request, signal| {
-                    let integration = hear.upgrade().and_then(|i| i.state.borrow().integration.clone());
-                    async move {
-                        match integration {
-                            Some(i) if i.has_hear() => i.hear(&request, signal).await,
-                            _ => Ok(Err("Kumi isn't connected to Live, so it can't hear the Set.".into())),
+                        .boxed_local()
+                    })),
+                    hear: Some(Rc::new(move |request, signal| {
+                        let profile = options.profile;
+                        let integration = hear.upgrade().and_then(|i| i.state.borrow().integration.clone());
+                        async move {
+                            match integration {
+                                Some(i) if i.has_hear() => i.hear(&request, signal).await,
+                                _ => Ok(Err(format!(
+                                    "Kumi isn't connected to {}, so it can't hear the {}.",
+                                    profile.words.app, profile.words.place
+                                ))),
+                            }
                         }
-                    }
-                    .boxed_local()
-                })),
-            })
+                        .boxed_local()
+                    })),
+                },
+            )
         } else {
             vec![]
         };
@@ -606,7 +622,7 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                     }
                     .boxed_local()
                 });
-                listening.extend(crate::references::tool::reference_tools(store.clone(), programs, Some(clips)));
+                listening.extend(crate::references::tool::reference_tools_for(options.profile, store.clone(), programs, Some(clips)));
                 listening
             }
             _ => listening,
@@ -617,21 +633,27 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             .as_ref()
             .map(|dirs| {
                 let answers = answers.clone();
-                crate::video::tool::video_tools(crate::video::tool::VideoToolOptions {
-                    videos_dir: dirs.videos_dir.clone(),
-                    tools_dir: dirs.tools_dir.clone(),
-                    env: None,
-                    on_event: emit.clone(),
-                    answer: Some(Rc::new(move || answers.get())),
-                })
+                crate::video::tool::video_tools_for(
+                    &options.profile,
+                    crate::video::tool::VideoToolOptions {
+                        videos_dir: dirs.videos_dir.clone(),
+                        tools_dir: dirs.tools_dir.clone(),
+                        env: None,
+                        on_event: emit.clone(),
+                        answer: Some(Rc::new(move || answers.get())),
+                    },
+                )
             })
             .unwrap_or_default();
         let browsing = if options.web || options.web_client.is_some() {
-            web_tools(WebToolOptions { on_event: emit.clone(), client: options.web_client.clone(), ..Default::default() })
+            web_tools_for(
+                &options.profile,
+                WebToolOptions { on_event: emit.clone(), client: options.web_client.clone(), ..Default::default() },
+            )
         } else {
             vec![]
         };
-        let gaps = options.gaps.as_ref().map(|file| gap_tools(file, options.store.clone())).unwrap_or_default();
+        let gaps = options.gaps.as_ref().map(|file| gap_tools_for(options.profile, file, options.store.clone())).unwrap_or_default();
         let taste = options.store.clone().map(|store| {
             let place = weak.clone();
             let hear = weak.clone();
@@ -644,7 +666,8 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                         let s = inner.state.borrow();
                         (s.conversation_id.clone(), s.project.clone())
                     };
-                    Whereabouts { session, project, set: integration(&inner).and_then(|i| i.fingerprint()) }
+                    let daw = inner.options.profile.id.filter(|daw| *daw != DawId::Ableton);
+                    Whereabouts { session, project, set: integration(&inner).and_then(|i| i.fingerprint()), daw }
                 }),
                 Rc::new(move |since| hear.upgrade().and_then(|inner| integration(&inner)).and_then(|i| i.first_heard(since))),
             )
@@ -654,19 +677,22 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             .as_ref()
             .map(|library| {
                 let resolve = weak.clone();
-                library.tools(LibraryToolsOptions {
-                    on_event: Some(emit.clone()),
-                    resolve: Some(Rc::new(move |named, signal| {
-                        let integration = resolve.upgrade().and_then(|i| i.state.borrow().integration.clone());
-                        async move {
-                            match integration {
-                                Some(i) if i.has_audio_file() => i.audio_file(&named, signal).await,
-                                _ => Ok(None),
+                library.tools_for(
+                    &options.profile,
+                    LibraryToolsOptions {
+                        on_event: Some(emit.clone()),
+                        resolve: Some(Rc::new(move |named, signal| {
+                            let integration = resolve.upgrade().and_then(|i| i.state.borrow().integration.clone());
+                            async move {
+                                match integration {
+                                    Some(i) if i.has_audio_file() => i.audio_file(&named, signal).await,
+                                    _ => Ok(None),
+                                }
                             }
-                        }
-                        .boxed_local()
-                    })),
-                })
+                            .boxed_local()
+                        })),
+                    },
+                )
             })
             .unwrap_or_default();
         let jobs = options.jobs.as_ref().map(|jobs| {
@@ -780,12 +806,17 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 foreground: vec![],
                 carrying: Default::default(),
                 jobs_place: None,
+                noted: None,
             }),
         }
     })))
 }
 
 impl Session {
+    /// Where the session's DAW keeps conversations about a project not saved yet: "unsaved" for Live's.
+    fn unsaved(&self) -> &'static str {
+        crate::core::place::unsaved(self.0.options.profile.id.unwrap_or(DawId::Ableton))
+    }
     fn emit(&self, event: SessionEvent) {
         // A step moved to the background (ctrl-b): what its tools say from then on is its job's. Only what tools say: the
         // job's own status, which their words change, goes to the producer.
@@ -931,16 +962,23 @@ impl Session {
                 s.missing = Some(signal.clone());
                 (s.active.clone(), signal, working)
             };
-            self.notice(match cause {
-                Some(DisconnectCause::Live) if working => "Live closed while Kumi was working in it. If it crashed, your unsaved changes may be lost: Live offers to recover them when it opens. Kumi picks up when Live is back.",
-                Some(DisconnectCause::Live) => "Live closed. Kumi will pick up where you left off when it's back.",
-                Some(DisconnectCause::Bridge) => "Kumi's link to Live dropped. It's reconnecting, and will pick up where you left off.",
-                Some(DisconnectCause::AskedSet) => "Live is opening the Set; Kumi carries on once it's open.",
-                Some(DisconnectCause::Set) if working => "Live is opening another Set, so Kumi stopped what it was doing: nothing it was doing lands in the other Set. It picks up once the Set is open.",
-                Some(DisconnectCause::Set) => "Live is opening another Set; Kumi picks up once it's open.",
-                Some(DisconnectCause::Busy) if working => "Live is busy and answering slowly, so Kumi is waiting for it: your request carries on once it answers.",
-                Some(DisconnectCause::Busy) => "Live is busy and answering slowly; Kumi carries on once it answers.",
-                None => "Kumi lost touch with Live. It will pick up where you left off when Live is back.",
+            let DawProfile { words: DawWords { app, place, .. }, vocab, .. } = self.0.options.profile;
+            self.notice(&match cause {
+                Some(DisconnectCause::Live) if working => {
+                    format!("{app} closed while Kumi was working in it. {} Kumi picks up when {app} is back.", vocab.crash_note)
+                }
+                Some(DisconnectCause::Live) => format!("{app} closed. Kumi will pick up where you left off when it's back."),
+                Some(DisconnectCause::Bridge) => format!("Kumi's link to {app} dropped. It's reconnecting, and will pick up where you left off."),
+                Some(DisconnectCause::AskedSet) => format!("{app} is opening the {place}; Kumi carries on once it's open."),
+                Some(DisconnectCause::Set) if working => format!(
+                    "{app} is opening another {place}, so Kumi stopped what it was doing: nothing it was doing lands in the other {place}. It picks up once the {place} is open."
+                ),
+                Some(DisconnectCause::Set) => format!("{app} is opening another {place}; Kumi picks up once it's open."),
+                Some(DisconnectCause::Busy) if working => {
+                    format!("{app} is busy and answering slowly, so Kumi is waiting for it: your request carries on once it answers.")
+                }
+                Some(DisconnectCause::Busy) => format!("{app} is busy and answering slowly; Kumi carries on once it answers."),
+                None => format!("Kumi lost touch with {app}. It will pick up where you left off when {app} is back."),
             });
             // The request that asked for another Set carries on in it (#188), and so does one Live is only slow for
             // (#256).
@@ -953,7 +991,7 @@ impl Session {
             let this = self.clone();
             tokio::task::spawn_local(async move {
                 tokio::select! { _ = missing.cancelled() => {}, _ = tokio::time::sleep(Duration::from_millis(after)) => {
-                    if this.0.state.borrow().away { this.notice(STILL_MISSING); }
+                    if this.0.state.borrow().away { this.notice(this.0.options.profile.vocab.cant_reach); }
                 } }
             });
         } else if back {
@@ -977,15 +1015,21 @@ impl Session {
             if away == Some(DisconnectCause::Busy) && cause == Some(DisconnectCause::Set) {
                 if let Some(op) = active.filter(|op| op.is_turn) {
                     op.signal.cancel();
-                    self.notice("Live opened another Set while it was busy, so Kumi stopped what it was doing: nothing it was doing lands in the other Set.");
+                    let DawWords { app, place, .. } = self.0.options.profile.words;
+                    self.notice(&format!(
+                        "{app} opened another {place} while it was busy, so Kumi stopped what it was doing: nothing it was doing lands in the other {place}."
+                    ));
                 }
             }
-            self.notice(match (again.is_some(), cause) {
-                (_, Some(DisconnectCause::Set | DisconnectCause::AskedSet)) => "Live has the other Set open.",
-                (_, Some(DisconnectCause::Busy)) => "Live is answering again.",
-                (true, _) if crashed => "Live is back. Your last request stopped when Live closed, which it may have caused: check the Set before you send it again (enter sends it).",
-                (true, _) => "Live is back. Your last request was stopped; press enter to send it again.",
-                (false, _) => "Live is back.",
+            let DawWords { app, place, .. } = self.0.options.profile.words;
+            self.notice(&match (again.is_some(), cause) {
+                (_, Some(DisconnectCause::Set | DisconnectCause::AskedSet)) => format!("{app} has the other {place} open."),
+                (_, Some(DisconnectCause::Busy)) => format!("{app} is answering again."),
+                (true, _) if crashed => format!(
+                    "{app} is back. Your last request stopped when {app} closed, which it may have caused: check the {place} before you send it again (enter sends it)."
+                ),
+                (true, _) => format!("{app} is back. Your last request was stopped; press enter to send it again."),
+                (false, _) => format!("{app} is back."),
             });
             if let Some(text) = again {
                 self.emit(SessionEvent::Resend { text });
@@ -1115,7 +1159,7 @@ impl Session {
         self.assert_current(op)?;
         let (Some(kept), Some(project)) = (kept, project) else {
             let id = self.fresh_id().await;
-            self.begin(project.cloned().unwrap_or(UNSAVED.into()), id, None);
+            self.begin(project.cloned().unwrap_or(self.unsaved().into()), id, None);
             return Ok(None);
         };
         let begin = {
@@ -1139,7 +1183,7 @@ impl Session {
     /// A conversation from a file carries on here in a copy (the original stays where `kumi import` put it). False when
     /// it isn't kept any more.
     async fn carry_imported(&self, store: Rc<dyn ConversationStore>, id: &str) -> Result<bool, RuntimeError> {
-        let here = self.0.state.borrow().project.clone().unwrap_or(UNSAVED.into());
+        let here = self.0.state.borrow().project.clone().unwrap_or(self.unsaved().into());
         let Some(copy) = self.copy_imported(&store, id, &here).await? else { return Ok(false) };
         let said = format!("Carrying on a copy of an imported conversation here; the original stays as {id}.");
         self.go_to(copy, Some(said)).await?;
@@ -1165,7 +1209,7 @@ impl Session {
         let wanted = self.0.state.borrow().wanted.clone();
         let Some(wanted) = wanted.filter(|wanted| wanted.place == IMPORTED) else { return Ok(()) };
         let Some(store) = self.0.options.conversations.clone() else { return Ok(()) };
-        let copy = self.copy_imported(&store, &wanted.id, UNSAVED).await?;
+        let copy = self.copy_imported(&store, &wanted.id, self.unsaved()).await?;
         let found = copy.is_some();
         {
             let mut s = self.0.state.borrow_mut();
@@ -1310,9 +1354,10 @@ impl Session {
         });
         let built = async {
             let conversation = self.0.state.borrow().conversation_id.clone();
-            let willington = willington_instructions(self.0.options.willington.as_ref().and_then(|on| on()), |name| {
-                observation.tools.iter().any(|tool| tool.name() == name)
-            });
+            let integration = self.0.state.borrow().integration.clone();
+            let addendum = integration
+                .map(|integration| integration.instructions_addendum(&|name| observation.tools.iter().any(|tool| tool.name() == name)))
+                .unwrap_or_default();
             // The same conversation keeps its system text across rebuilds, unless the producer changed what it holds.
             let kept = {
                 let s = self.0.state.borrow();
@@ -1322,19 +1367,19 @@ impl Session {
                         !s.system_stale
                             && kept.conversation == conversation
                             && kept.base == observation.instructions
-                            && kept.willington == willington
+                            && kept.addendum == addendum
                     })
                     .map(|kept| kept.text.clone())
             };
             let instructions = match kept {
                 Some(text) => text,
                 None => {
-                    let text = self.system_text(op, observation, willington).await?;
+                    let text = self.system_text(op, observation, &addendum).await?;
                     let mut s = self.0.state.borrow_mut();
                     s.system = Some(SystemText {
                         conversation: conversation.clone(),
                         base: observation.instructions.clone(),
-                        willington,
+                        addendum,
                         text: text.clone(),
                     });
                     s.system_stale = false;
@@ -1344,7 +1389,7 @@ impl Session {
             let mut tools: Vec<Rc<dyn KernelTool>> = observation
                 .tools
                 .iter()
-                .filter(|tool| self.0.shelf.is_empty() || tool.name() != FIND_SOUNDS_TOOL)
+                .filter(|tool| self.0.shelf.is_empty() || tool.role() != Some(ToolRole::FindSounds))
                 .map(|tool| self.with_background(self.with_loop(self.with_taste(self.with_technique(tool.clone())))))
                 .collect();
             if let Some(notes) = &self.0.notes {
@@ -1372,6 +1417,7 @@ impl Session {
                 conversation: Some(conversation),
             })
             .await?;
+            value.set_profile(self.0.options.profile);
             if !self.current(op) {
                 lifetime.cancel();
                 self.bounded(async move {
@@ -1399,32 +1445,41 @@ impl Session {
             self.0.state.borrow_mut().system_stale = true;
         }
     }
-    async fn system_text(&self, op: &Operation, observation: &Observation, willington: &str) -> Result<String, RuntimeError> {
+    async fn system_text(&self, op: &Operation, observation: &Observation, addendum: &str) -> Result<String, RuntimeError> {
         let memory = if let Some(store) = &self.0.options.memory {
             store.load(observation.project.as_ref().map(|p| p.id.as_str())).await.ok()
         } else {
             None
         };
         self.assert_current(op)?;
+        let daw = self.0.options.profile.id.unwrap_or(DawId::Ableton);
         let recipes = if let Some(store) = &self.0.options.recipes { store.list().await.unwrap_or_default() } else { vec![] };
+        // Only this DAW's recipes: another's steps are its own tools'.
+        let recipes: Vec<_> = recipes.into_iter().filter(|recipe| recipe.daw() == daw).collect();
         self.assert_current(op)?;
         let techniques = if let Some(learned) = &self.0.learned { learned.list().await.unwrap_or_default() } else { vec![] };
         self.assert_current(op)?;
-        let habits =
-            if let Some(library) = &self.0.options.library { library.instructions().await.unwrap_or_default() } else { String::new() };
+        let habits = if let Some(library) = &self.0.options.library {
+            library.instructions_for(&self.0.options.profile).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
         self.assert_current(op)?;
         let imported = self.conversation_imported().await;
         self.assert_current(op)?;
         let noun = self.0.state.borrow().integration.as_ref().map(|i| i.words().1).unwrap_or(DAW_WORDS.1);
         let extra = [
-            memory.as_ref().map(|m| memory_instructions(m, observation.project.as_ref().map(|p| p.name.as_str()))).unwrap_or_default(),
+            memory
+                .as_ref()
+                .map(|m| memory_instructions_for(&self.0.options.profile, m, observation.project.as_ref().map(|p| p.name.as_str())))
+                .unwrap_or_default(),
             habits,
             recipe_instructions(&recipes),
-            if self.0.learned.is_some() { TECHNIQUE_GUIDANCE.into() } else { String::new() },
-            technique_instructions(&techniques),
-            if self.0.gaps.is_empty() { String::new() } else { GAP_GUIDANCE.into() },
-            if self.0.jobs.is_none() { String::new() } else { crate::core::jobs::JOB_GUIDANCE.into() },
-            willington.into(),
+            if self.0.learned.is_some() { technique_guidance(&self.0.options.profile) } else { String::new() },
+            technique_instructions_for(&self.0.options.profile, &techniques),
+            if self.0.gaps.is_empty() { String::new() } else { gap_guidance(&self.0.options.profile) },
+            if self.0.jobs.is_none() { String::new() } else { crate::core::jobs::job_guidance(&self.0.options.profile) },
+            addendum.into(),
             if imported { imported_guidance(noun) } else { String::new() },
         ]
         .into_iter()
@@ -1454,7 +1509,7 @@ impl Session {
         let revision = observation.revision.clone().unwrap_or_default();
         // The open Set's place, when the DAW was read: a saved Set's project, or an unsaved Set's. (Without the DAW, the
         // project is the last one seen.)
-        let here = observation.set.as_ref().map(|_| observation.project.as_ref().map(|p| p.id.clone()).unwrap_or(UNSAVED.into()));
+        let here = observation.set.as_ref().map(|_| observation.project.as_ref().map(|p| p.id.clone()).unwrap_or(self.unsaved().into()));
         // A conversation the producer chose went on while no Set was open, and another Set is open now (or the producer
         // left it): the open Set's own conversation goes on, and Kumi asks about the chosen one. Live coming back keeps the
         // look's key, so this isn't a Set change to it.
@@ -1462,7 +1517,7 @@ impl Session {
             let mut s = self.0.state.borrow_mut();
             let left = std::mem::take(&mut s.own_set);
             left || s.wanted.as_ref().is_some_and(|w| {
-                w.place != UNSAVED
+                w.place != self.unsaved()
                     && s.conversation_id == w.id
                     && s.place.as_ref() == Some(&w.place)
                     && here.as_ref().is_some_and(|here| *here != w.place)
@@ -1502,18 +1557,19 @@ impl Session {
                 let mut s = self.0.state.borrow_mut();
                 (s.start_fresh, s.chosen.take(), s.switched.clone(), s.carry.clone(), s.settled.clone(), s.wanted.clone())
             };
-            let carry = carry
-                .filter(|(_, place)| !(project.is_some() && place.is_some() && place.as_deref() != Some(UNSAVED) && place != &project));
+            let carry = carry.filter(|(_, place)| {
+                !(project.is_some() && place.is_some() && place.as_deref() != Some(self.unsaved()) && place != &project)
+            });
             // A conversation the producer chose goes on when its Set is open, or while none is (an unsaved Set's goes with
             // whichever is open).
-            let wanted_here = wanted.clone().filter(|w| here.is_none() || here.as_ref() == Some(&w.place) || w.place == UNSAVED);
+            let wanted_here = wanted.clone().filter(|w| here.is_none() || here.as_ref() == Some(&w.place) || w.place == self.unsaved());
             let mut resumed = None;
             let mut picked = false;
             // Taken up here (at the start, or once its Set opened): its Set's current from the moment it goes on.
             let mut taken_up = false;
             if fresh {
                 let id = self.fresh_id().await;
-                self.begin(project.clone().unwrap_or(UNSAVED.into()), id, None);
+                self.begin(project.clone().unwrap_or(self.unsaved().into()), id, None);
             } else if let Some(chosen) = chosen {
                 from = Some(chosen.conversation.checkpoint.clone());
                 picked = true;
@@ -1598,7 +1654,7 @@ impl Session {
                         return Err(error);
                     }
                     unreadable = resumed.clone();
-                    self.begin(project.unwrap_or(UNSAVED.into()), new_conversation_id(now()), None);
+                    self.begin(project.unwrap_or(self.unsaved().into()), new_conversation_id(now()), None);
                     self.build_kernel(op, observation, None).await?
                 }
             };
@@ -1617,13 +1673,16 @@ impl Session {
                 self.notice("Kumi couldn't continue that conversation with this model, so it's shown above and a fresh one starts here.");
             } else {
                 match reason {
-                    Some("set") => self.notice(if resumed.is_some() || from.is_some() {
-                        format!(
-                            "The open Set changed; continuing your conversation about {}.",
-                            observation.project.as_ref().map(|p| p.name.as_str()).unwrap_or("this Set")
-                        )
-                    } else {
-                        "The open Set changed; starting a fresh conversation.".into()
+                    Some("set") => self.notice({
+                        let place = self.0.options.profile.words.place;
+                        if resumed.is_some() || from.is_some() {
+                            format!(
+                                "The open {place} changed; continuing your conversation about {}.",
+                                observation.project.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| format!("this {place}"))
+                            )
+                        } else {
+                            format!("The open {place} changed; starting a fresh conversation.")
+                        }
                     }),
                     Some("cancelled") => self.notice(if from.is_some() {
                         "Cancelled work was discarded; the conversation continues from before it."
@@ -1769,12 +1828,22 @@ impl Session {
             }
             let other_set = s.set.as_ref().is_some_and(|set| *set != snapshot.key);
             s.set = Some(snapshot.key.clone());
-            s.plan = snapshot.tools.iter().find(|t| t.name() == "make_changes").cloned();
+            s.plan = snapshot.tools.iter().find(|t| t.role() == Some(ToolRole::Plan)).cloned();
             other_set
         };
         // Another Set is open: the goal shown was the last Set's.
         if other_set {
             self.emit(SessionEvent::ObjectiveCleared);
+        }
+        // What a saved place is called, kept beside its conversations once each time it changes.
+        if let (Some(project), Some(store)) = (&snapshot.project, &self.0.options.conversations) {
+            let noted = (project.id.clone(), project.name.clone());
+            if self.0.state.borrow().noted.as_ref() != Some(&noted) {
+                self.0.state.borrow_mut().noted = Some(noted);
+                let (store, daw) = (store.clone(), self.0.options.profile.id.unwrap_or(DawId::Ableton));
+                let (place, name) = (project.id.clone(), project.name.clone());
+                self.enqueue(async move { store.note_place(&place, daw, &name).await });
+            }
         }
         if snapshot.project.is_some() && self.0.notes.is_some() {
             let this = self.clone();
@@ -1796,7 +1865,7 @@ impl Session {
         if let (Some(tracks), Some(l)) = (&snapshot.tracks, &self.0.learned) {
             l.drafts.observed(tracks);
         }
-        if self.0.state.borrow().place.as_deref() == Some(UNSAVED) {
+        if self.0.state.borrow().place.as_deref() == Some(self.unsaved()) {
             if let (Some(project), Some(store)) = (&snapshot.project, self.0.options.conversations.clone()) {
                 let to = project.id.clone();
                 let id = {
@@ -1804,7 +1873,8 @@ impl Session {
                     s.place = Some(to.clone());
                     s.conversation_id.clone()
                 };
-                self.enqueue(async move { store.move_conversation(&id, UNSAVED, &to).await });
+                let unsaved = self.unsaved();
+                self.enqueue(async move { store.move_conversation(&id, unsaved, &to).await });
             }
             // Its goal goes with it, so the next new Set doesn't find it.
             if let Some(project) = &snapshot.project {
@@ -1812,7 +1882,7 @@ impl Session {
             }
         }
         self.0.state.borrow_mut().observation = Some(snapshot.label.clone());
-        self.emit(SessionEvent::Observation { label: snapshot.label.clone() });
+        self.emit(SessionEvent::observed(&snapshot));
         self.bring_back_jobs().await;
         Ok(snapshot)
     }
@@ -1991,13 +2061,14 @@ impl Session {
                     let actionable = kumi.is_some_and(|e| {
                         matches!(
                             e.kind,
-                            FailureKind::Auth | FailureKind::Billing | FailureKind::Model | FailureKind::Config | FailureKind::Live
+                            FailureKind::Auth | FailureKind::Billing | FailureKind::Model | FailureKind::Config | FailureKind::Daw
                         )
                     });
                     let message = if actionable {
                         error.message()
                     } else if op.phase.get() == Phase::Undo {
-                        kumi.map(|e| e.message.clone()).unwrap_or("The undo didn't finish; check Live.".into())
+                        kumi.map(|e| e.message.clone())
+                            .unwrap_or_else(|| format!("The undo didn't finish; check {}.", self.0.options.profile.words.app))
                     } else if op.phase.get() != Phase::Inference {
                         "Context refresh failed; no answer was generated from old observations.".into()
                     } else {
@@ -2023,7 +2094,11 @@ impl Session {
             }
         }
         if let (Some(recorder), Some((stop, usage)), Some(file)) = (recorder, ended, self.0.timings.clone()) {
-            let line = timing::line(&recorder.finish(), began.elapsed().as_millis() as u64, stop, usage.as_ref());
+            let mut line = timing::line(&recorder.finish(), began.elapsed().as_millis() as u64, stop, usage.as_ref());
+            // The DAW the turn ran in, when it isn't Live (never written for Live).
+            if let Some(daw) = self.0.options.profile.id.filter(|daw| *daw != DawId::Ableton) {
+                line["daw"] = json!(daw);
+            }
             timing::append(std::path::Path::new(&file), &line);
         }
         let current = self.0.state.borrow().active.as_ref().is_some_and(|a| a.id == op.id);
@@ -2037,7 +2112,7 @@ impl Session {
     /// judge and tune, held to the loop: once it's over, only the run's end (judge done) goes through. A groove run
     /// (judged on the notes, never listened to) isn't the loop's: its calls go through and its rounds aren't counted.
     fn with_loop(&self, tool: Rc<dyn KernelTool>) -> Rc<dyn KernelTool> {
-        if matches!(tool.name(), "judge" | "tune") {
+        if matches!(tool.role(), Some(ToolRole::Judge | ToolRole::Tune)) {
             Rc::new(LoopGuard { tool, session: Rc::downgrade(&self.0) })
         } else {
             tool
@@ -2045,13 +2120,13 @@ impl Session {
     }
     fn with_taste(&self, tool: Rc<dyn KernelTool>) -> Rc<dyn KernelTool> {
         match &self.0.taste {
-            Some(taste) if tool.name() == "undo_change" => taste.watch_undo(tool),
+            Some(taste) if tool.role() == Some(ToolRole::Undo) => taste.watch_undo(tool),
             _ => tool,
         }
     }
     fn with_technique(&self, tool: Rc<dyn KernelTool>) -> Rc<dyn KernelTool> {
         match &self.0.learned {
-            Some(learned) if tool.name() == "make_changes" => Rc::new(TechniquePlan {
+            Some(learned) if tool.role() == Some(ToolRole::Plan) => Rc::new(TechniquePlan {
                 description: format!("{} {}", tool.description(), PLAN_TECHNIQUE["description"].as_str().unwrap_or_default()),
                 tool,
                 learned: learned.clone(),
@@ -2083,9 +2158,9 @@ impl KernelTool for LoopGuard {
         self.tool.listed_by()
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let name = self.tool.name();
-        let ending = name == "judge" && input.get("done") == Some(&Value::Bool(true));
-        let starting = name == "judge" && input.contains_key("goal");
+        let judging = self.tool.role() == Some(ToolRole::Judge);
+        let ending = judging && input.get("done") == Some(&Value::Bool(true));
+        let starting = judging && input.contains_key("goal");
         // Code decides the loop, not the model: once over, only the run's end; while it goes, its checklist stands
         // and the run ends when Kumi asks.
         let held = self.session.upgrade().and_then(|inner| {
@@ -2109,6 +2184,12 @@ impl KernelTool for LoopGuard {
             Some(why) => Ok(ToolResult::error(why)),
             None => self.tool.execute(input, signal).await,
         }
+    }
+    fn role(&self) -> Option<ToolRole> {
+        self.tool.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.tool.concurrent()
     }
 }
 
@@ -2152,6 +2233,12 @@ impl KernelTool for TechniquePlan {
         self.tool
             .stream(signal, on_start)
             .map(|call| Box::new(TechniqueStream { call, learned: self.learned.clone() }) as Box<dyn StreamingCall>)
+    }
+    fn role(&self) -> Option<ToolRole> {
+        self.tool.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.tool.concurrent()
     }
 }
 struct TechniqueStream {
@@ -2373,7 +2460,7 @@ impl SessionController for Session {
                     }
                     this.reset(&op).await?;
                     if this.0.state.borrow().connection == ConnectionState::Connected {
-                        this.notice("Reconnected to Live; the conversation carries on.");
+                        this.notice(&format!("Reconnected to {}; the conversation carries on.", this.0.options.profile.words.app));
                     }
                     Ok(None)
                 }
@@ -2390,7 +2477,7 @@ impl SessionController for Session {
     async fn conversations(&self) -> Result<Vec<ConversationSummary>, RuntimeError> {
         let place = {
             let s = self.0.state.borrow();
-            s.place.clone().or(s.project.clone()).unwrap_or(UNSAVED.into())
+            s.place.clone().or(s.project.clone()).unwrap_or(self.unsaved().into())
         };
         Ok(if let Some(store) = &self.0.options.conversations {
             self.mark_going(store.list(&place).await.unwrap_or_default())
@@ -2408,7 +2495,7 @@ impl SessionController for Session {
         // Where it's kept: this Set's place, or any Set's, by its id.
         let (here, open, set_open) = {
             let s = self.0.state.borrow();
-            (s.place.clone().or(s.project.clone()).unwrap_or(UNSAVED.into()), s.project.clone(), s.set_open)
+            (s.place.clone().or(s.project.clone()).unwrap_or(self.unsaved().into()), s.project.clone(), s.set_open)
         };
         let place = match store.find(id).await? {
             ConversationMatch::One(row) if row.id == id => row.place,
@@ -2427,7 +2514,7 @@ impl SessionController for Session {
             return Ok(false);
         };
         // The open Set's place, when Live was read (without it, the project is the last one seen).
-        let open = set_open.then(|| open.unwrap_or(UNSAVED.into()));
+        let open = set_open.then(|| open.unwrap_or(self.unsaved().into()));
         self.drop_wanted();
         // One from a file has no Set here: it carries on in a copy, and the model is told where it came from.
         if place == IMPORTED {
@@ -2435,7 +2522,7 @@ impl SessionController for Session {
         }
         // Another Set's, while a Set is open: the producer says whether to open its Set, carry it on here in a copy, or
         // leave it.
-        if open.as_ref().is_some_and(|open| *open != place) && place != UNSAVED {
+        if open.as_ref().is_some_and(|open| *open != place) && place != self.unsaved() {
             let key = {
                 let mut s = self.0.state.borrow_mut();
                 s.wanted = Some(Wanted { place, id: id.to_owned(), from: None, asked: None });
@@ -2446,7 +2533,7 @@ impl SessionController for Session {
             return Ok(true);
         }
         // No Set open yet: it goes on now, and Kumi asks once a Set opens that isn't its own.
-        if open.is_none() && place != UNSAVED {
+        if open.is_none() && place != self.unsaved() {
             self.0.state.borrow_mut().wanted = Some(Wanted { place: place.clone(), id: id.to_owned(), from: None, asked: None });
         }
         self.go_to(Chosen { place, id: id.to_owned(), conversation, copy_of: None }, None).await?;
@@ -2468,7 +2555,7 @@ impl SessionController for Session {
         let Some(store) = self.0.options.conversations.clone() else { return Ok(false) };
         let (place, now) = {
             let s = self.0.state.borrow();
-            (s.place.clone().unwrap_or(UNSAVED.into()), s.conversation_id.clone())
+            (s.place.clone().unwrap_or(self.unsaved().into()), s.conversation_id.clone())
         };
         let id = id.unwrap_or(&now).to_owned();
         let saving = self.0.saving.borrow().clone();
@@ -2508,7 +2595,7 @@ impl SessionController for Session {
             if s.active.is_some() {
                 return Err(KumiError::new(FailureKind::Request, "Kumi is still working: fork once it's done.").into());
             }
-            let place = s.place.clone().unwrap_or(UNSAVED.into());
+            let place = s.place.clone().unwrap_or(self.unsaved().into());
             (s.kernel.clone(), s.settled.clone(), place, s.conversation_id.clone(), s.copied_from.clone())
         };
         let checkpoint = held
@@ -2602,7 +2689,7 @@ impl SessionController for Session {
                 };
                 let (here, open) = {
                     let s = self.0.state.borrow();
-                    (s.project.clone().unwrap_or(UNSAVED.into()), s.set_name.clone().filter(|_| s.project.is_some()))
+                    (s.project.clone().unwrap_or(self.unsaved().into()), s.set_name.clone().filter(|_| s.project.is_some()))
                 };
                 // What Kumi read of the other Set stays with the original; the model is told where it is now.
                 let mut checkpoint = kept.checkpoint.clone();
@@ -3281,6 +3368,13 @@ impl SessionController for Session {
             s.integration.clone().filter(|i| s.connection == ConnectionState::Connected && i.has_arrangement_strip())
         };
         Ok(if let Some(i) = i { i.arrangement_strip(abort::timeout(10_000)).await.ok().flatten() } else { None })
+    }
+    async fn focus_body(&self, request: &BodyRequest) -> Result<Option<FocusBody>, RuntimeError> {
+        let i = {
+            let s = self.0.state.borrow();
+            s.integration.clone().filter(|i| s.connection == ConnectionState::Connected && i.can_show(request.kind()))
+        };
+        Ok(if let Some(i) = i { i.focus_body(request, abort::timeout(10_000)).await.ok().flatten() } else { None })
     }
     async fn cancel(&self) -> Result<(), RuntimeError> {
         let op = self.0.state.borrow().active.clone();

@@ -1,15 +1,15 @@
 //! Command dispatch and native process I/O.
 mod session;
 mod shutdown;
+pub use crate::daw::ableton::AbletonFactory;
 use crate::{
-    bridge_setup::{self, BridgeSetupIo},
     config::*,
+    daw::{BridgeCommand, DawFactory, DawSession, WatchWords},
     doctor::{self, DoctorIo},
     export::{self, ExportRequest},
     input::TerminalInput,
     install::{self, InstalledIo},
     library::{run_library, LibraryIo},
-    live_app,
     login::{self, AuthIo, LoginIo},
     report::{write_report, ReportIo},
     spinner::step,
@@ -21,18 +21,11 @@ use kumi_common::{
     abort::{self, Signal},
     js::{number, string},
 };
-use kumi_runtime::{
-    core::{contracts::Integration, export::Format},
-    integrations::ableton::AbletonOptions,
-    providers::ProviderId,
-    system::Env,
-    RuntimeError, KUMI_VERSION,
-};
+use kumi_runtime::{core::export::Format, providers::ProviderId, system::Env, RuntimeError, KUMI_VERSION};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
-pub type AbletonFactory = Rc<dyn Fn(AbletonOptions) -> Rc<dyn Integration>>;
 #[derive(Clone)]
 pub struct CliIo {
     pub input: Rc<dyn TerminalInput>,
@@ -156,12 +149,12 @@ fn installed_io(io: &CliIo) -> InstalledIo {
     out.input = Some(io.input.clone());
     out
 }
-fn doctor_io(io: &CliIo, factory: AbletonFactory) -> DoctorIo {
+fn doctor_io(io: &CliIo, factory: DawFactory) -> DoctorIo {
     let mut doctor = DoctorIo::new(io.out.clone(), io.env.clone());
-    doctor.bundled_bridge_version = bridge_setup::bundled_bridge_version();
+    doctor.bundled_bridge_version = crate::daw::current().bundled_bridge_version();
     doctor.probe_live = Some(Rc::new(move |config| {
         let factory = factory.clone();
-        async move { Ok(session::probe_live(config, factory).await) }.boxed_local()
+        async move { Ok(crate::daw::current().probe(config, &factory).await) }.boxed_local()
     }));
     doctor
 }
@@ -180,7 +173,8 @@ async fn login_with(config: &AppConfig, io: &CliIo) -> Result<(), RuntimeError> 
     )
     .await
 }
-pub async fn run(io: CliIo, factory: AbletonFactory) -> i32 {
+pub async fn run(io: CliIo, factory: impl Into<DawFactory>) -> i32 {
+    let factory = factory.into();
     io.exit_after_reopen.set(false);
     let mut secrets: Vec<String> =
         crate::report::KEY_VARIABLES.into_iter().filter_map(|s| io.env.get(s).filter(|s| !s.is_empty()).cloned()).collect();
@@ -199,7 +193,7 @@ pub async fn run(io: CliIo, factory: AbletonFactory) -> i32 {
         }
     }
 }
-async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>) -> Result<i32, RuntimeError> {
+async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) -> Result<i32, RuntimeError> {
     let config = load_config(&io.args, &io.env)?;
     match &config {
         AppConfig::Help => {
@@ -296,17 +290,14 @@ async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>
             run_library(options).await
         }
         AppConfig::Bridge { yes, allow_dirty } => {
-            let mut options = BridgeSetupIo::new(io.out.clone(), io.env.clone());
-            options.input = Some(io.input.clone());
-            options.yes = *yes;
-            options.allow_dirty = *allow_dirty;
-            options.wait_ms = io
+            let wait_ms = io
                 .env
                 .get("KUMI_BRIDGE_WAIT_SECONDS")
                 .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(|n| n.saturating_mul(1000));
-            bridge_setup::setup_bridge(options).await
+            let command = BridgeCommand { input: Some(io.input.clone()), yes: *yes, allow_dirty: *allow_dirty, wait_ms };
+            crate::daw::current().setup_bridge(io.out.clone(), &io.env, command).await
         }
         AppConfig::Auth { .. } => {
             login::auth_status(&config, AuthIo { out: io.out.clone(), env: io.env.clone(), fetch: None }).await?;
@@ -376,7 +367,10 @@ async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>
         }
         AppConfig::InferenceOnly { .. } | AppConfig::Live { .. } => {
             if io.installed() && matches!(config, AppConfig::Live { .. }) {
-                install::finish_legacy_transition(&installed_io(io)).await;
+                let installed = installed_io(io);
+                for provider in crate::daw::providers() {
+                    provider.finish_transition(&installed).await;
+                }
             }
             session::run_session(io.clone(), config, secrets, factory).await
         }
@@ -425,7 +419,7 @@ async fn reopen(io: &CliIo) -> Result<i32, RuntimeError> {
         return Ok(reopen().await);
     }
     let exe = if io.installed() {
-        std::path::Path::new(&install::kumi_home(&io.env)).join("app").join(bridge_setup::executable_name("kumi"))
+        std::path::Path::new(&install::kumi_home(&io.env)).join("app").join(crate::process::executable_name("kumi"))
     } else {
         std::env::current_exe().map_err(|e| RuntimeError::plain(e.to_string()))?
     };
@@ -443,8 +437,9 @@ async fn reopen(io: &CliIo) -> Result<i32, RuntimeError> {
     drop(guard);
     Ok(code)
 }
-/// Bind the command loop to the process after supplying the native Ableton factory.
-pub fn main_with(factory: AbletonFactory) -> i32 {
+/// Bind the command loop to the process after supplying each DAW's native factory.
+pub fn main_with(factory: impl Into<DawFactory>) -> i32 {
+    let factory = factory.into();
     // Before anything is written: Windows consoles need VT processing for Kumi's escape sequences.
     let _vt = crate::tui::tty::VtOutput::enable();
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {

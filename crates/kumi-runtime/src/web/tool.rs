@@ -5,6 +5,7 @@ use super::{
     read::{read_page, Page},
     search::{search_web, SearchCache, SearchWebOptions, SearchWhere},
 };
+use crate::core::daw::{asset_in_words, AssetPhrase, DawProfile};
 use crate::core::{
     contracts::{JsonObject, KernelTool, Reach, SessionEvent, ToolImage, ToolResult, WebAction, WebEvent, WebWhere},
     errors::RuntimeError,
@@ -93,8 +94,22 @@ struct State {
 struct WebTool {
     state: Rc<State>,
     search: bool,
+    data: Rc<Value>,
 }
 pub fn web_tools(options: WebToolOptions) -> Vec<Rc<dyn KernelTool>> {
+    web_tools_for(&DawProfile::ABLETON, options)
+}
+
+/// What the web tools' data says in Live's words, and how many times.
+pub(crate) const WEB_PHRASES: &[AssetPhrase] = &[AssetPhrase {
+    live: "(their files, their Set, their keys)",
+    count: 1,
+    said: |p| format!("(their files, their {}, their keys)", p.words.place),
+}];
+
+/// `web_tools`, saying the DAW's words.
+pub fn web_tools_for(profile: &DawProfile, options: WebToolOptions) -> Vec<Rc<dyn KernelTool>> {
+    let data = Rc::new(asset_in_words(DATA.clone(), profile, WEB_PHRASES));
     let now = options.now.unwrap_or_else(|| Rc::new(now_ms_f64));
     let state = Rc::new(State {
         on_event: options.on_event,
@@ -104,7 +119,7 @@ pub fn web_tools(options: WebToolOptions) -> Vec<Rc<dyn KernelTool>> {
         kept: RefCell::new(IndexMap::new()),
         searches: SearchCache::new(now, 20.0 * 60_000.0, 64),
     });
-    vec![Rc::new(WebTool { state: state.clone(), search: true }), Rc::new(WebTool { state, search: false })]
+    vec![Rc::new(WebTool { state: state.clone(), search: true, data: data.clone() }), Rc::new(WebTool { state, search: false, data })]
 }
 impl State {
     fn tell(&self, event: SessionEvent) {
@@ -152,10 +167,10 @@ impl KernelTool for WebTool {
         }
     }
     fn description(&self) -> &str {
-        DATA[self.name()]["description"].as_str().unwrap()
+        self.data[self.name()]["description"].as_str().unwrap()
     }
     fn input_schema(&self) -> JsonObject {
-        DATA[self.name()]["schema"].as_object().unwrap().clone()
+        self.data[self.name()]["schema"].as_object().unwrap().clone()
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let result = if self.search { self.search(&input, signal.clone()).await } else { self.read(&input, signal.clone()).await };
@@ -354,5 +369,18 @@ mod tests {
         assert_eq!(lines_of(&"\u{e9}".repeat(4_000_000)).len(), 2000);
         let budget = if cfg!(debug_assertions) { 10_000 } else { 4_000 };
         assert!(start.elapsed().as_millis() < budget, "{} ms", start.elapsed().as_millis());
+    }
+}
+
+#[cfg(test)]
+mod phrases {
+    use super::*;
+
+    #[test]
+    fn the_web_tools_phrases_are_all_there_and_lives_words_stay() {
+        assert_eq!(crate::core::daw::check_asset_phrases(&DATA, WEB_PHRASES), Ok(()));
+        assert_eq!(asset_in_words(DATA.clone(), &DawProfile::ABLETON, WEB_PHRASES), *DATA);
+        let said = asset_in_words(DATA.clone(), &DawProfile::UNKNOWN, WEB_PHRASES).to_string();
+        assert!(WEB_PHRASES.iter().all(|phrase| !said.contains(phrase.live)));
     }
 }

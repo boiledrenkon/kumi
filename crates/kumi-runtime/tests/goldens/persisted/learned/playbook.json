@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "lessons": [
+    {
+      "id": "l0a1b2c3d",
+      "at": 1760000000000,
+      "matched": "C2 · bright, rich · attack 15 ms",
+      "winner": "Wavetable   Auto Filter",
+      "from": 52,
+      "to": 88,
+      "moves": [
+        {
+          "label": "detune",
+          "score": 71
+        },
+        {
+          "label": "filter",
+          "score": 88
+        }
+      ],
+      "reaction": "liked"
+    },
+    {
+      "id": "l1b2c3d4e",
+      "at": 1760000001000,
+      "matched": "C2 · bright, rich · attack 15 ms",
+      "winner": "Wavetable   Auto Filter",
+      "from": 52,
+      "to": 88,
+      "moves": [
+        {
+          "label": "detune",
+          "score": 71
+        },
+        {
+          "label": "filter",
+          "score": 88
+        }
+      ]
+    }
+  ]
+}

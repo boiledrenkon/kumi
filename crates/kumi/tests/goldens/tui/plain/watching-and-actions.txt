@@ -1,0 +1,12 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[live] Kumi is watching the Set; do it in Live, then tell Kumi you're done.
+[live] Kumi stopped watching.
+[live] Playing from bar 17
+[memory] Noted about this Set: The Reese is the main bass (kept once the Set is saved)
+[memory] Noted about you: Prefers short reverbs
+[recipe] Saved “Drum bus” (3 steps)
+[technique] Kept “Neuro from a Reese” (for gritty neuro basses; /forget t1 drops it)
+Kumi closed. Each Set's conversation continues next time.

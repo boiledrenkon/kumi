@@ -53,7 +53,7 @@ fn pieces(window: Window, tempo: f64, meter: f64, taps: usize) -> Vec<Window> {
     found
 }
 
-impl Rendering {
+impl LiveRenderer {
     pub(super) async fn ears_pass(self: &Rc<Self>, rig: &mut Rig, signal: Signal) -> Result<IndexMap<String, Render>, RuntimeError> {
         let tempo = self.observer.tempo.get().unwrap_or(f64::NAN);
         let ears = rig.ears.as_ref().unwrap();

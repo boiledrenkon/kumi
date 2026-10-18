@@ -8,6 +8,7 @@
 
 use crate::{
     auth::store::CredentialStore,
+    core::daw::DawProfile,
     listening::listener::{self, gemini_key, gemini_listener, openai_listener, Answer, ChatListener, FromEnv, Listener, GEMINI},
     providers::{api_key_for, ProviderId},
 };
@@ -83,14 +84,22 @@ pub enum Choice {
     File { path: String },
 }
 
-/// A choice for a job, in words.
+/// A choice for a job, in words (Live's words for stems and transcription).
 pub fn describe(job: Job, choice: &Choice) -> String {
+    describe_for(&DawProfile::ABLETON, job, choice)
+}
+
+/// A choice for a job, in words: stems and transcription with the DAW's own, where it has them.
+pub fn describe_for(profile: &DawProfile, job: Job, choice: &Choice) -> String {
+    let app = profile.words.app;
     match (job, choice) {
         (_, Choice::File { path }) => format!("the model file {path}"),
-        (Job::Stems, _) => "Live's own splitter".into(),
-        (Job::Transcription, _) => {
-            "Live's conversions (drums, melody and harmony to MIDI), and Basic Pitch for a pitched part in a file that isn't in Live".into()
+        (Job::Stems, _) if profile.caps.stems => format!("{app}'s own splitter"),
+        (Job::Stems, _) => format!("none: {app} has no stem splitter Kumi can use"),
+        (Job::Transcription, _) if profile.caps.audio_to_midi => {
+            format!("{app}'s conversions (drums, melody and harmony to MIDI), and Basic Pitch for a pitched part in a file that isn't in {app}")
         }
+        (Job::Transcription, _) => "Basic Pitch, for a pitched part in a file".into(),
         (Job::Embeddings, Choice::Off) => "off: no embeddings".into(),
         (Job::Embeddings, _) => {
             "Kumi's own: LAION-CLAP's music model for style and AFx-Rep for effects, fetched from Kumi's models release the first time they're needed".into()
@@ -311,6 +320,11 @@ fn choice_word(word: &str) -> Option<Choice> {
 /// What the words ask: show the slots, swap one, or take a swap back. A model file's path may have spaces: in quotes,
 /// or running on to the word with its file ending (else to the end of the line).
 pub fn parse(words: &str) -> Result<Asked, String> {
+    parse_for(&DawProfile::ABLETON, words)
+}
+
+/// As `parse`, in the DAW's words.
+pub fn parse_for(profile: &DawProfile, words: &str) -> Result<Asked, String> {
     let (mut job, mut wanted, mut back, mut unknown) = (None, None, false, vec![]);
     // Each word, with where it starts.
     let spans: Vec<(usize, &str)> = words.split_whitespace().map(|word| (word.as_ptr() as usize - words.as_ptr() as usize, word)).collect();
@@ -382,7 +396,7 @@ pub fn parse(words: &str) -> Result<Asked, String> {
         return Err(format!(
             "Kumi doesn't know “{word}” as a model{}. {}",
             job.map(|job| format!(" for {}", job.name())).unwrap_or_default(),
-            takes(job)
+            takes(profile, job)
         ));
     }
     match (job, wanted) {
@@ -393,10 +407,10 @@ pub fn parse(words: &str) -> Result<Asked, String> {
 }
 
 /// What a slot takes, in a sentence.
-fn takes(job: Option<Job>) -> String {
+fn takes(profile: &DawProfile, job: Option<Job>) -> String {
     match job {
         Some(Job::Listening) => "Listening takes gemini, openai, off, default, or a model on this computer as <address>#<model> (an OpenAI-compatible server that takes audio).".into(),
-        Some(job @ (Job::Stems | Job::Transcription)) => format!("{} uses {} for now: Kumi can't run a model file for it yet.", capitalized(job.name()), describe(job, &Choice::Default)),
+        Some(job @ (Job::Stems | Job::Transcription)) => format!("{} uses {} for now: Kumi can't run a model file for it yet.", capitalized(job.name()), describe_for(profile, job, &Choice::Default)),
         Some(Job::Embeddings) => "Embeddings take default (Kumi's own), off, or an ONNX model file or an https link to one: /slots embeddings ~/models/clap.onnx.".into(),
         None => "The slots: stems, transcription, listening and embeddings (/slots shows them).".into(),
     }
@@ -410,6 +424,11 @@ fn capitalized(text: &str) -> String {
 /// What a slot would hold for what was asked, or why it can't: listening takes a model by name or address, embeddings
 /// an ONNX model file (or a link to one) for Kumi's own runtime, and stems and transcription keep Live's own for now.
 pub fn fits(job: Job, wanted: &Wanted) -> Result<Choice, String> {
+    fits_for(&DawProfile::ABLETON, job, wanted)
+}
+
+/// As `fits`, in the DAW's words.
+pub fn fits_for(profile: &DawProfile, job: Job, wanted: &Wanted) -> Result<Choice, String> {
     match job {
         Job::Listening => match wanted {
             Wanted::Choice(choice) => Ok(choice.clone()),
@@ -424,18 +443,18 @@ pub fn fits(job: Job, wanted: &Wanted) -> Result<Choice, String> {
         },
         Job::Stems | Job::Transcription => match wanted {
             Wanted::Choice(Choice::Default) => Ok(Choice::Default),
-            Wanted::Choice(Choice::Off) => Err(format!("{} needs something to do it: {} is the one Kumi has.", capitalized(job.name()), describe(job, &Choice::Default))),
-            Wanted::Choice(_) => Err(format!("That model doesn't do {}; {} does.", job.name(), describe(job, &Choice::Default))),
+            Wanted::Choice(Choice::Off) => Err(format!("{} needs something to do it: {} is the one Kumi has.", capitalized(job.name()), describe_for(profile, job, &Choice::Default))),
+            Wanted::Choice(_) => Err(format!("That model doesn't do {}; {} does.", job.name(), describe_for(profile, job, &Choice::Default))),
             _ if job == Job::Stems => Err(format!(
                 "Kumi can't run a stem model itself yet, so {} stays on {}. When it can, this is where one goes: /slots {} <file or Hugging Face link>.",
                 job.name(),
-                describe(job, &Choice::Default),
+                describe_for(profile, job, &Choice::Default),
                 job.name()
             )),
             _ => Err(format!(
                 "{} stays on {}: the slot doesn't take another transcription model yet.",
                 capitalized(job.name()),
-                describe(job, &Choice::Default)
+                describe_for(profile, job, &Choice::Default)
             )),
         },
     }
@@ -443,6 +462,11 @@ pub fn fits(job: Job, wanted: &Wanted) -> Result<Choice, String> {
 
 /// The slots, a line each, and how to swap one.
 pub fn show(slots: &Slots, env: &HashMap<String, String>) -> (Vec<String>, String) {
+    show_for(&DawProfile::ABLETON, slots, env)
+}
+
+/// As `show`, in the DAW's words.
+pub fn show_for(profile: &DawProfile, slots: &Slots, env: &HashMap<String, String>) -> (Vec<String>, String) {
     let mut lines: Vec<String> = Job::ALL
         .into_iter()
         .map(|job| {
@@ -452,7 +476,7 @@ pub fn show(slots: &Slots, env: &HashMap<String, String>) -> (Vec<String>, Strin
             } else {
                 String::new()
             };
-            format!("{} ({}): {}{swapped}", job.name(), job.about(), describe(job, &now))
+            format!("{} ({}): {}{swapped}", job.name(), job.about(), describe_for(profile, job, &now))
         })
         .collect();
     if let Some(said) = env_says(env) {
@@ -725,6 +749,8 @@ pub struct SlotsContext {
     pub file: PathBuf,
     pub store: Rc<dyn CredentialStore>,
     pub env: HashMap<String, String>,
+    /// The DAW whose words the slots use (Live's when None).
+    pub profile: Option<&'static DawProfile>,
 }
 
 /// What `/slots` says.
@@ -741,7 +767,8 @@ pub enum Said {
 /// `/slots` in plain words: shows the slots, swaps one after its check, or takes a swap back. `progress` hears what's
 /// under way, and `signal` stops a fetch or a check (a listening model's check has its own minute and a half).
 pub async fn command(words: &str, context: &SlotsContext, progress: &dyn Fn(String), signal: Signal) -> Said {
-    let asked = match parse(words) {
+    let profile = context.profile.unwrap_or(&DawProfile::ABLETON);
+    let asked = match parse_for(profile, words) {
         Ok(asked) => asked,
         Err(why) => return Said::Refused(why),
     };
@@ -755,7 +782,7 @@ pub async fn command(words: &str, context: &SlotsContext, progress: &dyn Fn(Stri
     };
     match asked {
         Asked::Show => {
-            let (mut lines, footer) = show(&slots, &context.env);
+            let (mut lines, footer) = show_for(profile, &slots, &context.env);
             if let Some(why) = unreadable {
                 lines.insert(0, format!("{why}, so listening is off. A swap here copies that file beside it and writes the slots afresh."));
             }
@@ -769,21 +796,24 @@ pub async fn command(words: &str, context: &SlotsContext, progress: &dyn Fn(Stri
             }
             match slots.back(job) {
                 Some(now) => match keep(&slots) {
-                    Ok(_) => Said::Done(format!("{} is back on {}.", capitalized(job.name()), describe(job, &now))),
+                    Ok(_) => Said::Done(format!("{} is back on {}.", capitalized(job.name()), describe_for(profile, job, &now))),
                     Err(why) => Said::Refused(why),
                 },
-                None => {
-                    Said::Refused(format!("{} hasn't been swapped: it's on {}.", capitalized(job.name()), describe(job, &slots.now(job))))
-                }
+                None => Said::Refused(format!(
+                    "{} hasn't been swapped: it's on {}.",
+                    capitalized(job.name()),
+                    describe_for(profile, job, &slots.now(job))
+                )),
             }
         }
         Asked::Swap(job, wanted) => {
-            let choice = match fits(job, &wanted) {
+            let choice = match fits_for(profile, job, &wanted) {
                 Ok(choice) => choice,
                 Err(why) => return Said::Refused(why),
             };
             let was = slots.now(job);
-            let stays = |why: String| Said::Refused(format!("{} stays on {}: {why}", capitalized(job.name()), describe(job, &was)));
+            let stays =
+                |why: String| Said::Refused(format!("{} stays on {}: {why}", capitalized(job.name()), describe_for(profile, job, &was)));
             // A model file by its full path, there; one from a link fetched first (over https, into Kumi's folder).
             let choice = match (choice, &wanted) {
                 (Choice::File { .. }, Wanted::Link(link)) => {
@@ -800,7 +830,7 @@ pub async fn command(words: &str, context: &SlotsContext, progress: &dyn Fn(Stri
                 (choice, _) => choice,
             };
             if choice == was {
-                return Said::Refused(format!("{} is already on {}.", capitalized(job.name()), describe(job, &choice)));
+                return Said::Refused(format!("{} is already on {}.", capitalized(job.name()), describe_for(profile, job, &choice)));
             }
             // An embedding model is tried on two known tones, which it has to tell apart.
             let tried = if let (Job::Embeddings, Choice::File { path }) = (job, &choice) {
@@ -829,7 +859,7 @@ pub async fn command(words: &str, context: &SlotsContext, progress: &dyn Fn(Stri
             // A new listening model is tried on the known clip first: one that hasn't answered in a minute and a half
             // won't.
             let heard = if job == Job::Listening && matches!(choice, Choice::Gemini | Choice::Openai | Choice::Local { .. }) {
-                progress(format!("Trying {} on a known clip…", describe(job, &choice)));
+                progress(format!("Trying {} on a known clip…", describe_for(profile, job, &choice)));
                 let signal = kumi_common::abort::any([signal.clone(), kumi_common::abort::timeout(90_000)]);
                 let listener = match found(&choice, context.store.as_ref(), &context.env, signal.clone()).await {
                     Ok(Some(listener)) => listener,
@@ -849,7 +879,7 @@ pub async fn command(words: &str, context: &SlotsContext, progress: &dyn Fn(Stri
                 return Said::Refused(format!(
                     "{} was swapped to {} while Kumi tried this one, so this swap isn't made: ask again to make it.",
                     capitalized(job.name()),
-                    describe(job, &latest.now(job))
+                    describe_for(profile, job, &latest.now(job))
                 ));
             }
             latest.switch(job, choice.clone());
@@ -857,7 +887,7 @@ pub async fn command(words: &str, context: &SlotsContext, progress: &dyn Fn(Stri
                 Ok(aside) => aside,
                 Err(why) => return Said::Refused(why),
             };
-            let mut said = format!("{} now uses {}", capitalized(job.name()), describe(job, &choice));
+            let mut said = format!("{} now uses {}", capitalized(job.name()), describe_for(profile, job, &choice));
             if let Some(heard) = heard.or(tried) {
                 said.push_str(&format!(": {heard}"));
             }
@@ -919,5 +949,23 @@ fn missing_key(choice: &Choice) -> String {
         Choice::Gemini => "there's no Gemini API key on this computer: set GEMINI_API_KEY (or GOOGLE_API_KEY), then try again.".into(),
         Choice::Openai => "there's no OpenAI API key (a ChatGPT sign-in doesn't reach OpenAI's audio models): set OPENAI_API_KEY or run kumi login openai, then try again.".into(),
         _ => "it found no model.".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_keeps_its_words_and_a_daw_without_its_splitter_or_conversions_isnt_told_of_them() {
+        for job in Job::ALL {
+            assert_eq!(describe_for(&DawProfile::ABLETON, job, &Choice::Default), describe(job, &Choice::Default));
+        }
+        assert_eq!(describe(Job::Stems, &Choice::Default), "Live's own splitter");
+        let other = DawProfile::UNKNOWN;
+        for job in [Job::Stems, Job::Transcription] {
+            let said = describe_for(&other, job, &Choice::Default);
+            assert!(!said.contains("Live"), "{said}");
+        }
     }
 }

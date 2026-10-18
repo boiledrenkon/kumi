@@ -1,0 +1,8 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[tool] live_discover started
+[connection] MCP/Live: disconnected; no verified current Live observation
+Kumi's link to Live dropped. It's reconnecting, and will pick up where you left off.
+Kumi closed. Each Set's conversation continues next time.

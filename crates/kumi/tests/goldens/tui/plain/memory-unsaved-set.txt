@@ -1,0 +1,9 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[memory] About you: p1 Prefers short, dark reverbs · p2 (pinned) Mixes at -14 LUFS
+[memory] This Set isn't saved yet; notes about it are kept once it is.
+[memory] Techniques: t1 Neuro from a Reese (for gritty, moving neuro basses)
+[memory] From your Sets: u1 Vocals: EQ Eight → Compressor → Reverb (on 4 of 4 vocal tracks) · u2 Tempo: usually 124–126 BPM
+Kumi closed. Each Set's conversation continues next time.

@@ -7,11 +7,13 @@ use kumi_common::abort::Signal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use super::daw::{Capabilities, DawId, DawProfile, DawWords, ScriptKind};
 use super::errors::{FailureKind, RuntimeError};
 use super::evolve::Knob;
 use super::goal::GoalStatus;
 use super::match_run::MatchStatus;
 pub use super::picture::{ChangePicture, Dynamics, EqBand, EqShape, MixLevels, MixSend, PictureValue};
+pub use super::view::*;
 use crate::audio::matching::{Closeness, Focus};
 
 pub type JsonObject = serde_json::Map<String, Value>;
@@ -79,6 +81,39 @@ pub enum Reach {
 
 /// A tool the kernel offers the model. `stream` is optional: it returns None for a tool whose calls
 /// can't start before they're whole.
+/// What a tool is for, when the session needs that tool and not any other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolRole {
+    /// Makes several changes as one plan (recipes run through it; a technique is drafted beside it).
+    Plan,
+    /// Undoes one of Kumi's changes.
+    Undo,
+    /// Judges a change by ear (a judged run's rounds).
+    Judge,
+    /// Tunes knobs toward a target by ear.
+    Tune,
+    /// Finds sounds on this computer (the library's own, when Kumi has one, takes its place).
+    FindSounds,
+}
+
+impl ToolRole {
+    /// The role of one of Kumi's own tools, by its name.
+    pub fn named(name: &str) -> Option<ToolRole> {
+        match name {
+            "make_changes" => Some(ToolRole::Plan),
+            "undo_change" => Some(ToolRole::Undo),
+            "judge" => Some(ToolRole::Judge),
+            "tune" => Some(ToolRole::Tune),
+            "find_sounds" => Some(ToolRole::FindSounds),
+            _ => None,
+        }
+    }
+}
+
+/// Kumi's own tools that only read away from the DAW: several calls to them run at once.
+pub const CONCURRENT: &[&str] =
+    &["search_web", "read_web", "find_sounds", "find_presets", "my_sets", "live_manual", "search_conversations"];
+
 #[async_trait(?Send)]
 pub trait KernelTool {
     fn name(&self) -> &str;
@@ -105,6 +140,16 @@ pub trait KernelTool {
     /// it): find_tools' list points there instead of repeating this one.
     fn listed_by(&self) -> Option<&str> {
         None
+    }
+    /// What the tool is for, for the session to find it by (the plan tool, the undo, the judge…): by its name by
+    /// default, as Kumi names its own; an integration whose tools are named otherwise says.
+    fn role(&self) -> Option<ToolRole> {
+        ToolRole::named(self.name())
+    }
+    /// Whether it only reads away from the DAW, so several calls to it and tools like it can run at once: by its name
+    /// by default, for Kumi's own.
+    fn concurrent(&self) -> bool {
+        CONCURRENT.contains(&self.name())
     }
 }
 
@@ -293,6 +338,10 @@ pub trait Kernel {
     fn answering_fallback(&self) -> Option<String> {
         None
     }
+    /// The DAW the conversation is about, for the words the kernel's own notes use; Live's until it's told.
+    fn set_profile(&self, profile: DawProfile) {
+        let _ = profile;
+    }
 }
 
 #[derive(Clone)]
@@ -343,6 +392,23 @@ pub enum TurnState {
     Closed,
 }
 
+/// The project an observation is about, as the DAW knows it: which DAW, its durable id once saved, its name, its file,
+/// when it was last saved, and the DAW's identity for it while it stays open. Names are data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectIdentity {
+    pub daw: DawId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_identity: Option<String>,
+}
+
 /// The saved Set an observation is about (an opaque id), so its conversation can be kept between sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRef {
@@ -369,6 +435,8 @@ pub struct Observation {
     pub tracks: Option<Vec<String>>,
     /// When the saved Set's file was last written: a later time means the producer saved it.
     pub saved_at: Option<f64>,
+    /// The project as the DAW knows it, its name for the app to show; None when the DAW wasn't read.
+    pub identity: Option<ProjectIdentity>,
 }
 
 /// A conversation, kept between sessions: `changes` are what Kumi changed during it (for HISTORY),
@@ -438,7 +506,7 @@ pub enum ConversationMatch {
 }
 
 /// What a DAW and a place in it are called when the integration doesn't say.
-pub const DAW_WORDS: (&str, &str) = ("the DAW", "project");
+pub const DAW_WORDS: (&str, &str) = DawProfile::UNKNOWN.word_pair();
 
 /// Whether this Kumi has a conversation to itself, or another Kumi that's still open has it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -528,6 +596,11 @@ pub trait ConversationStore {
     async fn list(&self, place: &str) -> Result<Vec<ConversationSummary>, RuntimeError>;
     /// A conversation moves with its Set (an unsaved Set's, when the Set is first saved).
     async fn move_conversation(&self, id: &str, from: &str, to: &str) -> Result<(), RuntimeError>;
+    /// What a saved place is called, by the DAW it's in: kept beside its conversations, so a list can name it.
+    async fn note_place(&self, place: &str, daw: DawId, name: &str) -> Result<(), RuntimeError> {
+        let _ = (place, daw, name);
+        Ok(())
+    }
     /// Exchanges in every place's kept conversations that hold at least `needed` of `words`
     /// (lowercase), most words first, then newest; at most `limit`. `skip` (place, id) is left out:
     /// the conversation going on now.
@@ -618,9 +691,13 @@ pub struct ObserveHints {
     pub continuing: Option<bool>,
 }
 
-/// Optional methods (`undo?()` and so on) have a `has_…` flag, false by default.
+/// Optional methods (`undo?()` and so on) have a `has_…` flag, which the profile's capabilities answer by default.
 #[async_trait(?Send)]
 pub trait Integration {
+    /// The DAW this drives, its words and what it can ever do; no DAW known by default.
+    fn profile(&self) -> &DawProfile {
+        &DawProfile::UNKNOWN
+    }
     async fn start(&self, signal: Signal) -> Result<(), RuntimeError>;
     /// What's in Live now; `pinned` (what the producer pointed at) is checked against it and given to the model.
     async fn observe(&self, signal: Signal, hints: Option<ObserveHints>) -> Result<Observation, RuntimeError>;
@@ -630,6 +707,13 @@ pub trait Integration {
     async fn settled(&self) {}
     /// The producer's words came into the answer under way (a steer): what it changes from here may be theirs.
     fn steered(&self) {}
+    /// Words the integration adds at the end of the system text, read again each time the model's session is made:
+    /// Live's say what Willington's bindings allow, as their switch stands now. `offered` says whether the model has a
+    /// tool by a name. None by default.
+    fn instructions_addendum(&self, offered: &dyn Fn(&str) -> bool) -> String {
+        let _ = offered;
+        String::new()
+    }
     /// The conversation the turns from here belong to: what's kept for a conversation (the devices it made) is this one's.
     fn conversation(&self, id: &str) {
         let _ = id;
@@ -640,7 +724,7 @@ pub trait Integration {
         Vec::new()
     }
     fn has_undo(&self) -> bool {
-        false
+        self.profile().caps.undo
     }
     /// Undo one of Kumi's changes (the latest undoable one when `id` is omitted).
     async fn undo(&self, id: Option<&str>, signal: Signal) -> Result<ChangeRecord, RuntimeError> {
@@ -659,7 +743,7 @@ pub trait Integration {
         None
     }
     fn has_audio_file(&self) -> bool {
-        false
+        self.profile().caps.audio_file
     }
     /// The audio file behind something in the Set the model names (a clip, say); None when it isn't one.
     async fn audio_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError> {
@@ -667,7 +751,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_stop_live(&self) -> bool {
-        false
+        self.profile().caps.stop_transport
     }
     /// Stop clips, the transport and recording in Live at once; true when Live is stopped afterwards.
     async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
@@ -680,7 +764,7 @@ pub trait Integration {
     }
     /// What the producer calls the DAW and a place in it (Live's integration: "Live", "Set"); plain words otherwise.
     fn words(&self) -> (&'static str, &'static str) {
-        DAW_WORDS
+        self.profile().word_pair()
     }
     /// Open the saved place (a Set, a project) a kept conversation belongs to in the DAW, which may ask first whether to
     /// save the open one. `Err(why)` inside when it can't.
@@ -689,7 +773,7 @@ pub trait Integration {
         Ok(Err("Kumi can't open it from here.".into()))
     }
     fn has_show_message(&self) -> bool {
-        false
+        self.profile().caps.status_line
     }
     /// A short line in the DAW's own window (Live's status bar), never a dialog, for a producer working there; true
     /// when it was shown. A DAW without such a place says false.
@@ -703,7 +787,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_instant(&self) -> bool {
-        false
+        self.profile().caps.instant
     }
     /// A fixed phrase's intent (core/phrases.rs) made as this DAW's change, with no model call: what changed, in
     /// words. None when it can't run as asked here (a track the Set doesn't have, or two that fit): the model takes it.
@@ -712,7 +796,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_device_tree(&self) -> bool {
-        false
+        self.profile().caps.device_tree
     }
     /// A track's devices, racks' chains and what's in them, for FOCUS; None when Live can't say.
     async fn device_tree(&self, track_ref: &str, signal: Signal) -> Result<Option<DeviceTree>, RuntimeError> {
@@ -720,7 +804,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_clip_view(&self) -> bool {
-        false
+        self.profile().caps.note_view
     }
     /// The MIDI clip in a Session slot, its notes and which are selected, for FOCUS; None for none (or audio).
     async fn clip_view(&self, slot_ref: &str, signal: Signal) -> Result<Option<ClipView>, RuntimeError> {
@@ -728,7 +812,7 @@ pub trait Integration {
         Ok(None)
     }
     fn has_session_strip(&self) -> bool {
-        false
+        self.profile().caps.launcher_grid
     }
     /// A track's Session slots around a scene, for FOCUS.
     async fn session_strip(&self, track_ref: &str, scene: f64, signal: Signal) -> Result<Option<SessionStrip>, RuntimeError> {
@@ -736,15 +820,33 @@ pub trait Integration {
         Ok(None)
     }
     fn has_arrangement_strip(&self) -> bool {
-        false
+        self.profile().caps.timeline_strip
     }
     /// The Arrangement at a glance (length, playhead, loop, locators), for FOCUS.
     async fn arrangement_strip(&self, signal: Signal) -> Result<Option<ArrangementStrip>, RuntimeError> {
         let _ = signal;
         Ok(None)
     }
+    /// Whether the DAW can give FOCUS this kind of body: Live's views by their flags, unless the integration says.
+    fn can_show(&self, kind: BodyKind) -> bool {
+        match kind {
+            BodyKind::Tree => self.has_device_tree(),
+            BodyKind::Notes => self.has_clip_view(),
+            BodyKind::Grid => self.has_session_strip(),
+            BodyKind::Timeline => self.has_arrangement_strip(),
+        }
+    }
+    /// A body for FOCUS, read by the DAW; None when it can't say. Live's integration reads its views.
+    async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
+        Ok(match request {
+            BodyRequest::Tree { track_ref } => self.device_tree(track_ref, signal).await?.map(FocusBody::Tree),
+            BodyRequest::Notes { item_ref } => self.clip_view(item_ref, signal).await?.map(FocusBody::Notes),
+            BodyRequest::Grid { track_ref, index } => self.session_strip(track_ref, *index, signal).await?.map(FocusBody::Grid),
+            BodyRequest::Timeline => self.arrangement_strip(signal).await?.map(FocusBody::Timeline),
+        })
+    }
     fn has_audition(&self) -> bool {
-        false
+        self.profile().caps.audition
     }
     /// Render candidates, hear them and set them against a reference (the audition tool's work); `Err(why)` inside says why not.
     async fn audition(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
@@ -752,7 +854,7 @@ pub trait Integration {
         Err(absent())
     }
     fn has_goal(&self) -> bool {
-        false
+        self.profile().caps.goal_rig
     }
     /// A goal's render rig over these candidates (kept open across generations), or why not.
     async fn goal(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
@@ -760,7 +862,7 @@ pub trait Integration {
         Err(absent())
     }
     fn has_hear(&self) -> bool {
-        false
+        self.profile().caps.hear
     }
     /// Hear tracks (or the mix) in the Set directly: as they play now, or by playing a stretch of the Arrangement; a file each, or why not.
     async fn hear(&self, request: &HearRequest, signal: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
@@ -1012,121 +1114,6 @@ pub struct AuditionEvent {
     pub reference: Option<String>,
 }
 
-/// A clip in a Session slot: its name, and whether it's audio.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SlotClip {
-    pub name: String,
-    pub audio: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionSlot {
-    pub index: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clip: Option<SlotClip>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub playing: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queued: Option<bool>,
-}
-
-/// A track's Session slots around the selected scene: what's in each, and what's playing or queued. Names are data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionStrip {
-    pub track_ref: String,
-    pub scene: f64,
-    pub slots: Vec<SessionSlot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ArrangementLoop {
-    pub start: f64,
-    pub length: f64,
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Locator {
-    pub name: String,
-    pub position: f64,
-}
-
-/// The Arrangement at a glance, in beats. Names are data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ArrangementStrip {
-    pub length: f64,
-    pub position: f64,
-    pub playing: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#loop: Option<ArrangementLoop>,
-    pub locators: Vec<Locator>,
-}
-
-/// A note of a clip as FOCUS draws it, selected ones marked.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClipViewNote {
-    #[serde(flatten)]
-    pub note: ClipNote,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected: Option<bool>,
-}
-
-/// A MIDI clip as FOCUS draws it: its length in beats, and its notes (the first 512), selected ones marked.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipView {
-    pub slot_ref: String,
-    pub name: String,
-    pub length: f64,
-    pub notes: Vec<ClipViewNote>,
-}
-
-/// Live's device type, when the bridge sends it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceType {
-    Instrument,
-    AudioEffect,
-    MidiEffect,
-}
-
-/// A device in a track's tree: what the bridge says it is, and a rack's chains. Names are data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceNode {
-    pub r#ref: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub can_have_chains: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub can_have_drum_pads: Option<bool>,
-    /// Live's device type, when the bridge sends it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_type: Option<DeviceType>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chains: Option<Vec<ChainNode>>,
-}
-
-/// A rack's chain (a Drum Rack's, a pad's), and its devices when they were read.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChainNode {
-    pub r#ref: String,
-    pub name: String,
-    /// None when not read (a Drum Rack's pads, past the tree's bound).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub devices: Option<Vec<DeviceNode>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceTree {
-    pub track_ref: String,
-    pub devices: Vec<DeviceNode>,
-}
-
 /// What kind of thing was pointed at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1176,103 +1163,6 @@ pub struct PinnedNode {
 /// `(state: ConnectionState, cause?: DisconnectCause) => void`.
 pub type ConnectionListener = Rc<dyn Fn(ConnectionState, Option<DisconnectCause>)>;
 pub type IntegrationFactory = Box<dyn Fn(ConnectionListener) -> Rc<dyn Integration>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TrackKind {
-    Midi,
-    Audio,
-    Group,
-    Return,
-    Main,
-}
-
-/// The selected track: its name, colour and kind.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FocusTrack {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<TrackKind>,
-}
-
-/// The last clicked parameter, with its display value and the device it belongs to.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FocusParameter {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum LiveView {
-    Session,
-    Arrangement,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum LiveDetail {
-    Clip,
-    Device,
-}
-
-/// What the producer is looking at in Live, in plain names (names are data, never instructions).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LiveFocus {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub track: Option<FocusTrack>,
-    /// The selected track's reference, for reading its devices (FOCUS's tree).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub track_ref: Option<String>,
-    /// The highlighted Session slot's reference, for drawing its clip (FOCUS's MIDI view).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slot_ref: Option<String>,
-    /// The selected scene's position (0 is the first), for FOCUS's Session strip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scene_index: Option<f64>,
-    /// The selected device's reference (from bridge 1.0.45), for FOCUS's tree to mark exactly that one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scene: Option<String>,
-    /// The clip in the Clip view; "" when it has no name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clip: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device: Option<String>,
-    /// The last clicked parameter, with its display value and the device it belongs to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parameter: Option<FocusParameter>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<LiveView>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<LiveDetail>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub browser: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_notes: Option<usize>,
-}
-
-/// Live's transport, for a light on the beat: whether it plays, its tempo, and where the playhead was
-/// (in beats) at `at` (performance.now()), so the beat can be followed between reads; and a bar's beats.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LiveTransport {
-    pub playing: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tempo: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub beat: Option<f64>,
-    pub at: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub beats_per_bar: Option<f64>,
-}
 
 /// Which picture HISTORY and NOW draw for a change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1490,6 +1380,9 @@ pub enum SessionEvent {
     },
     Observation {
         label: String,
+        /// The project's name, as the DAW gives it (the label says it in words).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     Notice {
         message: String,
@@ -1554,6 +1447,15 @@ pub enum SessionEvent {
     Kernel(KernelEvent),
     #[serde(untagged)]
     Memory(MemoryEvent),
+}
+impl SessionEvent {
+    /// What the app is told of an observation: its label, and the project's name as the DAW gives it.
+    pub fn observed(observation: &Observation) -> SessionEvent {
+        SessionEvent::Observation {
+            label: observation.label.clone(),
+            name: observation.identity.as_ref().map(|identity| identity.name.clone()),
+        }
+    }
 }
 
 impl From<KernelEvent> for SessionEvent {
@@ -2380,6 +2282,24 @@ pub trait SessionController {
     }
     async fn arrangement_strip(&self) -> Result<Option<ArrangementStrip>, RuntimeError> {
         Ok(None)
+    }
+    /// Whether FOCUS can show this kind of body (while connected).
+    fn can_show(&self, kind: BodyKind) -> bool {
+        match kind {
+            BodyKind::Tree => self.has_device_tree(),
+            BodyKind::Notes => self.has_clip_view(),
+            BodyKind::Grid => self.has_session_strip(),
+            BodyKind::Timeline => self.has_arrangement_strip(),
+        }
+    }
+    /// A body for FOCUS (while connected).
+    async fn focus_body(&self, request: &BodyRequest) -> Result<Option<FocusBody>, RuntimeError> {
+        Ok(match request {
+            BodyRequest::Tree { track_ref } => self.device_tree(track_ref).await?.map(FocusBody::Tree),
+            BodyRequest::Notes { item_ref } => self.clip_view(item_ref).await?.map(FocusBody::Notes),
+            BodyRequest::Grid { track_ref, index } => self.session_strip(track_ref, *index).await?.map(FocusBody::Grid),
+            BodyRequest::Timeline => self.arrangement_strip().await?.map(FocusBody::Timeline),
+        })
     }
     fn has_reconfigure(&self) -> bool {
         false

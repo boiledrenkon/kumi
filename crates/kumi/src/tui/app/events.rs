@@ -131,7 +131,7 @@ impl TuiApp {
                     state.strip = Strip::default();
                 }
             }
-            "observation" => self.0.state.borrow_mut().set_name = set_name_from(get("label")),
+            "observation" => self.0.state.borrow_mut().set_name = observed_name(&value),
             "library" => {
                 let tell = {
                     let mut state = self.0.state.borrow_mut();
@@ -152,7 +152,9 @@ impl TuiApp {
             "focus" => {
                 {
                     let mut state = self.0.state.borrow_mut();
-                    let focus: Option<LiveFocus> = serde_json::from_value(value["focus"].clone()).unwrap();
+                    // Read in neutral terms: the DAW's presentation fills them from its own wire form.
+                    let focus: Option<DawFocus> = serde_json::from_value(value["focus"].clone()).unwrap();
+                    let focus = focus.map(|focus| filled(crate::daw::view(), &focus));
                     state.touched = touched_next(state.focus.as_ref(), focus.as_ref(), state.touched);
                     state.focus = focus;
                 }
@@ -241,7 +243,9 @@ impl TuiApp {
                 let tell = at_start && state.willington_off;
                 drop(state);
                 if tell {
-                    self.notice(crate::willington::OFF_AT_START, NoticeTone::Info);
+                    if let Some(words) = crate::daw::current().toggle_words() {
+                        self.notice(words.off_at_start, NoticeTone::Info);
+                    }
                 }
             }
             "set-asked" => {
@@ -793,7 +797,7 @@ impl TuiApp {
             }
             "tool-input" => {
                 let mut state = self.0.state.borrow_mut();
-                if state.current.is_some() && !state.suppress && get("name") == "make_changes" {
+                if state.current.is_some() && !state.suppress && (crate::daw::presentation().plan)(get("name")) {
                     state.planning = Some(get("id").into());
                     state.planning_since = perf_now();
                 }

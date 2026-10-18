@@ -81,6 +81,9 @@ pub struct SetSummary {
     pub arrangement_beats: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<String>,
+    /// The DAW whose project it is; missing for Live's Sets (never written for them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daw: Option<crate::core::daw::DawId>,
 }
 static DEVICE_NAMES: LazyLock<std::collections::HashMap<String, String>> =
     LazyLock::new(|| serde_json::from_str(include_str!("device-names.json")).expect("device names"));

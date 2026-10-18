@@ -12,13 +12,7 @@ use kumi_common::js::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{
-    collections::HashSet,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        LazyLock,
-    },
-};
+use std::{collections::HashSet, sync::LazyLock};
 pub type KnownTrack = TrackChip;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleFile {
@@ -138,18 +132,14 @@ pub static REFERENCE_FIELDS: LazyLock<Vec<String>> = LazyLock::new(|| serde_json
 pub static UNDO_DESCRIPTION: LazyLock<String> = LazyLock::new(|| DATA["undoDescription"].as_str().unwrap().into());
 pub const UNDO_TOOL: &str = "undo_change";
 pub const EMERGENCY_STOP: &str = "live_session_emergency_stop";
-pub fn format_number(value: f64, digits: Option<usize>) -> String {
-    number::to_string(number::parse(&number::to_fixed(value, digits.unwrap_or(2))).unwrap_or(f64::NAN))
-}
+pub use crate::core::picture::format_number;
 pub fn note_name(note: f64) -> String {
     let index = note % 12.0;
     let notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
     let name = if index >= 0.0 && index < 12.0 && index.fract() == 0.0 { notes[index as usize] } else { "undefined" };
     format!("{name}{}", number::to_string((note / 12.0).floor() - 2.0))
 }
-pub fn hex_color(value: &Value) -> Option<String> {
-    value.as_f64().filter(|v| v.fract() == 0.0 && (0.0..=16777215.0).contains(v)).map(|v| format!("#{:06x}", v as u32))
-}
+pub use crate::core::refs::hex_color;
 pub(crate) fn record(value: Option<&Value>) -> &JsonObject {
     static EMPTY: LazyLock<JsonObject> = LazyLock::new(JsonObject::new);
     value.and_then(Value::as_object).unwrap_or(&EMPTY)
@@ -791,10 +781,7 @@ pub fn undo_note(message: &str) -> String {
         .unwrap_or("Live didn't accept the undo, so Kumi left it as it is.")
         .into()
 }
-pub fn next_change_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!("c{}", COUNTER.fetch_add(1, Ordering::Relaxed) + 1)
-}
+pub use crate::core::history::next_change_id;
 pub fn new_record(kind: &ChangeKind, summary: ChangeSummary, state: ChangeState, at: i64) -> ChangeRecord {
     ChangeRecord {
         id: next_change_id(),

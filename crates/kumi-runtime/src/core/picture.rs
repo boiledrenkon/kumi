@@ -6,6 +6,11 @@
 use serde::{Deserialize, Serialize};
 
 use super::contracts::ClipNote;
+use kumi_common::js::{
+    number,
+    string::{head, trim},
+};
+use serde_json::Value;
 
 /// The most one change's picture takes as JSON: past it, lists are thinned until it fits.
 pub const MAX_BYTES: usize = 4096;
@@ -403,6 +408,142 @@ fn thin<T: Clone>(items: Vec<T>, most: usize) -> Vec<T> {
 /// At most `max` characters.
 fn cut(text: &str, max: usize) -> String {
     text.trim().chars().take(max).collect()
+}
+
+// The framework a DAW's integration draws pictures with: a device's curves from its parameters, walked back over a run
+// of changes, and what was asked beside what was set. The DAW reads its own devices' parameters (`CurveReader`).
+
+/// A number as a change says it: rounded to `digits` places (2 by default), without trailing zeros.
+pub fn format_number(value: f64, digits: Option<usize>) -> String {
+    number::to_string(number::parse(&number::to_fixed(value, digits.unwrap_or(2))).unwrap_or(f64::NAN))
+}
+
+/// How a DAW reads an equaliser's and a compressor's curves from its devices' parameters.
+pub trait CurveReader {
+    /// An equaliser's bands, by its parameters; None for a device that isn't one.
+    fn eq_bands(&self, rows: &[ParameterRow]) -> Option<Vec<EqBand>>;
+    /// A compressor's curve, by its parameters; None for a device that isn't one.
+    fn dynamics(&self, rows: &[ParameterRow]) -> Option<Dynamics>;
+}
+
+/// One of a device's parameters, as read: its name, value, range and how the DAW shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParameterRow {
+    pub name: String,
+    pub value: f64,
+    pub min: f64,
+    pub max: f64,
+    pub text: Option<String>,
+}
+
+/// Each change's curve, from one read of its device made after the last of them (`changes` oldest first, each with
+/// the values it moved). Walking back from the newest: a change's after is the state before the one that followed
+/// it, and its before puts back the values it moved. None for a device that draws no curve.
+pub fn curves(reader: &dyn CurveReader, read: &[ParameterRow], changes: &[(String, Vec<PictureValue>)]) -> Vec<(String, ChangePicture)> {
+    let mut state = read.to_vec();
+    let mut drawn = Vec::new();
+    for (id, moved) in changes.iter().rev() {
+        let before = with_priors(&state, moved);
+        if let Some(curve) = curve_between(reader, &before, &state, moved) {
+            drawn.push((id.clone(), curve));
+        }
+        state = before;
+    }
+    drawn.reverse();
+    drawn
+}
+
+/// The curves one read gives the changes it was for (`ours`, oldest first, each with every value it moved). Only
+/// changes still applied are in what was read: the others are left out, and get none. Changes made while it read
+/// (`newer`) may be in it too: they're walked back first, and get theirs from a read of their own. None at all when a
+/// moved parameter isn't on the device read: another device sits in its place.
+pub fn curves_for(
+    reader: &dyn CurveReader,
+    read: &[ParameterRow],
+    ours: &[(String, Vec<PictureValue>)],
+    newer: &[(String, Vec<PictureValue>)],
+    applied: impl Fn(&str) -> bool,
+) -> Vec<(String, ChangePicture)> {
+    let walk: Vec<(String, Vec<PictureValue>)> = ours.iter().chain(newer).filter(|(id, _)| applied(id)).cloned().collect();
+    let names: std::collections::HashSet<&str> = read.iter().map(|row| row.name.as_str()).collect();
+    if !walk.iter().all(|(_, values)| values.iter().all(|value| names.contains(value.name.as_str()))) {
+        return Vec::new();
+    }
+    curves(reader, read, &walk).into_iter().filter(|(id, _)| ours.iter().any(|(ours, _)| ours == id)).collect()
+}
+
+/// The parameters with the values a change moved put back as they were.
+fn with_priors(rows: &[ParameterRow], moved: &[PictureValue]) -> Vec<ParameterRow> {
+    rows.iter()
+        .map(|row| match moved.iter().find(|value| value.name == row.name) {
+            Some(value) => ParameterRow { value: value.from.unwrap_or(row.value), text: value.from_text.clone(), ..row.clone() },
+            None => row.clone(),
+        })
+        .collect()
+}
+
+fn curve_between(
+    reader: &dyn CurveReader,
+    before: &[ParameterRow],
+    after: &[ParameterRow],
+    moved: &[PictureValue],
+) -> Option<ChangePicture> {
+    if let (Some(was), Some(now)) = (reader.eq_bands(before), reader.eq_bands(after)) {
+        return Some(ChangePicture::Eq { before: was, after: now, values: moved.to_vec() });
+    }
+    if let (Some(was), Some(now)) = (reader.dynamics(before), reader.dynamics(after)) {
+        return Some(ChangePicture::Dynamics { before: was, after: now, values: moved.to_vec() });
+    }
+    None
+}
+
+/// What was asked, as words, when it isn't what the DAW set: a number off by more than rounding, or words (“2 dB”) whose
+/// amount or unit differ from what Live shows.
+pub fn asked_apart(asked: &Value, set: Option<f64>, shown: Option<&str>) -> Option<String> {
+    match asked {
+        Value::Number(number) => {
+            let asked = number.as_f64()?;
+            let set = set?;
+            ((asked - set).abs() > 1e-4 * asked.abs().max(1.)).then(|| format_number(asked, None))
+        }
+        Value::String(text) => {
+            let text = trim(text);
+            let shown = shown?;
+            let same = match (amount(text), amount(shown)) {
+                (Some(a), Some(b)) => (a - b).abs() <= 0.005 * a.abs().max(b.abs()).max(1.) && unit(text) == unit(shown),
+                _ => text.eq_ignore_ascii_case(trim(shown)),
+            };
+            (!same && !text.is_empty()).then(|| head(text, 32))
+        }
+        _ => None,
+    }
+}
+
+/// The amount in words such as "-7.50 dB", "3.21 kHz" (3210), "4.00 : 1" (4), "18.0": None for "-inf dB" and words.
+pub fn amount(text: &str) -> Option<f64> {
+    let text = trim(text);
+    let start = text.find(|c: char| c.is_ascii_digit() || c == '-' || c == '+' || c == '.')?;
+    let rest = &text[start..];
+    let end = rest.char_indices().skip(1).find(|(_, c)| !(c.is_ascii_digit() || *c == '.')).map_or(rest.len(), |(at, _)| at);
+    let number: f64 = rest[..end].parse().ok()?;
+    let unit = trim(&rest[end..]).to_ascii_lowercase();
+    let scaled = if unit.starts_with("khz") { number * 1000. } else { number };
+    scaled.is_finite().then_some(scaled)
+}
+
+fn unit(text: &str) -> String {
+    text.trim_start_matches(|c: char| c.is_ascii_digit() || "+-., ".contains(c)).to_ascii_lowercase().replace(' ', "")
+}
+
+/// Names an automation lane's parameter and draws the lane to the parameter's range, as discovery read them; a lane
+/// with a point outside that range keeps its own.
+pub fn name_lane(picture: &mut ChangePicture, name: &str, low: f64, high: f64) {
+    if let ChangePicture::Automation { parameter, min, max, before, after } = picture {
+        name.clone_into(parameter);
+        if before.iter().chain(after.iter()).all(|point| (low..=high).contains(&point[1])) {
+            (*min, *max) = (low, high);
+        }
+    }
 }
 
 #[cfg(test)]

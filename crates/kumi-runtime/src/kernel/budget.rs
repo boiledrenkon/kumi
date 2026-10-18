@@ -5,6 +5,7 @@
 //! a short list where the conversation now starts. Clearing happens past thresholds, not on every
 //! request, so providers' prompt caches keep working in between.
 
+use crate::core::daw::DawProfile;
 use std::borrow::Cow;
 
 use kumi_common::js::json::stringify;
@@ -193,7 +194,7 @@ pub fn without_observations(messages: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-const CLEARED: &str = " … [Kumi cleared the rest of this earlier result to save room; read Live again if you need it.]";
+crate::daw_text!(#[allow(dead_code)] CLEARED, cleared: " … [Kumi cleared the rest of this earlier result to save room; read ", app, " again if you need it.]");
 /// Results this small stay whole: change confirmations, refusals, short answers.
 const SMALL: usize = 1024;
 /// What's kept of a cleared result; change results start with what changed.
@@ -376,7 +377,7 @@ fn previous_turn(messages: &[Message]) -> Option<usize> {
 }
 
 /// A copy of messages[0, end) with large tool results cut down and, if asked, observations removed; None when nothing changed.
-fn clear_until(messages: &[Message], end: usize, observations: bool) -> Option<Vec<Message>> {
+fn clear_until(messages: &[Message], end: usize, observations: bool, cleared_note: &str) -> Option<Vec<Message>> {
     let mut changed = false;
     let cleared: Vec<Message> = messages
         .iter()
@@ -400,12 +401,12 @@ fn clear_until(messages: &[Message], end: usize, observations: bool) -> Option<V
                                 _ => return part.clone(),
                             };
                             let content_output = matches!(output, ToolResultOutput::Content { .. });
-                            let small = value.ends_with(CLEARED) || value.len() <= SMALL;
+                            let small = value.ends_with(cleared_note) || value.len() <= SMALL;
                             if !content_output && small {
                                 return part.clone();
                             }
                             touched = true;
-                            let kept = if small { value } else { format!("{}{CLEARED}", head(&value, HEAD)) };
+                            let kept = if small { value } else { format!("{}{cleared_note}", head(&value, HEAD)) };
                             let mut result = result.clone();
                             result.output = match output {
                                 ToolResultOutput::Content { .. } => ToolResultOutput::Text { value: kept, provider_options: None },
@@ -569,6 +570,12 @@ impl Fitted<'_> {
 /// The settled history and the running turn, within the budget. Both come back borrowed when
 /// nothing had to go; otherwise the caller keeps the result, since the clearing now belongs to the conversation.
 pub fn fit<'a>(history: &'a [Message], turn: &'a [Message], budget: &ContextBudget) -> Fitted<'a> {
+    fit_for(&DawProfile::ABLETON, history, turn, budget)
+}
+
+/// `fit`, with what a cleared result says in the DAW's words.
+pub fn fit_for<'a>(profile: &DawProfile, history: &'a [Message], turn: &'a [Message], budget: &ContextBudget) -> Fitted<'a> {
+    let cleared_note = cleared(profile);
     // A request carries only so many images: this turn's earliest go first.
     let mut turn: Cow<'a, [Message]> = put_away_images(turn, MAX_IMAGES, PutAway::Room);
     let mut history: Cow<'a, [Message]> = Cow::Borrowed(history);
@@ -577,20 +584,20 @@ pub fn fit<'a>(history: &'a [Message], turn: &'a [Message], budget: &ContextBudg
         return Fitted { history, turn };
     }
     // Earlier turns first, keeping the one just before this whole: the producer may refer back to it.
-    if let Some(cleared) = clear_until(&history, previous_turn(&history).unwrap_or(0), true) {
+    if let Some(cleared) = clear_until(&history, previous_turn(&history).unwrap_or(0), true, &cleared_note) {
         history = Cow::Owned(cleared);
     }
     if within(&history, &turn, budget.limit) {
         return Fitted { history, turn };
     }
-    if let Some(cleared) = clear_until(&history, history.len(), true) {
+    if let Some(cleared) = clear_until(&history, history.len(), true, &cleared_note) {
         history = Cow::Owned(cleared);
     }
     if within(&history, &turn, budget.limit) {
         return Fitted { history, turn };
     }
     // This turn's older reads, keeping its latest results and the observation it started with.
-    if let Some(cleared) = clear_until(&turn, last_index(&turn, Role::Tool).unwrap_or(0), false) {
+    if let Some(cleared) = clear_until(&turn, last_index(&turn, Role::Tool).unwrap_or(0), false, &cleared_note) {
         turn = Cow::Owned(cleared);
     }
     if within(&history, &turn, budget.limit) {

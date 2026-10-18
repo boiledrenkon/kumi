@@ -52,6 +52,8 @@ pub struct Whereabouts {
     pub session: String,
     pub project: Option<String>,
     pub set: Option<Value>,
+    /// The DAW it's in, when it isn't Live (never written for Live).
+    pub daw: Option<crate::core::daw::DawId>,
 }
 
 /// Who undid one of Kumi's changes.
@@ -259,6 +261,9 @@ impl TasteLog {
         observation.subject = subject;
         observation.facts = facts;
         observation.context = json!({"set":place.set,"requests":self.state.borrow().requests});
+        if let Some(daw) = place.daw {
+            observation.context["daw"] = json!(daw);
+        }
         // Best effort: a row that can't be written is a reaction not learned from, nothing more.
         self.store.store().write(move |connection| observations::append(connection, &observation), |_| {});
     }
@@ -361,6 +366,12 @@ impl KernelTool for UndoWatch {
         }
         Ok(result)
     }
+    fn role(&self) -> Option<crate::core::contracts::ToolRole> {
+        self.tool.role()
+    }
+    fn concurrent(&self) -> bool {
+        self.tool.concurrent()
+    }
 }
 
 #[cfg(test)]
@@ -405,6 +416,7 @@ mod tests {
                 session: "20261006-120000-abcd".into(),
                 project: Some("0123456789abcdef0123456789abcdef".into()),
                 set: Some(json!({"tempo":172.0})),
+                daw: None,
             }),
             Rc::new(move |since| heard_at.filter(|at| *at >= since)),
             Rc::new(move || now.get()),

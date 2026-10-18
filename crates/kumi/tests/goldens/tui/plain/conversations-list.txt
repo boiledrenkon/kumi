@@ -1,0 +1,6 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[conversations] 1. add a hi-hat groove (this one, 2 requests) · 2. make the bass wider (2 hours ago, 5 requests) · Other Sets: 3. Bass ideas (Morning Run, pinned, 3 hours ago, 4 requests) · 4. sketch some chords (a Set, 1 day ago, 1 request). /resume <number, id or name> goes back to one.
+Kumi closed. Each Set's conversation continues next time.

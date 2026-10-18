@@ -123,7 +123,7 @@ fn js_string(value: Option<&Value>) -> String {
     }
 }
 fn node(row: Value) -> DeviceNode {
-    DeviceNode {
+    let mut node = DeviceNode {
         r#ref: js_string(row.get("ref")),
         name: row.get("name").and_then(Value::as_str).map(|s| head(s, 256)).unwrap_or_else(|| "Device".into()),
         class_name: row.get("className").and_then(Value::as_str).map(|s| head(s, 128)),
@@ -148,7 +148,10 @@ fn node(row: Value) -> DeviceNode {
                 .take(128)
                 .collect()
         }),
-    }
+        role: None,
+    };
+    node.role = Some(super::presentation::device_role(&node.row()));
+    node
 }
 async fn read_devices(host: &dyn ViewHost, parent: &str, signal: Signal) -> Result<Vec<DeviceNode>, RuntimeError> {
     let mut all = Vec::new();
@@ -321,6 +324,7 @@ pub async fn arrangement_strip(host: &dyn ViewHost, signal: Signal) -> Result<Op
                 })
             }),
             locators: marks,
+            beats_per_bar: None,
         }))
     }
     .await;
@@ -405,6 +409,7 @@ pub async fn clip_view(host: &dyn ViewHost, slot_ref: &str, signal: Signal) -> R
                     })
                 })
                 .collect(),
+            beats_per_bar: None,
         }))
     }
     .await;

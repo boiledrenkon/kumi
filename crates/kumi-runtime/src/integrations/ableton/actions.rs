@@ -23,14 +23,7 @@ pub struct ActionKind {
     #[serde(default, skip_serializing)]
     pub core: bool,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ActionSummary {
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub playing: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recording: Option<bool>,
-}
+pub use crate::core::plan::ActionSummary;
 impl ActionSummary {
     fn title(title: impl Into<String>) -> Self {
         Self { title: title.into(), playing: None, recording: None }

@@ -1,54 +1,56 @@
-//! Live's side of a fixed phrase (core/phrases.rs): the make_changes plan it is. One step, so it lands in HISTORY
-//! with its undo and Kumi says what changed, with no model call. A track the phrase names that isn't in the Set, or
-//! that two tracks fit, makes no plan: the request goes to the model.
+//! Live's side of a fixed phrase (core/phrases.rs): the change each one makes, on the Set as last read. The plan
+//! itself is core's (`instant_steps`).
 
 use serde_json::{json, Value};
 
 use super::set_model::SetModel;
-use crate::core::phrases::{resolve, Intent, Switch, TrackPick};
+use crate::core::phrases::{instant_steps, InstantVocab, Intent, PhraseTrack, Switch};
 
-/// The make_changes steps for an intent in the Set as last read: None when it can't run as asked.
-pub fn steps(intent: &Intent, model: &SetModel, beats_per_bar: f64) -> Option<Value> {
-    let step = match intent {
-        Intent::Tempo { bpm } => json!({"tool": "set_tempo", "input": {"tempo": bpm}}),
-        Intent::Track { track, switch, on } => {
-            let reference = track_ref(track, model)?;
-            match switch {
-                Switch::Mute => json!({"tool": "set_mixer", "input": {"trackRef": reference, "mute": on}}),
-                Switch::Solo => json!({"tool": "set_mixer", "input": {"trackRef": reference, "solo": on}}),
-                Switch::Arm => json!({"tool": "set_routing", "input": {"trackRef": reference, "arm": on}}),
-            }
+/// Live's changes for the fixed phrases.
+pub struct LiveInstant;
+
+impl InstantVocab for LiveInstant {
+    fn tempo(&self, bpm: f64) -> Value {
+        json!({"tool": "set_tempo", "input": {"tempo": bpm}})
+    }
+    fn track(&self, reference: &str, switch: Switch, on: bool) -> Value {
+        match switch {
+            Switch::Mute => json!({"tool": "set_mixer", "input": {"trackRef": reference, "mute": on}}),
+            Switch::Solo => json!({"tool": "set_mixer", "input": {"trackRef": reference, "solo": on}}),
+            Switch::Arm => json!({"tool": "set_routing", "input": {"trackRef": reference, "arm": on}}),
         }
-        Intent::Loop { from_bar, to_bar } => {
-            let bar = if beats_per_bar.is_finite() && beats_per_bar > 0.0 { beats_per_bar } else { 4.0 };
-            let start = f64::from(from_bar - 1) * bar;
-            let length = f64::from(to_bar - from_bar + 1) * bar;
-            json!({"tool": "set_transport", "input": {"loopEnabled": true, "loopStart": start, "loopLength": length}})
-        }
-        Intent::LoopOff => json!({"tool": "set_transport", "input": {"loopEnabled": false}}),
-        Intent::Metronome { on } => json!({"tool": "set_transport", "input": {"metronome": on}}),
-    };
-    Some(json!({"steps": [step], "final": true}))
+    }
+    fn loop_on(&self, start: f64, length: f64) -> Value {
+        json!({"tool": "set_transport", "input": {"loopEnabled": true, "loopStart": start, "loopLength": length}})
+    }
+    fn loop_off(&self) -> Value {
+        json!({"tool": "set_transport", "input": {"loopEnabled": false}})
+    }
+    fn metronome(&self, on: bool) -> Value {
+        json!({"tool": "set_transport", "input": {"metronome": on}})
+    }
 }
 
-/// The track a phrase means: by name among every track but Main, or by place among the Set's own tracks.
-fn track_ref(track: &TrackPick, model: &SetModel) -> Option<String> {
-    let tracks: Vec<_> = model
+/// The make_changes steps for an intent in the Set as last read: None when it can't run as asked. A track counts by
+/// place among the Set's own (regular and group) tracks, and Main is never one a phrase names.
+pub fn steps(intent: &Intent, model: &SetModel, beats_per_bar: f64) -> Option<Value> {
+    let tracks: Vec<PhraseTrack> = model
         .tracks
         .iter()
-        .filter(|node| match track {
-            TrackPick::Position(_) => matches!(node.kind.as_deref(), Some("regular" | "group") | None),
-            TrackPick::Name(_) => node.kind.as_deref() != Some("main"),
+        .map(|node| PhraseTrack {
+            reference: &node.reference,
+            name: &node.name,
+            own: matches!(node.kind.as_deref(), Some("regular" | "group") | None),
+            master: node.kind.as_deref() == Some("main"),
         })
         .collect();
-    let names: Vec<&str> = tracks.iter().map(|node| node.name.as_str()).collect();
-    resolve(track, &names).map(|at| tracks[at].reference.clone())
+    instant_steps(&LiveInstant, intent, &tracks, beats_per_bar)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::contracts::JsonObject;
+    use crate::core::{contracts::JsonObject, phrases::TrackPick};
 
     fn model() -> SetModel {
         let rows: Vec<JsonObject> = [

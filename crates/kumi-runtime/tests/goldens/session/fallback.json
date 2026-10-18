@@ -1,0 +1,9 @@
+{
+  "audition": "Kumi isn't connected to Live, so it can't render anything to hear.",
+  "fell back with": [
+    "Live isn't open."
+  ],
+  "goal": "Kumi isn't connected to Live, so it can't pursue a goal.",
+  "hear": "Kumi isn't connected to Live, so it can't hear the Set.",
+  "undo": "Kumi isn't connected to Live, so it can't undo."
+}

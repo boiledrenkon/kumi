@@ -1,4 +1,4 @@
-//! Continue without Live when the primary integration reports a Live setup failure.
+//! Continue without the DAW when the primary integration reports a DAW setup failure.
 use crate::core::{
     contracts::*,
     errors::{FailureKind, KumiError, RuntimeError},
@@ -11,12 +11,21 @@ pub struct FallbackIntegration {
     primary: Rc<dyn Integration>,
     current: RefCell<Rc<dyn Integration>>,
     fallback: Rc<dyn Fn() -> Rc<dyn Integration>>,
-    on_fallback: Rc<dyn Fn(String)>,
+    on_fallback: Rc<dyn Fn(&KumiError)>,
 }
+/// `on_fallback` is told what the primary said, in its own words.
 pub fn with_fallback(
     primary: Rc<dyn Integration>,
     fallback: Rc<dyn Fn() -> Rc<dyn Integration>>,
     on_fallback: Rc<dyn Fn(String)>,
+) -> Rc<FallbackIntegration> {
+    with_fallback_failure(primary, fallback, Rc::new(move |failure: &KumiError| on_fallback(failure.message.clone())))
+}
+/// `on_fallback` is told the primary's whole failure: its words, and the setup fix it has (restart the DAW).
+pub fn with_fallback_failure(
+    primary: Rc<dyn Integration>,
+    fallback: Rc<dyn Fn() -> Rc<dyn Integration>>,
+    on_fallback: Rc<dyn Fn(&KumiError)>,
 ) -> Rc<FallbackIntegration> {
     Rc::new(FallbackIntegration { current: RefCell::new(primary.clone()), primary, fallback, on_fallback })
 }
@@ -24,19 +33,29 @@ impl FallbackIntegration {
     fn current(&self) -> Rc<dyn Integration> {
         self.current.borrow().clone()
     }
+    /// "Kumi isn't connected to Live, so it can't …", in the primary's words (Live's when it doesn't say).
+    fn not_connected(&self, what: &str) -> String {
+        format!("Kumi isn't connected to {}, so it can't {what}.", self.primary.profile().or_live().words.app)
+    }
 }
 #[async_trait(?Send)]
 impl Integration for FallbackIntegration {
+    /// The primary's DAW, whichever answers now: what it can do is checked at each call.
+    fn profile(&self) -> &DawProfile {
+        self.primary.profile()
+    }
     async fn start(&self, signal: Signal) -> Result<(), RuntimeError> {
         if let Err(error) = self.primary.start(signal.clone()).await {
-            if signal.is_cancelled() || !error.kumi().is_some_and(|e| e.kind == FailureKind::Live) {
+            if signal.is_cancelled() || !error.kumi().is_some_and(|e| e.kind == FailureKind::Daw) {
                 return Err(error);
             }
             let _ = self.primary.close().await;
             let fallback = (self.fallback)();
             *self.current.borrow_mut() = fallback.clone();
             fallback.start(signal).await?;
-            (self.on_fallback)(error.message());
+            if let Some(failure) = error.kumi() {
+                (self.on_fallback)(failure);
+            }
         }
         Ok(())
     }
@@ -55,6 +74,9 @@ impl Integration for FallbackIntegration {
     fn conversation(&self, id: &str) {
         self.current().conversation(id)
     }
+    fn instructions_addendum(&self, offered: &dyn Fn(&str) -> bool) -> String {
+        self.current().instructions_addendum(offered)
+    }
     fn worker_tools(&self) -> Vec<Rc<dyn KernelTool>> {
         self.current().worker_tools()
     }
@@ -64,7 +86,7 @@ impl Integration for FallbackIntegration {
     async fn undo(&self, id: Option<&str>, signal: Signal) -> Result<ChangeRecord, RuntimeError> {
         let current = self.current();
         if !current.has_undo() {
-            return Err(KumiError::new(FailureKind::Request, "Kumi isn't connected to Live, so it can't undo.").into());
+            return Err(KumiError::new(FailureKind::Request, self.not_connected("undo")).into());
         }
         current.undo(id, signal).await
     }
@@ -168,6 +190,14 @@ impl Integration for FallbackIntegration {
             Ok(None)
         }
     }
+    async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
+        let c = self.current();
+        if c.can_show(request.kind()) {
+            c.focus_body(request, signal).await
+        } else {
+            Ok(None)
+        }
+    }
     fn has_audition(&self) -> bool {
         true
     }
@@ -176,7 +206,7 @@ impl Integration for FallbackIntegration {
         if c.has_audition() {
             c.audition(request, signal).await
         } else {
-            Ok(Err("Kumi isn't connected to Live, so it can't render anything to hear.".into()))
+            Ok(Err(self.not_connected("render anything to hear")))
         }
     }
     fn has_goal(&self) -> bool {
@@ -187,7 +217,7 @@ impl Integration for FallbackIntegration {
         if c.has_goal() {
             c.goal(request, signal).await
         } else {
-            Ok(Err("Kumi isn't connected to Live, so it can't pursue a goal.".into()))
+            Ok(Err(self.not_connected("pursue a goal")))
         }
     }
     fn has_hear(&self) -> bool {
@@ -198,7 +228,7 @@ impl Integration for FallbackIntegration {
         if c.has_hear() {
             c.hear(request, signal).await
         } else {
-            Ok(Err("Kumi isn't connected to Live, so it can't hear the Set.".into()))
+            Ok(Err(self.not_connected(&format!("hear the {}", self.primary.profile().or_live().words.place))))
         }
     }
 }
