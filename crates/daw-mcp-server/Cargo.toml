@@ -1,0 +1,20 @@
+[package]
+name = "daw-mcp-server"
+version = "0.1.0"
+description = "The REAPER and Renoise MCP host: MCP over stdio, speaking to Kumi's bridge inside the DAW."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "daw_mcp_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "daw-mcp-server"
+path = "src/bin/daw-mcp-server.rs"
+
+[dependencies]
+daw-bridge.workspace = true

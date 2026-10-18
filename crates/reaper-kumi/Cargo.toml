@@ -1,0 +1,16 @@
+[package]
+name = "reaper-kumi"
+version = "0.1.0"
+description = "Kumi's REAPER extension: the bridge REAPER loads from UserPlugins."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "reaper_kumi"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
