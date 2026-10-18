@@ -29,6 +29,9 @@ pub fn normalized(lines: &[Line]) -> String {
             if object.contains_key("pid") {
                 object.insert("pid".into(), "<pid>".into());
             }
+            if object.contains_key("deadlineMs") {
+                object.insert("deadlineMs".into(), "<deadline>".into());
+            }
             if let Some(result) = object.get_mut("result").and_then(Value::as_object_mut) {
                 if result.contains_key("pid") {
                     result.insert("pid".into(), "<pid>".into());
@@ -322,4 +325,16 @@ async fn a_host_that_only_listens_tells_the_bridge_it_is_reading() {
     // Once the host has written, the count starts over.
     assert_eq!(client.request("ping", json!({}), WAIT).await.unwrap(), json!({}));
     assert!(!client.is_closed());
+}
+
+#[tokio::test]
+async fn a_request_carries_the_time_the_host_gives_up() {
+    let simulator = Simulator::start(SimulatorConfig::reaper(secret(), "/lab/REAPER")).await.unwrap();
+    let client = BridgeClient::connect(simulator.address(), secret(), CLIENT).await.unwrap();
+    let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    client.request("ping", json!({}), Duration::from_secs(3)).await.unwrap();
+    let transcript = simulator.transcript();
+    let line = transcript.iter().find(|line| line.from_host && line.text.contains("\"ping\"")).unwrap();
+    let deadline = serde_json::from_str::<Value>(&line.text).unwrap()["deadlineMs"].as_u64().unwrap();
+    assert!((before + 3000..=before + 3000 + 500).contains(&deadline), "{deadline} vs {before}");
 }

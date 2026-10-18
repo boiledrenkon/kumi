@@ -22,8 +22,9 @@ use crate::log;
 use crate::queue::{self, Job, Outcome};
 use crate::reaper::Busy;
 
-/// How long a request may wait for the main thread when it names no deadline.
-const DEFAULT_WAIT: Duration = Duration::from_secs(10);
+/// How long a request may wait for the main thread when it names no deadline: no longer than the host's own timeouts
+/// (it names a deadline, but another host may not), so work isn't run for a caller that has stopped waiting.
+const DEFAULT_WAIT: Duration = Duration::from_secs(2);
 /// The longest a request waits for the main thread, whatever deadline it names.
 const MAX_WAIT: Duration = Duration::from_secs(60);
 /// No tick for this long: the main thread is held (a modal dialog, a long load or render).
@@ -37,6 +38,11 @@ const READ_POLL: Duration = Duration::from_millis(200);
 const STUCK_WRITE: Duration = Duration::from_secs(5);
 /// How long stop() waits for each step (readers done, byes written) before it closes the sockets hard.
 const STOP_GRACE: Duration = Duration::from_millis(500);
+
+/// A failed attempt to write the discovery file is tried again after this, not on every tick.
+const DISCOVERY_RETRY: Duration = Duration::from_secs(5);
+/// The accept loop waits this long after a failed accept (out of file descriptors, say) rather than spin.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 const CLOSING: &str = "REAPER is closing; nothing changed";
 
@@ -172,6 +178,8 @@ pub struct Server {
     threads: Arc<Mutex<Vec<Spawned>>>,
     started_ms: u64,
     discovery: Option<(PathBuf, Option<ProjectSummary>)>,
+    /// When writing the discovery file last failed, and what it said (logged once).
+    discovery_failure: Option<(Instant, String)>,
 }
 
 /// One connection's threads, and its socket for stop() to close.
@@ -208,7 +216,17 @@ impl Server {
                 .name("kumi-accept".into())
                 .spawn(move || crate::guard("accept", (), || accept_loop(listener, shared, threads)))?
         };
-        Ok(Server { config, port, hub, stopping, accept: Some(accept), threads, started_ms: unix_ms(), discovery: None })
+        Ok(Server {
+            config,
+            port,
+            hub,
+            stopping,
+            accept: Some(accept),
+            threads,
+            started_ms: unix_ms(),
+            discovery: None,
+            discovery_failure: None,
+        })
     }
 
     pub fn port(&self) -> u16 {
@@ -221,6 +239,9 @@ impl Server {
             return;
         }
         if self.discovery.as_ref().is_some_and(|(_, project)| *project == snapshot.project) {
+            return;
+        }
+        if self.discovery_failure.as_ref().is_some_and(|(at, _)| at.elapsed() < DISCOVERY_RETRY) {
             return;
         }
         let discovery = Discovery {
@@ -237,8 +258,17 @@ impl Server {
             started_ms: self.started_ms,
         };
         match files::write_discovery(&self.config.discovery_dir, &discovery) {
-            Ok(path) => self.discovery = Some((path, snapshot.project.clone())),
-            Err(error) => log::line(&format!("couldn't write the discovery file: {error}")),
+            Ok(path) => {
+                self.discovery = Some((path, snapshot.project.clone()));
+                self.discovery_failure = None;
+            }
+            Err(error) => {
+                let said = error.to_string();
+                if self.discovery_failure.as_ref().is_none_or(|(_, last)| *last != said) {
+                    log::line(&format!("couldn't write the discovery file: {said}"));
+                }
+                self.discovery_failure = Some((Instant::now(), said));
+            }
         }
     }
 
@@ -310,14 +340,19 @@ impl Shared {
         (identity, Offer { methods, events, ..Offer::default() })
     }
 
-    /// Why the main thread can't take work now, if it can't.
-    fn busy(&self) -> Option<Busy> {
+    /// Why the main thread isn't ticking, if it isn't: nothing queued would run soon.
+    fn stalled(&self) -> Option<Busy> {
         let snapshot = lock(&self.snapshot);
         match snapshot.last_tick {
             Some(tick) if tick.elapsed() > STALL => Some(snapshot.busy.unwrap_or(Busy::Modal)),
             None => Some(Busy::Starting),
-            _ => snapshot.busy,
+            _ => None,
         }
+    }
+
+    /// Why the main thread can't take work now, if it can't.
+    fn busy(&self) -> Option<Busy> {
+        self.stalled().or_else(|| lock(&self.snapshot).busy)
     }
 
     fn status(&self) -> Value {
@@ -357,6 +392,14 @@ impl Shared {
             Some(deadline) => Duration::from_millis(deadline - now),
             None => DEFAULT_WAIT,
         };
+        if !MAIN_METHODS.contains(&request.method.as_str()) {
+            return Frame::error(id, code::UNKNOWN_METHOD, format!("the REAPER bridge has no method {:?}", request.method));
+        }
+        // The main thread isn't ticking (a dialog, a long load): the work would sit until the wait ran out, and then
+        // be cancelled. Say so now.
+        if let Some(busy) = self.stalled() {
+            return Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason()));
+        }
         let (job, waiter) = queue::job(&request.method, request.params);
         if lock(&self.jobs).send(job).is_err() {
             return Frame::error(id, code::FAILED, CLOSING);
@@ -386,7 +429,11 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, threads: Arc<Mutex<Ve
         if shared.stopping.load(Ordering::Acquire) {
             break;
         }
-        let Ok(mut stream) = stream else { continue };
+        let Ok(mut stream) = stream else {
+            // Out of descriptors, say: retrying at once would spin a core.
+            thread::sleep(ACCEPT_BACKOFF);
+            continue;
+        };
         let Ok(peer) = stream.peer_addr() else { continue };
         if !loopback::peer_allowed(&peer) {
             continue;
@@ -441,7 +488,15 @@ fn spawn_connection(id: u64, stream: TcpStream, state: ServerConnection, started
         let shared = reader_shared;
         crate::guard("connection", (), || serve(&conn, state, stream, started, &shared));
         shared.hub.remove(conn.id);
-    })?;
+    });
+    let read = match read {
+        Ok(read) => read,
+        Err(error) => {
+            // Nothing reads this connection: it isn't one, and mustn't count against the limits.
+            shared.hub.remove(id);
+            return Err(error);
+        }
+    };
     Ok(Spawned { reader: read, writer: write, stream: closer })
 }
 
@@ -735,12 +790,39 @@ mod tests {
         let status = request(&mut stream, &mut reader, 2, "status")["result"].clone();
         assert_eq!(status["busy"], "modal");
         assert!(status["busyReason"].as_str().unwrap().contains("dialog"));
-        let deadline = unix_ms() + 50;
-        stream
-            .write_all(&Frame::Request(Request { id: 3, method: "quit".into(), params: json!({}), deadline_ms: Some(deadline) }).encode())
-            .unwrap();
-        let response = read_frame(&mut reader);
-        assert_eq!(response["error"]["code"], code::DEADLINE);
+        // A request is refused at once, "busy": it would only sit in the queue.
+        let started = Instant::now();
+        let response = request(&mut stream, &mut reader, 3, "quit");
+        assert_eq!(response["error"]["code"], code::BUSY);
+        assert!(response["error"]["message"].as_str().unwrap().contains("nothing changed"));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        // A deadline that has passed is told so first.
+        let past = Request { id: 4, method: "quit".into(), params: json!({}), deadline_ms: Some(unix_ms().saturating_sub(5)) };
+        stream.write_all(&Frame::Request(past).encode()).unwrap();
+        assert_eq!(read_frame(&mut reader)["error"]["code"], code::DEADLINE);
+        // And a method the bridge doesn't have needs no tick to be refused.
+        assert_eq!(request(&mut stream, &mut reader, 5, "explode")["error"]["code"], code::UNKNOWN_METHOD);
+    }
+
+    #[test]
+    fn a_discovery_file_that_cant_be_written_is_tried_again_in_a_while_not_every_tick() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let snapshot = lab.snapshot.lock().unwrap().clone();
+        let good = lab.dir.path().join("bridges/reaper/discovery");
+        // A file where the folder should be.
+        let blocked = lab.dir.path().join("blocked");
+        std::fs::write(&blocked, "").unwrap();
+        lab.server().config.discovery_dir = blocked.join("discovery");
+        lab.server().publish(&snapshot);
+        assert!(lab.server().discovery.is_none() && lab.server().discovery_failure.is_some());
+        // The problem goes away, but the next tick doesn't try yet.
+        lab.server().config.discovery_dir = good.clone();
+        lab.server().publish(&snapshot);
+        assert!(files::scan_discovery(&good, Daw::Reaper).is_empty());
+        lab.server().discovery_failure.as_mut().unwrap().0 -= DISCOVERY_RETRY;
+        lab.server().publish(&snapshot);
+        assert_eq!(files::scan_discovery(&good, Daw::Reaper).len(), 1);
+        assert!(lab.server().discovery_failure.is_none());
     }
 
     #[test]

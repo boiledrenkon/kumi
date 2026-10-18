@@ -196,7 +196,12 @@ impl BridgeClient {
         }
         let (answer, answered) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, answer);
-        let frame = Frame::Request(Request { id, method: method.into(), params, deadline_ms: None }).encode();
+        // The bridge doesn't start work this host has stopped waiting for: it gets the time the host will give up.
+        let deadline_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|now| (now + timeout).as_millis().min(MAX_SAFE_INTEGER as u128) as u64);
+        let frame = Frame::Request(Request { id, method: method.into(), params, deadline_ms }).encode();
         // The timeout covers the write too: a bridge that stopped reading fills the socket, and a write that waits for
         // room would hold the writer (and every request behind it) past their timeouts.
         let deadline = tokio::time::Instant::now() + timeout;
