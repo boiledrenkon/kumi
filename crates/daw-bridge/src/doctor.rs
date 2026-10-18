@@ -61,16 +61,36 @@ pub fn doctor(daw: Daw, inputs: &Inputs) -> Vec<Check> {
     checks
 }
 
+/// Where the bridge's receipt says it was placed, if it was.
+fn receipt_target(inputs: &Inputs, any_target: &Target) -> Option<std::path::PathBuf> {
+    let receipt = Lifecycle::new(inputs.kumi_home, any_target.clone()).receipt().ok()??;
+    (receipt.status == "installed").then(|| receipt.target.into())
+}
+
 fn reaper_target(inputs: &Inputs, checks: &mut Vec<Check>) -> Option<(Target, Vec<detect::Arch>)> {
-    let installs = detect::detect_reaper(&inputs.env);
-    let Some(install) = installs.first() else {
+    let mut installs = detect::detect_reaper(&inputs.env);
+    if installs.is_empty() {
         checks.push(check(
             "installed",
             Level::Note,
             "REAPER isn't installed (or not where Kumi looks: set KUMI_REAPER_RESOURCE_DIR to its resource folder)",
         ));
         return None;
-    };
+    }
+    // The REAPER the bridge was installed into comes first, not always the default one: a portable install has a
+    // resource folder of its own, and the bridge's files, reference and architecture are checked in that one.
+    let placed = installs
+        .iter()
+        .filter_map(|install| install::reaper_target(install, inputs.env.os).ok())
+        .find_map(|any| receipt_target(inputs, &any))
+        .and_then(|receipt| {
+            installs.iter().position(|install| install::reaper_target(install, inputs.env.os).is_ok_and(|target| target.path() == receipt))
+        });
+    if let Some(index) = placed {
+        let install = installs.remove(index);
+        installs.insert(0, install);
+    }
+    let install = &installs[0];
     let app = match (&install.app, &install.version) {
         (Some(app), Some(version)) => format!("REAPER {version} at {}", app.display()),
         (Some(app), None) => format!("REAPER at {}", app.display()),
@@ -398,5 +418,48 @@ mod tests {
         Lifecycle::new(&kumi, target).install(&source, "0.1.0").unwrap();
         let checks = doctor(Daw::Reaper, &inputs);
         assert!(ids(&checks).contains(&("arch", Level::Fail)), "{checks:?}");
+    }
+
+    #[test]
+    fn reaper_is_checked_where_the_bridge_was_installed_not_in_the_default_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let kumi = root.path().join("kumi");
+        let none = |_: &str| None;
+        let binary = [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0, 0, 0x01];
+        // The default REAPER, with its resource folder, and a portable one beside its app in ~/Applications.
+        let default_app = root.path().join("sys/Applications/REAPER.app/Contents/MacOS");
+        std::fs::create_dir_all(&default_app).unwrap();
+        std::fs::write(default_app.join("REAPER"), binary).unwrap();
+        let default_resource = root.path().join("home/Library/Application Support/REAPER");
+        std::fs::create_dir_all(default_resource.join("UserPlugins")).unwrap();
+        std::fs::write(default_resource.join("reaper.ini"), "").unwrap();
+        let portable_app = root.path().join("home/Applications/REAPER.app/Contents/MacOS");
+        std::fs::create_dir_all(&portable_app).unwrap();
+        std::fs::write(portable_app.join("REAPER"), binary).unwrap();
+        let portable = root.path().join("home/Applications");
+        std::fs::create_dir_all(portable.join("UserPlugins")).unwrap();
+        std::fs::write(portable.join("reaper.ini"), "").unwrap();
+        let inputs = Inputs {
+            env: Env { os: Os::Mac, home: root.path().join("home"), var: &none, root: Some(root.path().join("sys")) },
+            kumi_home: &kumi,
+            bundled: None,
+            running: &no_processes,
+            probe_timeout: Duration::from_secs(1),
+        };
+        let installs = detect::detect_reaper(&inputs.env);
+        assert_eq!(installs.len(), 2, "{installs:?}");
+        let source = root.path().join("reaper_kumi.dylib");
+        std::fs::write(&source, binary).unwrap();
+        let portable_install = installs.iter().find(|install| install.resource == portable).unwrap();
+        let target = install::reaper_target(portable_install, Os::Mac).unwrap();
+        Lifecycle::new(&kumi, target).install(&source, "0.1.0").unwrap();
+
+        let checks = doctor(Daw::Reaper, &inputs);
+        assert!(ids(&checks).contains(&("bridge", Level::Ok)), "{checks:?}");
+        assert!(!ids(&checks).iter().any(|(id, level)| *id == "reference" && *level == Level::Fail), "{checks:?}");
+        let installed = checks.iter().find(|c| c.id == "installed").unwrap();
+        assert!(installed.message.contains("sys/Applications") || installed.message.contains("home/Applications"), "{installed:?}");
+        let others = checks.iter().find(|c| c.id == "installs").unwrap();
+        assert!(others.message.contains("Application Support"), "the default folder is the other one: {others:?}");
     }
 }
