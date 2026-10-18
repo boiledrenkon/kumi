@@ -12,7 +12,7 @@ use crate::{
         contracts::{JsonObject, KernelTool, Reach, SessionEvent, ToolResult},
         errors::RuntimeError,
     },
-    integrations::ableton::samples::{default_sample_folders, find_samples, folder_path, FindSamplesOptions},
+    integrations::shared::samples::{default_sample_folders, find_samples, folder_path, FindSamplesOptions},
 };
 use async_trait::async_trait;
 use futures::future::LocalBoxFuture;

@@ -1,7 +1,7 @@
 //! Knob units: a parameter's raw range read through the text Live shows across it, so code picking numbers moves in
 //! units a listener hears evenly (dB, octaves, log-time) and one step is about one just-noticeable difference.
 
-use crate::integrations::ableton::display::parse_display;
+use crate::integrations::shared::display::parse_display;
 use kumi_common::js::number::to_string;
 use serde::{Deserialize, Serialize};
 
