@@ -233,6 +233,9 @@ function M.start(h, reloading)
       show_status("Kumi connected")
     end,
     log = log.write,
+    on_too_many_open = function(open)
+      b.remake = "too many connections held open after being refused (" .. open .. ")"
+    end,
   })
   observers = sync.new(guard)
   status.cache = b
@@ -264,6 +267,14 @@ function M.tick()
   unix_ms()
   if not b.cfg then
     if M.now_ms() >= b.retry_ms and configure() then listen() end
+  elseif b.remake and M.now_ms() >= b.retry_ms then
+    -- Descriptors held by refused connections can only be freed by closing the server (nothing else may close a
+    -- client): Kumi gets a bye and reconnects.
+    log.write("error", "making the server anew: " .. b.remake)
+    b.remake = nil
+    conns:close_all("overload")
+    b.retry_ms = M.now_ms() + M.RETRY_MS
+    listen()
   elseif not server_running() and M.now_ms() >= b.retry_ms then
     -- The only reason to remake the server: it says it isn't running. Remaking it drops every connection.
     log.write("error", "the server stopped running; listening again")

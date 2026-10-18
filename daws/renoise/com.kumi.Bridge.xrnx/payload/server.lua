@@ -46,7 +46,12 @@ local function key_of(client)
   return ok and key or nil
 end
 
--- Connections retired but not yet closed by their peers, kept (to be ignored) up to this many; the oldest are forgotten.
+-- Connections retired but not yet closed by their peers are file descriptors Renoise can't get back (this side may not
+-- close them), and a program's descriptors are few (a macOS app starts with 256, shared with its samples and songs).
+-- Past this many open ones the server is made anew, which closes them all and drops Kumi's connection too: it
+-- reconnects, and this only happens when something holds connections open on purpose or by a bug.
+M.MAX_RETIRED_OPEN = 32
+-- Retired records kept to be ignored, open or not; the oldest are forgotten.
 M.MAX_RETIRED = 128
 
 -- ctx: connections (kept by main.lua across payload reloads), now_ms(), unix_ms(), secret() -> secret or
@@ -309,6 +314,17 @@ function M:tick()
     end
   end
   self:forget_oldest_retired()
+  self:check_descriptors()
+end
+
+-- Tells the owner (ctx.on_too_many_open) when too many retired connections are still open.
+function M:check_descriptors()
+  if not self.ctx.on_too_many_open then return end
+  local open = 0
+  for _, record in pairs(self.ctx.connections) do
+    if record.closing and not is_gone(record) then open = open + 1 end
+  end
+  if open > M.MAX_RETIRED_OPEN then self.ctx.on_too_many_open(open) end
 end
 
 -- A peer that never closes its end of a retired connection can't make the list grow without end.

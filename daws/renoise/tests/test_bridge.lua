@@ -1134,24 +1134,56 @@ test("config: io.stat's mode is read in whichever format Renoise gives it", func
   eq(access(388), true, "0604")
 end)
 
-test("bridge: connections it has retired don't count, and a peer that never closes can't make them pile up", function()
+test("bridge: connections it has retired don't count against the limits, and are forgotten when their peers close", function()
   local env = setup()
   local kumi = connect(env)
-  for i = 1, 200 do
-    local peer = mock.connect()
-    peer:send("GET / HTTP/1.1\r\n\r\n") -- retired at once, the peer stays connected
-    if i % 20 == 0 then tick() end
+  local peers = {}
+  for i = 1, 30 do
+    peers[i] = mock.connect()
+    peers[i]:send("GET / HTTP/1.1\r\n\r\n") -- retired at once, the peer stays connected
   end
   tick()
   local retired_count = 0
   for _, record in pairs(KUMI_BRIDGE.connections) do
     if record.closing then retired_count = retired_count + 1 end
   end
-  ok(retired_count <= 128, "retired kept: " .. retired_count)
+  eq(retired_count, 30)
   -- Retired ones leave room for the living: a new host still gets in, and Kumi is still there.
   local fresh = connect(env)
   eq(request(fresh, "ping", {}).ok, true)
   eq(request(kumi, "ping", {}).ok, true)
-  eq(#mock.servers, 1, "the server was not remade")
+  eq(#mock.servers, 1, "the server was not remade: 30 is under the bound")
+  for _, peer in ipairs(peers) do peer:close() end
+  tick()
+  retired_count = 0
+  for _, record in pairs(KUMI_BRIDGE.connections) do
+    if record.closing then retired_count = retired_count + 1 end
+  end
+  eq(retired_count, 0, "forgotten once their peers closed")
+  no_dialogs()
+end)
+
+test("bridge: refused connections held open past the bound make the server anew, and Kumi reconnects", function()
+  local env = setup()
+  local kumi = connect(env)
+  local first = mock.server()
+  for i = 1, 40 do
+    local peer = mock.connect()
+    peer:send("GET / HTTP/1.1\r\n\r\n")
+  end
+  tick()
+  mock.advance(1100)
+  eq(#mock.servers, 2, "the server was made anew")
+  ok(not first.running and not first.open, "the old one is closed, and its connections with it")
+  ok(not kumi.open, "Kumi's connection went with it")
+  local got = frames(kumi)
+  eq(got[#got].type, "bye", "but it was told")
+  eq(next(KUMI_BRIDGE.connections), nil, "nothing of the old connections is kept")
+  ok(read(env.log_dir .. "/renoise-bridge.log"):find("making the server anew"), "logged")
+  local again = connect(env)
+  eq(request(again, "ping", {}).ok, true, "and Kumi gets back in")
+  -- A bridge that has been remade doesn't go on remaking: nothing is held open now.
+  mock.advance(3000)
+  eq(#mock.servers, 2)
   no_dialogs()
 end)
