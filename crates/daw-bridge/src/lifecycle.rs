@@ -237,6 +237,24 @@ impl Lifecycle {
         Ok(())
     }
 
+    /// Waits for any other install, upgrade, rollback or uninstall of this DAW's bridge (in this process or another) to
+    /// finish, then holds the lock until the returned file is dropped.
+    fn exclusive(&self) -> Result<std::fs::File, LifecycleError> {
+        owner::create_owner_only_dir(&self.paths.root)?;
+        // Opened in place, never replaced: a lock is on the file itself, and a replaced one is another file. The folder
+        // is owner-only already.
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(self.paths.lock())?;
+        file.lock()?;
+        Ok(file)
+    }
+
     fn begin(&self, action: &str, leftovers: &[&Path]) -> Result<(), LifecycleError> {
         let journal = Journal {
             action: action.into(),
@@ -379,7 +397,7 @@ impl Lifecycle {
     /// Installs `source` (the bridge's file or folder) as `version`, or upgrades to it when installed already: the
     /// secret is made if missing, the reference written, and the version before kept to roll back to.
     pub fn install(&self, source: &Path, version: &str) -> Result<Receipt, LifecycleError> {
-        owner::create_owner_only_dir(&self.paths.root)?;
+        let _lock = self.exclusive()?;
         // The bridge writes into these but may not be able to make them (Renoise's Lua can't make folders).
         owner::create_owner_only_dir(&self.paths.discovery())?;
         owner::create_owner_only_dir(&self.paths.logs())?;
@@ -417,6 +435,7 @@ impl Lifecycle {
 
     /// Goes back to the generation installed before this one.
     pub fn rollback(&self) -> Result<Receipt, LifecycleError> {
+        let _lock = self.exclusive()?;
         self.recover()?;
         let Some(mut receipt) = self.receipt()?.filter(|receipt| receipt.status == "installed") else {
             return Err(LifecycleError::State(format!("Kumi's {} bridge isn't installed", self.target.daw)));
@@ -440,6 +459,7 @@ impl Lifecycle {
     /// Kumi's folder instead, never deleted), its reference, and the kept generations. The secret stays unless
     /// `purge_secret`.
     pub fn uninstall(&self, purge_secret: bool) -> Result<Receipt, LifecycleError> {
+        let _lock = self.exclusive()?;
         self.recover()?;
         let Some(mut receipt) = self.receipt()? else {
             return Err(LifecycleError::State(format!("Kumi's {} bridge isn't installed", self.target.daw)));
@@ -537,6 +557,26 @@ mod tests {
         );
         // Installing again after an uninstall is an install.
         assert_eq!(life.install(&bridge_folder(root.path(), "4.0"), "4.0").unwrap().history[0].action, "install");
+    }
+
+    #[test]
+    fn two_installs_at_once_wait_for_each_other_instead_of_undoing_each_other() {
+        let root = tempfile::tempdir().unwrap();
+        let folders: Vec<PathBuf> = (0..2).map(|i| bridge_folder(root.path(), &format!("{i}.0"))).collect();
+        let workers: Vec<_> = (0..2)
+            .map(|i| {
+                let life = renoise(root.path());
+                let folder = folders[i].clone();
+                std::thread::spawn(move || (0..25).map(|_| life.install(&folder, &format!("{i}.0")).map(|_| ())).collect::<Vec<_>>())
+            })
+            .collect();
+        for worker in workers {
+            for result in worker.join().unwrap() {
+                result.unwrap();
+            }
+        }
+        let status = renoise(root.path()).status().unwrap();
+        assert!(status.present && status.matches, "{status:?}");
     }
 
     #[test]

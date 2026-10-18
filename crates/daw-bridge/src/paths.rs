@@ -50,6 +50,11 @@ impl BridgePaths {
         self.root.join("install-receipt.json")
     }
 
+    /// Held (locked) for the length of an install, upgrade, rollback or uninstall: two at once would undo each other.
+    pub fn lock(&self) -> PathBuf {
+        self.root.join("lifecycle.lock")
+    }
+
     /// An install, upgrade, rollback or uninstall in progress, so one cut short is finished or undone next time.
     pub fn journal(&self) -> PathBuf {
         self.root.join("lifecycle-journal.json")
