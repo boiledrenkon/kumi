@@ -52,8 +52,12 @@ test("mock: a send can fail, and one to a peer that stopped reading counts when 
   mock.socket_buffer_bytes = 1000
   client:send(string.rep("x", 600))
   eq(mock.blocked_sends, 0)
-  client:send(string.rep("x", 600))
+  eq(client:send(string.rep("x", 600)), false, "into a socket with room for 400 more, a send writes what fits and returns false")
   eq(mock.blocked_sends, 1, "the buffer is full: a real send would block the GUI thread")
+  eq(#table.concat(peer.inbox), 2 + 1000, "the peer holds \"ok\" and what fitted: 600 and 400 bytes, the line torn")
+  eq(client:send("y"), false)
+  eq(mock.blocked_sends, 2)
+  eq(#table.concat(peer.inbox), 2 + 1000, "and nothing more")
 end)
 
 test("mock: timers can be held while time and the sockets go on", function()

@@ -188,10 +188,19 @@ function Peer:wrap()
       if not peer.open then error("mock: send on a closed socket") end
       if peer.send_fails then return false end
       if peer.stalled then
-        -- The peer stopped reading: what it hasn't read piles up in the socket's buffers, and once they are full a real
-        -- send blocks Renoise's GUI thread until the peer reads again.
+        -- The peer stopped reading: what it hasn't read piles up in the socket's buffers. Into a full socket a real send
+        -- would block Renoise's GUI thread; measured on macOS (3.5.4) it writes what fits and returns false, with no
+        -- way to tell how much. Both are counted, for the tests to refuse.
+        local room = math.max(0, M.socket_buffer_bytes - peer.unread)
+        if #data > room then
+          M.blocked_sends = M.blocked_sends + 1
+          if room > 0 then
+            peer.inbox[#peer.inbox + 1] = data:sub(1, room)
+            peer.unread = peer.unread + room
+          end
+          return false
+        end
         peer.unread = peer.unread + #data
-        if peer.unread > M.socket_buffer_bytes then M.blocked_sends = M.blocked_sends + 1 end
       end
       peer.inbox[#peer.inbox + 1] = data
       peer.sent_calls = peer.sent_calls + 1
