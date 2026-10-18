@@ -1,5 +1,7 @@
 //! The listening tools' engines, apart from any DAW: a judged run (the judge, and the tune that picks its numbers) over
 //! what the DAW can do (`Renderer`). The DAW hears, changes and undoes; the engines decide.
+mod audition;
+mod call;
 mod form;
 mod groove;
 mod judge;
@@ -7,6 +9,7 @@ mod probe;
 mod roles;
 mod sound;
 mod tune;
+pub use audition::{analysis_focus, heard_options, silent_render};
 pub(crate) use judge::masking_items;
 #[cfg(test)]
 pub(crate) use judge::prune_unstored;
@@ -18,10 +21,11 @@ use super::{
     round::Round,
 };
 use crate::{
-    audio,
-    core::{context::ListenerSource, errors::RuntimeError},
+    audio::{self, analyze::Analysis},
+    core::{context::ListenerSource, contracts::AuditionEvent, errors::RuntimeError},
     references::store::ReferenceStore,
 };
+use indexmap::IndexMap;
 use kumi_common::{abort::Signal, js::number::round};
 use std::{
     cell::{Cell, RefCell},
@@ -37,6 +41,14 @@ pub struct Listening {
     pub(crate) judge: RefCell<Option<JudgeRun>>,
     /// The groove run under way (or the last one).
     groove: RefCell<Option<groove::GrooveRun>>,
+    on_audition: Option<Rc<dyn Fn(AuditionEvent)>>,
+    /// How many auditions the answer has made, and the best closeness any has had.
+    rounds: Cell<usize>,
+    best: Cell<Option<f64>>,
+    /// Whether an audition said how long its rounds take.
+    told_length: Cell<bool>,
+    /// The references auditions compared with lately, by what was asked for.
+    reference_cache: RefCell<IndexMap<String, Analysis>>,
     listener_source: Option<ListenerSource>,
     /// Measured references, read by name for the judge.
     references: Option<Rc<ReferenceStore>>,
@@ -53,6 +65,7 @@ impl Listening {
     pub fn new(
         host: Rc<dyn Renderer>,
         on_judge: Option<Rc<dyn Fn(Round)>>,
+        on_audition: Option<Rc<dyn Fn(AuditionEvent)>>,
         listener_source: Option<ListenerSource>,
         references: Option<Rc<ReferenceStore>>,
     ) -> Rc<Self> {
@@ -61,6 +74,11 @@ impl Listening {
             on_judge,
             judge: RefCell::new(None),
             groove: RefCell::new(None),
+            on_audition,
+            rounds: Cell::new(0),
+            best: Cell::new(None),
+            told_length: Cell::new(false),
+            reference_cache: RefCell::new(IndexMap::new()),
             listener_source,
             references,
             embedding_wanted: Cell::new((false, false)),
@@ -73,6 +91,8 @@ impl Listening {
     /// take back, so its changes count from `ids` (the changes applied now). If that changed the sound, the run's
     /// numbers are out of date: its next judge hears its bars again first.
     pub fn new_answer(&self, ids: Vec<String>) {
+        self.rounds.set(0);
+        self.best.set(None);
         // A groove run's changes are the ones since its last round: only its checkpoint moves (its rounds re-read the
         // notes).
         if let Some(run) = self.groove.borrow_mut().as_mut() {
@@ -111,6 +131,11 @@ impl Listening {
     /// What Kumi says when the project's tempo isn't known yet.
     pub(crate) fn no_tempo(&self) -> String {
         format!("Kumi doesn't know the {}'s tempo yet; try again.", self.host.profile().words.place)
+    }
+
+    /// How many auditions the answer has made.
+    pub fn round_count(&self) -> usize {
+        self.rounds.get()
     }
 
     /// Says what Kumi is doing.
@@ -157,4 +182,130 @@ pub(crate) fn too_long(beats: f64, tempo: f64, instead: &str) -> Option<String> 
 fn clock(seconds: f64) -> String {
     let whole = round(seconds) as i64;
     format!("{}:{:02}", whole / 60, whole % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        core::{
+            contracts::{AuditionCandidate, JsonObject},
+            daw::DawProfile,
+        },
+        listening::{
+            checklist::MainState,
+            judging::Placed,
+            renderer::{ListenFlag, Pass},
+        },
+    };
+    use async_trait::async_trait;
+    use serde_json::{json, Value};
+
+    /// A DAW with nothing in it, in an unknown DAW's words: only what every DAW must answer.
+    struct Bare {
+        tempo: Option<f64>,
+        refuses: Option<&'static str>,
+        flag: ListenFlag,
+    }
+
+    #[async_trait(?Send)]
+    impl Renderer for Bare {
+        fn profile(&self) -> &DawProfile {
+            &DawProfile::UNKNOWN
+        }
+        fn refusal(&self) -> Option<String> {
+            self.refuses.map(str::to_owned)
+        }
+        fn tempo(&self) -> Option<f64> {
+            self.tempo
+        }
+        fn beats_per_bar(&self) -> f64 {
+            4.
+        }
+        fn lifetime(&self) -> Signal {
+            Signal::new()
+        }
+        fn cleanup(&self) -> Signal {
+            Signal::new()
+        }
+        fn tell(&self, _title: &str, _playing: Option<bool>) {}
+        fn flag(&self) -> &ListenFlag {
+            &self.flag
+        }
+        fn kept_folder(&self) -> PathBuf {
+            std::env::temp_dir().join("kumi-bare-host")
+        }
+        async fn hear_pass(&self, _candidates: &[AuditionCandidate], _window: Window, _before_main: bool, _signal: Signal) -> Pass {
+            Pass { rendered: Err(RuntimeError::plain("Nothing to hear.")), notes: vec![], tried: None, lead: 0., audible: false }
+        }
+        async fn master_chain(&self, _signal: Signal) -> MainState {
+            MainState::default()
+        }
+        fn applied(&self) -> Vec<String> {
+            vec![]
+        }
+        fn applied_since(&self, _mark: &[String]) -> Vec<(String, String)> {
+            vec![]
+        }
+        async fn undo(&self, _id: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn turn_gain(&self, _gain: f64, _track: Option<&str>, _signal: Signal) -> Result<(String, bool), String> {
+            Err("No gain stage.".into())
+        }
+        async fn limited(&self, _track: Option<&str>, _signal: Signal) -> bool {
+            false
+        }
+        async fn chain(&self, _track: Option<&str>) -> Result<Vec<Placed>, String> {
+            Ok(vec![])
+        }
+        async fn delete_device(&self, _reference: &str) -> bool {
+            false
+        }
+    }
+
+    fn listening(tempo: Option<f64>, refuses: Option<&'static str>) -> Rc<Listening> {
+        Listening::new(Rc::new(Bare { tempo, refuses, flag: ListenFlag::default() }), None, None, None, None)
+    }
+
+    /// Each tool, with an input that reaches the engine.
+    fn calls() -> Vec<(&'static str, JsonObject)> {
+        let object = |value: Value| value.as_object().cloned().unwrap();
+        vec![
+            ("judge", object(json!({"goal": {"loudness": -14}}))),
+            ("tune", object(json!({"device": "d", "how": "fit"}))),
+            ("sound", object(json!({"tracks": ["a"]}))),
+            ("form", object(json!({}))),
+            ("groove", object(json!({"clip": "c", "reference": "r"}))),
+            ("audition", object(json!({"candidates": [{"track": "t"}], "from_beat": 0}))),
+        ]
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_dawss_refusal_is_what_every_listening_tool_says_when_it_cant_listen() {
+        let listening = listening(Some(120.), Some("Connect the DAW first."));
+        for (name, input) in calls() {
+            let said = listening.call(name, input, Signal::new()).await.expect("a listening tool").unwrap();
+            assert!(said.is_error, "{name}");
+            assert_eq!(said.text, "Connect the DAW first.", "{name}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_project_without_a_tempo_is_said_in_the_dawss_word_for_it() {
+        let listening = listening(None, None);
+        for (name, input) in calls().into_iter().filter(|(name, _)| *name != "groove" && *name != "tune") {
+            let said = listening.call(name, input, Signal::new()).await.expect("a listening tool").unwrap();
+            assert_eq!(said.text, "Kumi doesn't know the project's tempo yet; try again.", "{name}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn what_a_daw_doesnt_do_is_said_plainly_never_in_lives_words() {
+        let listening = listening(Some(120.), None);
+        let input = json!({"track": "t", "from_beat": 0, "beats": 4}).as_object().cloned().unwrap();
+        let said = listening.call("render", input, Signal::new()).await.expect("a listening tool").unwrap();
+        assert_eq!((said.is_error, said.text.as_str()), (true, "Kumi can't render a track's audio offline in this DAW."));
+        assert!(listening.call("make_changes", JsonObject::new(), Signal::new()).await.is_none());
+    }
 }

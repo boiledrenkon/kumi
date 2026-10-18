@@ -1,10 +1,11 @@
 use super::super::{bridge_version::GOAL_BRIDGE, concurrent::eager_all, connection::NO_CURRENT_LIVE};
+use super::rig::{Held, Rig, Source, Window};
 use super::*;
-use super::{
-    listen::heard_options,
-    rig::{Held, Rig, Source, Window},
+use crate::{
+    audio::{analyze::Analysis, matching::closeness},
+    core::evolve::Knob,
+    listening::engine::{heard_options, silent_render, Listening},
 };
-use crate::{audio::matching::closeness, core::evolve::Knob, integrations::ableton::audition::silent_render};
 use async_trait::async_trait;
 use kumi_common::js::number::{parse, round};
 use std::collections::{HashMap, HashSet};
@@ -117,6 +118,7 @@ impl LiveRenderer {
     }
     pub async fn open_goal(
         self: &Rc<Self>,
+        listening: &Listening,
         request: &AuditionRequest,
         original: Signal,
     ) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
@@ -136,7 +138,7 @@ impl LiveRenderer {
             return Ok(Err("Kumi doesn't know the Set's tempo yet; try again.".into()));
         }
         let signal = abort::any([original, self.connection().lifetime.clone()]);
-        let reference = self.heard_reference(named, request, signal.clone()).await?;
+        let reference = listening.heard_reference(named, request, signal.clone()).await?;
         let mut rig = self.open_rig(&request.candidates, request.from_beat, request.beats, signal.clone()).await?;
         rig.hold = Some(Held::default());
         // The candidates are tried where only Kumi hears them; the best goes on “Kumi · Goal best” once the search
@@ -198,7 +200,7 @@ impl LiveRenderer {
             snippet.reference_from = Some(request.reference_from.unwrap_or(0.) + offset * 60. / tempo);
             snippet.reference_seconds = Some(beats * 60. / tempo);
             // A stop or a failed read here leaves the rig as much as one before: it's taken down, as above.
-            let reference = match self.heard_reference(named, &snippet, signal).await {
+            let reference = match listening.heard_reference(named, &snippet, signal).await {
                 Ok(reference) => reference,
                 Err(error) => {
                     self.close_rig(rig).await;

@@ -118,6 +118,8 @@ pub struct PromptVocab {
     /// How a reference's drums become a MIDI clip and a stem: "separate its stems (live_command separate_stems), convert
     /// the drum stem to MIDI (live_command convert_drums_to_midi)".
     pub drum_stem_steps: &'static str,
+    /// A clip in the DAW's launcher, which Kumi plays from the timeline to render: "a Session clip".
+    pub launcher_clip: &'static str,
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -257,6 +259,9 @@ macro_rules! live_word {
     (drum_stem_steps) => {
         "separate its stems (live_command separate_stems), convert the drum stem to MIDI (live_command convert_drums_to_midi)"
     };
+    (launcher_clip) => {
+        "a Session clip"
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -376,6 +381,9 @@ macro_rules! daw_word {
     };
     ($profile:expr, drum_stem_steps) => {
         $profile.vocab.drum_stem_steps
+    };
+    ($profile:expr, launcher_clip) => {
+        $profile.vocab.launcher_clip
     };
 }
 
@@ -543,6 +551,7 @@ impl DawProfile {
             bass_mono: "",
             drum_kit: "a drum-kit device",
             drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
+            launcher_clip: "a clip",
         },
     };
 
@@ -624,6 +633,7 @@ impl DawProfile {
             bass_mono: crate::live_word!(bass_mono),
             drum_kit: crate::live_word!(drum_kit),
             drum_stem_steps: crate::live_word!(drum_stem_steps),
+            launcher_clip: crate::live_word!(launcher_clip),
         },
     };
 

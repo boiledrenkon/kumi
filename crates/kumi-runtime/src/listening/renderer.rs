@@ -3,7 +3,7 @@
 //! the same whichever DAW is there; a DAW answers these.
 use crate::{
     core::{
-        contracts::{AuditionCandidate, Render},
+        contracts::{AuditionCandidate, ChangeRecord, JsonObject, Render},
         daw::DawProfile,
         errors::RuntimeError,
     },
@@ -94,6 +94,9 @@ pub struct Pass {
     /// The most a capture runs before the part asked for, in seconds: a pass that records keeps a short lead for a hit
     /// to rise out of; one that taps the signal has none.
     pub lead: f64,
+    /// Whether the producer heard the listen where it plays (the project played out loud) or it was captured offline
+    /// or silently. The tools ask for listens the producer hears; a DAW that can't says so here.
+    pub audible: bool,
 }
 
 /// A device's knob: where it is, its range, the values it lists (a switch or a menu), and its scale.
@@ -122,6 +125,53 @@ impl DeviceKnob {
 pub struct EqFit {
     pub values: Vec<(String, f64)>,
     pub settings: Vec<&'static str>,
+}
+
+/// Which of an audition's candidates the producer hears where they play: Kumi hears the rest on its own (silently, when
+/// the DAW can).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audible {
+    /// Every one.
+    Every,
+    /// The first (the one the model leans toward).
+    First,
+}
+
+/// What an audition pass is asked for besides the candidates and where the part is.
+#[derive(Debug, Clone, Copy)]
+pub struct AuditionOptions {
+    pub audible: Audible,
+    /// This round of the answer's auditions, to say.
+    pub round: usize,
+    /// The project's tempo when the audition began.
+    pub tempo: f64,
+    /// Whether to say how long a round takes: the first audition of the answer says it once.
+    pub first: bool,
+}
+
+/// One candidate of an audition pass: the track asked for, the name it goes by now, the Session clip scene played (when a
+/// clip was asked for), and whether the producer heard it where it plays or Kumi heard it on its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuditionSource {
+    pub track: String,
+    pub name: String,
+    pub scene: Option<usize>,
+    pub audible: bool,
+}
+
+/// What an audition pass captured: its candidates in order, each one's capture by its name, and how long the part is.
+pub struct AuditionRender {
+    pub sources: Vec<AuditionSource>,
+    pub files: IndexMap<String, Render>,
+    pub beats: f64,
+}
+
+/// One audition pass through the DAW: what it captured or why it didn't, what the DAW noted, and whether it got as far
+/// as saying how long a round takes.
+pub struct AuditionPass {
+    pub rendered: Result<AuditionRender, RuntimeError>,
+    pub notes: Vec<String>,
+    pub opened: bool,
 }
 
 /// A clip's notes as the DAW plays them: each with its id (-1 when the DAW gave none), and where its time starts.
@@ -176,13 +226,21 @@ pub trait Renderer {
     fn kept_folder(&self) -> PathBuf;
 
     /// Where the song ends, in beats.
-    async fn song_end(&self, signal: Signal) -> Option<f64>;
-    /// A track's name, from its reference or its name.
-    async fn track_name(&self, named: &str, signal: Signal) -> Option<String>;
+    async fn song_end(&self, _signal: Signal) -> Option<f64> {
+        None
+    }
+    /// A track's name, from its reference or its name (None: the name given stands).
+    async fn track_name(&self, _named: &str, _signal: Signal) -> Option<String> {
+        None
+    }
     /// A track's long reference, as the history keeps references (positions): from its reference or its name.
-    async fn track_ref(&self, named: &str, signal: Signal) -> Option<String>;
+    async fn track_ref(&self, _named: &str, _signal: Signal) -> Option<String> {
+        None
+    }
     /// The audio file a clip or a file name stands for; None when it names a file itself.
-    async fn clip_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError>;
+    async fn clip_file(&self, _named: &str, _signal: Signal) -> Result<Option<String>, RuntimeError> {
+        Ok(None)
+    }
 
     /// Hears `window` of these sources in one pass (the mix is `MIX_CANDIDATE`): with `before_main`, the mix as it comes
     /// into the master chain too, when the DAW can.
@@ -191,27 +249,41 @@ pub trait Renderer {
     /// and the level its gain devices add. A chain the DAW can't read counts as one masking can't be read through.
     async fn master_chain(&self, signal: Signal) -> MainState;
     /// A track's fader, dB (−inf reads as −120; None when it can't be read).
-    async fn fader_of(&self, track: &str, signal: Signal) -> Option<f64>;
+    async fn fader_of(&self, _track: &str, _signal: Signal) -> Option<f64> {
+        None
+    }
 
     /// Kumi's changes in the history now (applied ones), oldest first.
     fn applied(&self) -> Vec<String>;
     /// Those not in `mark`: ids and titles.
     fn applied_since(&self, mark: &[String]) -> Vec<(String, String)>;
     /// Whether a change can change what's heard; None when the history has no such change.
-    fn audible(&self, id: &str) -> Option<bool>;
+    fn audible(&self, _id: &str) -> Option<bool> {
+        None
+    }
     /// How much has changed the project outside the history (a count, to compare later).
-    fn outside(&self) -> usize;
+    fn outside(&self) -> usize {
+        0
+    }
     /// What changed it outside the history since `mark`, in words.
-    fn outside_since(&self, mark: usize) -> Vec<&'static str>;
+    fn outside_since(&self, _mark: usize) -> Vec<&'static str> {
+        vec![]
+    }
     /// Kumi's undo of one change; why not, when the DAW wouldn't.
     async fn undo(&self, id: &str) -> Result<(), String>;
     /// The DAW's identities for the devices these changes made, as the history recorded them.
-    fn made(&self, changes: &[(String, String)]) -> Vec<String>;
+    fn made(&self, _changes: &[(String, String)]) -> Vec<String> {
+        vec![]
+    }
     /// How many devices these changes made (loaded or duplicated).
-    fn devices_made(&self, changes: &[(String, String)]) -> usize;
+    fn devices_made(&self, _changes: &[(String, String)]) -> usize {
+        0
+    }
     /// Kumi's applied track renames not among `before`, oldest first: the renamed track's reference, the name it had
     /// and its new name.
-    fn renames(&self, before: &[String]) -> Vec<(String, String, String)>;
+    fn renames(&self, _before: &[String]) -> Vec<(String, String, String)> {
+        vec![]
+    }
 
     /// Turns the level by `gain` dB where rebalancing goes on the run's track (the master without one); says what it
     /// turned, and whether a limiter holds the peaks after it.
@@ -224,70 +296,139 @@ pub trait Renderer {
     async fn delete_device(&self, reference: &str) -> bool;
 
     /// A device's knobs with the text the DAW shows across each one's range; why not, when it can't be read.
-    async fn knobs(&self, device: &str, signal: Signal) -> Result<Result<Vec<DeviceKnob>, String>, RuntimeError>;
+    async fn knobs(&self, _device: &str, _signal: Signal) -> Result<Result<Vec<DeviceKnob>, String>, RuntimeError> {
+        Ok(Err("Kumi can't read this DAW's device knobs.".into()))
+    }
     /// Sets knobs (by reference) to raw values in one step.
-    async fn set_knobs(&self, device: &str, values: &[(&str, f64)], signal: Signal) -> Result<(), RuntimeError>;
+    async fn set_knobs(&self, _device: &str, _values: &[(&str, f64)], _signal: Signal) -> Result<(), RuntimeError> {
+        Err(RuntimeError::plain("Kumi can't set this DAW's device knobs."))
+    }
     /// What kind of device it is, as its probes are saved: the DAW's class for its own devices, the name for a plug-in.
-    async fn device_kind(&self, device: &str, signal: Signal) -> Option<String>;
+    async fn device_kind(&self, _device: &str, _signal: Signal) -> Option<String> {
+        None
+    }
     /// The knobs to set so an equaliser's bands are these (the ones it isn't using take them); why not, when it can't.
     async fn fit_eq(
         &self,
-        device: &str,
-        knobs: &[DeviceKnob],
-        bands: &[Band],
-        signal: Signal,
-    ) -> Result<Result<EqFit, String>, RuntimeError>;
+        _device: &str,
+        _knobs: &[DeviceKnob],
+        _bands: &[Band],
+        _signal: Signal,
+    ) -> Result<Result<EqFit, String>, RuntimeError> {
+        Ok(Err("Kumi can't set this DAW's equaliser from a fit.".into()))
+    }
     /// Whether the device is on the track (its reference, as the history keeps them).
-    async fn on_track(&self, device: &str, track: &str, signal: Signal) -> bool;
+    async fn on_track(&self, _device: &str, _track: &str, _signal: Signal) -> bool {
+        false
+    }
     /// Makes `count` copies of a device's track, for work heard in `passes` passes over `window`.
     async fn open_copies(
         &self,
-        device: &str,
-        count: usize,
-        label: &str,
-        passes: u32,
-        window: Window,
-        signal: Signal,
-    ) -> Result<Result<Copies, String>, RuntimeError>;
+        _device: &str,
+        _count: usize,
+        _label: &str,
+        _passes: u32,
+        _window: Window,
+        _signal: Signal,
+    ) -> Result<Result<Copies, String>, RuntimeError> {
+        Ok(Err("Kumi can't make scratch copies of a track in this DAW.".into()))
+    }
     /// Sets each copy's knobs (by copy name, knob name and raw value).
     async fn set_copies(
         &self,
-        copies: &Copies,
-        values: serde_json::Map<String, serde_json::Value>,
-        signal: Signal,
-    ) -> Result<Result<(), String>, RuntimeError>;
+        _copies: &Copies,
+        _values: serde_json::Map<String, serde_json::Value>,
+        _signal: Signal,
+    ) -> Result<Result<(), String>, RuntimeError> {
+        Ok(Err("Kumi can't make scratch copies of a track in this DAW.".into()))
+    }
     /// Takes the copies away, whatever happened.
-    async fn close_copies(&self, copies: Copies);
+    async fn close_copies(&self, _copies: Copies) {}
 
     /// The devices on a device's track, as tune sees them, and where the device is among them.
-    async fn track_devices(&self, device: &str, signal: Signal) -> Result<(Vec<Seen>, usize), RuntimeError>;
+    async fn track_devices(&self, _device: &str, _signal: Signal) -> Result<(Vec<Seen>, usize), RuntimeError> {
+        Err(RuntimeError::plain("Kumi can't read a track's devices in this DAW."))
+    }
     /// Every parameter name the DAW lists for a plug-in; None when it can't list them.
-    async fn listed_names(&self, device: &str, signal: Signal) -> Result<Option<Vec<String>>, RuntimeError>;
+    async fn listed_names(&self, _device: &str, _signal: Signal) -> Result<Option<Vec<String>>, RuntimeError> {
+        Ok(None)
+    }
     /// A device's turnable parameters, the switches that are on, an equaliser's bands, and for a mapped plug-in what
     /// the DAW lists; left empty when it can't say.
-    async fn read_seen(&self, device: &mut Seen, signal: Signal);
+    async fn read_seen(&self, _device: &mut Seen, _signal: Signal) {}
     /// An equaliser's bands from its knobs: each band's number, frequency (Hz), whether it's on, and whether its gain
     /// shapes. None for any other device.
-    fn eq_bands(&self, knobs: &[DeviceKnob]) -> Vec<(u8, f64, bool, bool)>;
+    fn eq_bands(&self, _knobs: &[DeviceKnob]) -> Vec<(u8, f64, bool, bool)> {
+        vec![]
+    }
     /// The devices on the run's track (the master without one) as tune sees them, before their parameters are read.
-    async fn devices_seen(&self, track: Option<&str>, signal: Signal) -> Option<Vec<Seen>>;
+    async fn devices_seen(&self, _track: Option<&str>, _signal: Signal) -> Option<Vec<Seen>> {
+        None
+    }
 
     /// A clip's notes the DAW plays, each with its id; why not, when it can't be read or holds none.
-    async fn clip_notes(&self, clip: &str, signal: Signal) -> Result<ClipNotes, String>;
+    async fn clip_notes(&self, _clip: &str, _signal: Signal) -> Result<ClipNotes, String> {
+        Err("Kumi can't read a clip's notes in this DAW.".into())
+    }
     /// How a clip's notes fall into lanes: by its track's drum rack, when it has one.
-    async fn lanes_of(&self, clip: &str, signal: Signal) -> Kit;
+    async fn lanes_of(&self, _clip: &str, _signal: Signal) -> Kit {
+        Kit::pitched()
+    }
     /// The clip read again, so this answer may change it.
-    async fn reread_clip(&self, clip: &str, signal: Signal) -> Result<(), RuntimeError>;
+    async fn reread_clip(&self, _clip: &str, _signal: Signal) -> Result<(), RuntimeError> {
+        Ok(())
+    }
     /// Moves notes in one change, so the DAW takes all of it or none and the history takes it back as one.
-    async fn change_notes(&self, clip: &str, patches: &[NotePatch], signal: Signal) -> Result<(), RuntimeError>;
+    async fn change_notes(&self, _clip: &str, _patches: &[NotePatch], _signal: Signal) -> Result<(), RuntimeError> {
+        Err(RuntimeError::plain("Kumi can't move a clip's notes in this DAW."))
+    }
     /// The clip's long reference, as the history keeps it.
-    fn clip_id(&self, clip: &str) -> Option<String>;
+    fn clip_id(&self, _clip: &str) -> Option<String> {
+        None
+    }
     /// The changes applied since a checkpoint, split into the note edits on a clip (by its long reference) and the rest.
-    fn note_changes(&self, checkpoint: &[String], clip: Option<&str>) -> (Vec<(String, String)>, Vec<(String, String)>);
+    fn note_changes(&self, checkpoint: &[String], _clip: Option<&str>) -> (Vec<(String, String)>, Vec<(String, String)>) {
+        (vec![], self.applied_since(checkpoint))
+    }
     /// The track a drum stem's clip is on, by name; why not, when it isn't one on the timeline.
-    async fn stem_track(&self, audio: &str, signal: Signal) -> Result<String, String>;
+    async fn stem_track(&self, _audio: &str, _signal: Signal) -> Result<String, String> {
+        Err("Kumi can't find a drum stem's track in this DAW.".into())
+    }
+
+    /// Why nothing can be rendered now: the DAW isn't connected, or can't play and record for it.
+    fn render_refusal(&self) -> Option<String> {
+        self.refusal()
+    }
+    /// Plays the candidates over the part and captures each: the producer hears them as `options` says.
+    async fn audition_pass(
+        &self,
+        _candidates: &[AuditionCandidate],
+        _from_beat: Option<f64>,
+        _beats: Option<f64>,
+        _options: AuditionOptions,
+        _signal: Signal,
+    ) -> AuditionPass {
+        AuditionPass { rendered: Err(RuntimeError::plain("Kumi can't audition in this DAW.")), notes: vec![], opened: false }
+    }
+    /// The track's own audio between two points, rendered to a file at once (offline and silent), before its devices:
+    /// the reply's file, seconds, channels and sample rate; why not, when it can't be.
+    async fn render(&self, _track: &str, _from: f64, _beats: f64, _signal: Signal) -> Result<Result<JsonObject, String>, RuntimeError> {
+        Ok(Err("Kumi can't render a track's audio offline in this DAW.".into()))
+    }
+    /// A reference as the model sees it this turn (a short name for a long one).
+    fn short_ref(&self, long: &str) -> String {
+        long.into()
+    }
+    /// Puts a line in the history (an audition heard).
+    fn emit(&self, _record: ChangeRecord) {}
+    /// The DAW's clock, in milliseconds since the epoch.
+    fn now_ms(&self) -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
 
     /// Each track's clips on the timeline, by track name (the first 64 tracks): where each that plays starts and ends, in
     /// beats. A muted clip doesn't play; a looped clip ends where it stops playing, not where its loop does.
-    async fn clips_by_track(&self, signal: Signal) -> Vec<(String, Vec<(f64, f64)>)>;
+    async fn clips_by_track(&self, _signal: Signal) -> Vec<(String, Vec<(f64, f64)>)> {
+        vec![]
+    }
 }

@@ -3,6 +3,7 @@
 //!
 //! Inside this impl the inherent methods are called by their path (`LiveRenderer::tell(self, …)`): a method call on the
 //! `Rc` finds `Renderer`'s first.
+use super::super::bridge_version::RENDER_BRIDGE;
 use super::super::connection::NO_CURRENT_LIVE;
 use super::{pass::RECORD_LEAD, rig::BEFORE_MAIN, roles::bands_of, *};
 use crate::{
@@ -12,7 +13,9 @@ use crate::{
         fit::Band,
         judging::Placed,
         notes::Kit,
-        renderer::{Captured, ClipNotes, Copies, DeviceKnob, EqFit, ListenFlag, NotePatch, Pass, Renderer, Window},
+        renderer::{
+            AuditionOptions, AuditionPass, Captured, ClipNotes, Copies, DeviceKnob, EqFit, ListenFlag, NotePatch, Pass, Renderer, Window,
+        },
     },
     plugins::roles::Seen,
 };
@@ -87,7 +90,7 @@ impl Renderer for Rc<LiveRenderer> {
             let before_master = files.shift_remove(BEFORE_MAIN);
             Captured { files, sources, before_master }
         });
-        Pass { rendered, notes, tried, lead }
+        Pass { rendered, notes, tried, lead, audible: true }
     }
     async fn master_chain(&self, signal: Signal) -> MainState {
         self.main_state(signal).await
@@ -220,6 +223,35 @@ impl Renderer for Rc<LiveRenderer> {
     }
     async fn stem_track(&self, audio: &str, signal: Signal) -> Result<String, String> {
         self.stem_track_name(audio, signal).await
+    }
+
+    fn render_refusal(&self) -> Option<String> {
+        if !LiveRenderer::available(self) {
+            return Some(NO_CURRENT_LIVE.to_string());
+        }
+        (!LiveRenderer::supported(self, RENDER_BRIDGE)).then(|| LiveRenderer::too_old(self, RENDER_BRIDGE))
+    }
+    async fn audition_pass(
+        &self,
+        candidates: &[AuditionCandidate],
+        from_beat: Option<f64>,
+        beats: Option<f64>,
+        options: AuditionOptions,
+        signal: Signal,
+    ) -> AuditionPass {
+        self.audition_pass_of(candidates, from_beat, beats, options, signal).await
+    }
+    async fn render(&self, track: &str, from: f64, beats: f64, signal: Signal) -> Result<Result<JsonObject, String>, RuntimeError> {
+        self.render_offline(track, from, beats, signal).await
+    }
+    fn short_ref(&self, long: &str) -> String {
+        LiveRenderer::connection(self).references.borrow_mut().short_ref(long)
+    }
+    fn emit(&self, record: ChangeRecord) {
+        self.history.emit(&record)
+    }
+    fn now_ms(&self) -> i64 {
+        LiveRenderer::connection(self).now().timestamp_millis()
     }
 
     async fn clips_by_track(&self, signal: Signal) -> Vec<(String, Vec<(f64, f64)>)> {

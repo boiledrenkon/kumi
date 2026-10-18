@@ -1,217 +1,102 @@
 use super::super::{
-    audition::silent_render, bridge_version::RENDER_BRIDGE, concurrent::eager_all, connection::NO_CURRENT_LIVE, more_changes::bars,
+    bridge_version::RENDER_BRIDGE,
+    concurrent::eager_all,
+    connection::NO_CURRENT_LIVE,
+    context::{object as strict_object, payload},
+    history::result_text,
+    more_changes::bars,
 };
 use super::ears::RawFile;
 use super::ears_pass::PASS_SECONDS;
 use super::rig::{Rig, Source, Window};
 use super::*;
 use crate::{
-    audio::{matching::closeness, tools::summary},
     ears::capture::{read_capture, write_capture_wav},
+    listening::renderer::{Audible, AuditionOptions, AuditionPass, AuditionRender, AuditionSource},
 };
 use kumi_common::js::{
     number::{round, to_string},
     string::head,
 };
 impl LiveRenderer {
-    pub async fn audition(
+    /// Plays the candidates over the part and captures each (see `Renderer::audition_pass`).
+    pub(super) async fn audition_pass_of(
         self: &Rc<Self>,
-        request: &AuditionRequest,
-        original: Signal,
-    ) -> Result<Result<AuditionResult, String>, RuntimeError> {
-        let began = now_ms();
-        if !self.available() {
-            return Ok(Err(NO_CURRENT_LIVE.into()));
-        }
-        if !self.supported(RENDER_BRIDGE) {
-            return Ok(Err(self.too_old(RENDER_BRIDGE)));
-        }
-        if self.rendering.is_on() {
-            return Ok(Err("An audition is already running; wait for it.".into()));
-        }
-        let Some(tempo) = self.observer.tempo.get().filter(|value| *value != 0. && !value.is_nan()) else {
-            return Ok(Err("Kumi doesn't know the Set's tempo yet; try again.".into()));
-        };
-        let signal = abort::any([original.clone(), self.connection().lifetime.clone()]);
-        let mut notes = vec![];
-        self.rounds.set(self.rounds.get() + 1);
-        let round = self.rounds.get();
-        let mut files = vec![];
-        let mut takes: Vec<_> = request
-            .candidates
-            .iter()
-            .enumerate()
-            .map(|(i, candidate)| AuditionTake {
-                label: candidate.label.clone().unwrap_or_else(|| format!("Candidate {}", i + 1)),
-                track: candidate.track.clone(),
-                r#where: None,
-                silent: None,
-                closeness: None,
-                render: None,
-                heard: None,
-            })
-            .collect();
-        let mut beats = request.beats.unwrap_or(8.);
-        if let Some(why) = too_long(beats, tempo, "audition a part") {
-            return Ok(Err(why));
-        }
-        let rendering = self.rendering_now();
+        candidates: &[AuditionCandidate],
+        from_beat: Option<f64>,
+        beats: Option<f64>,
+        options: AuditionOptions,
+        signal: Signal,
+    ) -> AuditionPass {
         let mut rig = None;
-        let rendered: Result<(), RuntimeError> = async {
-            rig = Some(self.open_rig(&request.candidates, request.from_beat, request.beats, signal.clone()).await?);
+        let mut opened = false;
+        let rendered: Result<AuditionRender, RuntimeError> = async {
+            rig = Some(self.open_rig(candidates, from_beat, beats, signal.clone()).await?);
+            opened = true;
             let rig = rig.as_mut().unwrap();
             // The producer hears the first candidate where it plays; Kumi hears the others on their own.
-            for source in rig.sources.iter_mut().skip(1) {
-                source.quiet = !source.mix;
-            }
-            beats = rig.beats;
-            let length = (!self.told_length.replace(true)).then(|| round_number(beats * 60. / tempo + 6.));
-            self.tell(auditioning(rig, round, length), Some(true));
-            let rendered = self.render_pass(rig, signal.clone()).await?;
-            for (index, source) in rig.sources.iter().enumerate() {
-                let at = takes.iter().position(|take| take.track == source.track || take.track == source.name).unwrap_or(index);
-                let take = &mut takes[at];
-                take.r#where = Some(Where { track: source.name.clone(), clip: source.scene.map(|scene| format!("scene:{scene}")) });
-                if let Some(found) = rendered.get(&source.name) {
-                    files.push((at, found.clone()));
-                } else {
-                    take.silent = Some(true);
+            if options.audible == Audible::First {
+                for source in rig.sources.iter_mut().skip(1) {
+                    source.quiet = !source.mix;
                 }
             }
-            Ok(())
+            let beats = rig.beats;
+            let length = options.first.then(|| round_number(beats * 60. / options.tempo + 6.));
+            self.tell(auditioning(rig, options.round, length), Some(true));
+            let files = self.render_pass(rig, signal.clone()).await?;
+            let sources = rig
+                .sources
+                .iter()
+                .map(|source| AuditionSource {
+                    track: source.track.clone(),
+                    name: source.name.clone(),
+                    scene: source.scene,
+                    audible: !source.quiet,
+                })
+                .collect();
+            Ok(AuditionRender { sources, files, beats })
         }
         .await;
-        if let Err(error) = rendered {
-            notes.push(if original.is_cancelled() { "Stopped before it finished.".into() } else { head(&error.to_string(), 400) });
-        }
+        let mut notes = vec![];
         if let Some(rig) = rig.as_mut() {
             self.close_rig(rig).await;
             notes.extend(rig.notes.clone());
         }
-        drop(rendering);
-        let listen: Result<AuditionResult, RuntimeError> = async {
-            let reference = match request.reference.as_deref().filter(|s| !s.is_empty()) {
-                Some(named) => Some(self.heard_reference(named, request, signal.clone()).await?),
-                None => None,
-            };
-            for (index, render) in &files {
-                let seconds = render.seconds.unwrap_or(beats * 60. / tempo);
-                let heard =
-                    audio::hear(&render.file, heard_options(render.start, seconds, request.focus, signal.clone())).await.map_err(plain)?;
-                let take = &mut takes[*index];
-                take.heard = Some(Heard { lufs: heard.loudness.integrated_lufs, summary: summary(&heard) });
-                take.render = Some(render.clone());
-                if silent_render(&heard) {
-                    take.silent = Some(true);
-                    continue;
-                }
-                if let Some(reference) = &reference {
-                    take.closeness = Some(closeness(&heard, reference, request.focus));
-                }
-            }
-            let mut scored: Vec<_> = takes.iter().filter(|take| take.closeness.is_some()).collect();
-            scored.sort_by(|a, b| b.closeness.as_ref().unwrap().score.total_cmp(&a.closeness.as_ref().unwrap().score));
-            let best = scored.first().copied();
-            let silent = takes.iter().all(|take| take.silent == Some(true)) && !files.is_empty();
-            if silent {
-                notes.push(
-                    "The render was silent: is the source playing in the Arrangement at that spot (its clips there, the track not muted)?"
-                        .into(),
-                );
-            }
-            let previous = self.best.get();
-            if let Some(best) = best {
-                let score = best.closeness.as_ref().unwrap().score;
-                if previous.is_none_or(|previous| score > previous) {
-                    self.best.set(Some(score));
-                }
-            }
-            let title = if let Some(best) = best {
-                format!(
-                    "Auditioned {}",
-                    if takes.len() == 1 { best.label.clone() } else { format!("{} candidates · best {}", takes.len(), best.label) }
-                )
-            } else if silent {
-                "Auditioned: the render was silent".into()
-            } else {
-                format!("Auditioned {}", if takes.len() == 1 { takes[0].label.clone() } else { format!("{} candidates", takes.len()) })
-            };
-            self.history.emit(&ChangeRecord {
-                id: format!("a{}", &uuid::Uuid::new_v4().to_string()[..8]),
-                family: ChangeFamily::Clip,
-                title,
-                state: ChangeState::Heard,
-                score: best.and_then(|take| take.closeness.as_ref()).map(|close| close.score),
-                at: self.connection().now().timestamp_millis(),
-                track: None,
-                from: None,
-                to: None,
-                range: None,
-                colors: None,
-                clip: None,
-                devices: None,
-                note: None,
-                picture: None,
-            });
-            if let Some(tell) = &self.on_audition {
-                let event = AuditionEvent {
-                    round: round as u32,
-                    best: best.map(|take| BestTake { label: take.label.clone(), score: take.closeness.as_ref().unwrap().score }),
-                    previous,
-                    takes: scored
-                        .iter()
-                        .map(|take| TakeScore {
-                            label: take.label.clone(),
-                            score: take.closeness.as_ref().map(|close| close.score),
-                            silent: None,
-                            r#where: take.r#where.clone(),
-                        })
-                        .chain(takes.iter().filter(|take| take.closeness.is_none()).map(|take| TakeScore {
-                            label: take.label.clone(),
-                            score: None,
-                            silent: take.silent.filter(|s| *s),
-                            r#where: take.r#where.clone(),
-                        }))
-                        .collect(),
-                    gaps: best
-                        .and_then(|take| take.closeness.as_ref())
-                        .map(|close| close.gaps.iter().take(3).cloned().collect())
-                        .unwrap_or_default(),
-                    request: Some(request.clone()),
-                    reference: reference.as_ref().map(summary),
-                    structural: best
-                        .and_then(|take| take.closeness.as_ref())
-                        .and_then(|close| close.structural.as_ref())
-                        .map(|s| StructuralMove { gap: s.gap.clone(), r#move: s.r#move.clone() }),
-                };
-                let _ = catch_unwind(AssertUnwindSafe(|| tell(event)));
-            }
-            self.tell(
-                best.map(|take| format!("Auditioned · {}%", to_string(take.closeness.as_ref().unwrap().score)))
-                    .unwrap_or_else(|| "Auditioned".into()),
-                Some(false),
-            );
-            Ok(AuditionResult {
-                best: best.map(|take| take.label.clone()),
-                reference: reference.map(|heard| ReferenceHeard { summary: summary(&heard), file: heard.file }),
-                seconds: round_number((now_ms() - began) as f64 / 100.) / 10.,
-                takes,
-                notes: notes.clone(),
-            })
+        AuditionPass { rendered, notes, opened }
+    }
+    /// The track's own audio between two points, rendered to a file at once (see `Renderer::render`).
+    pub(super) async fn render_offline(
+        &self,
+        track: &str,
+        from: f64,
+        beats: f64,
+        signal: Signal,
+    ) -> Result<Result<JsonObject, String>, RuntimeError> {
+        let mut args = strict_object(&self.connection().references.borrow().lengthen(&json!({"trackRef":track})))?;
+        if let Err(error) = self.connection().references.borrow().require_fresh_references(&args) {
+            return Ok(Err(error.to_string()));
         }
-        .await;
-        match listen {
-            Ok(result) => Ok(Ok(result)),
-            Err(error) => {
-                self.tell("Auditioned", Some(false));
-                signal.check()?;
-                Ok(Err(format!(
-                    "{}Kumi couldn't listen to the render: {}",
-                    if notes.is_empty() { String::new() } else { format!("{} ", notes.join(" ")) },
-                    head(&error.to_string(), 300)
-                )))
+        let name = args["trackRef"]
+            .as_str()
+            .and_then(|r| self.connection().references.borrow().known.get(r).map(|t| t.name.clone()))
+            .filter(|s| !s.is_empty());
+        args.insert("fromBeat".into(), json!(from));
+        args.insert("toBeat".into(), json!(from + beats));
+        if let Some(name) = name {
+            args.insert("expectedName".into(), json!(name));
+        }
+        let result = self.connection().call("live_render_offline", args, abort::any([signal, self.connection().lifetime.clone()])).await?;
+        if result.is_error == Some(true) {
+            return Ok(Err(result_text(&result)));
+        }
+        let rendered = payload(&result)?;
+        let mut reply = JsonObject::new();
+        for (key, source) in [("file", "path"), ("seconds", "seconds"), ("channels", "channels"), ("sampleRate", "sampleRate")] {
+            if let Some(value) = rendered.get(source) {
+                reply.insert(key.into(), value.clone());
             }
         }
+        Ok(Ok(reply))
     }
     pub async fn hear_in_set(
         self: &Rc<Self>,
@@ -492,13 +377,4 @@ fn clock(seconds: f64) -> String {
 }
 fn plain(error: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::plain(error.to_string())
-}
-pub(super) fn heard_options(start: f64, seconds: f64, focus: Option<Focus>, signal: Signal) -> AnalyzeOptions {
-    AnalyzeOptions {
-        start: Some(start + if focus == Some(Focus::Section) { 0.1 } else { 0. }),
-        seconds: Some(seconds + if focus == Some(Focus::Section) { 0. } else { 0.1 }),
-        focus: analysis_focus(focus),
-        signal: Some(signal),
-        ..Default::default()
-    }
 }

@@ -2,7 +2,7 @@
 //! request, what a round answers, and each tool's definition in the DAW's words.
 use crate::{
     core::{
-        contracts::JsonObject,
+        contracts::{AuditionCandidate, AuditionRequest, JsonObject, MIX_CANDIDATE},
         daw::{asset_in_words, parenthetical, with_article, AssetPhrase, DawProfile},
     },
     listening::{
@@ -10,7 +10,7 @@ use crate::{
         round::{Round, RoundKind},
     },
 };
-use kumi_common::js::string::trim;
+use kumi_common::js::string::{head, trim};
 use serde_json::{json, Value};
 use std::sync::LazyLock;
 
@@ -413,6 +413,119 @@ pub fn judge_reply(round: &Round) -> Value {
     reply
 }
 
+pub const AUDITION_TOOL: &str = "audition";
+pub const RENDER_TOOL: &str = "render";
+static AUDITION: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!("assets/audition.json")).unwrap());
+
+/// A phrase with its first letter capitalised.
+fn capitalized(text: &str) -> String {
+    let mut letters = text.chars();
+    letters.next().map(|first| first.to_uppercase().chain(letters).collect()).unwrap_or_default()
+}
+
+pub(crate) const AUDITION_PHRASES: &[AssetPhrase] = &[
+    AssetPhrase { live: "first candidate in the Set", count: 1, said: |p| format!("first candidate in the {}", p.words.place) },
+    AssetPhrase {
+        live: "in the Arrangement, or a Session clip per candidate",
+        count: 1,
+        said: |p| format!("in the {}, or {} per candidate", p.words.timeline, p.vocab.launcher_clip),
+    },
+    AssetPhrase {
+        live: "plays from the Arrangement for the render",
+        count: 1,
+        said: |p| format!("plays from the {} for the render", p.words.timeline),
+    },
+    AssetPhrase { live: "what Main plays at from_beat", count: 1, said: |p| format!("what {} plays at from_beat", p.words.master) },
+    AssetPhrase { live: "(Main's output)", count: 1, said: |p| format!("({}'s output)", p.words.master) },
+    AssetPhrase {
+        live: "A Session clip on that track to play (its clipRef); left out, the Arrangement at from_beat",
+        count: 1,
+        said: |p| {
+            format!(
+                "{} on that track to play (its clipRef); left out, the {} at from_beat",
+                capitalized(p.vocab.launcher_clip),
+                p.words.timeline
+            )
+        },
+    },
+    AssetPhrase {
+        live: "Where the part starts in the Arrangement",
+        count: 1,
+        said: |p| format!("Where the part starts in the {}", p.words.timeline),
+    },
+    AssetPhrase { live: "Where to start in the Arrangement", count: 1, said: |p| format!("Where to start in the {}", p.words.timeline) },
+];
+
+/// The audition tool in the DAW's words.
+pub fn audition_tool(profile: &DawProfile) -> ToolDef {
+    definition(&AUDITION, profile, AUDITION_PHRASES)
+}
+
+/// The render tool in the DAW's words.
+pub fn render_tool(profile: &DawProfile) -> ToolDef {
+    let data = asset_in_words(AUDITION.clone(), profile, AUDITION_PHRASES);
+    ToolDef { description: data["renderDescription"].as_str().unwrap().into(), schema: data["renderSchema"].as_object().unwrap().clone() }
+}
+
+/// The audition tool's input as a request, or what's wrong with it.
+pub fn audition_request(profile: &DawProfile, input: &JsonObject) -> Result<AuditionRequest, String> {
+    let mut candidates = Vec::new();
+    for item in input.get("candidates").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+        let label = item.get("label").and_then(Value::as_str).map(trim).filter(|s| !s.is_empty()).map(|s| head(s, 60));
+        if item.get("mix") == Some(&Value::Bool(true)) {
+            if item.get("track").is_some() || item.get("clip").is_some() {
+                return Err("A mix candidate is the whole mix: give it no track or clip.".into());
+            }
+            candidates.push(AuditionCandidate { track: MIX_CANDIDATE.into(), mix: Some(true), label, clip: None });
+            continue;
+        }
+        let track = item
+            .get("track")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or("Each candidate needs its track (a trackRef from discovery), or is the whole mix ({\"mix\": true}).")?;
+        let clip = item.get("clip").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+        candidates.push(AuditionCandidate { track: track.into(), mix: None, label, clip });
+    }
+    if candidates.is_empty() || candidates.len() > 8 {
+        return Err("Give 1 to 8 candidates.".into());
+    }
+    let mix = candidates.iter().any(|c| c.mix == Some(true));
+    if mix && candidates.len() > 1 {
+        return Err("The whole mix renders on its own: every other candidate would play into it. Audition the mix alone (and tracks in another call).".into());
+    }
+    let mut tracks = std::collections::HashSet::new();
+    if !candidates.iter().all(|c| tracks.insert(c.track.clone())) {
+        return Err("Each candidate is a track of its own; put ideas on separate tracks to hear them side by side.".into());
+    }
+    let number = |key: &str| input.get(key).and_then(Value::as_f64).filter(|v| v.is_finite());
+    let from_beat = number("from_beat");
+    let beats = number("beats");
+    if from_beat.is_none() && candidates.iter().any(|c| c.clip.is_none()) {
+        return Err(format!(
+            "Say where the part is: from_beat (and beats) in the {}, or {} for each candidate.",
+            profile.words.timeline, profile.vocab.launcher_clip
+        ));
+    }
+    if beats.is_some_and(|v| !(v > 0.0)) {
+        return Err("beats is more than 0.".into());
+    }
+    let focus = input.get("focus").and_then(Value::as_str).filter(|s| ["sound", "section"].contains(s)).or(if mix {
+        Some("section")
+    } else {
+        None
+    });
+    Ok(AuditionRequest {
+        candidates,
+        from_beat,
+        beats,
+        reference: input.get("reference").and_then(Value::as_str).map(trim).filter(|s| !s.is_empty()).map(str::to_owned),
+        reference_from: number("reference_from_seconds"),
+        reference_seconds: number("reference_seconds"),
+        focus: focus.map(|s| serde_json::from_value(Value::String(s.into())).unwrap()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,7 +558,15 @@ mod tests {
             "live_command",
         ];
         for profile in [&DawProfile::UNKNOWN] {
-            for def in [judge_tool(profile), tune_tool(profile), sound_tool(profile), form_tool(profile), groove_tool(profile)] {
+            for def in [
+                audition_tool(profile),
+                render_tool(profile),
+                judge_tool(profile),
+                tune_tool(profile),
+                sound_tool(profile),
+                form_tool(profile),
+                groove_tool(profile),
+            ] {
                 let text = format!("{} {}", def.description, serde_json::to_string(&def.schema).unwrap());
                 for word in live {
                     let found = text.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|piece| piece == word);

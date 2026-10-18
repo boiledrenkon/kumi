@@ -22,12 +22,7 @@ use super::{
     views::ViewHost,
 };
 use crate::{
-    audio::{
-        self,
-        analyze::{Analysis, AnalyzeOptions},
-        matching::Focus,
-        tools::ResolveAudio,
-    },
+    audio::{self, matching::Focus, tools::ResolveAudio},
     core::{contracts::*, errors::RuntimeError},
     ears::link::EarsLink,
     listening::{
@@ -71,7 +66,6 @@ pub struct LiveRenderer {
     /// The prefixes of copies a search of this process is using right now: never swept.
     copies_live: RefCell<Vec<String>>,
     on_action: Option<Rc<dyn Fn(ActionEvent)>>,
-    on_audition: Option<Rc<dyn Fn(AuditionEvent)>>,
     change_timeout_ms: u64,
     user_library: Option<String>,
     ears_disabled: bool,
@@ -86,11 +80,6 @@ pub struct LiveRenderer {
     /// Held for the whole of each Live tool call. A stopped answer's call goes on putting Live back (taking a round
     /// back, closing a render, removing copies), and the next call, or the next answer, waits for it.
     busy: tokio::sync::Mutex<()>,
-    rounds: Cell<usize>,
-    best: Cell<Option<f64>>,
-    /// Whether an audition said how long its rounds take.
-    told_length: Cell<bool>,
-    reference_cache: RefCell<IndexMap<String, Analysis>>,
     best_steps: RefCell<Vec<String>>,
 }
 /// The listening tools over Live: the tools and their state are `Listening`'s (a judged run, a tune), Live is what they
@@ -160,7 +149,6 @@ impl LiveRenderer {
             copies_journal: options.restore_file.as_ref().map(|file| PathBuf::from(format!("{file}.copies"))),
             copies_live: RefCell::new(vec![]),
             on_action: options.on_action.clone(),
-            on_audition: options.on_audition.clone(),
             change_timeout_ms: options.change_timeout_ms.unwrap_or(30_000),
             user_library: options.user_library.clone(),
             ears_disabled: matches!(options.ears, Some(EarsSetup::Disabled)),
@@ -174,15 +162,8 @@ impl LiveRenderer {
             ears_folder,
             rendering: ListenFlag::default(),
             busy: tokio::sync::Mutex::new(()),
-            rounds: Cell::new(0),
-            best: Cell::new(None),
-            told_length: Cell::new(false),
-            reference_cache: RefCell::new(IndexMap::new()),
             best_steps: RefCell::new(vec![]),
         })
-    }
-    pub fn round_count(&self) -> usize {
-        self.rounds.get()
     }
     /// A restart of Live may make Max for Live available; bridge-only disconnects leave refusal intact.
     pub fn reset_live(&self) {
@@ -275,40 +256,6 @@ impl LiveRenderer {
         self.tell(&text, None);
         Ok(Some(text))
     }
-    /// The audio file a reference names: a clip's, else the name itself as a file. A clipRef that's stale, gone or a
-    /// MIDI clip's says so, rather than reading as a file that isn't there.
-    async fn reference_file(&self, named: &str, signal: Signal) -> Result<Result<String, String>, RuntimeError> {
-        match (self.clip_file)(named.into(), signal).await {
-            Ok(file) => Ok(Ok(file.unwrap_or_else(|| audio::audio_path(named)))),
-            Err(RuntimeError::Aborted) => Err(RuntimeError::Aborted),
-            Err(error) => Ok(Err(error.to_string())),
-        }
-    }
-    async fn heard_reference(&self, named: &str, request: &AuditionRequest, signal: Signal) -> Result<Analysis, RuntimeError> {
-        let file = self.reference_file(named, signal.clone()).await?.map_err(RuntimeError::Observation)?;
-        let key = stringify(&json!([file, request.reference_from.unwrap_or(0.), request.reference_seconds, request.focus]));
-        if let Some(known) = self.reference_cache.borrow().get(&key) {
-            return Ok(known.clone());
-        }
-        let heard = audio::hear(
-            &file,
-            AnalyzeOptions {
-                start: request.reference_from,
-                seconds: request.reference_seconds,
-                focus: analysis_focus(request.focus),
-                signal: Some(signal),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| RuntimeError::plain(e.to_string()))?;
-        let mut cache = self.reference_cache.borrow_mut();
-        cache.insert(key, heard.clone());
-        if cache.len() > 32 {
-            cache.shift_remove_index(0);
-        }
-        Ok(heard)
-    }
     pub async fn close(&self) {
         let setup = self.ears_setup.borrow().clone();
         if let Some(link) = match setup {
@@ -331,14 +278,18 @@ impl Rendering {
         let live = LiveRenderer::new(history, observer, options, step, clip_file);
         // The tools reach Live through its renderer; they hold no more of Rendering than that.
         let host: Rc<dyn crate::listening::renderer::Renderer> = Rc::new(live.clone());
-        let listening = Listening::new(host, options.on_judge.clone(), options.listener.clone(), options.references.clone());
+        let listening = Listening::new(
+            host,
+            options.on_judge.clone(),
+            options.on_audition.clone(),
+            options.listener.clone(),
+            options.references.clone(),
+        );
         Rc::new(Self { live, listening })
     }
     /// A match run continues the answer's rounds; a new answer starts a fresh score history.
     pub fn reset_turn(&self, continuing: bool) {
         if !continuing {
-            self.rounds.set(0);
-            self.best.set(None);
             self.listening.new_answer(self.applied_ids());
         }
     }
@@ -346,6 +297,11 @@ impl Rendering {
     /// so they aren't a round's to take back.
     pub fn steered(&self) {
         self.listening.steered(self.applied_ids());
+    }
+    /// One of the listening tools (judge, tune, sound, form, groove, audition, render) as the model calls it; None for
+    /// any other tool.
+    pub async fn call(&self, name: &str, input: JsonObject, signal: Signal) -> Option<Result<ToolResult, RuntimeError>> {
+        self.listening.call(name, input, signal).await
     }
     pub async fn judge(&self, request: &JudgeRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
         self.listening.judge(request, original).await
@@ -379,13 +335,17 @@ impl Rendering {
         self.listening.name_plugin_roles(round, signal).await
     }
     pub async fn audition(&self, request: &AuditionRequest, original: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
-        self.live.audition(request, original).await
+        self.listening.audition(request, original).await
+    }
+    /// How many auditions the answer has made.
+    pub fn round_count(&self) -> usize {
+        self.listening.round_count()
     }
     pub async fn hear_in_set(&self, request: &HearRequest, original: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
         self.live.hear_in_set(request, original).await
     }
     pub async fn open_goal(&self, request: &AuditionRequest, original: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
-        self.live.open_goal(request, original).await
+        self.live.open_goal(&self.listening, request, original).await
     }
 }
 fn object(value: Value) -> JsonObject {
@@ -408,9 +368,6 @@ fn fader_db(volume: f64) -> String {
     } else {
         format!("{} dB", to_fixed(20. * (volume / 0.85).log10() * if volume > 0.85 { 0.3 } else { 1. }, 1))
     }
-}
-fn analysis_focus(focus: Option<Focus>) -> Option<String> {
-    focus.map(|focus| if focus == Focus::Section { "mix" } else { "sound" }.into())
 }
 async fn delay(ms: f64, signal: Signal) -> Result<(), RuntimeError> {
     signal.check()?;

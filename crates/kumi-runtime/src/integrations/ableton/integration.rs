@@ -257,42 +257,6 @@ impl Ableton {
         }
         Ok(ToolResult::text(stringify(&json!(result))))
     }
-    async fn render_tool(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let from = input.get("from_beat").and_then(Value::as_f64).filter(|n| n.is_finite() && *n >= 0.);
-        let beats = input.get("beats").and_then(Value::as_f64).filter(|n| n.is_finite() && *n > 0.);
-        let (Some(track), Some(from), Some(beats)) = (input.get("track").filter(|v| v.is_string()), from, beats) else {
-            return Ok(ToolResult::error("Give the track (an audio track's reference from this turn), from_beat and beats."));
-        };
-        let mut args = object(&self.connection.references.borrow().lengthen(&json!({"trackRef":track})))?;
-        if let Err(error) = self.connection.references.borrow().require_fresh_references(&args) {
-            return Ok(ToolResult::error(error.to_string()));
-        }
-        let name = args["trackRef"]
-            .as_str()
-            .and_then(|r| self.connection.references.borrow().known.get(r).map(|t| t.name.clone()))
-            .filter(|s| !s.is_empty());
-        args.insert("fromBeat".into(), json!(from));
-        args.insert("toBeat".into(), json!(from + beats));
-        if let Some(name) = name {
-            args.insert("expectedName".into(), json!(name));
-        }
-        let result = self.connection.call("live_render_offline", args, self.combined(signal)).await?;
-        if result.is_error == Some(true) {
-            return Ok(ToolResult::error(result_text(&result)));
-        }
-        let rendered = payload(&result)?;
-        let mut reply = JsonObject::new();
-        for (key, source) in [("file", "path"), ("seconds", "seconds"), ("channels", "channels"), ("sampleRate", "sampleRate")] {
-            if let Some(value) = rendered.get(source) {
-                reply.insert(key.into(), value.clone());
-            }
-        }
-        reply.insert(
-            "note".into(),
-            json!("The track's own clips, before its devices. Hear it with listen (file), against a reference with compare_to."),
-        );
-        Ok(ToolResult::text(stringify(&json!(reply))))
-    }
     async fn live_undo(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let redo = input.get("redo") == Some(&json!(true));
         let result = self
@@ -378,110 +342,6 @@ impl Ableton {
         }
         let is_error = done.get("ok") != Some(&json!(true));
         Ok(ToolResult { text: stringify(&refs.shorten(&json!(done))), is_error, ..Default::default() })
-    }
-    async fn judge_tool(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let request = match judge_tool::judge_request(&input) {
-            Ok(request) => request,
-            Err(why) => return Ok(ToolResult::error(why)),
-        };
-        match self.rendering.judge(&request, signal.clone()).await? {
-            Ok(mut round) => {
-                self.rendering.name_plugin_roles(&mut round, signal).await;
-                Ok(ToolResult::text(stringify(&judge_tool::judge_reply(&round))))
-            }
-            Err(why) => Ok(ToolResult::error(why)),
-        }
-    }
-    async fn tune_tool(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let request = match judge_tool::tune_request(&input) {
-            Ok(request) => request,
-            Err(why) => return Ok(ToolResult::error(why)),
-        };
-        match self.rendering.tune(&request, signal.clone()).await? {
-            Ok(mut round) => {
-                self.rendering.name_plugin_roles(&mut round, signal).await;
-                Ok(ToolResult::text(stringify(&judge_tool::judge_reply(&round))))
-            }
-            Err(why) => Ok(ToolResult::error(why)),
-        }
-    }
-    async fn sound_tool(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let request = match judge_tool::sound_request(&input) {
-            Ok(request) => request,
-            Err(why) => return Ok(ToolResult::error(why)),
-        };
-        match self.rendering.sound(&request, signal).await? {
-            Ok(said) => Ok(ToolResult::text(stringify(&said))),
-            Err(why) => Ok(ToolResult::error(why)),
-        }
-    }
-    async fn form_tool(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        match self.rendering.form(&judge_tool::form_request(&input), signal).await? {
-            Ok(said) => Ok(ToolResult::text(stringify(&said))),
-            Err(why) => Ok(ToolResult::error(why)),
-        }
-    }
-    async fn groove_tool(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let request = match judge_tool::groove_request(&input) {
-            Ok(request) => request,
-            Err(why) => return Ok(ToolResult::error(why)),
-        };
-        match self.rendering.groove(&request, signal).await? {
-            Ok(round) => Ok(ToolResult::text(stringify(&judge_tool::judge_reply(&round)))),
-            Err(why) => Ok(ToolResult::error(why)),
-        }
-    }
-    async fn audition_tool(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let request = match audition::audition_request(&input) {
-            Ok(request) => request,
-            Err(why) => return Ok(ToolResult::error(why)),
-        };
-        let result = match self.rendering.audition(&request, signal).await? {
-            Ok(result) => result,
-            Err(why) => return Ok(ToolResult::error(why)),
-        };
-        let mut reply = object(&json!({"round":self.rendering.round_count()}))?;
-        if let Some(best) = result.best.filter(|s| !s.is_empty()) {
-            reply.insert("best".into(), json!(best));
-        }
-        let takes: Vec<_> = result
-            .takes
-            .iter()
-            .map(|take| {
-                let mut row =
-                    object(&json!({"label":take.label,"track":self.connection.references.borrow_mut().short_ref(&take.track)})).unwrap();
-                if take.silent == Some(true) {
-                    row.insert("silent".into(), json!(true));
-                }
-                if let Some(heard) = &take.heard {
-                    row.insert("heard".into(), json!(heard.summary));
-                }
-                if let Some(close) = &take.closeness {
-                    row.insert("score".into(), json!(close.score));
-                    row.insert("gaps".into(), json!(close.gaps));
-                    let features: JsonObject =
-                        close.features.iter().map(|f| (json!(f.name).as_str().unwrap().to_owned(), json!(f.similarity))).collect();
-                    row.insert("features".into(), json!(features));
-                    if let Some(structural) = &close.structural {
-                        row.insert("knobsCantCloseThis".into(), json!(format!("{}: {}", structural.gap, structural.r#move)));
-                    }
-                }
-                row
-            })
-            .collect();
-        reply.insert("takes".into(), json!(takes));
-        if let Some(reference) = result.reference {
-            reply.insert("reference".into(), json!(reference.summary));
-        }
-        reply.insert("seconds".into(), json!(result.seconds));
-        if !result.notes.is_empty() {
-            reply.insert("notes".into(), json!(result.notes));
-        }
-        Ok(ToolResult {
-            text: stringify(&json!(reply)),
-            is_error: result.takes.iter().all(|take| take.silent == Some(true) || take.heard.is_none()),
-            ..Default::default()
-        })
     }
 }
 
@@ -576,13 +436,12 @@ impl KernelTool for LiveTool {
                 };
                 Ok(ToolResult { text: outcome.for_model(), is_error: outcome.is_error, reply, ..Default::default() })
             }
-            "audition" => owner.audition_tool(input, signal).await,
-            "judge" => owner.judge_tool(input, signal).await,
-            "tune" => owner.tune_tool(input, signal).await,
-            "groove" => owner.groove_tool(input, signal).await,
-            "form" => owner.form_tool(input, signal).await,
-            "sound" => owner.sound_tool(input, signal).await,
-            "render" => owner.render_tool(input, signal).await,
+            "audition" | "judge" | "tune" | "groove" | "form" | "sound" | "render" => {
+                match owner.rendering.call(&self.name, input, signal).await {
+                    Some(result) => result,
+                    None => unreachable!("a listening tool"),
+                }
+            }
             "undo_in_live" => owner.live_undo(input, signal).await,
             "run_python" => owner.run_python(input, signal).await,
             "live_command" => {
