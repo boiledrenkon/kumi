@@ -10,13 +10,6 @@ const LIVE: [&str; 6] = ["ableton", "ableton_mcp_server", "live_app", "live_exte
 
 /// Uses allowed by file and phrase, with why.
 const ALLOWED: &[(&str, &str, &str)] = &[
-    ("terminal.rs", "willington::WillingtonControl", "/willington is Live's; step 11 gates it by capability"),
-    ("terminal.rs", "crate::willington::OFF_AT_START", "/willington is Live's; step 11 gates it by capability"),
-    ("tui/app.rs", "willington::WillingtonControl", "/willington is Live's; step 11 gates it by capability"),
-    ("tui/app/events.rs", "crate::willington::OFF_AT_START", "/willington is Live's; step 11 gates it by capability"),
-    ("tui/app/drawing.rs", "crate::willington::OFF_AT_START", "/willington is Live's; step 11 gates it by capability"),
-    ("tui/app/input.rs", "crate::willington::WillingtonControl", "/willington is Live's; step 11 gates it by capability"),
-    ("cli/native/session.rs", "willington::WillingtonControl", "/willington is Live's; step 11 gates it by capability"),
     ("doctor/installation.rs", "live_app::InstalledLive", "InstallationIo.lives, which the doctor's tests answer, lists Lives"),
     (
         "cli/native/session.rs",

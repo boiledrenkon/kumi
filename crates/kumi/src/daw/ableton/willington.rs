@@ -6,7 +6,7 @@ use crate::config::remote_scripts_dir;
 use ableton_mcp_server::delivery::{
     secret_permissions, write_owner_file, SecretPermissions, REMOTE_SCRIPT_PACKAGE, WILLINGTON_CONFIG, WILLINGTON_FOLDER,
 };
-use futures::future::{FutureExt, LocalBoxFuture};
+use futures::future::FutureExt;
 use kumi_common::time::now_ms_f64;
 use kumi_runtime::{integrations::ableton::willington::WillingtonSwitch, system::Env};
 use serde_json::Value;
@@ -173,16 +173,20 @@ fn libraries(folder: &Path, depth: usize) -> Vec<PathBuf> {
 }
 
 /// /willington for the app: whether the bindings are on (None while the bridge in Live doesn't carry
-/// Willington), and switching them, which ends with what to tell the producer.
-#[derive(Clone)]
-pub struct WillingtonControl {
-    pub on: Rc<dyn Fn() -> Option<bool>>,
-    pub set: Rc<dyn Fn(bool) -> LocalBoxFuture<'static, Result<&'static str, String>>>,
-}
+/// Willington), and switching them, which ends with what to tell the producer. Live's switch, a DAW's Toggle.
+pub type WillingtonControl = crate::daw::Toggle;
 /// How often Kumi looks again for a bridge that doesn't carry Willington yet: first-run setup can put one in place.
 const LOOK_AGAIN_MS: f64 = 2000.;
-impl WillingtonControl {
+impl crate::daw::Toggle {
+    /// Live's /willington switch, as `WillingtonControl::new` has always made it (its tests do).
     pub fn new(env: Env) -> Self {
+        control(env)
+    }
+}
+
+/// Live's /willington switch, from Willington's file beside the bridge in Live.
+pub fn control(env: Env) -> WillingtonControl {
+    {
         // The command menu asks on every frame it's drawn: the bridge, once found, stays where it is, and the
         // switch is read again only when its file changes.
         let found = RefCell::new((None::<Willington>, f64::NEG_INFINITY));
@@ -195,7 +199,7 @@ impl WillingtonControl {
             found.0.clone()
         });
         let read = Rc::new(RefCell::new(None::<(Option<(SystemTime, u64)>, bool)>));
-        Self {
+        WillingtonControl {
             on: {
                 let (find, read) = (find.clone(), read.clone());
                 Rc::new(move || {

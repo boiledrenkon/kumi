@@ -12,7 +12,6 @@ use crate::{
         width::{cell_width, graphemes},
     },
     update::UpdateControl,
-    willington::WillingtonControl,
 };
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::{
@@ -52,7 +51,7 @@ pub struct TerminalOptions {
     pub history: Option<Rc<RefCell<InputHistory>>>,
     pub updates: Option<UpdateControl>,
     /// /willington, where Kumi's bridge can carry Willington.
-    pub willington: Option<WillingtonControl>,
+    pub willington: Option<crate::daw::Toggle>,
     /// What's new since the producer last opened Kumi, said once as it starts.
     pub whats_new: Option<crate::whats_new::News>,
     /// Fixed phrases ("tempo 124", "mute drums") change Live at once, with no model call (`instantPhrases`).
@@ -977,7 +976,9 @@ impl Terminal for PlainTerminal {
             self.news(news, crate::whats_new::more_line(news));
         }
         if self.0.options.willington.as_ref().is_some_and(|w| (w.on)() == Some(false)) {
-            self.notice(&format!("[willington] {}", crate::willington::OFF_AT_START));
+            if let Some(words) = crate::daw::current().toggle_words() {
+                self.notice(&format!("[{}] {}", words.tag, words.off_at_start));
+            }
         }
         let weak = Rc::downgrade(&self.0);
         active.resume(Rc::new(move |bytes| {

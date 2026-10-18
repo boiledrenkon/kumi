@@ -120,6 +120,21 @@ pub trait BridgeRollbackStep {
     async fn after_swap(&self, io: &InstalledIo, home: &str, app: &str, version: &str, native: bool) -> i32;
 }
 
+/// A switch of the DAW's that the producer flips with a command (Live: /willington, for Willington's bindings): whether
+/// it's on (None while the DAW's bridge doesn't carry it), and flipping it, which ends with what to tell the producer.
+#[derive(Clone)]
+pub struct Toggle {
+    pub on: Rc<dyn Fn() -> Option<bool>>,
+    pub set: Rc<dyn Fn(bool) -> LocalBoxFuture<'static, Result<&'static str, String>>>,
+}
+
+/// What the app says of the DAW's switch: plain mode's tag for it, and the note when it's off as Kumi starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToggleWords {
+    pub tag: &'static str,
+    pub off_at_start: &'static str,
+}
+
 /// What the app says while it watches for the DAW to answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchWords {
@@ -214,6 +229,10 @@ pub trait DawProvider {
     fn removal_question(&self) -> &'static str;
     /// What removing Kumi says when the bridge's files stay in `folder`.
     fn files_stay(&self, folder: &str) -> String;
+    /// The DAW's switch the producer flips with a command, for a DAW that has one (Live: Willington's bindings).
+    fn toggle(&self, env: &Env) -> Option<Toggle>;
+    /// What the app says of that switch.
+    fn toggle_words(&self) -> Option<ToggleWords>;
     /// Chatting without the DAW, in its words.
     fn without_daw(&self, on_connection: Rc<dyn Fn(ConnectionState)>) -> Rc<dyn Integration>;
 }

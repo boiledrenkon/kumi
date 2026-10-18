@@ -39,7 +39,6 @@ use crate::{
     terminal::Terminal,
     text::{sanitize_text, StreamingText},
     update::UpdateControl,
-    willington::WillingtonControl,
 };
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::{
@@ -88,7 +87,7 @@ pub struct TuiOptions {
     /// Live's part of first-run setup; `None` when Kumi chats without Live by choice.
     pub connect_live: Option<ConnectDaw>,
     /// /willington, where Kumi's bridge can carry Willington.
-    pub willington: Option<WillingtonControl>,
+    pub willington: Option<crate::daw::Toggle>,
     /// /slots: which model does each listening job, swapped and taken back.
     pub slots: Option<Rc<kumi_runtime::slots::SlotsContext>>,
     /// What's new since the producer last opened Kumi, shown once as it starts.

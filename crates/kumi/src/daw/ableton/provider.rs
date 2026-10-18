@@ -7,7 +7,8 @@ use super::{
     willington::Willington,
 };
 use crate::daw::provider::{
-    BridgeCommand, BridgeRollbackStep, BridgeState, DawFactory, DawProvider, DawSession, EnableStep, RemovedBridge, WatchWords,
+    BridgeCommand, BridgeRollbackStep, BridgeState, DawFactory, DawProvider, DawSession, EnableStep, RemovedBridge, Toggle, ToggleWords,
+    WatchWords,
 };
 use crate::doctor::{Check, DoctorIo, InstallationIo, LiveProbe};
 use crate::report::LogFiles;
@@ -218,6 +219,12 @@ impl DawProvider for Ableton {
     }
     fn files_stay(&self, folder: &str) -> String {
         format!("The bridge's files stay in {folder} while Live uses it.")
+    }
+    fn toggle(&self, env: &Env) -> Option<Toggle> {
+        self.profile().caps.willington.then(|| super::willington::control(env.clone()))
+    }
+    fn toggle_words(&self) -> Option<ToggleWords> {
+        Some(ToggleWords { tag: "willington", off_at_start: super::willington::OFF_AT_START })
     }
     fn without_daw(&self, on_connection: Rc<dyn Fn(ConnectionState)>) -> Rc<dyn Integration> {
         kumi_runtime::integrations::create_inference_only_integration(on_connection)

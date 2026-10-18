@@ -326,7 +326,9 @@ impl TuiApp {
             add(line, st::FAINT);
         }
         if state.willington_off {
-            add(crate::willington::OFF_AT_START.into(), st::FAINT);
+            if let Some(words) = crate::daw::current().toggle_words() {
+                add(words.off_at_start.into(), st::FAINT);
+            }
         }
         if let Some(newer) = &state.newer {
             add(String::new(), st::TEXT);

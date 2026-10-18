@@ -243,7 +243,9 @@ impl TuiApp {
                 let tell = at_start && state.willington_off;
                 drop(state);
                 if tell {
-                    self.notice(crate::willington::OFF_AT_START, NoticeTone::Info);
+                    if let Some(words) = crate::daw::current().toggle_words() {
+                        self.notice(words.off_at_start, NoticeTone::Info);
+                    }
                 }
             }
             "set-asked" => {

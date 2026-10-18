@@ -7,7 +7,6 @@ use crate::{
     terminal::{create_terminal, Terminal, TerminalOptions},
     tui::app::{create_tui, AwaySettings, ConnectDaw, PanelTab, TuiOptions},
     voice::{create_voice_control, VoiceControlOptions},
-    willington::WillingtonControl,
 };
 use async_trait::async_trait;
 use kumi_runtime::{
@@ -667,7 +666,7 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
             })
         });
         options.updates = Some(updates);
-        options.willington = Some(WillingtonControl::new(io.env.clone()));
+        options.willington = provider.toggle(&io.env);
         options.slots = Some(slots_context);
         options.voice = Some(Rc::new(create_voice_control(VoiceControlOptions {
             env: Some(io.env.clone()),
@@ -703,7 +702,7 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
         options.secrets = secrets.clone();
         options.history = Some(history);
         options.updates = Some(updates);
-        options.willington = Some(WillingtonControl::new(io.env.clone()));
+        options.willington = provider.toggle(&io.env);
         Rc::new(create_terminal(options))
     };
     *terminal.borrow_mut() = Some(Rc::downgrade(&ui));
