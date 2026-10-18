@@ -1,12 +1,15 @@
 //! The REAPER calls the bridge makes, as safe functions over the API table. Main thread only (Api isn't Send).
 //! A function this REAPER lacks reads as empty or None rather than failing.
 
-use std::ffi::{c_char, CString};
+use std::ffi::CString;
 use std::ptr;
 
 use serde_json::{json, Value};
 
-use crate::api::{self, Api, MediaTrack, ReaProject};
+use crate::api::{self, Api, MediaItem, MediaItem_Take, MediaTrack, ReaProject, TrackEnvelope};
+
+mod objects;
+pub use objects::*;
 
 /// File: Quit REAPER.
 pub const ACTION_QUIT: i32 = 40004;
@@ -15,15 +18,48 @@ pub struct Reaper<'a> {
     api: &'a Api,
 }
 
-/// A project REAPER handed out; only this module makes one, so the safe calls below get REAPER's own pointers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A project REAPER handed out; only this module (and its children) makes one, so the safe calls get REAPER's own pointers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Project(*mut ReaProject);
 
 /// A track REAPER handed out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Track(*mut MediaTrack);
 
+/// A media item REAPER handed out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Item(*mut MediaItem);
+
+/// A take REAPER handed out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Take(*mut MediaItem_Take);
+
+/// An envelope REAPER handed out (track, FX parameter or take).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Envelope(*mut TrackEnvelope);
+
+/// What owns an FX chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FxOwner {
+    Track(Track),
+    Take(Take),
+}
+
+/// One FX in a chain, addressed the way REAPER's FX calls do: the index, with 0x1000000 for the input chain and
+/// 0x2000000 for a container's child (the address `container_item.N` gives).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Fx {
+    pub owner: FxOwner,
+    pub index: i32,
+}
+
 impl Project {
+    /// The first project the fake REAPER hands out, for tests that need a handle.
+    #[cfg(test)]
+    pub fn first() -> Project {
+        Reaper::new(&fake::api()).current_project().expect("a fake project").ptr
+    }
+
     /// Tells projects apart (a tab switch) without exposing the pointer.
     pub fn addr(self) -> usize {
         self.0 as usize
@@ -189,17 +225,7 @@ impl<'a> Reaper<'a> {
             }),
             None => String::new(),
         };
-        let guid = match (self.api.GetTrackGUID(), self.api.guidToString()) {
-            (Some(get), Some(to_string)) => {
-                let guid = unsafe { get(track) };
-                let mut buf = [0 as c_char; 64];
-                if !guid.is_null() {
-                    unsafe { to_string(guid, buf.as_mut_ptr()) };
-                }
-                unsafe { api::string(buf.as_ptr()) }
-            }
-            _ => String::new(),
-        };
+        let guid = self.track_guid(Track(track));
         let index = if number < 0.0 { 0 } else { number as i64 };
         json!({"index": index, "guid": guid, "name": name})
     }
@@ -245,235 +271,8 @@ impl<'a> Reaper<'a> {
     }
 }
 
-/// A fake REAPER for tests: an API table whose functions read and write a thread-local state.
 #[cfg(test)]
-pub mod fake {
-    use super::*;
-    use std::cell::RefCell;
-    use std::ffi::{c_int, c_void, CStr};
-
-    #[derive(Default, Clone)]
-    pub struct State {
-        pub version: String,
-        pub resource: String,
-        /// None: no project (REAPER never has none, but the bridge must not care).
-        pub project: Option<(String, String)>,
-        pub play_bits: i32,
-        pub bpm: f64,
-        pub state_count: i32,
-        pub tracks: Vec<(String, String)>,
-        pub selected: Vec<usize>,
-        pub loading: bool,
-        pub dirty: bool,
-        /// Saving leaves the project changed (a read-only folder, a plug-in refusing).
-        pub save_fails: bool,
-        pub saved: u32,
-        pub actions: Vec<i32>,
-        pub ui_refresh: i32,
-        /// A project is rendering (what EnumProjects(0x40000000) answers).
-        pub rendering: bool,
-        /// Called, with no borrow of the state held, as REAPER runs each action: a test's REAPER that quits by running
-        /// its atexit hooks inside the quit action.
-        pub on_action: Option<fn(i32)>,
-    }
-
-    thread_local! {
-        pub static STATE: RefCell<State> = RefCell::new(State::default());
-    }
-
-    pub fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
-        STATE.with(|s| f(&mut s.borrow_mut()))
-    }
-
-    const PROJECT: *mut ReaProject = 0x10 as *mut ReaProject;
-
-    fn track_ptr(index: usize) -> *mut MediaTrack {
-        (0x1000 + index * 8) as *mut MediaTrack
-    }
-
-    fn track_index(track: *mut MediaTrack) -> usize {
-        (track as usize - 0x1000) / 8
-    }
-
-    fn write(buf: *mut c_char, size: c_int, text: &str) {
-        if buf.is_null() || size <= 0 {
-            return;
-        }
-        let n = text.len().min(size as usize - 1);
-        unsafe {
-            ptr::copy_nonoverlapping(text.as_ptr(), buf.cast(), n);
-            *buf.add(n) = 0;
-        }
-    }
-
-    thread_local! {
-        static STRINGS: RefCell<Vec<CString>> = const { RefCell::new(Vec::new()) };
-    }
-
-    fn keep(text: String) -> *const c_char {
-        STRINGS.with(|s| {
-            let mut s = s.borrow_mut();
-            s.push(CString::new(text).unwrap());
-            s.last().unwrap().as_ptr()
-        })
-    }
-
-    unsafe extern "C" fn get_app_version() -> *const c_char {
-        keep(with(|s| s.version.clone()))
-    }
-    unsafe extern "C" fn get_resource_path() -> *const c_char {
-        keep(with(|s| s.resource.clone()))
-    }
-    unsafe extern "C" fn enum_projects(idx: c_int, buf: *mut c_char, size: c_int) -> *mut ReaProject {
-        with(|s| match (&s.project, idx) {
-            (_, 0x4000_0000) if s.rendering => PROJECT,
-            (Some((path, _)), -1 | 0) => {
-                write(buf, size, path);
-                PROJECT
-            }
-            _ => ptr::null_mut(),
-        })
-    }
-    unsafe extern "C" fn get_project_name(_proj: *mut ReaProject, buf: *mut c_char, size: c_int) {
-        with(|s| write(buf, size, s.project.as_ref().map(|p| p.1.as_str()).unwrap_or("")))
-    }
-    unsafe extern "C" fn get_current_project_in_load_save() -> *mut ReaProject {
-        if with(|s| s.loading) {
-            PROJECT
-        } else {
-            ptr::null_mut()
-        }
-    }
-    unsafe extern "C" fn master_get_tempo() -> f64 {
-        with(|s| s.bpm)
-    }
-    unsafe extern "C" fn get_play_state_ex(_proj: *mut ReaProject) -> c_int {
-        with(|s| s.play_bits)
-    }
-    unsafe extern "C" fn get_project_state_change_count(_proj: *mut ReaProject) -> c_int {
-        with(|s| s.state_count)
-    }
-    unsafe extern "C" fn count_tracks(_proj: *mut ReaProject) -> c_int {
-        with(|s| s.tracks.len() as c_int)
-    }
-    unsafe extern "C" fn count_selected_tracks2(_proj: *mut ReaProject, _master: bool) -> c_int {
-        with(|s| s.selected.len() as c_int)
-    }
-    unsafe extern "C" fn get_selected_track2(_proj: *mut ReaProject, i: c_int, _master: bool) -> *mut MediaTrack {
-        with(|s| s.selected.get(i as usize).map(|&t| track_ptr(t)).unwrap_or(ptr::null_mut()))
-    }
-    unsafe extern "C" fn get_media_track_info_value(track: *mut MediaTrack, parm: *const c_char) -> f64 {
-        assert_eq!(unsafe { CStr::from_ptr(parm) }, c"IP_TRACKNUMBER");
-        track_index(track) as f64 + 1.0
-    }
-    unsafe extern "C" fn get_track_name(track: *mut MediaTrack, buf: *mut c_char, size: c_int) -> bool {
-        with(|s| write(buf, size, &s.tracks[track_index(track)].1));
-        true
-    }
-    unsafe extern "C" fn get_track_guid(track: *mut MediaTrack) -> *mut api::GUID {
-        (track as usize + 1) as *mut api::GUID
-    }
-    unsafe extern "C" fn guid_to_string(guid: *const api::GUID, buf: *mut c_char) {
-        let index = track_index((guid as usize - 1) as *mut MediaTrack);
-        with(|s| write(buf, 64, &s.tracks[index].0));
-    }
-    unsafe extern "C" fn main_on_command_ex(command: c_int, _flag: c_int, _proj: *mut ReaProject) {
-        let hook = with(|s| {
-            s.actions.push(command);
-            s.on_action
-        });
-        if let Some(hook) = hook {
-            hook(command);
-        }
-    }
-    unsafe extern "C" fn prevent_ui_refresh(count: c_int) {
-        with(|s| s.ui_refresh += count);
-    }
-    unsafe extern "C" fn is_project_dirty(_proj: *mut ReaProject) -> c_int {
-        with(|s| s.dirty as c_int)
-    }
-    unsafe extern "C" fn main_save_project(_proj: *mut ReaProject, _save_as: bool) {
-        with(|s| {
-            s.dirty = s.save_fails;
-            s.saved += 1;
-        });
-    }
-    unsafe extern "C" fn kbd_get_text_from_cmd(cmd: c_int, _section: *mut c_void) -> *const c_char {
-        match cmd {
-            40001 => c"Track: Insert new track".as_ptr(),
-            40004 => c"File: Quit REAPER".as_ptr(),
-            40022 => c"File: Save project as...".as_ptr(),
-            40023 => c"File: New project".as_ptr(),
-            40026 => c"File: Save project".as_ptr(),
-            40860 => c"Close current project tab".as_ptr(),
-            40886 => c"File: Close all projects".as_ptr(),
-            41824 => c"File: Render project, using the most recent render settings".as_ptr(),
-            54000 => c"Script: kumi.lua".as_ptr(),
-            _ => c"".as_ptr(),
-        }
-    }
-    unsafe extern "C" fn named_command_lookup(name: *const c_char) -> c_int {
-        if unsafe { CStr::from_ptr(name) } == c"_RS_kumi" {
-            54000
-        } else {
-            0
-        }
-    }
-
-    /// The fake table: only the functions above resolve.
-    pub fn api() -> Api {
-        Api::load(lookup)
-    }
-
-    fn lookup(name: &CStr) -> *mut c_void {
-        match name.to_bytes() {
-            b"GetAppVersion" => get_app_version as *mut c_void,
-            b"GetResourcePath" => get_resource_path as *mut c_void,
-            b"EnumProjects" => enum_projects as *mut c_void,
-            b"GetProjectName" => get_project_name as *mut c_void,
-            b"GetCurrentProjectInLoadSave" => get_current_project_in_load_save as *mut c_void,
-            b"GetPlayStateEx" => get_play_state_ex as *mut c_void,
-            b"Master_GetTempo" => master_get_tempo as *mut c_void,
-            b"GetProjectStateChangeCount" => get_project_state_change_count as *mut c_void,
-            b"CountTracks" => count_tracks as *mut c_void,
-            b"CountSelectedTracks2" => count_selected_tracks2 as *mut c_void,
-            b"GetSelectedTrack2" => get_selected_track2 as *mut c_void,
-            b"GetMediaTrackInfo_Value" => get_media_track_info_value as *mut c_void,
-            b"GetTrackName" => get_track_name as *mut c_void,
-            b"GetTrackGUID" => get_track_guid as *mut c_void,
-            b"guidToString" => guid_to_string as *mut c_void,
-            b"Main_OnCommandEx" => main_on_command_ex as *mut c_void,
-            b"PreventUIRefresh" => prevent_ui_refresh as *mut c_void,
-            b"IsProjectDirty" => is_project_dirty as *mut c_void,
-            b"Main_SaveProject" => main_save_project as *mut c_void,
-            b"kbd_getTextFromCmd" => kbd_get_text_from_cmd as *mut c_void,
-            b"NamedCommandLookup" => named_command_lookup as *mut c_void,
-            _ => ptr::null_mut(),
-        }
-    }
-
-    /// The same table as REAPER's GetFunc, for the entry point's `reaper_plugin_info_t`.
-    ///
-    /// # Safety
-    /// `name` is a NUL-terminated string.
-    pub unsafe extern "C" fn get_func(name: *const c_char) -> *mut c_void {
-        lookup(unsafe { CStr::from_ptr(name) })
-    }
-
-    /// A typical lab state: an unsaved project with two tracks.
-    pub fn reset() {
-        with(|s| {
-            *s = State {
-                version: "7.82/macOS-arm64".into(),
-                resource: "/lab/REAPER".into(),
-                project: Some((String::new(), String::new())),
-                tracks: vec![("{AAAA}".into(), "Drums".into()), ("{BBBB}".into(), "Bass".into())],
-                bpm: 120.0,
-                ..State::default()
-            }
-        });
-    }
-}
+pub mod fake;
 
 #[cfg(test)]
 mod tests {
@@ -485,8 +284,8 @@ mod tests {
         fake::with(|s| {
             s.project = Some(("/lab/Projects/a.rpp".into(), "a.rpp".into()));
             s.play_bits = 5;
-            s.selected = vec![1];
         });
+        fake::select_tracks(&[1]);
         let api = fake::api();
         let reaper = Reaper::new(&api);
         assert_eq!(reaper.app_version(), "7.82/macOS-arm64");

@@ -10,11 +10,15 @@ use serde_json::{json, Value};
 
 use crate::api::{self, Api};
 use crate::csurf::Call;
+use crate::focus::Focus;
 use crate::queue::{self, Answer, Budget, Job};
+use crate::read::Reads;
 use crate::reaper::{Busy, PlayState, ProjectInfo, Reaper, ACTION_QUIT};
 
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const HEARTBEAT: Duration = Duration::from_millis(daw_bridge::wire::HEARTBEAT_MS);
+/// How often `focus` is polled when nothing has said it changed (Kumi asks about every 150 ms).
+const FOCUS_EVERY: Duration = Duration::from_millis(50);
 
 // Actions that close or replace the project, and so ask "Save changes?" in a dialog inside the request when it has any.
 const CLOSES_CURRENT_PROJECT: [i32; 2] = [40860, 40023];
@@ -72,6 +76,10 @@ pub struct Snapshot {
     pub busy: Option<Busy>,
     /// `status`'s fields read on the main thread: transport, track count, tick rates.
     pub status: Value,
+    /// What `focus` answers, polled each tick (Null until the first poll finds a project).
+    pub focus: Value,
+    /// When `focus` was polled.
+    pub focus_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -106,6 +114,8 @@ struct Pending {
     selection: bool,
     play: Option<PlayState>,
     tempo: bool,
+    // Something `focus` shows moved (selection, transport, FX focus): poll it this tick.
+    focus: bool,
 }
 
 /// `{playing, paused, recording, bpm}`: the keys the Renoise bridge shares (`playing`, `bpm`) plus REAPER's own.
@@ -147,6 +157,8 @@ enum Quit {
 
 pub struct Extension {
     api: Api,
+    reads: Reads,
+    focus: Focus,
     jobs: Receiver<Job>,
     out: Box<dyn Outbox>,
     snapshot: Arc<Mutex<Snapshot>>,
@@ -157,12 +169,16 @@ pub struct Extension {
     in_tick: Cell<bool>,
     quit: Cell<Quit>,
     last_heartbeat: Cell<Option<Instant>>,
+    focus_value: RefCell<Value>,
+    focus_at: Cell<Option<Instant>>,
 }
 
 impl Extension {
     pub fn new(api: Api, jobs: Receiver<Job>, out: Box<dyn Outbox>, snapshot: Arc<Mutex<Snapshot>>) -> Extension {
         let extension = Extension {
             api,
+            reads: Reads::default(),
+            focus: Focus::default(),
             jobs,
             out,
             snapshot,
@@ -173,6 +189,8 @@ impl Extension {
             in_tick: Cell::new(false),
             quit: Cell::new(Quit::No),
             last_heartbeat: Cell::new(None),
+            focus_value: RefCell::new(Value::Null),
+            focus_at: Cell::new(None),
         };
         extension.refresh_snapshot(None);
         extension
@@ -190,10 +208,31 @@ impl Extension {
                 drop(pending);
                 self.tick(Driver::Surface);
             }
-            Call::TrackListChange => pending.tracks = true,
-            Call::Selected(..) | Call::TrackSelection(_) => pending.selection = true,
-            Call::PlayState { play, pause, rec } => pending.play = Some(PlayState { playing: play, paused: pause, recording: rec }),
-            Call::Extended { call: api::CSURF_EXT_SETBPMANDPLAYRATE, .. } => pending.tempo = true,
+            Call::TrackListChange => {
+                pending.tracks = true;
+                pending.focus = true;
+            }
+            Call::Selected(..) | Call::TrackSelection(_) => {
+                pending.selection = true;
+                pending.focus = true;
+            }
+            Call::PlayState { play, pause, rec } => {
+                pending.play = Some(PlayState { playing: play, paused: pause, recording: rec });
+                pending.focus = true;
+            }
+            Call::Extended { call: api::CSURF_EXT_SETBPMANDPLAYRATE, .. } => {
+                pending.tempo = true;
+                pending.focus = true;
+            }
+            Call::Extended {
+                call:
+                    api::CSURF_EXT_SETFOCUSEDFX
+                    | api::CSURF_EXT_SETLASTTOUCHEDFX
+                    | api::CSURF_EXT_SETFXOPEN
+                    | api::CSURF_EXT_SETFXCHANGE
+                    | api::CSURF_EXT_SETLASTTOUCHEDTRACK,
+                ..
+            } => pending.focus = true,
             _ => {}
         }
         0
@@ -220,6 +259,9 @@ impl Extension {
             self.run_jobs();
         }
         self.poll_project();
+        if busy.is_none() {
+            self.poll_focus();
+        }
         self.flush_events();
         self.refresh_snapshot(busy);
         let now = Instant::now();
@@ -247,6 +289,8 @@ impl Extension {
         match method {
             "action" => self.action(params),
             "quit" => self.quit(params),
+            "read" => self.reads.read(&self.reaper(), params),
+            "snapshot" => self.reads.snapshot(&self.reaper()),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),
         }
     }
@@ -357,10 +401,35 @@ impl Extension {
         drop(sent);
         if !first {
             self.out.event("project", current.map(|(_, p)| p.to_json()).unwrap_or(Value::Null));
+            // Refs name objects of the project in this tab: they mean something else now.
+            self.reads.bump_epoch();
+            self.focus.reset();
             let mut pending = self.pending.borrow_mut();
             pending.tracks = true;
             pending.selection = true;
+            pending.focus = true;
         }
+    }
+
+    // `focus`, polled every FOCUS_EVERY, or at once when the surface said something it shows moved. The selection part
+    // of it is read now when REAPER said the selection moved, and by its own throttle otherwise.
+    fn poll_focus(&self) {
+        let (urgent, selection) = {
+            let pending = self.pending.borrow();
+            (pending.focus, pending.selection)
+        };
+        let due = urgent || self.focus_at.get().is_none_or(|at| at.elapsed() >= FOCUS_EVERY);
+        if !due {
+            return;
+        }
+        let reaper = self.reaper();
+        let value = match reaper.current_project() {
+            Some(project) => self.focus.poll(&self.reads, &reaper, project.ptr, selection),
+            None => Value::Null,
+        };
+        *self.focus_value.borrow_mut() = value;
+        self.focus_at.set(Some(Instant::now()));
+        self.pending.borrow_mut().focus = false;
     }
 
     fn flush_events(&self) {
@@ -401,6 +470,8 @@ impl Extension {
         snapshot.project = project.map(|p| ProjectSummary { name: p.name, path: p.path });
         snapshot.busy = busy;
         snapshot.status = status;
+        snapshot.focus = self.focus_value.borrow().clone();
+        snapshot.focus_at = self.focus_at.get();
         snapshot.last_tick = Some(Instant::now());
     }
 
@@ -493,7 +564,7 @@ mod tests {
         assert!(snapshot.last_tick.is_some());
         assert_eq!(snapshot.status["tracks"], 2);
         assert_eq!(snapshot.status["transport"]["playing"], true);
-        assert_eq!(snapshot.status["api"], json!({"resolved": 21, "total": 877}));
+        assert_eq!(snapshot.status["api"], json!({"resolved": fake::api().resolved(), "total": 877}));
         fake::with(|s| s.loading = true);
         extension.tick(Driver::Timer);
         assert_eq!(extension.snapshot().busy, Some(Busy::Loading));
@@ -535,6 +606,89 @@ mod tests {
         assert!(refused(json!({"command": "_nope"})).1.contains("no action"));
         assert_eq!(refused(json!({})).0, "bad-params");
         assert_eq!(fake::with(|s| s.actions.clone()), [40001, 54000]);
+    }
+
+    #[test]
+    fn reads_and_snapshots_are_answered_on_the_main_thread() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        let read = ask_with(&extension, &tx, "read", json!({"kind": "track", "limit": 2})).unwrap();
+        assert_eq!(read["items"][1]["name"], "Drums");
+        assert!(read["nextCursor"].is_string());
+        let snapshot = ask_with(&extension, &tx, "snapshot", json!({})).unwrap();
+        assert_eq!(snapshot["tracks"].as_array().unwrap().len(), 5);
+        assert_eq!(snapshot["epoch"], read["epoch"]);
+        assert_eq!(ask_with(&extension, &tx, "read", json!({})).unwrap_err().0, "bad-params");
+    }
+
+    fn focus_of(extension: &Extension) -> Value {
+        extension.snapshot().focus
+    }
+
+    #[test]
+    fn focus_is_polled_each_tick_and_kept_for_the_socket_threads() {
+        let (extension, _tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let focus = focus_of(&extension);
+        assert_eq!(focus["view"], "arrange");
+        assert_eq!(focus["changed"], 11);
+        assert_eq!(focus["selection"]["trackCount"], 0);
+        assert!(extension.snapshot().focus_at.is_some());
+        // Within the poll interval a tick leaves it be; a state change shows once it is due.
+        fake::with(|s| s.state_count = 12);
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["changed"], 11);
+        std::thread::sleep(FOCUS_EVERY + Duration::from_millis(5));
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["changed"], 12);
+    }
+
+    #[test]
+    fn the_surface_saying_the_selection_moved_refreshes_focus_at_once() {
+        let (extension, _tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["selection"]["trackRef"], Value::Null);
+        fake::select_tracks(&[1]);
+        extension.on_surface(Call::TrackSelection(fake::track_ptr(1)));
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["selection"]["trackRef"], "r:track:{BBBB}");
+        // A focused FX window comes with the surface's word for it.
+        fake::with(|s| s.focused_fx = Some((0, -1, -1, 0, 0)));
+        extension.on_surface(Call::Extended {
+            call: api::CSURF_EXT_SETFOCUSEDFX,
+            parm1: std::ptr::null_mut(),
+            parm2: std::ptr::null_mut(),
+            parm3: std::ptr::null_mut(),
+        });
+        extension.tick(Driver::Timer);
+        assert_eq!((&focus_of(&extension)["view"], &focus_of(&extension)["selection"]["fxRef"]), (&json!("fx"), &json!("r:fx:{FX-EQ}")));
+    }
+
+    #[test]
+    fn a_tab_switch_changes_the_epoch_and_the_focus_that_carries_it() {
+        let (extension, _tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = focus_of(&extension)["epoch"].clone();
+        fake::with(|s| s.project_id += 1);
+        extension.tick(Driver::Timer);
+        let after = focus_of(&extension)["epoch"].clone();
+        assert_ne!(before, after);
+        assert_eq!(after, extension.reads.epoch());
+    }
+
+    #[test]
+    fn nothing_is_polled_while_reaper_loads_a_project() {
+        let (extension, _tx, _, _) = setup();
+        fake::lab_project();
+        fake::with(|s| s.loading = true);
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension), Value::Null);
+        fake::with(|s| s.loading = false);
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["view"], "arrange");
     }
 
     #[test]
@@ -706,7 +860,7 @@ mod tests {
         let track = 0x1008 as *mut api::MediaTrack;
         extension.on_surface(Call::TrackListChange);
         extension.on_surface(Call::TrackListChange);
-        fake::with(|s| s.selected = vec![1]);
+        fake::select_tracks(&[1]);
         extension.on_surface(Call::Selected(track, true));
         extension.on_surface(Call::TrackSelection(track));
         extension.on_surface(Call::PlayState { play: true, pause: false, rec: false });
