@@ -99,8 +99,7 @@ test("json: decodes the JSON grammar", function()
   same(json.decode('{"a":[1,2.5,-3e2,true,false,null],"b":{"c":"d"}}'), { a = { 1, 2.5, -300, true, false, json.null }, b = { c = "d" } })
   eq(json.decode("  42  "), 42)
   eq(json.decode('"\\u00e9\\ud83d\\ude00\\/"'), "é😀/")
-  eq(json.decode('"\\ud800x"'), "\239\191\189x", "lone high surrogate")
-  eq(json.decode('"\\udc00"'), "\239\191\189", "lone low surrogate")
+  eq(json.decode('"\\ud83d\\ude00"'), "\240\159\152\128", "a pair")
   eq(json.decode("[]").n, nil)
   ok(json.is_array(json.decode("[]")))
   eq(enc(json.decode("[]")), "[]", "an empty array stays an array")
@@ -109,7 +108,7 @@ test("json: decodes the JSON grammar", function()
 end)
 
 test("json: rejects what isn't JSON", function()
-  for _, bad in ipairs({ "", " ", "[1,]", "{\"a\":1,}", "[01]", "01", "1.", ".5", "-", "+1", "1e", "[1 2]",
+  for _, bad in ipairs({ '"\\ud800x"', '"\\ud800"', '"\\udc00"', '"\\ud800\\u0041"', "1e400", "-1e999", "", " ", "[1,]", "{\"a\":1,}", "[01]", "01", "1.", ".5", "-", "+1", "1e", "[1 2]",
     "{a:1}", "{'a':1}", "\"a", "\"a\1\"", "\"\\x\"", "\"\\u12\"", "tru", "nul", "[1] x", "\"\255\"",
     "NaN", "Infinity", "[", "{", "{\"a\"}", "{\"a\" 1}" }) do
     local value, err = json.decode(bad)
@@ -159,4 +158,14 @@ test("json: the sliced encoder reports errors", function()
   local done, err = job:step(10)
   eq(done, nil)
   ok(err:find("mixes"))
+end)
+
+test("json: records how a top-level number was written", function()
+  local numbers = {}
+  local value = json.decode('{"a":1,"b":1.0,"c":-0,"d":1E2,"e":"x","f":[1.5],"g":null,"h":7,"h":"again"}', { numbers = numbers })
+  eq(value.a, 1)
+  same(numbers, { a = "1", b = "1.0", c = "-0", d = "1E2" }, "text of the numbers, the last of a repeated name")
+  numbers = {}
+  json.decode('[1,2]', { numbers = numbers })
+  eq(next(numbers), nil, "only an object's own members")
 end)

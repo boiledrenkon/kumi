@@ -6,7 +6,7 @@ local json = import("json")
 local sha256 = import("sha256")
 
 local byte, find, sub, format = string.byte, string.find, string.sub, string.format
-local concat, floor = table.concat, math.floor
+local concat = table.concat
 
 local M = {}
 
@@ -157,8 +157,20 @@ local null = json.null
 local function is_string(v) return type(v) == "string" end
 local function optional_string(v) return v == nil or v == null or type(v) == "string" end
 local function is_object(v) return type(v) == "table" and v ~= null and not json.is_array(v) end
-local function is_uint(v, max) return type(v) == "number" and v >= 0 and v == floor(v) and v <= (max or 2 ^ 64 - 1) end
-local function is_safe(v, allow_zero) return is_uint(v, M.MAX_SAFE_INTEGER) and (allow_zero or v > 0) end
+
+-- An unsigned integer member, judged by how it was written: 1.0, 1e2 and -0 are the same numbers as 1, 100 and 0 to Lua
+-- and refused for a u64 by serde_json, so the two ends of the wire agree by looking at the text. max is the largest
+-- value, or nil for 2^64-1 (compared as text, a double can't tell it from 2^64).
+local U64_MAX = "18446744073709551615"
+local function uint(numbers, key, max)
+  local lexeme = numbers[key]
+  if not lexeme or not find(lexeme, "^%d+$") then return false end
+  if max then return tonumber(lexeme) <= max end
+  return #lexeme < 20 or (#lexeme == 20 and lexeme <= U64_MAX)
+end
+local function safe(numbers, key, allow_zero)
+  return uint(numbers, key, M.MAX_SAFE_INTEGER) and (allow_zero or tonumber(numbers[key]) > 0)
+end
 
 local function strings(v)
   if v == nil then return true end
@@ -174,40 +186,42 @@ local function project_ok(v)
   return is_object(v) and optional_string(v.id) and optional_string(v.name) and optional_string(v.path)
 end
 
+-- Each takes the frame and the text of its top-level numbers.
 local CHECKS = {
   hello = function(f) return is_string(f.protocol) and is_string(f.nonce) and optional_string(f.client) end,
   challenge = function(f) return is_string(f.nonce) and is_string(f.proof) end,
   auth = function(f) return is_string(f.proof) end,
-  welcome = function(f)
+  welcome = function(f, n)
     return is_string(f.session) and is_string(f.daw) and is_string(f.bridge) and is_string(f.dawVersion)
-      and is_uint(f.pid, 4294967295) and is_string(f.resource) and project_ok(f.project)
-      and is_uint(f.maxFrameBytes) and is_uint(f.heartbeatMs) and strings(f.methods) and strings(f.events)
+      and uint(n, "pid", 4294967295) and is_string(f.resource) and project_ok(f.project)
+      and uint(n, "maxFrameBytes") and uint(n, "heartbeatMs") and strings(f.methods) and strings(f.events)
   end,
   refused = function(f) return is_string(f.reason) and optional_string(f.protocol) end,
-  request = function(f)
+  request = function(f, n)
     if f.params == nil then f.params = json.object() end
-    return is_safe(f.id) and is_string(f.method) and is_object(f.params)
-      and (f.deadlineMs == nil or f.deadlineMs == null or is_uint(f.deadlineMs))
+    return safe(n, "id") and is_string(f.method) and is_object(f.params)
+      and (f.deadlineMs == nil or f.deadlineMs == null or uint(n, "deadlineMs"))
   end,
-  response = function(f)
+  response = function(f, n)
     local has_error = f.error ~= nil and f.error ~= null
     if has_error and not (is_object(f.error) and is_string(f.error.code) and is_string(f.error.message)) then return false end
-    return is_safe(f.id) and type(f.ok) == "boolean" and f.ok ~= has_error
+    return safe(n, "id") and type(f.ok) == "boolean" and f.ok ~= has_error
   end,
-  event = function(f) return is_safe(f.seq) and is_string(f.name) end,
-  heartbeat = function(f) return is_safe(f.ms, true) end,
+  event = function(f, n) return safe(n, "seq") and is_string(f.name) end,
+  heartbeat = function(f, n) return safe(n, "ms", true) end,
   bye = function(f) return is_string(f.reason) end,
 }
 
 -- A frame read from one line, or nil and why. Unknown types come back with type "unknown".
 function M.parse_frame(line)
-  local value, err = json.decode(line)
+  local numbers = {}
+  local value, err = json.decode(line, { numbers = numbers })
   if value == nil then return nil, "not JSON: " .. tostring(err) end
   if not is_object(value) then return nil, "not a JSON object" end
   if type(value.type) ~= "string" then return nil, "no type" end
   local check = CHECKS[value.type]
   if not check then return { type = "unknown" } end
-  if not check(value) then return nil, "invalid " .. value.type .. " frame" end
+  if not check(value, numbers) then return nil, "invalid " .. value.type .. " frame" end
   return value
 end
 

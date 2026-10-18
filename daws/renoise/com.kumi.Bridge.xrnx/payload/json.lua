@@ -298,20 +298,14 @@ local function parse_string(s, i)
       if e == 117 then
         local cp = read_hex4(s, k + 2)
         j = k + 6
+        -- A surrogate escape must be half of a pair: a lone one is refused, as serde_json refuses it.
         if cp >= 0xD800 and cp <= 0xDBFF then
-          if byte(s, j) == 92 and byte(s, j + 1) == 117 then
-            local low = read_hex4(s, j + 2)
-            if low >= 0xDC00 and low <= 0xDFFF then
-              cp = 0x10000 + (cp - 0xD800) * 1024 + (low - 0xDC00)
-              j = j + 6
-            else
-              cp = 0xFFFD
-            end
-          else
-            cp = 0xFFFD
-          end
+          local low = byte(s, j) == 92 and byte(s, j + 1) == 117 and read_hex4(s, j + 2)
+          if not (low and low >= 0xDC00 and low <= 0xDFFF) then decode_error(s, k, "lone surrogate") end
+          cp = 0x10000 + (cp - 0xD800) * 1024 + (low - 0xDC00)
+          j = j + 6
         elseif cp >= 0xDC00 and cp <= 0xDFFF then
-          cp = 0xFFFD
+          decode_error(s, k, "lone surrogate")
         end
         n = n + 1; parts[n] = utf8_char(cp)
       else
@@ -352,7 +346,9 @@ local function parse_number(s, i)
     if not e then decode_error(s, j, "invalid number") end
     j = e + 1
   end
-  return tonumber(sub(s, i, j - 1)), j
+  local number = tonumber(sub(s, i, j - 1))
+  if number == math.huge or number == -math.huge then decode_error(s, i, "number out of range") end
+  return number, j
 end
 
 local parse_value
@@ -377,7 +373,8 @@ local function parse_array(s, i, depth, null)
   end
 end
 
-local function parse_object(s, i, depth, null)
+-- top: when given, the document's own members that are numbers get their text recorded in it, by name.
+local function parse_object(s, i, depth, null, top)
   local out = {}
   i = skip(s, i + 1)
   if byte(s, i) == 125 then return out, i + 1 end
@@ -388,8 +385,13 @@ local function parse_object(s, i, depth, null)
     i = skip(s, i)
     if byte(s, i) ~= 58 then decode_error(s, i, "expected ':'") end
     local v
-    v, i = parse_value(s, skip(s, i + 1), depth + 1, null)
+    local first = skip(s, i + 1)
+    v, i = parse_value(s, first, depth + 1, null)
     out[key] = v
+    if top then
+      local lead = byte(s, first)
+      top[key] = (lead == 45 or (lead and lead >= 48 and lead <= 57)) and sub(s, first, i - 1) or nil
+    end
     i = skip(s, i)
     local c = byte(s, i)
     if c == 125 then return out, i + 1 end
@@ -399,11 +401,11 @@ local function parse_object(s, i, depth, null)
 end
 
 -- depth: the nesting level a container at i would have (the document's outermost is 1).
-parse_value = function(s, i, depth, null)
+parse_value = function(s, i, depth, null, top)
   local c = byte(s, i)
   if c == 123 or c == 91 then
     if depth > M.MAX_DEPTH then decode_error(s, i, "too deeply nested") end
-    if c == 123 then return parse_object(s, i, depth, null) end
+    if c == 123 then return parse_object(s, i, depth, null, top) end
     return parse_array(s, i, depth, null)
   end
   if c == 34 then return parse_string(s, i) end
@@ -415,12 +417,14 @@ parse_value = function(s, i, depth, null)
   decode_error(s, i, "unexpected character")
 end
 
--- Returns the value, or nil and why. null decodes to json.null, or to nil with options.null_as_nil.
+-- Returns the value, or nil and why. null decodes to json.null, or to nil with options.null_as_nil. With
+-- options.numbers (a table), the number members of a top-level object are also recorded there as the text they were
+-- written as, by name (1.0 and 1 are the same number to Lua, and not the same to a u64 field).
 function M.decode(s, options)
   if type(s) ~= "string" then return nil, "not a string" end
   local null = (not (options and options.null_as_nil)) and M.null or nil
   local ok, value = pcall(function()
-    local v, j = parse_value(s, skip(s, 1), 1, null)
+    local v, j = parse_value(s, skip(s, 1), 1, null, options and options.numbers)
     j = skip(s, j)
     if j <= #s then decode_error(s, j, "trailing characters") end
     return v, j

@@ -199,6 +199,9 @@ fn request_nested(levels: usize) -> String {
 
 #[test]
 fn frame_vectors() {
+    let request_with =
+        |id: &str, deadline: &str| format!("{{\"type\":\"request\",\"id\":{id},\"method\":\"ping\",\"deadlineMs\":{deadline}}}");
+    let heartbeat = |ms: &str| format!("{{\"type\":\"heartbeat\",\"ms\":{ms}}}");
     let event = |data: &str| format!("{{\"type\":\"event\",\"seq\":1,\"name\":\"x\",\"data\":{data}}}");
     let lines = [
         ("an event whose data nests to the limit", event(&nest(MAX_PAYLOAD_DEPTH))),
@@ -207,6 +210,27 @@ fn frame_vectors() {
         ("a request whose params nest to the limit", request_nested(MAX_PAYLOAD_DEPTH).trim_end().to_string()),
         ("a request whose params nest one level past the limit", request_nested(MAX_PAYLOAD_DEPTH + 1).trim_end().to_string()),
         ("brackets that never close", format!("{{\"type\":\"event\",\"data\":{}", "[".repeat(10_000))),
+        // Numbers are judged by how they are written: a float, an exponent or -0 is not an unsigned integer.
+        ("a request id written 1", request_with("1", "5")),
+        ("a request id written 1.0", request_with("1.0", "5")),
+        ("a request id written 1e0", request_with("1e0", "5")),
+        ("a request id written 1E2", request_with("1E2", "5")),
+        ("a request id written -0", request_with("-0", "5")),
+        ("a request id of 2^53 - 1", request_with("9007199254740991", "5")),
+        ("a request id of 2^53", request_with("9007199254740992", "5")),
+        ("a deadline written 1.5", request_with("1", "1.5")),
+        ("a deadline written 1e3", request_with("1", "1e3")),
+        ("a deadline of 2^64 - 1", request_with("1", "18446744073709551615")),
+        ("a deadline of 2^64", request_with("1", "18446744073709551616")),
+        ("a deadline of null", request_with("1", "null")),
+        ("a heartbeat of 0", heartbeat("0")),
+        ("a heartbeat written -0", heartbeat("-0")),
+        ("a heartbeat written 0.0", heartbeat("0.0")),
+        ("a heartbeat out of range", heartbeat("1e400")),
+        ("an event number written 2.0", "{\"type\":\"event\",\"seq\":2.0,\"name\":\"x\"}".to_string()),
+        ("a name with a surrogate pair", "{\"type\":\"event\",\"seq\":1,\"name\":\"\\ud83d\\ude00\"}".to_string()),
+        ("a name with a lone high surrogate", "{\"type\":\"event\",\"seq\":1,\"name\":\"\\ud800x\"}".to_string()),
+        ("a name with a lone low surrogate", "{\"type\":\"event\",\"seq\":1,\"name\":\"\\udc00\"}".to_string()),
     ];
     let parse: Vec<Value> =
         lines.iter().map(|(name, line)| json!({"name": name, "line": line, "ok": Frame::parse(line).is_ok()})).collect();
@@ -222,7 +246,7 @@ fn frame_vectors() {
     check(
         "frames.json",
         json!({
-            "about": "Frame limits. maxJsonDepth: a frame nests at most this deep, its own object counting as the first level, on every reader and writer. parse: Frame::parse on line accepts it (ok) or refuses it. encode: a response whose result is resultDepth arrays inside one another is sent (sent), or answered with an error response instead; a bridge never writes a line it would refuse to read.",
+            "about": "Frame limits and grammar. maxJsonDepth: a frame nests at most this deep, its own object counting as the first level, on every reader and writer. parse: Frame::parse on line accepts it (ok) or refuses it; an unsigned integer member (id, seq, ms, deadlineMs, pid, maxFrameBytes, heartbeatMs) is judged by the text it was written as, and a surrogate escape must be half of a pair. encode: a response whose result is resultDepth arrays inside one another is sent (sent), or answered with an error response instead; a bridge never writes a line it would refuse to read.",
             "maxJsonDepth": MAX_JSON_DEPTH,
             "parse": parse,
             "encode": encode,
