@@ -6,6 +6,7 @@ pub mod host;
 pub mod mcp;
 pub mod simulator;
 pub mod stdio;
+pub mod tools;
 
 use daw_bridge::Daw;
 use std::path::PathBuf;

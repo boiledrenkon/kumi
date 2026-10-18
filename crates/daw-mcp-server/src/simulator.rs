@@ -22,7 +22,13 @@ pub struct Line {
     pub text: String,
 }
 
-#[derive(Debug, Clone)]
+pub mod reaper;
+
+/// What a simulated bridge answers beyond `ping` and `status`: `Some(Ok(result))`, `Some(Err((code, message)))`, or None
+/// for a method it doesn't have.
+pub type Respond = Arc<dyn Fn(&str, &Value) -> Option<Result<Value, (String, String)>> + Send + Sync>;
+
+#[derive(Clone)]
 pub struct SimulatorConfig {
     pub secret: Secret,
     pub identity: Identity,
@@ -31,6 +37,17 @@ pub struct SimulatorConfig {
     pub status_extra: Map<String, Value>,
     /// Where to write the discovery file, if anywhere.
     pub discovery_dir: Option<PathBuf>,
+    /// The methods beyond ping and status.
+    pub respond: Option<Respond>,
+}
+
+impl std::fmt::Debug for SimulatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimulatorConfig")
+            .field("identity", &self.identity)
+            .field("respond", &self.respond.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SimulatorConfig {
@@ -56,7 +73,15 @@ impl SimulatorConfig {
             },
             status_extra: Map::new(),
             discovery_dir: None,
+            respond: None,
         }
+    }
+
+    /// Adds methods, answered by `respond`, to what the bridge offers.
+    pub fn with_methods(mut self, methods: &[&str], respond: Respond) -> Self {
+        self.offer.methods.extend(methods.iter().map(|m| m.to_string()));
+        self.respond = Some(respond);
+        self
     }
 
     /// Renoise 3.5.4 (licensed) with an unsaved song.
@@ -79,6 +104,7 @@ impl SimulatorConfig {
             },
             status_extra,
             discovery_dir: None,
+            respond: None,
         }
     }
 }
@@ -221,7 +247,11 @@ fn answer(request: &Request, state: &Mutex<State>, config: &SimulatorConfig) -> 
             }
             Frame::ok(request.id, status)
         }
-        other => Frame::error(request.id, code::UNKNOWN_METHOD, format!("no method {other}")),
+        other => match config.respond.as_ref().and_then(|respond| respond(other, &request.params)) {
+            Some(Ok(result)) => Frame::ok(request.id, result),
+            Some(Err((code, message))) => Frame::error(request.id, &code, message),
+            None => Frame::error(request.id, code::UNKNOWN_METHOD, format!("no method {other}")),
+        },
     }
 }
 
