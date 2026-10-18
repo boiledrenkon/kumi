@@ -58,11 +58,17 @@ impl Waiter {
     /// Waits for the answer until `timeout`, or until `closing` is set (the extension is unloading, and its main thread
     /// may be the one waiting for this thread to end).
     pub fn wait(self, timeout: Duration, closing: &AtomicBool) -> Outcome {
+        self.wait_unless(timeout, closing, &|| false)
+    }
+
+    /// As `wait`, and gives up early, as a timeout does, once `give_up` says so (checked every few milliseconds): a
+    /// request that waits for a main thread that has been found to be in a dialog.
+    pub fn wait_unless(self, timeout: Duration, closing: &AtomicBool, give_up: &dyn Fn() -> bool) -> Outcome {
         let deadline = Instant::now() + timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let closed = closing.load(Ordering::Acquire);
-            if left.is_zero() || closed {
+            if left.is_zero() || closed || give_up() {
                 if self.state.compare_exchange(QUEUED, CANCELLED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                     return if closed { Outcome::Closed } else { Outcome::Cancelled };
                 }
@@ -195,6 +201,24 @@ mod tests {
         tx.send(job).unwrap();
         drop(rx);
         assert_eq!(waiter.wait(Duration::from_secs(1), &OPEN), Outcome::Closed);
+    }
+
+    #[test]
+    fn a_wait_that_gives_up_early_cancels_a_queued_job_and_leaves_a_claimed_one_be() {
+        let (tx, rx) = channel();
+        let (first, waiter) = job("read", json!({}));
+        tx.send(first).unwrap();
+        let started = Instant::now();
+        let outcome = waiter.wait_unless(Duration::from_secs(30), &OPEN, &|| started.elapsed() > Duration::from_millis(60));
+        assert_eq!(outcome, Outcome::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(drain(&rx, NO_LINGER, |_| panic!("a job that was given up on ran")), 0);
+        // A job already running isn't taken back: it may have changed something.
+        let (second, second_waiter) = job("action", json!({}));
+        tx.send(second).unwrap();
+        let held = rx.recv().unwrap();
+        assert!(held.claim());
+        assert_eq!(second_waiter.wait_unless(Duration::from_secs(30), &OPEN, &|| true), Outcome::Uncertain);
     }
 
     #[test]

@@ -18,6 +18,11 @@ use crate::reaper::{Busy, PlayState, ProjectInfo, Reaper, ACTION_QUIT};
 
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const HEARTBEAT: Duration = Duration::from_millis(daw_bridge::wire::HEARTBEAT_MS);
+/// How long the main window has to stay disabled before REAPER counts as in a dialog: a disable that comes and goes
+/// within an ordinary action is not one.
+const MODAL_AFTER: Duration = Duration::from_millis(300);
+/// Set to 0 to stop asking whether a dialog has the main window (for a REAPER where the question gets the wrong answer).
+const MODAL_CHECK_ENV: &str = "KUMI_REAPER_MODAL_CHECK";
 /// How often `focus` is polled when nothing has said it changed (Kumi asks about every 150 ms).
 const FOCUS_EVERY: Duration = Duration::from_millis(50);
 
@@ -200,6 +205,8 @@ pub struct Extension {
     pending: RefCell<Pending>,
     sent: RefCell<Sent>,
     watch: RefCell<Watch>,
+    modal_since: Cell<Option<Instant>>,
+    modal_check: bool,
     rates: RefCell<Rates>,
     in_tick: Cell<bool>,
     quit: Cell<Quit>,
@@ -221,6 +228,8 @@ impl Extension {
             pending: RefCell::default(),
             sent: RefCell::default(),
             watch: RefCell::default(),
+            modal_since: Cell::new(None),
+            modal_check: std::env::var(MODAL_CHECK_ENV).map_or(true, |value| value != "0"),
             rates: RefCell::default(),
             in_tick: Cell::new(false),
             quit: Cell::new(Quit::No),
@@ -290,8 +299,10 @@ impl Extension {
             self.reaper().run_action(ACTION_QUIT);
             return;
         }
-        let busy = self.reaper().busy();
-        if busy.is_none() {
+        // Nothing runs while a dialog has the main window, even in the moments before it counts as one.
+        let blocked = self.window_blocked();
+        let busy = self.reaper().busy().or_else(|| self.in_dialog(blocked).then_some(Busy::Modal));
+        if busy.is_none() && !blocked {
             self.run_jobs();
         }
         self.poll_project(busy.is_none());
@@ -305,6 +316,26 @@ impl Extension {
             self.last_heartbeat.set(Some(now));
             self.out.heartbeat();
         }
+    }
+
+    // Whether the main window is disabled right now, as a dialog does.
+    fn window_blocked(&self) -> bool {
+        self.modal_check && self.reaper().main_window_enabled() == Some(false)
+    }
+
+    // Whether a dialog has had REAPER's main window for a while: requests are then answered busy rather than queued behind
+    // it. (A window disabled for an instant is not one; but nothing runs while it is, either way.)
+    fn in_dialog(&self, blocked: bool) -> bool {
+        if !blocked {
+            self.modal_since.set(None);
+            return false;
+        }
+        let since = self.modal_since.get().unwrap_or_else(|| {
+            let now = Instant::now();
+            self.modal_since.set(Some(now));
+            now
+        });
+        since.elapsed() >= MODAL_AFTER
     }
 
     fn run_jobs(&self) {
@@ -929,6 +960,72 @@ mod tests {
         let settled = epoch_and_identity(&extension, &tx);
         extension.tick(Driver::Timer);
         assert_eq!(epoch_and_identity(&extension, &tx), settled);
+    }
+
+    #[test]
+    fn a_dialog_over_the_main_window_holds_requests_and_is_said_busy() {
+        let (extension, tx, _, _) = setup();
+        fake::with(|s| s.main_enabled = false);
+        // Disabled for long enough: a dialog. Requests wait, nothing is polled, and the snapshot says so.
+        extension.modal_since.set(Some(Instant::now() - MODAL_AFTER));
+        let (job, waiter) = queue::job("action", json!({"command": 40001}));
+        tx.send(job).unwrap();
+        extension.tick(Driver::Timer);
+        assert_eq!(extension.snapshot().busy, Some(Busy::Modal));
+        assert_eq!(waiter.wait(Duration::from_millis(1), &OPEN), Outcome::Cancelled);
+        assert!(fake::with(|s| s.actions.is_empty()));
+        // The dialog closes: the next tick is free again, and the next request runs.
+        fake::with(|s| s.main_enabled = true);
+        extension.tick(Driver::Timer);
+        assert_eq!(extension.snapshot().busy, None);
+        assert!(ask_with(&extension, &tx, "action", json!({"command": 40001})).is_ok());
+    }
+
+    #[test]
+    fn nothing_runs_in_the_first_moments_of_a_dialog_either() {
+        let (extension, tx, _, _) = setup();
+        fake::with(|s| s.main_enabled = false);
+        let (job, waiter) = queue::job("action", json!({"command": 40001}));
+        tx.send(job).unwrap();
+        // The window was just disabled: not yet a dialog to report, but no place to start work.
+        extension.tick(Driver::Timer);
+        assert_eq!(extension.snapshot().busy, None);
+        assert!(fake::with(|s| s.actions.is_empty()), "a request ran inside the dialog");
+        // It was only an instant: the request goes ahead once the window is back.
+        fake::with(|s| s.main_enabled = true);
+        extension.tick(Driver::Timer);
+        assert!(matches!(waiter.wait(Duration::from_secs(1), &OPEN), Outcome::Answered(Ok(_))));
+        assert_eq!(fake::with(|s| s.actions.clone()), [40001]);
+    }
+
+    #[test]
+    fn a_window_disabled_for_an_instant_is_not_a_dialog() {
+        let (extension, _tx, _, _) = setup();
+        fake::with(|s| s.main_enabled = false);
+        extension.tick(Driver::Timer);
+        fake::with(|s| s.main_enabled = true);
+        extension.tick(Driver::Timer);
+        assert_eq!(extension.modal_since.get(), None);
+        fake::with(|s| s.main_enabled = false);
+        extension.tick(Driver::Timer);
+        // The clock started again, not where it was.
+        assert!(extension.modal_since.get().is_some_and(|since| since.elapsed() < MODAL_AFTER));
+        assert_eq!(extension.snapshot().busy, None);
+    }
+
+    #[test]
+    fn the_dialog_check_can_be_turned_off() {
+        fake::reset();
+        let (tx, rx) = queue::channel();
+        let mut extension = Extension::new(fake::api(), rx, Box::new(Recorder::default()), Arc::new(Mutex::new(Snapshot::default())));
+        extension.modal_check = false;
+        fake::with(|s| s.main_enabled = false);
+        extension.modal_since.set(Some(Instant::now() - MODAL_AFTER));
+        let (job, waiter) = queue::job("action", json!({"command": 40001}));
+        tx.send(job).unwrap();
+        extension.tick(Driver::Timer);
+        assert!(matches!(waiter.wait(Duration::from_secs(1), &OPEN), Outcome::Answered(Ok(_))));
+        assert_eq!(extension.snapshot().busy, None);
     }
 
     #[test]
