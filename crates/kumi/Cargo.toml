@@ -21,6 +21,7 @@ path = "src/main.rs"
 kumi-common.workspace = true
 kumi-runtime.workspace = true
 ableton-mcp-server.workspace = true
+daw-bridge.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true

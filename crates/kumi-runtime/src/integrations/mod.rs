@@ -21,8 +21,11 @@ pub use ableton::rendering::main_chain as live_main_chain;
 pub use ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
 pub use ableton::{ears, hands};
 
-/// The DAWs this build integrates, by profile: Live only, for now.
-pub const REGISTERED: &[&DawProfile] = &[&DawProfile::ABLETON];
+/// The DAWs this build integrates, by profile: Live, and the DAWs whose bridges are Kumi's own.
+pub const REGISTERED: &[&DawProfile] = &[&DawProfile::ABLETON, &DawProfile::REAPER, &DawProfile::RENOISE];
+
+/// The places a store takes: every registered DAW's.
+pub const PLACES: crate::core::place::Places = crate::core::place::Places(&[DawId::Ableton, DawId::Reaper, DawId::Renoise]);
 
 /// A registered DAW's profile; None for one this build doesn't integrate.
 pub fn profile(id: DawId) -> Option<&'static DawProfile> {
@@ -33,7 +36,8 @@ pub fn profile(id: DawId) -> Option<&'static DawProfile> {
 pub fn presentation(id: DawId) -> Option<&'static ToolPresentation> {
     match id {
         DawId::Ableton => Some(&ableton::presentation::PRESENTATION),
-        _ => None,
+        DawId::Reaper => Some(&reaper::PRESENTATION),
+        DawId::Renoise => Some(&renoise::PRESENTATION),
     }
 }
 
@@ -41,7 +45,8 @@ pub fn presentation(id: DawId) -> Option<&'static ToolPresentation> {
 pub fn view(id: DawId) -> Option<&'static ViewPresentation> {
     match id {
         DawId::Ableton => Some(&ableton::presentation::VIEW),
-        _ => None,
+        DawId::Reaper => Some(&reaper::VIEW),
+        DawId::Renoise => Some(&renoise::VIEW),
     }
 }
 

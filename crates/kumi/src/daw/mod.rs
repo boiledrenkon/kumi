@@ -2,6 +2,7 @@
 //! app says of the DAW and shows of its tools, its focus and its devices comes from here, and each DAW's provider
 //! finds its bridge and makes the session's integration.
 pub mod ableton;
+pub mod own;
 pub mod provider;
 
 pub use provider::{
@@ -19,9 +20,9 @@ use kumi_runtime::{
 };
 use std::cell::Cell;
 
-/// Each registered DAW's provider.
-pub fn providers() -> [&'static dyn DawProvider; 1] {
-    [&ableton::provider::Ableton]
+/// Each registered DAW's provider: Live's first, then the DAWs whose bridges are Kumi's own.
+pub fn providers() -> [&'static dyn DawProvider; 3] {
+    [&ableton::provider::Ableton, &own::REAPER, &own::RENOISE]
 }
 
 /// A registered DAW's provider; None for one this Kumi doesn't integrate.
@@ -30,9 +31,8 @@ pub fn provider(id: DawId) -> Option<&'static dyn DawProvider> {
 }
 
 /// The DAW a session works with, and where Kumi's bridge for it says how to reach it: the one asked for (with --daw
-/// or KUMI_DAW); else the first registered DAW whose bridge is installed; else, chatting without a DAW, Live's words.
-/// That last is Live because Live is the only DAW registered: once another is, it's chosen on purpose (the DAW used
-/// last, or asked), not inherited from here.
+/// or KUMI_DAW); else the first registered DAW whose bridge is installed (Live first); else, chatting without a DAW,
+/// Live's words: Live stays the DAW Kumi starts with.
 pub fn chosen(asked: Option<DawId>, env: &Env) -> (&'static dyn DawProvider, Option<String>) {
     if let Some(provider) = asked.and_then(provider) {
         return (provider, provider.bridge_config(env));

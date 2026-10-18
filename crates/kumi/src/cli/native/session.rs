@@ -204,8 +204,9 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
     // Each Set's kept conversations, while Live may come in this session, or when the producer asked for one (then they
     // go on saving where they're kept, Live or not).
     let keep_days = settings.conversations.as_ref().and_then(|c| c.keep_days);
-    let conversations = (bridge_config.is_some() || bridge_missing || resume.is_some())
-        .then(|| create_conversation_store_keeping(&projects_dir, keep_days));
+    let conversations = (bridge_config.is_some() || bridge_missing || resume.is_some()).then(|| {
+        kumi_runtime::core::conversations::create_conversation_store_in(&projects_dir, keep_days, kumi_runtime::integrations::PLACES)
+    });
     // The conversation asked for is found before anything shows: a word that names none says so, and Kumi stops there.
     let (taken_up, choose, resume_notice) = match (&resume, &conversations) {
         (Some(Resume::Named(word)), Some(store)) => match store.find(word).await? {
@@ -524,11 +525,11 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
     };
     let database = database.ok().map(|(client, _)| client);
     options.memory = Some(match &database {
-        Some(client) => Rc::new(SqliteMemoryStore::new(client.clone())) as Rc<dyn MemoryStore>,
-        None => create_memory_store(MemoryStoreOptions {
-            projects_dir: projects_dir.clone().into(),
-            producer_file: load_memory_file(&io.env)?.into(),
-        }),
+        Some(client) => Rc::new(SqliteMemoryStore::with_places(client.clone(), kumi_runtime::integrations::PLACES)) as Rc<dyn MemoryStore>,
+        None => kumi_runtime::core::memory::create_memory_store_in(
+            MemoryStoreOptions { projects_dir: projects_dir.clone().into(), producer_file: load_memory_file(&io.env)?.into() },
+            kumi_runtime::integrations::PLACES,
+        ),
     });
     options.listen = true;
     options.recipes = Some(create_recipe_store(load_recipes_dir(&io.env)?));
