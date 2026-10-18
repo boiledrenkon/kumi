@@ -779,9 +779,10 @@ local function grant(peer, bytes)
 end
 
 test("bridge: a big frame goes out in slices over ticks, as the host grants credit", function()
-  local env = setup({ song = { name = string.rep("n", 600 * 1024) } })
+  local env = setup()
+  env.payload().handlers["test.big"] = function() return { blob = string.rep("n", 600 * 1024) } end
   local peer = connect(env)
-  send(peer, { type = "request", id = 99, method = "status" })
+  send(peer, { type = "request", id = 99, method = "test.big" })
   for _ = 1, 20 do
     tick(2)
     local taken = peer:take() -- (it keeps what it took, for frames() to split)
@@ -792,7 +793,7 @@ test("bridge: a big frame goes out in slices over ticks, as the host grants cred
     if frame.type == "response" and frame.id == 99 then response = frame end
   end
   ok(response, "the answer came whole")
-  eq(#response.result.project.name, 600 * 1024)
+  eq(#response.result.blob, 600 * 1024)
   ok(peer.sent_calls > 5, "sent in pieces")
   no_dialogs()
 end)
@@ -1322,4 +1323,31 @@ test("bridge: the bye goes out even behind a response of nearly two megabytes al
   s:close_all("quit")
   local all = table.concat(sent)
   eq(all, big:sub(1000) .. wire.encode_frame("bye", { reason = "quit" }), "the rest of the line, then the bye, nothing between")
+end)
+
+test("bridge: a huge song title is cut to 256 characters in the discovery file, the welcome and status", function()
+  local env = setup({ song = { name = string.rep("n", 1024 * 1024) } })
+  local peer, welcome = connect(env)
+  local function check(project, where)
+    eq(project.title, string.rep("n", 256) .. "\226\128\166", where .. " title")
+    eq(project.name, project.title, where .. " name")
+  end
+  check(welcome.project, "welcome")
+  check(request(peer, "status").result.project, "status")
+  local discovery_text = read(env.discovery_file())
+  ok(#discovery_text < 2048, "discovery file: " .. #discovery_text .. " bytes")
+  check(json.decode(discovery_text).project, "discovery")
+  no_dialogs()
+end)
+
+test("bridge: a cut title never splits a character", function()
+  local status = T.load_payload_module("status")
+  local json_ = T.load_payload_module("json")
+  local title = string.rep("\240\159\142\181", 300) -- 300 musical notes, 4 bytes each
+  local cut = status.cap(title)
+  ok(json_.valid_utf8(cut), "still UTF-8")
+  eq(cut, string.rep("\240\159\142\181", 256) .. "\226\128\166")
+  eq(status.cap("short"), "short")
+  eq(status.cap(string.rep("a", 256)), string.rep("a", 256), "exactly the limit stays")
+  eq(status.cap(string.rep("\195\169", 256)), string.rep("\195\169", 256), "256 two-byte characters stay")
 end)
