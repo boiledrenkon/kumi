@@ -119,7 +119,8 @@ async fn reapers_observation_is_its_project_in_short_refs_at_its_place() {
             let read = seen.tools[0].clone();
             let page = read.execute(json!({"kind": "item", "parent": "track:2"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
             assert!(!page.is_error, "{}", page.text);
-            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "item", "parent": BASS}));
+            // Lengthened, with the epoch the track was read in.
+            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "item", "parent": BASS, "epoch": "1"}));
             let page: Value = serde_json::from_str(&page.text).unwrap();
             assert_eq!(page["items"][0]["ref"], "item:1");
             assert_eq!(page["items"][0]["takeRef"], "take:1");
@@ -518,6 +519,22 @@ async fn reads_and_looks_stay_plain_short_and_whole() {
             let failed =
                 seen.tools[0].execute(json!({"kind": "item", "parent": bass}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
             assert!(failed.is_error && failed.text.starts_with(&bass) && !failed.text.contains("r:track:"), "{}", failed.text);
+            // The read names the epoch its ref came from, so REAPER refuses it in another project (a Save As copy in
+            // another tab shares the GUIDs).
+            assert_eq!(host.asked.borrow().last().unwrap().1["epoch"], "1");
+            host.answers.borrow_mut().push(("read", json!({"error": "stale", "code": "stale", "connected": true}), true));
+            let stale =
+                seen.tools[0].execute(json!({"kind": "item", "parent": bass}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert_eq!(
+                stale.text,
+                format!("{bass} was read in another project than the one REAPER has open now: read again for current refs")
+            );
+            host.answers.borrow_mut().push(("read", json!({"error": "moved", "code": "changed", "connected": true}), true));
+            let changed = seen.tools[0]
+                .execute(json!({"kind": "item", "parent": bass, "cursor": "c1.1.50~x"}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert!(changed.is_error && changed.text.starts_with("REAPER changed while reading"), "{}", changed.text);
 
             // A page past the kernel's cut is asked for again with half the rows, keeping its nextCursor.
             let row = |n: usize| json!({"ref": format!("r:item:{{I{n}}}"), "name": "x".repeat(400)});
@@ -540,6 +557,11 @@ async fn reads_and_looks_stay_plain_short_and_whole() {
             host.answers.borrow_mut().push(("snapshot", later, false));
             let again: Value = serde_json::from_str(&reaper.observe(Signal::new(), None).await.unwrap().context).unwrap();
             assert_eq!(again["tracks"][1]["ref"], json!(bass), "the same track, the same name");
+            // Read again in the new epoch, the ref carries it.
+            host.answers.borrow_mut().push(("read", json!({"items": [], "epoch": "2"}), false));
+            let tools = reaper.observe(Signal::new(), None).await.unwrap().tools;
+            let _ = tools[0].execute(json!({"kind": "item", "parent": bass}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert_eq!(host.asked.borrow().last().unwrap().1["epoch"], "2");
         })
         .await;
 }

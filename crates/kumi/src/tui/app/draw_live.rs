@@ -327,17 +327,25 @@ impl TuiApp {
             let focus = state.focus.as_ref();
             (focus.and_then(|f| f.track_ref.clone()), focus.and_then(|f| f.track.as_ref().map(|t| t.name.clone())))
         };
-        let shown = lanes.len().min(8);
-        let first = lanes
+        // What REAPER draws: tracks the producer hid, and those in a folder collapsed all the way, aren't.
+        let visible: Vec<usize> = (0..lanes.len()).filter(|at| !lanes[*at].hidden).collect();
+        if visible.is_empty() {
+            return 0;
+        }
+        let shown = visible.len().min(8);
+        let first = visible
             .iter()
-            .position(|lane| lane.track_ref.is_some() && lane.track_ref == selected_ref)
-            .or_else(|| selected_name.and_then(|name| lanes.iter().position(|lane| lane.track_ref.is_none() && lane.name == name)))
-            .map(|at| at.saturating_sub(shown / 2).min(lanes.len() - shown))
+            .position(|at| lanes[*at].track_ref.is_some() && lanes[*at].track_ref == selected_ref)
+            .or_else(|| {
+                selected_name.and_then(|name| visible.iter().position(|at| lanes[*at].track_ref.is_none() && lanes[*at].name == name))
+            })
+            .map(|at| at.saturating_sub(shown / 2).min(visible.len() - shown))
             .unwrap_or(0);
-        for (row, lane) in lanes.iter().skip(first).take(shown).enumerate() {
+        for (row, lane) in visible[first..first + shown].iter().map(|at| &lanes[*at]).enumerate() {
             let row = y + row as i32;
             let indent = "  ".repeat(lane.depth.min(4) as usize);
-            screen.put(x, row, &truncate(&format!("{indent}{}", lane.name), name_width), &st::DIM);
+            let sign = if lane.collapsed { "▸ " } else { "" };
+            screen.put(x, row, &truncate(&format!("{indent}{sign}{}", lane.name), name_width), &st::DIM);
             let mut line = vec![sp(" ", st::FAINT); cells as usize];
             for item in &lane.items {
                 let style = if item.selected {
@@ -355,14 +363,24 @@ impl TuiApp {
         }
         // The DAW sends a page of lanes, says where it starts and how many tracks it has in all: the rest are above or
         // below.
-        let above = strip.lanes_from.unwrap_or(0) + first;
-        let below = strip.track_count.unwrap_or(0).saturating_sub(above + shown);
-        let more = match (above, below) {
-            (0, 0) => return shown as i32,
-            (0, below) => format!("{below} more tracks below"),
-            (above, 0) => format!("{above} more tracks above"),
-            (above, below) => format!("{above} more tracks above · {below} below"),
+        let (top, bottom) = (visible[first], visible[first + shown - 1]);
+        let above = strip.lanes_from.unwrap_or(0) + top;
+        let total = strip.track_count.unwrap_or(0).max(strip.lanes_from.unwrap_or(0) + lanes.len());
+        let below = total.saturating_sub(strip.lanes_from.unwrap_or(0) + bottom + 1);
+        let hidden = lanes[top..=bottom].iter().filter(|lane| lane.hidden).count();
+        let mut more = match (above, below) {
+            (0, 0) => vec![],
+            (0, below) => vec![format!("{below} more tracks below")],
+            (above, 0) => vec![format!("{above} more tracks above")],
+            (above, below) => vec![format!("{above} more tracks above"), format!("{below} below")],
         };
+        if hidden > 0 {
+            more.push(format!("{hidden} hidden"));
+        }
+        if more.is_empty() {
+            return shown as i32;
+        }
+        let more = more.join(" · ");
         screen.put(x, y + shown as i32, &truncate(&more, width), &st::FAINT);
         shown as i32 + 1
     }

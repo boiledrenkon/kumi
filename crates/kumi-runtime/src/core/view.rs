@@ -426,6 +426,12 @@ pub struct TimelineLane {
     #[serde(default)]
     pub depth: u32,
     pub items: Vec<TimelineItem>,
+    /// Not drawn: the producer hid it, or it's in a folder collapsed all the way. It still counts among the tracks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    /// A folder collapsed all the way: its tracks are hidden.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
 }
 
 /// An item on a lane: where it starts and how long it is, in beats, its name, and whether it's muted or selected.

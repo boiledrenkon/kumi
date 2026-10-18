@@ -55,9 +55,14 @@ fn fill_focus(focus: &Value) -> DawFocus {
             owner: fx.clone(),
         })
     });
+    // The routing window is one track's, not always the selected one's: FOCUS shows that track's routing (without the
+    // selected track's name over it).
+    let selected_track = selected(&selection, "trackRef");
+    let routing = selected(&selection, "routingTrackRef").filter(|_| focus.get("view").and_then(Value::as_str) == Some("routing"));
+    let track = if routing.is_none() || routing == selected_track { focus_track(&selection) } else { None };
     DawFocus {
-        track: focus_track(&selection),
-        track_ref: selected(&selection, "trackRef"),
+        track,
+        track_ref: routing.or(selected_track),
         device_ref: selected(&selection, "fxRef"),
         device: fx,
         parameter,
@@ -182,6 +187,7 @@ pub fn create_reaper_integration(options: OwnOptions) -> Rc<dyn Integration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_reaper_ref_is_its_kind_and_its_guid() {
@@ -199,5 +205,19 @@ mod tests {
             refs.refs_in("r:send:{A1}:0:{B2}, r:send:{A1}:1:hw3 and r:marker:{C3}"),
             ["r:send:{A1}:0:{B2}", "r:send:{A1}:1:hw3", "r:marker:{C3}"]
         );
+    }
+
+    #[test]
+    fn the_routing_window_shows_its_own_tracks_routing() {
+        let selection = json!({"trackRef": "r:track:{A}", "track": {"name": "Lead"}, "routingTrackRef": "r:track:{B}"});
+        let other = fill_focus(&json!({"view": "routing", "selection": selection}));
+        assert_eq!(other.track_ref.as_deref(), Some("r:track:{B}"), "the window's track, not the selected one");
+        assert!(other.track.is_none(), "the selected track's name isn't put over another track's routing");
+        let same = fill_focus(
+            &json!({"view": "routing", "selection": {"trackRef": "r:track:{A}", "track": {"name": "Lead"}, "routingTrackRef": "r:track:{A}"}}),
+        );
+        assert_eq!((same.track_ref.as_deref(), same.track.map(|t| t.name)), (Some("r:track:{A}"), Some("Lead".into())));
+        let arrange = fill_focus(&json!({"view": "arrange", "selection": selection}));
+        assert_eq!(arrange.track_ref.as_deref(), Some("r:track:{A}"), "outside the routing view, the selected track");
     }
 }

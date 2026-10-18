@@ -103,6 +103,26 @@ case!(reapers_midi_editor_arrange_view_and_routing_draw_in_focus, async {
     let arrange = json!({"track":{"name":"Bass"},"trackRef":"r:track:{8}","mainView":{"kind":"timeline","label":"Arrange"}});
     h.emit(json!({"type":"focus","focus":arrange}));
     shows(&h, "102 more tracks above · 90 below").await;
+
+    // What REAPER doesn't draw, FOCUS doesn't either: a hidden track, and the tracks of a folder collapsed all the way
+    // (marked ▸); they're counted, not drawn.
+    *c.arrangement.borrow_mut() = Some(
+        serde_json::from_value(json!({"length":64.0,"position":0.0,"playing":false,"locators":[],"track_count":5,"lanes":[
+            {"name":"Drums","depth":0,"collapsed":true,"items":[]},
+            {"name":"Kick","depth":1,"hidden":true,"items":[]},
+            {"name":"Guide","depth":0,"hidden":true,"items":[]},
+            {"name":"Keys","depth":0,"items":[]},
+            {"name":"Vox","depth":0,"items":[]}
+        ]}))
+        .unwrap(),
+    );
+    let arrange = json!({"track":{"name":"Vox"},"trackRef":"r:track:{V}","mainView":{"kind":"timeline","label":"Arrange"}});
+    h.emit(json!({"type":"focus","focus":arrange}));
+    shows(&h, "2 hidden").await;
+    h.has("▸ Drums");
+    h.has("Keys");
+    let screen = h.screen().join("\n");
+    assert!(!screen.contains("Kick") && !screen.contains("Guide"), "{screen}");
     h.close().await;
 });
 

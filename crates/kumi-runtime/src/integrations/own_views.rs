@@ -89,12 +89,28 @@ pub fn notes(item_ref: &str, body: &Value) -> NoteView {
 
 /// The timeline with each track's items as bars (REAPER's arrange view), in beats.
 pub fn timeline(body: &Value) -> TimelineStrip {
+    // The depth of a folder collapsed all the way: the tracks under it are hidden, as REAPER hides them.
+    let mut under: Option<u32> = None;
     let lanes = list(body, "tracks")
-        .map(|track| TimelineLane {
+        .map(|track| {
+            let depth = number(track, "depth").unwrap_or(0.).max(0.) as u32;
+            let inside = under.is_some_and(|folder| depth > folder);
+            if !inside {
+                under = None;
+            }
+            let collapsed = number(track, "folder") == Some(1.) && text(track, "folderState") == "fully-collapsed";
+            if collapsed && !inside {
+                under = Some(depth);
+            }
+            (track, depth, inside || track.get("shown") == Some(&Value::Bool(false)), collapsed)
+        })
+        .map(|(track, depth, hidden, collapsed)| TimelineLane {
             name: text(track, "name"),
             track_ref: track.get("ref").and_then(Value::as_str).map(str::to_owned),
             color: color(track),
-            depth: number(track, "depth").unwrap_or(0.).max(0.) as u32,
+            depth,
+            hidden,
+            collapsed,
             items: list(track, "items")
                 .filter_map(|item| {
                     Some(TimelineItem {
@@ -339,4 +355,41 @@ pub fn body_args(kind: &str, reference: Option<&str>) -> JsonObject {
         args.insert("ref".into(), reference.into());
     }
     args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_timeline_keeps_hidden_tracks_marked_and_says_where_its_page_starts() {
+        let body = json!({"from": 40, "trackCount": 200, "tracks": [
+            {"ref": "r:track:{D}", "name": "Drums", "depth": 0, "folder": 1, "folderState": "fully-collapsed", "items": []},
+            {"ref": "r:track:{K}", "name": "Kick", "depth": 1, "folder": 0, "items": []},
+            {"ref": "r:track:{S}", "name": "Snare", "depth": 1, "folder": -1, "items": []},
+            {"ref": "r:track:{B}", "name": "Bass", "depth": 0, "folder": 0, "items": []},
+            {"ref": "r:track:{G}", "name": "Guide", "depth": 0, "folder": 0, "shown": false, "items": []},
+            {"ref": "r:track:{P}", "name": "Pads", "depth": 0, "folder": 1, "folderState": "collapsed", "items": []},
+            {"ref": "r:track:{P1}", "name": "Pad 1", "depth": 1, "folder": -1, "items": []}
+        ]});
+        let strip = timeline(&body);
+        let lanes = strip.lanes.unwrap();
+        let seen: Vec<(&str, bool, bool)> = lanes.iter().map(|lane| (lane.name.as_str(), lane.hidden, lane.collapsed)).collect();
+        assert_eq!(
+            seen,
+            [
+                ("Drums", false, true),
+                ("Kick", true, false),
+                ("Snare", true, false),
+                ("Bass", false, false),
+                ("Guide", true, false),
+                ("Pads", false, false),
+                ("Pad 1", false, false)
+            ],
+            "a fully collapsed folder hides its tracks, a collapsed one doesn't, and the producer's hidden track is hidden"
+        );
+        assert_eq!(lanes[3].track_ref.as_deref(), Some("r:track:{B}"));
+        assert_eq!((strip.lanes_from, strip.track_count), (Some(40), Some(200)));
+    }
 }

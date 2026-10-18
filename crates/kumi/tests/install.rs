@@ -2422,8 +2422,9 @@ async fn an_update_brings_renoises_tool_from_the_new_kumi_and_going_back_says_it
     let home = Path::new(&env["KUMI_HOME"]).to_path_buf();
     put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
     put(home.join("app").join(executable_name("kumi")), "earlier");
-    let prefs = dir.path().join("Renoise/V3.5.4");
-    let tools = prefs.join("Scripts/Tools");
+    // One component at a time, as Kumi builds the paths it shows: Windows shows `\` throughout.
+    let prefs = dir.path().join("Renoise").join("V3.5.4");
+    let tools = prefs.join("Scripts").join("Tools");
     fs::create_dir_all(&tools).unwrap();
     env.insert("KUMI_RENOISE_PREFS_DIR".into(), prefs.display().to_string());
     let tool = |version: &str| format!("return \"{version}\"\n");

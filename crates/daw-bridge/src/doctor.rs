@@ -271,6 +271,21 @@ fn bridge_checks(daw: Daw, target: &Target, app_archs: &[detect::Arch], inputs: 
                     Level::Ok,
                     format!("bridge {} answering on port {} ({daw} {}, {project})", identity.bridge, discovery.port, identity.daw_version),
                 ));
+                // What this version of the DAW lacks that the bridge reads with (REAPER's status names it): those reads come
+                // back empty, and nothing else says why.
+                let missing = found.status.as_ref().and_then(|status| status.get("missing")).and_then(|missing| missing.as_array());
+                for missing in missing.into_iter().flatten() {
+                    let (Some(feature), Some(needs)) =
+                        (missing.get("feature").and_then(|v| v.as_str()), missing.get("needs").and_then(|v| v.as_str()))
+                    else {
+                        continue;
+                    };
+                    checks.push(check(
+                        "missing",
+                        Level::Warn,
+                        format!("{daw} {} lacks what Kumi reads {feature} with: update to {daw} {needs} or newer", identity.daw_version),
+                    ));
+                }
                 if installed_version.as_ref().is_some_and(|installed| *installed != identity.bridge) {
                     checks.push(check(
                         "restart",
@@ -368,7 +383,12 @@ mod tests {
             resource: prefs.to_string_lossy().into_owned(),
             project: None,
         };
-        let bridge = crate::probe::testing::serve(secret, identity.clone());
+        // A DAW too old for some of what the bridge reads says which (REAPER's status does).
+        let bridge = crate::probe::testing::serve_with(
+            secret,
+            identity.clone(),
+            serde_json::json!({"missing": [{"feature": "markers and regions", "needs": "3.6"}]}),
+        );
         let discovery = Discovery {
             schema: DISCOVERY_SCHEMA.into(),
             daw: identity.daw.clone(),
@@ -389,6 +409,8 @@ mod tests {
         assert!(ids(&checks).contains(&("answering", Level::Ok)), "{checks:?}");
         assert!(ids(&checks).contains(&("restart", Level::Warn)));
         assert!(ids(&checks).contains(&("update", Level::Warn)));
+        let missing = checks.iter().find(|check| check.id == "missing").expect("what this Renoise lacks");
+        assert_eq!(missing.message, "Renoise 3.5.4 lacks what Kumi reads markers and regions with: update to Renoise 3.6 or newer");
         assert_eq!(receipt.version.as_deref(), Some("0.1.0"));
     }
 

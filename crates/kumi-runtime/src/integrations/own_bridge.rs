@@ -28,6 +28,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     path::PathBuf,
     rc::Rc,
     sync::LazyLock,
@@ -93,6 +94,9 @@ pub struct OwnIntegration<S: RefScheme> {
     /// The layout the book's refs are at (Renoise's track shifts, each raising it): every request names it, so the
     /// bridge carries an older ref through the shifts it hasn't seen.
     layout: Rc<Cell<Option<u64>>>,
+    /// The epoch each long ref was last read in: a read names its ref's, so a DAW whose refs hold across projects
+    /// (REAPER's GUIDs, which a Save As copy in another tab shares) refuses one read in another project.
+    seen_in: Rc<RefCell<HashMap<String, String>>>,
     /// Stops listening to the host's events.
     unlisten: RefCell<Option<Box<dyn Fn()>>>,
     /// The last look that read the project: its key and project, kept by a look that can't (as Live's are), so the
@@ -113,6 +117,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         selected: Rc::default(),
         identity: Rc::default(),
         layout: Rc::default(),
+        seen_in: Rc::default(),
         unlisten: RefCell::default(),
         previous: RefCell::default(),
     })
@@ -131,6 +136,8 @@ struct Refused {
     there: bool,
     /// Busy for now (a dialog, a load, a render): worth waiting for.
     busy: bool,
+    /// The host's code for it (`stale`, `changed`, `failed`…).
+    code: Option<String>,
 }
 
 /// The JSON a host tool answered with, or why it couldn't.
@@ -150,6 +157,7 @@ fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
             why: value.get("error").and_then(Value::as_str).map(str::to_owned).unwrap_or(text),
             there: value.get("connected") != Some(&Value::Bool(false)),
             busy: value.get("code").and_then(Value::as_str) == Some("busy"),
+            code: value.get("code").and_then(Value::as_str).map(str::to_owned),
         });
     }
     Ok(value)
@@ -351,6 +359,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     /// The observation from the host's snapshot.
     fn observation(&self, snapshot: &Value, pinned: Option<&PinnedNode>) -> Observation {
         self.see_epoch(snapshot.get("epoch").and_then(Value::as_str));
+        note_epoch(&self.seen_in, &self.book.borrow().scheme, snapshot);
         if self.layout.get().is_none() {
             self.layout.set(snapshot.get("layout").and_then(Value::as_u64));
         }
@@ -438,6 +447,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             endpoint: self.endpoint.borrow().clone(),
             book: self.book.clone(),
             layout: self.layout.clone(),
+            seen_in: self.seen_in.clone(),
             description: read_description(self.daw, &self.book.borrow().scheme),
         });
         Observation {
@@ -562,11 +572,21 @@ struct ReadTool<S: RefScheme> {
     endpoint: Option<Rc<dyn McpEndpoint>>,
     book: Rc<RefCell<Book<S>>>,
     layout: Rc<Cell<Option<u64>>>,
+    seen_in: Rc<RefCell<HashMap<String, String>>>,
     /// The description, with which kinds are read under which parent.
     description: String,
 }
 
-/// The read tool's description: what it reads, and for each kind read inside something, its parent.
+/// Keeps the epoch an answer was read in for each long ref it names.
+fn note_epoch(seen_in: &RefCell<HashMap<String, String>>, scheme: &impl RefScheme, answer: &Value) {
+    let Some(epoch) = answer.get("epoch").and_then(Value::as_str) else { return };
+    let text = answer.to_string();
+    let mut seen_in = seen_in.borrow_mut();
+    for reference in scheme.refs_in(&text) {
+        seen_in.insert(reference.to_owned(), epoch.to_owned());
+    }
+}
+
 /// The project as the model sees it: its name and state, without Kumi's identity for it or the folders it's in (its file
 /// name stays), and without what the transport tells once already.
 fn shown_project(project: &Value, transport: Option<&Value>) -> Value {
@@ -587,6 +607,7 @@ fn shown_project(project: &Value, transport: Option<&Value>) -> Value {
     shown
 }
 
+/// The read tool's description: what it reads, and for each kind read inside something, its parent.
 fn read_description(daw: &OwnDaw, scheme: &impl RefScheme) -> String {
     let parents: Vec<String> = daw
         .read_kinds
@@ -655,6 +676,12 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
         if let Some(layout) = self.layout.get() {
             args.insert("layout".into(), layout.into());
         }
+        // Refs that hold across projects are read only in the project they came from: the DAW refuses another (`stale`).
+        let primary = args.get("ref").or_else(|| args.get("parent")).and_then(Value::as_str).map(str::to_owned);
+        let epoch = primary.and_then(|reference| self.seen_in.borrow().get(&reference).cloned());
+        if let Some(epoch) = epoch.filter(|_| !self.book.borrow().scheme.positional()) {
+            args.insert("epoch".into(), epoch.into());
+        }
         // A page the model can take whole: past the kernel's cut its nextCursor would be lost, so fewer rows are asked for
         // (a few times at most, should the bridge not take fewer).
         let mut tries = 0;
@@ -662,6 +689,7 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
             let result = endpoint.call("read", args.clone(), abort::any([signal.clone(), abort::timeout(CALL_MS)])).await?;
             match answer_of(&result) {
                 Ok(page) => {
+                    note_epoch(&self.seen_in, &self.book.borrow().scheme, &page);
                     let text = stringify(&self.book.borrow_mut().shorten(&page));
                     let rows = page.get("items").and_then(Value::as_array).map_or(0, Vec::len);
                     let asked = args.get("limit").and_then(Value::as_u64).map_or(rows, |limit| (limit as usize).min(rows));
@@ -671,6 +699,25 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
                         continue;
                     }
                     return Ok(ToolResult::text(text));
+                }
+                // A ref from another project, or a list that moved between pages: what to do, in Kumi's words.
+                Err(Refused { code: Some(code), .. }) if code == "stale" || code == "changed" => {
+                    let words = self.daw.profile.words;
+                    let what = input.get("ref").or_else(|| input.get("parent")).and_then(Value::as_str).unwrap_or("That ref");
+                    let positional = self.book.borrow().scheme.positional();
+                    return Ok(ToolResult::error(match code.as_str() {
+                        "stale" if positional => {
+                            format!("{what} is from before the {} changed (something was added, removed or opened): read again for current refs", words.place)
+                        }
+                        "stale" => format!(
+                            "{what} was read in another {} than the one {} has open now: read again for current refs",
+                            words.place, words.app
+                        ),
+                        _ => format!(
+                            "{} changed while reading (something was added or removed): read it again from the start, without the cursor",
+                            words.app
+                        ),
+                    }));
                 }
                 // The DAW's words, with its long refs in this turn's short ones.
                 Err(refused) => {
