@@ -242,6 +242,17 @@ function M.make_song(options)
     })
   end
 
+  -- The post-FX fader and pan and the pre-FX width: plain parameters too.
+  local function level(t, key, default, max)
+    return object("renoise.DeviceParameter", {
+      name = key, name_observable = M.observable(), value_min = 0, value_max = max, value_default = default,
+      value_observable = M.observable(), value_string_observable = M.observable(),
+    }, {
+      value = function() return t[key] or default end,
+      value_string = function() return string.format("%.2f", t[key] or default) end,
+    })
+  end
+
   local KIND = { sequencer = 1, master = 2, send = 3, group = 4 }
 
   track = function(i)
@@ -254,6 +265,8 @@ function M.make_song(options)
       visible_note_columns_observable = t.visible_note_columns_observable,
       visible_effect_columns_observable = t.visible_effect_columns_observable,
       prefx_volume = prefx(t, "volume"), prefx_panning = prefx(t, "panning"),
+      prefx_width = level(t, "width", 1, 1), postfx_volume = level(t, "post_volume", 1, 1.4125375747681),
+      postfx_panning = level(t, "post_panning", 0.5, 1),
       column_is_muted_observable = function(_, c) return column_observable(t, "muted", c) end,
       column_name_observable = function(_, c) return column_observable(t, "name", c) end,
       device = function(_, k)

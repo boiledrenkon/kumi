@@ -94,6 +94,10 @@ local function rows(peer, kind, params)
   return response.result.items, response.result
 end
 
+local function near(actual, expected)
+  ok(type(actual) == "number" and math.abs(actual - expected) < 0.001, "expected about " .. expected .. ", got " .. tostring(actual))
+end
+
 local function failure(response, code)
   ok(response.error, "expected an error")
   eq(response.error.code, code, "error code")
@@ -1362,5 +1366,24 @@ test("reads: data in a column the track doesn't show is not read as an empty lin
   eq(body.tracks[1].lines[2].hidden, nil)
   body = call(peer, "focus_body", { kind = "pattern", window = { from = 1, to = 8 }, hidden = true }).result
   eq(body.tracks[1].lines[2].hidden.notes[1].col, 5)
+  H.no_dialogs()
+end)
+
+test("reads: a track row says the pre-FX and the post-FX fader and pan apart", function()
+  local env, peer = setup()
+  fill_demo() -- track 2: pre-FX volume 0.5, pan 1
+  mock.data.tracks[2].post_volume, mock.data.tracks[2].post_panning, mock.data.tracks[2].width = 0.25, 0.25, 0.5
+  local hat = rows(peer, "track")[2]
+  near(hat.preVolumeDb, -6.0206)
+  eq(hat.prePan, 1)
+  eq(hat.preWidth, 0.5)
+  near(hat.postVolumeDb, -12.0412)
+  eq(hat.postPan, -0.5)
+  eq(hat.volumeDb, hat.preVolumeDb, "volumeDb and pan stay the pre-FX ones")
+  eq(hat.pan, hat.prePan)
+  local kick = rows(peer, "track")[1]
+  eq(kick.postVolumeDb, 0)
+  eq(kick.postPan, 0)
+  eq(kick.preWidth, 1)
   H.no_dialogs()
 end)
