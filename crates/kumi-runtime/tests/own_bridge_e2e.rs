@@ -191,10 +191,14 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             assert_eq!(focus.item.as_ref().and_then(|item| item.item_ref.as_deref()), Some("1:pattern:1"));
             assert_eq!((focus.editor_view.as_ref(), focus.panes.as_ref(), focus.section_follows), (None, None, None), "neither pane open");
 
-            let Some(FocusBody::Tracker(grid)) = renoise.focus_body(&BodyRequest::Tracker { item_ref: None }, Signal::new()).await.unwrap()
-            else {
-                panic!("the pattern")
-            };
+            // The pattern FOCUS asks for is the focus's own, by its ref.
+            let pattern = BodyRequest::Tracker { item_ref: focus.item.as_ref().and_then(|item| item.item_ref.clone()) };
+            let Some(FocusBody::Tracker(grid)) = renoise.focus_body(&pattern, Signal::new()).await.unwrap() else { panic!("the pattern") };
+            let asked = script.asked();
+            assert_eq!(
+                asked.iter().rev().find(|(method, _)| method == "focus_body").unwrap().1,
+                json!({"kind": "pattern", "ref": "1:pattern:1"})
+            );
             assert_eq!((grid.lines, grid.from, grid.cursor), (32, 0, Some(0)));
             let kick = &grid.tracks[0];
             assert_eq!(kick.cells.len(), 32, "every line of the window, though the tool sends only those with something in them");
@@ -222,6 +226,17 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             assert_eq!(tree.devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["EQ 5", "Doofer"]);
             assert_eq!(tree.devices[1].can_have_chains, Some(true), "a Doofer holds devices");
             assert!(renoise.can_show(BodyKind::Tracker) && !renoise.can_show(BodyKind::Timeline));
+
+            // Another song opens: the old song's refs are retired, so a stale track:1 reads nothing of the new song.
+            script.switch_song();
+            let next = renoise.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&next.context).unwrap();
+            assert_ne!(context["tracks"][0]["ref"], "track:1", "the new song's tracks get names never used before: {context}");
+            let stale = next.tools[0]
+                .execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new())
+                .await
+                .unwrap();
+            assert!(stale.is_error, "{}", stale.text);
             renoise.close().await.unwrap();
             simulator.stop();
         })
