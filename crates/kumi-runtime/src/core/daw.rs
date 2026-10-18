@@ -76,6 +76,12 @@ pub struct PromptVocab {
     pub preset_examples: &'static str,
     /// find_presets' device field, with examples.
     pub preset_device_hint: &'static str,
+    /// What the producer works in, for the speech recogniser's hint: "Ableton Live Set".
+    pub voice_project: &'static str,
+    /// Devices a producer names aloud, for the speech recogniser's hint.
+    pub voice_devices: &'static str,
+    /// What a tutorial video talks about, for the speech recogniser's hint.
+    pub tutorial_words: &'static str,
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -179,6 +185,15 @@ macro_rules! live_word {
     (preset_device_hint) => {
         "The device it's for, or a rack holding it: \"Operator\", \"Drum Rack\", \"Pro-Q 3\""
     };
+    (voice_project) => {
+        "Ableton Live Set"
+    };
+    (voice_devices) => {
+        "Operator, Wavetable, Drift, Simpler, Drum Rack, Saturator, Roar, EQ Eight, Glue Compressor and Auto Filter"
+    };
+    (tutorial_words) => {
+        "Ableton Live tutorial: Operator, Wavetable, Drift, Simpler, Sampler, Drum Rack, Instrument Rack, Saturator, Dynamic Tube, EQ Eight, EQ Three, Glue Compressor, OTT, Roar, Auto Filter, Utility, reverb, delay, LFO, envelope, oscillator, detune, sidechain, dry/wet, Serum, Vital."
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -262,6 +277,15 @@ macro_rules! daw_word {
     };
     ($profile:expr, preset_device_hint) => {
         $profile.vocab.preset_device_hint
+    };
+    ($profile:expr, voice_project) => {
+        $profile.vocab.voice_project
+    };
+    ($profile:expr, voice_devices) => {
+        $profile.vocab.voice_devices
+    };
+    ($profile:expr, tutorial_words) => {
+        $profile.vocab.tutorial_words
     };
 }
 
@@ -395,6 +419,9 @@ impl DawProfile {
             preset_sources: "the DAW's own presets and device chains, and plug-ins' own presets",
             preset_examples: "(\"Serum\", \"Pro-Q 3\")",
             preset_device_hint: "The device it's for: \"Serum\", \"Pro-Q 3\"",
+            voice_project: "project",
+            voice_devices: "synths, samplers, EQs, compressors and filters",
+            tutorial_words: "Music production tutorial: synth, sampler, EQ, compressor, saturation, reverb, delay, LFO, envelope, oscillator, detune, sidechain, dry/wet, Serum, Vital.",
         },
     };
 
@@ -462,6 +489,9 @@ impl DawProfile {
             preset_sources: crate::live_word!(preset_sources),
             preset_examples: crate::live_word!(preset_examples),
             preset_device_hint: crate::live_word!(preset_device_hint),
+            voice_project: crate::live_word!(voice_project),
+            voice_devices: crate::live_word!(voice_devices),
+            tutorial_words: crate::live_word!(tutorial_words),
         },
     };
 

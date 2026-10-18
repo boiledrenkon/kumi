@@ -7,7 +7,7 @@ use crate::{
         JOB_MS, START_JOB_TOOL, WORKER_INSTRUCTIONS,
     },
     kernel::budget::job_report_block,
-    video::tool::{video_tools, VideoToolOptions},
+    video::tool::{video_tools_for, VideoToolOptions},
 };
 use kumi_common::js::number::to_string;
 use std::{collections::VecDeque, sync::LazyLock};
@@ -281,24 +281,26 @@ impl Session {
         let options = &self.0.options;
         let mut tools: Vec<Rc<dyn KernelTool>> = vec![];
         if options.web || options.web_client.is_some() {
-            tools.extend(web_tools(WebToolOptions {
-                on_event: on_event.clone(),
-                client: options.web_client.clone(),
-                ..Default::default()
-            }));
+            tools.extend(crate::web::tool::web_tools_for(
+                &options.profile,
+                WebToolOptions { on_event: on_event.clone(), client: options.web_client.clone(), ..Default::default() },
+            ));
         }
         if let Some(library) = &options.library {
-            tools.extend(library.tools(LibraryToolsOptions { on_event: Some(on_event.clone()), resolve: None }));
+            tools.extend(library.tools_for(&options.profile, LibraryToolsOptions { on_event: Some(on_event.clone()), resolve: None }));
         }
         tools.extend(self.0.recall.clone());
         if let Some(dirs) = &options.watch {
-            tools.extend(video_tools(VideoToolOptions {
-                videos_dir: dirs.videos_dir.clone(),
-                tools_dir: dirs.tools_dir.clone(),
-                env: None,
-                on_event: on_event.clone(),
-                answer: None,
-            }));
+            tools.extend(video_tools_for(
+                &options.profile,
+                VideoToolOptions {
+                    videos_dir: dirs.videos_dir.clone(),
+                    tools_dir: dirs.tools_dir.clone(),
+                    env: None,
+                    on_event: on_event.clone(),
+                    answer: None,
+                },
+            ));
         }
         let integration = self.0.state.borrow().integration.clone();
         if let Some(integration) = integration {

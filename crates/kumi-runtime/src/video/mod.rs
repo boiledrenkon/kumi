@@ -30,7 +30,7 @@ use regex::Regex;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use speech::{speech_model_for, speech_prompt, transcribe, TranscribeOptions};
+use speech::{speech_model_for, transcribe, TranscribeOptions};
 use std::{
     path::Path,
     rc::Rc,
@@ -65,6 +65,8 @@ pub struct WatchOptions {
     pub on_progress: Option<Rc<dyn Fn(&str)>>,
     /// How ffmpeg is found and fetched (for tests: the network and the computer); env and signal are the watch's.
     pub ffmpeg: FfmpegOptions,
+    /// The DAW the tutorials are for, for the speech recogniser's hint; Live when not given.
+    pub profile: Option<crate::core::daw::DawProfile>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SoundSpan {
@@ -865,7 +867,10 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
                             &wav,
                             TranscribeOptions {
                                 language: Some(language.clone()),
-                                prompt: Some(speech_prompt(&meta.title)),
+                                prompt: Some(speech::speech_prompt_for(
+                                    options.profile.as_ref().unwrap_or(&crate::core::daw::DawProfile::ABLETON),
+                                    &meta.title,
+                                )),
                                 signal: signal.clone(),
                                 on_progress: Some(Rc::new(move |percent| {
                                     if let Some(progress) = &on_progress {

@@ -3,6 +3,7 @@ use super::{
     captions::{format_time, parse_time},
     watch_video, Region, SoundSpan, VideoFailure, WatchOptions, WatchRequest, Watched, WatchedFrame,
 };
+use crate::core::daw::{asset_in_words, AssetPhrase, DawProfile};
 use crate::{
     audio::{hear, tools::summary, Analysis, AnalyzeOptions},
     core::{
@@ -132,9 +133,23 @@ pub struct VideoToolOptions {
 struct VideoTool {
     options: VideoToolOptions,
     seen: RefCell<Seen>,
+    data: Value,
 }
 pub fn video_tools(options: VideoToolOptions) -> Vec<Rc<dyn KernelTool>> {
-    vec![Rc::new(VideoTool { options, seen: RefCell::new(Seen::default()) })]
+    video_tools_for(&DawProfile::ABLETON, options)
+}
+
+/// What watch_video's data says in Live's words, and how many times.
+pub(crate) const VIDEO_PHRASES: &[AssetPhrase] = &[AssetPhrase {
+    live: "(bottom holds Live's devices and their values)",
+    count: 1,
+    said: |p| format!("(bottom holds {}'s devices and their values)", p.words.app),
+}];
+
+/// `video_tools`, saying the DAW's words.
+pub fn video_tools_for(profile: &DawProfile, options: VideoToolOptions) -> Vec<Rc<dyn KernelTool>> {
+    let data = asset_in_words(DATA.clone(), profile, VIDEO_PHRASES);
+    vec![Rc::new(VideoTool { options, seen: RefCell::new(Seen::default()), data })]
 }
 /// What this answer was shown of each video. A model that can no longer see frames put away to make
 /// room asks for the same moments again, which puts away others: an 11-minute tutorial was watched 205
@@ -226,10 +241,10 @@ impl KernelTool for VideoTool {
         WATCH_VIDEO_TOOL
     }
     fn description(&self) -> &str {
-        DATA["description"].as_str().unwrap()
+        self.data["description"].as_str().unwrap()
     }
     fn input_schema(&self) -> JsonObject {
-        DATA["schema"].as_object().unwrap().clone()
+        self.data["schema"].as_object().unwrap().clone()
     }
 
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
@@ -297,5 +312,18 @@ impl KernelTool for VideoTool {
                 }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod phrases {
+    use super::*;
+
+    #[test]
+    fn watch_videos_phrases_are_all_there_and_lives_words_stay() {
+        assert_eq!(crate::core::daw::check_asset_phrases(&DATA, VIDEO_PHRASES), Ok(()));
+        assert_eq!(asset_in_words(DATA.clone(), &DawProfile::ABLETON, VIDEO_PHRASES), *DATA);
+        let said = asset_in_words(DATA.clone(), &DawProfile::UNKNOWN, VIDEO_PHRASES).to_string();
+        assert!(VIDEO_PHRASES.iter().all(|phrase| !said.contains(phrase.live)));
     }
 }

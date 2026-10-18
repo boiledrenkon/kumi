@@ -5,6 +5,7 @@ use super::{
     ollama::{ollama_chat, FailurePhase, OllamaChatSettings, OllamaShape},
     words_only, Effort, PROVIDERS, USER_AGENT,
 };
+use crate::core::daw::DawProfile;
 use crate::{
     ai::{
         error::{ApiCallError, LanguageModelError},
@@ -531,6 +532,11 @@ impl LocalBinding {
     pub fn into_binding(self) -> ModelBinding {
         self.binding
     }
+    /// The same binding, its notes to the model and the producer in the DAW's words.
+    pub fn in_daw(self, profile: DawProfile) -> Self {
+        self.state.profile.set(profile);
+        self
+    }
 }
 #[derive(Default)]
 pub struct LocalModelOptions {
@@ -538,7 +544,11 @@ pub struct LocalModelOptions {
     pub effort: Option<Effort>,
     pub on_note: Option<Rc<dyn Fn(String)>>,
 }
-const NO_TOOLS: &str = "This model can't use tools here: you see the Set only as it's described above, and can't read more of it or change anything. When asked for a change, say so plainly, and that /model chooses a model that can make it.";
+crate::daw_text!(
+    #[allow(dead_code)]
+    NO_TOOLS, no_tools:
+    "This model can't use tools here: you see the ", place, " only as it's described above, and can't read more of it or change anything. When asked for a change, say so plainly, and that /model chooses a model that can make it."
+);
 struct Identified(Rc<dyn Fetch>);
 #[async_trait(?Send)]
 impl Fetch for Identified {
@@ -560,6 +570,8 @@ struct LocalState {
     fixed: Cell<usize>,
     instance: RefCell<Option<String>>,
     squeezed: Cell<f64>,
+    /// The DAW the conversation is about, for the words of Kumi's notes: Live's unless `in_daw` says.
+    profile: Cell<DawProfile>,
 }
 impl LocalState {
     fn kumi_sets(&self) -> bool {
@@ -634,7 +646,11 @@ impl LocalState {
                 "/model chooses one that can.".into()
             };
             self.tell(
-                format!("{} can't use tools, so Kumi can talk with it about your Set but can't change anything. {instead}", found.name),
+                format!(
+                    "{} can't use tools, so Kumi can talk with it about your {} but can't change anything. {instead}",
+                    found.name,
+                    self.profile.get().words.place
+                ),
                 quiet,
             );
         }
@@ -651,7 +667,7 @@ impl LocalState {
         if known.tools == Some(false) {
             if let Some(Message::System { content, .. }) = call.prompt.first_mut() {
                 content.push_str("\n\n");
-                content.push_str(NO_TOOLS);
+                content.push_str(&no_tools(&self.profile.get()));
             }
             call.tools = None;
             call.tool_choice = None;
@@ -831,6 +847,7 @@ pub fn resolve_local_model(server: LocalServer, model: String, options: LocalMod
         fixed: Cell::new(0),
         instance: RefCell::new(None),
         squeezed: Cell::new(1.),
+        profile: Cell::new(DawProfile::ABLETON),
     });
     let learning = state.clone();
     let task = tokio::task::spawn_local(async move {

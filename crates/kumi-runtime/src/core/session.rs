@@ -23,7 +23,7 @@ use crate::{
     library::{Library, LibraryToolsOptions, FIND_SOUNDS_TOOL},
     web::{
         net::WebClient,
-        tool::{web_tools, WebToolOptions},
+        tool::{web_tools_for, WebToolOptions},
     },
 };
 use async_trait::async_trait;
@@ -630,17 +630,23 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             .as_ref()
             .map(|dirs| {
                 let answers = answers.clone();
-                crate::video::tool::video_tools(crate::video::tool::VideoToolOptions {
-                    videos_dir: dirs.videos_dir.clone(),
-                    tools_dir: dirs.tools_dir.clone(),
-                    env: None,
-                    on_event: emit.clone(),
-                    answer: Some(Rc::new(move || answers.get())),
-                })
+                crate::video::tool::video_tools_for(
+                    &options.profile,
+                    crate::video::tool::VideoToolOptions {
+                        videos_dir: dirs.videos_dir.clone(),
+                        tools_dir: dirs.tools_dir.clone(),
+                        env: None,
+                        on_event: emit.clone(),
+                        answer: Some(Rc::new(move || answers.get())),
+                    },
+                )
             })
             .unwrap_or_default();
         let browsing = if options.web || options.web_client.is_some() {
-            web_tools(WebToolOptions { on_event: emit.clone(), client: options.web_client.clone(), ..Default::default() })
+            web_tools_for(
+                &options.profile,
+                WebToolOptions { on_event: emit.clone(), client: options.web_client.clone(), ..Default::default() },
+            )
         } else {
             vec![]
         };
