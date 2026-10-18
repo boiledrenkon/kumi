@@ -422,6 +422,69 @@ fn sends(client: &mut Client, home: &str) {
     println!("every ref that is still there reads back to its own send: {survivors_same}; {} -> {} sends", before.len(), after.len());
 }
 
+/// The colours the bridge reports: tracks, the first track's items and the markers. A colour REAPER keeps but doesn't use
+/// (no 0x1000000 flag) must read as null.
+fn colors(client: &mut Client) {
+    let tracks = read_all(client, "read track", json!({"kind": "track", "limit": 200}));
+    let coloured = tracks.iter().filter(|t| !t["color"].is_null()).count();
+    println!("  {} tracks, {} with a colour, {} without", tracks.len(), coloured, tracks.len() - coloured);
+    for track in tracks.iter().take(6) {
+        println!("  {} -> {}", track["name"], track["color"]);
+    }
+    if let Some(track) = tracks.get(1) {
+        let items = read_all(client, "read item of the first track", json!({"kind": "item", "parent": track["ref"], "limit": 5}));
+        println!("  first items' colours: {}", items.iter().map(|i| i["color"].to_string()).collect::<Vec<_>>().join(" "));
+    }
+    let focus = client.call("focus", json!({}));
+    println!("  focus header track: {}", focus["selection"]["track"]);
+}
+
+/// The state change count and dirty flag around the moves that tell a first save from another file opened.
+fn counts(client: &mut Client, home: &str, steps: &[&str]) {
+    let m2 = std::path::Path::new(home).parent().unwrap().join("m2");
+    let _ = std::fs::remove_file(m2.join("id.log"));
+    let show = |client: &mut Client, label: &str| {
+        let status = client.call("status", json!({}));
+        let page = client.call("read", json!({"kind": "project"}));
+        let row = &page["items"][0];
+        println!(
+            "{label}: count {} dirty {} path {} id {} epoch {} identity {}",
+            status["stateChangeCount"], row["dirty"], row["path"], row["id"], page["epoch"], row["identity"]
+        );
+    };
+    show(client, "start");
+    for step in steps {
+        std::fs::write(m2.join(format!("trigger-id-{step}")), "").unwrap();
+        thread::sleep(Duration::from_millis(1500));
+        show(client, step);
+    }
+    println!("{}", std::fs::read_to_string(m2.join("id.log")).unwrap_or_default().trim());
+}
+
+/// What the bridge reports for the project's id, step by step through Save As, a template and a copy opened from disk,
+/// with the lab script's own reading of REAPER's ProjExtState beside it (m2/id.log).
+fn ids(client: &mut Client, home: &str) {
+    let m2 = std::path::Path::new(home).parent().unwrap().join("m2");
+    let _ = std::fs::remove_file(m2.join("id.log"));
+    let row = |client: &mut Client| {
+        let page = client.call("read", json!({"kind": "project"}));
+        let row = page["items"][0].clone();
+        println!(
+            "  bridge: path {} saved {} id {} identity {} epoch {}",
+            row["path"], row["saved"], row["id"], row["identity"], page["epoch"]
+        );
+    };
+    println!("start");
+    row(client);
+    for step in ["set", "saveas", "template", "copy"] {
+        std::fs::write(m2.join(format!("trigger-id-{step}")), "").unwrap();
+        thread::sleep(Duration::from_millis(1500));
+        println!("{step}:");
+        row(client);
+    }
+    println!("{}", std::fs::read_to_string(m2.join("id.log")).unwrap_or_default().trim());
+}
+
 fn watch(client: &mut Client, seconds: f64) {
     let until = Instant::now() + Duration::from_secs_f64(seconds);
     let mut last = Value::Null;
@@ -450,6 +513,12 @@ fn main() {
         "s5" => s5(&mut client, seconds),
         "watch" => watch(&mut client, seconds),
         "refs" => refs(&mut client, &home),
+        "colors" => colors(&mut client),
+        "ids" => ids(&mut client, &home),
+        "counts" => {
+            let steps: Vec<&str> = extra.as_deref().unwrap_or("").split(',').filter(|s| !s.is_empty()).collect();
+            counts(&mut client, &home, &steps)
+        }
         "sends" => sends(&mut client, &home),
         other => panic!("no scenario {other}"),
     }
