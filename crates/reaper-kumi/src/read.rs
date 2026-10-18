@@ -50,6 +50,9 @@ pub struct Reads {
     epoch: RefCell<Epoch>,
     /// The serial of the project open in each tab: what its identity is made of.
     serials: RefCell<Serials>,
+    /// A Kumi project id found in a tab's project while it was unsaved: it came with the template the project was made
+    /// from, so it isn't that project's own.
+    inherited: RefCell<HashMap<usize, String>>,
 }
 
 /// A serial number for each project open in a tab, from this REAPER's own counter: the same while the project stays open
@@ -197,11 +200,38 @@ impl Reads {
     /// A different project took the place of the one in this tab.
     pub fn project_replaced(&self, proj: Project) {
         self.serials.borrow_mut().replace(proj.addr());
+        self.inherited.borrow_mut().remove(&proj.addr());
+    }
+
+    /// The Kumi project id the project carries (ProjExtState `kumi`/`project`, saved in the RPP), or None when it has none
+    /// of its own. It travels with the file: Save As, a copy of the file opened, a backup, all share it, as Live's Sets
+    /// do. A project that is still unsaved has none of its own: one found in it came with the template it was made from,
+    /// and stays foreign after the first save, until a different one is written over it.
+    pub fn project_id(&self, reaper: &Reaper, proj: Project, info: &crate::reaper::ProjectInfo) -> Option<String> {
+        let stored = reaper.project_ext_state(proj, "kumi", "project").filter(|id| !id.is_empty());
+        let tab = proj.addr();
+        let mut inherited = self.inherited.borrow_mut();
+        match (stored, info.path.is_empty()) {
+            (Some(id), true) => {
+                inherited.insert(tab, id);
+                None
+            }
+            (Some(id), false) if inherited.get(&tab) == Some(&id) => None,
+            (Some(id), false) => {
+                inherited.remove(&tab);
+                Some(id)
+            }
+            (None, _) => {
+                inherited.remove(&tab);
+                None
+            }
+        }
     }
 
     /// The tabs open now: the serial of a tab that closed is forgotten, so a pointer REAPER hands out again starts afresh.
     pub fn keep_tabs(&self, open: &[usize]) {
         self.serials.borrow_mut().by_tab.retain(|tab, _| open.contains(tab));
+        self.inherited.borrow_mut().retain(|tab, _| open.contains(tab));
     }
 
     pub fn registry(&self) -> RefMut<'_, Registry> {
@@ -310,7 +340,7 @@ impl Reads {
         match kind {
             "project" => {
                 let mut pager = pager;
-                pager.push(rows::project_row(reaper, proj, &info, &self.identity(proj)));
+                pager.push(rows::project_row(reaper, proj, &info, &self.identity(proj), self.project_id(reaper, proj, &info).as_deref()));
                 self.page(pager, None, Some(1))
             }
             "track" => self.read_tracks(reaper, proj, pager, cursor),
@@ -748,7 +778,7 @@ impl Reads {
         }
         let mut answer = json!({
             "epoch": self.epoch(),
-            "project": rows::project_row(reaper, proj, &info, &self.identity(proj)),
+            "project": rows::project_row(reaper, proj, &info, &self.identity(proj), self.project_id(reaper, proj, &info).as_deref()),
             "transport": rows::transport(reaper, proj),
             "tracks": tracks.rows,
             "selection": focus::selection(self, reaper, proj),

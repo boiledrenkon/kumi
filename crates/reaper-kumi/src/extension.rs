@@ -483,6 +483,10 @@ impl Extension {
                 self.reads.project_replaced(info.ptr);
             }
         }
+        // Noticed on every settled tick, so an id that came with a template is seen while the project is unsaved.
+        if let Some(info) = info.as_ref().filter(|_| settled) {
+            self.reads.project_id(&reaper, info.ptr, info);
+        }
         if (changed && !first) || replaced {
             self.out.event("project", current.map(|(_, p)| p.to_json()).unwrap_or(Value::Null));
             let mut pending = self.pending.borrow_mut();
@@ -817,6 +821,98 @@ mod tests {
     fn epoch_and_identity(extension: &Extension, tx: &std::sync::mpsc::Sender<Job>) -> (String, String) {
         let read = ask_with(extension, tx, "read", json!({"kind": "project"})).unwrap();
         (read["epoch"].as_str().unwrap().to_string(), read["items"][0]["identity"].as_str().unwrap().to_string())
+    }
+
+    const TEMPLATE_ID: &str = "11111111111111111111111111111111";
+    const OWN_ID: &str = "22222222222222222222222222222222";
+
+    fn set_id(id: Option<&str>) {
+        fake::with(|s| match id {
+            Some(id) => {
+                s.project_ext.insert(("kumi".into(), "project".into()), id.into());
+            }
+            None => {
+                s.project_ext.clear();
+            }
+        });
+    }
+
+    /// The `id` of the project row, as a read gives it.
+    fn project_id(extension: &Extension, tx: &std::sync::mpsc::Sender<Job>) -> Value {
+        ask_with(extension, tx, "read", json!({"kind": "project"})).unwrap()["items"][0]["id"].clone()
+    }
+
+    #[test]
+    fn a_projects_id_travels_with_its_file_through_save_as_and_a_copy_opened_from_disk() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        set_id(Some(OWN_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+        // Save As: the id is project data, so the copy is the same place (and nothing about the tab changed).
+        let before = epoch_and_identity(&extension, &tx);
+        fake::with(|s| s.project = Some(("/lab/Projects/Copy.rpp".into(), "Copy.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+        assert_eq!(epoch_and_identity(&extension, &tx), before);
+        // The file copied on disk and opened in the tab: another project object's worth of tracks, the same id.
+        fake::with(|s| {
+            s.project = Some(("/lab/Projects/Elsewhere/Song.rpp".into(), "Song.rpp".into()));
+            s.tracks = vec![fake::FakeTrack::new("{OTHER-1}", "Pad")];
+            s.state_count = 1;
+        });
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx), before, "another project took the tab");
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+    }
+
+    #[test]
+    fn a_project_made_from_a_template_does_not_take_the_templates_id() {
+        let (extension, tx, _, _) = setup();
+        // New from a template saved with an id: unsaved, and the id is in it.
+        fake::reset();
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), Value::Null, "an unsaved project has no id of its own");
+        // The first save writes the file with the template's id in it. It still isn't this project's.
+        fake::with(|s| s.project = Some(("/lab/Projects/Mix.rpp".into(), "Mix.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), Value::Null);
+        // Kumi writes the project's own id over it (M6): that is the id from then on, through Save As too.
+        set_id(Some(OWN_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+        fake::with(|s| s.project = Some(("/lab/Projects/Mix v2.rpp".into(), "Mix v2.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+    }
+
+    #[test]
+    fn a_project_without_an_id_has_none_until_one_is_written_and_the_snapshot_agrees() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), Value::Null);
+        set_id(Some(OWN_ID));
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+        assert_eq!(ask_with(&extension, &tx, "snapshot", json!({})).unwrap()["project"]["id"], OWN_ID);
+    }
+
+    #[test]
+    fn opening_the_template_file_itself_is_the_templates_own_place() {
+        let (extension, tx, _, _) = setup();
+        fake::reset();
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), Value::Null);
+        // The user opens the template's RPP (saved, with its id) in the same tab: that is the template's project.
+        fake::with(|s| {
+            s.project = Some(("/lab/Templates/Kit.rpp".into(), "Kit.rpp".into()));
+            s.tracks = vec![fake::FakeTrack::new("{KIT-1}", "Kit")];
+            s.state_count = 1;
+        });
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), TEMPLATE_ID);
     }
 
     #[test]
