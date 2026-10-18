@@ -11,6 +11,23 @@ pub enum DawId {
     Renoise,
 }
 
+impl DawId {
+    pub const ALL: [DawId; 3] = [DawId::Ableton, DawId::Reaper, DawId::Renoise];
+
+    /// Its name as files, settings and `--daw` say it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DawId::Ableton => "ableton",
+            DawId::Reaper => "reaper",
+            DawId::Renoise => "renoise",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<DawId> {
+        DawId::ALL.into_iter().find(|daw| daw.as_str() == text)
+    }
+}
+
 /// What the producer calls the DAW and a saved place in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DawWords {

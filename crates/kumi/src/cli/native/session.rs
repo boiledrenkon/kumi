@@ -226,11 +226,15 @@ pub(super) async fn run_session(
     secrets: &mut Vec<String>,
     factory: AbletonFactory,
 ) -> Result<i32, RuntimeError> {
-    let (inference, bridge_config, bridge_missing, resume) = match config {
-        AppConfig::InferenceOnly { inference, bridge_missing, resume } => (inference, None, bridge_missing.unwrap_or(false), resume),
-        AppConfig::Live { inference, bridge_config, resume } => (inference, Some(bridge_config), false, resume),
+    let (inference, bridge_config, bridge_missing, resume, daw) = match config {
+        AppConfig::InferenceOnly { inference, bridge_missing, resume, daw } => {
+            (inference, None, bridge_missing.unwrap_or(false), resume, daw)
+        }
+        AppConfig::Live { inference, bridge_config, resume, daw } => (inference, Some(bridge_config), false, resume, daw),
         _ => unreachable!(),
     };
+    // The DAW this session works with: the one asked for, else Live (the only one registered so far).
+    let _daw = daw.unwrap_or(kumi_runtime::core::daw::DawId::Ableton);
     let mode = if bridge_config.is_some() { "live" } else { "inference-only" };
     let store = Rc::new(open_credential_store(&inference.auth_file));
     for credential in store.list().await.unwrap_or_default().values() {
