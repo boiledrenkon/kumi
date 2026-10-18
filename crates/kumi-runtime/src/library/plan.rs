@@ -1,6 +1,6 @@
 use super::{
     learn::{plugin_preset_folders, set_folders, LearnPlan},
-    sources::{below, current_platform, homedir, join, library_sources, recent_sets, SourceKind, SourceOptions},
+    sources::{below, current_platform, homedir, join, SourceKind, SourceOptions},
     store::read_json,
 };
 use indexmap::IndexSet;
@@ -71,7 +71,7 @@ pub async fn plan_learning(options: PlanOptions) -> LearnPlan {
     let platform = original_sources.platform.clone().unwrap_or_else(|| current_platform().into());
     let mut source_options = original_sources.clone();
     source_options.folders = Some(options.folders.unwrap_or_default().into_iter().chain(remembered).collect());
-    let sources = library_sources(&source_options);
+    let sources = crate::integrations::library_sources(&source_options);
     let others: Vec<_> = sources
         .iter()
         .filter(|s| matches!(s.kind, SourceKind::Pack | SourceKind::Core | SourceKind::Splice))
@@ -79,7 +79,7 @@ pub async fn plan_learning(options: PlanOptions) -> LearnPlan {
         .collect();
     let find_sets = options.find_sets != Some(false);
     let recent: Vec<_> = if find_sets {
-        recent_sets(&original_sources)
+        crate::integrations::recent_projects(&original_sources)
             .into_iter()
             .chain(kumi_sets(options.projects_dir.as_deref()).await)
             .collect::<IndexSet<_>>()

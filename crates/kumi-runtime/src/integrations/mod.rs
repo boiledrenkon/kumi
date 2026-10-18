@@ -49,3 +49,17 @@ pub fn manual_tool(id: DawId, options: live_manual::ManualOptions) -> Option<std
         _ => None,
     }
 }
+
+/// Where the DAW keeps the producer's sounds, presets and saved projects, beside the folders named: Live's layout (its
+/// User Library, Places, packs and Core Library) and Splice's folder. Live is the only DAW registered; another DAW's
+/// places come with it.
+pub fn library_sources(options: &crate::library::sources::SourceOptions) -> Vec<crate::library::sources::Source> {
+    debug_assert!(profile(options.daw.unwrap_or(DawId::Ableton)).is_some(), "a registered DAW's places");
+    crate::library::sources::library_sources(options)
+}
+
+/// The DAW's saved projects it opened lately (Live's Sets, from its log).
+pub fn recent_projects(options: &crate::library::sources::SourceOptions) -> Vec<String> {
+    debug_assert!(profile(options.daw.unwrap_or(DawId::Ableton)).is_some(), "a registered DAW's projects");
+    crate::library::sources::recent_sets(options)
+}

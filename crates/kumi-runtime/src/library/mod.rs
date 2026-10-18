@@ -212,7 +212,7 @@ impl Library {
                 .chain(self.remembered.borrow().clone().unwrap_or_default())
                 .collect(),
         );
-        let Ok(sources) = tokio::task::spawn_blocking(move || library_sources(&options)).await else {
+        let Ok(sources) = tokio::task::spawn_blocking(move || crate::integrations::library_sources(&options)).await else {
             return self.source_cache.borrow().as_ref().map(|(_, sources)| sources.clone()).unwrap_or_default();
         };
         *self.source_cache.borrow_mut() = Some((now_ms(), sources.clone()));
