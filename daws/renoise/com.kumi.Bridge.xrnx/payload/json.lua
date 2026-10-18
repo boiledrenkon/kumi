@@ -125,17 +125,8 @@ local function encode_error(message)
   error({ json_error = message }, 0)
 end
 
--- "array" or "object"; errors on mixed or sparse tables.
-local function table_kind(t)
-  local mt = getmetatable(t)
-  if mt == array_mt then return "array" end
-  if mt == object_mt then return "object" end
-  local n = #t
-  if n == 0 then
-    local k = next(t)
-    if k == nil or type(k) == "string" then return "object" end
-    encode_error("table has keys that are not strings")
-  end
+-- A list has the keys 1 to #t and no others: a hole would make # unreliable and lose items silently.
+local function check_list(t, n)
   local count = 0
   for k in pairs(t) do
     if type(k) ~= "number" or k < 1 or k > n or k ~= floor(k) then
@@ -144,6 +135,23 @@ local function table_kind(t)
     count = count + 1
   end
   if count ~= n then encode_error("list has holes") end
+end
+
+-- "array" or "object"; errors on mixed or sparse tables (marked as lists or not).
+local function table_kind(t)
+  local mt = getmetatable(t)
+  if mt == object_mt then return "object" end
+  local n = #t
+  if mt == array_mt then
+    check_list(t, n)
+    return "array"
+  end
+  if n == 0 then
+    local k = next(t)
+    if k == nil or type(k) == "string" then return "object" end
+    encode_error("table has keys that are not strings")
+  end
+  check_list(t, n)
   return "array"
 end
 

@@ -169,3 +169,13 @@ test("json: records how a top-level number was written", function()
   json.decode('[1,2]', { numbers = numbers })
   eq(next(numbers), nil, "only an object's own members")
 end)
+
+test("json: a list with a hole is refused, marked as a list or not", function()
+  for _, list in ipairs({ { 1, nil, 3 }, json.array({ 1, nil, 3 }), json.array({ [1] = "a", [3] = "c" }) }) do
+    local text, err = json.encode(list)
+    eq(text, nil)
+    ok(err:find("holes") or err:find("mixes"), tostring(err))
+  end
+  eq(enc(json.array({ 1, 2, 3 })), "[1,2,3]")
+  eq(enc(json.array()), "[]")
+end)

@@ -6,7 +6,7 @@ local M = {}
 M.MAX_BYTES = 1024 * 1024
 M.MAX_PENDING = 500
 
-local path
+local path, tag
 local pending, count = {}, 0
 
 function M.configure(file)
@@ -16,6 +16,11 @@ end
 
 function M.path()
   return path
+end
+
+-- Said on every line after the level, so lines of two Renoises sharing a log folder can be told apart.
+function M.set_tag(text)
+  tag = text
 end
 
 function M.flush()
@@ -36,7 +41,7 @@ function M.flush()
 end
 
 function M.write(level, message)
-  local line = os.date("!%Y-%m-%dT%H:%M:%SZ") .. " " .. level .. " " .. tostring(message):gsub("\n", "\n    ")
+  local line = os.date("!%Y-%m-%dT%H:%M:%SZ") .. " " .. level .. (tag and (" [" .. tag .. "] ") or " ") .. tostring(message):gsub("\n", "\n    ")
   if count >= M.MAX_PENDING then
     table.remove(pending, 1)
     count = count - 1

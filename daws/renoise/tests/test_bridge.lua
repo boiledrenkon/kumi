@@ -47,6 +47,7 @@ local function setup(options)
   write(env.secret_file, env.secret .. "\n")
   env.reference = env.bundle .. "bridge-reference.json"
   if not options.no_reference then reference(env, options.reference) end
+  if options.patch then options.patch(env) end
   mock.reset({ bundle_path = env.bundle, version = options.version, platform = options.platform, fresh_wrappers = options.fresh_wrappers })
   for _, port in ipairs(options.busy_ports or {}) do mock.busy_ports[port] = true end
   if options.song ~= false then mock.song = mock.make_song(options.song) end
@@ -530,7 +531,7 @@ test("bridge: a send that fails closes that connection", function()
   peer.send_fails = true
   mock.song.selected_track_index = 5
   tick()
-  mock.advance(1000)
+  ok(peer.closed_by_server, "the socket is closed, not just forgotten")
   local other = connect(env)
   eq(request(other, "status").ok, true, "the others go on")
   no_dialogs()
@@ -782,4 +783,256 @@ test("bridge: one socket wrapped in several Lua objects is one connection", func
   for _ in pairs(KUMI_BRIDGE.connections) do count = count + 1 end
   eq(count, 1)
   no_dialogs()
+end)
+
+-- Housekeeping from the socket callbacks
+
+test("bridge: connections whose peers left stop counting at once, with no timer running", function()
+  setup()
+  local peers = {}
+  for i = 1, 4 do peers[i] = mock.connect() end
+  for i = 1, 4 do peers[i]:close() end
+  local fifth = mock.connect()
+  eq(#frames(fifth), 0, "taken, not refused for connections")
+  ok(not fifth.closed_by_server)
+  no_dialogs()
+end)
+
+test("bridge: a stalled handshake is refused by the next connection's callback, no timer needed", function()
+  setup()
+  local idle = {}
+  for i = 1, 4 do idle[i] = mock.connect() end
+  mock.time = mock.time + 3500 -- the clock moves, no timer runs
+  local late = mock.connect()
+  eq(#frames(late), 0, "the slots were free by then")
+  for i = 1, 4 do eq(frames(idle[i])[1].reason, "timeout", "idle peer " .. i) end
+  no_dialogs()
+end)
+
+test("bridge: a socket error is only noted; the server is made anew from the tick when it stopped", function()
+  local env = setup()
+  local first = mock.server()
+  mock.socket_error("boom")
+  ok(first.running and first.open, "nothing closed inside the callback")
+  first.running = false
+  tick()
+  eq(#mock.servers, 1, "not before the retry delay")
+  mock.advance(1100)
+  eq(#mock.servers, 2)
+  ok(mock.server() ~= nil and mock.server() ~= first, "a new server listens")
+  local peer = connect(env)
+  eq(request(peer, "ping", {}).ok, true)
+  no_dialogs()
+end)
+
+test("bridge: errors in a row make a new server even when the old one claims to run", function()
+  local env = setup()
+  local first = mock.server()
+  for _ = 1, 3 do mock.socket_error("boom") end
+  ok(first.running, "still running")
+  mock.advance(1100)
+  eq(#mock.servers, 2)
+  ok(mock.server() ~= first and not first.running, "replaced")
+  local peer = connect(env)
+  mock.socket_error("one")
+  eq(request(peer, "ping", {}).ok, true, "a single error does not")
+  eq(mock.server() ~= nil, true)
+  no_dialogs()
+end)
+
+test("bridge: a deadline that is now has passed, and a code that isn't text is sent as text", function()
+  local server = T.load_payload_module("server")
+  local sent = {}
+  local client = { is_open = true, send = function(_, text) sent[#sent + 1] = text; return true end }
+  local ctx = {
+    connections = {},
+    unix_ms = function() return 1000 end,
+    log = function() end,
+    on_request = function() error({ code = 5, message = "five" }) end,
+  }
+  local s = server.new(ctx)
+  local record = { key = "k", client = client, outbox = {} }
+  s:answer(record, { id = 1, method = "x", params = {}, deadlineMs = 1000 })
+  eq(json.decode(sent[1]).error.code, "deadline")
+  s:answer(record, { id = 2, method = "x", params = {}, deadlineMs = 1001 })
+  local reply = json.decode(sent[2])
+  eq(reply.error.code, "5")
+  eq(reply.error.message, "five")
+end)
+
+test("bridge: the bye goes out ahead of output that hasn't started, behind a line already part sent", function()
+  local server = T.load_payload_module("server")
+  local wire = T.load_payload_module("wire")
+  local sent = {}
+  local client = { is_open = true, send = function(_, text) sent[#sent + 1] = text; return true end }
+  local record = {
+    key = "k", client = client, closing = false,
+    conn = { authenticated = function() return true end },
+    outbox = { { text = "first-line\n", offset = 4 }, { text = "never-started\n", offset = 1 } },
+  }
+  local s = server.new({ connections = { k = record }, log = function() end })
+  s:close_all("quit")
+  eq(table.concat(sent), "st-line\n" .. wire.encode_frame("bye", { reason = "quit" }))
+  local fresh = {
+    key = "j", client = client, conn = { authenticated = function() return true end },
+    outbox = { { text = "waiting\n", offset = 1 } },
+  }
+  sent = {}
+  s = server.new({ connections = { j = fresh }, log = function() end })
+  s:close_all("shutdown")
+  eq(table.concat(sent), wire.encode_frame("bye", { reason = "shutdown" }), "nothing else ahead of it")
+end)
+
+test("bridge: a line that arrives a byte at a time doesn't hold a table slot for each", function()
+  local wire = T.load_payload_module("wire")
+  local framer = wire.framer(2000)
+  for _ = 1, 1500 do wire.feed(framer, "x") end
+  eq(wire.next_line(framer), nil)
+  ok(framer.count <= 256, "parts held: " .. framer.count)
+  wire.feed(framer, "\n")
+  local line = wire.next_line(framer)
+  eq(#line, 1500)
+end)
+
+test("bridge: an error reading the song for events costs that step, not the connections' tick", function()
+  local env = setup()
+  local peer = connect(env)
+  frames(peer)
+  mock.impl(mock.song).selected_track_index = nil -- reading it raises
+  mock.song.selected_instrument_index = 3
+  tick()
+  mock.advance(1100)
+  local beats = 0
+  for _, f in ipairs(frames(peer)) do
+    if f.type == "heartbeat" then beats = beats + 1 end
+  end
+  ok(beats >= 1, "heartbeats go on: " .. beats)
+  ok(read(env.log_dir .. "/renoise-bridge.log"):find("events:"), "logged")
+  eq(#mock.errors, 0, "nothing for Renoise to show")
+end)
+
+-- The payload's start
+
+local function raise_in_sync(env)
+  write(env.bundle .. "payload/sync.lua", 'return { new = function() error("boom at start") end }')
+end
+
+test("bridge: a payload whose start raises is dropped, and tried again once the cause is gone", function()
+  local fixed
+  local env = setup({ patch = function(e) fixed = e; raise_in_sync(e) end })
+  ok(env.payload() == nil, "no half-started payload")
+  eq(mock.server(), nil, "no server")
+  tick(20)
+  eq(#mock.errors, 0)
+  -- Put the real file back; five seconds later the tool starts without a restart.
+  local source = T.tool_dir .. "payload/sync.lua"
+  write(fixed.bundle .. "payload/sync.lua", read(source))
+  mock.advance(5200)
+  ok(env.payload() ~= nil, "started")
+  local peer = connect(env)
+  eq(request(peer, "ping", {}).ok, true)
+  no_dialogs()
+end)
+
+test("bridge: a reload whose new payload can't start puts the old one back, connections and all", function()
+  local env = setup()
+  local peer = connect(env)
+  local old = env.payload()
+  raise_in_sync(env)
+  request(peer, "renoise.reload")
+  tick()
+  ok(env.payload() == old, "the old payload is serving again")
+  eq(request(peer, "ping", {}).ok, true, "the same connection answers")
+  ok(read(env.log_dir .. "/renoise-bridge.log"):find("reload failed"), "logged")
+  no_dialogs()
+end)
+
+test("bridge: the payload is read with io.open, which takes UTF-8 paths on Windows, not loadfile", function()
+  local real = loadfile
+  _G.loadfile = function() error("loadfile used") end
+  local ok_, err = pcall(setup)
+  _G.loadfile = real
+  ok(ok_, tostring(err))
+end)
+
+test("bridge: a reload reads the reference again", function()
+  local env = setup()
+  local peer = connect(env)
+  local moved = env.dir .. "/elsewhere"
+  assert(os.execute("mkdir -p '" .. moved .. "'") == 0)
+  reference(env, { logDir = moved })
+  request(peer, "renoise.reload")
+  tick()
+  mock.advance(1100)
+  ok(read(moved .. "/renoise-bridge.log"), "the log is in the new folder now")
+  no_dialogs()
+end)
+
+test("bridge: log lines say which Renoise wrote them", function()
+  local env = setup()
+  connect(env)
+  local text = read(env.log_dir .. "/renoise-bridge.log")
+  ok(text:find("info %[pid 4242%] listening"), text)
+  no_dialogs()
+end)
+
+test("bridge: a song born from a template doesn't share the template's id", function()
+  local env = setup({ song = { tool_data = '{"songId":"0123456789abcdef0123456789abcdef"}' } })
+  local peer = connect(env)
+  local id = request(peer, "status").result.project.id
+  ok(id ~= "0123456789abcdef0123456789abcdef", "a new id for a song never saved: " .. tostring(id))
+  mock.save_song(env.dir .. "/a.xrns")
+  tick()
+  local stored = json.decode(mock.song.tool_data)
+  eq(stored.songId, id, "stored at the first save")
+  -- A second song from the same template gets its own.
+  mock.load_song({ tool_data = '{"songId":"0123456789abcdef0123456789abcdef"}' })
+  tick()
+  local second = request(peer, "status").result.project.id
+  ok(second ~= id and second ~= "0123456789abcdef0123456789abcdef", "its own: " .. tostring(second))
+  -- Reopened from its file, a saved song keeps what it stored.
+  mock.load_song({ file_name = env.dir .. "/a.xrns", tool_data = mock.song and '{"songId":"' .. id .. '"}' })
+  tick()
+  eq(request(peer, "status").result.project.id, id)
+  no_dialogs()
+end)
+
+test("bridge: status says why it is busy", function()
+  local env = setup()
+  local peer = connect(env)
+  mock.impl(mock.song).rendering = true
+  local reply = request(peer, "status")
+  eq(reply.result.busy, "rendering")
+  eq(reply.result.busyReason, "Renoise is rendering the song")
+  no_dialogs()
+end)
+
+test("bridge: unix times are whole numbers whatever the clock does", function()
+  local env = setup()
+  mock.time = mock.time + 0.37
+  tick()
+  local discovery = json.decode(read(env.discovery_file()))
+  eq(discovery.startedMs, math.floor(discovery.startedMs))
+  no_dialogs()
+end)
+
+test("config: io.stat's mode is read in whichever format Renoise gives it", function()
+  local config = T.load_payload_module("config")
+  local access = config.group_or_other_access
+  -- /dev/null is 0666: it names the format, then a mode is read in that format.
+  local formats = {
+    { null = 8630, private = 33152, readable = 33188, group = 33184, name = "st_mode" },
+    { null = 438, private = 384, readable = 420, group = 416, name = "permission bits" },
+    { null = 666, private = 600, readable = 644, group = 640, name = "octal digits" },
+  }
+  for _, f in ipairs(formats) do
+    mock.stat_modes["/dev/null"] = f.null
+    eq(access(f.private), false, f.name .. " 0600")
+    eq(access(f.readable), true, f.name .. " 0644")
+    eq(access(f.group), true, f.name .. " 0640")
+  end
+  -- 0400 and 0604 in permission bits (256, 388) are what the old guess got wrong.
+  mock.stat_modes["/dev/null"] = 438
+  eq(access(256), false, "0400")
+  eq(access(388), true, "0604")
 end)

@@ -34,6 +34,12 @@ function M.new(ctx)
   return setmetatable({ ctx = ctx }, M)
 end
 
+local function is_gone(record)
+  if record.gone then return true end
+  local ok, open = pcall(function() return record.client.is_open end)
+  return not ok or not open
+end
+
 function M:counts()
   local waiting, authenticated = 0, 0
   for _, record in pairs(self.ctx.connections) do
@@ -97,7 +103,20 @@ function M:push(record, text)
   return true
 end
 
+-- What can't wait for the timer, which stops behind a modal dialog and may run slowly while Renoise is in the
+-- background (its sockets still call in): handshakes past their deadline are refused, and connections the peer has
+-- closed stop counting against the limits. Closing a socket still waits for the tick.
+function M:reap()
+  local now = self.ctx.now_ms()
+  for key, record in pairs(self.ctx.connections) do
+    if record.conn and not record.closing then self:apply(record, record.conn:on_tick(now)) end
+    local ok, open = pcall(function() return record.client.is_open end)
+    if not ok or not open then self.ctx.connections[key] = nil end
+  end
+end
+
 function M:accept(client)
+  self:reap()
   local now = self.ctx.now_ms()
   local record = { key = key_of(client), client = client, anchor = client, outbox = {}, accepted_ms = now }
   self.ctx.connections[record.key] = record
@@ -137,7 +156,7 @@ end
 
 function M:answer(record, request)
   local deadline = request.deadlineMs
-  if type(deadline) == "number" and self.ctx.unix_ms() > deadline then
+  if type(deadline) == "number" and self.ctx.unix_ms() >= deadline then
     return self:send(record, wire.error(request.id, "deadline", "the deadline passed before the work started"))
   end
   local ok, result = xpcall(self.ctx.on_request, debug.traceback, record, request)
@@ -150,7 +169,8 @@ function M:answer(record, request)
     return self:send(record, text)
   end
   if type(result) == "table" then
-    return self:send(record, wire.error(request.id, result.code or "failed", tostring(result.message or "")))
+    -- (A code that isn't text would fail the host's frame check and cost it the connection.)
+    return self:send(record, wire.error(request.id, result.code ~= nil and tostring(result.code) or "failed", tostring(result.message or "")))
   end
   self.ctx.log("error", request.method .. " failed: " .. tostring(result))
   self:send(record, wire.error(request.id, "internal", (tostring(result):match("^[^\n]*"))))
@@ -161,6 +181,9 @@ function M:receive(client, data)
   if not record then record = self:accept(client) end
   record.client = client
   record.unsolicited = 0
+  self:reap()
+  -- The rest of a big frame goes out as the host talks, not only on the next tick.
+  if record.outbox[1] and not record.closing then self:flush(record, M.SEND_TICK_BYTES) end
   if record.closing or not record.conn then return end
   local ok, actions = xpcall(record.conn.on_bytes, debug.traceback, record.conn, data, self.ctx.now_ms(), self.ctx.identity)
   if not ok then
@@ -189,12 +212,6 @@ function M:authenticated_count()
   return authenticated
 end
 
-local function is_gone(record)
-  if record.gone then return true end
-  local ok, open = pcall(function() return record.client.is_open end)
-  return not ok or not open
-end
-
 -- From the timer: handshake deadlines, heartbeats, outboxes, deferred closes.
 function M:tick()
   local now = self.ctx.now_ms()
@@ -210,6 +227,8 @@ function M:tick()
     if record.outbox[1] then self:flush(record, M.SEND_TICK_BYTES) end
     if is_gone(record) then
       self.ctx.connections[key] = nil
+      -- (A record that is gone may still hold a socket: a failed send leaves it open.)
+      pcall(function() record.client:close() end)
       if not record.closing then self.ctx.log("info", "connection " .. key .. " went away") end
     elseif record.closing and not record.outbox[1] then
       self.ctx.connections[key] = nil
@@ -222,6 +241,9 @@ end
 function M:close_all(reason)
   for key, record in pairs(self.ctx.connections) do
     if record.conn and record.conn:authenticated() and not record.closing then
+      -- The bye must not wait behind output that hasn't started: only a line already part sent is finished first.
+      local head = record.outbox[1]
+      record.outbox = (head and head.offset > 1) and { head } or {}
       self:send(record, wire.encode_frame("bye", { reason = reason }))
       self:flush(record, M.SEND_TICK_BYTES)
     end

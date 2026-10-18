@@ -78,10 +78,24 @@ function M.candidate_ports(start)
   return ports
 end
 
--- Group or other access in a Unix mode, read either as st_mode or as octal digits written in
--- decimal; nil when it can't tell.
+-- How io.stat writes a mode isn't documented: all of st_mode (file type bits too), the permission bits alone, or the
+-- octal digits written as a decimal number (600). /dev/null is 0666 wherever it exists, so what it reads as says which.
+local function mode_format()
+  local stat = io.stat and io.stat("/dev/null")
+  local mode = stat and stat.mode
+  if mode == 8630 or mode == 438 then return "bits" end
+  if mode == 666 then return "digits" end
+  return nil
+end
+
+-- Group or other access in a Unix mode; nil when it can't tell.
 local function group_or_other_access(mode)
   if type(mode) ~= "number" then return nil end
+  local format = mode_format()
+  if format == "bits" then return mode % 64 ~= 0 end
+  if format == "digits" then return mode % 100 ~= 0 end
+  -- No /dev/null to ask: a whole st_mode is told by its file type bits, and octal digits by being no bigger than 777
+  -- and having no 8 or 9.
   if mode >= 32768 then return mode % 64 ~= 0 end
   if mode < 1000 and not tostring(mode):find("[89]") then return mode % 100 ~= 0 end
   return nil

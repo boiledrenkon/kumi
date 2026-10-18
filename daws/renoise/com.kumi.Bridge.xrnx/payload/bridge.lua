@@ -15,6 +15,8 @@ local M = {}
 
 M.RETRY_MS = 1000
 M.SETUP_RETRY_MS = 5000
+-- Socket errors in a row (no connection accepted or message read between) after which the server is made anew.
+M.SOCKET_ERRORS_BEFORE_RESTART = 3
 
 -- Renoise replaces os.clock with a high-precision timer in seconds.
 function M.now_ms()
@@ -48,7 +50,7 @@ local function unix_ms()
   if seconds ~= b.anchor_seconds then
     b.anchor_seconds, b.anchor_ms = seconds, now
   end
-  return seconds * 1000 + math.min(now - b.anchor_ms, 999)
+  return seconds * 1000 + math.floor(math.min(now - b.anchor_ms, 999))
 end
 
 local function identity()
@@ -236,9 +238,11 @@ function M.start(h, reloading)
   observers = sync.new(guard)
   status.cache = b
   if b.cfg and b.cfg.log_dir then log.configure(b.cfg.log_dir .. "/renoise-bridge.log") end
-  if not reloading or not server_running() then
-    if configure() then listen() end
-  end
+  -- Two Renoises write to one log: each line says whose it is.
+  log.set_tag(status.pid() and ("pid " .. status.pid()) or ("started " .. math.floor(b.started_ms / 1000)))
+  -- The reference is read again on a reload (new log or discovery folders); the server is not remade for it.
+  local configured = configure()
+  if configured and (not reloading or not server_running()) then listen() end
   attach(renoise.song())
   log.write("info", (reloading and "reloaded" or "started") .. " bridge " .. VERSION)
   log.flush()
@@ -261,29 +265,34 @@ function M.tick()
   unix_ms()
   if not b.cfg then
     if M.now_ms() >= b.retry_ms and configure() then listen() end
-  elseif not server_running() and M.now_ms() >= b.retry_ms then
+  elseif (not server_running() or (b.socket_errors or 0) >= M.SOCKET_ERRORS_BEFORE_RESTART) and M.now_ms() >= b.retry_ms then
+    b.socket_errors = 0
     listen()
   end
-  flush_events()
+  -- One failing step mustn't skip the others: connections still need their tick.
+  local ok, err = xpcall(flush_events, debug.traceback)
+  if not ok then M.log_error("events", err) end
   conns:tick()
   b.ticks = (b.ticks or 0) + 1
   if b.ticks % 20 == 0 then log.flush() end
 end
 
 function M.on_accept(client)
+  b.socket_errors = 0
   conns:accept(client)
 end
 
 function M.on_message(client, data)
+  b.socket_errors = 0
   conns:receive(client, data)
 end
 
+-- Only noted: closing the server inside Renoise's socket callback can upset it. The tick makes a new one when this one
+-- stopped running, or when errors come one after another with nothing in between.
 function M.on_socket_error(message)
   log.write("error", "socket error: " .. tostring(message))
-  if not server_running() then
-    host.close_server()
-    b.retry_ms = M.now_ms() + M.RETRY_MS
-  end
+  b.socket_errors = (b.socket_errors or 0) + 1
+  b.retry_ms = M.now_ms() + M.RETRY_MS
 end
 
 function M.on_new_document()

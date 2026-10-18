@@ -170,6 +170,13 @@ Peer.__index = Peer
 function Peer:wrap()
   if self.wrapper and not M.fresh_wrappers then return self.wrapper end
   local peer = self
+  -- Reading a property of a closed socket raises, as Renoise's do.
+  local function while_open(value)
+    return function()
+      if not peer.open then error("socket is closed") end
+      return value
+    end
+  end
   local wrapper = object("renoise.Socket.SocketClient", {
     peer_address = peer.address,
     peer_port = peer.port,
@@ -193,7 +200,13 @@ function Peer:wrap()
       peer.closed_by_server = true
     end,
     receive = function() error("mock: receive doesn't work inside Renoise's socket callbacks") end,
-  }, { is_open = function() return peer.open end })
+  }, {
+    is_open = function() return peer.open end,
+    peer_address = while_open(peer.address),
+    peer_port = while_open(peer.port),
+    local_address = while_open(peer.server.address),
+    local_port = while_open(peer.server.port),
+  })
   self.wrapper = wrapper
   return wrapper
 end
@@ -363,7 +376,7 @@ local function install_os_shims()
     return os.rename(path, path) ~= nil
   end
   io.stat = function(path)
-    if not io.exists(path) then return nil, "no such file", 2 end
+    if not (M.stat_modes[path] or io.exists(path)) then return nil, "no such file", 2 end
     return { type = "file", mode = M.stat_modes[path] or 33152, size = 0 }
   end
   io.popen = function(command)

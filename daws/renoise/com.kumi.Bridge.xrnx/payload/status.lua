@@ -63,9 +63,11 @@ end
 -- reopening it gives the same id until a save stores it); for an unsaved song, a new one kept until
 -- it's saved.
 function M.song_id(memory, song)
-  local id = stored_id(song)
+  local path = song.file_name or ""
+  -- A song never saved has no id of its own yet: one stored in it was inherited from the template it was made from,
+  -- and every song made from that template would share it.
+  local id = path ~= "" and stored_id(song) or nil
   if not id then
-    local path = song.file_name or ""
     if memory.song_id then
       id = memory.song_id
     elseif path ~= "" then
@@ -131,7 +133,9 @@ function M.status(memory, bundle_path)
   local status = M.identity(memory, bundle_path)
   status.heartbeatMs, status.methods, status.events = nil, nil, nil
   local song = renoise.song()
-  status.busy = (song ~= nil and song.rendering) and "rendering" or false
+  local rendering = song ~= nil and song.rendering
+  status.busy = rendering and "rendering" or false
+  if rendering then status.busyReason = "Renoise is rendering the song" end
   return status
 end
 

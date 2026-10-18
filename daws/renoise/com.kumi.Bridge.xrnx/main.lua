@@ -7,12 +7,15 @@ local BUNDLE = tool.bundle_path
 if not BUNDLE:match("[/\\]$") then BUNDLE = BUNDLE .. "/" end
 
 local TICK_MS = 50
+-- A payload whose start raised is tried again after this long.
+local START_RETRY_MS = 5000
 
 -- Everything that must stay referenced (the sockets above all) hangs off this table.
 local state = {
   server = nil,
   connections = {},
   payload = nil,
+  retry_start_ms = 0,
   reload_requested = false,
 }
 KUMI_BRIDGE = state
@@ -40,7 +43,13 @@ local function load_payload()
   local function import(name)
     local module = loaded[name]
     if module == nil then
-      local chunk, err = loadfile(BUNDLE .. "payload/" .. name .. ".lua")
+      -- Read with io.open, which Renoise makes take UTF-8 paths on Windows; loadfile would use the ANSI code page,
+      -- and a user folder with letters outside it would leave the tool without its payload.
+      local file, open_err = io.open(BUNDLE .. "payload/" .. name .. ".lua", "rb")
+      if not file then error(open_err, 0) end
+      local text = file:read("*a")
+      file:close()
+      local chunk, err = loadstring(text, "@payload/" .. name .. ".lua")
       if not chunk then error(err, 0) end
       module = chunk(import)
       loaded[name] = module
@@ -94,15 +103,29 @@ function host.request_reload()
   state.reload_requested = true
 end
 
+local function now_ms()
+  return os.clock() * 1000
+end
+
+-- The payload is in place only once its start has returned. One that raises is stopped and tried again in a while,
+-- not left half started (its tick raising twenty times a second).
 local function start()
   if state.payload then return end
   local ok, payload = xpcall(load_payload, debug.traceback)
   if not ok then
     report("load", payload)
+    state.retry_start_ms = now_ms() + START_RETRY_MS
+    return
+  end
+  local started, err = xpcall(payload.start, debug.traceback, host, false)
+  if not started then
+    report("start", err)
+    pcall(payload.stop, host, false)
+    host.close_server()
+    state.retry_start_ms = now_ms() + START_RETRY_MS
     return
   end
   state.payload = payload
-  payload.start(host, false)
 end
 
 local function stop()
@@ -122,12 +145,31 @@ local function swap_payload()
     call_payload("on_reload_failed", fresh)
     return
   end
-  if state.payload then guard("stop", state.payload.stop)(host, true) end
-  state.payload = fresh
-  guard("start", fresh.start)(host, true)
+  local old = state.payload
+  if old then guard("stop", old.stop)(host, true) end
+  local started, err = xpcall(fresh.start, debug.traceback, host, true)
+  if started then
+    state.payload = fresh
+    return
+  end
+  -- The new payload couldn't start: the old one, which was working, takes over again.
+  report("reload", err)
+  pcall(fresh.stop, host, true)
+  state.payload = nil
+  if old then
+    local back, why = xpcall(old.start, debug.traceback, host, true)
+    if back then
+      state.payload = old
+      call_payload("on_reload_failed", err)
+      return
+    end
+    report("reload", why)
+  end
+  state.retry_start_ms = now_ms() + START_RETRY_MS
 end
 
 local tick = guard("tick", function()
+  if not state.payload and now_ms() >= state.retry_start_ms then start() end
   if state.reload_requested then
     state.reload_requested = false
     swap_payload()
@@ -135,15 +177,24 @@ local tick = guard("tick", function()
   call_payload("tick")
 end)
 
+-- main.lua runs once per Lua state, and a closure made here is never one already added: there's nothing to look for.
+local hooks = {}
 local function hook(observable, where, fn)
   local guarded = guard(where, fn)
-  if not observable:has_notifier(guarded) then observable:add_notifier(guarded) end
+  observable:add_notifier(guarded)
+  hooks[#hooks + 1] = { observable = observable, fn = guarded }
 end
 
 hook(tool.tool_finished_loading_observable, "finished_loading", start)
 hook(tool.tool_will_unload_observable, "will_unload", function()
   if tool:has_timer(tick) then tool:remove_timer(tick) end
   stop()
+  -- Renoise's own observers outlive this Lua state's tool object in no case we know of; taking ours off costs nothing.
+  for _, entry in ipairs(hooks) do
+    if entry.observable ~= tool.tool_will_unload_observable then
+      pcall(function() entry.observable:remove_notifier(entry.fn) end)
+    end
+  end
 end)
 hook(tool.app_new_document_observable, "new_document", function()
   start()

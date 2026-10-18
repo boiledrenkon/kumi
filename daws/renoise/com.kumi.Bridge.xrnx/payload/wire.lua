@@ -81,6 +81,11 @@ function M.next_line(framer)
       framer.count = framer.count + 1
       framer.parts[framer.count] = rest
       framer.size = framer.size + #rest
+      -- A line that arrives a byte at a time would hold a table slot for each: join them now and then.
+      if framer.count >= 256 then
+        framer.parts = { concat(framer.parts, "", 1, framer.count) }
+        framer.count = 1
+      end
     end
   end
   local held = framer.size
