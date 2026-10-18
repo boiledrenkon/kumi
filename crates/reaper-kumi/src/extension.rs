@@ -68,6 +68,10 @@ struct Pending {
     play: Option<PlayState>,
 }
 
+fn bad_params(message: &str) -> (String, String) {
+    ("bad-params".into(), message.into())
+}
+
 // What was last sent, so a tick sends only changes.
 #[derive(Default)]
 struct Sent {
@@ -191,14 +195,52 @@ impl Extension {
         }
     }
 
-    fn handle(&self, method: &str, _params: &Value) -> Answer {
+    fn handle(&self, method: &str, params: &Value) -> Answer {
         match method {
-            "quit" => {
-                self.quit.set(Quit::Answered);
-                Ok(json!({"quitting": true}))
-            }
+            "action" => self.action(params),
+            "quit" => self.quit(params),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),
         }
+    }
+
+    // Runs a main-section action by id or command name. Actions that open a dialog (named "…") never run unattended.
+    fn action(&self, params: &Value) -> Answer {
+        let reaper = self.reaper();
+        let command = match &params["command"] {
+            Value::Number(n) => n.to_string(),
+            Value::String(s) => s.clone(),
+            _ => return Err(bad_params("command: an action id or a command name")),
+        };
+        let Some(id) = reaper.command_id(&command) else { return Err(bad_params(&format!("no action {command:?}"))) };
+        let Some(name) = reaper.action_name(id) else { return Err(bad_params(&format!("no action {command:?}"))) };
+        if name.ends_with("...") || name.ends_with('…') {
+            return Err(bad_params(&format!("{name:?} opens a dialog, which Kumi never runs unattended")));
+        }
+        if id == ACTION_QUIT {
+            return Err(bad_params("use quit, which checks for unsaved changes first"));
+        }
+        reaper.run_action(id);
+        Ok(json!({"command": id, "name": name}))
+    }
+
+    // Quits on the next tick. REAPER would ask about unsaved changes in a dialog, so those are saved first when asked
+    // (`save: true`), and refused otherwise; a project never saved can't be saved without Save As.
+    fn quit(&self, params: &Value) -> Answer {
+        let reaper = self.reaper();
+        let save = params["save"].as_bool().unwrap_or(false);
+        let dirty: Vec<ProjectInfo> = reaper.projects().into_iter().filter(|p| reaper.is_dirty(p.ptr)).collect();
+        if dirty.iter().any(|p| p.path.is_empty()) {
+            return Err(("failed".into(), "a project that was never saved has changes: save it in REAPER first".into()));
+        }
+        if !dirty.is_empty() && !save {
+            let names: Vec<&str> = dirty.iter().map(|p| p.name.as_str()).collect();
+            return Err(("failed".into(), format!("unsaved changes in {}: pass save: true to save them first", names.join(", "))));
+        }
+        for project in &dirty {
+            reaper.save(project.ptr);
+        }
+        self.quit.set(Quit::Answered);
+        Ok(json!({"quitting": true, "saved": dirty.iter().map(|p| p.path.clone()).collect::<Vec<_>>()}))
     }
 
     // What `status` adds to the bridge's identity; the socket threads serve it from the snapshot.
@@ -354,7 +396,7 @@ mod tests {
         assert!(snapshot.last_tick.is_some());
         assert_eq!(snapshot.status["tracks"], 2);
         assert_eq!(snapshot.status["transport"]["playing"], true);
-        assert_eq!(snapshot.status["api"], json!({"resolved": 16, "total": 877}));
+        assert_eq!(snapshot.status["api"], json!({"resolved": 20, "total": 877}));
         fake::with(|s| s.loading = true);
         extension.tick(Driver::Timer);
         assert!(extension.snapshot().busy.unwrap().contains("loading"));
@@ -368,10 +410,55 @@ mod tests {
         assert!(message.contains("explode"));
     }
 
+    fn ask_with(extension: &Extension, tx: &std::sync::mpsc::Sender<Job>, method: &str, params: Value) -> Answer {
+        let (job, waiter) = queue::job(method, params);
+        tx.send(job).unwrap();
+        extension.tick(Driver::Timer);
+        match waiter.wait(Duration::from_secs(1)) {
+            Outcome::Answered(answer) => answer,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn actions_run_by_id_or_name_but_never_a_dialog() {
+        let (extension, tx, _, _) = setup();
+        assert_eq!(
+            ask_with(&extension, &tx, "action", json!({"command": 40001})),
+            Ok(json!({"command": 40001, "name": "Track: Insert new track"}))
+        );
+        assert_eq!(
+            ask_with(&extension, &tx, "action", json!({"command": "_RS_kumi"})),
+            Ok(json!({"command": 54000, "name": "Script: kumi.lua"}))
+        );
+        let refused = |params: Value| ask_with(&extension, &tx, "action", params).unwrap_err();
+        assert!(refused(json!({"command": 40022})).1.contains("dialog"));
+        assert!(refused(json!({"command": 40004})).1.contains("quit"));
+        assert!(refused(json!({"command": 99999})).1.contains("no action"));
+        assert!(refused(json!({"command": "_nope"})).1.contains("no action"));
+        assert_eq!(refused(json!({})).0, "bad-params");
+        assert_eq!(fake::with(|s| s.actions.clone()), [40001, 54000]);
+    }
+
+    #[test]
+    fn quit_refuses_unsaved_changes_unless_asked_to_save() {
+        let (extension, tx, _, _) = setup();
+        fake::with(|s| s.dirty = true);
+        assert!(ask_with(&extension, &tx, "quit", json!({})).unwrap_err().1.contains("never saved"));
+        fake::with(|s| s.project = Some(("/lab/Projects/a.rpp".into(), "a.rpp".into())));
+        assert!(ask_with(&extension, &tx, "quit", json!({})).unwrap_err().1.contains("a.rpp"));
+        assert!(fake::with(|s| s.actions.is_empty()));
+        assert_eq!(
+            ask_with(&extension, &tx, "quit", json!({"save": true})),
+            Ok(json!({"quitting": true, "saved": ["/lab/Projects/a.rpp"]}))
+        );
+        assert_eq!(fake::with(|s| s.saved), 1);
+    }
+
     #[test]
     fn quit_answers_first_and_runs_reapers_quit_on_the_next_tick() {
         let (extension, tx, _, _) = setup();
-        assert_eq!(ask(&extension, &tx, "quit"), Outcome::Answered(Ok(json!({"quitting": true}))));
+        assert_eq!(ask(&extension, &tx, "quit"), Outcome::Answered(Ok(json!({"quitting": true, "saved": []}))));
         assert!(fake::with(|s| s.actions.is_empty()));
         extension.tick(Driver::Timer);
         assert_eq!(fake::with(|s| s.actions.clone()), [ACTION_QUIT]);

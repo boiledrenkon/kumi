@@ -74,9 +74,18 @@ impl<'a> Reaper<'a> {
     }
 
     pub fn current_project(&self) -> Option<ProjectInfo> {
+        self.project_at(-1)
+    }
+
+    /// Every open project tab, in tab order.
+    pub fn projects(&self) -> Vec<ProjectInfo> {
+        (0..).map_while(|i| self.project_at(i)).collect()
+    }
+
+    fn project_at(&self, index: i32) -> Option<ProjectInfo> {
         let enum_projects = self.api.EnumProjects()?;
         let mut proj = ptr::null_mut();
-        let path = api::read_buffer(|buf, size| proj = unsafe { enum_projects(-1, buf, size) });
+        let path = api::read_buffer(|buf, size| proj = unsafe { enum_projects(index, buf, size) });
         if proj.is_null() {
             return None;
         }
@@ -85,6 +94,21 @@ impl<'a> Reaper<'a> {
             None => String::new(),
         };
         Some(ProjectInfo { ptr: Project(proj), path, name })
+    }
+
+    pub fn is_dirty(&self, proj: Project) -> bool {
+        self.api.IsProjectDirty().is_some_and(|f| unsafe { f(proj.0) } != 0)
+    }
+
+    /// Saves a project that has a file (one without would open Save As).
+    pub fn save(&self, proj: Project) -> bool {
+        match self.api.Main_SaveProject() {
+            Some(f) => {
+                unsafe { f(proj.0, false) };
+                true
+            }
+            None => false,
+        }
     }
 
     /// Whether a project is loading or saving, or one is rendering: no edits then.
@@ -144,6 +168,24 @@ impl<'a> Reaper<'a> {
         json!({"index": index, "guid": guid, "name": name})
     }
 
+    /// A main-section action's command id: a number, or a named command such as `_SWS_ABOUT`.
+    pub fn command_id(&self, command: &str) -> Option<i32> {
+        if let Ok(id) = command.parse::<i32>() {
+            return (id > 0).then_some(id);
+        }
+        let lookup = self.api.NamedCommandLookup()?;
+        let name = CString::new(command).ok()?;
+        let id = unsafe { lookup(name.as_ptr()) };
+        (id > 0).then_some(id)
+    }
+
+    /// The action's name as the action list shows it; None when there is no such action.
+    pub fn action_name(&self, command: i32) -> Option<String> {
+        let f = self.api.kbd_getTextFromCmd()?;
+        let name = unsafe { api::string(f(command, ptr::null_mut())) };
+        (!name.is_empty()).then_some(name)
+    }
+
     pub fn run_action(&self, command: i32) -> bool {
         match self.api.Main_OnCommandEx() {
             Some(f) => {
@@ -185,6 +227,8 @@ pub mod fake {
         pub tracks: Vec<(String, String)>,
         pub selected: Vec<usize>,
         pub loading: bool,
+        pub dirty: bool,
+        pub saved: u32,
         pub actions: Vec<i32>,
         pub ui_refresh: i32,
     }
@@ -238,7 +282,7 @@ pub mod fake {
     }
     unsafe extern "C" fn enum_projects(idx: c_int, buf: *mut c_char, size: c_int) -> *mut ReaProject {
         with(|s| match (&s.project, idx) {
-            (Some((path, _)), -1) => {
+            (Some((path, _)), -1 | 0) => {
                 write(buf, size, path);
                 PROJECT
             }
@@ -291,6 +335,31 @@ pub mod fake {
     unsafe extern "C" fn prevent_ui_refresh(count: c_int) {
         with(|s| s.ui_refresh += count);
     }
+    unsafe extern "C" fn is_project_dirty(_proj: *mut ReaProject) -> c_int {
+        with(|s| s.dirty as c_int)
+    }
+    unsafe extern "C" fn main_save_project(_proj: *mut ReaProject, _save_as: bool) {
+        with(|s| {
+            s.dirty = false;
+            s.saved += 1;
+        });
+    }
+    unsafe extern "C" fn kbd_get_text_from_cmd(cmd: c_int, _section: *mut c_void) -> *const c_char {
+        match cmd {
+            40001 => c"Track: Insert new track".as_ptr(),
+            40004 => c"File: Quit REAPER".as_ptr(),
+            40022 => c"File: Save project as...".as_ptr(),
+            54000 => c"Script: kumi.lua".as_ptr(),
+            _ => c"".as_ptr(),
+        }
+    }
+    unsafe extern "C" fn named_command_lookup(name: *const c_char) -> c_int {
+        if unsafe { CStr::from_ptr(name) } == c"_RS_kumi" {
+            54000
+        } else {
+            0
+        }
+    }
 
     /// The fake table: only the functions above resolve.
     pub fn api() -> Api {
@@ -312,6 +381,10 @@ pub mod fake {
                 b"guidToString" => guid_to_string as *mut c_void,
                 b"Main_OnCommandEx" => main_on_command_ex as *mut c_void,
                 b"PreventUIRefresh" => prevent_ui_refresh as *mut c_void,
+                b"IsProjectDirty" => is_project_dirty as *mut c_void,
+                b"Main_SaveProject" => main_save_project as *mut c_void,
+                b"kbd_getTextFromCmd" => kbd_get_text_from_cmd as *mut c_void,
+                b"NamedCommandLookup" => named_command_lookup as *mut c_void,
                 _ => ptr::null_mut(),
             };
             f

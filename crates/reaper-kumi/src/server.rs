@@ -33,7 +33,7 @@ const PREAUTH_POLL: Duration = Duration::from_millis(200);
 
 /// Methods served off the main thread: they answer even while REAPER shows a dialog.
 const SOCKET_METHODS: [&str; 2] = ["ping", "status"];
-const MAIN_METHODS: [&str; 1] = ["quit"];
+const MAIN_METHODS: [&str; 2] = ["action", "quit"];
 const EVENTS: [&str; 4] = [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION];
 
 /// Where the reference file lives for a resource folder.
