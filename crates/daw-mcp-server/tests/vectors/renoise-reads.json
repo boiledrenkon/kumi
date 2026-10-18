@@ -473,6 +473,81 @@
       "request": {
         "method": "read",
         "params": {
+          "kind": "line",
+          "parent": "1:pattern:1",
+          "track": "1:track:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "line": 1,
+              "notes": [
+                {
+                  "col": 1,
+                  "instrument": "00",
+                  "note": "C-4"
+                }
+              ]
+            },
+            {
+              "line": 5,
+              "notes": [
+                {
+                  "col": 1,
+                  "fx": "0A20",
+                  "instrument": "00",
+                  "note": "D#4",
+                  "volume": "40"
+                }
+              ]
+            }
+          ],
+          "layout": 0
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "line",
+          "layout": 0,
+          "parent": "1:pattern:1",
+          "track": "1:track:4"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "line": 3,
+              "notes": [
+                {
+                  "col": 1,
+                  "instrument": "01",
+                  "note": "C-3"
+                },
+                {
+                  "col": 2,
+                  "note": "OFF"
+                }
+              ]
+            }
+          ],
+          "layout": 0
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
           "kind": "instrument"
         }
       },
