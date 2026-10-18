@@ -313,6 +313,15 @@ impl Extension {
         for project in &dirty {
             reaper.save(project.ptr);
         }
+        // Saving can fail (a read-only folder, a plug-in refusing) and leave the project changed: REAPER would then
+        // ask about it in a dialog when it quits, so look again.
+        let still: Vec<&str> = dirty.iter().filter(|p| reaper.is_dirty(p.ptr)).map(|p| p.name.as_str()).collect();
+        if !still.is_empty() {
+            return Err((
+                "failed".into(),
+                format!("{} still has unsaved changes after saving: REAPER would ask about them", still.join(", ")),
+            ));
+        }
         self.quit.set(Quit::Answered);
         Ok(json!({"quitting": true, "saved": dirty.iter().map(|p| p.path.clone()).collect::<Vec<_>>()}))
     }
@@ -631,6 +640,22 @@ mod tests {
         assert!(matches!(waiter.wait(Duration::from_secs(1), &OPEN), Outcome::Answered(Ok(_))));
         // And the UI refresh hold is balanced when something unwinds while it is held.
         assert_eq!(fake::with(|s| s.ui_refresh), 0);
+    }
+
+    #[test]
+    fn quit_looks_again_after_saving_and_stays_if_the_project_is_still_changed() {
+        let (extension, tx, _, _) = setup();
+        fake::with(|s| {
+            s.project = Some(("/lab/Projects/a.rpp".into(), "a.rpp".into()));
+            s.dirty = true;
+            s.save_fails = true;
+        });
+        let refused = ask_with(&extension, &tx, "quit", json!({"save": true})).unwrap_err();
+        assert!(refused.1.contains("still has unsaved changes") && refused.1.contains("a.rpp"), "{refused:?}");
+        extension.tick(Driver::Timer);
+        assert!(fake::with(|s| s.actions.is_empty()), "REAPER was told to quit with a project changed");
+        fake::with(|s| s.save_fails = false);
+        assert!(ask_with(&extension, &tx, "quit", json!({"save": true})).is_ok());
     }
 
     #[test]

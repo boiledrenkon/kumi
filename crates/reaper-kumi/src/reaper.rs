@@ -265,6 +265,8 @@ pub mod fake {
         pub selected: Vec<usize>,
         pub loading: bool,
         pub dirty: bool,
+        /// Saving leaves the project changed (a read-only folder, a plug-in refusing).
+        pub save_fails: bool,
         pub saved: u32,
         pub actions: Vec<i32>,
         pub ui_refresh: i32,
@@ -392,7 +394,7 @@ pub mod fake {
     }
     unsafe extern "C" fn main_save_project(_proj: *mut ReaProject, _save_as: bool) {
         with(|s| {
-            s.dirty = false;
+            s.dirty = s.save_fails;
             s.saved += 1;
         });
     }
