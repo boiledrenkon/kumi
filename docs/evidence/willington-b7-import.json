@@ -1,0 +1,1218 @@
+{
+  "schema": 1,
+  "date": "2026-10-18",
+  "status": "passed",
+  "scope": "Official CI bundle in a separately staged current-Kumi provider, in a fresh Live process. Fixture-scoped; installed user bridge/configuration unchanged.",
+  "willington": {
+    "commit": "5361914b1b79230e51c8f051b8b2122176e94adb",
+    "run": 39147867000,
+    "artifact": 12143757769,
+    "artifact_sha256": "88c4d38933cf28ad7f1bd64b0ae2d55fb68b487b3907d7a7194c6f0565c02cdd"
+  },
+  "kumi_base": "81989bfa",
+  "offline_tests": {
+    "release_import": 19,
+    "provider": 43,
+    "native_editing": 10
+  },
+  "fresh_process": {
+    "status": "passed",
+    "identity": {
+      "platform": "macos",
+      "architecture": "arm64",
+      "version": "12.4.15b7",
+      "executable": "/Applications/Ableton Live 12 Beta.app/Contents/MacOS/Live",
+      "source_sha256": "ba0a4b90a3563d18877dda7d1284590956644eb3970f5b68575e3a9d6b096518"
+    },
+    "components": {
+      "WillingtonBindings": {
+        "path": "willington/WillingtonBindings/build/live-12.4.15b7-arm64/libwillington.dylib",
+        "sha256": "85ca3057161573192e55f1010b6da52919734ccc0ed6277e25811267a7c305ca",
+        "writesEnabled": false
+      },
+      "WillingtonDeviceTools": {
+        "path": "willington/WillingtonDeviceTools/build/live-12.4.15b7-arm64/libwillington_devices.dylib",
+        "sha256": "8771a54b2fb663369b94869a7a0d6eef6abb1812a3c0a42049f01ca4761990cd",
+        "writesEnabled": false
+      },
+      "WillingtonRackZones": {
+        "path": "willington/WillingtonRackZones/build/live-12.4.15b7-arm64/libwillington_zones.dylib",
+        "sha256": "446b8c76a896d156087401077d76e6f6c0d6713691cbd161f733ae5a8189f23c",
+        "writesEnabled": false
+      },
+      "WillingtonEditing": {
+        "path": "willington/WillingtonEditing/build/live-12.4.15b7-arm64/libwillington_editing.dylib",
+        "sha256": "e65a810bf42d24bcc3f75e23364c2dfd23f9dd172345230c8f39724b679e0241",
+        "writesEnabled": false
+      }
+    },
+    "logs": [
+      "Willington extensions initialized; active providers: Follow Actions, Device Tools, Rack Zones, Native Editing; writes enabled: none"
+    ],
+    "scope": "Separate staged Kumi provider, official CI bundle; existing installed bridge remains unchanged."
+  },
+  "follow_actions": {
+    "status": "passed",
+    "checks": {
+      "listeners_registered": true,
+      "invalid_values_rejected": true,
+      "listeners_removed": true,
+      "mfl_allowlist": true
+    },
+    "cases": [
+      {
+        "property": "follow_action_enabled",
+        "value": true,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": true,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_enabled": [
+            true,
+            false
+          ]
+        }
+      },
+      {
+        "property": "follow_action_linked",
+        "value": false,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": false,
+          "follow_action_a": 4,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_linked": [
+            false,
+            true
+          ]
+        }
+      },
+      {
+        "property": "follow_action_loop_count",
+        "value": 3,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 3,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_loop_count": [
+            3,
+            1
+          ]
+        }
+      },
+      {
+        "property": "follow_action_chance_a",
+        "value": 37.0,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 37.0,
+          "follow_action_chance_b": 63.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_chance_a": [
+            37.0,
+            100.0
+          ],
+          "follow_action_chance_b": [
+            63.0,
+            0.0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_chance_b",
+        "value": 23.0,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 77.0,
+          "follow_action_chance_b": 23.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_chance_a": [
+            77.0,
+            100.0
+          ],
+          "follow_action_chance_b": [
+            23.0,
+            0.0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_jump_a",
+        "value": 2.0,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 2.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_jump_a": [
+            2.0,
+            1.0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_jump_b",
+        "value": 3.0,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 3.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_jump_b": [
+            3.0,
+            1.0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_time",
+        "value": 7.5,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 7.5
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_time": [
+            7.5,
+            4.0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_a",
+        "value": 0,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 0,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_a": [
+            0,
+            4
+          ]
+        }
+      },
+      {
+        "property": "follow_action_a",
+        "value": 1,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 1,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_a": [
+            1,
+            4
+          ]
+        }
+      },
+      {
+        "property": "follow_action_a",
+        "value": 2,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 2,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_a": [
+            2,
+            4
+          ]
+        }
+      },
+      {
+        "property": "follow_action_a",
+        "value": 3,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 3,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_a": [
+            3,
+            4
+          ]
+        }
+      },
+      {
+        "property": "follow_action_a",
+        "value": 5,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 5,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_a": [
+            5,
+            4
+          ]
+        }
+      },
+      {
+        "property": "follow_action_a",
+        "value": 6,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 6,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_a": [
+            6,
+            4
+          ]
+        }
+      },
+      {
+        "property": "follow_action_a",
+        "value": 7,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 7,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_a": [
+            7,
+            4
+          ]
+        }
+      },
+      {
+        "property": "follow_action_a",
+        "value": 8,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 8,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_a": [
+            8,
+            4
+          ]
+        }
+      },
+      {
+        "property": "follow_action_a",
+        "value": 9,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 9,
+          "follow_action_b": 0,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_a": [
+            9,
+            4
+          ]
+        }
+      },
+      {
+        "property": "follow_action_b",
+        "value": 1,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 1,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_b": [
+            1,
+            0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_b",
+        "value": 2,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 2,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_b": [
+            2,
+            0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_b",
+        "value": 3,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 3,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_b": [
+            3,
+            0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_b",
+        "value": 4,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 4,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_b": [
+            4,
+            0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_b",
+        "value": 5,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 5,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_b": [
+            5,
+            0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_b",
+        "value": 6,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 6,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_b": [
+            6,
+            0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_b",
+        "value": 7,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 7,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_b": [
+            7,
+            0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_b",
+        "value": 8,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 8,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_b": [
+            8,
+            0
+          ]
+        }
+      },
+      {
+        "property": "follow_action_b",
+        "value": 9,
+        "readback": true,
+        "disabled_write_rejected": true,
+        "write_notified": true,
+        "after": {
+          "follow_action_enabled": false,
+          "follow_action_linked": true,
+          "follow_action_a": 4,
+          "follow_action_b": 9,
+          "follow_action_loop_count": 1,
+          "follow_action_chance_a": 100.0,
+          "follow_action_chance_b": 0.0,
+          "follow_action_jump_a": 1.0,
+          "follow_action_jump_b": 1.0,
+          "follow_action_time": 4.0
+        },
+        "undo_restored_all": true,
+        "undo_notified": true,
+        "events": {
+          "follow_action_b": [
+            9,
+            0
+          ]
+        }
+      }
+    ],
+    "events": {
+      "follow_action_enabled": [],
+      "follow_action_linked": [],
+      "follow_action_a": [],
+      "follow_action_b": [
+        9,
+        0
+      ],
+      "follow_action_loop_count": [],
+      "follow_action_chance_a": [],
+      "follow_action_chance_b": [],
+      "follow_action_jump_a": [],
+      "follow_action_jump_b": [],
+      "follow_action_time": []
+    },
+    "initial": {
+      "follow_action_enabled": false,
+      "follow_action_linked": true,
+      "follow_action_a": 4,
+      "follow_action_b": 0,
+      "follow_action_loop_count": 1,
+      "follow_action_chance_a": 100.0,
+      "follow_action_chance_b": 0.0,
+      "follow_action_jump_a": 1.0,
+      "follow_action_jump_b": 1.0,
+      "follow_action_time": 4.0
+    },
+    "library_sha256": "85ca3057161573192e55f1010b6da52919734ccc0ed6277e25811267a7c305ca"
+  },
+  "devices": {
+    "status": "passed",
+    "suite": "full",
+    "checks": [
+      "input and write guards",
+      "create mapping",
+      "undo creation",
+      "verify creation undo and redo",
+      "verify creation redo and set inverted range",
+      "low endpoint",
+      "high endpoint and remove",
+      "removal readback and undo",
+      "undo restored mapping and redo",
+      "redo removed mapping",
+      "clear all four modulators",
+      "assign each last mapping slot",
+      "check and clear last slots",
+      "restore first-slot mappings",
+      "verify restored modulation signals"
+    ],
+    "mapping_events": [
+      [
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ]
+    ],
+    "undo_labels": [
+      "Undo Assign Macro",
+      "Undo Assign Macro"
+    ]
+  },
+  "zones": {
+    "status": "passed",
+    "checks": [
+      {
+        "track": "Zone Validation Instrument",
+        "kind": "selector",
+        "disabledWriteRejected": true,
+        "undoRedo": true,
+        "restored": true
+      },
+      {
+        "track": "Zone Validation Instrument",
+        "kind": "key",
+        "disabledWriteRejected": true,
+        "undoRedo": true,
+        "restored": true
+      },
+      {
+        "track": "Zone Validation Instrument",
+        "kind": "velocity",
+        "disabledWriteRejected": true,
+        "undoRedo": true,
+        "restored": true
+      },
+      {
+        "track": "Zone Validation MIDI",
+        "kind": "selector",
+        "disabledWriteRejected": true,
+        "undoRedo": true,
+        "restored": true
+      },
+      {
+        "track": "Zone Validation MIDI",
+        "kind": "key",
+        "disabledWriteRejected": true,
+        "undoRedo": true,
+        "restored": true
+      },
+      {
+        "track": "Zone Validation MIDI",
+        "kind": "velocity",
+        "disabledWriteRejected": true,
+        "undoRedo": true,
+        "restored": true
+      },
+      {
+        "track": "Zone Validation Audio",
+        "kind": "selector",
+        "disabledWriteRejected": true,
+        "undoRedo": true,
+        "restored": true
+      }
+    ]
+  },
+  "native_editing_mapper_fixture": {
+    "component": "WillingtonEditing",
+    "status": "passed",
+    "library_sha256": "e65a810bf42d24bcc3f75e23364c2dfd23f9dd172345230c8f39724b679e0241",
+    "checks": [
+      {
+        "kind": "global-follow",
+        "edit": {
+          "enabled": false
+        },
+        "observed": false,
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "edit": {
+          "chance_a": 35,
+          "loop_count": 2,
+          "time": 0.3333333333333333
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 35,
+          "chance_b": 65,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": true,
+          "loop_count": 2,
+          "time": 0.3333333333333333
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "note-expression",
+        "edit": {
+          "exists": true,
+          "events": [
+            [
+              0.1,
+              47.25,
+              0.2,
+              0.3,
+              0.7,
+              0.8
+            ],
+            [
+              1.1,
+              92.125,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          ]
+        },
+        "observed": {
+          "dimension": "pressure",
+          "events": [
+            [
+              0.1,
+              47.25,
+              0.2,
+              0.3,
+              0.7,
+              0.8
+            ],
+            [
+              1.1,
+              92.125,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          ],
+          "exists": true,
+          "time_origin": "note_start",
+          "unit": "midi"
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "arrangement-automation",
+        "edit": {
+          "action": "insert",
+          "event": [
+            60,
+            0.55,
+            0.5,
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "observed": {
+          "snapshotCaptured": true
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "edit": {
+          "linked": false
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 36,
+          "chance_b": 64,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": false,
+          "loop_count": 1,
+          "time": 1.25
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "edit": {
+          "linked": true,
+          "loop_count": 3
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 36,
+          "chance_b": 64,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": true,
+          "loop_count": 3,
+          "time": 1.25
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "group-tracks",
+        "applied": true,
+        "topologyRestored": true,
+        "cleanup": "explicit native ungroup; no Kumi history inverse"
+      }
+    ]
+  },
+  "provider_receipt_gates": {
+    "status": "passed",
+    "checks": [
+      {
+        "case": "matching receipts",
+        "allFourEnabled": true
+      },
+      {
+        "case": "stale editing receipt",
+        "refused": true
+      },
+      {
+        "case": "missing editing receipt",
+        "refused": true
+      }
+    ],
+    "finalWritesDisabled": true,
+    "stopped": true,
+    "logs": [
+      "Willington extensions initialized; active providers: Follow Actions, Device Tools, Rack Zones, Native Editing; writes enabled: Follow Actions, Device Tools, Rack Zones, Native Editing",
+      "Willington native editing writes unavailable: current-library native editing self-test is required",
+      "Willington extensions initialized; active providers: Follow Actions, Device Tools, Rack Zones, Native Editing; writes enabled: Follow Actions, Device Tools, Rack Zones",
+      "Willington native editing writes unavailable: owner-only native editing self-test receipt is required",
+      "Willington extensions initialized; active providers: Follow Actions, Device Tools, Rack Zones, Native Editing; writes enabled: Follow Actions, Device Tools, Rack Zones",
+      "Willington extensions initialized; active providers: Follow Actions, Device Tools, Rack Zones, Native Editing; writes enabled: none"
+    ],
+    "scope": "Only staged fixture configuration and receipts changed; installed user configuration unchanged."
+  },
+  "limits": [
+    "No Rust host/MCP history end-to-end claim.",
+    "Windows remains b5-only; no Windows b7 runtime claim.",
+    "Single-step mapping undo passes Live.Base.Timer and Max LiveAPI; a control-surface update callback can add an extra Custom Action undo entry.",
+    "CI-bundle engine audio was not remeasured; upstream engine coverage was obtained with the locally compiled libraries."
+  ],
+  "superseded_setup_attempts": [
+    {
+      "case": "staged package import",
+      "failure": "Missing operation registry in fixture package.",
+      "correction": "Copied the unchanged current registry as release staging does; subsequent provider load passed."
+    },
+    {
+      "case": "editing mapper after Set switch",
+      "failure": "Mapper retained a deleted prior Song object.",
+      "correction": "Created a fresh current-Kumi mapper for the loaded editing fixture; all seven checks passed."
+    }
+  ],
+  "harness_sha256": {
+    "b7_ci_zones.py": "b9abe710164e586fa3afcdd6e624c881187d78dd8eae0fbb3a07b31e28fa810f",
+    "b7_ci_follow.py": "5667097229ee0e7c4499a7b9404bb126739ed7794cf1848861e3477b41e71f7e",
+    "b7_provider_load.py": "c60ed78a0d62a163803f01bcb0d6d227f7044f9515d3b2af26b5a7266cdae092",
+    "b7_ci_provider_gates.py": "593d564c37418860d269ea7099395b15734af6134d793923ab32f7b9072b39ec",
+    "b7_ci_devices.py": "4c1e6ccf6470727f5537303dd3e7a5e28896de648744cd7fd7309a880fa5abc7",
+    "b7_ci_editing.py": "f12c4bd7510266a40445cd584638781b2c8534b9aab5428d37b77557374b8267"
+  }
+}
