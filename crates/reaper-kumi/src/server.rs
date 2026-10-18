@@ -70,6 +70,9 @@ pub struct Hub {
 
 struct HubInner {
     conns: Mutex<Vec<Arc<Conn>>>,
+    /// How long a test holds this server's readers between queuing a welcome and opening the connection to events.
+    #[cfg(test)]
+    welcome_pause_ms: AtomicU64,
 }
 
 /// What the main thread may touch of a connection. The handshake's state machine isn't here: the reader thread owns
@@ -80,6 +83,9 @@ struct Conn {
     stream: TcpStream,
     /// Set once the welcome is queued: events and heartbeats go out only after it.
     authenticated: AtomicBool,
+    /// Held while the reader queues the welcome and sets `authenticated`, and while the main thread sends an event or
+    /// a heartbeat: nothing goes out before the welcome, and none is missed by a host that has read it.
+    opening: Mutex<()>,
     /// The next event's number on this connection (only the main thread sends events).
     next_seq: AtomicU64,
     /// When the connection was accepted: a heartbeat's `ms` counts from here, as the Renoise tool's does.
@@ -88,7 +94,13 @@ struct Conn {
 
 impl Default for Hub {
     fn default() -> Self {
-        Hub { inner: Arc::new(HubInner { conns: Mutex::new(Vec::new()) }) }
+        Hub {
+            inner: Arc::new(HubInner {
+                conns: Mutex::new(Vec::new()),
+                #[cfg(test)]
+                welcome_pause_ms: AtomicU64::new(0),
+            }),
+        }
     }
 }
 
@@ -134,15 +146,21 @@ impl Outbox for Hub {
             log::line(&format!("event {name} isn't sent: its data nests deeper than {} levels", wire::MAX_PAYLOAD_DEPTH));
             return;
         }
-        for conn in self.conns().iter().filter(|c| c.authenticated.load(Ordering::Acquire)) {
-            let seq = conn.next_seq.fetch_add(1, Ordering::Relaxed);
-            self.send(conn, Frame::Event(Event { seq, name: name.into(), data: data.clone() }).encode());
+        for conn in self.conns() {
+            let _opening = lock(&conn.opening);
+            if conn.authenticated.load(Ordering::Acquire) {
+                let seq = conn.next_seq.fetch_add(1, Ordering::Relaxed);
+                self.send(&conn, Frame::Event(Event { seq, name: name.into(), data: data.clone() }).encode());
+            }
         }
     }
 
     fn heartbeat(&self) {
-        for conn in self.conns().iter().filter(|c| c.authenticated.load(Ordering::Acquire)) {
-            self.send(conn, Frame::Heartbeat { ms: conn.opened.elapsed().as_millis() as u64 }.encode());
+        for conn in self.conns() {
+            let _opening = lock(&conn.opening);
+            if conn.authenticated.load(Ordering::Acquire) {
+                self.send(&conn, Frame::Heartbeat { ms: conn.opened.elapsed().as_millis() as u64 }.encode());
+            }
         }
     }
 }
@@ -585,6 +603,7 @@ fn spawn_connection(id: u64, stream: TcpStream, state: ServerConnection, started
         out,
         stream: stream.try_clone()?,
         authenticated: AtomicBool::new(false),
+        opening: Mutex::new(()),
         next_seq: AtomicU64::new(1),
         opened: Instant::now(),
     });
@@ -664,8 +683,21 @@ fn serve(conn: &Arc<Conn>, mut state: ServerConnection, mut stream: TcpStream, s
             }
             Err(_) => return,
         };
-        for action in actions {
+        let mut actions = actions.into_iter().peekable();
+        while let Some(action) = actions.next() {
             match action {
+                // The welcome, queued and the connection opened to events as one step (see `Conn::opening`). The
+                // outbox is all but empty this early, so queuing it never waits.
+                ServerAction::Send(bytes) if matches!(actions.peek(), Some(ServerAction::Authenticated)) => {
+                    let _opening = lock(&conn.opening);
+                    if conn.out.try_send(bytes).is_err() {
+                        return;
+                    }
+                    #[cfg(test)]
+                    thread::sleep(Duration::from_millis(shared.hub.inner.welcome_pause_ms.load(Ordering::Relaxed)));
+                    conn.authenticated.store(true, Ordering::Release);
+                    actions.next();
+                }
                 ServerAction::Send(bytes) => {
                     if conn.out.send(bytes).is_err() {
                         return;
@@ -1243,6 +1275,23 @@ mod tests {
         let beat: Value = serde_json::from_str(&read_line(&mut reader).unwrap()).unwrap();
         assert_eq!(beat["type"], "heartbeat");
         assert!(beat["ms"].as_u64().unwrap() < 900, "{beat}");
+    }
+
+    /// The welcome and the connection's opening to events are one step: an event sent the moment the host has read
+    /// its welcome always reaches it, and none goes out before the welcome.
+    #[test]
+    fn an_event_sent_as_soon_as_the_host_has_its_welcome_reaches_it() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        // The host reads its welcome while the reader is held before it opens the connection: the event still arrives.
+        lab.hub.inner.welcome_pause_ms.store(200, Ordering::Relaxed);
+        for round in 0..5 {
+            let (stream, mut reader, _) = lab.authenticated();
+            lab.hub.event("tracks", json!({"round": round}));
+            let event: Value = serde_json::from_str(&read_line(&mut reader).unwrap_or_else(|| panic!("round {round}: no event"))).unwrap();
+            assert_eq!((event["type"].as_str(), event["data"]["round"].as_u64()), (Some("event"), Some(round)), "{event}");
+            drop((stream, reader));
+            wait_until(|| lab.hub.connections() == 0);
+        }
     }
 
     #[test]
