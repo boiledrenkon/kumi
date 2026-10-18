@@ -186,5 +186,11 @@ mod tests {
         assert_eq!(refs.kind_of("r:track:"), None);
         assert!(!refs.positional());
         assert_eq!(refs.refs_in("set r:fx:{AB-CD} and r:track:master"), ["r:fx:{AB-CD}", "r:track:master"]);
+        // A send is named by its two tracks (and which repeat of the pair), a marker by its GUID: never by a number.
+        assert_eq!(refs.kind_of("r:send:{A1}:-1:{B2}:2"), Some("send"));
+        assert_eq!(
+            refs.refs_in("r:send:{A1}:0:{B2}, r:send:{A1}:1:hw3 and r:marker:{C3}"),
+            ["r:send:{A1}:0:{B2}", "r:send:{A1}:1:hw3", "r:marker:{C3}"]
+        );
     }
 }
