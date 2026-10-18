@@ -7,6 +7,8 @@
 //! and refuses `changed` before it writes anything), and how to put it back (`restore`, which refuses `changed` if the
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
+mod sends;
+mod structure;
 mod tracks;
 mod undo;
 
@@ -70,14 +72,26 @@ pub struct Restored {
 enum Kind {
     TrackProp(&'static tracks::Prop),
     TrackDelete,
+    TrackAdd,
+    TrackMove,
+    SendProp(&'static sends::Prop),
+    SendAdd,
+    SendRemove,
 }
 
 fn kind(name: &str) -> Option<Kind> {
     if let Some(prop) = tracks::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::TrackProp(prop));
     }
+    if let Some(prop) = sends::PROPS.iter().find(|prop| prop.kind == name) {
+        return Some(Kind::SendProp(prop));
+    }
     match name {
+        "send-add" => Some(Kind::SendAdd),
+        "send-remove" => Some(Kind::SendRemove),
         "track-delete" => Some(Kind::TrackDelete),
+        "track-add" => Some(Kind::TrackAdd),
+        "track-move" => Some(Kind::TrackMove),
         _ => None,
     }
 }
@@ -87,6 +101,11 @@ impl Kind {
         match self {
             Kind::TrackProp(prop) => tracks::prop_preview(ctx, prop, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
+            Kind::TrackAdd => structure::add_preview(ctx, input),
+            Kind::TrackMove => structure::move_preview(ctx, input),
+            Kind::SendProp(prop) => sends::prop_preview(ctx, prop, input),
+            Kind::SendAdd => sends::add_preview(ctx, input),
+            Kind::SendRemove => sends::remove_preview(ctx, input),
         }
     }
 
@@ -94,6 +113,11 @@ impl Kind {
         match self {
             Kind::TrackProp(prop) => tracks::prop_apply(ctx, prop, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
+            Kind::TrackAdd => structure::add_apply(ctx, input, fence),
+            Kind::TrackMove => structure::move_apply(ctx, input, fence),
+            Kind::SendProp(prop) => sends::prop_apply(ctx, prop, input, fence),
+            Kind::SendAdd => sends::add_apply(ctx, input, fence),
+            Kind::SendRemove => sends::remove_apply(ctx, input, fence),
         }
     }
 
@@ -101,6 +125,11 @@ impl Kind {
         match self {
             Kind::TrackProp(prop) => tracks::prop_restore(ctx, prop, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
+            Kind::TrackAdd => structure::add_restore(ctx, restore),
+            Kind::TrackMove => structure::move_restore(ctx, restore),
+            Kind::SendProp(prop) => sends::prop_restore(ctx, prop, restore),
+            Kind::SendAdd => sends::add_restore(ctx, restore),
+            Kind::SendRemove => sends::remove_restore(ctx, restore),
         }
     }
 }

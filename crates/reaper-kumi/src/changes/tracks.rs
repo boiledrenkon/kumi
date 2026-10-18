@@ -54,7 +54,7 @@ fn trimmed(value: f64) -> String {
     text.strip_suffix(".0").map(str::to_string).unwrap_or(text)
 }
 
-fn pan_text(pan: f64) -> String {
+pub fn pan_text(pan: f64) -> String {
     let percent = (pan.abs() * 100.0).round() as i64;
     match percent {
         0 => "centre".into(),

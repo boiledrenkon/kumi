@@ -80,6 +80,25 @@ impl Reaper<'_> {
         self.api.ColorToNative().map(|f| unsafe { f(r, g, b) })
     }
 
+    /// Selects exactly this track (the master included).
+    pub fn select_only(&self, track: Track) {
+        if let Some(f) = self.api.SetOnlyTrackSelected() {
+            unsafe { f(track.0) }
+        }
+    }
+
+    pub fn set_track_selected(&self, track: Track, selected: bool) {
+        if let Some(f) = self.api.SetTrackSelected() {
+            unsafe { f(track.0, selected) }
+        }
+    }
+
+    /// Moves the selected tracks to just above the track at `before` (counted before the move). `folder` 0 leaves their
+    /// folder depths as they are.
+    pub fn reorder_selected(&self, before: i32, folder: i32) -> bool {
+        self.api.ReorderSelectedTracks().is_some_and(|f| unsafe { f(before, folder) })
+    }
+
     // ----- sends -----
 
     /// A send from `track` to `dest`, or a hardware output when there is none: its index among the sends of its kind.

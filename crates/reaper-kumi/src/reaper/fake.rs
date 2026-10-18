@@ -1624,6 +1624,54 @@ unsafe extern "C" fn set_track_send_info_value(
     })
 }
 
+unsafe extern "C" fn set_only_track_selected(track: *mut MediaTrack) {
+    counted(|s| {
+        s.master.selected = false;
+        for t in s.tracks.iter_mut() {
+            t.selected = false;
+        }
+        if let Some(t) = track_mut(s, track as u64) {
+            t.selected = true;
+        }
+    })
+}
+
+unsafe extern "C" fn set_track_selected(track: *mut MediaTrack, selected: bool) {
+    counted(|s| {
+        if let Some(t) = track_mut(s, track as u64) {
+            t.selected = selected;
+        }
+    })
+}
+
+/// Moves the selected tracks to just above `before`; the sends (which name their destination by position) follow.
+unsafe extern "C" fn reorder_selected_tracks(before: c_int, _folder: c_int) -> bool {
+    counted(|s| {
+        let n = s.tracks.len();
+        let moved: Vec<usize> = (0..n).filter(|&i| s.tracks[i].selected).collect();
+        if moved.is_empty() {
+            return false;
+        }
+        let before = (before.max(0) as usize).min(n);
+        let mut order: Vec<usize> = (0..before).filter(|i| !moved.contains(i)).collect();
+        order.extend(moved.iter().copied());
+        order.extend((before..n).filter(|i| !moved.contains(i)));
+        let mut position = vec![0usize; n];
+        for (new, &old) in order.iter().enumerate() {
+            position[old] = new;
+        }
+        let tracks = std::mem::take(&mut s.tracks);
+        s.tracks = order.iter().map(|&old| tracks[old].clone()).collect();
+        for track in s.tracks.iter_mut() {
+            for send in track.sends.iter_mut() {
+                send.dest = position[send.dest];
+            }
+        }
+        s.undo_dirty = true;
+        true
+    })
+}
+
 unsafe extern "C" fn color_to_native(r: c_int, g: c_int, b: c_int) -> c_int {
     r | g << 8 | b << 16
 }
@@ -1985,6 +2033,9 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"CreateTrackSend" => create_track_send as unsafe extern "C" fn(*mut MediaTrack, *mut MediaTrack) -> c_int,
         b"RemoveTrackSend" => remove_track_send as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int) -> bool,
         b"SetTrackSendInfo_Value" => set_track_send_info_value as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *const c_char, f64) -> bool,
+        b"SetOnlyTrackSelected" => set_only_track_selected as unsafe extern "C" fn(*mut MediaTrack),
+        b"SetTrackSelected" => set_track_selected as unsafe extern "C" fn(*mut MediaTrack, bool),
+        b"ReorderSelectedTracks" => reorder_selected_tracks as unsafe extern "C" fn(c_int, c_int) -> bool,
         b"ColorToNative" => color_to_native as unsafe extern "C" fn(c_int, c_int, c_int) -> c_int,
         b"UpdateArrange" => update_arrange as unsafe extern "C" fn(),
         b"TrackList_AdjustWindows" => track_list_adjust_windows as unsafe extern "C" fn(bool),
