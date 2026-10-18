@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use daw_bridge::auth::Secret;
 use daw_bridge::files::{self, Discovery, Reference, DISCOVERY_SCHEMA};
-use daw_bridge::handshake::{Offer, ServerAction, ServerConnection};
+use daw_bridge::handshake::{self, Offer, ServerAction, ServerConnection};
 use daw_bridge::wire::{self, code, Frame, Identity, Project, Request, MAX_AUTHENTICATED, MAX_UNAUTHENTICATED, PROTOCOL};
 use daw_bridge::{install, loopback, Daw};
 use serde_json::{json, Value};
@@ -336,7 +336,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, threads: Arc<Mutex<Ve
         if shared.stopping.load(Ordering::Acquire) {
             break;
         }
-        let Ok(stream) = stream else { continue };
+        let Ok(mut stream) = stream else { continue };
         let Ok(peer) = stream.peer_addr() else { continue };
         if !loopback::peer_allowed(&peer) {
             continue;
@@ -344,6 +344,8 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, threads: Arc<Mutex<Ve
         let (waiting, authenticated) = shared.hub.counts();
         if waiting >= MAX_UNAUTHENTICATED || authenticated >= MAX_AUTHENTICATED {
             log::line("a connection was turned away: too many open");
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+            let _ = stream.write_all(&handshake::refuse_connection());
             continue;
         }
         let secret = match files::read_secret(&shared.config.secret_file) {
@@ -687,6 +689,17 @@ mod tests {
         assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
         assert_eq!(read_line(&mut reader), None);
         assert!(files::scan_discovery(&dir, Daw::Reaper).is_empty());
+    }
+
+    #[test]
+    fn connections_over_the_limit_are_told_why() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let waiting: Vec<_> = (0..MAX_UNAUTHENTICATED).map(|_| lab.connect()).collect();
+        thread::sleep(Duration::from_millis(100));
+        let (_stream, mut reader) = lab.connect();
+        assert_eq!(read_frame(&mut reader), json!({"type": "refused", "reason": "connections"}));
+        assert_eq!(read_line(&mut reader), None);
+        drop(waiting);
     }
 
     #[test]
