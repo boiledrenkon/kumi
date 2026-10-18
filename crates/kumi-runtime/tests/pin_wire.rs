@@ -156,6 +156,7 @@ fn full_focus() -> LiveFocus {
         detail: Some(LiveDetail::Clip),
         browser: Some(true),
         selected_notes: Some(3),
+        ..Default::default()
     }
 }
 
@@ -887,6 +888,7 @@ fn device(r: &str, name: &str, class_name: &str, device_type: DeviceType) -> Dev
         can_have_drum_pads: Some(false),
         device_type: Some(device_type),
         chains: None,
+        role: None,
     }
 }
 
@@ -935,6 +937,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                         can_have_drum_pads: None,
                         device_type: None,
                         chains: None,
+                        role: None,
                     },
                 ],
             },
@@ -950,8 +953,9 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                     ClipViewNote { note: note(0.5, 38.0, 0.25, 87.5), selected: Some(false) },
                     ClipViewNote { note: note(1.75, 43.0, 1.0, 64.0), selected: None },
                 ],
+                beats_per_bar: None,
             },
-            ClipView { slot_ref: "7:clip_slot:1:0".into(), name: String::new(), length: 4.0, notes: vec![] },
+            ClipView { slot_ref: "7:clip_slot:1:0".into(), name: String::new(), length: 4.0, notes: vec![], beats_per_bar: None },
         ],
         session_strips: vec![SessionStrip {
             track_ref: "7:track:0".into(),
@@ -975,6 +979,7 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                 playing: true,
                 r#loop: Some(ArrangementLoop { start: 64.0, length: 16.0, enabled: true }),
                 locators: vec![Locator { name: "Drop".into(), position: 64.0 }, Locator { name: "Break".into(), position: 128.0 }],
+                beats_per_bar: None,
             },
             ArrangementStrip {
                 length: 0.0,
@@ -982,8 +987,9 @@ fn the_views_focus_draws_keep_their_wire_shape() {
                 playing: false,
                 r#loop: Some(ArrangementLoop { start: 0.0, length: 4.0, enabled: false }),
                 locators: vec![],
+                beats_per_bar: None,
             },
-            ArrangementStrip { length: 32.0, position: 0.0, playing: false, r#loop: None, locators: vec![] },
+            ArrangementStrip { length: 32.0, position: 0.0, playing: false, r#loop: None, locators: vec![], beats_per_bar: None },
         ],
         connection_states: CONNECTION_STATES.to_vec(),
         disconnect_causes: DISCONNECT_CAUSES.to_vec(),

@@ -1,6 +1,10 @@
-//! How the app shows Live's own tools: each step's words, what NOW says while it runs and its kind. Kumi's own tools
-//! are shown alike in every DAW (core/presentation.rs).
+//! How the app shows Live's own tools (each step's words, what NOW says while it runs and its kind; Kumi's own tools
+//! are shown alike in every DAW, core/presentation.rs), and how it reads Live's focus and devices.
 use crate::core::presentation::{ToolActivity, ToolPresentation};
+use crate::core::view::{
+    BodyKind, DawFocus, DeviceForm, DeviceRole, DeviceRow, DeviceSignal, FocusItem, FocusSection, FocusView, ItemKind, LiveDetail,
+    LiveView, SectionKind, ViewKind, ViewPresentation,
+};
 
 /// Live's tools as the app shows them.
 pub const PRESENTATION: ToolPresentation =
@@ -162,4 +166,96 @@ fn activity(tool: &str) -> Option<ToolActivity> {
 /// What NOW shows Live doing while the tool runs: a plan's or an arrangement's actions, and Live's own actions.
 fn acts(tool: &str) -> bool {
     matches!(tool, "make_changes" | "arrange" | "play" | "fire_scene" | "launch_clip" | "record" | "jump_to_locator" | "select" | "show")
+}
+
+/// How the app reads Live's focus and devices.
+pub const VIEW: ViewPresentation = ViewPresentation { fill_focus, device_role, heading };
+
+/// Live's word over each body FOCUS draws.
+fn heading(kind: BodyKind) -> &'static str {
+    match kind {
+        BodyKind::Tree => "Device",
+        BodyKind::Notes => "Clip",
+        BodyKind::Grid => "Session",
+        BodyKind::Timeline => "Arrangement",
+    }
+}
+
+/// Fills a focus's neutral fields from Live's wire form, one for one: the Session and Arrangement views, the Clip and
+/// Device views, the highlighted slot's clip, the selected scene. A neutral field already there must agree.
+pub fn fill_focus(focus: &mut DawFocus) {
+    let view = |kind, label: &str| FocusView { kind, label: label.into() };
+    let main = focus.view.map(|main| match main {
+        LiveView::Session => view(ViewKind::Launcher, "Session"),
+        LiveView::Arrangement => view(ViewKind::Timeline, "Arrangement"),
+    });
+    let editor = focus.detail.map(|detail| match detail {
+        LiveDetail::Clip => view(ViewKind::NoteEditor, "Clip view"),
+        LiveDetail::Device => view(ViewKind::DeviceChain, "Device view"),
+    });
+    let item = (focus.slot_ref.is_some() || focus.clip.is_some()).then(|| FocusItem {
+        kind: ItemKind::Clip,
+        item_ref: focus.slot_ref.clone(),
+        name: focus.clip.clone(),
+    });
+    let section = (focus.scene_index.is_some() || focus.scene.is_some()).then(|| FocusSection {
+        kind: SectionKind::Scene,
+        index: focus.scene_index,
+        name: focus.scene.clone(),
+    });
+    fill(&mut focus.main_view, main);
+    fill(&mut focus.editor_view, editor);
+    fill(&mut focus.item, item);
+    fill(&mut focus.section, section);
+}
+
+/// A neutral field from Live's: kept when Live's says nothing, and the same as Live's when both say.
+fn fill<T: PartialEq + std::fmt::Debug>(field: &mut Option<T>, live: Option<T>) {
+    match (field.as_ref(), live) {
+        (_, None) => {}
+        (None, live) => *field = live,
+        (Some(kept), Some(live)) => debug_assert_eq!(*kept, live, "a focus's neutral field disagrees with Live's"),
+    }
+}
+
+/// What a Live device is, from its class, whether it holds chains or pads, and Live's device type when sent.
+pub fn device_role(row: &DeviceRow) -> DeviceRole {
+    let cls = row.class_name.unwrap_or("");
+    let typed = match row.device_type {
+        Some("instrument") => DeviceSignal::Instrument,
+        Some("audio_effect") => DeviceSignal::Audio,
+        Some("midi_effect") => DeviceSignal::Midi,
+        _ => DeviceSignal::Unknown,
+    };
+    let role = |signal, form| DeviceRole { signal, form };
+    if row.can_have_drum_pads == Some(true) || cls == "DrumGroupDevice" {
+        return role(DeviceSignal::Instrument, DeviceForm::DrumContainer);
+    }
+    if row.can_have_chains == Some(true) || cls.ends_with("GroupDevice") {
+        let signal = if cls.starts_with("MidiEffect") || typed == DeviceSignal::Midi {
+            DeviceSignal::Midi
+        } else if cls.starts_with("Instrument") || typed == DeviceSignal::Instrument {
+            DeviceSignal::Instrument
+        } else {
+            DeviceSignal::Audio
+        };
+        return role(signal, DeviceForm::Container);
+    }
+    if cls.starts_with("MxDevice") {
+        let signal = if cls.contains("MidiEffect") {
+            DeviceSignal::Midi
+        } else if cls.contains("Instrument") {
+            DeviceSignal::Instrument
+        } else {
+            DeviceSignal::Audio
+        };
+        return role(signal, DeviceForm::Script);
+    }
+    if cls.contains("Plugin") {
+        return role(typed, DeviceForm::Plugin);
+    }
+    if cls == "DrumCell" || cls == "DrumSampler" {
+        return role(DeviceSignal::Instrument, DeviceForm::DrumInstrument);
+    }
+    role(typed, DeviceForm::Native)
 }

@@ -190,6 +190,14 @@ impl Integration for FallbackIntegration {
             Ok(None)
         }
     }
+    async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
+        let c = self.current();
+        if c.can_show(request.kind()) {
+            c.focus_body(request, signal).await
+        } else {
+            Ok(None)
+        }
+    }
     fn has_audition(&self) -> bool {
         true
     }

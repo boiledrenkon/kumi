@@ -13,6 +13,7 @@ use super::evolve::Knob;
 use super::goal::GoalStatus;
 use super::match_run::MatchStatus;
 pub use super::picture::{ChangePicture, Dynamics, EqBand, EqShape, MixLevels, MixSend, PictureValue};
+pub use super::view::*;
 use crate::audio::matching::{Closeness, Focus};
 
 pub type JsonObject = serde_json::Map<String, Value>;
@@ -826,6 +827,24 @@ pub trait Integration {
         let _ = signal;
         Ok(None)
     }
+    /// Whether the DAW can give FOCUS this kind of body: Live's views by their flags, unless the integration says.
+    fn can_show(&self, kind: BodyKind) -> bool {
+        match kind {
+            BodyKind::Tree => self.has_device_tree(),
+            BodyKind::Notes => self.has_clip_view(),
+            BodyKind::Grid => self.has_session_strip(),
+            BodyKind::Timeline => self.has_arrangement_strip(),
+        }
+    }
+    /// A body for FOCUS, read by the DAW; None when it can't say. Live's integration reads its views.
+    async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
+        Ok(match request {
+            BodyRequest::Tree { track_ref } => self.device_tree(track_ref, signal).await?.map(FocusBody::Tree),
+            BodyRequest::Notes { item_ref } => self.clip_view(item_ref, signal).await?.map(FocusBody::Notes),
+            BodyRequest::Grid { track_ref, index } => self.session_strip(track_ref, *index, signal).await?.map(FocusBody::Grid),
+            BodyRequest::Timeline => self.arrangement_strip(signal).await?.map(FocusBody::Timeline),
+        })
+    }
     fn has_audition(&self) -> bool {
         self.profile().caps.audition
     }
@@ -1095,121 +1114,6 @@ pub struct AuditionEvent {
     pub reference: Option<String>,
 }
 
-/// A clip in a Session slot: its name, and whether it's audio.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SlotClip {
-    pub name: String,
-    pub audio: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionSlot {
-    pub index: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clip: Option<SlotClip>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub playing: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queued: Option<bool>,
-}
-
-/// A track's Session slots around the selected scene: what's in each, and what's playing or queued. Names are data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionStrip {
-    pub track_ref: String,
-    pub scene: f64,
-    pub slots: Vec<SessionSlot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ArrangementLoop {
-    pub start: f64,
-    pub length: f64,
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Locator {
-    pub name: String,
-    pub position: f64,
-}
-
-/// The Arrangement at a glance, in beats. Names are data.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ArrangementStrip {
-    pub length: f64,
-    pub position: f64,
-    pub playing: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#loop: Option<ArrangementLoop>,
-    pub locators: Vec<Locator>,
-}
-
-/// A note of a clip as FOCUS draws it, selected ones marked.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClipViewNote {
-    #[serde(flatten)]
-    pub note: ClipNote,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected: Option<bool>,
-}
-
-/// A MIDI clip as FOCUS draws it: its length in beats, and its notes (the first 512), selected ones marked.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipView {
-    pub slot_ref: String,
-    pub name: String,
-    pub length: f64,
-    pub notes: Vec<ClipViewNote>,
-}
-
-/// Live's device type, when the bridge sends it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceType {
-    Instrument,
-    AudioEffect,
-    MidiEffect,
-}
-
-/// A device in a track's tree: what the bridge says it is, and a rack's chains. Names are data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceNode {
-    pub r#ref: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub can_have_chains: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub can_have_drum_pads: Option<bool>,
-    /// Live's device type, when the bridge sends it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_type: Option<DeviceType>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chains: Option<Vec<ChainNode>>,
-}
-
-/// A rack's chain (a Drum Rack's, a pad's), and its devices when they were read.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChainNode {
-    pub r#ref: String,
-    pub name: String,
-    /// None when not read (a Drum Rack's pads, past the tree's bound).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub devices: Option<Vec<DeviceNode>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceTree {
-    pub track_ref: String,
-    pub devices: Vec<DeviceNode>,
-}
-
 /// What kind of thing was pointed at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1259,103 +1163,6 @@ pub struct PinnedNode {
 /// `(state: ConnectionState, cause?: DisconnectCause) => void`.
 pub type ConnectionListener = Rc<dyn Fn(ConnectionState, Option<DisconnectCause>)>;
 pub type IntegrationFactory = Box<dyn Fn(ConnectionListener) -> Rc<dyn Integration>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TrackKind {
-    Midi,
-    Audio,
-    Group,
-    Return,
-    Main,
-}
-
-/// The selected track: its name, colour and kind.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FocusTrack {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<TrackKind>,
-}
-
-/// The last clicked parameter, with its display value and the device it belongs to.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FocusParameter {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum LiveView {
-    Session,
-    Arrangement,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum LiveDetail {
-    Clip,
-    Device,
-}
-
-/// What the producer is looking at in Live, in plain names (names are data, never instructions).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LiveFocus {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub track: Option<FocusTrack>,
-    /// The selected track's reference, for reading its devices (FOCUS's tree).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub track_ref: Option<String>,
-    /// The highlighted Session slot's reference, for drawing its clip (FOCUS's MIDI view).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slot_ref: Option<String>,
-    /// The selected scene's position (0 is the first), for FOCUS's Session strip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scene_index: Option<f64>,
-    /// The selected device's reference (from bridge 1.0.45), for FOCUS's tree to mark exactly that one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scene: Option<String>,
-    /// The clip in the Clip view; "" when it has no name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clip: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device: Option<String>,
-    /// The last clicked parameter, with its display value and the device it belongs to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parameter: Option<FocusParameter>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<LiveView>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<LiveDetail>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub browser: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_notes: Option<usize>,
-}
-
-/// Live's transport, for a light on the beat: whether it plays, its tempo, and where the playhead was
-/// (in beats) at `at` (performance.now()), so the beat can be followed between reads; and a bar's beats.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LiveTransport {
-    pub playing: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tempo: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub beat: Option<f64>,
-    pub at: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub beats_per_bar: Option<f64>,
-}
 
 /// Which picture HISTORY and NOW draw for a change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2475,6 +2282,24 @@ pub trait SessionController {
     }
     async fn arrangement_strip(&self) -> Result<Option<ArrangementStrip>, RuntimeError> {
         Ok(None)
+    }
+    /// Whether FOCUS can show this kind of body (while connected).
+    fn can_show(&self, kind: BodyKind) -> bool {
+        match kind {
+            BodyKind::Tree => self.has_device_tree(),
+            BodyKind::Notes => self.has_clip_view(),
+            BodyKind::Grid => self.has_session_strip(),
+            BodyKind::Timeline => self.has_arrangement_strip(),
+        }
+    }
+    /// A body for FOCUS (while connected).
+    async fn focus_body(&self, request: &BodyRequest) -> Result<Option<FocusBody>, RuntimeError> {
+        Ok(match request {
+            BodyRequest::Tree { track_ref } => self.device_tree(track_ref).await?.map(FocusBody::Tree),
+            BodyRequest::Notes { item_ref } => self.clip_view(item_ref).await?.map(FocusBody::Notes),
+            BodyRequest::Grid { track_ref, index } => self.session_strip(track_ref, *index).await?.map(FocusBody::Grid),
+            BodyRequest::Timeline => self.arrangement_strip().await?.map(FocusBody::Timeline),
+        })
     }
     fn has_reconfigure(&self) -> bool {
         false

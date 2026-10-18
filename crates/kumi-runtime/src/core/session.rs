@@ -3369,6 +3369,13 @@ impl SessionController for Session {
         };
         Ok(if let Some(i) = i { i.arrangement_strip(abort::timeout(10_000)).await.ok().flatten() } else { None })
     }
+    async fn focus_body(&self, request: &BodyRequest) -> Result<Option<FocusBody>, RuntimeError> {
+        let i = {
+            let s = self.0.state.borrow();
+            s.integration.clone().filter(|i| s.connection == ConnectionState::Connected && i.can_show(request.kind()))
+        };
+        Ok(if let Some(i) = i { i.focus_body(request, abort::timeout(10_000)).await.ok().flatten() } else { None })
+    }
     async fn cancel(&self) -> Result<(), RuntimeError> {
         let op = self.0.state.borrow().active.clone();
         if let Some(op) = op {

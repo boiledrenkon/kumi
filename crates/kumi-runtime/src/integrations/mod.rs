@@ -7,6 +7,7 @@ pub mod shared;
 
 use crate::core::daw::{DawId, DawProfile};
 use crate::core::presentation::ToolPresentation;
+use crate::core::view::ViewPresentation;
 
 pub use ableton::focus::parse_focus;
 pub use ableton::project::{create_project_store, Baseline, ProjectStore};
@@ -24,6 +25,14 @@ pub fn profile(id: DawId) -> Option<&'static DawProfile> {
 pub fn presentation(id: DawId) -> Option<&'static ToolPresentation> {
     match id {
         DawId::Ableton => Some(&ableton::presentation::PRESENTATION),
+        _ => None,
+    }
+}
+
+/// How the app reads a registered DAW's focus and devices.
+pub fn view(id: DawId) -> Option<&'static ViewPresentation> {
+    match id {
+        DawId::Ableton => Some(&ableton::presentation::VIEW),
         _ => None,
     }
 }

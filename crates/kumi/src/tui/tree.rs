@@ -1,6 +1,6 @@
 //! The selected path open, other racks folded.
-use super::icons::{device_kind, DeviceRow, IconKind};
-use kumi_runtime::core::contracts::{ChainNode, DeviceNode, DeviceTree, DeviceType};
+use super::icons::{device_kind, role_kind, IconKind};
+use kumi_runtime::core::contracts::{ChainNode, DeviceNode, DeviceTree};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeNode {
     Device,
@@ -121,16 +121,8 @@ pub fn tree_rows(tree: &DeviceTree, focus: &TreeFocus) -> Vec<TreeRow> {
                 let last = index == devices.len() - 1;
                 let chains = device.chains.as_deref().unwrap_or_default();
                 let expanded = self.path.contains(&device.r#ref) && !chains.is_empty();
-                let kind = device_kind(&DeviceRow {
-                    class_name: device.class_name.as_deref(),
-                    can_have_chains: device.can_have_chains,
-                    can_have_drum_pads: device.can_have_drum_pads,
-                    device_type: device.device_type.as_ref().map(|kind| match kind {
-                        DeviceType::Instrument => "instrument",
-                        DeviceType::AudioEffect => "audio_effect",
-                        DeviceType::MidiEffect => "midi_effect",
-                    }),
-                });
+                // What the DAW said it is, or what it says from the bridge's row.
+                let kind = device.role.map(role_kind).unwrap_or_else(|| device_kind(&device.row()));
                 self.rows.push(TreeRow {
                     r#ref: device.r#ref.clone(),
                     node: TreeNode::Device,

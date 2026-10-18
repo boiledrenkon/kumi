@@ -1924,7 +1924,7 @@ impl TuiApp {
             state.set_name.as_ref(),
             focus.and_then(|f| f.track.as_ref()).map(|t| &t.name),
             focus.and_then(|f| f.device.as_ref()),
-            focus.and_then(|f| f.clip.as_ref()),
+            focus.and_then(|f| f.item.as_ref()).and_then(|item| item.name.as_ref()),
             state.pinned.as_ref().map(|p| &p.pin.name),
         ]
         .into_iter()

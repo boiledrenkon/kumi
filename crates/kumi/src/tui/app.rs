@@ -253,8 +253,8 @@ struct Used {
 }
 #[derive(Default)]
 struct Strip {
-    session: Option<SessionStrip>,
-    arrangement: Option<ArrangementStrip>,
+    grid: Option<LauncherStrip>,
+    timeline: Option<TimelineStrip>,
     key: Option<String>,
     reading: bool,
 }
@@ -270,7 +270,7 @@ struct State {
     used: Used,
     connection: ConnectionState,
     set_name: Option<String>,
-    focus: Option<LiveFocus>,
+    focus: Option<DawFocus>,
     catch_up: Option<CatchUp>,
     newer: Option<String>,
     library: Option<LibraryStatus>,
@@ -318,7 +318,7 @@ struct State {
     held: Vec<Held>,
     last_stop: Option<String>,
     asides: Vec<Rc<RefCell<Aside>>>,
-    transport: Option<LiveTransport>,
+    transport: Option<Transport>,
     activity: String,
     panel: Option<PanelRef>,
     /// The picker asking whether to keep a technique: closing it is a no.
@@ -349,7 +349,7 @@ struct State {
     tree_key: Option<String>,
     tree_reading: bool,
     tree_again: bool,
-    clip: Option<ClipView>,
+    clip: Option<NoteView>,
     clip_key: Option<String>,
     clip_reading: bool,
     clip_again: bool,
@@ -360,7 +360,7 @@ struct State {
     /// Files the producer added, which go with the next message, and whether the clipboard is being read.
     attachments: Vec<Attachment>,
     pasting: bool,
-    refreshing: Option<&'static str>,
+    refreshing: Option<BodyKind>,
     tree_refresh: Option<JoinHandle<()>>,
     wake_timer: Option<JoinHandle<()>>,
     wake_time: Option<f64>,

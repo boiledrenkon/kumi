@@ -152,7 +152,9 @@ impl TuiApp {
             "focus" => {
                 {
                     let mut state = self.0.state.borrow_mut();
-                    let focus: Option<LiveFocus> = serde_json::from_value(value["focus"].clone()).unwrap();
+                    // Read in neutral terms: the DAW's presentation fills them from its own wire form.
+                    let focus: Option<DawFocus> = serde_json::from_value(value["focus"].clone()).unwrap();
+                    let focus = focus.map(|focus| filled(crate::daw::view(), &focus));
                     state.touched = touched_next(state.focus.as_ref(), focus.as_ref(), state.touched);
                     state.focus = focus;
                 }

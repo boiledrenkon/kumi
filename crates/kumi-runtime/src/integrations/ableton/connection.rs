@@ -363,7 +363,16 @@ impl LiveConnection {
                     async move { endpoint.call("live_discover", views::object(json!({"kind":"selection","limit":1})), signal).await }
                         .boxed_local()
                 }),
-                on_focus: on_focus.clone(),
+                // The app reads the neutral fields: Live's presentation fills them from what the feed read.
+                on_focus: {
+                    let on_focus = on_focus.clone();
+                    Rc::new(move |focus: Option<LiveFocus>| {
+                        on_focus(focus.map(|mut focus| {
+                            super::presentation::fill_focus(&mut focus);
+                            focus
+                        }))
+                    })
+                },
                 on_failure: Some(on_failure),
                 interval_ms: self.options.focus_interval_ms.filter(|n| *n != 0),
                 timeout_ms: None,

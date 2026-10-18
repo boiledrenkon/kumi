@@ -4,6 +4,7 @@
 //! even those don't show, a two-letter badge stands in. The tint goes on the icon only, never the
 //! row's text. What follows an icon leaves one space after its two cells.
 
+use kumi_runtime::core::view::{DeviceForm, DeviceRole, DeviceSignal};
 use std::collections::HashMap;
 
 use super::style::{process_platform, Rgb, Style};
@@ -204,62 +205,29 @@ pub fn icon(kind: IconKind, style: IconStyle, color: Option<Rgb>) -> Span {
     }
 }
 
-/// What the bridge says about a device row: its class, whether it holds chains or pads, and Live's device type when sent.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct DeviceRow<'a> {
-    pub class_name: Option<&'a str>,
-    pub can_have_chains: Option<bool>,
-    pub can_have_drum_pads: Option<bool>,
-    pub device_type: Option<&'a str>,
-}
+pub use kumi_runtime::core::view::DeviceRow;
 
-impl<'a> DeviceRow<'a> {
-    /// The fields from a JSON object, read as loosely as the TypeScript read them.
-    pub fn from_value(value: &'a serde_json::Value) -> DeviceRow<'a> {
-        DeviceRow {
-            class_name: value.get("className").and_then(serde_json::Value::as_str),
-            can_have_chains: value.get("canHaveChains").and_then(serde_json::Value::as_bool),
-            can_have_drum_pads: value.get("canHaveDrumPads").and_then(serde_json::Value::as_bool),
-            device_type: value.get("deviceType").and_then(serde_json::Value::as_str),
-        }
-    }
-}
-
-/// What kind of device a device row is, from what the bridge says about it (its class, and Live's device type when sent).
+/// What kind of device a device row is, as the DAW says from what its bridge says about it (Live: its class, and its
+/// device type when sent).
 pub fn device_kind(row: &DeviceRow<'_>) -> IconKind {
-    let cls = row.class_name.unwrap_or("");
-    let kind = row.device_type.filter(|kind| matches!(*kind, "instrument" | "audio_effect" | "midi_effect"));
-    if row.can_have_drum_pads == Some(true) || cls == "DrumGroupDevice" {
-        return IconKind::DrumRack;
-    }
-    if row.can_have_chains == Some(true) || cls.ends_with("GroupDevice") {
-        return if cls.starts_with("MidiEffect") || kind == Some("midi_effect") {
-            IconKind::MidiRack
-        } else if cls.starts_with("Instrument") || kind == Some("instrument") {
-            IconKind::InstrumentRack
-        } else {
-            IconKind::AudioRack
-        };
-    }
-    if cls.starts_with("MxDevice") {
-        return if cls.contains("MidiEffect") {
-            IconKind::MaxMidi
-        } else if cls.contains("Instrument") {
-            IconKind::MaxInstrument
-        } else {
-            IconKind::MaxAudio
-        };
-    }
-    if cls.contains("Plugin") {
-        return IconKind::Plugin;
-    }
-    if cls == "DrumCell" || cls == "DrumSampler" {
-        return IconKind::DrumInstrument;
-    }
-    match kind {
-        Some("instrument") => IconKind::Instrument,
-        Some("audio_effect") => IconKind::AudioEffect,
-        Some("midi_effect") => IconKind::MidiEffect,
+    role_kind((crate::daw::view().device_role)(row))
+}
+
+/// A device's icon kind from what it is.
+pub fn role_kind(role: DeviceRole) -> IconKind {
+    match (role.form, role.signal) {
+        (DeviceForm::DrumContainer, _) => IconKind::DrumRack,
+        (DeviceForm::Container, DeviceSignal::Midi) => IconKind::MidiRack,
+        (DeviceForm::Container, DeviceSignal::Instrument) => IconKind::InstrumentRack,
+        (DeviceForm::Container, _) => IconKind::AudioRack,
+        (DeviceForm::Script, DeviceSignal::Midi) => IconKind::MaxMidi,
+        (DeviceForm::Script, DeviceSignal::Instrument) => IconKind::MaxInstrument,
+        (DeviceForm::Script, _) => IconKind::MaxAudio,
+        (DeviceForm::Plugin, _) => IconKind::Plugin,
+        (DeviceForm::DrumInstrument, _) => IconKind::DrumInstrument,
+        (DeviceForm::Native, DeviceSignal::Instrument) => IconKind::Instrument,
+        (DeviceForm::Native, DeviceSignal::Audio) => IconKind::AudioEffect,
+        (DeviceForm::Native, DeviceSignal::Midi) => IconKind::MidiEffect,
         _ => IconKind::Device,
     }
 }
