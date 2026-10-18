@@ -104,6 +104,14 @@ impl ReaperScript {
         let mut state = self.state.lock().unwrap();
         state.asked.push((method.to_string(), params.clone()));
         let epoch = Self::epoch_text(&state);
+        // Refs that say which epoch they came from are refused once the project in the tab is another.
+        if matches!(method, "read" | "focus_body") {
+            if let Some(sent) = params.get("epoch").and_then(Value::as_str).filter(|sent| *sent != epoch) {
+                let message =
+                    format!("those refs are from an earlier epoch ({sent}; now {epoch}): the project in the tab changed, read again");
+                return Some(Err(("stale".into(), message)));
+            }
+        }
         Some(match method {
             "read" => Self::read(&state, &epoch, params),
             "snapshot" => {

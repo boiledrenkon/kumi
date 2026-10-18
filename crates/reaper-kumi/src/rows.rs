@@ -159,7 +159,142 @@ pub fn track_row(reaper: &Reaper, track: Track) -> Value {
     if master {
         row["master"] = true.into();
     }
+    add_track_state(reaper, track, master, &mut row);
     row
+}
+
+/// -1, which every new track has, follows the project's default pan mode.
+fn pan_mode_name(mode: i64) -> &'static str {
+    match mode {
+        -1 => "default",
+        0 => "classic",
+        3 => "balance",
+        5 => "stereo",
+        6 => "dual",
+        _ => "other",
+    }
+}
+
+fn record_mode_name(mode: i64) -> &'static str {
+    match mode {
+        0 => "input",
+        1 => "stereo-out",
+        2 => "none",
+        3 => "stereo-out-compensated",
+        4 => "midi-out",
+        5 => "mono-out",
+        6 => "mono-out-compensated",
+        7 => "midi-overdub",
+        8 => "midi-replace",
+        _ => "other",
+    }
+}
+
+fn monitoring_name(mode: i64) -> &'static str {
+    match mode {
+        0 => "off",
+        1 => "on",
+        2 => "auto",
+        _ => "other",
+    }
+}
+
+/// -1 on a send is the track's own mode.
+pub fn automation_mode_name(mode: i64) -> &'static str {
+    match mode {
+        -1 => "track",
+        0 => "trim",
+        1 => "read",
+        2 => "touch",
+        3 => "write",
+        4 => "latch",
+        _ => "other",
+    }
+}
+
+/// `I_RECINPUT` as the header decodes it: none (below 0); MIDI from a device (63 all, 62 the virtual keyboard) and a
+/// channel (0 all); or audio from a first channel, mono, stereo or as many as the track has.
+fn record_input(value: i64) -> Value {
+    if value < 0 {
+        return json!({"kind": "none"});
+    }
+    if value & 4096 != 0 {
+        let channel = value & 31;
+        let device = (value >> 5) & 63;
+        return json!({
+            "kind": "midi",
+            "channel": channel,
+            "device": match device { 63 => "all".to_string(), 62 => "virtual-keyboard".to_string(), n => n.to_string() },
+        });
+    }
+    let layout = if value & 2048 != 0 {
+        "multichannel"
+    } else if value & 1024 != 0 {
+        "stereo"
+    } else {
+        "mono"
+    };
+    json!({"kind": "audio", "first": (value & 1023) + 1, "layout": layout})
+}
+
+/// Whether a folder is open or collapsed; null for a track that is not a folder.
+pub fn folder_state(reaper: &Reaper, track: Track) -> Value {
+    if reaper.track_value(track, "I_FOLDERDEPTH") as i64 != 1 {
+        return Value::Null;
+    }
+    match reaper.track_value(track, "I_FOLDERCOMPACT") as i64 {
+        0 => "open",
+        1 => "collapsed",
+        _ => "fully-collapsed",
+    }
+    .into()
+}
+
+/// What a mixer strip shows beyond the fader: channels, how it pans, whether it is shown, what it records, and the lanes
+/// of a track with fixed lanes. A strip reads the same in any view.
+fn add_track_state(reaper: &Reaper, track: Track, master: bool, row: &mut Value) {
+    let value = |key: &str| reaper.track_value(track, key);
+    let mode = value("I_PANMODE") as i64;
+    row["channels"] = (value("I_NCHAN") as i64).into();
+    row["panMode"] = pan_mode_name(mode).into();
+    row["width"] = round(value("D_WIDTH"), 4).into();
+    row["panLaw"] = (value("D_PANLAW") >= 0.0).then(|| round(value("D_PANLAW"), 4)).into();
+    row["dualPan"] =
+        if mode == 6 { json!({"left": round(value("D_DUALPANL"), 4), "right": round(value("D_DUALPANR"), 4)}) } else { Value::Null };
+    row["phaseInverted"] = (value("B_PHASE") != 0.0).into();
+    row["fxEnabled"] = (value("I_FXEN") != 0.0).into();
+    row["automationMode"] = automation_mode_name(value("I_AUTOMODE") as i64).into();
+    if master {
+        return;
+    }
+    row["parentRef"] = reaper.track_parent(track).map(|parent| refs::track_ref(&track_id(reaper, parent))).into();
+    row["shownInArrange"] = (value("B_SHOWINTCP") != 0.0).into();
+    row["shownInMixer"] = (value("B_SHOWINMIXER") != 0.0).into();
+    row["folderState"] = folder_state(reaper, track);
+    row["recordInput"] = record_input(value("I_RECINPUT") as i64);
+    row["recordMode"] = record_mode_name(value("I_RECMODE") as i64).into();
+    row["monitoring"] = monitoring_name(value("I_RECMON") as i64).into();
+    // Fixed lanes (comping): how many, what each is called and which play.
+    let free_mode = value("I_FREEMODE") as i64;
+    row["itemLayout"] = match free_mode {
+        1 => "free",
+        2 => "lanes",
+        _ => "normal",
+    }
+    .into();
+    if free_mode == 2 {
+        let lanes = (0..value("I_NUMFIXEDLANES") as i64)
+            .map(|n| {
+                let plays = match reaper.track_value(track, &format!("C_LANEPLAYS:{n}")) as i64 {
+                    0 => "no",
+                    1 => "only",
+                    _ => "with-others",
+                };
+                json!({"index": n, "name": clip(&reaper.track_string(track, &format!("P_LANENAME:{n}")).unwrap_or_default()), "plays": plays})
+            })
+            .collect::<Vec<_>>();
+        row["lanes"] = lanes.into();
+    }
 }
 
 /// What a take's source is called in a row: "wav", "mid", other types in lower case, "empty" for no take or source.
@@ -193,9 +328,34 @@ pub fn item_row(reaper: &Reaper, proj: Project, item: Item) -> Value {
         "source": source_word(reaper, take),
         "muted": reaper.item_value(item, "B_MUTE") != 0.0,
         "lane": reaper.item_value(item, "I_FIXEDLANE") as i64,
-        "color": custom_color(reaper, reaper.item_value(item, "I_CUSTOMCOLOR")),
+        "lanePlays": lane_plays(reaper, item),
+        "color": item_color(reaper, item, take),
         "selected": reaper.item_value(item, "B_UISEL") != 0.0,
     })
+}
+
+/// The colour REAPER draws an item in: its active take's own, else the item's.
+pub fn item_color(reaper: &Reaper, item: Item, take: Option<Take>) -> Value {
+    let own = take.map(|take| reaper.take_value(take, "I_CUSTOMCOLOR") as i32).filter(|native| native & 0x100_0000 != 0);
+    match own {
+        Some(native) => color(reaper, Some(native)),
+        None => custom_color(reaper, reaper.item_value(item, "I_CUSTOMCOLOR")),
+    }
+}
+
+/// Whether the item's fixed lane plays: only on a track with fixed lanes, else null.
+pub fn lane_plays(reaper: &Reaper, item: Item) -> Value {
+    let on_lanes = reaper.item_track(item).is_some_and(|track| reaper.track_value(track, "I_FREEMODE") as i64 == 2);
+    if !on_lanes {
+        return Value::Null;
+    }
+    match reaper.item_value(item, "C_LANEPLAYS") as i64 {
+        0 => "no",
+        1 => "only",
+        2 => "with-others",
+        _ => "hidden",
+    }
+    .into()
 }
 
 /// An FX in a chain: `position` is its place there; a container lists its children's refs.
@@ -243,7 +403,8 @@ pub fn send_mode_name(mode: i64) -> &'static str {
     match mode {
         0 => "post-fader",
         1 => "pre-fx",
-        3 => "pre-fader",
+        // 2 is the deprecated spelling of 3.
+        2 | 3 => "pre-fader",
         8 => "pre-receive",
         _ => "other",
     }
@@ -262,25 +423,35 @@ fn channels(reaper: &Reaper, track: Track, category: i32, index: i32) -> Value {
     json!({"src": source, "dst": {"first": destination & 1023, "mono": destination & 1024 != 0}})
 }
 
-/// What names a send in its ref: the other end, and which of several to the same one (from 1).
+/// What names a send in its ref: the other end, and which of several to the same one (`repeat`, from 1) among how
+/// many (`of`). REAPER gives a send no identity, so a ref to one of several reads nothing once their number changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendKey {
     pub other: SendEnd,
     pub repeat: u32,
+    pub of: u32,
 }
 
 /// The keys of all of a track's sends (`category` 0), receives (-1) or hardware outputs (1), by position.
 pub fn send_keys(reaper: &Reaper, track: Track, category: i32) -> Vec<SendKey> {
+    let ends: Vec<SendEnd> = (0..reaper.send_count(track, category))
+        .map(|index| match reaper.send_peer(track, category, index) {
+            Some(peer) => SendEnd::Track(track_id(reaper, peer)),
+            // The output it goes to, not its place in the list: removing another output must not rename this one.
+            None => SendEnd::Hardware(reaper.send_value(track, category, index, "I_DSTCHAN") as i32),
+        })
+        .collect();
+    let mut totals: HashMap<String, u32> = HashMap::new();
+    for end in &ends {
+        *totals.entry(end.text()).or_insert(0) += 1;
+    }
     let mut seen: HashMap<String, u32> = HashMap::new();
-    (0..reaper.send_count(track, category))
-        .map(|index| {
-            let other = match reaper.send_peer(track, category, index) {
-                Some(peer) => SendEnd::Track(track_id(reaper, peer)),
-                None => SendEnd::Hardware(index),
-            };
-            let count = seen.entry(other.text()).or_insert(0);
-            *count += 1;
-            SendKey { other, repeat: *count }
+    ends.into_iter()
+        .map(|other| {
+            let text = other.text();
+            let repeat = seen.entry(text.clone()).or_insert(0);
+            *repeat += 1;
+            SendKey { repeat: *repeat, of: totals[&text], other }
         })
         .collect()
 }
@@ -294,8 +465,8 @@ pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32, key: &
         SendEnd::Hardware(_) => None,
     };
     let mode = reaper.send_value(track, category, index, "I_SENDMODE") as i64;
-    json!({
-        "ref": refs::send_ref(&this, category, &key.other, key.repeat),
+    let mut row = json!({
+        "ref": refs::send_ref(&this, category, &key.other, key.repeat, key.of),
         "category": category,
         "direction": match category { c if c < 0 => "receive", 0 => "send", _ => "hardware" },
         "index": index,
@@ -307,6 +478,39 @@ pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32, key: &
         "mode": mode,
         "modeName": send_mode_name(mode),
         "channels": channels(reaper, track, category, index),
+        "phaseInverted": reaper.send_value(track, category, index, "B_PHASE") != 0.0,
+        "mono": reaper.send_value(track, category, index, "B_MONO") != 0.0,
+        "automationMode": automation_mode_name(reaper.send_value(track, category, index, "I_AUTOMODE") as i64),
+    });
+    if category <= 0 {
+        row["midi"] = midi_flags(reaper.send_value(track, category, index, "I_MIDIFLAGS") as i64);
+    }
+    // The envelopes of a send (volume, pan, mute) are the sending track's own. REAPER hands out one of each kind for every
+    // send, active or not, and an inactive one has no GUID to keep: a send lists the ones that are in use.
+    if category == 0 {
+        let envelopes: Vec<Value> = ["<VOLENV", "<PANENV", "<MUTEENV"]
+            .into_iter()
+            .filter_map(|chunk| reaper.send_envelope(track, index, chunk))
+            .filter(|envelope| reaper.envelope_flag(*envelope, "ACTIVE"))
+            .filter_map(|envelope| reaper.envelope_guid(envelope))
+            .map(|guid| refs::envelope_ref(&this, &EnvelopeId::Guid(guid)).into())
+            .collect();
+        row["envelopeRefs"] = envelopes.into();
+    }
+    row
+}
+
+/// `I_MIDIFLAGS` of a send: whether MIDI goes (low 5 bits 31 turn it off), from which channel (0 all) to which (0 the
+/// original), on which buses (0 all), and whether the faders send MIDI volume and pan.
+fn midi_flags(flags: i64) -> Value {
+    let source = flags & 31;
+    json!({
+        "enabled": source != 31,
+        "srcChannel": if source == 31 { 0 } else { source },
+        "dstChannel": (flags >> 5) & 31,
+        "srcBus": (flags >> 14) & 255,
+        "dstBus": (flags >> 22) & 255,
+        "faders": flags & 1024 != 0,
     })
 }
 
@@ -343,21 +547,35 @@ pub fn note_row(reaper: &Reaper, take: Take, item_start_qn: f64, index: i32, not
     })
 }
 
-/// The envelope's row. `which` is how its ref names it.
-pub fn envelope_row(reaper: &Reaper, track: &TrackId, which: &EnvelopeId, envelope: Envelope) -> Value {
+/// The envelope's row, named by its GUID. An FX parameter's envelope also says which FX and parameter it is for.
+pub fn envelope_row(reaper: &Reaper, track: &TrackId, envelope: Envelope) -> Value {
+    let reference = reaper.envelope_guid(envelope).map(|guid| refs::envelope_ref(track, &EnvelopeId::Guid(guid)));
+    let (fx_ref, param) = match reaper.envelope_owner(envelope) {
+        Some((owner, index, param)) if index >= 0 => {
+            (Some(refs::fx_ref(&reaper.fx_guid(Fx { owner: FxOwner::Track(owner), index }))), Some(param))
+        }
+        _ => (None, None),
+    };
     json!({
-        "ref": refs::envelope_ref(track, which),
+        "ref": reference,
         "name": clip(&reaper.envelope_name(envelope)),
         "pointCount": reaper.envelope_point_count(envelope),
         "armed": reaper.envelope_flag(envelope, "ARM"),
         "visible": reaper.envelope_flag(envelope, "VISIBLE"),
         "active": reaper.envelope_flag(envelope, "ACTIVE"),
+        "fxRef": fx_ref,
+        "param": param,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sends_mode_has_a_name_for_every_spelling_reaper_has() {
+        assert_eq!([0, 1, 2, 3, 8, 5].map(send_mode_name), ["post-fader", "pre-fx", "pre-fader", "pre-fader", "pre-receive", "other"]);
+    }
 
     #[test]
     fn gains_are_decibels_with_a_floor() {

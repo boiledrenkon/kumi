@@ -65,7 +65,7 @@ fn window_arg(arguments: &Value) -> Result<Option<Value>, String> {
 /// The arguments a `read` forwards: only the ones it knows, each checked.
 fn read_params(arguments: &Value) -> Result<Value, String> {
     let mut params = Map::new();
-    for name in ["kind", "ref", "parent", "cursor"] {
+    for name in ["kind", "ref", "parent", "cursor", "epoch"] {
         if let Some(text) = text_arg(arguments, name)? {
             params.insert(name.into(), text.into());
         }
@@ -96,7 +96,7 @@ fn body_params(arguments: &Value) -> Result<Value, String> {
     let mut params = Map::new();
     let Some(kind) = text_arg(arguments, "kind")? else { return Err("kind: which body".into()) };
     params.insert("kind".into(), kind.into());
-    for name in ["ref", "cursor", "around"] {
+    for name in ["ref", "cursor", "around", "epoch"] {
         if let Some(text) = text_arg(arguments, name)? {
             params.insert(name.into(), text.into());
         }

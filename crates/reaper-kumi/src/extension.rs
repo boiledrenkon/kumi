@@ -163,6 +163,8 @@ struct Watch {
     undo: Option<i32>,
     tracks: HashSet<String>,
     tracks_at: Option<Instant>,
+    /// REAPER's count of projects loaded or made (`projectconfig`), as of the last look.
+    loads: u64,
 }
 
 fn track_guids(reaper: &Reaper, project: crate::reaper::Project) -> HashSet<String> {
@@ -321,10 +323,12 @@ impl Extension {
         // Nothing runs while a dialog has the main window, even in the moments before it counts as one.
         let blocked = self.window_blocked();
         let busy = self.reaper().busy().or_else(|| self.in_dialog(blocked).then_some(Busy::Modal));
+        // The project first: a request waiting at a tab switch or a load is answered about the project REAPER has now,
+        // under the epoch that project has, and a cursor from the one before is refused.
+        self.poll_project(busy.is_none());
         if busy.is_none() && !blocked {
             self.run_jobs();
         }
-        self.poll_project(busy.is_none());
         if busy.is_none() {
             self.poll_focus();
         }
@@ -466,6 +470,11 @@ impl Extension {
             "api": {"resolved": self.api.resolved(), "total": api::FUNCTION_COUNT},
             "ticksPerSecond": {"timer": rates.timer_hz, "surface": rates.surface_hz},
         });
+        let missing = reaper.missing_features();
+        if !missing.is_empty() {
+            status["missing"] =
+                missing.iter().map(|(feature, needs)| json!({"feature": feature, "needs": needs})).collect::<Vec<_>>().into();
+        }
         if let Some(project) = project {
             status["transport"] = transport_json(reaper.play_state(project.ptr), reaper.tempo());
             status["tracks"] = reaper.track_count(project.ptr).into();
@@ -497,6 +506,7 @@ impl Extension {
         if switched || replaced {
             // Refs name objects of the project in this tab: they mean something else now.
             self.reads.bump_epoch();
+            self.reads.forget_touched(&reaper);
             self.focus.reset();
             if let Some(info) = info.as_ref().filter(|_| replaced) {
                 self.reads.project_replaced(info.ptr);
@@ -534,6 +544,7 @@ impl Extension {
                 undo,
                 tracks: track_guids(reaper, info.ptr),
                 tracks_at: Some(Instant::now()),
+                loads: crate::projectconfig::loads(),
             };
         };
         match watch.project {
@@ -546,19 +557,23 @@ impl Extension {
                 (true, false)
             }
             Some(_) => {
+                // REAPER loaded a project or made one since the last look, and the tab is the same: what it holds is
+                // another project, whatever its file, its tracks or its counter say.
+                let loaded = crate::projectconfig::loads() != watch.loads;
                 let file_changed = watch.path != info.path || watch.name != info.name;
                 let counter_went_back = matches!((watch.count, count), (Some(before), Some(now)) if now < before);
                 let history_reset = matches!((watch.undo, undo), (Some(before), Some(now)) if before >= 2 && now <= 1);
                 let went_unsaved = !watch.path.is_empty() && info.path.is_empty();
                 let due = count != watch.count && watch.tracks_at.is_none_or(|at| at.elapsed() >= WATCH_REFRESH);
                 let mut replaced = false;
-                if file_changed || counter_went_back || history_reset || due {
+                if loaded || file_changed || counter_went_back || history_reset || due {
                     let now = track_guids(reaper, info.ptr);
-                    let moves = Moves { file_changed, counter_went_back, history_reset, went_unsaved };
+                    let moves = Moves { file_changed, counter_went_back, history_reset: history_reset || loaded, went_unsaved };
                     replaced = is_another_project(&watch.tracks, &now, moves);
                     watch.tracks = now;
                     watch.tracks_at = Some(Instant::now());
                 }
+                watch.loads = crate::projectconfig::loads();
                 watch.path = info.path.clone();
                 watch.name = info.name.clone();
                 watch.count = count;
@@ -728,6 +743,27 @@ mod tests {
     }
 
     #[test]
+    fn a_reaper_too_old_for_a_feature_says_so_in_its_status() {
+        let (extension, _tx, _, snapshot) = setup();
+        extension.tick(Driver::Timer);
+        assert_eq!(snapshot.lock().unwrap().status.get("missing"), None, "nothing is missing from a complete API");
+        fake::reset();
+        let (_tx2, rx) = queue::channel();
+        let old = Extension::new(
+            fake::api_without(&["GetRegionOrMarker", "Undo_GetNumEntries"]),
+            rx,
+            Box::new(Recorder::default()),
+            Arc::new(Mutex::new(Snapshot::default())),
+        );
+        old.tick(Driver::Timer);
+        let status = old.snapshot().status;
+        let missing: Vec<(&str, &str)> =
+            status["missing"].as_array().unwrap().iter().map(|m| (m["feature"].as_str().unwrap(), m["needs"].as_str().unwrap())).collect();
+        assert_eq!(missing.iter().map(|m| m.1).collect::<Vec<_>>(), ["7.62", "7.79"]);
+        assert!(missing[0].0.contains("markers"), "{missing:?}");
+    }
+
+    #[test]
     fn unknown_methods_are_refused_by_name() {
         let (extension, tx, _, _) = setup();
         let Outcome::Answered(Err((code, message))) = ask(&extension, &tx, "explode") else { panic!() };
@@ -807,6 +843,33 @@ mod tests {
         assert_eq!(focus_of(&extension)["changed"], 12);
     }
 
+    /// `GetTouchedOrFocusedFX` names a track by its number, in whichever project is active: after a tab switch it can be
+    /// about the project before.
+    #[test]
+    fn the_touched_parameter_from_before_a_tab_switch_is_not_this_projects_until_reaper_says_another() {
+        let (extension, _tx, _, _) = setup();
+        fake::lab_project();
+        fake::with(|s| {
+            s.tracks[0].fx[0].params = vec![fake::FakeParam::new("Gain", 0.75, "-3.0 dB")];
+            s.touched_fx = Some((0, -1, -1, 0, 0));
+        });
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["selection"]["param"]["name"], "Gain");
+        // The producer switches to another project: REAPER still says the same.
+        fake::with(|s| s.project_id += 1);
+        extension.on_surface(Call::TrackListChange);
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["selection"].get("param"), None);
+        // It says something else once a parameter is touched there.
+        fake::with(|s| {
+            s.tracks[0].fx[0].params.push(fake::FakeParam::new("Pan", 0.5, "C"));
+            s.touched_fx = Some((0, -1, -1, 0, 1));
+        });
+        extension.on_surface(Call::TrackListChange);
+        extension.tick(Driver::Timer);
+        assert_eq!(focus_of(&extension)["selection"]["param"]["name"], "Pan");
+    }
+
     #[test]
     fn the_surface_saying_the_selection_moved_refreshes_focus_at_once() {
         let (extension, _tx, _, _) = setup();
@@ -840,6 +903,30 @@ mod tests {
         let after = focus_of(&extension)["epoch"].clone();
         assert_ne!(before, after);
         assert_eq!(after, extension.reads.epoch());
+    }
+
+    #[test]
+    fn a_request_waiting_at_a_tab_switch_is_answered_under_the_new_epoch_and_a_cursor_from_before_is_refused() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let first = ask_with(&extension, &tx, "read", json!({"kind": "track", "limit": 1})).unwrap();
+        let cursor = first["nextCursor"].clone();
+        let before = first["epoch"].as_str().unwrap().to_string();
+        // The producer switches tab; the next page's request was queued before the tick that notices.
+        fake::with(|s| s.project_id += 1);
+        let (code, message) = ask_with(&extension, &tx, "read", json!({"kind": "track", "cursor": cursor})).unwrap_err();
+        assert_eq!(code, "bad-params");
+        assert!(message.contains("from before the project tab changed"), "{message}");
+        // A read with no cursor, queued at the same moment, carries the new project's epoch, never the old one.
+        fake::with(|s| s.project_id += 1);
+        let after = ask_with(&extension, &tx, "read", json!({"kind": "track", "limit": 1})).unwrap();
+        assert_ne!(after["epoch"].as_str().unwrap(), before);
+        assert_eq!(after["epoch"], json!(extension.reads.epoch()));
+        // A snapshot taken in that tick carries the new epoch too.
+        fake::with(|s| s.project_id += 1);
+        let snapshot = ask_with(&extension, &tx, "snapshot", json!({})).unwrap();
+        assert_eq!(snapshot["epoch"], json!(extension.reads.epoch()));
     }
 
     /// The epoch and the project's identity as a read gives them.
@@ -1125,6 +1212,72 @@ mod tests {
         project_with_history("/lab/Templates/Kit.rpp", 1);
         extension.tick(Driver::Timer);
         assert_eq!(project_id(&extension, &tx), TEMPLATE_ID);
+    }
+
+    /// The gap in the heuristics: an unedited project made from a template, then the template's own file opened over it.
+    /// Its file changes (from none to a name), which a first save does too; its undo history stays at one entry; its
+    /// tracks are the same. Only REAPER's word that a project was loaded says it is another one.
+    #[test]
+    fn a_file_opened_over_an_unedited_template_project_is_a_load_because_reaper_says_so() {
+        let (extension, tx, _, _) = setup();
+        fake::reset();
+        project_with_history("", 1);
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        let template_born = epoch_and_identity(&extension, &tx);
+        assert_eq!(project_id(&extension, &tx), Value::Null, "an unsaved project has no id of its own");
+        // File > Open of the template's RPP in the same tab: the same tracks, one undo entry before and after.
+        project_with_history("/lab/Templates/Kit.rpp", 1);
+        crate::projectconfig::note_load();
+        extension.tick(Driver::Timer);
+        let opened = epoch_and_identity(&extension, &tx);
+        assert_ne!(opened.0, template_born.0, "a new epoch");
+        assert_ne!(opened.1, template_born.1, "a new identity");
+        assert_eq!(project_id(&extension, &tx), TEMPLATE_ID, "the template's own id is its own, not the one the project inherited");
+        // The same without REAPER's word is what the heuristics take for a first save.
+        let (extension, tx, _, _) = setup();
+        fake::reset();
+        project_with_history("", 1);
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        project_with_history("/lab/Templates/Kit.rpp", 1);
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), before, "a first save");
+    }
+
+    /// A tab closed and a project opened that REAPER gave the same address, within one tick: nothing about the pointer, the
+    /// file or the tracks need differ, and it is another project all the same.
+    #[test]
+    fn a_tab_closed_and_a_project_opened_at_its_address_within_one_tick_is_another_project() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        crate::projectconfig::note_load();
+        extension.tick(Driver::Timer);
+        let after = epoch_and_identity(&extension, &tx);
+        assert_ne!(after.0, before.0);
+        assert_ne!(after.1, before.1);
+    }
+
+    #[test]
+    fn a_load_reaper_reports_while_it_loads_is_noticed_once_it_has_finished() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        crate::projectconfig::note_load();
+        fake::with(|s| s.loading = true);
+        extension.tick(Driver::Timer);
+        fake::with(|s| s.loading = false);
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx).0, before.0);
+        // One load is one new project, not a new one every tick after.
+        let after = epoch_and_identity(&extension, &tx);
+        extension.tick(Driver::Timer);
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), after);
     }
 
     #[test]

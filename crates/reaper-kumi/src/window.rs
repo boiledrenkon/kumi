@@ -21,6 +21,20 @@ pub fn is_enabled(_hwnd: *mut c_void) -> Option<bool> {
     Some(crate::reaper::fake::with(|s| s.main_enabled))
 }
 
+/// The title of the window that has the keyboard focus, when this platform can say. REAPER's API names the focused FX
+/// window and the MIDI editor but no other window; a floating window such as a track's routing and I/O is only known by
+/// its title. (The routing matrix is a dock tab in 7.82, not a window of its own: nothing says whether it is in front.)
+#[cfg(not(test))]
+pub fn front_title() -> Option<String> {
+    platform::front_title()
+}
+
+/// Tests ask the fake REAPER.
+#[cfg(test)]
+pub fn front_title() -> Option<String> {
+    crate::reaper::fake::with(|s| s.front_title.clone())
+}
+
 /// What this platform asks, for the log.
 #[cfg(not(test))]
 pub fn describe() -> &'static str {
@@ -40,10 +54,23 @@ mod platform {
     #[link(name = "user32")]
     unsafe extern "system" {
         fn IsWindowEnabled(hwnd: *mut c_void) -> i32;
+        fn GetForegroundWindow() -> *mut c_void;
+        fn GetWindowTextW(hwnd: *mut c_void, text: *mut u16, max: i32) -> i32;
     }
 
     pub fn is_enabled(hwnd: *mut c_void) -> Option<bool> {
         Some(unsafe { IsWindowEnabled(hwnd) } != 0)
+    }
+
+    /// The foreground window's title.
+    pub fn front_title() -> Option<String> {
+        let window = unsafe { GetForegroundWindow() };
+        if window.is_null() {
+            return None;
+        }
+        let mut text = [0u16; 512];
+        let len = unsafe { GetWindowTextW(window, text.as_mut_ptr(), text.len() as i32) };
+        (len > 0).then(|| String::from_utf16_lossy(&text[..len as usize]))
     }
 
     pub fn describe() -> &'static str {
@@ -84,6 +111,23 @@ mod platform {
             return None;
         }
         Some(unsafe { send(app, c"modalWindow") }.is_null())
+    }
+
+    /// The title of `[NSApp keyWindow]`, the window that has the keyboard focus.
+    pub fn front_title() -> Option<String> {
+        let class = unsafe { objc_getClass(c"NSApplication".as_ptr()) };
+        if class.is_null() {
+            return None;
+        }
+        let app = unsafe { send(class, c"sharedApplication") };
+        let key = if app.is_null() { app } else { unsafe { send(app, c"keyWindow") } };
+        if key.is_null() {
+            return None;
+        }
+        let title = unsafe { send(key, c"title") };
+        let text = if title.is_null() { title } else { unsafe { send(title, c"UTF8String") } };
+        // SAFETY: UTF8String is a NUL-terminated C string that lives as long as the NSString.
+        (!text.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(text as *const c_char) }.to_string_lossy().into_owned())
     }
 
     pub fn describe() -> &'static str {
@@ -147,6 +191,11 @@ mod platform {
         // SAFETY: SWELL's IsWindowEnabled(HWND) -> BOOL.
         let function = unsafe { std::mem::transmute::<*mut c_void, IsWindowEnabled>(function) };
         Some(unsafe { function(hwnd) } != 0)
+    }
+
+    /// Not measured here: the focused window's title is not asked of SWELL.
+    pub fn front_title() -> Option<String> {
+        None
     }
 
     pub fn describe() -> &'static str {
