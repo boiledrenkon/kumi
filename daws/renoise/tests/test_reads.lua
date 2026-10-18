@@ -1392,11 +1392,11 @@ end)
 test("reads: a track row says the pre-FX and the post-FX fader and pan apart", function()
   local env, peer = setup()
   fill_demo() -- track 2: pre-FX volume 0.5, pan 1
-  mock.data.tracks[2].post_volume, mock.data.tracks[2].post_panning, mock.data.tracks[2].width = 0.25, 0.25, 0.5
+  mock.data.tracks[2].post_volume, mock.data.tracks[2].post_panning, mock.data.tracks[2].width = 0.25, 0.25, 50
   local hat = rows(peer, "track")[2]
   near(hat.preVolumeDb, -6.0206)
   eq(hat.prePan, 1)
-  eq(hat.preWidth, 0.5)
+  eq(hat.preWidth, 50)
   near(hat.postVolumeDb, -12.0412)
   eq(hat.postPan, -0.5)
   eq(hat.volumeDb, hat.preVolumeDb, "volumeDb and pan stay the pre-FX ones")
@@ -1404,7 +1404,7 @@ test("reads: a track row says the pre-FX and the post-FX fader and pan apart", f
   local kick = rows(peer, "track")[1]
   eq(kick.postVolumeDb, 0)
   eq(kick.postPan, 0)
-  eq(kick.preWidth, 1)
+  eq(kick.preWidth, 0, "Renoise's own default: no widening")
   H.no_dialogs()
 end)
 
