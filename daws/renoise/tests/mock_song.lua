@@ -265,7 +265,7 @@ function M.make_song(options)
       visible_note_columns_observable = t.visible_note_columns_observable,
       visible_effect_columns_observable = t.visible_effect_columns_observable,
       prefx_volume = prefx(t, "volume"), prefx_panning = prefx(t, "panning"),
-      prefx_width = level(t, "width", 1, 1), postfx_volume = level(t, "post_volume", 1, 1.4125375747681),
+      prefx_width = level(t, "width", 0, 127), postfx_volume = level(t, "post_volume", 1, 1.4125375747681),
       postfx_panning = level(t, "post_panning", 0.5, 1),
       column_is_muted = function(_, c)
         column_observable(t, "muted", c)
