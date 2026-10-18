@@ -217,6 +217,11 @@ function M.ok(id, result)
   return M.encode_frame("response", { id = id, ok = true, result = result == nil and json.object() or result })
 end
 
+-- Sent at accept, before reading, to a connection over the limits.
+function M.over_capacity()
+  return M.encode_frame("refused", { reason = "connections" })
+end
+
 function M.error(id, code, message)
   return M.encode_frame("response", { id = id, ok = false, error = { code = code, message = message } })
 end

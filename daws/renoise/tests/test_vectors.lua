@@ -89,6 +89,7 @@ end
 
 test("vectors: the server side of a connection", function()
   local v = vectors("server.json")
+  same(assert(json.decode(wire.over_capacity():sub(1, -2))), v.overCapacity, "over capacity")
   for _, case in ipairs(v.cases) do
     local conn = wire.connection(v.secret, 0, v.serverNonce, v.session)
     local closed = false

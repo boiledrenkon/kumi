@@ -132,6 +132,10 @@ local function selection(song)
   }
 end
 
+local function tracks(song)
+  return { count = song.sequencer_track_count + song.send_track_count + 1 }
+end
+
 local function transport(song)
   local t = song.transport
   return { playing = t.playing, bpm = t.bpm, lpb = t.lpb }
@@ -140,6 +144,7 @@ end
 local function attach(song)
   observers:detach()
   if not song then return end
+  observers:watch(song.tracks_observable, "tracks")
   observers:watch(song.selected_track_index_observable, "selection")
   observers:watch(song.selected_instrument_index_observable, "selection")
   observers:watch(song.selected_pattern_index_observable, "selection")
@@ -148,6 +153,7 @@ local function attach(song)
   observers:watch(song.transport.bpm_observable, "transport")
   observers:watch(song.transport.lpb_observable, "transport")
   observers:watch(song.name_observable, "project")
+  observers:changed("tracks", tracks(song))
   observers:changed("selection", selection(song))
   observers:changed("transport", transport(song))
   observers:changed("project", status.project(b.memory))
@@ -165,6 +171,10 @@ local function flush_events()
   local song = renoise.song()
   if not song then return end
   local dirty = observers:take_dirty()
+  if dirty.tracks then
+    local value = tracks(song)
+    if observers:changed("tracks", value) then conns:event("tracks", value) end
+  end
   if dirty.selection then
     local value = selection(song)
     if observers:changed("selection", value) then conns:event("selection", value) end
@@ -237,7 +247,8 @@ end
 function M.stop(_, reloading)
   if observers then observers:detach() end
   if not reloading then
-    if conns then conns:close_all("unload") end
+    -- Renoise releases the song just before it quits; a tool disabled or reloaded sees no release.
+    if conns then conns:close_all(b.quitting and "quit" or "shutdown") end
     host.close_server()
     discovery.remove(b.discovery_path)
     b.discovery_path = nil
@@ -276,11 +287,13 @@ function M.on_socket_error(message)
 end
 
 function M.on_new_document()
+  b.quitting = false
   attach(renoise.song())
   send_project()
 end
 
 function M.on_release_document()
+  b.quitting = true
   observers:detach()
   b.memory.song_id = nil
   conns:event("project", json.null)

@@ -87,7 +87,7 @@ function M:accept(client)
   end
   local waiting, authenticated = self:counts()
   if waiting >= wire.MAX_UNAUTHENTICATED or authenticated >= wire.MAX_AUTHENTICATED then
-    self:send(record, wire.encode_frame("refused", { reason = "limit" }))
+    self:send(record, wire.over_capacity())
     self:close(record, "too many connections")
     return record
   end
