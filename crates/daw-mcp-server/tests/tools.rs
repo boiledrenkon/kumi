@@ -231,9 +231,12 @@ async fn arguments_are_checked_before_the_bridge_is_asked() {
 }
 
 #[tokio::test]
-async fn only_known_arguments_reach_the_bridge_and_the_limit_is_capped() {
+async fn only_known_arguments_reach_the_bridge_and_a_limit_past_a_page_is_refused() {
     let mut lab = Lab::start(3, 0).await;
-    lab.tool("read", json!({"kind": "track", "limit": 5000, "pid": std::process::id(), "mood": "loud"})).await;
+    let (refused, is_error) = lab.tool("read", json!({"kind": "track", "limit": 5000})).await;
+    assert!(is_error && refused["error"].as_str().unwrap().contains("from 1 to 200"), "{refused}");
+    assert!(lab.script.asked().is_empty(), "refused before the bridge is asked");
+    lab.tool("read", json!({"kind": "track", "limit": 200, "pid": std::process::id(), "mood": "loud"})).await;
     lab.tool("focus_body", json!({"kind": "arrange", "window": {"from": 0, "to": 8}, "extra": 1})).await;
     let asked = lab.script.asked();
     assert_eq!(asked[0], ("read".to_string(), json!({"kind": "track", "limit": 200})));
