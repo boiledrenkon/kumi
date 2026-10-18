@@ -72,6 +72,9 @@ libc.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+# REAPER's and Renoise's integrations, end to end against Kumi's host and its simulated bridges.
+daw-bridge.workspace = true
+daw-mcp-server = { path = "../daw-mcp-server" }
 # Certificates for the stand-in servers and proxies of the network tests, with the ring Kumi's TLS already has.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 # live_views reads deep Set snapshots, as the bridge does.

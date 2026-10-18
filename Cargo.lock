@@ -1290,6 +1290,8 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "daw-bridge",
+ "daw-mcp-server",
  "encoding_rs",
  "fancy-regex",
  "flate2",
