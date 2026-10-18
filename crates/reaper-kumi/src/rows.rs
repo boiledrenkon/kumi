@@ -353,15 +353,24 @@ pub fn note_row(reaper: &Reaper, take: Take, item_start_qn: f64, index: i32, not
     })
 }
 
-/// The envelope's row. `which` is how its ref names it.
-pub fn envelope_row(reaper: &Reaper, track: &TrackId, which: &EnvelopeId, envelope: Envelope) -> Value {
+/// The envelope's row, named by its GUID. An FX parameter's envelope also says which FX and parameter it is for.
+pub fn envelope_row(reaper: &Reaper, track: &TrackId, envelope: Envelope) -> Value {
+    let reference = reaper.envelope_guid(envelope).map(|guid| refs::envelope_ref(track, &EnvelopeId::Guid(guid)));
+    let (fx_ref, param) = match reaper.envelope_owner(envelope) {
+        Some((owner, index, param)) if index >= 0 => {
+            (Some(refs::fx_ref(&reaper.fx_guid(Fx { owner: FxOwner::Track(owner), index }))), Some(param))
+        }
+        _ => (None, None),
+    };
     json!({
-        "ref": refs::envelope_ref(track, which),
+        "ref": reference,
         "name": clip(&reaper.envelope_name(envelope)),
         "pointCount": reaper.envelope_point_count(envelope),
         "armed": reaper.envelope_flag(envelope, "ARM"),
         "visible": reaper.envelope_flag(envelope, "VISIBLE"),
         "active": reaper.envelope_flag(envelope, "ACTIVE"),
+        "fxRef": fx_ref,
+        "param": param,
     })
 }
 

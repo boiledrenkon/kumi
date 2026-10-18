@@ -605,7 +605,7 @@ impl Reaper<'_> {
         (!envelope.is_null()).then_some(Envelope(envelope))
     }
 
-    /// A track's own envelope by its chunk name (`<VOLENV2`, `<PANENV`…).
+    /// A track's envelope by its chunk name (`<VOLENV2`, `<PANENV`…) or its GUID.
     pub fn track_envelope_by_chunk_name(&self, track: Track, name: &str) -> Option<Envelope> {
         let name = cstring(name);
         let envelope = unsafe { self.api.GetTrackEnvelopeByChunkName()?(track.0, name.as_ptr()) };
@@ -632,6 +632,24 @@ impl Reaper<'_> {
             Some(f) => text(|buf, size| unsafe { f(envelope.0, buf, size) }),
             None => String::new(),
         }
+    }
+
+    /// An envelope's GUID, which stays with it through a save, an undo and the others being added or removed.
+    pub fn envelope_guid(&self, envelope: Envelope) -> Option<String> {
+        let key = cstring("GUID");
+        let f = self.api.GetSetEnvelopeInfo_String()?;
+        big_string(|buf| unsafe { f(envelope.0, key.as_ptr(), buf, false) })
+            .map(|guid| guid.trim().to_string())
+            .filter(|guid| !guid.is_empty())
+    }
+
+    /// The track an envelope is on and, for an FX parameter's envelope, the FX (as `TrackFX_` addresses it) and the
+    /// parameter; -1 and -1 for any other.
+    pub fn envelope_owner(&self, envelope: Envelope) -> Option<(Track, i32, i32)> {
+        let f = self.api.Envelope_GetParentTrack()?;
+        let (mut fx, mut param) = (-1, -1);
+        let track = unsafe { f(envelope.0, &mut fx, &mut param) };
+        (!track.is_null()).then_some((Track(track.cast()), fx, param))
     }
 
     pub fn envelope_point_count(&self, envelope: Envelope) -> i32 {

@@ -20,12 +20,12 @@ pub enum TrackId {
 /// Which envelope of a track.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvelopeId {
-    /// A track's own: the chunk name (`VOLENV2`).
+    /// The envelope's own GUID: what every envelope is named by.
+    Guid(String),
+    /// A track's built-in one by its chunk name (`VOLENV2`): an alias, read back as the GUID's ref.
     Chunk(String),
-    /// An FX parameter's.
+    /// An FX parameter's: an alias too.
     Param { fx: String, index: i32 },
-    /// By position in the track's envelope list, for an envelope neither of the others names.
-    Position(i32),
 }
 
 /// What is at the other end of a send.
@@ -155,12 +155,12 @@ impl Ref {
             ("marker", [guid]) => Ref::Marker(guid_of(guid, "a marker id")?),
             ("region", [guid]) => Ref::Region(guid_of(guid, "a region id")?),
             ("env", [track, name]) => {
-                let which = match name.strip_prefix('i').and_then(|n| n.parse::<i32>().ok()) {
-                    Some(position) => EnvelopeId::Position(position),
-                    None if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
-                        EnvelopeId::Chunk(name.to_string())
-                    }
-                    None => return Err(bad()),
+                let which = if looks_like_guid(name) {
+                    EnvelopeId::Guid(name.to_string())
+                } else if !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+                    EnvelopeId::Chunk(name.to_string())
+                } else {
+                    return Err(bad());
                 };
                 Ref::Envelope { track: TrackId::parse(track)?, which }
             }
@@ -233,9 +233,9 @@ pub fn region_ref(guid: &str) -> String {
 }
 pub fn envelope_ref(track: &TrackId, which: &EnvelopeId) -> String {
     match which {
+        EnvelopeId::Guid(guid) => format!("{PREFIX}:env:{}:{guid}", track.text()),
         EnvelopeId::Chunk(name) => format!("{PREFIX}:env:{}:{name}", track.text()),
         EnvelopeId::Param { fx, index } => format!("{PREFIX}:env:{}:{fx}:{index}", track.text()),
-        EnvelopeId::Position(position) => format!("{PREFIX}:env:{}:i{position}", track.text()),
     }
 }
 
@@ -472,9 +472,9 @@ mod tests {
             Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2 | 1024), repeat: 2, of: 2 },
             Ref::Marker(guid.into()),
             Ref::Region(fx.into()),
+            Ref::Envelope { track: track.clone(), which: EnvelopeId::Guid(guid.into()) },
             Ref::Envelope { track: track.clone(), which: EnvelopeId::Chunk("VOLENV2".into()) },
-            Ref::Envelope { track: track.clone(), which: EnvelopeId::Param { fx: fx.into(), index: 4 } },
-            Ref::Envelope { track, which: EnvelopeId::Position(5) },
+            Ref::Envelope { track, which: EnvelopeId::Param { fx: fx.into(), index: 4 } },
         ] {
             let text = reference.text();
             assert_eq!(Ref::parse(&text).as_ref(), Ok(&reference), "{text}");
@@ -509,6 +509,8 @@ mod tests {
             ("r:pattern:3", "no ref kind"),
             ("r:env:{A}:", "well-formed"),
             ("r:env:{A}:VOL ENV", "well-formed"),
+            // A position in the envelope list names a different envelope once the list changes: no ref has one.
+            ("r:env:{A}:i3", "well-formed"),
         ] {
             let error = Ref::parse(text).unwrap_err();
             assert!(error.contains(needle), "{text}: {error}");

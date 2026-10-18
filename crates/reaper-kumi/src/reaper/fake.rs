@@ -80,6 +80,8 @@ pub struct FakeCc {
 #[derive(Clone)]
 pub struct FakeEnvelope {
     pub name: String,
+    /// The envelope's own GUID, as REAPER keeps one for every envelope.
+    pub guid: String,
     /// The chunk name (`<VOLENV2`) of a track's own envelope.
     pub chunk: Option<String>,
     /// The FX (by GUID) and parameter an FX envelope belongs to.
@@ -91,11 +93,13 @@ pub struct FakeEnvelope {
 
 impl FakeEnvelope {
     pub fn own(name: &str, chunk: &str, points: i32) -> Self {
-        FakeEnvelope { name: name.into(), chunk: Some(chunk.into()), fx_param: None, points, armed: false, visible: true }
+        let guid = format!("{{ENV-{}}}", chunk.trim_start_matches('<'));
+        FakeEnvelope { name: name.into(), guid, chunk: Some(chunk.into()), fx_param: None, points, armed: false, visible: true }
     }
 
     pub fn for_param(name: &str, fx: &str, param: i32, points: i32) -> Self {
-        FakeEnvelope { name: name.into(), chunk: None, fx_param: Some((fx.into(), param)), points, armed: false, visible: true }
+        let guid = format!("{{ENV-{}-{param}}}", fx.trim_matches(|c| c == '{' || c == '}'));
+        FakeEnvelope { name: name.into(), guid, chunk: None, fx_param: Some((fx.into(), param)), points, armed: false, visible: true }
     }
 }
 
@@ -1324,7 +1328,10 @@ unsafe extern "C" fn get_track_envelope(track: *mut MediaTrack, index: c_int) ->
 unsafe extern "C" fn get_track_envelope_by_chunk_name(track: *mut MediaTrack, name: *const c_char) -> *mut TrackEnvelope {
     let name = name_of(name);
     counted(|s| {
-        let found = track_of(s, track as u64).and_then(|t| t.envelopes.iter().position(|e| e.chunk.as_deref() == Some(name.as_str())));
+        // A chunk name (`<VOLENV2`) or an envelope's GUID.
+        let found = track_of(s, track as u64).and_then(|t| {
+            t.envelopes.iter().position(|e| e.chunk.as_deref() == Some(name.as_str()) || (name.starts_with('{') && e.guid == name))
+        });
         found.map_or(ptr::null_mut(), |n| pack(ENVELOPE, unpack(track as u64).1, n as u64, 0) as *mut TrackEnvelope)
     })
 }
@@ -1335,6 +1342,33 @@ unsafe extern "C" fn get_fx_envelope(track: *mut MediaTrack, fx: c_int, param: c
         let Some(guid) = fx_of(s, track as u64, fx).map(|f| f.guid.clone()) else { return ptr::null_mut() };
         let found = t.envelopes.iter().position(|e| e.fx_param.as_ref() == Some(&(guid.clone(), param)));
         found.map_or(ptr::null_mut(), |n| pack(ENVELOPE, unpack(track as u64).1, n as u64, 0) as *mut TrackEnvelope)
+    })
+}
+/// The FX with this GUID in a chain, as the path of child positions that leads to it.
+fn fx_path_of(chain: &[FakeFx], guid: &str) -> Option<Vec<usize>> {
+    chain.iter().enumerate().find_map(|(n, fx)| {
+        if fx.guid == guid {
+            return Some(vec![n]);
+        }
+        let mut path = fx_path_of(fx.children.as_deref()?, guid)?;
+        path.insert(0, n);
+        Some(path)
+    })
+}
+unsafe extern "C" fn envelope_get_parent_track(envelope: *mut TrackEnvelope, fx_out: *mut c_int, param_out: *mut c_int) -> *mut MediaTrack {
+    counted(|s| {
+        let (kind, a, _, _) = unpack(envelope as u64);
+        let Some(e) = envelope_of(s, envelope as u64).filter(|_| kind == ENVELOPE) else { return ptr::null_mut() };
+        let track = pack(TRACK, a, 0, 0);
+        let fx_param = e.fx_param.as_ref().and_then(|(guid, param)| {
+            let path = fx_path_of(&track_of(s, track)?.fx, guid)?;
+            Some((fx_address(&path, false), *param))
+        });
+        unsafe {
+            *fx_out = fx_param.map_or(-1, |(fx, _)| fx);
+            *param_out = fx_param.map_or(-1, |(_, param)| param);
+        }
+        track as *mut MediaTrack
     })
 }
 unsafe extern "C" fn count_take_envelopes(take: *mut MediaItem_Take) -> c_int {
@@ -1365,6 +1399,7 @@ unsafe extern "C" fn get_set_envelope_info_string(envelope: *mut TrackEnvelope, 
             "ACTIVE" => write(buf, 4096, "1"),
             "ARM" => write(buf, 4096, flag(e.armed)),
             "VISIBLE" => write(buf, 4096, flag(e.visible)),
+            "GUID" => write(buf, 4096, &e.guid),
             _ => return false,
         }
         true
@@ -1575,6 +1610,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetTrackEnvelope" => get_track_envelope as unsafe extern "C" fn(*mut MediaTrack, c_int) -> *mut TrackEnvelope,
         b"GetTrackEnvelopeByChunkName" => get_track_envelope_by_chunk_name as unsafe extern "C" fn(*mut MediaTrack, *const c_char) -> *mut TrackEnvelope,
         b"GetFXEnvelope" => get_fx_envelope as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, bool) -> *mut TrackEnvelope,
+        b"Envelope_GetParentTrack" => envelope_get_parent_track as unsafe extern "C" fn(*mut TrackEnvelope, *mut c_int, *mut c_int) -> *mut MediaTrack,
         b"CountTakeEnvelopes" => count_take_envelopes as unsafe extern "C" fn(*mut MediaItem_Take) -> c_int,
         b"GetTakeEnvelope" => get_take_envelope as unsafe extern "C" fn(*mut MediaItem_Take, c_int) -> *mut TrackEnvelope,
         b"GetEnvelopeName" => get_envelope_name as unsafe extern "C" fn(*mut TrackEnvelope, *mut c_char, c_int) -> bool,

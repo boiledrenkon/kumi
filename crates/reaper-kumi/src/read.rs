@@ -29,10 +29,6 @@ const SNAPSHOT_TRACKS: usize = 200;
 const SNAPSHOT_MARKERS: usize = 100;
 /// The snapshot's own share of the answer, so the tracks leave room for the markers and the selection.
 const SNAPSHOT_TRACK_BYTES: usize = 150 * 1024;
-/// A track's own envelopes, by the chunk name `GetTrackEnvelopeByChunkName` takes.
-const OWN_ENVELOPES: [&str; 8] = ["VOLENV", "VOLENV2", "VOLENV3", "PANENV", "PANENV2", "WIDTHENV", "WIDTHENV2", "MUTEENV"];
-/// The parameters probed for an envelope in one call, so a plug-in with thousands doesn't hold the main thread.
-const PARAM_PROBES: usize = 6000;
 const KINDS: [&str; 11] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"];
 
 pub fn bad(message: impl Into<String>) -> (String, String) {
@@ -408,7 +404,7 @@ impl Reads {
             Ref::Envelope { track, which } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let envelope = self.envelope_of(reaper, proj, owner, &which)?;
-                rows::envelope_row(reaper, &track, &which, envelope)
+                rows::envelope_row(reaper, &track, envelope)
             }
         };
         Ok(json!({"items": [row], "epoch": self.epoch()}))
@@ -422,6 +418,12 @@ impl Reads {
 
     fn envelope_of(&self, reaper: &Reaper, proj: Project, track: Track, which: &EnvelopeId) -> Result<Envelope, (String, String)> {
         let found = match which {
+            EnvelopeId::Guid(guid) => reaper
+                .track_envelope_by_chunk_name(track, guid)
+                .or_else(|| {
+                    self.track_envelopes(reaper, track).into_iter().find(|(id, _)| id.as_deref() == Some(guid.as_str())).map(|(_, e)| e)
+                })
+                .filter(|envelope| reaper.envelope_owner(*envelope).is_some_and(|(owner, _, _)| owner == track)),
             EnvelopeId::Chunk(name) => reaper.track_envelope_by_chunk_name(track, &format!("<{name}")),
             EnvelopeId::Param { fx, index } => {
                 let fx = self.fx_by_guid(reaper, proj, fx)?;
@@ -430,9 +432,8 @@ impl Reads {
                     _ => None,
                 }
             }
-            EnvelopeId::Position(position) => reaper.track_envelope(track, *position),
         };
-        found.ok_or_else(|| failed("that track has no such envelope"))
+        found.ok_or_else(|| failed("that track has no such envelope (deleted, or on another track)"))
     }
 
     // ----- tracks -----
@@ -694,69 +695,35 @@ impl Reads {
 
     // ----- envelopes -----
 
-    /// A track's envelopes with the id their refs use: own ones by chunk name, FX ones by FX and parameter.
-    fn track_envelopes(&self, reaper: &Reaper, proj: Project, track: Track) -> Vec<(EnvelopeId, Envelope)> {
-        let own: Vec<(&str, Envelope)> = OWN_ENVELOPES
-            .iter()
-            .filter_map(|name| reaper.track_envelope_by_chunk_name(track, &format!("<{name}")).map(|e| (*name, e)))
-            .collect();
-        let mut fx_params: Option<HashMap<Envelope, (String, i32)>> = None;
-        let mut found = Vec::new();
-        for position in 0..reaper.track_envelope_count(track) {
-            let Some(envelope) = reaper.track_envelope(track, position) else { continue };
-            let which = if let Some((name, _)) = own.iter().find(|(_, e)| *e == envelope) {
-                EnvelopeId::Chunk((*name).to_string())
-            } else {
-                let map = fx_params.get_or_insert_with(|| self.fx_param_envelopes(reaper, proj, track));
-                match map.get(&envelope) {
-                    Some((fx, index)) => EnvelopeId::Param { fx: fx.clone(), index: *index },
-                    None => EnvelopeId::Position(position),
-                }
-            };
-            found.push((which, envelope));
-        }
-        found
-    }
-
-    /// Every parameter envelope on a track's FX, found by asking each parameter (REAPER can't list them by FX).
-    fn fx_param_envelopes(&self, reaper: &Reaper, proj: Project, track: Track) -> HashMap<Envelope, (String, i32)> {
-        let mut map = HashMap::new();
-        let mut probes = 0usize;
-        let mut pending: Vec<Fx> = {
-            let owner = FxOwner::Track(track);
-            (0..reaper.fx_count(owner)).map(|index| Fx { owner, index }).collect()
-        };
-        while let Some(fx) = pending.pop() {
-            let guid = reaper.fx_guid(fx);
-            self.registry.borrow_mut().note_fx(proj, &guid, fx);
-            pending.extend(reaper.fx_children(fx));
-            for param in 0..reaper.fx_param_count(fx) {
-                probes += 1;
-                if probes > PARAM_PROBES {
-                    return map;
-                }
-                if let Some(envelope) = reaper.fx_param_envelope(track, fx.index, param) {
-                    map.insert(envelope, (guid.clone(), param));
-                }
-            }
-        }
-        map
+    /// A track's envelopes, each with the GUID its ref is made of (none if REAPER gives it none): in the order REAPER lists
+    /// them, which changes as the producer shows and adds envelopes, so a ref never holds a position.
+    fn track_envelopes(&self, reaper: &Reaper, track: Track) -> Vec<(Option<String>, Envelope)> {
+        (0..reaper.track_envelope_count(track))
+            .filter_map(|position| reaper.track_envelope(track, position))
+            .map(|envelope| (reaper.envelope_guid(envelope), envelope))
+            .collect()
     }
 
     fn read_envelopes(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
         let parent = parent.ok_or_else(|| bad("envelope: pass the track or FX as parent"))?;
-        let found: Vec<(TrackId, EnvelopeId, Envelope)> = match Ref::parse(parent).map_err(bad)? {
+        let found: Vec<(TrackId, Envelope)> = match Ref::parse(parent).map_err(bad)? {
             Ref::Track(id) => {
                 let track = self.track_by_id(reaper, proj, &id)?;
-                self.track_envelopes(reaper, proj, track).into_iter().map(|(which, e)| (id.clone(), which, e)).collect()
+                self.track_envelopes(reaper, track).into_iter().map(|(_, e)| (id.clone(), e)).collect()
             }
             Ref::Fx(guid) => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
                 let FxOwner::Track(track) = fx.owner else { return Err(bad("take FX envelopes aren't read yet")) };
                 let id = rows::track_id(reaper, track);
-                (0..reaper.fx_param_count(fx))
-                    .filter_map(|param| reaper.fx_param_envelope(track, fx.index, param).map(|e| (param, e)))
-                    .map(|(param, e)| (id.clone(), EnvelopeId::Param { fx: guid.clone(), index: param }, e))
+                // The track's envelopes that are for this FX: asked of each envelope, not of every parameter of the FX.
+                self.track_envelopes(reaper, track)
+                    .into_iter()
+                    .filter(|(_, e)| {
+                        reaper
+                            .envelope_owner(*e)
+                            .is_some_and(|(_, index, _)| index >= 0 && reaper.fx_guid(Fx { owner: fx.owner, index }) == guid)
+                    })
+                    .map(|(_, e)| (id.clone(), e))
                     .collect()
             }
             other => return Err(bad(format!("parent: a track or FX ref, not r:{}", other.kind()))),
@@ -768,8 +735,8 @@ impl Reads {
                 next = Some(position);
                 break;
             }
-            let (track, which, envelope) = &found[position];
-            if !pager.push(rows::envelope_row(reaper, track, which, *envelope)) {
+            let (track, envelope) = &found[position];
+            if !pager.push(rows::envelope_row(reaper, track, *envelope)) {
                 next = Some(position);
                 break;
             }
@@ -1199,39 +1166,80 @@ mod tests {
     }
 
     #[test]
-    fn envelopes_are_named_by_chunk_or_by_fx_and_parameter() {
+    fn envelopes_are_named_by_their_guid_and_an_fx_ones_say_which_fx_and_parameter() {
         let lab = Lab::new();
         let envelopes = lab.rows(json!({"kind": "envelope", "parent": "r:track:{AAAA}"}));
         assert_eq!(
             envelopes.iter().map(|r| r["ref"].as_str().unwrap()).collect::<Vec<_>>(),
-            ["r:env:{AAAA}:VOLENV2", "r:env:{AAAA}:{FX-EQ}:1"]
+            ["r:env:{AAAA}:{ENV-VOLENV2}", "r:env:{AAAA}:{ENV-FX-EQ-1}"]
         );
         assert_eq!(
             (&envelopes[0]["name"], &envelopes[0]["pointCount"], &envelopes[0]["armed"], &envelopes[0]["visible"]),
             (&json!("Volume"), &json!(4), &json!(false), &json!(true))
         );
+        assert_eq!((&envelopes[0]["fxRef"], &envelopes[0]["param"]), (&Value::Null, &Value::Null));
+        assert_eq!((&envelopes[1]["fxRef"], &envelopes[1]["param"]), (&json!("r:fx:{FX-EQ}"), &json!(1)));
         // An FX lists its own.
         let of_fx = lab.rows(json!({"kind": "envelope", "parent": "r:fx:{FX-EQ}"}));
         assert_eq!(of_fx.len(), 1);
-        assert_eq!(of_fx[0]["ref"], "r:env:{AAAA}:{FX-EQ}:1");
-        // And a ref reads back to the same row.
+        assert_eq!(of_fx[0]["ref"], "r:env:{AAAA}:{ENV-FX-EQ-1}");
+        // And a ref reads back to the same row; the chunk name and the FX-and-parameter forms are aliases of it.
+        assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:{ENV-VOLENV2}"}))[0], envelopes[0]);
+        assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:{ENV-FX-EQ-1}"}))[0], envelopes[1]);
         assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:VOLENV2"}))[0], envelopes[0]);
         assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:{FX-EQ}:1"}))[0], envelopes[1]);
+        // The GUID is the track's own to name: another track's envelope isn't read through it.
+        assert_eq!(lab.read(json!({"ref": "r:env:{BBBB}:{ENV-VOLENV2}"})).unwrap_err().0, "failed");
+    }
+
+    /// Send, dual-pan, tempo and the like have no chunk name a ref could use, and an FX envelope was found by probing the
+    /// parameters: every envelope was named by its place in the track's list, which others coming and going change.
+    #[test]
+    fn an_envelope_ref_holds_when_other_envelopes_come_and_go() {
+        use crate::reaper::fake::FakeEnvelope;
+        let lab = Lab::new();
+        let send = |name: &str, guid: &str, points: i32| FakeEnvelope {
+            chunk: None,
+            fx_param: None,
+            guid: guid.into(),
+            ..FakeEnvelope::own(name, "", points)
+        };
+        fake::with(|s| {
+            s.tracks[1].envelopes =
+                vec![send("Send Volume: Delay", "{ENV-SEND-DELAY}", 3), send("Send Volume: Reverb", "{ENV-SEND-REVERB}", 9)]
+        });
+        let rows = lab.rows(json!({"kind": "envelope", "parent": "r:track:{BBBB}"}));
+        assert_eq!(
+            rows.iter().map(|r| r["ref"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["r:env:{BBBB}:{ENV-SEND-DELAY}", "r:env:{BBBB}:{ENV-SEND-REVERB}"]
+        );
+        let name_of = |reference: &str| lab.rows(json!({"ref": reference}))[0]["name"].clone();
+        assert_eq!(name_of("r:env:{BBBB}:{ENV-SEND-REVERB}"), json!("Send Volume: Reverb"));
+        // The producer shows the track's own Volume envelope, which REAPER lists first.
+        fake::with(|s| s.tracks[1].envelopes.insert(0, FakeEnvelope::own("Volume", "<VOLENV2", 0)));
+        assert_eq!(name_of("r:env:{BBBB}:{ENV-SEND-REVERB}"), json!("Send Volume: Reverb"));
+        // The producer removes the Delay send and its envelope: its ref names nothing, and Reverb's still reads Reverb.
+        fake::with(|s| s.tracks[1].envelopes.retain(|e| e.guid != "{ENV-SEND-DELAY}"));
+        assert_eq!(lab.read(json!({"ref": "r:env:{BBBB}:{ENV-SEND-DELAY}"})).unwrap_err().0, "failed");
+        assert_eq!(name_of("r:env:{BBBB}:{ENV-SEND-REVERB}"), json!("Send Volume: Reverb"));
     }
 
     #[test]
-    fn an_envelope_nothing_names_falls_back_to_its_position() {
+    fn an_fx_with_thousands_of_parameters_is_not_probed_parameter_by_parameter() {
+        use crate::reaper::fake::{FakeEnvelope, FakeFx, FakeParam};
         let lab = Lab::new();
         fake::with(|s| {
-            s.tracks[1].envelopes.push(crate::reaper::fake::FakeEnvelope {
-                chunk: None,
-                fx_param: None,
-                ..crate::reaper::fake::FakeEnvelope::own("Mystery", "", 1)
-            })
+            let mut big = FakeFx::new("{FX-BIG}", "VST3: Big (Vendor)");
+            big.params = (0..8000).map(|i| FakeParam::new(&format!("Param {i}"), 0.5, "0.5")).collect();
+            s.tracks[1].fx = vec![big];
+            s.tracks[1].envelopes = vec![FakeEnvelope::for_param("Param 7000", "{FX-BIG}", 7000, 2)];
         });
-        let envelopes = lab.rows(json!({"kind": "envelope", "parent": "r:track:{BBBB}"}));
-        assert_eq!(envelopes[0]["ref"], "r:env:{BBBB}:i0");
-        assert_eq!(lab.rows(json!({"ref": "r:env:{BBBB}:i0"}))[0]["name"], "Mystery");
+        fake::with(|s| s.calls = 0);
+        let rows = lab.rows(json!({"kind": "envelope", "parent": "r:track:{BBBB}"}));
+        assert_eq!(rows[0]["ref"], "r:env:{BBBB}:{ENV-FX-BIG-7000}");
+        assert_eq!((&rows[0]["fxRef"], &rows[0]["param"]), (&json!("r:fx:{FX-BIG}"), &json!(7000)));
+        let calls = fake::with(|s| s.calls);
+        assert!(calls < 100, "{calls} calls to find one envelope");
     }
 
     #[test]
