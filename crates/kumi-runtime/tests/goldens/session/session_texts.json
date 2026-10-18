@@ -1,0 +1,15 @@
+{
+  "listen without live": {
+    "text": "Kumi isn't connected to Live, so it can't hear the Set.",
+    "isError": true
+  },
+  "reconnected": [
+    "Reconnected to Live; the conversation carries on."
+  ],
+  "undo didn't finish": [
+    "The undo didn't finish; check Live."
+  ],
+  "undo without live": [
+    "Kumi isn't connected to Live, so it can't undo."
+  ]
+}

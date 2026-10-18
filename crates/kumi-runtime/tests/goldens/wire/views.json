@@ -1,0 +1,221 @@
+{
+  "deviceTrees": [
+    {
+      "trackRef": "7:track:0",
+      "devices": [
+        {
+          "ref": "7:device:0:-1",
+          "name": "Arpeggiator",
+          "className": "MidiArpeggiator",
+          "canHaveChains": false,
+          "canHaveDrumPads": false,
+          "deviceType": "midi_effect"
+        },
+        {
+          "ref": "7:device:0:0",
+          "name": "Drum Rack",
+          "className": "DrumGroupDevice",
+          "canHaveChains": true,
+          "canHaveDrumPads": true,
+          "deviceType": "instrument",
+          "chains": [
+            {
+              "ref": "7:chain:0:0:0",
+              "name": "Kick",
+              "devices": [
+                {
+                  "ref": "7:device:0:0:0:0",
+                  "name": "Simpler",
+                  "className": "OriginalSimpler",
+                  "canHaveChains": false,
+                  "canHaveDrumPads": false,
+                  "deviceType": "instrument"
+                },
+                {
+                  "ref": "7:device:0:0:0:1",
+                  "name": "Saturator",
+                  "className": "Saturator",
+                  "canHaveChains": false,
+                  "canHaveDrumPads": false,
+                  "deviceType": "audio_effect"
+                }
+              ]
+            },
+            {
+              "ref": "7:chain:0:0:1",
+              "name": "Snare"
+            },
+            {
+              "ref": "7:chain:0:0:2",
+              "name": "Hat",
+              "devices": []
+            }
+          ]
+        },
+        {
+          "ref": "7:device:0:1",
+          "name": "Glue Compressor",
+          "className": "GlueCompressor",
+          "canHaveChains": false,
+          "canHaveDrumPads": false,
+          "deviceType": "audio_effect"
+        },
+        {
+          "ref": "7:device:0:2",
+          "name": "Audio Effect Rack",
+          "className": "AudioEffectGroupDevice",
+          "canHaveChains": true,
+          "canHaveDrumPads": false,
+          "deviceType": "audio_effect",
+          "chains": [
+            {
+              "ref": "7:chain:0:2:0",
+              "name": "Wet",
+              "devices": [
+                {
+                  "ref": "7:device:0:2:0:0",
+                  "name": "Reverb",
+                  "className": "Reverb",
+                  "canHaveChains": false,
+                  "canHaveDrumPads": false,
+                  "deviceType": "audio_effect"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "ref": "7:device:0:3",
+          "name": "Utility"
+        }
+      ]
+    },
+    {
+      "trackRef": "7:track:3",
+      "devices": []
+    }
+  ],
+  "clipViews": [
+    {
+      "slotRef": "7:clip_slot:0:1",
+      "name": "Bassline",
+      "length": 8.0,
+      "notes": [
+        {
+          "pitch": 36.0,
+          "start": 0.0,
+          "duration": 0.5,
+          "velocity": 100.0,
+          "selected": true
+        },
+        {
+          "pitch": 38.0,
+          "start": 0.5,
+          "duration": 0.25,
+          "velocity": 87.5,
+          "selected": false
+        },
+        {
+          "pitch": 43.0,
+          "start": 1.75,
+          "duration": 1.0,
+          "velocity": 64.0
+        }
+      ]
+    },
+    {
+      "slotRef": "7:clip_slot:1:0",
+      "name": "",
+      "length": 4.0,
+      "notes": []
+    }
+  ],
+  "sessionStrips": [
+    {
+      "trackRef": "7:track:0",
+      "scene": 1.0,
+      "slots": [
+        {
+          "index": 0.0,
+          "clip": {
+            "name": "Intro",
+            "audio": false
+          },
+          "playing": true
+        },
+        {
+          "index": 1.0,
+          "clip": {
+            "name": "Vox",
+            "audio": true
+          },
+          "queued": true
+        },
+        {
+          "index": 2.0
+        },
+        {
+          "index": 3.0,
+          "clip": {
+            "name": "Outro",
+            "audio": false
+          },
+          "playing": false,
+          "queued": false
+        }
+      ]
+    }
+  ],
+  "arrangementStrips": [
+    {
+      "length": 256.0,
+      "position": 64.5,
+      "playing": true,
+      "loop": {
+        "start": 64.0,
+        "length": 16.0,
+        "enabled": true
+      },
+      "locators": [
+        {
+          "name": "Drop",
+          "position": 64.0
+        },
+        {
+          "name": "Break",
+          "position": 128.0
+        }
+      ]
+    },
+    {
+      "length": 0.0,
+      "position": 0.0,
+      "playing": false,
+      "loop": {
+        "start": 0.0,
+        "length": 4.0,
+        "enabled": false
+      },
+      "locators": []
+    },
+    {
+      "length": 32.0,
+      "position": 0.0,
+      "playing": false,
+      "locators": []
+    }
+  ],
+  "connectionStates": [
+    "disconnected",
+    "connecting",
+    "connected",
+    "error"
+  ],
+  "disconnectCauses": [
+    "live",
+    "bridge",
+    "set",
+    "askedset",
+    "busy"
+  ]
+}

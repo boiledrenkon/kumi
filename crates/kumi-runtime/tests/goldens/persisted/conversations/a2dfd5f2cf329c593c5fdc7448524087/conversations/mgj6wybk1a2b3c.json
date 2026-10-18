@@ -1,0 +1,1 @@
+{"savedAt":1760000900000,"checkpoint":{"version":1,"messages":[{"role":"user","content":"Try a sub under it"},{"role":"assistant","content":"Added a sine sub an octave down."},{"role":"user","content":"Louder"},{"role":"assistant","content":"Up 3 dB."}],"origin":"openai/gpt-5.5","tools":"Zq3vY0b8mXH2c9KdLwPr1A"},"first":"Try a sub under it","turns":2}

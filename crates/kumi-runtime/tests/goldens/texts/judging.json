@@ -1,0 +1,16 @@
+{
+  "processing: one device": "it closed 0.2 of a step for 1 more device, less than the processing costs",
+  "processing: three devices": "it closed 0.2 of a step for 3 more devices, less than the processing costs",
+  "rebalance: couldn't turn": "loudness is -2 dB off; there's no Utility to turn / verdict: its loudness couldn't be matched (it's 2 dB quieter: there's no Utility to turn) (not kept)",
+  "rebalance: rebalanced": "Utility gain +2 dB / verdict: the gaps didn't close once loudness was matched (not kept)",
+  "rebalance: unheard, Live wouldn't": "Kumi couldn't hear its rebalance (nothing came through) and Live wouldn't take it back: Utility gain 2 dB (it's grouped) / verdict: Kumi couldn't hear its rebalance (nothing came through) and Live wouldn't take it back: Utility gain 2 dB (it's grouped) (not kept)",
+  "rebalance: unheard, taken back": "couldn't hear the rebalance (nothing came through), so its last step was taken back / verdict: its loudness couldn't be matched (it's 2 dB quieter: Kumi couldn't hear the rebalance) (not kept)",
+  "take back: Live wouldn't, chain unread": "Live wouldn't take back Drive 6 dB (it's grouped), Load Saturator (it's grouped) (Live went away): undo it yourself [stayed]",
+  "take back: Live wouldn't, device removed": "Live wouldn't undo Drive 6 dB (it's grouped), Load Saturator (it's grouped), so Kumi removed Saturator instead [stayed]",
+  "take back: Live wouldn't, device stayed": "Live wouldn't take back Drive 6 dB (it's grouped), Load Saturator (it's grouped): undo it yourself [stayed]",
+  "take back: Live wouldn't, nothing made": "Live wouldn't take back Drive 6 dB (it's grouped), Load Saturator (it's grouped): undo it yourself [stayed]",
+  "take back: changed outside too": "taken back: Load Saturator, Drive 6 dB; whatever Live's own undo changed isn't in HISTORY, so it stays (change it back yourself if it should go) [stayed]",
+  "take back: nothing to take back": "nothing in HISTORY to take back (change it back yourself if you changed it another way) [stayed]",
+  "take back: nothing to take back, changed outside": "nothing in HISTORY to take back; whatever Python run in Live changed isn't in HISTORY, so it stays (change it back yourself if it should go) [stayed]",
+  "take back: taken back": "taken back: Load Saturator, Drive 6 dB"
+}

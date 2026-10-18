@@ -1,0 +1,11 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Make the kick punchier.\n\n<current_observation_untrusted>\n{\"observedAt\":\"2026-10-03T12:00:00.000Z\",\"connectionGeneration\":\"connection\",\"epoch\":7,\"adapter\":\"remote-script\",\"provenance\":\"fake-live\",\"liveVersion\":\"12.0\",\"set\":{\"ref\":\"set:1\",\"name\":\"Set\",\"tempo\":120,\"timeSignature\":\"4/4\",\"playing\":false,\"position\":0,\"loop\":{\"start\":0,\"length\":16},\"recording\":{\"session\":false,\"arrangement\":null},\"swing\":0},\"tracks\":[{\"ref\":\"track:1\",\"name\":\"Bass\",\"type\":\"midi\",\"volume\":\"-6.0 dB\",\"pan\":\"C\",\"devices\":[{\"ref\":\"device:1\",\"name\":\"Rack\",\"type\":\"InstrumentGroupDevice\",\"chains\":[{\"ref\":\"chain:1\",\"name\":\"Low\",\"devices\":[{\"ref\":\"device:2\",\"name\":\"Nested\",\"chains\":[{\"ref\":\"chain:3\",\"name\":\"Inside\",\"devices\":[{\"ref\":\"device:3\",\"name\":\"Analog\"}]}]}]},{\"ref\":\"chain:2\",\"name\":\"Air\",\"devices\":[]}]}]},{\"ref\":\"track:2\",\"name\":\"Kick\",\"type\":\"audio\",\"volume\":\"-6.0 dB\",\"pan\":\"C\",\"devices\":[{\"ref\":\"device:4\",\"name\":\"EQ Eight\",\"type\":\"Eq8\"}]},{\"ref\":\"track:3\",\"name\":\"Keys\",\"type\":\"midi\",\"volume\":\"-6.0 dB\",\"pan\":\"C\"}],\"selectedInLive\":{\"track\":{\"ref\":\"track:1\",\"name\":\"Bass\"},\"note\":\"\\\"This track\\\" or \\\"here\\\" in the producer's words means this one, unless they pointed at something in Kumi.\"},\"truncated\":false,\"coverage\":\"Current open Set only. Bounded discovery; details and track counts require fresh paged reads. Names/paths are not durable identity.\"}\n</current_observation_untrusted>"
+      }
+    ]
+  }
+]

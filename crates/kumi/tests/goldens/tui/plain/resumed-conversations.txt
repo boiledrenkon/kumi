@@ -1,0 +1,16 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[resumed] Continuing your conversation from 3 hours ago (/new starts fresh).
+── Back to your conversation from 3 hours ago ──
+you> make the bass wider
+kumi> Widened it to 140%, keeping the sub mono.
+you> and a bit darker, [redacted]
+kumi> Lowered the filter to 800 Hz.
+[resumed] Your conversation from 3 hours ago, which this model can't continue:
+you> make the bass wider
+kumi> Widened it to 140%, keeping the sub mono.
+you> and a bit darker, [redacted]
+kumi> Lowered the filter to 800 Hz.
+Kumi closed. Each Set's conversation continues next time.

@@ -1,0 +1,42 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[connection] MCP/Live: disconnected; no verified current Live observation
+Live closed. Kumi will pick up where you left off when it's back.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+Live is back.
+[tool] live_discover started
+[connection] MCP/Live: disconnected; no verified current Live observation
+Kumi's link to Live dropped. It's reconnecting, and will pick up where you left off.
+[cancelled] first text unavailable; total 1200 ms; usage unavailable; cost unavailable
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+Live is back. Your last request was stopped; press enter to send it again.
+[tool] live_discover started
+[connection] MCP/Live: disconnected; no verified current Live observation
+Live closed while Kumi was working in it. If it crashed, your unsaved changes may be lost: Live offers to recover them when it opens. Kumi picks up when Live is back.
+[cancelled] first text unavailable; total 1200 ms; usage unavailable; cost unavailable
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+Live is back. Your last request stopped when Live closed, which it may have caused: check the Set before you send it again (enter sends it).
+[connection] MCP/Live: disconnected; no verified current Live observation
+Live is opening another Set; Kumi picks up once it's open.
+[connection] MCP/Live: connected
+[observation] Current open Set: Morning Run — Remote Script · real-live
+Live has the other Set open.
+[tool] live_discover started
+[connection] MCP/Live: disconnected; no verified current Live observation
+Live is busy and answering slowly, so Kumi is waiting for it: your request carries on once it answers.
+[connection] MCP/Live: connected
+[observation] Current open Set: Morning Run — Remote Script · real-live
+Live is answering again.
+[connection] MCP/Live: disconnected; no verified current Live observation
+Live is busy and answering slowly, so Kumi is waiting for it: your request carries on once it answers.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+Live opened another Set while it was busy, so Kumi stopped what it was doing: nothing it was doing lands in the other Set.
+Live has the other Set open.
+[cancelled] first text unavailable; total 1200 ms; usage unavailable; cost unavailable
+Kumi closed. Each Set's conversation continues next time.

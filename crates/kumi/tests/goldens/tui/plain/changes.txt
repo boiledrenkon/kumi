@@ -1,0 +1,15 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[change] Operator · Filter Freq 1.20 kHz → 800 Hz (/undo takes it back)
+[change] EQ Eight · 3 Gain A 0.00 dB → -4.00 dB (/undo takes it back)
+[change] Compressor · Ratio 2.00 : 1 → 4.00 : 1 (/undo takes it back)
+[change] Filter Freq automation, bars 1–5 (/undo takes it back)
+[change] Bass volume 0.0 dB → -3.0 dB (/undo takes it back)
+[change] Chords · 1 note added (/undo takes it back)
+[change] New MIDI clip “Chord” · 3 notes (/undo takes it back)
+[change] Loaded Saturator into Audio Effect Rack › Chain 1 (/undo takes it back)
+[change] Bass colour orange → blue (/undo takes it back)
+[change] Bass volume down (/undo takes it back)
+Kumi closed. Each Set's conversation continues next time.

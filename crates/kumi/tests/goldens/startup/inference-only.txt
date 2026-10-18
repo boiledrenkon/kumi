@@ -1,0 +1,7 @@
+Kumi · anthropic/claude-sonnet-5-5 · MCP disconnected / No Live access
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: disconnected; no verified current Live observation
+[connection] MCP/Live: disconnected; no verified current Live observation
+[observation] Inference-only — No Live access
+[status] idle; MCP/Live: disconnected; turns 0; Inference-only — No Live access
+Kumi closed. Each Set's conversation continues next time.

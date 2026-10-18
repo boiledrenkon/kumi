@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "techniques": [
+    {
+      "name": "Reese",
+      "fits": "dark basses",
+      "idea": "Two saws detuned 7 cents into a 24 dB low-pass, its cutoff moved by a slow LFO.",
+      "id": "t1",
+      "at": 1760000000000,
+      "used": 0,
+      "updated": 1760000004000,
+      "lastUsed": 1760000002000,
+      "request": "make a Reese",
+      "undone": 1
+    },
+    {
+      "name": "Wobble",
+      "fits": "dark basses",
+      "idea": "Two saws detuned 7 cents into a 24 dB low-pass, its cutoff moved by a slow LFO.",
+      "settings": "Cutoff 300 Hz, resonance 20%",
+      "substitutes": "Serum: two saws, unison 2",
+      "recipe": "Dark Reese bass",
+      "source": {
+        "title": "Reese bass in 5 minutes",
+        "url": "https://example.com/reese"
+      },
+      "id": "t2",
+      "at": 1760000001000,
+      "used": 0
+    }
+  ]
+}

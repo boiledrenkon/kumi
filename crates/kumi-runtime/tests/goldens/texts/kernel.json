@@ -1,0 +1,17 @@
+{
+  "ASKED": "[What the producer said in that part, oldest first:]\n",
+  "CARRY_ON_NOTE": "[Kumi] The connection dropped partway through your answer. Carry on from where it stopped, without repeating what you said.",
+  "OBSERVATION_MARKER": "\n\n<current_observation_untrusted>",
+  "SHORTENED": "[Kumi removed the earlier part of this conversation to save room.]\n\n",
+  "STOPPED_BEFORE_RUNNING": "Stopped before running; nothing was done.",
+  "STOPPED_NOTE": "(Stopped before finishing. The steps above happened; the one in progress may have too, so check Live before carrying on.)",
+  "STOPPED_READING": "Stopped while running; nothing came back.",
+  "STOPPED_WHILE_RUNNING": "Stopped while running; it may have changed Live, so check before running it again.",
+  "cleared earlier observation": "ask a",
+  "cleared earlier result": "{\"changed\":\"a\",\"items\":[<176 bytes of filler> … [Kumi cleared the rest of this earlier result to save room; read Live again if you need it.]",
+  "cut result": "{\"changed\":\"t1\",\"items\":[<3720 bytes of filler> … [Kumi cut the rest of this result: the request had no more room. Ask for less of it (a narrower read, a page, a filter) to see more.]",
+  "images put away for room": "frames i0\n[2 images were shown here and put away to make room: a request carries the latest 40. Keep what you read from pictures in your own words as they come. Asking for the same moments again only puts away others.]",
+  "images put away once the turn ended": "frames i0\n[2 images were shown here; they're no longer attached (the tool shows them again when asked).]",
+  "observation cleared beside a report": "ask a\n\n<current_observation_untrusted>\n[Kumi cleared this observation to save room; the background jobs' reports below are cut to their opening.]\n</current_observation_untrusted>\n\n[Kumi] Background job 3's report, cut to its opening: Burial pitches vocal snippets up an octave and drowns them in reverb. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More detail. More deta… The whole report: jobs, action result, id 3.",
+  "shortened conversation": "[Kumi removed the earlier part of this conversation to save room.]\n\n[What the producer said in that part, oldest first:]\n- <300 bytes of filler>…\n\nnow\n\n<current_observation_untrusted>\n<600 bytes of filler>\n</current_observation_untrusted>"
+}

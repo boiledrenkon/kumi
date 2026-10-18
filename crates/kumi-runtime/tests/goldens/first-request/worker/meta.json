@@ -1,0 +1,17 @@
+{
+  "toolsKey": "g_K2jIdp6v2V6Xh0X7iyGv",
+  "fixed": 18141,
+  "fixedByHand": 18141,
+  "sent": [
+    "search_web",
+    "read_web",
+    "find_sounds",
+    "find_presets",
+    "my_sets",
+    "live_manual",
+    "search_conversations",
+    "watch_video",
+    "make_device"
+  ],
+  "requests": 1
+}

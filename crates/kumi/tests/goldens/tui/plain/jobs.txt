@@ -1,0 +1,10 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[job 2] started in the background: Burial vocal chops
+[job 2] Burial vocal chops: done: Burial pitches vocal snippets up and drowns them in reverb.
+[job 3] Manual: Grain Delay: failed: The manual couldn't be reached.
+[job 4] Resample chain: stopped
+[job 2] Kumi carries on with its result
+Kumi closed. Each Set's conversation continues next time.

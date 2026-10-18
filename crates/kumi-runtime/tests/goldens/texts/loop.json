@@ -1,0 +1,20 @@
+{
+  "LOOP_HINT": "\n[Kumi] This request is about how the mix or a sound measures: when a clear target or problem is involved, work in judged rounds (judge with a goal, one change, judge it); Kumi then keeps the loop going until the goal is met.",
+  "budget": "[stop budget] [Kumi loop] That's the loop's budget spent. End the run with judge done: true (one last listen to the whole stretch), then tell the producer what changed, before → after, what's still off, and which devices hold the work.",
+  "ended": "[stop ended] ",
+  "holds done at the start": "Kumi's loop isn't over: the checklist isn't met and changes are still helping. Next: loudness (-10.5 now, wants -9 LUFS ±0.5). Budget left: 5 rounds. Make one change toward it and judge it (a tune is judged already); Kumi asks for done when it's time.",
+  "met": "[stop met] [Kumi loop] Every item on the checklist is within tolerance. End the run with judge done: true (one last listen to the whole stretch), then tell the producer what changed, before → after, what's still off, and which devices hold the work.",
+  "nothing judged": "[Kumi loop] Judge the change you made (judge with change saying what it was), or, if you made none, make one toward the next target (loudness) and judge it.",
+  "nothing judged again": "[Kumi loop] Judge the change you made (judge with change saying what it was), or, if you made none, make one toward the next target (loudness) and judge it.",
+  "nothing judged at last": "[stop unjudged] [Kumi loop] The loop got no judged change from the last answers. End the run with judge done: true (one last listen to the whole stretch), then tell the producer what changed, before → after, what's still off, and which devices hold the work.",
+  "over: budget": "its budget is spent",
+  "over: met": "every item on the checklist is within tolerance",
+  "over: stalled": "changes stopped helping",
+  "round 0": "[Kumi loop] Round 0.  Next: loudness (-10.5 now, wants -9 LUFS ±0.5). Budget left: 5 rounds, about 1 minutes. Make one change toward it, then judge it (a tune is judged already; Kumi asks for done when it's time).",
+  "round 1 kept": "[Kumi loop] Round 1. Kept: loudness improved. Next: loudness (-10.5 now, wants -9 LUFS ±0.5); it calls for the last limiter's gain. Budget left: 4 rounds, about 1 minutes. Make one change toward it, then judge it (a tune is judged already; Kumi asks for done when it's time).",
+  "round 2 taken back": "[Kumi loop] Round 2. Taken back: it hurt punch (crest). Try another way. Next: loudness (-10.5 now, wants -9 LUFS ±0.5). Budget left: 4 rounds, about 1 minutes. Make one change toward it, then judge it (a tune is judged already; Kumi asks for done when it's time).",
+  "setup": "[Kumi loop] master it to -9 LUFS\n\nWork in rounds. Start a judged run: judge with the goal that fits (loudness and a ceiling for a master, a reference when there's one, focus on the element that must cut through), hearing the mix or the track the request is about. Then make one change toward the next target with Live's devices and judge it with change. Kumi decides when the loop stops: don't end the run with done until it asks.",
+  "stalled": "[stop stalled] [Kumi loop] Changes stopped helping. End the run with judge done: true (one last listen to the whole stretch), then tell the producer what changed, before → after, what's still off, and which devices hold the work.",
+  "unjudged": "[Kumi loop] master it Start a judged run first: judge with the goal that fits the request (a loudness and a ceiling, a reference, the element that must cut through), hearing the mix or the track it's about. Then make one change toward the next target and judge it.",
+  "unjudged again": "[stop unjudged] "
+}

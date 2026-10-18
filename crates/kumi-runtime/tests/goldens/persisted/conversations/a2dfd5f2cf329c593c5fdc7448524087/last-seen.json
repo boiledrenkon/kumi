@@ -1,0 +1,1 @@
+{"version":1,"path":"/Music/Night Drive.als","name":"Night Drive","savedAt":1759999940000,"artifactId":"artifact-1","pages":[{"records":[{"snapshotId":"t1","kind":"track","name":"Bass","parentSnapshotId":"set"},{"snapshotId":"d1","kind":"device","name":"Wavetable","parentSnapshotId":"t1"},{"snapshotId":"l1","kind":"locator","name":"Drop","time":128}]}]}

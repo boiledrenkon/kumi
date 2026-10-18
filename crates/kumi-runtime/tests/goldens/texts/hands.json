@@ -1,0 +1,7 @@
+{
+  "Live isn't running": "Live isn't running. [no-live]",
+  "file dialogs where hands can't": "Kumi can't fill Live's file dialogs here. [unavailable]",
+  "no answer in time": "Live didn't answer in time; is a dialog open in Live? [failed]",
+  "stopped": "Stopped [failed]",
+  "toggles where hands can't": "Kumi can't set the toggles of Live's dialogs here. [unavailable]"
+}

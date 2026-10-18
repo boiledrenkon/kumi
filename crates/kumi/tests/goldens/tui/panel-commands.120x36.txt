@@ -1,0 +1,36 @@
+  Kumi  ·  Night Drive                                                                                          ● Live
+
+                                                                                  FOCUS
+                                                                                  Night Drive
+                                                                                  Your selection will show here
+
+
+                                                                                  NOW
+                                                                                  Ready
+
+                         ██                          ▀▀
+                         ██ ▄█▀  ██  ██  ██▀▀██▀▀█▄  ██
+                         ██▀█▄   ██  ██  ██  ██  ██  ██
+                         ▀▀  ▀▀   ▀▀▀▀▀  ▀▀  ▀▀  ▀▀  ▀▀
+
+                         ░▒▓████████████████████████▓▒░
+
+
+   /new            Start a fresh conversation (the last one is kept)…
+   /reconnect                                                                     HISTORY ────────────────────────────
+   /undo                                                                          Nothing changed yet
+   /refresh
+   /copy
+   /export
+   /share                                                              one.
+   /loop
+   /goal
+   /status
+   /changelog
+   /help
+   /quit
+
+
+   /
+                                               enter to choose · esc to close
+

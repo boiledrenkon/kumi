@@ -1,0 +1,10 @@
+Kumi · openai-codex/fixture · MCP connecting / Live unverified
+Each Set's conversations are kept: its latest continues next time, and /resume goes back to earlier ones (any Set's, by number, id or name). /help for commands.
+[connection] MCP/Live: connected
+[observation] Current open Set: Night Drive — Remote Script · real-live
+[memory] About you: p1 Prefers short, dark reverbs · p2 (pinned) Mixes at -14 LUFS
+[memory] About Night Drive: s1 The Reese is the main bass
+[memory] Techniques: t1 Neuro from a Reese (for gritty, moving neuro basses)
+[memory] From your Sets: u1 Vocals: EQ Eight → Compressor → Reverb (on 4 of 4 vocal tracks) · u2 Tempo: usually 124–126 BPM
+[recipes] Drum bus: Glue, saturation and a short room on a new return · Resample twice (needs track): OTT and Saturator, then Grain Delay
+Kumi closed. Each Set's conversation continues next time.

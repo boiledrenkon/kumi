@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "Sidechain pump",
+  "about": "",
+  "params": [],
+  "steps": [
+    {
+      "tool": "load_device",
+      "trackRef": "$track",
+      "name": "Wavetable"
+    },
+    {
+      "tool": "set_parameter",
+      "trackRef": "$track",
+      "device": "Wavetable",
+      "name": "Filter Freq",
+      "value": "$cutoff"
+    }
+  ],
+  "created": 1759913600000,
+  "used": 0
+}
