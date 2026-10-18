@@ -68,14 +68,6 @@ local function selection_of(song, epoch)
   return selection
 end
 
--- Quarter notes from the start of the song to a line of a sequence slot.
-local function beats_at(song, sequence, line)
-  local sequencer = song.sequencer
-  local lines = 0
-  for s = 1, sequence - 1 do lines = lines + song:pattern(sequencer:pattern(s)).number_of_lines end
-  return (lines + line - 1) / song.transport.lpb
-end
-
 -- The play position while it plays, else the edit cursor.
 local function transport_of(song)
   local transport = song.transport
@@ -85,8 +77,8 @@ local function transport_of(song)
     local at = transport.playback_pos
     sequence, line, beat = at.sequence, at.line, transport.playback_pos_beats
   else
-    sequence, line = song.selected_sequence_index, song.selected_line_index
-    beat = beats_at(song, sequence, line)
+    -- (the beat is Renoise's own: it follows the song's LPB changes (ZLxx), and costs nothing however long the sequence is)
+    sequence, line, beat = song.selected_sequence_index, song.selected_line_index, transport.edit_pos_beats
   end
   local per_bar = transport.metronome_beats_per_bar
   return {

@@ -1575,3 +1575,18 @@ test("reads: where the pid is unknown the project's identity is made from when R
   ok(identity:match("^t" .. started .. ":%d+$"), "made from the start time: " .. identity)
   H.no_dialogs()
 end)
+
+test("reads: while stopped the beat is Renoise's own edit position, which follows LPB changes", function()
+  local env, peer = setup()
+  mock.ops.select("selected_sequence_index", 2)
+  mock.ops.select("selected_line_index", 5)
+  local before = call(peer, "focus").result.transport.beat
+  eq(before, (32 + 4) / 4, "one pattern of 32 lines, then four lines, at 4 lines a beat")
+  mock.data.transport_fields.edit_beats = 7.25 -- as ZLxx would make it
+  eq(call(peer, "focus").result.transport.beat, 7.25)
+  mock.data.transport_fields.edit_beats = nil
+  mock.ops.transport("playing", true)
+  mock.ops.play_at(1, 3, 2.5)
+  eq(call(peer, "focus").result.transport.beat, 2.5, "playing, the play position's")
+  H.no_dialogs()
+end)

@@ -522,7 +522,15 @@ function M.make_song(options)
     loop_block_enabled_observable = simple_observable(),
     playback_pos = object("renoise.SongPos", { sequence = 1, line = 1 }),
   }
-  local transport = object("renoise.Transport", transport_fields)
+  local transport = object("renoise.Transport", transport_fields, {
+    -- The edit position in quarter notes: the lines before it over the LPB (a test can set `edit_beats`, as a ZLxx would).
+    edit_pos_beats = function()
+      if transport_fields.edit_beats ~= nil then return transport_fields.edit_beats end
+      local lines = 0
+      for s = 1, d.song_fields.selected_sequence_index - 1 do lines = lines + d.patterns[d.sequence[s]].lines end
+      return (lines + d.song_fields.selected_line_index - 1) / transport_fields.lpb
+    end,
+  })
 
   local song_fields = {
     name = options.name or "", name_observable = simple_observable(), file_name = options.file_name or "",
