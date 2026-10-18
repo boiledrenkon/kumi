@@ -101,7 +101,9 @@ impl Reads {
         // track; else the top.
         let start = match (cursor, around_param(params)?) {
             (None, Some(around)) => self.around_start(reaper, proj, around, limit, total)?,
-            _ => self.position_number(cursor)?,
+            _ => {
+                self.resume_number(cursor, total, |position| reaper.track_at(proj, position as i32).map(|track| reaper.track_guid(track)))?
+            }
         };
         let budget = if first_page { ANSWER_BYTES - ARRANGE_EXTRAS_BYTES } else { ANSWER_BYTES };
         let mut pager = Pager::new(limit, budget);
@@ -132,7 +134,8 @@ impl Reads {
             "from": start,
         });
         if let Some(next) = next {
-            body["nextCursor"] = self.cursor_text(&next.to_string()).into();
+            let key = reaper.track_at(proj, next as i32).map(|track| reaper.track_guid(track));
+            body["nextCursor"] = self.cursor_text(&Self::anchored(next, key)).into();
         }
         if first_page {
             self.arrange_extras(reaper, proj, from_seconds, to_seconds, &mut body);
@@ -241,9 +244,9 @@ impl Reads {
         let first_page = cursor.is_none();
         let mut pager =
             Pager::new(limit_param(params, DEFAULT_NOTES, MAX_NOTES)?, if first_page { ANSWER_BYTES - 40 * 1024 } else { ANSWER_BYTES });
-        let mut index = self.position_number(cursor)?;
+        let mut index = self.position_within(cursor, note_count.max(0) as usize)?;
         let mut next = None;
-        while (index as i32) < note_count {
+        while index < note_count.max(0) as usize {
             if !pager.open() {
                 next = Some(index);
                 break;

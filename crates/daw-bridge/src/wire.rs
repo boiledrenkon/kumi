@@ -182,6 +182,8 @@ pub mod code {
     pub const FAILED: &str = "failed";
     /// The refs or the cursor are from before the project in the tab changed: read again.
     pub const STALE: &str = "stale";
+    /// The list under a cursor changed between two pages, so the page after it can't be told: read again.
+    pub const CHANGED: &str = "changed";
     pub const INTERNAL: &str = "internal";
 }
 

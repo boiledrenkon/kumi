@@ -39,6 +39,11 @@ pub fn failed(message: impl Into<String>) -> (String, String) {
     ("failed".into(), message.into())
 }
 
+/// The list under a cursor is not the one it was made for.
+pub fn changed(message: impl Into<String>) -> (String, String) {
+    (daw_bridge::wire::code::CHANGED.into(), message.into())
+}
+
 /// The refs' registry and the epoch they live in.
 #[derive(Default)]
 pub struct Reads {
@@ -249,31 +254,71 @@ impl Reads {
         }
     }
 
+    /// A cursor is `c1.<epoch>.<position>`, with `~<key>` after the position when the row it points at has an identity:
+    /// a page goes on from that row wherever it is by then, not from a position an edit between two pages has moved.
     fn cursor_text(&self, position: &str) -> String {
         format!("c1.{}.{position}", self.epoch())
     }
 
-    /// The position a cursor names, or an error when it isn't this project's.
-    fn cursor_position(&self, cursor: Option<&str>) -> Result<Option<String>, (String, String)> {
+    /// The position and, if it has one, the key of the row a cursor points at; None for no cursor.
+    fn cursor_parts(&self, cursor: Option<&str>) -> Result<Option<(String, Option<String>)>, (String, String)> {
         let Some(cursor) = cursor else { return Ok(None) };
         let mut parts = cursor.splitn(3, '.');
         match (parts.next(), parts.next(), parts.next()) {
-            (Some("c1"), Some(epoch), Some(position)) if !position.is_empty() => {
-                if epoch == self.epoch() {
-                    Ok(Some(position.to_string()))
-                } else {
-                    Err(bad("that cursor is from before the project tab changed: read again from the start"))
+            (Some("c1"), Some(epoch), Some(rest)) if !rest.is_empty() => {
+                if epoch != self.epoch() {
+                    return Err(bad("that cursor is from before the project tab changed: read again from the start"));
                 }
+                Ok(Some(match rest.split_once('~') {
+                    Some((position, key)) if !position.is_empty() && !key.is_empty() => (position.to_string(), Some(key.to_string())),
+                    Some(_) => return Err(bad("cursor: pass the nextCursor an earlier read gave, unchanged")),
+                    None => (rest.to_string(), None),
+                }))
             }
             _ => Err(bad("cursor: pass the nextCursor an earlier read gave, unchanged")),
         }
     }
 
-    fn position_number(&self, cursor: Option<&str>) -> Result<usize, (String, String)> {
-        match self.cursor_position(cursor)? {
-            None => Ok(0),
-            Some(position) => position.parse::<usize>().map_err(|_| bad("cursor: not one this kind of read gave")),
+    /// The position of a cursor into a list of `total` rows that has no identity to follow (a parameter, a note): from
+    /// the start without one, and refused when it points past the end, since the list is shorter than it was.
+    fn position_within(&self, cursor: Option<&str>, total: usize) -> Result<usize, (String, String)> {
+        self.resume_number(cursor, total, |_| None)
+    }
+
+    /// Where the next page of a list of `total` rows starts. A cursor made with a key goes on from the row that has it,
+    /// where it is now; if no row has it any more the list changed under the cursor. One without a key goes on from its
+    /// position. Either way a position past the end is refused.
+    fn resume_number(
+        &self,
+        cursor: Option<&str>,
+        total: usize,
+        key_at: impl Fn(usize) -> Option<String>,
+    ) -> Result<usize, (String, String)> {
+        let Some((position, key)) = self.cursor_parts(cursor)? else { return Ok(0) };
+        let position: usize = position.parse().map_err(|_| bad("cursor: not one this kind of read gave"))?;
+        if position > total {
+            return Err(changed("that cursor points past the end of a list that is shorter now: read again from the start"));
         }
+        let Some(key) = key else { return Ok(position) };
+        if key_at(position).as_deref() == Some(key.as_str()) {
+            return Ok(position);
+        }
+        (0..total)
+            .find(|&at| key_at(at).as_deref() == Some(key.as_str()))
+            .ok_or_else(|| changed("what that cursor pointed at is gone: the list changed between pages, read again from the start"))
+    }
+
+    /// A position and the key of its row, as a cursor carries them.
+    fn anchored(position: impl std::fmt::Display, key: Option<String>) -> String {
+        match key {
+            Some(key) => format!("{position}~{key}"),
+            None => position.to_string(),
+        }
+    }
+
+    /// A page of a list whose rows have keys: its cursor points at the row after the last, and carries that row's key.
+    fn page_keyed(&self, pager: Pager, next: Option<usize>, total: Option<usize>, key_at: impl Fn(usize) -> Option<String>) -> Answer {
+        self.page_at(pager, next.map(|at| Self::anchored(at, key_at(at))), total)
     }
 
     fn page(&self, pager: Pager, next: Option<usize>, total: Option<usize>) -> Answer {
@@ -473,10 +518,20 @@ impl Reads {
         None
     }
 
+    /// The key of the row at a position of the master-then-tracks list.
+    pub fn track_key(&self, reaper: &Reaper, proj: Project, position: usize) -> Option<String> {
+        match position {
+            0 => Some("master".into()),
+            n => reaper.track_at(proj, n as i32 - 1).map(|track| reaper.track_guid(track)),
+        }
+    }
+
     fn read_tracks(&self, reaper: &Reaper, proj: Project, mut pager: Pager, cursor: Option<&str>) -> Answer {
-        let start = self.position_number(cursor)?;
+        let total = reaper.track_count(proj) as usize + 1;
+        let key = |position: usize| self.track_key(reaper, proj, position);
+        let start = self.resume_number(cursor, total, key)?;
         let next = self.track_page(reaper, proj, &mut pager, start);
-        self.page(pager, next, Some(reaper.track_count(proj) as usize + 1))
+        self.page_keyed(pager, next, Some(total), key)
     }
 
     // ----- items and takes -----
@@ -485,7 +540,8 @@ impl Reads {
         if let Some(parent) = parent {
             let track = self.parent_track(reaper, proj, parent)?;
             let total = reaper.track_item_count(track) as usize;
-            let mut position = self.position_number(cursor)?;
+            let key = |position: usize| reaper.track_item(track, position as i32).map(|item| reaper.item_guid(item));
+            let mut position = self.resume_number(cursor, total, key)?;
             let mut next = None;
             while position < total {
                 if !pager.open() {
@@ -500,32 +556,48 @@ impl Reads {
                 }
                 position += 1;
             }
-            return self.page(pager, next, Some(total));
+            return self.page_keyed(pager, next, Some(total), key);
         }
-        // Every item in the project: the cursor is `track.item`.
-        let (mut track_at, mut item_at) = match self.cursor_position(cursor)? {
+        // Every item in the project: the cursor is `track.item`, and the GUID of that item.
+        let not_a_cursor = || bad("cursor: not one this kind of read gave");
+        let tracks = reaper.track_count(proj) as usize;
+        let item_key = |track_at: usize, item_at: usize| {
+            let item = reaper.track_at(proj, track_at as i32).and_then(|track| reaper.track_item(track, item_at as i32))?;
+            Some(reaper.item_guid(item))
+        };
+        let (mut track_at, mut item_at) = match self.cursor_parts(cursor)? {
             None => (0usize, 0usize),
-            Some(position) => {
-                let (t, i) = position.split_once('.').ok_or_else(|| bad("cursor: not one this kind of read gave"))?;
-                (
-                    t.parse().map_err(|_| bad("cursor: not one this kind of read gave"))?,
-                    i.parse().map_err(|_| bad("cursor: not one this kind of read gave"))?,
-                )
+            Some((position, key)) => {
+                let (t, i) = position.split_once('.').ok_or_else(not_a_cursor)?;
+                let (t, i): (usize, usize) = (t.parse().map_err(|_| not_a_cursor())?, i.parse().map_err(|_| not_a_cursor())?);
+                match key {
+                    None if t <= tracks => (t, i),
+                    // The item the cursor points at, where it is now (or gone).
+                    Some(key) if t < tracks && item_key(t, i).as_deref() == Some(key.as_str()) => (t, i),
+                    Some(key) => (0..tracks)
+                        .find_map(|t| {
+                            let count = reaper.track_at(proj, t as i32).map_or(0, |track| reaper.track_item_count(track)) as usize;
+                            (0..count).find(|&i| item_key(t, i).as_deref() == Some(key.as_str())).map(|i| (t, i))
+                        })
+                        .ok_or_else(|| {
+                            changed("the item that cursor pointed at is gone: the items changed between pages, read again from the start")
+                        })?,
+                    None => return Err(changed("that cursor points past the last track: read again from the start")),
+                }
             }
         };
-        let tracks = reaper.track_count(proj) as usize;
         let mut next = None;
         'tracks: while track_at < tracks {
             if let Some(track) = reaper.track_at(proj, track_at as i32) {
                 let count = reaper.track_item_count(track) as usize;
                 while item_at < count {
                     if !pager.open() {
-                        next = Some(format!("{track_at}.{item_at}"));
+                        next = Some(Self::anchored(format!("{track_at}.{item_at}"), item_key(track_at, item_at)));
                         break 'tracks;
                     }
                     if let Some(item) = reaper.track_item(track, item_at as i32) {
                         if !pager.push(rows::item_row(reaper, proj, item)) {
-                            next = Some(format!("{track_at}.{item_at}"));
+                            next = Some(Self::anchored(format!("{track_at}.{item_at}"), item_key(track_at, item_at)));
                             break 'tracks;
                         }
                     }
@@ -546,7 +618,8 @@ impl Reads {
         };
         let total = reaper.take_count(item) as usize;
         let active = reaper.active_take(item);
-        let mut position = self.position_number(cursor)?;
+        let key = |position: usize| reaper.take_at(item, position as i32).map(|take| reaper.take_guid(take));
+        let mut position = self.resume_number(cursor, total, key)?;
         let mut next = None;
         while position < total {
             if !pager.open() {
@@ -561,7 +634,7 @@ impl Reads {
             }
             position += 1;
         }
-        self.page(pager, next, Some(total))
+        self.page_keyed(pager, next, Some(total), key)
     }
 
     // ----- FX and parameters -----
@@ -586,7 +659,8 @@ impl Reads {
             other => return Err(bad(format!("parent: a track, take or FX ref, not r:{}", other.kind()))),
         };
         let total = chain.len();
-        let mut position = self.position_number(cursor)?;
+        let key = |position: usize| chain.get(position).map(|fx| reaper.fx_guid(*fx));
+        let mut position = self.resume_number(cursor, total, key)?;
         let mut next = None;
         while position < total {
             if !pager.open() {
@@ -601,7 +675,7 @@ impl Reads {
             }
             position += 1;
         }
-        self.page(pager, next, Some(total))
+        self.page_keyed(pager, next, Some(total), key)
     }
 
     fn read_params(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
@@ -609,7 +683,7 @@ impl Reads {
         let fx = self.parent_fx(reaper, proj, parent)?;
         let guid = reaper.fx_guid(fx);
         let total = reaper.fx_param_count(fx).max(0) as usize;
-        let mut position = self.position_number(cursor)?;
+        let mut position = self.position_within(cursor, total)?;
         let mut next = None;
         while position < total {
             if !pager.open() {
@@ -637,7 +711,10 @@ impl Reads {
                 rows::send_keys(reaper, track, category).into_iter().enumerate().map(move |(index, key)| (category, index as i32, key))
             })
             .collect();
-        let mut position = self.position_number(cursor)?;
+        let this = rows::track_id(reaper, track);
+        let key =
+            |position: usize| all.get(position).map(|(category, _, key)| refs::send_ref(&this, *category, &key.other, key.repeat, key.of));
+        let mut position = self.resume_number(cursor, all.len(), key)?;
         let mut next = None;
         while position < all.len() {
             if !pager.open() {
@@ -651,30 +728,31 @@ impl Reads {
             }
             position += 1;
         }
-        self.page(pager, next, Some(all.len()))
+        self.page_keyed(pager, next, Some(all.len()), key)
     }
 
     // ----- markers and regions -----
 
     fn read_markers(&self, reaper: &Reaper, proj: Project, mut pager: Pager, regions: bool, cursor: Option<&str>) -> Answer {
-        let total = reaper.marker_count(proj);
-        let mut position = self.position_number(cursor)? as i32;
+        let total = reaper.marker_count(proj).max(0) as usize;
+        let key = |position: usize| reaper.marker(proj, position as i32).map(|marker| marker.guid);
+        let mut position = self.resume_number(cursor, total, key)?;
         let mut next = None;
         while position < total {
-            let Some(marker) = reaper.marker(proj, position) else { break };
+            let Some(marker) = reaper.marker(proj, position as i32) else { break };
             if marker.is_region == regions {
                 if !pager.open() {
-                    next = Some(position as usize);
+                    next = Some(position);
                     break;
                 }
                 if !pager.push(rows::marker_row(reaper, proj, &marker)) {
-                    next = Some(position as usize);
+                    next = Some(position);
                     break;
                 }
             }
             position += 1;
         }
-        self.page(pager, next, None)
+        self.page_keyed(pager, next, None, key)
     }
 
     // ----- MIDI notes -----
@@ -691,7 +769,7 @@ impl Reads {
         };
         let (notes, _, _) = reaper.midi_counts(take).ok_or_else(|| bad("that take isn't MIDI"))?;
         let item_qn = take_start_qn(reaper, proj, take);
-        let mut position = self.position_number(cursor)?;
+        let mut position = self.position_within(cursor, notes.max(0) as usize)?;
         let mut next = None;
         while position < notes.max(0) as usize {
             if !pager.open() {
@@ -744,7 +822,8 @@ impl Reads {
             }
             other => return Err(bad(format!("parent: a track or FX ref, not r:{}", other.kind()))),
         };
-        let mut position = self.position_number(cursor)?;
+        let key = |position: usize| found.get(position).and_then(|(_, envelope)| reaper.envelope_guid(*envelope));
+        let mut position = self.resume_number(cursor, found.len(), key)?;
         let mut next = None;
         while position < found.len() {
             if !pager.open() {
@@ -758,7 +837,7 @@ impl Reads {
             }
             position += 1;
         }
-        self.page(pager, next, Some(found.len()))
+        self.page_keyed(pager, next, Some(found.len()), key)
     }
 
     // ----- snapshot -----
@@ -789,11 +868,12 @@ impl Reads {
         });
         let mut truncated = serde_json::Map::new();
         if let Some(next) = next_track {
-            truncated
-                .insert("tracks".into(), json!({"total": reaper.track_count(proj) + 1, "nextCursor": self.cursor_text(&next.to_string())}));
+            let cursor = self.cursor_text(&Self::anchored(next, self.track_key(reaper, proj, next)));
+            truncated.insert("tracks".into(), json!({"total": reaper.track_count(proj) + 1, "nextCursor": cursor}));
         }
         if let Some(next) = next_marker {
-            truncated.insert("markers".into(), json!({"total": marker_total, "nextCursor": self.cursor_text(&next.to_string())}));
+            let key = reaper.marker(proj, next as i32).map(|marker| marker.guid);
+            truncated.insert("markers".into(), json!({"total": marker_total, "nextCursor": self.cursor_text(&Self::anchored(next, key))}));
         }
         if !truncated.is_empty() {
             answer["truncated"] = Value::Object(truncated);
@@ -1012,6 +1092,128 @@ mod tests {
             |epoch: &str| lab.reads.focus_body(&Reaper::new(&api), &json!({"kind": "routing", "ref": "r:track:{AAAA}", "epoch": epoch}));
         assert_eq!(body(&epoch).unwrap_err().0, "stale");
         assert_eq!(body(&lab.reads.epoch()).unwrap()["kind"], "routing");
+    }
+
+    fn names(rows: &Value) -> Vec<String> {
+        rows["items"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// A cursor is a position, so an edit between two pages used to repeat a row or skip one without a word.
+    #[test]
+    fn a_cursor_goes_on_from_its_row_wherever_it_is_after_tracks_come_and_go() {
+        let lab = Lab::new();
+        let eight = || (1..=8).map(|n| FakeTrack::new(&format!("{{T{n}}}"), &format!("T{n}"))).collect::<Vec<_>>();
+        fake::with(|s| s.tracks = eight());
+        // The master, then T1, T2; the cursor points at T3.
+        let first = lab.read(json!({"kind": "track", "limit": 3})).unwrap();
+        assert_eq!(names(&first), ["MASTER", "T1", "T2"]);
+        let cursor = first["nextCursor"].clone();
+        let next = |lab: &Lab| lab.read(json!({"kind": "track", "limit": 3, "cursor": cursor.clone()}));
+        // A track inserted at the top: T2 isn't read twice, T3 isn't skipped.
+        fake::with(|s| s.tracks.insert(0, FakeTrack::new("{NEW}", "New")));
+        assert_eq!(names(&next(&lab).unwrap()), ["T3", "T4", "T5"]);
+        // The first track deleted instead (put back, then taken out): T3 is still next.
+        fake::with(|s| s.tracks = eight());
+        fake::with(|s| {
+            s.tracks.remove(0);
+        });
+        assert_eq!(names(&next(&lab).unwrap()), ["T3", "T4", "T5"]);
+        // The row the cursor points at is deleted: the list changed under it, and the page says so.
+        fake::with(|s| s.tracks.retain(|t| t.guid != "{T3}"));
+        let (code, message) = next(&lab).unwrap_err();
+        assert_eq!(code, "changed");
+        assert!(message.contains("read again from the start"), "{message}");
+    }
+
+    #[test]
+    fn items_fx_markers_and_sends_go_on_from_their_row_too() {
+        use crate::reaper::fake::{FakeFx, FakeItem, FakeMarker, FakeSend};
+        let lab = Lab::new();
+        fake::with(|s| {
+            s.tracks = vec![FakeTrack::new("{A}", "A"), FakeTrack::new("{B}", "B")];
+            let item = |n: u32, at: f64| FakeItem::new(&format!("{{I{n}}}"), at, 1.0, vec![]);
+            s.tracks[0].items = (1..=4).map(|n| item(n, n as f64)).collect();
+            s.tracks[1].items = vec![item(5, 1.0), item(6, 2.0)];
+            s.tracks[0].fx = (1..=4).map(|n| FakeFx::new(&format!("{{F{n}}}"), &format!("fx{n}"))).collect();
+            s.markers = (1..=4)
+                .map(|n| FakeMarker {
+                    guid: format!("{{M{n}}}"),
+                    is_region: false,
+                    start: n as f64,
+                    end: n as f64,
+                    name: format!("m{n}"),
+                    number: n,
+                    color: 0,
+                })
+                .collect();
+        });
+        let refs =
+            |rows: &Value| rows["items"].as_array().unwrap().iter().map(|r| r["ref"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        // The items of the whole project: two on a page, the cursor points at I3. An item added before it, in front of the
+        // track's others, doesn't make I2 come again.
+        let first = lab.read(json!({"kind": "item", "limit": 2})).unwrap();
+        assert_eq!(refs(&first), ["r:item:{I1}", "r:item:{I2}"]);
+        fake::with(|s| s.tracks[0].items.insert(0, FakeItem::new("{I0}", 0.0, 1.0, vec![])));
+        let second = lab.read(json!({"kind": "item", "limit": 2, "cursor": first["nextCursor"]})).unwrap();
+        assert_eq!(refs(&second), ["r:item:{I3}", "r:item:{I4}"]);
+        // The same under one track.
+        let first = lab.read(json!({"kind": "item", "parent": "r:track:{A}", "limit": 2})).unwrap();
+        assert_eq!(refs(&first), ["r:item:{I0}", "r:item:{I1}"]);
+        fake::with(|s| {
+            s.tracks[0].items.remove(0);
+        });
+        let second = lab.read(json!({"kind": "item", "parent": "r:track:{A}", "limit": 2, "cursor": first["nextCursor"]})).unwrap();
+        assert_eq!(refs(&second), ["r:item:{I2}", "r:item:{I3}"]);
+        // An item deleted that the cursor pointed at.
+        fake::with(|s| s.tracks[0].items.retain(|i| i.guid != "{I2}"));
+        let gone = lab.read(json!({"kind": "item", "parent": "r:track:{A}", "limit": 2, "cursor": first["nextCursor"]})).unwrap_err();
+        assert_eq!(gone.0, "changed");
+        // FX.
+        let first = lab.read(json!({"kind": "fx", "parent": "r:track:{A}", "limit": 2})).unwrap();
+        fake::with(|s| s.tracks[0].fx.insert(0, FakeFx::new("{F0}", "fx0")));
+        let second = lab.read(json!({"kind": "fx", "parent": "r:track:{A}", "limit": 2, "cursor": first["nextCursor"]})).unwrap();
+        assert_eq!(refs(&second), ["r:fx:{F3}", "r:fx:{F4}"]);
+        // Markers.
+        let first = lab.read(json!({"kind": "marker", "limit": 2})).unwrap();
+        fake::with(|s| s.markers.insert(0, FakeMarker { guid: "{M0}".into(), name: "m0".into(), ..s.markers[0].clone() }));
+        let second = lab.read(json!({"kind": "marker", "limit": 2, "cursor": first["nextCursor"]})).unwrap();
+        assert_eq!(refs(&second), ["r:marker:{M3}", "r:marker:{M4}"]);
+        // Sends: two to one track, then one more is made before the cursor.
+        fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(1), FakeSend::to(1)]);
+        let first = lab.read(json!({"kind": "send", "parent": "r:track:{A}", "limit": 1})).unwrap();
+        fake::with(|s| s.tracks[0].sends.push(FakeSend::to(1)));
+        // The pair has three now: the cursor named the first of two, which is no row any more.
+        let (code, _) = lab.read(json!({"kind": "send", "parent": "r:track:{A}", "limit": 1, "cursor": first["nextCursor"]})).unwrap_err();
+        assert_eq!(code, "changed");
+    }
+
+    /// A position past the count wrapped to a negative i32 and ran REAPER's main thread through tens of thousands of
+    /// calls; a cursor that points past the end of a list is refused instead.
+    #[test]
+    fn a_cursor_past_the_end_is_refused_not_walked() {
+        let lab = Lab::new();
+        let epoch = lab.reads.epoch();
+        let far = format!("c1.{epoch}.{}", u32::MAX as u64 - 3);
+        let farther = format!("c1.{epoch}.{}", 1u64 << 31);
+        fake::with(|s| s.calls = 0);
+        for cursor in [&far, &farther] {
+            for params in [
+                json!({"kind": "marker", "cursor": cursor}),
+                json!({"kind": "track", "cursor": cursor}),
+                json!({"kind": "note", "parent": "r:take:{TAKE-S1}", "cursor": cursor}),
+                json!({"kind": "param", "parent": "r:fx:{FX-EQ}", "cursor": cursor}),
+            ] {
+                let (code, _) = lab.read(params.clone()).unwrap_err();
+                assert_eq!(code, "changed", "{params}");
+            }
+        }
+        // The MIDI body too, and the arrange body.
+        let api = fake::api();
+        let body = |params: Value| lab.reads.focus_body(&Reaper::new(&api), &params);
+        assert_eq!(body(json!({"kind": "midi", "ref": "r:take:{TAKE-S1}", "cursor": far})).unwrap_err().0, "changed");
+        assert_eq!(body(json!({"kind": "arrange", "cursor": farther})).unwrap_err().0, "changed");
+        let calls = fake::with(|s| s.calls);
+        assert!(calls < 200, "{calls} calls to refuse a cursor");
     }
 
     #[test]
