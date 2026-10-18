@@ -96,18 +96,27 @@ impl BridgeClient {
         Self::connect_within(address, secret, client, Duration::from_millis(CLIENT_HANDSHAKE_TIMEOUT_MS)).await
     }
 
+    /// `timeout` covers the connect and the handshake together. A connect nobody accepts in time is an `Io` error of kind
+    /// `TimedOut` (Windows keeps retrying the SYN to a closed loopback port for about 2 s before it refuses), a handshake
+    /// that doesn't finish is `Timeout`.
     pub async fn connect_within(address: SocketAddr, secret: Secret, client: &str, timeout: Duration) -> Result<Self, ConnectError> {
         if !peer_allowed(&address) {
             return Err(ConnectError::NotLoopback(address));
         }
-        match tokio::time::timeout(timeout, Self::open(address, secret, client)).await {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let stream = match tokio::time::timeout_at(deadline, TcpStream::connect(address)).await {
+            Ok(stream) => stream.map_err(ConnectError::Io)?,
+            Err(_) => {
+                return Err(ConnectError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "nothing accepted the connection in time")))
+            }
+        };
+        match tokio::time::timeout_at(deadline, Self::handshake(stream, secret, client)).await {
             Ok(result) => result,
             Err(_) => Err(ConnectError::Timeout),
         }
     }
 
-    async fn open(address: SocketAddr, secret: Secret, client: &str) -> Result<Self, ConnectError> {
-        let stream = TcpStream::connect(address).await.map_err(ConnectError::Io)?;
+    async fn handshake(stream: TcpStream, secret: Secret, client: &str) -> Result<Self, ConnectError> {
         stream.set_nodelay(true).map_err(ConnectError::Io)?;
         let (mut reader, mut writer) = stream.into_split();
         let (mut handshake, hello) = ClientHandshake::start(secret, client);

@@ -177,3 +177,18 @@ async fn refusals_early_closes_and_garbage_during_the_handshake() {
     let closed = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap().local_addr().unwrap();
     assert!(matches!(BridgeClient::connect(closed, secret(), CLIENT).await, Err(ConnectError::Io(_))));
 }
+
+#[tokio::test]
+async fn a_bridge_that_never_speaks_is_a_handshake_timeout() {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let silent = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    assert!(matches!(
+        BridgeClient::connect_within(address, secret(), CLIENT, Duration::from_millis(150)).await,
+        Err(ConnectError::Timeout)
+    ));
+    silent.abort();
+}

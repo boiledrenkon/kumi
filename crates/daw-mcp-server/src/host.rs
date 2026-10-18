@@ -72,6 +72,13 @@ fn connect_error(daw: Daw, error: &ConnectError) -> String {
     }
 }
 
+/// A connect that nothing answers: refused, or (Windows retries the SYN to a closed loopback port for about 2 s before
+/// it refuses) not accepted in time. A running bridge accepts at once, even while its DAW is busy, so either means
+/// the process is gone.
+fn no_listener(error: &std::io::Error) -> bool {
+    matches!(error.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::TimedOut)
+}
+
 impl Host {
     pub fn new(daw: Daw, kumi_home: &Path) -> Self {
         Self { daw, paths: BridgePaths::new(kumi_home, daw), current: tokio::sync::Mutex::new(None) }
@@ -110,13 +117,13 @@ impl Host {
         })
     }
 
-    /// Connects to the instance a discovery file names. A file without a pid (Renoise on Windows) whose port refuses
-    /// the connection is stale: it's removed, and the result is None.
+    /// Connects to the instance a discovery file names. A file without a pid (Renoise on Windows) whose port nobody
+    /// answers is stale: it's removed, and the result is None.
     async fn connect(&self, discovery: &Discovery, secret: &daw_bridge::auth::Secret) -> Option<Result<BridgeClient, String>> {
         let address = SocketAddr::from(([127, 0, 0, 1], discovery.port));
         let client = match BridgeClient::connect_within(address, secret.clone(), CLIENT_NAME, CONNECT_TIMEOUT).await {
             Ok(client) => client,
-            Err(ConnectError::Io(error)) if discovery.pid == 0 && error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            Err(ConnectError::Io(error)) if discovery.pid == 0 && no_listener(&error) => {
                 let _ = std::fs::remove_file(self.paths.discovery().join(discovery.file_name()));
                 return None;
             }
@@ -277,5 +284,19 @@ fn busy_word(error: &RequestError) -> String {
         RequestError::Bridge { code, message } if code == daw_bridge::wire::code::BUSY => message.clone(),
         RequestError::Timeout => "not answering (a dialog may be open)".into(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn a_refused_or_unanswered_connect_means_nothing_listens() {
+        assert!(no_listener(&Error::from(ErrorKind::ConnectionRefused)));
+        assert!(no_listener(&Error::from(ErrorKind::TimedOut)));
+        assert!(!no_listener(&Error::from(ErrorKind::ConnectionReset)));
+        assert!(!no_listener(&Error::from(ErrorKind::PermissionDenied)));
     }
 }
