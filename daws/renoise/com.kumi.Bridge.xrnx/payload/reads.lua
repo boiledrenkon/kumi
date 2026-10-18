@@ -27,7 +27,7 @@ local function cursor_start(params, epoch, layout)
   local cursor = params.cursor
   if cursor == nil then return 1 end
   local cursor_epoch, cursor_layout, position = tostring(cursor):match("^([^.]+)%.(%d+)%.(%d+)$")
-  if not cursor_epoch then fail("bad-params", "not a cursor: " .. tostring(cursor)) end
+  if not cursor_epoch or tonumber(position) < 1 then fail("bad-params", "not a cursor: " .. tostring(cursor)) end
   if cursor_epoch ~= epoch then fail("stale", "that cursor is from an earlier epoch: read again from the start") end
   if tonumber(cursor_layout) ~= layout then
     fail("stale", "tracks were inserted or removed since that cursor was made: read again from the start")

@@ -337,7 +337,9 @@ function M:respond(record, request, ok, result)
     return self:send(record, wire.error(request.id, result.code ~= nil and tostring(result.code) or "failed", tostring(result.message or "")), true)
   end
   self.ctx.log("error", request.method .. " failed: " .. tostring(result))
-  self:send(record, wire.error(request.id, "internal", (tostring(result):match("^[^\n]*"))), true)
+  -- (the log has the traceback; the host gets the first line without the file and line it came from)
+  local first = tostring(result):match("^[^\n]*")
+  self:send(record, wire.error(request.id, "internal", (first:gsub("^[^%s:]*%.lua:%d+: ", ""))), true)
 end
 
 function M:receive(client, data)

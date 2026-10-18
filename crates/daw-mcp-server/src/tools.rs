@@ -57,8 +57,9 @@ fn window_arg(arguments: &Value) -> Result<Option<Value>, String> {
     let Some(window) = arguments.get("window").filter(|w| !w.is_null()) else { return Ok(None) };
     let number = |name: &str| window.get(name).and_then(Value::as_f64).filter(|n| n.is_finite());
     match (number("from"), number("to")) {
-        (Some(from), Some(to)) if to > from => Ok(Some(json!({"from": from, "to": to}))),
-        _ => Err("window must be {from, to}: two numbers, to after from".into()),
+        // (a bridge that wants a longer window says so: a pattern's one line is one)
+        (Some(from), Some(to)) if to >= from => Ok(Some(json!({"from": from, "to": to}))),
+        _ => Err("window must be {from, to}: two numbers, to not before from".into()),
     }
 }
 
@@ -278,9 +279,14 @@ mod tests {
         let params = body_params(&json!({"kind": "arrange", "limit": 24, "around": "r:track:{A}"})).unwrap();
         assert_eq!(params, json!({"kind": "arrange", "around": "r:track:{A}", "limit": 24}));
         assert!(body_params(&json!({"kind": "arrange", "around": 5})).is_err());
+        // (one line of a pattern is a window; a bridge that wants more says so)
+        assert_eq!(
+            body_params(&json!({"kind": "pattern", "window": {"from": 5, "to": 5}})).unwrap(),
+            json!({"kind": "pattern", "window": {"from": 5.0, "to": 5.0}})
+        );
         for bad in [
             json!({}),
-            json!({"kind": "arrange", "window": {"from": 5, "to": 5}}),
+            json!({"kind": "arrange", "window": {"from": 6, "to": 5}}),
             json!({"kind": "arrange", "window": "all"}),
             json!({"kind": "fx", "ref": 2}),
         ] {

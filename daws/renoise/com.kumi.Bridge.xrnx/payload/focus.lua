@@ -166,11 +166,13 @@ end
 local function window_of(params, default_center, total)
   local window = params.window
   local from, to
-  if type(window) == "table" then
+  if window ~= nil then
+    if type(window) ~= "table" then fail("bad-params", "window must be {from, to}") end
     from = integer(window.from, "window.from", 1, 100000)
     to = integer(window.to, "window.to", 1, 100000)
+    if not from or not to then fail("bad-params", "window needs both from and to") end
   end
-  if not from or not to then
+  if not from then
     from = math.max(1, default_center - 16)
     to = from + M.BODY_LINES - 1
   end

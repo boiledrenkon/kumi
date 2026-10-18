@@ -12,10 +12,14 @@ end
 -- {epoch = text, kind = text, n = {numbers}}, or nil and why.
 function M.parse(text)
   if type(text) ~= "string" then return nil, "not text" end
-  local epoch, kind, rest = text:match("^([^:]+):([^:]+):(%d[%d%.]*)$")
+  local epoch, kind, rest = text:match("^([^:]+):([^:]+):([%d%.]+)$")
   if not epoch then return nil, "not a ref" end
+  -- (indices count from 1, with no zeros in front and nothing between or after the dots: the tool makes no other)
   local numbers = {}
-  for digits in rest:gmatch("%d+") do numbers[#numbers + 1] = tonumber(digits) end
+  for digits in (rest .. "."):gmatch("([^.]*)%.") do
+    if not digits:match("^[1-9]%d*$") then return nil, "not a ref" end
+    numbers[#numbers + 1] = tonumber(digits)
+  end
   return { epoch = epoch, kind = kind, n = numbers }
 end
 
