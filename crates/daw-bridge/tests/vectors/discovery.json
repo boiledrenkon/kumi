@@ -1,0 +1,47 @@
+{
+  "about": "key = the first 16 lowercase hex of SHA-256(the resource path's UTF-8 bytes, exactly as given); file name = <daw>-<pid>-<key>.json.",
+  "cases": [
+    {
+      "daw": "reaper",
+      "pid": 1000,
+      "resource": "/Users/kumi/Library/Application Support/REAPER",
+      "key": "3efb76f1f82102ea",
+      "fileName": "reaper-1000-3efb76f1f82102ea.json"
+    },
+    {
+      "daw": "reaper",
+      "pid": 1001,
+      "resource": "C:\\Users\\kumi\\AppData\\Roaming\\REAPER",
+      "key": "c21bb613c7bb8610",
+      "fileName": "reaper-1001-c21bb613c7bb8610.json"
+    },
+    {
+      "daw": "renoise",
+      "pid": 1002,
+      "resource": "/home/kumi/.config/Renoise/V3.5.4",
+      "key": "12028ad44b74ad9d",
+      "fileName": "renoise-1002-12028ad44b74ad9d.json"
+    },
+    {
+      "daw": "renoise",
+      "pid": 1003,
+      "resource": "/Users/kumi/Library/Preferences/Renoise/V3.5.4",
+      "key": "7be2bc2f922de1fa",
+      "fileName": "renoise-1003-7be2bc2f922de1fa.json"
+    },
+    {
+      "daw": "renoise",
+      "pid": 1004,
+      "resource": "C:\\Users\\Kümi\\AppData\\Roaming\\Renoise\\V3.5.4",
+      "key": "408e5202da343279",
+      "fileName": "renoise-1004-408e5202da343279.json"
+    },
+    {
+      "daw": "reaper",
+      "pid": 1005,
+      "resource": "/Volumes/Lab/REAPER portable",
+      "key": "8c024af852e8b135",
+      "fileName": "reaper-1005-8c024af852e8b135.json"
+    }
+  ]
+}

@@ -1,0 +1,144 @@
+{
+  "about": "Feed each chunk in order and take lines until none; an error ends the stream. maxBytes bounds a line without its newline (and a trailing carriage return).",
+  "cases": [
+    {
+      "name": "two lines in one read",
+      "maxBytes": 64,
+      "chunksHex": [
+        "7b2261223a317d0a7b2262223a327d0a"
+      ],
+      "expect": [
+        {
+          "line": "{\"a\":1}"
+        },
+        {
+          "line": "{\"b\":2}"
+        }
+      ]
+    },
+    {
+      "name": "a line split across reads",
+      "maxBytes": 64,
+      "chunksHex": [
+        "7b226122",
+        "3a317d",
+        "0a"
+      ],
+      "expect": [
+        {
+          "line": "{\"a\":1}"
+        }
+      ]
+    },
+    {
+      "name": "carriage return dropped, blank lines skipped",
+      "maxBytes": 64,
+      "chunksHex": [
+        "0a0d0a7b2261223a317d0d0a0a"
+      ],
+      "expect": [
+        {
+          "line": "{\"a\":1}"
+        }
+      ]
+    },
+    {
+      "name": "a line of exactly the limit",
+      "maxBytes": 8,
+      "chunksHex": [
+        "7b2261223a31327d0a"
+      ],
+      "expect": [
+        {
+          "line": "{\"a\":12}"
+        }
+      ]
+    },
+    {
+      "name": "one byte over the limit with its newline",
+      "maxBytes": 8,
+      "chunksHex": [
+        "7b2261223a3132337d0a"
+      ],
+      "expect": [
+        {
+          "error": "oversized"
+        }
+      ]
+    },
+    {
+      "name": "over the limit before any newline",
+      "maxBytes": 8,
+      "chunksHex": [
+        "7b2261223a31323334"
+      ],
+      "expect": [
+        {
+          "error": "oversized"
+        }
+      ]
+    },
+    {
+      "name": "the limit before any newline excludes a carriage return",
+      "maxBytes": 8,
+      "chunksHex": [
+        "7b2261223a31327d0d",
+        "0a"
+      ],
+      "expect": [
+        {
+          "line": "{\"a\":12}"
+        }
+      ]
+    },
+    {
+      "name": "the limit excludes the carriage return",
+      "maxBytes": 8,
+      "chunksHex": [
+        "7b2261223a31327d0d0a"
+      ],
+      "expect": [
+        {
+          "line": "{\"a\":12}"
+        }
+      ]
+    },
+    {
+      "name": "invalid UTF-8",
+      "maxBytes": 64,
+      "chunksHex": [
+        "7b2261223a22ff227d0a"
+      ],
+      "expect": [
+        {
+          "error": "invalid-utf8"
+        }
+      ]
+    },
+    {
+      "name": "UTF-8 split across reads",
+      "maxBytes": 64,
+      "chunksHex": [
+        "7b2261223a22c3",
+        "a9227d0a"
+      ],
+      "expect": [
+        {
+          "line": "{\"a\":\"é\"}"
+        }
+      ]
+    },
+    {
+      "name": "nothing after an error",
+      "maxBytes": 8,
+      "chunksHex": [
+        "7b2261223a3132333435367d0a7b7d0a"
+      ],
+      "expect": [
+        {
+          "error": "oversized"
+        }
+      ]
+    }
+  ]
+}
