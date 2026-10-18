@@ -8,6 +8,7 @@ local sync = import("sync")
 local jobs_module = import("jobs")
 local reads = import("reads")
 local focus = import("focus")
+local rows = import("rows")
 local status = import("status")
 local config = import("config")
 local discovery = import("discovery")
@@ -356,9 +357,15 @@ function M.start(h, reloading)
   })
   b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
   b.changed = b.changed or 0
+  b.document = b.document or 1
+  -- A song's id (the one in the project row) and which opening of a song this is: the same while it stays open.
+  rows.song_extra = function(song)
+    return { id = status.song_id(b.memory, song), identity = (status.pid() or 0) .. ":" .. b.document }
+  end
   observers = sync.new(guard, b)
   jobs = jobs_module.new({
     now_ms = M.now_ms,
+    unix_ms = unix_ms,
     epoch = epoch,
     layout = function() return b.layout or 0 end,
     finish = function(job, ok, value)
@@ -456,6 +463,7 @@ end
 
 function M.on_new_document()
   b.quitting = false
+  b.document = b.document + 1
   bump_epoch("a song was opened")
   attach(renoise.song())
   send_project()

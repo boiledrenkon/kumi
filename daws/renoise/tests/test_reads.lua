@@ -115,6 +115,8 @@ test("reads: song", function()
   eq(#items, 1)
   ok(result.epoch:match("^%x+$"), "an epoch in hex")
   eq(items[1].name, "Demo")
+  ok(items[1].id:match("^%x+$") and #items[1].id == 32, "the song's id")
+  ok(items[1].identity:match("^4242:%d+$"), "the pid and which opening of a song this is: " .. items[1].identity)
   eq(items[1].path, "/s/demo.xrns")
   eq(items[1].bpm, 128)
   eq(items[1].lpb, 4)
@@ -786,13 +788,18 @@ test("reads: what the tool can't map moves the epoch", function()
   H.no_dialogs()
 end)
 
-test("reads: a song opened moves the epoch", function()
+test("reads: a song opened moves the epoch and the identity", function()
   local env, peer = setup()
   local before = epoch_of(peer)
-  mock.load_song(demo({ name = "Next" }))
+  local first = rows(peer, "song")[1]
+  mock.load_song(demo({ name = "Next", file_name = "/s/next.xrns" }))
   H.tick(2)
   ok(epoch_of(peer) ~= before)
-  eq(rows(peer, "song")[1].name, "Next")
+  local next_song = rows(peer, "song")[1]
+  eq(next_song.name, "Next")
+  local function serial(row) return tonumber(row.identity:match("^4242:(%d+)$")) end
+  eq(serial(next_song), serial(first) + 1, "another opening")
+  ok(next_song.id ~= first.id, "and another song")
   H.no_dialogs()
 end)
 
@@ -937,5 +944,21 @@ test("reads: a ref reads the one object it names", function()
   failure(call(peer, "read", { ref = "0:track:1" }), "stale")
   failure(call(peer, "read", { ref = "r:track:{GUID}" }), "bad-params")
   failure(call(peer, "read", { ref = E .. ":line:1" }), "bad-params")
+  H.no_dialogs()
+end)
+
+test("reads: a read whose deadline passes is ended, not finished for nobody", function()
+  local env, peer = setup(nil, heavy({ tracks = 60, lines = 32 }))
+  mock.clock_step_ms = 1
+  H.send(peer, { type = "request", id = 1, method = "read", params = { kind = "track", limit = 60 }, deadlineMs = os.time() * 1000 + 25 })
+  local response
+  for _ = 1, 100 do
+    mock.advance(10)
+    for _, f in ipairs(H.frames(peer)) do if f.type == "response" and f.id == 1 then response = f end end
+    if response then break end
+  end
+  mock.clock_step_ms = 0
+  ok(response, "answered")
+  failure(response, "deadline")
   H.no_dialogs()
 end)

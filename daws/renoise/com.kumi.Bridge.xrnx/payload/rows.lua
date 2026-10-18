@@ -102,10 +102,14 @@ end
 
 -- Rows
 
+-- Set by the bridge: the song's `id` and `identity` (it knows the pid and which document this is).
+---@type fun(song: renoise.Song): table
+M.song_extra = function(_) return {} end
+
 local function song_row(song)
   local transport = song.transport
   local path = song.file_name
-  return {
+  local row = {
     name = status.cap(song.name or ""),
     path = (path and path ~= "") and path or json.null,
     bpm = transport.bpm,
@@ -117,6 +121,8 @@ local function song_row(song)
     editMode = transport.edit_mode,
     followPlayer = transport.follow_player,
   }
+  for k, v in pairs(M.song_extra(song)) do row[k] = v end
+  return row
 end
 
 local function track_row(song, epoch, i, parents)

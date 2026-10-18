@@ -7,8 +7,8 @@ M.__index = M
 
 M.BUDGET_MS = 8
 
--- ctx: now_ms(), epoch() -> text, layout() -> number (moves when tracks, patterns or lines are inserted or removed),
--- finish(job, ok, value), on_active(boolean)
+-- ctx: now_ms(), unix_ms(), epoch() -> text, layout() -> number (moves when tracks, patterns or lines are inserted or
+-- removed), finish(job, ok, value), on_active(boolean)
 function M.new(ctx)
   return setmetatable({ ctx = ctx, list = {}, last_run_ms = 0 }, M)
 end
@@ -22,6 +22,10 @@ function M:add(record, request, fn)
     if ctx.now_ms() >= job.deadline then coroutine.yield() end
     if ctx.epoch() ~= job.epoch then
       error({ code = "epoch-changed", message = "the song changed while this was being read: read again" }, 0)
+    end
+    local deadline = request.deadlineMs
+    if type(deadline) == "number" and ctx.unix_ms() >= deadline then
+      error({ code = "deadline", message = "the deadline passed while this was being read" }, 0)
     end
     if ctx.layout() ~= job.layout then
       error({ code = "changed", message = "tracks, patterns or lines were inserted or removed while this was being read: read again" }, 0)
