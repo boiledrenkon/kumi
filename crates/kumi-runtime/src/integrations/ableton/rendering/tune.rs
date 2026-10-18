@@ -22,28 +22,6 @@ use crate::listening::{
 use kumi_common::js::{number::to_string, string::head};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TuneHow {
-    /// An EQ calculated from what was measured.
-    Fit,
-    /// One knob, homed in on.
-    Home,
-    /// A few knobs that interact, searched in generations heard side by side.
-    Search,
-    /// One knob heard across its range in one pass, what it does saved, then set where it meets the target.
-    Probe,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TuneRequest {
-    pub device: String,
-    pub how: TuneHow,
-    /// The checklist item it's for (its id or label); the run's next target without one.
-    pub target: Option<String>,
-    pub knobs: Vec<String>,
-    pub change: Option<String>,
-}
-
 /// A device's knob: where it is, its range, the values it lists (a switch or a menu), and its scale.
 #[derive(Debug, Clone)]
 pub(super) struct DeviceKnob {

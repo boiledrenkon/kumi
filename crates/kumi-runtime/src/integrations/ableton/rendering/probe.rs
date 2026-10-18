@@ -3,7 +3,7 @@
 //! response says), and the knob goes where its response meets the target, judged as the round.
 
 use super::rig::Window;
-use super::tune::{said_first, DeviceKnob, TuneRequest, COPIES_BUDGET};
+use super::tune::{said_first, DeviceKnob, COPIES_BUDGET};
 use super::*;
 use crate::listening::{
     checklist::Quantity,

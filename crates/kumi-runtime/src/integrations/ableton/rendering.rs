@@ -103,11 +103,8 @@ pub struct Rendering {
     /// The listening model as last looked up (found, a definite none, or why the lookup failed), and when.
     listener: RefCell<Option<(Result<Option<Rc<dyn crate::listening::listener::Listener>>, String>, i64)>>,
 }
-pub use form::FormRequest;
-pub use groove::GrooveRequest;
-pub use judge::{gain_device, gain_parameter, GoalRequest, JudgeRequest, Named};
-pub use sound::SoundRequest;
-pub use tune::{TuneHow, TuneRequest};
+pub use crate::listening::tools::{FormRequest, GoalRequest, GrooveRequest, JudgeRequest, SoundRequest, TuneHow, TuneRequest};
+pub use judge::{gain_device, gain_parameter, Named};
 /// Kumi playing the Set to listen. Main stays as the producer has it, so they hear what Kumi hears (and steer from it).
 /// However the render ends, a panic included, dropping it ends it. One taken while another render runs changes nothing.
 pub struct RenderingNow<'a> {

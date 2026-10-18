@@ -105,6 +105,19 @@ pub struct PromptVocab {
     pub refs_retired: &'static str,
     /// What a restructure adds, deletes or moves: "tracks and scenes".
     pub structure: &'static str,
+    /// What brings a judged run's level back to where it belongs: "the last Live Limiter on the track, else a Utility it adds".
+    pub gain_stage: &'static str,
+    /// The judge's fix for a steady imbalance: "a static EQ (EQ Eight)".
+    pub static_eq: &'static str,
+    /// The judge's fix for one that comes and goes: "a dynamic band (Multiband Dynamics)".
+    pub dynamic_band: &'static str,
+    /// The judge's fix for wide lows: "mono below a frequency (Utility's Bass Mono)".
+    pub bass_mono: &'static str,
+    /// The device a drum part is read in lanes by: "a Drum Rack".
+    pub drum_kit: &'static str,
+    /// How a reference's drums become a MIDI clip and a stem: "separate its stems (live_command separate_stems), convert
+    /// the drum stem to MIDI (live_command convert_drums_to_midi)".
+    pub drum_stem_steps: &'static str,
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -226,6 +239,24 @@ macro_rules! live_word {
     (structure) => {
         "tracks and scenes"
     };
+    (gain_stage) => {
+        "the last Live Limiter on the track, else a Utility it adds"
+    };
+    (static_eq) => {
+        "a static EQ (EQ Eight)"
+    };
+    (dynamic_band) => {
+        "a dynamic band (Multiband Dynamics)"
+    };
+    (bass_mono) => {
+        "mono below a frequency (Utility's Bass Mono)"
+    };
+    (drum_kit) => {
+        "a Drum Rack"
+    };
+    (drum_stem_steps) => {
+        "separate its stems (live_command separate_stems), convert the drum stem to MIDI (live_command convert_drums_to_midi)"
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -327,6 +358,24 @@ macro_rules! daw_word {
     };
     ($profile:expr, structure) => {
         $profile.vocab.structure
+    };
+    ($profile:expr, gain_stage) => {
+        $profile.vocab.gain_stage
+    };
+    ($profile:expr, static_eq) => {
+        $profile.vocab.static_eq
+    };
+    ($profile:expr, dynamic_band) => {
+        $profile.vocab.dynamic_band
+    };
+    ($profile:expr, bass_mono) => {
+        $profile.vocab.bass_mono
+    };
+    ($profile:expr, drum_kit) => {
+        $profile.vocab.drum_kit
+    };
+    ($profile:expr, drum_stem_steps) => {
+        $profile.vocab.drum_stem_steps
     };
 }
 
@@ -470,6 +519,12 @@ impl DawProfile {
             own_undo: "the DAW's own undo",
             refs_retired: "The DAW may have taken the tracks back, so Kumi's references are retired: discover again before using any.",
             structure: "tracks",
+            gain_stage: "the track's last limiter, else a gain device it adds",
+            static_eq: "a static EQ",
+            dynamic_band: "a dynamic band",
+            bass_mono: "mono below a frequency",
+            drum_kit: "a drum-kit device",
+            drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
         },
     };
 
@@ -545,6 +600,12 @@ impl DawProfile {
             own_undo: crate::live_word!(own_undo),
             refs_retired: crate::live_word!(refs_retired),
             structure: crate::live_word!(structure),
+            gain_stage: crate::live_word!(gain_stage),
+            static_eq: crate::live_word!(static_eq),
+            dynamic_band: crate::live_word!(dynamic_band),
+            bass_mono: crate::live_word!(bass_mono),
+            drum_kit: crate::live_word!(drum_kit),
+            drum_stem_steps: crate::live_word!(drum_stem_steps),
         },
     };
 

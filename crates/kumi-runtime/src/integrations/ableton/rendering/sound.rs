@@ -10,16 +10,6 @@ use crate::listening::{
     sound::{against_key, bandwidth, ducking, harmonics, interlock, key_classes, kit, noise_floor, problems, tail, width},
 };
 
-/// What the model asks of the sound tool.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SoundRequest {
-    pub tracks: Vec<String>,
-    pub against: Option<String>,
-    pub key: Option<String>,
-    pub from_beat: Option<f64>,
-    pub beats: Option<f64>,
-}
-
 impl Rendering {
     pub async fn sound(self: &Rc<Self>, request: &SoundRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
         if !self.available() {

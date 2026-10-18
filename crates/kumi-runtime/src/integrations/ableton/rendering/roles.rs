@@ -2,7 +2,7 @@
 //! device's name, class and whether it's on, the parameters Live lets Kumi turn, and for a plug-in every name Live
 //! lists for it, so the plug-in map's names are checked against Live's own before any is used.
 
-use super::tune::{DeviceKnob, TuneHow, TuneRequest};
+use super::tune::DeviceKnob;
 use super::*;
 use crate::listening::{
     knobs::{shown_hz, Unit},

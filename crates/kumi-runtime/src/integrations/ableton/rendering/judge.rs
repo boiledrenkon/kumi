@@ -9,8 +9,7 @@ use super::rig::{Window, BEFORE_MAIN};
 use super::*;
 use crate::listening::{
     checklist::{
-        main_chain, masking_unfair, note_stretch, worst_stretch, Checklist, Explicit, Goal, MainDevice, MainState, Profile, Quantity, Row,
-        REGIONS,
+        main_chain, masking_unfair, note_stretch, worst_stretch, Checklist, Goal, MainDevice, MainState, Profile, Quantity, Row, REGIONS,
     },
     detect::{self, Problem, ProblemKind},
     embed,
@@ -23,33 +22,6 @@ use crate::references::{store::KeptReference, tool::MEASURED};
 use async_trait::async_trait;
 use kumi_common::js::{number::to_string, string::head};
 use std::path::Path;
-
-/// What the model asks of the judge: a goal (which starts a run), what to hear, the change since the last call, or
-/// the end.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct JudgeRequest {
-    pub goal: Option<GoalRequest>,
-    /// A track to judge instead of the mix.
-    pub track: Option<String>,
-    pub from_beat: Option<f64>,
-    pub beats: Option<f64>,
-    pub change: Option<String>,
-    pub done: bool,
-}
-
-/// A goal as the model gives it: targets, a reference (a file or a clip), whether to clear what the detectors find,
-/// and the element that must cut through.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct GoalRequest {
-    pub loudness: Option<f64>,
-    pub true_peak: Option<f64>,
-    pub reference: Option<String>,
-    pub problems: bool,
-    pub focus: Option<String>,
-    pub targets: Vec<Explicit>,
-    /// A single sound against a reference sound (its envelope and tone on the checklist too).
-    pub sound: bool,
-}
 
 /// One part of the run's stretch heard as things stand: its checklist values and its sound.
 #[derive(Debug, Clone)]

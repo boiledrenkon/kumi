@@ -22,24 +22,6 @@ use std::collections::HashMap;
 /// The tools that change a clip's notes: what a groove round takes back, on its clip, when it isn't kept.
 const NOTE_TOOLS: [&str; 4] = ["change_notes", "delete_notes", "edit_notes", "transform_midi"];
 
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct GrooveRequest {
-    /// The part: a MIDI clip.
-    pub clip: Option<String>,
-    /// The reference: a MIDI clip (a reference's drums through Drums to MIDI, say), or an audio file of a pitched part
-    /// that isn't in Live.
-    pub reference: Option<String>,
-    /// An audio file reference's tempo (BPM); estimated when left out.
-    pub reference_tempo: Option<f64>,
-    /// The reference's drum stem (an audio clip), to move its hits onto their onsets.
-    pub audio: Option<String>,
-    pub change: Option<String>,
-    /// Code moves the notes toward the reference, by `amount`.
-    pub apply: bool,
-    pub amount: Option<f64>,
-    pub done: bool,
-}
-
 pub struct GrooveRun {
     clip: String,
     /// How the part's notes fall into lanes.

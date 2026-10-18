@@ -13,14 +13,6 @@ use crate::listening::{
 use crate::references::tool::MEASURED;
 use kumi_common::js::string::head;
 
-/// What the model asks of the form tool: a stretch (the whole song without one) and a reference to compare with.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct FormRequest {
-    pub from_beat: Option<f64>,
-    pub beats: Option<f64>,
-    pub reference: Option<String>,
-}
-
 impl Rendering {
     pub async fn form(self: &Rc<Self>, request: &FormRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
         let formed = self.form_now(request, original).await;
