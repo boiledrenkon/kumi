@@ -149,6 +149,12 @@ pub enum Resume {
 /// `-c`/`--continue` and `-r`/`--resume [id or name]` taken out of a session's arguments: what's left, and which
 /// conversation to take up.
 /// The DAW asked for with `--daw <id>` (or `--daw=<id>`), else KUMI_DAW: one this Kumi integrates, None for Live.
+/// What's wrong with KUMI_DAW, when it names no DAW Kumi knows.
+pub(crate) fn daw_env_problem(env: &Env) -> Option<String> {
+    env.get("KUMI_DAW").filter(|s| !s.is_empty())?;
+    take_daw(&[], env).err().map(|error| error.message())
+}
+
 pub(crate) fn take_daw(args: &[String], env: &Env) -> Result<(Vec<String>, Option<DawId>), RuntimeError> {
     let registered =
         || kumi_runtime::integrations::REGISTERED.iter().filter_map(|profile| profile.id).map(DawId::as_str).collect::<Vec<_>>().join(", ");
@@ -721,7 +727,12 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
     // The doctor and the report speak of the DAW asked for (`--daw reaper doctor`, KUMI_DAW), else of the one a session
     // would work with.
     if args.iter().any(|arg| arg == "doctor" || arg == "report") {
-        let (rest, daw) = take_daw(args, env)?;
+        // A KUMI_DAW Kumi doesn't know never stops them: the doctor says what's wrong with it.
+        let mut known = env.clone();
+        if daw_env_problem(env).is_some() {
+            known.remove("KUMI_DAW");
+        }
+        let (rest, daw) = take_daw(args, &known)?;
         match rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["doctor"] => return Ok(AppConfig::Doctor { json: false, daw }),
             ["doctor", "--json"] => return Ok(AppConfig::Doctor { json: true, daw }),

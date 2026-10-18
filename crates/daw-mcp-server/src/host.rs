@@ -263,18 +263,7 @@ impl Host {
             match self.connect(discovery, &secret).await {
                 Some(Ok(client)) => {
                     // The bridge's events go on to the MCP client while this connection lasts.
-                    let (mut from, to) = (client.events(), self.events.clone());
-                    tokio::spawn(async move {
-                        loop {
-                            match from.recv().await {
-                                Ok(event) => {
-                                    let _ = to.send(json!({"name": event.name, "data": event.data}));
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                    });
+                    tokio::spawn(forward_events(client.events(), self.events.clone()));
                     *current = Some(Current { pid: discovery.pid, resource: discovery.resource.clone(), port: discovery.port, client });
                 }
                 Some(Err(why)) => return Err(why),
@@ -400,6 +389,25 @@ impl Host {
     }
 }
 
+/// The bridge's events, on to the MCP client as `{name, data}`. Events dropped on the way (the host fell behind) are
+/// said, never lost silently: a track shift among them would leave positional refs one off, so Kumi reads them again.
+pub async fn forward_events(
+    mut from: tokio::sync::broadcast::Receiver<daw_bridge::wire::Event>,
+    to: tokio::sync::broadcast::Sender<Value>,
+) {
+    loop {
+        match from.recv().await {
+            Ok(event) => {
+                let _ = to.send(json!({"name": event.name, "data": event.data}));
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                let _ = to.send(json!({"name": "events_lost", "data": {}}));
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 fn busy_word(error: &RequestError) -> String {
     match error {
         RequestError::Bridge { code, message } if code == daw_bridge::wire::code::BUSY => message.clone(),
@@ -412,6 +420,22 @@ fn busy_word(error: &RequestError) -> String {
 mod tests {
     use super::*;
     use std::io::{Error, ErrorKind};
+
+    #[tokio::test]
+    async fn events_dropped_on_the_way_are_said_not_lost_silently() {
+        let (bridge, from) = tokio::sync::broadcast::channel(2);
+        let (to, mut client) = tokio::sync::broadcast::channel(16);
+        for n in 0..5 {
+            bridge.send(daw_bridge::wire::Event { seq: n + 1, name: "tracks".into(), data: json!({"layout": n}) }).unwrap();
+        }
+        drop(bridge);
+        forward_events(from, to).await;
+        let mut names = vec![];
+        while let Ok(event) = client.try_recv() {
+            names.push(event["name"].as_str().unwrap().to_string());
+        }
+        assert_eq!(names, ["events_lost", "tracks", "tracks"], "the three dropped are said; the last two come through");
+    }
 
     #[test]
     fn a_refused_or_unanswered_connect_means_nothing_listens() {

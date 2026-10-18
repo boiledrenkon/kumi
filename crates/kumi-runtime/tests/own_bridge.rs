@@ -612,3 +612,84 @@ async fn a_song_reopened_after_a_restart_keeps_its_conversation_not_the_empty_so
         })
         .await;
 }
+
+/// A look that runs into Renoise's own change is taken again; one that fails while Renoise is there keeps the project and
+/// Renoise's tools (no fresh conversation), and asks the session to look again by itself.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_look_the_daw_interrupts_is_taken_again_and_a_failed_one_keeps_the_tools_and_looks_again() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let song = json!({"epoch": "1", "layout": 0, "project": {"id": PROJECT_ID, "identity": "t1:1", "name": "Acid", "path": "/songs/Acid.xrns", "bpm": 140}, "tracks": [], "selection": {}});
+            let changed = json!({"error": "the song changed while this was being read: read again", "code": "epoch-changed", "connected": true});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", song.clone(), false)]),
+                asked: RefCell::default(),
+            });
+            let looks_again = Rc::new(std::cell::Cell::new(0));
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            let counted = looks_again.clone();
+            options.context.on_look_again = Some(Rc::new(move || counted.set(counted.get() + 1)));
+            let renoise = create_renoise_integration(options);
+            renoise.start(Signal::new()).await.unwrap();
+            let first = renoise.observe(Signal::new(), None).await.unwrap();
+            // Interrupted once: taken again a moment later, the same look.
+            host.answers.borrow_mut().push(("snapshot", changed.clone(), true));
+            let later = host.clone();
+            let song_again = song.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                later.answers.borrow_mut().push(("snapshot", song_again, false));
+            });
+            let again = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!((again.key.as_str(), again.label.as_str()), (first.key.as_str(), first.label.as_str()));
+            assert_eq!(looks_again.get(), 0);
+            // Interrupted for good: the project and the tools stay, and the session is asked to look again.
+            host.answers.borrow_mut().push(("snapshot", changed, true));
+            let failed = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(failed.key, first.key, "the same song's conversation");
+            assert_eq!(failed.revision, first.revision, "no tools change for the session");
+            assert_eq!(failed.tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>(), ["renoise_read"]);
+            assert!(failed.label.starts_with("Renoise — couldn't look just now"), "{}", failed.label);
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+            assert_eq!(looks_again.get(), 1, "looked again without a turn");
+        })
+        .await;
+}
+
+/// An answer read in another track layout than the book's: newer (a tracks event lost on the way) retires the book's
+/// names so none reads the wrong track; older (a shift landed first) is read again, carried to now.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_answer_in_another_track_layout_never_leaves_a_name_on_the_wrong_track() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let snapshot = json!({"epoch": "1", "layout": 0, "project": {"id": PROJECT_ID, "identity": "t1:1", "name": "Acid", "path": "/songs/Acid.xrns"}, "tracks": [{"ref": "1:track:1", "name": "Kick"}, {"ref": "1:track:2", "name": "Bass"}], "selection": {}});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            let seen = renoise.observe(Signal::new(), None).await.unwrap();
+            let read = seen.tools[0].clone();
+            let context: Value = serde_json::from_str(&seen.context).unwrap();
+            assert_eq!(context["tracks"][0]["ref"], "track:1");
+            // Two tracks were inserted at the top and Kumi never heard: the answer is two shifts on.
+            host.answers.borrow_mut().push((
+                "read",
+                json!({"epoch": "1", "layout": 2, "items": [{"ref": "1:track:3", "name": "Kick"}]}),
+                false,
+            ));
+            let page = read.execute(json!({"kind": "track"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            let page: Value = serde_json::from_str(&page.text).unwrap();
+            assert_ne!(page["items"][0]["ref"], "track:1", "Kick's new name isn't the old track:1");
+            let old = read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert!(old.is_error && old.text.contains("isn't one of this turn's refs"), "{}", old.text);
+            // An answer from before a shift the book follows (layout 1 against 2): read again, a few times at most.
+            host.answers.borrow_mut().push(("read", json!({"epoch": "1", "layout": 1, "items": []}), false));
+            let before = host.asked.borrow().iter().filter(|(tool, _)| tool == "read").count();
+            read.execute(json!({"kind": "track"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            let reads = host.asked.borrow().iter().filter(|(tool, _)| tool == "read").count() - before;
+            assert_eq!(reads, 5, "read again, carried to now");
+        })
+        .await;
+}

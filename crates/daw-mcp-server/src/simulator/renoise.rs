@@ -42,6 +42,8 @@ struct State {
     empty: bool,
     /// How often Renoise was started again: each start is another process, so the song's identity is another.
     restarts: u32,
+    /// The file loads while the next snapshot of the empty song is being read: that read ends `epoch-changed`.
+    load_during_look: bool,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -141,6 +143,7 @@ impl RenoiseScript {
                 asked: vec![],
                 empty: false,
                 restarts: 0,
+                load_during_look: false,
             })),
         }
     }
@@ -175,6 +178,12 @@ impl RenoiseScript {
     /// The file it was opened with is loaded: the same song as before (its id is its path's), in the new process.
     pub fn load_the_file(&self) {
         self.state.lock().unwrap().empty = false;
+    }
+
+    /// The file loads while the next look at the empty song is being read, as on real Renoise: that read ends
+    /// `epoch-changed`, and the next one finds the file.
+    pub fn load_the_file_during_the_next_look(&self) {
+        self.state.lock().unwrap().load_during_look = true;
     }
 
     /// The empty song Renoise starts on: unsaved, an id of its own, nothing in it.
@@ -212,6 +221,11 @@ impl RenoiseScript {
         }
         let mut state = self.state.lock().unwrap();
         state.asked.push((method.to_string(), params.clone()));
+        if state.empty && state.load_during_look && method == "snapshot" {
+            state.empty = false;
+            state.load_during_look = false;
+            return Some(Err(("epoch-changed".into(), "the song changed while this was being read: read again".into())));
+        }
         if state.empty {
             return Self::empty_song(&state, method, params);
         }

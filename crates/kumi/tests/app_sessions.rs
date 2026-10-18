@@ -431,3 +431,34 @@ case!(renoise_started_again_on_the_same_song_keeps_its_conversation_and_says_onl
     input.end();
     assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 0);
 });
+
+case!(renoise_loading_its_file_during_kumis_first_look_keeps_the_conversation_and_renoises_tools, async {
+    let script = RenoiseScript::new();
+    let first = script.clone();
+    let lab = AppLab::new(DawId::Renoise, Daw::Renoise, move |secret| first.config(secret, "/lab/Renoise")).await;
+    let (input, out, task) = lab.start(false);
+    wait_for("the first look", &out, |text| text.lines().any(|l| l.starts_with("[observation] "))).await;
+    lab.simulator.stop();
+    let gone = out.0.borrow().len();
+    wait_for("Renoise gone", &out, |text| text[gone..].contains(": disconnected")).await;
+    // Started again: the file loads while Kumi's first look at the empty song is being read, as on real Renoise.
+    script.start_again_on_the_empty_song();
+    script.load_the_file_during_the_next_look();
+    let paths = BridgePaths::new(&lab._home.path().join(".kumi"), Daw::Renoise);
+    let mut config = script.config(ensure_secret(&paths.secret()).unwrap(), "/lab/Renoise");
+    config.discovery_dir = Some(paths.discovery());
+    let _again = Simulator::start(config).await.unwrap();
+    let back = out.0.borrow().len();
+    wait_for("Renoise back", &out, |text| text[back..].contains("Renoise is back.")).await;
+    wait_for("the look after", &out, |text| text[back..].lines().any(|l| l.starts_with("[observation] "))).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+    let status = command(&input, &out, "/status").await;
+    assert!(!status.contains("Inference-only") && status.contains("Demo"), "the song's look, with Renoise's tools: {status}");
+    let said = out.0.borrow()[back..].to_string();
+    for word in ["starting a fresh conversation", "tools changed", "opening another song", "has the other song open"] {
+        assert!(!said.contains(word), "{word:?} after a restart on the same song:\n{said}");
+    }
+    input.write("/quit\n");
+    input.end();
+    assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 0);
+});
