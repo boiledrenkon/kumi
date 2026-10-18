@@ -239,6 +239,11 @@ impl BridgeClient {
         self.inner.grant_owed.load(Ordering::SeqCst)
     }
 
+    /// Whether both are the same connection (a clone of it).
+    pub fn same_connection(&self, other: &BridgeClient) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::SeqCst)
     }

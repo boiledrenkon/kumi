@@ -262,19 +262,7 @@ impl Host {
             };
             match self.connect(discovery, &secret).await {
                 Some(Ok(client)) => {
-                    // The bridge's events go on to the MCP client while this connection lasts.
-                    let (mut from, to) = (client.events(), self.events.clone());
-                    tokio::spawn(async move {
-                        loop {
-                            match from.recv().await {
-                                Ok(event) => {
-                                    let _ = to.send(json!({"name": event.name, "data": event.data}));
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            }
-                        }
-                    });
+                    self.forward_events(&client);
                     *current = Some(Current { pid: discovery.pid, resource: discovery.resource.clone(), port: discovery.port, client });
                 }
                 Some(Err(why)) => return Err(why),
@@ -282,6 +270,50 @@ impl Host {
             }
         }
         Ok(alive.len())
+    }
+
+    /// The bridge's events go on to the MCP client while this connection lasts.
+    fn forward_events(&self, client: &BridgeClient) {
+        let (mut from, to) = (client.events(), self.events.clone());
+        tokio::spawn(async move {
+            loop {
+                match from.recv().await {
+                    Ok(event) => {
+                        let _ = to.send(json!({"name": event.name, "data": event.data}));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    /// A connection that is silent and answers no ping is dead, or its DAW is frozen (a plug-in loading, a long script):
+    /// from here the two look the same, and a frozen DAW takes a new connection no better. So the instance is asked afresh
+    /// first. If it answers, the old connection goes and the new one is kept; if not, nothing is dropped (the DAW is busy).
+    async fn fresh_connection(&self, silent: &BridgeClient, pid: u32, resource: &str) -> Option<BridgeClient> {
+        let secret = self.secret().ok()?;
+        let (alive, _, _) = self.instances();
+        let discovery = alive.iter().find(|discovery| discovery.pid == pid && discovery.resource == resource)?;
+        let Some(Ok(client)) = self.connect(discovery, &secret).await else { return None };
+        let mut current = self.current.lock().await;
+        match current.as_ref() {
+            // Someone else replaced it while this one connected: use theirs.
+            Some(open) if !open.client.same_connection(silent) => {
+                let theirs = open.client.clone();
+                drop(current);
+                client.close().await;
+                Some(theirs)
+            }
+            _ => {
+                if let Some(old) = current.take() {
+                    old.client.close().await;
+                }
+                self.forward_events(&client);
+                *current = Some(Current { pid, resource: resource.to_string(), port: discovery.port, client: client.clone() });
+                Some(client)
+            }
+        }
     }
 
     /// `status`: the chosen instance's bridge (the one already connected, else the only one or the newest).
@@ -325,30 +357,28 @@ impl Host {
     /// Asks the chosen instance's bridge for one of its answers (`read`, `snapshot`, `focus`, `focus_body`). The
     /// connection is made if there isn't one, and isn't held while the bridge thinks: other calls go ahead beside it.
     pub async fn call(&self, method: &str, params: Value, pick: &Pick, timeout: Duration) -> Result<Value, CallError> {
-        let (client, pid) = {
+        let (client, pid, resource) = {
             let mut current = self.current.lock().await;
             self.ensure_connected(&mut current, pick).await.map_err(CallError::NotConnected)?;
             let open = current.as_ref().expect("connected above");
-            (open.client.clone(), open.pid)
+            (open.client.clone(), open.pid, open.resource.clone())
         };
-        match client.request(method, params, timeout).await {
+        match client.request(method, params.clone(), timeout).await {
             Ok(answer) => Ok(answer),
             Err(RequestError::Bridge { code, message }) => Err(CallError::Bridge { code, message }),
             Err(RequestError::Timeout) => {
                 // A DAW behind a dialog is silent but still answers a ping (a socket callback needs no timer); a connection the
-                // bridge has let go of, or lost, answers nothing for ever. Told apart, the dead one is dropped, so the next
-                // call connects afresh instead of timing out for ever.
+                // bridge has let go of, or lost, answers nothing for ever, and so does a frozen DAW. A new connection tells these
+                // apart: if the instance answers it, the old one was lost and is replaced (and the call is asked again on the
+                // new one); if not, the DAW is busy and the old connection is kept, as it was.
                 if client.busy() && client.request("ping", json!({}), PING_PROBE).await == Err(RequestError::Timeout) {
-                    let mut current = self.current.lock().await;
-                    if current.as_ref().is_some_and(|open| open.pid == pid) {
-                        if let Some(open) = current.take() {
-                            open.client.close().await;
-                        }
-                    }
-                    return Err(CallError::Closed(format!(
-                        "{} stopped answering on this connection and it was dropped; asking again connects afresh",
-                        self.daw
-                    )));
+                    let Some(fresh) = self.fresh_connection(&client, pid, &resource).await else { return Err(CallError::Timeout) };
+                    return match fresh.request(method, params, timeout).await {
+                        Ok(answer) => Ok(answer),
+                        Err(RequestError::Bridge { code, message }) => Err(CallError::Bridge { code, message }),
+                        Err(RequestError::Timeout) => Err(CallError::Timeout),
+                        Err(RequestError::Closed) => Err(CallError::Closed(format!("{} closed the connection", self.daw))),
+                    };
                 }
                 Err(CallError::Timeout)
             }
