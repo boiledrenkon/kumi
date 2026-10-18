@@ -54,8 +54,21 @@ const CLOSING: &str = "REAPER is closing; nothing changed";
 
 /// Methods served off the main thread: they answer even while REAPER shows a dialog.
 const SOCKET_METHODS: [&str; 3] = ["ping", "status", "focus"];
-const MAIN_METHODS: [&str; 5] = ["action", "quit", "read", "snapshot", "focus_body"];
-const EVENTS: [&str; 4] = [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION];
+const MAIN_METHODS: [&str; 11] = [
+    "action",
+    "quit",
+    "read",
+    "snapshot",
+    "focus_body",
+    "change_preview",
+    "change_apply",
+    "change_restore",
+    "transport_stop",
+    "undo_step_begin",
+    "undo_step_end",
+];
+const EVENTS: [&str; 5] =
+    [wire::event::PROJECT, wire::event::TRANSPORT, wire::event::TRACKS, wire::event::SELECTION, wire::event::UNDONE_IN_DAW];
 
 /// Where the reference file lives for a resource folder.
 pub fn reference_path(resource: &Path) -> PathBuf {
@@ -922,7 +935,7 @@ mod tests {
         let (mut stream, mut reader, welcome) = lab.authenticated();
         assert_eq!(welcome["daw"], "reaper");
         assert_eq!(welcome["project"], json!({"name": "Song.rpp", "path": "/m/Song.rpp"}));
-        assert_eq!(welcome["events"], json!(["project", "transport", "tracks", "selection"]));
+        assert_eq!(welcome["events"], json!(["project", "transport", "tracks", "selection", "undone_in_daw"]));
 
         let jobs = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
         let main = thread::spawn(move || {

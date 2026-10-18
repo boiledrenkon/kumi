@@ -310,6 +310,20 @@ pub struct State {
     pub state_count: i32,
     /// The undo history's entries: one for a project just loaded.
     pub undo_entries: i32,
+    /// The descriptions of entries 1 and on (a test's own entries may be missing: they read "Edit n"), and the one the
+    /// project is at (None: the last).
+    pub undo_descs: Vec<String>,
+    pub undo_cur: Option<i32>,
+    /// Blocks begun and not ended, and whether anything was written since the last point: a bare edit makes no point
+    /// of its own and joins the next block that is ended with flags.
+    pub undo_depth: i32,
+    pub undo_dirty: bool,
+    /// Track states handed out by `GetTrackStateChunk`, by the number in the chunk text.
+    pub chunks: Vec<FakeTrack>,
+    /// A GUID counter for tracks made by `InsertTrackAtIndex`.
+    pub made: u32,
+    /// How often the screen was told to redraw.
+    pub redraws: u32,
     pub master: FakeTrack,
     pub tracks: Vec<FakeTrack>,
     pub markers: Vec<FakeMarker>,
@@ -363,6 +377,13 @@ impl Default for State {
             time_signature: (4, 4),
             state_count: 0,
             undo_entries: 1,
+            undo_descs: vec![],
+            undo_cur: None,
+            undo_depth: 0,
+            undo_dirty: false,
+            chunks: vec![],
+            made: 0,
+            redraws: 0,
             master: FakeTrack::new("{MASTER}", "MASTER"),
             tracks: vec![],
             markers: vec![],
@@ -876,6 +897,7 @@ unsafe extern "C" fn get_media_track_info_value(track: *mut MediaTrack, parm: *c
             "D_VOL" => t.volume,
             "D_PAN" => t.pan,
             "B_MAINSEND" => t.main_send as i32 as f64,
+            "I_CUSTOMCOLOR" => t.color as f64,
             other => t.extra.get(other).copied().unwrap_or_else(|| new_track_default(other)),
         }
     })
@@ -913,8 +935,25 @@ unsafe extern "C" fn get_set_media_track_info(track: *mut MediaTrack, parm: *con
     })
 }
 unsafe extern "C" fn get_set_media_track_info_string(track: *mut MediaTrack, parm: *const c_char, buf: *mut c_char, set: bool) -> bool {
-    assert!(!set, "the fake only reads");
     let parm = name_of(parm);
+    if set {
+        let value = name_of(buf);
+        return counted(|s| {
+            let at = unpack(track as u64).1;
+            let t = match at {
+                MASTER => Some(&mut s.master),
+                n => s.tracks.get_mut(n as usize),
+            };
+            match (t, parm.as_str()) {
+                (Some(t), "P_NAME") => {
+                    t.name = value;
+                    s.undo_dirty = true;
+                    true
+                }
+                _ => false,
+            }
+        });
+    }
     counted(|s| match (track_of(s, track as u64), parm.as_str()) {
         (Some(t), "GUID") => {
             write(buf, 4096, &t.guid);
@@ -1419,6 +1458,285 @@ unsafe extern "C" fn get_set_track_send_info(
     })
 }
 
+// ----- writes -----
+
+fn track_mut(s: &mut State, handle: u64) -> Option<&mut FakeTrack> {
+    let (kind, a, _, _) = unpack(handle);
+    match (kind, a) {
+        (TRACK, MASTER) => Some(&mut s.master),
+        (TRACK, a) => s.tracks.get_mut(a as usize),
+        _ => None,
+    }
+}
+
+unsafe extern "C" fn set_media_track_info_value(track: *mut MediaTrack, parm: *const c_char, value: f64) -> bool {
+    let parm = name_of(parm);
+    counted(|s| {
+        let Some(t) = track_mut(s, track as u64) else { return false };
+        match parm.as_str() {
+            "D_VOL" => t.volume = value,
+            "D_PAN" => t.pan = value,
+            "B_MUTE" => t.mute = value != 0.0,
+            "I_SOLO" => t.solo = value as i32,
+            "I_RECARM" => t.arm = value != 0.0,
+            "I_SELECTED" => t.selected = value != 0.0,
+            "I_FOLDERDEPTH" => t.folder = value as i32,
+            "I_CUSTOMCOLOR" => t.color = value as i32,
+            "B_MAINSEND" => t.main_send = value != 0.0,
+            other => {
+                t.extra.insert(other.to_string(), value);
+            }
+        }
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn insert_track_at_index(index: c_int, _defaults: bool) {
+    counted(|s| {
+        s.made += 1;
+        let at = (index.max(0) as usize).min(s.tracks.len());
+        s.tracks.insert(at, FakeTrack::new(&format!("{{NEW-{}}}", s.made), ""));
+        // Sends name their destination by position.
+        for track in s.tracks.iter_mut() {
+            for send in track.sends.iter_mut() {
+                if send.dest >= at {
+                    send.dest += 1;
+                }
+            }
+        }
+        s.undo_dirty = true;
+    })
+}
+
+unsafe extern "C" fn delete_track(track: *mut MediaTrack) {
+    counted(|s| {
+        let at = unpack(track as u64).1;
+        if at == MASTER || at as usize >= s.tracks.len() {
+            return;
+        }
+        let at = at as usize;
+        s.tracks.remove(at);
+        // Sends to it go with it, and the others' destinations close up.
+        for other in s.tracks.iter_mut() {
+            other.sends.retain(|send| send.dest != at);
+            for send in other.sends.iter_mut() {
+                if send.dest > at {
+                    send.dest -= 1;
+                }
+            }
+        }
+        s.undo_dirty = true;
+    })
+}
+
+/// The chunk of a fake track is a token naming the state kept for it, in the shape of the head of a real one.
+unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
+    counted(|s| {
+        let Some(t) = track_of(s, track as u64).cloned() else { return false };
+        let text = format!("<TRACK {}\nNAME \"{}\"\nFAKECHUNK {}\n>\n", t.guid, t.name, s.chunks.len());
+        s.chunks.push(t);
+        if text.len() + 1 > size as usize {
+            // Too small: REAPER fills what fits; the caller grows its buffer.
+            write(buf, size, &text);
+            return true;
+        }
+        write(buf, size, &text);
+        true
+    })
+}
+
+unsafe extern "C" fn set_track_state_chunk(track: *mut MediaTrack, chunk: *const c_char, _isundo: bool) -> bool {
+    let chunk = name_of(chunk);
+    counted(|s| {
+        let Some(n) = chunk.lines().find_map(|line| line.strip_prefix("FAKECHUNK ")).and_then(|n| n.trim().parse::<usize>().ok()) else {
+            return false;
+        };
+        let Some(state) = s.chunks.get(n).cloned() else { return false };
+        let Some(slot) = track_mut(s, track as u64) else { return false };
+        // A track's sends are the destination's lines, not part of its chunk.
+        let sends = std::mem::take(&mut slot.sends);
+        *slot = FakeTrack { sends: if state.sends.is_empty() { sends } else { state.sends }, ..state };
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn create_track_send(track: *mut MediaTrack, dest: *mut MediaTrack) -> c_int {
+    counted(|s| {
+        let dest_at = if dest.is_null() { None } else { Some(unpack(dest as u64).1 as usize) };
+        s.undo_dirty = true;
+        let Some(t) = track_mut(s, track as u64) else { return -1 };
+        match dest_at {
+            Some(dest) => {
+                t.sends.push(FakeSend::to(dest));
+                t.sends.len() as c_int - 1
+            }
+            None => {
+                t.hw_outs.push(FakeSend::to(0));
+                t.hw_outs.len() as c_int - 1
+            }
+        }
+    })
+}
+
+unsafe extern "C" fn remove_track_send(track: *mut MediaTrack, category: c_int, index: c_int) -> bool {
+    counted(|s| {
+        let Some(t) = track_mut(s, track as u64) else { return false };
+        let list = if category > 0 { &mut t.hw_outs } else { &mut t.sends };
+        if category < 0 || index < 0 || index as usize >= list.len() {
+            return false;
+        }
+        list.remove(index as usize);
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn set_track_send_info_value(
+    track: *mut MediaTrack,
+    category: c_int,
+    index: c_int,
+    parm: *const c_char,
+    value: f64,
+) -> bool {
+    let parm = name_of(parm);
+    counted(|s| {
+        let Some(t) = track_mut(s, track as u64) else { return false };
+        let list = if category > 0 { &mut t.hw_outs } else { &mut t.sends };
+        if category < 0 {
+            return false;
+        }
+        let Some(send) = list.get_mut(index.max(0) as usize) else { return false };
+        match parm.as_str() {
+            "D_VOL" => send.volume = value,
+            "D_PAN" => send.pan = value,
+            "B_MUTE" => send.mute = value != 0.0,
+            "I_SENDMODE" => send.mode = value as i32,
+            "I_SRCCHAN" => send.src_chan = value as i32,
+            "I_DSTCHAN" => send.dst_chan = value as i32,
+            other => {
+                send.extra.insert(other.to_string(), value);
+            }
+        }
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn color_to_native(r: c_int, g: c_int, b: c_int) -> c_int {
+    r | g << 8 | b << 16
+}
+
+unsafe extern "C" fn update_arrange() {
+    with(|s| s.redraws += 1);
+}
+
+unsafe extern "C" fn track_list_adjust_windows(_minor: bool) {
+    with(|s| s.redraws += 1);
+}
+
+// ----- the undo history -----
+
+fn undo_cur_of(s: &State) -> i32 {
+    s.undo_cur.unwrap_or(s.undo_entries - 1)
+}
+
+fn undo_desc_at(s: &State, index: i32) -> String {
+    match index {
+        0 => "--- Initial state ---".into(),
+        n => s.undo_descs.get(n as usize - 1).cloned().unwrap_or_else(|| format!("Edit {n}")),
+    }
+}
+
+/// The history gains a point at the end, after dropping what could still have been redone.
+pub fn push_undo_point(s: &mut State, desc: &str) {
+    let cur = undo_cur_of(s);
+    while s.undo_descs.len() < cur as usize {
+        let n = s.undo_descs.len() + 1;
+        s.undo_descs.push(format!("Edit {n}"));
+    }
+    s.undo_descs.truncate(cur as usize);
+    s.undo_descs.push(desc.to_string());
+    s.undo_entries = cur + 2;
+    s.undo_cur = None;
+}
+
+/// The producer's Edit > Undo: the history steps back, and REAPER counts a change.
+pub fn producer_undo() {
+    with(|s| {
+        let cur = undo_cur_of(s);
+        if cur > 0 {
+            s.undo_cur = Some(cur - 1);
+            s.state_count += 1;
+        }
+    })
+}
+
+/// The producer's Edit > Redo.
+pub fn producer_redo() {
+    with(|s| {
+        let cur = undo_cur_of(s);
+        if cur + 1 < s.undo_entries {
+            s.undo_cur = Some(cur + 1);
+            s.state_count += 1;
+        }
+    })
+}
+
+/// The producer edits something REAPER makes a point of.
+pub fn producer_edit(desc: &str) {
+    with(|s| {
+        push_undo_point(s, desc);
+        s.state_count += 1;
+    })
+}
+
+unsafe extern "C" fn undo_begin_block2(_proj: *mut ReaProject) {
+    with(|s| s.undo_depth += 1);
+}
+
+unsafe extern "C" fn undo_end_block2(_proj: *mut ReaProject, desc: *const c_char, flags: c_int) {
+    let desc = name_of(desc);
+    with(|s| {
+        s.undo_depth = (s.undo_depth - 1).max(0);
+        if s.undo_depth > 0 || flags == 0 {
+            return;
+        }
+        // REAPER counts a flagged block whether or not it made a point.
+        s.state_count += 1;
+        if s.undo_dirty {
+            push_undo_point(s, &desc);
+            s.undo_dirty = false;
+        }
+    })
+}
+
+unsafe extern "C" fn undo_can_undo2(_proj: *mut ReaProject) -> *const c_char {
+    let text = with(|s| {
+        let cur = undo_cur_of(s);
+        (cur > 0).then(|| undo_desc_at(s, cur))
+    });
+    text.map_or(ptr::null(), keep)
+}
+
+unsafe extern "C" fn undo_can_redo2(_proj: *mut ReaProject) -> *const c_char {
+    let text = with(|s| {
+        let cur = undo_cur_of(s);
+        (cur + 1 < s.undo_entries).then(|| undo_desc_at(s, cur + 1))
+    });
+    text.map_or(ptr::null(), keep)
+}
+
+unsafe extern "C" fn undo_get_cur_entry(_proj: *mut ReaProject) -> c_int {
+    with(|s| undo_cur_of(s))
+}
+
+unsafe extern "C" fn undo_get_entry_desc(_proj: *mut ReaProject, index: c_int) -> *const c_char {
+    let text = with(|s| (index >= 0 && index < s.undo_entries).then(|| undo_desc_at(s, index)));
+    text.map_or(ptr::null(), keep)
+}
+
 // ----- envelopes -----
 
 unsafe extern "C" fn count_track_envelopes(track: *mut MediaTrack) -> c_int {
@@ -1659,6 +1977,23 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSelectedTrack2" => get_selected_track2 as unsafe extern "C" fn(*mut ReaProject, c_int, bool) -> *mut MediaTrack,
         b"GetLastTouchedTrack" => get_last_touched_track as unsafe extern "C" fn() -> *mut MediaTrack,
         b"GetMediaTrackInfo_Value" => get_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char) -> f64,
+        b"SetMediaTrackInfo_Value" => set_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char, f64) -> bool,
+        b"InsertTrackAtIndex" => insert_track_at_index as unsafe extern "C" fn(c_int, bool),
+        b"DeleteTrack" => delete_track as unsafe extern "C" fn(*mut MediaTrack),
+        b"GetTrackStateChunk" => get_track_state_chunk as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int, bool) -> bool,
+        b"SetTrackStateChunk" => set_track_state_chunk as unsafe extern "C" fn(*mut MediaTrack, *const c_char, bool) -> bool,
+        b"CreateTrackSend" => create_track_send as unsafe extern "C" fn(*mut MediaTrack, *mut MediaTrack) -> c_int,
+        b"RemoveTrackSend" => remove_track_send as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int) -> bool,
+        b"SetTrackSendInfo_Value" => set_track_send_info_value as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *const c_char, f64) -> bool,
+        b"ColorToNative" => color_to_native as unsafe extern "C" fn(c_int, c_int, c_int) -> c_int,
+        b"UpdateArrange" => update_arrange as unsafe extern "C" fn(),
+        b"TrackList_AdjustWindows" => track_list_adjust_windows as unsafe extern "C" fn(bool),
+        b"Undo_BeginBlock2" => undo_begin_block2 as unsafe extern "C" fn(*mut ReaProject),
+        b"Undo_EndBlock2" => undo_end_block2 as unsafe extern "C" fn(*mut ReaProject, *const c_char, c_int),
+        b"Undo_CanUndo2" => undo_can_undo2 as unsafe extern "C" fn(*mut ReaProject) -> *const c_char,
+        b"Undo_CanRedo2" => undo_can_redo2 as unsafe extern "C" fn(*mut ReaProject) -> *const c_char,
+        b"Undo_GetCurEntry" => undo_get_cur_entry as unsafe extern "C" fn(*mut ReaProject) -> c_int,
+        b"Undo_GetEntryDesc" => undo_get_entry_desc as unsafe extern "C" fn(*mut ReaProject, c_int) -> *const c_char,
         b"GetSetMediaTrackInfo" => get_set_media_track_info as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_void) -> *mut c_void,
         b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
         b"GetTrackName" => get_track_name as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int) -> bool,

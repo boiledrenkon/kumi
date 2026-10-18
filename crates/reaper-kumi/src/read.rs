@@ -395,7 +395,7 @@ impl Reads {
 
     // ----- resolving refs -----
 
-    fn track_by_id(&self, reaper: &Reaper, proj: Project, id: &TrackId) -> Result<Track, (String, String)> {
+    pub(crate) fn track_by_id(&self, reaper: &Reaper, proj: Project, id: &TrackId) -> Result<Track, (String, String)> {
         let mut registry = self.registry.borrow_mut();
         registry.track(reaper, proj, id).ok_or_else(|| match id {
             TrackId::Guid(guid) if registry.is_shared(guid) => shared_id("track"),

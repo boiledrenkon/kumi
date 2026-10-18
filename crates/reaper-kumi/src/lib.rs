@@ -5,6 +5,7 @@
 //! queue work that the timer and the surface's Run() drain (see `extension`).
 
 pub mod api;
+pub mod changes;
 pub mod csurf;
 pub mod extension;
 pub mod focus;
@@ -135,7 +136,11 @@ impl Loaded {
         if self.stopped.replace(true) {
             return;
         }
+        // A plan's open undo block is closed while REAPER can still be asked to.
+        self.extension.stop();
         self.register(c"-timer", on_timer as *mut c_void);
+        self.register(c"-hookpostcommand2", on_post_command2 as *mut c_void);
+        self.register(c"-hookpostcommand", on_post_command as *mut c_void);
         self.register(c"-projectconfig", projectconfig::REGISTRATION.as_ptr());
         if let Some(surface) = self.surface.borrow_mut().take() {
             self.register(c"-csurf_inst", surface.as_ptr());
@@ -168,6 +173,29 @@ fn on_surface(call: Call) -> i32 {
         return 0;
     }
     loaded.extension.on_surface(call)
+}
+
+/// REAPER ran an action (any, from a menu, a key, a script): the undo history may have moved. Which of the two hooks
+/// REAPER calls depends on how the action was started (`Main_OnCommand` fires the first; a key press fires both), so both
+/// are registered; the history is looked at on the next tick whichever ran.
+extern "C" fn on_post_command(_command: c_int, _flag: c_int) {
+    guard("post-command", (), || {
+        if let Some(loaded) = loaded() {
+            loaded.extension.nudge();
+        }
+    })
+}
+
+extern "C" fn on_post_command2(
+    _section: *mut c_void,
+    _command: c_int,
+    _val: c_int,
+    _valhw: c_int,
+    _relmode: c_int,
+    _hwnd: *mut c_void,
+    _proj: *mut c_void,
+) {
+    on_post_command(0, 0)
 }
 
 extern "C" fn on_exit() {
@@ -208,6 +236,8 @@ fn load(info: &PluginInfo) -> c_int {
     loaded.register(c"csurf_inst", surface.as_ptr());
     // REAPER's own word that a project was loaded or made in some tab (the pointer and the file can't always say).
     loaded.register(c"projectconfig", projectconfig::REGISTRATION.as_ptr());
+    loaded.register(c"hookpostcommand", on_post_command as *mut c_void);
+    loaded.register(c"hookpostcommand2", on_post_command2 as *mut c_void);
     *loaded.surface.borrow_mut() = Some(surface);
     loaded.register(c"timer", on_timer as *mut c_void);
     // REAPER 7.55+; older ones still call the entry point to unload.
@@ -305,11 +335,11 @@ mod tests {
         assert!(registered().is_empty());
 
         assert_eq!(unsafe { ReaperPluginEntry(null_mut(), &mut info(api::REAPER_PLUGIN_VERSION)) }, 1);
-        assert_eq!(registered(), ["ext_name", "csurf_inst", "projectconfig", "timer", "atexit"]);
+        assert_eq!(registered(), ["ext_name", "csurf_inst", "projectconfig", "hookpostcommand", "hookpostcommand2", "timer", "atexit"]);
         assert_eq!(discovery_files(&discovery), 0, "no server before the first tick");
         // Loading again registers nothing more.
         assert_eq!(unsafe { ReaperPluginEntry(null_mut(), &mut info(api::REAPER_PLUGIN_VERSION)) }, 1);
-        assert_eq!(registered().len(), 5);
+        assert_eq!(registered().len(), 7);
 
         hook("timer")();
         assert_eq!(discovery_files(&discovery), 1);
@@ -317,11 +347,11 @@ mod tests {
 
         // Unloading says goodbye to REAPER and to Kumi; the quit hook coming after it does nothing more.
         assert_eq!(unsafe { ReaperPluginEntry(null_mut(), null_mut()) }, 0);
-        assert_eq!(registered()[5..], ["-timer", "-projectconfig", "-csurf_inst"]);
+        assert_eq!(registered()[7..], ["-timer", "-hookpostcommand2", "-hookpostcommand", "-projectconfig", "-csurf_inst"]);
         assert_eq!(discovery_files(&discovery), 0);
         hook("atexit")();
         on_timer();
-        assert_eq!(registered().len(), 8);
+        assert_eq!(registered().len(), 12);
     }
 
     thread_local! {

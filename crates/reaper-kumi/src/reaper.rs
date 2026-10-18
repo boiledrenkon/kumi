@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::api::{self, Api, MediaItem, MediaItem_Take, MediaTrack, ReaProject, TrackEnvelope};
 
 mod objects;
+mod write;
 pub use objects::*;
 
 /// File: Quit REAPER.

@@ -218,6 +218,7 @@ enum Quit {
 pub struct Extension {
     api: Api,
     reads: Reads,
+    changes: crate::changes::Changes,
     focus: Focus,
     jobs: Receiver<Job>,
     out: Box<dyn Outbox>,
@@ -241,6 +242,7 @@ impl Extension {
         let extension = Extension {
             api,
             reads: Reads::default(),
+            changes: Default::default(),
             focus: Focus::default(),
             jobs,
             out,
@@ -304,6 +306,16 @@ impl Extension {
         0
     }
 
+    /// REAPER ran an action (the post-command hooks): the undo history is looked at on the next tick.
+    pub fn nudge(&self) {
+        self.changes.nudge();
+    }
+
+    /// The extension is going: a plan's open undo block is closed.
+    pub fn stop(&self) {
+        self.changes.stop(&self.reaper(), &self.reads);
+    }
+
     pub fn tick(&self, driver: Driver) {
         // A request's REAPER call can call back into the surface (Run included): that tick is skipped.
         if self.in_tick.replace(true) {
@@ -331,6 +343,8 @@ impl Extension {
         }
         if busy.is_none() {
             self.poll_focus();
+            // The producer's undo of Kumi's changes; a plan left open.
+            self.changes.tick(&self.reaper(), &self.reads, &*self.out);
         }
         self.flush_events();
         self.refresh_snapshot(busy);
@@ -382,6 +396,12 @@ impl Extension {
             "read" => self.reads.read(&self.reaper(), params),
             "snapshot" => self.reads.snapshot(&self.reaper()),
             "focus_body" => self.reads.focus_body(&self.reaper(), params),
+            "change_preview" => self.changes.preview(&self.reaper(), &self.reads, params),
+            "change_apply" => self.changes.apply(&self.reaper(), &self.reads, params),
+            "change_restore" => self.changes.restore(&self.reaper(), &self.reads, params),
+            "transport_stop" => self.changes.transport_stop(&self.reaper()),
+            "undo_step_begin" => self.changes.step_begin(&self.reaper(), &self.reads, params),
+            "undo_step_end" => self.changes.step_end(&self.reaper(), &self.reads, params),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),
         }
     }

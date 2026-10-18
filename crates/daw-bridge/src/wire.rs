@@ -203,6 +203,8 @@ pub mod event {
     pub const TRANSPORT: &str = "transport";
     pub const TRACKS: &str = "tracks";
     pub const SELECTION: &str = "selection";
+    /// The producer undid or redid Kumi's changes in the DAW itself: data is `{descs, how: undo|redo}`.
+    pub const UNDONE_IN_DAW: &str = "undone_in_daw";
 }
 
 /// What a line could not be.
