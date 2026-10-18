@@ -6,10 +6,9 @@ pub mod auth;
 pub mod command;
 pub mod core;
 pub mod devices;
-pub mod hands;
 pub mod integrations;
 // Live's own parts, at the paths they always had.
-pub use integrations::ears;
+pub use integrations::{ears, hands};
 pub mod kernel;
 pub mod library;
 pub mod listening;

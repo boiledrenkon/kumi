@@ -9,10 +9,10 @@ use crate::core::daw::{DawId, DawProfile};
 use crate::core::presentation::ToolPresentation;
 use crate::core::view::ViewPresentation;
 
-pub use ableton::ears;
 pub use ableton::focus::parse_focus;
 pub use ableton::project::{create_project_store, Baseline, ProjectStore};
 pub use ableton::{create_ableton_integration, create_inference_only_integration, BRIDGE_TOOLS};
+pub use ableton::{ears, hands};
 
 /// The DAWs this build integrates, by profile: Live only, for now.
 pub const REGISTERED: &[&DawProfile] = &[&DawProfile::ABLETON];

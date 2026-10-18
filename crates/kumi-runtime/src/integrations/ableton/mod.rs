@@ -17,6 +17,7 @@ pub mod execution_services;
 pub mod fast;
 pub mod focus;
 pub mod fold;
+pub mod hands;
 pub mod history;
 mod inference;
 pub mod instant;
