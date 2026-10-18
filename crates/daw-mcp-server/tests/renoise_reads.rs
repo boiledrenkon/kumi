@@ -107,3 +107,34 @@ async fn pages_bigger_than_the_credit_window_arrive_as_the_host_reads() {
     assert!(client.max_unread_credit() <= window);
     simulator.stop();
 }
+
+/// Another song is opened: the epoch moves, refs and cursors from before are refused as stale, and the answers carry the
+/// new epoch, which reads the same.
+#[tokio::test]
+async fn a_song_switched_retires_the_refs_and_cursors_from_before() {
+    let secret = secret();
+    let script = RenoiseScript::new();
+    let simulator = Simulator::start(script.config(secret.clone(), "/lab/Renoise")).await.unwrap();
+    let client = BridgeClient::connect(simulator.address(), secret, "daw-mcp-server/test").await.unwrap();
+    let page = client.request("read", json!({"kind": "track", "limit": 2}), WAIT).await.unwrap();
+    assert_eq!(page["epoch"], "1");
+    script.switch_song();
+    let stale = |error: RequestError| matches!(error, RequestError::Bridge { code, .. } if code == "stale");
+    assert!(stale(client.request("read", json!({"kind": "track", "limit": 2, "cursor": page["nextCursor"]}), WAIT).await.unwrap_err()));
+    assert!(stale(client.request("read", json!({"ref": "1:track:3"}), WAIT).await.unwrap_err()));
+    assert!(stale(client.request("focus_body", json!({"kind": "dsp", "ref": "1:track:1"}), WAIT).await.unwrap_err()));
+    // The new epoch is in every answer, and what is asked with it reads as before.
+    let again = client.request("read", json!({"kind": "track", "limit": 2}), WAIT).await.unwrap();
+    assert_eq!(again["epoch"], "2");
+    assert_eq!(again["items"][0]["ref"], "2:track:1");
+    assert_eq!(again["nextCursor"], "2.3");
+    let rest = client.request("read", json!({"kind": "track", "limit": 2, "cursor": again["nextCursor"]}), WAIT).await.unwrap();
+    assert_eq!(rest["items"][0]["ref"], "2:track:3");
+    let one = client.request("read", json!({"ref": "2:track:3"}), WAIT).await.unwrap();
+    assert_eq!(one["items"][0]["name"], "Drums");
+    assert_eq!(one["items"][0]["groupRef"], "2:track:5");
+    let focus = client.request("focus", json!({}), WAIT).await.unwrap();
+    assert_eq!(focus["epoch"], "2");
+    assert_eq!(focus["selection"]["trackRef"], "2:track:1");
+    simulator.stop();
+}

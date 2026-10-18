@@ -1076,6 +1076,138 @@
         "method": "focus_body",
         "params": {
           "kind": "pattern",
+          "ref": "1:pattern:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "cursor": 1,
+          "epoch": "1",
+          "from": 1,
+          "lines": 32,
+          "lpb": 4,
+          "name": "",
+          "ref": "1:pattern:1",
+          "tracks": [
+            {
+              "color": "#ff0000",
+              "effectColumns": 1,
+              "lines": [
+                {
+                  "line": 1,
+                  "notes": [
+                    {
+                      "col": 1,
+                      "instrument": "00",
+                      "note": "C-4"
+                    }
+                  ]
+                },
+                {
+                  "line": 5,
+                  "notes": [
+                    {
+                      "col": 1,
+                      "fx": "0A20",
+                      "instrument": "00",
+                      "note": "D#4",
+                      "volume": "40"
+                    }
+                  ]
+                }
+              ],
+              "name": "Kick",
+              "noteColumns": 1,
+              "ref": "1:track:1"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Hat",
+              "noteColumns": 1,
+              "ref": "1:track:2"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Drums",
+              "noteColumns": 1,
+              "ref": "1:track:3"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [
+                {
+                  "line": 3,
+                  "notes": [
+                    {
+                      "col": 1,
+                      "instrument": "01",
+                      "note": "C-3"
+                    },
+                    {
+                      "col": 2,
+                      "note": "OFF"
+                    }
+                  ]
+                }
+              ],
+              "name": "Bass",
+              "noteColumns": 2,
+              "ref": "1:track:4"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 2,
+              "lines": [
+                {
+                  "effects": [
+                    {
+                      "amount": "40",
+                      "col": 1,
+                      "number": "0A"
+                    }
+                  ],
+                  "line": 2
+                }
+              ],
+              "name": "Mix",
+              "noteColumns": 1,
+              "ref": "1:track:5"
+            },
+            {
+              "color": "#dcdcdc",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Master",
+              "noteColumns": 1,
+              "ref": "1:track:6"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Send 1",
+              "noteColumns": 1,
+              "ref": "1:track:7"
+            }
+          ],
+          "window": {
+            "from": 1,
+            "to": 32
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "focus_body",
+        "params": {
+          "kind": "pattern",
           "window": {
             "from": 3,
             "to": 6
