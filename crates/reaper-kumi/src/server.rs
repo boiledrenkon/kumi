@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender, SyncSender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -43,6 +43,10 @@ const STOP_GRACE: Duration = Duration::from_millis(500);
 const DISCOVERY_RETRY: Duration = Duration::from_secs(5);
 /// The accept loop waits this long after a failed accept (out of file descriptors, say) rather than spin.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// How often a connection's writer looks whether the server has said everything it will: its outbox may be kept open by
+/// a sender nobody dropped, and stopping must not wait for that.
+const WRITER_POLL: Duration = Duration::from_millis(50);
 
 const CLOSING: &str = "REAPER is closing; nothing changed";
 
@@ -174,12 +178,19 @@ pub struct Server {
     port: u16,
     hub: Hub,
     stopping: Arc<AtomicBool>,
+    /// Set by stop() once the byes are queued: a writer with nothing left to write may end.
+    flushed: Arc<AtomicBool>,
     accept: Option<JoinHandle<()>>,
     threads: Arc<Mutex<Vec<Spawned>>>,
     started_ms: u64,
     discovery: Option<(PathBuf, Option<ProjectSummary>)>,
     /// When writing the discovery file last failed, and what it said (logged once).
     discovery_failure: Option<(Instant, String)>,
+}
+
+/// The connections a stopping server has to say goodbye to.
+struct Closing {
+    conns: Vec<Arc<Conn>>,
 }
 
 /// One connection's threads, and its socket for stop() to close.
@@ -207,8 +218,16 @@ impl Server {
     pub fn start(listener: TcpListener, config: Config, hub: Hub, jobs: Sender<Job>, snapshot: Arc<Mutex<Snapshot>>) -> io::Result<Server> {
         let port = listener.local_addr()?.port();
         let stopping = Arc::new(AtomicBool::new(false));
+        let flushed = Arc::new(AtomicBool::new(false));
         let threads = Arc::new(Mutex::new(Vec::new()));
-        let shared = Shared { config: config.clone(), hub: hub.clone(), jobs: Mutex::new(jobs), snapshot, stopping: stopping.clone() };
+        let shared = Shared {
+            config: config.clone(),
+            hub: hub.clone(),
+            jobs: Mutex::new(jobs),
+            snapshot,
+            stopping: stopping.clone(),
+            flushed: flushed.clone(),
+        };
         let shared = Arc::new(shared);
         let accept = {
             let threads = threads.clone();
@@ -221,6 +240,7 @@ impl Server {
             port,
             hub,
             stopping,
+            flushed,
             accept: Some(accept),
             threads,
             started_ms: unix_ms(),
@@ -276,10 +296,21 @@ impl Server {
     /// closes every connection and waits for the threads. Bounded: nothing it waits for waits on the main thread, and
     /// a peer that stopped reading is cut off after a grace.
     pub fn stop(mut self, reason: &str) {
-        // The connections as they are now: a reader that sees `stopping` first answers, leaves the hub and ends, and
-        // would otherwise be missed here and never told goodbye.
-        let mut conns = self.hub.conns();
+        let closing = self.begin_stop();
+        self.finish_stop(closing, reason);
+    }
+
+    /// The first step of stopping: the connections as they are now, taken before anything can wake a reader. A reader
+    /// that sees `stopping` first answers, leaves the hub and ends, and would otherwise be missed afterwards and never
+    /// told goodbye. Requests waiting for the main thread are answered "closing" from here on.
+    fn begin_stop(&mut self) -> Closing {
+        let conns = self.hub.conns();
         self.stopping.store(true, Ordering::Release);
+        Closing { conns }
+    }
+
+    fn finish_stop(mut self, closing: Closing, reason: &str) {
+        let mut conns = closing.conns;
         if let Some((path, _)) = self.discovery.take() {
             let _ = std::fs::remove_file(path);
         }
@@ -303,6 +334,7 @@ impl Server {
             let _ = conn.out.try_send(Frame::Bye { reason: reason.into() }.encode());
         }
         // Each writer ends once its outbox (the bye last) is written.
+        self.flushed.store(true, Ordering::Release);
         drop(conns);
         wait_until(|| spawned.iter().all(Spawned::finished));
         for s in &spawned {
@@ -329,6 +361,7 @@ struct Shared {
     jobs: Mutex<Sender<Job>>,
     snapshot: Arc<Mutex<Snapshot>>,
     stopping: Arc<AtomicBool>,
+    flushed: Arc<AtomicBool>,
 }
 
 impl Shared {
@@ -500,10 +533,19 @@ fn spawn_connection(id: u64, stream: TcpStream, state: ServerConnection, started
     let mut writer = stream.try_clone()?;
     let closer = stream.try_clone()?;
     let stopping = shared.stopping.clone();
+    let flushed = shared.flushed.clone();
     let write = thread::Builder::new().name("kumi-write".into()).spawn(move || {
-        for bytes in rx {
-            if !write_frame(&mut writer, &bytes, &stopping) {
-                break;
+        loop {
+            match rx.recv_timeout(WRITER_POLL) {
+                Ok(bytes) => {
+                    if !write_frame(&mut writer, &bytes, &stopping) {
+                        break;
+                    }
+                }
+                // Idle, and the server has said all it will: done, whoever still holds the outbox open.
+                Err(RecvTimeoutError::Timeout) if flushed.load(Ordering::Acquire) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
         let _ = writer.shutdown(Shutdown::Both);
@@ -616,6 +658,7 @@ mod tests {
         hub: Hub,
         snapshot: Arc<Mutex<Snapshot>>,
         jobs: mpsc::Receiver<Job>,
+        tx: mpsc::Sender<Job>,
     }
 
     impl Lab {
@@ -642,8 +685,8 @@ mod tests {
             let hub = Hub::default();
             let (tx, jobs) = queue::channel();
             let listener = TcpListener::bind((loopback::BIND_ADDRESS, 0)).unwrap();
-            let server = Server::start(listener, config, hub.clone(), tx, snapshot.clone()).unwrap();
-            Lab { dir, server: Some(server), hub, snapshot, jobs }
+            let server = Server::start(listener, config, hub.clone(), tx.clone(), snapshot.clone()).unwrap();
+            Lab { dir, server: Some(server), hub, snapshot, jobs, tx }
         }
 
         fn server(&mut self) -> &mut Server {
@@ -904,6 +947,44 @@ mod tests {
         assert!(response["error"]["message"].as_str().unwrap().contains("closing"));
         assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
         assert_eq!(read_line(&mut reader), None);
+    }
+
+    #[test]
+    fn a_host_whose_reader_left_before_the_stop_took_its_list_is_still_told_goodbye() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        let request = Request { id: 1, method: "action".into(), params: json!({"command": 40001}), deadline_ms: None };
+        stream.write_all(&Frame::Request(request).encode()).unwrap();
+        // The request is waiting for the main thread (it is in the queue, put back for the server's sake).
+        let job = lab.jobs.recv_timeout(Duration::from_secs(5)).unwrap();
+        lab.tx.send(job).unwrap();
+        let mut server = lab.server.take().unwrap();
+        let closing = server.begin_stop();
+        // The race, made certain: the reader answers "closing" and leaves the hub before the stop goes any further.
+        let until = Instant::now() + Duration::from_secs(5);
+        while server.hub.connections() > 0 && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(server.hub.connections(), 0, "the reader should have left");
+        server.finish_stop(closing, "quit");
+        let response = read_frame(&mut reader);
+        assert_eq!((response["id"].as_u64(), response["error"]["code"].as_str()), (Some(1), Some(code::FAILED)));
+        assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
+        assert_eq!(read_line(&mut reader), None);
+    }
+
+    #[test]
+    fn an_outbox_somebody_still_holds_open_cant_hold_up_stop() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (_stream, mut reader, _) = lab.authenticated();
+        // A sender nobody dropped: the writer's channel never closes by itself.
+        let held = lab.hub.conns();
+        assert_eq!(held.len(), 1);
+        let started = Instant::now();
+        lab.server.take().unwrap().stop("quit");
+        assert!(started.elapsed() < Duration::from_secs(3), "stop took {:?}", started.elapsed());
+        assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
+        drop(held);
     }
 
     #[test]
