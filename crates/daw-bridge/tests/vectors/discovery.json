@@ -1,5 +1,5 @@
 {
-  "about": "key = the first 16 lowercase hex of SHA-256(the resource path's UTF-8 bytes, exactly as given); file name = <daw>-<pid>-<key>.json.",
+  "about": "key = the first 16 lowercase hex of SHA-256(the resource path's UTF-8 bytes, exactly as given); file name = <daw>-<pid>-<key>.json, pid 0 when the bridge can't learn it.",
   "cases": [
     {
       "daw": "reaper",
@@ -31,10 +31,10 @@
     },
     {
       "daw": "renoise",
-      "pid": 1004,
+      "pid": 0,
       "resource": "C:\\Users\\Kümi\\AppData\\Roaming\\Renoise\\V3.5.4",
       "key": "408e5202da343279",
-      "fileName": "renoise-1004-408e5202da343279.json"
+      "fileName": "renoise-0-408e5202da343279.json"
     },
     {
       "daw": "reaper",

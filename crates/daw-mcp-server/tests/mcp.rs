@@ -167,3 +167,29 @@ async fn initialize_negotiates_the_protocol_version() {
     assert_eq!(junk["error"]["code"], -32600);
     session.finish().await;
 }
+
+#[tokio::test]
+async fn a_bridge_without_a_pid_is_checked_by_connecting() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BridgePaths::new(home.path(), Daw::Renoise);
+    let secret = ensure_secret(&paths.secret()).unwrap();
+    let mut config = SimulatorConfig::renoise(secret, "C:\\Users\\kumi\\AppData\\Roaming\\Renoise\\V3.5.4");
+    config.identity.pid = 0;
+    config.discovery_dir = Some(paths.discovery());
+    let simulator = Simulator::start(config).await.unwrap();
+    let mut session = Session::start(Daw::Renoise, home.path());
+    let status = session.tool(1, "status", json!({})).await;
+    assert_eq!((status["connected"].clone(), status["pid"].clone()), (json!(true), json!(0)));
+
+    // Gone without removing its file (a crash): the port refuses, so the file is stale.
+    let mut stale = simulator.discovery();
+    stale.resource = "C:\\elsewhere\\V3.5.4".into();
+    stale.port = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap().local_addr().unwrap().port();
+    std::fs::write(paths.discovery().join(stale.file_name()), serde_json::to_string(&stale).unwrap()).unwrap();
+    let found = session.tool(2, "discover", json!({})).await;
+    assert_eq!(found["staleRemoved"], 1);
+    assert_eq!(found["instances"].as_array().unwrap().len(), 1);
+    assert!(!paths.discovery().join(stale.file_name()).exists());
+    simulator.stop();
+    session.finish().await;
+}
