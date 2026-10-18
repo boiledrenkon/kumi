@@ -1,0 +1,1507 @@
+{
+  "cases": [
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "song"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "bpm": 128,
+              "editMode": false,
+              "followPlayer": false,
+              "id": "b9e741f2bc26a406294ae3e2318dbafc",
+              "identity": "4242:2",
+              "lpb": 4,
+              "name": "Demo",
+              "path": "/s/demo.xrns",
+              "patternCount": 3,
+              "playing": false,
+              "sequenceLength": 4,
+              "tpl": 6
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "track",
+          "limit": 2
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "color": "#ff0000",
+              "colorBlend": 0,
+              "deviceCount": 2,
+              "effectColumns": 1,
+              "groupRef": "1:track:3",
+              "index": 1,
+              "mute": "active",
+              "name": "Kick",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:1",
+              "solo": false,
+              "type": "sequencer",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:3",
+              "index": 2,
+              "mute": "active",
+              "name": "Hat",
+              "noteColumns": 1,
+              "pan": 1,
+              "ref": "1:track:2",
+              "solo": false,
+              "type": "sequencer",
+              "volumeDb": -6.020599913279624
+            }
+          ],
+          "nextCursor": "1.3"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "cursor": "1.3",
+          "kind": "track",
+          "limit": 2
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:5",
+              "index": 3,
+              "mute": "active",
+              "name": "Drums",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:3",
+              "solo": false,
+              "type": "group",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:5",
+              "index": 4,
+              "mute": "active",
+              "name": "Bass",
+              "noteColumns": 2,
+              "pan": 0,
+              "ref": "1:track:4",
+              "solo": false,
+              "type": "sequencer",
+              "volumeDb": 0
+            }
+          ],
+          "nextCursor": "1.5"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "track",
+          "limit": 200
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "color": "#ff0000",
+              "colorBlend": 0,
+              "deviceCount": 2,
+              "effectColumns": 1,
+              "groupRef": "1:track:3",
+              "index": 1,
+              "mute": "active",
+              "name": "Kick",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:1",
+              "solo": false,
+              "type": "sequencer",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:3",
+              "index": 2,
+              "mute": "active",
+              "name": "Hat",
+              "noteColumns": 1,
+              "pan": 1,
+              "ref": "1:track:2",
+              "solo": false,
+              "type": "sequencer",
+              "volumeDb": -6.020599913279624
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:5",
+              "index": 3,
+              "mute": "active",
+              "name": "Drums",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:3",
+              "solo": false,
+              "type": "group",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:5",
+              "index": 4,
+              "mute": "active",
+              "name": "Bass",
+              "noteColumns": 2,
+              "pan": 0,
+              "ref": "1:track:4",
+              "solo": false,
+              "type": "sequencer",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 2,
+              "groupRef": null,
+              "index": 5,
+              "mute": "active",
+              "name": "Mix",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:5",
+              "solo": false,
+              "type": "group",
+              "volumeDb": 0
+            },
+            {
+              "color": "#dcdcdc",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": null,
+              "index": 6,
+              "name": "Master",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:6",
+              "type": "master",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": null,
+              "index": 7,
+              "mute": "active",
+              "name": "Send 1",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:7",
+              "solo": false,
+              "type": "send",
+              "volumeDb": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "sequence"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "mutedTracks": [],
+              "patternRef": "1:pattern:1",
+              "ref": "1:seq:1",
+              "section": "Intro"
+            },
+            {
+              "mutedTracks": [],
+              "patternRef": "1:pattern:2",
+              "ref": "1:seq:2",
+              "section": null
+            },
+            {
+              "mutedTracks": [
+                2
+              ],
+              "patternRef": "1:pattern:1",
+              "ref": "1:seq:3",
+              "section": null
+            },
+            {
+              "mutedTracks": [],
+              "patternRef": "1:pattern:3",
+              "ref": "1:seq:4",
+              "section": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "pattern"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "aliases": {},
+              "lines": 32,
+              "name": "",
+              "ref": "1:pattern:1"
+            },
+            {
+              "aliases": {
+                "2": 1
+              },
+              "lines": 32,
+              "name": "",
+              "ref": "1:pattern:2"
+            },
+            {
+              "aliases": {},
+              "lines": 32,
+              "name": "",
+              "ref": "1:pattern:3"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "line",
+          "parent": "1:pattern:1",
+          "track": 1
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "line": 1,
+              "notes": [
+                {
+                  "col": 1,
+                  "instrument": "00",
+                  "note": "C-4"
+                }
+              ]
+            },
+            {
+              "line": 5,
+              "notes": [
+                {
+                  "col": 1,
+                  "fx": "0A20",
+                  "instrument": "00",
+                  "note": "D#4",
+                  "volume": "40"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "line",
+          "limit": 1,
+          "parent": "1:pattern:1",
+          "track": 1
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "line": 1,
+              "notes": [
+                {
+                  "col": 1,
+                  "instrument": "00",
+                  "note": "C-4"
+                }
+              ]
+            }
+          ],
+          "nextCursor": "1.5"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "instrument"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "index": 1,
+              "macros": [
+                {
+                  "name": "Cutoff",
+                  "value": 0.75
+                },
+                {
+                  "name": "Macro 2",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 3",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 4",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 5",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 6",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 7",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 8",
+                  "value": 0
+                }
+              ],
+              "name": "Kit",
+              "phraseCount": 1,
+              "plugin": null,
+              "ref": "1:instrument:1",
+              "sampleCount": 2
+            },
+            {
+              "index": 2,
+              "macros": [
+                {
+                  "name": "Macro 1",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 2",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 3",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 4",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 5",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 6",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 7",
+                  "value": 0
+                },
+                {
+                  "name": "Macro 8",
+                  "value": 0
+                }
+              ],
+              "name": "Pad",
+              "phraseCount": 0,
+              "plugin": "Serum",
+              "ref": "1:instrument:2",
+              "sampleCount": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "sample",
+          "parent": "1:instrument:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "baseNote": 48,
+              "index": 1,
+              "loop": "off",
+              "muteGroup": 0,
+              "name": "Sample 1",
+              "noteRange": [
+                0,
+                119
+              ],
+              "ref": "1:sample:1.1",
+              "velocityRange": [
+                0,
+                127
+              ]
+            },
+            {
+              "baseNote": 48,
+              "index": 2,
+              "loop": "off",
+              "muteGroup": 0,
+              "name": "Sample 2",
+              "noteRange": [
+                0,
+                119
+              ],
+              "ref": "1:sample:1.2",
+              "velocityRange": [
+                0,
+                127
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "phrase",
+          "parent": "1:instrument:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "index": 1,
+              "keyTracking": "none",
+              "lines": 16,
+              "looping": true,
+              "lpb": 4,
+              "name": "Phrase 1",
+              "ref": "1:phrase:1.1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "device",
+          "parent": "1:track:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "active": true,
+              "displayName": "EQ 5",
+              "index": 1,
+              "isDoofer": false,
+              "isSplitter": false,
+              "name": "EQ 5",
+              "paramCount": 2,
+              "path": "Audio/Effects/Native/EQ 5",
+              "plugin": false,
+              "preset": "Bright",
+              "ref": "1:device:1.1"
+            },
+            {
+              "active": true,
+              "displayName": "Doofer",
+              "index": 2,
+              "isDoofer": true,
+              "isSplitter": false,
+              "name": "Doofer",
+              "paramCount": 0,
+              "path": "Audio/Effects/Native/Doofer",
+              "plugin": false,
+              "preset": null,
+              "ref": "1:device:1.2"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "param",
+          "parent": "1:device:1.1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "index": 1,
+              "max": 1,
+              "min": 0,
+              "name": "Gain",
+              "ref": "1:param:1.1.1",
+              "value": 0.5,
+              "valueString": "0.50"
+            },
+            {
+              "index": 2,
+              "max": 1,
+              "min": 0,
+              "name": "Freq",
+              "ref": "1:param:1.1.2",
+              "value": 0.25,
+              "valueString": "0.25"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "ref": "1:track:3"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:5",
+              "index": 3,
+              "mute": "active",
+              "name": "Drums",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:3",
+              "solo": false,
+              "type": "group",
+              "volumeDb": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "snapshot",
+        "params": {}
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "changed": 10,
+          "epoch": "1",
+          "project": {
+            "bpm": 128,
+            "editMode": false,
+            "followPlayer": false,
+            "id": "b9e741f2bc26a406294ae3e2318dbafc",
+            "identity": "4242:2",
+            "lpb": 4,
+            "name": "Demo",
+            "path": "/s/demo.xrns",
+            "patternCount": 3,
+            "playing": false,
+            "sequenceLength": 4,
+            "tpl": 6
+          },
+          "selection": {
+            "cursor": {
+              "column": 1,
+              "columnKind": "note",
+              "line": 1,
+              "sequence": 1,
+              "track": 1
+            },
+            "deviceName": "Doofer",
+            "deviceRef": "1:device:1.2",
+            "instrumentName": "Kit",
+            "instrumentRef": "1:instrument:1",
+            "line": 1,
+            "patternName": "",
+            "patternRef": "1:pattern:1",
+            "phraseRef": "1:phrase:1.1",
+            "sampleRef": "1:sample:1.2",
+            "sequence": 1,
+            "sequenceRef": "1:seq:1",
+            "track": {
+              "color": "#ff0000",
+              "name": "Kick",
+              "type": "sequencer"
+            },
+            "trackRef": "1:track:1"
+          },
+          "tracks": [
+            {
+              "color": "#ff0000",
+              "colorBlend": 0,
+              "deviceCount": 2,
+              "effectColumns": 1,
+              "groupRef": "1:track:3",
+              "index": 1,
+              "mute": "active",
+              "name": "Kick",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:1",
+              "solo": false,
+              "type": "sequencer",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:3",
+              "index": 2,
+              "mute": "active",
+              "name": "Hat",
+              "noteColumns": 1,
+              "pan": 1,
+              "ref": "1:track:2",
+              "solo": false,
+              "type": "sequencer",
+              "volumeDb": -6.020599913279624
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:5",
+              "index": 3,
+              "mute": "active",
+              "name": "Drums",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:3",
+              "solo": false,
+              "type": "group",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": "1:track:5",
+              "index": 4,
+              "mute": "active",
+              "name": "Bass",
+              "noteColumns": 2,
+              "pan": 0,
+              "ref": "1:track:4",
+              "solo": false,
+              "type": "sequencer",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 2,
+              "groupRef": null,
+              "index": 5,
+              "mute": "active",
+              "name": "Mix",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:5",
+              "solo": false,
+              "type": "group",
+              "volumeDb": 0
+            },
+            {
+              "color": "#dcdcdc",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": null,
+              "index": 6,
+              "name": "Master",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:6",
+              "type": "master",
+              "volumeDb": 0
+            },
+            {
+              "color": "#29a699",
+              "colorBlend": 0,
+              "deviceCount": 0,
+              "effectColumns": 1,
+              "groupRef": null,
+              "index": 7,
+              "mute": "active",
+              "name": "Send 1",
+              "noteColumns": 1,
+              "pan": 0,
+              "ref": "1:track:7",
+              "solo": false,
+              "type": "send",
+              "volumeDb": 0
+            }
+          ],
+          "transport": {
+            "beat": 0,
+            "beatsPerBar": 4,
+            "bpm": 128,
+            "editMode": false,
+            "followPlayer": false,
+            "line": 1,
+            "loop": {
+              "block": false,
+              "end": 16,
+              "on": false,
+              "pattern": false,
+              "start": 0
+            },
+            "lpb": 4,
+            "playing": false,
+            "recording": false,
+            "sequence": 1,
+            "tempo": 128,
+            "tpl": 6
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "focus",
+        "params": {}
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "changed": 10,
+          "dspVisible": false,
+          "epoch": "1",
+          "matrixVisible": false,
+          "selection": {
+            "cursor": {
+              "column": 1,
+              "columnKind": "note",
+              "line": 1,
+              "sequence": 1,
+              "track": 1
+            },
+            "deviceName": "Doofer",
+            "deviceRef": "1:device:1.2",
+            "instrumentName": "Kit",
+            "instrumentRef": "1:instrument:1",
+            "line": 1,
+            "patternName": "",
+            "patternRef": "1:pattern:1",
+            "phraseRef": "1:phrase:1.1",
+            "sampleRef": "1:sample:1.2",
+            "sequence": 1,
+            "sequenceRef": "1:seq:1",
+            "track": {
+              "color": "#ff0000",
+              "name": "Kick",
+              "type": "sequencer"
+            },
+            "trackRef": "1:track:1"
+          },
+          "transport": {
+            "beat": 0,
+            "beatsPerBar": 4,
+            "bpm": 128,
+            "editMode": false,
+            "followPlayer": false,
+            "line": 1,
+            "loop": {
+              "block": false,
+              "end": 16,
+              "on": false,
+              "pattern": false,
+              "start": 0
+            },
+            "lpb": 4,
+            "playing": false,
+            "recording": false,
+            "sequence": 1,
+            "tempo": 128,
+            "tpl": 6
+          },
+          "view": "pattern"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "focus_body",
+        "params": {
+          "kind": "pattern"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "cursor": 1,
+          "epoch": "1",
+          "from": 1,
+          "lines": 32,
+          "lpb": 4,
+          "name": "",
+          "ref": "1:pattern:1",
+          "tracks": [
+            {
+              "color": "#ff0000",
+              "effectColumns": 1,
+              "lines": [
+                {
+                  "line": 1,
+                  "notes": [
+                    {
+                      "col": 1,
+                      "instrument": "00",
+                      "note": "C-4"
+                    }
+                  ]
+                },
+                {
+                  "line": 5,
+                  "notes": [
+                    {
+                      "col": 1,
+                      "fx": "0A20",
+                      "instrument": "00",
+                      "note": "D#4",
+                      "volume": "40"
+                    }
+                  ]
+                }
+              ],
+              "name": "Kick",
+              "noteColumns": 1,
+              "ref": "1:track:1"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Hat",
+              "noteColumns": 1,
+              "ref": "1:track:2"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Drums",
+              "noteColumns": 1,
+              "ref": "1:track:3"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [
+                {
+                  "line": 3,
+                  "notes": [
+                    {
+                      "col": 1,
+                      "instrument": "01",
+                      "note": "C-3"
+                    },
+                    {
+                      "col": 2,
+                      "note": "OFF"
+                    }
+                  ]
+                }
+              ],
+              "name": "Bass",
+              "noteColumns": 2,
+              "ref": "1:track:4"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 2,
+              "lines": [
+                {
+                  "effects": [
+                    {
+                      "amount": "40",
+                      "col": 1,
+                      "number": "0A"
+                    }
+                  ],
+                  "line": 2
+                }
+              ],
+              "name": "Mix",
+              "noteColumns": 1,
+              "ref": "1:track:5"
+            },
+            {
+              "color": "#dcdcdc",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Master",
+              "noteColumns": 1,
+              "ref": "1:track:6"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Send 1",
+              "noteColumns": 1,
+              "ref": "1:track:7"
+            }
+          ],
+          "window": {
+            "from": 1,
+            "to": 32
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "focus_body",
+        "params": {
+          "kind": "pattern",
+          "window": {
+            "from": 3,
+            "to": 6
+          }
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "cursor": 1,
+          "epoch": "1",
+          "from": 3,
+          "lines": 32,
+          "lpb": 4,
+          "name": "",
+          "ref": "1:pattern:1",
+          "tracks": [
+            {
+              "color": "#ff0000",
+              "effectColumns": 1,
+              "lines": [
+                {
+                  "line": 5,
+                  "notes": [
+                    {
+                      "col": 1,
+                      "fx": "0A20",
+                      "instrument": "00",
+                      "note": "D#4",
+                      "volume": "40"
+                    }
+                  ]
+                }
+              ],
+              "name": "Kick",
+              "noteColumns": 1,
+              "ref": "1:track:1"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Hat",
+              "noteColumns": 1,
+              "ref": "1:track:2"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Drums",
+              "noteColumns": 1,
+              "ref": "1:track:3"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [
+                {
+                  "line": 3,
+                  "notes": [
+                    {
+                      "col": 1,
+                      "instrument": "01",
+                      "note": "C-3"
+                    },
+                    {
+                      "col": 2,
+                      "note": "OFF"
+                    }
+                  ]
+                }
+              ],
+              "name": "Bass",
+              "noteColumns": 2,
+              "ref": "1:track:4"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 2,
+              "lines": [],
+              "name": "Mix",
+              "noteColumns": 1,
+              "ref": "1:track:5"
+            },
+            {
+              "color": "#dcdcdc",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Master",
+              "noteColumns": 1,
+              "ref": "1:track:6"
+            },
+            {
+              "color": "#29a699",
+              "effectColumns": 1,
+              "lines": [],
+              "name": "Send 1",
+              "noteColumns": 1,
+              "ref": "1:track:7"
+            }
+          ],
+          "window": {
+            "from": 3,
+            "to": 6
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "focus_body",
+        "params": {
+          "kind": "matrix"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "current": 1,
+          "epoch": "1",
+          "slots": [
+            {
+              "aliases": {},
+              "mutedTracks": [],
+              "name": "",
+              "pattern": 1,
+              "ref": "1:seq:1",
+              "section": "Intro"
+            },
+            {
+              "aliases": {
+                "2": 1
+              },
+              "mutedTracks": [],
+              "name": "",
+              "pattern": 2,
+              "ref": "1:seq:2",
+              "section": null
+            },
+            {
+              "aliases": {},
+              "mutedTracks": [
+                2
+              ],
+              "name": "",
+              "pattern": 1,
+              "ref": "1:seq:3",
+              "section": null
+            },
+            {
+              "aliases": {},
+              "mutedTracks": [],
+              "name": "",
+              "pattern": 3,
+              "ref": "1:seq:4",
+              "section": null
+            }
+          ],
+          "trackRefs": [
+            "1:track:1",
+            "1:track:2",
+            "1:track:3",
+            "1:track:4",
+            "1:track:5",
+            "1:track:6",
+            "1:track:7"
+          ],
+          "tracks": [
+            "Kick",
+            "Hat",
+            "Drums",
+            "Bass",
+            "Mix",
+            "Master",
+            "Send 1"
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "focus_body",
+        "params": {
+          "kind": "phrase",
+          "ref": "1:phrase:1.1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "from": 1,
+          "instrumentRef": "1:instrument:1",
+          "keyTracking": "none",
+          "lines": 16,
+          "looping": true,
+          "lpb": 4,
+          "name": "Phrase 1",
+          "ref": "1:phrase:1.1",
+          "tracks": [
+            {
+              "color": null,
+              "effectColumns": 1,
+              "lines": [
+                {
+                  "line": 3,
+                  "notes": [
+                    {
+                      "col": 1,
+                      "note": "C-4"
+                    }
+                  ]
+                }
+              ],
+              "name": "Phrase 1",
+              "noteColumns": 1,
+              "ref": "1:phrase:1.1"
+            }
+          ],
+          "window": {
+            "from": 1,
+            "to": 16
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "focus_body",
+        "params": {
+          "kind": "instrument",
+          "ref": "1:instrument:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "keyzones": [
+            {
+              "baseNote": 48,
+              "noteRange": [
+                0,
+                119
+              ],
+              "sample": "Sample 1",
+              "sampleRef": "1:sample:1.1",
+              "velocityRange": [
+                0,
+                127
+              ]
+            },
+            {
+              "baseNote": 48,
+              "noteRange": [
+                0,
+                119
+              ],
+              "sample": "Sample 2",
+              "sampleRef": "1:sample:1.2",
+              "velocityRange": [
+                0,
+                127
+              ]
+            }
+          ],
+          "macros": [
+            {
+              "name": "Cutoff",
+              "value": 0.75
+            },
+            {
+              "name": "Macro 2",
+              "value": 0
+            },
+            {
+              "name": "Macro 3",
+              "value": 0
+            },
+            {
+              "name": "Macro 4",
+              "value": 0
+            },
+            {
+              "name": "Macro 5",
+              "value": 0
+            },
+            {
+              "name": "Macro 6",
+              "value": 0
+            },
+            {
+              "name": "Macro 7",
+              "value": 0
+            },
+            {
+              "name": "Macro 8",
+              "value": 0
+            }
+          ],
+          "name": "Kit",
+          "phrases": [
+            "Phrase 1"
+          ],
+          "plugin": null,
+          "ref": "1:instrument:1"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "focus_body",
+        "params": {
+          "kind": "dsp",
+          "ref": "1:track:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "name": "Kick",
+          "nodes": [
+            {
+              "childNodes": [],
+              "container": false,
+              "enabled": true,
+              "name": "EQ 5",
+              "plugin": false,
+              "ref": "1:device:1.1"
+            },
+            {
+              "childNodes": [],
+              "container": true,
+              "enabled": true,
+              "name": "Doofer",
+              "plugin": false,
+              "ref": "1:device:1.2"
+            }
+          ],
+          "ref": "1:track:1"
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "nonsense"
+        }
+      },
+      "response": {
+        "error": {
+          "code": "bad-params",
+          "message": "unknown kind nonsense (song, track, sequence, pattern, line, instrument, sample, phrase, device, param)"
+        },
+        "ok": false
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "line",
+          "track": 1
+        }
+      },
+      "response": {
+        "error": {
+          "code": "bad-params",
+          "message": "read of line needs a parent (pattern ref)"
+        },
+        "ok": false
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "ref": "0:track:1"
+        }
+      },
+      "response": {
+        "error": {
+          "code": "stale",
+          "message": "that ref is from an earlier epoch (0; now 1): read again"
+        },
+        "ok": false
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "cursor": "0.2",
+          "kind": "track"
+        }
+      },
+      "response": {
+        "error": {
+          "code": "stale",
+          "message": "that cursor is from an earlier epoch: read again from the start"
+        },
+        "ok": false
+      }
+    },
+    {
+      "request": {
+        "method": "focus_body",
+        "params": {
+          "kind": "pattern",
+          "window": {
+            "from": 5,
+            "to": 2
+          }
+        }
+      },
+      "response": {
+        "error": {
+          "code": "bad-params",
+          "message": "window.to is before window.from"
+        },
+        "ok": false
+      }
+    }
+  ],
+  "epoch": "1"
+}

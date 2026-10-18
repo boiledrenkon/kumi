@@ -2,6 +2,7 @@
 //! [`ServerConnection`], a scripted identity, and a transcript of every line, for the host's tests.
 use daw_bridge::auth::Secret;
 use daw_bridge::files::{write_discovery, Discovery, DISCOVERY_SCHEMA};
+use daw_bridge::frame::Framer;
 use daw_bridge::handshake::{Offer, ServerAction, ServerConnection};
 use daw_bridge::wire::{code, event, Frame, Identity, Project, Request, CREDIT_WINDOW_BYTES, PROTOCOL};
 use daw_bridge::Daw;
@@ -23,6 +24,7 @@ pub struct Line {
 }
 
 pub mod reaper;
+pub mod renoise;
 
 /// What a simulated bridge answers beyond `ping` and `status`: `Some(Ok(result))`, `Some(Err((code, message)))`, or None
 /// for a method it doesn't have.
@@ -257,6 +259,28 @@ fn answer(request: &Request, state: &Mutex<State>, config: &SimulatorConfig) -> 
     }
 }
 
+/// The most credit a bridge holds (the Renoise tool's cap).
+const MAX_CREDIT: u64 = 4 * 1024 * 1024;
+
+/// Whether a frame is sent whatever the credit: the handshake, and the bye (the tool ignores credit on unload).
+fn uncounted(bytes: &[u8]) -> bool {
+    let line = String::from_utf8_lossy(bytes);
+    let first = line.split('\n').next().unwrap_or("");
+    matches!(
+        Frame::parse(first.trim_end_matches('\r')),
+        Ok(Frame::Challenge { .. } | Frame::Welcome(_) | Frame::Refused { .. } | Frame::Bye { .. })
+    )
+}
+
+/// Where a frame goes: out at once (the handshake, the bye), or out within the credit.
+fn put(direct: &mut Vec<u8>, counted: &mut Vec<u8>, bytes: Vec<u8>) {
+    if uncounted(&bytes) {
+        direct.extend(bytes);
+    } else {
+        counted.extend(bytes);
+    }
+}
+
 async fn serve(
     stream: TcpStream,
     number: usize,
@@ -269,62 +293,87 @@ async fn serve(
     let clock = Instant::now();
     let mut connection = ServerConnection::new(config.secret.clone(), 0);
     let mut chunk = vec![0u8; 64 * 1024];
+    // A bridge that names `creditBytes` sends within the credit the host grants, as the Renoise tool does: what it may
+    // not send yet waits in `queue`, and a `credit` frame lets more go.
+    let limited = config.offer.credit_bytes.is_some();
+    let mut credit = config.offer.credit_bytes.unwrap_or(0);
+    let mut queue: Vec<u8> = vec![];
+    let mut host_lines = Framer::new(1 << 20);
     let mut heartbeat = tokio::time::interval(Duration::from_millis(config.offer.heartbeat_ms.max(1)));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let mut out: Vec<u8> = vec![];
+        let mut direct: Vec<u8> = vec![];
         let mut close = false;
         tokio::select! {
             read = reader.read(&mut chunk) => {
                 let count = match read { Ok(0) | Err(_) => return, Ok(count) => count };
                 record(&state, number, true, &chunk[..count]);
+                host_lines.feed(&chunk[..count]);
+                while let Some(Ok(line)) = host_lines.next_line() {
+                    if let Ok(Frame::Credit { bytes }) = Frame::parse(&line) {
+                        credit = (credit + bytes).min(MAX_CREDIT);
+                    }
+                }
                 let mut identity = || (state.lock().unwrap().identity.clone(), config.offer.clone());
                 for action in connection.on_bytes(&chunk[..count], clock.elapsed().as_millis() as u64, &mut identity) {
                     match action {
-                        ServerAction::Send(bytes) => out.extend(bytes),
+                        ServerAction::Send(bytes) => put(&mut direct, &mut out, bytes),
                         ServerAction::Close(_) => close = true,
                         ServerAction::Authenticated => {}
-                        ServerAction::Request(request) => out.extend(answer(&request, &state, &config).encode()),
+                        ServerAction::Request(request) => put(&mut direct, &mut out, answer(&request, &state, &config).encode()),
                     }
                 }
             }
             _ = heartbeat.tick() => {
                 for action in connection.on_tick(clock.elapsed().as_millis() as u64) {
                     match action {
-                        ServerAction::Send(bytes) => out.extend(bytes),
+                        ServerAction::Send(bytes) => put(&mut direct, &mut out, bytes),
                         ServerAction::Close(_) => close = true,
                         _ => {}
                     }
                 }
-                if connection.is_authenticated() && state.lock().unwrap().busy.is_none() {
-                    out.extend(Frame::Heartbeat { ms: clock.elapsed().as_millis() as u64 }.encode());
+                // (Not behind output that waits for credit, as in the tool.)
+                if connection.is_authenticated() && state.lock().unwrap().busy.is_none() && queue.is_empty() {
+                    put(&mut direct, &mut out, Frame::Heartbeat { ms: clock.elapsed().as_millis() as u64 }.encode());
                 }
             }
             sent = events.recv() => {
                 if let Ok((name, data)) = sent {
                     if let Some(bytes) = connection.event(&name, data) {
-                        out.extend(bytes);
+                        put(&mut direct, &mut out, bytes);
                     }
                 }
             }
             _ = stopped.changed() => {
                 if connection.is_authenticated() {
-                    out.extend(Frame::Bye { reason: "quit".into() }.encode());
+                    put(&mut direct, &mut out, Frame::Bye { reason: "quit".into() }.encode());
                 }
                 close = true;
             }
         }
-        if !out.is_empty() {
+        if !out.is_empty() || !direct.is_empty() {
             // Heartbeats are left out of the transcript: their timing isn't the test's.
-            let kept: Vec<u8> = String::from_utf8_lossy(&out)
+            let mut produced = direct.clone();
+            produced.extend_from_slice(&out);
+            let kept: Vec<u8> = String::from_utf8_lossy(&produced)
                 .split_inclusive('\n')
                 .filter(|line| !line.starts_with("{\"type\":\"heartbeat\""))
                 .collect::<String>()
                 .into_bytes();
             record(&state, number, false, &kept);
-            if writer.write_all(&out).await.is_err() {
-                return;
-            }
+        }
+        let mut send = direct;
+        if limited {
+            queue.extend(out);
+            let allowed = (queue.len() as u64).min(credit) as usize;
+            credit -= allowed as u64;
+            send.extend(queue.drain(..allowed));
+        } else {
+            send.extend(out);
+        }
+        if !send.is_empty() && writer.write_all(&send).await.is_err() {
+            return;
         }
         if close {
             let _ = writer.shutdown().await;

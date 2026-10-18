@@ -962,3 +962,83 @@ test("reads: a read whose deadline passes is ended, not finished for nobody", fu
   failure(response, "deadline")
   H.no_dialogs()
 end)
+
+-- What the tool answers to a fixed set of requests over the demo song, kept in a file the host's simulator replays
+-- (crates/daw-mcp-server/tests/vectors/renoise-reads.json), so the simulator can't drift from the tool. KUMI_BLESS=1
+-- writes the file; without it a difference fails the test.
+local function pretty(value, indent)
+  indent = indent or ""
+  if value == json.null then return "null" end
+  if type(value) ~= "table" then return json.encode(value) end
+  local inner = indent .. "  "
+  local parts = {}
+  if json.is_array(value) then
+    if #value == 0 then return "[]" end
+    for _, item in ipairs(value) do parts[#parts + 1] = inner .. pretty(item, inner) end
+    return "[\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "]"
+  end
+  local keys = {}
+  for key in pairs(value) do keys[#keys + 1] = key end
+  if #keys == 0 then return "{}" end
+  table.sort(keys)
+  for _, key in ipairs(keys) do parts[#parts + 1] = inner .. json.encode(key) .. ": " .. pretty(value[key], inner) end
+  return "{\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "}"
+end
+
+test("reads: the answers are the vectors the host's simulator replays", function()
+  local env, peer = setup()
+  fill_demo()
+  mock.ops.select_sample(2)
+  mock.ops.select_phrase(1)
+  mock.ops.select_device(2)
+  local E = epoch_of(peer)
+  local cases = {}
+  local function ask(method, params)
+    local response = call(peer, method, params)
+    ok(response, method .. " was not answered")
+    cases[#cases + 1] = { request = { method = method, params = params }, response = response.ok
+      and { ok = true, result = response.result } or { ok = false, error = response.error } }
+    return response
+  end
+  ask("read", { kind = "song" })
+  local first = ask("read", { kind = "track", limit = 2 })
+  ask("read", { kind = "track", limit = 2, cursor = first.result.nextCursor })
+  ask("read", { kind = "track", limit = 200 })
+  ask("read", { kind = "sequence" })
+  ask("read", { kind = "pattern" })
+  ask("read", { kind = "line", parent = E .. ":pattern:1", track = 1 })
+  ask("read", { kind = "line", parent = E .. ":pattern:1", track = 1, limit = 1 })
+  ask("read", { kind = "instrument" })
+  ask("read", { kind = "sample", parent = E .. ":instrument:1" })
+  ask("read", { kind = "phrase", parent = E .. ":instrument:1" })
+  ask("read", { kind = "device", parent = E .. ":track:1" })
+  ask("read", { kind = "param", parent = E .. ":device:1.1" })
+  ask("read", { ref = E .. ":track:3" })
+  ask("snapshot", {})
+  ask("focus", {})
+  ask("focus_body", { kind = "pattern" })
+  ask("focus_body", { kind = "pattern", window = { from = 3, to = 6 } })
+  ask("focus_body", { kind = "matrix" })
+  ask("focus_body", { kind = "phrase", ref = E .. ":phrase:1.1" })
+  ask("focus_body", { kind = "instrument", ref = E .. ":instrument:1" })
+  ask("focus_body", { kind = "dsp", ref = E .. ":track:1" })
+  ask("read", { kind = "nonsense" })
+  ask("read", { kind = "line", track = 1 })
+  ask("read", { ref = "0:track:1" })
+  ask("read", { kind = "track", cursor = "0.2" })
+  ask("focus_body", { kind = "pattern", window = { from = 5, to = 2 } })
+  H.no_dialogs()
+  local made = { epoch = E, cases = json.array(cases) }
+  local path = T.tests_dir .. "../../../crates/daw-mcp-server/tests/vectors/renoise-reads.json"
+  if os.getenv("KUMI_BLESS") == "1" then
+    assert(os.execute("mkdir -p '" .. path:match("^(.*)/[^/]*$") .. "'") == 0)
+    local file = assert(io.open(path, "wb"))
+    file:write(pretty(made), "\n")
+    file:close()
+    return
+  end
+  local file = assert(io.open(path, "rb"), "no vectors at " .. path .. ": run with KUMI_BLESS=1")
+  local kept = assert(json.decode(file:read("*a")))
+  file:close()
+  T.same(made, kept)
+end)

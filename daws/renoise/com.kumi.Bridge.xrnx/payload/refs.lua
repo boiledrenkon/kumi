@@ -22,8 +22,8 @@ end
 -- A ref of `kind` with `count` indices from the current epoch, or an error table for the request to fail with.
 ---@return integer[]
 function M.expect(text, kind, count, epoch)
-  local ref, why = M.parse(text)
-  if not ref then error({ code = "bad-params", message = "not a ref: " .. tostring(why) }, 0) end
+  local ref = M.parse(text)
+  if not ref then error({ code = "bad-params", message = "not a ref: " .. tostring(text) }, 0) end
   if ref.kind ~= kind or #ref.n ~= count then
     error({ code = "bad-params", message = "expected a " .. kind .. " ref, got " .. text }, 0)
   end
