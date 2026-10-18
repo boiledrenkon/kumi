@@ -1,6 +1,6 @@
 # Willington rack zones
 
-Exact-build rack zone access for Live **12.4.15b5/b6, macOS ARM64**.
+Exact-build rack zone access for Live **12.4.15b5/b6/b7, macOS ARM64**.
 This separate adapter leaves the existing follow-action and device adapters intact.
 Supports regular Instrument, MIDI Effect and Audio Effect Rack chains.
 Native reads/writes, undo/redo, Set persistence and Kumi transactions have retained
@@ -137,3 +137,8 @@ normal matrix bundles. Build with
 42 gating cases, 49 fade measurements with 14 attenuation comparisons, and
 seven actual Max `live.object` read/write/restore cycles. Native zone undo/redo
 and invalid-value rejection also pass. See the [b6 receipts](../../evidence/live-12.4.15b6-arm64/README.md).
+
+## Live 12.4.15b7 macOS ARM64
+
+The exact `live-12.4.15b7-arm64` profile participates in default selection and
+normal matrix bundles. See the [b7 evidence and coverage limits](../../evidence/live-12.4.15b7-arm64/README.md).
