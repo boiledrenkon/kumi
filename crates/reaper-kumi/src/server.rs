@@ -478,18 +478,21 @@ impl Shared {
         if !MAIN_METHODS.contains(&request.method.as_str()) {
             return Frame::error(id, code::UNKNOWN_METHOD, format!("the REAPER bridge has no method {:?}", request.method));
         }
-        // The main thread isn't ticking (a dialog, a long load): the work would sit until the wait ran out, and then
-        // be cancelled. Say so now.
-        if let Some(busy) = self.stalled() {
+        // The main thread isn't ticking (a long load), or a dialog has the main window: the work would sit until the wait
+        // ran out, and then be cancelled. Say so now.
+        if let Some(busy) = self.stalled().or_else(|| lock(&self.snapshot).busy.filter(|busy| *busy == Busy::Modal)) {
             return Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason()));
         }
         let (job, waiter) = queue::job(&request.method, request.params);
         if lock(&self.jobs).send(job).is_err() {
             return Frame::error(id, code::FAILED, CLOSING);
         }
-        match waiter.wait(wait.min(MAX_WAIT), &self.stopping) {
+        // A dialog that opens while the request waits ends the wait: nothing would run it until the dialog closes.
+        let in_dialog = || lock(&self.snapshot).busy == Some(Busy::Modal);
+        match waiter.wait_unless(wait.min(MAX_WAIT), &self.stopping, &in_dialog) {
             Outcome::Answered(Ok(result)) => Frame::ok(id, result),
             Outcome::Answered(Err((code, message))) => Frame::error(id, &code, message),
+            Outcome::Cancelled if in_dialog() => Frame::error(id, code::BUSY, format!("{}; nothing changed", Busy::Modal.reason())),
             Outcome::Cancelled if request.deadline_ms.is_some() => {
                 Frame::error(id, code::DEADLINE, "the deadline passed before REAPER got to it; nothing changed")
             }
@@ -955,6 +958,50 @@ mod tests {
         let focus = request(&mut stream, &mut reader, 3, "focus")["result"].clone();
         assert_eq!(focus["busy"], "modal");
         assert_eq!(focus["view"], "arrange");
+    }
+
+    #[test]
+    fn a_dialog_over_the_main_window_refuses_requests_at_once_while_the_main_thread_still_ticks() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        // The extension ticks (REAPER's timer runs inside the dialog's loop) and says a dialog has the window.
+        lab.snapshot.lock().unwrap().busy = Some(Busy::Modal);
+        let started = Instant::now();
+        let response = request(&mut stream, &mut reader, 1, "quit");
+        assert_eq!(response["error"]["code"], code::BUSY);
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(message.contains("dialog") && message.contains("nothing changed"), "{message}");
+        assert!(started.elapsed() < Duration::from_millis(500), "queued behind the dialog instead of refused");
+        // status says why, and goes on answering.
+        let status = request(&mut stream, &mut reader, 2, "status")["result"].clone();
+        assert_eq!((&status["busy"], status["busyReason"].as_str().is_some_and(|r| r.contains("dialog"))), (&json!("modal"), true));
+        // Loading is different: the work waits for the load (REAPER is back soon), as before.
+        lab.snapshot.lock().unwrap().busy = Some(Busy::Loading);
+        let job_rx = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
+        let request_frame = Request { id: 3, method: "quit".into(), params: json!({}), deadline_ms: Some(unix_ms() + 400) };
+        stream.write_all(&Frame::Request(request_frame).encode()).unwrap();
+        assert!(job_rx.recv_timeout(Duration::from_secs(2)).is_ok(), "a request during a load is queued");
+    }
+
+    #[test]
+    fn a_request_waiting_when_a_dialog_opens_is_answered_busy_at_once() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        // Nothing drains the queue. The request waits for a far deadline; the main thread finds the dialog a moment later.
+        let snapshot = lab.snapshot.clone();
+        let later = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            snapshot.lock().unwrap().busy = Some(Busy::Modal);
+        });
+        let started = Instant::now();
+        let request_frame =
+            Request { id: 1, method: "read".into(), params: json!({"kind": "track"}), deadline_ms: Some(unix_ms() + 20_000) };
+        stream.write_all(&Frame::Request(request_frame).encode()).unwrap();
+        let response = read_frame(&mut reader);
+        later.join().unwrap();
+        assert_eq!(response["error"]["code"], code::BUSY);
+        assert!(response["error"]["message"].as_str().unwrap().contains("dialog"));
+        assert!(started.elapsed() < Duration::from_secs(3), "waited {:?} for a deadline 20 s away", started.elapsed());
     }
 
     #[test]

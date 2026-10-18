@@ -15,6 +15,7 @@ pub mod reaper;
 pub mod refs;
 pub mod rows;
 pub mod server;
+pub mod window;
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -108,6 +109,7 @@ impl Loaded {
         };
         let config = Config::from_reference(&reference);
         log::set_dir(config.log_dir.clone());
+        log::line(&format!("a dialog over the main window is noticed through: {}", window::describe()));
         let started =
             config.bind().and_then(|listener| Server::start(listener, config, self.hub.clone(), self.jobs.clone(), self.snapshot.clone()));
         match started {

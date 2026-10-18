@@ -189,6 +189,16 @@ impl<'a> Reaper<'a> {
         None
     }
 
+    /// Whether the main window takes input; false while a modal dialog has it disabled. None when REAPER or this
+    /// platform can't say.
+    pub fn main_window_enabled(&self) -> Option<bool> {
+        let hwnd = unsafe { self.api.GetMainHwnd()?() };
+        if hwnd.is_null() {
+            return None;
+        }
+        crate::window::is_enabled(hwnd)
+    }
+
     pub fn play_state(&self, proj: Project) -> PlayState {
         PlayState::from_bits(self.api.GetPlayStateEx().map(|f| unsafe { f(proj.0) }).unwrap_or(0))
     }
