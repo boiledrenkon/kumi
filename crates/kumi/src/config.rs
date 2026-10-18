@@ -825,7 +825,10 @@ pub fn load_config(args: &[String], env: &Env) -> Result<AppConfig, RuntimeError
         return Ok(AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: None, resume, daw });
     }
     if args.is_empty() {
-        return Ok(if let Some(bridge_config) = find_bridge_config(env) {
+        // The DAW asked for, else the first whose bridge is installed; without one, chat without a DAW.
+        let (provider, found) = crate::daw::chosen(daw, env);
+        let daw = Some(provider.id()).filter(|daw| *daw != DawId::Ableton);
+        return Ok(if let Some(bridge_config) = found {
             AppConfig::Live { inference: load_inference_config(env)?, bridge_config, resume, daw }
         } else {
             AppConfig::InferenceOnly { inference: load_inference_config(env)?, bridge_missing: Some(true), resume, daw }

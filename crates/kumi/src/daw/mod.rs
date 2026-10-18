@@ -1,24 +1,72 @@
-//! The DAW this Kumi works with: Live, the only one registered so far. What the app says of the DAW and shows of its
-//! tools, its focus and its devices comes from here.
+//! The DAWs this Kumi works with (Live, the only one registered so far), and the one this run works with: what the
+//! app says of the DAW and shows of its tools, its focus and its devices comes from here, and each DAW's provider
+//! finds its bridge and makes the session's integration.
 pub mod ableton;
+pub mod provider;
 
-use kumi_runtime::core::{
-    daw::{DawId, DawProfile},
-    presentation::ToolPresentation,
-    view::ViewPresentation,
+pub use provider::{DawFactory, DawProvider, DawSession, WatchWords};
+
+use kumi_runtime::{
+    core::{
+        daw::{DawId, DawProfile},
+        presentation::ToolPresentation,
+        view::ViewPresentation,
+    },
+    system::Env,
 };
+use std::cell::Cell;
+
+/// Each registered DAW's provider.
+pub fn providers() -> [&'static dyn DawProvider; 1] {
+    [&ableton::provider::Ableton]
+}
+
+/// A registered DAW's provider; None for one this Kumi doesn't integrate.
+pub fn provider(id: DawId) -> Option<&'static dyn DawProvider> {
+    providers().into_iter().find(|provider| provider.id() == id)
+}
+
+/// The DAW a session works with, and where Kumi's bridge for it says how to reach it: the one asked for (with --daw
+/// or KUMI_DAW); else the first registered DAW whose bridge is installed; else, chatting without a DAW, Live's words.
+/// That last is Live because Live is the only DAW registered: once another is, it's chosen on purpose (the DAW used
+/// last, or asked), not inherited from here.
+pub fn chosen(asked: Option<DawId>, env: &Env) -> (&'static dyn DawProvider, Option<String>) {
+    if let Some(provider) = asked.and_then(provider) {
+        return (provider, provider.bridge_config(env));
+    }
+    for provider in providers() {
+        if let Some(config) = provider.bridge_config(env) {
+            return (provider, Some(config));
+        }
+    }
+    (&ableton::provider::Ableton, None)
+}
+
+thread_local! {
+    static CURRENT: Cell<DawId> = const { Cell::new(DawId::Ableton) };
+}
+
+/// Sets the DAW this run works with (Live until a session says otherwise).
+pub fn work_with(id: DawId) {
+    CURRENT.with(|current| current.set(id));
+}
+
+/// The DAW this run works with.
+pub fn current() -> &'static dyn DawProvider {
+    provider(CURRENT.with(Cell::get)).expect("the DAW worked with is registered")
+}
 
 /// The DAW the app works with.
 pub fn profile() -> &'static DawProfile {
-    kumi_runtime::integrations::profile(DawId::Ableton).expect("Live is registered")
+    current().profile()
 }
 
 /// How the app shows the DAW's own tools.
 pub fn presentation() -> &'static ToolPresentation {
-    kumi_runtime::integrations::presentation(DawId::Ableton).expect("Live is registered")
+    current().presentation()
 }
 
 /// How the app reads the DAW's focus and devices.
 pub fn view() -> &'static ViewPresentation {
-    kumi_runtime::integrations::view(DawId::Ableton).expect("Live is registered")
+    current().view()
 }

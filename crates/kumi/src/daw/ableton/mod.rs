@@ -3,4 +3,11 @@
 pub mod bridge_setup;
 pub mod live_app;
 pub mod live_extension;
+pub mod provider;
 pub mod willington;
+
+use kumi_runtime::{core::contracts::Integration, integrations::ableton::AbletonOptions};
+use std::rc::Rc;
+
+/// Makes Live's integration from its options: the app's own, or a test's stand-in.
+pub type AbletonFactory = Rc<dyn Fn(AbletonOptions) -> Rc<dyn Integration>>;

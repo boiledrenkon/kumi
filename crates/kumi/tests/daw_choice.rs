@@ -48,3 +48,24 @@ fn only_a_daw_this_kumi_integrates_can_be_chosen() {
     // --daw beats KUMI_DAW.
     assert_eq!(config(&["--daw", "ableton"], &chosen), config(&[], &env));
 }
+
+/// With no DAW's bridge installed and none asked for, Kumi chats without a DAW in Live's words: Live is the only DAW
+/// registered. A second DAW has to decide this on purpose (the DAW used last, or asking), so this pins it.
+#[test]
+fn without_any_bridge_kumi_chats_in_lives_words_while_live_is_the_only_daw() {
+    use kumi::daw::{chosen, providers};
+    use kumi_runtime::core::{
+        contracts::Integration,
+        daw::{DawId, DawProfile},
+    };
+    let env = env();
+    assert_eq!(providers().map(|provider| provider.id()), [DawId::Ableton], "a second DAW decides the fallback on purpose");
+    let (provider, found) = chosen(None, &env);
+    assert_eq!((provider.id(), found), (DawId::Ableton, None));
+    let without = provider.without_daw(std::rc::Rc::new(|_| {}));
+    // Live's words and vocabulary, with none of Live's capabilities while there's no Live to use them on.
+    assert_eq!((without.profile().id, without.profile().words), (Some(DawId::Ableton), DawProfile::ABLETON.words));
+    assert!(*without.profile() == DawProfile::ABLETON.without_caps());
+    let config = serde_json::to_value(load_config(&[], &env).unwrap()).unwrap();
+    assert_eq!((config["mode"].as_str(), config["bridgeMissing"].as_bool(), config.get("daw")), (Some("inference-only"), Some(true), None));
+}
