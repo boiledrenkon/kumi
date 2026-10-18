@@ -1,5 +1,7 @@
 //! `kumi bridge`: installs and updates the native bridge.
-pub use crate::process::{ask_yes_no, copy_tree, default_run, executable_dir, executable_name, repository_dir, run_program, Ran, Run};
+pub use crate::process::{
+    ask_yes_no, copy_tree, default_run, executable_dir, executable_name, repository_dir, run_program, AsyncBool, Confirm, Ran, Run,
+};
 use crate::{input::TerminalInput, tui::tty::TtyOutput};
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::{abort::Signal, js::string::trim};
@@ -66,8 +68,6 @@ use kumi_runtime::{
 };
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
-pub type AsyncBool = Rc<dyn Fn() -> LocalBoxFuture<'static, bool>>;
-pub type Confirm = Rc<dyn Fn(String) -> LocalBoxFuture<'static, bool>>;
 #[derive(Clone)]
 pub struct BridgeSetupIo {
     pub out: Rc<dyn TtyOutput>,

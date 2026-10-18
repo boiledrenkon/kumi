@@ -41,6 +41,19 @@ pub(crate) async fn live_open(io: &InstalledIo, run: Run) -> bool {
     )
     .await
 }
+/// After an update: going back (`back_to`, the earlier Kumi), a bridge in Live as new as the earlier Kumi's stays, as a
+/// newer one serves it too and Live may have it loaded; otherwise the bridge as after any update.
+pub(crate) async fn after_update(io: &InstalledIo, home: &str, app: &str, back_to: Option<&str>) -> i32 {
+    if let Some(kumi) = back_to {
+        let installed = find_bridge_config(&io.env).and_then(|config| read_bridge_server(&config).ok()?.version);
+        if let Some(installed) = installed.filter(|installed| bridge_version(app).is_none_or(|bundled| !newer_version(&bundled, installed)))
+        {
+            io.out.write(&format!("The bridge in Live stays {installed}, which works with {kumi}.\n"));
+            return 0;
+        }
+    }
+    bridge_after(io, home, app).await
+}
 pub(crate) async fn bridge_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
     let say = |text: String| io.out.write(&format!("{text}\n"));
     let Some(config) = find_bridge_config(&io.env) else {

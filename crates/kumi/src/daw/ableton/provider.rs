@@ -169,8 +169,8 @@ impl DawProvider for Ableton {
         }
         .boxed_local()
     }
-    fn after_update<'a>(&'a self, io: &'a InstalledIo, home: &'a str, app: &'a str) -> LocalBoxFuture<'a, i32> {
-        super::install::bridge_after(io, home, app).boxed_local()
+    fn after_update<'a>(&'a self, io: &'a InstalledIo, home: &'a str, app: &'a str, back_to: Option<&'a str>) -> LocalBoxFuture<'a, i32> {
+        super::install::after_update(io, home, app, back_to).boxed_local()
     }
     fn after_checkout_update<'a>(&'a self, io: &'a UpdateIo, run: Run, repo: &'a str) -> LocalBoxFuture<'a, i32> {
         super::install::after_checkout_update(io, run, repo).boxed_local()

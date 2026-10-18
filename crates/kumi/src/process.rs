@@ -12,6 +12,10 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncReadExt;
+/// Asks something that answers yes or no later (whether an app is running, say).
+pub type AsyncBool = Rc<dyn Fn() -> LocalBoxFuture<'static, bool>>;
+/// Asks the producer a yes/no question.
+pub type Confirm = Rc<dyn Fn(String) -> LocalBoxFuture<'static, bool>>;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ran {
     pub code: i32,

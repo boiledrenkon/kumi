@@ -4,10 +4,10 @@
 //! the daily check's note, and the bridge's ports are tried on this computer (127.0.0.1) only.
 use super::{tilde, Check};
 use crate::{
-    bridge_setup::{repository_dir, AsyncBool},
     config::{kumi_dir, load_settings_file, read_settings},
     install::{app_version, chown_line, has_app, not_yours, startup_files, PATH_MARKER, UPDATE_SPACE},
     live_app::InstalledLive,
+    process::{repository_dir, AsyncBool},
     update::newer,
 };
 use futures::future::LocalBoxFuture;

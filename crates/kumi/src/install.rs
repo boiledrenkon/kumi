@@ -6,10 +6,9 @@ pub use crate::daw::ableton::install::{bridge_command, finish_legacy_transition,
 use crate::daw::RemovedBridge;
 pub use crate::update::newer as newer_version;
 use crate::{
-    bridge_setup::{ask_yes_no, bridge_version, default_run, executable_name, AsyncBool, Confirm, Run},
-    config::{find_bridge_config, json_files, load_db_file},
-    doctor::read_bridge_server,
+    config::{json_files, load_db_file},
     input::TerminalInput,
+    process::{ask_yes_no, default_run, executable_name, AsyncBool, Confirm, Run},
     spinner::step,
     tui::tty::TtyOutput,
 };
@@ -337,12 +336,12 @@ pub(crate) async fn ask(io: &InstalledIo, question: &str, ahead: Option<&str>) -
         ask_yes_no(io.input.clone(), io.out.clone(), question, ahead).await
     }
 }
-/// Each DAW's bridge after Kumi changed: brought up to date where it can be, or how to. The exit code is the first
-/// one that isn't 0.
-async fn bridges_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
+/// Each DAW's bridge after Kumi changed (`back_to`: to the earlier Kumi it names): brought up to date where it can be,
+/// or how to. The exit code is the first one that isn't 0.
+async fn bridges_after(io: &InstalledIo, home: &str, app: &str, back_to: Option<&str>) -> i32 {
     let mut code = 0;
     for provider in crate::daw::providers() {
-        let done = provider.after_update(io, home, app).await;
+        let done = provider.after_update(io, home, app, back_to).await;
         if code == 0 {
             code = done;
         }
@@ -635,7 +634,7 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     }
     if pinned == Some(KUMI_VERSION) {
         say(format!("Kumi is {KUMI_VERSION} already."));
-        return Ok(bridges_after(&io, &home, &app).await);
+        return Ok(bridges_after(&io, &home, &app, None).await);
     }
     let looking = pinned.map(|version| format!("Looking for Kumi {version}…")).unwrap_or_else(|| "Looking for a newer Kumi…".into());
     let asking = async {
@@ -660,7 +659,7 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
         }
         None if !newer_version(&manifest.kumi, KUMI_VERSION) => {
             say(format!("Kumi is up to date ({KUMI_VERSION})."));
-            return Ok(bridges_after(&io, &home, &app).await);
+            return Ok(bridges_after(&io, &home, &app, None).await);
         }
         _ => {}
     }
@@ -823,16 +822,7 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     if let Some(open) = still_open(&io, &join(&app, &executable_name("kumi"))).await {
         say(open);
     }
-    // Going back, a bridge in Live as new as the earlier Kumi's stays: a newer one serves it too, and Live may have it
-    // loaded. An older one is brought up to date as after any update.
-    let installed = find_bridge_config(&io.env).and_then(|config| read_bridge_server(&config).ok()?.version);
-    if let Some(installed) =
-        installed.filter(|installed| older && bridge_version(&app).is_none_or(|bundled| !newer_version(&bundled, installed)))
-    {
-        say(format!("The bridge in Live stays {installed}, which works with {}.", manifest.kumi));
-        return Ok(0);
-    }
-    Ok(bridges_after(&io, &home, &app).await)
+    Ok(bridges_after(&io, &home, &app, older.then_some(manifest.kumi.as_str())).await)
 }
 /// How many other processes run `exe` on this account: Kumi windows, or a `kumi` command in another terminal.
 /// None on Windows, where Kumi can't update or roll back while one runs at all.
@@ -841,7 +831,7 @@ pub async fn others_running(exe: &str) -> usize {
         return 0;
     }
     let ps = if Path::new("/bin/ps").exists() { "/bin/ps" } else { "ps" };
-    let listing = crate::bridge_setup::run_program(ps, &["-axo".into(), "uid=,pid=,args=".into()], None).await.stdout;
+    let listing = crate::process::run_program(ps, &["-axo".into(), "uid=,pid=,args=".into()], None).await.stdout;
     #[cfg(unix)]
     // SAFETY: getuid has no preconditions.
     let uid = unsafe { libc::getuid() }.to_string();

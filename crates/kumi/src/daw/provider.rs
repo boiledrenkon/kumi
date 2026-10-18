@@ -183,8 +183,9 @@ pub trait DawProvider {
     /// The DAW's log for `kumi report`: its heading, and its bridge's lines and errors (`logs`: a test's log files in
     /// place of the DAW's own).
     fn report_log<'a>(&'a self, env: &'a Env, home: &'a str, logs: Option<&'a LogFiles>) -> LocalBoxFuture<'a, (String, String)>;
-    /// After an installed Kumi's update, its bridge brought up to date where it can be, or how to: the exit code.
-    fn after_update<'a>(&'a self, io: &'a InstalledIo, home: &'a str, app: &'a str) -> LocalBoxFuture<'a, i32>;
+    /// After an installed Kumi's update (`back_to`: to the earlier Kumi it names), its bridge brought up to date where it
+    /// can be, or how to: the exit code.
+    fn after_update<'a>(&'a self, io: &'a InstalledIo, home: &'a str, app: &'a str, back_to: Option<&'a str>) -> LocalBoxFuture<'a, i32>;
     /// After a checkout's update, the same, with the checkout's own build of the bridge.
     fn after_checkout_update<'a>(&'a self, io: &'a UpdateIo, run: Run, repo: &'a str) -> LocalBoxFuture<'a, i32>;
     /// Ready the bridge for a rollback to the Kumi at `previous` (`version`; `legacy`: a JavaScript Kumi).

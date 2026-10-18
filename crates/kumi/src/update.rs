@@ -2,7 +2,7 @@
 /// Live's part, where update has always had it.
 pub use crate::daw::ableton::install::{checkout_bridge, older_bridge, OlderBridge};
 use crate::{
-    bridge_setup::{default_run, repository_dir, AsyncBool, Ran, Run},
+    process::{default_run, repository_dir, AsyncBool, Ran, Run},
     spinner::step,
     tui::tty::TtyOutput,
 };
