@@ -64,6 +64,11 @@
 //! - heartbeat `{"type":"heartbeat","ms":n}` every `heartbeatMs`: after 3 missed the host calls the bridge busy;
 //! - bye `{"type":"bye","reason":…}` before the bridge closes.
 //!
+//! A host that has read 16 KiB without writing sends a heartbeat frame of its own (the bridge ignores its content):
+//! the Renoise tool closes a connection to which 64 KiB of events and heartbeats went since the host last sent
+//! anything, because a send to a full socket may block Renoise's GUI. A closed host reconnects when it next needs
+//! the bridge.
+//!
 //! Every bridge answers `ping` and `status` (its identity plus `busy`).
 
 pub mod auth;

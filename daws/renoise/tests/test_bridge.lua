@@ -472,6 +472,70 @@ test("bridge: other keys in tool_data are kept", function()
   no_dialogs()
 end)
 
+-- Selection changes that always differ, one per tick: events of about 110 bytes.
+local function churn(song, from, to, every, on_every)
+  for i = from, to do
+    song.selected_track_index = i % 90 + 1
+    tick()
+    if every and i % every == 0 then on_every(i) end
+  end
+end
+
+test("bridge: a host that stopped reading is cut off before the socket fills, never blocked on", function()
+  local env = setup()
+  local peer = connect(env)
+  frames(peer)
+  peer:stop_reading()
+  churn(mock.song, 1, 3000)
+  ok(peer.closed_by_server, "closed")
+  eq(mock.blocked_sends, 0, "sends that would have blocked Renoise")
+  ok(peer.unread <= 64 * 1024, "at most 64 KiB went to a peer that wasn't reading, not " .. peer.unread)
+  ok(peer.unread > 60 * 1024, "and it was allowed that much: " .. peer.unread)
+  ok(read(env.log_dir .. "/renoise-bridge.log"):find("the host stopped reading"), "logged")
+  local other = connect(env)
+  eq(request(other, "status").ok, true, "a new connection works")
+  no_dialogs()
+end)
+
+test("bridge: a host that sends now and then is never cut off, however many events there are", function()
+  local env = setup()
+  local peer = connect(env)
+  local count = 0
+  churn(mock.song, 1, 3000, 100, function()
+    for _, f in ipairs(frames(peer)) do
+      if f.type == "event" then count = count + 1 end
+    end
+    eq(request(peer, "ping", {}).ok, true)
+  end)
+  ok(not peer.closed_by_server, "open")
+  ok(count > 2000, "the events kept coming: " .. count)
+  no_dialogs()
+end)
+
+test("bridge: a host that never says a word is closed after the heartbeats pile up", function()
+  local env = setup()
+  local peer = connect(env)
+  peer:stop_reading()
+  mock.advance(600 * 1000)
+  ok(not peer.closed_by_server, "ten minutes of heartbeats are well within the cap")
+  mock.advance(3000 * 1000)
+  ok(peer.closed_by_server, "closed")
+  eq(mock.blocked_sends, 0)
+  no_dialogs()
+end)
+
+test("bridge: a send that fails closes that connection", function()
+  local env = setup()
+  local peer = connect(env)
+  peer.send_fails = true
+  mock.song.selected_track_index = 5
+  tick()
+  mock.advance(1000)
+  local other = connect(env)
+  eq(request(other, "status").ok, true, "the others go on")
+  no_dialogs()
+end)
+
 test("bridge: heartbeats about once a second, only after auth", function()
   local env = setup()
   local waiting = mock.connect()

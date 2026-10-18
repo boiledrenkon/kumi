@@ -177,6 +177,13 @@ function Peer:wrap()
     local_port = peer.server.port,
     send = function(_, data)
       if not peer.open then error("mock: send on a closed socket") end
+      if peer.send_fails then return false end
+      if peer.stalled then
+        -- The peer stopped reading: what it hasn't read piles up in the socket's buffers, and once they are full a real
+        -- send blocks Renoise's GUI thread until the peer reads again.
+        peer.unread = peer.unread + #data
+        if peer.unread > M.socket_buffer_bytes then M.blocked_sends = M.blocked_sends + 1 end
+      end
       peer.inbox[#peer.inbox + 1] = data
       peer.sent_calls = peer.sent_calls + 1
       return true
@@ -230,6 +237,15 @@ function Peer:close()
   self.open = false
 end
 
+-- The peer stops reading (a suspended process): from now on its socket's buffers fill.
+function Peer:stop_reading()
+  self.stalled, self.unread = true, 0
+end
+
+function Peer:resume_reading()
+  self.stalled, self.unread = false, 0
+end
+
 local next_peer_port = 50000
 
 -- A client connecting to the bridge's server.
@@ -244,6 +260,7 @@ function M.connect(options)
     open = true,
     inbox = {},
     sent_calls = 0,
+    unread = 0,
   }, Peer)
   server.peers[#server.peers + 1] = peer
   callback(server, "socket_accepted", peer:wrap())
@@ -369,6 +386,8 @@ function M.reset(options)
   M.errors, M.modals, M.statuses, M.popen_calls = {}, {}, {}, {}
   M.servers, M.busy_ports, M.timers, M.menu_entries = {}, {}, {}, {}
   M.stat_modes = {}
+  -- Bytes a socket takes from a peer that doesn't read, and the sends that would have blocked because of it.
+  M.socket_buffer_bytes, M.blocked_sends = options.socket_buffer_bytes or 256 * 1024, 0
   M.time = 0
   M.song = nil
   M.platform = options.platform or "MACINTOSH"

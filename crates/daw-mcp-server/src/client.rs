@@ -23,6 +23,10 @@ use tokio::sync::{broadcast, oneshot};
 /// paths and a project name.
 const HANDSHAKE_LINE_BYTES: usize = 64 * 1024;
 const READ_CHUNK: usize = 64 * 1024;
+/// A host that has only listened for this many bytes sends the bridge a heartbeat frame. A bridge cuts off a host that
+/// has let 64 KiB of events and heartbeats pile up (Renoise's does: a send to a full socket may block its GUI), and
+/// a quiet host that is reading would otherwise look like one that isn't.
+const ACK_AFTER_BYTES: u64 = 16 * 1024;
 
 /// Why a connection could not be made.
 #[derive(Debug)]
@@ -80,6 +84,8 @@ struct Inner {
     pending: Mutex<Pending>,
     next_id: AtomicU64,
     last_frame: Mutex<Instant>,
+    /// Bytes read since this host last wrote anything.
+    unacked: AtomicU64,
     closed: AtomicBool,
     events: broadcast::Sender<Event>,
     welcome: Welcome,
@@ -147,6 +153,7 @@ impl BridgeClient {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             last_frame: Mutex::new(Instant::now()),
+            unacked: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             events,
             welcome: *welcome,
@@ -193,29 +200,14 @@ impl BridgeClient {
         // The timeout covers the write too: a bridge that stopped reading fills the socket, and a write that waits for
         // room would hold the writer (and every request behind it) past their timeouts.
         let deadline = tokio::time::Instant::now() + timeout;
-        let writing = AtomicBool::new(false);
-        let written = tokio::time::timeout_at(deadline, async {
-            let mut writer = self.inner.writer.lock().await;
-            writing.store(true, Ordering::SeqCst);
-            writer.write_all(&frame).await
-        })
-        .await;
-        match written {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
+        match write_before(&self.inner, &frame, deadline).await {
+            Ok(()) => {}
+            Err(failure) => {
                 self.inner.pending.lock().unwrap().remove(&id);
-                fail_all(&self.inner);
-                return Err(RequestError::Closed);
-            }
-            Err(_) => {
-                self.inner.pending.lock().unwrap().remove(&id);
-                if writing.load(Ordering::SeqCst) {
-                    // Part of the frame may be out: the stream can't carry another line, so the connection goes.
-                    fail_all(&self.inner);
-                    let _ =
-                        tokio::time::timeout(Duration::from_millis(200), async { self.inner.writer.lock().await.shutdown().await }).await;
-                }
-                return Err(RequestError::Timeout);
+                return Err(match failure {
+                    WriteFailure::Closed => RequestError::Closed,
+                    WriteFailure::TimedOut => RequestError::Timeout,
+                });
             }
         }
         match tokio::time::timeout_at(deadline, answered).await {
@@ -231,6 +223,40 @@ impl BridgeClient {
     pub async fn close(&self) {
         let _ = self.inner.writer.lock().await.shutdown().await;
         fail_all(&self.inner);
+    }
+}
+
+enum WriteFailure {
+    Closed,
+    TimedOut,
+}
+
+/// Writes one line, waiting for the writer and for room in the socket no longer than `deadline`. A write that timed
+/// out midway may have put part of the line out, so the connection can't carry another one and is failed and shut down.
+async fn write_before(inner: &Inner, line: &[u8], deadline: tokio::time::Instant) -> Result<(), WriteFailure> {
+    let writing = AtomicBool::new(false);
+    let written = tokio::time::timeout_at(deadline, async {
+        let mut writer = inner.writer.lock().await;
+        writing.store(true, Ordering::SeqCst);
+        writer.write_all(line).await
+    })
+    .await;
+    match written {
+        Ok(Ok(())) => {
+            inner.unacked.store(0, Ordering::SeqCst);
+            Ok(())
+        }
+        Ok(Err(_)) => {
+            fail_all(inner);
+            Err(WriteFailure::Closed)
+        }
+        Err(_) => {
+            if writing.load(Ordering::SeqCst) {
+                fail_all(inner);
+                let _ = tokio::time::timeout(Duration::from_millis(200), async { inner.writer.lock().await.shutdown().await }).await;
+            }
+            Err(WriteFailure::TimedOut)
+        }
     }
 }
 
@@ -290,7 +316,18 @@ async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut
                 fail_all(&live);
                 return;
             }
-            Ok(count) => framer.feed(&chunk[..count]),
+            Ok(count) => {
+                framer.feed(&chunk[..count]);
+                // Listening without saying anything: tell the bridge this host is still reading.
+                if live.unacked.fetch_add(count as u64, Ordering::SeqCst) + count as u64 >= ACK_AFTER_BYTES {
+                    live.unacked.store(0, Ordering::SeqCst);
+                    let inner = live.clone();
+                    tokio::spawn(async move {
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                        let _ = write_before(&inner, &Frame::Heartbeat { ms: 0 }.encode(), deadline).await;
+                    });
+                }
+            }
         }
     }
 }

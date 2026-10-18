@@ -14,6 +14,12 @@ M.__index = M
 M.SEND_CHUNK = 64 * 1024
 M.SEND_NOW_BYTES = 256 * 1024
 M.SEND_TICK_BYTES = 1024 * 1024
+-- Output the host didn't ask for (events, heartbeats) queued to a connection since the host last sent anything. Past
+-- it the host has stopped reading (suspended, stopped in a debugger), and the socket's buffers would fill: Renoise's
+-- documentation doesn't say what a send to a full socket does, and a block would freeze the GUI. The connection is
+-- closed instead; a host that is only listening says so now and then (crates/daw-mcp-server does), and one that
+-- was closed reconnects when it next needs the bridge.
+M.UNSOLICITED_LIMIT = 64 * 1024
 
 local LOOPBACK_PEERS = { ["127.0.0.1"] = true, ["::1"] = true, ["::ffff:127.0.0.1"] = true }
 
@@ -75,6 +81,20 @@ function M:send(record, text)
   if not text or record.gone then return end
   record.outbox[#record.outbox + 1] = { text = text, offset = 1 }
   if #record.outbox == 1 then self:flush(record, M.SEND_NOW_BYTES) end
+end
+
+-- Output nobody asked for. False, and the connection closed, once the host has let too much pile up unread.
+function M:push(record, text)
+  if not text or record.gone or record.closing then return false end
+  local total = (record.unsolicited or 0) + #text
+  if total > M.UNSOLICITED_LIMIT then
+    record.outbox = {}
+    self:close(record, "the host stopped reading (" .. total .. " bytes of events and heartbeats unread)")
+    return false
+  end
+  record.unsolicited = total
+  self:send(record, text)
+  return true
 end
 
 function M:accept(client)
@@ -140,6 +160,7 @@ function M:receive(client, data)
   local record = self.ctx.connections[key_of(client)]
   if not record then record = self:accept(client) end
   record.client = client
+  record.unsolicited = 0
   if record.closing or not record.conn then return end
   local ok, actions = xpcall(record.conn.on_bytes, debug.traceback, record.conn, data, self.ctx.now_ms(), self.ctx.identity)
   if not ok then
@@ -155,7 +176,7 @@ function M:event(name, data)
     if record.conn and not record.closing and record.conn:authenticated() then
       local text, err = record.conn:event(name, data)
       if text then
-        self:send(record, text)
+        self:push(record, text)
       else
         self.ctx.log("error", "could not encode event " .. name .. ": " .. tostring(err))
       end
@@ -182,7 +203,7 @@ function M:tick()
     if conn and not record.closing then
       self:apply(record, conn:on_tick(now))
       if conn:authenticated() and not record.closing and now >= (record.heartbeat_ms or now) then
-        self:send(record, wire.encode_frame("heartbeat", { ms = math.floor(now - record.accepted_ms) }))
+        self:push(record, wire.encode_frame("heartbeat", { ms = math.floor(now - record.accepted_ms) }))
         record.heartbeat_ms = math.max((record.heartbeat_ms or now) + wire.HEARTBEAT_MS, now + wire.HEARTBEAT_MS / 2)
       end
     end
