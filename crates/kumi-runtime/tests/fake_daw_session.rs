@@ -255,6 +255,18 @@ impl Integration for FakeIntegration {
     async fn close(&self) -> Result<(), RuntimeError> {
         Ok(())
     }
+    fn can_show(&self, kind: kumi_runtime::core::view::BodyKind) -> bool {
+        kind == kumi_runtime::core::view::BodyKind::Matrix
+    }
+    async fn focus_body(
+        &self,
+        request: &kumi_runtime::core::view::BodyRequest,
+        _: Signal,
+    ) -> Result<Option<kumi_runtime::core::view::FocusBody>, RuntimeError> {
+        use kumi_runtime::core::view::*;
+        Ok((request == &BodyRequest::Matrix)
+            .then(|| FocusBody::Matrix(SequenceMatrix { tracks: vec!["Kick".into()], slots: vec![], current: None })))
+    }
 }
 
 /// A session with every option on, over the fake DAW (or, `away`, without it).
@@ -475,4 +487,24 @@ fn ceil(text: &str, mut at: usize) -> usize {
         at += 1;
     }
     at
+}
+
+/// FOCUS's bodies of another DAW's own (here its sequence) reach the app through the session, as Live's four always
+/// did.
+#[tokio::test(flavor = "current_thread")]
+async fn the_session_offers_another_daws_own_focus_bodies() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use kumi_runtime::core::view::{BodyKind, BodyRequest, FocusBody};
+            let dir = tempfile::tempdir().unwrap();
+            let (main, worker) = (Rc::new(Recorded::default()), Rc::new(Recorded::default()));
+            let (session, _, _, _) = open(&main, &worker, dir.path(), false);
+            session.start().await.unwrap();
+            assert!(session.can_show(BodyKind::Matrix), "the DAW's own body");
+            assert!(!session.can_show(BodyKind::Tracker), "one the DAW doesn't draw");
+            assert!(session.can_show(BodyKind::Tree) && session.can_show(BodyKind::Timeline), "Live's four, as always");
+            assert!(matches!(session.focus_body(&BodyRequest::Matrix).await.unwrap(), Some(FocusBody::Matrix(_))));
+            session.close().await.unwrap();
+        })
+        .await;
 }

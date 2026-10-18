@@ -204,3 +204,29 @@ fn renoises_open_panes_show_when_the_producer_works_in_them() {
     let closed = DawFocus { panes: None, ..focus(2, "Mixer", 1., false) };
     assert_eq!(touched_next(Some(&track), Some(&closed), Some(Touched::Tracker)), Some(Touched::Tracker), "no matrix open, the pattern");
 }
+
+case!(scratch_pattern_under_dsp_frame, async {
+    work_with(DawId::Renoise);
+    let c = Rc::new(Control::default());
+    *c.own.borrow_mut() = Some(FocusBody::Tracker(TrackerGrid {
+        item_ref: "55cef1:pattern:1".into(),
+        name: "".into(),
+        lines: 64,
+        from: 0,
+        cursor: Some(0),
+        playing: None,
+        lpb: Some(4.),
+        tracks: vec![TrackerTrack { name: "Track 01".into(), color: None, cells: vec!["--- .. .. .. .. ....".into()] }],
+    }));
+    let h = Harness::with(120, 40, c.clone(), |_| {});
+    h.start().await;
+    h.connect();
+    let focus = json!({"track":{"name":"Track 01","kind":"sequencer"},"trackRef":"55cef1:track:1","mainView":{"kind":"pattern-editor","label":"Pattern Editor"},"editorView":{"kind":"device-chain","label":"Track DSPs"},"item":{"kind":"pattern-track","itemRef":"55cef1:pattern:1"},"section":{"kind":"sequence-slot","index":0.0}});
+    h.emit(json!({"type":"focus","focus":focus}));
+    for _ in 0..100 {
+        h.screen();
+        delay(5).await;
+    }
+    eprintln!("{}\n{:?}", h.screen().join("\n"), h.calls());
+    h.close().await;
+});

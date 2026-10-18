@@ -190,6 +190,9 @@ impl Integration for FallbackIntegration {
             Ok(None)
         }
     }
+    fn can_show(&self, kind: BodyKind) -> bool {
+        self.current().can_show(kind)
+    }
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
         let c = self.current();
         if c.can_show(request.kind()) {

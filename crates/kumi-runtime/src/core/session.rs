@@ -3362,6 +3362,14 @@ impl SessionController for Session {
     fn has_arrangement_strip(&self) -> bool {
         true
     }
+    fn can_show(&self, kind: BodyKind) -> bool {
+        match kind {
+            // Live's four, as the session always offered them.
+            BodyKind::Tree | BodyKind::Notes | BodyKind::Grid | BodyKind::Timeline => true,
+            // Another DAW's own (a tracker's pattern, its matrix, keyzones, a track's routing), when its integration draws them.
+            _ => self.0.state.borrow().integration.as_ref().is_some_and(|i| i.can_show(kind)),
+        }
+    }
     async fn arrangement_strip(&self) -> Result<Option<ArrangementStrip>, RuntimeError> {
         let i = {
             let s = self.0.state.borrow();
