@@ -1,7 +1,7 @@
 //! REAPER, through Kumi's extension and host: its refs (REAPER's GUIDs, which hold across reloads), its read tool and
 //! its instructions. The integration itself is the one every bridge of Kumi's own shares (`own_bridge`).
 use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
-use super::own_views::{self, focus_track, selected, view};
+use super::own_views::{self, body_args, focus_track, selected, view};
 use crate::core::{
     contracts::{Integration, JsonObject},
     daw::DawProfile,
@@ -68,12 +68,19 @@ fn fill_focus(focus: &Value) -> DawFocus {
     }
 }
 
-fn body_request(request: &BodyRequest) -> Option<(&'static str, Option<String>)> {
+/// FOCUS draws a screenful of lanes, so it asks for that many tracks, not a page of every track in the project.
+const ARRANGE_LANES: u32 = 24;
+
+fn body_request(request: &BodyRequest) -> Option<JsonObject> {
     Some(match request {
-        BodyRequest::Tree { track_ref } => ("fx", Some(track_ref.clone())),
-        BodyRequest::Notes { item_ref } => ("midi", Some(item_ref.clone())),
-        BodyRequest::Timeline => ("arrange", None),
-        BodyRequest::Routing { track_ref } => ("routing", Some(track_ref.clone())),
+        BodyRequest::Tree { track_ref } => body_args("fx", Some(track_ref)),
+        BodyRequest::Notes { item_ref } => body_args("midi", Some(item_ref)),
+        BodyRequest::Timeline => {
+            let mut args = body_args("arrange", None);
+            args.insert("limit".into(), ARRANGE_LANES.into());
+            args
+        }
+        BodyRequest::Routing { track_ref } => body_args("routing", Some(track_ref)),
         _ => return None,
     })
 }

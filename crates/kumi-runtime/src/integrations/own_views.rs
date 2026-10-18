@@ -124,6 +124,7 @@ pub fn timeline(body: &Value) -> TimelineStrip {
         locators,
         beats_per_bar: number(body, "beatsPerBar"),
         lanes: Some(lanes),
+        track_count: number(body, "trackCount").map(|n| n.max(0.) as usize),
     }
 }
 

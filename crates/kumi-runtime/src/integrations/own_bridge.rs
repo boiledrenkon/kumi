@@ -56,7 +56,7 @@ pub struct OwnDaw {
     pub fill_focus: fn(&Value) -> DawFocus,
     /// The bodies FOCUS can draw for this DAW, each as the host's `focus_body` kind with its ref, and read back.
     pub bodies: &'static [BodyKind],
-    pub body_request: fn(&BodyRequest) -> Option<(&'static str, Option<String>)>,
+    pub body_request: fn(&BodyRequest) -> Option<JsonObject>,
     pub to_body: fn(&BodyRequest, &Value) -> Option<FocusBody>,
 }
 
@@ -319,10 +319,10 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         self.daw.bodies.contains(&kind)
     }
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
-        let Some((kind, reference)) = (self.daw.body_request)(request).filter(|_| self.daw.bodies.contains(&request.kind())) else {
+        let Some(args) = (self.daw.body_request)(request).filter(|_| self.daw.bodies.contains(&request.kind())) else {
             return Ok(None);
         };
-        let args = Value::Object(crate::integrations::own_views::body_args(kind, reference.as_deref()));
+        let args = Value::Object(args);
         Ok(match self.call("focus_body", args, signal).await? {
             Ok(body) => (self.daw.to_body)(request, &body),
             Err(_) => None,

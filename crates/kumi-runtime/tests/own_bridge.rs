@@ -264,6 +264,16 @@ async fn reapers_focus_is_read_while_focus_shows_and_its_bodies_come_neutral() {
             assert_eq!((routing.routes[0].kind, routing.routes[0].tap.as_deref()), (RouteKind::Send, Some("post-fader")));
             assert_eq!((routing.routes[1].kind, routing.routes[1].muted), (RouteKind::Receive, true));
             assert_eq!(routing.parent_send, Some(true));
+
+            // The arrange view: a screenful of lanes asked for, never a page of every track, and how many there are.
+            host.answers.borrow_mut().push((
+                "focus_body",
+                json!({"length": 64, "beatsPerBar": 4, "playhead": 8, "trackCount": 200, "tracks": [{"ref": BASS, "name": "Bass", "depth": 0, "items": []}], "nextCursor": "c1.1.24"}),
+                false,
+            ));
+            let Some(FocusBody::Timeline(strip)) = reaper.focus_body(&BodyRequest::Timeline, Signal::new()).await.unwrap() else { panic!("the arrange view") };
+            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "arrange", "limit": 24}));
+            assert_eq!((strip.lanes.as_ref().map(Vec::len), strip.track_count), (Some(1), Some(200)));
             reaper.close().await.unwrap();
         })
         .await;

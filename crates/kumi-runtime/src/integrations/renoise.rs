@@ -1,7 +1,7 @@
 //! Renoise, through Kumi's tool and host: its refs (positions, as Renoise numbers them, under the song's epoch), its
 //! read tool and its instructions. The integration itself is the one every bridge of Kumi's own shares (`own_bridge`).
 use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
-use super::own_views::{self, focus_track, selected, view};
+use super::own_views::{self, body_args, focus_track, selected, view};
 use crate::core::{
     contracts::{Integration, JsonObject},
     daw::DawProfile,
@@ -86,15 +86,15 @@ fn fill_focus(focus: &Value) -> DawFocus {
     }
 }
 
-fn body_request(request: &BodyRequest) -> Option<(&'static str, Option<String>)> {
+fn body_request(request: &BodyRequest) -> Option<JsonObject> {
     Some(match request {
-        BodyRequest::Tree { track_ref } => ("dsp", Some(track_ref.clone())),
+        BodyRequest::Tree { track_ref } => body_args("dsp", Some(track_ref)),
         BodyRequest::Tracker { item_ref } => {
             let phrase = item_ref.as_deref().and_then(|r| RenoiseRefs.kind_of(r)) == Some("phrase");
-            (if phrase { "phrase" } else { "pattern" }, item_ref.clone())
+            body_args(if phrase { "phrase" } else { "pattern" }, item_ref.as_deref())
         }
-        BodyRequest::Matrix => ("matrix", None),
-        BodyRequest::Keyzones { item_ref } => ("instrument", Some(item_ref.clone())),
+        BodyRequest::Matrix => body_args("matrix", None),
+        BodyRequest::Keyzones { item_ref } => body_args("instrument", Some(item_ref)),
         _ => return None,
     })
 }

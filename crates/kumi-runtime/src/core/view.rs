@@ -402,6 +402,9 @@ pub struct ArrangementStrip {
     /// none for Live's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lanes: Option<Vec<TimelineLane>>,
+    /// Every track the timeline has, when `lanes` holds only the first of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_count: Option<usize>,
 }
 
 /// A track on the timeline with its items, in beats. Names are data.

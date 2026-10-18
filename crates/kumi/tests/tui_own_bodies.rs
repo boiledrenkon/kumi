@@ -74,7 +74,7 @@ case!(reapers_midi_editor_arrange_view_and_routing_draw_in_focus, async {
     // The arrange view: each track's items as bars on the timeline.
     *c.arrangement.borrow_mut() = Some(
         serde_json::from_value(
-            json!({"length":64.0,"position":8.0,"playing":true,"locators":[{"name":"Verse","position":0.0}],"beatsPerBar":4.0,"lanes":[
+            json!({"length":64.0,"position":8.0,"playing":true,"locators":[{"name":"Verse","position":0.0}],"beatsPerBar":4.0,"track_count":200,"lanes":[
                 {"name":"Drums","depth":0,"items":[{"start":0.0,"length":32.0,"name":"Beat"}]},
                 {"name":"Bass","depth":1,"items":[{"start":16.0,"length":16.0,"name":"Bass take","selected":true}]}
             ]}),
@@ -87,6 +87,7 @@ case!(reapers_midi_editor_arrange_view_and_routing_draw_in_focus, async {
     h.has("Drums");
     h.has("  Bass");
     h.has("▬▬");
+    h.has("198 more tracks");
     h.close().await;
 });
 

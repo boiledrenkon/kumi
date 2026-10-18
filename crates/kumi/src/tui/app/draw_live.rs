@@ -339,7 +339,8 @@ impl TuiApp {
             }
             spans(screen, x + name_width + 1, row, &line, None);
         }
-        let more = lanes.len() - shown;
+        // The DAW sends the first tracks' lanes and says how many it has in all.
+        let more = strip.track_count.unwrap_or(lanes.len()).max(lanes.len()) - shown;
         if more > 0 {
             screen.put(x, y + shown as i32, &truncate(&format!("{more} more tracks"), width), &st::FAINT);
             return shown as i32 + 1;
