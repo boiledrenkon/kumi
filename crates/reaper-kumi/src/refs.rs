@@ -28,17 +28,47 @@ pub enum EnvelopeId {
     Position(i32),
 }
 
+/// What is at the other end of a send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendEnd {
+    Track(TrackId),
+    /// A hardware output, by its number.
+    Hardware(i32),
+}
+
+impl SendEnd {
+    pub fn text(&self) -> String {
+        match self {
+            SendEnd::Track(id) => id.text().to_string(),
+            SendEnd::Hardware(n) => format!("hw{n}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ref {
     Track(TrackId),
     Item(String),
     Take(String),
     Fx(String),
-    Param { fx: String, index: i32 },
-    Send { track: TrackId, category: i32, index: i32 },
-    Marker(i32),
-    Region(i32),
-    Envelope { track: TrackId, which: EnvelopeId },
+    Param {
+        fx: String,
+        index: i32,
+    },
+    /// A send or receive of `track`, named by the track at its other end (and which of several, from 2), or a hardware
+    /// output by its number: never by position, which a reorder moves.
+    Send {
+        track: TrackId,
+        category: i32,
+        other: SendEnd,
+        repeat: u32,
+    },
+    Marker(String),
+    Region(String),
+    Envelope {
+        track: TrackId,
+        which: EnvelopeId,
+    },
 }
 
 impl TrackId {
@@ -90,13 +120,22 @@ impl Ref {
             ("take", [guid]) => Ref::Take(guid_of(guid, "a take id")?),
             ("fx", [guid]) => Ref::Fx(guid_of(guid, "an FX id")?),
             ("param", [guid, index]) => Ref::Param { fx: guid_of(guid, "an FX id")?, index: number(index, "a parameter index")? },
-            ("send", [track, category, index]) => Ref::Send {
-                track: TrackId::parse(track)?,
-                category: number(category, "a send category")?,
-                index: number(index, "a send index")?,
-            },
-            ("marker", [n]) => Ref::Marker(number(n, "a marker number")?),
-            ("region", [n]) => Ref::Region(number(n, "a region number")?),
+            ("send", [track, category, other]) | ("send", [track, category, other, _]) => {
+                let category = number(category, "a send category")?;
+                let repeat = match rest.get(3) {
+                    None => 1,
+                    Some(k) => k.parse::<u32>().ok().filter(|&k| k >= 2).ok_or_else(|| format!("{k:?} isn't a repeat count: from 2"))?,
+                };
+                let other = match other.strip_prefix("hw").map(|n| n.parse::<i32>()) {
+                    Some(Ok(n)) if n >= 0 && category == 1 && repeat == 1 => SendEnd::Hardware(n),
+                    Some(_) => return Err(bad()),
+                    None if matches!(category, -1 | 0) => SendEnd::Track(TrackId::parse(other)?),
+                    None => return Err(bad()),
+                };
+                Ref::Send { track: TrackId::parse(track)?, category, other, repeat }
+            }
+            ("marker", [guid]) => Ref::Marker(guid_of(guid, "a marker id")?),
+            ("region", [guid]) => Ref::Region(guid_of(guid, "a region id")?),
             ("env", [track, name]) => {
                 let which = match name.strip_prefix('i').and_then(|n| n.parse::<i32>().ok()) {
                     Some(position) => EnvelopeId::Position(position),
@@ -137,9 +176,9 @@ impl Ref {
             Ref::Take(guid) => take_ref(guid),
             Ref::Fx(guid) => fx_ref(guid),
             Ref::Param { fx, index } => param_ref(fx, *index),
-            Ref::Send { track, category, index } => send_ref(track, *category, *index),
-            Ref::Marker(n) => marker_ref(*n),
-            Ref::Region(n) => region_ref(*n),
+            Ref::Send { track, category, other, repeat } => send_ref(track, *category, other, *repeat),
+            Ref::Marker(guid) => marker_ref(guid),
+            Ref::Region(guid) => region_ref(guid),
             Ref::Envelope { track, which } => envelope_ref(track, which),
         }
     }
@@ -160,14 +199,19 @@ pub fn fx_ref(guid: &str) -> String {
 pub fn param_ref(fx_guid: &str, index: i32) -> String {
     format!("{PREFIX}:param:{fx_guid}:{index}")
 }
-pub fn send_ref(track: &TrackId, category: i32, index: i32) -> String {
-    format!("{PREFIX}:send:{}:{category}:{index}", track.text())
+pub fn send_ref(track: &TrackId, category: i32, other: &SendEnd, repeat: u32) -> String {
+    let base = format!("{PREFIX}:send:{}:{category}:{}", track.text(), other.text());
+    if repeat >= 2 {
+        format!("{base}:{repeat}")
+    } else {
+        base
+    }
 }
-pub fn marker_ref(number: i32) -> String {
-    format!("{PREFIX}:marker:{number}")
+pub fn marker_ref(guid: &str) -> String {
+    format!("{PREFIX}:marker:{guid}")
 }
-pub fn region_ref(number: i32) -> String {
-    format!("{PREFIX}:region:{number}")
+pub fn region_ref(guid: &str) -> String {
+    format!("{PREFIX}:region:{guid}")
 }
 pub fn envelope_ref(track: &TrackId, which: &EnvelopeId) -> String {
     match which {
@@ -403,9 +447,11 @@ mod tests {
             Ref::Take(guid.into()),
             Ref::Fx(fx.into()),
             Ref::Param { fx: fx.into(), index: 7 },
-            Ref::Send { track: track.clone(), category: -1, index: 2 },
-            Ref::Marker(3),
-            Ref::Region(12),
+            Ref::Send { track: track.clone(), category: -1, other: SendEnd::Track(TrackId::Guid(fx.into())), repeat: 1 },
+            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 3 },
+            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2), repeat: 1 },
+            Ref::Marker(guid.into()),
+            Ref::Region(fx.into()),
             Ref::Envelope { track: track.clone(), which: EnvelopeId::Chunk("VOLENV2".into()) },
             Ref::Envelope { track: track.clone(), which: EnvelopeId::Param { fx: fx.into(), index: 4 } },
             Ref::Envelope { track, which: EnvelopeId::Position(5) },
@@ -427,6 +473,11 @@ mod tests {
             ("r:item:42", "GUID"),
             ("r:param:{A}:x", "parameter index"),
             ("r:send:{A}:0", "well-formed"),
+            ("r:send:{A}:0:{B}:1", "repeat count"),
+            ("r:send:{A}:0:hw1", "well-formed"),
+            ("r:send:{A}:1:{B}", "well-formed"),
+            ("r:send:{A}:1:hw1:2", "well-formed"),
+            ("r:marker:3", "GUID"),
             ("r:pattern:3", "no ref kind"),
             ("r:env:{A}:", "well-formed"),
             ("r:env:{A}:VOL ENV", "well-formed"),

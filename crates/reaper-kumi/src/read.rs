@@ -48,8 +48,32 @@ pub fn failed(message: impl Into<String>) -> (String, String) {
 pub struct Reads {
     registry: RefCell<Registry>,
     epoch: RefCell<Epoch>,
-    /// How many times a new project took the place of the one in a tab, by tab: part of the project's identity.
-    replaced: RefCell<HashMap<usize, u32>>,
+    /// The serial of the project open in each tab: what its identity is made of.
+    serials: RefCell<Serials>,
+}
+
+/// A serial number for each project open in a tab, from this REAPER's own counter: the same while the project stays open
+/// (a tab switched away from and back to keeps its number), new when a different project takes the tab's place. The
+/// tab's pointer is only the key: File > New in the tab, and a pointer REAPER hands out again, both repeat it.
+#[derive(Default)]
+struct Serials {
+    by_tab: HashMap<usize, u64>,
+    last: u64,
+}
+
+impl Serials {
+    fn of(&mut self, tab: usize) -> u64 {
+        if let Some(&serial) = self.by_tab.get(&tab) {
+            return serial;
+        }
+        self.replace(tab)
+    }
+
+    fn replace(&mut self, tab: usize) -> u64 {
+        self.last += 1;
+        self.by_tab.insert(tab, self.last);
+        self.last
+    }
 }
 
 /// The size of a value as JSON, without building the text.
@@ -165,21 +189,19 @@ impl Reads {
         self.registry.borrow_mut().clear();
     }
 
-    /// What names the project open in this tab while it stays open in this REAPER: this process, the tab, and how many
-    /// projects have taken the tab's place.
+    /// What names the project open in this tab while it stays open in this REAPER: this process and the project's serial.
     pub fn identity(&self, proj: Project) -> String {
-        let replaced = self.replaced.borrow().get(&proj.addr()).copied().unwrap_or(0);
-        let tab = format!("{}:{:x}", std::process::id(), proj.addr());
-        if replaced == 0 {
-            tab
-        } else {
-            format!("{tab}.{replaced}")
-        }
+        format!("{}:{}", std::process::id(), self.serials.borrow_mut().of(proj.addr()))
     }
 
-    /// A new project took the place of the one in this tab.
+    /// A different project took the place of the one in this tab.
     pub fn project_replaced(&self, proj: Project) {
-        *self.replaced.borrow_mut().entry(proj.addr()).or_insert(0) += 1;
+        self.serials.borrow_mut().replace(proj.addr());
+    }
+
+    /// The tabs open now: the serial of a tab that closed is forgotten, so a pointer REAPER hands out again starts afresh.
+    pub fn keep_tabs(&self, open: &[usize]) {
+        self.serials.borrow_mut().by_tab.retain(|tab, _| open.contains(tab));
     }
 
     pub fn registry(&self) -> RefMut<'_, Registry> {
@@ -322,15 +344,17 @@ impl Reads {
                 }
                 rows::param_row(reaper, fx, &guid, index)
             }
-            Ref::Send { track, category, index } => {
+            Ref::Send { track, category, other, repeat } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
-                if index < 0 || index >= reaper.send_count(owner, category) {
-                    return Err(failed(format!("{reference} isn't there: the track has {} of them", reaper.send_count(owner, category))));
-                }
-                rows::send_row(reaper, owner, category, index)
+                let keys = rows::send_keys(reaper, owner, category);
+                let key = rows::SendKey { other, repeat };
+                let Some(index) = keys.iter().position(|k| *k == key) else {
+                    return Err(failed(format!("{reference} isn't there: the track has no such send (deleted, or it went elsewhere)")));
+                };
+                rows::send_row(reaper, owner, category, index as i32, &key)
             }
-            Ref::Marker(number) => self.marker_by_number(reaper, proj, number, false)?,
-            Ref::Region(number) => self.marker_by_number(reaper, proj, number, true)?,
+            Ref::Marker(guid) => self.marker_by_guid(reaper, proj, &guid, false)?,
+            Ref::Region(guid) => self.marker_by_guid(reaper, proj, &guid, true)?,
             Ref::Envelope { track, which } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let envelope = self.envelope_of(reaper, proj, owner, &which)?;
@@ -340,12 +364,10 @@ impl Reads {
         Ok(json!({"items": [row], "epoch": self.epoch()}))
     }
 
-    fn marker_by_number(&self, reaper: &Reaper, proj: Project, number: i32, region: bool) -> Result<Value, (String, String)> {
-        (0..reaper.marker_count(proj))
-            .filter_map(|i| reaper.marker(proj, i))
-            .find(|m| m.is_region == region && m.number == number)
-            .map(|m| rows::marker_row(reaper, proj, &m))
-            .ok_or_else(|| failed(format!("there is no {} {number}", if region { "region" } else { "marker" })))
+    fn marker_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str, region: bool) -> Result<Value, (String, String)> {
+        reaper.marker_by_guid(proj, guid).filter(|m| m.is_region == region).map(|m| rows::marker_row(reaper, proj, &m)).ok_or_else(|| {
+            failed(format!("there is no {} {guid} in the project (deleted, or another tab)", if region { "region" } else { "marker" }))
+        })
     }
 
     fn envelope_of(&self, reaper: &Reaper, proj: Project, track: Track, which: &EnvelopeId) -> Result<Envelope, (String, String)> {
@@ -542,8 +564,12 @@ impl Reads {
         let parent = parent.ok_or_else(|| bad("send: pass the track as parent"))?;
         let track = self.parent_track(reaper, proj, parent)?;
         // Sends, then receives, then hardware outputs.
-        let counts = [(0, reaper.send_count(track, 0)), (-1, reaper.send_count(track, -1)), (1, reaper.send_count(track, 1))];
-        let all: Vec<(i32, i32)> = counts.iter().flat_map(|&(category, n)| (0..n).map(move |index| (category, index))).collect();
+        let all: Vec<(i32, i32, rows::SendKey)> = [0, -1, 1]
+            .into_iter()
+            .flat_map(|category| {
+                rows::send_keys(reaper, track, category).into_iter().enumerate().map(move |(index, key)| (category, index as i32, key))
+            })
+            .collect();
         let mut position = self.position_number(cursor)?;
         let mut next = None;
         while position < all.len() {
@@ -551,8 +577,8 @@ impl Reads {
                 next = Some(position);
                 break;
             }
-            let (category, index) = all[position];
-            if !pager.push(rows::send_row(reaper, track, category, index)) {
+            let (category, index, key) = &all[position];
+            if !pager.push(rows::send_row(reaper, track, *category, *index, key)) {
                 next = Some(position);
                 break;
             }
@@ -823,6 +849,7 @@ mod tests {
         // The Kumi project id the project carries, once it has one; and what names it while it stays open.
         assert_eq!(project["id"], Value::Null);
         assert_eq!(project["identity"], lab.reads.identity(Project::first()));
+        assert!(!project["identity"].as_str().unwrap().contains('x'));
         fake::with(|s| {
             s.project_ext.insert(("kumi".into(), "project".into()), "0123456789abcdef0123456789abcdef".into());
         });
@@ -830,18 +857,37 @@ mod tests {
     }
 
     #[test]
-    fn a_project_is_named_by_its_tab_until_another_takes_the_tabs_place() {
+    fn a_project_is_named_by_a_serial_until_another_takes_its_tab() {
         let lab = Lab::new();
-        let before = lab.rows(json!({"kind": "project"}))[0]["identity"].as_str().unwrap().to_string();
-        assert!(before.starts_with(&format!("{}:", std::process::id())), "{before}");
-        assert_eq!(lab.rows(json!({"kind": "project"}))[0]["identity"], before.as_str());
+        let identity = |lab: &Lab| lab.rows(json!({"kind": "project"}))[0]["identity"].as_str().unwrap().to_string();
+        let (first, second) = (Project::first().addr(), Project::first().addr() + 16);
+        let before = identity(&lab);
+        // This process and a serial: never a pointer.
+        assert_eq!(before, format!("{}:1", std::process::id()));
+        assert_eq!(identity(&lab), before);
+        // A different project takes the tab (File > New, Open): the next serial.
         lab.reads.project_replaced(Project::first());
-        let after = lab.rows(json!({"kind": "project"}))[0]["identity"].as_str().unwrap().to_string();
-        assert_ne!(after, before);
-        assert!(after.starts_with(&before));
-        // Another tab is another project.
-        fake::with(|s| s.project_id += 1);
-        assert!(!lab.rows(json!({"kind": "project"}))[0]["identity"].as_str().unwrap().starts_with(&before));
+        let after = identity(&lab);
+        assert_eq!(after, format!("{}:2", std::process::id()));
+        // Another tab is another project; going back to the first finds it as it was.
+        fake::with(|s| {
+            s.other_tabs = vec![0];
+            s.project_id = 1;
+        });
+        lab.reads.keep_tabs(&[first, second]);
+        assert_eq!(identity(&lab), format!("{}:3", std::process::id()));
+        fake::with(|s| {
+            s.other_tabs = vec![1];
+            s.project_id = 0;
+        });
+        assert_eq!(identity(&lab), after);
+        // A tab that closed is forgotten: its pointer, handed out again, is a new project.
+        lab.reads.keep_tabs(&[first]);
+        fake::with(|s| {
+            s.other_tabs = vec![];
+            s.project_id = 1;
+        });
+        assert_eq!(identity(&lab), format!("{}:4", std::process::id()));
     }
 
     #[test]
@@ -1025,7 +1071,7 @@ mod tests {
         let lab = Lab::new();
         let out = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["ref"], "r:send:{AAAA}:0:0");
+        assert_eq!(out[0]["ref"], "r:send:{AAAA}:0:{DDDD}");
         assert_eq!(
             (&out[0]["destRef"], &out[0]["trackRef"], &out[0]["direction"]),
             (&json!("r:track:{DDDD}"), &json!("r:track:{AAAA}"), &json!("send"))
@@ -1036,7 +1082,10 @@ mod tests {
         );
         assert_eq!(out[0]["channels"], json!({"src": {"first": 0, "count": 2}, "dst": {"first": 0, "mono": false}}));
         let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
-        assert_eq!(reverb.iter().map(|r| r["ref"].as_str().unwrap()).collect::<Vec<_>>(), ["r:send:{DDDD}:-1:0", "r:send:{DDDD}:1:0"]);
+        assert_eq!(
+            reverb.iter().map(|r| r["ref"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["r:send:{DDDD}:-1:{AAAA}", "r:send:{DDDD}:1:hw0"]
+        );
         // A receive's other track is where it comes from.
         assert_eq!(
             (&reverb[0]["destRef"], &reverb[0]["trackRef"], &reverb[0]["direction"]),
@@ -1068,13 +1117,13 @@ mod tests {
         let markers = lab.rows(json!({"kind": "marker"}));
         assert_eq!(
             markers,
-            [json!({"ref": "r:marker:1", "number": 1, "name": "Drop", "position": 4.0, "positionBeats": 8.0, "color": Value::Null})]
+            [json!({"ref": "r:marker:{MARK-1}", "number": 1, "name": "Drop", "position": 4.0, "positionBeats": 8.0, "color": Value::Null})]
         );
         let regions = lab.rows(json!({"kind": "region"}));
         assert_eq!(
             regions,
             [
-                json!({"ref": "r:region:1", "number": 1, "name": "Verse", "position": 8.0, "positionBeats": 16.0, "end": 16.0, "endBeats": 32.0, "color": "#00ff00"})
+                json!({"ref": "r:region:{REG-1}", "number": 1, "name": "Verse", "position": 8.0, "positionBeats": 16.0, "end": 16.0, "endBeats": 32.0, "color": "#00ff00"})
             ]
         );
     }
@@ -1145,9 +1194,9 @@ mod tests {
             ("r:take:{TAKE-K1}", "name", json!("kick.wav")),
             ("r:fx:{FX-DLY}", "name", json!("VST: ReaDelay (Cockos)")),
             ("r:param:{FX-EQ}:2", "name", json!("Wet")),
-            ("r:send:{DDDD}:-1:0", "category", json!(-1)),
-            ("r:marker:1", "name", json!("Drop")),
-            ("r:region:1", "end", json!(16.0)),
+            ("r:send:{DDDD}:-1:{AAAA}", "category", json!(-1)),
+            ("r:marker:{MARK-1}", "name", json!("Drop")),
+            ("r:region:{REG-1}", "end", json!(16.0)),
         ] {
             let rows = lab.rows(json!({"ref": reference}));
             assert_eq!(rows.len(), 1, "{reference}");
@@ -1164,15 +1213,22 @@ mod tests {
             "r:take:{NOPE}",
             "r:fx:{NOPE}",
             "r:param:{FX-EQ}:99",
-            "r:send:{AAAA}:0:5",
-            "r:marker:77",
-            "r:region:77",
+            "r:send:{AAAA}:0:{NOPE}",
+            "r:send:{AAAA}:0:{DDDD}:2",
+            "r:send:{AAAA}:1:hw5",
+            "r:marker:{NOPE}",
+            "r:region:{NOPE}",
+            // A marker's GUID isn't a region's.
+            "r:region:{MARK-1}",
+            "r:marker:{REG-1}",
             "r:env:{AAAA}:PANENV",
         ] {
             let (code, message) = lab.read(json!({"ref": reference})).unwrap_err();
             assert_eq!(code, "failed", "{reference}: {message}");
         }
-        for reference in ["track:{AAAA}", "r:pattern:3", "r:track:", "r:param:{FX-EQ}:x"] {
+        for reference in
+            ["track:{AAAA}", "r:pattern:3", "r:track:", "r:param:{FX-EQ}:x", "r:send:{AAAA}:0:5", "r:send:{AAAA}:0", "r:marker:3"]
+        {
             assert_eq!(lab.read(json!({"ref": reference})).unwrap_err().0, "bad-params", "{reference}");
         }
     }
@@ -1314,7 +1370,7 @@ mod tests {
         assert_eq!(selection["track"], json!({"name": "Kick", "color": Value::Null, "type": "audio"}));
         assert_eq!(selection["itemName"], "kick.wav");
         let markers: Vec<&str> = snapshot["markers"].as_array().unwrap().iter().map(|m| m["ref"].as_str().unwrap()).collect();
-        assert_eq!(markers, ["r:marker:1", "r:region:1"]);
+        assert_eq!(markers, ["r:marker:{MARK-1}", "r:region:{REG-1}"]);
         assert_eq!(snapshot.get("truncated"), None);
     }
 
@@ -1324,7 +1380,15 @@ mod tests {
         fake::with(|s| {
             s.tracks = (0..320).map(|i| FakeTrack::new(&format!("{{T{i}}}"), "t")).collect();
             s.markers = (0..150)
-                .map(|i| fake::FakeMarker { is_region: false, start: i as f64, end: i as f64, name: "m".into(), number: i + 1, color: 0 })
+                .map(|i| fake::FakeMarker {
+                    guid: format!("{{M{i}}}"),
+                    is_region: false,
+                    start: i as f64,
+                    end: i as f64,
+                    name: "m".into(),
+                    number: i + 1,
+                    color: 0,
+                })
                 .collect();
         });
         let snapshot = snapshot(&lab).unwrap();
@@ -1348,6 +1412,7 @@ mod tests {
             s.tracks = (0..260).map(|i| FakeTrack::new(&format!("{{T{i}}}"), &long)).collect();
             s.markers = (0..150)
                 .map(|i| fake::FakeMarker {
+                    guid: format!("{{M{i}}}"),
                     is_region: true,
                     start: i as f64,
                     end: i as f64 + 1.0,
@@ -1369,5 +1434,141 @@ mod tests {
         fake::with(|s| s.project = None);
         assert_eq!(snapshot(&lab).unwrap_err().0, "failed");
         assert_eq!(lab.read(json!({"kind": "track"})).unwrap_err().0, "failed");
+    }
+
+    #[test]
+    fn several_sends_to_one_track_are_told_apart_by_a_count_from_two_and_a_reorder_keeps_them() {
+        use crate::reaper::fake::FakeSend;
+        let lab = Lab::new();
+        let mut loud = FakeSend::to(3);
+        loud.volume = 0.5;
+        let mut louder = FakeSend::to(3);
+        louder.volume = 0.25;
+        fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(3), FakeSend::to(1), loud, louder]);
+        let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
+        let refs: Vec<&str> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
+        assert_eq!(refs, ["r:send:{AAAA}:0:{DDDD}", "r:send:{AAAA}:0:{BBBB}", "r:send:{AAAA}:0:{DDDD}:2", "r:send:{AAAA}:0:{DDDD}:3"]);
+        let volume = |lab: &Lab, reference: &str| lab.rows(json!({"ref": reference}))[0]["volumeDb"].clone();
+        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3"), json!(-12.04));
+        // A send to another track moves to the front: the others keep their refs, and so their sends.
+        fake::with(|s| s.tracks[0].sends.swap(0, 1));
+        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:2"), json!(-6.02));
+        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3"), json!(-12.04));
+        assert_eq!(lab.rows(json!({"ref": "r:send:{AAAA}:0:{BBBB}"}))[0]["index"], 0);
+    }
+
+    #[test]
+    fn markers_with_the_same_number_have_refs_of_their_own() {
+        let lab = Lab::new();
+        fake::with(|s| {
+            s.markers.push(fake::FakeMarker {
+                guid: "{MARK-2}".into(),
+                is_region: false,
+                start: 12.0,
+                end: 12.0,
+                name: "Another one 1".into(),
+                number: 1,
+                color: 0,
+            });
+        });
+        let markers = lab.rows(json!({"kind": "marker"}));
+        assert_eq!(markers.iter().map(|m| m["ref"].as_str().unwrap()).collect::<Vec<_>>(), ["r:marker:{MARK-1}", "r:marker:{MARK-2}"]);
+        assert_eq!(markers[0]["number"], markers[1]["number"]);
+        assert_eq!(lab.rows(json!({"ref": "r:marker:{MARK-2}"}))[0]["name"], "Another one 1");
+        // The number is editable: the ref doesn't follow it.
+        fake::with(|s| s.markers[2].number = 9);
+        assert_eq!(lab.rows(json!({"ref": "r:marker:{MARK-2}"}))[0]["number"], 9);
+    }
+
+    /// Every answer, run through the contract's naming rule: a ref sits only under `ref`, `parent`, `…Ref` or `…Refs`.
+    #[test]
+    fn every_answer_names_refs_the_way_the_contract_says() {
+        use crate::focus::Focus;
+        use daw_bridge::contract::misplaced_refs;
+        let lab = Lab::new();
+        fake::with(|s| {
+            s.tracks[1].items[0].selected = true;
+            s.tracks[2].selected = true;
+            s.touched_fx = Some((0, -1, -1, 0, 1));
+            s.focused_fx = Some((0, -1, -1, 0, 0));
+            s.tracks[2].items[0].takes[0].fx.push(crate::reaper::fake::FakeFx::new("{FX-TAKE}", "JS: Volume"));
+        });
+        let api = fake::api();
+        let reaper = Reaper::new(&api);
+        let mut answers: Vec<(String, Value)> = Vec::new();
+        let expect = |label: String, answer: Answer| (label.clone(), answer.unwrap_or_else(|e| panic!("{label}: {e:?}")));
+        // Every kind at every parent that has some, and every row read again by its own ref.
+        let mut refs_seen: Vec<String> = Vec::new();
+        for kind in ["project", "track", "item", "marker", "region"] {
+            let answer = lab.reads.read(&reaper, &json!({"kind": kind}));
+            if let Ok(page) = &answer {
+                refs_seen.extend(page["items"].as_array().unwrap().iter().filter_map(|r| r["ref"].as_str().map(str::to_string)));
+            }
+            answers.push(expect(format!("read {kind}"), answer));
+        }
+        // Each ref found is a parent in its turn: tracks to items and FX, FX to parameters, containers to their children.
+        let mut queue: Vec<String> = refs_seen.clone();
+        let mut at = 0;
+        while at < queue.len() {
+            let parent = queue[at].clone();
+            at += 1;
+            let kinds: &[&str] = match parent.split(':').nth(1) {
+                Some("track") => &["item", "fx", "send", "envelope"],
+                Some("item") => &["take", "note"],
+                Some("take") => &["fx", "note"],
+                Some("fx") => &["fx", "param", "envelope"],
+                _ => &[],
+            };
+            for kind in kinds {
+                if let Ok(page) = lab.reads.read(&reaper, &json!({"kind": kind, "parent": parent})) {
+                    for found in page["items"].as_array().unwrap().iter().filter_map(|r| r["ref"].as_str()) {
+                        if !queue.iter().any(|known| known == found) {
+                            queue.push(found.to_string());
+                        }
+                    }
+                    answers.push((format!("read {kind} of {parent}"), page));
+                }
+            }
+        }
+        refs_seen = queue;
+        refs_seen.sort();
+        refs_seen.dedup();
+        for reference in &refs_seen {
+            if let Ok(page) = lab.reads.read(&reaper, &json!({"ref": reference})) {
+                answers.push((format!("read {reference}"), page));
+            }
+        }
+        answers.push(expect("snapshot".into(), lab.reads.snapshot(&reaper)));
+        let project = reaper.current_project().unwrap().ptr;
+        let focus = Focus::default();
+        answers.push(("focus (fx)".into(), focus.poll(&lab.reads, &reaper, project, true)));
+        fake::with(|s| s.focused_fx = None);
+        answers.push(("focus (arrange)".into(), focus.poll(&lab.reads, &reaper, project, true)));
+        fake::with(|s| s.midi_editor = Some((2, 0, 0)));
+        answers.push(("focus (midi)".into(), focus.poll(&lab.reads, &reaper, project, true)));
+        for (kind, reference) in [
+            ("arrange", None),
+            ("midi", Some("r:take:{TAKE-S1}")),
+            ("fx", Some("r:track:{AAAA}")),
+            ("fx", Some("r:take:{TAKE-S1}")),
+            ("routing", Some("r:track:{DDDD}")),
+            ("routing", Some("r:track:{AAAA}")),
+        ] {
+            let mut params = json!({"kind": kind});
+            if let Some(reference) = reference {
+                params["ref"] = reference.into();
+            }
+            answers.push(expect(format!("focus_body {kind} {reference:?}"), lab.reads.focus_body(&reaper, &params)));
+        }
+        assert!(answers.len() > 50, "only {} answers walked", answers.len());
+        for (label, answer) in &answers {
+            let misplaced = misplaced_refs(answer);
+            assert!(misplaced.is_empty(), "{label}: {misplaced:?}");
+        }
+        // The walk saw refs of every kind the contract names.
+        let kinds: std::collections::BTreeSet<&str> = refs_seen.iter().filter_map(|r| r.split(':').nth(1)).collect();
+        for kind in ["track", "item", "take", "fx", "param", "send", "marker", "region", "env"] {
+            assert!(kinds.contains(kind), "no {kind} ref walked: {kinds:?}");
+        }
     }
 }

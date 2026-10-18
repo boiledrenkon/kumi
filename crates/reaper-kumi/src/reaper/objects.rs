@@ -5,7 +5,7 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
 
 use super::{Envelope, Fx, FxOwner, Item, Project, Reaper, Take, Track};
-use crate::api;
+use crate::api::{self, ProjectMarker};
 
 /// REAPER's string getters that take no size want a big buffer.
 const BIG: usize = 4096;
@@ -41,11 +41,13 @@ fn text(mut fill: impl FnMut(*mut c_char, c_int) -> bool) -> String {
 /// A marker or region as `EnumProjectMarkers3` gives it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Marker {
+    /// REAPER's own id for it: the shown number can be edited and repeat.
+    pub guid: String,
     pub is_region: bool,
     pub start: f64,
     pub end: f64,
     pub name: String,
-    /// The number REAPER shows, not the enumeration index.
+    /// The number REAPER shows (editable, and may repeat).
     pub number: i32,
     pub color: i32,
 }
@@ -186,16 +188,46 @@ impl Reaper<'_> {
 
     // ----- markers, regions and the tempo map -----
 
-    /// Markers and regions together, as REAPER enumerates them.
+    /// Markers and regions together (REAPER 7.62's object API: each has a GUID).
     pub fn marker_count(&self, proj: Project) -> i32 {
-        self.api.CountProjectMarkers().map(|f| unsafe { f(proj.0, ptr::null_mut(), ptr::null_mut()) }).unwrap_or(0)
+        self.api.GetNumRegionsOrMarkers().map(|f| unsafe { f(proj.0) }).unwrap_or(0)
     }
 
+    /// The marker or region at an internal index.
     pub fn marker(&self, proj: Project, index: i32) -> Option<Marker> {
-        let f = self.api.EnumProjectMarkers3()?;
-        let (mut is_region, mut start, mut end, mut name, mut number, mut color) = (false, 0.0, 0.0, ptr::null(), 0, 0);
-        let next = unsafe { f(proj.0, index, &mut is_region, &mut start, &mut end, &mut name, &mut number, &mut color) };
-        (next != 0).then(|| Marker { is_region, start, end, name: unsafe { api::string(name) }, number, color })
+        let marker = unsafe { self.api.GetRegionOrMarker()?(proj.0, index, ptr::null()) };
+        self.marker_at(proj, marker)
+    }
+
+    /// The marker or region with this GUID.
+    pub fn marker_by_guid(&self, proj: Project, guid: &str) -> Option<Marker> {
+        let guid = cstring(guid);
+        let marker = unsafe { self.api.GetRegionOrMarker()?(proj.0, -1, guid.as_ptr()) };
+        self.marker_at(proj, marker)
+    }
+
+    fn marker_at(&self, proj: Project, marker: *mut ProjectMarker) -> Option<Marker> {
+        if marker.is_null() {
+            return None;
+        }
+        let value = |parm: &std::ffi::CStr| {
+            self.api.GetRegionOrMarkerInfo_Value().map(|f| unsafe { f(proj.0, marker, parm.as_ptr()) }).unwrap_or(0.0)
+        };
+        let string = |parm: &std::ffi::CStr| {
+            let f = self.api.GetSetRegionOrMarkerInfo_String();
+            f.and_then(|f| big_string(|buf| unsafe { f(proj.0, marker, parm.as_ptr(), buf, false) })).unwrap_or_default()
+        };
+        let is_region = value(c"B_ISREGION") != 0.0;
+        let start = value(c"D_STARTPOS");
+        Some(Marker {
+            guid: string(c"GUID"),
+            is_region,
+            start,
+            end: if is_region { value(c"D_ENDPOS") } else { start },
+            name: string(c"P_NAME"),
+            number: value(c"I_NUMBER") as i32,
+            color: value(c"I_CUSTOMCOLOR") as i32,
+        })
     }
 
     pub fn tempo_marker_count(&self, proj: Project) -> i32 {

@@ -258,3 +258,26 @@ async fn the_pick_chooses_the_reaper_a_read_goes_to() {
     session.finish().await;
     drop(started);
 }
+
+#[tokio::test]
+async fn every_answer_the_host_hands_over_names_refs_the_way_the_contract_says() {
+    let mut lab = Lab::start(5, 0).await;
+    let mut answers = Vec::new();
+    for (tool, arguments) in [
+        ("read", json!({"kind": "track"})),
+        ("read", json!({"kind": "item", "parent": "r:track:{T0002}"})),
+        ("read", json!({"ref": "r:track:{T0001}"})),
+        ("snapshot", json!({})),
+        ("focus", json!({})),
+        ("focus_body", json!({"kind": "arrange"})),
+        ("focus_body", json!({"kind": "routing", "ref": "r:track:{T0001}"})),
+    ] {
+        let (answer, is_error) = lab.tool(tool, arguments.clone()).await;
+        assert!(!is_error, "{tool} {arguments}: {answer}");
+        answers.push((tool, answer));
+    }
+    for (tool, answer) in &answers {
+        let misplaced = daw_bridge::contract::misplaced_refs(answer);
+        assert!(misplaced.is_empty(), "{tool}: {misplaced:?}");
+    }
+}

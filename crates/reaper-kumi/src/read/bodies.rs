@@ -156,7 +156,7 @@ impl Reads {
             }
             let list = if marker.is_region { &mut regions } else { &mut markers };
             if list.len() < WINDOW_MARKERS {
-                let mut row = json!({"ref": if marker.is_region { refs::region_ref(marker.number) } else { refs::marker_ref(marker.number) }, "number": marker.number, "name": rows::clip(&marker.name), "position": beats(marker.start)});
+                let mut row = json!({"ref": if marker.is_region { refs::region_ref(&marker.guid) } else { refs::marker_ref(&marker.guid) }, "number": marker.number, "name": rows::clip(&marker.name), "position": beats(marker.start)});
                 if marker.is_region {
                     row["end"] = beats(marker.end).into();
                 }
@@ -358,15 +358,19 @@ impl Reads {
         };
         let id = rows::track_id(reaper, track);
         // Sends, then receives, then hardware outputs, each as its `send` row with the other end's name.
-        let counts = [(0, reaper.send_count(track, 0)), (-1, reaper.send_count(track, -1)), (1, reaper.send_count(track, 1))];
-        let total: usize = counts.iter().map(|&(_, n)| n.max(0) as usize).sum();
-        let routes: Vec<Value> = counts
+        let all: Vec<(i32, i32, rows::SendKey)> = [0, -1, 1]
+            .into_iter()
+            .flat_map(|category| {
+                rows::send_keys(reaper, track, category).into_iter().enumerate().map(move |(index, key)| (category, index as i32, key))
+            })
+            .collect();
+        let total = all.len();
+        let routes: Vec<Value> = all
             .iter()
-            .flat_map(|&(category, n)| (0..n).map(move |index| (category, index)))
             .take(MAX_SENDS)
-            .map(|(category, index)| {
-                let mut route = rows::send_row(reaper, track, category, index);
-                route["otherName"] = other_name(reaper, track, category, index).into();
+            .map(|(category, index, key)| {
+                let mut route = rows::send_row(reaper, track, *category, *index, key);
+                route["otherName"] = other_name(reaper, track, *category, *index).into();
                 route
             })
             .collect();
@@ -569,7 +573,15 @@ mod tests {
         let reads = lab();
         // 120 bpm: a second is two beats.
         fake::with(|s| {
-            s.markers.push(fake::FakeMarker { is_region: false, start: 40.0, end: 40.0, name: "Far".into(), number: 2, color: 0 });
+            s.markers.push(fake::FakeMarker {
+                guid: "{MARK-FAR}".into(),
+                is_region: false,
+                start: 40.0,
+                end: 40.0,
+                name: "Far".into(),
+                number: 2,
+                color: 0,
+            });
             s.tempo_markers = vec![
                 FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4 },
                 FakeTempo { time: 6.0, bpm: 90.0, num: 3, denom: 4 },
@@ -612,7 +624,7 @@ mod tests {
         assert_eq!(body["timeSelection"], Value::Null);
         assert_eq!(body["view"], json!({"from": 0.0, "to": 60.0}));
         // The marker at 4 s and the region from 8 s, in beats; the marker at 40 s is off the window.
-        assert_eq!((refs_of(&body["markers"]), refs_of(&body["regions"])), (vec!["r:marker:1"], vec!["r:region:1"]));
+        assert_eq!((refs_of(&body["markers"]), refs_of(&body["regions"])), (vec!["r:marker:{MARK-1}"], vec!["r:region:{REG-1}"]));
         assert_eq!(body["markers"][0]["position"], 8.0);
         assert_eq!((&body["regions"][0]["position"], &body["regions"][0]["end"]), (&json!(16.0), &json!(32.0)));
         // The tempo in force when the window opens, and the change inside it; not the one far past it.
@@ -870,7 +882,7 @@ mod tests {
         fake::with(|s| s.tracks[3].main_send = false);
         let reverb = body(&reads, json!({"kind": "routing", "ref": "r:track:{DDDD}"})).unwrap();
         assert_eq!((&reverb["ref"], &reverb["name"], &reverb["parentSend"]), (&json!("r:track:{DDDD}"), &json!("Reverb"), &json!(false)));
-        assert_eq!(refs_of(&reverb["routes"]), ["r:send:{DDDD}:-1:0", "r:send:{DDDD}:1:0"]);
+        assert_eq!(refs_of(&reverb["routes"]), ["r:send:{DDDD}:-1:{AAAA}", "r:send:{DDDD}:1:hw0"]);
         let routes = reverb["routes"].as_array().unwrap();
         assert_eq!(
             (&routes[0]["direction"], &routes[0]["destRef"], &routes[0]["otherName"]),
@@ -881,7 +893,7 @@ mod tests {
             (&json!("hardware"), &Value::Null, &json!("Out 3/4"))
         );
         let drums = body(&reads, json!({"kind": "routing", "ref": "r:track:{AAAA}"})).unwrap();
-        assert_eq!(refs_of(&drums["routes"]), ["r:send:{AAAA}:0:0"]);
+        assert_eq!(refs_of(&drums["routes"]), ["r:send:{AAAA}:0:{DDDD}"]);
         assert_eq!((&drums["routes"][0]["otherName"], &drums["parentSend"]), (&json!("Reverb"), &json!(true)));
         // The master has nowhere to send; with no ref the selected track is the one.
         assert_eq!(body(&reads, json!({"kind": "routing", "ref": "r:track:master"})).unwrap()["parentSend"], false);

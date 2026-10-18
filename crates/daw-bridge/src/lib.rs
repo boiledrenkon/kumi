@@ -73,6 +73,7 @@
 //! Every bridge answers `ping` and `status` (its identity plus `busy`).
 
 pub mod auth;
+pub mod contract;
 pub mod daw;
 pub mod detect;
 pub mod doctor;
