@@ -79,11 +79,13 @@ pub struct OwnIntegration<S: RefScheme> {
     endpoint: Rc<RefCell<Option<Rc<dyn McpEndpoint>>>>,
     book: Rc<RefCell<Book<S>>>,
     epoch: RefCell<Option<String>>,
-    connected: Cell<bool>,
+    connected: Rc<Cell<bool>>,
     closed: Rc<Cell<bool>>,
     watching: Cell<bool>,
     /// The track the producer has selected, as the last focus said: the timeline's page is centred on it.
     selected: Rc<RefCell<Option<String>>>,
+    /// The project's identity as last observed: another one in the same tab (or another song) is another project.
+    identity: Rc<RefCell<Option<String>>>,
 }
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
@@ -93,15 +95,22 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         endpoint: Rc::new(RefCell::new(None)),
         book: Rc::new(RefCell::new(Book::default())),
         epoch: RefCell::new(None),
-        connected: Cell::new(false),
+        connected: Rc::default(),
         closed: Rc::new(Cell::new(false)),
         watching: Cell::new(false),
         selected: Rc::default(),
+        identity: Rc::default(),
     })
 }
 
+/// Why a host tool answered an error: its words, and whether the DAW is there at all (it quit, or its bridge did).
+struct Refused {
+    why: String,
+    there: bool,
+}
+
 /// The JSON a host tool answered with, or why it couldn't.
-fn answer_of(result: &CallToolResult) -> Result<Value, String> {
+fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
     let text = result
         .content
         .iter()
@@ -113,9 +122,22 @@ fn answer_of(result: &CallToolResult) -> Result<Value, String> {
         .join("\n");
     let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
     if result.is_error == Some(true) {
-        return Err(value.get("error").and_then(Value::as_str).map(str::to_owned).unwrap_or(text));
+        return Err(Refused {
+            why: value.get("error").and_then(Value::as_str).map(str::to_owned).unwrap_or(text),
+            there: value.get("connected") != Some(&Value::Bool(false)),
+        });
     }
     Ok(value)
+}
+
+/// Why the DAW may answer late, in words: REAPER's `busy` code.
+fn busy_words(code: &str, profile: &DawProfile) -> String {
+    match code {
+        "modal" => "a dialog is open".into(),
+        "loading" => format!("a {} is loading", profile.words.place),
+        "rendering" => "it's rendering".into(),
+        other => other.into(),
+    }
 }
 
 impl<S: RefScheme + 'static> OwnIntegration<S> {
@@ -148,7 +170,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     /// A host tool's answer: Ok with its JSON, Err with why (the host's words) when it answered an error.
-    async fn call(&self, tool: &str, args: Value, signal: Signal) -> Result<Result<Value, String>, RuntimeError> {
+    async fn call(&self, tool: &str, args: Value, signal: Signal) -> Result<Result<Value, Refused>, RuntimeError> {
         let endpoint = self.endpoint(signal.clone()).await?;
         let args = args.as_object().cloned().unwrap_or_default();
         let bounded = abort::any([signal, abort::timeout(CALL_MS)]);
@@ -184,30 +206,67 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             return;
         }
         let (endpoint, closed, daw, selected) = (self.endpoint.clone(), self.closed.clone(), self.daw, self.selected.clone());
+        let (connected, identity, on_connection) =
+            (self.connected.clone(), self.identity.clone(), self.options.context.on_connection.clone());
         let period = self.options.context.focus_interval_ms.unwrap_or(FOCUS_MS).max(50);
         tokio::task::spawn_local(async move {
-            let (mut last, mut last_transport): (Option<Value>, Option<Value>) = (None, None);
+            let (mut last, mut last_transport, mut last_epoch): (Option<Value>, Option<Value>, Option<String>) = (None, None, None);
+            let lose_focus = |last: &mut Option<Value>| {
+                if last.take().is_some() {
+                    if let Some(on_focus) = &on_focus {
+                        on_focus(None);
+                    }
+                }
+            };
             while !closed.get() {
                 tokio::time::sleep(std::time::Duration::from_millis(period)).await;
                 let Some(host) = endpoint.borrow().clone() else { continue };
-                let read =
-                    host.call("focus", JsonObject::new(), abort::timeout(2_000)).await.ok().and_then(|result| answer_of(&result).ok());
+                let read = host.call("focus", JsonObject::new(), abort::timeout(2_000)).await.ok().map(|result| answer_of(&result));
                 if closed.get() {
                     break;
                 }
-                let Some(focus) = read.filter(|focus| focus.is_object()) else {
-                    if last.take().is_some() {
-                        if let Some(on_focus) = &on_focus {
-                            on_focus(None);
+                let focus = match read {
+                    Some(Ok(focus)) if focus.is_object() => focus,
+                    // The DAW went away (it quit, or its bridge did): the session says so, and FOCUS empties with it.
+                    Some(Err(Refused { there: false, .. })) => {
+                        if connected.replace(false) {
+                            on_connection(ConnectionState::Disconnected, Some(DisconnectCause::Live));
                         }
+                        last_epoch = None;
+                        lose_focus(&mut last);
+                        continue;
                     }
-                    continue;
+                    _ => {
+                        lose_focus(&mut last);
+                        continue;
+                    }
                 };
+                // Back after it went away: the session looks again.
+                if !connected.replace(true) {
+                    on_connection(ConnectionState::Connected, None);
+                }
+                // Another project in the same tab, or another song: the epoch moved, and the project's identity with it.
+                let epoch = focus.get("epoch").and_then(Value::as_str).map(str::to_owned);
+                if last_epoch.is_some() && epoch != last_epoch {
+                    let mut args = JsonObject::new();
+                    args.insert("kind".into(), daw.project_kind.into());
+                    let row = host.call("read", args, abort::timeout(2_000)).await.ok().and_then(|result| answer_of(&result).ok());
+                    let now = row.as_ref().and_then(|row| row.pointer("/items/0/identity")).and_then(Value::as_str).map(str::to_owned);
+                    let before = identity.borrow().clone();
+                    if now.is_some() && before.is_some() && now != before {
+                        *identity.borrow_mut() = now;
+                        on_connection(ConnectionState::Disconnected, Some(DisconnectCause::Set));
+                        on_connection(ConnectionState::Connected, None);
+                    }
+                }
+                last_epoch = epoch;
                 *selected.borrow_mut() = focus.pointer("/selection/trackRef").and_then(Value::as_str).map(str::to_owned);
-                let seen = json!({"view": focus.get("view"), "selection": focus.get("selection"), "epoch": focus.get("epoch")});
+                let seen = json!({"view": focus.get("view"), "selection": focus.get("selection"), "epoch": focus.get("epoch"), "busy": focus.get("busy")});
                 if last.as_ref() != Some(&seen) {
                     if let Some(on_focus) = &on_focus {
-                        on_focus(Some((daw.fill_focus)(&focus)));
+                        let mut filled = (daw.fill_focus)(&focus);
+                        filled.busy = focus.get("busy").and_then(Value::as_str).map(|code| busy_words(code, daw.profile));
+                        on_focus(Some(filled));
                     }
                     last = Some(seen);
                 }
@@ -285,6 +344,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             context["markers"] = markers;
         }
         let identity = project.get("identity").and_then(Value::as_str).map(str::to_owned);
+        *self.identity.borrow_mut() = identity.clone();
         let tool: Rc<dyn KernelTool> =
             Rc::new(ReadTool::<S> { daw: self.daw, endpoint: self.endpoint.borrow().clone(), book: self.book.clone() });
         Observation {
@@ -295,10 +355,18 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             instructions: self.daw.instructions.into(),
             tools: vec![tool],
             project: saved.map(|_| ProjectRef { id: place, name: name.clone() }),
-            set: identity,
+            set: identity.clone(),
             tracks: Some(tracks.iter().filter_map(|track| track.get("name").and_then(Value::as_str).map(str::to_owned)).collect()),
             saved_at: None,
-            identity: None,
+            // The project as the DAW names it, for the app to show (saved or not).
+            identity: Some(ProjectIdentity {
+                daw: self.id(),
+                id: saved.map(str::to_owned),
+                name,
+                file: project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).map(str::to_owned),
+                saved_at: None,
+                open_identity: identity,
+            }),
         }
     }
 }
@@ -346,9 +414,13 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
                 self.set_connected(true);
                 Ok(self.observation(&snapshot))
             }
-            Ok(Err(why)) => {
-                self.set_connected(false);
-                Ok(self.no_access(Some(&why)))
+            // Busy (a dialog, a load): still there, and still connected; the focus says why it waits.
+            Ok(Err(refused)) if refused.there => Ok(self.no_access(Some(&refused.why))),
+            Ok(Err(refused)) => {
+                if self.connected.replace(false) {
+                    (self.options.context.on_connection)(ConnectionState::Disconnected, Some(DisconnectCause::Live));
+                }
+                Ok(self.no_access(Some(&refused.why)))
             }
             Err(error) if error.is_aborted() => Err(error),
             Err(_) => {
@@ -412,7 +484,7 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
                 let shortened = self.book.borrow_mut().shorten(&page);
                 Ok(ToolResult::text(stringify(&shortened)))
             }
-            Err(why) => Ok(ToolResult::error(why)),
+            Err(refused) => Ok(ToolResult::error(refused.why)),
         }
     }
     fn reach(&self) -> Reach {

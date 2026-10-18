@@ -706,9 +706,11 @@ impl TuiApp {
             };
             self.notice(
                 &format!(
-                    "{state} · {} {} · {} · {turns}{}{}{}",
-                    crate::daw::words().app,
-                    enum_name(&status.connection),
+                    "{state} · {} · {} · {turns}{}{}{}",
+                    match self.0.state.borrow().focus.as_ref().and_then(|focus| focus.busy.clone()) {
+                        Some(why) => format!("{} is busy: {why}", crate::daw::words().app),
+                        None => format!("{} {}", crate::daw::words().app, enum_name(&status.connection)),
+                    },
                     self.model_label().unwrap_or_else(|| "no model".into()),
                     status.observation.as_ref().filter(|s| !s.is_empty()).map(|s| format!(" · {s}")).unwrap_or_default(),
                     library.map(|l| format!(" · {l}")).unwrap_or_default(),

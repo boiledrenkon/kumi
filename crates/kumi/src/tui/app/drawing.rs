@@ -153,6 +153,9 @@ impl TuiApp {
             (st::WARN, format!("{daw} not connected"))
         } else if state.connection == ConnectionState::Connecting {
             (st::FAINT, format!("connecting to {daw}…"))
+        } else if state.focus.as_ref().is_some_and(|focus| focus.busy.is_some()) {
+            // There, but answering late (a dialog is open): not "not connected".
+            (st::WARN, format!("{daw} busy"))
         } else {
             (st::ACCENT, daw.to_string())
         }

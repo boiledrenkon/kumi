@@ -110,7 +110,7 @@ impl ReaperScript {
                 let tracks: Vec<Value> = state.tracks.iter().take(MAX_LIMIT).cloned().collect();
                 let mut snapshot = json!({
                     "epoch": epoch,
-                    "project": {"id": null, "identity": "sim:1", "name": "Song.rpp", "path": "/lab/Song.rpp", "tempo": 120.0},
+                    "project": Self::project(&state),
                     "transport": {"playing": false, "recording": false, "beat": 0.0, "tempo": 120.0, "beatsPerBar": 4.0, "seconds": 0.0, "loop": {"on": false, "start": 0.0, "end": 0.0}},
                     "tracks": tracks,
                     "selection": {"trackRef": "r:track:{T0001}", "itemRef": null, "takeRef": null, "fxRef": null, "cursor": 0.0},
@@ -194,6 +194,11 @@ impl ReaperScript {
         Ok(body)
     }
 
+    /// The project row: another project in the tab (`switch_tab`) is another identity.
+    fn project(state: &State) -> Value {
+        json!({"id": null, "identity": format!("sim:{}", state.epoch), "name": "Song.rpp", "path": "/lab/Song.rpp", "tempo": 120.0})
+    }
+
     fn read(state: &State, epoch: &str, params: &Value) -> Result<Value, (String, String)> {
         let bad = |message: &str| ("bad-params".to_string(), message.to_string());
         if let Some(reference) = params.get("ref").and_then(Value::as_str) {
@@ -221,6 +226,7 @@ impl ReaperScript {
             }
         };
         let all: Vec<Value> = match (kind, params.get("parent").and_then(Value::as_str)) {
+            ("project", _) => vec![Self::project(state)],
             ("track", _) => state.tracks.clone(),
             ("item", Some(parent)) => {
                 state.tracks.iter().filter(|row| row["ref"] == parent).map(|row| item_row(row["ref"].as_str().unwrap())).collect()

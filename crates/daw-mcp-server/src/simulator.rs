@@ -259,14 +259,27 @@ fn record(state: &Mutex<State>, connection: usize, from_host: bool, bytes: &[u8]
 
 fn answer(request: &Request, state: &Mutex<State>, config: &SimulatorConfig) -> Frame {
     let state = state.lock().unwrap();
-    if let Some(busy) = &state.busy {
+    // Busy, as the bridges are: status and focus still answer (saying why), the rest is refused.
+    if let Some(busy) = state.busy.clone().filter(|_| !matches!(request.method.as_str(), "status" | "focus")) {
         return Frame::error(request.id, code::BUSY, format!("{} is {busy}", state.identity.daw));
     }
+    let busy = state.busy.clone();
     match request.method.as_str() {
         "ping" => Frame::ok(request.id, json!({})),
+        "focus" if busy.is_some() => {
+            let respond = config.respond.clone();
+            drop(state);
+            match respond.and_then(|respond| respond("focus", &request.params)) {
+                Some(Ok(mut focus)) => {
+                    focus["busy"] = busy.into();
+                    Frame::ok(request.id, focus)
+                }
+                _ => Frame::error(request.id, code::BUSY, "busy; nothing changed"),
+            }
+        }
         "status" => {
             let mut status = serde_json::to_value(&state.identity).unwrap();
-            status["busy"] = false.into();
+            status["busy"] = busy.map_or(Value::Bool(false), Value::from);
             for (key, value) in &config.status_extra {
                 status[key] = value.clone();
             }

@@ -188,12 +188,12 @@ async fn a_busy_reaper_is_said_so_and_a_quit_one_is_gone() {
     let mut lab = Lab::start(3, 0).await;
     assert!(!lab.tool("read", json!({"kind": "track"})).await.1);
     lab.simulator.set_busy(Some("rendering"));
-    for (tool, arguments) in [
-        ("read", json!({"kind": "track"})),
-        ("snapshot", json!({})),
-        ("focus", json!({})),
-        ("focus_body", json!({"kind": "fx", "ref": "r:track:master"})),
-    ] {
+    // The focus still answers, saying why it may be stale; the work is refused.
+    let (focus, is_error) = lab.tool("focus", json!({})).await;
+    assert!(!is_error && focus["busy"] == "rendering", "{focus}");
+    for (tool, arguments) in
+        [("read", json!({"kind": "track"})), ("snapshot", json!({})), ("focus_body", json!({"kind": "fx", "ref": "r:track:master"}))]
+    {
         let (answer, is_error) = lab.tool(tool, arguments).await;
         assert!(is_error, "{tool}");
         assert_eq!(

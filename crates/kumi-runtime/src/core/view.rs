@@ -113,6 +113,9 @@ pub struct DawFocus {
     /// The section moves with the playhead (Renoise following the player): a new one is playback's, not the producer's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section_follows: Option<bool>,
+    /// Why the DAW answers late, in words ("a dialog is open"), while it does: what it shows may be stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy: Option<String>,
 }
 
 /// What the producer is looking at, as Live's integration has always sent it.

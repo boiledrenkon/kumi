@@ -173,9 +173,10 @@ async fn a_renoise_behind_a_dialog_is_said_busy_and_a_quit_one_is_gone() {
     let mut lab = Lab::start(None).await;
     assert!(!lab.tool("focus", json!({})).await.1);
     lab.simulator.set_busy(Some("rendering"));
-    for (tool, arguments) in
-        [("read", json!({"kind": "track"})), ("snapshot", json!({})), ("focus", json!({})), ("focus_body", json!({"kind": "matrix"}))]
-    {
+    // The focus still answers, saying why it may be stale; the work is refused.
+    let (focus, is_error) = lab.tool("focus", json!({})).await;
+    assert!(!is_error && focus["busy"] == "rendering", "{focus}");
+    for (tool, arguments) in [("read", json!({"kind": "track"})), ("snapshot", json!({})), ("focus_body", json!({"kind": "matrix"}))] {
         let (answer, is_error) = lab.tool(tool, arguments).await;
         assert!(is_error, "{tool}");
         assert_eq!(

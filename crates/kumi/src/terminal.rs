@@ -292,6 +292,8 @@ struct State {
     said: std::collections::HashMap<String, String>,
     /// Kumi's question about another Set's conversation, open until a line says 1, 2 or 3 (or Kumi withdraws it).
     asking: Option<String>,
+    /// Why the DAW answers late, while it does (a dialog is open), as its focus says.
+    busy: Option<String>,
 }
 struct Inner {
     options: TerminalOptions,
@@ -334,6 +336,7 @@ pub fn create_terminal(options: TerminalOptions) -> PlainTerminal {
             carry: vec![],
             said: std::collections::HashMap::new(),
             asking: None,
+            busy: None,
         }),
         parser: RefCell::new(None),
         keys: RefCell::new(None),
@@ -660,7 +663,7 @@ impl PlainTerminal {
                 "[status] {}; MCP/{}: {}; turns {}{}; {}{}",
                 enum_name(status.state),
                 crate::daw::words().app,
-                enum_name(status.connection),
+                self.0.state.borrow().busy.as_ref().map_or_else(|| enum_name(status.connection), |why| format!("busy ({why})")),
                 status.turns,
                 status.max_turns.filter(|n| *n != 0).map(|n| format!("/{n}")).unwrap_or_default(),
                 status.observation.clone().unwrap_or_else(|| format!("No current {} observation", crate::daw::words().app)),
@@ -1131,6 +1134,17 @@ impl Terminal for PlainTerminal {
                 }
             )),
             "observation" => self.notice(&format!("[observation] {}", get("label"))),
+            // A busy DAW (a dialog is open) is said as it starts and ends; Live's focus never says it.
+            "focus" => {
+                let busy = value["focus"]["busy"].as_str().map(str::to_owned);
+                let before = std::mem::replace(&mut self.0.state.borrow_mut().busy, busy.clone());
+                let app = crate::daw::words().app;
+                match (before, busy) {
+                    (None, Some(why)) => self.notice(&format!("[connection] MCP/{app}: busy ({why})")),
+                    (Some(_), None) => self.notice(&format!("[connection] MCP/{app}: answering again")),
+                    _ => {}
+                }
+            }
             "library" => {
                 let mut state = self.0.state.borrow_mut();
                 if !state.told_library

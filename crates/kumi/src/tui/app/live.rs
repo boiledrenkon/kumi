@@ -104,12 +104,17 @@ impl TuiApp {
             let result = app.0.options.controller.focus_body(&BodyRequest::Notes { item_ref: reference }).await;
             let again = {
                 let mut state = app.0.state.borrow_mut();
+                // A busy DAW answers nothing: what was shown stays.
+                let busy = state.focus.as_ref().is_some_and(|focus| focus.busy.is_some());
                 if let Ok(body) = result {
                     let clip = match body {
                         Some(FocusBody::Notes(notes)) => Some(notes),
                         _ => None,
                     };
-                    if clip.is_none() || clip.as_ref().map(|c| c.item_ref().to_string()) == state.focus.as_ref().and_then(item_ref) {
+                    let kept = clip.is_none() && busy;
+                    if !kept
+                        && (clip.is_none() || clip.as_ref().map(|c| c.item_ref().to_string()) == state.focus.as_ref().and_then(item_ref))
+                    {
                         state.clip = clip;
                     }
                 }
@@ -174,10 +179,13 @@ impl TuiApp {
                 if kind == BodyKind::Grid { BodyRequest::Grid { track_ref: reference, index: scene } } else { BodyRequest::Timeline };
             if let Ok(body) = app.0.options.controller.focus_body(&request).await {
                 let mut state = app.0.state.borrow_mut();
+                // A busy DAW answers nothing: what was shown stays.
+                let busy = state.focus.as_ref().is_some_and(|focus| focus.busy.is_some());
                 match (kind, body) {
                     (BodyKind::Grid, Some(FocusBody::Grid(strip))) => state.strip.grid = Some(strip),
-                    (BodyKind::Grid, _) => state.strip.grid = None,
                     (_, Some(FocusBody::Timeline(strip))) => state.strip.timeline = Some(strip),
+                    _ if busy => {}
+                    (BodyKind::Grid, _) => state.strip.grid = None,
                     (_, _) => state.strip.timeline = None,
                 }
             }
@@ -281,9 +289,13 @@ impl TuiApp {
             let result = app.0.options.controller.focus_body(&request).await;
             let again = {
                 let mut state = app.0.state.borrow_mut();
+                // A busy DAW answers nothing: what was shown stays.
+                let busy = state.focus.as_ref().is_some_and(|focus| focus.busy.is_some());
                 if state.own.key.as_ref() == Some(&key) {
                     if let Ok(body) = result {
-                        state.own.body = body;
+                        if body.is_some() || !busy {
+                            state.own.body = body;
+                        }
                     }
                 }
                 state.own.reading = false;

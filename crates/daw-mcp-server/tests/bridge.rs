@@ -73,8 +73,10 @@ async fn session(simulator: &Simulator) {
     let event = tokio::time::timeout(WAIT, events.recv()).await.unwrap().unwrap();
     assert_eq!((event.seq, event.name.as_str(), &event.data), (1, "project", &json!({"name": "Next"})));
     assert_eq!(client.request("status", json!({}), WAIT).await.unwrap()["project"], json!({"name": "Next"}));
+    // Busy, as the bridges are: status still answers (saying why), work is refused.
     simulator.set_busy(Some("rendering"));
-    assert!(matches!(client.request("status", json!({}), WAIT).await, Err(RequestError::Bridge { code, .. }) if code == "busy"));
+    assert_eq!(client.request("status", json!({}), WAIT).await.unwrap()["busy"], "rendering");
+    assert!(matches!(client.request("render", json!({}), WAIT).await, Err(RequestError::Bridge { code, .. }) if code == "busy"));
     simulator.set_busy(None);
     simulator.stop();
     for _ in 0..100 {

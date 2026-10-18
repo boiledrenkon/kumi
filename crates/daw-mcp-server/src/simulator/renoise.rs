@@ -57,6 +57,8 @@ fn epoch_of(text: &str) -> Option<u32> {
 fn retag(value: &Value, from: u32, to: u32, key: Option<&str>) -> Value {
     match value {
         Value::String(text) if key == Some("epoch") && *text == from.to_string() => Value::String(to.to_string()),
+        // Another song is another identity.
+        Value::String(text) if key == Some("identity") && from != to => Value::String(format!("{text}.{to}")),
         Value::String(text) if epoch_of(text) == Some(from) => {
             Value::String(format!("{to}{}", &text[text.find([':', '.']).expect("a ref or cursor")..]))
         }

@@ -133,6 +133,13 @@ impl TuiApp {
                 screen.put(x, area.y + 2 + index as i32, &truncate(text, width), style);
             }
         }
+        // A busy DAW (a dialog is open): FOCUS keeps what it showed, and says why it may be stale.
+        let busy = self.0.state.borrow().focus.as_ref().and_then(|focus| focus.busy.clone());
+        if let Some(why) = busy {
+            screen.fill(Rect::new(x + 5, area.y + 1, (width - 5).max(1), 1), &st::SURFACE);
+            let said = format!(" · {} is busy: {why}", crate::daw::words().app);
+            screen.put(x + 5, area.y + 1, &truncate(&said, (width - 5).max(1)), &st::WARN);
+        }
         screen.put(x, area.y + now_at, &truncate("NOW", width), &st::LABEL);
         let now = self.now_line();
         if let Some(dot) = now.dot {

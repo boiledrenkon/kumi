@@ -12,5 +12,7 @@
 1 > {"type":"request","id":4,"method":"status","params":{},"deadlineMs":"<deadline>"}
 1 < {"type":"response","id":4,"ok":true,"result":{"daw":"renoise","bridge":"0.1.0","dawVersion":"3.5.4","pid":"<pid>","resource":"/lab/Renoise/V3.5.4","project":{"name":"Next"},"busy":false,"demo":false}}
 1 > {"type":"request","id":5,"method":"status","params":{},"deadlineMs":"<deadline>"}
-1 < {"type":"response","id":5,"ok":false,"error":{"code":"busy","message":"renoise is rendering"}}
+1 < {"type":"response","id":5,"ok":true,"result":{"daw":"renoise","bridge":"0.1.0","dawVersion":"3.5.4","pid":"<pid>","resource":"/lab/Renoise/V3.5.4","project":{"name":"Next"},"busy":"rendering","demo":false}}
+1 > {"type":"request","id":6,"method":"render","params":{},"deadlineMs":"<deadline>"}
+1 < {"type":"response","id":6,"ok":false,"error":{"code":"busy","message":"renoise is rendering"}}
 1 < {"type":"bye","reason":"quit"}
