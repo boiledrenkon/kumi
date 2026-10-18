@@ -1244,6 +1244,154 @@ mod tests {
         assert!(calls < 200, "{calls} calls to refuse a cursor");
     }
 
+    fn set_track(index: usize, values: &[(&str, f64)]) {
+        fake::with(|s| {
+            for (key, value) in values {
+                s.tracks[index].extra.insert((*key).into(), *value);
+            }
+        });
+    }
+
+    /// What a mixer strip shows beyond the fader, and what a power user checks before they change a track.
+    #[test]
+    fn a_track_row_says_how_it_pans_records_and_is_shown_and_which_folder_it_is_in() {
+        let lab = Lab::new();
+        let rows = lab.rows(json!({"kind": "track"}));
+        let row = |n: usize| &rows[n];
+        // The defaults of a new track; Kick is in Drums' folder, Drums is open, and the master has no parent.
+        let kick = rows.iter().find(|r| r["name"] == "Kick").unwrap();
+        assert_eq!(
+            (&kick["channels"], &kick["panMode"], &kick["width"], &kick["panLaw"], &kick["dualPan"]),
+            (&json!(2), &json!("balance"), &json!(1.0), &Value::Null, &Value::Null)
+        );
+        assert_eq!(
+            (&kick["phaseInverted"], &kick["fxEnabled"], &kick["shownInArrange"], &kick["shownInMixer"], &kick["folderState"]),
+            (&json!(false), &json!(true), &json!(true), &json!(true), &Value::Null)
+        );
+        assert_eq!(
+            (&kick["parentRef"], &kick["recordInput"], &kick["recordMode"], &kick["monitoring"]),
+            (&json!("r:track:{AAAA}"), &json!({"kind": "none"}), &json!("input"), &json!("off"))
+        );
+        assert_eq!((&kick["automationMode"], &kick["itemLayout"], kick.get("lanes")), (&json!("trim"), &json!("normal"), None));
+        assert_eq!(rows.iter().find(|r| r["name"] == "Drums").unwrap()["parentRef"], Value::Null);
+        assert_eq!(rows.iter().find(|r| r["name"] == "Drums").unwrap()["folderState"], "open");
+        assert_eq!(row(0)["master"], true);
+        assert_eq!(row(0).get("parentRef"), None);
+        // A dual-pan track, narrowed, with a pan law, inverted, its FX chain bypassed, hidden in the arrange view, a
+        // collapsed folder, recording MIDI from every device on channel 3, monitoring, overdubbing, in touch mode.
+        set_track(
+            1,
+            &[
+                ("I_PANMODE", 6.0),
+                ("D_DUALPANL", -1.0),
+                ("D_DUALPANR", 0.5),
+                ("D_WIDTH", 0.25),
+                ("D_PANLAW", 0.5),
+                ("B_PHASE", 1.0),
+                ("I_FXEN", 0.0),
+                ("B_SHOWINTCP", 0.0),
+                ("I_NCHAN", 6.0),
+                ("I_RECINPUT", (4096 | (63 << 5) | 3) as f64),
+                ("I_RECMODE", 7.0),
+                ("I_RECMON", 1.0),
+                ("I_AUTOMODE", 2.0),
+            ],
+        );
+        set_track(0, &[("I_FOLDERCOMPACT", 2.0)]);
+        let rows = lab.rows(json!({"kind": "track"}));
+        let kick = rows.iter().find(|r| r["name"] == "Kick").unwrap();
+        assert_eq!(
+            (&kick["panMode"], &kick["dualPan"], &kick["width"], &kick["panLaw"], &kick["channels"]),
+            (&json!("dual"), &json!({"left": -1.0, "right": 0.5}), &json!(0.25), &json!(0.5), &json!(6))
+        );
+        assert_eq!(
+            (&kick["phaseInverted"], &kick["fxEnabled"], &kick["shownInArrange"], &kick["shownInMixer"]),
+            (&json!(true), &json!(false), &json!(false), &json!(true))
+        );
+        assert_eq!(kick["recordInput"], json!({"kind": "midi", "channel": 3, "device": "all"}));
+        assert_eq!(
+            (&kick["recordMode"], &kick["monitoring"], &kick["automationMode"]),
+            (&json!("midi-overdub"), &json!("on"), &json!("touch"))
+        );
+        assert_eq!(rows.iter().find(|r| r["name"] == "Drums").unwrap()["folderState"], "fully-collapsed");
+        // Audio inputs, mono and stereo and multichannel, and the virtual keyboard.
+        for (value, expected) in [
+            (512.0, json!({"kind": "audio", "first": 513, "layout": "mono"})),
+            ((1024 | 2) as f64, json!({"kind": "audio", "first": 3, "layout": "stereo"})),
+            ((2048 | 4) as f64, json!({"kind": "audio", "first": 5, "layout": "multichannel"})),
+            ((4096 | (62 << 5)) as f64, json!({"kind": "midi", "channel": 0, "device": "virtual-keyboard"})),
+            ((4096 | (3 << 5) | 16) as f64, json!({"kind": "midi", "channel": 16, "device": "3"})),
+        ] {
+            set_track(1, &[("I_RECINPUT", value)]);
+            assert_eq!(lab.rows(json!({"ref": "r:track:{BBBB}"}))[0]["recordInput"], expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_track_with_fixed_lanes_names_them_says_which_play_and_its_items_say_if_theirs_does() {
+        let lab = Lab::new();
+        set_track(
+            1,
+            &[("I_FREEMODE", 2.0), ("I_NUMFIXEDLANES", 3.0), ("C_LANEPLAYS:0", 0.0), ("C_LANEPLAYS:1", 1.0), ("C_LANEPLAYS:2", 2.0)],
+        );
+        fake::with(|s| {
+            s.tracks[1].lane_names = vec!["Take 1".into(), "Take 2".into(), "Take 3".into()];
+            s.tracks[1].items[0].lane = 1;
+            s.tracks[1].items[0].extra.insert("C_LANEPLAYS".into(), 1.0);
+            s.tracks[1].items[1].extra.insert("C_LANEPLAYS".into(), -1.0);
+        });
+        let track = &lab.rows(json!({"ref": "r:track:{BBBB}"}))[0];
+        assert_eq!(track["itemLayout"], "lanes");
+        assert_eq!(
+            track["lanes"],
+            json!([
+                {"index": 0, "name": "Take 1", "plays": "no"},
+                {"index": 1, "name": "Take 2", "plays": "only"},
+                {"index": 2, "name": "Take 3", "plays": "with-others"},
+            ])
+        );
+        let items = lab.rows(json!({"kind": "item", "parent": "r:track:{BBBB}"}));
+        assert_eq!((&items[0]["lane"], &items[0]["lanePlays"], &items[1]["lanePlays"]), (&json!(1), &json!("only"), &json!("hidden")));
+        // Items on a track without fixed lanes have no lane to play.
+        let drums = lab.rows(json!({"kind": "item", "parent": "r:track:{CCCC}"}));
+        assert_eq!(drums[0]["lanePlays"], Value::Null);
+    }
+
+    #[test]
+    fn a_send_says_its_phase_mono_midi_and_automation_and_links_its_envelopes() {
+        use crate::reaper::fake::FakeEnvelope;
+        let lab = Lab::new();
+        fake::with(|s| {
+            let send = &mut s.tracks[0].sends[0];
+            send.extra.insert("B_PHASE".into(), 1.0);
+            send.extra.insert("B_MONO".into(), 1.0);
+            send.extra.insert("I_AUTOMODE".into(), 3.0);
+            send.extra.insert("I_MIDIFLAGS".into(), (31) as f64);
+            s.tracks[0].envelopes.push(FakeEnvelope::for_send("Send Volume: Reverb", 0, "<VOLENV", 3));
+            s.tracks[0].envelopes.push(FakeEnvelope::for_send("Send Mute: Reverb", 0, "<MUTEENV", 1));
+        });
+        let sends = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
+        let send = &sends[0];
+        assert_eq!((&send["phaseInverted"], &send["mono"], &send["automationMode"]), (&json!(true), &json!(true), &json!("write")));
+        assert_eq!(send["midi"], json!({"enabled": false, "srcChannel": 0, "dstChannel": 0, "srcBus": 0, "dstBus": 0, "faders": false}));
+        assert_eq!(send["envelopeRefs"], json!(["r:env:{AAAA}:{ENV-SEND0-VOLENV}", "r:env:{AAAA}:{ENV-SEND0-MUTEENV}"]));
+        // The ref reads the envelope.
+        assert_eq!(lab.rows(json!({"ref": "r:env:{AAAA}:{ENV-SEND0-VOLENV}"}))[0]["name"], "Send Volume: Reverb");
+        // The defaults of a send: MIDI on, from every channel to the original, the track's own automation mode.
+        fake::with(|s| s.tracks[0].sends[0].extra.clear());
+        let send = &lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}))[0];
+        assert_eq!(send["midi"]["enabled"], true);
+        assert_eq!((&send["automationMode"], &send["phaseInverted"], &send["mono"]), (&json!("track"), &json!(false), &json!(false)));
+        // Channels 3 to 5, buses 2 and 3, the faders sending MIDI volume and pan.
+        let flags = 3 | (5 << 5) | 1024 | (2 << 14) | (3 << 22);
+        fake::with(|s| s.tracks[0].sends[0].extra.insert("I_MIDIFLAGS".into(), flags as f64));
+        let send = &lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}))[0];
+        assert_eq!(send["midi"], json!({"enabled": true, "srcChannel": 3, "dstChannel": 5, "srcBus": 2, "dstBus": 3, "faders": true}));
+        // A receive has MIDI flags too; a hardware output has no MIDI to speak of.
+        let reverb = lab.rows(json!({"kind": "send", "parent": "r:track:{DDDD}"}));
+        assert!(reverb[0].get("midi").is_some() && reverb[1].get("midi").is_none() && reverb[0].get("envelopeRefs").is_none());
+    }
+
     #[test]
     fn limits_default_to_fifty_and_stop_at_two_hundred() {
         let lab = Lab::new();

@@ -301,6 +301,20 @@ impl Reaper<'_> {
         self.api.GetMediaTrackInfo_Value().map(|f| unsafe { f(track.0, parm.as_ptr()) }).unwrap_or(0.0)
     }
 
+    /// The folder track this track is inside, if it is inside one.
+    pub fn track_parent(&self, track: Track) -> Option<Track> {
+        let f = self.api.GetSetMediaTrackInfo()?;
+        let parent = unsafe { f(track.0, c"P_PARTRACK".as_ptr(), ptr::null_mut()) };
+        (!parent.is_null()).then_some(Track(parent.cast()))
+    }
+
+    /// A track's text attribute (`P_LANENAME:2`…), None when REAPER has none.
+    pub fn track_string(&self, track: Track, parm: &str) -> Option<String> {
+        let parm = cstring(parm);
+        let f = self.api.GetSetMediaTrackInfo_String()?;
+        big_string(|buf| unsafe { f(track.0, parm.as_ptr(), buf, false) })
+    }
+
     /// How many folders deep the track sits (0 at the top level).
     pub fn track_depth(&self, track: Track) -> i32 {
         self.api.GetTrackDepth().map(|f| unsafe { f(track.0) }).unwrap_or(0)
@@ -585,6 +599,13 @@ impl Reaper<'_> {
     pub fn send_value(&self, track: Track, category: i32, index: i32, parm: &str) -> f64 {
         let parm = cstring(parm);
         self.api.GetTrackSendInfo_Value().map(|f| unsafe { f(track.0, category, index, parm.as_ptr()) }).unwrap_or(0.0)
+    }
+
+    /// A send's own envelope of this kind (`<VOLENV`, `<PANENV`, `<MUTEENV`), if it has one.
+    pub fn send_envelope(&self, track: Track, index: i32, chunk: &str) -> Option<Envelope> {
+        let parm = cstring(&format!("P_ENV:{chunk}"));
+        let envelope = unsafe { self.api.GetSetTrackSendInfo()?(track.0, 0, index, parm.as_ptr(), ptr::null_mut()) };
+        (!envelope.is_null()).then_some(Envelope(envelope.cast()))
     }
 
     /// The track on the other end: `P_DESTTRACK` of a send, `P_SRCTRACK` of a receive.

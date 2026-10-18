@@ -4,6 +4,7 @@
 
 use super::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 #[derive(Clone)]
@@ -86,20 +87,40 @@ pub struct FakeEnvelope {
     pub chunk: Option<String>,
     /// The FX (by GUID) and parameter an FX envelope belongs to.
     pub fx_param: Option<(String, i32)>,
+    /// The send (by index) and chunk name of a send's envelope.
+    pub send: Option<(usize, String)>,
     pub points: i32,
     pub armed: bool,
     pub visible: bool,
 }
 
 impl FakeEnvelope {
+    /// A send's own envelope (`<VOLENV`…): the index of the send it belongs to.
+    pub fn for_send(name: &str, send: usize, chunk: &str, points: i32) -> Self {
+        let mut envelope = FakeEnvelope::own(name, "", points);
+        envelope.chunk = None;
+        envelope.guid = format!("{{ENV-SEND{send}-{}}}", chunk.trim_start_matches('<'));
+        envelope.send = Some((send, chunk.into()));
+        envelope
+    }
+
     pub fn own(name: &str, chunk: &str, points: i32) -> Self {
         let guid = format!("{{ENV-{}}}", chunk.trim_start_matches('<'));
-        FakeEnvelope { name: name.into(), guid, chunk: Some(chunk.into()), fx_param: None, points, armed: false, visible: true }
+        FakeEnvelope { name: name.into(), guid, chunk: Some(chunk.into()), fx_param: None, send: None, points, armed: false, visible: true }
     }
 
     pub fn for_param(name: &str, fx: &str, param: i32, points: i32) -> Self {
         let guid = format!("{{ENV-{}-{param}}}", fx.trim_matches(|c| c == '{' || c == '}'));
-        FakeEnvelope { name: name.into(), guid, chunk: None, fx_param: Some((fx.into(), param)), points, armed: false, visible: true }
+        FakeEnvelope {
+            name: name.into(),
+            guid,
+            chunk: None,
+            fx_param: Some((fx.into(), param)),
+            send: None,
+            points,
+            armed: false,
+            visible: true,
+        }
     }
 }
 
@@ -144,11 +165,24 @@ pub struct FakeItem {
     pub selected: bool,
     pub takes: Vec<FakeTake>,
     pub active: usize,
+    /// Other `GetMediaItemInfo_Value` attributes (`C_LANEPLAYS`…).
+    pub extra: HashMap<String, f64>,
 }
 
 impl FakeItem {
     pub fn new(guid: &str, position: f64, length: f64, takes: Vec<FakeTake>) -> Self {
-        FakeItem { guid: guid.into(), position, length, mute: false, lane: 0, color: 0, selected: false, takes, active: 0 }
+        FakeItem {
+            guid: guid.into(),
+            position,
+            length,
+            mute: false,
+            lane: 0,
+            color: 0,
+            selected: false,
+            takes,
+            active: 0,
+            extra: HashMap::new(),
+        }
     }
 }
 
@@ -162,11 +196,13 @@ pub struct FakeSend {
     pub mute: bool,
     pub src_chan: i32,
     pub dst_chan: i32,
+    /// Other `GetTrackSendInfo_Value` attributes (`B_PHASE`, `I_MIDIFLAGS`…); a send's default for those not here.
+    pub extra: HashMap<String, f64>,
 }
 
 impl FakeSend {
     pub fn to(dest: usize) -> Self {
-        FakeSend { dest, mode: 0, volume: 1.0, pan: 0.0, mute: false, src_chan: 0, dst_chan: 0 }
+        FakeSend { dest, mode: 0, volume: 1.0, pan: 0.0, mute: false, src_chan: 0, dst_chan: 0, extra: HashMap::new() }
     }
 }
 
@@ -190,6 +226,11 @@ pub struct FakeTrack {
     pub sends: Vec<FakeSend>,
     pub hw_outs: Vec<FakeSend>,
     pub envelopes: Vec<FakeEnvelope>,
+    /// Other `GetMediaTrackInfo_Value` attributes (`I_PANMODE`, `B_SHOWINTCP`, `C_LANEPLAYS:0`…); a new track's default for
+    /// those not here.
+    pub extra: HashMap<String, f64>,
+    /// `P_LANENAME:n` of a track with fixed lanes.
+    pub lane_names: Vec<String>,
 }
 
 impl FakeTrack {
@@ -212,6 +253,8 @@ impl FakeTrack {
             sends: vec![],
             hw_outs: vec![],
             envelopes: vec![],
+            extra: HashMap::new(),
+            lane_names: vec![],
         }
     }
 }
@@ -813,9 +856,40 @@ unsafe extern "C" fn get_media_track_info_value(track: *mut MediaTrack, parm: *c
             "D_VOL" => t.volume,
             "D_PAN" => t.pan,
             "B_MAINSEND" => t.main_send as i32 as f64,
-            "I_NCHAN" => 2.0,
-            _ => 0.0,
+            other => t.extra.get(other).copied().unwrap_or_else(|| new_track_default(other)),
         }
+    })
+}
+/// What a new track holds for the attributes the fake lets a test set.
+fn new_track_default(parm: &str) -> f64 {
+    match parm {
+        "I_NCHAN" => 2.0,
+        "B_SHOWINTCP" | "B_SHOWINMIXER" | "I_FXEN" | "D_WIDTH" => 1.0,
+        "D_PANLAW" | "I_RECINPUT" => -1.0,
+        "I_PANMODE" => 3.0,
+        _ => 0.0,
+    }
+}
+/// `P_PARTRACK`: the nearest folder above that has not been closed by the tracks between.
+unsafe extern "C" fn get_set_media_track_info(track: *mut MediaTrack, parm: *const c_char, set: *mut c_void) -> *mut c_void {
+    assert!(set.is_null(), "the fake only reads");
+    let parm = name_of(parm);
+    counted(|s| {
+        let at = unpack(track as u64).1;
+        if parm != "P_PARTRACK" || track_of(s, track as u64).is_none() || at == MASTER {
+            return ptr::null_mut();
+        }
+        let mut open: Vec<usize> = Vec::new();
+        for (n, t) in s.tracks.iter().enumerate().take(at as usize) {
+            if t.folder == 1 {
+                open.push(n);
+            } else if t.folder < 0 {
+                for _ in 0..-t.folder {
+                    open.pop();
+                }
+            }
+        }
+        open.last().map_or(ptr::null_mut(), |&n| track_ptr(n).cast())
     })
 }
 unsafe extern "C" fn get_set_media_track_info_string(track: *mut MediaTrack, parm: *const c_char, buf: *mut c_char, set: bool) -> bool {
@@ -829,6 +903,10 @@ unsafe extern "C" fn get_set_media_track_info_string(track: *mut MediaTrack, par
         (Some(t), "P_NAME") => {
             write(buf, 4096, &t.name);
             true
+        }
+        (Some(t), lane) if lane.starts_with("P_LANENAME:") => {
+            let name = lane["P_LANENAME:".len()..].parse::<usize>().ok().and_then(|n| t.lane_names.get(n));
+            name.inspect(|name| write(buf, 4096, name)).is_some()
         }
         _ => false,
     })
@@ -908,7 +986,7 @@ unsafe extern "C" fn get_media_item_info_value(item: *mut MediaItem, parm: *cons
             "B_UISEL" => i.selected as i32 as f64,
             "I_CURTAKE" => i.active as f64,
             "IP_ITEMNUMBER" => unpack(item as u64).2 as f64,
-            _ => 0.0,
+            other => i.extra.get(other).copied().unwrap_or(0.0),
         }
     })
 }
@@ -1287,7 +1365,7 @@ unsafe extern "C" fn get_track_send_info_value(track: *mut MediaTrack, category:
             "I_SENDMODE" => send.mode as f64,
             "I_SRCCHAN" => send.src_chan as f64,
             "I_DSTCHAN" => send.dst_chan as f64,
-            _ => 0.0,
+            other => send.extra.get(other).copied().unwrap_or(if other == "I_AUTOMODE" { -1.0 } else { 0.0 }),
         }
     })
 }
@@ -1304,6 +1382,14 @@ unsafe extern "C" fn get_set_track_send_info(
         let own = unpack(track as u64).1;
         match (parm.as_str(), category) {
             ("P_DESTTRACK", 0) => send_of(s, track as u64, 0, index).map_or(ptr::null_mut(), |send| track_ptr(send.dest).cast()),
+            (env, 0) if env.starts_with("P_ENV:") => {
+                let chunk = &env["P_ENV:".len()..];
+                let t = track_of(s, track as u64);
+                let found = t.and_then(|t| {
+                    t.envelopes.iter().position(|e| e.send.as_ref().is_some_and(|(send, c)| *send == index as usize && c == chunk))
+                });
+                found.map_or(ptr::null_mut(), |n| pack(ENVELOPE, own, n as u64, 0) as *mut c_void)
+            }
             ("P_SRCTRACK", c) if c < 0 && own != MASTER => {
                 receives(s, own as usize).get(index as usize).map_or(ptr::null_mut(), |&(src, _)| track_ptr(src).cast())
             }
@@ -1547,6 +1633,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSelectedTrack2" => get_selected_track2 as unsafe extern "C" fn(*mut ReaProject, c_int, bool) -> *mut MediaTrack,
         b"GetLastTouchedTrack" => get_last_touched_track as unsafe extern "C" fn() -> *mut MediaTrack,
         b"GetMediaTrackInfo_Value" => get_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char) -> f64,
+        b"GetSetMediaTrackInfo" => get_set_media_track_info as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_void) -> *mut c_void,
         b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
         b"GetTrackName" => get_track_name as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int) -> bool,
         b"GetProjExtState" => get_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *mut c_char, c_int) -> c_int,
