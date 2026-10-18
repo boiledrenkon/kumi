@@ -201,6 +201,9 @@ fn request_nested(levels: usize) -> String {
 fn frame_vectors() {
     let request_with =
         |id: &str, deadline: &str| format!("{{\"type\":\"request\",\"id\":{id},\"method\":\"ping\",\"deadlineMs\":{deadline}}}");
+    let welcome_with = |credit: &str| {
+        format!("{{\"type\":\"welcome\",\"session\":\"{}\",\"daw\":\"renoise\",\"bridge\":\"0.1.0\",\"dawVersion\":\"3.5.4\",\"pid\":1,\"resource\":\"/r\",\"project\":null,\"maxFrameBytes\":67108864,\"heartbeatMs\":1000,\"creditBytes\":{credit}}}", "0".repeat(32))
+    };
     let heartbeat = |ms: &str| format!("{{\"type\":\"heartbeat\",\"ms\":{ms}}}");
     let event = |data: &str| format!("{{\"type\":\"event\",\"seq\":1,\"name\":\"x\",\"data\":{data}}}");
     let lines = [
@@ -228,6 +231,13 @@ fn frame_vectors() {
         ("a heartbeat written 0.0", heartbeat("0.0")),
         ("a heartbeat out of range", heartbeat("1e400")),
         ("an event number written 2.0", "{\"type\":\"event\",\"seq\":2.0,\"name\":\"x\"}".to_string()),
+        ("a credit of 65536", "{\"type\":\"credit\",\"bytes\":65536}".to_string()),
+        ("a credit of 0", "{\"type\":\"credit\",\"bytes\":0}".to_string()),
+        ("a credit written 1.0", "{\"type\":\"credit\",\"bytes\":1.0}".to_string()),
+        ("a credit of 2^53", "{\"type\":\"credit\",\"bytes\":9007199254740992}".to_string()),
+        ("a credit without bytes", "{\"type\":\"credit\"}".to_string()),
+        ("a welcome naming creditBytes", welcome_with("524288")),
+        ("a welcome naming creditBytes written 1.5", welcome_with("1.5")),
         ("a name with a surrogate pair", "{\"type\":\"event\",\"seq\":1,\"name\":\"\\ud83d\\ude00\"}".to_string()),
         ("a name with a lone high surrogate", "{\"type\":\"event\",\"seq\":1,\"name\":\"\\ud800x\"}".to_string()),
         ("a name with a lone low surrogate", "{\"type\":\"event\",\"seq\":1,\"name\":\"\\udc00\"}".to_string()),

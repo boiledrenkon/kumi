@@ -216,6 +216,9 @@ handlers["renoise.reload"] = function()
   return { reloading = true }
 end
 
+-- (Exposed for the tests, which add methods of their own.)
+M.handlers = handlers
+
 function M.handle(_, request)
   local handler = handlers[request.method]
   if not handler then error({ code = "unknown-method", message = "no method " .. request.method }) end

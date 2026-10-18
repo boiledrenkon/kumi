@@ -3,7 +3,7 @@
 use daw_bridge::auth::Secret;
 use daw_bridge::files::{write_discovery, Discovery, DISCOVERY_SCHEMA};
 use daw_bridge::handshake::{Offer, ServerAction, ServerConnection};
-use daw_bridge::wire::{code, event, Frame, Identity, Project, Request, PROTOCOL};
+use daw_bridge::wire::{code, event, Frame, Identity, Project, Request, CREDIT_WINDOW_BYTES, PROTOCOL};
 use daw_bridge::Daw;
 use serde_json::{json, Map, Value};
 use std::net::SocketAddr;
@@ -75,6 +75,8 @@ impl SimulatorConfig {
             },
             offer: Offer {
                 events: vec![event::PROJECT.into(), event::TRANSPORT.into(), event::TRACKS.into(), event::SELECTION.into()],
+                // Like the Renoise tool: it sends only within the credit the host grants.
+                credit_bytes: Some(CREDIT_WINDOW_BYTES),
                 ..Offer::default()
             },
             status_extra,

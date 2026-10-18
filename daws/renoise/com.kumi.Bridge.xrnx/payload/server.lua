@@ -114,17 +114,36 @@ local function raw_send(self, record, text)
   return true
 end
 
+-- Sends what is queued, a chunk at a time, within the budget of this call and within the credit the host has granted
+-- (nil credit: no limit, before the host is authenticated). Out of credit the rest waits, a line half out and all: the
+-- host reads it when it grants more, and a host that has paused is never sent into a full socket.
 function M:flush(record, budget)
   local sent = 0
   while record.outbox[1] and sent < budget do
     local item = record.outbox[1]
-    local piece = sub(item.text, item.offset, item.offset + M.SEND_CHUNK - 1)
+    -- (The welcome is not counted: the host counts what it reads after it.)
+    local credit = item ~= record.welcome_item and record.credit or nil
+    if credit and credit <= 0 then break end
+    local size = M.SEND_CHUNK
+    if credit and credit < size then size = credit end
+    local piece = sub(item.text, item.offset, item.offset + size - 1)
     if not raw_send(self, record, piece) then return sent end
     sent = sent + #piece
+    if credit then record.credit = credit - #piece end
     item.offset = item.offset + #piece
-    if item.offset > #item.text then table.remove(record.outbox, 1) end
+    if item.offset > #item.text then
+      table.remove(record.outbox, 1)
+      if item == record.welcome_item then record.welcome_item = nil end
+    end
   end
   return sent
+end
+
+-- The host has read `bytes` more: more may be sent, and what was held goes out.
+function M:grant(record, bytes)
+  if not record.credit then return end
+  record.credit = math.min(record.credit + bytes, wire.CREDIT_MAX)
+  if record.outbox[1] and not record.closing then self:flush(record, M.SEND_TICK_BYTES) end
 end
 
 function M:send(record, text)
@@ -196,7 +215,11 @@ function M:apply(record, actions)
       self:send(record, action.send)
     elseif action.close then
       self:close(record, action.close)
+    elseif action.credit then
+      self:grant(record, action.credit)
     elseif action.authenticated then
+      record.credit = wire.CREDIT_WINDOW
+      record.welcome_item = record.outbox[#record.outbox] -- the welcome just queued, if it is not all out yet
       record.heartbeat_ms = self.ctx.now_ms() + wire.HEARTBEAT_MS
       if self.ctx.on_authenticated then self.ctx.on_authenticated(record) end
     elseif action.request then
@@ -305,7 +328,10 @@ function M:tick()
     if conn and not record.closing then
       self:apply(record, conn:on_tick(now))
       if conn:authenticated() and not record.closing and now >= (record.heartbeat_ms or now) then
-        self:push(record, wire.encode_frame("heartbeat", { ms = math.floor(now - record.accepted_ms) }))
+        -- (Not while output waits: the connection isn't idle, and heartbeats would pile up behind a paused host.)
+        if not record.outbox[1] then
+          self:push(record, wire.encode_frame("heartbeat", { ms = math.floor(now - record.accepted_ms) }))
+        end
         record.heartbeat_ms = math.max((record.heartbeat_ms or now) + wire.HEARTBEAT_MS, now + wire.HEARTBEAT_MS / 2)
       end
     end
@@ -349,6 +375,7 @@ function M:close_all(reason)
       local head = record.outbox[1]
       record.outbox = (head and head.offset > 1) and { head } or {}
       self:send(record, wire.encode_frame("bye", { reason = reason }))
+      record.credit = nil -- the host is being let go of: nothing is held back for want of credit
       -- All of it, a line part sent included however big, then the bye. Measured on macOS, Renoise 3.5.4: a send to a
       -- full socket writes what fits, then returns false (no block, no queue). Unmeasured on Windows.
       self:flush(record, M.MAX_FRAME_BYTES)

@@ -118,6 +118,41 @@
       "ok": false
     },
     {
+      "name": "a credit of 65536",
+      "line": "{\"type\":\"credit\",\"bytes\":65536}",
+      "ok": true
+    },
+    {
+      "name": "a credit of 0",
+      "line": "{\"type\":\"credit\",\"bytes\":0}",
+      "ok": false
+    },
+    {
+      "name": "a credit written 1.0",
+      "line": "{\"type\":\"credit\",\"bytes\":1.0}",
+      "ok": false
+    },
+    {
+      "name": "a credit of 2^53",
+      "line": "{\"type\":\"credit\",\"bytes\":9007199254740992}",
+      "ok": false
+    },
+    {
+      "name": "a credit without bytes",
+      "line": "{\"type\":\"credit\"}",
+      "ok": false
+    },
+    {
+      "name": "a welcome naming creditBytes",
+      "line": "{\"type\":\"welcome\",\"session\":\"00000000000000000000000000000000\",\"daw\":\"renoise\",\"bridge\":\"0.1.0\",\"dawVersion\":\"3.5.4\",\"pid\":1,\"resource\":\"/r\",\"project\":null,\"maxFrameBytes\":67108864,\"heartbeatMs\":1000,\"creditBytes\":524288}",
+      "ok": true
+    },
+    {
+      "name": "a welcome naming creditBytes written 1.5",
+      "line": "{\"type\":\"welcome\",\"session\":\"00000000000000000000000000000000\",\"daw\":\"renoise\",\"bridge\":\"0.1.0\",\"dawVersion\":\"3.5.4\",\"pid\":1,\"resource\":\"/r\",\"project\":null,\"maxFrameBytes\":67108864,\"heartbeatMs\":1000,\"creditBytes\":1.5}",
+      "ok": false
+    },
+    {
       "name": "a name with a surrogate pair",
       "line": "{\"type\":\"event\",\"seq\":1,\"name\":\"\\ud83d\\ude00\"}",
       "ok": true

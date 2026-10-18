@@ -349,3 +349,48 @@ async fn a_request_carries_the_time_the_host_gives_up() {
     let deadline = serde_json::from_str::<Value>(&line.text).unwrap()["deadlineMs"].as_u64().unwrap();
     assert!((before + 3000..=before + 3000 + 500).contains(&deadline), "{deadline} vs {before}");
 }
+
+#[tokio::test]
+async fn a_host_gives_back_what_it_reads_to_a_bridge_that_sends_within_credit() {
+    let simulator = Simulator::start(SimulatorConfig::renoise(secret(), "/lab/Renoise/V3.5.4")).await.unwrap();
+    let client = BridgeClient::connect(simulator.address(), secret(), CLIENT).await.unwrap();
+    assert_eq!(client.welcome().credit_bytes, Some(daw_bridge::wire::CREDIT_WINDOW_BYTES));
+    let mut events = client.events();
+    let credit = || -> u64 {
+        simulator
+            .transcript()
+            .iter()
+            .filter(|line| line.from_host && line.text.contains("\"credit\""))
+            .map(|line| serde_json::from_str::<Value>(&line.text).unwrap()["bytes"].as_u64().unwrap())
+            .sum()
+    };
+    assert_eq!(credit(), 0, "nothing read yet");
+    // Twelve events of about 20 KB: past a quarter of the window (128 KiB) after the seventh.
+    for i in 0..12 {
+        simulator.emit("tracks", json!({"pad": "x".repeat(20_000), "i": i}));
+        events.recv().await.unwrap();
+    }
+    let mut granted = 0;
+    for _ in 0..100 {
+        granted = credit();
+        if granted >= 128 * 1024 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(granted >= 128 * 1024, "granted {granted}: a quarter of the window is read");
+    // Never more than it has read.
+    let read: u64 =
+        simulator.transcript().iter().filter(|l| !l.from_host && l.text.contains("\"event\"")).map(|l| l.text.len() as u64 + 1).sum();
+    assert!(granted <= read, "granted {granted} of {read} read");
+    // A bridge that doesn't ask for credit is sent none.
+    let reaper = Simulator::start(SimulatorConfig::reaper(secret(), "/lab/REAPER")).await.unwrap();
+    let plain = BridgeClient::connect(reaper.address(), secret(), CLIENT).await.unwrap();
+    let mut plain_events = plain.events();
+    for _ in 0..12 {
+        reaper.emit("tracks", json!({"pad": "x".repeat(20_000)}));
+        plain_events.recv().await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(reaper.transcript().iter().all(|line| !line.from_host || !line.text.contains("\"credit\"")));
+}

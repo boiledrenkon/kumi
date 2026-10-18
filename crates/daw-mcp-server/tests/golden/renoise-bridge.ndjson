@@ -1,7 +1,7 @@
 1 > {"type":"hello","protocol":"kumi-daw/1","nonce":"<nonce>","client":"daw-mcp-server/test"}
 1 < {"type":"challenge","nonce":"<nonce>","proof":"<proof>"}
 1 > {"type":"auth","proof":"<proof>"}
-1 < {"type":"welcome","session":"<session>","daw":"renoise","bridge":"0.1.0","dawVersion":"3.5.4","pid":"<pid>","resource":"/lab/Renoise/V3.5.4","project":{"name":"Untitled"},"maxFrameBytes":67108864,"heartbeatMs":1000,"methods":["ping","status"],"events":["project","transport","tracks","selection"]}
+1 < {"type":"welcome","session":"<session>","daw":"renoise","bridge":"0.1.0","dawVersion":"3.5.4","pid":"<pid>","resource":"/lab/Renoise/V3.5.4","project":{"name":"Untitled"},"maxFrameBytes":67108864,"heartbeatMs":1000,"methods":["ping","status"],"events":["project","transport","tracks","selection"],"creditBytes":524288}
 1 > {"type":"request","id":1,"method":"ping","params":{},"deadlineMs":"<deadline>"}
 1 < {"type":"response","id":1,"ok":true,"result":{}}
 1 > {"type":"request","id":2,"method":"status","params":{},"deadlineMs":"<deadline>"}

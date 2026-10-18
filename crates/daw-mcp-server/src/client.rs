@@ -86,6 +86,8 @@ struct Inner {
     last_frame: Mutex<Instant>,
     /// Bytes read since this host last wrote anything.
     unacked: AtomicU64,
+    /// The bytes the bridge may send before the first grant, when it sends within credit (the welcome said so).
+    credit_window: Option<u64>,
     closed: AtomicBool,
     events: broadcast::Sender<Event>,
     welcome: Welcome,
@@ -154,6 +156,7 @@ impl BridgeClient {
             next_id: AtomicU64::new(1),
             last_frame: Mutex::new(Instant::now()),
             unacked: AtomicU64::new(0),
+            credit_window: welcome.credit_bytes,
             closed: AtomicBool::new(false),
             events,
             welcome: *welcome,
@@ -274,6 +277,8 @@ fn fail_all(inner: &Inner) {
 
 async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut framer: Framer) {
     let mut chunk = vec![0u8; READ_CHUNK];
+    // Bytes of whole lines taken in since the last grant of credit.
+    let mut consumed = 0u64;
     loop {
         let Some(live) = inner.upgrade() else { return };
         // Lines already fed (the welcome's read may have carried more).
@@ -282,6 +287,7 @@ async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut
                 fail_all(&live);
                 return;
             };
+            consumed += line.len() as u64 + 1;
             *live.last_frame.lock().unwrap() = Instant::now();
             match Frame::parse(&line) {
                 Ok(Frame::Response(response)) => {
@@ -311,6 +317,18 @@ async fn read_loop(inner: std::sync::Weak<Inner>, mut reader: OwnedReadHalf, mut
                     fail_all(&live);
                     return;
                 }
+            }
+        }
+        // A bridge that sends within credit holds back once it has used what it was granted: it gets back what was read,
+        // in steps of a quarter of the window, as the host takes the lines in (a host that stops reading stops granting).
+        if let Some(window) = live.credit_window {
+            if consumed >= window / 4 {
+                let grant = std::mem::take(&mut consumed);
+                let inner = live.clone();
+                tokio::spawn(async move {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                    let _ = write_before(&inner, &Frame::Credit { bytes: grant }.encode(), deadline).await;
+                });
             }
         }
         drop(live);
