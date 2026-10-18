@@ -321,10 +321,12 @@ impl Extension {
         // Nothing runs while a dialog has the main window, even in the moments before it counts as one.
         let blocked = self.window_blocked();
         let busy = self.reaper().busy().or_else(|| self.in_dialog(blocked).then_some(Busy::Modal));
+        // The project first: a request waiting at a tab switch or a load is answered about the project REAPER has now,
+        // under the epoch that project has, and a cursor from the one before is refused.
+        self.poll_project(busy.is_none());
         if busy.is_none() && !blocked {
             self.run_jobs();
         }
-        self.poll_project(busy.is_none());
         if busy.is_none() {
             self.poll_focus();
         }
@@ -840,6 +842,30 @@ mod tests {
         let after = focus_of(&extension)["epoch"].clone();
         assert_ne!(before, after);
         assert_eq!(after, extension.reads.epoch());
+    }
+
+    #[test]
+    fn a_request_waiting_at_a_tab_switch_is_answered_under_the_new_epoch_and_a_cursor_from_before_is_refused() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let first = ask_with(&extension, &tx, "read", json!({"kind": "track", "limit": 1})).unwrap();
+        let cursor = first["nextCursor"].clone();
+        let before = first["epoch"].as_str().unwrap().to_string();
+        // The producer switches tab; the next page's request was queued before the tick that notices.
+        fake::with(|s| s.project_id += 1);
+        let (code, message) = ask_with(&extension, &tx, "read", json!({"kind": "track", "cursor": cursor})).unwrap_err();
+        assert_eq!(code, "bad-params");
+        assert!(message.contains("from before the project tab changed"), "{message}");
+        // A read with no cursor, queued at the same moment, carries the new project's epoch, never the old one.
+        fake::with(|s| s.project_id += 1);
+        let after = ask_with(&extension, &tx, "read", json!({"kind": "track", "limit": 1})).unwrap();
+        assert_ne!(after["epoch"].as_str().unwrap(), before);
+        assert_eq!(after["epoch"], json!(extension.reads.epoch()));
+        // A snapshot taken in that tick carries the new epoch too.
+        fake::with(|s| s.project_id += 1);
+        let snapshot = ask_with(&extension, &tx, "snapshot", json!({})).unwrap();
+        assert_eq!(snapshot["epoch"], json!(extension.reads.epoch()));
     }
 
     /// The epoch and the project's identity as a read gives them.
