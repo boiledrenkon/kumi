@@ -490,7 +490,8 @@ function M.start(h, reloading)
   b.document = b.document or 1
   -- A song's id (the one in the project row) and which opening of a song this is: the same while it stays open.
   rows.song_extra = function(song)
-    return { id = status.song_id(b.memory, song), identity = (status.pid() or 0) .. ":" .. b.document }
+    -- (where the pid is unknown, when this Renoise was started stands in for it: `0:1` would be the same after every restart)
+    return { id = status.song_id(b.memory, song), identity = (status.pid() or ("t" .. b.started_ms)) .. ":" .. b.document }
   end
   observers = sync.new(guard, b, { structural = on_structural, tracks = on_tracks })
   jobs = jobs_module.new({

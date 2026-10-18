@@ -1564,3 +1564,14 @@ test("reads: keyzones say their layer and mappings, instruments say what they pl
   eq(body.tracks[1].mutedColumns, nil)
   H.no_dialogs()
 end)
+
+test("reads: where the pid is unknown the project's identity is made from when Renoise started, not 0", function()
+  local env, peer = setup({ platform = "WINDOWS" })
+  local f = assert(io.open(env.discovery_file(0), "rb"))
+  local started = json.decode(f:read("*a")).startedMs
+  f:close()
+  ok(started > 0, "a start time")
+  local identity = rows(peer, "song")[1].identity
+  ok(identity:match("^t" .. started .. ":%d+$"), "made from the start time: " .. identity)
+  H.no_dialogs()
+end)
