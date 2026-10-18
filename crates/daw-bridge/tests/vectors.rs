@@ -287,11 +287,12 @@ fn server_vectors() {
     check(
         "server.json",
         json!({
-            "about": "A bridge's side of a connection. Accept it at time 0 with the secret, serverNonce and session below; for each step feed inHex (or advance the clock to tickMs) and expect, in order: send (compare as JSON; for a welcome compare type, session, maxFrameBytes and heartbeatMs, the rest is the bridge's own), close (silent: no reply; refused:<reason>: after the refusal; protocol: a bad line after auth, no reply), authenticated, request (the request to answer). Nothing is read after a close.",
+            "about": "A bridge's side of a connection. Accept it at time 0 with the secret, serverNonce and session below; for each step feed inHex (or advance the clock to tickMs) and expect, in order: send (compare as JSON; for a welcome compare type, session, maxFrameBytes and heartbeatMs, the rest is the bridge's own), close (silent: no reply; refused:<reason>: after the refusal; protocol: a bad line after auth, no reply), authenticated, request (the request to answer). Nothing is read after a close. overCapacity: what a bridge sends, before reading, to a connection over its limits, then closes.",
             "secret": SECRET,
             "serverNonce": SERVER_NONCE,
             "session": SESSION,
             "welcomeIdentity": serde_json::to_value(identity().0).unwrap(),
+            "overCapacity": serde_json::from_slice::<Value>(&daw_bridge::handshake::refuse_connection()).unwrap(),
             "cases": made,
         }),
     );
@@ -312,14 +313,15 @@ fn discovery_vectors() {
         .enumerate()
         .map(|(index, resource)| {
             let daw = if resource.contains("Renoise") { "renoise" } else { "reaper" };
-            let pid = 1000 + index as u32;
+            // Renoise on Windows can't learn its pid: 0.
+            let pid = if index == 4 { 0 } else { 1000 + index as u32 };
             json!({"daw": daw, "pid": pid, "resource": resource, "key": discovery_key(resource), "fileName": discovery_file_name(daw, pid, resource)})
         })
         .collect();
     check(
         "discovery.json",
         json!({
-            "about": "key = the first 16 lowercase hex of SHA-256(the resource path's UTF-8 bytes, exactly as given); file name = <daw>-<pid>-<key>.json.",
+            "about": "key = the first 16 lowercase hex of SHA-256(the resource path's UTF-8 bytes, exactly as given); file name = <daw>-<pid>-<key>.json, pid 0 when the bridge can't learn it.",
             "cases": cases,
         }),
     );

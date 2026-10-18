@@ -52,6 +52,12 @@ impl Default for Offer {
     }
 }
 
+/// What a bridge sends a connection it accepts over its limits ([`crate::wire::MAX_UNAUTHENTICATED`],
+/// [`crate::wire::MAX_AUTHENTICATED`]) before closing it, without reading from it.
+pub fn refuse_connection() -> Vec<u8> {
+    Frame::Refused { reason: refusal::CONNECTIONS.into(), protocol: None }.encode()
+}
+
 /// One accepted connection, on the bridge's side. Check the peer with [`crate::loopback::peer_allowed`] and the
 /// connection counts before making one.
 #[derive(Debug)]

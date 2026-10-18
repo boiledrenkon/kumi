@@ -62,6 +62,9 @@ fn connect_error(daw: Daw, error: &ConnectError) -> String {
         ConnectError::Handshake(daw_bridge::handshake::HandshakeError::Refused { reason, .. }) if reason == "auth" => {
             format!("the bridge in {daw} was set up with another secret: restart {daw}, or set up Kumi's bridge again")
         }
+        ConnectError::Handshake(daw_bridge::handshake::HandshakeError::Refused { reason, .. }) if reason == "connections" => {
+            format!("the bridge in {daw} already has as many connections as it takes: close another Kumi or MCP app connected to it")
+        }
         ConnectError::Handshake(daw_bridge::handshake::HandshakeError::BadProof) => {
             format!("whatever listens there isn't Kumi's bridge, or {daw} was set up with another secret")
         }
@@ -107,22 +110,29 @@ impl Host {
         })
     }
 
-    async fn connect(&self, discovery: &Discovery, secret: &daw_bridge::auth::Secret) -> Result<BridgeClient, String> {
+    /// Connects to the instance a discovery file names. A file without a pid (Renoise on Windows) whose port refuses
+    /// the connection is stale: it's removed, and the result is None.
+    async fn connect(&self, discovery: &Discovery, secret: &daw_bridge::auth::Secret) -> Option<Result<BridgeClient, String>> {
         let address = SocketAddr::from(([127, 0, 0, 1], discovery.port));
-        let client = BridgeClient::connect_within(address, secret.clone(), CLIENT_NAME, CONNECT_TIMEOUT)
-            .await
-            .map_err(|error| connect_error(self.daw, &error))?;
+        let client = match BridgeClient::connect_within(address, secret.clone(), CLIENT_NAME, CONNECT_TIMEOUT).await {
+            Ok(client) => client,
+            Err(ConnectError::Io(error)) if discovery.pid == 0 && error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                let _ = std::fs::remove_file(self.paths.discovery().join(discovery.file_name()));
+                return None;
+            }
+            Err(error) => return Some(Err(connect_error(self.daw, &error))),
+        };
         let identity = &client.welcome().identity;
         if identity.daw != self.daw.id() || identity.pid != discovery.pid || identity.resource != discovery.resource {
             client.close().await;
-            return Err(format!("port {} answered as another instance ({} pid {})", discovery.port, identity.daw, identity.pid));
+            return Some(Err(format!("port {} answered as another instance ({} pid {})", discovery.port, identity.daw, identity.pid)));
         }
-        Ok(client)
+        Some(Ok(client))
     }
 
     /// `discover`: every running instance's bridge, connected and asked for its status.
     pub async fn discover(&self) -> Value {
-        let (alive, stale, invalid) = self.instances();
+        let (alive, mut stale, invalid) = self.instances();
         let secret = self.secret();
         let mut instances = vec![];
         for discovery in &alive {
@@ -140,11 +150,15 @@ impl Host {
                     row["error"] = why.clone().into();
                 }
                 Ok(secret) => match self.connect(discovery, secret).await {
-                    Err(why) => {
+                    None => {
+                        stale += 1;
+                        continue;
+                    }
+                    Some(Err(why)) => {
                         row["connected"] = false.into();
                         row["error"] = why.into();
                     }
-                    Ok(client) => {
+                    Some(Ok(client)) => {
                         row["connected"] = true.into();
                         row["bridge"] = client.welcome().identity.bridge.clone().into();
                         match client.request("status", json!({}), STATUS_TIMEOUT).await {
@@ -170,7 +184,7 @@ impl Host {
         if !invalid.is_empty() {
             result["invalid"] = invalid.into();
         }
-        if alive.is_empty() {
+        if instances.is_empty() {
             result["hint"] = match &secret {
                 Err(why) => why.clone(),
                 Ok(_) => format!(
@@ -209,10 +223,11 @@ impl Host {
                 return self.not_connected(why);
             };
             match self.connect(discovery, &secret).await {
-                Ok(client) => {
+                Some(Ok(client)) => {
                     *current = Some(Current { pid: discovery.pid, resource: discovery.resource.clone(), port: discovery.port, client });
                 }
-                Err(why) => return self.not_connected(why),
+                Some(Err(why)) => return self.not_connected(why),
+                None => return self.not_connected(format!("no {} with Kumi's bridge is running", self.daw)),
             }
         }
         let open = current.as_ref().expect("connected above");
