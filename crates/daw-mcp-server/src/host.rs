@@ -57,7 +57,10 @@ fn connect_error(daw: Daw, error: &ConnectError) -> String {
         ConnectError::Handshake(daw_bridge::handshake::HandshakeError::Refused { reason, protocol: Some(protocol) })
             if reason == "protocol" =>
         {
-            format!("the bridge in {daw} speaks {protocol}, another version than this Kumi's: restart {daw} to load the installed one")
+            format!(
+                "the bridge in {daw} speaks {}, another version than this Kumi's: restart {daw} to load the installed one",
+                daw_bridge::handshake::known_protocol(protocol)
+            )
         }
         ConnectError::Handshake(daw_bridge::handshake::HandshakeError::Refused { reason, .. }) if reason == "auth" => {
             format!("the bridge in {daw} was set up with another secret: restart {daw}, or set up Kumi's bridge again")
@@ -132,7 +135,8 @@ impl Host {
         let identity = &client.welcome().identity;
         if identity.daw != self.daw.id() || identity.pid != discovery.pid || identity.resource != discovery.resource {
             client.close().await;
-            return Some(Err(format!("port {} answered as another instance ({} pid {})", discovery.port, identity.daw, identity.pid)));
+            let daw = daw_bridge::handshake::tidy(&identity.daw, 16);
+            return Some(Err(format!("port {} answered as another instance ({daw} pid {})", discovery.port, identity.pid)));
         }
         Some(Ok(client))
     }
