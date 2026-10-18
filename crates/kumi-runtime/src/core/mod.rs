@@ -7,6 +7,7 @@ pub mod errors;
 pub mod evolve;
 pub mod export;
 pub mod file_sync;
+pub mod fold;
 pub mod gaps;
 pub mod goal;
 pub mod goal_mode;
