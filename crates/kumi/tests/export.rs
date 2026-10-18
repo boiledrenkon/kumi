@@ -114,6 +114,85 @@ fn no_planted_secret_survives_any_export() {
 }
 
 #[test]
+fn a_full_export_takes_out_what_a_field_named_for_a_secret_holds_whatever_it_looks_like() {
+    // Values no shape gives away: only the field's name says they're secret.
+    let hidden = [
+        "DblxMLBwPWoG8rQN",
+        "dXNlcjpwYXNz",
+        "k-short",
+        "AKIDshort12",
+        "tok3nV4lue",
+        "sid=abc123",
+        "pr0ducerName",
+        "PinCode4821",
+        "r3sultS3cret",
+        "pwTwo99",
+        "t3xtPwdV4l",
+        "c00kieOne",
+        "Errpw7788",
+        "awsS3cr3tK",
+    ];
+    let input = json!({
+        "track": "Kick",
+        "nested": {"password": "DblxMLBwPWoG8rQN"},
+        "auth": "Basic dXNlcjpwYXNz",
+        "apiKey": "k-short",
+        "access_key": "AKIDshort12",
+        "X-Auth-Token": "tok3nV4lue",
+        "Cookie": "sid=abc123",
+        "AWSSecretKey": "awsS3cr3tK",
+        "credential": {"user": "pr0ducerName", "pin": "PinCode4821"},
+        "author": "Aphex Twin",
+        "max_tokens": 512
+    });
+    let messages = vec![
+        json!({"role": "user", "content": [{"type": "text", "text": "Sign in to the sample store."}]}),
+        json!({"role": "assistant", "content": [
+            {"type": "tool-call", "toolCallId": "toolu_1", "toolName": "store_login", "input": input},
+            {"type": "tool-call", "toolCallId": "toolu_2", "toolName": "store_session", "input": {}},
+            {"type": "tool-call", "toolCallId": "toolu_3", "toolName": "store_check", "input": {}}
+        ]}),
+        json!({"role": "tool", "content": [
+            {"type": "tool-result", "toolCallId": "toolu_1", "toolName": "store_login",
+                "output": {"type": "json", "value": {"device": "EQ Eight", "session": {"secret": "r3sultS3cret", "Passwd": "pwTwo99"}}}},
+            {"type": "tool-result", "toolCallId": "toolu_2", "toolName": "store_session",
+                "output": {"type": "text", "value": r#"{"ok":true,"login":{"pwd":"t3xtPwdV4l","cookies":["c00kieOne"]}}"#}},
+            {"type": "tool-result", "toolCallId": "toolu_3", "toolName": "store_check",
+                "output": {"type": "error-json", "value": {"reason": "expired", "client_secret": "Errpw7788"}}}
+        ]}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "Signed in."}]}),
+    ];
+    let conversation = SavedConversation {
+        saved_at: NOW - 100,
+        checkpoint: KernelCheckpoint { version: 1, messages, origin: Some("openai/gpt-test".into()), tools: None },
+        changes: None,
+        first: Some("Sign in to the sample store.".into()),
+        turns: Some(1),
+    };
+    let source = Source {
+        id: "k3x9a1b2",
+        conversation: &conversation,
+        title: "Store",
+        place: Some("Song"),
+        words: ("Live", "Set"),
+        created: NOW - 5000,
+    };
+    let redact: &dyn Fn(&str) -> String = &redactor(&[], HOME, USER);
+    for format in [Format::Markdown, Format::Html, Format::Json] {
+        let out = render(format, &source, true, Some(redact), zone(), NOW);
+        for secret in hidden {
+            assert!(!out.contains(secret), "{format:?}: {secret} survived:\n{out}");
+        }
+        // What isn't named for a secret stays: the track, an author, a count of tokens, a device, why it failed.
+        for kept in ["Kick", "Aphex Twin", "512", "EQ Eight", "expired"] {
+            assert!(out.contains(kept), "{format:?}: {kept} was taken out:\n{out}");
+        }
+    }
+    let raw = render(Format::Json, &source, true, None, zone(), NOW);
+    assert!(hidden.iter().all(|secret| raw.contains(secret)), "--raw leaves every field as it is:\n{raw}");
+}
+
+#[test]
 fn files_go_beside_others_never_over_them_and_only_the_producer_reads_them() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kumi-louder-kick-k3x9a1b2.md");

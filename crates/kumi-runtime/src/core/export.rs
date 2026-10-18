@@ -607,8 +607,12 @@ fn call_of(part: &Value, options: &Options, calls: &mut HashMap<String, Call>, l
     }
     let number = format!("call_{}", calls.len() + 1);
     // The name call_tool ran is the model's words: it passes the redactor too.
-    let (kept, input) =
-        if options.full { (name.to_string(), redact_value(&input, options.redact)) } else { ((options.redact)(tool), json!({})) };
+    let (kept, input) = if options.full {
+        let named = options.redacted.then(|| named_secrets_out(&input));
+        (name.to_string(), redact_value(named.as_ref().unwrap_or(&input), options.redact))
+    } else {
+        ((options.redact)(tool), json!({}))
+    };
     calls.insert(id, Call { id: number.clone(), name: kept.clone(), step_only: STEP_ONLY.contains(&tool) });
     Some(json!({"type": "tool-call", "toolCallId": number, "toolName": kept, "input": input}))
 }
@@ -623,7 +627,7 @@ fn result_of(part: &Value, options: &Options, calls: &HashMap<String, Call>, lef
     let call = calls.get(id)?;
     let text = if options.full && !call.step_only {
         let output = part.get("output").filter(|output| !output.is_null()).or_else(|| part.get("result")).cloned().unwrap_or(Value::Null);
-        let text = (options.redact)(&result_text(&output));
+        let text = (options.redact)(&result_text(&output, options.redacted));
         if trim(&text).is_empty() {
             "(nothing)".to_string()
         } else {
@@ -725,11 +729,20 @@ fn texts(parts: &[Value]) -> String {
     parts.iter().filter(|part| kind(part) == "text").filter_map(|part| part.get("text").and_then(Value::as_str)).collect()
 }
 
-/// A tool's result as words: its text, its JSON laid out, an error's words, a picture named.
-fn result_text(output: &Value) -> String {
+/// A tool's result as words: its text, its JSON laid out, an error's words, a picture named. With `redacted`, what its JSON
+/// (or JSON its words hold) keeps under a field named for a secret is taken out.
+fn result_text(output: &Value, redacted: bool) -> String {
     let value = output.get("value");
-    let words = |value: Option<&Value>| value.and_then(Value::as_str).unwrap_or("").to_string();
-    let laid_out = |value: Option<&Value>| value.map(|value| stringify_pretty(value, 2)).unwrap_or_default();
+    let words = |value: Option<&Value>| {
+        let text = value.and_then(Value::as_str).unwrap_or("");
+        if redacted {
+            named_secrets_out_of_words(text)
+        } else {
+            text.to_string()
+        }
+    };
+    let laid_out_whole = |value: &Value| stringify_pretty(&if redacted { named_secrets_out(value) } else { value.clone() }, 2);
+    let laid_out = |value: Option<&Value>| value.map(laid_out_whole).unwrap_or_default();
     match output.get("type").and_then(Value::as_str) {
         Some("text") => words(value),
         Some("error-text") => format!("Error: {}", words(value)),
@@ -744,7 +757,7 @@ fn result_text(output: &Value) -> String {
                 items
                     .iter()
                     .filter_map(|item| match kind(item) {
-                        "text" => item.get("text").and_then(Value::as_str).map(str::to_string),
+                        "text" => item.get("text").filter(|text| text.is_string()).map(|text| words(Some(text))),
                         "file" => Some("[a picture]".to_string()),
                         _ => None,
                     })
@@ -752,11 +765,107 @@ fn result_text(output: &Value) -> String {
                     .join("\n")
             })
             .unwrap_or_default(),
-        _ => output
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| if output.is_null() { String::new() } else { stringify_pretty(output, 2) }),
+        _ => match output {
+            Value::String(_) => words(Some(output)),
+            Value::Null => String::new(),
+            _ => laid_out_whole(output),
+        },
     }
+}
+
+/// The words of an object's field name, split at separators and changes of case, in lowercase: "X-Auth-Token" → x, auth,
+/// token; "apiKey" → api, key; "AWSSecretKey" → aws, secret, key.
+fn name_words(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    for (at, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        let before = at.checked_sub(1).map(|at| chars[at]).filter(|c| c.is_alphanumeric());
+        let after = chars.get(at + 1).copied();
+        let starts = before.is_some_and(|before| {
+            c.is_uppercase()
+                && (before.is_lowercase() || before.is_numeric() || (before.is_uppercase() && after.is_some_and(char::is_lowercase)))
+        });
+        if starts && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// Whether a field's name says it holds a secret (password, api_key, accessKey, X-Auth-Token, Cookie…), in any case and
+/// with any separator. Whole words only: an author or a count of tokens isn't one.
+fn names_a_secret(name: &str) -> bool {
+    const WORDS: [&str; 16] = [
+        "password",
+        "passwd",
+        "pwd",
+        "passphrase",
+        "secret",
+        "secrets",
+        "token",
+        "auth",
+        "authorization",
+        "credential",
+        "credentials",
+        "cookie",
+        "cookies",
+        "apikey",
+        "accesskey",
+        "privatekey",
+    ];
+    let words = name_words(name);
+    words.iter().any(|word| WORDS.contains(&word.as_str()))
+        || words.windows(2).any(|pair| matches!((pair[0].as_str(), pair[1].as_str()), ("api" | "access" | "private", "key")))
+}
+
+/// A value with every string under a field named for a secret taken out, however short or plain it is.
+fn named_secrets_out(value: &Value) -> Value {
+    fn hide(value: &Value, under: bool) -> Value {
+        match value {
+            Value::String(text) if under && !text.is_empty() => Value::String("[secret]".into()),
+            Value::Array(items) => Value::Array(items.iter().map(|item| hide(item, under)).collect()),
+            Value::Object(fields) => {
+                Value::Object(fields.iter().map(|(name, item)| (name.clone(), hide(item, under || names_a_secret(name)))).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    hide(value, false)
+}
+
+/// A result's words with what the JSON they hold keeps under a field named for a secret taken out where it stands, the
+/// words otherwise as they were. Words that aren't JSON stay as they are.
+fn named_secrets_out_of_words(text: &str) -> String {
+    fn named(value: &Value, under: bool, out: &mut Vec<String>) {
+        match value {
+            Value::String(text) if under && !text.is_empty() => out.push(text.clone()),
+            Value::Array(items) => items.iter().for_each(|item| named(item, under, out)),
+            Value::Object(fields) => fields.iter().for_each(|(name, item)| named(item, under || names_a_secret(name), out)),
+            _ => {}
+        }
+    }
+    let Ok(value) = serde_json::from_str::<Value>(text) else { return text.to_string() };
+    let mut secrets = Vec::new();
+    named(&value, false, &mut secrets);
+    // The longest first, so one inside another goes whole.
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    secrets.dedup();
+    let mut out = text.to_string();
+    for secret in secrets {
+        out = out.replace(&Value::String(secret).to_string(), "\"[secret]\"");
+    }
+    out
 }
 
 /// A value with each of its strings, and its keys, through the redactor.
