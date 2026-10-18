@@ -332,6 +332,15 @@ impl Extension {
         snapshot.last_tick = Some(Instant::now());
     }
 
+    /// Answers every queued job "closing" without running it: the extension is unloading.
+    pub fn cancel_jobs(&self) {
+        while let Ok(job) = self.jobs.try_recv() {
+            if job.claim() {
+                job.answer(Err(("failed".into(), "REAPER is closing; nothing changed".into())));
+            }
+        }
+    }
+
     /// A copy of what the socket threads see.
     pub fn snapshot(&self) -> Snapshot {
         self.snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -361,6 +370,9 @@ mod tests {
     use crate::queue::Outcome;
     use crate::reaper::fake;
     use std::rc::Rc;
+    use std::sync::atomic::AtomicBool;
+
+    static OPEN: AtomicBool = AtomicBool::new(false);
 
     #[derive(Clone, Default)]
     struct Recorder(Rc<RefCell<Vec<(String, Value)>>>);
@@ -393,7 +405,7 @@ mod tests {
         let (job, waiter) = queue::job(method, json!({}));
         tx.send(job).unwrap();
         extension.tick(Driver::Timer);
-        waiter.wait(Duration::from_secs(1))
+        waiter.wait(Duration::from_secs(1), &OPEN)
     }
 
     #[test]
@@ -427,7 +439,7 @@ mod tests {
         let (job, waiter) = queue::job(method, params);
         tx.send(job).unwrap();
         extension.tick(Driver::Timer);
-        match waiter.wait(Duration::from_secs(1)) {
+        match waiter.wait(Duration::from_secs(1), &OPEN) {
             Outcome::Answered(answer) => answer,
             other => panic!("{other:?}"),
         }
@@ -486,7 +498,19 @@ mod tests {
         let (job, waiter) = queue::job("quit", json!({}));
         tx.send(job).unwrap();
         extension.tick(Driver::Timer);
-        assert_eq!(waiter.wait(Duration::from_millis(1)), Outcome::Cancelled);
+        assert_eq!(waiter.wait(Duration::from_millis(1), &OPEN), Outcome::Cancelled);
+    }
+
+    #[test]
+    fn unloading_answers_queued_jobs_without_running_them() {
+        let (extension, tx, _, _) = setup();
+        let (job, waiter) = queue::job("action", json!({"command": 40001}));
+        tx.send(job).unwrap();
+        extension.cancel_jobs();
+        let Outcome::Answered(Err((code, message))) = waiter.wait(Duration::from_secs(1), &OPEN) else { panic!() };
+        assert_eq!(code, "failed");
+        assert!(message.contains("closing"));
+        assert!(fake::with(|s| s.actions.is_empty()));
     }
 
     #[test]

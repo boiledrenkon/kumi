@@ -128,6 +128,8 @@ impl Loaded {
             self.register(c"-csurf_inst", surface.as_ptr());
             drop(surface);
         }
+        // Queued requests are answered "closing" (the main thread, here, will never run them).
+        self.extension.cancel_jobs();
         if let Some(server) = self.server.borrow_mut().take() {
             server.stop(reason);
         }

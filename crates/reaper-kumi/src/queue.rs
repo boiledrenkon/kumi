@@ -2,7 +2,7 @@
 //! them within a per-tick budget. Each job has a deadline: a job the main thread hasn't claimed by then is
 //! cancelled (nothing changed); one it claimed but didn't answer in time is uncertain.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,21 +47,32 @@ pub enum Outcome {
     Cancelled,
     /// Started but not answered in time: it may have changed something.
     Uncertain,
-    /// The extension is unloading.
+    /// The extension is unloading, and the job never started: nothing changed.
     Closed,
 }
 
+/// How often a waiting socket thread looks whether the extension is closing.
+const CLOSING_POLL: Duration = Duration::from_millis(25);
+
 impl Waiter {
-    pub fn wait(self, timeout: Duration) -> Outcome {
-        match self.reply.recv_timeout(timeout) {
-            Ok(answer) => Outcome::Answered(answer),
-            Err(RecvTimeoutError::Disconnected) => self.after_drop(),
-            Err(RecvTimeoutError::Timeout) => {
+    /// Waits for the answer until `timeout`, or until `closing` is set (the extension is unloading, and its main thread
+    /// may be the one waiting for this thread to end).
+    pub fn wait(self, timeout: Duration, closing: &AtomicBool) -> Outcome {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let closed = closing.load(Ordering::Acquire);
+            if left.is_zero() || closed {
                 if self.state.compare_exchange(QUEUED, CANCELLED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                    Outcome::Cancelled
-                } else {
-                    Outcome::Uncertain
+                    return if closed { Outcome::Closed } else { Outcome::Cancelled };
                 }
+                // Claimed: the answer may have landed just now.
+                return self.reply.try_recv().map_or(Outcome::Uncertain, Outcome::Answered);
+            }
+            match self.reply.recv_timeout(left.min(CLOSING_POLL)) {
+                Ok(answer) => return Outcome::Answered(answer),
+                Err(RecvTimeoutError::Disconnected) => return self.after_drop(),
+                Err(RecvTimeoutError::Timeout) => {}
             }
         }
     }
@@ -138,6 +149,7 @@ mod tests {
     use std::thread;
 
     const NO_LINGER: Budget = Budget { per_tick: Duration::from_millis(50), linger: Duration::ZERO };
+    static OPEN: AtomicBool = AtomicBool::new(false);
 
     #[test]
     fn a_drained_job_is_answered() {
@@ -145,7 +157,7 @@ mod tests {
         let (job, waiter) = job("status", json!({}));
         tx.send(job).unwrap();
         assert_eq!(drain(&rx, NO_LINGER, |job| job.answer(Ok(json!({"ok": true})))), 1);
-        assert_eq!(waiter.wait(Duration::from_secs(1)), Outcome::Answered(Ok(json!({"ok": true}))));
+        assert_eq!(waiter.wait(Duration::from_secs(1), &OPEN), Outcome::Answered(Ok(json!({"ok": true}))));
     }
 
     #[test]
@@ -153,7 +165,7 @@ mod tests {
         let (tx, rx) = channel();
         let (job, waiter) = job("quit", json!({}));
         tx.send(job).unwrap();
-        assert_eq!(waiter.wait(Duration::from_millis(1)), Outcome::Cancelled);
+        assert_eq!(waiter.wait(Duration::from_millis(1), &OPEN), Outcome::Cancelled);
         assert_eq!(drain(&rx, NO_LINGER, |_| panic!("a cancelled job ran")), 0);
     }
 
@@ -169,7 +181,7 @@ mod tests {
             })
         });
         thread::sleep(Duration::from_millis(20));
-        assert_eq!(waiter.wait(Duration::from_millis(10)), Outcome::Uncertain);
+        assert_eq!(waiter.wait(Duration::from_millis(10), &OPEN), Outcome::Uncertain);
         main.join().unwrap();
     }
 
@@ -179,7 +191,49 @@ mod tests {
         let (job, waiter) = job("status", json!({}));
         tx.send(job).unwrap();
         drop(rx);
-        assert_eq!(waiter.wait(Duration::from_secs(1)), Outcome::Closed);
+        assert_eq!(waiter.wait(Duration::from_secs(1), &OPEN), Outcome::Closed);
+    }
+
+    #[test]
+    fn closing_ends_a_wait_at_once_and_cancels_a_queued_job() {
+        let (tx, rx) = channel();
+        let (job, waiter) = job("action", json!({}));
+        tx.send(job).unwrap();
+        let closing = Arc::new(AtomicBool::new(false));
+        let flag = closing.clone();
+        let waiting = thread::spawn(move || {
+            let started = Instant::now();
+            (waiter.wait(Duration::from_secs(30), &flag), started.elapsed())
+        });
+        thread::sleep(Duration::from_millis(50));
+        closing.store(true, Ordering::Release);
+        let (outcome, took) = waiting.join().unwrap();
+        assert_eq!(outcome, Outcome::Closed);
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert_eq!(drain(&rx, NO_LINGER, |_| panic!("a job cancelled at closing ran")), 0);
+    }
+
+    #[test]
+    fn closing_while_a_job_runs_is_uncertain() {
+        let (tx, rx) = channel();
+        let (job, waiter) = job("action", json!({}));
+        tx.send(job).unwrap();
+        let held = rx.recv().unwrap();
+        assert!(held.claim());
+        let closing = AtomicBool::new(true);
+        assert_eq!(waiter.wait(Duration::from_secs(30), &closing), Outcome::Uncertain);
+        held.answer(Ok(Value::Null));
+    }
+
+    #[test]
+    fn an_answer_that_lands_as_the_wait_ends_is_kept() {
+        let (tx, rx) = channel();
+        let (job, waiter) = job("action", json!({}));
+        tx.send(job).unwrap();
+        let held = rx.recv().unwrap();
+        assert!(held.claim());
+        held.answer(Ok(json!(1)));
+        assert_eq!(waiter.wait(Duration::ZERO, &OPEN), Outcome::Answered(Ok(json!(1))));
     }
 
     #[test]
@@ -194,7 +248,7 @@ mod tests {
             .collect();
         let quick = |job: Job| job.answer(Ok(Value::Null));
         assert_eq!(drain(&rx, Budget { per_tick: Duration::from_secs(5), linger: Duration::ZERO }, quick), 5);
-        assert!(waiters.into_iter().all(|w| w.wait(Duration::from_secs(1)) == Outcome::Answered(Ok(Value::Null))));
+        assert!(waiters.into_iter().all(|w| w.wait(Duration::from_secs(1), &OPEN) == Outcome::Answered(Ok(Value::Null))));
 
         for _ in 0..3 {
             tx.send(job("slow", json!({})).0).unwrap();

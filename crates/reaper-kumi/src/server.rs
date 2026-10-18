@@ -24,11 +24,21 @@ use crate::reaper::Busy;
 
 /// How long a request may wait for the main thread when it names no deadline.
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
+/// The longest a request waits for the main thread, whatever deadline it names.
+const MAX_WAIT: Duration = Duration::from_secs(60);
 /// No tick for this long: the main thread is held (a modal dialog, a long load or render).
 const STALL: Duration = Duration::from_millis(1500);
 /// Frames queued for one connection before it counts as stuck and is closed.
 const OUTBOX_FRAMES: usize = 4096;
-const PREAUTH_POLL: Duration = Duration::from_millis(200);
+/// How long a socket read waits before its thread looks at the handshake's deadline and whether the server is
+/// stopping: on Windows a blocking read isn't sure to wake when stop() shuts the socket.
+const READ_POLL: Duration = Duration::from_millis(200);
+/// A write that makes no progress for this long means the peer stopped reading: the connection is closed.
+const STUCK_WRITE: Duration = Duration::from_secs(5);
+/// How long stop() waits for each step (readers done, byes written) before it closes the sockets hard.
+const STOP_GRACE: Duration = Duration::from_millis(500);
+
+const CLOSING: &str = "REAPER is closing; nothing changed";
 
 /// Methods served off the main thread: they answer even while REAPER shows a dialog.
 const SOCKET_METHODS: [&str; 2] = ["ping", "status"];
@@ -153,9 +163,30 @@ pub struct Server {
     hub: Hub,
     stopping: Arc<AtomicBool>,
     accept: Option<JoinHandle<()>>,
-    threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    threads: Arc<Mutex<Vec<Spawned>>>,
     started_ms: u64,
     discovery: Option<(PathBuf, Option<ProjectSummary>)>,
+}
+
+/// One connection's threads, and its socket for stop() to close.
+struct Spawned {
+    reader: JoinHandle<()>,
+    writer: JoinHandle<()>,
+    stream: TcpStream,
+}
+
+impl Spawned {
+    fn finished(&self) -> bool {
+        self.reader.is_finished() && self.writer.is_finished()
+    }
+}
+
+/// Waits until `done` holds or the grace runs out.
+fn wait_until(done: impl Fn() -> bool) {
+    let grace = Instant::now() + STOP_GRACE;
+    while !done() && Instant::now() < grace {
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 impl Server {
@@ -205,28 +236,38 @@ impl Server {
         }
     }
 
-    /// Says bye (`quit`, `reload` or `shutdown`), closes every connection, removes the discovery file and waits for
-    /// the threads.
+    /// Removes the discovery file, answers waiting requests "closing", says bye (`quit`, `reload` or `shutdown`),
+    /// closes every connection and waits for the threads. Bounded: nothing it waits for waits on the main thread, and
+    /// a peer that stopped reading is cut off after a grace.
     pub fn stop(mut self, reason: &str) {
         self.stopping.store(true, Ordering::Release);
+        if let Some((path, _)) = self.discovery.take() {
+            let _ = std::fs::remove_file(path);
+        }
         // Wakes the blocking accept.
         let _ = TcpStream::connect_timeout(&(loopback::BIND_ADDRESS, self.port).into(), Duration::from_millis(200));
         if let Some(accept) = self.accept.take() {
             let _ = accept.join();
         }
+        let spawned = std::mem::take(&mut *lock(&self.threads));
         let conns = std::mem::take(&mut *lock(&self.hub.inner.conns));
         for conn in &conns {
-            if conn.authenticated.load(Ordering::Acquire) {
-                let _ = conn.out.try_send(Frame::Bye { reason: reason.into() }.encode());
-            }
             let _ = conn.stream.shutdown(Shutdown::Read);
         }
-        drop(conns);
-        for handle in std::mem::take(&mut *lock(&self.threads)) {
-            let _ = handle.join();
+        // Readers see `stopping` within a poll; a request waiting for the main thread is answered "closing" first.
+        wait_until(|| spawned.iter().all(|s| s.reader.is_finished()));
+        for conn in conns.iter().filter(|c| c.authenticated.load(Ordering::Acquire)) {
+            let _ = conn.out.try_send(Frame::Bye { reason: reason.into() }.encode());
         }
-        if let Some((path, _)) = self.discovery.take() {
-            let _ = std::fs::remove_file(path);
+        // Each writer ends once its outbox (the bye last) is written.
+        drop(conns);
+        wait_until(|| spawned.iter().all(Spawned::finished));
+        for s in &spawned {
+            let _ = s.stream.shutdown(Shutdown::Both);
+        }
+        for s in spawned {
+            let _ = s.reader.join();
+            let _ = s.writer.join();
         }
     }
 }
@@ -299,6 +340,9 @@ impl Shared {
             "status" => return Frame::ok(id, self.status()),
             _ => {}
         }
+        if self.stopping.load(Ordering::Acquire) {
+            return Frame::error(id, code::FAILED, CLOSING);
+        }
         let now = unix_ms();
         let wait = match request.deadline_ms {
             Some(deadline) if deadline <= now => {
@@ -309,9 +353,9 @@ impl Shared {
         };
         let (job, waiter) = queue::job(&request.method, request.params);
         if lock(&self.jobs).send(job).is_err() {
-            return Frame::error(id, code::FAILED, "REAPER is closing");
+            return Frame::error(id, code::FAILED, CLOSING);
         }
-        match waiter.wait(wait) {
+        match waiter.wait(wait.min(MAX_WAIT), &self.stopping) {
             Outcome::Answered(Ok(result)) => Frame::ok(id, result),
             Outcome::Answered(Err((code, message))) => Frame::error(id, &code, message),
             Outcome::Cancelled if request.deadline_ms.is_some() => {
@@ -324,12 +368,12 @@ impl Shared {
             Outcome::Uncertain => {
                 Frame::error(id, code::UNCERTAIN, "REAPER started this but didn't finish in time; it may or may not have happened")
             }
-            Outcome::Closed => Frame::error(id, code::FAILED, "REAPER is closing"),
+            Outcome::Closed => Frame::error(id, code::FAILED, CLOSING),
         }
     }
 }
 
-fn accept_loop(listener: TcpListener, shared: Arc<Shared>, threads: Arc<Mutex<Vec<JoinHandle<()>>>>) {
+fn accept_loop(listener: TcpListener, shared: Arc<Shared>, threads: Arc<Mutex<Vec<Spawned>>>) {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let started = Instant::now();
     for stream in listener.incoming() {
@@ -358,31 +402,28 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, threads: Arc<Mutex<Ve
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let now_ms = started.elapsed().as_millis() as u64;
         match spawn_connection(id, stream, (shared.config.connection)(secret, now_ms), started, &shared) {
-            Ok(handles) => {
+            Ok(spawned) => {
                 let mut threads = lock(&threads);
-                threads.retain(|h| !h.is_finished());
-                threads.extend(handles);
+                threads.retain(|s| !s.finished());
+                threads.push(spawned);
             }
             Err(error) => log::line(&format!("couldn't start a connection: {error}")),
         }
     }
 }
 
-fn spawn_connection(
-    id: u64,
-    stream: TcpStream,
-    state: ServerConnection,
-    started: Instant,
-    shared: &Arc<Shared>,
-) -> io::Result<[JoinHandle<()>; 2]> {
+fn spawn_connection(id: u64, stream: TcpStream, state: ServerConnection, started: Instant, shared: &Arc<Shared>) -> io::Result<Spawned> {
     stream.set_nodelay(true)?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    // Writes wake as often as reads do: a blocked send isn't woken by shutting the socket on every OS.
+    stream.set_write_timeout(Some(READ_POLL))?;
     let (out, rx) = mpsc::sync_channel::<Vec<u8>>(OUTBOX_FRAMES);
     let conn = Arc::new(Conn { id, state: Mutex::new(state), out, stream: stream.try_clone()?, authenticated: AtomicBool::new(false) });
     let mut writer = stream.try_clone()?;
+    let closer = stream.try_clone()?;
+    let stopping = shared.stopping.clone();
     let write = thread::Builder::new().name("kumi-write".into()).spawn(move || {
         for bytes in rx {
-            if writer.write_all(&bytes).is_err() {
+            if !write_frame(&mut writer, &bytes, &stopping) {
                 break;
             }
         }
@@ -395,13 +436,39 @@ fn spawn_connection(
         crate::guard("connection", (), || serve(&conn, stream, started, &shared));
         shared.hub.remove(conn.id);
     })?;
-    Ok([read, write])
+    Ok(Spawned { reader: read, writer: write, stream: closer })
+}
+
+/// Writes one frame: false when the socket failed, the peer stopped reading (no progress for [`STUCK_WRITE`]) or the
+/// server is stopping and the peer isn't taking bytes.
+fn write_frame(stream: &mut TcpStream, mut bytes: &[u8], stopping: &AtomicBool) -> bool {
+    let mut stalled: Option<Instant> = None;
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => return false,
+            Ok(n) => {
+                bytes = &bytes[n..];
+                stalled = None;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                if stopping.load(Ordering::Acquire) || stalled.get_or_insert_with(Instant::now).elapsed() >= STUCK_WRITE {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 fn serve(conn: &Arc<Conn>, mut stream: TcpStream, started: Instant, shared: &Shared) {
     let mut buf = vec![0u8; 64 * 1024];
-    let _ = stream.set_read_timeout(Some(PREAUTH_POLL));
+    let _ = stream.set_read_timeout(Some(READ_POLL));
     loop {
+        if shared.stopping.load(Ordering::Acquire) {
+            return;
+        }
         let actions = match stream.read(&mut buf) {
             Ok(0) => return,
             Ok(n) => lock(&conn.state).on_bytes(&buf[..n], started.elapsed().as_millis() as u64, &mut || shared.identity()),
@@ -421,10 +488,7 @@ fn serve(conn: &Arc<Conn>, mut stream: TcpStream, started: Instant, shared: &Sha
                     log::line(&format!("connection {} closed: {reason:?}", conn.id));
                     return;
                 }
-                ServerAction::Authenticated => {
-                    conn.authenticated.store(true, Ordering::Release);
-                    let _ = stream.set_read_timeout(None);
-                }
+                ServerAction::Authenticated => conn.authenticated.store(true, Ordering::Release),
                 ServerAction::Request(request) => {
                     let response = shared.answer(request);
                     if conn.out.send(response.encode()).is_err() {
@@ -692,6 +756,39 @@ mod tests {
         assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
         assert_eq!(read_line(&mut reader), None);
         assert!(files::scan_discovery(&dir, Daw::Reaper).is_empty());
+    }
+
+    #[test]
+    fn stopping_answers_a_queued_request_and_never_waits_for_the_main_thread() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        // Nothing drains the queue: the main thread is the one inside stop(). The host picked a far deadline.
+        let request = Request { id: 1, method: "action".into(), params: json!({"command": 40001}), deadline_ms: Some(unix_ms() + 25_000) };
+        stream.write_all(&Frame::Request(request).encode()).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        lab.server.take().unwrap().stop("quit");
+        assert!(started.elapsed() < Duration::from_secs(2), "stop took {:?}", started.elapsed());
+        let response = read_frame(&mut reader);
+        assert_eq!((response["id"].as_u64(), response["error"]["code"].as_str()), (Some(1), Some(code::FAILED)));
+        assert!(response["error"]["message"].as_str().unwrap().contains("closing"));
+        assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
+        assert_eq!(read_line(&mut reader), None);
+    }
+
+    #[test]
+    fn a_peer_that_stopped_reading_doesnt_hold_up_stop() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (_stream, _reader, _) = lab.authenticated();
+        // Enough events to fill the socket's buffers, so the writer blocks on a peer that never reads.
+        let big = "x".repeat(256 * 1024);
+        for _ in 0..64 {
+            lab.hub.event("tracks", json!({"pad": big}));
+        }
+        thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        lab.server.take().unwrap().stop("quit");
+        assert!(started.elapsed() < Duration::from_secs(3), "stop took {:?}", started.elapsed());
     }
 
     #[test]
