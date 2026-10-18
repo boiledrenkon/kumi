@@ -330,6 +330,8 @@ pub struct State {
     pub cursor_context: i32,
     /// False while a modal dialog has the main window disabled.
     pub main_enabled: bool,
+    /// The title of the window with the keyboard focus (None: the platform can't say).
+    pub front_title: Option<String>,
     pub loading: bool,
     pub dirty: bool,
     /// Saving leaves the project changed (a read-only folder, a plug-in refusing).
@@ -378,6 +380,7 @@ impl Default for State {
             selected_envelope: None,
             cursor_context: 0,
             main_enabled: true,
+            front_title: None,
             loading: false,
             dirty: false,
             save_fails: false,
