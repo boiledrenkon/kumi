@@ -353,10 +353,25 @@ impl Server {
     }
 }
 
+/// The longest project name and path the discovery file and the welcome carry (in characters): hosts skip a discovery
+/// file over 64 KiB, and a project title can be as long as its author likes.
+pub const MAX_NAME: usize = 256;
+pub const MAX_PATH: usize = 1024;
+
+/// Text cut to `max` characters, the last of them an ellipsis when something was cut.
+pub fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
+}
+
 fn project(summary: &ProjectSummary) -> Project {
     Project {
-        name: (!summary.name.is_empty()).then(|| summary.name.clone()),
-        path: (!summary.path.is_empty()).then(|| summary.path.clone()),
+        name: (!summary.name.is_empty()).then(|| cut(&summary.name, MAX_NAME)),
+        path: (!summary.path.is_empty()).then(|| cut(&summary.path, MAX_PATH)),
         ..Project::default()
     }
 }
@@ -1015,6 +1030,32 @@ mod tests {
         assert_eq!(read_frame(&mut reader), json!({"type": "bye", "reason": "quit"}));
         assert_eq!(read_line(&mut reader), None);
         assert!(files::scan_discovery(&dir, Daw::Reaper).is_empty());
+    }
+
+    #[test]
+    fn a_long_project_title_is_cut_in_the_discovery_file_and_the_welcome() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let mut snapshot = lab.snapshot.lock().unwrap().clone();
+        snapshot.project = Some(ProjectSummary { name: "é".repeat(100_000), path: format!("/m/{}", "p".repeat(100_000)) });
+        *lab.snapshot.lock().unwrap() = snapshot.clone();
+        lab.server().publish(&snapshot);
+        let dir = lab.dir.path().join("bridges/reaper/discovery");
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).collect();
+        assert_eq!(files.len(), 1);
+        // Far under the 64 KiB a host will read, and still found.
+        assert!(files[0].metadata().unwrap().len() < 8 * 1024, "{} bytes", files[0].metadata().unwrap().len());
+        let found = files::scan_discovery(&dir, Daw::Reaper);
+        let project = found[0].discovery.as_ref().unwrap().project.clone().unwrap();
+        let name = project.name.unwrap();
+        assert_eq!(name.chars().count(), MAX_NAME);
+        assert!(name.ends_with('…') && name.starts_with("éé"));
+        assert_eq!(project.path.unwrap().chars().count(), MAX_PATH);
+        // The welcome carries the same, so a long title can't hold up the handshake either.
+        let (_stream, _reader, welcome) = lab.authenticated();
+        assert_eq!(welcome["project"]["name"].as_str().unwrap().chars().count(), MAX_NAME);
+        // A name that fits is left alone.
+        assert_eq!(cut("Song.rpp", MAX_NAME), "Song.rpp");
+        assert_eq!(cut(&"a".repeat(MAX_NAME), MAX_NAME).chars().count(), MAX_NAME);
     }
 
     #[test]

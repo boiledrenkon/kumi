@@ -91,11 +91,12 @@ pub struct ProjectSummary {
 impl ProjectSummary {
     pub fn to_json(&self) -> Value {
         let mut project = serde_json::Map::new();
+        // As long as the discovery file and the welcome keep them.
         if !self.name.is_empty() {
-            project.insert("name".into(), self.name.clone().into());
+            project.insert("name".into(), crate::server::cut(&self.name, crate::server::MAX_NAME).into());
         }
         if !self.path.is_empty() {
-            project.insert("path".into(), self.path.clone().into());
+            project.insert("path".into(), crate::server::cut(&self.path, crate::server::MAX_PATH).into());
         }
         Value::Object(project)
     }
