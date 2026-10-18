@@ -221,7 +221,7 @@ https://github.com/user1303836/kumi/blob/main/docs/en/WILLINGTON_INTEGRATION.md
 With the Willington multi-version bundle, install `WillingtonRuntime` beside the
 provider packages. At startup their `install()` functions select bindings using
 the connected Live process's OS, architecture, version and executable hash.
-Validated macOS ARM64 12.4.15b4/b5/b6 bindings can coexist in one installation;
+Validated macOS ARM64 12.4.15b4/b5/b6/b7 bindings can coexist in one installation;
 a missing validated component profile skips only that component. Artifact or
 integrity failures tear down all native providers; ordinary Kumi stays active.
 The existing owner-only `willington.json` opt-in and write controls still apply.
@@ -245,7 +245,7 @@ to maintain `minimum <= fadeMinimum <= fadeMaximum <= maximum`.
 Install the exact-build `WillingtonRackZones` Remote Script package alongside
 the existing adapters, then add the optional `"rackZones": true` field to the
 owner-only `willington.json`. The existing `enableWrites` flag controls writes.
-Rack Zones is supported on Live 12.4.15b5/b6 macOS ARM64 and 12.4.15b5 Windows x64,
+Rack Zones is supported on Live 12.4.15b5/b6/b7 macOS ARM64 and 12.4.15b5 Windows x64,
 and included in the validated multi-version bundle. Default installation selects its matching profile;
 other builds remain unavailable. The b5 validation added 42 actual signal-gating
 checks, 49 fade measurements and seven actual Max `live.object` write/read/restore
@@ -310,3 +310,5 @@ Remote Script's authority/idempotency path, and HISTORY undo. Group creation
 checks HISTORY refusal; cleanup explicitly ungroups it. Cleanup also restores
 the original Set state, provider and display hook and deletes the endpoint
 secret file. This does not test model inference, a released installer or chat UI.
+
+Live 12.4.15b7 on Apple Silicon requires Willington `5361914b1b79230e51c8f051b8b2122176e94adb` or a later bundle retaining the validated `live-12.4.15b7-arm64` row and its required components in `willington/WillingtonRuntime/matrix.json`. Older Kumi bundles need updating; `willington/release.json` identifies the imported commit. Windows support remains limited to its b5 profiles. See the [b7 CI-bundle checks](../docs/evidence/willington-b7-import.json). Macro removal's single undo is validated from Live timers and Max LiveAPI; a `_Framework.ControlSurface.update_display` callback can add a separate Custom Action undo entry. Local self-test receipts must match the selected library hash.
