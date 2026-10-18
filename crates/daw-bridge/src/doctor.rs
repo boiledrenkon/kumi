@@ -1,0 +1,402 @@
+//! Doctor's checks for one DAW's bridge: installed, opened once, the bridge's files and their hash, the secret, the
+//! DAW running, the bridge answering and its version, ports, quarantine, architecture, and Renoise's own settings.
+use crate::daw::Daw;
+use crate::detect::{self, Env, Os};
+use crate::files::{read_secret, scan_discovery};
+use crate::install::{self, RENOISE_TOOL_ID};
+use crate::lifecycle::{Lifecycle, Target};
+use crate::owner;
+use crate::paths::BridgePaths;
+use crate::probe::{listening, probe};
+use serde::Serialize;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    Ok,
+    /// Worth knowing, nothing wrong.
+    Note,
+    Warn,
+    Fail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Check {
+    pub id: &'static str,
+    pub level: Level,
+    pub message: String,
+}
+
+fn check(id: &'static str, level: Level, message: impl Into<String>) -> Check {
+    Check { id, level, message: message.into() }
+}
+
+/// What this Kumi ships for the DAW, to compare with what's installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bundled {
+    pub version: String,
+    pub sha256: String,
+}
+
+/// What doctor reads besides the file system: the running DAW's pids (one process listing), injectable for tests.
+pub struct Inputs<'a> {
+    pub env: Env<'a>,
+    pub kumi_home: &'a Path,
+    pub bundled: Option<Bundled>,
+    pub running: &'a dyn Fn(Daw) -> Vec<u32>,
+    pub probe_timeout: Duration,
+}
+
+pub fn doctor(daw: Daw, inputs: &Inputs) -> Vec<Check> {
+    let mut checks = vec![];
+    let target = match daw {
+        Daw::Reaper => reaper_target(inputs, &mut checks),
+        Daw::Renoise => renoise_target(inputs, &mut checks),
+    };
+    let Some((target, app_archs)) = target else { return checks };
+    bridge_checks(daw, &target, &app_archs, inputs, &mut checks);
+    checks
+}
+
+fn reaper_target(inputs: &Inputs, checks: &mut Vec<Check>) -> Option<(Target, Vec<detect::Arch>)> {
+    let installs = detect::detect_reaper(&inputs.env);
+    let Some(install) = installs.first() else {
+        checks.push(check(
+            "installed",
+            Level::Note,
+            "REAPER isn't installed (or not where Kumi looks: set KUMI_REAPER_RESOURCE_DIR to its resource folder)",
+        ));
+        return None;
+    };
+    let app = match (&install.app, &install.version) {
+        (Some(app), Some(version)) => format!("REAPER {version} at {}", app.display()),
+        (Some(app), None) => format!("REAPER at {}", app.display()),
+        (None, _) => format!("REAPER's resource folder {} (the app wasn't found)", install.resource.display()),
+    };
+    checks.push(check("installed", Level::Ok, app));
+    if installs.len() > 1 {
+        let others: Vec<String> = installs[1..].iter().map(|other| other.resource.display().to_string()).collect();
+        checks.push(check("installs", Level::Note, format!("other REAPER resource folders: {}", others.join(", "))));
+    }
+    if !install.opened {
+        checks.push(check("opened", Level::Warn, format!("REAPER hasn't run with {} yet: open it once", install.resource.display())));
+    }
+    match install::reaper_target(install, inputs.env.os) {
+        Ok(target) => Some((target, install.archs.clone())),
+        Err(why) => {
+            checks.push(check("opened", Level::Fail, why.to_string()));
+            None
+        }
+    }
+}
+
+fn renoise_target(inputs: &Inputs, checks: &mut Vec<Check>) -> Option<(Target, Vec<detect::Arch>)> {
+    let found = detect::detect_renoise(&inputs.env);
+    if found.apps.is_empty() && found.prefs.is_empty() {
+        checks.push(check(
+            "installed",
+            Level::Note,
+            "Renoise isn't installed (or not where Kumi looks: set KUMI_RENOISE_PREFS_DIR to its preferences folder)",
+        ));
+        return None;
+    }
+    for app in &found.apps {
+        let version = app.version.as_deref().unwrap_or("(version unknown)");
+        checks.push(check("installed", Level::Ok, format!("Renoise {version} at {}", app.path.display())));
+        if app.demo == Some(true) {
+            checks.push(check("demo", Level::Note, "this is Renoise's demo: it can't render, so Kumi can't listen to songs offline"));
+        }
+    }
+    let target = match install::renoise_target(&found) {
+        Ok(target) => target,
+        Err(why) => {
+            checks.push(check("opened", Level::Fail, why.to_string()));
+            return None;
+        }
+    };
+    if let Some(prefs) = &found.target {
+        if let Some(config) = detect::renoise_config(&prefs.dir, RENOISE_TOOL_ID) {
+            if config.osc_server {
+                checks.push(check(
+                    "osc",
+                    Level::Warn,
+                    "Renoise's OSC server is on: it takes commands from the network without a password (Kumi doesn't need it; Preferences > OSC turns it off)",
+                ));
+            }
+            if config.tool_disabled {
+                checks.push(check("disabled", Level::Fail, "Kumi's tool is disabled in Renoise: turn it on in Tools > Tool Browser"));
+            }
+        }
+    }
+    let archs = found.apps.first().map(|app| app.archs.clone()).unwrap_or_default();
+    Some((target, archs))
+}
+
+fn bridge_checks(daw: Daw, target: &Target, app_archs: &[detect::Arch], inputs: &Inputs, checks: &mut Vec<Check>) {
+    let lifecycle = Lifecycle::new(inputs.kumi_home, target.clone());
+    let paths = BridgePaths::new(inputs.kumi_home, daw);
+    let installed_version = match lifecycle.status() {
+        Err(error) => {
+            checks.push(check("bridge", Level::Fail, format!("Kumi's {daw} bridge receipt can't be read: {error}")));
+            None
+        }
+        Ok(status) => match &status.receipt {
+            None => {
+                let level = if target.path().exists() { Level::Warn } else { Level::Fail };
+                let message = if target.path().exists() {
+                    format!(
+                        "{} is there but Kumi has no record of installing it: set up Kumi's {daw} bridge again",
+                        target.path().display()
+                    )
+                } else {
+                    format!("Kumi's {daw} bridge isn't installed")
+                };
+                checks.push(check("bridge", level, message));
+                None
+            }
+            Some(receipt) if !status.present => {
+                checks.push(check(
+                    "bridge",
+                    Level::Fail,
+                    format!("Kumi's {daw} bridge was removed from {}: set it up again", receipt.target),
+                ));
+                None
+            }
+            Some(receipt) => {
+                let version = receipt.version.clone().unwrap_or_default();
+                let sha = receipt.sha256.clone().unwrap_or_default();
+                if status.matches {
+                    checks.push(check("bridge", Level::Ok, format!("bridge {version} installed ({})", &sha[..sha.len().min(12)])));
+                } else {
+                    checks.push(check(
+                        "bridge",
+                        Level::Warn,
+                        format!("bridge {version} was changed since Kumi installed it: set it up again"),
+                    ));
+                }
+                if let Some(bundled) = &inputs.bundled {
+                    if bundled.sha256 != sha {
+                        checks.push(check(
+                            "update",
+                            Level::Warn,
+                            format!("this Kumi ships bridge {} and {daw} has {version}: update Kumi's {daw} bridge", bundled.version),
+                        ));
+                    }
+                }
+                if !status.reference {
+                    checks.push(check(
+                        "reference",
+                        Level::Fail,
+                        format!("the bridge's reference file is missing: {}", target.reference.display()),
+                    ));
+                }
+                Some(version)
+            }
+        },
+    };
+    match read_secret(&paths.secret()) {
+        Ok(_) if inputs.env.os == Os::Windows && !owner::is_owner_only(&paths.secret()) => {
+            checks.push(check("secret", Level::Fail, "the bridge's secret is readable by other accounts"));
+        }
+        Ok(_) => {}
+        Err(error) => checks.push(check("secret", Level::Fail, format!("the bridge's secret: {error}"))),
+    }
+    let file = target.path();
+    if file.exists() {
+        let quarantined = if target.folder {
+            detect::quarantined(&file.join("main.lua")) || detect::quarantined(&file)
+        } else {
+            detect::quarantined(&file)
+        };
+        if quarantined {
+            checks.push(check(
+                "quarantine",
+                Level::Fail,
+                format!("macOS marked {} as downloaded, so {daw} won't load it: set up the bridge again to clear it", file.display()),
+            ));
+        }
+        if !target.folder && !install::arch_fits(&file, app_archs) {
+            checks.push(check("arch", Level::Fail, format!("the extension's architecture doesn't match {daw}'s ({app_archs:?})")));
+        }
+    }
+
+    let pids = (inputs.running)(daw);
+    let discovered = scan_discovery(&paths.discovery(), daw);
+    let alive: Vec<_> = discovered.iter().filter(|found| found.alive).filter_map(|found| found.discovery.as_ref().ok()).collect();
+    if pids.is_empty() && alive.is_empty() {
+        checks.push(check("running", Level::Note, format!("{daw} isn't running")));
+    } else if !pids.is_empty() {
+        checks.push(check(
+            "running",
+            Level::Ok,
+            format!("{daw} is running (pid {})", pids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")),
+        ));
+    }
+    if !pids.is_empty() && alive.is_empty() && installed_version.is_some() {
+        checks.push(check("answering", Level::Warn, format!("{daw} is running without Kumi's bridge: restart {daw} to load it")));
+    }
+    let secret = read_secret(&paths.secret()).ok();
+    for discovery in &alive {
+        let Some(secret) = &secret else { break };
+        let address = SocketAddr::from(([127, 0, 0, 1], discovery.port));
+        match probe(address, secret, "kumi-doctor", inputs.probe_timeout) {
+            Ok(found) => {
+                let identity = &found.welcome.identity;
+                let project = identity.project.as_ref().and_then(|project| project.name.clone()).unwrap_or_else(|| "no project".into());
+                checks.push(check(
+                    "answering",
+                    Level::Ok,
+                    format!("bridge {} answering on port {} ({daw} {}, {project})", identity.bridge, discovery.port, identity.daw_version),
+                ));
+                if installed_version.as_ref().is_some_and(|installed| *installed != identity.bridge) {
+                    checks.push(check(
+                        "restart",
+                        Level::Warn,
+                        format!(
+                            "{daw} (pid {}) still runs bridge {}: restart {daw} to load {}",
+                            identity.pid,
+                            identity.bridge,
+                            installed_version.as_deref().unwrap_or("")
+                        ),
+                    ));
+                }
+            }
+            Err(error) => {
+                checks.push(check("answering", Level::Fail, format!("{daw}'s bridge on port {} didn't answer: {error}", discovery.port)))
+            }
+        }
+    }
+    let ours: Vec<u16> = alive.iter().map(|discovery| discovery.port).collect();
+    let taken: Vec<String> = daw
+        .ports()
+        .filter(|port| !ours.contains(port) && listening(*port, Duration::from_millis(200)))
+        .map(|port| port.to_string())
+        .collect();
+    if !taken.is_empty() {
+        checks.push(check(
+            "ports",
+            Level::Note,
+            format!("another program listens on port {} of {daw}'s range: the bridge takes the next free one", taken.join(", ")),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::files::{write_discovery, Discovery, DISCOVERY_SCHEMA};
+    use crate::wire::{Identity, PROTOCOL};
+
+    fn no_processes(_: Daw) -> Vec<u32> {
+        vec![]
+    }
+
+    fn running(_: Daw) -> Vec<u32> {
+        vec![4242]
+    }
+
+    fn ids(checks: &[Check]) -> Vec<(&'static str, Level)> {
+        checks.iter().map(|check| (check.id, check.level)).collect()
+    }
+
+    #[test]
+    fn renoise_from_nothing_to_answering() {
+        let root = tempfile::tempdir().unwrap();
+        let kumi = root.path().join("kumi");
+        let none = |_: &str| None;
+        let inputs = |running: &'static dyn Fn(Daw) -> Vec<u32>| Inputs {
+            env: Env { os: Os::Mac, home: root.path().join("home"), var: &none, root: Some(root.path().join("sys")) },
+            kumi_home: &kumi,
+            bundled: None,
+            running,
+            probe_timeout: Duration::from_secs(5),
+        };
+        assert_eq!(ids(&doctor(Daw::Renoise, &inputs(&no_processes))), [("installed", Level::Note)]);
+
+        let prefs = root.path().join("home/Library/Preferences/Renoise/V3.5.4");
+        std::fs::create_dir_all(&prefs).unwrap();
+        std::fs::write(prefs.join("Config.xml"), "<OscServerEnabled>true</OscServerEnabled>").unwrap();
+        let checks = doctor(Daw::Renoise, &inputs(&no_processes));
+        assert!(checks.contains(&check("osc", Level::Warn, checks.iter().find(|c| c.id == "osc").unwrap().message.clone())));
+        assert!(ids(&checks).contains(&("bridge", Level::Fail)));
+        assert!(ids(&checks).contains(&("secret", Level::Fail)));
+
+        // Installed through the lifecycle.
+        let target = install::renoise_target(&detect::detect_renoise(&inputs(&no_processes).env)).unwrap();
+        let source = root.path().join("src").join("com.kumi.Bridge.xrnx");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("main.lua"), "-- tool\n").unwrap();
+        let receipt = Lifecycle::new(&kumi, target).install(&source, "0.1.0").unwrap();
+        let checks = doctor(Daw::Renoise, &inputs(&no_processes));
+        assert!(ids(&checks).contains(&("bridge", Level::Ok)), "{checks:?}");
+        assert!(!ids(&checks).iter().any(|(id, _)| *id == "secret" || *id == "reference"));
+        assert!(ids(&checks).contains(&("running", Level::Note)));
+
+        // Running, but started before the bridge was installed.
+        assert!(ids(&doctor(Daw::Renoise, &inputs(&running))).contains(&("answering", Level::Warn)));
+
+        // Answering, with an older bridge than the one installed.
+        let secret = read_secret(&BridgePaths::new(&kumi, Daw::Renoise).secret()).unwrap();
+        let identity = Identity {
+            daw: "renoise".into(),
+            bridge: "0.0.9".into(),
+            daw_version: "3.5.4".into(),
+            pid: std::process::id(),
+            resource: prefs.to_string_lossy().into_owned(),
+            project: None,
+        };
+        let bridge = crate::probe::testing::serve(secret, identity.clone());
+        let discovery = Discovery {
+            schema: DISCOVERY_SCHEMA.into(),
+            daw: identity.daw.clone(),
+            pid: identity.pid,
+            host: "127.0.0.1".into(),
+            port: bridge.address.port(),
+            protocol: PROTOCOL.into(),
+            version: identity.bridge.clone(),
+            daw_version: identity.daw_version.clone(),
+            resource: identity.resource.clone(),
+            project: None,
+            started_ms: 1,
+        };
+        write_discovery(&BridgePaths::new(&kumi, Daw::Renoise).discovery(), &discovery).unwrap();
+        let mut with_bundle = inputs(&running);
+        with_bundle.bundled = Some(Bundled { version: "0.2.0".into(), sha256: "other".into() });
+        let checks = doctor(Daw::Renoise, &with_bundle);
+        assert!(ids(&checks).contains(&("answering", Level::Ok)), "{checks:?}");
+        assert!(ids(&checks).contains(&("restart", Level::Warn)));
+        assert!(ids(&checks).contains(&("update", Level::Warn)));
+        assert_eq!(receipt.version.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn reaper_wrong_architecture_and_unrecorded_files() {
+        let root = tempfile::tempdir().unwrap();
+        let kumi = root.path().join("kumi");
+        let none = |_: &str| None;
+        let app = root.path().join("sys/Applications/REAPER.app/Contents/MacOS");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("REAPER"), [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 0x01]).unwrap();
+        let resource = root.path().join("home/Library/Application Support/REAPER");
+        std::fs::create_dir_all(resource.join("UserPlugins")).unwrap();
+        std::fs::write(resource.join("reaper.ini"), "").unwrap();
+        let inputs = Inputs {
+            env: Env { os: Os::Mac, home: root.path().join("home"), var: &none, root: Some(root.path().join("sys")) },
+            kumi_home: &kumi,
+            bundled: None,
+            running: &no_processes,
+            probe_timeout: Duration::from_secs(1),
+        };
+        std::fs::write(resource.join("UserPlugins/reaper_kumi.dylib"), [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0, 0, 0x01]).unwrap();
+        assert!(ids(&doctor(Daw::Reaper, &inputs)).contains(&("bridge", Level::Warn)));
+        let source = root.path().join("reaper_kumi.dylib");
+        std::fs::write(&source, [0xcf, 0xfa, 0xed, 0xfe, 0x07, 0, 0, 0x01]).unwrap();
+        let target = install::reaper_target(&detect::detect_reaper(&inputs.env)[0], Os::Mac).unwrap();
+        Lifecycle::new(&kumi, target).install(&source, "0.1.0").unwrap();
+        let checks = doctor(Daw::Reaper, &inputs);
+        assert!(ids(&checks).contains(&("arch", Level::Fail)), "{checks:?}");
+    }
+}

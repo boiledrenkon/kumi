@@ -65,13 +65,16 @@
 pub mod auth;
 pub mod daw;
 pub mod detect;
+pub mod doctor;
 pub mod files;
 pub mod frame;
 pub mod handshake;
+pub mod install;
 pub mod lifecycle;
 pub mod loopback;
 pub mod owner;
 pub mod paths;
+pub mod probe;
 pub mod wire;
 
 pub use daw::Daw;
