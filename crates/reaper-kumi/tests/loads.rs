@@ -45,7 +45,11 @@ mod loader {
         let symbol = CString::new(symbol).unwrap();
         let said = || unsafe {
             let error = dlerror();
-            if error.is_null() { "no reason given".to_string() } else { CStr::from_ptr(error).to_string_lossy().into_owned() }
+            if error.is_null() {
+                "no reason given".to_string()
+            } else {
+                CStr::from_ptr(error).to_string_lossy().into_owned()
+            }
         };
         let handle = unsafe { dlopen(path.as_ptr(), RTLD_NOW) };
         if handle.is_null() {
