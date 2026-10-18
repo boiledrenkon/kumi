@@ -15,7 +15,8 @@ try {
   Remove-Item Env:KUMI_REMOTE_SCRIPTS_DIR -ErrorAction SilentlyContinue
   Remove-Item Env:KUMI_LIVE_EXTENSIONS_DIR -ErrorAction SilentlyContinue
   # The whole workspace, or only the packages named in KUMI_PACKAGES (space separated).
-  $scope = if ($env:KUMI_PACKAGES) { $env:KUMI_PACKAGES.Trim() -split ' +' | ForEach-Object { '-p'; $_ } } else { @('--workspace') }
+  # (Typed as an array, even of one: a lone string splatted with @ is passed a character at a time.)
+  [string[]]$scope = if ($env:KUMI_PACKAGES) { $env:KUMI_PACKAGES.Trim() -split ' +' | ForEach-Object { '-p'; $_ } } else { '--workspace' }
   if ($env:KUMI_NEXTEST -eq '1') { & cargo nextest run @scope --locked @args } else { & cargo test @scope --locked @args }
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally {
