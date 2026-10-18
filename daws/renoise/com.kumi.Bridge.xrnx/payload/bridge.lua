@@ -51,7 +51,7 @@ end
 -- How many shifts of the track list the tool keeps to carry refs through.
 M.SHIFT_HISTORY = 64
 -- Watchers left behind by deleted objects, past which the song is watched anew.
-M.MAX_DEAD = 32
+M.MAX_DEAD = 256
 
 function M.log_error(where, err)
   log.write("error", where .. ": " .. tostring(err))
@@ -195,6 +195,11 @@ local SELECTION_OBSERVABLES = {
 
 -- What each kind of object is watched for. A new object gets its watchers where it is made (inside the notifier that saw
 -- it), so there is no turn on which it goes unseen.
+local function watch_device(device)
+  observers:watch_changes(device.is_active_observable)
+  observers:watch_changes(device.display_name_observable)
+end
+
 local function watch_track(song, i)
   local track = song:track(i)
   observers:watch_changes(track.name_observable)
@@ -203,21 +208,60 @@ local function watch_track(song, i)
   observers:watch_changes(track.solo_state_observable)
   observers:watch_changes(track.visible_note_columns_observable)
   observers:watch_changes(track.visible_effect_columns_observable)
-  observers:watch_structural(track.devices_observable, "a track's devices changed", "devices")
+  for c = 1, track.max_note_columns do
+    observers:watch_changes(track:column_is_muted_observable(c))
+    observers:watch_changes(track:column_name_observable(c))
+  end
+  for d = 1, #track.devices do watch_device(track:device(d)) end
+  observers:watch_structural(track.devices_observable, "a track's devices changed", "devices", track)
 end
 
-local function watch_pattern(song, p)
+-- What a pattern's track shows is another pattern's when it is an alias.
+local function watch_pattern_track(pattern, t)
+  observers:watch_changes(pattern:track(t).alias_pattern_index_observable)
+end
+
+local function watch_pattern(song, p, tracks)
   local pattern = song:pattern(p)
   observers:watch_lines(pattern)
   observers:watch_changes(pattern.name_observable)
   observers:watch_layout(pattern.number_of_lines_observable)
+  for t = 1, tracks do watch_pattern_track(pattern, t) end
+end
+
+local function watch_sample(sample)
+  observers:watch_changes(sample.name_observable)
+  local mapping = sample.sample_mapping
+  if not mapping then return end
+  observers:watch_changes(mapping.note_range_observable)
+  observers:watch_changes(mapping.velocity_range_observable)
+  observers:watch_changes(mapping.base_note_observable)
+  observers:watch_changes(mapping.layer_observable)
+  observers:watch_changes(mapping.map_key_to_pitch_observable)
+  observers:watch_changes(mapping.map_velocity_to_volume_observable)
+end
+
+local function watch_phrase(phrase)
+  observers:watch_lines(phrase)
+  observers:watch_changes(phrase.name_observable)
+  observers:watch_layout(phrase.number_of_lines_observable)
+  observers:watch_changes(phrase.lpb_observable)
+  observers:watch_changes(phrase.visible_note_columns_observable)
+  observers:watch_changes(phrase.visible_effect_columns_observable)
 end
 
 local function watch_instrument(song, i)
   local instrument = song:instrument(i)
   observers:watch_changes(instrument.name_observable)
-  observers:watch_structural(instrument.samples_observable, "an instrument's samples changed", "samples")
-  observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed", "phrases")
+  for k = 1, #instrument.macros do
+    local macro = instrument:macro(k)
+    observers:watch_changes(macro.value_observable)
+    observers:watch_changes(macro.name_observable)
+  end
+  for s = 1, #instrument.samples do watch_sample(instrument:sample(s)) end
+  for ph = 1, #instrument.phrases do watch_phrase(instrument:phrase(ph)) end
+  observers:watch_structural(instrument.samples_observable, "an instrument's samples changed", "samples", instrument)
+  observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed", "phrases", instrument)
 end
 
 -- Everything the focus pane and the reads depend on is watched: events for what Kumi is told as it happens, a counter
@@ -235,8 +279,10 @@ local function attach(song)
   observers:watch_structural(sequencer.pattern_sequence_observable, "the sequence changed", "sequence")
   observers:watch_changes(sequencer.pattern_assignments_observable)
   observers:watch_changes(sequencer.pattern_slot_mutes_observable)
-  for p = 1, #song.patterns do watch_pattern(song, p) end
-  for t = 1, track_total(song) do watch_track(song, t) end
+  observers:watch_changes(sequencer:sequence_sections_changed_observable())
+  local tracks = track_total(song)
+  for p = 1, #song.patterns do watch_pattern(song, p, tracks) end
+  for t = 1, tracks do watch_track(song, t) end
   for i = 1, #song.instruments do watch_instrument(song, i) end
   b.track_count = track_total(song)
   b.reattach = false
@@ -255,19 +301,27 @@ end
 -- A change to the lists refs index into: the epoch moves (so every answer after it is in the new epoch, and a ref from
 -- before is refused), and what was made gets its watchers. A deleted object's watchers stay until the song is watched
 -- anew, which happens once enough of them have piled up.
-local function on_structural(reason, kind, op)
+local function on_structural(reason, kind, op, owner)
   bump_epoch(reason)
   local song = renoise.song()
   if not song then return end
   local made, lost = op and op.type == "insert", op and op.type == "remove"
-  if kind == "instruments" or kind == "patterns" then
-    if made then
-      if kind == "instruments" then watch_instrument(song, op.index) else watch_pattern(song, op.index) end
-    elseif lost then
-      observers.dead = observers.dead + 1
-    else
-      b.reattach = true
+  if made then
+    if kind == "instruments" then
+      watch_instrument(song, op.index)
+    elseif kind == "patterns" then
+      watch_pattern(song, op.index, track_total(song))
+    elseif kind == "devices" then
+      watch_device(owner:device(op.index))
+    elseif kind == "samples" then
+      watch_sample(owner:sample(op.index))
+    elseif kind == "phrases" then
+      watch_phrase(owner:phrase(op.index))
     end
+  elseif lost then
+    observers.dead = observers.dead + 1
+  elseif kind == "instruments" or kind == "patterns" then
+    b.reattach = true
   end
 end
 
@@ -293,6 +347,7 @@ local function on_tracks(op)
   if #b.shifts > M.SHIFT_HISTORY then table.remove(b.shifts, 1) end
   if op.type == "insert" then
     watch_track(song, op.index)
+    for p = 1, #song.patterns do watch_pattern_track(song:pattern(p), op.index) end
   else
     observers.dead = observers.dead + 1
   end
@@ -535,6 +590,11 @@ end
 -- Called from the fast timer while jobs are pending.
 function M.tick_jobs()
   if jobs and jobs:pending() > 0 then jobs:run() end
+end
+
+-- How many things the song is watched through (the tests count them to see that only what is new gets watched).
+function M.watching()
+  return observers and #observers.entries or 0
 end
 
 function M.on_new_document()

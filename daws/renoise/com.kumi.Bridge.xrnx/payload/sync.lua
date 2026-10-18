@@ -14,7 +14,7 @@ local M = {}
 M.__index = M
 
 -- guard(where, fn) wraps a notifier so it never raises. state: a table that outlives the song (the counters).
--- hooks: { structural = function(reason, kind, op), tracks = function(op) }.
+-- hooks: { structural = function(reason, kind, op, owner), tracks = function(op) }.
 function M.new(guard, state, hooks)
   return setmetatable({ entries = {}, dirty = {}, last = {}, guard = guard, state = state or {}, hooks = hooks or {}, dead = 0 }, M)
 end
@@ -55,13 +55,14 @@ function M:watch_tracks(observable)
   end))
 end
 
--- Refs shift or vanish when this changes. `kind` names the list; `op` is the list operation, when the observable is a list.
-function M:watch_structural(observable, reason, kind)
+-- Refs shift or vanish when this changes. `kind` names the list; `op` is the list operation, when the observable is a list;
+-- `owner` is the object that holds the list (a track, an instrument), when it has one.
+function M:watch_structural(observable, reason, kind, owner)
   add(self, observable, self.guard("notifier " .. reason, function(op)
     count(self)
     reshape(self)
     if self.hooks.structural then
-      self.hooks.structural(reason, kind, op and { type = op.type, index = op.index, index2 = op.index2 } or nil)
+      self.hooks.structural(reason, kind, op and { type = op.type, index = op.index, index2 = op.index2 } or nil, owner)
     end
   end))
 end

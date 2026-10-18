@@ -115,11 +115,14 @@ end
 local function device(data)
   local params = {}
   for i, p in ipairs(data.params or {}) do params[i] = parameter(p) end
+  -- (the proxy is made anew on every read: what is watched lives in the data)
+  data.is_active_observable = data.is_active_observable or M.observable()
+  data.display_name_observable = data.display_name_observable or M.observable()
   return object("renoise.AudioDevice", {
     name = data.name, display_name = data.display_name or data.name, short_name = data.name,
     device_path = data.path or ("Audio/Effects/Native/" .. data.name),
-    is_active = data.active ~= false, is_active_observable = M.observable(),
-    display_name_observable = M.observable(),
+    is_active = data.active ~= false, is_active_observable = data.is_active_observable,
+    display_name_observable = data.display_name_observable,
     active_preset = data.preset or 0, active_preset_observable = M.observable(),
     presets = data.presets or {},
     parameters = params,
@@ -133,6 +136,15 @@ local function device(data)
       return params[i]
     end,
   })
+end
+
+-- The observable of a note column's mute or name: one per column, kept in the track's data.
+local function column_observable(t, kind, c)
+  if type(c) ~= "number" or c < 1 or c > 12 or t.kind == "master" or t.kind == "send" then out_of_range("column", c) end
+  t.column_observables = t.column_observables or {}
+  local key = kind .. c
+  t.column_observables[key] = t.column_observables[key] or M.observable()
+  return t.column_observables[key]
 end
 
 -- A song
@@ -242,6 +254,8 @@ function M.make_song(options)
       visible_note_columns_observable = t.visible_note_columns_observable,
       visible_effect_columns_observable = t.visible_effect_columns_observable,
       prefx_volume = prefx(t, "volume"), prefx_panning = prefx(t, "panning"),
+      column_is_muted_observable = function(_, c) return column_observable(t, "muted", c) end,
+      column_name_observable = function(_, c) return column_observable(t, "name", c) end,
       device = function(_, k)
         if not t.devices[k] then out_of_range("device", k) end
         return device(t.devices[k])
@@ -255,6 +269,7 @@ function M.make_song(options)
       solo_state = function() return t.solo or false end,
       visible_note_columns = function() return t.note_columns end,
       visible_effect_columns = function() return t.effect_columns end,
+      max_note_columns = function() return (t.kind == "master" or t.kind == "send") and 0 or 12 end,
       devices = function()
         local devices = {}
         for k, spec in ipairs(t.devices) do devices[k] = device(spec) end
@@ -280,10 +295,14 @@ function M.make_song(options)
     local pattern = d.patterns[p]
     pattern.tracks[t] = pattern.tracks[t] or { alias = 0, lines = {} }
     local data = pattern.tracks[t]
+    data.alias_observable = data.alias_observable or M.observable()
     return object("renoise.PatternTrack", {
+      alias_pattern_index_observable = data.alias_observable,
+      -- an alias shows (and writes to) the lines of the pattern it is an alias of
       line = function(_, k)
         if type(k) ~= "number" or k < 1 or k > pattern.lines then out_of_range("line", k) end
-        return line(data.lines[k])
+        local source = data.alias > 0 and d.patterns[data.alias] and d.patterns[data.alias].tracks[t] or data
+        return line(source.lines[k])
       end,
     }, {
       alias_pattern_index = function() return data.alias end,
@@ -330,23 +349,61 @@ function M.make_song(options)
     })
   end
 
+  -- (what is watched lives in the data: the proxies are made anew on every read)
   local function sample_object(i, s)
     local sample = d.instruments[i].samples[s]
+    sample.observables = sample.observables or {}
+    local watched = sample.observables
+    for _, key in ipairs({ "name", "note_range", "velocity_range", "base_note", "layer", "map_key_to_pitch", "map_velocity_to_volume" }) do
+      watched[key] = watched[key] or M.observable()
+    end
     local mapping = object("renoise.SampleMapping", {
       base_note = sample.base_note, note_range = sample.note_range, velocity_range = sample.velocity_range,
+      layer = sample.layer or 1, map_key_to_pitch = sample.map_key_to_pitch ~= false,
+      map_velocity_to_volume = sample.map_velocity_to_volume ~= false,
+      base_note_observable = watched.base_note, note_range_observable = watched.note_range,
+      velocity_range_observable = watched.velocity_range, layer_observable = watched.layer,
+      map_key_to_pitch_observable = watched.map_key_to_pitch, map_velocity_to_volume_observable = watched.map_velocity_to_volume,
     })
     return object("renoise.Sample", { name = sample.name, loop_mode = sample.loop_mode, mute_group = sample.mute_group,
-      sample_mapping = mapping })
+      name_observable = watched.name, sample_mapping = mapping })
   end
 
   local function phrase_object(i, ph)
     local phrase = d.instruments[i].phrases[ph]
+    phrase.notifiers = phrase.notifiers or {}
+    phrase.observables = phrase.observables or {}
+    local watched = phrase.observables
+    for _, key in ipairs({ "name", "number_of_lines", "lpb", "visible_note_columns", "visible_effect_columns" }) do
+      watched[key] = watched[key] or M.observable()
+    end
     return object("renoise.InstrumentPhrase", {
       name = phrase.name, number_of_lines = phrase.lines, lpb = phrase.lpb, key_tracking = phrase.key_tracking,
       looping = phrase.looping, visible_note_columns = phrase.note_columns, visible_effect_columns = phrase.effect_columns,
+      name_observable = watched.name, number_of_lines_observable = watched.number_of_lines, lpb_observable = watched.lpb,
+      visible_note_columns_observable = watched.visible_note_columns,
+      visible_effect_columns_observable = watched.visible_effect_columns,
       line = function(_, k)
         if type(k) ~= "number" or k < 1 or k > phrase.lines then out_of_range("phrase line", k) end
         return line(phrase.data[k])
+      end,
+      add_line_notifier = function(_, fn)
+        for _, existing in ipairs(phrase.notifiers) do
+          if existing == fn then error("the notifier was already added", 2) end
+        end
+        phrase.notifiers[#phrase.notifiers + 1] = fn
+      end,
+      remove_line_notifier = function(_, fn)
+        for n, existing in ipairs(phrase.notifiers) do
+          if existing == fn then table.remove(phrase.notifiers, n) return end
+        end
+        error("the notifier was not added", 2)
+      end,
+      has_line_notifier = function(_, fn)
+        for _, existing in ipairs(phrase.notifiers) do
+          if existing == fn then return true end
+        end
+        return false
       end,
     })
   end
@@ -400,9 +457,11 @@ function M.make_song(options)
 
   d.sequence_observable, d.assignments_observable, d.mutes_observable =
     simple_observable(), simple_observable(), simple_observable()
+  d.sections_observable = simple_observable()
   local sequencer = object("renoise.PatternSequencer", {
     pattern_sequence_observable = d.sequence_observable, pattern_assignments_observable = d.assignments_observable,
     pattern_slot_mutes_observable = d.mutes_observable,
+    sequence_sections_changed_observable = function() return d.sections_observable end,
     pattern = function(_, s)
       if not d.sequence[s] then out_of_range("sequence", s) end
       return d.sequence[s]
@@ -495,6 +554,13 @@ local function song_fields() return M.data.song_fields end
 function ops.set_note(p, t, k, column, given)
   local pattern = M.data.patterns[p]
   pattern.tracks[t] = pattern.tracks[t] or { alias = 0, lines = {} }
+  -- (written through an alias, it lands in the pattern the alias shows)
+  local alias = pattern.tracks[t].alias
+  if alias > 0 then
+    p = alias
+    pattern = M.data.patterns[p]
+    pattern.tracks[t] = pattern.tracks[t] or { alias = 0, lines = {} }
+  end
   local data = pattern.tracks[t]
   data.lines[k] = data.lines[k] or { notes = {}, effects = {} }
   data.lines[k].notes = data.lines[k].notes or {}
@@ -519,6 +585,8 @@ function ops.alias(p, t, of)
   local pattern = M.data.patterns[p]
   pattern.tracks[t] = pattern.tracks[t] or { alias = 0, lines = {} }
   pattern.tracks[t].alias = of
+  pattern.tracks[t].alias_observable = pattern.tracks[t].alias_observable or M.observable()
+  fire(pattern.tracks[t].alias_observable)
 end
 
 function ops.mute_slot(t, s, muted)
@@ -528,6 +596,61 @@ end
 
 function ops.section(s, name)
   M.data.sections[s] = name
+  fire(M.data.sections_observable)
+end
+
+function ops.mute_column(t, c, muted)
+  local track = M.data.tracks[t]
+  track.muted_columns = track.muted_columns or {}
+  track.muted_columns[c] = muted or nil
+  fire(column_observable(track, "muted", c))
+end
+
+function ops.name_column(t, c, name)
+  local track = M.data.tracks[t]
+  track.column_names = track.column_names or {}
+  track.column_names[c] = name
+  fire(column_observable(track, "name", c))
+end
+
+function ops.set_device(t, d, field, value)
+  local data = M.data.tracks[t].devices[d]
+  data[field] = value
+  local key = (field == "active" and "is_active" or field) .. "_observable"
+  data[key] = data[key] or M.observable()
+  fire(data[key])
+end
+
+function ops.set_macro(i, k, value)
+  local macro = M.data.instruments[i].macros[k]
+  macro.value = value
+  fire(macro.value_observable)
+end
+
+-- A sample's mapping: field is note_range, velocity_range, base_note, layer, map_key_to_pitch or map_velocity_to_volume.
+function ops.set_mapping(i, s, field, value)
+  local sample = M.data.instruments[i].samples[s]
+  sample.observables = sample.observables or {}
+  sample[field] = value
+  sample.observables[field] = sample.observables[field] or M.observable()
+  fire(sample.observables[field])
+end
+
+function ops.set_phrase_note(i, ph, k, column, given)
+  local phrase = M.data.instruments[i].phrases[ph]
+  phrase.data[k] = phrase.data[k] or { notes = {}, effects = {} }
+  phrase.data[k].notes = phrase.data[k].notes or {}
+  phrase.data[k].notes[column] = note_data(given)
+  for _, fn in ipairs(list(phrase.notifiers or {})) do pcall(fn, { line = k }) end
+end
+
+-- A phrase's lines or lpb.
+function ops.set_phrase(i, ph, field, value)
+  local phrase = M.data.instruments[i].phrases[ph]
+  phrase[field == "number_of_lines" and "lines" or field] = value
+  phrase.observables = phrase.observables or {}
+  phrase.observables[field] = phrase.observables[field] or M.observable()
+  fire(phrase.observables[field])
 end
 
 local function track_spec(spec)
@@ -626,6 +749,13 @@ function ops.insert_sample(i, spec)
   for k, v in pairs(spec or {}) do sample[k] = v end
   instrument.samples[#instrument.samples + 1] = sample
   fire(instrument.samples_observable, { type = "insert", index = #instrument.samples })
+end
+
+function ops.insert_phrase(i)
+  local instrument = M.data.instruments[i]
+  instrument.phrases[#instrument.phrases + 1] = { name = "Phrase " .. (#instrument.phrases + 1), lines = 16, lpb = 4,
+    key_tracking = 1, looping = true, note_columns = 1, effect_columns = 1, data = {} }
+  fire(instrument.phrases_observable, { type = "insert", index = #instrument.phrases })
 end
 
 function ops.insert_instrument(spec)

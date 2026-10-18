@@ -713,7 +713,7 @@
       "response": {
         "ok": true,
         "result": {
-          "changed": 10,
+          "changed": 12,
           "epoch": "1",
           "layout": 0,
           "project": {
@@ -900,7 +900,7 @@
       "response": {
         "ok": true,
         "result": {
-          "changed": 10,
+          "changed": 12,
           "dspVisible": false,
           "epoch": "1",
           "layout": 0,
