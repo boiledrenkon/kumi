@@ -17,7 +17,7 @@ use super::{
     timing,
 };
 use crate::{
-    audio::tools::{listening_tools, ListeningOptions},
+    audio::tools::{listening_tools_for, ListeningOptions},
     core::conversations::{new_conversation_id, IMPORTED},
     kernel::budget::{transcript_of, OBSERVATION_MARKER},
     library::{Library, LibraryToolsOptions, FIND_SOUNDS_TOOL},
@@ -567,33 +567,36 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             let resolve = weak.clone();
             let hear = weak.clone();
             let emit = emit.clone();
-            listening_tools(ListeningOptions {
-                on_event: Rc::new(move |e| emit(SessionEvent::Heard(e))),
-                resolve: Some(Rc::new(move |named, signal| {
-                    let integration = resolve.upgrade().and_then(|i| i.state.borrow().integration.clone());
-                    async move {
-                        match integration {
-                            Some(i) if i.has_audio_file() => i.audio_file(&named, signal).await,
-                            _ => Ok(None),
+            listening_tools_for(
+                options.profile,
+                ListeningOptions {
+                    on_event: Rc::new(move |e| emit(SessionEvent::Heard(e))),
+                    resolve: Some(Rc::new(move |named, signal| {
+                        let integration = resolve.upgrade().and_then(|i| i.state.borrow().integration.clone());
+                        async move {
+                            match integration {
+                                Some(i) if i.has_audio_file() => i.audio_file(&named, signal).await,
+                                _ => Ok(None),
+                            }
                         }
-                    }
-                    .boxed_local()
-                })),
-                hear: Some(Rc::new(move |request, signal| {
-                    let profile = options.profile;
-                    let integration = hear.upgrade().and_then(|i| i.state.borrow().integration.clone());
-                    async move {
-                        match integration {
-                            Some(i) if i.has_hear() => i.hear(&request, signal).await,
-                            _ => Ok(Err(format!(
-                                "Kumi isn't connected to {}, so it can't hear the {}.",
-                                profile.words.app, profile.words.place
-                            ))),
+                        .boxed_local()
+                    })),
+                    hear: Some(Rc::new(move |request, signal| {
+                        let profile = options.profile;
+                        let integration = hear.upgrade().and_then(|i| i.state.borrow().integration.clone());
+                        async move {
+                            match integration {
+                                Some(i) if i.has_hear() => i.hear(&request, signal).await,
+                                _ => Ok(Err(format!(
+                                    "Kumi isn't connected to {}, so it can't hear the {}.",
+                                    profile.words.app, profile.words.place
+                                ))),
+                            }
                         }
-                    }
-                    .boxed_local()
-                })),
-            })
+                        .boxed_local()
+                    })),
+                },
+            )
         } else {
             vec![]
         };

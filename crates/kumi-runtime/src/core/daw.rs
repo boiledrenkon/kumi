@@ -20,6 +20,10 @@ pub struct DawWords {
     pub place: &'static str,
     /// More than one: "Sets".
     pub places: &'static str,
+    /// The track everything ends in: "Main".
+    pub master: &'static str,
+    /// The timeline a song is laid out on: "Arrangement".
+    pub timeline: &'static str,
 }
 
 /// The DAW's own things that Kumi's texts name: its devices, its ways and its limits. Live's are what the texts said
@@ -54,6 +58,14 @@ pub struct PromptVocab {
     pub render_leftovers: &'static str,
     /// The device that ends a kept sound's chain for safety: "a Limiter".
     pub safety_limiter: &'static str,
+    /// How Kumi hears the project: in Live, after each track's devices, as it plays or by playing the loop.
+    pub listen_method: &'static str,
+    /// The tool that writes notes into the project: "write_midi_clip".
+    pub write_notes_tool: &'static str,
+    /// The DAW's own EQ, by name: "EQ Eight".
+    pub eq: &'static str,
+    /// The octave the DAW names middle C (MIDI 60) in: Live calls it C3.
+    pub middle_c_octave: i8,
 }
 
 /// Live's word for each field of a profile's words and vocabulary: the one place they're spelled, so a text
@@ -69,6 +81,12 @@ macro_rules! live_word {
     };
     (places) => {
         "Sets"
+    };
+    (master) => {
+        "Main"
+    };
+    (timeline) => {
+        "Arrangement"
     };
     (plan_tool) => {
         "make_changes"
@@ -112,6 +130,15 @@ macro_rules! live_word {
     (safety_limiter) => {
         "a Limiter"
     };
+    (listen_method) => {
+        "Kumi listens in Live directly, after each track's devices: while Live plays, to what's playing now (seconds, 8 by default); while it's stopped, by playing the loop or from the playhead (or from_beat and beats), which the producer hears too. No recording or bouncing first."
+    };
+    (write_notes_tool) => {
+        "write_midi_clip"
+    };
+    (eq) => {
+        "EQ Eight"
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -126,6 +153,12 @@ macro_rules! daw_word {
     };
     ($profile:expr, places) => {
         $profile.words.places
+    };
+    ($profile:expr, master) => {
+        $profile.words.master
+    };
+    ($profile:expr, timeline) => {
+        $profile.words.timeline
     };
     ($profile:expr, plan_tool) => {
         $profile.vocab.plan_tool
@@ -168,6 +201,15 @@ macro_rules! daw_word {
     };
     ($profile:expr, safety_limiter) => {
         $profile.vocab.safety_limiter
+    };
+    ($profile:expr, listen_method) => {
+        $profile.vocab.listen_method
+    };
+    ($profile:expr, write_notes_tool) => {
+        $profile.vocab.write_notes_tool
+    };
+    ($profile:expr, eq) => {
+        $profile.vocab.eq
     };
 }
 
@@ -275,7 +317,7 @@ impl DawProfile {
     /// No DAW known: plain words, and nothing it can do.
     pub const UNKNOWN: DawProfile = DawProfile {
         id: None,
-        words: DawWords { app: "the DAW", place: "project", places: "projects" },
+        words: DawWords { app: "the DAW", place: "project", places: "projects", master: "the master track", timeline: "timeline" },
         caps: Capabilities::NONE,
         vocab: PromptVocab {
             plan_tool: "make_changes",
@@ -292,13 +334,23 @@ impl DawProfile {
             goal_needs: "Goals need the DAW connected, with Kumi's bridge.",
             render_leftovers: "Kumi couldn't clean up after rendering; remove what it left in the project by hand.",
             safety_limiter: "a limiter",
+            listen_method: "Kumi hears the DAW directly, after each track's devices (seconds, 8 by default, or from_beat and beats). No recording or bouncing first.",
+            write_notes_tool: "the tool that writes notes",
+            eq: "an EQ",
+            middle_c_octave: 4,
         },
     };
 
     /// Ableton Live, as Kumi drives it today: everything above.
     pub const ABLETON: DawProfile = DawProfile {
         id: Some(DawId::Ableton),
-        words: DawWords { app: crate::live_word!(app), place: crate::live_word!(place), places: crate::live_word!(places) },
+        words: DawWords {
+            app: crate::live_word!(app),
+            place: crate::live_word!(place),
+            places: crate::live_word!(places),
+            master: crate::live_word!(master),
+            timeline: crate::live_word!(timeline),
+        },
         caps: Capabilities {
             undo: true,
             instant: true,
@@ -344,12 +396,35 @@ impl DawProfile {
             goal_needs: crate::live_word!(goal_needs),
             render_leftovers: crate::live_word!(render_leftovers),
             safety_limiter: crate::live_word!(safety_limiter),
+            listen_method: crate::live_word!(listen_method),
+            write_notes_tool: crate::live_word!(write_notes_tool),
+            eq: crate::live_word!(eq),
+            middle_c_octave: 3,
         },
     };
 
     /// The same DAW with nothing it can do now: its words stay (the producer still calls it by its name).
     pub const fn without_caps(self) -> DawProfile {
         DawProfile { caps: Capabilities::NONE, ..self }
+    }
+
+    /// The profile a text that said Live before other DAWs speaks in: Live's when no DAW is known (an integration
+    /// that doesn't say), this one's otherwise.
+    pub fn or_live(&self) -> &DawProfile {
+        if *self == Self::UNKNOWN {
+            &Self::ABLETON
+        } else {
+            self
+        }
+    }
+
+    /// A MIDI note by the name the DAW gives it: "C3" for 60 in Live.
+    pub fn note_name(&self, midi: u8) -> String {
+        if self.vocab.middle_c_octave == 3 {
+            return crate::notation::pitch_name(midi);
+        }
+        const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        format!("{}{}", NAMES[midi as usize % 12], midi as i32 / 12 - 5 + self.vocab.middle_c_octave as i32)
     }
 
     /// `(app, place)`, as `Integration::words` answered before profiles.
@@ -389,6 +464,63 @@ impl Capabilities {
         browser_items: false,
         configured_plugin_params: false,
     };
+}
+
+/// A phrase one of Kumi's frozen assets (a tool's JSON) says in Live's words, how many times the asset's descriptions
+/// hold it, and how a DAW says it. The asset stays byte for byte as it is; a DAW's words go in as it's loaded.
+pub struct AssetPhrase {
+    pub live: &'static str,
+    pub count: usize,
+    pub said: fn(&DawProfile) -> String,
+}
+
+/// Every description in an asset: a string under a "description" key, at any depth. Keys, names, enum values and
+/// defaults are never descriptions, so the words never change a schema.
+fn descriptions(value: &mut serde_json::Value, each: &mut dyn FnMut(&mut String)) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                match item {
+                    serde_json::Value::String(text) if key == "description" => each(text),
+                    _ => descriptions(item, each),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|item| descriptions(item, each)),
+        _ => {}
+    }
+}
+
+/// Whether each phrase appears in the asset's descriptions exactly as many times as it says.
+pub fn check_asset_phrases(value: &serde_json::Value, phrases: &[AssetPhrase]) -> Result<(), String> {
+    let mut value = value.clone();
+    let mut found = vec![0; phrases.len()];
+    descriptions(&mut value, &mut |text| {
+        for (count, phrase) in found.iter_mut().zip(phrases) {
+            *count += text.matches(phrase.live).count();
+        }
+    });
+    match phrases.iter().zip(found).find(|(phrase, found)| phrase.count != *found) {
+        Some((phrase, found)) => Err(format!("“{}” is in the asset {found} times, not {}", phrase.live, phrase.count)),
+        None => Ok(()),
+    }
+}
+
+/// An asset in a DAW's words: its descriptions with each phrase said the DAW's way. Live's stay as they are.
+pub fn asset_in_words(mut value: serde_json::Value, profile: &DawProfile, phrases: &[AssetPhrase]) -> serde_json::Value {
+    debug_assert_eq!(check_asset_phrases(&value, phrases), Ok(()));
+    let said: Vec<(&str, String)> =
+        phrases.iter().map(|phrase| (phrase.live, (phrase.said)(profile))).filter(|(live, said)| live != said).collect();
+    if !said.is_empty() {
+        descriptions(&mut value, &mut |text| {
+            for (live, said) in &said {
+                if text.contains(live) {
+                    *text = text.replace(live, said);
+                }
+            }
+        });
+    }
+    value
 }
 
 #[cfg(test)]

@@ -33,6 +33,10 @@ impl FallbackIntegration {
     fn current(&self) -> Rc<dyn Integration> {
         self.current.borrow().clone()
     }
+    /// "Kumi isn't connected to Live, so it can't …", in the primary's words (Live's when it doesn't say).
+    fn not_connected(&self, what: &str) -> String {
+        format!("Kumi isn't connected to {}, so it can't {what}.", self.primary.profile().or_live().words.app)
+    }
 }
 #[async_trait(?Send)]
 impl Integration for FallbackIntegration {
@@ -82,7 +86,7 @@ impl Integration for FallbackIntegration {
     async fn undo(&self, id: Option<&str>, signal: Signal) -> Result<ChangeRecord, RuntimeError> {
         let current = self.current();
         if !current.has_undo() {
-            return Err(KumiError::new(FailureKind::Request, "Kumi isn't connected to Live, so it can't undo.").into());
+            return Err(KumiError::new(FailureKind::Request, self.not_connected("undo")).into());
         }
         current.undo(id, signal).await
     }
@@ -194,7 +198,7 @@ impl Integration for FallbackIntegration {
         if c.has_audition() {
             c.audition(request, signal).await
         } else {
-            Ok(Err("Kumi isn't connected to Live, so it can't render anything to hear.".into()))
+            Ok(Err(self.not_connected("render anything to hear")))
         }
     }
     fn has_goal(&self) -> bool {
@@ -205,7 +209,7 @@ impl Integration for FallbackIntegration {
         if c.has_goal() {
             c.goal(request, signal).await
         } else {
-            Ok(Err("Kumi isn't connected to Live, so it can't pursue a goal.".into()))
+            Ok(Err(self.not_connected("pursue a goal")))
         }
     }
     fn has_hear(&self) -> bool {
@@ -216,7 +220,7 @@ impl Integration for FallbackIntegration {
         if c.has_hear() {
             c.hear(request, signal).await
         } else {
-            Ok(Err("Kumi isn't connected to Live, so it can't hear the Set.".into()))
+            Ok(Err(self.not_connected(&format!("hear the {}", self.primary.profile().or_live().words.place))))
         }
     }
 }
