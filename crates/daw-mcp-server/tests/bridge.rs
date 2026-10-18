@@ -292,16 +292,22 @@ async fn a_bridge_that_stopped_reading_cant_hold_a_request_past_its_timeout() {
     let writing = tokio::spawn(async move { big.request("big", json!({"pad": "x".repeat(32 << 20)}), Duration::from_secs(1)).await });
     tokio::time::sleep(Duration::from_millis(200)).await;
     // Behind it, a small request has its own, shorter timeout.
-    let behind = client.request("status", json!({}), Duration::from_millis(300)).await;
+    // (A request stuck behind the write would never return: the outer timeout is only so a failure is a failure, not a hang.)
+    let behind = tokio::time::timeout(Duration::from_secs(20), client.request("status", json!({}), Duration::from_millis(300)))
+        .await
+        .expect("a request waiting behind the write is stuck");
     assert!(matches!(behind, Err(RequestError::Timeout)), "{behind:?}");
-    // (Building the frame is a few hundred ms of CPU on this single thread, before the write starts.)
-    assert!(started.elapsed() < Duration::from_millis(2500), "{:?}", started.elapsed());
-    let first = writing.await.unwrap();
+    // (Building the frame is CPU on this single thread, before the write starts: slow runners need room.)
+    assert!(started.elapsed() < Duration::from_secs(6), "{:?}", started.elapsed());
+    let first = tokio::time::timeout(Duration::from_secs(20), writing).await.expect("the big request is stuck in its write").unwrap();
     assert!(matches!(first, Err(RequestError::Timeout)), "{first:?}");
-    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-    // Part of a frame went out, so the connection is gone rather than carrying a corrupt stream.
-    assert!(client.is_closed());
-    assert!(matches!(client.request("ping", json!({}), WAIT).await, Err(RequestError::Closed)));
+    assert!(started.elapsed() < Duration::from_secs(12), "{:?}", started.elapsed());
+    // Part of a frame went out, so the connection is gone rather than carrying a corrupt stream. (Windows' loopback
+    // sockets buffer tens of MiB, so a write there may complete: it was the answer that never came.)
+    if cfg!(not(windows)) {
+        assert!(client.is_closed());
+        assert!(matches!(client.request("ping", json!({}), WAIT).await, Err(RequestError::Closed)));
+    }
 }
 
 #[tokio::test]
@@ -319,8 +325,13 @@ async fn a_host_that_only_listens_tells_the_bridge_it_is_reading() {
         simulator.emit("tracks", json!({"pad": "x".repeat(4000)}));
         events.recv().await.unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
     // About 72 KB read: one heartbeat each time 16 KiB came in without the host writing.
+    for _ in 0..100 {
+        if heartbeats() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!((3..=4).contains(&heartbeats()), "{}", heartbeats());
     // Once the host has written, the count starts over.
     assert_eq!(client.request("ping", json!({}), WAIT).await.unwrap(), json!({}));

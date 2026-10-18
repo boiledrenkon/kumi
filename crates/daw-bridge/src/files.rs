@@ -307,7 +307,10 @@ mod tests {
         let file = dir.path().join("bridge-reference.json");
         std::fs::write(&file, reference.to_json()).unwrap();
         assert_eq!(Reference::read(&file).unwrap(), reference);
-        std::fs::write(&file, reference.to_json().replace(&paths.secret().to_string_lossy().into_owned(), "relative")).unwrap();
+        // (The path as the JSON spells it: a Windows path's backslashes are escaped there.)
+        let secret = serde_json::to_string(&paths.secret().to_string_lossy()).unwrap();
+        let secret = &secret[1..secret.len() - 1];
+        std::fs::write(&file, reference.to_json().replace(secret, "relative")).unwrap();
         assert!(Reference::read(&file).is_err());
     }
 

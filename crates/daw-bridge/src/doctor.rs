@@ -458,7 +458,7 @@ mod tests {
         assert!(ids(&checks).contains(&("bridge", Level::Ok)), "{checks:?}");
         assert!(!ids(&checks).iter().any(|(id, level)| *id == "reference" && *level == Level::Fail), "{checks:?}");
         let installed = checks.iter().find(|c| c.id == "installed").unwrap();
-        assert!(installed.message.contains("sys/Applications") || installed.message.contains("home/Applications"), "{installed:?}");
+        assert!(installed.message.replace('\\', "/").contains("home/Applications/REAPER.app"), "{installed:?}");
         let others = checks.iter().find(|c| c.id == "installs").unwrap();
         assert!(others.message.contains("Application Support"), "the default folder is the other one: {others:?}");
     }

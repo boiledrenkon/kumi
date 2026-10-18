@@ -563,11 +563,13 @@ mod tests {
     fn two_installs_at_once_wait_for_each_other_instead_of_undoing_each_other() {
         let root = tempfile::tempdir().unwrap();
         let folders: Vec<PathBuf> = (0..2).map(|i| bridge_folder(root.path(), &format!("{i}.0"))).collect();
+        // (Each install on Windows runs PowerShell to lock its folders down: seconds each.)
+        let rounds = if cfg!(windows) { 3 } else { 25 };
         let workers: Vec<_> = (0..2)
             .map(|i| {
                 let life = renoise(root.path());
                 let folder = folders[i].clone();
-                std::thread::spawn(move || (0..25).map(|_| life.install(&folder, &format!("{i}.0")).map(|_| ())).collect::<Vec<_>>())
+                std::thread::spawn(move || (0..rounds).map(|_| life.install(&folder, &format!("{i}.0")).map(|_| ())).collect::<Vec<_>>())
             })
             .collect();
         for worker in workers {

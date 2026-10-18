@@ -174,13 +174,16 @@ mod tests {
         let (tx, rx) = channel();
         let (job, waiter) = job("slow", json!({}));
         tx.send(job).unwrap();
+        let (started, running) = mpsc::channel();
         let main = thread::spawn(move || {
             drain(&rx, NO_LINGER, |job| {
-                thread::sleep(Duration::from_millis(100));
+                started.send(()).unwrap();
+                thread::sleep(Duration::from_millis(300));
                 job.answer(Ok(Value::Null));
             })
         });
-        thread::sleep(Duration::from_millis(20));
+        // Claimed and running (not just about to be): the wait's end finds a job that has started.
+        running.recv().unwrap();
         assert_eq!(waiter.wait(Duration::from_millis(10), &OPEN), Outcome::Uncertain);
         main.join().unwrap();
     }
