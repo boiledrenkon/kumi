@@ -20,6 +20,13 @@ pub const CLIENT_HANDSHAKE_TIMEOUT_MS: u64 = 5000;
 pub const MAX_JSON_DEPTH: usize = 64;
 /// The same limit for a value that sits in a frame's field (params, a result, an event's data).
 pub const MAX_PAYLOAD_DEPTH: usize = MAX_JSON_DEPTH - 1;
+/// The credit a bridge that uses flow control starts with (its welcome's `creditBytes`): a floor the host's first grant
+/// tops up to what its receive buffer holds, then grants back what it reads. A bridge cannot know that buffer, and a
+/// fixed guess larger than a paused host's would fill the socket and block a bridge that must not block.
+pub const CREDIT_FLOOR_BYTES: u64 = 64 * 1024;
+/// No answer from a bridge that pages (the Renoise tool's reads) is longer than this. It may be longer than the credit
+/// at that moment: the bridge sends it as the host grants.
+pub const MAX_PAGE_BYTES: usize = 256 * 1024;
 /// Connections a bridge holds at once, before and after they authenticate.
 pub const MAX_UNAUTHENTICATED: usize = 4;
 pub const MAX_AUTHENTICATED: usize = 4;
@@ -52,6 +59,11 @@ pub enum Frame {
     Event(Event),
     Heartbeat {
         ms: u64,
+    },
+    /// Host to bridge: the host has read this many more bytes, so the bridge may send that many more (flow control; see
+    /// [`CREDIT_FLOOR_BYTES`]). Only a bridge that names `creditBytes` in its welcome sends within credit.
+    Credit {
+        bytes: u64,
     },
     Bye {
         reason: String,
@@ -90,6 +102,10 @@ pub struct Welcome {
     pub methods: Vec<String>,
     #[serde(default)]
     pub events: Vec<String>,
+    /// A bridge that sends only within the credit the host grants (the Renoise tool) says how many bytes it may send
+    /// before the host's first grant; a host that sees this grants more as it reads. Without it the bridge sends freely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_bytes: Option<u64>,
 }
 
 /// Which bridge, in which running DAW, on which project: the welcome's, `status`'s and the discovery file's shared
@@ -278,6 +294,7 @@ impl Frame {
             }
             Frame::Event(event) => safe("seq", event.seq, false)?,
             Frame::Heartbeat { ms } => safe("ms", *ms, true)?,
+            Frame::Credit { bytes } => safe("bytes", *bytes, false)?,
             _ => {}
         }
         Ok(())
@@ -378,6 +395,7 @@ mod tests {
             heartbeat_ms: 1000,
             methods: vec!["status".into()],
             events: vec![],
+            credit_bytes: None,
         }));
         let value: Value = serde_json::from_slice(&welcome.encode()).unwrap();
         assert_eq!(value["daw"], "renoise");

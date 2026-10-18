@@ -314,41 +314,13 @@ function M.advance(ms)
     local ok, err = pcall(next_timer.fn)
     if not ok then record_error("timer", err) end
   end
-  M.time = target
+  M.time = math.max(M.time, target)
 end
 
 -- Songs
 
-function M.make_song(options)
-  options = options or {}
-  local transport = object("renoise.Transport", {
-    playing = options.playing or false,
-    playing_observable = M.observable(),
-    bpm = options.bpm or 120,
-    bpm_observable = M.observable(),
-    lpb = options.lpb or 4,
-    lpb_observable = M.observable(),
-  })
-  return object("renoise.Song", {
-    name = options.name or "",
-    name_observable = M.observable(),
-    file_name = options.file_name or "",
-    tool_data = options.tool_data or M.NIL,
-    transport = transport,
-    rendering = false,
-    tracks_observable = M.observable(),
-    sequencer_track_count = options.sequencer_tracks or 1,
-    send_track_count = options.send_tracks or 0,
-    selected_track_index = 1,
-    selected_track_index_observable = M.observable(),
-    selected_instrument_index = 1,
-    selected_instrument_index_observable = M.observable(),
-    selected_pattern_index = 1,
-    selected_pattern_index_observable = M.observable(),
-    selected_sequence_index = 1,
-    selected_sequence_index_observable = M.observable(),
-  })
-end
+-- (M.make_song and M.ops, the song and what the producer does to it, are in mock_song.lua.)
+assert(loadfile(tests_dir .. "mock_song.lua"))()(M, object)
 
 -- Replaces the song as Renoise does: release the old document, then announce the new one.
 function M.load_song(options)
@@ -379,8 +351,12 @@ local function install_os_shims()
     if t then return real_time(t) end
     return 1800000000 + math.floor(M.time / 1000)
   end
-  -- Renoise's os.clock is a high-precision timer in seconds.
-  os.clock = function() return M.time / 1000 end
+  -- Renoise's os.clock is a high-precision timer in seconds. Each read can cost time (M.clock_step_ms), as work does:
+  -- it is how a test makes a job use up its slices.
+  os.clock = function()
+    M.time = M.time + (M.clock_step_ms or 0)
+    return M.time / 1000
+  end
   os.platform = function() return M.platform end
   os.mkdir = function(path)
     local ok = os.execute("mkdir " .. shell_quote(path) .. " 2>/dev/null")
@@ -432,6 +408,7 @@ function M.reset(options)
   M.servers, M.busy_ports, M.timers, M.menu_entries = {}, {}, {}, {}
   M.stat_modes, M.stat_mtimes = {}, {}
   M.stall_timers = false
+  M.clock_step_ms = 0
   -- Bytes a socket takes from a peer that doesn't read, and the sends that would have blocked because of it.
   M.socket_buffer_bytes, M.blocked_sends = options.socket_buffer_bytes or 256 * 1024, 0
   M.time = 0
@@ -439,6 +416,19 @@ function M.reset(options)
   M.platform = options.platform or "MACINTOSH"
   M.fresh_wrappers = options.fresh_wrappers ~= false
   install_os_shims()
+
+  -- The window: which frames the producer has open.
+  M.window = object("renoise.ApplicationWindow", {
+    MIDDLE_FRAME_PATTERN_EDITOR = 1, MIDDLE_FRAME_MIXER = 2, MIDDLE_FRAME_INSTRUMENT_PHRASE_EDITOR = 3,
+    MIDDLE_FRAME_INSTRUMENT_SAMPLE_KEYZONES = 4, MIDDLE_FRAME_INSTRUMENT_SAMPLE_EDITOR = 5,
+    MIDDLE_FRAME_INSTRUMENT_SAMPLE_MODULATION = 6, MIDDLE_FRAME_INSTRUMENT_SAMPLE_EFFECTS = 7,
+    MIDDLE_FRAME_INSTRUMENT_PLUGIN_EDITOR = 8, MIDDLE_FRAME_INSTRUMENT_MIDI_EDITOR = 9,
+    LOWER_FRAME_TRACK_DSPS = 1, LOWER_FRAME_TRACK_AUTOMATION = 2,
+    active_middle_frame = 1, active_middle_frame_observable = M.observable(),
+    pattern_matrix_is_visible = false, pattern_matrix_is_visible_observable = M.observable(),
+    lower_frame_is_visible = false, lower_frame_is_visible_observable = M.observable(),
+    active_lower_frame = 1, active_lower_frame_observable = M.observable(),
+  })
 
   local function modal(name)
     return function(_, ...)
@@ -455,6 +445,7 @@ function M.reset(options)
     show_custom_prompt = modal("show_custom_prompt"),
     prompt_for_path = modal("prompt_for_path"),
     log_filename = "Log.txt",
+    window = M.window,
   })
 
   local function find_timer(fn)
@@ -501,6 +492,11 @@ function M.reset(options)
     song = function() return M.song end,
     tool = function() return M.tool end,
     Socket = new_socket_api(),
+    Track = object("renoise.Track", { TRACK_TYPE_SEQUENCER = 1, TRACK_TYPE_MASTER = 2, TRACK_TYPE_SEND = 3,
+      TRACK_TYPE_GROUP = 4, MUTE_STATE_ACTIVE = 1, MUTE_STATE_OFF = 2, MUTE_STATE_MUTED = 3 }),
+    Sample = object("renoise.Sample", { LOOP_MODE_OFF = 1, LOOP_MODE_FORWARD = 2, LOOP_MODE_REVERSE = 3, LOOP_MODE_PING_PONG = 4 }),
+    InstrumentPhrase = object("renoise.InstrumentPhrase", { KEY_TRACKING_NONE = 1, KEY_TRACKING_TRANSPOSE = 2, KEY_TRACKING_OFFSET = 3 }),
+    ApplicationWindow = M.window,
   })
   return M
 end

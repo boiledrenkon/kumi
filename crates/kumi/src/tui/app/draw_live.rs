@@ -70,7 +70,8 @@ impl TuiApp {
         screen.put(x, area.y + 1, &truncate("FOCUS", width), &st::LABEL);
         let rows = self.tree_shown();
         let clip = if rows.is_none() { self.clip_shown() } else { None };
-        let strip = if rows.is_none() && clip.is_none() { self.strip_kind() } else { None };
+        let own = if rows.is_none() && clip.is_none() { self.own_shown() } else { None };
+        let strip = if rows.is_none() && clip.is_none() && own.is_none() { self.strip_kind() } else { None };
         let (grid, timeline) = {
             let state = self.0.state.borrow();
             (
@@ -86,6 +87,13 @@ impl TuiApp {
             Some(BodyKind::Tree)
         } else if clip.is_some() {
             Some(BodyKind::Notes)
+        } else if let Some(own) = &own {
+            Some(match own {
+                FocusBody::Tracker(_) => BodyKind::Tracker,
+                FocusBody::Matrix(_) => BodyKind::Matrix,
+                FocusBody::Keyzones(_) => BodyKind::Keyzones,
+                _ => BodyKind::Routing,
+            })
         } else if grid.is_some() {
             Some(BodyKind::Grid)
         } else if timeline.is_some() {
@@ -106,6 +114,17 @@ impl TuiApp {
         } else if let Some(grid) = grid {
             screen.put(x + 5, area.y + 1, &heading(BodyKind::Grid), &st::FAINT);
             now_at = 4 + self.draw_grid(screen, x, area.y + 2, width, &grid);
+        } else if let Some(own) = own {
+            let most = (area.height - Self::bottom_height(area.height) - 8).clamp(3, 16);
+            let (kind, drawn) = match &own {
+                FocusBody::Tracker(grid) => (BodyKind::Tracker, self.draw_tracker(screen, x, area.y + 2, width, grid, most)),
+                FocusBody::Matrix(matrix) => (BodyKind::Matrix, self.draw_matrix(screen, x, area.y + 2, width, matrix, most)),
+                FocusBody::Keyzones(map) => (BodyKind::Keyzones, self.draw_keyzones(screen, x, area.y + 2, width, map, most)),
+                FocusBody::Routing(routing) => (BodyKind::Routing, self.draw_routing(screen, x, area.y + 2, width, routing, most)),
+                _ => (BodyKind::Routing, 0),
+            };
+            screen.put(x + 5, area.y + 1, &heading(kind), &st::FAINT);
+            now_at = 4 + drawn;
         } else if let Some(timeline) = timeline {
             screen.put(x + 5, area.y + 1, &heading(BodyKind::Timeline), &st::FAINT);
             now_at = 4 + self.draw_timeline(screen, x, area.y + 2, width, &timeline);
@@ -286,7 +305,202 @@ impl TuiApp {
         whole.push(format!("{} bars", number::to_string(bar(strip.length) - 1.)));
         screen.put(x, y + 2, &truncate(&where_.join(" · "), width), &st::DIM);
         screen.put(x, y + 3, &truncate(&whole.join(" · "), width), &st::FAINT);
-        4
+        4 + self.draw_lanes(screen, x, y + 4, width, strip, span)
+    }
+    /// A timeline's tracks (REAPER's arrange view), each with its items as bars on the strip's scale: the selected
+    /// track's lanes first in view, as many as fit.
+    fn draw_lanes(&self, screen: &mut Screen, x: i32, y: i32, width: i32, strip: &TimelineStrip, span: f64) -> i32 {
+        let Some(lanes) = strip.lanes.as_ref().filter(|lanes| !lanes.is_empty()) else { return 0 };
+        let name_width = (width / 3).clamp(6, 16);
+        let cells = (width - name_width - 1).max(4);
+        let at = |beats: f64| (beats / span * cells as f64).floor().clamp(0., (cells - 1) as f64) as usize;
+        let selected = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.as_ref().map(|t| t.name.clone()));
+        let shown = lanes.len().min(8);
+        let first = selected
+            .and_then(|name| lanes.iter().position(|lane| lane.name == name))
+            .map(|at| at.saturating_sub(shown / 2).min(lanes.len() - shown))
+            .unwrap_or(0);
+        for (row, lane) in lanes.iter().skip(first).take(shown).enumerate() {
+            let row = y + row as i32;
+            let indent = "  ".repeat(lane.depth.min(4) as usize);
+            screen.put(x, row, &truncate(&format!("{indent}{}", lane.name), name_width), &st::DIM);
+            let mut line = vec![sp(" ", st::FAINT); cells as usize];
+            for item in &lane.items {
+                let style = if item.selected {
+                    st::ACCENT
+                } else if item.muted {
+                    st::FAINT
+                } else {
+                    st::TEXT
+                };
+                for cell in &mut line[at(item.start)..=at(item.start + item.length.max(0.))] {
+                    *cell = sp("▬", style);
+                }
+            }
+            spans(screen, x + name_width + 1, row, &line, None);
+        }
+        // The DAW sends the first tracks' lanes and says how many it has in all.
+        let more = strip.track_count.unwrap_or(lanes.len()).max(lanes.len()) - shown;
+        if more > 0 {
+            screen.put(x, y + shown as i32, &truncate(&format!("{more} more tracks"), width), &st::FAINT);
+            return shown as i32 + 1;
+        }
+        shown as i32
+    }
+    /// A tracker's pattern or phrase around its cursor: line numbers (beats brighter), then each track's cells, the
+    /// focused track first, as many tracks as fit.
+    fn draw_tracker(&self, screen: &mut Screen, x: i32, y: i32, width: i32, grid: &TrackerGrid, most: i32) -> i32 {
+        screen.put(
+            x,
+            y,
+            &truncate(&format!("{} · {} lines", if grid.name.is_empty() { "Pattern" } else { &grid.name }, grid.lines), width),
+            &st::TEXT,
+        );
+        let focused = self.0.state.borrow().focus.as_ref().and_then(|f| f.track.as_ref().map(|t| t.name.clone()));
+        let mut order: Vec<&TrackerTrack> = grid.tracks.iter().collect();
+        if let Some(at) = focused.and_then(|name| order.iter().position(|track| track.name == name)) {
+            let track = order.remove(at);
+            order.insert(0, track);
+        }
+        let number_width = 4;
+        let mut column = x + number_width;
+        let mut shown: Vec<(&TrackerTrack, i32, i32)> = vec![];
+        for track in order {
+            let cell = track.cells.iter().map(|cell| text_width(cell)).max().unwrap_or(3).max(3).min(width - number_width);
+            if column + cell > x + width {
+                break;
+            }
+            shown.push((track, column, cell));
+            column += cell + 1;
+        }
+        for (track, at, cell) in &shown {
+            screen.put(*at, y + 1, &truncate(&track.name, *cell), &st::DIM);
+        }
+        let rows = shown.iter().map(|(track, _, _)| track.cells.len()).max().unwrap_or(0).min(most.max(1) as usize);
+        let lpb = grid.lpb.filter(|lpb| *lpb >= 1.).unwrap_or(4.) as usize;
+        for row in 0..rows {
+            let line = grid.from + row;
+            let y = y + 2 + row as i32;
+            if grid.cursor == Some(line) {
+                screen.fill(Rect::new(x - 1, y, width + 2, 1), &st::RAISED);
+            }
+            let style = if grid.playing == Some(line) {
+                st::ACCENT
+            } else if line % lpb == 0 {
+                st::DIM
+            } else {
+                st::FAINT
+            };
+            screen.put(x, y, &format!("{:>3}", line + 1), &style);
+            for (track, at, cell) in &shown {
+                let text = track.cells.get(row).map(String::as_str).unwrap_or("");
+                screen.put(
+                    *at,
+                    y,
+                    &truncate(text, *cell),
+                    &if text.chars().all(|c| matches!(c, '.' | '-' | ' ')) { st::FAINT } else { st::TEXT },
+                );
+            }
+        }
+        2 + rows as i32
+    }
+    /// A tracker's sequence: each slot's pattern under each track (muted ones dimmed), sections between, the current
+    /// slot raised.
+    fn draw_matrix(&self, screen: &mut Screen, x: i32, y: i32, width: i32, matrix: &SequenceMatrix, most: i32) -> i32 {
+        let column = 4;
+        let fit = ((width - 5) / column).max(1) as usize;
+        let mut head = String::from("     ");
+        for track in matrix.tracks.iter().take(fit) {
+            head.push_str(&format!("{:<4}", track.chars().take(3).collect::<String>()));
+        }
+        screen.put(x, y, &truncate(&head, width), &st::DIM);
+        let rows = (most.max(2) - 1) as usize;
+        let current = matrix.current.unwrap_or(0);
+        let first = current.saturating_sub(rows / 2).min(matrix.slots.len().saturating_sub(rows));
+        let mut row = 1;
+        for (index, slot) in matrix.slots.iter().enumerate().skip(first) {
+            if row as usize > rows {
+                break;
+            }
+            if let Some(section) = &slot.section {
+                if row as usize >= rows {
+                    break;
+                }
+                screen.put(x, y + row, &truncate(&format!("— {section}"), width), &st::FAINT);
+                row += 1;
+            }
+            if Some(index) == matrix.current {
+                screen.fill(Rect::new(x - 1, y + row, width + 2, 1), &st::RAISED);
+            }
+            screen.put(x, y + row, &format!("{:>3} ", index + 1), &st::FAINT);
+            for track in 0..matrix.tracks.len().min(fit) {
+                let muted = slot.muted.contains(&track);
+                screen.put(
+                    x + 5 + track as i32 * column,
+                    y + row,
+                    &format!("{:>2}", slot.pattern),
+                    &if muted { st::FAINT } else { st::TEXT },
+                );
+            }
+            row += 1;
+        }
+        row
+    }
+    /// An instrument's samples on the keyboard: each zone's notes and velocities, then its macros and phrases.
+    fn draw_keyzones(&self, screen: &mut Screen, x: i32, y: i32, width: i32, map: &KeyzoneMap, most: i32) -> i32 {
+        let profile = crate::daw::profile();
+        screen.put(x, y, &truncate(if map.name.is_empty() { "Instrument" } else { &map.name }, width), &st::TEXT);
+        let rows = map.zones.len().min((most.max(2) - 2) as usize);
+        for (row, zone) in map.zones.iter().take(rows).enumerate() {
+            let notes = if zone.notes.0 == zone.notes.1 {
+                profile.note_name(zone.notes.0)
+            } else {
+                format!("{}–{}", profile.note_name(zone.notes.0), profile.note_name(zone.notes.1))
+            };
+            let velocities =
+                if zone.velocities == (0, 127) { String::new() } else { format!(" · vel {}–{}", zone.velocities.0, zone.velocities.1) };
+            let line = format!("{notes:<9} {}{velocities}", zone.sample);
+            screen.put(x, y + 1 + row as i32, &truncate(&line, width), &st::DIM);
+        }
+        let mut facts = vec![format!("{} {}", map.zones.len(), if map.zones.len() == 1 { "zone" } else { "zones" })];
+        if !map.macros.is_empty() {
+            facts.push(format!("{} macros", map.macros.len()));
+        }
+        if !map.phrases.is_empty() {
+            facts.push(format!("{} {}", map.phrases.len(), if map.phrases.len() == 1 { "phrase" } else { "phrases" }));
+        }
+        screen.put(x, y + 1 + rows as i32, &truncate(&facts.join(" · "), width), &st::FAINT);
+        2 + rows as i32
+    }
+    /// A track's sends and receives, with their levels and where they tap the track.
+    fn draw_routing(&self, screen: &mut Screen, x: i32, y: i32, width: i32, routing: &RoutingView, most: i32) -> i32 {
+        self.track_header(screen, x, y, width);
+        let rows = routing.routes.len().min((most.max(2) - 2) as usize);
+        for (row, route) in routing.routes.iter().take(rows).enumerate() {
+            let arrow = match route.kind {
+                RouteKind::Send => "→",
+                RouteKind::Receive => "←",
+                RouteKind::Hardware => "⇥",
+            };
+            let mut line = format!("{arrow} {}", route.other);
+            if let Some(db) = route.volume_db {
+                line.push_str(&format!(" · {} dB", number::to_string(number::round(db * 10.) / 10.)));
+            }
+            if let Some(tap) = &route.tap {
+                line.push_str(&format!(" · {tap}"));
+            }
+            screen.put(x, y + 1 + row as i32, &truncate(&line, width), &if route.muted { st::FAINT } else { st::DIM });
+        }
+        let parent = match routing.parent_send {
+            Some(true) => "feeds its parent",
+            Some(false) => "doesn't feed its parent",
+            None => "",
+        };
+        if !parent.is_empty() {
+            screen.put(x, y + 1 + rows as i32, &truncate(parent, width), &st::FAINT);
+            return 2 + rows as i32;
+        }
+        1 + rows as i32
     }
     pub(super) fn draw_held(&self, screen: &mut Screen, x: i32, mut y: i32, width: i32, rows: i32) {
         let state = self.0.state.borrow();
@@ -535,13 +749,12 @@ impl TuiApp {
                 change.score.map(|n| format!("{}%", number::to_string(n))).unwrap_or_else(|| "heard".into())
             } else {
                 match change.state {
-                    ChangeState::Applied => "undo",
-                    ChangeState::Undone => "undone",
-                    ChangeState::Kept => "kept",
-                    ChangeState::Expired => "no undo",
-                    _ => "check Live",
+                    ChangeState::Applied => "undo".into(),
+                    ChangeState::Undone => "undone".into(),
+                    ChangeState::Kept => "kept".into(),
+                    ChangeState::Expired => "no undo".into(),
+                    _ => format!("check {}", crate::daw::words().app),
                 }
-                .into()
             };
             let action_style = if heard {
                 st::DIM

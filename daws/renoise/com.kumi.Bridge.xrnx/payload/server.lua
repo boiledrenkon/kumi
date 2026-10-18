@@ -114,17 +114,36 @@ local function raw_send(self, record, text)
   return true
 end
 
+-- Sends what is queued, a chunk at a time, within the budget of this call and within the credit the host has granted
+-- (nil credit: no limit, before the host is authenticated). Out of credit the rest waits, a line half out and all: the
+-- host reads it when it grants more, and a host that has paused is never sent into a full socket.
 function M:flush(record, budget)
   local sent = 0
   while record.outbox[1] and sent < budget do
     local item = record.outbox[1]
-    local piece = sub(item.text, item.offset, item.offset + M.SEND_CHUNK - 1)
+    -- (The welcome is not counted: the host counts what it reads after it.)
+    local credit = item ~= record.welcome_item and record.credit or nil
+    if credit and credit <= 0 then break end
+    local size = M.SEND_CHUNK
+    if credit and credit < size then size = credit end
+    local piece = sub(item.text, item.offset, item.offset + size - 1)
     if not raw_send(self, record, piece) then return sent end
     sent = sent + #piece
+    if credit then record.credit = credit - #piece end
     item.offset = item.offset + #piece
-    if item.offset > #item.text then table.remove(record.outbox, 1) end
+    if item.offset > #item.text then
+      table.remove(record.outbox, 1)
+      if item == record.welcome_item then record.welcome_item = nil end
+    end
   end
   return sent
+end
+
+-- The host has read `bytes` more: more may be sent, and what was held goes out.
+function M:grant(record, bytes)
+  if not record.credit then return end
+  record.credit = math.min(record.credit + bytes, wire.CREDIT_MAX)
+  if record.outbox[1] and not record.closing then self:flush(record, M.SEND_TICK_BYTES) end
 end
 
 function M:send(record, text)
@@ -196,7 +215,11 @@ function M:apply(record, actions)
       self:send(record, action.send)
     elseif action.close then
       self:close(record, action.close)
+    elseif action.credit then
+      self:grant(record, action.credit)
     elseif action.authenticated then
+      record.credit = wire.CREDIT_FLOOR
+      record.welcome_item = record.outbox[#record.outbox] -- the welcome just queued, if it is not all out yet
       record.heartbeat_ms = self.ctx.now_ms() + wire.HEARTBEAT_MS
       if self.ctx.on_authenticated then self.ctx.on_authenticated(record) end
     elseif action.request then
@@ -215,14 +238,14 @@ end
 -- the next tick.
 function M:run_requests(record)
   local waiting = record.requests
-  if not waiting[1] then return end
+  if not waiting[1] or record.job then return end
   if record.closing then
     record.requests = {}
     return
   end
   local started = self.ctx.now_ms()
   local done = 0
-  while waiting[done + 1] and not record.closing and not record.gone do
+  while waiting[done + 1] and not record.closing and not record.gone and not record.job do
     done = done + 1
     self:answer(record, waiting[done])
     if self.ctx.now_ms() - started >= M.REQUEST_BUDGET_MS then break end
@@ -241,6 +264,25 @@ function M:answer(record, request)
     return self:send(record, wire.error(request.id, "deadline", "the deadline passed before the work started"))
   end
   local ok, result = xpcall(self.ctx.on_request, debug.traceback, record, request)
+  -- A long read comes back as a job to be run a slice at a time; the connection's later requests wait behind it, so
+  -- answers keep their order.
+  if ok and type(result) == "table" and result.kumi_job then
+    record.job = self.ctx.start_job(record, request, result.kumi_job)
+    return
+  end
+  self:respond(record, request, ok, result)
+end
+
+-- A job has ended: its answer goes out, then the requests that waited behind it are answered.
+function M:finish_job(record, request, ok, value)
+  record.job = nil
+  if self.ctx.connections[record.key] ~= record or record.closing then return end
+  self:respond(record, request, ok, value)
+  self:run_requests(record)
+end
+
+-- What a request came to (the handler's result, or what it raised), as the response.
+function M:respond(record, request, ok, result)
   if ok then
     local text, err = wire.ok(request.id, result)
     if not text then
@@ -305,7 +347,10 @@ function M:tick()
     if conn and not record.closing then
       self:apply(record, conn:on_tick(now))
       if conn:authenticated() and not record.closing and now >= (record.heartbeat_ms or now) then
-        self:push(record, wire.encode_frame("heartbeat", { ms = math.floor(now - record.accepted_ms) }))
+        -- (Not while output waits: the connection isn't idle, and heartbeats would pile up behind a paused host.)
+        if not record.outbox[1] then
+          self:push(record, wire.encode_frame("heartbeat", { ms = math.floor(now - record.accepted_ms) }))
+        end
         record.heartbeat_ms = math.max((record.heartbeat_ms or now) + wire.HEARTBEAT_MS, now + wire.HEARTBEAT_MS / 2)
       end
     end
@@ -313,6 +358,7 @@ function M:tick()
     if record.outbox[1] then self:flush(record, M.SEND_TICK_BYTES) end
     if is_gone(record) then
       self.ctx.connections[key] = nil
+      if self.ctx.cancel_jobs then self.ctx.cancel_jobs(record) end
       if not record.closing then self.ctx.log("info", "connection " .. key .. " went away") end
     end
   end
@@ -349,6 +395,7 @@ function M:close_all(reason)
       local head = record.outbox[1]
       record.outbox = (head and head.offset > 1) and { head } or {}
       self:send(record, wire.encode_frame("bye", { reason = reason }))
+      record.credit = nil -- the host is being let go of: nothing is held back for want of credit
       -- All of it, a line part sent included however big, then the bye. Measured on macOS, Renoise 3.5.4: a send to a
       -- full socket writes what fits, then returns false (no block, no queue). Unmeasured on Windows.
       self:flush(record, M.MAX_FRAME_BYTES)

@@ -70,6 +70,17 @@ fn read_params(arguments: &Value) -> Result<Value, String> {
             params.insert(name.into(), text.into());
         }
     }
+    // The track whose lines of a pattern are read (Renoise's `line`): a number or a ref.
+    match arguments.get("track") {
+        None | Some(Value::Null) => {}
+        Some(Value::Number(n)) if n.as_u64().is_some_and(|n| n >= 1) => {
+            params.insert("track".into(), n.clone().into());
+        }
+        Some(Value::String(text)) if !text.is_empty() => {
+            params.insert("track".into(), text.clone().into());
+        }
+        Some(_) => return Err("track must be a track number from 1, or a track ref".into()),
+    }
     if !params.contains_key("kind") && !params.contains_key("ref") {
         return Err("kind: what to read (or ref: one object)".into());
     }
@@ -202,9 +213,22 @@ mod tests {
             json!({"kind": "track", "limit": 0}),
             json!({"kind": "track", "limit": "9"}),
             json!({"kind": "track", "cursor": []}),
+            json!({"kind": "line", "track": 0}),
+            json!({"kind": "line", "track": 1.5}),
+            json!({"kind": "line", "track": ""}),
+            json!({"kind": "line", "track": ["1"]}),
         ] {
             assert!(read_params(&bad).is_err(), "{bad}");
         }
+        // Renoise's lines are read for a track, given by number or by ref.
+        assert_eq!(
+            read_params(&json!({"kind": "line", "parent": "1:pattern:2", "track": 3})).unwrap(),
+            json!({"kind": "line", "parent": "1:pattern:2", "track": 3})
+        );
+        assert_eq!(
+            read_params(&json!({"kind": "line", "parent": "1:pattern:2", "track": "1:track:3"})).unwrap(),
+            json!({"kind": "line", "parent": "1:pattern:2", "track": "1:track:3"})
+        );
     }
 
     #[test]

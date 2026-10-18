@@ -100,3 +100,15 @@ test("wire: a connection's events are numbered from 1, and only after auth", fun
   eq(second.name, "selection")
   eq(second.data.track, 2)
 end)
+
+test("wire: a credit frame after auth becomes a credit action; a bad one closes the connection", function()
+  local conn = wire.connection(string.rep("k", 40), 0)
+  conn.state = "ready"
+  conn.framer.max = wire.MAX_FRAME
+  local actions = conn:on_bytes('{"type":"credit","bytes":65536}\n{"type":"request","id":1,"method":"ping"}\n', 0, function() error("no") end)
+  eq(#actions, 2)
+  eq(actions[1].credit, 65536)
+  eq(actions[2].request.id, 1, "in order with what follows")
+  actions = conn:on_bytes('{"type":"credit","bytes":0}\n', 0, function() error("no") end)
+  ok(actions[#actions].close, "a credit of nothing is not a frame")
+end)

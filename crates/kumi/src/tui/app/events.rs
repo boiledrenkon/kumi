@@ -120,6 +120,7 @@ impl TuiApp {
                     self.read_tree(true);
                     self.read_clip(true);
                     self.read_strip(true);
+                    self.read_own(true);
                 } else {
                     let mut state = self.0.state.borrow_mut();
                     state.tree = None;
@@ -161,6 +162,7 @@ impl TuiApp {
                 self.read_tree(false);
                 self.read_clip(false);
                 self.read_strip(false);
+                self.read_own(false);
             }
             "pointed" => {
                 let pin: PinnedNode = serde_json::from_value(value["pin"].clone()).unwrap();
@@ -354,7 +356,7 @@ impl TuiApp {
                 }
             }
             "remembered" => {
-                let set = self.0.state.borrow().set_name.clone().unwrap_or_else(|| "this Set".into());
+                let set = self.0.state.borrow().set_name.clone().unwrap_or_else(|| format!("this {}", crate::daw::words().place));
                 let about = if get("scope") == "producer" {
                     "about you".into()
                 } else if value["pending"] == true {

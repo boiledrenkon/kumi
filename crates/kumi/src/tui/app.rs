@@ -260,6 +260,15 @@ struct Strip {
     key: Option<String>,
     reading: bool,
 }
+/// A body of a DAW's own view (a tracker's pattern or matrix, an instrument's keyzones, a track's routing), the one
+/// FOCUS shows when the producer is there, with what it was read for.
+#[derive(Default)]
+struct OwnBody {
+    body: Option<FocusBody>,
+    key: Option<String>,
+    reading: bool,
+    again: bool,
+}
 struct State {
     /// The web page saved last for this conversation (by /share or /export), with its key: /share shows it again while
     /// nothing in the conversation changed.
@@ -357,6 +366,7 @@ struct State {
     clip_again: bool,
     touched: Option<Touched>,
     strip: Strip,
+    own: OwnBody,
     tree_cursor: Option<usize>,
     pinned: Option<Pin>,
     /// Files the producer added, which go with the next message, and whether the clipboard is being read.
@@ -452,7 +462,7 @@ impl State {
             last_stop: None,
             asides: vec![],
             transport: None,
-            activity: "connecting to Live".into(),
+            activity: format!("connecting to {}", crate::daw::words().app),
             panel: None,
             offer: None,
             set_ask: None,
@@ -480,6 +490,7 @@ impl State {
             clip_again: false,
             touched: None,
             strip: Strip::default(),
+            own: OwnBody::default(),
             tree_cursor: None,
             pinned: None,
             attachments: vec![],
@@ -813,7 +824,8 @@ impl TuiApp {
             app.0.tty.write(&images);
             app.0.tty.restore(false);
             if !app.0.output_failed.get() {
-                app.0.options.output.write(&format!("{}\n", app.clean(message.as_deref().unwrap_or(FAREWELL), usize::MAX)));
+                let farewell = message.unwrap_or_else(farewell);
+                app.0.options.output.write(&format!("{}\n", app.clean(&farewell, usize::MAX)));
                 // The conversation this run had or took up, by the id that brings it back.
                 if let Some(now) = continue_hint(app.0.options.controller.conversation_now().await) {
                     app.0.options.output.write(&format!("\x1b[2m{now}\x1b[22m\n"));
@@ -964,7 +976,10 @@ impl Drop for Inner {
         }
     }
 }
-const FAREWELL: &str = "Kumi closed. Each Set's conversation continues next time.";
+/// The goodbye: each Set's (project's, song's) conversation continues next time.
+pub(crate) fn farewell() -> String {
+    format!("Kumi closed. Each {}'s conversation continues next time.", crate::daw::words().place)
+}
 /// The conversation going on, for /status: what it's called and the id that brings it back once it's kept.
 pub(crate) fn conversation_line(now: &ConversationNow, clean: impl Fn(&str) -> String) -> String {
     let title = clean(&now.title);
@@ -975,9 +990,9 @@ pub(crate) fn conversation_line(now: &ConversationNow, clean: impl Fn(&str) -> S
         format!("Conversation: {title} (kept once you ask something)")
     }
 }
-/// What the conversation commands say in a chat that keeps none: without Live, started without -c or -r.
+/// What the conversation commands say in a chat that keeps none: without the DAW, started without -c or -r.
 pub(crate) fn not_kept() -> String {
-    format!("A chat without Live keeps no conversations; {k} -c or {k} -r carries on a kept one.", k = *KUMI_START)
+    format!("A chat without {} keeps no conversations; {k} -c or {k} -r carries on a kept one.", crate::daw::words().app, k = *KUMI_START)
 }
 /// The line that brings this run's conversation back: when it's kept, and this run made a request in it or took it up.
 pub(crate) fn continue_hint(now: Option<ConversationNow>) -> Option<String> {

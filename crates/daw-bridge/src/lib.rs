@@ -65,6 +65,15 @@
 //!   after 3 missed the host calls the bridge busy;
 //! - bye `{"type":"bye","reason":…}` before the bridge closes.
 //!
+//! - credit `{"type":"credit","bytes":n}` (host to bridge): a bridge whose welcome names `creditBytes` (the Renoise tool)
+//!   sends only within credit, starting with that many bytes (a floor, [`wire::CREDIT_FLOOR_BYTES`]) counted from the
+//!   first frame after the welcome. The host sets its receive buffer before it connects, reads back what it got, and
+//!   grants at once what tops the bridge up to that, then what it has read since (bytes, partial lines too), a quarter
+//!   of the buffer at a time, so the bytes the bridge has sent and the host has not read never exceed the buffer and a
+//!   host that pauses is held back from rather than sent into a full socket. Each answer of such a bridge is under
+//!   [`wire::MAX_PAGE_BYTES`], and may be longer than the credit at that moment: it goes out as the host grants. A
+//!   bridge that names none sends freely and ignores credit.
+//!
 //! A host that has read 16 KiB without writing sends a heartbeat frame of its own (the bridge ignores its content):
 //! the Renoise tool closes a connection to which 64 KiB of events and heartbeats went since the host last sent
 //! anything, because a send to a full socket may block Renoise's GUI. A closed host reconnects when it next needs

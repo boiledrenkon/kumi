@@ -167,6 +167,10 @@ pub trait DawProvider {
     fn bridge_answers(&self, bridge_config: &str) -> LocalBoxFuture<'static, bool>;
     /// Whether the DAW is open.
     fn app_open(&self, env: &Env) -> LocalBoxFuture<'static, bool>;
+    /// Whether the DAW runs now, from one process listing: for choosing among several DAWs whose bridges are installed.
+    fn running_now(&self) -> bool {
+        false
+    }
     fn watch_words(&self) -> WatchWords;
     /// The step setup shows for the producer to tell the DAW to use Kumi's bridge; None when it needs none.
     fn enable_step(&self) -> Option<EnableStep>;

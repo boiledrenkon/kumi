@@ -325,6 +325,8 @@ pub async fn arrangement_strip(host: &dyn ViewHost, signal: Signal) -> Result<Op
             }),
             locators: marks,
             beats_per_bar: None,
+            lanes: None,
+            track_count: None,
         }))
     }
     .await;

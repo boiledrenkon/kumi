@@ -109,12 +109,22 @@ local function connect(env, options)
   return peer, welcome
 end
 
+-- What a host does as it reads: takes what the socket holds and gives credit back for those bytes, until that releases
+-- no more.
+local function give_back(peer)
+  repeat
+    local taken = peer:take()
+    if #taken > 0 then send(peer, { type = "credit", bytes = #taken }) end
+  until #taken == 0
+end
+
 local next_id = 0
 local function request(peer, method, params, extra)
   next_id = next_id + 1
   local frame = { type = "request", id = next_id, method = method, params = params }
   for k, v in pairs(extra or {}) do frame[k] = v end
   send(peer, frame)
+  give_back(peer)
   local got = frames(peer)
   local reply = got[#got]
   eq(reply.type, "response")
@@ -155,6 +165,12 @@ local function refused(peer, reason)
   return got[1]
 end
 
+-- (For test_reads.lua, which plays the host against a song.)
+T.harness = {
+  setup = setup, connect = connect, send = send, frames = frames, tick = tick, request = request, events = events,
+  no_dialogs = no_dialogs, retired = retired, read = read, PORT = PORT,
+}
+
 test("bridge: listens on 127.0.0.1:9780 and writes the discovery file", function()
   local env = setup()
   local server = mock.server()
@@ -192,7 +208,7 @@ test("bridge: the handshake proves both sides and the welcome says who it is", f
   eq(welcome.project.title, "Tune Title")
   eq(welcome.project.path, "/songs/tune.xrns")
   ok(welcome.project.id:match("^%x+$") and #welcome.project.id == 32)
-  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload")
+  eq(table.concat(welcome.methods, ","), "ping,status,renoise.reload,read,snapshot,focus,focus_body")
   eq(table.concat(welcome.events, ","), "project,tracks,selection,transport")
   eq(mock.statuses[#mock.statuses], "Kumi connected")
   no_dialogs()
@@ -519,6 +535,7 @@ test("bridge: a host that sends now and then is never cut off, however many even
   local peer = connect(env)
   local count = 0
   churn(mock.song, 1, 3000, 100, function()
+    give_back(peer)
     for _, f in ipairs(frames(peer)) do
       if f.type == "event" then count = count + 1 end
     end
@@ -773,15 +790,106 @@ test("bridge: works with no song yet, then attaches when one arrives", function(
   no_dialogs()
 end)
 
-test("bridge: a big frame goes out in slices over ticks", function()
-  local env = setup({ song = { name = string.rep("n", 600 * 1024) } })
+-- What a host does as it reads: gives the bridge back the credit for the bytes it has taken in.
+local function grant(peer, bytes)
+  send(peer, { type = "credit", bytes = bytes })
+end
+
+test("bridge: a big frame goes out in slices over ticks, as the host grants credit", function()
+  local env = setup()
+  env.payload().handlers["test.big"] = function() return { blob = string.rep("n", 600 * 1024) } end
   local peer = connect(env)
-  send(peer, { type = "request", id = 99, method = "status" })
-  tick(2)
-  local got = frames(peer)
-  eq(got[#got].id, 99)
-  eq(#got[#got].result.project.name, 600 * 1024)
+  send(peer, { type = "request", id = 99, method = "test.big" })
+  for _ = 1, 20 do
+    tick(2)
+    local taken = peer:take() -- (it keeps what it took, for frames() to split)
+    if #taken > 0 then grant(peer, #taken) end
+  end
+  local response
+  for _, frame in ipairs(frames(peer)) do
+    if frame.type == "response" and frame.id == 99 then response = frame end
+  end
+  ok(response, "the answer came whole")
+  eq(#response.result.blob, 600 * 1024)
   ok(peer.sent_calls > 5, "sent in pieces")
+  no_dialogs()
+end)
+
+test("bridge: the welcome gives a floor of credit, to be topped up by the host's first grant", function()
+  local env = setup()
+  local _, welcome = connect(env)
+  eq(welcome.creditBytes, 64 * 1024)
+  no_dialogs()
+end)
+
+-- A host's window is what its receive buffer holds: the credit it lets a bridge have unread. Its first grant tops the
+-- welcome's floor (64 KiB) up to that, and it grants back what it reads.
+for _, window in ipairs({ 64 * 1024, 256 * 1024 }) do
+  test("bridge: a host with a " .. math.floor(window / 1024) .. " KiB receive buffer that pauses mid-answer is held back from, never torn, never retired, and finishes when it reads", function()
+    local env = setup()
+    local peer = connect(env)
+    frames(peer)
+    local size = 1500 * 1024
+    env.payload().handlers["test.big"] = function() return { blob = string.rep("z", size) } end
+    -- A socket whose buffers hold no more than the host's window: a send past it would block Renoise.
+    mock.socket_buffer_bytes = window
+    if window > 64 * 1024 then grant(peer, window - 64 * 1024) end
+    peer:stop_reading()
+    send(peer, { type = "request", id = 7, method = "test.big", params = {} })
+    tick(4)
+    ok(peer.unread <= window, "no more than the window was sent: " .. peer.unread)
+    ok(peer.unread >= window - 4096, "but the window was used: " .. peer.unread)
+    eq(mock.blocked_sends, 0, "nothing sent into a full socket")
+    -- A long pause: heartbeats and ticks go by; the host is not retired, and nothing more is sent.
+    mock.advance(20 * 1000)
+    eq(peer.unread <= window, true)
+    ok(not retired(peer), "not retired")
+    eq(mock.blocked_sends, 0)
+    -- It reads again: what it read is granted back, and the answer comes to an end, whole. It grants as the bytes come
+    -- off the socket (the answer is longer than the window, so a line is never whole before the credit is given).
+    peer:resume_reading()
+    local text = ""
+    for _ = 1, 400 do
+      repeat
+        local taken = peer:take()
+        text = text .. taken
+        if #taken > 0 then grant(peer, #taken) end
+      until #taken == 0
+      mock.advance(20)
+      -- (what the host reads is never more than the window past what it granted)
+      ok(peer.unread <= window, "unread " .. peer.unread)
+    end
+    text = text .. peer:take()
+    local lines = {}
+    for line in text:gmatch("[^\n]+") do lines[#lines + 1] = line end
+    local response
+    for _, line in ipairs(lines) do
+      local frame = json.decode(line)
+      ok(frame, "every line is whole JSON")
+      if frame.type == "response" and frame.id == 7 then response = frame end
+    end
+    ok(response, "the answer arrived")
+    eq(#response.result.blob, size)
+    ok(not retired(peer), "never retired")
+    eq(mock.blocked_sends, 0)
+    no_dialogs()
+  end)
+end
+
+test("bridge: no heartbeats pile up behind output that waits for credit", function()
+  local env = setup()
+  local peer = connect(env)
+  frames(peer)
+  env.payload().handlers["test.big"] = function() return { blob = string.rep("z", 900 * 1024) } end
+  mock.socket_buffer_bytes = 600 * 1024
+  peer:stop_reading()
+  send(peer, { type = "request", id = 7, method = "test.big", params = {} })
+  tick(4)
+  mock.advance(120 * 1000) -- two minutes
+  local waiting = 0
+  for _, record in pairs(KUMI_BRIDGE.connections) do waiting = math.max(waiting, #record.outbox) end
+  ok(waiting <= 2, "items waiting: " .. waiting)
+  ok(not retired(peer))
   no_dialogs()
 end)
 
@@ -1242,4 +1350,31 @@ test("bridge: the bye goes out even behind a response of nearly two megabytes al
   s:close_all("quit")
   local all = table.concat(sent)
   eq(all, big:sub(1000) .. wire.encode_frame("bye", { reason = "quit" }), "the rest of the line, then the bye, nothing between")
+end)
+
+test("bridge: a huge song title is cut to 256 characters in the discovery file, the welcome and status", function()
+  local env = setup({ song = { name = string.rep("n", 1024 * 1024) } })
+  local peer, welcome = connect(env)
+  local function check(project, where)
+    eq(project.title, string.rep("n", 256) .. "\226\128\166", where .. " title")
+    eq(project.name, project.title, where .. " name")
+  end
+  check(welcome.project, "welcome")
+  check(request(peer, "status").result.project, "status")
+  local discovery_text = read(env.discovery_file())
+  ok(#discovery_text < 2048, "discovery file: " .. #discovery_text .. " bytes")
+  check(json.decode(discovery_text).project, "discovery")
+  no_dialogs()
+end)
+
+test("bridge: a cut title never splits a character", function()
+  local status = T.load_payload_module("status")
+  local json_ = T.load_payload_module("json")
+  local title = string.rep("\240\159\142\181", 300) -- 300 musical notes, 4 bytes each
+  local cut = status.cap(title)
+  ok(json_.valid_utf8(cut), "still UTF-8")
+  eq(cut, string.rep("\240\159\142\181", 256) .. "\226\128\166")
+  eq(status.cap("short"), "short")
+  eq(status.cap(string.rep("a", 256)), string.rep("a", 256), "exactly the limit stays")
+  eq(status.cap(string.rep("\195\169", 256)), string.rep("\195\169", 256), "256 two-byte characters stay")
 end)

@@ -70,6 +70,14 @@ pub fn help(installed: bool) -> String {
         "Sign in and connect Live: it puts the bridge in Live and can restart Live for you.\nThen talk about the open Live Set; /login and /model change the sign-in and model.",
     ));
     first.push((format!("{cmd} bridge"), "Or, with Live closed: put the bridge into Live, or bring it up to date"));
+    first.push((
+        format!("{cmd} --daw reaper|renoise"),
+        "Work in REAPER or Renoise instead: Kumi's extension or tool goes in as Live's bridge does",
+    ));
+    first.push((
+        format!("{cmd} --daw reaper|renoise bridge"),
+        "Put Kumi's extension into REAPER, or its tool into Renoise, or bring it up to date",
+    ));
     let mut more=vec![("-c, --continue","Continue the conversation you had last, in any Set"),("-r, --resume [id or name]","Continue a kept conversation by its id, the start of one, or its name;\nalone, choose one (both work with --inference-only too)"),("export [id or name]","Save a kept conversation as Markdown (--md, the default; --html a web page;\n--json a file another Kumi imports); your latest without an id or with --last.\n--full adds each step's input and result, -o <path> chooses where, --raw leaves\nkeys and paths in"),("import <file>","Keep a conversation saved with export --json, to carry on with -r"),("--inference-only","Chat without Live"),("--bridge-config <path>","Use this bridge configuration (an absolute path)"),("login","Sign in: asks whether with ChatGPT or an API key"),("login <provider>","Sign in to one provider: openai-codex with a ChatGPT plan (--device\nwithout a browser); anthropic, openai, opencode with an API key (asked for)"),("logout <provider>","Remove Kumi's sign-in for that provider"),("model [<provider>/<model>]","Show or choose the model; ollama/<model> or lmstudio/<model> for one on this computer"),("auth","Show which providers are usable (no secrets)"),("doctor","Check the installation, sign-in, the bridge, Live and the terminal"),("library","What Kumi knows of your sounds, presets and Sets (it learns them in the\nbackground); --rebuild learns them all again"),("update","Bring Kumi up to date, and the bridge in Live when it's older"),("update --check","Say whether there's a newer Kumi, without installing it")];
     let doctor = more.iter().position(|(s, _)| *s == "doctor").map_or(more.len(), |at| at + 1);
     more.insert(doctor, ("doctor --json", "The doctor's checks as JSON, without keys, to share"));
@@ -83,7 +91,7 @@ pub fn help(installed: bool) -> String {
     more.extend([("report", "Write a file to send when something goes wrong (no keys in it)"), ("--version", "Show Kumi's version")]);
     let more: Vec<_> = more.into_iter().map(|(s, text)| (format!("{cmd} {s}"), text)).collect();
     format!(
-        "Kumi {KUMI_VERSION} — producer assistant for Ableton Live\n\nFirst run:\n{}\n\nMore:\n{}\n\n{}",
+        "Kumi {KUMI_VERSION} — producer assistant for Ableton Live, REAPER and Renoise\n\nFirst run:\n{}\n\nMore:\n{}\n\n{}",
         help_rows(&first.iter().map(|(s, t)| (s.as_str(), *t)).collect::<Vec<_>>()),
         help_rows(&more.iter().map(|(s, t)| (s.as_str(), *t)).collect::<Vec<_>>()),
         include_str!("help-tail.txt")
@@ -205,11 +213,16 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
             Ok(0)
         }
         AppConfig::Doctor { json } => {
+            // The doctor speaks in the words of the DAW this producer works with (Live's, for Live).
+            crate::daw::work_with(crate::daw::chosen(None, &io.env).0.id());
             let mut doctor = doctor_io(io, factory);
             doctor.json = *json;
             doctor::run_doctor(doctor).await
         }
-        AppConfig::Report => write_report(ReportIo::new(doctor_io(io, factory))).await,
+        AppConfig::Report => {
+            crate::daw::work_with(crate::daw::chosen(None, &io.env).0.id());
+            write_report(ReportIo::new(doctor_io(io, factory))).await
+        }
         AppConfig::Export { conversation, format, out, full, raw } => {
             let format = match format.as_str() {
                 "html" => Format::Html,
@@ -289,7 +302,7 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
             options.signal = Some(signal);
             run_library(options).await
         }
-        AppConfig::Bridge { yes, allow_dirty } => {
+        AppConfig::Bridge { yes, allow_dirty, daw } => {
             let wait_ms = io
                 .env
                 .get("KUMI_BRIDGE_WAIT_SECONDS")
@@ -297,7 +310,8 @@ async fn dispatch(io: &CliIo, factory: DawFactory, secrets: &mut Vec<String>) ->
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(|n| n.saturating_mul(1000));
             let command = BridgeCommand { input: Some(io.input.clone()), yes: *yes, allow_dirty: *allow_dirty, wait_ms };
-            crate::daw::current().setup_bridge(io.out.clone(), &io.env, command).await
+            let provider = daw.and_then(crate::daw::provider).unwrap_or_else(crate::daw::current);
+            provider.setup_bridge(io.out.clone(), &io.env, command).await
         }
         AppConfig::Auth { .. } => {
             login::auth_status(&config, AuthIo { out: io.out.clone(), env: io.env.clone(), fetch: None }).await?;

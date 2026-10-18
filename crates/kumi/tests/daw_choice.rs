@@ -1,5 +1,5 @@
-//! `--daw <id>` and KUMI_DAW choose the DAW a session works with, among the DAWs this Kumi integrates (Live alone so
-//! far). Choosing Live is what Kumi does anyway: the configuration reads, and is written, exactly as without it.
+//! `--daw <id>` and KUMI_DAW choose the DAW a session works with, among the DAWs this Kumi integrates (Live, REAPER and
+//! Renoise). Choosing Live is what Kumi does anyway: the configuration reads, and is written, exactly as without it.
 use kumi::config::*;
 use kumi_runtime::system::Env;
 
@@ -39,24 +39,37 @@ fn choosing_live_reads_as_choosing_nothing() {
 #[test]
 fn only_a_daw_this_kumi_integrates_can_be_chosen() {
     let env = env();
-    for asked in [vec!["--daw", "reaper"], vec!["--daw=renoise"], vec!["--daw"], vec!["--daw", "Live"], vec!["--daw", "ABLETON"]] {
-        assert_eq!(config(&asked, &env), Err("Use: --daw <daw>, with daw one of ableton.".into()), "{asked:?}");
+    for asked in [vec!["--daw"], vec!["--daw", "Live"], vec!["--daw", "ABLETON"], vec!["--daw", "bitwig"]] {
+        assert_eq!(config(&asked, &env), Err("Use: --daw <daw>, with daw one of ableton, reaper, renoise.".into()), "{asked:?}");
     }
     let mut chosen = env.clone();
-    chosen.insert("KUMI_DAW".into(), "reaper".into());
-    assert_eq!(config(&[], &chosen), Err("KUMI_DAW must be one of: ableton.".into()));
+    chosen.insert("KUMI_DAW".into(), "bitwig".into());
+    assert_eq!(config(&[], &chosen), Err("KUMI_DAW must be one of: ableton, reaper, renoise.".into()));
     // --daw beats KUMI_DAW.
     assert_eq!(config(&["--daw", "ableton"], &chosen), config(&[], &env));
 }
 
-/// With no DAW's bridge installed and none asked for, Kumi chats without a DAW in Live's words: Live is the only DAW
-/// registered. A second DAW has to decide this on purpose (the DAW used last, or asking), so this pins it.
 #[test]
-fn without_any_bridge_kumi_chats_in_lives_words_while_live_is_the_only_daw() {
+fn reaper_or_renoise_chosen_is_written_and_read_back() {
+    let env = env();
+    for (asked, id) in [(vec!["--daw", "reaper"], "reaper"), (vec!["--daw=renoise"], "renoise")] {
+        let config: serde_json::Value = serde_json::from_str(&config(&asked, &env).unwrap()).unwrap();
+        assert_eq!(config["daw"], id, "{asked:?}");
+    }
+    let mut chosen = env.clone();
+    chosen.insert("KUMI_DAW".into(), "renoise".into());
+    let config: serde_json::Value = serde_json::from_str(&config(&[], &chosen).unwrap()).unwrap();
+    assert_eq!(config["daw"], "renoise");
+}
+
+/// With no DAW's bridge installed and none asked for, Kumi chats without a DAW in Live's words: Live stays the DAW Kumi
+/// starts with. REAPER and Renoise are chosen with --daw or KUMI_DAW, or by their bridge being installed.
+#[test]
+fn without_any_bridge_kumi_chats_in_lives_words() {
     use kumi::daw::{chosen, providers};
     use kumi_runtime::core::daw::{DawId, DawProfile};
     let env = env();
-    assert_eq!(providers().map(|provider| provider.id()), [DawId::Ableton], "a second DAW decides the fallback on purpose");
+    assert_eq!(providers().map(|provider| provider.id()), [DawId::Ableton, DawId::Reaper, DawId::Renoise], "Live first");
     let (provider, found) = chosen(None, &env);
     assert_eq!((provider.id(), found), (DawId::Ableton, None));
     let without = provider.without_daw(std::rc::Rc::new(|_| {}));
@@ -65,4 +78,21 @@ fn without_any_bridge_kumi_chats_in_lives_words_while_live_is_the_only_daw() {
     assert!(*without.profile() == DawProfile::ABLETON.without_caps());
     let config = serde_json::to_value(load_config(&[], &env).unwrap()).unwrap();
     assert_eq!((config["mode"].as_str(), config["bridgeMissing"].as_bool(), config.get("daw")), (Some("inference-only"), Some(true), None));
+}
+
+#[test]
+fn bridge_sets_up_the_bridge_of_the_daw_asked_for_and_lives_otherwise() {
+    let env = env();
+    assert_eq!(config(&["bridge"], &env).unwrap(), r#"{"mode":"bridge","yes":false,"allowDirty":false}"#, "Live's, as always");
+    assert_eq!(config(&["--daw", "ableton", "bridge"], &env), config(&["bridge"], &env));
+    assert_eq!(
+        config(&["--daw", "reaper", "bridge", "--yes"], &env).unwrap(),
+        r#"{"mode":"bridge","yes":true,"allowDirty":false,"daw":"reaper"}"#
+    );
+    assert_eq!(config(&["bridge", "--daw=renoise"], &env), config(&["--daw", "renoise", "bridge"], &env));
+    let mut chosen = env.clone();
+    chosen.insert("KUMI_DAW".into(), "renoise".into());
+    assert!(config(&["bridge"], &chosen).unwrap().contains(r#""daw":"renoise""#));
+    assert!(config(&["--daw", "logic", "bridge"], &env).unwrap_err().starts_with("Use: --daw <daw>"));
+    assert_eq!(config(&["--daw", "reaper", "bridge", "--force"], &env).unwrap_err(), "Use: bridge [--yes] [--allow-dirty].");
 }

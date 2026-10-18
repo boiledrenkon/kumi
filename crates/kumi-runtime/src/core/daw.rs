@@ -637,6 +637,105 @@ impl DawProfile {
         },
     };
 
+    /// REAPER, through Kumi's extension: its words and vocabulary. What it can do grows with each milestone.
+    pub const REAPER: DawProfile = DawProfile {
+        id: Some(DawId::Reaper),
+        words: DawWords { app: "REAPER", place: "project", places: "projects", master: "the master track", timeline: "arrange view" },
+        // FOCUS follows REAPER (M2): its FX chains, a take's notes, the arrange view, the focus and transport as read.
+        caps: Capabilities {
+            device_tree: true,
+            note_view: true,
+            timeline_strip: true,
+            focus_stream: true,
+            transport_stream: true,
+            ..Capabilities::NONE
+        },
+        vocab: PromptVocab {
+            plan_tool: "make_changes",
+            ref_example: "track:3",
+            recipe_step_example: "a parameter set by its name on an FX an earlier step added",
+            missing_example: "setting a plug-in's oversampling",
+            goal_instruments: "ReaSynth, a ReaSamplOmatic5000 sample or a plug-in synth",
+            serial_parallel: "serial FX chains against parallel containers",
+            build_chains: "add an FX container with parallel chains, load FX into them",
+            keep_candidates: "don't undo them: the producer may want to A/B them",
+            layers: "an FX container of parallel layers",
+            cant_reach: "Kumi can't reach REAPER. Is it open, with Kumi's extension installed (kumi bridge)?",
+            crash_note: "If it crashed, your unsaved changes may be lost.",
+            goal_needs: "Goals need REAPER connected, with Kumi's extension.",
+            render_leftovers: "Kumi couldn't clean up after rendering; remove what it left in the project by hand.",
+            safety_limiter: "a limiter",
+            listen_method: "Kumi renders the part offline to hear it (seconds, 8 by default, or from_beat and beats), then plays what it chose out loud.",
+            write_notes_tool: "the tool that writes MIDI notes",
+            eq: "ReaEQ",
+            middle_c_octave: 4,
+            structure_moves: UNKNOWN_STRUCTURE_MOVES,
+            library_places: "REAPER's resource folder (FX chains, track and project templates)",
+            preset_sources: "REAPER's FX presets and chains, and plug-ins' own presets",
+            preset_examples: "(\"ReaEQ\", \"Serum\", \"Pro-Q 3\")",
+            preset_device_hint: "The FX it's for: \"ReaComp\", \"Serum\"",
+            voice_project: "REAPER project",
+            voice_devices: "ReaEQ, ReaComp, ReaXcomp, ReaDelay, ReaVerbate, ReaSynth and ReaSamplOmatic5000",
+            tutorial_words: "REAPER tutorial: ReaEQ, ReaComp, ReaXcomp, ReaDelay, ReaVerbate, ReaSynth, ReaSamplOmatic5000, JSFX, FX chain, FX container, routing, sidechain, automation item, take, lane, region, marker, Serum, Vital.",
+            own_undo: "REAPER's own undo (Cmd-Z in REAPER)",
+            refs_retired: "REAPER may have changed the tracks, so Kumi's references are retired: discover again before using any.",
+            structure: "tracks",
+            gain_stage: "the track's last limiter, else a gain FX it adds",
+            eq_name: "ReaEQ",
+            multiband: "ReaXcomp",
+            bass_mono: "",
+            drum_kit: "a sampler kit (one ReaSamplOmatic5000 per pad)",
+            drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
+            launcher_clip: "an item",
+        },
+    };
+
+    /// Renoise, through Kumi's tool: its words and vocabulary. What it can do grows with each milestone.
+    pub const RENOISE: DawProfile = DawProfile {
+        id: Some(DawId::Renoise),
+        words: DawWords { app: "Renoise", place: "song", places: "songs", master: "the Master track", timeline: "pattern sequence" },
+        // FOCUS follows Renoise (M2): its DSP chains, the focus and transport as read.
+        caps: Capabilities { device_tree: true, focus_stream: true, transport_stream: true, ..Capabilities::NONE },
+        vocab: PromptVocab {
+            plan_tool: "make_changes",
+            ref_example: "track:3",
+            recipe_step_example: "a parameter set by its name on a device an earlier step loaded",
+            missing_example: "setting a plug-in's oversampling",
+            goal_instruments: "a sample instrument with keyzones, a plug-in synth or a Doofer of layers",
+            serial_parallel: "serial device chains against a Splitter's parallel branches",
+            build_chains: "add a Splitter, load devices into its branches",
+            keep_candidates: "don't undo them: the producer may want to A/B them",
+            layers: "a Doofer of layers",
+            cant_reach: "Kumi can't reach Renoise. Is it open, with Kumi's tool installed (kumi bridge)?",
+            crash_note: "If it crashed, your unsaved changes may be lost.",
+            goal_needs: "Goals need Renoise connected, with Kumi's tool.",
+            render_leftovers: "Kumi couldn't clean up after rendering; remove what it left in the song by hand.",
+            safety_limiter: "a Maximizer",
+            listen_method: "Kumi renders the part offline to hear it (seconds, 8 by default, or from_beat and beats), then plays what it chose out loud.",
+            write_notes_tool: "the tool that writes pattern lines",
+            eq: "EQ 10",
+            middle_c_octave: 5,
+            structure_moves: UNKNOWN_STRUCTURE_MOVES,
+            library_places: "Renoise's Library folders (instruments, multi-samples, chains, presets, phrases)",
+            preset_sources: "Renoise's device presets, chains and instruments, and plug-ins' own presets",
+            preset_examples: "(\"Compressor\", \"Serum\", \"Pro-Q 3\")",
+            preset_device_hint: "The device it's for: \"Compressor\", \"Serum\"",
+            voice_project: "Renoise song",
+            voice_devices: "Compressor, EQ 10, Maximizer, Delay, Reverb, Distortion, Doofer, Splitter and sample instruments",
+            tutorial_words: "Renoise tutorial: pattern editor, pattern matrix, phrase editor, keyzones, effect commands, Doofer, Splitter, instrument macros, modulation, Compressor, EQ 10, Maximizer, Reverb, Delay, sidechain, LFO, envelope, Serum, Vital.",
+            own_undo: "Renoise's own undo (Cmd-Z in Renoise)",
+            refs_retired: "Renoise may have moved the tracks, so Kumi's references are retired: discover again before using any.",
+            structure: "tracks",
+            gain_stage: "the track's last Maximizer, else a Gainer it adds",
+            eq_name: "EQ 10",
+            multiband: "",
+            bass_mono: "",
+            drum_kit: "a drum-kit instrument (a sample per keyzone)",
+            drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
+            launcher_clip: "a pattern",
+        },
+    };
+
     /// The same DAW with nothing it can do now: its words stay (the producer still calls it by its name).
     pub const fn without_caps(self) -> DawProfile {
         DawProfile { caps: Capabilities::NONE, ..self }
@@ -800,8 +899,23 @@ mod tests {
     }
 
     #[test]
+    fn reaper_and_renoise_speak_their_own_words_never_lives() {
+        let live = regex::Regex::new(
+            r"\b(Live|Set|Sets|Ableton|Session|Arrangement|Remote Script|Control Surface|Main|Drum Rack|Operator|Simpler|EQ Eight|Utility|[Rr]acks?|[Cc]lip slots?|[Ss]cenes?)\b",
+        )
+        .unwrap();
+        for profile in [DawProfile::REAPER, DawProfile::RENOISE] {
+            let said = format!("{:?}", profile);
+            let found: Vec<&str> = live.find_iter(&said).map(|m| m.as_str()).collect();
+            assert!(found.is_empty(), "{:?}: {found:?}", profile.id);
+        }
+        assert_eq!(DawProfile::REAPER.word_pair(), ("REAPER", "project"));
+        assert_eq!(DawProfile::RENOISE.word_pair(), ("Renoise", "song"));
+    }
+
+    #[test]
     fn every_profile_has_a_structural_change_for_every_gap() {
-        for profile in [DawProfile::ABLETON, DawProfile::UNKNOWN] {
+        for profile in [DawProfile::ABLETON, DawProfile::UNKNOWN, DawProfile::REAPER, DawProfile::RENOISE] {
             for (kind, _) in crate::audio::matching::STRUCTURE_MOVES {
                 assert!(profile.vocab.structure_moves.iter().any(|(k, _)| k == kind), "{kind:?}");
             }

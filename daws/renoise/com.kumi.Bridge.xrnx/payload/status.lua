@@ -6,9 +6,11 @@ local sha256 = import("sha256")
 local wire = import("wire")
 local VERSION = import("version")
 
+local byte, sub = string.byte, string.sub
+
 local M = {}
 
-M.METHODS = { "ping", "status", "renoise.reload" }
+M.METHODS = { "ping", "status", "renoise.reload", "read", "snapshot", "focus", "focus_body" }
 M.EVENTS = { "project", "tracks", "selection", "transport" }
 
 -- Kept across payload reloads (the bridge sets it to its own state).
@@ -94,16 +96,33 @@ local function file_name(path)
   return path:match("([^/\\]+)$") or path
 end
 
+-- A song's title is whatever the user typed, and hosts skip a discovery file over 64 KiB: the title in every project row
+-- (the discovery file, the welcome, status, events) is cut to this many characters, and ends in "…" when it was.
+M.MAX_TITLE_CHARS = 256
+
+function M.cap(text, max)
+  max = max or M.MAX_TITLE_CHARS
+  if #text <= max then return text end -- (no more bytes than characters allowed)
+  local count, position = 0, 1
+  while position <= #text do
+    local lead = byte(text, position)
+    local width = lead >= 0xF0 and 4 or lead >= 0xE0 and 3 or lead >= 0xC0 and 2 or 1
+    if count == max then return sub(text, 1, position - 1) .. "\226\128\166" end
+    count, position = count + 1, position + width
+  end
+  return text
+end
+
 -- The open song as the wire's project, or json.null.
 function M.project(memory)
   local song = renoise.song()
   if not song then return json.null end
   local path = song.file_name or ""
-  local title = song.name or ""
+  local title = M.cap(song.name or "")
   local project = { id = M.song_id(memory, song) }
   if path ~= "" then
     project.path = path
-    project.name = file_name(path)
+    project.name = M.cap(file_name(path))
   elseif title ~= "" then
     project.name = title
   end

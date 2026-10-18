@@ -834,6 +834,7 @@ pub trait Integration {
             BodyKind::Notes => self.has_clip_view(),
             BodyKind::Grid => self.has_session_strip(),
             BodyKind::Timeline => self.has_arrangement_strip(),
+            _ => false,
         }
     }
     /// A body for FOCUS, read by the DAW; None when it can't say. Live's integration reads its views.
@@ -843,6 +844,7 @@ pub trait Integration {
             BodyRequest::Notes { item_ref } => self.clip_view(item_ref, signal).await?.map(FocusBody::Notes),
             BodyRequest::Grid { track_ref, index } => self.session_strip(track_ref, *index, signal).await?.map(FocusBody::Grid),
             BodyRequest::Timeline => self.arrangement_strip(signal).await?.map(FocusBody::Timeline),
+            _ => None,
         })
     }
     fn has_audition(&self) -> bool {
@@ -2290,6 +2292,7 @@ pub trait SessionController {
             BodyKind::Notes => self.has_clip_view(),
             BodyKind::Grid => self.has_session_strip(),
             BodyKind::Timeline => self.has_arrangement_strip(),
+            _ => false,
         }
     }
     /// A body for FOCUS (while connected).
@@ -2299,6 +2302,7 @@ pub trait SessionController {
             BodyRequest::Notes { item_ref } => self.clip_view(item_ref).await?.map(FocusBody::Notes),
             BodyRequest::Grid { track_ref, index } => self.session_strip(track_ref, *index).await?.map(FocusBody::Grid),
             BodyRequest::Timeline => self.arrangement_strip().await?.map(FocusBody::Timeline),
+            _ => None,
         })
     }
     fn has_reconfigure(&self) -> bool {
