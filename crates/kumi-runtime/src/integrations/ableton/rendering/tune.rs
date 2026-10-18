@@ -3,10 +3,10 @@
 //! generations, each generation heard in one pass on scratch copies of the track. Each round logs its listens.
 
 use super::super::connection::NO_CURRENT_LIVE;
-use super::judge::{masking_items, JudgeHeard};
 use super::pass::RECORD_LEAD;
 use super::rig::Window;
 use super::*;
+use crate::listening::engine::{masking_items, JudgeHeard};
 use crate::listening::{
     checklist::{masking_unfair, plan_cut, Quantity, Target, REGIONS},
     cmaes::Cmaes,
@@ -59,7 +59,7 @@ impl Rendering {
     pub async fn tune(self: &Rc<Self>, request: &TuneRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
         let tuned = self.tune_now(request, original).await;
         // The takes the run no longer stores go, however the call ended.
-        self.prune_kept().await;
+        self.listening.prune_kept().await;
         tuned
     }
 
@@ -67,12 +67,12 @@ impl Rendering {
         if !self.available() {
             return Ok(Err(NO_CURRENT_LIVE.into()));
         }
-        if self.rendering.get() {
+        if self.rendering.is_on() {
             return Ok(Err("Kumi is already listening to something; wait for it.".into()));
         }
-        self.follow_renames();
+        self.listening.follow_renames();
         let index = {
-            let run = self.judge.borrow();
+            let run = self.listening.judge.borrow();
             let Some(run) = run.as_ref().filter(|run| run.rounds.last().is_some_and(|round| round.kind != RoundKind::Done)) else {
                 return Ok(Err("Start a judged run first (judge with a goal): tune picks numbers against its checklist.".into()));
             };
@@ -100,14 +100,14 @@ impl Rendering {
         };
         let signal = abort::any([original, self.connection().lifetime.clone()]);
         // Live changed under the run: its bars are heard again before any number is picked against them.
-        if self.judge.borrow().as_ref().is_some_and(|run| run.out_of_date()) {
-            match self.rebaseline(signal.clone()).await {
+        if self.listening.judge.borrow().as_ref().is_some_and(|run| run.out_of_date()) {
+            match self.listening.rebaseline(signal.clone()).await {
                 // The device to tune may have gone with this answer's changes: the round asks for them again first.
                 Ok(Ok((round, true))) => {
-                    self.tell_judged(&round);
+                    self.listening.tell_judged(&round);
                     return Ok(Ok(round));
                 }
-                Ok(Ok((round, false))) => self.tell_judged(&round),
+                Ok(Ok((round, false))) => self.listening.tell_judged(&round),
                 Ok(Err(why)) => return Ok(Err(why)),
                 Err(error) => {
                     signal.check()?;
@@ -119,16 +119,16 @@ impl Rendering {
             // The target's excerpt, and how it sounds as things stand. With a change already made (a device just put in
             // place), its "before" can't be heard any more: then the bars whose before is known.
             let changed = {
-                let run = self.judge.borrow();
+                let run = self.listening.judge.borrow();
                 !self.applied_since(&run.as_ref().unwrap().checkpoint).is_empty()
             };
             // The run's window moves only once its "before" is heard: a listen that fails or is stopped leaves the run
             // where it was.
             let (window, known) = {
-                let mut guard = self.judge.borrow_mut();
+                let mut guard = self.listening.judge.borrow_mut();
                 let run = guard.as_mut().unwrap();
                 run.target = Some(index);
-                let wanted = self.excerpt_for(run);
+                let wanted = self.listening.excerpt_for(run);
                 let known = |window: Window| run.excerpts.iter().any(|excerpt| excerpt.window == window && excerpt.state == run.state);
                 let window = if known(wanted) || !changed { wanted } else { run.window };
                 (window, known(window))
@@ -140,17 +140,17 @@ impl Rendering {
                         .into(),
                 ));
             }
-            if let Err(why) = self.ensure_before(window, signal.clone()).await? {
+            if let Err(why) = self.listening.ensure_before(window, signal.clone()).await? {
                 return Ok(Err(why));
             }
-            self.judge.borrow_mut().as_mut().unwrap().window = window;
+            self.listening.judge.borrow_mut().as_mut().unwrap().window = window;
             let knobs = match self.device_knobs(&request.device, signal.clone()).await? {
                 Ok(knobs) => knobs,
                 Err(why) => return Ok(Err(why)),
             };
             // Knobs named by role: found on the device, or on another of its track in the agreed order. An EQ band goes
             // nearest where the target sits in frequency.
-            let near = self.judge.borrow().as_ref().and_then(|run| target_hz(&run.checklist.items.get(index)?.quantity));
+            let near = self.listening.judge.borrow().as_ref().and_then(|run| target_hz(&run.checklist.items.get(index)?.quantity));
             let (request, knobs) = match self.knobs_by_role(request, &knobs, near, signal.clone()).await? {
                 Ok(None) => (request.clone(), knobs),
                 Ok(Some(found)) if found.device == request.device => (found, knobs),
@@ -170,7 +170,7 @@ impl Rendering {
         .await;
         match outcome {
             Ok(Ok(round)) => {
-                self.tell_judged(&round);
+                self.listening.tell_judged(&round);
                 Ok(Ok(round))
             }
             Ok(Err(why)) => Ok(Err(why)),
@@ -260,7 +260,7 @@ impl Rendering {
     /// The excerpt's sound before the change, measured again for its frames (what a fit predicts from).
     async fn before_heard(&self, window: Window, signal: Signal) -> Result<crate::listening::measure::Heard, RuntimeError> {
         let (file, start) = {
-            let run = self.judge.borrow();
+            let run = self.listening.judge.borrow();
             let run = run.as_ref().unwrap();
             let excerpt = run.excerpts.iter().find(|excerpt| excerpt.window == window && excerpt.state == run.state);
             excerpt
@@ -287,7 +287,7 @@ impl Rendering {
         signal: Signal,
     ) -> Result<Result<Round, String>, RuntimeError> {
         let (quantity, target, label, now, open_regions, excerpt) = {
-            let run = self.judge.borrow();
+            let run = self.listening.judge.borrow();
             let run = run.as_ref().unwrap();
             let item = &run.checklist.items[index];
             let excerpt = run
@@ -447,7 +447,7 @@ impl Rendering {
             if settings.is_empty() { String::new() } else { format!("; {}", settings.join(", ")) },
             predicted.map(|predicted| format!(" ({predicted})")).unwrap_or_default()
         );
-        self.judge_round(Some(change), None, signal).await
+        self.listening.judge_round(Some(change), None, signal).await
     }
 
     /// One knob homed in on: each probe heard on the target's excerpt, the next sized by what the last ones did, until
@@ -478,7 +478,7 @@ impl Rendering {
             return Ok(Err(format!("{} is a switch or a list, not a knob to home in on.", knob.name)));
         };
         let (aim, met, unit, label, start, before, checklist, changed, whole_all, before_all) = {
-            let run = self.judge.borrow();
+            let run = self.listening.judge.borrow();
             let run = run.as_ref().unwrap();
             let item = &run.checklist.items[index];
             let Some((aim, met)) = item.aim() else {
@@ -523,7 +523,7 @@ impl Rendering {
         // the excerpt's readings, so the aim moves by how far the whole stretch reads from the excerpt.
         let kind = self.device_kind(&request.device, signal.clone()).await;
         let measure = checklist.items[index].id.clone();
-        let scope = self.judge.borrow().as_ref().and_then(|run| run.track.clone()).unwrap_or_else(|| "mix".into());
+        let scope = self.listening.judge.borrow().as_ref().and_then(|run| run.track.clone()).unwrap_or_else(|| "mix".into());
         let saved = kind.as_ref().and_then(|kind| Probes::home().load(kind, &knob.name, &measure, &scope));
         if let Some(response) = &saved {
             let now = if changed { response.at_knob(x0) } else { Some(before) };
@@ -534,7 +534,7 @@ impl Rendering {
         // Where the knob is now (it moves with each probe).
         let mut current = x0;
         let (track, focus) = {
-            let run = self.judge.borrow();
+            let run = self.listening.judge.borrow();
             let run = run.as_ref().unwrap();
             (run.track.clone(), run.focus.clone())
         };
@@ -548,12 +548,12 @@ impl Rendering {
                 self.set_knobs(&request.device, &[(knob, scale.raw(scale.from_perceptual(at)))], signal.clone()).await?;
                 current = at;
                 let what = format!("{} at {}", knob.name, scale.text(scale.from_perceptual(at)));
-                let heard = match self.judge_hear(track.as_deref(), focus.as_deref(), window, &what, signal.clone()).await? {
+                let heard = match self.listening.judge_hear(track.as_deref(), focus.as_deref(), window, &what, signal.clone()).await? {
                     Ok(heard) => heard,
                     Err(why) => return Ok(Err(why)),
                 };
                 let mut values = {
-                    let mut guard = self.judge.borrow_mut();
+                    let mut guard = self.listening.judge.borrow_mut();
                     guard.as_mut().unwrap().listens += 1;
                     heard.read(&checklist)
                 };
@@ -634,11 +634,11 @@ impl Rendering {
                 Homed::Stuck => "; the knob went as far as it helps",
             }
         );
-        self.judge_round(Some(change), Some(heard), signal).await
+        self.listening.judge_round(Some(change), Some(heard), signal).await
     }
 }
 
-impl Rendering {
+impl LiveRenderer {
     /// Notes a search's scratch copies (`entry`: their prefix, the tracks there before, the copied track's name) with
     /// the Set they're in and this Kumi's process, or forgets them (None) once they're gone. Each Kumi keeps its own
     /// journal, so two never write over each other's entries.
@@ -837,7 +837,9 @@ impl Rendering {
         }
         Ok(Ok(heard))
     }
+}
 
+impl Rendering {
     /// A few knobs that interact, searched in small CMA-ES generations: each generation's candidates set on scratch
     /// copies of the track and heard side by side in one pass, scored on the target's gap, the guards and what the
     /// change costs. The best is set on the device and judged as the round.
@@ -864,7 +866,7 @@ impl Rendering {
             chosen.push((knob, scale));
         }
         let (scoped, checklist, before, whole) = {
-            let run = self.judge.borrow();
+            let run = self.listening.judge.borrow();
             let run = run.as_ref().unwrap();
             let before = run
                 .excerpts
@@ -886,7 +888,7 @@ impl Rendering {
             ));
         }
         // The copies are of the device's own track, so it has to be the run's (refs read long: a short one is a counter).
-        let run_track = self.scope_ref(Some(&scoped), signal.clone()).await.ok();
+        let run_track = self.live.scope_ref(Some(&scoped), signal.clone()).await.ok();
         if !run_track
             .is_some_and(|track| super::super::mutations::same_track(&self.connection().references.borrow(), &request.device, &track))
         {
@@ -946,11 +948,11 @@ impl Rendering {
                     return Ok(Err(why));
                 }
                 let what = format!("Kumi hears {} settings on copies of {scoped} only it hears", copies.names.len());
-                let heard = match self.hear_tracks(&copies.names, window, &what, signal.clone()).await? {
+                let heard = match self.live.hear_tracks(&copies.names, window, &what, signal.clone()).await? {
                     Ok(heard) => heard,
                     Err(why) => return Ok(Err(why)),
                 };
-                self.judge.borrow_mut().as_mut().unwrap().listens += 1;
+                self.listening.judge.borrow_mut().as_mut().unwrap().listens += 1;
                 let costs: Vec<f64> = copies
                     .names
                     .iter()
@@ -998,7 +1000,7 @@ impl Rendering {
             search.generation,
             search.lambda
         );
-        self.judge_round(Some(change), None, signal).await
+        self.listening.judge_round(Some(change), None, signal).await
     }
 }
 

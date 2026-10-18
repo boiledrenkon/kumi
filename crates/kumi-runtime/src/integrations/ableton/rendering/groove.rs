@@ -108,7 +108,7 @@ impl Rendering {
         };
         match outcome {
             Ok(Ok(round)) => {
-                self.tell_judged(&round);
+                self.listening.tell_judged(&round);
                 Ok(Ok(round))
             }
             Ok(Err(why)) => Ok(Err(why)),
@@ -279,8 +279,8 @@ impl Rendering {
         let rendering = self.rendering_now();
         let mut rig = None;
         let rendered: Result<IndexMap<String, Render>, RuntimeError> = async {
-            rig = Some(self.open_rig(&candidates, Some(window.from), Some(window.beats), signal.clone()).await?);
-            self.render_pass(rig.as_mut().unwrap(), signal.clone()).await
+            rig = Some(self.live.open_rig(&candidates, Some(window.from), Some(window.beats), signal.clone()).await?);
+            self.live.render_pass(rig.as_mut().unwrap(), signal.clone()).await
         }
         .await;
         if let Some(rig) = rig.as_mut() {

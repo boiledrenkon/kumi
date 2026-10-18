@@ -3,7 +3,7 @@
 use crate::{
     core::{
         contracts::JsonObject,
-        daw::{asset_in_words, AssetPhrase, DawProfile},
+        daw::{asset_in_words, parenthetical, with_article, AssetPhrase, DawProfile},
     },
     listening::{
         checklist::{Explicit, Quantity, Target},
@@ -112,15 +112,6 @@ pub struct ToolDef {
     pub schema: JsonObject,
 }
 
-/// "an EQ Eight", "a ReaEQ": a name with its article, unless it has one.
-fn with_article(name: &str) -> String {
-    if name.starts_with("a ") || name.starts_with("an ") {
-        return name.into();
-    }
-    let vowel = name.chars().next().is_some_and(|first| "AEIOUaeiou".contains(first));
-    format!("{} {name}", if vowel { "an" } else { "a" })
-}
-
 static JUDGE: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!("assets/judge.json")).unwrap());
 static TUNE: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!("assets/tune.json")).unwrap());
 static SOUND: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_str!("assets/sound.json")).unwrap());
@@ -131,9 +122,17 @@ static GROOVE: LazyLock<Value> = LazyLock::new(|| serde_json::from_str(include_s
 pub(crate) const JUDGE_PHRASES: &[AssetPhrase] = &[
     AssetPhrase { live: "Live's devices", count: 1, said: |p| format!("{}'s devices", p.words.app) },
     AssetPhrase { live: "the last Live Limiter on the track, else a Utility it adds", count: 1, said: |p| p.vocab.gain_stage.into() },
-    AssetPhrase { live: "a static EQ (EQ Eight)", count: 1, said: |p| p.vocab.static_eq.into() },
-    AssetPhrase { live: "a dynamic band (Multiband Dynamics)", count: 1, said: |p| p.vocab.dynamic_band.into() },
-    AssetPhrase { live: "mono below a frequency (Utility's Bass Mono)", count: 1, said: |p| p.vocab.bass_mono.into() },
+    AssetPhrase { live: "a static EQ (EQ Eight)", count: 1, said: |p| format!("a static EQ{}", parenthetical(p.vocab.eq_name)) },
+    AssetPhrase {
+        live: "a dynamic band (Multiband Dynamics)",
+        count: 1,
+        said: |p| format!("a dynamic band{}", parenthetical(p.vocab.multiband)),
+    },
+    AssetPhrase {
+        live: "mono below a frequency (Utility's Bass Mono)",
+        count: 1,
+        said: |p| format!("mono below a frequency{}", parenthetical(p.vocab.bass_mono)),
+    },
     AssetPhrase { live: "starts in the Arrangement", count: 1, said: |p| format!("starts in the {}", p.words.timeline) },
 ];
 pub(crate) const TUNE_PHRASES: &[AssetPhrase] = &[
@@ -454,13 +453,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn a_name_comes_with_its_article() {
-        assert_eq!(with_article("EQ Eight"), "an EQ Eight");
-        assert_eq!(with_article("an EQ"), "an EQ");
-        assert_eq!(with_article("timeline"), "a timeline");
-        assert_eq!(with_article("Arrangement"), "an Arrangement");
     }
 }

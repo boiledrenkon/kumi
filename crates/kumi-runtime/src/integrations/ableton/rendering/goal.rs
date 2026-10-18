@@ -27,7 +27,7 @@ struct Cached {
     structural: Option<StructuralMove>,
 }
 struct Goal {
-    render: Rc<Rendering>,
+    render: Rc<LiveRenderer>,
     rig: tokio::sync::Mutex<Rig>,
     slots: RefCell<Vec<GoalSlotInfo>>,
     current: RefCell<IndexMap<String, IndexMap<String, f64>>>,
@@ -74,7 +74,7 @@ fn by_device(read: &Knobs, moved: &[(Knob, f64)]) -> IndexMap<String, Vec<Value>
     }
     devices
 }
-impl Rendering {
+impl LiveRenderer {
     async fn read_knobs(&self, name: &str, signal: Signal) -> Result<Knobs, RuntimeError> {
         let tracks = self.rows("track", json!({"fields":["name"]}), signal.clone()).await?;
         let reference = tracks

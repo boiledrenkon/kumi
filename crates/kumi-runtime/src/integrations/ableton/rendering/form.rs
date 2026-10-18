@@ -2,9 +2,9 @@
 //! reference's form beside it.
 
 use super::super::connection::NO_CURRENT_LIVE;
-use super::judge::JudgeHeard;
 use super::rig::Window;
 use super::*;
+use crate::listening::engine::JudgeHeard;
 use crate::listening::{
     form::{compare, file_grid, form, form_from, Form},
     measure::{measure_file, MeasureOptions},
@@ -17,7 +17,7 @@ impl Rendering {
     pub async fn form(self: &Rc<Self>, request: &FormRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
         let formed = self.form_now(request, original).await;
         // form hears through the judge's listen, which keeps its takes in judge/: they go now, a judged run's own stay.
-        self.prune_kept().await;
+        self.listening.prune_kept().await;
         formed
     }
 
@@ -28,7 +28,7 @@ impl Rendering {
         let Some(tempo) = self.observer.tempo.get().filter(|tempo| *tempo > 0.) else {
             return Ok(Err("Kumi doesn't know the Set's tempo yet; try again.".into()));
         };
-        if self.rendering.get() {
+        if self.rendering.is_on() {
             return Ok(Err("Kumi is already listening to something; wait for it.".into()));
         }
         let signal = abort::any([original, self.connection().lifetime.clone()]);
@@ -69,7 +69,7 @@ impl Rendering {
             }
             None => None,
         };
-        let heard = match self.judge_hear(None, None, span, "the song, read bar by bar", signal.clone()).await? {
+        let heard = match self.listening.judge_hear(None, None, span, "the song, read bar by bar", signal.clone()).await? {
             Ok(JudgeHeard { silent: Some(why), .. }) | Err(why) => return Ok(Err(why)),
             Ok(heard) => heard,
         };

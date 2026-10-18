@@ -11,6 +11,7 @@ use super::{
     measure::{fine_hz, percentile, Heard, Measures, FINE_BINS, THIRDS},
     sound,
 };
+use crate::core::daw::{with_article, DawProfile};
 use serde::{Deserialize, Serialize};
 
 /// The regions tonal balance is judged in: third-octave bands, first to last.
@@ -567,6 +568,18 @@ pub struct Checklist {
 }
 
 impl Checklist {
+    /// The fixes it names, in the DAW's words. Live's are what they were.
+    pub fn in_words(&mut self, profile: &DawProfile) {
+        for item in &mut self.items {
+            if let Some(fix) = item.fix.take() {
+                item.fix = Some(detect::fix_in_words(&fix, profile).replace(
+                    "an EQ Eight toward the reference's shape",
+                    &format!("{} toward the reference's shape", with_article(profile.vocab.eq)),
+                ));
+            }
+        }
+    }
+
     /// The goal's targets and reference, the problems found in the first listen (and in the focus element against
     /// the mix), and the guards.
     pub fn new(goal: &Goal, heard: &Heard, problems: &[Problem]) -> Self {
@@ -1202,13 +1215,20 @@ pub use crate::integrations::live_main_chain::{main_chain, utility_gain, MainDev
 /// `devices` are Main's (`MainState`); `missed` is why that tap wasn't heard when Kumi Ears tried (None: no Max for
 /// Live).
 pub fn masking_unfair(focus: &str, devices: &[String], missed: Option<&str>) -> Option<String> {
+    masking_unfair_in(&DawProfile::ABLETON, focus, devices, missed)
+}
+
+/// `masking_unfair`, in the DAW's words.
+pub fn masking_unfair_in(profile: &DawProfile, focus: &str, devices: &[String], missed: Option<&str>) -> Option<String> {
+    let master = profile.words.master;
     (!devices.is_empty()).then(|| {
-        let instead = match missed {
-            Some(why) => format!("Kumi couldn't hear the mix as it comes into Main's chain this time ({why})"),
-            None => "With Max for Live, Kumi hears the mix as it comes into Main's chain and reads masking there".into(),
+        let instead = match (missed, profile.caps.ears) {
+            (Some(why), _) => format!(" Kumi couldn't hear the mix as it comes into {master}'s chain this time ({why})"),
+            (None, true) => format!(" With Max for Live, Kumi hears the mix as it comes into {master}'s chain and reads masking there"),
+            (None, false) => String::new(),
         };
         format!(
-            "Masking can't be read through Main's chain ({}): it's left off the checklist. To work on {focus} cutting through, judge it with Main's devices switched off, then the master's loudness and peaks on their own. {instead}",
+            "Masking can't be read through {master}'s chain ({}): it's left off the checklist. To work on {focus} cutting through, judge it with {master}'s devices switched off, then the master's loudness and peaks on their own.{instead}",
             devices.join(", ")
         )
     })
@@ -1519,5 +1539,41 @@ pub fn plan_cut(heard: &Heard, low: f64, high: f64, steady: bool, wanted: f64, q
     match best {
         Some((_, band, predicted)) => (band, predicted),
         None => deepest.unwrap_or((Band { shape: Shape::Bell, hz: center, db: 0., q }, region_excess(heard, low, high, steady))),
+    }
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::*;
+
+    #[test]
+    fn the_fixes_name_the_dawss_devices_and_lives_stay_as_they_were() {
+        let fixes = [
+            "an EQ Eight toward the reference's shape (tune with how: fit)",
+            "mono below about 120 Hz (Utility's Bass Mono) (tune with how: fit calculates the cut)",
+            "a high pass at about 25–30 Hz",
+        ];
+        let checklist = || Checklist {
+            items: fixes
+                .iter()
+                .map(|fix| Item {
+                    fix: Some((*fix).into()),
+                    ..item("x", "X", Role::Guard, "dB", Quantity::Integrated, Target::AtMost { value: 0. }, 1.)
+                })
+                .collect(),
+        };
+        let mut live = checklist();
+        live.in_words(&DawProfile::ABLETON);
+        assert_eq!(live.items.iter().map(|item| item.fix.as_deref().unwrap()).collect::<Vec<_>>(), fixes);
+        let mut other = checklist();
+        other.in_words(&DawProfile::UNKNOWN);
+        assert_eq!(
+            other.items.iter().map(|item| item.fix.as_deref().unwrap()).collect::<Vec<_>>(),
+            [
+                "an EQ toward the reference's shape (tune with how: fit)",
+                "mono below about 120 Hz (tune with how: fit calculates the cut)",
+                "a high pass at about 25–30 Hz"
+            ]
+        );
     }
 }

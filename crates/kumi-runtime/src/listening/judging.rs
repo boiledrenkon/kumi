@@ -35,9 +35,13 @@ pub struct Placed {
     pub reference: String,
 }
 
-/// What a round has done in Live.
+/// What a round has done in the DAW.
 #[async_trait(?Send)]
 pub trait RoundHost {
+    /// What the producer calls the DAW, in the words a round says what it couldn't take back.
+    fn app(&self) -> &str {
+        "Live"
+    }
     /// Turns the level by `gain` dB where rebalancing goes; says what it turned.
     async fn turn(&self, gain: f64) -> Result<String, String>;
     /// Hears the round's excerpt as things stand.
@@ -257,8 +261,12 @@ pub async fn rebalance(
                         ));
                     }
                 } else {
-                    let why =
-                        format!("Kumi couldn't hear its rebalance ({}) and Live wouldn't take it back: {}", unheard.why, stuck.join(", "));
+                    let why = format!(
+                        "Kumi couldn't hear its rebalance ({}) and {} wouldn't take it back: {}",
+                        unheard.why,
+                        host.app(),
+                        stuck.join(", ")
+                    );
                     settled.rebalanced = Some(why.clone());
                     unfair = Some(why);
                 }
@@ -358,6 +366,7 @@ pub async fn take_back(host: &dyn RoundHost, checkpoint: &[String]) -> TakenBack
 /// Takes these changes back (ids and titles, oldest first), newest first, as `take_back` does.
 pub async fn take_back_these(host: &dyn RoundHost, all: Vec<(String, String)>) -> TakenBack {
     let stayed = |said: String| TakenBack { said, stayed: true };
+    let app = host.app();
     if all.is_empty() {
         return stayed("nothing in HISTORY to take back (change it back yourself if you changed it another way)".into());
     }
@@ -378,11 +387,11 @@ pub async fn take_back_these(host: &dyn RoundHost, all: Vec<(String, String)>) -
     let titles = said.join(", ");
     let made = host.made(&stuck);
     if made.is_empty() {
-        return stayed(format!("Live wouldn't take back {titles}: undo it yourself"));
+        return stayed(format!("{app} wouldn't take back {titles}: undo it yourself"));
     }
     let found = match host.chain().await {
         Ok(now) => removable(&now, &made),
-        Err(why) => return stayed(format!("Live wouldn't take back {titles} ({why}): undo it yourself")),
+        Err(why) => return stayed(format!("{app} wouldn't take back {titles} ({why}): undo it yourself")),
     };
     let mut removed = vec![];
     for device in found.iter().rev() {
@@ -393,9 +402,9 @@ pub async fn take_back_these(host: &dyn RoundHost, all: Vec<(String, String)>) -
     // All of it went only when each stuck change made a device and each of those was removed.
     let left = made.len() < stuck.len() || removed.len() < made.len();
     if removed.is_empty() {
-        stayed(format!("Live wouldn't take back {titles}: undo it yourself"))
+        stayed(format!("{app} wouldn't take back {titles}: undo it yourself"))
     } else {
-        TakenBack { said: format!("Live wouldn't undo {titles}, so Kumi removed {} instead", removed.join(", ")), stayed: left }
+        TakenBack { said: format!("{app} wouldn't undo {titles}, so Kumi removed {} instead", removed.join(", ")), stayed: left }
     }
 }
 

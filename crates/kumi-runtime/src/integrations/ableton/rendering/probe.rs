@@ -28,7 +28,7 @@ pub(super) struct Copies {
     position: u64,
 }
 
-impl Rendering {
+impl LiveRenderer {
     /// Makes `count` copies of a device's track, for work heard in `passes` passes over `window`. The tracks there
     /// before are noted first (by Live's identity), so a crash or a lost connection still leaves the copies to be
     /// swept, and the one undo step lasts about as long as the work.
@@ -149,7 +149,9 @@ impl Rendering {
         let own = !class.is_empty() && !class.contains("PluginDevice") && !class.starts_with("Mx");
         Some(if own { class.to_owned() } else { name.to_owned() }).filter(|kind| !kind.is_empty())
     }
+}
 
+impl Rendering {
     /// One knob heard across its range in one pass (scratch copies of the run's track, the knob at a setting on each),
     /// what it does to each checklist measure saved, then the knob set where its response meets the target (never
     /// past a setting that made something else worse) and judged.
@@ -179,7 +181,7 @@ impl Rendering {
             return Ok(Err(format!("{} is a switch or a list, not a knob to probe.", knob.name)));
         };
         let (scoped, checklist, before, whole, changed) = {
-            let run = self.judge.borrow();
+            let run = self.listening.judge.borrow();
             let run = run.as_ref().unwrap();
             let before = run
                 .excerpts
@@ -207,7 +209,7 @@ impl Rendering {
                     .into(),
             ));
         }
-        let run_track = self.scope_ref(Some(&scoped), signal.clone()).await.ok();
+        let run_track = self.live.scope_ref(Some(&scoped), signal.clone()).await.ok();
         if !run_track
             .is_some_and(|track| super::super::mutations::same_track(&self.connection().references.borrow(), &request.device, &track))
         {
@@ -244,11 +246,11 @@ impl Rendering {
                 return Ok(Err(why));
             }
             let what = format!("Kumi hears {} across its range on copies only it hears", knob.name);
-            let heard = match self.hear_tracks(&copies.names, window, &what, signal.clone()).await? {
+            let heard = match self.live.hear_tracks(&copies.names, window, &what, signal.clone()).await? {
                 Ok(heard) => heard,
                 Err(why) => return Ok(Err(why)),
             };
-            self.judge.borrow_mut().as_mut().unwrap().listens += 1;
+            self.listening.judge.borrow_mut().as_mut().unwrap().listens += 1;
             Ok(Ok(copies
                 .names
                 .iter()
@@ -350,7 +352,7 @@ impl Rendering {
             item.unit,
             if met_said { "" } else { " (as near as it gets)" }
         );
-        self.judge_round(Some(change), None, signal).await
+        self.listening.judge_round(Some(change), None, signal).await
     }
 }
 

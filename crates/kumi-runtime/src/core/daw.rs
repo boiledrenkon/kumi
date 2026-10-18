@@ -107,11 +107,11 @@ pub struct PromptVocab {
     pub structure: &'static str,
     /// What brings a judged run's level back to where it belongs: "the last Live Limiter on the track, else a Utility it adds".
     pub gain_stage: &'static str,
-    /// The judge's fix for a steady imbalance: "a static EQ (EQ Eight)".
-    pub static_eq: &'static str,
-    /// The judge's fix for one that comes and goes: "a dynamic band (Multiband Dynamics)".
-    pub dynamic_band: &'static str,
-    /// The judge's fix for wide lows: "mono below a frequency (Utility's Bass Mono)".
+    /// The device the judge's fix for a steady imbalance names: "EQ Eight" (none: the fix names no device).
+    pub eq_name: &'static str,
+    /// The device its fix for an imbalance that comes and goes names: "Multiband Dynamics".
+    pub multiband: &'static str,
+    /// The device its fix for wide lows names: "Utility's Bass Mono".
     pub bass_mono: &'static str,
     /// The device a drum part is read in lanes by: "a Drum Rack".
     pub drum_kit: &'static str,
@@ -242,14 +242,14 @@ macro_rules! live_word {
     (gain_stage) => {
         "the last Live Limiter on the track, else a Utility it adds"
     };
-    (static_eq) => {
-        "a static EQ (EQ Eight)"
+    (eq_name) => {
+        "EQ Eight"
     };
-    (dynamic_band) => {
-        "a dynamic band (Multiband Dynamics)"
+    (multiband) => {
+        "Multiband Dynamics"
     };
     (bass_mono) => {
-        "mono below a frequency (Utility's Bass Mono)"
+        "Utility's Bass Mono"
     };
     (drum_kit) => {
         "a Drum Rack"
@@ -362,11 +362,11 @@ macro_rules! daw_word {
     ($profile:expr, gain_stage) => {
         $profile.vocab.gain_stage
     };
-    ($profile:expr, static_eq) => {
-        $profile.vocab.static_eq
+    ($profile:expr, eq_name) => {
+        $profile.vocab.eq_name
     };
-    ($profile:expr, dynamic_band) => {
-        $profile.vocab.dynamic_band
+    ($profile:expr, multiband) => {
+        $profile.vocab.multiband
     };
     ($profile:expr, bass_mono) => {
         $profile.vocab.bass_mono
@@ -377,6 +377,24 @@ macro_rules! daw_word {
     ($profile:expr, drum_stem_steps) => {
         $profile.vocab.drum_stem_steps
     };
+}
+
+/// A device's name as a parenthetical after what it does: " (EQ Eight)", or nothing for a DAW whose fix names no device.
+pub fn parenthetical(name: &str) -> String {
+    if name.is_empty() {
+        String::new()
+    } else {
+        format!(" ({name})")
+    }
+}
+
+/// "an EQ Eight", "a ReaEQ": a name with its article, unless it has one.
+pub fn with_article(name: &str) -> String {
+    if name.starts_with("a ") || name.starts_with("an ") {
+        return name.into();
+    }
+    let vowel = name.chars().next().is_some_and(|first| "AEIOUaeiou".contains(first));
+    format!("{} {name}", if vowel { "an" } else { "a" })
 }
 
 /// A text in a DAW's words, made from pieces: string literals, a word's name (`place`, `app`…) or `(if cap: "…")` for
@@ -520,9 +538,9 @@ impl DawProfile {
             refs_retired: "The DAW may have taken the tracks back, so Kumi's references are retired: discover again before using any.",
             structure: "tracks",
             gain_stage: "the track's last limiter, else a gain device it adds",
-            static_eq: "a static EQ",
-            dynamic_band: "a dynamic band",
-            bass_mono: "mono below a frequency",
+            eq_name: "",
+            multiband: "",
+            bass_mono: "",
             drum_kit: "a drum-kit device",
             drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
         },
@@ -601,8 +619,8 @@ impl DawProfile {
             refs_retired: crate::live_word!(refs_retired),
             structure: crate::live_word!(structure),
             gain_stage: crate::live_word!(gain_stage),
-            static_eq: crate::live_word!(static_eq),
-            dynamic_band: crate::live_word!(dynamic_band),
+            eq_name: crate::live_word!(eq_name),
+            multiband: crate::live_word!(multiband),
             bass_mono: crate::live_word!(bass_mono),
             drum_kit: crate::live_word!(drum_kit),
             drum_stem_steps: crate::live_word!(drum_stem_steps),
@@ -792,6 +810,16 @@ mod tests {
         let said = asset_in_words(asset, &DawProfile::UNKNOWN, PHRASES);
         assert_eq!(said["description"], "Hear the project (not the Arrangement), then the timeline.");
         assert_eq!(said["enum"][0], "the Set", "only descriptions change");
+    }
+
+    #[test]
+    fn a_name_comes_with_its_article_and_a_device_in_parentheses_when_there_is_one() {
+        assert_eq!(with_article("EQ Eight"), "an EQ Eight");
+        assert_eq!(with_article("an EQ"), "an EQ");
+        assert_eq!(with_article("timeline"), "a timeline");
+        assert_eq!(with_article("Arrangement"), "an Arrangement");
+        assert_eq!(parenthetical("EQ Eight"), " (EQ Eight)");
+        assert_eq!(parenthetical(""), "");
     }
 
     #[test]

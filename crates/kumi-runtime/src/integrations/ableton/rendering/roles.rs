@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 /// A device's track, from the device's ref read long: "<epoch>:device:<track>:…".
 static ON_TRACK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([0-9]+):device:([0-9]+):").unwrap());
 
-impl Rendering {
+impl LiveRenderer {
     /// The tune request with its knobs named by role found: on its device, or else on another of its track, in the
     /// agreed order. An EQ band named by role on an EQ Eight is the band nearest `near` (the target's frequency, Hz)
     /// when it's known. None when no knob is named by role; why, when nothing can turn one.
@@ -65,30 +65,6 @@ impl Rendering {
             }
             Resolved::Refused(why) => Err(why),
         })
-    }
-
-    /// A round's next fix names a mapped plug-in's role when one on the run's track does the job (Ozone 12 first, then
-    /// the other mapped plug-ins), with the fix it had after it. It stays as it was when none does, or Live can't say.
-    pub async fn name_plugin_roles(self: &Rc<Self>, round: &mut Round, signal: Signal) {
-        let Some(job) = round.next.as_ref().and_then(|next| roles::job_for_item(&next.id)) else { return };
-        let Some(track) = self.judge.borrow().as_ref().map(|run| run.track.clone()) else { return };
-        let Ok(parent) = self.scope_ref(track.as_deref(), signal.clone()).await else { return };
-        let Ok(rows) = self.rows("device", json!({"parent":parent,"fields":DEVICE_FIELDS}), signal.clone()).await else { return };
-        let mut devices: Vec<Seen> = rows.iter().map(seen).collect();
-        let doing: Vec<usize> = (0..devices.len())
-            .filter(|at| !devices[*at].off && devices[*at].adapter().is_some_and(|adapter| roles::job_role(adapter, job).is_some()))
-            .collect();
-        if doing.is_empty() {
-            return;
-        }
-        for at in doing {
-            self.read_seen(&mut devices[at], signal.clone()).await;
-        }
-        if let Some(next) = round.next.as_mut() {
-            if let Some(fix) = roles::plugin_fix(&devices, job, next.fix.as_deref()) {
-                next.fix = Some(fix);
-            }
-        }
     }
 
     fn long_device(&self, device: &str) -> String {
@@ -166,6 +142,32 @@ impl Rendering {
         }
         if device.adapter().is_some() {
             device.listed = self.listed_names(&long, signal).await.ok().flatten();
+        }
+    }
+}
+
+impl Rendering {
+    /// A round's next fix names a mapped plug-in's role when one on the run's track does the job (Ozone 12 first, then
+    /// the other mapped plug-ins), with the fix it had after it. It stays as it was when none does, or Live can't say.
+    pub async fn name_plugin_roles(self: &Rc<Self>, round: &mut Round, signal: Signal) {
+        let Some(job) = round.next.as_ref().and_then(|next| roles::job_for_item(&next.id)) else { return };
+        let Some(track) = self.listening.judge.borrow().as_ref().map(|run| run.track.clone()) else { return };
+        let Ok(parent) = self.live.scope_ref(track.as_deref(), signal.clone()).await else { return };
+        let Ok(rows) = self.rows("device", json!({"parent":parent,"fields":DEVICE_FIELDS}), signal.clone()).await else { return };
+        let mut devices: Vec<Seen> = rows.iter().map(seen).collect();
+        let doing: Vec<usize> = (0..devices.len())
+            .filter(|at| !devices[*at].off && devices[*at].adapter().is_some_and(|adapter| roles::job_role(adapter, job).is_some()))
+            .collect();
+        if doing.is_empty() {
+            return;
+        }
+        for at in doing {
+            self.read_seen(&mut devices[at], signal.clone()).await;
+        }
+        if let Some(next) = round.next.as_mut() {
+            if let Some(fix) = roles::plugin_fix(&devices, job, next.fix.as_deref()) {
+                next.fix = Some(fix);
+            }
         }
     }
 }

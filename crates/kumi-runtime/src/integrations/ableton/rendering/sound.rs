@@ -18,7 +18,7 @@ impl Rendering {
         let Some(tempo) = self.observer.tempo.get().filter(|tempo| *tempo > 0.) else {
             return Ok(Err("Kumi doesn't know the Set's tempo yet; try again.".into()));
         };
-        if self.rendering.get() {
+        if self.rendering.is_on() {
             return Ok(Err("Kumi is already listening to something; wait for it.".into()));
         }
         let key = match &request.key {
@@ -54,7 +54,7 @@ impl Rendering {
             heard_names.push(against.clone());
         }
         let what = format!("measuring {}", heard_names.join(", "));
-        let heard = match self.hear_takes(&heard_names, window, &what, signal).await? {
+        let heard = match self.live.hear_takes(&heard_names, window, &what, signal).await? {
             Ok(heard) => heard,
             Err(why) => return Ok(Err(why)),
         };

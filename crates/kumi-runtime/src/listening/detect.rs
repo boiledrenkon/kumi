@@ -4,6 +4,7 @@
 //! element and the rest of the mix as a target-to-mask ratio.
 
 use super::measure::{band_edges, fine_hz, percentile, Frames, Heard, FINE_BINS, THIRDS};
+use crate::core::daw::{parenthetical, DawProfile};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -270,6 +271,14 @@ fn peak_q(frames: &Frames, hit: &[(usize, f64)], first: usize, last: usize) -> f
     let octaves = (right - left + 1) as f64 / 12.;
     let ratio = 2f64.powf(octaves);
     (ratio.sqrt() / (ratio - 1.)).clamp(2., 12.)
+}
+
+/// A fix as the DAW says it: the devices these texts name by Live's words go by the DAW's. Live's are what they were.
+pub fn fix_in_words(fix: &str, profile: &DawProfile) -> String {
+    fix.replace(
+        "mono below about 120 Hz (Utility's Bass Mono)",
+        &format!("mono below about 120 Hz{}", parenthetical(profile.vocab.bass_mono)),
+    )
 }
 
 /// The low end: stereo below 120 Hz, rumble under 30 Hz, a DC offset, one bass note louder than the rest.

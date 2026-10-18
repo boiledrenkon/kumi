@@ -13,7 +13,7 @@ use kumi_common::js::{
     number::{round, to_string},
     string::head,
 };
-impl Rendering {
+impl LiveRenderer {
     pub async fn audition(
         self: &Rc<Self>,
         request: &AuditionRequest,
@@ -26,7 +26,7 @@ impl Rendering {
         if !self.supported(RENDER_BRIDGE) {
             return Ok(Err(self.too_old(RENDER_BRIDGE)));
         }
-        if self.rendering.get() {
+        if self.rendering.is_on() {
             return Ok(Err("An audition is already running; wait for it.".into()));
         }
         let Some(tempo) = self.observer.tempo.get().filter(|value| *value != 0. && !value.is_nan()) else {
@@ -236,7 +236,7 @@ impl Rendering {
         if !self.supported(RENDER_BRIDGE) {
             return Ok(Err(self.too_old(RENDER_BRIDGE)));
         }
-        if self.rendering.get() {
+        if self.rendering.is_on() {
             return Ok(Err("Kumi is already listening to something; wait for it.".into()));
         }
         let looped = set.and_then(|set| set.get("loop")).filter(|v| v["enabled"] == true && v["length"].as_f64().is_some_and(|v| v > 0.));
