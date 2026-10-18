@@ -25,6 +25,17 @@ use kumi_runtime::mcp::types::{CallToolResult, Implementation, ListToolsResult};
 use serde_json::{json, Value};
 use std::{cell::Cell, cell::RefCell, rc::Rc, sync::Arc};
 
+/// Every key of `input` is one the tool's schema offers (it takes no others), and what it requires is there.
+fn within_schema(schema: &JsonObject, input: &JsonObject) {
+    let properties = schema["properties"].as_object().unwrap();
+    for key in input.keys() {
+        assert!(properties.contains_key(key), "{key} isn't in the schema: {schema:?}");
+    }
+    for key in schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        assert!(input.contains_key(key), "{key} is required");
+    }
+}
+
 /// The host's MCP, called in process.
 struct InProcess {
     host: Arc<Host>,
@@ -52,6 +63,18 @@ impl McpEndpoint for InProcess {
     }
     fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
         Box::new(|| {})
+    }
+    /// The bridge's events as the host forwards them (`notifications/daw_event`).
+    fn on_live_event(&self, listener: Rc<dyn Fn(JsonObject)>) -> Box<dyn Fn()> {
+        let mut events = self.host.events();
+        let task = tokio::task::spawn_local(async move {
+            while let Ok(event) = events.recv().await {
+                if let Some(event) = event.as_object() {
+                    listener(event.clone());
+                }
+            }
+        });
+        Box::new(move || task.abort())
     }
     fn stderr_status(&self) -> StderrStatus {
         StderrStatus { bytes: 0, truncated: false }
@@ -182,11 +205,16 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
                 read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
             assert!(!devices.is_error && devices.text.contains("EQ 5") && devices.text.contains("device:"), "{}", devices.text);
             assert!(!devices.text.contains("1:device:"), "{}", devices.text);
-            let lines = read
-                .execute(json!({"kind": "line", "parent": "pattern:1", "track": 1}).as_object().unwrap().clone(), Signal::new())
-                .await
-                .unwrap();
-            assert!(!lines.is_error && lines.text.contains("D#4"), "{}", lines.text);
+            // A pattern's lines, asked as the model can ask through the tool's schema: the track by its ref, lengthened.
+            let input = json!({"kind": "line", "parent": "pattern:1", "trackRef": "track:1"}).as_object().unwrap().clone();
+            within_schema(&read.input_schema(), &input);
+            let _ = read.execute(input, Signal::new()).await.unwrap();
+            assert_eq!(script.asked().last().unwrap().1, json!({"kind": "line", "parent": "1:pattern:1", "track": "1:track:1"}));
+            assert!(
+                read.description().contains("line under a pattern") && read.description().contains("trackRef"),
+                "{}",
+                read.description()
+            );
 
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let focus = seen.borrow().iter().flatten().next().cloned().expect("the focus, as the host reads it");
@@ -229,6 +257,19 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             assert_eq!(tree.devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["EQ 5", "Doofer"]);
             assert_eq!(tree.devices[1].can_have_chains, Some(true), "a Doofer holds devices");
             assert!(renoise.can_show(BodyKind::Tracker) && !renoise.can_show(BodyKind::Timeline));
+
+            // A track inserted above Kick: the tool says so (`tracks`), the host passes it on, and track:1 follows Kick to
+            // its new place; reads name the layout their refs are at.
+            simulator.emit("tracks", json!({"count": 8, "made": [1], "gone": [], "layout": 1}));
+            for _ in 0..100 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                let _ = read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await;
+                if script.asked().last().is_some_and(|(_, params)| params["parent"] == "1:track:2") {
+                    break;
+                }
+            }
+            let asked = script.asked().last().unwrap().1.clone();
+            assert_eq!(asked, json!({"kind": "device", "parent": "1:track:2", "layout": 1}), "track:1 follows Kick");
 
             // Another song opens: the old song's refs are retired, so a stale track:1 reads nothing of the new song.
             script.switch_song();

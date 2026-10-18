@@ -283,6 +283,14 @@ impl DawProvider for Own {
         if !self.present(&io.env) {
             return async { vec![] }.boxed_local();
         }
+        // The DAW is here, but Kumi's bridge was never put in: a note, nothing to fix.
+        if self.receipt(&io.env).is_none() {
+            let note = Check::note(
+                format!("{} isn't in {}", self.bridge, self.name()),
+                Some(format!("{} --daw {} bridge puts it in, if you want Kumi in {}", *kumi_runtime::KUMI, self.id.as_str(), self.name())),
+            );
+            return async move { vec![note] }.boxed_local();
+        }
         let daw = self.daw;
         let env = io.env.clone();
         let bundled = self.bundled_source().and_then(|source| {
@@ -432,10 +440,18 @@ impl DawProvider for Own {
     }
     fn remove_bridge<'a>(&'a self, io: &'a InstalledIo, _run: Run) -> LocalBoxFuture<'a, Result<RemovedBridge, RuntimeError>> {
         async move {
-            if self.receipt(&io.env).is_none() {
+            let Some(receipt) = self.receipt(&io.env) else {
                 return Ok(RemovedBridge::None);
-            }
-            let target = self.target(&io.env).map_err(RuntimeError::plain)?;
+            };
+            // Where the receipt says it went: the DAW's folder may be gone (Renoise's preferences, a portable REAPER).
+            let target = Path::new(&receipt.target);
+            let target = Target {
+                daw: self.daw,
+                dir: target.parent().map(Path::to_path_buf).unwrap_or_default(),
+                name: target.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+                folder: self.daw == Daw::Renoise,
+                reference: PathBuf::from(&receipt.reference),
+            };
             match Lifecycle::new(&kumi_home(&io.env), target).uninstall(true) {
                 Ok(_) => Ok(RemovedBridge::Removed),
                 Err(why) => {

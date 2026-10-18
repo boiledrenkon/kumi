@@ -25,6 +25,23 @@ where
         }
         Ok::<_, std::io::Error>(())
     });
+    // The bridge's events, as notifications between the answers.
+    let mut events = host.events();
+    let notices = answers.clone();
+    let forwarding = tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    let notification = serde_json::json!({"jsonrpc": "2.0", "method": "notifications/daw_event", "params": event});
+                    if notices.send(encode(&notification)).is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
     let mut framer = Framer::new(MAX_MESSAGE_BYTES);
     let mut chunk = vec![0u8; 64 * 1024];
     let mut tasks = tokio::task::JoinSet::new();
@@ -54,6 +71,7 @@ where
         }
     }
     while tasks.join_next().await.is_some() {}
+    forwarding.abort();
     drop(answers);
     writer.await.unwrap_or(Ok(()))?;
     host.close().await;

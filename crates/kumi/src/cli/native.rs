@@ -159,10 +159,12 @@ fn installed_io(io: &CliIo) -> InstalledIo {
 }
 fn doctor_io(io: &CliIo, factory: DawFactory) -> DoctorIo {
     let mut doctor = DoctorIo::new(io.out.clone(), io.env.clone());
-    doctor.bundled_bridge_version = crate::daw::current().bundled_bridge_version();
+    // Live's checks probe Live and judge its bridge by Live's version, whichever DAW the doctor speaks for.
+    let live = crate::daw::provider(kumi_runtime::core::daw::DawId::Ableton).expect("Live is registered");
+    doctor.bundled_bridge_version = live.bundled_bridge_version();
     doctor.probe_live = Some(Rc::new(move |config| {
         let factory = factory.clone();
-        async move { Ok(crate::daw::current().probe(config, &factory).await) }.boxed_local()
+        async move { Ok(live.probe(config, &factory).await) }.boxed_local()
     }));
     doctor
 }
@@ -481,4 +483,67 @@ pub fn main_with(factory: impl Into<DawFactory>) -> i32 {
     let local = tokio::task::LocalSet::new();
     let code = local.block_on(&runtime, run(io, factory));
     shutdown::finish(runtime, local, code, explicit_exit.get(), err.as_ref())
+}
+
+#[cfg(test)]
+mod doctor_io_tests {
+    use super::*;
+    use crate::input::ByteListener;
+    use kumi_runtime::core::daw::DawId;
+
+    struct Silent;
+    impl TerminalInput for Silent {
+        fn is_tty(&self) -> bool {
+            false
+        }
+        fn is_raw(&self) -> bool {
+            false
+        }
+        fn set_raw_mode(&self, _: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn resume(&self, _: ByteListener) {}
+        fn pause(&self) {}
+        fn on_end(&self, _: Rc<dyn Fn()>) {}
+    }
+    struct Nowhere;
+    impl TtyOutput for Nowhere {
+        fn is_tty(&self) -> bool {
+            false
+        }
+        fn columns(&self) -> Option<i32> {
+            None
+        }
+        fn rows(&self) -> Option<i32> {
+            None
+        }
+        fn write(&self, _: &str) {}
+    }
+
+    /// The doctor speaking for REAPER (used last) still probes Live for Live's checks, and judges Live's bridge by
+    /// Live's version, never REAPER's.
+    #[tokio::test(flavor = "current_thread")]
+    async fn lives_checks_probe_live_whichever_daw_the_doctor_speaks_for() {
+        tokio::task::LocalSet::new().run_until(probe_live_as_reaper()).await;
+    }
+    async fn probe_live_as_reaper() {
+        crate::daw::work_with(DawId::Reaper);
+        let probed = Rc::new(Cell::new(0));
+        let count = probed.clone();
+        let factory = DawFactory {
+            ableton: Rc::new(move |options| {
+                count.set(count.get() + 1);
+                kumi_runtime::integrations::create_ableton_integration(options)
+            }),
+            own_host: None,
+        };
+        let io = CliIo::new(Rc::new(Silent), Rc::new(Nowhere), Rc::new(Nowhere), Env::new());
+        let doctor = doctor_io(&io, factory);
+        let live = crate::daw::provider(DawId::Ableton).unwrap();
+        assert_eq!(doctor.bundled_bridge_version, live.bundled_bridge_version());
+        let probe = doctor.probe_live.clone().unwrap();
+        let _ = probe("/nowhere/bridge-config.json".into()).await;
+        assert_eq!(probed.get(), 1, "Live's probe made Live's integration");
+        crate::daw::work_with(DawId::Ableton);
+    }
 }

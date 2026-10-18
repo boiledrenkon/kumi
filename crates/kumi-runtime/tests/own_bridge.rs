@@ -367,3 +367,74 @@ async fn renoises_focus_is_its_middle_frame_with_the_panes_open_beside_it() {
         })
         .await;
 }
+
+/// A project bigger than the snapshot: the model is told how many tracks there are and how to read the rest, never
+/// shown 200 as if they were all.
+#[tokio::test(flavor = "current_thread")]
+async fn a_project_bigger_than_the_snapshot_says_so() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut snapshot = reaper_snapshot();
+            snapshot["truncated"] = json!({"tracks": {"total": 1000, "nextCursor": "c1.1.200"}});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let reaper = create_reaper_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            reaper.start(Signal::new()).await.unwrap();
+            let context: Value = serde_json::from_str(&reaper.observe(Signal::new(), None).await.unwrap().context).unwrap();
+            assert_eq!(context["moreTracks"], "1,000 tracks in all, 2 listed here; reaper_read kind track pages through every one");
+
+            let renoise_snapshot = json!({
+                "epoch": "3", "moreTracks": true,
+                "project": {"id": null, "identity": "99:1", "name": "Big", "bpm": 140},
+                "tracks": [{"ref": "3:track:1", "index": 1, "name": "Kick", "type": "sequencer"}],
+                "selection": {"trackRef": "3:track:1"},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", renoise_snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            let context: Value = serde_json::from_str(&renoise.observe(Signal::new(), None).await.unwrap().context).unwrap();
+            assert_eq!(context["moreTracks"], "Not every track is listed here; renoise_read kind track pages through every one");
+        })
+        .await;
+}
+
+/// A look that can't read the song (Renoise behind a dialog, or quit) keeps the song's key and project, as Live's do:
+/// the conversation stays with it. A saved song's key is its id, so it holds through a restart of Renoise.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_look_keeps_the_songs_key_and_project() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let snapshot = json!({
+                "epoch": "3",
+                "project": {"id": PROJECT_ID, "identity": "4242:2", "name": "Acid", "bpm": 140},
+                "tracks": [{"ref": "3:track:1", "index": 1, "name": "Kick", "type": "sequencer"}],
+                "selection": {"trackRef": "3:track:1"},
+            });
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let states = Rc::new(RefCell::new(vec![]));
+            let renoise = create_renoise_integration(options(host.clone(), states.clone()));
+            renoise.start(Signal::new()).await.unwrap();
+            let seen = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(seen.key, format!("renoise:{PROJECT_ID}"), "a saved song is its id");
+            let project = seen.project.clone().expect("a saved song");
+            // Behind a dialog: busy, still there.
+            host.answers.borrow_mut().push(("snapshot", json!({"error": "a dialog is open", "code": "busy", "connected": true}), true));
+            let busy = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!((busy.key.as_str(), busy.project.as_ref()), (seen.key.as_str(), Some(&project)), "busy isn't another song");
+            assert!(!states.borrow().contains(&ConnectionState::Disconnected), "busy isn't gone: {:?}", states.borrow());
+            // Quit: gone, and still the same song's conversation.
+            host.answers.borrow_mut().push(("snapshot", json!({"error": "no Renoise is running", "connected": false}), true));
+            let gone = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!((gone.key.as_str(), gone.project.as_ref()), (seen.key.as_str(), Some(&project)), "away isn't another song");
+            assert_eq!(states.borrow().last(), Some(&ConnectionState::Disconnected));
+        })
+        .await;
+}

@@ -155,3 +155,49 @@ async fn reapers_and_renoises_bridge_messages_never_speak_lives_words() {
         assert!(state.notice.unwrap().contains(&command) && watch.unreachable.contains(&command), "{said}");
     }
 }
+
+/// Asking for Live (`--daw ableton`, `KUMI_DAW=ableton`) starts Live, though REAPER's bridge is in too and was used
+/// last; asking for nothing goes by the last used. The configuration still never writes Live.
+#[tokio::test(flavor = "current_thread")]
+async fn asking_for_live_starts_live_whatever_was_used_last() {
+    let (dir, mut env) = renoise_home();
+    // Live's bridge, as its reference in the Remote Scripts says.
+    let config = dir.path().join("bridge-config.json");
+    std::fs::write(&config, "{}").unwrap();
+    let scripts = dir.path().join("Remote Scripts/AbletonMcpBridge");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::write(scripts.join("bridge-reference.json"), serde_json::json!({"config": config}).to_string()).unwrap();
+    // REAPER's, as its receipt says, and used last.
+    let resource = dir.path().join("REAPER");
+    env.insert("KUMI_REAPER_RESOURCE_DIR".into(), resource.to_string_lossy().into_owned());
+    let paths = daw_bridge::paths::BridgePaths::new(&dir.path().join(".kumi"), daw_bridge::daw::Daw::Reaper);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let receipt = daw_bridge::lifecycle::Receipt {
+        schema: daw_bridge::lifecycle::RECEIPT_SCHEMA.into(),
+        daw: "reaper".into(),
+        status: "installed".into(),
+        target: resource.join("UserPlugins/reaper_kumi.dylib").to_string_lossy().into_owned(),
+        reference: resource.join("UserPlugins/kumi-bridge-reference.json").to_string_lossy().into_owned(),
+        generation: Some("g1".into()),
+        version: Some("0.1.0".into()),
+        sha256: None,
+        previous: vec![],
+        updated_ms: 0,
+        history: vec![],
+    };
+    std::fs::write(paths.receipt(), serde_json::to_string(&receipt).unwrap()).unwrap();
+    kumi::daw::remember_used(DawId::Reaper, &env);
+    let config_of = |args: &[&str], env: &Env| {
+        serde_json::to_value(kumi::config::load_config(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), env).unwrap()).unwrap()
+    };
+    let asked = config_of(&["--daw", "ableton"], &env);
+    assert_eq!(asked["bridgeConfig"], serde_json::json!(config.to_string_lossy()), "Live's bridge: {asked}");
+    assert!(asked.get("daw").is_none(), "Live is never written: {asked}");
+    let mut by_env = env.clone();
+    by_env.insert("KUMI_DAW".into(), "ableton".into());
+    assert_eq!(config_of(&[], &by_env), asked);
+    // Nothing asked and nothing running: the one used last (what runs on this computer is left out).
+    let none = |_: &dyn DawProvider| false;
+    assert_eq!(kumi::daw::chosen_with(None, &env, &none).0.id(), DawId::Reaper, "nothing asked: the one used last");
+    assert_eq!(kumi::daw::chosen_with(Some(DawId::Ableton), &env, &none).0.id(), DawId::Ableton, "Live asked: Live");
+}

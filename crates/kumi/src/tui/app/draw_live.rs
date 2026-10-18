@@ -383,10 +383,14 @@ impl TuiApp {
         for (track, at, cell) in &shown {
             screen.put(*at, y + 1, &truncate(&track.name, *cell), &st::DIM);
         }
-        let rows = shown.iter().map(|(track, _, _)| track.cells.len()).max().unwrap_or(0).min(most.max(1) as usize);
+        let lines = shown.iter().map(|(track, _, _)| track.cells.len()).max().unwrap_or(0);
+        let rows = lines.min(most.max(1) as usize);
+        // The rows around the cursor (or the playhead when following): the window the DAW sends is wider than the pane.
+        let centre = grid.cursor.or(grid.playing).map(|line| line.saturating_sub(grid.from));
+        let first = centre.map_or(0, |at| at.saturating_sub(rows / 2).min(lines - rows));
         let lpb = grid.lpb.filter(|lpb| *lpb >= 1.).unwrap_or(4.) as usize;
-        for row in 0..rows {
-            let line = grid.from + row;
+        for (row, index) in (first..first + rows).enumerate() {
+            let line = grid.from + index;
             let y = y + 2 + row as i32;
             if grid.cursor == Some(line) {
                 screen.fill(Rect::new(x - 1, y, width + 2, 1), &st::RAISED);
@@ -400,7 +404,7 @@ impl TuiApp {
             };
             screen.put(x, y, &format!("{:>3}", line + 1), &style);
             for (track, at, cell) in &shown {
-                let text = track.cells.get(row).map(String::as_str).unwrap_or("");
+                let text = track.cells.get(index).map(String::as_str).unwrap_or("");
                 screen.put(
                     *at,
                     y,

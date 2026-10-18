@@ -1170,7 +1170,7 @@ pub struct UninstallOptions {
 /// updates and repairs leave behind (`app.replaced` is the Windows installer's), and what Kumi fetched and fetches
 /// again when needed (programs, models, videos; each only while it holds only Kumi's own). Never conversations, notes,
 /// recipes, sign-ins, the library or references; the bridge's files stay while Live uses them.
-pub const KUMI_S_OWN: [&str; 13] = [
+pub const KUMI_S_OWN: [&str; 14] = [
     "app",
     "app.previous",
     "app.previous.old",
@@ -1184,6 +1184,8 @@ pub const KUMI_S_OWN: [&str; 13] = [
     "models",
     "videos",
     "bridge",
+    // REAPER's and Renoise's bridges' receipts, secrets, logs and discovery (their DAWs load their own copies).
+    "bridges",
 ];
 /// What the producer keeps unless they say --all.
 const KEPT: &str = "conversations, notes, recipes, sign-ins, library and references";
@@ -1380,7 +1382,7 @@ fn not_kumis_said(home: &str, why: NotKumis, display: &dyn Fn(&str) -> String) -
 /// What Kumi keeps in its folder besides itself, by name: the producer's conversations, notes, recipes, sign-ins,
 /// library and references, and what Kumi remembers between runs. Only --all takes these, and only from a folder of
 /// Kumi's alone: elsewhere, names like projects and settings.json could be the producer's.
-const KUMI_S_DATA: [&str; 26] = [
+const KUMI_S_DATA: [&str; 27] = [
     "auth.json",
     "settings.json",
     "kumi.db",
@@ -1407,6 +1409,8 @@ const KUMI_S_DATA: [&str; 26] = [
     "devices",
     "max",
     "probes",
+    // The DAW used last, among several bridges.
+    "last-daw",
 ];
 /// Kumi's folders whose names the producer may use too (`~/.local/bin`, say): only Kumi's entries in them go, and the
 /// folder once nothing else is left in it.
@@ -1747,7 +1751,14 @@ pub async fn uninstall_installed(io: InstalledIo, options: UninstallOptions) -> 
     // Each DAW's bridge, taken out when the producer says so; the files of one that stays stay too, while it uses them.
     let mut staying = vec![];
     for provider in crate::daw::providers() {
-        let removed = provider.remove_bridge(&io, run.clone()).await?;
+        // One DAW's bridge that can't come out stays, said; the rest of Kumi still goes.
+        let removed = match provider.remove_bridge(&io, run.clone()).await {
+            Ok(removed) => removed,
+            Err(why) => {
+                say(format!("{why}; its files stay."));
+                RemovedBridge::Kept
+            }
+        };
         if removed != RemovedBridge::Removed && provider.bridge_files_in_use(&join(&home, provider.bridge_folder()), &io.env) {
             staying.push(provider);
         }

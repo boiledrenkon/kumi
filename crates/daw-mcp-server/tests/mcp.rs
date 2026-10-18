@@ -193,3 +193,26 @@ async fn a_bridge_without_a_pid_is_checked_by_connecting() {
     simulator.stop();
     session.finish().await;
 }
+
+/// What the bridge says as it happens (a track inserted where refs are positions) reaches the MCP client as
+/// `notifications/daw_event`, between the answers.
+#[tokio::test]
+async fn the_bridges_events_reach_the_client_as_notifications() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = BridgePaths::new(home.path(), Daw::Renoise);
+    let secret = ensure_secret(&paths.secret()).unwrap();
+    let mut config = SimulatorConfig::renoise(secret, "/lab/Renoise/V3.5.4");
+    config.discovery_dir = Some(paths.discovery());
+    let simulator = Simulator::start(config).await.unwrap();
+    let mut session = Session::start(Daw::Renoise, home.path());
+    assert_eq!(session.tool(1, "status", json!({})).await["connected"], json!(true));
+    simulator.emit("tracks", json!({"count": 8, "made": [1], "gone": [], "layout": 1}));
+    let line = tokio::time::timeout(std::time::Duration::from_secs(10), session.output.next_line()).await.unwrap().unwrap().unwrap();
+    let event: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        event,
+        json!({"jsonrpc": "2.0", "method": "notifications/daw_event", "params": {"name": "tracks", "data": {"count": 8, "made": [1], "gone": [], "layout": 1}}})
+    );
+    simulator.stop();
+    session.finish().await;
+}

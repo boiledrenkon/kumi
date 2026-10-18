@@ -84,6 +84,7 @@ fn read_params(arguments: &Value) -> Result<Value, String> {
     if !params.contains_key("kind") && !params.contains_key("ref") {
         return Err("kind: what to read (or ref: one object)".into());
     }
+    layout_arg(arguments, &mut params)?;
     if let Some(limit) = limit_arg(arguments)? {
         params.insert("limit".into(), limit.into());
     }
@@ -106,7 +107,20 @@ fn body_params(arguments: &Value) -> Result<Value, String> {
     if let Some(limit) = limit_arg(arguments)? {
         params.insert("limit".into(), limit.into());
     }
+    layout_arg(arguments, &mut params)?;
     Ok(Value::Object(params))
+}
+
+/// The layout the request's refs were made in (Renoise's track shifts since): the bridge carries older refs through them.
+fn layout_arg(arguments: &Value, params: &mut Map<String, Value>) -> Result<(), String> {
+    match arguments.get("layout") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Number(n)) if n.as_u64().is_some() => {
+            params.insert("layout".into(), n.clone().into());
+            Ok(())
+        }
+        Some(_) => Err("layout must be a whole number from 0".into()),
+    }
 }
 
 fn size_of(value: &Value) -> usize {
