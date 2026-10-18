@@ -161,6 +161,11 @@ impl<'a> Reaper<'a> {
         self.api.GetProjectStateChangeCount().map(|f| unsafe { f(proj.0) })
     }
 
+    /// The project's tempo now, in beats per minute.
+    pub fn tempo(&self) -> Option<f64> {
+        self.api.Master_GetTempo().map(|f| unsafe { f() })
+    }
+
     pub fn track_count(&self, proj: Project) -> i32 {
         self.api.CountTracks().map(|f| unsafe { f(proj.0) }).unwrap_or(0)
     }
@@ -254,6 +259,7 @@ pub mod fake {
         /// None: no project (REAPER never has none, but the bridge must not care).
         pub project: Option<(String, String)>,
         pub play_bits: i32,
+        pub bpm: f64,
         pub state_count: i32,
         pub tracks: Vec<(String, String)>,
         pub selected: Vec<usize>,
@@ -330,6 +336,9 @@ pub mod fake {
             ptr::null_mut()
         }
     }
+    unsafe extern "C" fn master_get_tempo() -> f64 {
+        with(|s| s.bpm)
+    }
     unsafe extern "C" fn get_play_state_ex(_proj: *mut ReaProject) -> c_int {
         with(|s| s.play_bits)
     }
@@ -402,6 +411,7 @@ pub mod fake {
                 b"GetProjectName" => get_project_name as *mut c_void,
                 b"GetCurrentProjectInLoadSave" => get_current_project_in_load_save as *mut c_void,
                 b"GetPlayStateEx" => get_play_state_ex as *mut c_void,
+                b"Master_GetTempo" => master_get_tempo as *mut c_void,
                 b"GetProjectStateChangeCount" => get_project_state_change_count as *mut c_void,
                 b"CountTracks" => count_tracks as *mut c_void,
                 b"CountSelectedTracks2" => count_selected_tracks2 as *mut c_void,
@@ -430,6 +440,7 @@ pub mod fake {
                 resource: "/lab/REAPER".into(),
                 project: Some((String::new(), String::new())),
                 tracks: vec![("{AAAA}".into(), "Drums".into()), ("{BBBB}".into(), "Bass".into())],
+                bpm: 120.0,
                 ..State::default()
             }
         });
