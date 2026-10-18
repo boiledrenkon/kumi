@@ -276,6 +276,9 @@ impl Server {
     /// closes every connection and waits for the threads. Bounded: nothing it waits for waits on the main thread, and
     /// a peer that stopped reading is cut off after a grace.
     pub fn stop(mut self, reason: &str) {
+        // The connections as they are now: a reader that sees `stopping` first answers, leaves the hub and ends, and
+        // would otherwise be missed here and never told goodbye.
+        let mut conns = self.hub.conns();
         self.stopping.store(true, Ordering::Release);
         if let Some((path, _)) = self.discovery.take() {
             let _ = std::fs::remove_file(path);
@@ -286,7 +289,11 @@ impl Server {
             let _ = accept.join();
         }
         let spawned = std::mem::take(&mut *lock(&self.threads));
-        let conns = std::mem::take(&mut *lock(&self.hub.inner.conns));
+        for conn in std::mem::take(&mut *lock(&self.hub.inner.conns)) {
+            if !conns.iter().any(|known| known.id == conn.id) {
+                conns.push(conn);
+            }
+        }
         for conn in &conns {
             let _ = conn.stream.shutdown(Shutdown::Read);
         }
