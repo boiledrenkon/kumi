@@ -1493,3 +1493,31 @@ test("reads: a matrix too big for a page keeps the slots around the one playing,
   eq(small.truncated, nil)
   H.no_dialogs()
 end)
+
+test("reads: a snapshot, an instrument body and a chain are cut to a page, and say so", function()
+  local long = string.rep("n", 2000)
+  local tracks = {}
+  for i = 1, 150 do tracks[i] = { name = long } end
+  local env, peer = setup(nil, demo({ tracks = tracks, send_tracks = 0 }))
+  local snapshot = call(peer, "snapshot")
+  ok(#json.encode(snapshot) <= MAX_LINE, "the snapshot fits a page")
+  eq(snapshot.result.moreTracks, true)
+  ok(#snapshot.result.tracks < 150 and #snapshot.result.tracks >= 1, "and lists fewer tracks: " .. #snapshot.result.tracks)
+  local E = snapshot.result.epoch
+  -- a chain of 400 devices with long names
+  for d = 1, 400 do mock.ops.insert_device(1, { name = "Gainer", display_name = long, params = {} }) end
+  local chain = call(peer, "focus_body", { kind = "dsp", ref = E .. ":track:1" })
+  E = epoch_of(peer)
+  chain = call(peer, "focus_body", { kind = "dsp", ref = E .. ":track:1" })
+  ok(#json.encode(chain) <= MAX_LINE, "the chain fits a page")
+  eq(chain.result.truncated, true)
+  ok(#chain.result.nodes >= 1 and #chain.result.nodes < 400)
+  -- an instrument with 255 samples with long names
+  for _ = 1, 253 do mock.ops.insert_sample(1, { name = long }) end
+  E = epoch_of(peer)
+  local body = call(peer, "focus_body", { kind = "instrument", ref = E .. ":instrument:1" })
+  ok(#json.encode(body) <= MAX_LINE, "the instrument body fits a page")
+  eq(body.result.truncated, true)
+  ok(#body.result.keyzones >= 1 and #body.result.keyzones < 255)
+  H.no_dialogs()
+end)

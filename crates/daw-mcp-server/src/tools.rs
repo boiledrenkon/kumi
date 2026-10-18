@@ -154,14 +154,18 @@ impl Host {
     /// A call whose answer is a page: if the bridge sends one past the frame bound, the same page is asked for again
     /// with half the rows, down to one.
     async fn paged(&self, method: &str, mut params: Value, pick: &Pick, timeout: Duration) -> (Value, bool) {
+        let mut before = usize::MAX;
         for attempt in 0..=SMALLER_PAGES {
             match self.call(method, params.clone(), pick, timeout).await {
                 Ok(answer) if size_of(&answer) <= MAX_ANSWER_BYTES => return (answer, false),
-                Ok(_) => {
+                Ok(answer) => {
+                    // (An answer that doesn't page, or a bridge that ignores the limit, is no smaller for asking again.)
+                    let size = size_of(&answer);
                     let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(DEFAULT_LIMIT);
-                    if limit <= 1 || attempt == SMALLER_PAGES {
+                    if limit <= 1 || attempt == SMALLER_PAGES || size >= before {
                         return (self.call_error(&CallError::TooBig), true);
                     }
+                    before = size;
                     params["limit"] = (limit / 2).into();
                 }
                 Err(error) => return (self.call_error(&error), true),

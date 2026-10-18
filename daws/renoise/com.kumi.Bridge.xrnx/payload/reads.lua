@@ -81,6 +81,26 @@ local function page(job, epoch, params, total, row_at, sparse, extra)
   end
 end
 
+-- Shrinks the named lists of an answer that has no pages (a snapshot, an instrument, a chain), each from its end by about a
+-- third at a time, until it fits a page; `truncated` says it was cut.
+function M.bound(result, keys)
+  while #json.encode(result) > M.PAGE_BUDGET do
+    local cut = false
+    for _, key in ipairs(keys) do
+      local list = result[key]
+      if list and #list > 1 then
+        local shorter = {}
+        for i = 1, math.max(1, math.floor(#list * 0.7)) do shorter[i] = list[i] end
+        result[key] = array(shorter)
+        cut = true
+      end
+    end
+    if not cut then break end
+    result.truncated = true
+  end
+  return result
+end
+
 ---@return integer
 local function track_param(value, epoch, song)
   ---@type integer?

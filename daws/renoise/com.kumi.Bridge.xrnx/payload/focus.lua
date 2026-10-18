@@ -157,6 +157,12 @@ function M.snapshot(job, epoch, changed)
     changed = changed,
   }
   if count > M.SNAPSHOT_TRACKS then result.moreTracks = true end
+  -- (a snapshot says it has more tracks than it lists with `moreTracks`, whatever the reason)
+  reads.bound(result, { "tracks" })
+  if result.truncated then
+    result.truncated = nil
+    result.moreTracks = true
+  end
   return result
 end
 
@@ -403,7 +409,7 @@ local function instrument_body(job, params, epoch)
     phrases = array(phrases),
   }
   if sample_count > M.MAX_BODY_ROWS or phrase_count > M.MAX_BODY_ROWS then result.truncated = true end
-  return result
+  return reads.bound(result, { "keyzones", "phrases" })
 end
 
 -- The chain of a track. Flat until M4 reads the Doofers' and Splitters' XML: they are marked as containers.
@@ -420,7 +426,7 @@ local function dsp_body(job, params, epoch)
       container = row.isDoofer or row.isSplitter, childNodes = json.array(),
     }
   end
-  return { epoch = epoch, ref = refs.make(epoch, "track", at), name = song:track(at).name, nodes = array(nodes) }
+  return reads.bound({ epoch = epoch, ref = refs.make(epoch, "track", at), name = song:track(at).name, nodes = array(nodes) }, { "nodes" })
 end
 
 -- focus_body {kind, ref?, window?}
