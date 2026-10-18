@@ -245,6 +245,8 @@ pub struct State {
     pub bpm: f64,
     pub time_signature: (i32, i32),
     pub state_count: i32,
+    /// The undo history's entries: one for a project just loaded.
+    pub undo_entries: i32,
     pub master: FakeTrack,
     pub tracks: Vec<FakeTrack>,
     pub markers: Vec<FakeMarker>,
@@ -295,6 +297,7 @@ impl Default for State {
             bpm: 0.0,
             time_signature: (4, 4),
             state_count: 0,
+            undo_entries: 1,
             master: FakeTrack::new("{MASTER}", "MASTER"),
             tracks: vec![],
             markers: vec![],
@@ -535,6 +538,9 @@ unsafe extern "C" fn get_play_state_ex(_proj: *mut ReaProject) -> c_int {
 }
 unsafe extern "C" fn get_project_state_change_count(_proj: *mut ReaProject) -> c_int {
     counted(|s| s.state_count)
+}
+unsafe extern "C" fn undo_get_num_entries(_proj: *mut ReaProject) -> c_int {
+    counted(|s| s.undo_entries)
 }
 unsafe extern "C" fn get_project_length(_proj: *mut ReaProject) -> f64 {
     counted(|s| s.length)
@@ -1474,6 +1480,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetPlayStateEx" => get_play_state_ex as unsafe extern "C" fn(*mut ReaProject) -> c_int,
         b"Master_GetTempo" => master_get_tempo as unsafe extern "C" fn() -> f64,
         b"GetProjectStateChangeCount" => get_project_state_change_count as unsafe extern "C" fn(*mut ReaProject) -> c_int,
+        b"Undo_GetNumEntries" => undo_get_num_entries as unsafe extern "C" fn(*mut ReaProject) -> c_int,
         b"GetProjectLength" => get_project_length as unsafe extern "C" fn(*mut ReaProject) -> f64,
         b"GetCursorPositionEx" => get_cursor_position_ex as unsafe extern "C" fn(*mut ReaProject) -> f64,
         b"GetPlayPosition2Ex" => get_play_position2_ex as unsafe extern "C" fn(*mut ReaProject) -> f64,

@@ -110,14 +110,14 @@ pub fn time_selection(reaper: &Reaper, proj: Project) -> Value {
 }
 
 /// The project's row. `identity` is what names this open project while it stays open in this REAPER; `id` is the Kumi
-/// project id the project itself carries (ProjExtState `kumi`/`project`), null before Kumi gave it one.
-pub fn project_row(reaper: &Reaper, proj: Project, info: &ProjectInfo, identity: &str) -> Value {
+/// project id the project itself carries (see `Reads::project_id`), null before it has one of its own.
+pub fn project_row(reaper: &Reaper, proj: Project, info: &ProjectInfo, identity: &str, id: Option<&str>) -> Value {
     let cursor = reaper.cursor(proj);
     let state = reaper.play_state(proj);
     let (loop_start, loop_end) = reaper.loop_points(proj);
     let signature = reaper.time_signature_at(proj, cursor);
     json!({
-        "id": reaper.project_ext_state(proj, "kumi", "project").filter(|id| !id.is_empty()),
+        "id": id,
         "identity": identity,
         "name": clip(&info.name),
         "path": clip(&info.path),

@@ -265,6 +265,11 @@ impl Reaper<'_> {
         (found > 0).then_some(value)
     }
 
+    /// How many entries the undo history holds (REAPER 7.79): one after a project is loaded, more with each edit.
+    pub fn undo_entries(&self, proj: Project) -> Option<i32> {
+        self.api.Undo_GetNumEntries().map(|f| unsafe { f(proj.0) })
+    }
+
     /// Whether the track has an instrument plug-in.
     pub fn track_has_instrument(&self, track: Track) -> bool {
         self.api.TrackFX_GetInstrument().is_some_and(|f| unsafe { f(track.0) } >= 0)

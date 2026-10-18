@@ -159,6 +159,8 @@ struct Watch {
     path: String,
     name: String,
     count: Option<i32>,
+    /// The undo history's entries: one right after a project is loaded.
+    undo: Option<i32>,
     tracks: HashSet<String>,
     tracks_at: Option<Instant>,
 }
@@ -167,9 +169,26 @@ fn track_guids(reaper: &Reaper, project: crate::reaper::Project) -> HashSet<Stri
     (0..reaper.track_count(project).min(WATCH_TRACKS)).filter_map(|i| reaper.track_at(project, i)).map(|t| reaper.track_guid(t)).collect()
 }
 
-/// Whether the tracks now are another project's than the tracks before: they share none; or one side has none and
-/// the file changed or the counter went back; or neither has any and the file changed.
-fn is_another_project(before: &HashSet<String>, now: &HashSet<String>, file_changed: bool, counter_went_back: bool) -> bool {
+/// What the bridge saw change in the active tab's project since it last looked.
+#[derive(Debug, Clone, Copy, Default)]
+struct Moves {
+    file_changed: bool,
+    counter_went_back: bool,
+    /// The undo history fell back to a fresh project's: a project was loaded, whatever file.
+    history_reset: bool,
+    /// A saved project became unsaved: a project made from a template, never a Save As.
+    went_unsaved: bool,
+}
+
+/// Whether the project now is another project than the one before. A load (the undo history gone), or a saved project
+/// that became unsaved, is one whatever the tracks (a template carries the GUIDs of the project it was made from);
+/// otherwise the tracks decide: they share none; or one side has none and the file changed or the counter went back;
+/// or neither has any and the file changed.
+fn is_another_project(before: &HashSet<String>, now: &HashSet<String>, moves: Moves) -> bool {
+    let Moves { file_changed, counter_went_back, history_reset, went_unsaved } = moves;
+    if history_reset || went_unsaved {
+        return true;
+    }
     match (before.is_empty(), now.is_empty()) {
         (false, false) => before.is_disjoint(now),
         (true, true) => file_changed,
@@ -483,6 +502,10 @@ impl Extension {
                 self.reads.project_replaced(info.ptr);
             }
         }
+        // Noticed on every settled tick, so an id that came with a template is seen while the project is unsaved.
+        if let Some(info) = info.as_ref().filter(|_| settled) {
+            self.reads.project_id(&reaper, info.ptr, info);
+        }
         if (changed && !first) || replaced {
             self.out.event("project", current.map(|(_, p)| p.to_json()).unwrap_or(Value::Null));
             let mut pending = self.pending.borrow_mut();
@@ -501,12 +524,14 @@ impl Extension {
         };
         let addr = info.ptr.addr();
         let count = reaper.state_change_count(info.ptr);
+        let undo = reaper.undo_entries(info.ptr);
         let fresh = |watch: &mut Watch| {
             *watch = Watch {
                 project: Some(addr),
                 path: info.path.clone(),
                 name: info.name.clone(),
                 count,
+                undo,
                 tracks: track_guids(reaper, info.ptr),
                 tracks_at: Some(Instant::now()),
             };
@@ -523,17 +548,21 @@ impl Extension {
             Some(_) => {
                 let file_changed = watch.path != info.path || watch.name != info.name;
                 let counter_went_back = matches!((watch.count, count), (Some(before), Some(now)) if now < before);
+                let history_reset = matches!((watch.undo, undo), (Some(before), Some(now)) if before >= 2 && now <= 1);
+                let went_unsaved = !watch.path.is_empty() && info.path.is_empty();
                 let due = count != watch.count && watch.tracks_at.is_none_or(|at| at.elapsed() >= WATCH_REFRESH);
                 let mut replaced = false;
-                if file_changed || counter_went_back || due {
+                if file_changed || counter_went_back || history_reset || due {
                     let now = track_guids(reaper, info.ptr);
-                    replaced = is_another_project(&watch.tracks, &now, file_changed, counter_went_back);
+                    let moves = Moves { file_changed, counter_went_back, history_reset, went_unsaved };
+                    replaced = is_another_project(&watch.tracks, &now, moves);
                     watch.tracks = now;
                     watch.tracks_at = Some(Instant::now());
                 }
                 watch.path = info.path.clone();
                 watch.name = info.name.clone();
                 watch.count = count;
+                watch.undo = undo;
                 (false, replaced)
             }
         }
@@ -819,6 +848,98 @@ mod tests {
         (read["epoch"].as_str().unwrap().to_string(), read["items"][0]["identity"].as_str().unwrap().to_string())
     }
 
+    const TEMPLATE_ID: &str = "11111111111111111111111111111111";
+    const OWN_ID: &str = "22222222222222222222222222222222";
+
+    fn set_id(id: Option<&str>) {
+        fake::with(|s| match id {
+            Some(id) => {
+                s.project_ext.insert(("kumi".into(), "project".into()), id.into());
+            }
+            None => {
+                s.project_ext.clear();
+            }
+        });
+    }
+
+    /// The `id` of the project row, as a read gives it.
+    fn project_id(extension: &Extension, tx: &std::sync::mpsc::Sender<Job>) -> Value {
+        ask_with(extension, tx, "read", json!({"kind": "project"})).unwrap()["items"][0]["id"].clone()
+    }
+
+    #[test]
+    fn a_projects_id_travels_with_its_file_through_save_as_and_a_copy_opened_from_disk() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        set_id(Some(OWN_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+        // Save As: the id is project data, so the copy is the same place (and nothing about the tab changed).
+        let before = epoch_and_identity(&extension, &tx);
+        fake::with(|s| s.project = Some(("/lab/Projects/Copy.rpp".into(), "Copy.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+        assert_eq!(epoch_and_identity(&extension, &tx), before);
+        // The file copied on disk and opened in the tab: another project object's worth of tracks, the same id.
+        fake::with(|s| {
+            s.project = Some(("/lab/Projects/Elsewhere/Song.rpp".into(), "Song.rpp".into()));
+            s.tracks = vec![fake::FakeTrack::new("{OTHER-1}", "Pad")];
+            s.state_count = 1;
+        });
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx), before, "another project took the tab");
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+    }
+
+    #[test]
+    fn a_project_made_from_a_template_does_not_take_the_templates_id() {
+        let (extension, tx, _, _) = setup();
+        // New from a template saved with an id: unsaved, and the id is in it.
+        fake::reset();
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), Value::Null, "an unsaved project has no id of its own");
+        // The first save writes the file with the template's id in it. It still isn't this project's.
+        fake::with(|s| s.project = Some(("/lab/Projects/Mix.rpp".into(), "Mix.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), Value::Null);
+        // Kumi writes the project's own id over it (M6): that is the id from then on, through Save As too.
+        set_id(Some(OWN_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+        fake::with(|s| s.project = Some(("/lab/Projects/Mix v2.rpp".into(), "Mix v2.rpp".into())));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+    }
+
+    #[test]
+    fn a_project_without_an_id_has_none_until_one_is_written_and_the_snapshot_agrees() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), Value::Null);
+        set_id(Some(OWN_ID));
+        assert_eq!(project_id(&extension, &tx), OWN_ID);
+        assert_eq!(ask_with(&extension, &tx, "snapshot", json!({})).unwrap()["project"]["id"], OWN_ID);
+    }
+
+    #[test]
+    fn opening_the_template_file_itself_is_the_templates_own_place() {
+        let (extension, tx, _, _) = setup();
+        fake::reset();
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), Value::Null);
+        // The user opens the template's RPP (saved, with its id) in the same tab: that is the template's project.
+        fake::with(|s| {
+            s.project = Some(("/lab/Templates/Kit.rpp".into(), "Kit.rpp".into()));
+            s.tracks = vec![fake::FakeTrack::new("{KIT-1}", "Kit")];
+            s.state_count = 1;
+        });
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), TEMPLATE_ID);
+    }
+
     #[test]
     fn saving_a_project_under_another_name_keeps_the_epoch_and_the_identity() {
         let (extension, tx, recorder, _) = setup();
@@ -932,17 +1053,95 @@ mod tests {
     }
 
     #[test]
-    fn the_classifier_weighs_tracks_then_file_then_counter() {
+    fn the_classifier_weighs_a_load_then_tracks_then_file_then_counter() {
         let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<HashSet<_>>();
         let (a, ab, c, none) = (set(&["a"]), set(&["a", "b"]), set(&["c"]), set(&[]));
-        assert!(!is_another_project(&a, &ab, false, false));
-        assert!(!is_another_project(&ab, &a, true, true), "a file saved under another name keeps its tracks");
-        assert!(is_another_project(&a, &c, false, false), "no track in common is another project, whatever the file");
-        assert!(!is_another_project(&none, &a, false, false), "the first track of an empty project");
-        assert!(is_another_project(&a, &none, false, true), "tracks gone and the counter back");
-        assert!(!is_another_project(&a, &none, false, false), "tracks gone by editing");
-        assert!(is_another_project(&none, &none, true, false), "another file, nothing to compare");
-        assert!(!is_another_project(&none, &none, false, true));
+        let moved = |file_changed, counter_went_back| Moves { file_changed, counter_went_back, ..Moves::default() };
+        assert!(!is_another_project(&a, &ab, moved(false, false)));
+        assert!(!is_another_project(&ab, &a, moved(true, true)), "a file saved under another name keeps its tracks");
+        assert!(is_another_project(&a, &c, moved(false, false)), "no track in common is another project, whatever the file");
+        assert!(!is_another_project(&none, &a, moved(false, false)), "the first track of an empty project");
+        assert!(is_another_project(&a, &none, moved(false, true)), "tracks gone and the counter back");
+        assert!(!is_another_project(&a, &none, moved(false, false)), "tracks gone by editing");
+        assert!(is_another_project(&none, &none, moved(true, false)), "another file, nothing to compare");
+        assert!(!is_another_project(&none, &none, moved(false, true)));
+        // A load, or a saved project that became unsaved, is another project with the very same tracks: a template carries
+        // the GUIDs of the project it was made from, and so does a copy of a file.
+        assert!(is_another_project(&ab, &ab, Moves { history_reset: true, ..Moves::default() }));
+        assert!(is_another_project(&ab, &ab, Moves { went_unsaved: true, file_changed: true, ..Moves::default() }));
+    }
+
+    /// A project the bridge sees, with the file it came from and how far its undo history has got.
+    fn project_with_history(path: &str, undo: i32) {
+        fake::with(|s| {
+            s.project = Some((path.into(), path.rsplit('/').next().unwrap_or("").into()));
+            s.undo_entries = undo;
+        });
+    }
+
+    #[test]
+    fn a_template_made_from_the_open_project_is_a_new_project_though_it_has_the_same_tracks() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        // New project from a template that was saved from this very project: unsaved, the same GUIDs.
+        project_with_history("", 1);
+        extension.tick(Driver::Timer);
+        let after = epoch_and_identity(&extension, &tx);
+        assert_ne!(after, before);
+    }
+
+    #[test]
+    fn a_first_save_is_the_same_project_and_opening_a_file_is_not_even_with_the_same_tracks() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        // The template-born project: unsaved, with the template's id in it and some edits made.
+        project_with_history("", 5);
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        let unsaved = epoch_and_identity(&extension, &tx);
+        // The first save: the file gets a name, the undo history stays, the project is the one it was.
+        project_with_history("/lab/Projects/Mix.rpp", 5);
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), unsaved);
+        assert_eq!(project_id(&extension, &tx), Value::Null, "still the template's id, not this project's own");
+        // A copy of the template's file opened in the tab: a load, the undo history starts over, whatever the tracks.
+        project_with_history("/lab/Projects/Template copy.rpp", 1);
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx), unsaved);
+        assert_eq!(project_id(&extension, &tx), TEMPLATE_ID, "a copy of a file shares its place");
+    }
+
+    #[test]
+    fn opening_a_file_over_an_unsaved_project_with_edits_is_a_load() {
+        let (extension, tx, _, _) = setup();
+        fake::reset();
+        project_with_history("", 4);
+        set_id(Some(TEMPLATE_ID));
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), Value::Null);
+        // The template's own file, opened over it, with the same tracks (they came from it).
+        project_with_history("/lab/Templates/Kit.rpp", 1);
+        extension.tick(Driver::Timer);
+        assert_eq!(project_id(&extension, &tx), TEMPLATE_ID);
+    }
+
+    #[test]
+    fn reverting_to_the_saved_file_reloads_the_project_and_a_few_undos_dont() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        project_with_history("/lab/Projects/Song.rpp", 6);
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        // Entries come and go with edits; pruning an old one is not a load.
+        project_with_history("/lab/Projects/Song.rpp", 5);
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), before);
+        // Revert to saved: the file is loaded again.
+        project_with_history("/lab/Projects/Song.rpp", 1);
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx).0, before.0);
     }
 
     #[test]

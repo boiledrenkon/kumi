@@ -50,6 +50,9 @@ pub struct Reads {
     epoch: RefCell<Epoch>,
     /// The serial of the project open in each tab: what its identity is made of.
     serials: RefCell<Serials>,
+    /// A Kumi project id found in a tab's project while it was unsaved: it came with the template the project was made
+    /// from, so it isn't that project's own.
+    inherited: RefCell<HashMap<usize, String>>,
 }
 
 /// A serial number for each project open in a tab, from this REAPER's own counter: the same while the project stays open
@@ -197,11 +200,38 @@ impl Reads {
     /// A different project took the place of the one in this tab.
     pub fn project_replaced(&self, proj: Project) {
         self.serials.borrow_mut().replace(proj.addr());
+        self.inherited.borrow_mut().remove(&proj.addr());
+    }
+
+    /// The Kumi project id the project carries (ProjExtState `kumi`/`project`, saved in the RPP), or None when it has none
+    /// of its own. It travels with the file: Save As, a copy of the file opened, a backup, all share it, as Live's Sets
+    /// do. A project that is still unsaved has none of its own: one found in it came with the template it was made from,
+    /// and stays foreign after the first save, until a different one is written over it.
+    pub fn project_id(&self, reaper: &Reaper, proj: Project, info: &crate::reaper::ProjectInfo) -> Option<String> {
+        let stored = reaper.project_ext_state(proj, "kumi", "project").filter(|id| !id.is_empty());
+        let tab = proj.addr();
+        let mut inherited = self.inherited.borrow_mut();
+        match (stored, info.path.is_empty()) {
+            (Some(id), true) => {
+                inherited.insert(tab, id);
+                None
+            }
+            (Some(id), false) if inherited.get(&tab) == Some(&id) => None,
+            (Some(id), false) => {
+                inherited.remove(&tab);
+                Some(id)
+            }
+            (None, _) => {
+                inherited.remove(&tab);
+                None
+            }
+        }
     }
 
     /// The tabs open now: the serial of a tab that closed is forgotten, so a pointer REAPER hands out again starts afresh.
     pub fn keep_tabs(&self, open: &[usize]) {
         self.serials.borrow_mut().by_tab.retain(|tab, _| open.contains(tab));
+        self.inherited.borrow_mut().retain(|tab, _| open.contains(tab));
     }
 
     pub fn registry(&self) -> RefMut<'_, Registry> {
@@ -310,7 +340,7 @@ impl Reads {
         match kind {
             "project" => {
                 let mut pager = pager;
-                pager.push(rows::project_row(reaper, proj, &info, &self.identity(proj)));
+                pager.push(rows::project_row(reaper, proj, &info, &self.identity(proj), self.project_id(reaper, proj, &info).as_deref()));
                 self.page(pager, None, Some(1))
             }
             "track" => self.read_tracks(reaper, proj, pager, cursor),
@@ -748,7 +778,7 @@ impl Reads {
         }
         let mut answer = json!({
             "epoch": self.epoch(),
-            "project": rows::project_row(reaper, proj, &info, &self.identity(proj)),
+            "project": rows::project_row(reaper, proj, &info, &self.identity(proj), self.project_id(reaper, proj, &info).as_deref()),
             "transport": rows::transport(reaper, proj),
             "tracks": tracks.rows,
             "selection": focus::selection(self, reaper, proj),
@@ -1570,5 +1600,41 @@ mod tests {
         for kind in ["track", "item", "take", "fx", "param", "send", "marker", "region", "env"] {
             assert!(kinds.contains(kind), "no {kind} ref walked: {kinds:?}");
         }
+    }
+
+    /// REAPER stores a colour even when it isn't used: only the 0x1000000 flag says it is. Without it a track is the default
+    /// colour (null), never black.
+    #[test]
+    fn a_colour_counts_only_with_reapers_set_flag_so_default_tracks_are_not_black() {
+        let lab = Lab::new();
+        fake::with(|s| {
+            s.tracks[0].color = 0; // no custom colour
+            s.tracks[1].color = fake::native_color(0, 0, 0); // a custom colour that is black
+            s.tracks[2].color = 0x0000FF; // a colour kept but not used (no flag)
+            s.tracks[3].color = fake::native_color(255, 0, 0);
+            s.tracks[1].items[0].color = 0;
+            s.tracks[1].items[1].color = fake::native_color(0, 255, 0);
+            s.tracks[2].items[0].color = 0x00FF00; // kept, not used
+            s.markers[0].color = 0x0000FF; // kept, not used
+            s.markers[1].color = fake::native_color(0, 0, 0);
+        });
+        let colours = |rows: Vec<Value>| rows.iter().map(|r| r["color"].clone()).collect::<Vec<_>>();
+        let tracks = lab.rows(json!({"kind": "track"}));
+        assert_eq!(colours(tracks[1..].to_vec()), [Value::Null, json!("#000000"), Value::Null, json!("#ff0000")]);
+        assert_eq!(colours(lab.rows(json!({"kind": "item", "parent": "r:track:{BBBB}"}))), [Value::Null, json!("#00ff00")]);
+        assert_eq!(colours(lab.rows(json!({"kind": "item", "parent": "r:track:{CCCC}"}))), [Value::Null]);
+        assert_eq!(colours(lab.rows(json!({"kind": "marker"}))), [Value::Null]);
+        assert_eq!(colours(lab.rows(json!({"kind": "region"}))), [json!("#000000")]);
+        // The same in what FOCUS draws: the selection's header and the arrange window.
+        fake::select_tracks(&[0]);
+        let api = fake::api();
+        let reaper = Reaper::new(&api);
+        let snapshot = lab.reads.snapshot(&reaper).unwrap();
+        assert_eq!(snapshot["selection"]["track"]["color"], Value::Null);
+        fake::select_tracks(&[1]);
+        assert_eq!(lab.reads.snapshot(&reaper).unwrap()["selection"]["track"]["color"], "#000000");
+        let arrange = lab.reads.focus_body(&reaper, &json!({"kind": "arrange"})).unwrap();
+        assert_eq!(colours(arrange["tracks"].as_array().unwrap().clone()), [Value::Null, json!("#000000"), Value::Null, json!("#ff0000")]);
+        assert_eq!(colours(arrange["tracks"][1]["items"].as_array().unwrap().clone()), [Value::Null, json!("#00ff00")]);
     }
 }
