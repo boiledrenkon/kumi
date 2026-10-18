@@ -7,13 +7,9 @@ pub use crate::core::project::{
     create_project_store, decide_project_with, moved_to, project_id, project_id_of, same_file, Baseline, FileProjectStore, ProjectRules,
     ProjectStore,
 };
-use indexmap::{IndexMap, IndexSet};
-use kumi_common::js::{
-    json::stringify,
-    string::{head, trim, utf16_len},
-};
+use indexmap::IndexMap;
+use kumi_common::js::json::stringify;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -57,23 +53,20 @@ impl ProjectRules for LiveRules {
 pub fn decide_project(kept: Option<&str>, path: &str, last: Option<&str>, own: bool) -> (String, bool) {
     decide_project_with(&LiveRules, kept, path, last, own)
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DescribedDiff {
-    pub lines: Vec<String>,
-    pub more: usize,
-}
+use crate::core::describe::{describe_changes, describe_watch_changes, small, Detail, ProjectChange, ProjectItem, ProjectWords};
+pub use crate::core::describe::{DescribedDiff, DescribedWatch};
+
 pub fn catch_up_from(name: &str, baseline: &Baseline, described: DescribedDiff) -> CatchUp {
     CatchUp { set: name.into(), last_seen_at: baseline.saved_at, lines: described.lines, more: described.more, after_reconnect: None }
 }
 
-const KINDS: &[(&str, &str)] =
-    &[("track", "tracks"), ("scene", "scenes"), ("clip", "clips"), ("device", "devices"), ("locator", "locators")];
-fn plural(kind: &str) -> String {
-    KINDS.iter().find(|(one, _)| *one == kind).map(|(_, many)| many.to_string()).unwrap_or_else(|| format!("{kind}s"))
-}
-fn known(kind: &str) -> bool {
-    KINDS.iter().any(|(one, _)| *one == kind)
-}
+/// Live's kinds, as its bridge's semantic snapshots name them.
+pub const LIVE_WORDS: ProjectWords = ProjectWords {
+    kinds: &[("track", "tracks"), ("scene", "scenes"), ("clip", "clips"), ("device", "devices"), ("locator", "locators")],
+    project: "set",
+    rank: &["set", "track", "scene", "device", "clip", "locator"],
+    opaque: &["device"],
+};
 /// A snapshot's records by their ids, borrowed from its pages: a diff names only a few of them.
 fn records(pages: &[JsonObject]) -> IndexMap<&str, &Value> {
     let mut rows = IndexMap::new();
@@ -98,158 +91,89 @@ fn js_text(value: Option<&Value>) -> String {
         Some(v) => stringify(v),
     }
 }
-fn quoted(value: &Value, fallback: &str) -> String {
-    value.as_str().map(trim).filter(|s| !s.is_empty()).map(|s| format!("“{}”", head(s, 60))).unwrap_or_else(|| fallback.into())
-}
 static DERIVED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/(parentSnapshotId|structureHash|trackCount|sceneCount|clipCount|deviceCount)$|/hash$").unwrap());
-fn named(kind: &str, items: &[&Value], verb: &str) -> String {
-    let names: Vec<_> = items.iter().map(|item| quoted(&item["name"], "")).filter(|s| !s.is_empty()).collect();
-    if items.len() == 1 {
-        return trim(&format!("{verb} {kind} {}", names.first().map(String::as_str).unwrap_or(""))).into();
-    }
-    if names.len() == items.len() && items.len() <= 3 {
-        format!("{verb} {} {}", plural(kind), names.join(", "))
-    } else {
-        format!("{verb} {} {}", items.len(), plural(kind))
-    }
-}
 fn pick<'a>(ids: &Value, from: &IndexMap<&str, &'a Value>) -> Vec<&'a Value> {
     ids.as_array().into_iter().flatten().filter_map(|id| from.get(js_text(Some(id)).as_str()).copied()).collect()
 }
-fn resolve_ambiguity<'a>(
-    item: &Value,
-    was: &IndexMap<&str, &'a Value>,
-    now: &IndexMap<&str, &'a Value>,
-    added: &mut IndexMap<String, Vec<&'a Value>>,
-    removed: &mut IndexMap<String, Vec<&'a Value>>,
-    lines: &mut Vec<String>,
-) {
-    let kind = js_text(item.get("kind"));
-    if !known(&kind) {
-        return;
-    }
-    let mut olds = pick(&item["beforeSnapshotIds"], was);
-    let mut news = pick(&item["afterSnapshotIds"], now);
-    olds.retain(|old| {
-        if let Some(i) = news.iter().position(|row| row.get("name") == old.get("name")) {
-            news.remove(i);
-            false
-        } else {
-            true
-        }
-    });
-    olds.retain(|old| {
-        if let Some(i) = news.iter().position(|row| row.get("order") == old.get("order")) {
-            let same = news.remove(i);
-            lines.push(format!("Renamed {kind} {} → {}", quoted(&old["name"], "(unnamed)"), quoted(&same["name"], "(unnamed)")));
-            false
-        } else {
-            true
-        }
-    });
-    if !news.is_empty() {
-        added.entry(kind.clone()).or_default().extend(news);
-    }
-    if !olds.is_empty() {
-        removed.entry(kind).or_default().extend(olds);
-    }
-}
-pub fn describe_diff(diff: &JsonObject, before: &[JsonObject], after: &[JsonObject], limit: Option<usize>) -> DescribedDiff {
+/// Live's semantic diff as ProjectChanges, one for each item the descriptions read, in order. `watching` adds what
+/// watch_me says beside catch-up: the track each thing is on, what an added thing is made of, each detail's values.
+fn changes_of(diff: &JsonObject, before: &[JsonObject], after: &[JsonObject], watching: bool) -> Vec<ProjectChange> {
     let was = records(before);
     let now = records(after);
-    let mut lines = vec![];
-    let mut added: IndexMap<String, Vec<&Value>> = IndexMap::new();
-    let mut removed: IndexMap<String, Vec<&Value>> = IndexMap::new();
-    let mut edited: IndexMap<String, Vec<(&Value, IndexSet<String>)>> = IndexMap::new();
-    for item in diff.get("items").and_then(Value::as_array).into_iter().flatten() {
-        if item["type"] == "ambiguity" {
-            resolve_ambiguity(item, &was, &now, &mut added, &mut removed, &mut lines);
+    let mut tracks = IndexMap::new();
+    if watching {
+        tracks = track_coordinates(&was);
+        tracks.extend(track_coordinates(&now));
+    }
+    let item = |row: &Value| ProjectItem {
+        name: row.get("name").cloned(),
+        order: row.get("order").cloned(),
+        on: row["data"]["parentSnapshotId"].as_str().and_then(|parent| tracks.get(parent)).cloned(),
+    };
+    let mut changes = vec![];
+    for entry in diff.get("items").and_then(Value::as_array).into_iter().flatten() {
+        let kind = js_text(entry.get("kind"));
+        if entry["type"] == "ambiguity" {
+            let before = pick(&entry["beforeSnapshotIds"], &was).into_iter().map(item).collect();
+            let after = pick(&entry["afterSnapshotIds"], &now).into_iter().map(item).collect();
+            changes.push(ProjectChange::Unclear { kind, before, after });
             continue;
         }
-        if item["type"] != "change" {
+        if entry["type"] != "change" {
             continue;
         }
-        let Some(facets) = item["facets"].as_array() else { continue };
-        let kind = js_text(item.get("kind"));
-        let old = item["beforeSnapshotId"].as_str().and_then(|id| was.get(id)).copied();
-        let current = item["afterSnapshotId"].as_str().and_then(|id| now.get(id)).copied();
+        let Some(facets) = entry["facets"].as_array() else { continue };
+        let old = entry["beforeSnapshotId"].as_str().and_then(|id| was.get(id)).copied();
+        let current = entry["afterSnapshotId"].as_str().and_then(|id| now.get(id)).copied();
         if facets.iter().any(|v| v == "added") {
             if let Some(current) = current {
-                added.entry(kind).or_default().push(current);
+                let made_of = if watching { made_of(&kind, current) } else { JsonObject::new() };
+                changes.push(ProjectChange::Added { item: item(current), made_of, kind });
                 continue;
             }
         }
         if facets.iter().any(|v| v == "removed") {
             if let Some(old) = old {
-                removed.entry(kind).or_default().push(old);
+                changes.push(ProjectChange::Removed { item: item(old), kind });
                 continue;
             }
         }
-        let details: Vec<_> =
-            item["details"].as_array().into_iter().flatten().filter(|d| d["path"].as_str().is_some_and(|p| !DERIVED.is_match(p))).collect();
-        if kind == "set" {
-            for d in details {
-                if d["path"] == "/data/tempo" && d["before"].is_number() && d["after"].is_number() {
-                    lines.push(format!("Tempo {} → {} BPM", js_text(d.get("before")), js_text(d.get("after"))));
-                }
-            }
-            continue;
-        }
-        if facets.iter().any(|v| v == "renamed") {
-            if let (Some(old), Some(current)) = (old, current) {
-                lines.push(format!("Renamed {kind} {} → {}", quoted(&old["name"], "(unnamed)"), quoted(&current["name"], "(unnamed)")));
-            }
-        }
-        let what: IndexSet<_> =
-            details.iter().filter_map(|d| d["path"].as_str()?.split('/').nth(2)).filter(|p| !p.is_empty()).map(str::to_owned).collect();
-        if !what.is_empty() {
-            if let Some(row) = current.or(old) {
-                edited.entry(kind).or_default().push((row, what));
-            }
-        }
-    }
-    for (kind, gone) in &mut removed {
-        let Some(fresh) = added.get_mut(kind) else { continue };
-        gone.retain(|old| {
-            if let Some(i) = fresh.iter().position(|item| item.get("order") == old.get("order")) {
-                let matched = fresh.remove(i);
-                lines.push(format!(
-                    "{} → {} (renamed and changed)",
-                    quoted(&old["name"], &format!("An unnamed {kind}")),
-                    quoted(&matched["name"], "(unnamed)")
-                ));
-                false
-            } else {
-                true
-            }
+        let details: Vec<_> = entry["details"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|d| d["path"].as_str().is_some_and(|p| !DERIVED.is_match(p)))
+            .collect();
+        // The Set itself: catch-up says its tempo, nothing else.
+        let lines = (kind == "set").then(|| {
+            details
+                .iter()
+                .filter(|d| d["path"] == "/data/tempo" && d["before"].is_number() && d["after"].is_number())
+                .map(|d| format!("Tempo {} → {} BPM", js_text(d.get("before")), js_text(d.get("after"))))
+                .collect()
         });
+        let details = details
+            .into_iter()
+            .map(|d| {
+                let path = d["path"].as_str().unwrap_or("");
+                Detail {
+                    facet: path.split('/').nth(2).unwrap_or("").to_owned(),
+                    what: path.strip_prefix("/data/").unwrap_or(path).replace('/', "."),
+                    from: if watching { small(d.get("before")).unwrap_or(Value::Null) } else { Value::Null },
+                    to: if watching { small(d.get("after")).unwrap_or(Value::Null) } else { Value::Null },
+                    fingerprint: path.ends_with("Hash") || path.ends_with("Fingerprint") || path.ends_with("/hash"),
+                }
+            })
+            .collect();
+        let renamed = facets.iter().any(|v| v == "renamed");
+        changes.push(ProjectChange::Changed { kind, before: old.map(item), after: current.map(item), renamed, details, lines });
     }
-    for (kind, _) in KINDS {
-        if let Some(items) = added.get(*kind).filter(|items| !items.is_empty()) {
-            lines.push(named(kind, items, "Added"))
-        }
-        if let Some(items) = removed.get(*kind).filter(|items| !items.is_empty()) {
-            lines.push(named(kind, items, "Removed"))
-        }
-        if let Some(changes) = edited.get(*kind) {
-            if changes.len() == 1 {
-                let (record, what) = &changes[0];
-                let what = what.iter().map(String::as_str).collect::<Vec<_>>().join(", ");
-                lines.push(format!(
-                    "Changed {kind} {}{}",
-                    quoted(&record["name"], "(unnamed)"),
-                    if what.is_empty() { String::new() } else { format!(" ({what})") }
-                ));
-            } else if changes.len() > 1 {
-                lines.push(format!("Changed {} {}", changes.len(), plural(kind)));
-            }
-        }
-    }
-    let limit = limit.unwrap_or(8);
-    let more = lines.len().saturating_sub(limit);
-    lines.truncate(limit);
-    DescribedDiff { lines, more }
+    changes
+}
+/// Catch-up's lines from Live's semantic diff (core's describe_changes).
+pub fn describe_diff(diff: &JsonObject, before: &[JsonObject], after: &[JsonObject], limit: Option<usize>) -> DescribedDiff {
+    describe_changes(&changes_of(diff, before, after, false), &LIVE_WORDS, limit)
 }
 
 fn numeric(value: Option<&Value>) -> f64 {
@@ -275,21 +199,6 @@ fn track_coordinates(rows: &IndexMap<&str, &Value>) -> IndexMap<String, String> 
         names.insert(format!("{base}-{count}"), row["name"].as_str().unwrap_or("(unnamed)").to_owned());
     }
     names
-}
-fn small(value: Option<&Value>) -> Option<Value> {
-    let value = value?;
-    Some(match value {
-        Value::String(s) => json!(head(s, 120)),
-        Value::Array(_) | Value::Object(_) => {
-            let text = stringify(value);
-            if utf16_len(&text) <= 240 {
-                value.clone()
-            } else {
-                json!(format!("{}…", head(&text, 237)))
-            }
-        }
-        _ => value.clone(),
-    })
 }
 fn made_of(kind: &str, row: &Value) -> JsonObject {
     let data = &row["data"];
@@ -335,132 +244,7 @@ fn made_of(kind: &str, row: &Value) -> JsonObject {
     }
     made
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DescribedWatch {
-    pub changes: Vec<JsonObject>,
-    pub more: usize,
-}
+/// watch_me's changes from Live's semantic diff (core's describe_watch_changes).
 pub fn describe_watch(diff: &JsonObject, before: &[JsonObject], after: &[JsonObject], limit: Option<usize>) -> DescribedWatch {
-    let was = records(before);
-    let now = records(after);
-    let mut tracks = track_coordinates(&was);
-    tracks.extend(track_coordinates(&now));
-    let on = |row: Option<&Value>| {
-        row.and_then(|r| r["data"]["parentSnapshotId"].as_str())
-            .and_then(|p| tracks.get(p))
-            .map(|n| json!({"on":n}).as_object().unwrap().clone())
-            .unwrap_or_default()
-    };
-    let mut changes: Vec<(usize, JsonObject)> = vec![];
-    for (item_index, item) in diff.get("items").and_then(Value::as_array).into_iter().flatten().enumerate() {
-        let kind = js_text(item.get("kind"));
-        if kind != "set" && !known(&kind) {
-            continue;
-        }
-        let change = if item["type"] == "ambiguity" {
-            let names = |ids: &Value, from: &IndexMap<&str, &Value>| {
-                let mut counted: IndexMap<String, usize> = IndexMap::new();
-                for id in ids.as_array().into_iter().flatten() {
-                    if let Some(name) = from.get(js_text(Some(id)).as_str()).and_then(|r| r["name"].as_str()) {
-                        *counted.entry(name.into()).or_default() += 1;
-                    }
-                }
-                let mut listed: Vec<_> = counted
-                    .iter()
-                    .take(20)
-                    .map(|(name, count)| if *count > 1 { format!("{name} ×{count}") } else { name.clone() })
-                    .collect();
-                if counted.len() > 20 {
-                    listed.push(format!("+{} more names", counted.len() - 20))
-                }
-                listed
-            };
-            json!({"unclear":kind,"before":names(&item["beforeSnapshotIds"],&was),"after":names(&item["afterSnapshotIds"],&now)})
-                .as_object()
-                .unwrap()
-                .clone()
-        } else {
-            if item["type"] != "change" {
-                continue;
-            }
-            let Some(facets) = item["facets"].as_array() else { continue };
-            let old = item["beforeSnapshotId"].as_str().and_then(|id| was.get(id)).copied();
-            let current = item["afterSnapshotId"].as_str().and_then(|id| now.get(id)).copied();
-            if facets.iter().any(|v| v == "added") && current.is_some() {
-                let current = current.unwrap();
-                let mut c = json!({"added":kind}).as_object().unwrap().clone();
-                c.extend(made_of(&kind, current));
-                c.extend(on(Some(current)));
-                c.insert("order".into(), current["order"].clone());
-                c
-            } else if facets.iter().any(|v| v == "removed") && old.is_some() {
-                let old = old.unwrap();
-                let mut c = json!({"removed":kind,"name":old["name"]}).as_object().unwrap().clone();
-                c.extend(on(Some(old)));
-                c.insert("order".into(), old["order"].clone());
-                c
-            } else {
-                let what:Vec<_>=item["details"].as_array().into_iter().flatten().filter_map(|d|{let path=d["path"].as_str()?;if DERIVED.is_match(path)||path.ends_with("Hash")||path.ends_with("Fingerprint")||path.ends_with("/hash"){return None}Some(json!({"what":path.strip_prefix("/data/").unwrap_or(path).replace('/',"."),"from":small(d.get("before")).unwrap_or(Value::Null),"to":small(d.get("after")).unwrap_or(Value::Null)}))}).collect();
-                let renamed = facets.iter().any(|v| v == "renamed")
-                    && old.is_some()
-                    && current.is_some()
-                    && old.unwrap().get("name") != current.unwrap().get("name");
-                let row = current.or(old);
-                if what.is_empty() && !renamed {
-                    if kind == "device" && row.is_some() {
-                        let mut c = json!({"changed":kind,"name":row.unwrap()["name"]}).as_object().unwrap().clone();
-                        c.extend(on(row));
-                        c.insert("what".into(), json!("its settings"));
-                        c
-                    } else {
-                        continue;
-                    }
-                } else {
-                    let mut c =
-                        json!({"changed":kind,"name":row.map(|r|r["name"].clone()).unwrap_or(Value::Null)}).as_object().unwrap().clone();
-                    c.extend(on(row));
-                    if renamed {
-                        c.insert("renamedFrom".into(), old.unwrap()["name"].clone());
-                    }
-                    if !what.is_empty() {
-                        c.insert("what".into(), json!(&what[..what.len().min(12)]));
-                    }
-                    c
-                }
-            }
-        };
-        changes.push((item_index, change));
-    }
-    let gone: Vec<_> = changes.iter().filter(|(_, c)| c.contains_key("removed")).cloned().collect();
-    for (id, gone) in gone {
-        if let Some(fresh) = changes.iter().position(|(_, c)| {
-            c.get("added") == gone.get("removed") && c.get("order") == gone.get("order") && c.get("on") == gone.get("on")
-        }) {
-            let mut rest = changes[fresh].1.clone();
-            let added = rest.shift_remove("added").unwrap();
-            rest.shift_remove("order");
-            let mut replacement = json!({"changed":added}).as_object().unwrap().clone();
-            replacement.extend(rest);
-            replacement.insert("renamedFrom".into(), gone.get("name").cloned().unwrap_or(Value::Null));
-            replacement.insert("note".into(), json!("renamed and changed"));
-            changes[fresh].1 = replacement;
-            changes.retain(|(old, _)| *old != id);
-        }
-    }
-    let rank = |c: &JsonObject| {
-        let kind = c.get("added").or(c.get("removed")).or(c.get("changed")).or(c.get("unclear")).and_then(Value::as_str).unwrap_or("");
-        ["set", "track", "scene", "device", "clip", "locator"].iter().position(|v| *v == kind).unwrap_or(usize::MAX)
-    };
-    changes.sort_by_key(|(_, c)| rank(c));
-    let mut changes: Vec<_> = changes
-        .into_iter()
-        .map(|(_, mut c)| {
-            c.shift_remove("order");
-            c
-        })
-        .collect();
-    let limit = limit.unwrap_or(40);
-    let more = changes.len().saturating_sub(limit);
-    changes.truncate(limit);
-    DescribedWatch { changes, more }
+    describe_watch_changes(&changes_of(diff, before, after, true), &LIVE_WORDS, limit)
 }
