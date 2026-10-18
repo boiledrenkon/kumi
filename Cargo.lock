@@ -1873,6 +1873,13 @@ dependencies = [
 [[package]]
 name = "reaper-kumi"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "daw-bridge",
+ "hex",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "redox_syscall"

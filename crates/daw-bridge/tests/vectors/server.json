@@ -1,5 +1,5 @@
 {
-  "about": "A bridge's side of a connection. Accept it at time 0 with the secret, serverNonce and session below; for each step feed inHex (or advance the clock to tickMs) and expect, in order: send (compare as JSON; for a welcome compare type, session, maxFrameBytes and heartbeatMs, the rest is the bridge's own), close (silent: no reply; refused:<reason>: after the refusal; protocol: a bad line after auth, no reply), authenticated, request (the request to answer). Nothing is read after a close.",
+  "about": "A bridge's side of a connection. Accept it at time 0 with the secret, serverNonce and session below; for each step feed inHex (or advance the clock to tickMs) and expect, in order: send (compare as JSON; for a welcome compare type, session, maxFrameBytes and heartbeatMs, the rest is the bridge's own), close (silent: no reply; refused:<reason>: after the refusal; protocol: a bad line after auth, no reply), authenticated, request (the request to answer). Nothing is read after a close. overCapacity: what a bridge sends, before reading, to a connection over its limits, then closes.",
   "secret": "kumi-test-secret-0123456789abcdefghijklmnopqrstuvwxyz",
   "serverNonce": "fedcba9876543210fedcba9876543210",
   "session": "5e55105e55105e55105e55105e55105e",
@@ -13,6 +13,10 @@
       "name": "Song.rpp",
       "path": "/Users/kumi/Music/Song.rpp"
     }
+  },
+  "overCapacity": {
+    "type": "refused",
+    "reason": "connections"
   },
   "cases": [
     {

@@ -126,6 +126,16 @@ pub fn create_owner_only_dir(path: &Path) -> std::io::Result<()> {
 /// Writes the file whole, owner-only from its first byte: a new file beside it, then renamed over it, so a reader
 /// sees the old contents or the new, never part.
 pub fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_whole(path, bytes, true)
+}
+
+/// Writes the file whole (a new file beside it, renamed over it), mode 0600 on unix, without Windows' ACL step (a
+/// PowerShell run): for files holding no secret in a folder already made owner-only, written from inside a DAW.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_whole(path, bytes, false)
+}
+
+fn write_whole(path: &Path, bytes: &[u8], acl: bool) -> std::io::Result<()> {
     let temporary = temporary_beside(path);
     let written = (|| {
         let mut options = std::fs::OpenOptions::new();
@@ -137,12 +147,14 @@ pub fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         }
         let mut file = options.open(&temporary)?;
         #[cfg(windows)]
-        {
+        if acl {
             drop(file);
             run_acl(&temporary, &format!("$ErrorActionPreference='Stop';{ACL_TARGET}{SECURE_FILE}{FILE_CHECKS}"), 30_000)
                 .map_err(|why| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why))?;
             file = std::fs::OpenOptions::new().write(true).truncate(true).open(&temporary)?;
         }
+        #[cfg(not(windows))]
+        let _ = acl;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);

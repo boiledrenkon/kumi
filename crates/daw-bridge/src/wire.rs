@@ -66,6 +66,8 @@ pub mod refusal {
     pub const TIMEOUT: &str = "timeout";
     /// A line before auth wasn't the frame that step expects.
     pub const HANDSHAKE: &str = "handshake";
+    /// Sent at accept when the bridge already holds as many connections as it takes, before reading anything.
+    pub const CONNECTIONS: &str = "connections";
 }
 
 /// What the bridge says about itself once the host has proved it knows the secret.
@@ -95,6 +97,8 @@ pub struct Identity {
     pub bridge: String,
     /// The DAW's version as it reports it (REAPER's `GetAppVersion`, Renoise's `RENOISE_VERSION`).
     pub daw_version: String,
+    /// The DAW's process id; 0 when the bridge can't learn it (Renoise's Lua on Windows), and then the host checks
+    /// the bridge is alive by connecting.
     pub pid: u32,
     /// REAPER's resource folder or Renoise's preferences folder: what tells several instances apart.
     pub resource: String,

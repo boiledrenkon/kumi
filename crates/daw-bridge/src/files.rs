@@ -129,6 +129,7 @@ impl Reference {
 pub struct Discovery {
     pub schema: String,
     pub daw: String,
+    /// 0 when the bridge can't learn it (see [`crate::wire::Identity::pid`]).
     pub pid: u32,
     pub host: String,
     pub port: u16,
@@ -158,12 +159,14 @@ pub fn discovery_file_name(daw: &str, pid: u32, resource: &str) -> String {
 }
 
 /// Writes a bridge's discovery file whole (what the REAPER extension calls; the Renoise tool does the same in Lua).
+/// The lifecycle made the folder owner-only; the file holds no secret, so it's written without Windows' ACL step,
+/// which would start PowerShell from inside the DAW.
 pub fn write_discovery(dir: &Path, discovery: &Discovery) -> std::io::Result<PathBuf> {
-    owner::create_owner_only_dir(dir)?;
+    std::fs::create_dir_all(dir)?;
     let path = dir.join(discovery.file_name());
     let mut text = serde_json::to_string(discovery).expect("discovery serializes");
     text.push('\n');
-    owner::write_owner_only(&path, text.as_bytes())?;
+    owner::write_atomic(&path, text.as_bytes())?;
     Ok(path)
 }
 
@@ -172,7 +175,7 @@ pub fn write_discovery(dir: &Path, discovery: &Discovery) -> std::io::Result<Pat
 pub struct Found {
     pub path: PathBuf,
     pub discovery: Result<Discovery, String>,
-    /// Whether its pid still runs (as this user).
+    /// Whether its pid still runs (as this user). A file with pid 0 (unknown) counts as alive: connect to know.
     pub alive: bool,
 }
 
@@ -187,7 +190,7 @@ pub fn scan_discovery(dir: &Path, daw: Daw) -> Vec<Found> {
             let name = entry.file_name().to_string_lossy().into_owned();
             let rest = name.strip_prefix(&prefix)?.strip_suffix(".json")?;
             let (pid, key) = rest.split_once('-')?;
-            let pid: u32 = pid.parse().ok().filter(|pid| *pid > 0)?;
+            let pid: u32 = pid.parse().ok()?;
             if key.len() != 16 || !key.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {
                 return None;
             }
@@ -208,7 +211,7 @@ pub fn scan_discovery(dir: &Path, daw: Daw) -> Vec<Found> {
                         Ok(discovery)
                     }
                 });
-            Some(Found { path, discovery, alive: process_alive(pid) })
+            Some(Found { path, discovery, alive: pid == 0 || process_alive(pid) })
         })
         .collect();
     found.sort_by(|a, b| {
@@ -327,6 +330,12 @@ mod tests {
         std::fs::rename(dir.path().join(a.file_name()), dir.path().join(discovery(me, "/c", 0).file_name())).unwrap();
         let found = scan_discovery(dir.path(), Daw::Reaper);
         assert!(found.iter().any(|found| found.discovery.as_ref().is_err_and(|why| why.contains("name"))));
+
+        // A file without a pid (Renoise on Windows) is kept for the host to check by connecting.
+        let unknown = discovery(0, "/u", 0);
+        write_discovery(dir.path(), &unknown).unwrap();
+        assert!(scan_discovery(dir.path(), Daw::Reaper).iter().any(|found| found.alive && found.path.ends_with(unknown.file_name())));
+        std::fs::remove_file(dir.path().join(unknown.file_name())).unwrap();
 
         // A dead pid's file is pruned.
         let dead = discovery(999_999_999, "/d", 0);
