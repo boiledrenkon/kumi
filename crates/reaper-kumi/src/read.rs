@@ -309,7 +309,7 @@ impl Reads {
     fn read_one(&self, reaper: &Reaper, proj: Project, reference: &str) -> Answer {
         let row = match Ref::parse(reference).map_err(bad)? {
             Ref::Track(id) => rows::track_row(reaper, self.track_by_id(reaper, proj, &id)?),
-            Ref::Item(guid) => rows::item_row(reaper, self.item_by_guid(reaper, proj, &guid)?),
+            Ref::Item(guid) => rows::item_row(reaper, proj, self.item_by_guid(reaper, proj, &guid)?),
             Ref::Take(guid) => take_row(reaper, self.take_by_guid(reaper, proj, &guid)?, None),
             Ref::Fx(guid) => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
@@ -344,7 +344,7 @@ impl Reads {
         (0..reaper.marker_count(proj))
             .filter_map(|i| reaper.marker(proj, i))
             .find(|m| m.is_region == region && m.number == number)
-            .map(|m| rows::marker_row(reaper, &m))
+            .map(|m| rows::marker_row(reaper, proj, &m))
             .ok_or_else(|| failed(format!("there is no {} {number}", if region { "region" } else { "marker" })))
     }
 
@@ -404,7 +404,7 @@ impl Reads {
                     break;
                 }
                 if let Some(item) = reaper.track_item(track, position as i32) {
-                    if !pager.push(rows::item_row(reaper, item)) {
+                    if !pager.push(rows::item_row(reaper, proj, item)) {
                         next = Some(position);
                         break;
                     }
@@ -435,7 +435,7 @@ impl Reads {
                         break 'tracks;
                     }
                     if let Some(item) = reaper.track_item(track, item_at as i32) {
-                        if !pager.push(rows::item_row(reaper, item)) {
+                        if !pager.push(rows::item_row(reaper, proj, item)) {
                             next = Some(format!("{track_at}.{item_at}"));
                             break 'tracks;
                         }
@@ -574,7 +574,7 @@ impl Reads {
                     next = Some(position as usize);
                     break;
                 }
-                if !pager.push(rows::marker_row(reaper, &marker)) {
+                if !pager.push(rows::marker_row(reaper, proj, &marker)) {
                     next = Some(position as usize);
                     break;
                 }
@@ -715,7 +715,7 @@ impl Reads {
         let mut next_marker = None;
         for index in 0..marker_total {
             let Some(marker) = reaper.marker(proj, index) else { break };
-            if !markers.open() || !markers.push(rows::marker_row(reaper, &marker)) {
+            if !markers.open() || !markers.push(rows::marker_row(reaper, proj, &marker)) {
                 next_marker = Some(index as usize);
                 break;
             }
@@ -1066,9 +1066,17 @@ mod tests {
     fn markers_and_regions_are_read_apart_with_the_numbers_reaper_shows() {
         let lab = Lab::new();
         let markers = lab.rows(json!({"kind": "marker"}));
-        assert_eq!(markers, [json!({"ref": "r:marker:1", "number": 1, "name": "Drop", "position": 4.0, "color": Value::Null})]);
+        assert_eq!(
+            markers,
+            [json!({"ref": "r:marker:1", "number": 1, "name": "Drop", "position": 4.0, "positionBeats": 8.0, "color": Value::Null})]
+        );
         let regions = lab.rows(json!({"kind": "region"}));
-        assert_eq!(regions, [json!({"ref": "r:region:1", "number": 1, "name": "Verse", "position": 8.0, "end": 16.0, "color": "#00ff00"})]);
+        assert_eq!(
+            regions,
+            [
+                json!({"ref": "r:region:1", "number": 1, "name": "Verse", "position": 8.0, "positionBeats": 16.0, "end": 16.0, "endBeats": 32.0, "color": "#00ff00"})
+            ]
+        );
     }
 
     #[test]

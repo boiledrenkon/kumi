@@ -577,6 +577,9 @@ unsafe extern "C" fn time_map_get_time_sig_at_time(_proj: *mut ReaProject, time:
 unsafe extern "C" fn time_map2_time_to_qn(_proj: *mut ReaProject, time: f64) -> f64 {
     counted(|s| time * s.bpm / 60.0)
 }
+unsafe extern "C" fn time_map2_qn_to_time(_proj: *mut ReaProject, qn: f64) -> f64 {
+    counted(|s| qn * 60.0 / s.bpm)
+}
 unsafe extern "C" fn time_map2_time_to_beats(
     _proj: *mut ReaProject,
     time: f64,
@@ -1455,6 +1458,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetRepeatEx" => get_set_repeat_ex as unsafe extern "C" fn(*mut ReaProject, c_int) -> c_int,
         b"TimeMap_GetTimeSigAtTime" => time_map_get_time_sig_at_time as unsafe extern "C" fn(*mut ReaProject, f64, *mut c_int, *mut c_int, *mut f64),
         b"TimeMap2_timeToQN" => time_map2_time_to_qn as unsafe extern "C" fn(*mut ReaProject, f64) -> f64,
+        b"TimeMap2_QNToTime" => time_map2_qn_to_time as unsafe extern "C" fn(*mut ReaProject, f64) -> f64,
         b"TimeMap2_timeToBeats" => time_map2_time_to_beats as unsafe extern "C" fn(*mut ReaProject, f64, *mut c_int, *mut c_int, *mut f64, *mut c_int) -> f64,
         b"GetSet_ArrangeView2" => get_set_arrange_view2 as unsafe extern "C" fn(*mut ReaProject, bool, c_int, c_int, *mut f64, *mut f64),
         b"IsProjectDirty" => is_project_dirty as unsafe extern "C" fn(*mut ReaProject) -> c_int,

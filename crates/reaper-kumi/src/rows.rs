@@ -172,14 +172,19 @@ pub fn source_word(reaper: &Reaper, take: Option<Take>) -> String {
     }
 }
 
-pub fn item_row(reaper: &Reaper, item: Item) -> Value {
+pub fn item_row(reaper: &Reaper, proj: Project, item: Item) -> Value {
     let guid = reaper.item_guid(item);
     let take = reaper.active_take(item);
+    let (position, length) = (reaper.item_value(item, "D_POSITION"), reaper.item_value(item, "D_LENGTH"));
+    let start = reaper.quarter_notes_at(proj, position);
+    let end = reaper.quarter_notes_at(proj, position + length);
     json!({
         "ref": refs::item_ref(&guid),
         "trackRef": reaper.item_track(item).map(|t| refs::track_ref(&track_id(reaper, t))),
-        "position": seconds(reaper.item_value(item, "D_POSITION")),
-        "length": seconds(reaper.item_value(item, "D_LENGTH")),
+        "position": seconds(position),
+        "length": seconds(length),
+        "positionBeats": start.map(seconds),
+        "lengthBeats": start.zip(end).map(|(start, end)| seconds(end - start)),
         "name": take.map(|t| clip(&reaper.take_name(t))).unwrap_or_default(),
         "takeRef": take.map(|t| refs::take_ref(&reaper.take_guid(t))),
         "takes": reaper.take_count(item),
@@ -277,16 +282,19 @@ pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32) -> Val
     })
 }
 
-pub fn marker_row(reaper: &Reaper, marker: &Marker) -> Value {
+pub fn marker_row(reaper: &Reaper, proj: Project, marker: &Marker) -> Value {
+    let beats = |time: f64| reaper.quarter_notes_at(proj, time).map(seconds);
     let mut row = json!({
         "ref": if marker.is_region { refs::region_ref(marker.number) } else { refs::marker_ref(marker.number) },
         "number": marker.number,
         "name": clip(&marker.name),
         "position": seconds(marker.start),
+        "positionBeats": beats(marker.start),
         "color": custom_color(reaper, marker.color as f64),
     });
     if marker.is_region {
         row["end"] = seconds(marker.end).into();
+        row["endBeats"] = beats(marker.end).into();
     }
     row
 }
@@ -317,11 +325,6 @@ pub fn envelope_row(reaper: &Reaper, track: &TrackId, which: &EnvelopeId, envelo
         "visible": reaper.envelope_flag(envelope, "VISIBLE"),
         "active": reaper.envelope_flag(envelope, "ACTIVE"),
     })
-}
-
-/// The tempo map's markers.
-pub fn tempo_marker_row(marker: &crate::reaper::TempoMarker) -> Value {
-    json!({"position": seconds(marker.time), "bpm": round(marker.bpm, 3), "num": marker.num, "den": marker.denom, "linear": marker.linear})
 }
 
 #[cfg(test)]

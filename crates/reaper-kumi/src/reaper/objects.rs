@@ -154,6 +154,11 @@ impl Reaper<'_> {
         self.api.TimeMap2_timeToQN().map(|f| unsafe { f(proj.0, time) })
     }
 
+    /// The time of a position given in quarter notes from the project start.
+    pub fn time_at_quarter_notes(&self, proj: Project, qn: f64) -> Option<f64> {
+        self.api.TimeMap2_QNToTime().map(|f| unsafe { f(proj.0, qn) })
+    }
+
     /// The 0-based measure and the 0-based beat in it.
     pub fn bar_and_beat_at(&self, proj: Project, time: f64) -> Option<(i32, f64)> {
         let f = self.api.TimeMap2_timeToBeats()?;

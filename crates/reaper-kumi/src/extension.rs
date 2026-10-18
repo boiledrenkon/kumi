@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(ask_with(&extension, &tx, "read", json!({})).unwrap_err().0, "bad-params");
         let body = ask_with(&extension, &tx, "focus_body", json!({"kind": "routing", "ref": "r:track:{AAAA}"})).unwrap();
         assert_eq!(
-            (&body["kind"], &body["epoch"], &body["sends"][0]["destRef"]),
+            (&body["kind"], &body["epoch"], &body["routes"][0]["destRef"]),
             (&json!("routing"), &read["epoch"], &json!("r:track:{DDDD}"))
         );
         assert_eq!(ask_with(&extension, &tx, "focus_body", json!({"kind": "mixer"})).unwrap_err().0, "bad-params");

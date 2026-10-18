@@ -78,8 +78,12 @@ impl Reads {
     // ----- the arrange window -----
 
     fn arrange_body(&self, reaper: &Reaper, proj: Project, params: &Value, cursor: Option<&str>) -> Answer {
-        let (from, to) =
-            window_param(params)?.or_else(|| reaper.arrange_view(proj)).unwrap_or((0.0, reaper.project_length(proj).max(30.0)));
+        let beats = |time: f64| reaper.quarter_notes_at(proj, time).unwrap_or(0.0);
+        let length = beats(reaper.project_length(proj));
+        // In beats: the window asked for, else the whole project (a few bars of room when it is empty).
+        let (from, to) = window_param(params)?.unwrap_or((0.0, length.max(16.0)));
+        let (from_seconds, to_seconds) = (seconds_at(reaper, proj, from), seconds_at(reaper, proj, to));
+        let signature = reaper.time_signature_at(proj, from_seconds);
         let first_page = cursor.is_none();
         let start = self.position_number(cursor)?;
         let limit = limit_param(params, ARRANGE_TRACKS, ARRANGE_TRACKS)?;
@@ -94,42 +98,69 @@ impl Reads {
                 break;
             }
             if let Some(track) = reaper.track_at(proj, position as i32) {
-                if !pager.push(arrange_track(reaper, track, from, to)) {
+                if !pager.push(arrange_track(reaper, proj, track, from_seconds, to_seconds)) {
                     next = Some(position);
                     break;
                 }
             }
             position += 1;
         }
-        let mut body = json!({"window": {"from": rows::seconds(from), "to": rows::seconds(to)}, "tracks": pager.rows, "trackCount": total});
+        let mut body = json!({
+            "window": {"from": rows::seconds(from), "to": rows::seconds(to)},
+            "windowSeconds": {"from": rows::seconds(from_seconds), "to": rows::seconds(to_seconds)},
+            "length": rows::seconds(length),
+            "lengthSeconds": rows::seconds(reaper.project_length(proj)),
+            "beatsPerBar": signature.map(|s| bar_beats(&s)),
+            "tracks": pager.rows,
+            "trackCount": total,
+        });
         if let Some(next) = next {
             body["nextCursor"] = self.cursor_text(&next.to_string()).into();
         }
         if first_page {
-            self.arrange_extras(reaper, proj, from, to, &mut body);
+            self.arrange_extras(reaper, proj, from_seconds, to_seconds, &mut body);
         }
         Ok(body)
     }
 
-    /// The parts of the window that aren't tracks: the playhead, the loop, the selection, markers and the tempo map.
+    /// The parts of the window that aren't tracks: the playhead, the loop, the selection, markers and the tempo map. All
+    /// positions are beats; `…Seconds` keys carry the same in seconds.
     fn arrange_extras(&self, reaper: &Reaper, proj: Project, from: f64, to: f64, body: &mut Value) {
+        let beats = |time: f64| rows::seconds(reaper.quarter_notes_at(proj, time).unwrap_or(0.0));
         let state = reaper.play_state(proj);
         let cursor = reaper.cursor(proj);
+        let playhead = if state.playing || state.recording { reaper.play_position(proj) } else { cursor };
         let (loop_start, loop_end) = reaper.loop_points(proj);
-        body["playhead"] = rows::seconds(if state.playing || state.recording { reaper.play_position(proj) } else { cursor }).into();
-        body["cursor"] = rows::seconds(cursor).into();
-        body["loop"] = json!({"on": reaper.repeat(proj), "start": rows::seconds(loop_start), "end": rows::seconds(loop_end)});
-        body["timeSelection"] = rows::time_selection(reaper, proj);
+        let (selection_start, selection_end) = reaper.time_selection(proj);
+        body["playing"] = (state.playing || state.recording).into();
+        body["playhead"] = beats(playhead).into();
+        body["playheadSeconds"] = rows::seconds(playhead).into();
+        body["cursor"] = beats(cursor).into();
+        body["loop"] = json!({"on": reaper.repeat(proj), "start": beats(loop_start), "end": beats(loop_end)});
+        body["loopSeconds"] = json!({"start": rows::seconds(loop_start), "end": rows::seconds(loop_end)});
+        if selection_end > selection_start {
+            body["timeSelection"] = json!({"start": beats(selection_start), "end": beats(selection_end)});
+            body["timeSelectionSeconds"] = json!({"start": rows::seconds(selection_start), "end": rows::seconds(selection_end)});
+        } else {
+            body["timeSelection"] = Value::Null;
+        }
+        if let Some((view_from, view_to)) = reaper.arrange_view(proj) {
+            body["view"] = json!({"from": beats(view_from), "to": beats(view_to)});
+        }
         let (mut markers, mut regions) = (Vec::new(), Vec::new());
         for index in 0..reaper.marker_count(proj) {
             let Some(marker) = reaper.marker(proj, index) else { break };
-            let (start, end) = if marker.is_region { (marker.start, marker.end) } else { (marker.start, marker.start) };
-            if end < from || start > to {
+            let end = if marker.is_region { marker.end } else { marker.start };
+            if end < from || marker.start > to {
                 continue;
             }
             let list = if marker.is_region { &mut regions } else { &mut markers };
             if list.len() < WINDOW_MARKERS {
-                list.push(rows::marker_row(reaper, &marker));
+                let mut row = json!({"ref": if marker.is_region { refs::region_ref(marker.number) } else { refs::marker_ref(marker.number) }, "number": marker.number, "name": rows::clip(&marker.name), "position": beats(marker.start)});
+                if marker.is_region {
+                    row["end"] = beats(marker.end).into();
+                }
+                list.push(row);
             }
         }
         body["markers"] = markers.into();
@@ -142,7 +173,7 @@ impl Reads {
             .enumerate()
             .filter(|(i, m)| Some(*i) == before || (m.time > from && m.time <= to))
             .take(WINDOW_TEMPO_MARKERS)
-            .map(|(_, m)| rows::tempo_marker_row(m))
+            .map(|(_, m)| json!({"position": beats(m.time), "bpm": rows::seconds(m.bpm), "num": m.num, "den": m.denom, "linear": m.linear}))
             .collect();
         body["tempoMarkers"] = shown.into();
     }
@@ -209,6 +240,7 @@ impl Reads {
             "name": rows::clip(&reaper.take_name(take)),
             "window": {"from": rows::seconds(from), "to": rows::seconds(to)},
             "length": rows::seconds(length_qn),
+            "beatsPerBar": reaper.time_signature_at(proj, position).map(|s| bar_beats(&s)),
             "noteCount": note_count,
             "notes": pager.rows,
         });
@@ -226,18 +258,18 @@ impl Reads {
     fn fx_body(&self, reaper: &Reaper, proj: Project, reference: Option<&str>) -> Answer {
         let (owner, reference, name, kind) = self.chain_owner(reaper, proj, reference)?;
         let mut budget = MAX_FX_NODES;
-        let chain: Vec<Value> = (0..reaper.fx_count(owner))
+        let nodes: Vec<Value> = (0..reaper.fx_count(owner))
             .map(|index| Fx { owner, index })
-            .filter_map(|fx| self.fx_node(reaper, proj, fx, &mut budget))
+            .filter_map(|fx| self.fx_node(reaper, proj, fx, &mut budget, false))
             .collect();
         let input: Vec<Value> = match owner {
             FxOwner::Track(track) => (0..reaper.input_fx_count(track))
                 .map(|index| Fx { owner, index: INPUT_FX | index })
-                .filter_map(|fx| self.fx_node(reaper, proj, fx, &mut budget))
+                .filter_map(|fx| self.fx_node(reaper, proj, fx, &mut budget, false))
                 .collect(),
             FxOwner::Take(_) => Vec::new(),
         };
-        let mut body = json!({"ref": reference, "owner": kind, "ownerName": name, "chain": chain, "inputChain": input});
+        let mut body = json!({"ref": reference, "owner": kind, "ownerName": name, "nodes": nodes, "inputNodes": input});
         if budget == 0 {
             body["truncated"] = true.into();
         }
@@ -278,8 +310,9 @@ impl Reads {
         }
     }
 
-    /// One node of the tree; a container carries its children. `budget` counts the nodes left to list.
-    fn fx_node(&self, reaper: &Reaper, proj: Project, fx: Fx, budget: &mut usize) -> Option<Value> {
+    /// One node of the tree; a container carries its child nodes. `budget` counts the nodes left to list. A node is
+    /// `parallel` when it runs beside the one before it.
+    fn fx_node(&self, reaper: &Reaper, proj: Project, fx: Fx, budget: &mut usize, _nested: bool) -> Option<Value> {
         if *budget == 0 {
             return None;
         }
@@ -294,12 +327,17 @@ impl Reads {
             "enabled": reaper.fx_enabled(fx),
             "offline": reaper.fx_offline(fx),
             "preset": rows::clip(&reaper.fx_preset(fx)),
-            "parallel": reaper.fx_config(fx, "parallel").and_then(|p| p.trim().parse::<i32>().ok()).unwrap_or(0),
+            "plugin": !is_container,
             "container": is_container,
+            "parallel": reaper.fx_config(fx, "parallel").and_then(|p| p.trim().parse::<i32>().ok()).unwrap_or(0) != 0,
         });
         if is_container {
-            node["children"] =
-                reaper.fx_children(fx).into_iter().filter_map(|child| self.fx_node(reaper, proj, child, budget)).collect::<Vec<_>>().into();
+            node["childNodes"] = reaper
+                .fx_children(fx)
+                .into_iter()
+                .filter_map(|child| self.fx_node(reaper, proj, child, budget, true))
+                .collect::<Vec<_>>()
+                .into();
         }
         Some(node)
     }
@@ -319,38 +357,67 @@ impl Reads {
                 .ok_or_else(|| bad("routing: pass the track as ref (no track is selected)"))?,
         };
         let id = rows::track_id(reaper, track);
-        let list = |category: i32| {
-            let total = reaper.send_count(track, category);
-            let rows: Vec<Value> = (0..total.min(MAX_SENDS as i32)).map(|index| rows::send_row(reaper, track, category, index)).collect();
-            (rows, total)
-        };
-        let ((sends, send_total), (receives, receive_total), (hardware, hardware_total)) = (list(0), list(-1), list(1));
+        // Sends, then receives, then hardware outputs, each as its `send` row with the other end's name.
+        let counts = [(0, reaper.send_count(track, 0)), (-1, reaper.send_count(track, -1)), (1, reaper.send_count(track, 1))];
+        let total: usize = counts.iter().map(|&(_, n)| n.max(0) as usize).sum();
+        let routes: Vec<Value> = counts
+            .iter()
+            .flat_map(|&(category, n)| (0..n).map(move |index| (category, index)))
+            .take(MAX_SENDS)
+            .map(|(category, index)| {
+                let mut route = rows::send_row(reaper, track, category, index);
+                route["otherName"] = other_name(reaper, track, category, index).into();
+                route
+            })
+            .collect();
         let mut body = json!({
             "ref": refs::track_ref(&id),
             "name": rows::clip(&reaper.track_name(track)),
-            "sends": sends,
-            "receives": receives,
-            "hardwareOuts": hardware,
+            "routes": routes,
+            // The master has nowhere to send.
+            "parentSend": id != TrackId::Master && reaper.track_value(track, "B_MAINSEND") != 0.0,
         });
-        // The master has no parent to send to.
-        body["parentSend"] = if id == TrackId::Master {
-            Value::Null
-        } else {
-            json!({
-                "on": reaper.track_value(track, "B_MAINSEND") != 0.0,
-                "offset": reaper.track_value(track, "C_MAINSEND_OFFS") as i64,
-                "channels": reaper.track_value(track, "C_MAINSEND_NCH") as i64,
-            })
-        };
-        if send_total as usize > MAX_SENDS || receive_total as usize > MAX_SENDS || hardware_total as usize > MAX_SENDS {
-            body["truncated"] = json!({"sends": send_total, "receives": receive_total, "hardwareOuts": hardware_total});
+        if id != TrackId::Master {
+            body["parentSendOffset"] = (reaper.track_value(track, "C_MAINSEND_OFFS") as i64).into();
+            body["parentSendChannels"] = (reaper.track_value(track, "C_MAINSEND_NCH") as i64).into();
+        }
+        if total > MAX_SENDS {
+            body["routeCount"] = total.into();
+            body["truncated"] = true.into();
         }
         Ok(body)
     }
 }
 
-/// A track in the arrange window: its place in the folders and the items that touch the window.
-fn arrange_track(reaper: &Reaper, track: Track, from: f64, to: f64) -> Value {
+/// The name of the other end of a route: the track's, or the hardware output's channels.
+fn other_name(reaper: &Reaper, track: Track, category: i32, index: i32) -> String {
+    match reaper.send_peer(track, category, index) {
+        Some(other) => rows::clip(&reaper.track_name(other)),
+        None => {
+            let destination = reaper.send_value(track, category, index, "I_DSTCHAN") as i64;
+            let first = (destination & 1023) + 1;
+            if destination & 1024 != 0 {
+                format!("Out {first} (mono)")
+            } else {
+                format!("Out {first}/{}", first + 1)
+            }
+        }
+    }
+}
+
+/// Quarter notes in a bar of this time signature.
+fn bar_beats(signature: &crate::reaper::TimeSignature) -> f64 {
+    rows::seconds(signature.num as f64 * 4.0 / signature.denom.max(1) as f64)
+}
+
+/// The time of a position in quarter notes.
+fn seconds_at(reaper: &Reaper, proj: Project, beats: f64) -> f64 {
+    reaper.time_at_quarter_notes(proj, beats).unwrap_or(0.0)
+}
+
+/// A track in the arrange window: its place in the folders and the items that touch it. `from` and `to` are seconds; the
+/// items' places are beats.
+fn arrange_track(reaper: &Reaper, proj: Project, track: Track, from: f64, to: f64) -> Value {
     let id = rows::track_id(reaper, track);
     let mut items = Vec::new();
     let mut omitted = 0usize;
@@ -364,7 +431,7 @@ fn arrange_track(reaper: &Reaper, track: Track, from: f64, to: f64) -> Value {
         if items.len() >= ITEMS_PER_TRACK {
             omitted += 1;
         } else {
-            items.push(arrange_item(reaper, item, position, length));
+            items.push(arrange_item(reaper, proj, item, position, length));
         }
     }
     let mut row = json!({
@@ -386,15 +453,19 @@ fn arrange_track(reaper: &Reaper, track: Track, from: f64, to: f64) -> Value {
     row
 }
 
-fn arrange_item(reaper: &Reaper, item: Item, position: f64, length: f64) -> Value {
+/// An item as a bar: where it starts and how long it is, in beats.
+fn arrange_item(reaper: &Reaper, proj: Project, item: Item, position: f64, length: f64) -> Value {
     let take = reaper.active_take(item);
+    let start = reaper.quarter_notes_at(proj, position).unwrap_or(0.0);
+    let end = reaper.quarter_notes_at(proj, position + length).unwrap_or(start);
+    let custom = reaper.item_value(item, "I_CUSTOMCOLOR") as i32;
     json!({
         "ref": refs::item_ref(&reaper.item_guid(item)),
-        "position": rows::seconds(position),
-        "length": rows::seconds(length),
+        "position": rows::seconds(start),
+        "length": rows::seconds(end - start),
         "name": take.map(|t| rows::clip(&reaper.take_name(t))).unwrap_or_default(),
         "source": rows::source_word(reaper, take),
-        "color": reaper.color_hex(reaper.item_value(item, "I_CUSTOMCOLOR") as i32).filter(|_| reaper.item_value(item, "I_CUSTOMCOLOR") as i32 & 0x100_0000 != 0),
+        "color": (custom & 0x100_0000 != 0).then(|| reaper.color_hex(custom)).flatten(),
         "muted": reaper.item_value(item, "B_MUTE") != 0.0,
         "lane": reaper.item_value(item, "I_FIXEDLANE") as i64,
         "selected": reaper.item_value(item, "B_UISEL") != 0.0,
@@ -494,8 +565,9 @@ mod tests {
     }
 
     #[test]
-    fn the_arrange_window_has_the_tracks_in_their_folders_and_the_items_that_touch_it() {
+    fn the_arrange_window_has_the_tracks_in_their_folders_and_the_items_that_touch_it_in_beats() {
         let reads = lab();
+        // 120 bpm: a second is two beats.
         fake::with(|s| {
             s.markers.push(fake::FakeMarker { is_region: false, start: 40.0, end: 40.0, name: "Far".into(), number: 2, color: 0 });
             s.tempo_markers = vec![
@@ -508,40 +580,71 @@ mod tests {
             s.loop_range = (4.0, 8.0);
             s.repeat = true;
         });
-        let body = body(&reads, json!({"kind": "arrange", "window": {"from": 3.0, "to": 10.0}})).unwrap();
+        let body = body(&reads, json!({"kind": "arrange", "window": {"from": 6.0, "to": 20.0}})).unwrap();
         assert_eq!(body["kind"], "arrange");
         assert_eq!(body["epoch"], reads.epoch());
-        assert_eq!(body["window"], json!({"from": 3.0, "to": 10.0}));
+        assert_eq!((&body["window"], &body["windowSeconds"]), (&json!({"from": 6.0, "to": 20.0}), &json!({"from": 3.0, "to": 10.0})));
+        assert_eq!((&body["length"], &body["lengthSeconds"], &body["beatsPerBar"]), (&json!(128.0), &json!(64.0), &json!(4.0)));
         let tracks = body["tracks"].as_array().unwrap();
         assert_eq!(refs_of(&body["tracks"]), ["r:track:{AAAA}", "r:track:{BBBB}", "r:track:{CCCC}", "r:track:{DDDD}"]);
         assert_eq!((&tracks[0]["depth"], &tracks[0]["folder"], &tracks[0]["color"]), (&json!(0), &json!(1), &json!("#ff0000")));
         assert_eq!((&tracks[1]["depth"], &tracks[2]["depth"], &tracks[2]["folder"]), (&json!(1), &json!(1), &json!(-1)));
-        // Kick's first item ends at 2 s, before the window; the second (2 s to 4 s) touches it.
+        // Kick's first item ends at 2 s, before the window; the second (2 s to 4 s) touches it: beats 4 to 8.
         assert_eq!(refs_of(&tracks[1]["items"]), ["r:item:{ITEM-K2}"]);
+        let kick = &tracks[1]["items"][0];
         assert_eq!(
-            (&tracks[1]["items"][0]["selected"], &tracks[1]["items"][0]["source"], &tracks[1]["items"][0]["name"]),
-            (&json!(true), &json!("wav"), &json!("kick.wav"))
+            (&kick["position"], &kick["length"], &kick["selected"], &kick["source"], &kick["name"]),
+            (&json!(4.0), &json!(4.0), &json!(true), &json!("wav"), &json!("kick.wav"))
         );
-        // Snare's MIDI item (8 s to 12 s) starts inside it.
-        assert_eq!(tracks[2]["items"][0]["source"], "mid");
+        // Snare's MIDI item (8 s to 12 s) starts inside the window: beats 16 to 24.
         assert_eq!(
-            (&body["playhead"], &body["cursor"], &body["loop"]),
-            (&json!(3.0), &json!(3.0), &json!({"on": true, "start": 4.0, "end": 8.0}))
+            (&tracks[2]["items"][0]["source"], &tracks[2]["items"][0]["position"], &tracks[2]["items"][0]["length"]),
+            (&json!("mid"), &json!(16.0), &json!(8.0))
+        );
+        assert_eq!(
+            (&body["playing"], &body["playhead"], &body["playheadSeconds"], &body["cursor"]),
+            (&json!(false), &json!(6.0), &json!(3.0), &json!(6.0))
+        );
+        assert_eq!(
+            (&body["loop"], &body["loopSeconds"]),
+            (&json!({"on": true, "start": 8.0, "end": 16.0}), &json!({"start": 4.0, "end": 8.0}))
         );
         assert_eq!(body["timeSelection"], Value::Null);
-        // The marker at 4 s and the region from 8 s; the marker at 40 s is off the window.
+        assert_eq!(body["view"], json!({"from": 0.0, "to": 60.0}));
+        // The marker at 4 s and the region from 8 s, in beats; the marker at 40 s is off the window.
         assert_eq!((refs_of(&body["markers"]), refs_of(&body["regions"])), (vec!["r:marker:1"], vec!["r:region:1"]));
+        assert_eq!(body["markers"][0]["position"], 8.0);
+        assert_eq!((&body["regions"][0]["position"], &body["regions"][0]["end"]), (&json!(16.0), &json!(32.0)));
         // The tempo in force when the window opens, and the change inside it; not the one far past it.
         let tempo: Vec<f64> = body["tempoMarkers"].as_array().unwrap().iter().map(|m| m["bpm"].as_f64().unwrap()).collect();
         assert_eq!(tempo, [120.0, 90.0]);
-        assert_eq!(body["tempoMarkers"][1], json!({"position": 6.0, "bpm": 90.0, "num": 3, "den": 4, "linear": false}));
+        assert_eq!(
+            (&body["tempoMarkers"][1]["position"], &body["tempoMarkers"][1]["num"], &body["tempoMarkers"][1]["den"]),
+            (&json!(12.0), &json!(3), &json!(4))
+        );
     }
 
     #[test]
-    fn without_a_window_the_arrange_view_is_the_window() {
+    fn a_selected_time_range_is_in_beats_with_the_seconds_beside_it() {
         let reads = lab();
-        fake::with(|s| s.arrange_view = (2.0, 9.0));
-        assert_eq!(body(&reads, json!({"kind": "arrange"})).unwrap()["window"], json!({"from": 2.0, "to": 9.0}));
+        fake::with(|s| s.time_selection = (2.0, 5.0));
+        let body = body(&reads, json!({"kind": "arrange"})).unwrap();
+        assert_eq!(
+            (&body["timeSelection"], &body["timeSelectionSeconds"]),
+            (&json!({"start": 4.0, "end": 10.0}), &json!({"start": 2.0, "end": 5.0}))
+        );
+    }
+
+    #[test]
+    fn without_a_window_the_whole_project_is_shown() {
+        let reads = lab();
+        assert_eq!(body(&reads, json!({"kind": "arrange"})).unwrap()["window"], json!({"from": 0.0, "to": 128.0}));
+        // An empty project still gets a few bars to draw.
+        fake::with(|s| {
+            s.length = 0.0;
+            s.tracks.clear();
+        });
+        assert_eq!(body(&reads, json!({"kind": "arrange"})).unwrap()["window"], json!({"from": 0.0, "to": 16.0}));
     }
 
     #[test]
@@ -562,10 +665,10 @@ mod tests {
     fn a_long_arrange_pages_by_track_and_keeps_the_markers_for_the_first_page() {
         let reads = lab();
         fake::with(|s| s.tracks = (0..620).map(|i| FakeTrack::new(&format!("{{T{i}}}"), "t")).collect());
-        let first = body(&reads, json!({"kind": "arrange", "window": {"from": 0.0, "to": 10.0}})).unwrap();
+        let first = body(&reads, json!({"kind": "arrange", "window": {"from": 0.0, "to": 20.0}})).unwrap();
         assert_eq!(first["tracks"].as_array().unwrap().len(), ARRANGE_TRACKS);
         assert!(first["markers"].is_array());
-        let second = body(&reads, json!({"kind": "arrange", "window": {"from": 0.0, "to": 10.0}, "cursor": first["nextCursor"]})).unwrap();
+        let second = body(&reads, json!({"kind": "arrange", "window": {"from": 0.0, "to": 20.0}, "cursor": first["nextCursor"]})).unwrap();
         assert_eq!(second["tracks"].as_array().unwrap().len(), 120);
         assert_eq!(second["tracks"][0]["ref"], "r:track:{T500}");
         assert_eq!(second.get("nextCursor"), None);
@@ -580,7 +683,7 @@ mod tests {
                 .map(|i| FakeItem::new(&format!("{{I{i}}}"), i as f64 * 0.01, 1.0, vec![FakeTake::wave(&format!("{{K{i}}}"), "x")]))
                 .collect();
         });
-        let body = body(&reads, json!({"kind": "arrange", "window": {"from": 0.0, "to": 10.0}})).unwrap();
+        let body = body(&reads, json!({"kind": "arrange", "window": {"from": 0.0, "to": 20.0}})).unwrap();
         assert_eq!(body["tracks"][0]["items"].as_array().unwrap().len(), ITEMS_PER_TRACK);
         assert_eq!(body["tracks"][0]["itemsOmitted"], 50);
     }
@@ -602,7 +705,7 @@ mod tests {
                 })
                 .collect();
         });
-        let params = json!({"kind": "arrange", "window": {"from": 0.0, "to": 100.0}});
+        let params = json!({"kind": "arrange", "window": {"from": 0.0, "to": 200.0}});
         let mut page = body(&reads, params.clone()).unwrap();
         let mut seen = 0;
         loop {
@@ -626,7 +729,10 @@ mod tests {
             (&body["ref"], &body["itemRef"], &body["trackRef"], &body["name"]),
             (&json!("r:take:{TAKE-S1}"), &json!("r:item:{ITEM-S1}"), &json!("r:track:{CCCC}"), &json!("snare.mid"))
         );
-        assert_eq!((&body["window"], &body["length"], &body["noteCount"]), (&json!({"from": 0.0, "to": 8.0}), &json!(8.0), &json!(2)));
+        assert_eq!(
+            (&body["window"], &body["length"], &body["noteCount"], &body["beatsPerBar"]),
+            (&json!({"from": 0.0, "to": 8.0}), &json!(8.0), &json!(2), &json!(4.0))
+        );
         assert_eq!(body["notes"].as_array().unwrap().len(), 2);
         assert_eq!(body["notes"][1]["pitch"], 40);
         assert_eq!(body["ccLanes"], json!([{"cc": 7, "total": 2, "points": [[0.0, 100], [0.5, 64]]}]));
@@ -716,15 +822,20 @@ mod tests {
         });
         let body = body(&reads, json!({"kind": "fx", "ref": "r:track:{AAAA}"})).unwrap();
         assert_eq!((&body["ref"], &body["owner"], &body["ownerName"]), (&json!("r:track:{AAAA}"), &json!("track"), &json!("Drums")));
-        let chain = &body["chain"];
-        assert_eq!(refs_of(chain), ["r:fx:{FX-EQ}", "r:fx:{FX-C}"]);
-        assert_eq!((&chain[0]["enabled"], &chain[0]["preset"], &chain[0]["container"]), (&json!(false), &json!("Warm"), &json!(false)));
-        assert_eq!(chain[0].get("children"), None);
-        let outer = &chain[1];
-        assert_eq!(refs_of(&outer["children"]), ["r:fx:{FX-COMP}", "r:fx:{FX-C2}"]);
-        assert_eq!(outer["children"][0]["parallel"], 1);
-        assert_eq!(refs_of(&outer["children"][1]["children"]), ["r:fx:{FX-DLY}"]);
-        assert_eq!(refs_of(&body["inputChain"]), ["r:fx:{FX-IN}"]);
+        let nodes = &body["nodes"];
+        assert_eq!(refs_of(nodes), ["r:fx:{FX-EQ}", "r:fx:{FX-C}"]);
+        assert_eq!(
+            (&nodes[0]["enabled"], &nodes[0]["preset"], &nodes[0]["plugin"], &nodes[0]["container"], &nodes[0]["parallel"]),
+            (&json!(false), &json!("Warm"), &json!(true), &json!(false), &json!(false))
+        );
+        assert_eq!(nodes[0].get("childNodes"), None);
+        let outer = &nodes[1];
+        assert_eq!((&outer["container"], &outer["plugin"]), (&json!(true), &json!(false)));
+        assert_eq!(refs_of(&outer["childNodes"]), ["r:fx:{FX-COMP}", "r:fx:{FX-C2}"]);
+        assert_eq!(outer["childNodes"][0]["parallel"], true);
+        assert_eq!(outer["childNodes"][1]["parallel"], false);
+        assert_eq!(refs_of(&outer["childNodes"][1]["childNodes"]), ["r:fx:{FX-DLY}"]);
+        assert_eq!(refs_of(&body["inputNodes"]), ["r:fx:{FX-IN}"]);
     }
 
     #[test]
@@ -735,10 +846,10 @@ mod tests {
             s.master.fx.push(FakeFx::new("{FX-LIM}", "VST: ReaLimit"));
         });
         let take = body(&reads, json!({"kind": "fx", "ref": "r:take:{TAKE-K2}"})).unwrap();
-        assert_eq!((&take["owner"], refs_of(&take["chain"])), (&json!("take"), vec!["r:fx:{FX-TAKE}"]));
+        assert_eq!((&take["owner"], refs_of(&take["nodes"])), (&json!("take"), vec!["r:fx:{FX-TAKE}"]));
         assert_eq!(body(&reads, json!({"kind": "fx", "ref": "r:item:{ITEM-K2}"})).unwrap()["ref"], "r:take:{TAKE-K2}");
         let master = body(&reads, json!({"kind": "fx", "ref": "r:track:master"})).unwrap();
-        assert_eq!((&master["owner"], refs_of(&master["chain"])), (&json!("master"), vec!["r:fx:{FX-LIM}"]));
+        assert_eq!((&master["owner"], refs_of(&master["nodes"])), (&json!("master"), vec!["r:fx:{FX-LIM}"]));
         assert!(body(&reads, json!({"kind": "fx"})).unwrap_err().1.contains("no track is selected"));
         fake::select_tracks(&[3]);
         assert_eq!(body(&reads, json!({"kind": "fx"})).unwrap()["ref"], "r:track:{DDDD}");
@@ -749,29 +860,42 @@ mod tests {
         let reads = lab();
         fake::with(|s| s.tracks[3].fx = (0..600).map(|i| FakeFx::new(&format!("{{F{i}}}"), "fx")).collect());
         let body = body(&reads, json!({"kind": "fx", "ref": "r:track:{DDDD}"})).unwrap();
-        assert_eq!(body["chain"].as_array().unwrap().len(), MAX_FX_NODES);
+        assert_eq!(body["nodes"].as_array().unwrap().len(), MAX_FX_NODES);
         assert_eq!(body["truncated"], true);
     }
 
     #[test]
-    fn routing_lists_sends_receives_hardware_and_the_parent_send() {
+    fn routing_lists_sends_receives_hardware_and_the_parent_send_as_routes_with_the_other_end_named() {
         let reads = lab();
         fake::with(|s| s.tracks[3].main_send = false);
         let reverb = body(&reads, json!({"kind": "routing", "ref": "r:track:{DDDD}"})).unwrap();
-        assert_eq!((&reverb["ref"], &reverb["name"]), (&json!("r:track:{DDDD}"), &json!("Reverb")));
-        assert_eq!(refs_of(&reverb["receives"]), ["r:send:{DDDD}:-1:0"]);
-        assert_eq!(reverb["receives"][0]["destRef"], "r:track:{AAAA}");
-        assert_eq!(refs_of(&reverb["hardwareOuts"]), ["r:send:{DDDD}:1:0"]);
-        assert_eq!(reverb["sends"], json!([]));
-        assert_eq!(reverb["parentSend"]["on"], false);
+        assert_eq!((&reverb["ref"], &reverb["name"], &reverb["parentSend"]), (&json!("r:track:{DDDD}"), &json!("Reverb"), &json!(false)));
+        assert_eq!(refs_of(&reverb["routes"]), ["r:send:{DDDD}:-1:0", "r:send:{DDDD}:1:0"]);
+        let routes = reverb["routes"].as_array().unwrap();
+        assert_eq!(
+            (&routes[0]["direction"], &routes[0]["destRef"], &routes[0]["otherName"]),
+            (&json!("receive"), &json!("r:track:{AAAA}"), &json!("Drums"))
+        );
+        assert_eq!(
+            (&routes[1]["direction"], &routes[1]["destRef"], &routes[1]["otherName"]),
+            (&json!("hardware"), &Value::Null, &json!("Out 3/4"))
+        );
         let drums = body(&reads, json!({"kind": "routing", "ref": "r:track:{AAAA}"})).unwrap();
-        assert_eq!(refs_of(&drums["sends"]), ["r:send:{AAAA}:0:0"]);
-        assert_eq!(drums["parentSend"]["on"], true);
+        assert_eq!(refs_of(&drums["routes"]), ["r:send:{AAAA}:0:0"]);
+        assert_eq!((&drums["routes"][0]["otherName"], &drums["parentSend"]), (&json!("Reverb"), &json!(true)));
         // The master has nowhere to send; with no ref the selected track is the one.
-        assert_eq!(body(&reads, json!({"kind": "routing", "ref": "r:track:master"})).unwrap()["parentSend"], Value::Null);
+        assert_eq!(body(&reads, json!({"kind": "routing", "ref": "r:track:master"})).unwrap()["parentSend"], false);
         fake::select_tracks(&[0]);
         assert_eq!(body(&reads, json!({"kind": "routing"})).unwrap()["ref"], "r:track:{AAAA}");
         assert_eq!(body(&reads, json!({"kind": "routing", "ref": "r:fx:{FX-EQ}"})).unwrap_err().0, "bad-params");
+    }
+
+    #[test]
+    fn a_mono_hardware_output_is_named_by_its_one_channel() {
+        let reads = lab();
+        fake::with(|s| s.tracks[3].hw_outs = vec![FakeSend { dst_chan: 1 | 1024, ..FakeSend::to(0) }]);
+        let body = body(&reads, json!({"kind": "routing", "ref": "r:track:{DDDD}"})).unwrap();
+        assert_eq!(body["routes"][1]["otherName"], "Out 2 (mono)");
     }
 
     #[test]
@@ -779,8 +903,8 @@ mod tests {
         let reads = lab();
         fake::with(|s| s.tracks[1].sends = (0..260).map(|_| FakeSend::to(3)).collect());
         let body = body(&reads, json!({"kind": "routing", "ref": "r:track:{BBBB}"})).unwrap();
-        assert_eq!(body["sends"].as_array().unwrap().len(), MAX_SENDS);
-        assert_eq!(body["truncated"]["sends"], 260);
+        assert_eq!(body["routes"].as_array().unwrap().len(), MAX_SENDS);
+        assert_eq!((&body["routeCount"], &body["truncated"]), (&json!(260), &json!(true)));
         assert!(serde_json::to_string(&body).unwrap().len() < 256 * 1024);
     }
 
