@@ -406,7 +406,7 @@ fn events() -> Vec<SessionEvent> {
     events.push(SessionEvent::Resend { text: "make the kick punchier".into() });
     events.extend(TURN_STATES.map(|state| SessionEvent::State { state }));
     events.extend(CONNECTION_STATES.map(|state| SessionEvent::Connection { state }));
-    events.push(SessionEvent::Observation { label: "Night Drive · 8 tracks · 124 BPM".into() });
+    events.push(SessionEvent::Observation { label: "Night Drive · 8 tracks · 124 BPM".into(), name: None });
     events.push(SessionEvent::Notice { message: "Kumi lost Live for a moment; it's back.".into() });
     events.extend(FAILURE_KINDS.map(|kind| SessionEvent::Error {
         message: "The model said no.".into(),

@@ -23,6 +23,7 @@ pub fn no_access(profile: &DawProfile, instructions: &str, key: &str, now: DateT
         set: None,
         tracks: None,
         saved_at: None,
+        identity: None,
         context: stringify(&json!({
             "observedAt": now.to_rfc3339_opts(SecondsFormat::Millis, true),
             "mode": "inference-only",

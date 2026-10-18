@@ -131,7 +131,11 @@ impl TuiApp {
                     state.strip = Strip::default();
                 }
             }
-            "observation" => self.0.state.borrow_mut().set_name = set_name_from(get("label")),
+            // The project's name as the DAW gives it; from the label's words when an older event has none.
+            "observation" => {
+                let name = value["name"].as_str().and_then(shown_name).or_else(|| set_name_from(get("label")));
+                self.0.state.borrow_mut().set_name = name;
+            }
             "library" => {
                 let tell = {
                     let mut state = self.0.state.borrow_mut();

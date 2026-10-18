@@ -1882,7 +1882,10 @@ impl Session {
             }
         }
         self.0.state.borrow_mut().observation = Some(snapshot.label.clone());
-        self.emit(SessionEvent::Observation { label: snapshot.label.clone() });
+        self.emit(SessionEvent::Observation {
+            label: snapshot.label.clone(),
+            name: snapshot.identity.as_ref().map(|identity| identity.name.clone()),
+        });
         self.bring_back_jobs().await;
         Ok(snapshot)
     }

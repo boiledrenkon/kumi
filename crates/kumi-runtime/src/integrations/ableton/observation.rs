@@ -830,6 +830,14 @@ impl Observer {
                 label: format!("Current open Set: {name} — {source}"),
                 instructions: INSTRUCTIONS.into(),
                 tools: host.definitions(),
+                identity: Some(ProjectIdentity {
+                    daw: DawId::Ableton,
+                    id: project_ref.as_ref().map(|project| project.id.clone()),
+                    name: name.to_string(),
+                    file: path.clone(),
+                    saved_at,
+                    open_identity: Some(identity.clone()),
+                }),
                 project: project_ref,
                 set: Some(identity.clone()),
                 tracks: track_list

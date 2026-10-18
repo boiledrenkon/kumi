@@ -131,6 +131,14 @@ pub fn touched_next(before: Option<&LiveFocus>, after: Option<&LiveFocus>, was: 
         was.unwrap_or(view)
     })
 }
+/// A project's name as the app shows it: trimmed, and none for one that's empty or runs over lines.
+pub fn shown_name(name: &str) -> Option<String> {
+    if name.contains(['\n', '\r', '\u{2028}', '\u{2029}']) {
+        return None;
+    }
+    let name = string::trim(name);
+    (!name.is_empty()).then(|| name.into())
+}
 pub fn set_name_from(label: &str) -> Option<String> {
     let (name, suffix) = label.strip_prefix("Current open Set: ")?.rsplit_once(" — ")?;
     if suffix.contains('—') || name.contains(['\n', '\r', '\u{2028}', '\u{2029}']) {

@@ -391,6 +391,23 @@ pub enum TurnState {
     Closed,
 }
 
+/// The project an observation is about, as the DAW knows it: which DAW, its durable id once saved, its name, its file,
+/// when it was last saved, and the DAW's identity for it while it stays open. Names are data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectIdentity {
+    pub daw: DawId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_identity: Option<String>,
+}
+
 /// The saved Set an observation is about (an opaque id), so its conversation can be kept between sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRef {
@@ -417,6 +434,8 @@ pub struct Observation {
     pub tracks: Option<Vec<String>>,
     /// When the saved Set's file was last written: a later time means the producer saved it.
     pub saved_at: Option<f64>,
+    /// The project as the DAW knows it, its name for the app to show; None when the DAW wasn't read.
+    pub identity: Option<ProjectIdentity>,
 }
 
 /// A conversation, kept between sessions: `changes` are what Kumi changed during it (for HISTORY),
@@ -1554,6 +1573,9 @@ pub enum SessionEvent {
     },
     Observation {
         label: String,
+        /// The project's name, as the DAW gives it (the label says it in words).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     Notice {
         message: String,
