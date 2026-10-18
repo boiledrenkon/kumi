@@ -99,7 +99,9 @@ impl Loaded {
         };
         let config = Config::from_reference(&reference);
         log::set_dir(config.log_dir.clone());
-        match Server::start(config, self.hub.clone(), self.jobs.clone(), self.snapshot.clone()) {
+        let started =
+            config.bind().and_then(|listener| Server::start(listener, config, self.hub.clone(), self.jobs.clone(), self.snapshot.clone()));
+        match started {
             Ok(server) => {
                 log::line(&format!("serving on 127.0.0.1:{} (REAPER {})", server.port(), self.extension.reaper().app_version()));
                 *self.server.borrow_mut() = Some(server);
