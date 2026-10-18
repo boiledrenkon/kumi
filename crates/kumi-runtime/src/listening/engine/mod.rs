@@ -1,6 +1,9 @@
 //! The listening tools' engines, apart from any DAW: a judged run (the judge, and the tune that picks its numbers) over
 //! what the DAW can do (`Renderer`). The DAW hears, changes and undoes; the engines decide.
 mod judge;
+mod probe;
+mod roles;
+mod tune;
 #[cfg(test)]
 pub(crate) use judge::prune_unstored;
 pub(crate) use judge::{masking_items, JudgeHeard};

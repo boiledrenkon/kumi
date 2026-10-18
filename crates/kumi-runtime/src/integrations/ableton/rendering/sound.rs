@@ -54,7 +54,7 @@ impl Rendering {
             heard_names.push(against.clone());
         }
         let what = format!("measuring {}", heard_names.join(", "));
-        let heard = match self.live.hear_takes(&heard_names, window, &what, signal).await? {
+        let heard = match self.listening.hear_takes(&heard_names, window, &what, signal).await? {
             Ok(heard) => heard,
             Err(why) => return Ok(Err(why)),
         };

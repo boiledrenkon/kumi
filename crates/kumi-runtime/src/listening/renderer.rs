@@ -7,12 +7,13 @@ use crate::{
         daw::DawProfile,
         errors::RuntimeError,
     },
-    listening::{checklist::MainState, judging::Placed},
+    listening::{checklist::MainState, fit::Band, judging::Placed, knobs::Scale},
+    plugins::roles::Seen,
 };
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use kumi_common::abort::Signal;
-use std::{cell::Cell, path::PathBuf};
+use std::{any::Any, cell::Cell, path::PathBuf};
 
 /// A stretch of the timeline, in beats.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +85,45 @@ pub struct Pass {
     pub notes: Vec<String>,
     /// Why the mix wasn't heard as it comes into the master chain, when the DAW tried (and that it came through empty).
     pub tried: Option<String>,
+    /// The most a capture runs before the part asked for, in seconds: a pass that records keeps a short lead for a hit
+    /// to rise out of; one that taps the signal has none.
+    pub lead: f64,
+}
+
+/// A device's knob: where it is, its range, the values it lists (a switch or a menu), and its scale.
+#[derive(Debug, Clone)]
+pub struct DeviceKnob {
+    pub reference: String,
+    pub name: String,
+    pub raw: f64,
+    pub min: f64,
+    pub max: f64,
+    pub items: Vec<String>,
+    pub scale: Option<Scale>,
+}
+
+impl DeviceKnob {
+    /// The raw value of one of the values it lists.
+    pub fn item(&self, wanted: &str) -> Option<f64> {
+        let index = self.items.iter().position(|item| item.eq_ignore_ascii_case(wanted))?;
+        let steps = (self.items.len().max(2) - 1) as f64;
+        Some(self.min + index as f64 * (self.max - self.min) / steps)
+    }
+}
+
+/// What the DAW sets on an equaliser to draw fitted bands: knobs (by reference) to raw values, in the order to set them,
+/// and what else it set to make them land as calculated, in words.
+pub struct EqFit {
+    pub values: Vec<(String, f64)>,
+    pub settings: Vec<&'static str>,
+}
+
+/// Scratch copies of a device's track, made for one search or probe and taken away after it.
+pub struct Copies {
+    /// The copies' track names, in order.
+    pub names: Vec<String>,
+    /// What the DAW keeps to set and remove them.
+    pub held: Box<dyn Any>,
 }
 
 /// The DAW as the listening tools meet it.
@@ -155,4 +195,53 @@ pub trait Renderer {
     async fn chain(&self, track: Option<&str>) -> Result<Vec<Placed>, String>;
     /// Deletes a device; whether it went.
     async fn delete_device(&self, reference: &str) -> bool;
+
+    /// A device's knobs with the text the DAW shows across each one's range; why not, when it can't be read.
+    async fn knobs(&self, device: &str, signal: Signal) -> Result<Result<Vec<DeviceKnob>, String>, RuntimeError>;
+    /// Sets knobs (by reference) to raw values in one step.
+    async fn set_knobs(&self, device: &str, values: &[(&str, f64)], signal: Signal) -> Result<(), RuntimeError>;
+    /// What kind of device it is, as its probes are saved: the DAW's class for its own devices, the name for a plug-in.
+    async fn device_kind(&self, device: &str, signal: Signal) -> Option<String>;
+    /// The knobs to set so an equaliser's bands are these (the ones it isn't using take them); why not, when it can't.
+    async fn fit_eq(
+        &self,
+        device: &str,
+        knobs: &[DeviceKnob],
+        bands: &[Band],
+        signal: Signal,
+    ) -> Result<Result<EqFit, String>, RuntimeError>;
+    /// Whether the device is on the track (its reference, as the history keeps them).
+    async fn on_track(&self, device: &str, track: &str, signal: Signal) -> bool;
+    /// Makes `count` copies of a device's track, for work heard in `passes` passes over `window`.
+    async fn open_copies(
+        &self,
+        device: &str,
+        count: usize,
+        label: &str,
+        passes: u32,
+        window: Window,
+        signal: Signal,
+    ) -> Result<Result<Copies, String>, RuntimeError>;
+    /// Sets each copy's knobs (by copy name, knob name and raw value).
+    async fn set_copies(
+        &self,
+        copies: &Copies,
+        values: serde_json::Map<String, serde_json::Value>,
+        signal: Signal,
+    ) -> Result<Result<(), String>, RuntimeError>;
+    /// Takes the copies away, whatever happened.
+    async fn close_copies(&self, copies: Copies);
+
+    /// The devices on a device's track, as tune sees them, and where the device is among them.
+    async fn track_devices(&self, device: &str, signal: Signal) -> Result<(Vec<Seen>, usize), RuntimeError>;
+    /// Every parameter name the DAW lists for a plug-in; None when it can't list them.
+    async fn listed_names(&self, device: &str, signal: Signal) -> Result<Option<Vec<String>>, RuntimeError>;
+    /// A device's turnable parameters, the switches that are on, an equaliser's bands, and for a mapped plug-in what
+    /// the DAW lists; left empty when it can't say.
+    async fn read_seen(&self, device: &mut Seen, signal: Signal);
+    /// An equaliser's bands from its knobs: each band's number, frequency (Hz), whether it's on, and whether its gain
+    /// shapes. None for any other device.
+    fn eq_bands(&self, knobs: &[DeviceKnob]) -> Vec<(u8, f64, bool, bool)>;
+    /// The devices on the run's track (the master without one) as tune sees them, before their parameters are read.
+    async fn devices_seen(&self, track: Option<&str>, signal: Signal) -> Option<Vec<Seen>>;
 }

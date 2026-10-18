@@ -4,14 +4,16 @@
 //! Inside this impl the inherent methods are called by their path (`LiveRenderer::tell(self, …)`): a method call on the
 //! `Rc` finds `Renderer`'s first.
 use super::super::connection::NO_CURRENT_LIVE;
-use super::{rig::BEFORE_MAIN, *};
+use super::{pass::RECORD_LEAD, rig::BEFORE_MAIN, roles::bands_of, *};
 use crate::{
     core::daw::DawProfile,
     listening::{
         checklist::MainState,
+        fit::Band,
         judging::Placed,
-        renderer::{Captured, ListenFlag, Pass, Renderer, Window},
+        renderer::{Captured, Copies, DeviceKnob, EqFit, ListenFlag, Pass, Renderer, Window},
     },
+    plugins::roles::Seen,
 };
 use async_trait::async_trait;
 use kumi_common::js::string::head;
@@ -72,6 +74,8 @@ impl Renderer for Rc<LiveRenderer> {
         // Why the mix wasn't heard as it comes into Main's chain, when Kumi Ears tried to: its device wasn't placed, or
         // nothing came through from it.
         let mut tried = None;
+        // The record pass keeps a lead before the part for a hit to rise out of; Kumi Ears measures from the part itself.
+        let lead = if rig.as_ref().is_some_and(|rig| rig.ears.is_some()) { 0. } else { RECORD_LEAD };
         if let Some(rig) = rig.as_mut() {
             let placed = rig.ears.as_ref().is_some_and(|ears| ears.before_main.is_some());
             self.close_rig(rig).await;
@@ -82,7 +86,7 @@ impl Renderer for Rc<LiveRenderer> {
             let before_master = files.shift_remove(BEFORE_MAIN);
             Captured { files, sources, before_master }
         });
-        Pass { rendered, notes, tried }
+        Pass { rendered, notes, tried, lead }
     }
     async fn master_chain(&self, signal: Signal) -> MainState {
         self.main_state(signal).await
@@ -130,5 +134,68 @@ impl Renderer for Rc<LiveRenderer> {
     }
     async fn delete_device(&self, reference: &str) -> bool {
         self.step("delete_device", json!({"ref":reference}), LiveRenderer::cleanup(self)).await.is_ok()
+    }
+
+    async fn knobs(&self, device: &str, signal: Signal) -> Result<Result<Vec<DeviceKnob>, String>, RuntimeError> {
+        self.device_knobs(device, signal).await
+    }
+    async fn set_knobs(&self, device: &str, values: &[(&str, f64)], signal: Signal) -> Result<(), RuntimeError> {
+        self.set_knob_values(device, values, signal).await
+    }
+    async fn device_kind(&self, device: &str, signal: Signal) -> Option<String> {
+        LiveRenderer::device_kind(self, device, signal).await
+    }
+    async fn fit_eq(
+        &self,
+        device: &str,
+        knobs: &[DeviceKnob],
+        bands: &[Band],
+        signal: Signal,
+    ) -> Result<Result<EqFit, String>, RuntimeError> {
+        self.fit_eq_bands(device, knobs, bands, signal).await
+    }
+    async fn on_track(&self, device: &str, track: &str, signal: Signal) -> bool {
+        // The copies are of the device's own track, so it has to be the run's (refs read long: a short one is a counter).
+        let run_track = self.scope_ref(Some(track), signal).await.ok();
+        run_track
+            .is_some_and(|track| super::super::mutations::same_track(&LiveRenderer::connection(self).references.borrow(), device, &track))
+    }
+    async fn open_copies(
+        &self,
+        device: &str,
+        count: usize,
+        label: &str,
+        passes: u32,
+        window: Window,
+        signal: Signal,
+    ) -> Result<Result<Copies, String>, RuntimeError> {
+        LiveRenderer::open_copies(self, device, count, (label, passes, window), signal).await
+    }
+    async fn set_copies(
+        &self,
+        copies: &Copies,
+        values: serde_json::Map<String, Value>,
+        signal: Signal,
+    ) -> Result<Result<(), String>, RuntimeError> {
+        LiveRenderer::set_copies(self, copies, values, signal).await
+    }
+    async fn close_copies(&self, copies: Copies) {
+        LiveRenderer::close_copies(self, copies).await
+    }
+
+    async fn track_devices(&self, device: &str, signal: Signal) -> Result<(Vec<Seen>, usize), RuntimeError> {
+        self.track_devices_of(device, signal).await
+    }
+    async fn listed_names(&self, device: &str, signal: Signal) -> Result<Option<Vec<String>>, RuntimeError> {
+        self.listed_names_of(device, signal).await
+    }
+    async fn read_seen(&self, device: &mut Seen, signal: Signal) {
+        LiveRenderer::read_seen(self, device, signal).await
+    }
+    fn eq_bands(&self, knobs: &[DeviceKnob]) -> Vec<(u8, f64, bool, bool)> {
+        bands_of(knobs)
+    }
+    async fn devices_seen(&self, track: Option<&str>, signal: Signal) -> Option<Vec<Seen>> {
+        self.devices_on(track, signal).await
     }
 }

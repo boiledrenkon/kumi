@@ -377,6 +377,13 @@ impl Rendering {
     pub fn names_now(&self, named: &Named) -> (Option<String>, Option<String>) {
         self.listening.names_now(named)
     }
+    pub async fn tune(&self, request: &TuneRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
+        self.listening.tune(request, original).await
+    }
+    /// A round's next fix names a mapped plug-in's role when one on the run's track does the job.
+    pub async fn name_plugin_roles(&self, round: &mut Round, signal: Signal) {
+        self.listening.name_plugin_roles(round, signal).await
+    }
     pub async fn audition(&self, request: &AuditionRequest, original: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
         self.live.audition(request, original).await
     }

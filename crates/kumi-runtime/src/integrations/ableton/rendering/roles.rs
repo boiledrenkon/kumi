@@ -1,14 +1,14 @@
-//! Knobs named by role in tune, and fixes that name a mapped plug-in's role. A track is read as tune sees it: each
-//! device's name, class and whether it's on, the parameters Live lets Kumi turn, and for a plug-in every name Live
-//! lists for it, so the plug-in map's names are checked against Live's own before any is used.
-
-use super::tune::DeviceKnob;
+//! Live's side of tune's roles: a track read as tune sees it (each device's name, class and whether it's on, the
+//! parameters Live lets Kumi turn, and for a plug-in every name Live lists for it), and EQ Eight's bands from its knobs.
+//! What is made of them is `Listening`'s.
 use super::*;
-use crate::listening::{
-    knobs::{shown_hz, Unit},
-    round::Round,
+use crate::{
+    listening::{
+        knobs::{shown_hz, Unit},
+        renderer::DeviceKnob,
+    },
+    plugins::roles::Seen,
 };
-use crate::plugins::roles::{self, is_plugin, Found, Resolved, Seen};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -16,57 +16,6 @@ use std::sync::LazyLock;
 static ON_TRACK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([0-9]+):device:([0-9]+):").unwrap());
 
 impl LiveRenderer {
-    /// The tune request with its knobs named by role found: on its device, or else on another of its track, in the
-    /// agreed order. An EQ band named by role on an EQ Eight is the band nearest `near` (the target's frequency, Hz)
-    /// when it's known. None when no knob is named by role; why, when nothing can turn one.
-    pub(super) async fn knobs_by_role(
-        &self,
-        request: &TuneRequest,
-        knobs: &[DeviceKnob],
-        near: Option<f64>,
-        signal: Signal,
-    ) -> Result<Result<Option<TuneRequest>, String>, RuntimeError> {
-        let turnable: Vec<String> = knobs.iter().map(|knob| knob.name.clone()).collect();
-        if request.how == TuneHow::Fit || request.knobs.iter().all(|word| turnable.iter().any(|name| roles::same(name, word))) {
-            return Ok(Ok(None));
-        }
-        let long = self.long_device(&request.device);
-        let (mut devices, asked) = self.track_devices(&long, signal.clone()).await?;
-        devices[asked].turnable = turnable.to_vec();
-        devices[asked].bands = bands_of(knobs);
-        if is_plugin(&devices[asked].class) {
-            devices[asked].listed = self.listed_names(&long, signal.clone()).await?;
-        }
-        // The rest of the track is read only when the device can't turn a role.
-        if request.knobs.iter().any(|word| matches!(roles::find(&devices[asked], word), Some(Found::Missing(_)))) {
-            for at in roles::agreed_order(&devices, Some(asked)) {
-                self.read_seen(&mut devices[at], signal.clone()).await;
-            }
-            signal.check()?;
-        }
-        Ok(match roles::resolve_near(&devices, asked, &request.knobs, near) {
-            Resolved::AsAsked => Ok(None),
-            Resolved::On { device, knobs, read, instead } => {
-                let mut found = request.clone();
-                if device != asked {
-                    found.device = devices[device].reference.clone();
-                }
-                found.knobs = knobs;
-                // The log says why another device, and how each role was read.
-                let said: Vec<String> = request.change.iter().cloned().chain(instead).chain(std::iter::once(read.join("; "))).collect();
-                found.change = Some(
-                    said.iter()
-                        .map(|part| part.trim().trim_end_matches('.'))
-                        .filter(|part| !part.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(". "),
-                );
-                Ok(Some(found))
-            }
-            Resolved::Refused(why) => Err(why),
-        })
-    }
-
     fn long_device(&self, device: &str) -> String {
         let long = self.connection().references.borrow().lengthen(&json!({"deviceRef":device}));
         long["deviceRef"].as_str().unwrap_or(device).to_owned()
@@ -111,7 +60,7 @@ impl LiveRenderer {
 
     /// A device's turnable parameters and the switches that are on, and for a mapped plug-in what Live lists; left
     /// empty when Live can't say.
-    async fn read_seen(&self, device: &mut Seen, signal: Signal) {
+    pub(super) async fn read_seen(&self, device: &mut Seen, signal: Signal) {
         let long = self.long_device(&device.reference);
         let fields = json!({"parent":long,"fields":["name","value","max","displayValue"]});
         if let Ok(rows) = self.rows("parameter", fields, signal.clone()).await {
@@ -144,37 +93,28 @@ impl LiveRenderer {
             device.listed = self.listed_names(&long, signal).await.ok().flatten();
         }
     }
-}
 
-impl Rendering {
-    /// A round's next fix names a mapped plug-in's role when one on the run's track does the job (Ozone 12 first, then
-    /// the other mapped plug-ins), with the fix it had after it. It stays as it was when none does, or Live can't say.
-    pub async fn name_plugin_roles(self: &Rc<Self>, round: &mut Round, signal: Signal) {
-        let Some(job) = round.next.as_ref().and_then(|next| roles::job_for_item(&next.id)) else { return };
-        let Some(track) = self.listening.judge.borrow().as_ref().map(|run| run.track.clone()) else { return };
-        let Ok(parent) = self.live.scope_ref(track.as_deref(), signal.clone()).await else { return };
-        let Ok(rows) = self.rows("device", json!({"parent":parent,"fields":DEVICE_FIELDS}), signal.clone()).await else { return };
-        let mut devices: Vec<Seen> = rows.iter().map(seen).collect();
-        let doing: Vec<usize> = (0..devices.len())
-            .filter(|at| !devices[*at].off && devices[*at].adapter().is_some_and(|adapter| roles::job_role(adapter, job).is_some()))
-            .collect();
-        if doing.is_empty() {
-            return;
-        }
-        for at in doing {
-            self.read_seen(&mut devices[at], signal.clone()).await;
-        }
-        if let Some(next) = round.next.as_mut() {
-            if let Some(fix) = roles::plugin_fix(&devices, job, next.fix.as_deref()) {
-                next.fix = Some(fix);
-            }
-        }
+    /// The devices on a device's track, as tune sees them, and where the device is among them.
+    pub(super) async fn track_devices_of(&self, device: &str, signal: Signal) -> Result<(Vec<Seen>, usize), RuntimeError> {
+        self.track_devices(&self.long_device(device), signal).await
+    }
+
+    /// Every parameter name Live lists for a plug-in; None when Live can't list them.
+    pub(super) async fn listed_names_of(&self, device: &str, signal: Signal) -> Result<Option<Vec<String>>, RuntimeError> {
+        self.listed_names(&self.long_device(device), signal).await
+    }
+
+    /// The devices on the run's track (the master without one) as tune sees them, before their parameters are read.
+    pub(super) async fn devices_on(self: &Rc<Self>, track: Option<&str>, signal: Signal) -> Option<Vec<Seen>> {
+        let parent = self.scope_ref(track, signal.clone()).await.ok()?;
+        let rows = self.rows("device", json!({"parent":parent,"fields":DEVICE_FIELDS}), signal.clone()).await.ok()?;
+        Some(rows.iter().map(seen).collect())
     }
 }
 
 /// An EQ Eight's bands from its knobs: each band's number, frequency (Hz), whether it's on, and whether its gain shapes
 /// (a bell or a shelf: a cut's gain does nothing). None for any other device.
-fn bands_of(knobs: &[DeviceKnob]) -> Vec<(u8, f64, bool, bool)> {
+pub(super) fn bands_of(knobs: &[DeviceKnob]) -> Vec<(u8, f64, bool, bool)> {
     let named = |name: String| knobs.iter().find(|knob| knob.name == name);
     knobs
         .iter()
