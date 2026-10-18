@@ -418,7 +418,7 @@ fn sends(client: &mut Client, home: &str) {
     for (reference, volume) in &after {
         println!("  after  {reference} {volume} dB");
     }
-    let survivors_same = before.iter().filter(|b| after.iter().any(|a| a.0 == b.0)).all(|b| after.iter().any(|a| *a == *b));
+    let survivors_same = before.iter().filter(|b| after.iter().any(|a| a.0 == b.0)).all(|b| after.contains(b));
     println!("every ref that is still there reads back to its own send: {survivors_same}; {} -> {} sends", before.len(), after.len());
 }
 
