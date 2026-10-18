@@ -66,6 +66,16 @@ struct Pending {
     tracks: bool,
     selection: bool,
     play: Option<PlayState>,
+    tempo: bool,
+}
+
+/// `{playing, paused, recording, bpm}`: the keys the Renoise bridge shares (`playing`, `bpm`) plus REAPER's own.
+fn transport_json(play: PlayState, bpm: Option<f64>) -> Value {
+    let mut transport = play.to_json();
+    if let Some(bpm) = bpm {
+        transport["bpm"] = bpm.into();
+    }
+    transport
 }
 
 fn bad_params(message: &str) -> (String, String) {
@@ -76,7 +86,7 @@ fn bad_params(message: &str) -> (String, String) {
 #[derive(Default)]
 struct Sent {
     project: Option<(usize, ProjectSummary)>,
-    play: Option<PlayState>,
+    transport: Option<Value>,
 }
 
 // Ticks per second for each driver, measured over the last second.
@@ -144,6 +154,7 @@ impl Extension {
             Call::TrackListChange => pending.tracks = true,
             Call::Selected(..) | Call::TrackSelection(_) => pending.selection = true,
             Call::PlayState { play, pause, rec } => pending.play = Some(PlayState { playing: play, paused: pause, recording: rec }),
+            Call::Extended { call: api::CSURF_EXT_SETBPMANDPLAYRATE, .. } => pending.tempo = true,
             _ => {}
         }
         0
@@ -253,7 +264,7 @@ impl Extension {
             "ticksPerSecond": {"timer": rates.timer_hz, "surface": rates.surface_hz},
         });
         if let Some(project) = project {
-            status["transport"] = reaper.play_state(project.ptr).to_json();
+            status["transport"] = transport_json(reaper.play_state(project.ptr), reaper.tempo());
             status["tracks"] = reaper.track_count(project.ptr).into();
             if let Some(count) = reaper.state_change_count(project.ptr) {
                 status["stateChangeCount"] = count.into();
@@ -282,17 +293,19 @@ impl Extension {
 
     fn flush_events(&self) {
         let pending = std::mem::take(&mut *self.pending.borrow_mut());
-        if !pending.tracks && !pending.selection && pending.play.is_none() {
+        if !pending.tracks && !pending.selection && pending.play.is_none() && !pending.tempo {
             return;
         }
         let reaper = self.reaper();
         let Some(project) = reaper.current_project() else { return };
-        if let Some(play) = pending.play {
+        if pending.play.is_some() || pending.tempo {
+            let play = pending.play.unwrap_or_else(|| reaper.play_state(project.ptr));
+            let transport = transport_json(play, reaper.tempo());
             let mut sent = self.sent.borrow_mut();
-            if sent.play != Some(play) {
-                sent.play = Some(play);
+            if sent.transport.as_ref() != Some(&transport) {
+                sent.transport = Some(transport.clone());
                 drop(sent);
-                self.out.event("transport", play.to_json());
+                self.out.event("transport", transport);
             }
         }
         if pending.tracks {
@@ -396,7 +409,7 @@ mod tests {
         assert!(snapshot.last_tick.is_some());
         assert_eq!(snapshot.status["tracks"], 2);
         assert_eq!(snapshot.status["transport"]["playing"], true);
-        assert_eq!(snapshot.status["api"], json!({"resolved": 20, "total": 877}));
+        assert_eq!(snapshot.status["api"], json!({"resolved": 21, "total": 877}));
         fake::with(|s| s.loading = true);
         extension.tick(Driver::Timer);
         assert_eq!(extension.snapshot().busy, Some(Busy::Loading));
@@ -500,15 +513,31 @@ mod tests {
         assert_eq!(
             recorder.take(),
             [
-                ("transport".to_string(), json!({"playing": true, "paused": false, "recording": false})),
+                ("transport".to_string(), json!({"playing": true, "paused": false, "recording": false, "bpm": 120.0})),
                 ("tracks".to_string(), json!({"count": 2})),
                 ("selection".to_string(), json!({"tracks": [{"index": 2, "guid": "{BBBB}", "name": "Bass"}]})),
             ]
         );
-        // The same play state again is not news.
+        // The same play state again is not news; a tempo change is.
         extension.on_surface(Call::PlayState { play: true, pause: false, rec: false });
         extension.tick(Driver::Timer);
         assert!(recorder.take().is_empty());
+        fake::with(|s| {
+            s.bpm = 96.0;
+            s.play_bits = 1;
+        });
+        let tempo = Call::Extended {
+            call: api::CSURF_EXT_SETBPMANDPLAYRATE,
+            parm1: std::ptr::null_mut(),
+            parm2: std::ptr::null_mut(),
+            parm3: std::ptr::null_mut(),
+        };
+        extension.on_surface(tempo);
+        extension.tick(Driver::Timer);
+        assert_eq!(
+            recorder.take(),
+            [("transport".to_string(), json!({"playing": true, "paused": false, "recording": false, "bpm": 96.0}))]
+        );
     }
 
     #[test]
