@@ -61,7 +61,8 @@
 //! - response `{"type":"response","id":n,"ok":true,"result":…}` or `{…,"ok":false,"error":{"code":…,"message":…}}`
 //!   with the codes in [`wire::code`];
 //! - event `{"type":"event","seq":n,"name":…,"data":…}`, numbered from 1 on each connection;
-//! - heartbeat `{"type":"heartbeat","ms":n}` every `heartbeatMs`: after 3 missed the host calls the bridge busy;
+//! - heartbeat `{"type":"heartbeat","ms":n}` every `heartbeatMs`, `ms` counting from when the connection was accepted:
+//!   after 3 missed the host calls the bridge busy;
 //! - bye `{"type":"bye","reason":…}` before the bridge closes.
 //!
 //! A host that has read 16 KiB without writing sends a heartbeat frame of its own (the bridge ignores its content):

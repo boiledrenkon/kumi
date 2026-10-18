@@ -64,7 +64,6 @@ pub struct Hub {
 
 struct HubInner {
     conns: Mutex<Vec<Arc<Conn>>>,
-    started: Instant,
 }
 
 /// What the main thread may touch of a connection. The handshake's state machine isn't here: the reader thread owns
@@ -77,11 +76,13 @@ struct Conn {
     authenticated: AtomicBool,
     /// The next event's number on this connection (only the main thread sends events).
     next_seq: AtomicU64,
+    /// When the connection was accepted: a heartbeat's `ms` counts from here, as the Renoise tool's does.
+    opened: Instant,
 }
 
 impl Default for Hub {
     fn default() -> Self {
-        Hub { inner: Arc::new(HubInner { conns: Mutex::new(Vec::new()), started: Instant::now() }) }
+        Hub { inner: Arc::new(HubInner { conns: Mutex::new(Vec::new()) }) }
     }
 }
 
@@ -134,9 +135,8 @@ impl Outbox for Hub {
     }
 
     fn heartbeat(&self) {
-        let ms = self.inner.started.elapsed().as_millis() as u64;
         for conn in self.conns().iter().filter(|c| c.authenticated.load(Ordering::Acquire)) {
-            self.send(conn, Frame::Heartbeat { ms }.encode());
+            self.send(conn, Frame::Heartbeat { ms: conn.opened.elapsed().as_millis() as u64 }.encode());
         }
     }
 }
@@ -470,7 +470,14 @@ fn spawn_connection(id: u64, stream: TcpStream, state: ServerConnection, started
     // Writes wake as often as reads do: a blocked send isn't woken by shutting the socket on every OS.
     stream.set_write_timeout(Some(READ_POLL))?;
     let (out, rx) = mpsc::sync_channel::<Vec<u8>>(OUTBOX_FRAMES);
-    let conn = Arc::new(Conn { id, out, stream: stream.try_clone()?, authenticated: AtomicBool::new(false), next_seq: AtomicU64::new(1) });
+    let conn = Arc::new(Conn {
+        id,
+        out,
+        stream: stream.try_clone()?,
+        authenticated: AtomicBool::new(false),
+        next_seq: AtomicU64::new(1),
+        opened: Instant::now(),
+    });
     let mut writer = stream.try_clone()?;
     let closer = stream.try_clone()?;
     let stopping = shared.stopping.clone();
@@ -923,6 +930,17 @@ mod tests {
         lab.hub.event("tracks", json!({"count": 2}));
         let event = read_frame(&mut reader);
         assert_eq!((event["seq"].as_u64(), event["data"].clone()), (Some(1), json!({"count": 2})));
+    }
+
+    #[test]
+    fn a_heartbeat_counts_from_the_connection_not_from_the_server() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        thread::sleep(Duration::from_millis(400));
+        let (_stream, mut reader, _) = lab.authenticated();
+        lab.hub.heartbeat();
+        let beat: Value = serde_json::from_str(&read_line(&mut reader).unwrap()).unwrap();
+        assert_eq!(beat["type"], "heartbeat");
+        assert!(beat["ms"].as_u64().unwrap() < 300, "{beat}");
     }
 
     #[test]
