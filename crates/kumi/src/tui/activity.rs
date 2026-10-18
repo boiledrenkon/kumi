@@ -54,46 +54,22 @@ impl Activity {
     }
 }
 
-fn kind_of(tool: &str) -> Option<Activity> {
-    Some(match tool {
-        "search_web"
-        | "search_conversations"
-        | "live_browser_search"
-        | "find_sounds"
-        | "find_presets"
-        | "my_sets"
-        | "live_browser_roots"
-        | "live_browser_inspect" => Activity::Search,
-        "read_web" | "live_manual" => Activity::Read,
-        "server_status"
-        | "live_status"
-        | "live_discover"
-        | "live_snapshot"
-        | "live_note_read"
-        | "live_song_state"
-        | "live_performance_read"
-        | "live_key_estimate"
-        | "live_take_lane_read"
-        | "live_warp_marker_read"
-        | "live_arrangement_automation_read"
-        | "watch_me"
-        | "select"
-        | "show"
-        | "groove" => Activity::Look,
-        "make_device" | "arrange" => Activity::Build,
-        "listen" | "audition" | "judge" | "tune" | "sound" | "form" | "reference" => Activity::Listen,
-        "watch_video" => Activity::Watch,
-        "play" | "fire_scene" | "launch_clip" | "jump_to_locator" => Activity::Play,
-        "record" | "capture_midi" => Activity::Record,
-        "run_python" => Activity::Code,
-        _ => return None,
-    })
-}
-
-/// The kind of task a tool is; the rest change the Set.
+/// The kind of task a tool is, as Kumi and the DAW show it; the rest change the project.
 pub fn activity_of(tool: Option<&str>) -> Activity {
+    use kumi_runtime::core::presentation::{activity, ToolActivity};
     let Some(tool) = tool.filter(|tool| !tool.is_empty()) else { return Activity::Think };
-    kind_of(tool).unwrap_or(if tool.starts_with("live_") { Activity::Look } else { Activity::Change })
+    match activity(crate::daw::presentation(), crate::daw::profile(), tool) {
+        ToolActivity::Search => Activity::Search,
+        ToolActivity::Read => Activity::Read,
+        ToolActivity::Look => Activity::Look,
+        ToolActivity::Build => Activity::Build,
+        ToolActivity::Change => Activity::Change,
+        ToolActivity::Listen => Activity::Listen,
+        ToolActivity::Watch => Activity::Watch,
+        ToolActivity::Play => Activity::Play,
+        ToolActivity::Record => Activity::Record,
+        ToolActivity::Code => Activity::Code,
+    }
 }
 
 /// Each kind's one-cell frames, shown about ten a second.

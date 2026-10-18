@@ -16,6 +16,7 @@ pub mod memory;
 pub mod phrases;
 pub mod picture;
 pub mod playbook;
+pub mod presentation;
 pub mod private;
 pub mod recall;
 pub mod recipes;

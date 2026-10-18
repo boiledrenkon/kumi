@@ -453,15 +453,14 @@ impl TuiApp {
             if let Some(action) = action.filter(|a| flash.is_none() || a.at > state.last_change.as_ref().unwrap().1) {
                 if action.memory
                     || running.is_none()
-                    || running.is_some_and(|s| {
-                        matches!(s.tool.as_deref(), Some("make_changes" | "arrange"))
-                            || ACTION_TOOLS.contains(&s.tool.as_deref().unwrap_or(""))
-                    })
+                    || running.is_some_and(|s| (crate::daw::presentation().acts)(s.tool.as_deref().unwrap_or("")))
                 {
                     return NowLine { dot, label, detail: format!("{} {}", action.glyph, action.title), style: st::BRIGHT, activity: None };
                 }
             }
-            if let Some(flash) = flash.filter(|_| running.is_none() || running.is_some_and(|s| s.tool.as_deref() == Some("make_changes"))) {
+            if let Some(flash) = flash.filter(|_| {
+                running.is_none() || running.is_some_and(|s| (crate::daw::presentation().plan)(s.tool.as_deref().unwrap_or("")))
+            }) {
                 return NowLine {
                     dot,
                     label,

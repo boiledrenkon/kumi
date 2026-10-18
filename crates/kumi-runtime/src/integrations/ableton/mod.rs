@@ -40,6 +40,7 @@ pub use options::AbletonOptions;
 pub mod plan_execution;
 pub mod plan_stream;
 pub mod plugin_tool;
+pub mod presentation;
 pub mod project;
 pub mod samples;
 pub mod set_model;

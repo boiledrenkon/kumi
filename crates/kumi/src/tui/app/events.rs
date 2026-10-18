@@ -793,7 +793,7 @@ impl TuiApp {
             }
             "tool-input" => {
                 let mut state = self.0.state.borrow_mut();
-                if state.current.is_some() && !state.suppress && get("name") == "make_changes" {
+                if state.current.is_some() && !state.suppress && (crate::daw::presentation().plan)(get("name")) {
                     state.planning = Some(get("id").into());
                     state.planning_since = perf_now();
                 }

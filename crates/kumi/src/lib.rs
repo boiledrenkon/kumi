@@ -2,6 +2,7 @@ pub mod awake;
 pub mod bridge_setup;
 pub mod cli;
 pub mod config;
+pub mod daw;
 pub mod doctor;
 pub mod export;
 pub mod history;
