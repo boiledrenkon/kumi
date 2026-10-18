@@ -68,6 +68,14 @@ pub struct PromptVocab {
     pub middle_c_octave: i8,
     /// For each gap no knob closes, the structural change that closes it, with the DAW's own devices.
     pub structure_moves: &'static [(crate::audio::matching::StructuralKind, &'static str)],
+    /// The DAW's own places for sounds, as find_sounds names them: "Live's User Library and Places".
+    pub library_places: &'static str,
+    /// What presets the producer has, as find_presets names them.
+    pub preset_sources: &'static str,
+    /// Devices to find presets for, as find_presets' examples.
+    pub preset_examples: &'static str,
+    /// find_presets' device field, with examples.
+    pub preset_device_hint: &'static str,
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -159,6 +167,18 @@ macro_rules! live_word {
     (eq) => {
         "EQ Eight"
     };
+    (library_places) => {
+        "Live's User Library and Places"
+    };
+    (preset_sources) => {
+        "Live's presets and racks (in the User Library, Places and packs, and Live's own), Max for Live devices, and plug-ins' own presets"
+    };
+    (preset_examples) => {
+        "(\"Wavetable\", \"Drum Rack\", \"Serum\")"
+    };
+    (preset_device_hint) => {
+        "The device it's for, or a rack holding it: \"Operator\", \"Drum Rack\", \"Pro-Q 3\""
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -230,6 +250,18 @@ macro_rules! daw_word {
     };
     ($profile:expr, eq) => {
         $profile.vocab.eq
+    };
+    ($profile:expr, library_places) => {
+        $profile.vocab.library_places
+    };
+    ($profile:expr, preset_sources) => {
+        $profile.vocab.preset_sources
+    };
+    ($profile:expr, preset_examples) => {
+        $profile.vocab.preset_examples
+    };
+    ($profile:expr, preset_device_hint) => {
+        $profile.vocab.preset_device_hint
     };
 }
 
@@ -359,6 +391,10 @@ impl DawProfile {
             eq: "an EQ",
             middle_c_octave: 4,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
+            library_places: "the DAW's own library",
+            preset_sources: "the DAW's own presets and device chains, and plug-ins' own presets",
+            preset_examples: "(\"Serum\", \"Pro-Q 3\")",
+            preset_device_hint: "The device it's for: \"Serum\", \"Pro-Q 3\"",
         },
     };
 
@@ -422,6 +458,10 @@ impl DawProfile {
             eq: crate::live_word!(eq),
             middle_c_octave: 3,
             structure_moves: crate::audio::matching::STRUCTURE_MOVES,
+            library_places: crate::live_word!(library_places),
+            preset_sources: crate::live_word!(preset_sources),
+            preset_examples: crate::live_word!(preset_examples),
+            preset_device_hint: crate::live_word!(preset_device_hint),
         },
     };
 

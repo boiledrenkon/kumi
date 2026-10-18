@@ -667,19 +667,22 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             .as_ref()
             .map(|library| {
                 let resolve = weak.clone();
-                library.tools(LibraryToolsOptions {
-                    on_event: Some(emit.clone()),
-                    resolve: Some(Rc::new(move |named, signal| {
-                        let integration = resolve.upgrade().and_then(|i| i.state.borrow().integration.clone());
-                        async move {
-                            match integration {
-                                Some(i) if i.has_audio_file() => i.audio_file(&named, signal).await,
-                                _ => Ok(None),
+                library.tools_for(
+                    &options.profile,
+                    LibraryToolsOptions {
+                        on_event: Some(emit.clone()),
+                        resolve: Some(Rc::new(move |named, signal| {
+                            let integration = resolve.upgrade().and_then(|i| i.state.borrow().integration.clone());
+                            async move {
+                                match integration {
+                                    Some(i) if i.has_audio_file() => i.audio_file(&named, signal).await,
+                                    _ => Ok(None),
+                                }
                             }
-                        }
-                        .boxed_local()
-                    })),
-                })
+                            .boxed_local()
+                        })),
+                    },
+                )
             })
             .unwrap_or_default();
         let jobs = options.jobs.as_ref().map(|jobs| {
@@ -1438,8 +1441,11 @@ impl Session {
         self.assert_current(op)?;
         let techniques = if let Some(learned) = &self.0.learned { learned.list().await.unwrap_or_default() } else { vec![] };
         self.assert_current(op)?;
-        let habits =
-            if let Some(library) = &self.0.options.library { library.instructions().await.unwrap_or_default() } else { String::new() };
+        let habits = if let Some(library) = &self.0.options.library {
+            library.instructions_for(&self.0.options.profile).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
         self.assert_current(op)?;
         let imported = self.conversation_imported().await;
         self.assert_current(op)?;
