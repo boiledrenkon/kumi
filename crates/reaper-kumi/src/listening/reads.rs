@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 
-use crate::reaper::{Fx, Project, Reaper, Track};
+use crate::reaper::{Fx, FxOwner, Project, Reaper, Track};
 use crate::refs;
 use crate::rows;
 
@@ -15,8 +15,37 @@ const MAX_SPANS: usize = 2000;
 pub const MAX_GRID: u64 = 64;
 const MAX_ITEMS: usize = 128;
 
+/// What REAPER's `fx_type` starts with for a plug-in format (an instrument's adds "i": "VSTi", "AUi"; measured in 7.82,
+/// where ReaPlugs say "VST", JSFX "JS" and a container "Container").
+const PLUGIN_TYPES: [&str; 5] = ["VST", "AU", "CLAP", "LV2", "DX"];
+
 fn round(value: f64) -> f64 {
     rows::seconds(value)
+}
+
+/// What listening needs on an FX row (contract §9): the track whose chain it is on (`trackRef`; a take's FX also says
+/// its `takeRef`, an input FX already says `input`), whether it is a plug-in from outside REAPER (`plugin`: a VST, VST3,
+/// AU, CLAP, LV2 or DX plug-in not made by Cockos; ReaEQ and the other ReaPlugs, JSFX and containers are REAPER's own),
+/// and the plug-in's own name when the producer renamed the FX (`originalName`, REAPER's `fx_name`).
+pub fn add_fx_place(reaper: &Reaper, fx: Fx, row: &mut Value) {
+    let track = match fx.owner {
+        FxOwner::Track(track) => Some(track),
+        FxOwner::Take(take) => {
+            row["takeRef"] = refs::take_ref(&reaper.take_guid(take)).into();
+            reaper.take_item(take).and_then(|item| reaper.item_track(item))
+        }
+    };
+    if let Some(track) = track {
+        row["trackRef"] = refs::track_ref(&rows::track_id(reaper, track)).into();
+    }
+    let kind = reaper.fx_config(fx, "fx_type").unwrap_or_default().to_ascii_uppercase();
+    let own = reaper.fx_config(fx, "fx_name").filter(|name| !name.is_empty());
+    let made_by_cockos = own.clone().unwrap_or_else(|| reaper.fx_name(fx)).trim_end().ends_with("(Cockos)");
+    row["plugin"] = (PLUGIN_TYPES.iter().any(|prefix| kind.starts_with(prefix)) && !made_by_cockos).into();
+    let renamed = reaper.fx_config(fx, "renamed_name").is_some_and(|name| !name.is_empty());
+    if let Some(own) = own.filter(|_| renamed) {
+        row["originalName"] = rows::clip(&own).into();
+    }
 }
 
 /// Stretches merged where they touch or overlap, in order.

@@ -958,6 +958,48 @@ fn audition_says_why_when_it_cant_play() {
     assert!(fake::with(|s| s.listening.sources.iter().all(|source| source.destroyed)), "every source made is freed");
 }
 
+// ----- FX rows -----
+
+#[test]
+fn fx_rows_say_their_track_take_and_whether_they_are_plug_ins_from_outside_reaper() {
+    let rig = Rig::new();
+    fake::with(|s| {
+        let mut pro_q = FakeFx::new("{FX-PQ}", "VST3: Pro-Q 3 (FabFilter)");
+        pro_q.renamed = "Kick EQ".into();
+        s.tracks[1].fx = vec![pro_q];
+        s.tracks[1].input_fx = vec![FakeFx::new("{FX-IN}", "JS: Volume Adjustment")];
+        s.tracks[1].items[0].takes[0].fx = vec![FakeFx::new("{FX-TK}", "AUi: DLSMusicDevice (Apple)")];
+        s.state_count += 1;
+    });
+    rig.tick();
+    let one = |reference: &str| {
+        let answer = rig.ask("read", json!({"ref": reference})).unwrap_or_else(|e| panic!("{reference}: {e:?}"));
+        assert!(daw_bridge::contract::misplaced_refs(&answer).is_empty(), "{answer}");
+        answer["items"][0].clone()
+    };
+    let pro_q = one("r:fx:{FX-PQ}");
+    assert_eq!(
+        (&pro_q["trackRef"], &pro_q["plugin"], &pro_q["name"], &pro_q["originalName"]),
+        (&json!("r:track:{BBBB}"), &json!(true), &json!("Kick EQ"), &json!("VST3: Pro-Q 3 (FabFilter)"))
+    );
+    let input = one("r:fx:{FX-IN}");
+    assert_eq!((&input["trackRef"], &input["input"], &input["plugin"]), (&json!("r:track:{BBBB}"), &json!(true), &json!(false)));
+    assert_eq!(input.get("originalName"), None, "not renamed");
+    let take = one("r:fx:{FX-TK}");
+    assert_eq!(
+        (&take["trackRef"], &take["takeRef"], &take["plugin"]),
+        (&json!("r:track:{BBBB}"), &json!("r:take:{TAKE-K1}"), &json!(true))
+    );
+    // A page: REAPER's own ReaEQ (VST3 by Cockos) and a container are no plug-ins from outside.
+    let page = rig.ask("read", json!({"kind": "fx", "parent": "r:track:{AAAA}"})).unwrap();
+    assert!(daw_bridge::contract::misplaced_refs(&page).is_empty(), "{page}");
+    let rows = page["items"].as_array().unwrap();
+    assert_eq!(
+        rows.iter().map(|r| (r["ref"].clone(), r["plugin"].clone(), r["trackRef"].clone())).collect::<Vec<_>>(),
+        [(json!("r:fx:{FX-EQ}"), json!(false), json!("r:track:{AAAA}")), (json!("r:fx:{FX-C}"), json!(false), json!("r:track:{AAAA}")),]
+    );
+}
+
 // ----- the audio behind an item -----
 
 #[test]

@@ -88,7 +88,7 @@ pub fn refusal(reaper: &Reaper, proj: Project) -> Option<String> {
     }
     let state = reaper.play_state(proj);
     if state.playing || state.recording {
-        return Some("REAPER is playing: Kumi plays its render out loud once REAPER stops".into());
+        return Some("REAPER is playing, so Kumi didn't play its render over it".into());
     }
     None
 }

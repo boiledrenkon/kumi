@@ -404,7 +404,8 @@ impl Registry {
         for &track in &tracks {
             self.index_chain(reaper, FxOwner::Track(track));
         }
-        if !self.fx.contains_key(guid) {
+        let every_chain = !self.fx.contains_key(guid);
+        if every_chain {
             for &track in &tracks {
                 for index in 0..reaper.track_item_count(track) {
                     let Some(item) = reaper.track_item(track, index) else { continue };
@@ -416,7 +417,9 @@ impl Registry {
                 }
             }
         }
-        self.fx_built = Some((count, Instant::now()));
+        // M5 listening (m5-reaper): a miss is remembered only after every chain was looked at; when a track had the FX the
+        // takes weren't, and a take's FX asked for next (same state count) would be missed without a look.
+        self.fx_built = every_chain.then(|| (count, Instant::now()));
         if self.shared_fx.contains(guid) {
             return None;
         }

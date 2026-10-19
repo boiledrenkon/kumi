@@ -826,6 +826,37 @@ unsafe extern "C" fn track_fx_get_parameter_step_sizes(
     true
 }
 
+// ----- an FX's own name -----
+
+/// REAPER's `fx_name`: the plug-in's own name, whatever the FX was renamed (measured in 7.82); other keys go on.
+unsafe extern "C" fn track_fx_get_named_config_parm(
+    track: *mut MediaTrack,
+    fx: c_int,
+    key: *const c_char,
+    buf: *mut c_char,
+    size: c_int,
+) -> bool {
+    if name_of(key) == "fx_name" {
+        return counted(|s| fx_of(s, track as u64, fx).map(|f| write(buf, size, &f.name)).is_some());
+    }
+    type Get = unsafe extern "C" fn(*mut MediaTrack, c_int, *const c_char, *mut c_char, c_int) -> bool;
+    next_fn!(c"TrackFX_GetNamedConfigParm" as Get).is_some_and(|f| unsafe { f(track, fx, key, buf, size) })
+}
+
+unsafe extern "C" fn take_fx_get_named_config_parm(
+    take: *mut MediaItem_Take,
+    fx: c_int,
+    key: *const c_char,
+    buf: *mut c_char,
+    size: c_int,
+) -> bool {
+    if name_of(key) == "fx_name" {
+        return counted(|s| fx_of(s, take as u64, fx).map(|f| write(buf, size, &f.name)).is_some());
+    }
+    type Get = unsafe extern "C" fn(*mut MediaItem_Take, c_int, *const c_char, *mut c_char, c_int) -> bool;
+    next_fn!(c"TakeFX_GetNamedConfigParm" as Get).is_some_and(|f| unsafe { f(take, fx, key, buf, size) })
+}
+
 // ----- chunks that keep the GUIDs written in them, and tracks' P_EXT -----
 
 fn guids_in(chunk: &str, key: &str) -> Vec<String> {
@@ -970,5 +1001,7 @@ pub(super) fn lookup(name: &CStr) -> Option<*mut c_void> {
         b"GetTrackStateChunk" => get_track_state_chunk as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int, bool) -> bool,
         b"SetTrackStateChunk" => set_track_state_chunk as unsafe extern "C" fn(*mut MediaTrack, *const c_char, bool) -> bool,
         b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
+        b"TrackFX_GetNamedConfigParm" => track_fx_get_named_config_parm as unsafe extern "C" fn(*mut MediaTrack, c_int, *const c_char, *mut c_char, c_int) -> bool,
+        b"TakeFX_GetNamedConfigParm" => take_fx_get_named_config_parm as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *const c_char, *mut c_char, c_int) -> bool,
     }
 }
