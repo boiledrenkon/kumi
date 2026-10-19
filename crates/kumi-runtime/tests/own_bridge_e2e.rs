@@ -562,6 +562,11 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
                 .await
                 .unwrap();
             assert!(!ran.is_error && ran.text.contains("Ran Lua"), "{}", ran.text);
+            assert!(
+                ran.text.contains("\"printed\":[\"set\"]") && ran.text.contains("\"result\":140"),
+                "what it printed and returned: {}",
+                ran.text
+            );
             assert!(script.undo_history().last().is_some_and(|step| step.contains("Ran Lua")), "{:?}", script.undo_history());
             let left = tool(&latest, "undo_change").execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
             assert!(left.is_error && left.text.contains("Renoise's own undo can"), "{}", left.text);

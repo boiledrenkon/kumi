@@ -186,6 +186,27 @@ const PAGE_TEXT_BYTES: usize = 60 * 1024;
 /// A turn's short ref (`track:3`): the shape of a name this turn gave.
 pub(super) static SHORT_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z]+:[0-9]+$").unwrap());
 
+/// A call's arguments (`args`, in order or by name) with this turn's short refs anywhere in them made long: they sit under no
+/// ref-named field, so the book's own walk passes them by.
+pub(super) fn lengthen_anywhere<S: RefScheme>(book: &Book<S>, value: &Value) -> Value {
+    match value {
+        Value::String(text) if SHORT_REF.is_match(text) => book.lengthen(&json!({"ref": text}))["ref"].clone(),
+        Value::Array(items) => Value::Array(items.iter().map(|item| lengthen_anywhere(book, item)).collect()),
+        Value::Object(fields) => Value::Object(fields.iter().map(|(key, item)| (key.clone(), lengthen_anywhere(book, item))).collect()),
+        other => other.clone(),
+    }
+}
+
+/// What a call answered (`result`, `out`) with the DAW's refs anywhere in it made this turn's short ones.
+pub(super) fn shorten_anywhere<S: RefScheme>(book: &mut Book<S>, value: &Value) -> Value {
+    match value {
+        Value::String(text) if book.scheme.kind_of(text).is_some() => json!(book.short_ref(text)),
+        Value::Array(items) => Value::Array(items.iter().map(|item| shorten_anywhere(book, item)).collect()),
+        Value::Object(fields) => Value::Object(fields.iter().map(|(key, item)| (key.clone(), shorten_anywhere(book, item))).collect()),
+        other => other.clone(),
+    }
+}
+
 /// Why a host tool answered an error: its words, and whether the DAW is there at all (it quit, or its bridge did).
 pub(super) struct Refused {
     pub(super) why: String,
@@ -1017,6 +1038,11 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
                 "limit": {"type": "integer", "minimum": 1, "maximum": MOST_ROWS, "description": "How many rows (50 by default)"},
             },
         });
+        // A REAPER API function that only reads, by name, with its arguments.
+        if self.daw.read_kinds.contains(&"call") {
+            schema["properties"]["fn"] = json!({"type": "string", "description": "For kind call: a REAPER API function that only reads (GetMediaTrackInfo_Value, TrackFX_GetParamName…)"});
+            schema["properties"]["args"] = json!({"type": ["array", "object"], "description": "For kind call: its arguments, in order or by the SDK's names; tracks, items, takes and envelopes as refs"});
+        }
         // A tracker's lines are read one track at a time.
         if self.daw.read_kinds.contains(&"line") {
             schema["properties"]["trackRef"] = json!({"type": "string", "description": "For kind line: the track (its ref, from this turn) whose lines of the parent pattern to read"});
@@ -1031,6 +1057,9 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
         };
         let args = self.book.borrow().lengthen(&Value::Object(input.clone()));
         let mut args = args.as_object().cloned().unwrap_or_default();
+        if let Some(call_args) = args.get("args").cloned() {
+            args.insert("args".into(), lengthen_anywhere(&self.book.borrow(), &call_args));
+        }
         // A short ref this turn doesn't know (an earlier song's, or made up) is refused in Kumi's words, not the DAW's.
         for key in ["ref", "parent", "trackRef"] {
             let (Some(asked), Some(sent)) = (input.get(key).and_then(Value::as_str), args.get(key).and_then(Value::as_str)) else {
@@ -1075,6 +1104,13 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
                         return Ok(ToolResult::error(format!("{app} changed while reading (tracks were added or removed): read it again")));
                     }
                     note_epoch(&self.seen_in, &self.book.borrow().scheme, &page);
+                    let mut page = page;
+                    // (a call's answer holds refs under no ref-named field)
+                    for key in ["result", "out"] {
+                        if let Some(value) = page.get(key).cloned() {
+                            page[key] = shorten_anywhere(&mut self.book.borrow_mut(), &value);
+                        }
+                    }
                     let text = stringify(&self.book.borrow_mut().shorten(&page));
                     let rows = page.get("items").and_then(Value::as_array).map_or(0, Vec::len);
                     let asked = args.get("limit").and_then(Value::as_u64).map_or(rows, |limit| (limit as usize).min(rows));

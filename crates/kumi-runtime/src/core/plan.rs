@@ -735,8 +735,8 @@ impl<H: PlanHost> Plan<H> {
                 done.insert("lines".into(), lines.clone());
             }
             // What Kumi read for itself in the step's notation, or left to the DAW (a sidechain's channel, an audio
-            // clip's looping): the model says it.
-            for key in ["notation", "channel", "looping"] {
+            // clip's looping): the model says it. And what Lua or a call through the DAW's API answered.
+            for key in ["notation", "channel", "looping", "result", "printed", "out", "failed"] {
                 if let Some(said) = reply.get(key) {
                     done.insert(key.into(), said.clone());
                 }

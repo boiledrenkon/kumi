@@ -653,7 +653,11 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     /// The input with this turn's short refs made long, or what to say of a short ref the turn doesn't know.
     fn lengthened(&self, input: &JsonObject) -> Result<JsonObject, String> {
         let book = self.link().book.borrow();
-        let long = book.lengthen(&Value::Object(input.clone()));
+        let mut long = book.lengthen(&Value::Object(input.clone()));
+        // (a call's arguments hold refs under no ref-named field)
+        if let Some(args) = long.get("args").cloned() {
+            long["args"] = super::own_bridge::lengthen_anywhere(&book, &args);
+        }
         let mut unknown = None;
         find_unknown(&long, "", &mut unknown, 0);
         if let Some(asked) = unknown {
@@ -878,6 +882,13 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         }
         if let Some(restored) = applied.pointer("/applied/base") {
             reply["base"] = self.link().book.borrow_mut().shorten(restored);
+        }
+        // What Lua or a call through the DAW's API answered: its value, what it printed, its out-values, or the error it
+        // stopped at (what it changed before that stays), with the DAW's refs in them short.
+        for key in ["result", "printed", "out", "failed"] {
+            if let Some(value) = applied.pointer(&format!("/applied/{key}")) {
+                reply[key] = super::own_bridge::shorten_anywhere(&mut self.link().book.borrow_mut(), value);
+            }
         }
         ChangeOutcome { text: stringify(&reply), is_error: false, missed: None, stops: false }
     }
