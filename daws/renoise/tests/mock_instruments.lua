@@ -1118,8 +1118,23 @@ local function macro_object(macro)
   getters.value_string = function() return string.format("%d %%", math.floor(macro.value * 100 + 0.5)) end
   fields.value_string_observable = obs(macro, "value_string")
   fields.mappings_observable = obs(macro, "mappings")
-  getters.mappings = function() return {} end
-  fields.mapping = function(_, i) out_of_range("mapping", i) end
+  -- (a mapping a test gives: {name of the parameter, min, max, scaling}; Kumi can't make one)
+  local function mapping_object(m)
+    local parameter = h.parameter({ name = m.name or "Param", value = 0, min = 0, max = 1 }, {})
+    return object("renoise.InstrumentMacroMapping", {
+      parameter = parameter, parameter_min = m.min or 0, parameter_max = m.max or 1, parameter_scaling = m.scaling or 3,
+      parameter_min_observable = obs(m, "min"), parameter_max_observable = obs(m, "max"), parameter_scaling_observable = obs(m, "scaling"),
+    })
+  end
+  getters.mappings = function()
+    local out = {}
+    for k, m in ipairs(macro.mappings or {}) do out[k] = mapping_object(m) end
+    return out
+  end
+  fields.mapping = function(_, i)
+    if not (macro.mappings or {})[i] then out_of_range("mapping", i) end
+    return mapping_object(macro.mappings[i])
+  end
   return object("renoise.InstrumentMacro", fields, getters, setters)
 end
 
