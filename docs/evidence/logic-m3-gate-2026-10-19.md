@@ -5,7 +5,8 @@ the operator, 34 of 37: the three misses are the operator's, listed under the ru
 
 Scope: `feat/logic` at d1f99a13 (the bridge; the acceptance run's own fixes follow in 13ab8324 and 92b3d297), the bridge changing the real Logic Pro through Accessibility and the
 control bar and naming Logic's own undo back, Kumi's host journalling the changes, and Kumi's runtime
-putting a plan into HISTORY and taking it back out as new steps.
+putting a plan into HISTORY and taking it back out as new steps. Paths in this record and in the
+recordings show the Mac's home directory as `/Users/me`; the project ids, hashes of the paths, are over that.
 
 | | |
 | --- | --- |

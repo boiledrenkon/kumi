@@ -6,7 +6,9 @@ Everything here was measured in the lab of 2026-10-18 (`docs/evidence/logic-lab-
 and, for the rows, on the Scratch project in Logic Pro 12.3.1 during M2. The exact JSON is the
 host's simulated Logic (`crates/daw-mcp-server/src/simulator/logic.rs`) and the vectors the bridge
 records from the real Logic (`crates/daw-mcp-server/tests/vectors/logic-reads.json`); where the two
-differ, the vectors are what Logic shows and this page says why.
+differ, the vectors are what Logic shows and this page says why. A recording names no home of the Mac
+it was made on: the bridge's recorder saves `/Users/<name>` as `/Users/me`, and a project's id, the
+hash of its path, is the hash of the redacted path (`logic_kumi::fixtures::redacted`).
 
 ## Channels
 

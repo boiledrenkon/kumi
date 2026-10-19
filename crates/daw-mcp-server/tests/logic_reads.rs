@@ -190,3 +190,38 @@ async fn the_read_methods_on_the_wire() {
     golden("logic-reads-bridge.ndjson", &normalized(&simulator.transcript()));
     simulator.stop();
 }
+
+/// The names after `/Users/` in `text` other than the stand-in `me`: the homes a recording names.
+fn homes_named(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = vec![];
+    let mut rest = text;
+    while let Some(at) = rest.find("/Users/") {
+        rest = &rest[at + "/Users/".len()..];
+        let end = rest.find(|c: char| c == '/' || c == '"' || c == '\\' || c.is_whitespace()).unwrap_or(rest.len());
+        let name = &rest[..end];
+        if !name.is_empty() && name != "me" && !names.iter().any(|known| known == name) {
+            names.push(name.to_string());
+        }
+        rest = &rest[end..];
+    }
+    names
+}
+
+#[test]
+fn the_logic_recordings_name_no_home_of_the_mac_they_were_made_on() {
+    // The vectors are blessed from the bridge's scenes, which its recorder saves with every home as /Users/me, and the
+    // goldens from the vectors; a recording made another way mustn't bring a home back.
+    let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut files = vec![tests.join("vectors").join("logic-reads.json")];
+    for entry in std::fs::read_dir(tests.join("golden")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("logic-")) {
+            files.push(path);
+        }
+    }
+    assert!(files.len() >= 5, "{files:?}");
+    for file in files {
+        let homes = homes_named(&std::fs::read_to_string(&file).unwrap());
+        assert!(homes.is_empty(), "{} names a home: /Users/{}", file.display(), homes.join(", /Users/"));
+    }
+}

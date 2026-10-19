@@ -224,3 +224,22 @@ fn the_other_scenes_change_the_selection_the_transport_and_the_busy_state() {
         check(&focus);
     }
 }
+
+#[test]
+fn the_scenes_name_no_home_of_the_mac_they_were_recorded_on() {
+    // The recorder saves every home as /Users/me (fixtures::redacted); a scene edited or written another way mustn't
+    // bring one back.
+    let mut scenes = 0;
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let dir = entry.unwrap().path();
+        assert!(!dir.join("scene.json").exists(), "{} holds its scene uncompressed: gzip it", dir.display());
+        let file = dir.join(logic_kumi::fixtures::SCENE_FILE);
+        if !file.is_file() {
+            continue;
+        }
+        let homes = logic_kumi::fixtures::homes_named(&logic_kumi::fixtures::scene_text(&dir).unwrap());
+        assert!(homes.is_empty(), "{} names a home: /Users/{}", file.display(), homes.join(", /Users/"));
+        scenes += 1;
+    }
+    assert!(scenes >= 4, "{scenes} scenes");
+}
