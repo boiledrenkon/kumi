@@ -98,9 +98,8 @@ function M.device_now(song, env, t, place)
   if not d then return nil, why end
   local track = song:track(t)
   if d < 1 or d > #track.devices then return nil, "unknown" end
-  local now = M.device_print(track:device(d))
-  local was = place.print or {}
-  if now.path ~= was.path or now.name ~= was.name then return nil, "changed" end
+  -- (the track's devices' log follows the device: its name is no part of what it is; what kind of device it is, is)
+  if track:device(d).device_path ~= (place.print or {}).path then return nil, "changed" end
   return d
 end
 
@@ -124,7 +123,7 @@ function M.tally_note(tally)
       routings(tally.skipped), tally.skipped == 1 and "it names" or "they name", tally.skipped == 1 and "it" or "them")
   end
   if tally.unknown > 0 then
-    parts[#parts + 1] = string.format("%s could not be set again: the song changed in a way Kumi couldn't follow, so it can't tell where %s now: look at %s.",
+    parts[#parts + 1] = string.format("%s could not be set again: the song changed in a way Kumi couldn't follow, or the tool was reloaded, so it can't tell where %s now: look at %s.",
       routings(tally.unknown), tally.unknown == 1 and "it is" or "they are", tally.unknown == 1 and "it" or "them")
   end
   if tally.failed > 0 then parts[#parts + 1] = string.format("%s could not be set again: look at %s.", routings(tally.failed), tally.failed == 1 and "it" or "them") end
@@ -231,7 +230,8 @@ function M.pool_now(song, env, pool)
     if why == "unknown" then return nil end
     if now and now <= #song.patterns then
       local pattern = song:pattern(now)
-      if pattern.name == print.name and pattern.number_of_lines == print.lines then found[tonumber(key)] = now end
+      -- (the pool's log follows the pattern: a name is no part of what it is, and the producer renames freely; its length is)
+      if pattern.number_of_lines == print.lines then found[tonumber(key)] = now end
     end
   end
   local followed = {}
@@ -253,8 +253,8 @@ function M.keep_instruments(song, env, values)
 end
 
 -- The instrument values to write for the kept ones: a table from then to now. Nil and why when one can't be put back as the
--- same instrument: "unknown" (what happened to the instruments can't be told), or the name of one that is gone or isn't what
--- it was.
+-- same instrument: "unknown" (what happened to the instruments can't be told), or the name (then) of one that is gone. The
+-- instruments' log follows each: its name is no part of what it is (Renoise renames an instrument as a sample loads into it).
 function M.instruments_now(song, env, kept)
   local map = {}
   if type(kept) ~= "table" or not next(kept.prints or {}) then return map end
@@ -262,7 +262,7 @@ function M.instruments_now(song, env, kept)
   for key, name in pairs(kept.prints) do
     local now, why = env.instrument_at(tonumber(key) + 1, kept.mark)
     if why == "unknown" then return nil, "unknown" end
-    if not now or now > #song.instruments or song:instrument(now).name ~= name then return nil, name end
+    if not now or now > #song.instruments then return nil, name end
     map[tonumber(key)] = now - 1
   end
   return map

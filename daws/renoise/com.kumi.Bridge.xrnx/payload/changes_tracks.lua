@@ -413,14 +413,24 @@ end
 
 -- Phase one, in the callback that made the track. Nothing half-done stays: a track that couldn't be finished is deleted again, where
 -- it is (followed through the swaps this callback made itself). Answers the track's place and what to say about where it went.
--- Whether a slot still holds the place it had: the sequence up to it is the one the record saw (its patterns found where they
--- are now, by `pattern_now`). A slot made or deleted after it doesn't move it; anything before it does (Renoise's sequence
--- notifier can't say which slot moved where).
+-- Whether a slot still holds the place it had (Renoise's sequence notifier can't say which slot moved where). It does when the
+-- sequence is the one the record saw (its patterns found where they are now, by `pattern_now`); or when the sequence up to it
+-- is, and its pattern is none of its neighbours': patterns repeat, and a slot made or deleted before a run of one pattern
+-- leaves the sequence up to it as it was. A slot made or deleted after it doesn't move it.
 local function slot_holds(kept, now, s, pattern_now)
   if type(kept) ~= "table" or s > #now or s > #kept then return false end
-  for k = 1, s do
-    if pattern_now(kept[k]) ~= now[k] then return false end
+  local same = #kept == #now
+  for k = 1, #kept do
+    if pattern_now(kept[k]) ~= now[k] then
+      if k <= s then return false end
+      same = false
+    end
   end
+  if same then return true end
+  local mine = pattern_now(kept[s])
+  if (s > 1 and pattern_now(kept[s - 1]) == mine) or (s < #kept and pattern_now(kept[s + 1]) == mine) then return false end
+  -- (one of its pattern made just before it would leave the sequence up to it as it was, and push it on)
+  if now[s + 1] ~= nil and now[s + 1] == mine then return false end
   return true
 end
 
@@ -535,7 +545,7 @@ local function placed(song, env, material, discard)
       fail("stale", string.format("the instruments changed in a way Kumi couldn't follow since %s was deleted, so it can't tell which its notes play: nothing was put back", q(material.name)))
     end
     if not discard then
-      fail("changed", string.format("the instrument %s that %s's notes play was deleted or changed in Renoise since: Kumi won't put them back playing another", q(why), q(material.name)))
+      fail("changed", string.format("the instrument %s that %s's notes play was deleted in Renoise since: Kumi won't put them back playing another", q(why), q(material.name)))
     end
     map = {}
   end
