@@ -2021,3 +2021,32 @@ test("places, track × a member made among those before a track taken out of its
   ok(undone.result, json.encode(undone.error or {}))
   ok(names():find("Kick,Hat,New,Bass,Pad,Lead", 1, true), names())
 end)
+
+test("places, value × Dest. Track given as text is a track counted from 1, as Renoise reads it; text without a number is refused", function()
+  local env, peer = setup()
+  routing_catalog()
+  mock.song:track(1):insert_device_at("Audio/Effects/Native/*LFO", 2)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local input = { ref = epoch .. ":device:1.2", param = "Dest. Track", valueString = "3: Bass" }
+  local previewed = preview(peer, "device-param", input)
+  local done = apply(peer, "device-param", input, "Kumi: aim (kp99)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(mock.data.tracks[1].devices[2].params[1].value, 2, "Bass, the third track: the value 2")
+  for _, text in ipairs({ "None", "-1", "0" }) do
+    local now, now_layout = place(peer)
+    failure(call(peer, "change_preview", { kind = "device-param", input = { ref = now .. ":device:1.2", param = "Dest. Track", valueString = text }, epoch = now, layout = now_layout }), "bad-params")
+  end
+end)
+
+test("places, nested groups × the first member of a group that is a group's first: it goes back first in its own group", function()
+  local env, peer = setup(nil, { tracks = { { name = "Kick" }, { name = "A" }, { name = "B" }, { kind = "group", name = "Inner", members = 2 },
+    { kind = "group", name = "Outer", members = 1 } } })
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  eq(order(), "Kick,A(in),B(in),Inner[G](in),Outer[G],Master,Send 1")
+  local previewed, done = delete_track(peer, 2, "Kumi: d (kpa0)")
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kpa1)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(order(), "Kick,A(in),B(in),Inner[G](in),Outer[G],Master,Send 1")
+  eq(mock.song:track(2).group_parent.name, "Inner")
+end)
