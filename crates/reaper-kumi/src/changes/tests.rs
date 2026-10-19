@@ -2469,3 +2469,84 @@ fn a_notes_change_in_a_big_take_costs_no_more_calls_than_in_a_small_one() {
     assert_eq!(costs[0], costs[1], "{costs:?}");
     assert_eq!(costs[1], costs[2], "{costs:?}");
 }
+
+// ----- a restore that writes nothing makes no point (N1) -----
+
+#[test]
+fn a_restore_or_apply_that_writes_nothing_closes_without_a_point_so_it_commits_nothing_of_the_producers() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), "Kumi: Kick volume −6 dB (kn101)");
+    assert_eq!(applied["undo"]["entry"], true);
+    let restored = lab.undo("track-volume", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(restored["undo"]["entry"], true, "an undo that wrote is a point");
+    // The producer has bare edits that REAPER hasn't made a point of yet; the same undo is asked again (a retry).
+    state(|s| s.undo_dirty = true);
+    let entries = state(|s| s.undo_entries);
+    let again = lab.undo("track-volume", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(again["undo"]["entry"], false, "nothing was written, so there is no point");
+    assert_eq!(state(|s| s.undo_entries), entries);
+    assert!(state(|s| s.undo_dirty), "the producer's pending edits are not committed under Kumi's name");
+    // The same for an apply that finds it so already.
+    let (_, applied) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": 0.0}), "Kumi: Kick volume 0 dB (kn102)");
+    assert_eq!(applied["undo"]["entry"], false);
+    assert_eq!(state(|s| s.undo_entries), entries);
+    assert!(state(|s| s.undo_dirty));
+    // And the other kinds that can find it so: a send, an FX parameter, a note retry, a tempo, the loop.
+    let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added “ReaEQ” to “Kick” (kn103)");
+    lab.undo("fx-add", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    let entries = state(|s| s.undo_entries);
+    let (preview, applied) = lab.make("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [1]}), "Kumi: Deleted 1 note (kn104)");
+    lab.undo("notes-delete", &preview, &applied, "Kumi: undo (kund4)").unwrap();
+    let entries_after = state(|s| s.undo_entries);
+    assert_eq!(entries_after, entries + 2);
+    let retry = lab.undo("notes-delete", &preview, &applied, "Kumi: undo (kund5)").unwrap();
+    assert_eq!(retry["undo"]["entry"], false);
+    assert_eq!(state(|s| s.undo_entries), entries_after);
+}
+
+// ----- the undo watch with a long history, and an undo with an edit in one look (N2) -----
+
+#[test]
+fn an_undo_is_still_seen_when_hundreds_of_points_are_redoable() {
+    let lab = Lab::new();
+    let desc = "Kumi: Kick volume −6 dB (kn201)";
+    lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), desc);
+    for n in 0..300 {
+        fake::producer_edit(&format!("Edit {n}"));
+    }
+    lab.tick();
+    lab.events.take();
+    // The producer steps back over 300 of their own edits: none is Kumi's.
+    for _ in 0..300 {
+        fake::producer_undo();
+    }
+    lab.tick();
+    assert!(lab.events.take().is_empty());
+    // And then over Kumi's: more than 256 points can be redone now, which a look at the first 256 of them can't tell apart.
+    fake::producer_undo();
+    lab.tick();
+    assert_eq!(lab.events.take(), [("undone_in_daw".to_string(), json!({"descs": [desc], "how": "undo", "epoch": lab.reads.epoch()}))]);
+    fake::producer_redo();
+    lab.tick();
+    assert_eq!(lab.events.take(), [("undone_in_daw".to_string(), json!({"descs": [desc], "how": "redo", "epoch": lab.reads.epoch()}))]);
+}
+
+#[test]
+fn an_undo_and_a_new_edit_between_two_looks_still_tell_that_kumis_point_was_undone() {
+    let lab = Lab::new();
+    let desc = "Kumi: Kick volume −6 dB (kn202)";
+    lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), desc);
+    lab.tick();
+    lab.events.take();
+    // The same number of points, with the project at the same place, and Kumi's gone.
+    fake::producer_undo();
+    fake::producer_edit("Adjust track pan");
+    lab.tick();
+    assert_eq!(lab.events.take(), [("undone_in_daw".to_string(), json!({"descs": [desc], "how": "undo", "epoch": lab.reads.epoch()}))]);
+    // Bare edits that make no point, and the producer's own, say nothing.
+    state(|s| s.state_count += 1);
+    lab.tick();
+    fake::producer_edit("Adjust track mute");
+    lab.tick();
+    assert!(lab.events.take().is_empty());
+}

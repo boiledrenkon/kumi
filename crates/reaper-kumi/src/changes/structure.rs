@@ -170,6 +170,7 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: Some(json!({"ref": refs::track_ref(&id), "kind": "track"})),
         material: None,
         display: json!({"title": if plan.adopted.is_empty() { format!("Added track {}", super::quoted(&label)) } else { format!("Added folder {}", super::quoted(&label)) }}),
+        ..Default::default()
     })
 }
 
@@ -219,6 +220,7 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"deleted": reference}),
         display: json!({"title": format!("{} taken away again", super::quoted(&name))}),
+        ..Default::default()
     })
 }
 
@@ -335,6 +337,7 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: None,
         display: json!({"title": format!("Moved track {} to position {}", super::quoted(&name), at + 1)}),
+        unwritten: plan.from == plan.to,
     })
 }
 
@@ -348,7 +351,11 @@ pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let now_window = window(reaper, ctx, low, high);
     if now_window != restore.applied["window"] && !restore.discard {
         if now_window == restore.prior["window"] {
-            return Ok(Restored { restored: restore.prior.clone(), display: json!({"title": "Track already back in its place"}) });
+            return Ok(Restored {
+                restored: restore.prior.clone(),
+                display: json!({"title": "Track already back in its place"}),
+                unwritten: true,
+            });
         }
         return Err(changed("the tracks around it have been moved or changed in REAPER since Kumi moved it"));
     }
@@ -367,5 +374,6 @@ pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"index": place(reaper, track)}),
         display: json!({"title": format!("{} back at position {}", super::quoted(&name), from + 1)}),
+        ..Default::default()
     })
 }

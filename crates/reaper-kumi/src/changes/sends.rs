@@ -301,6 +301,7 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         created: None,
         material: None,
         display: json!({"title": (prop.title)(&route, &after), "before": now, "after": after}),
+        unwritten: (prop.same)(&now, &wanted),
     })
 }
 
@@ -308,7 +309,8 @@ pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored>
     let found = find_for_restore(ctx, restore.target["ref"].as_str().unwrap_or_default(), &restore.applied["send"], !restore.discard)?;
     let route = route_text(&found.from, &found.to);
     let now = (prop.read)(ctx.reaper, found.track, found.index);
-    if !(prop.same)(&now, restore.prior) {
+    let already = (prop.same)(&now, restore.prior);
+    if !already {
         if !restore.discard && !(prop.same)(&now, restore.applied) {
             return Err(changed(format!("{route}'s {} changed in REAPER since Kumi set it", prop.noun)));
         }
@@ -323,6 +325,7 @@ pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored>
     Ok(Restored {
         restored: after.clone(),
         display: json!({"title": format!("{} (put back)", (prop.title)(&route, &after)), "before": now, "after": after}),
+        unwritten: already,
     })
 }
 
@@ -450,7 +453,13 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     let mut applied = send_state(reaper, plan.from, index);
     applied["send"] = seal(reaper, &found);
-    Ok(Applied { applied, created: Some(created), material: None, display: json!({"title": format!("Added send {route}")}) })
+    Ok(Applied {
+        applied,
+        created: Some(created),
+        material: None,
+        display: json!({"title": format!("Added send {route}")}),
+        ..Default::default()
+    })
 }
 
 pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -467,6 +476,7 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"removed": reference}),
         display: json!({"title": format!("Send {} taken away again", route_text(&found.from, &found.to))}),
+        ..Default::default()
     })
 }
 
@@ -516,6 +526,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: Some(material),
         display: json!({"title": format!("Removed send {}", route_text(&found.from, &found.to))}),
+        ..Default::default()
     })
 }
 
@@ -541,7 +552,11 @@ pub fn remove_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         None => None,
     };
     if let Some(index) = back {
-        return Ok(Restored { restored: send_state(reaper, from, index), display: json!({"title": "The send is back already"}) });
+        return Ok(Restored {
+            restored: send_state(reaper, from, index),
+            display: json!({"title": "The send is back already"}),
+            unwritten: true,
+        });
     }
     let index = reaper.create_send(from, Some(to)).ok_or_else(|| failed("REAPER wouldn't make the send again"))?;
     write_state(reaper, from, index, &material["state"]);
@@ -557,5 +572,6 @@ pub fn remove_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"ref": refs::send_ref(&track, 0, &key.other, key.repeat, key.of), "state": send_state(reaper, from, index)}),
         display,
+        ..Default::default()
     })
 }

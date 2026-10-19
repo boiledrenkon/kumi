@@ -436,6 +436,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value, mode: Mode) -> Done<Applie
         created: None,
         material: None,
         display: json!({"title": title(mode.verb(), count, &label), "notes": after.len(), "written": rows_of(ctx, take, plan.item_qn, added.iter().copied().enumerate())}),
+        unwritten: removed.is_empty() && added.is_empty(),
     })
 }
 
@@ -490,5 +491,6 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"notes": after.len()}),
         display: json!({"title": format!("Notes in {label} put back ({} removed, {} written again)", found.len(), to_insert.len())}),
+        unwritten: found.is_empty() && to_insert.is_empty(),
     })
 }

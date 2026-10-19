@@ -14,6 +14,8 @@ use crate::reaper::{Project, Reaper};
 
 /// The most redoable points looked at: the history can hold hundreds, and what the producer undid is at its front.
 const REDO_SCAN: i32 = 256;
+/// The most points looked at behind the one the project is at: what the producer can have undone in the time of a look.
+const TAIL_SCAN: i32 = 128;
 
 /// Whether a point's description is one of Kumi's: `Kumi: …` ending in a nonce, `k` and four base-36 characters.
 pub fn is_kumi(desc: &str) -> bool {
@@ -29,16 +31,27 @@ struct View {
     entries: i32,
     at: i32,
     count: i32,
+    /// The descriptions of the points up to `at` (the last `TAIL_SCAN` of them), oldest first.
+    tail: Vec<String>,
     /// The descriptions of the points after `at`, nearest first.
     redo: Vec<String>,
+}
+
+impl View {
+    /// The place in the history of `tail`'s first point.
+    fn tail_start(&self) -> i32 {
+        self.at + 1 - self.tail.len() as i32
+    }
 }
 
 fn view(reaper: &Reaper, proj: Project) -> Option<View> {
     let (entries, at) = reaper.undo_position(proj)?;
     let count = reaper.state_change_count(proj).unwrap_or(0);
+    let first = (at + 1 - TAIL_SCAN).max(0);
+    let tail = (first..=at).map(|index| reaper.undo_entry(proj, index).unwrap_or_default()).collect();
     let last = (entries - 1).min(at + REDO_SCAN);
     let redo = (at + 1..=last).map(|index| reaper.undo_entry(proj, index).unwrap_or_default()).collect();
-    Some(View { entries, at, count, redo })
+    Some(View { entries, at, count, tail, redo })
 }
 
 #[derive(Default)]
@@ -69,14 +82,22 @@ impl Watch {
         let nudged = std::mem::take(&mut self.nudged);
         let Some((entries, at)) = reaper.undo_position(proj) else { return };
         let count = reaper.state_change_count(proj).unwrap_or(0);
-        if let Some(seen) = &self.seen {
-            if !nudged && seen.entries == entries && seen.at == at && seen.count == count {
-                return;
+        if let Some(seen) = &mut self.seen {
+            if !nudged && seen.entries == entries && seen.at == at {
+                if seen.count == count {
+                    return;
+                }
+                // Bare edits, unless the point the project is at is another one: an undo and a new edit between two looks
+                // leave the same number of points with the project at the same place.
+                if reaper.undo_entry(proj, at).as_ref() == seen.tail.last() {
+                    seen.count = count;
+                    return;
+                }
             }
         }
         let Some(now) = view(reaper, proj) else { return };
         if let Some(before) = self.seen.take() {
-            for (how, descs) in changes(reaper, proj, &before, &now) {
+            for (how, descs) in changes(&before, &now) {
                 out.event("undone_in_daw", json!({"descs": descs, "how": how, "epoch": epoch}));
             }
         }
@@ -85,26 +106,30 @@ impl Watch {
 }
 
 /// What the producer did to Kumi's points between two looks: `("undo" | "redo", their descriptions)`.
-fn changes(reaper: &Reaper, proj: Project, before: &View, now: &View) -> Vec<(&'static str, Vec<String>)> {
-    let kumi = |descs: &[String]| descs.iter().filter(|desc| is_kumi(desc)).cloned().collect::<Vec<_>>();
+///
+/// The points up to where the project is agree up to some place and differ after it: what was applied after that place
+/// before the producer undid (and may have replaced by a new edit, which drops them). What is applied after it now, and
+/// was redoable before, was redone.
+fn changes(before: &View, now: &View) -> Vec<(&'static str, Vec<String>)> {
+    let kumi = |descs: Vec<String>| descs.into_iter().filter(|desc| is_kumi(desc)).collect::<Vec<_>>();
+    let (before_start, now_start) = (before.tail_start(), now.tail_start());
+    let common_to = before.at.min(now.at);
+    let diverges = (before_start.max(now_start)..=common_to)
+        .find(|&index| before.tail[(index - before_start) as usize] != now.tail[(index - now_start) as usize])
+        .unwrap_or(common_to + 1);
     let mut found = Vec::new();
-    // Undone: the redoable list grew at its front by what the project moved back over.
-    if now.redo.len() > before.redo.len() && now.redo.ends_with(&before.redo) {
-        let undone = kumi(&now.redo[..now.redo.len() - before.redo.len()]);
-        if !undone.is_empty() {
-            found.push(("undo", undone));
-        }
-    // Redone: it shrank at its front, and the project is at the last of them. (A new edit by the producer drops the list
-    // too, but then the point it is at is the new one, not the one that was redoable.)
-    } else if before.redo.len() > now.redo.len() && before.redo.ends_with(&now.redo) {
-        let moved = before.redo.len() - now.redo.len();
-        let redone = &before.redo[..moved];
-        let at_the_last =
-            now.at == before.at + moved as i32 && reaper.undo_entry(proj, now.at).as_deref() == redone.last().map(String::as_str);
-        let redone = kumi(redone);
-        if at_the_last && !redone.is_empty() {
-            found.push(("redo", redone));
-        }
+    let undone = kumi((diverges.max(before_start)..=before.at).map(|index| before.tail[(index - before_start) as usize].clone()).collect());
+    if !undone.is_empty() {
+        found.push(("undo", undone));
+    }
+    let redone = kumi(
+        (diverges.max(before.at + 1).max(now_start)..=now.at)
+            .filter(|&index| before.redo.get((index - before.at - 1) as usize) == now.tail.get((index - now_start) as usize))
+            .map(|index| now.tail[(index - now_start) as usize].clone())
+            .collect(),
+    );
+    if !redone.is_empty() {
+        found.push(("redo", redone));
     }
     found
 }

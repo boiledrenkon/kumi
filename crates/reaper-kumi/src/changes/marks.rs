@@ -183,7 +183,13 @@ pub fn add_apply(ctx: &Ctx, input: &Value, region: bool) -> Done<Applied> {
     } else {
         format!("{word}{name} at {}", bar_text(ctx.reaper, ctx.proj, marker.start))
     };
-    Ok(Applied { applied: state(&marker), created: Some(target(&marker)), material: None, display: json!({"title": title}) })
+    Ok(Applied {
+        applied: state(&marker),
+        created: Some(target(&marker)),
+        material: None,
+        display: json!({"title": title}),
+        ..Default::default()
+    })
 }
 
 /// What a marker is, exactly: where, what it is called, its colour and number.
@@ -212,6 +218,7 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"deleted": reference(&marker)}),
         display: json!({"title": format!("{} taken away again", label(&marker))}),
+        ..Default::default()
     })
 }
 
@@ -253,6 +260,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: Some(material),
         display: json!({"title": format!("Deleted {}", label(&marker).to_lowercase_first())}),
+        ..Default::default()
     })
 }
 
@@ -266,6 +274,7 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             return Ok(Restored {
                 restored: json!({"ref": reference(&existing)}),
                 display: json!({"title": format!("{} is back already", label(&existing))}),
+                unwritten: true,
             });
         }
         return Err(changed("a marker with that id is in the project again"));
@@ -284,6 +293,7 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"ref": reference(&marker), "was": material["was"]}),
         display: json!({"title": format!("{} put back", label(&marker)), "note": "REAPER gives a marker made again a new id."}),
+        ..Default::default()
     })
 }
 
@@ -412,13 +422,15 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         created: None,
         material: None,
         display: json!({"title": (prop.title)(ctx, &marker, &after), "before": now, "after": after}),
+        unwritten: (prop.same)(&now, &wanted),
     })
 }
 
 pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored> {
     let marker = find_for_restore(ctx, &restore.target["ref"])?;
     let now = (prop.read)(&marker);
-    if !(prop.same)(&now, restore.prior) {
+    let already = (prop.same)(&now, restore.prior);
+    if !already {
         if !restore.discard && !(prop.same)(&now, restore.applied) {
             return Err(changed(format!("{}'s {} changed in REAPER since Kumi set it", label(&marker), prop.noun)));
         }
@@ -434,5 +446,6 @@ pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored>
     Ok(Restored {
         restored: after.clone(),
         display: json!({"title": format!("{} (put back)", (prop.title)(ctx, &marker, &after)), "before": now, "after": after}),
+        unwritten: already,
     })
 }

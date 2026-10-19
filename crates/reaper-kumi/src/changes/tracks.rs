@@ -266,7 +266,13 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         return Err(failed(format!("REAPER kept {}'s {} as it was", named(ctx, &found), prop.noun)));
     }
     let title = (prop.title)(&named(ctx, &found), &now, &after);
-    Ok(Applied { applied: after.clone(), created: None, material: None, display: json!({"title": title, "before": now, "after": after}) })
+    Ok(Applied {
+        applied: after.clone(),
+        created: None,
+        material: None,
+        display: json!({"title": title, "before": now, "after": after}),
+        unwritten: (prop.same)(&now, &wanted),
+    })
 }
 
 pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored> {
@@ -276,7 +282,8 @@ pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored>
     let now = (prop.read)(ctx.reaper, found.track);
     let name = named(ctx, &found);
     // Already as it was: a retry of a restore that went through.
-    if !(prop.same)(&now, restore.prior) {
+    let already = (prop.same)(&now, restore.prior);
+    if !already {
         if !restore.discard && !(prop.same)(&now, restore.applied) {
             return Err(("changed".into(), format!("{name}'s {} changed in REAPER since Kumi set it", prop.noun)));
         }
@@ -290,7 +297,11 @@ pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored>
     }
     let after = (prop.read)(ctx.reaper, found.track);
     let title = (prop.title)(&name, &now, &after);
-    Ok(Restored { restored: after.clone(), display: json!({"title": format!("{title} (put back)"), "before": now, "after": after}) })
+    Ok(Restored {
+        restored: after.clone(),
+        display: json!({"title": format!("{title} (put back)"), "before": now, "after": after}),
+        unwritten: already,
+    })
 }
 
 /// An object that was there for the preview and isn't for the apply has changed since.
@@ -430,6 +441,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: Some(material),
         display: json!({"title": format!("Deleted track {}", super::quoted(&name))}),
+        ..Default::default()
     })
 }
 
@@ -483,7 +495,11 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     // A track with that id is there: it came back some other way, or it was never gone.
     if ctx.reads.track_by_id(reaper, ctx.proj, &id).is_ok() {
         return if restore.discard {
-            Ok(Restored { restored: json!({"ref": refs::track_ref(&id)}), display: json!({"title": "The track is there already"}) })
+            Ok(Restored {
+                restored: json!({"ref": refs::track_ref(&id)}),
+                display: json!({"title": "The track is there already"}),
+                unwritten: true,
+            })
         } else {
             Err(("changed".into(), "a track with that id is in the project again".into()))
         };
@@ -550,5 +566,5 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if let Some(lost) = material["lostEnvelopes"].as_u64().filter(|lost| *lost > 0) {
         display["note"] = format!("Its {lost} send envelope(s) were not put back.").into();
     }
-    Ok(Restored { restored: Value::Object(restored), display })
+    Ok(Restored { restored: Value::Object(restored), display, ..Default::default() })
 }
