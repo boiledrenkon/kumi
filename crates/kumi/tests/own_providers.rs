@@ -348,15 +348,26 @@ async fn an_update_keeps_the_bridges_in_place_and_a_rollback_takes_each_to_the_c
     assert_eq!(receipt_of(&env, Daw::Reaper).generation, installed[0].generation);
     assert_eq!(receipt_of(&env, Daw::Renoise).generation, installed[1].generation);
 
-    // An earlier Kumi that knows neither DAW: both stay, said.
+    // An earlier Kumi that knows neither DAW: both stay, said; and as KUMI_DAW names Renoise, which that Kumi refuses to
+    // start with, that's said too.
     out.0.borrow_mut().clear();
+    let mut asking = env.clone();
+    asking.insert("KUMI_DAW".into(), "renoise".into());
+    let asking = kumi::install::InstalledIo::new(out.clone(), asking);
     for provider in [&own::REAPER as &dyn DawProvider, &own::RENOISE] {
-        let step = provider.prepare_rollback(&io, &home, &unknowing.to_string_lossy(), "1.19.1", false).await.unwrap();
-        assert_eq!(step.after_swap(&io, &home, &unknowing.to_string_lossy(), "1.19.1", true).await, 0);
+        let step = provider.prepare_rollback(&asking, &home, &unknowing.to_string_lossy(), "1.19.1", false).await.unwrap();
+        assert_eq!(step.after_swap(&asking, &home, &unknowing.to_string_lossy(), "1.19.1", true).await, 0);
     }
     let said = out.0.borrow().clone();
     assert!(said.contains("Kumi's extension stays in REAPER (") && said.contains("Kumi 1.19.1 doesn't know REAPER"), "{said}");
     assert!(said.contains("Kumi's tool stays in Renoise (") && said.contains("Kumi 1.19.1 doesn't know Renoise"), "{said}");
+    assert!(
+        said.contains(
+            "KUMI_DAW is set to renoise where you run Kumi, and Kumi 1.19.1 doesn't know Renoise: it won't start while it's set."
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("KUMI_DAW is set to reaper"), "{said}");
     assert_eq!(receipt_of(&env, Daw::Reaper).version.as_deref(), Some("0.1.0"));
 
     // An update with KUMI_REAPER_RESOURCE_DIR no longer set, and a REAPER with its default resource folder too:

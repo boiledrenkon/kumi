@@ -590,6 +590,15 @@ impl BridgeRollbackStep for OwnRollback {
     }
     async fn after_swap(&self, io: &InstalledIo, _home: &str, app: &str, version: &str, _native: bool) -> i32 {
         let own = own_of(self.0);
+        // An earlier Kumi that doesn't know this DAW refuses to start while KUMI_DAW names it (1.19 and before).
+        let asked = io.env.get("KUMI_DAW").is_some_and(|daw| daw.eq_ignore_ascii_case(own.id.as_str()));
+        if asked && own.carried_by(Path::new(app)).is_none() {
+            io.out.write(&format!(
+                "KUMI_DAW is set to {} where you run Kumi, and Kumi {version} doesn't know {}: it won't start while it's set. Unset KUMI_DAW to use Kumi {version}.\n",
+                own.id.as_str(),
+                own.name()
+            ));
+        }
         if own.receipt(&io.env).is_none() {
             return 0;
         }
