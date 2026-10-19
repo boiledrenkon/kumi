@@ -1003,8 +1003,8 @@ fn config_get(owner: u64, index: c_int, key: &str) -> Option<String> {
                     fx.name.split(':').next().unwrap_or("").trim().to_string()
                 })
             }
-            // The fake's state chunk is its parameters' values, comma-separated, for a plug-in that gives one.
-            "vst_chunk" => return fx.chunk.as_ref().map(|_| fx.params.iter().map(|p| p.value.to_string()).collect::<Vec<_>>().join(",")),
+            // The fake's state chunk is its parameters' values (see `chunk_of`), for a plug-in that gives one.
+            "vst_chunk" => return fx.chunk.as_ref().map(|_| chunk_of(&fx.params.iter().map(|p| p.value).collect::<Vec<_>>())),
             "parent_container" => {
                 return (path.len() > 1).then(|| fx_address(s, owner, &path[..path.len() - 1], input).to_string());
             }
@@ -1109,6 +1109,12 @@ unsafe extern "C" fn take_fx_get_named_config_parm(
     named_config(t as u64, fx, key, buf, size)
 }
 
+/// The fake's state chunk for these parameter values: base64's letters, as a real chunk has (each value's bits in hex,
+/// joined by "+").
+pub fn chunk_of(values: &[f64]) -> String {
+    values.iter().map(|v| format!("{:016x}", v.to_bits())).collect::<Vec<_>>().join("+")
+}
+
 /// The modulation keys REAPER clamps when it reads them back (measured): what they read for a value.
 fn clamped(field: &str, value: &str) -> String {
     let number = value.parse::<f64>().ok();
@@ -1141,10 +1147,10 @@ fn set_config(owner: u64, index: c_int, key: *const c_char, value: *const c_char
                 if fx.chunk.is_none() {
                     return false;
                 }
-                // The fake's state chunk is its parameters' values, comma-separated: setting it sets them (and clears the
-                // preset's name, as REAPER's does). No undo point.
-                for (p, v) in fx.params.iter_mut().zip(value.split(',')) {
-                    if let Ok(v) = v.parse::<f64>() {
+                // The fake's state chunk is its parameters' values: setting it sets them (and clears the preset's name, as
+                // REAPER's does). No undo point.
+                for (p, v) in fx.params.iter_mut().zip(value.split('+')) {
+                    if let Some(v) = u64::from_str_radix(v, 16).ok().map(f64::from_bits) {
                         p.value = v;
                         p.shown = p.text_for(v);
                     }
@@ -1361,7 +1367,7 @@ unsafe extern "C" fn take_fx_get_io_size(take: *mut MediaItem_Take, fx: c_int, i
 // ----- envelopes -----
 
 /// An envelope's points: its own, or (a test's envelope made with a count) that many made up on first use.
-pub(super) fn points_of(e: &FakeEnvelope) -> Vec<FakePoint> {
+pub fn points_of(e: &FakeEnvelope) -> Vec<FakePoint> {
     e.pts.clone().unwrap_or_else(|| (0..e.points).map(|i| FakePoint::at(i as f64, 0.5)).collect())
 }
 

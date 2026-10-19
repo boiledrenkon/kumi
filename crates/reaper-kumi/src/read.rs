@@ -581,7 +581,10 @@ impl Reads {
             Ref::Take(guid) => take_row(reaper, self.take_by_guid(reaper, proj, &guid)?, None),
             Ref::Fx(guid) => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;
-                rows::fx_row(reaper, fx, chain_position(reaper, fx))
+                // m4-r-fxenv: one FX read alone also says its state chunk, presets, wet and delta.
+                let mut row = rows::fx_row(reaper, fx, chain_position(reaper, fx));
+                envelopes::add_fx_details(reaper, fx, &mut row);
+                row
             }
             Ref::Param { fx: guid, index } => {
                 let fx = self.fx_by_guid(reaper, proj, &guid)?;

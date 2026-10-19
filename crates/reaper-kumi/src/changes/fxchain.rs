@@ -164,8 +164,7 @@ pub(crate) fn slot_address(reaper: &Reaper, container: Fx, slot: usize) -> Optio
         address += (place as i64 + 1) * stride;
         stride *= counts.get(level).copied().unwrap_or(0) + 1;
     }
-    let address = CONTAINER_FX as i64 + address;
-    (address < INPUT_FX as i64 * 2 && address > 0).then_some(address as i32)
+    i32::try_from(CONTAINER_FX as i64 + address).ok()
 }
 
 /// Where an FX goes when it is added at `place` of a chain: the place REAPER's add takes (`-1000 - place`), and whether
@@ -497,6 +496,16 @@ impl Drop for QuietAutomation<'_, '_> {
             self.reaper.set_automation_override(mode);
         }
     }
+}
+
+/// Every envelope of the parameters of an FX and of the FX inside it (a container's children, at any depth).
+pub(crate) fn fx_envelopes_deep(reaper: &Reaper, at: &FxAt) -> usize {
+    let mut count = fx_envelopes(reaper, at).len();
+    for child in reaper.fx_children(at.fx) {
+        let child = FxAt { fx: child, guid: reaper.fx_guid(child), holder: Holder::Container(at.fx) };
+        count += fx_envelopes_deep(reaper, &child);
+    }
+    count
 }
 
 /// Every envelope of an FX's parameters: its track's, or its take's.

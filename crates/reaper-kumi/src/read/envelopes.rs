@@ -157,3 +157,34 @@ fn merge(row: &mut Value, extra: Value) {
         row.extend(extra);
     }
 }
+
+/// What one FX read alone adds (M4): its state chunk (the text when it is small enough for a frame, else its size and
+/// hash), where it is among its presets, and its wet and delta controls.
+pub(super) fn add_fx_details(reaper: &Reaper, fx: crate::reaper::Fx, row: &mut Value) {
+    /// The most of a state chunk a read carries: the frame holds 256 KiB.
+    const STATE_SHOWN: usize = 96 << 10;
+    let state =
+        ["vst_chunk", "clap_chunk"].into_iter().find_map(|key| reaper.fx_config_big(fx, key).filter(|t| !t.is_empty()).map(|t| (key, t)));
+    if let Some((key, text)) = state {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in text.bytes() {
+            hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let mut detail =
+            json!({"format": if key == "vst_chunk" { "vst" } else { "clap" }, "bytes": text.len(), "hash": format!("{hash:016x}")});
+        if text.len() <= STATE_SHOWN {
+            detail["chunk"] = text.into();
+        }
+        row["state"] = detail;
+    }
+    if let Some((index, count)) = reaper.fx_preset_index(fx) {
+        row["presetIndex"] = index.into();
+        row["presetCount"] = count.into();
+    }
+    if let Some(wet) = reaper.fx_ident(fx, ":wet") {
+        row["wet"] = reaper.param_normalized(fx, wet).into();
+    }
+    if let Some(delta) = reaper.fx_ident(fx, ":delta") {
+        row["delta"] = (reaper.param_normalized(fx, delta) >= 0.5).into();
+    }
+}

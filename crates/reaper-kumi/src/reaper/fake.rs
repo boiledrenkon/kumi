@@ -9,6 +9,7 @@ use std::ffi::{c_char, c_int, c_void, CStr};
 
 // m4-r-fxenv: FX in every chain, envelopes, points, automation items.
 mod fxenv;
+pub use fxenv::{chunk_of, points_of};
 
 #[derive(Clone)]
 pub struct FakeParam {

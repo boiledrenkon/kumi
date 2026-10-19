@@ -288,7 +288,7 @@ fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     if inside > 0 {
         notes.push(format!("The {inside} FX inside the container go with it and come back with an undo."));
     }
-    let envelopes = fxchain::fx_envelopes(ctx.reaper, &at).len();
+    let envelopes = fxchain::fx_envelopes_deep(ctx.reaper, &at);
     if envelopes > 0 {
         notes.push(format!(
             "Its {envelopes} automation envelope(s) go with it; an undo brings them back as new envelopes (their refs change)."
@@ -327,7 +327,7 @@ fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let (label, where_) = (fx_label(ctx, at.fx), fxchain::holder_label(ctx, at.holder));
     let name = reaper.fx_name(at.fx);
     let index = fxchain::position_of(&chain, &at.guid).unwrap_or(0);
-    let envelopes = fxchain::fx_envelopes(reaper, &at).len();
+    let envelopes = fxchain::fx_envelopes_deep(reaper, &at);
     if !reaper.fx_delete(at.fx) {
         return Err(failed("REAPER wouldn't delete the FX"));
     }
@@ -711,7 +711,7 @@ pub(super) fn find_printed(ask: &dyn Fn(f64) -> Option<String>, wanted: &str) ->
                 .min_by(|a, b| (a.1 - target).abs().total_cmp(&(b.1 - target).abs()));
             if let Some((value, read)) = best {
                 if (read - target).abs() <= tolerance {
-                    return Ok(value);
+                    return Ok(centre_of(ask, value, read));
                 }
                 return Err(failed(format!(
                     "no value of that parameter reads {wanted}; the closest reads {}",
@@ -728,6 +728,34 @@ pub(super) fn find_printed(ask: &dyn Fn(f64) -> Option<String>, wanted: &str) ->
     };
     let run = matches.iter().zip(first..).take_while(|(n, expected)| **n == *expected).count();
     Ok((first + run / 2) as f64 / 1000.0)
+}
+
+/// The middle of the values around `value` that print the same number as it: a plug-in prints a rounded number, and the
+/// value the number stands for is the middle of the values that round to it (the edge the bisection stops at is up to half
+/// a printed step off).
+fn centre_of(ask: &dyn Fn(f64) -> Option<String>, value: f64, read: f64) -> f64 {
+    let same = |v: f64| ask(v).as_deref().and_then(reading).is_some_and(|r| r == read);
+    let edge = |far: f64| {
+        if same(far) {
+            return far;
+        }
+        let (mut out, mut inside) = (far, value);
+        for _ in 0..50 {
+            let mid = (out + inside) / 2.0;
+            if same(mid) {
+                inside = mid;
+            } else {
+                out = mid;
+            }
+        }
+        inside
+    };
+    let centre = (edge(0.0) + edge(1.0)) / 2.0;
+    if same(centre) {
+        centre
+    } else {
+        value
+    }
 }
 
 /// The normalized value a plug-in prints as `wanted`: found by asking it to print values, never by setting them.
