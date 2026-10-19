@@ -2246,6 +2246,17 @@ pub fn producer_redo() {
     })
 }
 
+/// REAPER's history at its limit: its `n` oldest points go at once (into one point, as REAPER names it).
+pub fn trim_history(n: usize) {
+    with(|s| {
+        let n = n.min(s.undo_descs.len());
+        s.undo_descs.drain(..n);
+        s.undo_entries -= n as i32;
+        s.undo_cur = s.undo_cur.map(|cur| cur - n as i32);
+        s.state_count += 1;
+    })
+}
+
 /// The producer edits something REAPER makes a point of.
 pub fn producer_edit(desc: &str) {
     with(|s| {

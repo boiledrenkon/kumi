@@ -2944,6 +2944,32 @@ fn an_undo_is_still_seen_when_hundreds_of_points_are_redoable() {
 }
 
 #[test]
+fn reaper_dropping_its_oldest_points_when_its_history_is_full_is_no_undo_of_kumis_change() {
+    let lab = Lab::new();
+    for n in 0..600 {
+        fake::producer_edit(&format!("Edit {n}"));
+    }
+    let desc = "Kumi: Kick volume −6 dB (kn203)";
+    lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), desc);
+    for n in 0..60 {
+        fake::producer_edit(&format!("Edit after {n}"));
+    }
+    lab.tick();
+    lab.events.take();
+    // The producer's next edit fills the history: REAPER drops its 246 oldest points at once.
+    fake::producer_edit("Adjust track pan");
+    fake::trim_history(246);
+    lab.tick();
+    assert!(lab.events.take().is_empty(), "Kumi's change is still applied, 61 points down");
+    // Undone after all: told.
+    for _ in 0..62 {
+        fake::producer_undo();
+    }
+    lab.tick();
+    assert_eq!(lab.events.take(), [("undone_in_daw".to_string(), json!({"descs": [desc], "how": "undo", "epoch": lab.reads.epoch()}))]);
+}
+
+#[test]
 fn an_undo_and_a_new_edit_between_two_looks_still_tell_that_kumis_point_was_undone() {
     let lab = Lab::new();
     let desc = "Kumi: Kick volume −6 dB (kn202)";
