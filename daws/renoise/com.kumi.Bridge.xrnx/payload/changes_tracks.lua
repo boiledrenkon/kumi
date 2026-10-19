@@ -283,14 +283,15 @@ end
 
 -- Writes `wanted` (a snapshot by place now: t -> {mute, solo}) back over the tracks `places`: every solo taken away, the solo
 -- that makes its soloed tracks (the track whose own solo gives exactly them, tried from the last back, each from no solo), then
--- every mute state. Tracks out of the snapshot keep a mute the producer gave them. Returns the tracks a script can't solo again
--- along with the others (soloed in the snapshot by a solo of several, as Renoise's GUI can).
+-- every mute state. The other tracks (made since, or not the ones they were) keep a mute the producer gave them. Returns the
+-- tracks a script can't solo again along with the others (soloed in the snapshot by a solo of several, as Renoise's GUI can).
 local function solo_write_back(song, wanted, places, x_index, x_solo)
   local count = rows.track_count(song)
-  local kept = {}
+  local ours, kept = {}, {}
+  for _, t in ipairs(places) do ours[t] = true end
   for t = 1, count do
     local track = song:track(t)
-    if not wanted[t] and t ~= x_index and not is_master(track) and track.mute_state == MUTED() then kept[#kept + 1] = t end
+    if not ours[t] and t ~= x_index and not is_master(track) and track.mute_state == MUTED() then kept[#kept + 1] = t end
   end
   if not unsolo_all(song) then fail("failed", "Renoise kept a solo on") end
   local soloed, set = {}, {}
@@ -456,7 +457,8 @@ local function solo_restore(song, env, restore, desc)
   local x_prior = prior.solo == true
   local back = (track.solo_state == true) == x_prior
   for _, t in ipairs(places) do back = back and holds(t, wanted[t]) end
-  if back and #strangers == 0 then
+  -- (a track that isn't the one it was is never written, so it doesn't keep a restore that went through from being back)
+  if back then
     return {
       restored = { solo = x_prior }, display = { title = name .. (x_prior and " soloed" or " unsoloed") .. " (put back)" },
       undo = { desc = desc, entry = false }, unwritten = true,

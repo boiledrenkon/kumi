@@ -187,11 +187,12 @@ test("track solo: tracks made, deleted or renamed between the solo and its undo;
   -- a track renamed since isn't known for the one it was: refused, and discard leaves it as Renoise does
   local again = solo(peer, E, 4, true)
   mock.ops.rename_track(1, "Newer")
+  mock.ops.mute_track(1, MUTED)
   local message = K.failure(K.restore(peer, again), "changed")
   ok(message:find("isn't the track it was", 1, true), message)
   local forced = K.restore(peer, again, nil, { discard = true })
   ok(forced.result, "discard")
-  eq(states(), "Newer=A Kick=A Bass=A Pad=M Send 1=A")
+  eq(states(), "Newer=M Kick=A Bass=A Pad=M Send 1=A", "the track that isn't the one it was keeps the producer's mute")
   note_has(forced.result.display, "A track that isn't the track it was is left as Renoise left it.")
   -- tracks swapped since: Renoise's track refs don't survive a swap, so nothing is written
   local swapped = solo(peer, E, 2, true)
