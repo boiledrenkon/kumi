@@ -539,26 +539,48 @@ function M.journal_sequence_event(journal, undoing)
   end
 end
 
--- M4 (n-song): the pattern numbers of a sequence a change keeps, moved with a pattern made or deleted in the pool: a pattern
--- deleted is kept as its place, negative (Renoise's redo makes it again there), so the sequence it was in matches nothing now.
-local function shift_sequence(list, type_, index)
-  if type(list) ~= "table" then return end
-  for k, p in ipairs(list) do
-    if type_ == "insert" then
-      if p == -index then list[k] = index elseif p > 0 and p >= index then list[k] = p + 1 elseif p < 0 and -p > index then list[k] = p - 1 end
-    elseif type_ == "remove" then
-      if p == index then list[k] = -index elseif p > index then list[k] = p - 1 elseif p < 0 and -p > index then list[k] = p + 1 end
+-- M4 (n-song): the pattern numbers of the sequences a change keeps, moved with a pattern made or deleted in the pool. A pattern
+-- deleted becomes a mark (so the sequence it was in matches nothing now), kept on a stack: Renoise's redo makes its patterns again
+-- in the reverse order its undo deleted them, so a pattern made where the newest mark was is that pattern again.
+local function shift_sequences(entry, type_, index)
+  local lists = {}
+  for _, state in ipairs({ entry.prior, entry.applied }) do
+    if type(state) == "table" and type(state.sequence) == "table" then lists[#lists + 1] = state.sequence end
+  end
+  entry.gone = entry.gone or {}
+  local stack = entry.gone
+  if type_ == "remove" then
+    entry.marks = (entry.marks or 0) + 1
+    local mark = "gone" .. entry.marks
+    for _, list in ipairs(lists) do
+      for k, p in ipairs(list) do
+        if p == index then list[k] = mark elseif type(p) == "number" and p > index then list[k] = p - 1 end
+      end
+    end
+    for _, item in ipairs(stack) do
+      if item.index > index then item.index = item.index - 1 end
+    end
+    stack[#stack + 1] = { index = index, mark = mark }
+  elseif type_ == "insert" then
+    local top = stack[#stack]
+    local revive = top and top.index == index and top.mark or nil
+    if revive then stack[#stack] = nil end
+    for _, list in ipairs(lists) do
+      for k, p in ipairs(list) do
+        if type(p) == "number" and p >= index then list[k] = p + 1 elseif revive and p == revive then list[k] = index end
+      end
+    end
+    for _, item in ipairs(stack) do
+      if item.index >= index then item.index = item.index + 1 end
     end
   end
 end
 
--- A pattern made or deleted: the patterns the journal knows are numbered by their place and move with it.
 function M.journal_pattern_event(journal, type_, index)
   for i = #journal.entries, 1, -1 do
     local place = journal.entries[i].place
     if journal.entries[i].follows == "sequence" then
-      shift_sequence(journal.entries[i].prior and journal.entries[i].prior.sequence, type_, index)
-      shift_sequence(journal.entries[i].applied and journal.entries[i].applied.sequence, type_, index)
+      shift_sequences(journal.entries[i], type_, index)
     elseif journal.entries[i].uses_patterns then
       table.remove(journal.entries, i) -- (it holds pattern numbers, which the pool's change moved)
     elseif place and place.pattern then
@@ -680,9 +702,11 @@ end
 -- lists them; the title opens with `heading`, or with the located object's name when `named`.
 function M.same_value(a, b)
   if type(a) == "table" and type(b) == "table" then
-    if #a ~= #b then return false end
-    for i = 1, #a do
-      if not M.same_value(a[i], b[i]) then return false end
+    for k, v in pairs(a) do
+      if not M.same_value(v, b[k]) then return false end
+    end
+    for k in pairs(b) do
+      if a[k] == nil then return false end
     end
     return true
   end

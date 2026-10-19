@@ -197,20 +197,17 @@ settings {
     },
     {
       name = "precount",
-      read = function(t) return t.metronome_precount_enabled and t.metronome_precount_bars or false end,
+      -- (kept with its bars when it is off, so Kumi's undo puts back the bars Renoise would use next)
+      read = function(t) return { on = t.metronome_precount_enabled, bars = t.metronome_precount_bars } end,
       write = function(t, v)
-        if v == false then
-          t.metronome_precount_enabled = false
-        else
-          t.metronome_precount_bars = v
-          t.metronome_precount_enabled = true
-        end
+        if t.metronome_precount_bars ~= v.bars then t.metronome_precount_bars = v.bars end
+        if t.metronome_precount_enabled ~= v.on then t.metronome_precount_enabled = v.on end
       end,
-      check = function(v)
-        if v == false then return false end
-        return whole(v, "precount (bars, or false for none)", 1, 4)
+      check = function(v, _, t)
+        if v == false then return { on = false, bars = t.metronome_precount_bars } end
+        return { on = true, bars = whole(v, "precount (bars, or false for none)", 1, 4) }
       end,
-      text = function(v) return v == false and "no precount" or (v == 1 and "1-bar precount" or (v .. "-bar precount")) end,
+      text = function(v) return not v.on and "no precount" or (v.bars == 1 and "1-bar precount" or (v.bars .. "-bar precount")) end,
     },
   },
 }
@@ -232,20 +229,16 @@ settings {
     },
     {
       name = "quantize",
-      read = function(t) return t.record_quantize_enabled and t.record_quantize_lines or false end,
+      read = function(t) return { on = t.record_quantize_enabled, lines = t.record_quantize_lines } end,
       write = function(t, v)
-        if v == false then
-          t.record_quantize_enabled = false
-        else
-          t.record_quantize_lines = v
-          t.record_quantize_enabled = true
-        end
+        if t.record_quantize_lines ~= v.lines then t.record_quantize_lines = v.lines end
+        if t.record_quantize_enabled ~= v.on then t.record_quantize_enabled = v.on end
       end,
-      check = function(v)
-        if v == false then return false end
-        return whole(v, "quantize (lines, or false for none)", 1, 32)
+      check = function(v, _, t)
+        if v == false then return { on = false, lines = t.record_quantize_lines } end
+        return { on = true, lines = whole(v, "quantize (lines, or false for none)", 1, 32) }
       end,
-      text = function(v) return v == false and "record quantize off" or ("record quantize " .. v .. (v == 1 and " line" or " lines")) end,
+      text = function(v) return not v.on and "record quantize off" or ("record quantize " .. v.lines .. (v.lines == 1 and " line" or " lines")) end,
     },
     {
       name = "wrap", read = function(t) return t.wrapped_pattern_edit end, write = function(t, v) t.wrapped_pattern_edit = v end,
@@ -257,20 +250,17 @@ settings {
     },
     {
       name = "keyboardVelocity",
-      read = function(t) return t.keyboard_velocity_enabled and t.keyboard_velocity or false end,
+      read = function(t) return { on = t.keyboard_velocity_enabled, value = t.keyboard_velocity } end,
       write = function(t, v)
-        if v == false then
-          t.keyboard_velocity_enabled = false
-        else
-          t.keyboard_velocity_enabled = true
-          t.keyboard_velocity = v
-        end
+        if t.keyboard_velocity_enabled ~= v.on then t.keyboard_velocity_enabled = v.on end
+        -- (Renoise answers 127 while it is off: the value is set only while on)
+        if v.on and t.keyboard_velocity ~= v.value then t.keyboard_velocity = v.value end
       end,
-      check = function(v)
-        if v == false then return false end
-        return whole(v, "keyboardVelocity (0 to 127, or false for full velocity)", 0, 127)
+      check = function(v, _, t)
+        if v == false then return { on = false, value = t.keyboard_velocity } end
+        return { on = true, value = whole(v, "keyboardVelocity (0 to 127, or false for full velocity)", 0, 127) }
       end,
-      text = function(v) return v == false and "keyboard velocity off" or ("keyboard velocity " .. v) end,
+      text = function(v) return not v.on and "keyboard velocity off" or ("keyboard velocity " .. v.value) end,
     },
     {
       name = "recordTo",
