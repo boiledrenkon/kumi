@@ -138,3 +138,18 @@ async fn a_change_previewed_in_another_project_is_refused_and_released_changes_a
     let (bad, is_error) = lab.tool("change_release", json!({"transactionIds": []})).await;
     assert!(is_error && bad["code"] == "bad-params", "{bad}");
 }
+
+#[tokio::test]
+async fn an_undo_the_daw_couldnt_say_it_finished_is_never_sent_again() {
+    let mut lab = Lab::start().await;
+    let preview = lab.preview(-6.0).await;
+    lab.apply(&preview, "a1").await;
+    lab.script.uncertain_restore_once();
+    let (unsure, is_error) = lab.undo(&preview, "u1", false).await;
+    assert!(is_error && unsure["code"] == "undo-uncertain", "{unsure}");
+    let restores = lab.script.undo_history().len();
+    // Asked again (a new key): refused, nothing sent, so the restore isn't made twice.
+    let (again, is_error) = lab.undo(&preview, "u2", false).await;
+    assert!(is_error && again["code"] == "undo-uncertain", "{again}");
+    assert_eq!(lab.script.undo_history().len(), restores);
+}
