@@ -21,6 +21,8 @@ const PAGE_BYTES: usize = 256 * 1024 - 4096;
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
 const METHODS: [&str; 4] = ["read", "snapshot", "focus", "focus_body"];
+/// The ref kinds a device change leaves naming what they named, as the tool lists them (`kept.kinds`).
+const KEPT_BY_DEVICES: [&str; 9] = ["song", "track", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase"];
 /// What a song made to be changed answers besides (`config_with_changes`).
 const CHANGE_METHODS: [&str; 3] = ["change_preview", "change_apply", "change_restore"];
 
@@ -340,7 +342,7 @@ impl RenoiseScript {
                         Ok(answer(
                             state,
                             // Only the devices moved: the tracks are where they were, and their refs from before still name them.
-                            json!({"applied": {"devices": count + 2}, "created": {"ref": made, "kind": "device"}, "display": {"title": format!("Added {path} to track {track}")}, "undo": {"desc": desc, "entry": true}, "kept": {"from": epoch.to_string(), "tracks": true}}),
+                            json!({"applied": {"devices": count + 2}, "created": {"ref": made, "kind": "device"}, "display": {"title": format!("Added {path} to track {track}")}, "undo": {"desc": desc, "entry": true}, "kept": {"from": epoch.to_string(), "tracks": true, "kinds": KEPT_BY_DEVICES}}),
                         ))
                     }
                     _ => {
@@ -355,7 +357,7 @@ impl RenoiseScript {
                         state.undo.push(desc);
                         Ok(answer(
                             state,
-                            json!({"restored": {"devices": count}, "display": {"title": "Device deleted"}, "kept": {"from": epoch.to_string(), "tracks": true}}),
+                            json!({"restored": {"devices": count}, "display": {"title": "Device deleted"}, "kept": {"from": epoch.to_string(), "tracks": true, "kinds": KEPT_BY_DEVICES}}),
                         ))
                     }
                 }
