@@ -454,3 +454,88 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Renoise);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = RenoiseScript::new();
+            let mut config = script.config(secret, "/lab/Renoise");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Renoise, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let renoise = create_renoise_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            renoise.start(Signal::new()).await.unwrap();
+            let observed = renoise.observe(Signal::new(), None).await.unwrap();
+            assert!(observed.instructions.contains("devices go at 2 or later"), "{}", observed.instructions);
+
+            // A fader, then a device: the device moves Renoise's epoch, and the ref it made is named in the new one.
+            let plan = tool(&observed, "make_changes");
+            let steps = json!({"steps": [
+                {"tool": "track_volume", "input": {"ref": "track:1", "volumeDb": -6}},
+                {"tool": "device_add", "as": "eq", "input": {"ref": "track:1", "path": "EQ 10"}},
+            ]});
+            within_schema(&plan.input_schema(), &input(steps.clone()));
+            let done = plan.execute(input(steps), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            assert_eq!(script.track_state(1), (-6.0, false, 1));
+            let reply: Value = serde_json::from_str(&done.text).unwrap_or(Value::Null);
+            assert!(done.text.contains("\"ref\":\"device:"), "the device it made, in a short ref: {}", done.text);
+            assert!(!done.text.contains(":device:"), "no long ref reaches the model: {reply}");
+            // The names from before the epoch moved are retired: an old ref is refused in Kumi's words, nothing sent.
+            let old = tool(&observed, "track_mute").execute(input(json!({"ref": "track:1", "mute": true})), Signal::new()).await.unwrap();
+            assert!(old.is_error && old.text.contains("isn't one of this turn's refs"), "{}", old.text);
+            assert!(!old.text.contains(":track:"), "{}", old.text);
+
+            // The next look names the tracks in the new epoch; mute is no step of Renoise's undo, and Kumi says so.
+            let again = renoise.observe(Signal::new(), None).await.unwrap();
+            let tracks = serde_json::from_str::<Value>(&again.context).unwrap()["tracks"].clone();
+            let kick = tracks[0]["ref"].as_str().unwrap().to_owned();
+            let steps_before = script.undo_history().len();
+            let muted = tool(&again, "track_mute").execute(input(json!({"ref": kick, "mute": true})), Signal::new()).await.unwrap();
+            assert!(!muted.is_error && muted.text.contains("Renoise's own undo won't take this back; Kumi can."), "{}", muted.text);
+            assert_eq!(script.undo_history().len(), steps_before, "no step in Renoise's undo");
+
+            // Kumi undoes each as a new step: the mute, the device (the epoch moves again, and Kumi follows), the fader.
+            let undo = tool(&again, "undo_change");
+            for title in ["Track 1 muted", "Added EQ 10 to track 1", "Track 1 volume -6 dB"] {
+                let id = told.borrow().iter().find(|record| record.title == title).map(|record| record.id.clone()).unwrap();
+                let undone = undo.execute(input(json!({"change": id})), Signal::new()).await.unwrap();
+                assert!(!undone.is_error, "{title}: {}", undone.text);
+            }
+            assert_eq!(script.track_state(1), (0.0, false, 0));
+            assert!(
+                script.undo_history().iter().filter(|step| step.starts_with("Kumi: undo ")).count() == 3,
+                "{:?}",
+                script.undo_history()
+            );
+
+            // The producer moved the fader after Kumi's change: Kumi's undo leaves it.
+            let latest = renoise.observe(Signal::new(), None).await.unwrap();
+            let kick = serde_json::from_str::<Value>(&latest.context).unwrap()["tracks"][0]["ref"].as_str().unwrap().to_owned();
+            let set = tool(&latest, "track_volume").execute(input(json!({"ref": kick, "volumeDb": -3})), Signal::new()).await.unwrap();
+            assert!(!set.is_error, "{}", set.text);
+            script.set_volume(1, -1.0);
+            let kept = tool(&latest, "undo_change").execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(kept.is_error && kept.text.contains("changed in Renoise since Kumi set it"), "{}", kept.text);
+            assert_eq!(script.track_state(1).0, -1.0);
+            // The song changed behind Kumi's back (another epoch): the tool refuses, and Kumi says so in the model's ref.
+            script.switch_song();
+            let stale = tool(&latest, "track_volume").execute(input(json!({"ref": kick, "volumeDb": -2})), Signal::new()).await.unwrap();
+            assert!(stale.is_error && stale.text.starts_with(&format!("{kick} is from before the song changed")), "{}", stale.text);
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

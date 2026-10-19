@@ -20,7 +20,7 @@ const VECTORS_EPOCH: u32 = 1; // (the same, as a number)
 const PAGE_BYTES: usize = 256 * 1024 - 4096;
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
-const METHODS: [&str; 4] = ["read", "snapshot", "focus", "focus_body"];
+const METHODS: [&str; 7] = ["read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore"];
 
 struct Case {
     method: String,
@@ -44,6 +44,12 @@ struct State {
     restarts: u32,
     /// The file loads while the next snapshot of the empty song is being read: that read ends `epoch-changed`.
     load_during_look: bool,
+    /// What Kumi's changes did to the song: each track's volume and mute, and the devices added to it.
+    volume: std::collections::HashMap<u64, f64>,
+    mute: std::collections::HashMap<u64, bool>,
+    devices: std::collections::HashMap<u64, u64>,
+    /// Renoise's undo history, as the changes named their steps.
+    undo: Vec<String>,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -144,6 +150,10 @@ impl RenoiseScript {
                 empty: false,
                 restarts: 0,
                 load_during_look: false,
+                volume: Default::default(),
+                mute: Default::default(),
+                devices: Default::default(),
+                undo: vec![],
             })),
         }
     }
@@ -200,6 +210,148 @@ impl RenoiseScript {
         }))
     }
 
+    /// A track's volume (dB), mute and devices Kumi added, as Kumi's changes left them.
+    pub fn track_state(&self, track: u64) -> (f64, bool, u64) {
+        let state = self.state.lock().unwrap();
+        (
+            state.volume.get(&track).copied().unwrap_or(0.0),
+            state.mute.get(&track).copied().unwrap_or(false),
+            state.devices.get(&track).copied().unwrap_or(0),
+        )
+    }
+
+    /// The producer moves a track's volume in Renoise.
+    pub fn set_volume(&self, track: u64, db: f64) {
+        self.state.lock().unwrap().volume.insert(track, db);
+    }
+
+    /// Renoise's undo history, as Kumi's changes named their steps.
+    pub fn undo_history(&self) -> Vec<String> {
+        self.state.lock().unwrap().undo.clone()
+    }
+
+    /// The kinds the simulator makes, as the tool makes them (contract §3b): a track's volume and mute (mute is no
+    /// step of Renoise's undo), and a device added at the end of a track, which moves the epoch (Renoise's refs into
+    /// device lists are positions) and is deleted again by its restore, moving it once more. A track is found by its
+    /// place in any epoch: the tool carries its journal's places through epochs that kept the tracks.
+    fn change(state: &mut State, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let bad = |message: &str| ("bad-params".to_string(), message.to_string());
+        let place = |text: Option<&str>, kind: &str| -> Option<(u32, Vec<u64>)> {
+            let text = text?;
+            let mut parts = text.splitn(3, ':');
+            let (epoch, found, rest) = (parts.next()?.parse().ok()?, parts.next()?, parts.next()?);
+            (found == kind).then(|| (epoch, rest.split('.').filter_map(|n| n.parse().ok()).collect()))
+        };
+        let kind = params["kind"].as_str().unwrap_or_default();
+        let epoch = state.epoch;
+        if method != "change_restore" && params.get("epoch").and_then(Value::as_str) != Some(&epoch.to_string()) {
+            return Err(("stale".into(), format!("that change is from an earlier epoch (now {epoch}): read again")));
+        }
+        let (reference, input) = match method {
+            "change_restore" => (params["target"]["ref"].as_str(), &params["prior"]),
+            _ => (params["input"]["ref"].as_str(), &params["input"]),
+        };
+        let Some((from, at)) = place(reference, "track") else { return Err(bad("ref must be a track's ref")) };
+        if method != "change_restore" && from != epoch {
+            return Err(("stale".into(), format!("that ref is from an earlier epoch ({from}; now {epoch}): read again")));
+        }
+        let track = at[0];
+        let desc = params["desc"].as_str().unwrap_or_default().to_string();
+        let answer = |state: &State, value: Value| {
+            let mut value = value;
+            value["epoch"] = state.epoch.to_string().into();
+            value["layout"] = 0.into();
+            value
+        };
+        match kind {
+            "track-volume" | "track-mute" => {
+                let field = if kind == "track-volume" { "volumeDb" } else { "mute" };
+                let now = if kind == "track-volume" {
+                    json!(state.volume.get(&track).copied().unwrap_or(0.0))
+                } else {
+                    json!(state.mute.get(&track).copied().unwrap_or(false))
+                };
+                let wanted = input.get(field).cloned().ok_or(bad(&format!("{field} is missing")))?;
+                let title = if kind == "track-volume" {
+                    format!("Track {track} volume {} dB", wanted.as_f64().unwrap_or_default())
+                } else {
+                    format!("Track {track} muted")
+                };
+                let write = |state: &mut State, value: &Value| {
+                    if kind == "track-volume" {
+                        state.volume.insert(track, value.as_f64().unwrap_or_default());
+                    } else {
+                        state.mute.insert(track, value == &Value::Bool(true));
+                    }
+                };
+                match method {
+                    "change_preview" => Ok(answer(
+                        state,
+                        json!({"target": {"ref": reference, "kind": "track"}, "prior": {field: now}, "fence": {field: now}, "display": {"title": title}}),
+                    )),
+                    "change_apply" => {
+                        if params["fence"][field].as_f64() != now.as_f64() || params["fence"][field].as_bool() != now.as_bool() {
+                            return Err(("changed".into(), format!("track {track} changed since the preview")));
+                        }
+                        write(state, &wanted);
+                        // Mute is no step of Renoise's undo: Kumi's undo takes it back, Renoise's doesn't.
+                        let entry = kind != "track-mute";
+                        if entry {
+                            state.undo.push(desc.clone());
+                        }
+                        let mut display = json!({"title": title});
+                        if !entry {
+                            display["note"] = "Renoise's own undo won't take this back; Kumi can.".into();
+                        }
+                        Ok(answer(state, json!({"applied": {field: wanted}, "display": display, "undo": {"desc": desc, "entry": entry}})))
+                    }
+                    _ => {
+                        let applied = &params["applied"][field];
+                        if (applied.as_f64() != now.as_f64() || applied.as_bool() != now.as_bool()) && params["discard"] != true {
+                            return Err(("changed".into(), format!("track {track} changed in Renoise since Kumi set it")));
+                        }
+                        write(state, &wanted);
+                        state.undo.push(desc);
+                        Ok(answer(state, json!({"restored": {field: wanted}, "display": {"title": format!("Track {track} put back")}})))
+                    }
+                }
+            }
+            "device-add" => {
+                let count = state.devices.get(&track).copied().unwrap_or(0);
+                let path = params["input"]["path"].as_str().unwrap_or("EQ 10").to_string();
+                match method {
+                    "change_preview" => Ok(answer(
+                        state,
+                        json!({"target": {"ref": reference, "kind": "track"}, "prior": {"devices": count + 1}, "fence": {"devices": count + 1}, "display": {"title": format!("Added {path} to track {track}")}}),
+                    )),
+                    "change_apply" => {
+                        state.devices.insert(track, count + 1);
+                        state.epoch += 1;
+                        state.undo.push(desc.clone());
+                        let made = format!("{}:device:{track}.{}", state.epoch, count + 2);
+                        Ok(answer(
+                            state,
+                            json!({"applied": {"devices": count + 2}, "created": {"ref": made, "kind": "device"}, "display": {"title": format!("Added {path} to track {track}")}, "undo": {"desc": desc, "entry": true}}),
+                        ))
+                    }
+                    _ => {
+                        let Some((made_in, _)) = place(params["created"]["ref"].as_str(), "device") else {
+                            return Err(bad("created must be a device's ref"));
+                        };
+                        if made_in != epoch || count == 0 {
+                            return Err(("changed".into(), "the devices changed since Kumi added it".into()));
+                        }
+                        state.devices.insert(track, count - 1);
+                        state.epoch += 1;
+                        state.undo.push(desc);
+                        Ok(answer(state, json!({"restored": {"devices": count}, "display": {"title": "Device deleted"}})))
+                    }
+                }
+            }
+            _ => Err(bad("the simulator makes only track-volume, track-mute and device-add")),
+        }
+    }
+
     /// Every request the simulator answered, in order.
     pub fn asked(&self) -> Vec<(String, Value)> {
         self.state.lock().unwrap().asked.clone()
@@ -228,6 +380,9 @@ impl RenoiseScript {
         }
         if state.empty {
             return Self::empty_song(&state, method, params);
+        }
+        if method.starts_with("change_") {
+            return Some(Self::change(&mut state, method, params));
         }
         let restarts = state.restarts;
         let epoch = state.epoch;

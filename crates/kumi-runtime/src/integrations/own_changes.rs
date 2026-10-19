@@ -424,12 +424,12 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         }
     }
 
-    /// A refusal before anything was written, in Kumi's words.
-    fn refusal(&self, refused: &Refused, input: &JsonObject) -> String {
+    /// A refusal before anything was written, in Kumi's words (`asked`: the input as the model gave it, in short refs).
+    fn refusal(&self, refused: &Refused, asked: &JsonObject) -> String {
         let profile = self.link().words();
         let words = profile.words;
         let why = self.link().in_short_refs(&refused.why);
-        let what = input.get("ref").and_then(Value::as_str).unwrap_or("That ref");
+        let what = asked.get("ref").and_then(Value::as_str).unwrap_or("That ref");
         match refused.code.as_deref() {
             Some("stale") if self.link().book.borrow().scheme.positional() => {
                 format!("{what} is from before the {} changed (something was added, removed or opened): read again for current refs; nothing changed", words.place)
@@ -455,12 +455,12 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     }
 
     /// One change: previewed, applied in one named step of the DAW's undo, and kept in HISTORY.
-    async fn one_change(&self, kind: &'static OwnKind, input: JsonObject, signal: Signal) -> ChangeOutcome {
+    async fn one_change(&self, kind: &'static OwnKind, asked: JsonObject, signal: Signal) -> ChangeOutcome {
         let words = self.link().words().words;
         if self.history.changes_this_turn.get() >= 5_000 {
             return ChangeOutcome::stop("That's 5000 changes in one answer; carry on in the next one");
         }
-        let mut input = match self.lengthened(&input) {
+        let mut input = match self.lengthened(&asked) {
             Ok(input) => input,
             Err(why) => return ChangeOutcome::error(why),
         };
@@ -476,7 +476,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             Ok(Err(refused)) if refused.busy => {
                 return ChangeOutcome::error(format!("{} is busy ({}): nothing changed; try again in a moment", words.app, refused.why))
             }
-            Ok(Err(refused)) => return ChangeOutcome::error(self.refusal(&refused, &input)),
+            Ok(Err(refused)) => return ChangeOutcome::error(self.refusal(&refused, &asked)),
             Err(error) if error.is_aborted() => {
                 return ChangeOutcome::error(format!("Stopped before {} was asked: nothing changed", words.app))
             }
@@ -515,7 +515,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                     words.app, refused.why
                 ))
             }
-            Ok(Err(refused)) => return ChangeOutcome::error(self.refusal(&refused, &input)),
+            Ok(Err(refused)) => return ChangeOutcome::error(self.refusal(&refused, &asked)),
             Err(_) => {
                 self.remember(kind, &title, &transaction, ChangeState::Unsure, Some(format!("{} didn't answer this change.", words.app)));
                 return ChangeOutcome::stop(format!("{} didn't answer this change ({title}), so it may or may not have happened: read it before going on", words.app));
