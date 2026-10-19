@@ -116,7 +116,7 @@ pub fn project_row(reaper: &Reaper, proj: Project, info: &ProjectInfo, identity:
     let state = reaper.play_state(proj);
     let (loop_start, loop_end) = reaper.loop_points(proj);
     let signature = reaper.time_signature_at(proj, cursor);
-    json!({
+    let mut row = json!({
         "id": id,
         "identity": identity,
         "name": clip(&info.name),
@@ -131,7 +131,72 @@ pub fn project_row(reaper: &Reaper, proj: Project, info: &ProjectInfo, identity:
         "loop": {"on": reaper.repeat(proj), "start": seconds(loop_start), "end": seconds(loop_end)},
         "timeSelection": time_selection(reaper, proj),
         "tabCount": reaper.tab_count(),
-    })
+    });
+    add_project_settings(reaper, proj, &mut row);
+    row
+}
+
+/// (r-tracks) What the project's own settings hold, for the changes that set them: its ruler lanes, its named track
+/// groups, the grid and timebase, and its title, author and notes (when it has them; the notes clipped).
+fn add_project_settings(reaper: &Reaper, proj: Project, row: &mut Value) {
+    const NOTES_SHOWN: usize = 2000;
+    let lanes = reaper.project_info(proj, "RULER_LANE_COUNT").unwrap_or(0.0).max(0.0) as i64;
+    let lane_rows: Vec<Value> = (0..lanes.min(64))
+        .map(|lane| {
+            let info = |key: &str| reaper.project_info(proj, &format!("{key}:{lane}")).unwrap_or(0.0);
+            let mut lane_row =
+                json!({"lane": lane, "name": clip(&reaper.project_text(proj, &format!("RULER_LANE_NAME:{lane}")).unwrap_or_default())});
+            match info("RULER_LANE_DEFAULT") as i64 {
+                1 => lane_row["defaultFor"] = "regions".into(),
+                2 => lane_row["defaultFor"] = "markers".into(),
+                3 => lane_row["defaultFor"] = "both".into(),
+                _ => {}
+            }
+            for (key, field) in [("RULER_LANE_HIDDEN", "hidden"), ("RULER_LANE_LOCKED", "locked")] {
+                if info(key) != 0.0 {
+                    lane_row[field] = true.into();
+                }
+            }
+            lane_row
+        })
+        .collect();
+    if !lane_rows.is_empty() {
+        row["rulerLanes"] = lane_rows.into();
+    }
+    let groups: Vec<Value> = (1..=64)
+        .filter_map(|group| {
+            let name = reaper.project_text(proj, &format!("TRACK_GROUP_NAME:{group}")).unwrap_or_default();
+            (!name.is_empty()).then(|| json!({"group": group, "name": clip(&name)}))
+        })
+        .collect();
+    if !groups.is_empty() {
+        row["trackGroups"] = groups.into();
+    }
+    if let Some((division, mode, swing)) = reaper.grid(proj) {
+        row["grid"] = json!({"division": round(division, 6), "swing": if mode == 1 { round(swing, 4) } else { 0.0 }, "measure": mode == 3});
+    }
+    let timebase = |name: &str| reaper.config_text(name).and_then(|text| text.trim().parse::<i64>().ok());
+    let words = |code: i64| match code {
+        0 => "time",
+        1 => "beats",
+        2 => "beats-position",
+        _ => "other",
+    };
+    if let (Some(items), Some(tempo)) = (timebase("itemtimelock"), timebase("tempoenvtimelock")) {
+        row["timebase"] = json!({"items": words(items), "tempoEnvelopes": words(tempo)});
+    }
+    for (key, field) in [("PROJECT_TITLE", "title"), ("PROJECT_AUTHOR", "author")] {
+        if let Some(text) = reaper.project_text(proj, key).filter(|text| !text.is_empty()) {
+            row[field] = clip(&text).into();
+        }
+    }
+    if let Some(notes) = reaper.project_notes(proj).filter(|notes| !notes.is_empty()) {
+        let shown: String = notes.chars().take(NOTES_SHOWN).collect();
+        if shown.len() < notes.len() {
+            row["notesClipped"] = true.into();
+        }
+        row["notes"] = shown.into();
+    }
 }
 
 pub fn track_row(reaper: &Reaper, track: Track) -> Value {

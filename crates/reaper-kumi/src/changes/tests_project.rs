@@ -174,3 +174,30 @@ fn a_regions_render_matrix_gains_and_loses_tracks_and_only_those_are_put_back() 
         assert_eq!(lab.preview("region-render", wrong.clone()).unwrap_err().0, "bad-params", "{wrong}");
     }
 }
+
+#[test]
+fn the_project_row_says_its_lanes_named_groups_grid_timebase_title_and_notes() {
+    let lab = Lab::new();
+    let project = |lab: &Lab| lab.call("read", json!({"kind": "project"})).unwrap()["items"][0].clone();
+    let row = project(&lab);
+    assert_eq!(
+        row["rulerLanes"],
+        json!([{"lane": 0, "name": "", "defaultFor": "regions"}, {"lane": 1, "name": "", "defaultFor": "markers"}])
+    );
+    assert_eq!(row["grid"], json!({"division": 0.25, "swing": 0.0, "measure": false}));
+    assert_eq!(row["timebase"], json!({"items": "beats", "tempoEnvelopes": "beats"}));
+    for absent in ["trackGroups", "title", "author", "notes"] {
+        assert!(row.get(absent).is_none(), "{absent} only when set");
+    }
+    lab.make("ruler-lane", json!({"lane": 1, "name": "Cues", "hidden": true}), "Kumi: x (kr001)");
+    lab.make("track-group-name", json!({"groupNumber": 2, "name": "Drums"}), "Kumi: x (kr002)");
+    lab.make("project-info", json!({"title": "Night Drive"}), "Kumi: x (kr003)");
+    lab.make("project-notes", json!({"notes": "n".repeat(2500)}), "Kumi: x (kr004)");
+    lab.make("project-grid", json!({"division": "1/16", "swing": 0.25}), "Kumi: x (kr005)");
+    let row = project(&lab);
+    assert_eq!(row["rulerLanes"][1], json!({"lane": 1, "name": "Cues", "defaultFor": "markers", "hidden": true}));
+    assert_eq!(row["trackGroups"], json!([{"group": 2, "name": "Drums"}]));
+    assert_eq!((row["title"].as_str(), row["notesClipped"].as_bool()), (Some("Night Drive"), Some(true)));
+    assert_eq!(row["notes"].as_str().unwrap().len(), 2000);
+    assert_eq!(row["grid"], json!({"division": 0.0625, "swing": 0.25, "measure": false}));
+}
