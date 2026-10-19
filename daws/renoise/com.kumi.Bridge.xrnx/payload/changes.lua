@@ -11,6 +11,8 @@ import("changes_layout")
 import("changes_slots")
 import("changes_lua")
 import("changes_instruments")
+-- (M4 n-devices: presets, names, and the Doofer, Splitter and Notepad edits Kumi's host composes)
+local presets = import("changes_presets")
 
 local M = {}
 
@@ -141,6 +143,9 @@ end
 
 -- The restores that carry their params by hand, by kind.
 M.carry_for = { ["track-delete"] = M.carry_restore, ["slot-delete"] = M.carry_slot_restore }
+
+-- (M4 n-devices) A device's preset data, for Kumi's host to edit (`preset_read`).
+function M.preset_read(params, env) return presets.read(params, env) end
 
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active

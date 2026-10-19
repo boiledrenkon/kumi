@@ -269,6 +269,8 @@ local function watch_device(device, token, track_token)
   observers:owned(token, track_token, function()
     observers:watch_changes(device.is_active_observable)
     observers:watch_changes(device.display_name_observable)
+    -- (M4 n-devices: device-set's maximized, for the producer's undo of it)
+    observers:watch_changes(device.is_maximized_observable)
   end)
 end
 
@@ -739,6 +741,11 @@ function handlers.change_restore(params)
   return changes.restore(params, change_env())
 end
 
+-- (M4 n-devices) A device's preset data and shape, for Kumi's host to edit Doofers, Splitters and Notepads.
+function handlers.preset_read(params)
+  return changes.preset_read(params, change_env())
+end
+
 -- A step of undo around a plan: Renoise has none that spans callbacks, so every change stays its own step (merged: false).
 function handlers.undo_step_begin(params)
   local label = type(params) == "table" and params.label or nil
@@ -840,7 +847,7 @@ local function carried(params, carry)
   return moved
 end
 
-local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true }
+local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true, preset_read = true }
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).

@@ -309,9 +309,98 @@ local function device_setters(data)
   return {
     is_active = setter("is_active", "active", "is_active_observable"),
     display_name = setter("display_name", "display_name", "display_name_observable"),
-    is_maximized = setter("is_maximized", "maximized"),
+    is_maximized = setter("is_maximized", "maximized", "is_maximized_observable"),
     active_preset_data = setter("active_preset_data", "preset_data"),
   }
+end
+
+-- (M4 n-devices) A device whose data names its XML slot type (`slot`) has preset data as Renoise's: XML made from its
+-- parameters (each saved in the element its spec names, `element`), and a write sets the parameters from the XML. What
+-- Renoise does with other text (measured, 3.5.4): text that isn't XML raises, as does an empty one; another device type's
+-- data crashes Renoise; after a write `active_preset` reads 0. `xml_body` is the rest of the slot (a Doofer's chain...).
+local function number_text(v) return string.format("%.9g", v) end
+
+function M.preset_xml(data)
+  local lines = { '<?xml version="1.0" encoding="UTF-8"?>', '<FilterDevicePreset doc_version="14">', '  <DeviceSlot type="' .. data.slot .. '">',
+    "    <IsMaximized>true</IsMaximized>" }
+  for _, p in ipairs(data.params or {}) do
+    -- (an element the rest of the slot holds already, a Doofer's macro, is that one)
+    if p.element and p.element ~= "" and not (data.xml_body and data.xml_body:find("<" .. p.element .. ">", 1, true)) then
+      lines[#lines + 1] = "    <" .. p.element .. ">"
+      lines[#lines + 1] = "      <Value>" .. number_text(p.value) .. "</Value>"
+      lines[#lines + 1] = "    </" .. p.element .. ">"
+    end
+  end
+  if data.xml_body then lines[#lines + 1] = data.xml_body end
+  lines[#lines + 1] = "  </DeviceSlot>"
+  lines[#lines + 1] = "</FilterDevicePreset>"
+  return table.concat(lines, "\n") .. "\n"
+end
+
+-- The XML as it reads now: what was written (or made), with the parameters' values as they are.
+local function preset_text(data)
+  local text = data.preset_data or M.preset_xml(data)
+  for _, p in ipairs(data.params or {}) do
+    if p.element and p.element ~= "" then
+      text = text:gsub("(<" .. p.element .. ">%s*<Value>)[^<]*(</Value>)", "%1" .. number_text(p.value) .. "%2", 1)
+    end
+  end
+  return text
+end
+
+local function write_preset_xml(data, text)
+  if type(text) ~= "string" or text == "" then error("exception: 'Failed to parse a memory XML file (The document is empty)!'", 3) end
+  local slot = text:match('<DeviceSlot%s+type="([%w_]+)"')
+  if not text:find("<FilterDevicePreset", 1, true) or not slot or not text:find("</FilterDevicePreset>", 1, true) then
+    error("exception: 'Failed to parse a memory XML file ( ^)!'", 3)
+  end
+  local version = tonumber(text:match('doc_version="(%d+)"'))
+  if version and version > 14 then error("exception: ''[BinStream]' was saved with an incompatible, more recent version of Renoise.'", 3) end
+  if slot ~= data.slot then
+    M.crashes[#M.crashes + 1] = "wrote " .. slot .. " preset data to a " .. data.slot .. " (Renoise crashes)"
+    return
+  end
+  if M.on_preset_write then M.on_preset_write(data, text) end
+  local old_params, old_text, old_preset = {}, data.preset_data, data.preset
+  for k, p in ipairs(data.params or {}) do old_params[k] = p.value end
+  local function apply(params, preset_text_, preset)
+    for k, p in ipairs(data.params or {}) do
+      if params[k] ~= nil and p.value ~= params[k] then
+        p.value = params[k]
+        M.fire(p.value_observable)
+      end
+    end
+    data.preset_data, data.preset = preset_text_, preset
+  end
+  local new_params = {}
+  for k, p in ipairs(data.params or {}) do
+    if p.element and p.element ~= "" then
+      local v = tonumber(text:match("<" .. p.element .. ">%s*<Value>([^<]*)</Value>"))
+      if v then new_params[k] = v end
+    end
+  end
+  apply(new_params, text, 0)
+  M.record(function() apply(old_params, old_text, old_preset) end, function() apply(new_params, text, 0) end)
+end
+
+-- Choosing a preset: its parameter values (`preset_values[n]`, by parameter) and the XML they make; an undo step.
+local function choose_preset(data, n)
+  if type(n) ~= "number" or n < 0 or n > #(data.presets or {}) then error("std::logic_error: 'invalid preset index'", 3) end
+  local old_params, old_text, old_preset = {}, data.preset_data, data.preset
+  for k, p in ipairs(data.params or {}) do old_params[k] = p.value end
+  local values = (data.preset_values or {})[n] or {}
+  local function apply(params, text, preset)
+    for k, p in ipairs(data.params or {}) do
+      if params[k] ~= nil and p.value ~= params[k] then
+        p.value = params[k]
+        M.fire(p.value_observable)
+      end
+    end
+    data.preset_data, data.preset = text, preset
+    M.fire(data.active_preset_observable)
+  end
+  apply(values, nil, n)
+  M.record(function() apply(old_params, old_text, old_preset) end, function() apply(values, nil, n) end)
 end
 
 local function device(data)
@@ -336,12 +425,14 @@ local function device(data)
   -- (the proxy is made anew on every read: what is watched lives in the data)
   data.is_active_observable = data.is_active_observable or M.observable()
   data.display_name_observable = data.display_name_observable or M.observable()
+  data.is_maximized_observable = data.is_maximized_observable or M.observable()
+  data.active_preset_observable = data.active_preset_observable or M.observable()
   local proxy = object("renoise.AudioDevice", {
     name = data.name, display_name = data.display_name or data.name, short_name = data.name,
     device_path = data.path or ("Audio/Effects/Native/" .. data.name),
     is_active = data.active ~= false, is_active_observable = data.is_active_observable,
-    display_name_observable = data.display_name_observable,
-    active_preset = data.preset or 0, active_preset_observable = M.observable(),
+    display_name_observable = data.display_name_observable, is_maximized_observable = data.is_maximized_observable,
+    active_preset = data.preset or 0, active_preset_observable = data.active_preset_observable,
     is_maximized = data.maximized == true,
     active_preset_data = data.preset_data or "",
     presets = data.presets or {},
@@ -360,8 +451,18 @@ local function device(data)
     is_active = function() return data.active ~= false end,
     display_name = function() return data.display_name or data.name end,
     is_maximized = function() return data.maximized == true end,
-    active_preset_data = function() return data.preset_data or "" end,
-  }, device_setters(data))
+    active_preset_data = function()
+      if data.slot then return preset_text(data) end
+      return data.preset_data or ""
+    end,
+    active_preset = function() return data.preset or 0 end,
+  }, (function()
+    local setters = device_setters(data)
+    -- (M4 n-devices: a device with an XML slot type takes preset data as Renoise does, and a preset choice sets its values)
+    if data.slot then setters.active_preset_data = function(text) write_preset_xml(data, text) end end
+    setters.active_preset = function(n) choose_preset(data, n) end
+    return setters
+  end)())
   return proxy
 end
 
