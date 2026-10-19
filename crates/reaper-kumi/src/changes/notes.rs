@@ -164,7 +164,7 @@ fn take_label(ctx: &Ctx, take: Take) -> String {
     if name.is_empty() {
         "a take".into()
     } else {
-        format!("{} take", rows::clip(&name))
+        format!("take {}", super::quoted(&rows::clip(&name)))
     }
 }
 

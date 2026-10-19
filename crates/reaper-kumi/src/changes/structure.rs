@@ -109,9 +109,9 @@ fn add_fence(ctx: &Ctx, plan: &Add) -> Value {
 pub fn add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let plan = add_plan(ctx, input)?;
     let words = match (&plan.name, plan.adopted.is_empty()) {
-        (Some(name), true) => format!("Added track {name}"),
+        (Some(name), true) => format!("Added track {}", super::quoted(name)),
         (None, true) => "Added a track".to_string(),
-        (Some(name), false) => format!("Added folder {name}"),
+        (Some(name), false) => format!("Added folder {}", super::quoted(name)),
         (None, false) => "Added a folder".to_string(),
     };
     let fence = add_fence(ctx, &plan);
@@ -159,11 +159,12 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let guid = reaper.track_guid(track);
     let id = TrackId::Guid(guid.clone());
     let name = rows::clip(&reaper.track_name(track));
+    let label = super::track_name(reaper, track);
     Ok(Applied {
         applied: json!({"index": place(reaper, track), "name": name, "folder": !plan.adopted.is_empty(), "closedAt": closed}),
         created: Some(json!({"ref": refs::track_ref(&id), "kind": "track"})),
         material: None,
-        display: json!({"title": if plan.adopted.is_empty() { format!("Added track {name}") } else { format!("Added folder {name}") }}),
+        display: json!({"title": if plan.adopted.is_empty() { format!("Added track {}", super::quoted(&label)) } else { format!("Added folder {}", super::quoted(&label)) }}),
     })
 }
 
@@ -191,11 +192,14 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         }
         reaper.set_track_value(last, "I_FOLDERDEPTH", closed["before"].as_f64().unwrap_or(0.0));
     }
-    let name = rows::clip(&reaper.track_name(track));
+    let name = super::track_name(reaper, track);
     if !reaper.delete_track(track) {
         return Err(failed("REAPER wouldn't delete the track"));
     }
-    Ok(Restored { restored: json!({"deleted": reference}), display: json!({"title": format!("Track {name} taken away again")}) })
+    Ok(Restored {
+        restored: json!({"deleted": reference}),
+        display: json!({"title": format!("{} taken away again", super::quoted(&name))}),
+    })
 }
 
 // ----- moving a track -----
@@ -235,9 +239,9 @@ fn move_window(ctx: &Ctx, plan: &Move) -> Value {
 
 pub fn move_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let plan = move_plan(ctx, input)?;
-    let name = rows::clip(&ctx.reaper.track_name(plan.track));
+    let name = super::track_name(ctx.reaper, plan.track);
     let state = json!({"index": plan.from, "window": move_window(ctx, &plan)});
-    let mut display = json!({"title": format!("Moved track {name} to position {}", plan.to + 1), "before": plan.from, "after": plan.to});
+    let mut display = json!({"title": format!("Moved track {} to position {}", super::quoted(&name), plan.to + 1), "before": plan.from, "after": plan.to});
     if plan.from == plan.to {
         display["unchanged"] = true.into();
     }
@@ -294,13 +298,13 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if at != plan.to {
         return Err(failed(format!("REAPER put the track at {} rather than {}", at + 1, plan.to + 1)));
     }
-    let name = rows::clip(&ctx.reaper.track_name(moved));
+    let name = super::track_name(ctx.reaper, moved);
     let after = json!({"index": at, "window": window(ctx.reaper, ctx, plan.from.min(plan.to) - 1, plan.from.max(plan.to))});
     Ok(Applied {
         applied: after,
         created: None,
         material: None,
-        display: json!({"title": format!("Moved track {name} to position {}", at + 1)}),
+        display: json!({"title": format!("Moved track {} to position {}", super::quoted(&name), at + 1)}),
     })
 }
 
@@ -308,6 +312,7 @@ pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let guid = parse_track_ref(restore.target["ref"].as_str().unwrap_or_default(), "target")?;
     let reaper = ctx.reaper;
     let track = track_of(ctx, &guid).ok_or_else(|| ("gone".to_string(), "that track isn't in the project any more".to_string()))?;
+    let name = super::track_name(reaper, track);
     let (from, to) = (restore.prior["index"].as_i64().unwrap_or(0), restore.applied["index"].as_i64().unwrap_or(0));
     let (low, high) = (from.min(to) - 1, from.max(to));
     let now_window = window(reaper, ctx, low, high);
@@ -329,9 +334,8 @@ pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             }
         }
     }
-    let name = rows::clip(&reaper.track_name(track));
     Ok(Restored {
         restored: json!({"index": place(reaper, track)}),
-        display: json!({"title": format!("Track {name} back at position {}", from + 1)}),
+        display: json!({"title": format!("{} back at position {}", super::quoted(&name), from + 1)}),
     })
 }

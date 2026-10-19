@@ -22,6 +22,11 @@ struct Found {
     to: String,
 }
 
+/// A send as the titles say it: `“Bass” → “Reverb”`.
+fn route_text(from: &str, to: &str) -> String {
+    format!("{} → {}", super::quoted(from), super::quoted(to))
+}
+
 fn name_of(reaper: &Reaper, track: Track) -> String {
     let name = rows::clip(&reaper.track_name(track));
     if name.is_empty() {
@@ -119,7 +124,7 @@ pub static PROPS: [Prop; 4] = [
         },
         write: |reaper, track, index, state| reaper.set_send_value(track, 0, index, "D_VOL", number(state, "volume")),
         same: |a, b| close(number(a, "volume"), number(b, "volume")),
-        title: |route, to| format!("{route} {} dB", super::tracks::db_text(number(to, "volumeDb"))),
+        title: |route, to| format!("Send {route} {} dB", super::tracks::db_text(number(to, "volumeDb"))),
         noun: "volume",
     },
     Prop {
@@ -135,7 +140,7 @@ pub static PROPS: [Prop; 4] = [
         },
         write: |reaper, track, index, state| reaper.set_send_value(track, 0, index, "D_PAN", number(state, "pan")),
         same: |a, b| close(number(a, "pan"), number(b, "pan")),
-        title: |route, to| format!("{route} pan {}", super::tracks::pan_text(number(to, "pan"))),
+        title: |route, to| format!("Send {route} pan {}", super::tracks::pan_text(number(to, "pan"))),
         noun: "pan",
     },
     Prop {
@@ -149,7 +154,7 @@ pub static PROPS: [Prop; 4] = [
             reaper.set_send_value(track, 0, index, "B_MUTE", if state["mute"] == true { 1.0 } else { 0.0 })
         },
         same: |a, b| a["mute"] == b["mute"],
-        title: |route, to| format!("{route} send {}", if to["mute"] == true { "muted" } else { "unmuted" }),
+        title: |route, to| format!("Send {route} {}", if to["mute"] == true { "muted" } else { "unmuted" }),
         noun: "mute",
     },
     Prop {
@@ -168,7 +173,7 @@ pub static PROPS: [Prop; 4] = [
                 || (b["mode"].as_i64().unwrap_or(0) == 2 && a["mode"] == 3)
                 || a["mode"] == b["mode"]
         },
-        title: |route, to| format!("{route} send {}", to["modeName"].as_str().unwrap_or("")),
+        title: |route, to| format!("Send {route} {}", to["modeName"].as_str().unwrap_or("")),
         noun: "mode",
     },
 ];
@@ -178,7 +183,7 @@ pub fn prop_preview(ctx: &Ctx, prop: &Prop, input: &Value) -> Done<Preview> {
     let found = find(ctx, reference)?;
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     let wanted = (prop.wanted)(input)?;
-    let route = format!("{} → {}", found.from, found.to);
+    let route = route_text(&found.from, &found.to);
     let mut display = json!({"title": (prop.title)(&route, &wanted), "before": now, "after": wanted});
     if (prop.same)(&now, &wanted) {
         display["unchanged"] = true.into();
@@ -188,7 +193,7 @@ pub fn prop_preview(ctx: &Ctx, prop: &Prop, input: &Value) -> Done<Preview> {
 
 pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<Applied> {
     let found = find_for_apply(ctx, input["ref"].as_str().unwrap_or_default())?;
-    let route = format!("{} → {}", found.from, found.to);
+    let route = route_text(&found.from, &found.to);
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     if !(prop.same)(&now, fence) {
         return Err(changed(format!("{route}'s {} changed since the preview", prop.noun)));
@@ -211,7 +216,7 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
 
 pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored> {
     let found = find_for_restore(ctx, restore.target["ref"].as_str().unwrap_or_default())?;
-    let route = format!("{} → {}", found.from, found.to);
+    let route = route_text(&found.from, &found.to);
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     if !(prop.same)(&now, restore.prior) {
         if !restore.discard && !(prop.same)(&now, restore.applied) {
@@ -311,7 +316,7 @@ fn add_fence(ctx: &Ctx, plan: &Add) -> Value {
 
 pub fn add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let plan = add_plan(ctx, input)?;
-    let route = format!("{} → {}", name_of(ctx.reaper, plan.from), name_of(ctx.reaper, plan.to));
+    let route = route_text(&name_of(ctx.reaper, plan.from), &name_of(ctx.reaper, plan.to));
     let existing = rows::send_keys(ctx.reaper, plan.from, 0).iter().filter(|key| key.other == SendEnd::Track(plan.to_id.clone())).count();
     let mut display = json!({"title": format!("Added send {route}")});
     if existing > 0 {
@@ -344,7 +349,7 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let keys = rows::send_keys(reaper, plan.from, 0);
     let key = keys.get(index as usize).ok_or_else(|| failed("the new send isn't in the track's sends"))?;
     let reference = refs::send_ref(&plan.from_id, 0, &key.other, key.repeat, key.of);
-    let route = format!("{} → {}", name_of(reaper, plan.from), name_of(reaper, plan.to));
+    let route = route_text(&name_of(reaper, plan.from), &name_of(reaper, plan.to));
     Ok(Applied {
         applied: send_state(reaper, plan.from, index),
         created: Some(target(&reference)),
@@ -359,14 +364,14 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let found = find_for_restore(ctx, reference)?;
     let now = send_state(ctx.reaper, found.track, found.index);
     if !restore.discard && !same_state(&now, restore.applied) {
-        return Err(changed(format!("the send {} → {} has been changed in REAPER since Kumi added it", found.from, found.to)));
+        return Err(changed(format!("the send {} has been changed in REAPER since Kumi added it", route_text(&found.from, &found.to))));
     }
     if !ctx.reaper.remove_send(found.track, 0, found.index) {
         return Err(failed("REAPER wouldn't remove the send"));
     }
     Ok(Restored {
         restored: json!({"removed": reference}),
-        display: json!({"title": format!("Send {} → {} taken away again", found.from, found.to)}),
+        display: json!({"title": format!("Send {} taken away again", route_text(&found.from, &found.to))}),
     })
 }
 
@@ -376,7 +381,7 @@ pub fn remove_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let reference = input["ref"].as_str().unwrap_or_default();
     let found = find(ctx, reference)?;
     let now = send_state(ctx.reaper, found.track, found.index);
-    let mut display = json!({"title": format!("Removed send {} → {}", found.from, found.to), "before": now});
+    let mut display = json!({"title": format!("Removed send {}", route_text(&found.from, &found.to)), "before": now});
     let envelopes = active_envelopes(ctx.reaper, found.track, found.index);
     if envelopes > 0 {
         display["note"] = format!("Its {envelopes} envelope(s) can't be put back by undo.").into();
@@ -398,7 +403,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reaper = ctx.reaper;
     let now = send_state(reaper, found.track, found.index);
     if !same_state(&now, fence) {
-        return Err(changed(format!("the send {} → {} changed since the preview", found.from, found.to)));
+        return Err(changed(format!("the send {} changed since the preview", route_text(&found.from, &found.to))));
     }
     let receiver = reaper
         .send_peer(found.track, 0, found.index)
@@ -413,7 +418,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"removed": true}),
         created: None,
         material: Some(material),
-        display: json!({"title": format!("Removed send {} → {}", found.from, found.to)}),
+        display: json!({"title": format!("Removed send {}", route_text(&found.from, &found.to))}),
     })
 }
 
@@ -437,7 +442,7 @@ pub fn remove_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     write_state(reaper, from, index, &material["state"]);
     let keys = rows::send_keys(reaper, from, 0);
     let key = keys.get(index as usize).ok_or_else(|| failed("the send made again isn't in the track's sends"))?;
-    let mut display = json!({"title": format!("Send {} → {} put back", name_of(reaper, from), name_of(reaper, to))});
+    let mut display = json!({"title": format!("Send {} put back", route_text(&name_of(reaper, from), &name_of(reaper, to)))});
     if let Some(lost) = material["lostEnvelopes"].as_u64().filter(|lost| *lost > 0) {
         display["note"] = format!("Its {lost} envelope(s) were not put back.").into();
     }

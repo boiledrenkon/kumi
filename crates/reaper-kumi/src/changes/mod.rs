@@ -459,6 +459,25 @@ impl Changes {
 const TRANSPORT_STOP: i32 = 1016;
 const TRANSPORT_PLAY: i32 = 1007;
 
+/// A name inside a title's sentence, in curly quotes as Live's titles quote theirs: a track called "Track 5" reads
+/// "Deleted track “Track 5”", not "Deleted track Track 5". A title that begins with the name (a fader's, a mute's) leaves it bare.
+pub(crate) fn quoted(name: &str) -> String {
+    format!("\u{201c}{name}\u{201d}")
+}
+
+/// A track as the producer calls it: its name, or the number REAPER shows for one with none ("Master" for the master).
+pub(crate) fn track_name(reaper: &Reaper, track: crate::reaper::Track) -> String {
+    if reaper.track_value(track, "IP_TRACKNUMBER") < 0.0 {
+        return "Master".into();
+    }
+    let name = crate::rows::clip(&reaper.track_name(track));
+    if name.is_empty() {
+        format!("Track {}", reaper.track_value(track, "IP_TRACKNUMBER") as i64)
+    } else {
+        name
+    }
+}
+
 /// The track a request's `ref` names.
 pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::TrackId> {
     let text = input.get("ref").and_then(Value::as_str).ok_or_else(|| bad(format!("{what}: ref must be a track ref")))?;

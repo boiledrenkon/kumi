@@ -169,9 +169,9 @@ pub static PROPS: [Prop; 6] = [
         title: |_, from, to| {
             let (from, to) = (from["name"].as_str().unwrap_or_default(), to["name"].as_str().unwrap_or_default());
             if from.is_empty() {
-                format!("Named track {to}")
+                format!("Named track {}", super::quoted(to))
             } else {
-                format!("Renamed track {from} to {to}")
+                format!("Renamed track {} → {}", super::quoted(from), super::quoted(to))
             }
         },
         noun: "name",
@@ -329,7 +329,7 @@ pub fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let found = find_to_delete(ctx, input)?;
     let now = signature(ctx.reaper, found.track);
     let held = now["items"].as_i64().unwrap_or(0) + now["fx"].as_i64().unwrap_or(0);
-    let mut display = json!({"title": format!("Deleted track {}", named(ctx, &found))});
+    let mut display = json!({"title": format!("Deleted track {}", super::quoted(&named(ctx, &found)))});
     if held > 0 {
         display["note"] = format!("It holds {} items and {} FX; Kumi keeps them to put back.", now["items"], now["fx"]).into();
     }
@@ -405,7 +405,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"deleted": true}),
         created: None,
         material: Some(material),
-        display: json!({"title": format!("Deleted track {name}")}),
+        display: json!({"title": format!("Deleted track {}", super::quoted(&name))}),
     })
 }
 
@@ -503,11 +503,11 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if material["selected"] == true {
         reaper.set_track_value(track, "I_SELECTED", 1.0);
     }
-    let name = rows::clip(&reaper.track_name(track));
+    let name = super::track_name(reaper, track);
     let mut restored = Map::new();
     restored.insert("ref".into(), refs::track_ref(&id).into());
     restored.insert("routes".into(), remade.into());
-    let mut display = json!({"title": format!("Track {name} put back")});
+    let mut display = json!({"title": format!("{} put back", super::quoted(&name))});
     if let Some(lost) = material["lostEnvelopes"].as_u64().filter(|lost| *lost > 0) {
         display["note"] = format!("Its {lost} send envelope(s) were not put back.").into();
     }

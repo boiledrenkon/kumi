@@ -67,16 +67,12 @@ fn fx_of(located: &Located) -> Fx {
     Fx { owner: FxOwner::Track(located.track), index: located.index }
 }
 
+/// The track as a title's sentence says it: its name in quotes, or "the master".
 fn track_label(ctx: &Ctx, track: Track) -> String {
     if rows::track_id(ctx.reaper, track) == TrackId::Master {
-        return "Master".into();
+        return "the master".into();
     }
-    let name = rows::clip(&ctx.reaper.track_name(track));
-    if name.is_empty() {
-        format!("Track {}", ctx.reaper.track_value(track, "IP_TRACKNUMBER") as i64)
-    } else {
-        name
-    }
+    super::quoted(&super::track_name(ctx.reaper, track))
 }
 
 /// A plug-in's name as a producer says it: without the format in front and the maker behind.
@@ -211,7 +207,7 @@ fn add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
         target: track_target(ctx, track),
         prior: chain_fence(&before),
         fence: chain_fence(&before),
-        display: json!({"title": format!("Added {} to {}", short_name(&name), track_label(ctx, track)), "position": place}),
+        display: json!({"title": format!("Added {} to {}", super::quoted(&short_name(&name)), track_label(ctx, track)), "position": place}),
     })
 }
 
@@ -241,7 +237,7 @@ fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"guid": guid, "index": index, "signature": signature(ctx, fx)}),
         created: Some(json!({"ref": refs::fx_ref(&guid), "kind": "fx"})),
         material: None,
-        display: json!({"title": format!("Added {label} to {}", track_label(ctx, track)), "ref": refs::fx_ref(&guid), "index": index}),
+        display: json!({"title": format!("Added {} to {}", super::quoted(&label), track_label(ctx, track)), "ref": refs::fx_ref(&guid), "index": index}),
     })
 }
 
@@ -259,7 +255,7 @@ fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     }
     Ok(Restored {
         restored: json!({"deleted": guid}),
-        display: json!({"title": format!("{label} taken off {}", track_label(ctx, located.track))}),
+        display: json!({"title": format!("{} taken off {}", super::quoted(&label), track_label(ctx, located.track))}),
     })
 }
 
@@ -311,7 +307,7 @@ fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
         return Err(bad("containers aren't changed yet"));
     }
     let now = json!({"guid": located.guid, "index": located.index, "signature": signature(ctx, fx)});
-    let mut display = json!({"title": format!("Deleted {} from {}", fx_label(ctx, fx), track_label(ctx, located.track))});
+    let mut display = json!({"title": format!("Deleted {} from {}", super::quoted(&fx_label(ctx, fx)), track_label(ctx, located.track))});
     let lost = envelopes_of(ctx, &located);
     if lost > 0 {
         display["note"] = format!("Its {lost} automation envelope(s) go with it and don't come back with an undo.").into();
@@ -351,7 +347,7 @@ fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: json!({"deleted": located.guid}),
         created: None,
         material: Some(json!({"entry": entry, "index": located.index, "guid": located.guid, "name": name, "lostEnvelopes": lost})),
-        display: json!({"title": format!("Deleted {label} from {track_name}")}),
+        display: json!({"title": format!("Deleted {} from {track_name}", super::quoted(&label))}),
     })
 }
 
@@ -389,7 +385,7 @@ fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         // Back already (a retry, or the producer undid it): nothing to write.
         return Ok(Restored {
             restored: json!({"ref": refs::fx_ref(guid), "was": refs::fx_ref(guid)}),
-            display: json!({"title": format!("{} is back already", fx_label(ctx, fx))}),
+            display: json!({"title": format!("{} is back already", super::quoted(&fx_label(ctx, fx)))}),
         });
     }
     let track = track_of(ctx, restore.target)?;
@@ -406,7 +402,7 @@ fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let fx = Fx { owner: FxOwner::Track(track), index: made };
     Ok(Restored {
         restored: json!({"ref": refs::fx_ref(&now), "was": refs::fx_ref(guid), "index": made}),
-        display: json!({"title": format!("{} put back on {}", fx_label(ctx, fx), track_label(ctx, track))}),
+        display: json!({"title": format!("{} put back on {}", super::quoted(&fx_label(ctx, fx)), track_label(ctx, track))}),
     })
 }
 
@@ -443,7 +439,7 @@ fn move_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let before = chain(ctx, located.track);
     let to = move_index(input, before.len())?;
     let fx = fx_of(&located);
-    let mut display = json!({"title": format!("Moved {} to place {} on {}", fx_label(ctx, fx), to + 1, track_label(ctx, located.track)), "from": located.index, "to": to});
+    let mut display = json!({"title": format!("Moved {} to place {} on {}", super::quoted(&fx_label(ctx, fx)), to + 1, track_label(ctx, located.track)), "from": located.index, "to": to});
     if to as i32 == located.index {
         display["unchanged"] = true.into();
     }
@@ -476,7 +472,7 @@ fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied: chain_fence(&after),
         created: None,
         material: None,
-        display: json!({"title": format!("Moved {} to place {} on {}", fx_label(ctx, fx), to + 1, track_label(ctx, located.track))}),
+        display: json!({"title": format!("Moved {} to place {} on {}", super::quoted(&fx_label(ctx, fx)), to + 1, track_label(ctx, located.track))}),
     })
 }
 
@@ -500,7 +496,10 @@ fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let now = chain(ctx, located.track);
     let label = fx_label(ctx, fx_of(&located));
     if now == prior {
-        return Ok(Restored { restored: chain_fence(&now), display: json!({"title": format!("{label} is where it was")}) });
+        return Ok(Restored {
+            restored: chain_fence(&now),
+            display: json!({"title": format!("{} is where it was", super::quoted(&label))}),
+        });
     }
     if !restore.discard && now != applied {
         return Err(changed("the FX on that track have been rearranged in REAPER since Kumi moved one"));
@@ -512,7 +511,7 @@ fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     }
     Ok(Restored {
         restored: chain_fence(&expected),
-        display: json!({"title": format!("{label} back to place {} on {}", to + 1, track_label(ctx, located.track))}),
+        display: json!({"title": format!("{} back to place {} on {}", super::quoted(&label), to + 1, track_label(ctx, located.track))}),
     })
 }
 
@@ -523,7 +522,12 @@ fn bypass_input(input: &Value) -> Done<bool> {
 }
 
 fn bypass_title(ctx: &Ctx, located: &Located, bypass: bool) -> String {
-    format!("{} {} on {}", if bypass { "Bypassed" } else { "Enabled" }, fx_label(ctx, fx_of(located)), track_label(ctx, located.track))
+    format!(
+        "{} {} on {}",
+        if bypass { "Bypassed" } else { "Enabled" },
+        super::quoted(&fx_label(ctx, fx_of(located))),
+        track_label(ctx, located.track)
+    )
 }
 
 fn bypass_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {

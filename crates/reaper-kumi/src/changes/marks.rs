@@ -61,7 +61,7 @@ fn label(marker: &Marker) -> String {
     if marker.name.is_empty() {
         format!("{word} {}", marker.number)
     } else {
-        format!("{word} {}", rows::clip(&marker.name))
+        format!("{word} {}", super::quoted(&rows::clip(&marker.name)))
     }
 }
 
@@ -155,7 +155,7 @@ fn add_plan(ctx: &Ctx, input: &Value, region: bool) -> Done<Add> {
 pub fn add_preview(ctx: &Ctx, input: &Value, region: bool) -> Done<Preview> {
     let plan = add_plan(ctx, input, region)?;
     let word = if region { "Region" } else { "Marker" };
-    let name = if plan.name.is_empty() { String::new() } else { format!(" {}", plan.name) };
+    let name = if plan.name.is_empty() { String::new() } else { format!(" {}", super::quoted(&plan.name)) };
     let title = if region {
         format!("{word}{name} from {} to {}", bar_text(ctx.reaper, ctx.proj, plan.start), bar_text(ctx.reaper, ctx.proj, plan.end))
     } else {
@@ -177,7 +177,7 @@ pub fn add_apply(ctx: &Ctx, input: &Value, region: bool) -> Done<Applied> {
         .ok_or_else(|| failed("REAPER wouldn't add the marker"))?;
     let marker = ctx.reaper.marker_by_guid(ctx.proj, &guid).ok_or_else(|| failed("the marker made isn't in the project"))?;
     let word = if region { "Region" } else { "Marker" };
-    let name = if marker.name.is_empty() { String::new() } else { format!(" {}", rows::clip(&marker.name)) };
+    let name = if marker.name.is_empty() { String::new() } else { format!(" {}", super::quoted(&rows::clip(&marker.name))) };
     let title = if region {
         format!("{word}{name} from {} to {}", bar_text(ctx.reaper, ctx.proj, marker.start), bar_text(ctx.reaper, ctx.proj, marker.end))
     } else {
@@ -354,7 +354,8 @@ pub static PROPS: [Prop; 3] = [
         same: |a, b| a["name"] == b["name"],
         title: |_, marker, to| {
             let name = to["name"].as_str().unwrap_or_default();
-            format!("Renamed {} to {name}", label(marker).to_lowercase_first())
+            let shown = if name.is_empty() { "no name".to_string() } else { super::quoted(name) };
+            format!("Renamed {} → {shown}", label(marker).to_lowercase_first())
         },
         noun: "name",
     },
@@ -410,7 +411,7 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         applied: after.clone(),
         created: None,
         material: None,
-        display: json!({"title": (prop.title)(ctx, &after_marker, &after), "before": now, "after": after}),
+        display: json!({"title": (prop.title)(ctx, &marker, &after), "before": now, "after": after}),
     })
 }
 
@@ -432,6 +433,6 @@ pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored>
     }
     Ok(Restored {
         restored: after.clone(),
-        display: json!({"title": format!("{} (put back)", (prop.title)(ctx, &after_marker, &after)), "before": now, "after": after}),
+        display: json!({"title": format!("{} (put back)", (prop.title)(ctx, &marker, &after)), "before": now, "after": after}),
     })
 }
