@@ -241,20 +241,14 @@ fn a_saved_project_is_identified_by_its_path_in_status_the_welcome_and_the_disco
     assert_eq!(client.welcome["daw"], "logic");
     assert_eq!(client.welcome["pid"], me());
     assert_eq!(client.welcome["resource"], "com.apple.logic10");
+    assert_eq!((client.welcome["bridge"].as_str(), client.welcome["dawVersion"].as_str()), (Some(BRIDGE_VERSION), Some("12.3.1")));
     assert_eq!(client.welcome["methods"], json!(["ping", "status"]));
     assert_eq!(client.welcome["events"], json!(["project"]));
     assert_eq!(client.welcome["project"], serde_json::to_value(&project).unwrap());
     assert_eq!(client.call("ping")["result"], json!({}));
     let status = client.status();
-    assert_eq!(
-        status,
-        json!({
-            "identity": {"daw": "logic", "bridge": BRIDGE_VERSION, "dawVersion": "12.3.1", "pid": me(), "resource": "com.apple.logic10", "project": project},
-            "busy": null,
-            "permission": null,
-        })
-    );
-    assert_eq!(status.as_object().unwrap().keys().collect::<Vec<_>>(), ["identity", "busy", "permission"]);
+    assert_eq!(status, json!({"project": project, "busy": false, "permission": null}));
+    assert_eq!(status.as_object().unwrap().keys().collect::<Vec<_>>(), ["project", "busy", "permission"]);
     assert_eq!(client.call("read")["error"]["code"], "unknown-method");
 
     // The helper was asked as the contract says: the apps by both bundle ids, then the permission and the windows.
@@ -276,8 +270,8 @@ fn an_unsaved_project_has_an_identity_and_no_id() {
     assert_eq!(project.extra.get("identity"), Some(&json!("Untitled")));
     let mut client = lab.client();
     let status = client.status();
-    assert_eq!(status["identity"]["project"], json!({"name": "Untitled", "identity": "Untitled"}));
-    assert_eq!(status["identity"]["project"].get("id"), None);
+    assert_eq!(status["project"], json!({"name": "Untitled", "identity": "Untitled"}));
+    assert_eq!(status["project"].get("id"), None);
 }
 
 #[test]
@@ -286,37 +280,37 @@ fn no_window_is_away_a_dialog_is_modal_and_no_title_is_loading() {
     let hands = hands_showing(json!([song]));
     let lab = Lab::start(&hands);
     let mut client = lab.client();
-    assert_eq!(client.status()["busy"], Value::Null);
-    let project = client.status()["identity"]["project"].clone();
+    assert_eq!(client.status()["busy"], false);
+    let project = client.status()["project"].clone();
 
     // Logic's Space isn't the current one: no window at all, though the Window menu still lists it.
     hands.set_windows(json!([]), &["Song - Tracks"]);
     let status = client.status_when("away", |status| status["busy"] == "away");
-    assert_eq!(status["identity"]["project"], project, "the project stays while away");
+    assert_eq!(status["project"], project, "the project stays while away");
 
     // An Import panel as the main window, the project window behind it.
     let behind = json!({"title": "Song - Tracks", "role": "AXWindow", "subrole": "AXStandardWindow", "main": false, "focused": false, "document": format!("file://{SONG}")});
     hands.set_windows(json!([dialog("Import"), behind]), &["Song - Tracks"]);
     let status = client.status_when("modal", |status| status["busy"] == "modal");
-    assert_eq!(status["identity"]["project"], project);
+    assert_eq!(status["project"], project);
     // Free again, then a sheet on the project window: modal, and still the project.
     let song = tracks_window("Song - Tracks", Some(&format!("file://{SONG}")));
     hands.set_windows(json!([song]), &["Song - Tracks"]);
-    client.status_when("free", |status| status["busy"].is_null());
+    client.status_when("free", |status| status["busy"] == false);
     let mut sheet = tracks_window("Song - Tracks", Some(&format!("file://{SONG}")));
     sheet["modal"] = true.into();
     hands.set_windows(json!([sheet]), &["Song - Tracks"]);
     let status = client.status_when("a sheet", |status| status["busy"] == "modal");
-    assert_eq!(status["identity"]["project"], project);
+    assert_eq!(status["project"], project);
 
     // A project loading: the main window has no title yet.
     hands.set_windows(json!([tracks_window("", None)]), &[""]);
     let status = client.status_when("loading", |status| status["busy"] == "loading");
-    assert_eq!(status["identity"]["project"], project);
+    assert_eq!(status["project"], project);
 
     // Back to the project: free.
     hands.set_windows(json!([tracks_window("Song - Tracks", Some(&format!("file://{SONG}")))]), &["Song - Tracks"]);
-    client.status_when("free", |status| status["busy"].is_null());
+    client.status_when("free", |status| status["busy"] == false);
     assert!(client.events.is_empty(), "the same project again isn't a project event: {:?}", client.events);
 }
 
@@ -328,15 +322,15 @@ fn without_accessibility_status_names_the_permission_and_is_never_busy() {
     let lab = Lab::start(&hands);
     let mut client = lab.client();
     let status = client.status();
-    assert_eq!((&status["permission"], &status["busy"]), (&json!("accessibility"), &Value::Null));
-    assert_eq!(status["identity"]["project"], Value::Null);
-    assert_eq!(status["identity"]["pid"], me());
+    assert_eq!((&status["permission"], &status["busy"]), (&json!("accessibility"), &json!(false)));
+    assert_eq!(status["project"], Value::Null);
+    assert_eq!(client.welcome["pid"], me());
     assert_eq!(hands.calls_of("windows"), 0, "nothing is read without the permission");
     // Granted: the windows are read from then on.
     hands.set_windows(json!([tracks_window("Song - Tracks", Some(&format!("file://{SONG}")))]), &["Song - Tracks"]);
     hands.set_trusted(true);
     let status = client.status_when("the permission", |status| status["permission"].is_null());
-    assert_eq!(status["identity"]["project"]["id"], logic::project_id(SONG));
+    assert_eq!(status["project"]["id"], logic::project_id(SONG));
     assert_eq!(client.next_event()["name"], "project");
 }
 
@@ -353,7 +347,7 @@ fn the_discovery_file_follows_the_project_and_goes_with_the_bridge() {
     assert_eq!(event["data"], json!({"id": logic::project_id(OTHER), "name": "Other", "path": OTHER}));
     // The discovery file was rewritten before the event went out.
     assert_eq!(lab.discovery().unwrap().project.unwrap().id.as_deref(), Some(logic::project_id(OTHER).as_str()));
-    assert_eq!(client.status()["identity"]["project"]["path"], OTHER);
+    assert_eq!(client.status()["project"]["path"], OTHER);
 
     // A project closed: no project, said once.
     hands.set_windows(json!([dialog("Choose a Project")]), &[]);
@@ -376,7 +370,7 @@ fn a_helper_that_exits_is_started_again_and_the_bridge_keeps_answering() {
     hands.exit();
     wait_for("the helper to be started again", || hands.launches() == 2);
     let status = client.status();
-    assert_eq!(status["identity"]["project"]["id"], logic::project_id(SONG), "the last look is kept meanwhile");
+    assert_eq!(status["project"]["id"], logic::project_id(SONG), "the last look is kept meanwhile");
     assert_eq!(lab.discovery().unwrap().project.unwrap().id.as_deref(), Some(logic::project_id(SONG).as_str()));
     // The new helper is the one asked: a project switch is followed.
     hands.set_windows(json!([tracks_window("Other - Tracks", Some(&format!("file://{OTHER}")))]), &["Other - Tracks"]);
@@ -393,7 +387,7 @@ fn logic_quitting_ends_the_bridge_with_a_bye() {
     hands.emit(json!({"event": "app", "state": "terminated", "pid": me() + 1, "bundle": "com.apple.logic10"}));
     hands.emit(json!({"event": "app", "state": "launched", "pid": me() + 2, "bundle": "com.apple.mobilelogic"}));
     thread::sleep(Duration::from_millis(100));
-    assert_eq!(client.status()["identity"]["pid"], me());
+    assert_eq!(client.status()["project"]["name"], "Song");
     hands.emit(json!({"event": "app", "state": "terminated", "pid": me(), "bundle": "com.apple.logic10"}));
     assert_eq!(client.bye(), json!({"type": "bye", "reason": "quit"}));
     let discovery_dir = lab.discovery_dir.clone();
@@ -430,5 +424,5 @@ fn the_bridge_waits_for_logic_and_attaches_when_it_launches() {
     let discovery = lab.wait_discovery();
     assert_eq!((discovery.pid, discovery.resource.as_str()), (me(), "com.apple.logic10"));
     let mut client = lab.client();
-    assert_eq!(client.status()["identity"]["project"]["name"], "Song");
+    assert_eq!(client.status()["project"]["name"], "Song");
 }

@@ -843,8 +843,9 @@ mod tests {
 
         assert_eq!(request(&mut stream, &mut reader, 1, "ping")["result"], json!({}));
         let status = request(&mut stream, &mut reader, 2, "status")["result"].clone();
-        assert_eq!(status["identity"], serde_json::to_value(lock(&lab.model).identity()).unwrap());
-        assert_eq!((&status["busy"], &status["permission"]), (&Value::Null, &Value::Null));
+        assert_eq!(status["project"], welcome["project"]);
+        assert_eq!((&status["busy"], &status["permission"]), (&json!(false), &Value::Null));
+        assert_eq!(status.as_object().unwrap().keys().collect::<Vec<_>>(), ["project", "busy", "permission"]);
         // The next look says Logic is behind a dialog and the helper lacks its permission: status says so at once.
         {
             let mut model = lock(&lab.model);

@@ -23,13 +23,15 @@ helper whether Accessibility is granted and what Logic's windows are:
 - the main window's document gives a saved project's path, and so its id (the
   first 32 hex of the SHA-256 of `logic-project:<path>`); the title gives an
   unsaved project's identity (the title without its ` - Tracks` suffix);
-- `busy` is `modal` when the main or focused window is a dialog or a sheet is
-  open, `away` when Logic reports no window at all (its Space isn't the
-  current one), `loading` while the main window has no title;
+- `busy` is `false` when Logic can take work, `modal` when the main or
+  focused window is a dialog or a sheet is open, `away` when Logic reports no
+  window at all (its Space isn't the current one), `loading` while the main
+  window has no title;
 - `permission` is `accessibility` while the helper isn't trusted; `status`
   still answers then, and nothing counts as busy.
 
-It answers `ping` and `status` (the identity with `busy` and `permission`),
+It answers `ping` and `status` (`{project, busy, permission}`, flat as the
+REAPER bridge's; the identity itself is in the welcome, where the host takes it),
 sends a `project` event when the project's id or identity changes (rewriting
 the discovery file first), and when Logic terminates, or is no longer among
 the running apps, removes the discovery file, tells its hosts `bye` with

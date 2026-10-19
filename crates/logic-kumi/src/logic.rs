@@ -343,12 +343,13 @@ impl Model {
         }
     }
 
-    /// What `status` answers: the identity, why Logic can't take work (or null), and the permission the helper lacks
-    /// (or null).
+    /// What `status` answers, flat as the REAPER extension's and as the host reads it: the project (or null), why
+    /// Logic can't take work (`false` when it can), and the permission the helper lacks (or null). The identity itself
+    /// is the welcome's.
     pub fn status(&self) -> Value {
         json!({
-            "identity": self.identity(),
-            "busy": self.busy.map(Busy::code),
+            "project": self.project,
+            "busy": self.busy.map_or(Value::Bool(false), |busy| busy.code().into()),
             "permission": self.permission.map(Permission::code),
         })
     }
@@ -564,26 +565,29 @@ mod tests {
     }
 
     #[test]
-    fn status_is_the_identity_with_busy_and_the_permission() {
+    fn status_is_the_project_with_busy_and_the_permission_and_the_identity_is_the_welcomes() {
         let mut model = Model::new(42, "com.apple.logic10", "12.3.1");
         model.on_windows(&json!({"windows": [{"title": "Song - Tracks", "role": "AXWindow", "subrole": "AXStandardWindow", "main": true, "focused": true, "document": "file:///m/Song.logicx"}], "listed": ["Song - Tracks"]}));
         let status = model.status();
-        assert_eq!(status["identity"]["daw"], "logic");
-        assert_eq!(status["identity"]["pid"], 42);
-        assert_eq!(status["identity"]["resource"], "com.apple.logic10");
-        assert_eq!(status["identity"]["dawVersion"], "12.3.1");
-        assert_eq!(status["identity"]["bridge"], BRIDGE_VERSION);
-        assert_eq!(status["identity"]["project"]["path"], "/m/Song.logicx");
-        assert_eq!(status["busy"], Value::Null);
+        assert_eq!(status["project"]["path"], "/m/Song.logicx");
+        assert_eq!(status["busy"], false);
         assert_eq!(status["permission"], Value::Null);
-        assert_eq!(status.as_object().unwrap().keys().collect::<Vec<_>>(), ["identity", "busy", "permission"]);
-        // Not trusted: the permission is named, and nothing counts as busy.
+        assert_eq!(status.as_object().unwrap().keys().collect::<Vec<_>>(), ["project", "busy", "permission"]);
+        let identity = serde_json::to_value(model.identity()).unwrap();
+        assert_eq!(identity["daw"], "logic");
+        assert_eq!(identity["pid"], 42);
+        assert_eq!(identity["resource"], "com.apple.logic10");
+        assert_eq!(identity["dawVersion"], "12.3.1");
+        assert_eq!(identity["bridge"], BRIDGE_VERSION);
+        assert_eq!(identity["project"], status["project"]);
+        // Away: busy is the word for it.
         model.on_windows(&json!({"windows": []}));
+        assert_eq!(model.status()["busy"], "away");
+        // Not trusted: the permission is named, and nothing counts as busy.
         assert!(model.on_trusted(false));
-        assert_eq!((model.status()["permission"].as_str(), model.status()["busy"].as_str()), (Some("accessibility"), None));
+        assert_eq!((&model.status()["permission"], &model.status()["busy"]), (&json!("accessibility"), &json!(false)));
         assert!(!model.on_trusted(false));
         assert!(model.on_trusted(true));
         assert_eq!(model.status()["permission"], Value::Null);
-        assert_eq!(serde_json::to_value(model.identity()).unwrap(), status["identity"]);
     }
 }
