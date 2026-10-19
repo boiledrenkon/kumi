@@ -1154,6 +1154,28 @@ test("reads: a track inserted is told at once, and a ref made before reads the s
   H.no_dialogs()
 end)
 
+test("reads: an edit that moves the epoch (a device added) after a track insert leaves every request without track refs readable", function()
+  local env, peer = setup()
+  fill_demo()
+  local E = epoch_of(peer)
+  mock.ops.insert_track(1, { name = "New" })
+  eq(H.events(peer, "tracks")[1].data.layout, 1)
+  -- A device added: the epoch moves and no event says so. The layout goes on, not back to 0.
+  mock.ops.insert_device(2, { path = "Audio/Effects/Native/EQ 5" })
+  local now = call(peer, "focus").result
+  ok(now.epoch ~= E, "the epoch moved")
+  eq(now.layout, 1, "the layout goes on counting")
+  -- Requests that name no track answer, whatever layout they carry (Kumi's last one was 1).
+  ok(call(peer, "read", { kind = "song", layout = 1 }).result, "read song")
+  ok(call(peer, "read", { kind = "pattern", layout = 1 }).result, "read pattern")
+  ok(call(peer, "focus_body", { kind = "pattern", layout = 1 }).result, "the pattern body")
+  ok(call(peer, "focus_body", { kind = "matrix", layout = 0 }).result, "the matrix, even with an older layout")
+  -- A track ref from before the device was added is stale: it's from the old epoch.
+  local old = call(peer, "read", { kind = "device", parent = E .. ":track:2", layout = 1 })
+  eq(old.error and old.error.code, "stale", json.encode(old))
+  H.no_dialogs()
+end)
+
 test("reads: a track removed answers gone for its refs, and the tracks after it move down", function()
   local env, peer = setup()
   fill_demo()

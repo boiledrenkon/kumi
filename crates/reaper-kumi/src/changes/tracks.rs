@@ -75,7 +75,7 @@ fn color_state(native: i32) -> Value {
 
 /// The colour a state shows: none (0) unless REAPER's flag says one is set. A track with none can still hold a number below
 /// the flag, which means nothing and is put back as it was.
-fn colour_of(state: &Value) -> i64 {
+pub fn colour_of(state: &Value) -> i64 {
     let native = state["color"].as_i64().unwrap_or(0);
     if native & 0x100_0000 == 0 {
         0

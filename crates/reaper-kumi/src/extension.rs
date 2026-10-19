@@ -2,7 +2,7 @@
 //! queued requests within a budget, then turns what the control surface reported into events.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -163,7 +163,7 @@ struct Watch {
     undo: Option<i32>,
     tracks: HashSet<String>,
     tracks_at: Option<Instant>,
-    /// REAPER's count of projects loaded or made (`projectconfig`), as of the last look.
+    /// REAPER's count of loads into this project (`projectconfig`), as of the last look.
     loads: u64,
 }
 
@@ -227,6 +227,8 @@ pub struct Extension {
     pending: RefCell<Pending>,
     sent: RefCell<Sent>,
     watch: RefCell<Watch>,
+    /// Each tab's load count as of when it was last the active one (a project loaded at its pointer since is another).
+    seen_loads: RefCell<HashMap<usize, u64>>,
     modal_since: Cell<Option<Instant>>,
     modal_check: bool,
     rates: RefCell<Rates>,
@@ -251,6 +253,7 @@ impl Extension {
             pending: RefCell::default(),
             sent: RefCell::default(),
             watch: RefCell::default(),
+            seen_loads: RefCell::default(),
             modal_since: Cell::new(None),
             modal_check: std::env::var(MODAL_CHECK_ENV).map_or(true, |value| value != "0"),
             rates: RefCell::default(),
@@ -380,8 +383,17 @@ impl Extension {
         // Held by the first request, released on the way out even if something unwinds: an unbalanced hold leaves
         // REAPER's arrange view frozen.
         let mut refresh = RefreshHold { reaper: &reaper, held: false };
+        let mark = || (reaper.current_project().map(|p| p.ptr.addr()), crate::projectconfig::loads());
+        let mut seen = mark();
         queue::drain(&self.jobs, self.budget, |job| {
             refresh.hold();
+            // A job before this one switched tabs or loaded a project (an action, a script): the project is looked at
+            // again first, so this one is answered about the project REAPER has now, under its epoch.
+            let now = mark();
+            if now != seen {
+                self.poll_project(true);
+                seen = now;
+            }
             let answer = crate::guard("request", Err(("internal".into(), "the request failed inside the bridge".into())), || {
                 self.handle(&job.method, &job.params)
             });
@@ -400,6 +412,8 @@ impl Extension {
             "change_apply" => self.changes.apply(&self.reaper(), &self.reads, params),
             "change_restore" => self.changes.restore(&self.reaper(), &self.reads, params),
             "transport_stop" => self.changes.transport_stop(&self.reaper()),
+            "transport_play" => self.changes.transport_play(&self.reaper()),
+            "cursor_set" => self.changes.cursor_set(&self.reaper(), &self.reads, params),
             "undo_step_begin" => self.changes.step_begin(&self.reaper(), &self.reads, params),
             "undo_step_end" => self.changes.step_end(&self.reaper(), &self.reads, params),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),
@@ -564,7 +578,7 @@ impl Extension {
                 undo,
                 tracks: track_guids(reaper, info.ptr),
                 tracks_at: Some(Instant::now()),
-                loads: crate::projectconfig::loads(),
+                loads: crate::projectconfig::loads_of(addr),
             };
         };
         match watch.project {
@@ -573,13 +587,17 @@ impl Extension {
                 (false, false)
             }
             Some(before) if before != addr => {
+                // A tab whose project was loaded since it was last seen (one closed and another opened at its pointer
+                // within a tick) holds another project.
+                let reloaded = self.seen_loads.borrow().get(&addr).is_some_and(|seen| *seen != crate::projectconfig::loads_of(addr));
+                self.seen_loads.borrow_mut().insert(before, watch.loads);
                 fresh(&mut watch);
-                (true, false)
+                (true, reloaded)
             }
             Some(_) => {
                 // REAPER loaded a project or made one since the last look, and the tab is the same: what it holds is
                 // another project, whatever its file, its tracks or its counter say.
-                let loaded = crate::projectconfig::loads() != watch.loads;
+                let loaded = crate::projectconfig::loads_of(addr) != watch.loads;
                 let file_changed = watch.path != info.path || watch.name != info.name;
                 let counter_went_back = matches!((watch.count, count), (Some(before), Some(now)) if now < before);
                 let history_reset = matches!((watch.undo, undo), (Some(before), Some(now)) if before >= 2 && now <= 1);
@@ -593,7 +611,7 @@ impl Extension {
                     watch.tracks = now;
                     watch.tracks_at = Some(Instant::now());
                 }
-                watch.loads = crate::projectconfig::loads();
+                watch.loads = crate::projectconfig::loads_of(addr);
                 watch.path = info.path.clone();
                 watch.name = info.name.clone();
                 watch.count = count;
@@ -1281,6 +1299,112 @@ mod tests {
         let after = epoch_and_identity(&extension, &tx);
         assert_ne!(after.0, before.0);
         assert_ne!(after.1, before.1);
+    }
+
+    #[test]
+    fn a_job_that_switches_the_project_leaves_the_jobs_behind_it_under_the_new_projects_epoch() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = extension.reads.epoch();
+        // Another host's action switches to the next tab; Kumi's read is queued behind it, in the same tick.
+        fn next_tab(_: i32) {
+            fake::with(|s| s.project_id += 1);
+        }
+        fake::with(|s| s.on_action = Some(next_tab));
+        // (40001 stands in for 40861: the fake runs any named action, and its hook does the switching.)
+        let (switch, switched) = queue::job("action", json!({"command": 40001}));
+        let (read, answered) = queue::job("read", json!({"kind": "track", "limit": 1}));
+        tx.send(switch).unwrap();
+        tx.send(read).unwrap();
+        extension.tick(Driver::Timer);
+        assert!(matches!(switched.wait(Duration::from_secs(1), &OPEN), Outcome::Answered(Ok(_))));
+        let Outcome::Answered(Ok(page)) = answered.wait(Duration::from_secs(1), &OPEN) else { panic!("the read") };
+        assert_ne!(page["epoch"], json!(before), "answered about the project REAPER has now");
+        assert_eq!(page["epoch"], json!(extension.reads.epoch()));
+    }
+
+    #[test]
+    fn a_load_into_another_tabs_project_is_not_another_project_in_this_tab() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        let active = extension.reaper().current_project().unwrap().ptr.addr();
+        // REAPER loads something into another project (the render queue, a subproject): this tab is the same.
+        crate::projectconfig::ask_with(move || Some(active + 16 * 7), move || Some(active));
+        crate::projectconfig::note_load();
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), before);
+        // A load into this tab's project is another project.
+        crate::projectconfig::ask_with(move || Some(active), move || Some(active));
+        crate::projectconfig::note_load();
+        extension.tick(Driver::Timer);
+        let after = epoch_and_identity(&extension, &tx);
+        assert_ne!((after.0.as_str(), after.1.as_str()), (before.0.as_str(), before.1.as_str()));
+    }
+
+    #[test]
+    fn a_tab_loaded_while_another_was_in_front_is_another_project_when_it_comes_to_the_front() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        let a = fake::with(|s| s.project_id);
+        fake::with(|s| s.other_tabs = vec![a + 1]);
+        extension.tick(Driver::Timer);
+        // B in front, then A again.
+        fake::with(|s| {
+            s.other_tabs = vec![a];
+            s.project_id = a + 1;
+        });
+        extension.tick(Driver::Timer);
+        let b = epoch_and_identity(&extension, &tx);
+        let b_ptr = extension.reaper().current_project().unwrap().ptr.addr();
+        fake::with(|s| {
+            s.other_tabs = vec![a + 1];
+            s.project_id = a;
+        });
+        extension.tick(Driver::Timer);
+        // B closed and C opened at B's pointer within one tick, while A was in front: a load into that pointer.
+        crate::projectconfig::ask_with(move || Some(b_ptr), || None);
+        crate::projectconfig::note_load();
+        fake::with(|s| {
+            s.other_tabs = vec![a];
+            s.project_id = a + 1;
+        });
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx).1, b.1, "C isn't B, though it has B's pointer");
+    }
+
+    #[test]
+    fn a_load_reaper_doesnt_name_is_the_front_tabs_and_leaves_background_tabs_alone() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        let a = fake::with(|s| s.project_id);
+        fake::with(|s| s.other_tabs = vec![a + 1]);
+        extension.tick(Driver::Timer);
+        // B in front once, then A again.
+        fake::with(|s| {
+            s.other_tabs = vec![a];
+            s.project_id = a + 1;
+        });
+        extension.tick(Driver::Timer);
+        let b = epoch_and_identity(&extension, &tx);
+        fake::with(|s| {
+            s.other_tabs = vec![a + 1];
+            s.project_id = a;
+        });
+        extension.tick(Driver::Timer);
+        // A load REAPER doesn't name, with A in front: A's, not B's.
+        let front = extension.reaper().current_project().unwrap().ptr.addr();
+        crate::projectconfig::ask_with(|| None, move || Some(front));
+        crate::projectconfig::note_load();
+        extension.tick(Driver::Timer);
+        fake::with(|s| {
+            s.other_tabs = vec![a];
+            s.project_id = a + 1;
+        });
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx).1, b.1, "B nobody touched is still B");
     }
 
     #[test]

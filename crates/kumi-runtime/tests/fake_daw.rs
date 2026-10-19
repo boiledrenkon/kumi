@@ -124,6 +124,8 @@ struct FakeChanges<const P: bool> {
     calls: RefCell<Vec<String>>,
     /// Transactions whose undo the DAW won't confirm.
     unsure: RefCell<Vec<String>>,
+    /// Whether each undo was told to discard, in order.
+    discards: RefCell<Vec<bool>>,
 }
 #[async_trait(?Send)]
 impl<const P: bool> ChangeHost for FakeChanges<P> {
@@ -193,8 +195,9 @@ impl<const P: bool> ChangeHost for FakeChanges<P> {
         entry: &Entry<Vec<String>>,
         snapshot: &Applied<Vec<String>>,
         _undo_key: &str,
-        _discard: bool,
+        discard: bool,
     ) -> Result<Option<UndoResult>, RuntimeError> {
+        self.discards.borrow_mut().push(discard);
         if !self.unsure.borrow().contains(&snapshot.transaction_id) {
             return Ok(None);
         }
@@ -242,7 +245,13 @@ impl<const P: bool> FakeDaw<P> {
     fn new(answers: Answers) -> Rc<Self> {
         let said = Rc::new(RefCell::new(Vec::<String>::new()));
         let heard = said.clone();
-        let host = FakeChanges { answers, book: RefCell::default(), calls: RefCell::default(), unsure: RefCell::default() };
+        let host = FakeChanges {
+            answers,
+            book: RefCell::default(),
+            calls: RefCell::default(),
+            unsure: RefCell::default(),
+            discards: RefCell::default(),
+        };
         let told = move |record: ChangeRecord| {
             let mut heard = heard.borrow_mut();
             heard.push(record.title);
@@ -744,4 +753,23 @@ fn each_allowed_text_is_still_there() {
             "core/{file} no longer says {phrase} ({why}): take it off the list"
         );
     }
+}
+
+/// The shared undo_change is Live's as it was: HISTORY's undo of the change named (or the last), never discarding,
+/// whatever the input holds (a model can send a field the schema doesn't offer), and "Undone: …" for the producer when it
+/// ends the answer. Only a DAW whose undo takes discard passes it, through undo_change_with.
+#[tokio::test]
+async fn the_shared_undo_change_never_discards_unless_its_daw_says_so() {
+    use kumi_runtime::integrations::shared::undo::{undo_change, undo_change_with};
+    let daw = FakeDaw::<false>::new(Answers { plan_steps: false, stops: false, reachable: true, batches: false, copies: false });
+    let first = daw.record("tempo", "Tempo 120 → 124 BPM", "t-1", None);
+    daw.record("tempo", "Tempo 124 → 126 BPM", "t-2", None);
+    let input = |value: Value| value.as_object().unwrap().clone();
+
+    let undone = undo_change(&daw.history, &input(json!({"change": "last", "final": true, "discard": true})), Signal::new()).await.unwrap();
+    assert_eq!((undone.is_error, undone.reply.as_deref()), (false, Some("Undone: Tempo 124 → 126 BPM.")));
+    assert_eq!(undone.text, json!({"undone": "Tempo 124 → 126 BPM", "change": id_of(&daw.history, "Tempo 124 → 126 BPM")}).to_string());
+    let undone = undo_change_with(&daw.history, &input(json!({"change": first})), Signal::new(), true).await.unwrap();
+    assert_eq!((undone.is_error, undone.reply), (false, None), "{}", undone.text);
+    assert_eq!(*daw.history.host.discards.borrow(), [false, true]);
 }

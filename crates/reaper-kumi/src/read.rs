@@ -429,7 +429,7 @@ impl Reads {
             .ok_or_else(|| failed("that take isn't in the project (deleted, or another tab)"))
     }
 
-    fn fx_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Fx, (String, String)> {
+    pub(crate) fn fx_by_guid(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Fx, (String, String)> {
         let mut registry = self.registry.borrow_mut();
         registry.fx(reaper, proj, guid).ok_or_else(|| match registry.is_shared(guid) {
             true => shared_id("FX"),

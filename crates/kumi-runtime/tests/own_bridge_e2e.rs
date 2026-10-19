@@ -36,6 +36,11 @@ fn within_schema(schema: &JsonObject, input: &JsonObject) {
     }
 }
 
+/// The last read the tool was asked (the focus is polled meanwhile, so it needn't be the last request).
+fn last_read(script: &RenoiseScript) -> Value {
+    script.asked().into_iter().rev().find(|(method, _)| method == "read").map(|(_, params)| params).unwrap_or(Value::Null)
+}
+
 /// The host's MCP, called in process.
 struct InProcess {
     host: Arc<Host>,
@@ -213,15 +218,12 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             let input = json!({"kind": "line", "parent": "pattern:1", "trackRef": "track:1"}).as_object().unwrap().clone();
             within_schema(&read.input_schema(), &input);
             let _ = read.execute(input, Signal::new()).await.unwrap();
-            assert_eq!(
-                script.asked().last().unwrap().1,
-                json!({"kind": "line", "parent": "1:pattern:1", "track": "1:track:1", "layout": 0})
-            );
+            assert_eq!(last_read(&script), json!({"kind": "line", "parent": "1:pattern:1", "track": "1:track:1", "layout": 0}));
             // The columns the track hides, asked for as the schema allows.
             let input = json!({"kind": "line", "parent": "pattern:1", "trackRef": "track:1", "hidden": true}).as_object().unwrap().clone();
             within_schema(&read.input_schema(), &input);
             let _ = read.execute(input, Signal::new()).await.unwrap();
-            assert_eq!(script.asked().last().unwrap().1["hidden"], true);
+            assert_eq!(last_read(&script)["hidden"], true);
             assert!(
                 read.description().contains("line under a pattern") && read.description().contains("trackRef"),
                 "{}",
@@ -244,7 +246,8 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             let asked = script.asked();
             assert_eq!(
                 asked.iter().rev().find(|(method, _)| method == "focus_body").unwrap().1,
-                json!({"kind": "pattern", "ref": "1:pattern:1", "layout": 0})
+                // (No layout: a pattern isn't on a track, so no track shift moves it.)
+                json!({"kind": "pattern", "ref": "1:pattern:1"})
             );
             assert_eq!((grid.lines, grid.from, grid.cursor), (32, 0, Some(0)));
             let kick = &grid.tracks[0];
@@ -280,27 +283,49 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             for _ in 0..100 {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 let _ = read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await;
-                if script.asked().last().is_some_and(|(_, params)| params["parent"] == "1:track:2") {
+                if last_read(&script)["parent"] == "1:track:2" {
                     break;
                 }
             }
-            let asked = script.asked().last().unwrap().1.clone();
+            let asked = last_read(&script);
             assert_eq!(asked, json!({"kind": "device", "parent": "1:track:2", "layout": 1}), "track:1 follows Kick");
+
+            // The same shift again (it reached Kumi after the book was past it): nothing moves twice.
+            simulator.emit("tracks", json!({"count": 8, "made": [1], "gone": [], "layout": 1}));
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await;
+            assert_eq!(last_read(&script)["parent"], "1:track:2", "track:1 is still Kick, not moved again");
+            // A gap (layout 3 after 1): the shifts between are unknown, so the track names go.
+            simulator.emit("tracks", json!({"count": 10, "made": [1], "gone": [], "layout": 3}));
+            let mut last = String::new();
+            for _ in 0..200 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                last = read
+                    .execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new())
+                    .await
+                    .unwrap()
+                    .text;
+                if last.contains("isn't one of this turn's refs") {
+                    break;
+                }
+            }
+            assert!(last.contains("isn't one of this turn's refs"), "{last}");
 
             // Events dropped on the way (the host fell behind): a shift among them is unknown, so the track names go and are
             // read again; none is left on the wrong track.
             simulator.emit("events_lost", json!({}));
-            let mut refused = None;
-            for _ in 0..100 {
+            // (Until the event lands, the read goes to the simulator, which has nothing scripted for that track's devices.)
+            let mut last = String::new();
+            for _ in 0..200 {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 let answer =
                     read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
-                if answer.is_error {
-                    refused = Some(answer.text);
+                last = answer.text;
+                if answer.is_error && last.contains("isn't one of this turn's refs") {
                     break;
                 }
             }
-            assert!(refused.as_deref().is_some_and(|text| text.contains("isn't one of this turn's refs")), "{refused:?}");
+            assert!(last.contains("isn't one of this turn's refs"), "{last}");
 
             // Another song opens: the old song's refs are retired, so a stale track:1 reads nothing of the new song.
             script.switch_song();
@@ -312,6 +337,203 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
                 .await
                 .unwrap();
             assert!(stale.is_error, "{}", stale.text);
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// One of the observation's tools, by name.
+fn tool(observed: &Observation, name: &str) -> Rc<dyn KernelTool> {
+    observed.tools.iter().find(|tool| tool.name() == name).cloned().unwrap_or_else(|| panic!("no {name} tool"))
+}
+
+fn input(value: Value) -> JsonObject {
+    value.as_object().unwrap().clone()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_steps() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Reaper);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = ReaperScript::new(3, 0);
+            let mut config = script.config(secret, "/lab/REAPER");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Reaper, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let reaper = create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let tracks: Value = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"].clone();
+            let (first, second) = (tracks[1]["ref"].as_str().unwrap().to_owned(), tracks[2]["ref"].as_str().unwrap().to_owned());
+            assert!(observed.instructions.contains("undo_change takes back one of yours as a new step"), "{}", observed.instructions);
+
+            // A plan: a fader, a track added and named by what the step before made, a mute. Each step is one change in
+            // HISTORY, in REAPER's words, made through the host's journal.
+            let plan = tool(&observed, "make_changes");
+            let steps = json!({"steps": [
+                {"tool": "track_volume", "input": {"ref": first, "volumeDb": -6}},
+                {"tool": "track_add", "as": "pad", "input": {"name": "Pad"}},
+                {"tool": "track_rename", "input": {"ref": "@pad", "name": "Pads"}},
+                {"tool": "track_mute", "input": {"ref": second, "mute": true}},
+            ]});
+            within_schema(&plan.input_schema(), &input(steps.clone()));
+            let done = plan.execute(input(steps), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            assert_eq!(script.volume(1), -6.0);
+            assert_eq!((script.track(4)["name"].clone(), script.track(2)["mute"].clone()), (json!("Pads"), json!(true)));
+            let titles: Vec<String> = told.borrow().iter().map(|record| record.title.clone()).collect();
+            assert_eq!(titles, ["Track 1 volume -6 dB", "Added track Pad", "Renamed Pad to Pads", "Track 2 muted"]);
+            assert!(!done.text.contains("r:track:"), "no long ref reaches the model: {}", done.text);
+            let undo_steps = script.undo_history();
+            assert_eq!(undo_steps.len(), 4, "one named step of REAPER's undo each: {undo_steps:?}");
+            assert!(undo_steps.iter().all(|step| step.starts_with("Kumi: ")), "{undo_steps:?}");
+
+            // The next look lists them for the model, each applied.
+            let again = reaper.observe(Signal::new(), None).await.unwrap();
+            let latest = serde_json::from_str::<Value>(&again.context).unwrap()["kumiChanges"].clone();
+            assert_eq!(latest.as_array().map(Vec::len), Some(4), "{latest}");
+            assert!(latest.as_array().unwrap().iter().all(|row| row["state"] == "applied"), "{latest}");
+
+            // Undo the last: the name goes back, as a new step of REAPER's undo.
+            let undo = tool(&again, "undo_change");
+            let undone = undo.execute(input(json!({"change": "last", "final": true})), Signal::new()).await.unwrap();
+            assert!(!undone.is_error, "{}", undone.text);
+            assert_eq!(undone.reply.as_deref(), Some("Undone: Track 2 muted."));
+            assert_eq!(script.track(2)["mute"], json!(false));
+            assert_eq!(script.undo_history().len(), 5, "the undo is a new step");
+
+            // The producer moved the fader since: Kumi leaves it, says why, and HISTORY keeps the change.
+            script.set_volume(1, -3.0);
+            let volume = told.borrow()[0].id.clone();
+            let kept = undo.execute(input(json!({"change": volume})), Signal::new()).await.unwrap();
+            assert!(kept.is_error && kept.text.contains("changed since Kumi set it"), "{}", kept.text);
+            assert_eq!(script.volume(1), -3.0);
+            assert_eq!(told.borrow().last().map(|record| record.state), Some(ChangeState::Kept));
+
+            // The producer presses REAPER's undo on the rename: the bridge says so, and HISTORY follows.
+            let rename = script.undo_history().iter().find(|step| step.contains("Renamed")).cloned().unwrap();
+            simulator.emit("undone_in_daw", json!({"descs": [rename], "how": "undo"}));
+            let mut followed = false;
+            for _ in 0..100 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                if told.borrow().iter().any(|record| record.title == "Renamed Pad to Pads" && record.state == ChangeState::Undone) {
+                    followed = true;
+                    break;
+                }
+            }
+            assert!(followed, "{:?}", told.borrow().iter().map(|r| (&r.title, r.state)).collect::<Vec<_>>());
+
+            // A value it already has: nothing to change, no step and no row.
+            let rows = told.borrow().len();
+            let same = tool(&again, "track_volume").execute(input(json!({"ref": first, "volumeDb": -3})), Signal::new()).await.unwrap();
+            assert!(!same.is_error && same.text.contains("\"unchanged\":true"), "{}", same.text);
+            assert_eq!(told.borrow().len(), rows);
+            // A ref this turn never gave: refused in Kumi's words, nothing sent.
+            let unknown =
+                tool(&again, "track_volume").execute(input(json!({"ref": "track:99", "volumeDb": -3})), Signal::new()).await.unwrap();
+            assert!(unknown.is_error && unknown.text.contains("isn't one of this turn's refs"), "{}", unknown.text);
+
+            // /undo in the app takes back the latest change still standing.
+            let record = reaper.undo(None, Signal::new()).await.unwrap();
+            assert_eq!(record.title, "Added track Pad");
+            assert_eq!(script.track(3)["name"], json!("Track 3"));
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Renoise);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = RenoiseScript::new();
+            let mut config = script.config_with_changes(secret, "/lab/Renoise");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Renoise, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let renoise = create_renoise_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            renoise.start(Signal::new()).await.unwrap();
+            let observed = renoise.observe(Signal::new(), None).await.unwrap();
+            assert!(observed.instructions.contains("devices go at 2 or later"), "{}", observed.instructions);
+
+            // A fader, then a device: the device moves Renoise's epoch, and the ref it made is named in the new one.
+            let plan = tool(&observed, "make_changes");
+            let steps = json!({"steps": [
+                {"tool": "track_volume", "input": {"ref": "track:1", "volumeDb": -6}},
+                {"tool": "device_add", "as": "eq", "input": {"ref": "track:1", "path": "EQ 10"}},
+            ]});
+            within_schema(&plan.input_schema(), &input(steps.clone()));
+            let done = plan.execute(input(steps), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            assert_eq!(script.track_state(1), (-6.0, false, 1));
+            let reply: Value = serde_json::from_str(&done.text).unwrap_or(Value::Null);
+            assert!(done.text.contains("\"ref\":\"device:"), "the device it made, in a short ref: {}", done.text);
+            assert!(!done.text.contains(":device:"), "no long ref reaches the model: {reply}");
+            // The names from before the epoch moved are retired: an old ref is refused in Kumi's words, nothing sent.
+            let old = tool(&observed, "track_mute").execute(input(json!({"ref": "track:1", "mute": true})), Signal::new()).await.unwrap();
+            assert!(old.is_error && old.text.contains("isn't one of this turn's refs"), "{}", old.text);
+            assert!(!old.text.contains(":track:"), "{}", old.text);
+
+            // The next look names the tracks in the new epoch; mute is no step of Renoise's undo, and Kumi says so.
+            let again = renoise.observe(Signal::new(), None).await.unwrap();
+            let tracks = serde_json::from_str::<Value>(&again.context).unwrap()["tracks"].clone();
+            let kick = tracks[0]["ref"].as_str().unwrap().to_owned();
+            let steps_before = script.undo_history().len();
+            let muted = tool(&again, "track_mute").execute(input(json!({"ref": kick, "mute": true})), Signal::new()).await.unwrap();
+            assert!(!muted.is_error && muted.text.contains("Renoise's own undo won't take this back; Kumi can."), "{}", muted.text);
+            assert_eq!(script.undo_history().len(), steps_before, "no step in Renoise's undo");
+
+            // Kumi undoes each as a new step: the mute, the device (the epoch moves again, and Kumi follows), the fader.
+            let undo = tool(&again, "undo_change");
+            for title in ["Track 1 muted", "Added EQ 10 to track 1", "Track 1 volume -6 dB"] {
+                let id = told.borrow().iter().find(|record| record.title == title).map(|record| record.id.clone()).unwrap();
+                let undone = undo.execute(input(json!({"change": id})), Signal::new()).await.unwrap();
+                assert!(!undone.is_error, "{title}: {}", undone.text);
+            }
+            assert_eq!(script.track_state(1), (0.0, false, 0));
+            assert!(
+                script.undo_history().iter().filter(|step| step.starts_with("Kumi: undo ")).count() == 3,
+                "{:?}",
+                script.undo_history()
+            );
+
+            // The producer moved the fader after Kumi's change: Kumi's undo leaves it.
+            let latest = renoise.observe(Signal::new(), None).await.unwrap();
+            let kick = serde_json::from_str::<Value>(&latest.context).unwrap()["tracks"][0]["ref"].as_str().unwrap().to_owned();
+            let set = tool(&latest, "track_volume").execute(input(json!({"ref": kick, "volumeDb": -3})), Signal::new()).await.unwrap();
+            assert!(!set.is_error, "{}", set.text);
+            script.set_volume(1, -1.0);
+            let kept = tool(&latest, "undo_change").execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(kept.is_error && kept.text.contains("changed in Renoise since Kumi set it"), "{}", kept.text);
+            assert_eq!(script.track_state(1).0, -1.0);
+            // The song changed behind Kumi's back (another epoch): the tool refuses, and Kumi says so in the model's ref.
+            script.switch_song();
+            let stale = tool(&latest, "track_volume").execute(input(json!({"ref": kick, "volumeDb": -2})), Signal::new()).await.unwrap();
+            assert!(stale.is_error && stale.text.starts_with(&format!("{kick} is from before the song changed")), "{}", stale.text);
             renoise.close().await.unwrap();
             simulator.stop();
         })

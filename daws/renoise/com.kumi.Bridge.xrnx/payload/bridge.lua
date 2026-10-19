@@ -45,7 +45,9 @@ end
 
 local function bump_epoch(reason, tracks_kept)
   b.epoch_n = b.epoch_n + 1
-  b.layout, b.shifts = 0, {}
+  -- The layout goes on counting across epochs (no event says when an epoch moves for a device or a pattern, so a layout
+  -- that started over would look older than the one Kumi holds); the shifts start over, since refs from before are stale.
+  b.shifts = {}
   -- (the journal's places are tracks: a change to devices, patterns or instruments leaves them where they were)
   if b.journal and not tracks_kept then changes.journal_reset(b.journal) end
   log.write("info", "epoch " .. epoch() .. ": " .. reason)
@@ -654,6 +656,8 @@ local function carried(params, carry)
     error({ code = "bad-params", message = "layout must be a whole number from 0" }, 0)
   end
   if since == b.layout then return params end
+  -- Only refs on a track move with the layout: a request naming none is never refused for it.
+  if not refs.names_tracks(params) then return params end
   if since > b.layout then
     error({ code = "stale", message = "that layout (" .. since .. ") is from another epoch (now " .. epoch() .. "): read again" }, 0)
   end
@@ -839,7 +843,9 @@ end
 function M.on_new_document()
   b.quitting = false
   b.document = b.document + 1
-  b.memory.born_unsaved = nil
+  -- Another song: its id is worked out afresh. (Starting with a file, Renoise opens its empty song and then the file
+  -- without releasing the first, so the empty song's id would otherwise stay with the file.)
+  b.memory.song_id, b.memory.born_unsaved = nil, nil
   if renoise.song() then status.note_document(b.memory, renoise.song()) end
   bump_epoch("a song was opened")
   attach(renoise.song())

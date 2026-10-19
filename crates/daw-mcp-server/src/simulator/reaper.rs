@@ -55,6 +55,14 @@ fn track_row(index: usize, name: &str) -> Value {
     })
 }
 
+/// Two of a field's values are the same: numbers by their value (-3 and -3.0), anything else exactly.
+fn same(a: &Value, b: &Value) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(a), Some(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 fn item_row(track: &str) -> Value {
     json!({"ref": format!("r:item:{{I-{}}}", &track[9..track.len() - 1]), "trackRef": track, "position": 0.0, "length": 2.0, "name": "loop.wav", "source": "wav"})
 }
@@ -117,13 +125,21 @@ impl ReaperScript {
             .with_methods(&["read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore"], self.respond())
     }
 
-    /// The one change kind the sim makes, `track-volume {ref, volumeDb}`, the way the contract has every kind made:
-    /// a preview that writes nothing, an apply fenced by what the preview saw, a restore fenced by what the apply wrote.
+    /// The kinds the sim makes, the way the contract has every kind made: a preview that writes nothing, an apply
+    /// fenced by what the preview saw, a restore fenced by what the apply wrote. A track's volume, mute or name (one
+    /// field each), and a track added at the end (its restore deletes it).
     fn change(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
         let bad = |message: &str| ("bad-params".to_string(), message.to_string());
-        if params["kind"] != "track-volume" {
-            return Err(bad("the simulator makes only track-volume"));
+        let kind = params["kind"].as_str().unwrap_or_default();
+        if kind == "track-add" {
+            return Self::add_track(state, epoch, method, params);
         }
+        let field = match kind {
+            "track-volume" => "volumeDb",
+            "track-mute" => "mute",
+            "track-rename" => "name",
+            _ => return Err(bad("the simulator makes only track-volume, track-mute, track-rename and track-add")),
+        };
         let (reference, input) = match method {
             "change_restore" => (params["target"]["ref"].as_str(), &params["prior"]),
             _ => (params["input"]["ref"].as_str(), &params["input"]),
@@ -133,44 +149,101 @@ impl ReaperScript {
             .iter()
             .position(|track| Some(track["ref"].as_str().unwrap_or_default()) == reference)
             .ok_or(("failed".to_string(), "that track isn't in the project".to_string()))?;
-        let now = state.tracks[index]["volumeDb"].as_f64().unwrap_or(0.0);
+        let now = state.tracks[index][field].clone();
         let name = state.tracks[index]["name"].as_str().unwrap_or_default().to_string();
-        let wanted = input["volumeDb"].as_f64().ok_or(bad("volumeDb must be a number"))?;
-        let display = json!({"title": format!("{name} volume {wanted} dB")});
+        let wanted = input.get(field).filter(|value| !value.is_null()).cloned().ok_or(bad(&format!("{field} is missing")))?;
+        let title = match field {
+            "volumeDb" => format!("{name} volume {} dB", wanted.as_f64().unwrap_or_default()),
+            "mute" if wanted == true => format!("{name} muted"),
+            "mute" => format!("{name} unmuted"),
+            _ => format!("Renamed {name} to {}", wanted.as_str().unwrap_or_default()),
+        };
         match method {
             "change_preview" => Ok(json!({
                 "epoch": epoch,
                 "target": {"ref": reference, "kind": "track"},
-                "prior": {"volumeDb": now},
-                "fence": {"volumeDb": now},
-                "display": display,
+                "prior": {field: now},
+                "fence": {field: now},
+                "display": {"title": title, "unchanged": same(&now, &wanted)},
             })),
             "change_apply" => {
-                if params["fence"]["volumeDb"].as_f64() != Some(now) {
-                    return Err(("changed".into(), format!("{name}'s volume changed since the preview")));
+                if !same(&params["fence"][field], &now) {
+                    return Err(("changed".into(), format!("{name} changed since the preview")));
                 }
                 let desc = params["desc"].as_str().ok_or(bad("desc must be a string"))?.to_string();
-                state.tracks[index]["volumeDb"] = wanted.into();
+                state.tracks[index][field] = wanted.clone();
                 state.changed += 1;
                 state.undo.push(desc.clone());
                 Ok(
-                    json!({"epoch": epoch, "applied": {"volumeDb": wanted}, "display": display, "undo": {"desc": desc, "entry": true, "stateCount": state.changed}}),
+                    json!({"epoch": epoch, "applied": {field: wanted}, "display": {"title": title}, "undo": {"desc": desc, "entry": true, "stateCount": state.changed}}),
                 )
             }
             _ => {
-                let applied = params["applied"]["volumeDb"].as_f64();
-                if applied != Some(now) && params["discard"] != true {
-                    return Err(("changed".into(), format!("{name}'s volume changed since Kumi set it")));
+                if same(&now, &wanted) {
+                    return Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": {"title": title}}));
+                }
+                if !same(&params["applied"][field], &now) && params["discard"] != true {
+                    return Err(("changed".into(), format!("{name} changed since Kumi set it")));
                 }
                 let desc = params["desc"].as_str().ok_or(bad("desc must be a string"))?.to_string();
-                state.tracks[index]["volumeDb"] = wanted.into();
+                state.tracks[index][field] = wanted.clone();
                 state.changed += 1;
                 state.undo.push(desc);
-                Ok(
-                    json!({"epoch": epoch, "restored": {"volumeDb": wanted}, "display": {"title": format!("{name} volume back to {wanted} dB")}}),
-                )
+                Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": {"title": format!("{name} put back")}}))
             }
         }
+    }
+
+    /// `track-add {name?}`: a track at the end, its ref in `created`; its restore deletes it, unless it's gone.
+    fn add_track(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let name = params["input"]["name"].as_str().unwrap_or("").to_string();
+        match method {
+            "change_preview" => Ok(json!({
+                "epoch": epoch,
+                "target": {"ref": null, "kind": "track"},
+                "prior": {"tracks": state.tracks.len() - 1},
+                "fence": {"tracks": state.tracks.len() - 1},
+                "display": {"title": format!("Added track {name}")},
+            })),
+            "change_apply" => {
+                let desc = params["desc"].as_str().unwrap_or_default().to_string();
+                let index = state.tracks.len();
+                let row = track_row(index + 900, &name);
+                let made = row["ref"].clone();
+                state.tracks.push(row);
+                state.changed += 1;
+                state.undo.push(desc.clone());
+                Ok(
+                    json!({"epoch": epoch, "applied": {"added": true}, "created": {"ref": made, "kind": "track"}, "display": {"title": format!("Added track {name}")}, "undo": {"desc": desc, "entry": true}}),
+                )
+            }
+            _ => {
+                let made = params["created"]["ref"].as_str().unwrap_or_default();
+                let Some(index) = state.tracks.iter().position(|track| track["ref"] == made) else {
+                    return Err(("gone".into(), "the track Kumi added is gone".into()));
+                };
+                state.tracks.remove(index);
+                state.changed += 1;
+                state.undo.push(params["desc"].as_str().unwrap_or_default().to_string());
+                Ok(json!({"epoch": epoch, "restored": {"added": false}, "display": {"title": format!("Deleted track {name}")}}))
+            }
+        }
+    }
+
+    /// The producer presses REAPER's undo: Kumi's last step comes off (its values back as the preview saw them is the
+    /// test's business); the description of what came off, for the bridge's `undone_in_daw`.
+    pub fn undo_last(&self) -> Option<String> {
+        self.state.lock().unwrap().undo.pop()
+    }
+
+    pub fn track(&self, index: usize) -> Value {
+        self.state.lock().unwrap().tracks[index].clone()
+    }
+
+    pub fn set_track(&self, index: usize, field: &str, value: Value) {
+        let mut state = self.state.lock().unwrap();
+        state.tracks[index][field] = value;
+        state.changed += 1;
     }
 
     fn epoch_text(state: &State) -> String {
