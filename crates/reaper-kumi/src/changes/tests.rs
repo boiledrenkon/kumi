@@ -2122,6 +2122,32 @@ fn a_ref_to_one_of_two_sends_without_their_state_is_refused() {
 }
 
 #[test]
+fn an_undo_told_to_put_the_values_back_anyway_still_writes_only_to_the_send_it_changed() {
+    let undo_anyway = |preview: &Value, applied: &Value| {
+        json!({"kind": "send-mute", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"],
+            "desc": "Kumi: undo (kund9)", "discard": true})
+    };
+    let lab = Lab::new();
+    let (first, _) = two_sends();
+    let (preview, applied) = lab.make("send-mute", json!({"ref": first, "mute": true}), "Kumi: Send “Kick” → “Reverb” muted (ksi20)");
+    // The producer removes Kumi's send, adds one of their own, and mutes the one now at its place.
+    producer_swaps_the_first_send();
+    state(|s| s.tracks[1].sends[0].mute = true);
+    let before = send_volumes();
+    let (code, message) = lab.call("change_restore", undo_anyway(&preview, &applied)).unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("isn't the one Kumi changed"), "{message}");
+    assert_eq!(send_volumes(), before, "the producer's mute stays");
+    // The producer only turned Kumi's send down since: it is the same send, and the mute is taken back anyway.
+    let lab = Lab::new();
+    let (first, _) = two_sends();
+    let (preview, applied) = lab.make("send-mute", json!({"ref": first, "mute": true}), "Kumi: Send “Kick” → “Reverb” muted (ksi21)");
+    state(|s| s.tracks[1].sends[0].volume = 0.1);
+    lab.call("change_restore", undo_anyway(&preview, &applied)).unwrap();
+    assert_eq!(send_volumes(), [(0.1, false), (0.5, false)]);
+}
+
+#[test]
 fn kumis_undo_of_a_send_change_leaves_the_producers_sends_when_the_pair_changed() {
     let lab = Lab::new();
     let (first, _) = two_sends();
@@ -2967,6 +2993,26 @@ fn reaper_dropping_its_oldest_points_when_its_history_is_full_is_no_undo_of_kumi
     }
     lab.tick();
     assert_eq!(lab.events.take(), [("undone_in_daw".to_string(), json!({"descs": [desc], "how": "undo", "epoch": lab.reads.epoch()}))]);
+}
+
+#[test]
+fn reaper_merging_the_oldest_points_of_a_short_history_is_no_undo_of_kumis_change_in_them() {
+    let lab = Lab::new();
+    for n in 0..10 {
+        fake::producer_edit(&format!("Edit {n}"));
+    }
+    let desc = "Kumi: Kick volume −6 dB (kn204)";
+    lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), desc);
+    for n in 0..80 {
+        fake::producer_edit(&format!("Edit after {n}"));
+    }
+    lab.tick();
+    lab.events.take();
+    // 94 points; REAPER's undo memory is full: the 31 oldest, Kumi's among them, go into its first point.
+    fake::producer_edit("Adjust track pan");
+    fake::trim_history(31);
+    lab.tick();
+    assert!(lab.events.take().is_empty(), "Kumi's change is still applied, merged into REAPER's first point");
 }
 
 #[test]

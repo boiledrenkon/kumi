@@ -163,6 +163,20 @@ local param_spec = {
   title = function(name, _, to) return name .. " " .. (to.valueString or tostring(to.value)) end,
 }
 
+-- A value that is a place may be given as text: a number in it is the track or send it names, fenced as a number is (Renoise's
+-- own reading of such text is a lab question: 3.5.4 is taken to read a number, as the mock does); other text names no place.
+param_spec.wanted_at = function(loc, input)
+  if loc.points and type(input.valueString) == "string" then
+    local n = tonumber(input.valueString:match("^%s*(%-?%d+)%s*$"))
+    if not n then
+      bad(string.format("%s names a %s: give its number (%s), not text", loc.name, loc.points,
+        loc.points == "send" and "a send among the sends, from 0" or "a track, from 0; -1 for none"))
+    end
+    return param_spec.wanted(loc.object, { value = n })
+  end
+  return param_spec.wanted(loc.object, input)
+end
+
 -- Which parameter of a device a request means: its number from 1, or its name (any case).
 local function parameter_number(device, wanted)
   local count = #device.parameters

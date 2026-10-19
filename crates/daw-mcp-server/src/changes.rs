@@ -208,31 +208,30 @@ impl Journal {
         Ok(record)
     }
 
-    /// Room for one more record of `bytes`: the oldest go, previewed ones first, then undone ones, then applied ones
-    /// (Kumi then can't undo them: its undo answers `unknown`). Past the bytes, the largest go first instead (what a
+    /// Room for one more record of `bytes`: previewed ones go first, then undone ones nothing can bring back (the DAW's
+    /// undo doesn't reach them, so Kumi's undo made no step of it), then the oldest of the rest, undone or applied alike
+    /// (an undone one comes back with the DAW's undo of Kumi's undo step, which the journal follows; one let go, Kumi can't
+    /// undo: its undo answers `unknown`). Past the bytes, the largest goes first instead, whatever its state (what a
     /// delete removed is what fills the journal). Only changes in flight stay whatever it takes.
     fn make_room(inner: &mut Inner, bytes: usize) -> Result<(), Refusal> {
+        const KEPT: [State; 3] = [State::Undone, State::Applied, State::Uncertain];
         while inner.records.len() >= MAX_RECORDS || inner.total + bytes > MAX_BYTES {
-            let oldest = |states: &[State]| inner.order.iter().find(|id| states.contains(&inner.records[*id].state)).cloned();
+            let oldest = |wanted: &dyn Fn(&Record) -> bool| inner.order.iter().find(|id| wanted(&inner.records[*id])).cloned();
             // (newest first, so that of records as large the oldest is the last found, which `max_by_key` takes)
-            let largest = |states: &[State]| {
+            let largest = || {
                 inner
                     .order
                     .iter()
                     .rev()
-                    .filter(|id| states.contains(&inner.records[*id].state))
+                    .filter(|id| KEPT.contains(&inner.records[*id].state))
                     .max_by_key(|id| inner.sizes.get(*id).copied().unwrap_or(0))
                     .cloned()
             };
             let by_size = inner.total + bytes > MAX_BYTES;
-            let big = || match by_size {
-                true => largest(&[State::Undone]).or_else(|| largest(&[State::Applied, State::Uncertain])),
-                false => None,
-            };
-            let Some(oldest) = oldest(&[State::Previewed])
-                .or_else(big)
-                .or_else(|| oldest(&[State::Undone]))
-                .or_else(|| oldest(&[State::Applied, State::Uncertain]))
+            let Some(oldest) = oldest(&|record| record.state == State::Previewed)
+                .or_else(|| by_size.then(largest).flatten())
+                .or_else(|| oldest(&|record| record.state == State::Undone && !record.in_daw_undo))
+                .or_else(|| oldest(&|record| KEPT.contains(&record.state)))
             else {
                 return Err(refuse("full", format!("the DAW is busy with {} changes at once: try again in a moment", inner.records.len())));
             };
@@ -834,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_journal_forgets_its_oldest_previewed_then_undone_then_applied_changes_and_never_refuses_one() {
+    fn a_full_journal_forgets_its_oldest_previewed_then_what_cant_come_back_then_the_oldest_and_never_refuses_one() {
         let journal = Journal::default();
         let first = preview(&journal);
         for _ in 1..MAX_RECORDS {
@@ -843,23 +842,33 @@ mod tests {
         assert_eq!(journal.len(), MAX_RECORDS);
         preview(&journal);
         assert!(journal.get(&first.id).is_none(), "the oldest previewed one went");
-        // Every record applied, the second one undone: it goes first, then the oldest applied, and nothing is refused.
+        // Every record applied; the second undone (the DAW's undo of Kumi's undo step would bring it back); the third,
+        // which the DAW's undo doesn't reach, undone too: that one goes first, then the oldest, and nothing is refused.
         let ids: Vec<String> = journal.inner.lock().unwrap().order.clone();
-        for id in &ids {
+        for (n, id) in ids.iter().enumerate() {
             let record = journal.get(id).unwrap();
             journal.begin_apply(id, &record.confirmation, "k", None).unwrap().unwrap();
-            journal.end_apply(id, "k", Ok(&json!({"applied": {}})));
+            let entry = if n == 2 { json!(false) } else { json!(true) };
+            journal.end_apply(id, "k", Ok(&json!({"applied": {}, "undo": {"entry": entry}})));
         }
-        journal.begin_undo(&ids[1], "u").unwrap().unwrap();
-        journal.end_undo(&ids[1], "u", Ok(&json!({"restored": {}})));
+        for id in &ids[1..3] {
+            journal.begin_undo(id, "u").unwrap().unwrap();
+            journal.end_undo(id, "u", Ok(&json!({"restored": {}})));
+        }
         let answer = json!({"prior": {}, "fence": {}});
-        let newer = journal.previewed("track-volume", &json!({}), &answer, None).unwrap();
-        assert!(journal.get(&ids[1]).is_none() && journal.get(&ids[0]).is_some(), "the undone one went first");
-        journal.begin_apply(&newer.id, &newer.confirmation, "k", None).unwrap().unwrap();
-        journal.end_apply(&newer.id, "k", Ok(&json!({"applied": {}})));
-        assert!(journal.previewed("track-volume", &json!({}), &answer, None).is_ok());
+        let make = || {
+            let newer = journal.previewed("track-volume", &json!({}), &answer, None).unwrap();
+            journal.begin_apply(&newer.id, &newer.confirmation, "k", None).unwrap().unwrap();
+            journal.end_apply(&newer.id, "k", Ok(&json!({"applied": {}})));
+        };
+        make();
+        assert!(journal.get(&ids[2]).is_none() && journal.get(&ids[0]).is_some(), "the undone one nothing brings back went first");
+        make();
         assert!(journal.get(&ids[0]).is_none(), "then the oldest applied one (Kumi's undo of it answers unknown)");
+        assert!(journal.get(&ids[1]).is_some(), "the one Kumi undid stays as long as its age keeps it");
         assert_eq!(journal.begin_undo(&ids[0], "u").unwrap_err().code, "unknown");
+        make();
+        assert!(journal.get(&ids[1]).is_none(), "then it, by its age");
         assert_eq!(journal.len(), MAX_RECORDS);
     }
 
@@ -950,6 +959,29 @@ mod tests {
         let roomy = json!({"prior": {}, "fence": {}, "display": {"title": "x".repeat(70_000)}});
         assert!(journal.previewed("track-volume", &json!({}), &roomy, None).is_ok());
         assert!(journal.get(&big.id).is_none() && journal.get(&small.id).is_some(), "the big delete went, the older small change stays");
+    }
+
+    #[test]
+    fn past_its_bytes_size_decides_and_a_small_undone_record_stays() {
+        let journal = Journal::default();
+        // Thirty small changes Kumi undid (the DAW's undo of each undo step would bring it back), then a big delete.
+        let small: Vec<Record> = (0..30)
+            .map(|_| {
+                let record = preview(&journal);
+                journal.begin_apply(&record.id, &record.confirmation, "a", None).unwrap().unwrap();
+                journal.end_apply(&record.id, "a", Ok(&json!({"applied": {}})));
+                journal.begin_undo(&record.id, "u").unwrap().unwrap();
+                journal.end_undo(&record.id, "u", Ok(&json!({"restored": {}})));
+                record
+            })
+            .collect();
+        let big = preview(&journal);
+        journal.begin_apply(&big.id, &big.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&big.id, "a", Ok(&json!({"applied": {}, "material": {"chunk": "x".repeat(MAX_BYTES - 64 * 1024)}})));
+        let roomy = json!({"prior": {}, "fence": {}, "display": {"title": "x".repeat(70_000)}});
+        assert!(journal.previewed("track-volume", &json!({}), &roomy, None).is_ok());
+        assert!(journal.get(&big.id).is_none(), "the big delete went");
+        assert!(small.iter().all(|record| journal.get(&record.id).is_some()), "every small undone change stays");
     }
 
     #[test]

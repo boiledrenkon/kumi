@@ -460,8 +460,20 @@ pub fn send_keys(reaper: &Reaper, track: Track, category: i32) -> Vec<SendKey> {
 pub const SEND_STATE: [&str; 10] =
     ["D_VOL", "D_PAN", "B_MUTE", "I_SENDMODE", "I_SRCCHAN", "I_DSTCHAN", "I_MIDIFLAGS", "B_PHASE", "B_MONO", "I_AUTOMODE"];
 
-/// The states of all the sends from one track to another, in order, as one hash: it moves when one is added, taken away,
-/// or changed.
+/// A send's envelopes, as what tells it from a send with the same settings: each one's being on and its number of points.
+pub fn send_envelope_print(reaper: &Reaper, track: Track, index: i32) -> String {
+    ["<VOLENV", "<PANENV", "<MUTEENV"]
+        .into_iter()
+        .map(|chunk| match reaper.send_envelope(track, index, chunk) {
+            Some(envelope) => format!("{}{}", u8::from(reaper.envelope_flag(envelope, "ACTIVE")), reaper.envelope_point_count(envelope)),
+            None => "-".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The states of all the sends from one track to another, in order, with their envelopes, as one hash: it moves when one
+/// is added, taken away, or changed.
 pub fn pair_hash(reaper: &Reaper, owner: Track, receiver: Track) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for index in 0..reaper.send_count(owner, 0) {
@@ -472,6 +484,9 @@ pub fn pair_hash(reaper: &Reaper, owner: Track, receiver: Track) -> String {
             for byte in reaper.send_value(owner, 0, index, parm).to_bits().to_le_bytes() {
                 hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
             }
+        }
+        for byte in send_envelope_print(reaper, owner, index).bytes() {
+            hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
         }
         hash = (hash ^ 0xff).wrapping_mul(0x0000_0100_0000_01b3);
     }

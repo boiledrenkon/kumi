@@ -584,7 +584,7 @@ impl Reads {
                 }
                 rows::param_row(reaper, fx, &guid, index)
             }
-            Ref::Send { track, category, other, repeat, of, .. } => {
+            Ref::Send { track, category, other, repeat, of, seen } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let keys = rows::send_keys(reaper, owner, category);
                 let key = rows::SendKey { other, repeat, of };
@@ -604,6 +604,17 @@ impl Reads {
                     };
                     return Err(failed(format!("that send isn't there: {why}")));
                 };
+                // One of two or more sends to one track is the send it was read as only while those sends are as the ref saw
+                // them (or as Kumi's own writes made them): never another send at that place.
+                if category == 0 && of >= 2 {
+                    let receiver = reaper.send_peer(owner, 0, index as i32);
+                    if !receiver.is_some_and(|receiver| crate::changes::send_seen_holds(reaper, owner, receiver, seen.as_deref())) {
+                        return Err((
+                            daw_bridge::wire::code::STALE.into(),
+                            "the sends between those tracks changed since that ref was read: read the track's sends again".into(),
+                        ));
+                    }
+                }
                 rows::send_row(reaper, owner, category, index as i32, &key)
             }
             Ref::Marker(guid) => self.marker_by_guid(reaper, proj, &guid, false)?,
@@ -2177,11 +2188,16 @@ mod tests {
             ]
         );
         let volume = |lab: &Lab, reference: &str| lab.rows(json!({"ref": reference}))[0]["volumeDb"].clone();
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3of3"), json!(-12.04));
+        assert_eq!(volume(&lab, refs[3]), json!(-12.04));
         // A send to another track moves to the front: the others keep their refs, and so their sends.
         fake::with(|s| s.tracks[0].sends.swap(0, 1));
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:2of3"), json!(-6.02));
-        assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3of3"), json!(-12.04));
+        assert_eq!(volume(&lab, refs[2]), json!(-6.02));
+        assert_eq!(volume(&lab, refs[3]), json!(-12.04));
+        // A ref without the state of the sends it is one of names none of them.
+        assert_eq!(lab.read(json!({"ref": "r:send:{AAAA}:0:{DDDD}:3of3"})).unwrap_err().0, "stale");
+        // The producer changes one of the sends to Reverb: a ref read before reads none of them, never the send at its place now.
+        fake::with(|s| s.tracks[0].sends[1].volume = 0.9);
+        assert_eq!(lab.read(json!({"ref": refs[3]})).unwrap_err().0, "stale");
         assert_eq!(lab.rows(json!({"ref": "r:send:{AAAA}:0:{BBBB}"}))[0]["index"], 0);
     }
 

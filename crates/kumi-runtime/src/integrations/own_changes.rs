@@ -245,6 +245,8 @@ pub enum Ending {
     Restart,
     /// The host doesn't know the change any more.
     Unknown,
+    /// Past the changes only Kumi can take back that Kumi keeps for its undo (half the window).
+    Crowded,
 }
 
 impl<S: RefScheme> Link<S> {
@@ -271,13 +273,15 @@ impl<S: RefScheme> Link<S> {
             Ending::Window => format!("Past the {UNDO_WINDOW} changes Kumi keeps for its undo"),
             Ending::Restart => format!("Kumi's link to {app} started again, so Kumi can't undo this anymore"),
             Ending::Unknown => "Kumi can't undo this anymore".to_string(),
+            Ending::Crowded => format!("Past the {} changes only Kumi can take back that Kumi keeps for its undo", UNDO_WINDOW / 2),
         };
         if self.undo_unanswered.borrow().contains(transaction) {
             format!("{why}, and whether its undo went through isn't known: check it in {app}, and change it back by hand if it's still as Kumi set it.")
         } else if self.outside_daw_undo.borrow().contains(transaction) {
             format!("{why}, and {own_undo} doesn't take this back: neither can now, so change it by hand if needed.")
         } else if self.in_plan.borrow().contains(transaction) {
-            format!("{why}; {own_undo} may still take it back, together with the plan's other changes.")
+            // (true before the plan's undo and after it: the step goes with the plan, never alone)
+            format!("{why}; {own_undo} takes it back only with the plan's other changes.")
         } else {
             format!("{why}; {own_undo} may still take it back.")
         }
@@ -432,7 +436,15 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
                 // A restore that made devices again moves Renoise's epoch: the book follows.
                 follow_epoch(&self.link.book, &self.link.epoch, &self.link.layout, &done);
                 note_epoch(&self.link.seen_in, &self.link.book.borrow().scheme, &done);
-                return Ok(None);
+                // What the DAW couldn't put back (a mute in a slot, lines in a pattern, a routing), said on the row and
+                // in the answer: an undo made in part never reads as whole.
+                let Some(left_out) = done.pointer("/display/note").and_then(Value::as_str).filter(|note| !note.is_empty()) else {
+                    return Ok(None);
+                };
+                let note = self.link.in_short_refs(left_out);
+                let record = history.update(entry, ChangeState::Undone, Some(note.clone()));
+                let text = stringify(&json!({"undone": record.title, "change": record.id, "note": note}));
+                return Ok(Some(UndoResult::with(record, text, false)));
             }
             Ok(other) => {
                 let note = format!("{} didn't confirm the undo; try again.", words.app);
@@ -453,6 +465,8 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
                 format!("The {} changed since (another one is open, or it was reloaded), so Kumi left it.", words.place),
             ),
             Some("undone") => return Ok(Some(history.undone(entry))),
+            // (what Lua or a call through the DAW's API did: Kumi doesn't know what it changed, the DAW's own undo does)
+            Some("daw-only") => (ChangeState::Kept, why.clone()),
             Some("unknown") => (ChangeState::Expired, self.link.ending_note(&snapshot.transaction_id, Ending::Unknown)),
             Some("not-applied" | "uncertain")
                 if snapshot.record.state == ChangeState::Unsure || refused.code.as_deref() == Some("uncertain") =>
@@ -918,21 +932,32 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
 
     /// Kumi's changes the host keeps stay within its journal: past `UNDO_WINDOW` of them, some are let go (one that could
     /// still be undone is then too old for Kumi to undo, and says who can), so the host never runs out of room for a new
-    /// one. The change just made stays whatever it takes. What is undone (or ended) goes first, since nothing is left of
-    /// it to undo; then the oldest the DAW's own undo may still take back; the changes only Kumi can take back go last.
+    /// one. The change just made stays whatever it takes. What nothing can bring back goes first (ended, or undone by Kumi
+    /// where its undo made no step of the DAW's); then changes only Kumi can take back past half the window, so they never
+    /// crowd out the rest; then the oldest of the others (one Kumi undid stays as long, since the DAW's undo of Kumi's undo
+    /// step brings it back, and the host must be there to follow); the rest of the changes only Kumi can take back go last.
     fn keep_window(&self) {
         let held: Vec<_> =
             self.history.entries.borrow().values().filter(|entry| !entry.borrow().transaction_id.is_empty()).cloned().collect();
         let over = held.len().saturating_sub(UNDO_WINDOW);
         let Some((_, older)) = held.split_last().filter(|_| over > 0) else { return };
         let outside = self.link().outside_daw_undo.borrow().clone();
-        let ended = |entry: &&Entry<Value>| matches!(entry.borrow().record.state, ChangeState::Undone | ChangeState::Expired);
-        let only_kumi = |entry: &&Entry<Value>| outside.contains(&entry.borrow().transaction_id);
+        let only_kumi = |entry: &Entry<Value>| outside.contains(&entry.borrow().transaction_id);
+        let for_good = |entry: &Entry<Value>| match entry.borrow().record.state {
+            ChangeState::Expired => true,
+            ChangeState::Undone => only_kumi(entry),
+            _ => false,
+        };
+        let (ours, theirs): (Vec<_>, Vec<_>) = older.iter().filter(|entry| !for_good(entry)).partition(|entry| only_kumi(entry));
+        let crowding = ours.len().saturating_sub(UNDO_WINDOW / 2);
+        let crowded: std::collections::HashSet<String> =
+            ours[..crowding].iter().map(|entry| entry.borrow().transaction_id.clone()).collect();
         let order = older
             .iter()
-            .filter(ended)
-            .chain(older.iter().filter(|entry| !ended(entry) && !only_kumi(entry)))
-            .chain(older.iter().filter(|entry| !ended(entry) && only_kumi(entry)));
+            .filter(|entry| for_good(entry))
+            .chain(ours[..crowding].iter().copied())
+            .chain(theirs)
+            .chain(ours[crowding..].iter().copied());
         let mut released = vec![];
         for entry in order.take(over) {
             let (state, transaction) = {
@@ -940,7 +965,8 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 (entry.record.state, entry.transaction_id.clone())
             };
             if matches!(state, ChangeState::Applied | ChangeState::Unsure | ChangeState::Kept) {
-                let note = self.link().ending_note(&transaction, Ending::Window);
+                let ending = if crowded.contains(&transaction) { Ending::Crowded } else { Ending::Window };
+                let note = self.link().ending_note(&transaction, ending);
                 self.history.update(entry, ChangeState::Expired, Some(note));
             }
             released.push(std::mem::take(&mut entry.borrow_mut().transaction_id));
@@ -1548,7 +1574,31 @@ mod tests {
         assert_eq!(gone.state, ChangeState::Expired);
         let note = gone.note.unwrap();
         assert!(note.contains("neither can now") && note.contains("by hand"), "{note}");
+        // (let go for the cap on changes only Kumi takes back, inside the 400: the note gives that reason)
+        assert!(note.starts_with("Past the 200 changes only Kumi can take back"), "{note}");
         assert_eq!(row(&plan, &mutes[51]).state, ChangeState::Applied, "only as many go as are over");
+        // More changes after the flood: each stays undoable (changes only Kumi takes back hold at most half the window).
+        let held = |plan: &OwnPlan<super::super::renoise::RenoiseRefs>, id: &str| {
+            plan.history.entries.borrow().get(id).is_some_and(|entry| !entry.borrow().transaction_id.is_empty())
+        };
+        let more: Vec<String> = (0..3)
+            .map(|n| plan.remember(volume, ChangeSummary::title("Kick volume"), &format!("t-v{n}"), ChangeState::Applied, None))
+            .collect();
+        for id in std::iter::once(&last).chain(&more) {
+            assert!(row(&plan, id).state == ChangeState::Applied && held(&plan, id), "{id} is still Kumi's to undo");
+        }
+        // 400 mutes one by one (an A/B leaving each on), then three volumes: the same.
+        let plan = engine::<super::super::renoise::RenoiseRefs>(&super::super::renoise::DAW, None);
+        for n in 0..400 {
+            plan.link().outside_daw_undo.borrow_mut().insert(format!("t-m{n}"));
+            plan.remember(mute, ChangeSummary::title("Kick muted"), &format!("t-m{n}"), ChangeState::Applied, None);
+        }
+        let volumes: Vec<String> = (0..3)
+            .map(|n| plan.remember(volume, ChangeSummary::title("Kick volume"), &format!("t-v{n}"), ChangeState::Applied, None))
+            .collect();
+        for id in &volumes {
+            assert!(row(&plan, id).state == ChangeState::Applied && held(&plan, id), "{id} is still Kumi's to undo");
+        }
         // 400 mutes, each undone by Kumi, then a volume: the undone ones go, and the volume stays.
         let plan = engine::<super::super::renoise::RenoiseRefs>(&super::super::renoise::DAW, None);
         for n in 0..400 {
@@ -1568,16 +1618,38 @@ mod tests {
         link.outside_daw_undo.borrow_mut().insert("t-repeat".into());
         link.undo_unanswered.borrow_mut().insert("t-sent".into());
         link.in_plan.borrow_mut().insert("t-step".into());
-        for ending in [Ending::Window, Ending::Restart, Ending::Unknown] {
+        for ending in [Ending::Window, Ending::Restart, Ending::Unknown, Ending::Crowded] {
             let repeat = link.ending_note("t-repeat", ending);
             assert!(repeat.contains("by hand") && !repeat.contains("may still take it back"), "{repeat}");
             let sent = link.ending_note("t-sent", ending);
             assert!(sent.contains("check it in REAPER") && sent.contains("by hand") && !sent.contains("may still"), "{sent}");
             let step = link.ending_note("t-step", ending);
-            assert!(step.contains("may still take it back, together with the plan's other changes"), "{step}");
+            assert!(step.contains("takes it back only with the plan's other changes") && !step.contains("may still"), "{step}");
             assert!(link.ending_note("t-other", ending).ends_with("may still take it back."));
         }
         assert!(link.ending_note("t-other", Ending::Restart).starts_with("Kumi's link to REAPER started again"));
+    }
+
+    #[tokio::test]
+    async fn a_change_kumi_just_undid_stays_for_the_daws_undo_of_that_undo_to_bring_it_back() {
+        tokio::task::LocalSet::new().run_until(async { undone_stays() }).await;
+    }
+
+    fn undone_stays() {
+        let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, None);
+        let volume = plan.change_kind("track_volume").unwrap();
+        for n in 0..UNDO_WINDOW - 1 {
+            plan.remember(volume, ChangeSummary::title("Vocal volume"), &format!("t-{n}"), ChangeState::Applied, None);
+        }
+        // At the window, Kumi undoes its newest change, then makes one more.
+        let undone = plan.remember(volume, ChangeSummary::title("Vocal volume −6 dB"), "t-undone", ChangeState::Applied, None);
+        let entry = plan.history.entries.borrow().get(&undone).cloned().unwrap();
+        plan.history.update(&entry, ChangeState::Undone, None);
+        plan.remember(volume, ChangeSummary::title("Vocal volume −3 dB"), "t-next", ChangeState::Applied, None);
+        assert_eq!(entry.borrow().transaction_id, "t-undone", "the change Kumi just undid is still held");
+        // The producer's Cmd-Z of Kumi's undo step brings it back: HISTORY follows.
+        plan.undone_in_daw(&json!({"undone": [], "redone": ["t-undone"]}));
+        assert_eq!(entry.borrow().record.state, ChangeState::Applied);
     }
 
     fn past_the_window() {
