@@ -354,6 +354,7 @@ fn route(ctx: &Ctx, track: Track, category: i32, index: i32) -> Option<Value> {
         "category": category,
         "envelopes": envelopes,
         "other": ctx.reaper.track_guid(other),
+        "stamp": ctx.reaper.send_text(track, category, index, super::sends::STAMP),
         "volume": value("D_VOL"),
         "pan": value("D_PAN"),
         "mute": value("B_MUTE"),
@@ -483,6 +484,10 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         let Ok(other) = ctx.reads.track_by_id(reaper, ctx.proj, &TrackId::Guid(other.to_string())) else { continue };
         let (from, to, category) = if route["category"] == -1 { (other, track, 0) } else { (track, other, 0) };
         let Some(at) = reaper.create_send(from, Some(to)) else { continue };
+        // A send of Kumi's comes back with its mark.
+        if let Some(stamp) = route["stamp"].as_str() {
+            reaper.set_send_text(from, 0, at, super::sends::STAMP, stamp);
+        }
         let set = |parm: &str, key: &str| reaper.set_send_value(from, category, at, parm, route[key].as_f64().unwrap_or(0.0));
         for (parm, key) in [
             ("D_VOL", "volume"),

@@ -111,6 +111,26 @@ impl Reaper<'_> {
         self.api.RemoveTrackSend().is_some_and(|f| unsafe { f(track.0, category, index) })
     }
 
+    /// A send's text attribute (`P_EXT:…`): None when it has none.
+    pub fn send_text(&self, track: Track, category: i32, index: i32, parm: &str) -> Option<String> {
+        let parm = cstring(parm);
+        let f = self.api.GetSetTrackSendInfo_String()?;
+        let mut ok = false;
+        let text = api::read_buffer(|buf, size| {
+            // Asked for a read, the buffer is written; its size is not passed, so it is kept big enough for a stamp.
+            let _ = size;
+            ok = unsafe { f(track.0, category, index, parm.as_ptr(), buf, false) };
+        });
+        (ok && !text.is_empty()).then_some(text)
+    }
+
+    pub fn set_send_text(&self, track: Track, category: i32, index: i32, parm: &str, value: &str) -> bool {
+        let (parm, value) = (cstring(parm), cstring(value));
+        let Some(f) = self.api.GetSetTrackSendInfo_String() else { return false };
+        let mut buf = value.into_bytes_with_nul();
+        unsafe { f(track.0, category, index, parm.as_ptr(), buf.as_mut_ptr().cast(), true) }
+    }
+
     pub fn set_send_value(&self, track: Track, category: i32, index: i32, parm: &str, value: f64) -> bool {
         let parm = cstring(parm);
         self.api.SetTrackSendInfo_Value().is_some_and(|f| unsafe { f(track.0, category, index, parm.as_ptr(), value) })

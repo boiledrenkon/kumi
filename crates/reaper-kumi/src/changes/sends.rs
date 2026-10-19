@@ -18,6 +18,7 @@ fn changed(message: impl Into<String>) -> Fault {
 struct Found {
     track: Track,
     index: i32,
+    receiver: Track,
     from: String,
     to: String,
 }
@@ -61,16 +62,102 @@ fn find(ctx: &Ctx, reference: &str) -> Done<Found> {
         }));
     };
     let receiver = reaper.send_peer(owner, 0, index as i32).ok_or_else(|| failed("that send has no receiving track"))?;
-    Ok(Found { track: owner, index: index as i32, from: name_of(reaper, owner), to: name_of(reaper, receiver) })
+    Ok(Found { track: owner, index: index as i32, receiver, from: name_of(reaper, owner), to: name_of(reaper, receiver) })
 }
 
-fn find_for_apply(ctx: &Ctx, reference: &str) -> Done<Found> {
-    find(ctx, reference)
-        .map_err(|fault| if fault.0 == "failed" { changed(format!("{}: it changed since the preview", fault.1)) } else { fault })
+// ----- which send it is -----
+
+/// Where Kumi writes its mark on a send it makes: REAPER gives a send no identity of its own, and a ref is only a place
+/// among the sends to one track.
+pub(super) const STAMP: &str = "P_EXT:kumi_id";
+
+fn stamp_of(reaper: &Reaper, track: Track, index: i32) -> Option<String> {
+    reaper.send_text(track, 0, index, STAMP)
 }
 
-fn find_for_restore(ctx: &Ctx, reference: &str) -> Done<Found> {
-    find(ctx, reference).map_err(|fault| if fault.0 == "failed" { ("gone".to_string(), fault.1) } else { fault })
+fn find_by_stamp(reaper: &Reaper, owner: Track, stamp: &str) -> Option<i32> {
+    (0..reaper.send_count(owner, 0)).find(|&index| stamp_of(reaper, owner, index).as_deref() == Some(stamp))
+}
+
+fn fresh_stamp() -> String {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let count = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:x}{:04x}{:x}", nanos, std::process::id() & 0xffff, count)
+}
+
+/// The states of all the sends from one track to another, as one hash: it moves when one is added, taken away, or changed.
+fn pair_hash(reaper: &Reaper, owner: Track, receiver: Track) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for index in 0..reaper.send_count(owner, 0) {
+        if reaper.send_peer(owner, 0, index) != Some(receiver) {
+            continue;
+        }
+        let state = send_state(reaper, owner, index);
+        for (_, key) in STATE_KEYS {
+            for byte in number(&state, key).to_bits().to_le_bytes() {
+                hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        hash = (hash ^ 0xff).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// How many sends go from one track to another.
+fn pair_count(reaper: &Reaper, owner: Track, receiver: Track) -> usize {
+    (0..reaper.send_count(owner, 0)).filter(|&index| reaper.send_peer(owner, 0, index) == Some(receiver)).count()
+}
+
+/// What tells this send from every other: the mark Kumi made it with, or else its whole state and the states of the
+/// sends beside it. A look at a send takes one; a later write or undo holds the send to it.
+fn seal(reaper: &Reaper, found: &Found) -> Value {
+    json!({
+        "stamp": stamp_of(reaper, found.track, found.index),
+        "state": send_state(reaper, found.track, found.index),
+        "pair": pair_hash(reaper, found.track, found.receiver),
+    })
+}
+
+/// The send a ref names, and held to a seal: one with a stamp is found by it wherever the producer has moved it among the
+/// sends; any other is the one at the place the ref says only while it is in the state the seal has and has the same
+/// sends beside it (`check`), else it may be another send, which is not written.
+fn find_sealed(ctx: &Ctx, reference: &str, seal: &Value, check: bool) -> Done<Found> {
+    let reaper = ctx.reaper;
+    if let Some(stamp) = seal["stamp"].as_str() {
+        let Ref::Send { track, .. } = Ref::parse(reference).map_err(bad)? else { return Err(bad("ref must be a send ref (r:send:…)")) };
+        let owner = ctx.reads.track_by_id(reaper, ctx.proj, &track)?;
+        let index = find_by_stamp(reaper, owner, stamp).ok_or_else(|| failed("that send isn't there (deleted, or it went elsewhere)"))?;
+        let receiver = reaper.send_peer(owner, 0, index).ok_or_else(|| failed("that send has no receiving track"))?;
+        return Ok(Found { track: owner, index, receiver, from: name_of(reaper, owner), to: name_of(reaper, receiver) });
+    }
+    let found = find(ctx, reference)?;
+    if check && seal.is_object() {
+        let route = route_text(&found.from, &found.to);
+        if !same_state(&send_state(reaper, found.track, found.index), &seal["state"]) {
+            return Err(changed(format!("the send {route} is not as it was: it may be another send now")));
+        }
+        if pair_hash(reaper, found.track, found.receiver) != seal["pair"] {
+            return Err(changed(format!(
+                "the sends {route} have changed (one added, taken away or changed): the ref may name another send now"
+            )));
+        }
+    }
+    Ok(found)
+}
+
+fn find_for_apply(ctx: &Ctx, reference: &str, seal: &Value) -> Done<Found> {
+    find_sealed(ctx, reference, seal, true).map_err(|fault| {
+        if fault.0 == "failed" {
+            changed(format!("{}: it changed since the preview", fault.1))
+        } else {
+            fault
+        }
+    })
+}
+
+fn find_for_restore(ctx: &Ctx, reference: &str, seal: &Value, check: bool) -> Done<Found> {
+    find_sealed(ctx, reference, seal, check).map_err(|fault| if fault.0 == "failed" { ("gone".to_string(), fault.1) } else { fault })
 }
 
 fn target(reference: &str) -> Value {
@@ -188,14 +275,15 @@ pub fn prop_preview(ctx: &Ctx, prop: &Prop, input: &Value) -> Done<Preview> {
     if (prop.same)(&now, &wanted) {
         display["unchanged"] = true.into();
     }
-    Ok(Preview { target: target(reference), prior: now.clone(), fence: now, display })
+    let fence = json!({"field": now, "send": seal(ctx.reaper, &found)});
+    Ok(Preview { target: target(reference), prior: now, fence, display })
 }
 
 pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<Applied> {
-    let found = find_for_apply(ctx, input["ref"].as_str().unwrap_or_default())?;
+    let found = find_for_apply(ctx, input["ref"].as_str().unwrap_or_default(), &fence["send"])?;
     let route = route_text(&found.from, &found.to);
     let now = (prop.read)(ctx.reaper, found.track, found.index);
-    if !(prop.same)(&now, fence) {
+    if !(prop.same)(&now, &fence["field"]) {
         return Err(changed(format!("{route}'s {} changed since the preview", prop.noun)));
     }
     let wanted = (prop.wanted)(input)?;
@@ -206,8 +294,10 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
     if !(prop.same)(&after, &wanted) {
         return Err(failed(format!("REAPER kept the send's {} as it was", prop.noun)));
     }
+    let mut applied = after.clone();
+    applied["send"] = seal(ctx.reaper, &found);
     Ok(Applied {
-        applied: after.clone(),
+        applied,
         created: None,
         material: None,
         display: json!({"title": (prop.title)(&route, &after), "before": now, "after": after}),
@@ -215,7 +305,7 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
 }
 
 pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored> {
-    let found = find_for_restore(ctx, restore.target["ref"].as_str().unwrap_or_default())?;
+    let found = find_for_restore(ctx, restore.target["ref"].as_str().unwrap_or_default(), &restore.applied["send"], !restore.discard)?;
     let route = route_text(&found.from, &found.to);
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     if !(prop.same)(&now, restore.prior) {
@@ -343,6 +433,9 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     let reaper = ctx.reaper;
     let index = reaper.create_send(plan.from, Some(plan.to)).ok_or_else(|| failed("REAPER wouldn't make the send"))?;
+    // Marked as Kumi's own, so that an undo finds this send and no other, whatever the producer does to the ones beside it.
+    let stamp = fresh_stamp();
+    reaper.set_send_text(plan.from, 0, index, STAMP, &stamp);
     for (parm, value) in &plan.changes {
         reaper.set_send_value(plan.from, 0, index, parm, *value);
     }
@@ -350,18 +443,20 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let key = keys.get(index as usize).ok_or_else(|| failed("the new send isn't in the track's sends"))?;
     let reference = refs::send_ref(&plan.from_id, 0, &key.other, key.repeat, key.of);
     let route = route_text(&name_of(reaper, plan.from), &name_of(reaper, plan.to));
-    Ok(Applied {
-        applied: send_state(reaper, plan.from, index),
-        created: Some(target(&reference)),
-        material: None,
-        display: json!({"title": format!("Added send {route}")}),
-    })
+    let found = Found { track: plan.from, index, receiver: plan.to, from: name_of(reaper, plan.from), to: name_of(reaper, plan.to) };
+    let mut created = target(&reference);
+    if stamp_of(reaper, plan.from, index).as_deref() == Some(stamp.as_str()) {
+        created["stamp"] = stamp.into();
+    }
+    let mut applied = send_state(reaper, plan.from, index);
+    applied["send"] = seal(reaper, &found);
+    Ok(Applied { applied, created: Some(created), material: None, display: json!({"title": format!("Added send {route}")}) })
 }
 
 pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let created = restore.created.ok_or_else(|| bad("created: the send that was added"))?;
     let reference = created["ref"].as_str().ok_or_else(|| bad("created: the send's ref"))?;
-    let found = find_for_restore(ctx, reference)?;
+    let found = find_for_restore(ctx, reference, &restore.applied["send"], !restore.discard)?;
     let now = send_state(ctx.reaper, found.track, found.index);
     if !restore.discard && !same_state(&now, restore.applied) {
         return Err(changed(format!("the send {} has been changed in REAPER since Kumi added it", route_text(&found.from, &found.to))));
@@ -386,7 +481,8 @@ pub fn remove_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     if envelopes > 0 {
         display["note"] = format!("Its {envelopes} envelope(s) can't be put back by undo.").into();
     }
-    Ok(Preview { target: target(reference), prior: now.clone(), fence: now, display })
+    let fence = json!({"state": now, "send": seal(ctx.reaper, &found)});
+    Ok(Preview { target: target(reference), prior: now, fence, display })
 }
 
 fn active_envelopes(reaper: &Reaper, track: Track, index: i32) -> usize {
@@ -399,10 +495,10 @@ fn active_envelopes(reaper: &Reaper, track: Track, index: i32) -> usize {
 
 pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let reference = input["ref"].as_str().unwrap_or_default();
-    let found = find_for_apply(ctx, reference)?;
+    let found = find_for_apply(ctx, reference, &fence["send"])?;
     let reaper = ctx.reaper;
     let now = send_state(reaper, found.track, found.index);
-    if !same_state(&now, fence) {
+    if !same_state(&now, &fence["state"]) {
         return Err(changed(format!("the send {} changed since the preview", route_text(&found.from, &found.to))));
     }
     let receiver = reaper
@@ -410,10 +506,11 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         .map(|t| reaper.track_guid(t))
         .ok_or_else(|| failed("that send has no receiving track"))?;
     let lost = active_envelopes(reaper, found.track, found.index);
+    let (stamp, together) = (stamp_of(reaper, found.track, found.index), pair_count(reaper, found.track, found.receiver));
     if !reaper.remove_send(found.track, 0, found.index) {
         return Err(failed("REAPER wouldn't remove the send"));
     }
-    let material = json!({"state": now, "receiver": receiver, "lostEnvelopes": lost});
+    let material = json!({"state": now, "receiver": receiver, "lostEnvelopes": lost, "stamp": stamp, "together": together});
     Ok(Applied {
         applied: json!({"removed": true}),
         created: None,
@@ -431,15 +528,26 @@ pub fn remove_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let receiver = TrackId::Guid(material["receiver"].as_str().unwrap_or_default().to_string());
     let to =
         track_by_id(ctx, &receiver).ok_or_else(|| ("gone".to_string(), "the receiving track isn't in the project any more".to_string()))?;
-    // The send is back already (a retry, or the producer made it): nothing is made twice.
-    if let Some(index) = rows::send_keys(reaper, from, 0).iter().position(|key| key.other == SendEnd::Track(receiver.clone())) {
-        let existing = send_state(reaper, from, index as i32);
-        if same_state(&existing, &material["state"]) {
-            return Ok(Restored { restored: existing, display: json!({"title": "The send is back already"}) });
+    // The send is back already (a retry, or the producer made it): nothing is made twice. One with the mark is Kumi's send;
+    // else there are as many to that track as there were before it went, and one has its state.
+    let stamp = material["stamp"].as_str();
+    let back = match stamp.and_then(|stamp| find_by_stamp(reaper, from, stamp)) {
+        Some(index) => Some(index),
+        None if stamp.is_none() && pair_count(reaper, from, to) >= material["together"].as_u64().unwrap_or(1) as usize => {
+            (0..reaper.send_count(from, 0)).find(|&index| {
+                reaper.send_peer(from, 0, index) == Some(to) && same_state(&send_state(reaper, from, index), &material["state"])
+            })
         }
+        None => None,
+    };
+    if let Some(index) = back {
+        return Ok(Restored { restored: send_state(reaper, from, index), display: json!({"title": "The send is back already"}) });
     }
     let index = reaper.create_send(from, Some(to)).ok_or_else(|| failed("REAPER wouldn't make the send again"))?;
     write_state(reaper, from, index, &material["state"]);
+    if let Some(stamp) = stamp {
+        reaper.set_send_text(from, 0, index, STAMP, stamp);
+    }
     let keys = rows::send_keys(reaper, from, 0);
     let key = keys.get(index as usize).ok_or_else(|| failed("the send made again isn't in the track's sends"))?;
     let mut display = json!({"title": format!("Send {} put back", route_text(&name_of(reaper, from), &name_of(reaper, to)))});

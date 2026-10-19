@@ -75,6 +75,9 @@ impl Lab {
         if let Some(material) = applied.get("material") {
             params["material"] = material.clone();
         }
+        if let Some(created) = applied.get("created") {
+            params["created"] = created.clone();
+        }
         self.call("change_restore", params)
     }
 }
@@ -386,8 +389,9 @@ fn adding_a_track_makes_it_where_asked_and_undo_takes_it_away_by_its_id() {
     assert_eq!((applied["applied"]["index"].clone(), applied["applied"]["name"].clone()), (json!(1), json!("Pad")));
     // The sends that named a track by place still reach it: Drums sends to Reverb, now one further on.
     assert_eq!(state(|s| s.tracks[0].sends[0].dest), 4);
-    let restored = lab.undo("track-add", &preview, &applied, "Kumi: undo Added track Pad (kund1)");
     // (undo of an add is told what was created)
+    let without = json!({"kind": "track-add", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": "Kumi: undo (kund0)", "epoch": lab.reads.epoch()});
+    let restored = lab.call("change_restore", without);
     assert!(restored.is_err(), "created is needed: {restored:?}");
     let mut params = json!({"kind": "track-add", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo Added track Pad (kund1)"});
     params["epoch"] = lab.reads.epoch().into();
@@ -612,7 +616,9 @@ fn adding_a_send_makes_it_with_its_settings_and_undo_removes_exactly_that_one() 
     let input = json!({"ref": KICK, "toRef": "r:track:{DDDD}", "volumeDb": -9.0, "mode": "pre-fader"});
     let (preview, applied) = lab.make("send-add", input, "Kumi: Added send Kick → Reverb (ksa01)");
     assert_eq!(preview["display"]["title"], "Added send “Kick” → “Reverb”");
-    assert_eq!(applied["created"], json!({"ref": "r:send:{BBBB}:0:{DDDD}", "kind": "send"}));
+    assert_eq!(applied["created"]["ref"], "r:send:{BBBB}:0:{DDDD}");
+    assert_eq!(applied["created"]["kind"], "send");
+    assert!(applied["created"]["stamp"].as_str().is_some_and(|stamp| !stamp.is_empty()), "Kumi's own send carries its mark");
     assert_eq!(state(|s| s.tracks[1].sends.len()), 1);
     assert!((state(|s| s.tracks[1].sends[0].volume) - 10f64.powf(-9.0 / 20.0)).abs() < 1e-12);
     assert_eq!(state(|s| s.tracks[1].sends[0].mode), 3);
@@ -1941,4 +1947,149 @@ fn a_track_called_track_005_reads_without_stuttering_in_every_title_and_its_rest
     for text in [title(&preview), restored["display"]["title"].as_str().unwrap().to_string()] {
         no_stutter(&text);
     }
+}
+
+// ----- sends by identity (M1) -----
+
+/// Kick sends twice to Reverb: s1 at -12 dB and s2 at -6 dB (the producer's own sends, with no mark).
+fn two_sends() -> (String, String) {
+    state(|s| {
+        let mut first = FakeSend::to(3);
+        first.volume = 0.25;
+        let mut second = FakeSend::to(3);
+        second.volume = 0.5;
+        s.tracks[1].sends = vec![first, second];
+        s.state_count += 1;
+    });
+    ("r:send:{BBBB}:0:{DDDD}:1of2".into(), "r:send:{BBBB}:0:{DDDD}:2of2".into())
+}
+
+fn send_volumes() -> Vec<(f64, bool)> {
+    state(|s| s.tracks[1].sends.iter().map(|send| ((send.volume * 100.0).round() / 100.0, send.mute)).collect())
+}
+
+/// The producer removes the first send and makes a new one (a fresh send is at 0 dB).
+fn producer_swaps_the_first_send() {
+    state(|s| {
+        s.tracks[1].sends.remove(0);
+        s.tracks[1].sends.push(FakeSend::to(3));
+        s.state_count += 1;
+    });
+}
+
+#[test]
+fn a_send_ref_that_names_another_send_after_the_producer_removed_one_and_added_one_is_refused_at_the_apply() {
+    let lab = Lab::new();
+    let (first, _) = two_sends();
+    let input = json!({"ref": first, "mute": true});
+    let preview = lab.call("change_preview", json!({"kind": "send-mute", "input": input})).unwrap();
+    producer_swaps_the_first_send();
+    let before = send_volumes();
+    let entries = state(|s| s.undo_entries);
+    let apply = json!({"kind": "send-mute", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    let (code, message) = lab.call("change_apply", apply).unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("changed") || message.contains("another send"), "{message}");
+    assert_eq!((send_volumes(), state(|s| s.undo_entries)), (before.clone(), entries), "no send was muted");
+    assert!(before.iter().all(|(_, mute)| !mute));
+}
+
+#[test]
+fn kumis_undo_of_a_send_change_leaves_the_producers_sends_when_the_pair_changed() {
+    let lab = Lab::new();
+    let (first, _) = two_sends();
+    let (preview, applied) = lab.make("send-mute", json!({"ref": first, "mute": true}), "Kumi: Send “Kick” → “Reverb” muted (ksi01)");
+    // The producer mutes the second send too, removes the first and adds a new one.
+    state(|s| s.tracks[1].sends[1].mute = true);
+    producer_swaps_the_first_send();
+    let before = send_volumes();
+    let (code, _) = lab.undo("send-mute", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert_eq!(send_volumes(), before, "the producer's mute of the other send stays");
+    // The sends as Kumi left them: the same undo goes through.
+    state(|s| {
+        s.tracks[1].sends.pop();
+        s.tracks[1].sends.insert(0, {
+            let mut send = FakeSend::to(3);
+            send.volume = 0.25;
+            send.mute = true;
+            send
+        });
+        s.tracks[1].sends[1].mute = false;
+    });
+    lab.undo("send-mute", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(send_volumes(), [(0.25, false), (0.5, false)]);
+}
+
+#[test]
+fn kumis_undo_of_a_send_it_added_finds_that_send_by_its_mark_and_never_the_producers() {
+    let lab = Lab::new();
+    state(|s| s.tracks[1].sends.clear());
+    let input = json!({"ref": KICK, "toRef": "r:track:{DDDD}"});
+    let (preview, applied) = lab.make("send-add", input, "Kumi: Added send “Kick” → “Reverb” (ksi02)");
+    let kumis_stamp = applied["created"]["stamp"].as_str().unwrap().to_string();
+    // The producer deletes it and makes their own send to the same track.
+    state(|s| {
+        s.tracks[1].sends.clear();
+        s.tracks[1].sends.push(FakeSend::to(3));
+        s.state_count += 1;
+    });
+    let (code, message) = lab.undo("send-add", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "gone", "{message}: Kumi's send is not there, and the producer's is not Kumi's to take away");
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 1);
+    // The producer puts another send in front of Kumi's: the mark finds Kumi's, whatever its place.
+    state(|s| {
+        s.tracks[1].sends.clear();
+        let mut mine = FakeSend::to(3);
+        mine.ext.insert("P_EXT:kumi_id".into(), kumis_stamp.clone());
+        s.tracks[1].sends = vec![FakeSend::to(3), mine];
+        s.state_count += 1;
+    });
+    lab.undo("send-add", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 1);
+    assert!(state(|s| s.tracks[1].sends[0].ext.is_empty()), "the one left is the producer's");
+}
+
+#[test]
+fn a_send_kumi_removed_is_made_again_even_when_an_identical_one_is_left_and_keeps_its_mark() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tracks[1].sends = vec![FakeSend::to(3), FakeSend::to(3)];
+        s.state_count += 1;
+    });
+    let (preview, applied) =
+        lab.make("send-remove", json!({"ref": "r:send:{BBBB}:0:{DDDD}:1of2"}), "Kumi: Removed send “Kick” → “Reverb” (ksi03)");
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 1);
+    lab.undo("send-remove", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 2, "the one that was left is not taken for the one removed");
+    // A retry makes no third.
+    lab.undo("send-remove", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 2);
+    // A send with a mark comes back with it.
+    state(|s| {
+        s.tracks[1].sends = vec![{
+            let mut send = FakeSend::to(3);
+            send.ext.insert("P_EXT:kumi_id".into(), "abc".into());
+            send
+        }];
+        s.state_count += 1;
+    });
+    let (preview, applied) =
+        lab.make("send-remove", json!({"ref": "r:send:{BBBB}:0:{DDDD}"}), "Kumi: Removed send “Kick” → “Reverb” (ksi04)");
+    assert!(state(|s| s.tracks[1].sends.is_empty()));
+    lab.undo("send-remove", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends[0].ext.get("P_EXT:kumi_id").cloned()), Some("abc".to_string()));
+}
+
+#[test]
+fn a_deleted_tracks_sends_come_back_with_their_marks() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tracks[0].sends[0].ext.insert("P_EXT:kumi_id".into(), "def".into());
+    });
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{AAAA}"}), "Kumi: Deleted track “Drums” (ksi05)");
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    let marks: Vec<_> =
+        state(|s| s.tracks.iter().flat_map(|t| t.sends.iter().filter_map(|send| send.ext.get("P_EXT:kumi_id").cloned())).collect());
+    assert_eq!(marks, ["def"]);
 }

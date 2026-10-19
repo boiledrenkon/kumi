@@ -259,11 +259,13 @@ pub struct FakeSend {
     pub dst_chan: i32,
     /// Other `GetTrackSendInfo_Value` attributes (`B_PHASE`, `I_MIDIFLAGS`…); a send's default for those not here.
     pub extra: HashMap<String, f64>,
+    /// `P_EXT:…` text a send carries.
+    pub ext: HashMap<String, String>,
 }
 
 impl FakeSend {
     pub fn to(dest: usize) -> Self {
-        FakeSend { dest, mode: 0, volume: 1.0, pan: 0.0, mute: false, src_chan: 0, dst_chan: 0, extra: HashMap::new() }
+        FakeSend { dest, mode: 0, volume: 1.0, pan: 0.0, mute: false, src_chan: 0, dst_chan: 0, extra: HashMap::new(), ext: HashMap::new() }
     }
 }
 
@@ -1832,6 +1834,42 @@ unsafe extern "C" fn get_set_track_send_info(
     })
 }
 
+unsafe extern "C" fn get_set_track_send_info_string(
+    track: *mut MediaTrack,
+    category: c_int,
+    index: c_int,
+    parm: *const c_char,
+    buf: *mut c_char,
+    set: bool,
+) -> bool {
+    let parm = name_of(parm);
+    if !parm.starts_with("P_EXT:") {
+        return false;
+    }
+    let value = if set { name_of(buf) } else { String::new() };
+    counted(|s| {
+        if set {
+            // The fake writes a send of the track itself (a send of category 0).
+            let Some(send) = track_mut(s, track as u64).filter(|_| category == 0).and_then(|t| t.sends.get_mut(index as usize)) else {
+                return false;
+            };
+            send.ext.insert(parm, value);
+            s.undo_dirty = true;
+            return true;
+        }
+        match send_of(s, track as u64, category, index).and_then(|send| send.ext.get(&parm)) {
+            Some(text) => {
+                write(buf, 1024, text);
+                true
+            }
+            None => {
+                write(buf, 1024, "");
+                false
+            }
+        }
+    })
+}
+
 // ----- writes -----
 
 fn track_mut(s: &mut State, handle: u64) -> Option<&mut FakeTrack> {
@@ -1907,7 +1945,9 @@ unsafe extern "C" fn delete_track(track: *mut MediaTrack) {
 /// The chunk of a fake track is a token naming the state kept for it, in the shape of the head of a real one.
 unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
     counted(|s| {
-        let Some(t) = track_of(s, track as u64).cloned() else { return false };
+        let Some(mut t) = track_of(s, track as u64).cloned() else { return false };
+        // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
+        t.sends.clear();
         let text = format!("<TRACK {}\nNAME \"{}\"\nFAKECHUNK {}\n{}>\n", t.guid, t.name, s.chunks.len(), fx_chain_text(&t.fx));
         s.chunks.push(t);
         if text.len() + 1 > size as usize {
@@ -2570,6 +2610,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"TakeFX_GetParamEx" => take_fx_get_param_ex as unsafe extern "C" fn(*mut MediaItem_Take, c_int, c_int, *mut f64, *mut f64, *mut f64) -> f64,
         b"GetTrackNumSends" => get_track_num_sends as unsafe extern "C" fn(*mut MediaTrack, c_int) -> c_int,
         b"GetTrackSendInfo_Value" => get_track_send_info_value as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *const c_char) -> f64,
+        b"GetSetTrackSendInfo_String" => get_set_track_send_info_string as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *const c_char, *mut c_char, bool) -> bool,
         b"GetSetTrackSendInfo" => get_set_track_send_info as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *const c_char, *mut c_void) -> *mut c_void,
         b"CountTrackEnvelopes" => count_track_envelopes as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
         b"GetTrackEnvelope" => get_track_envelope as unsafe extern "C" fn(*mut MediaTrack, c_int) -> *mut TrackEnvelope,
