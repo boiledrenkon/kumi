@@ -757,21 +757,5 @@ pub fn undo_note(message: &str) -> String {
 }
 pub use crate::core::history::next_change_id;
 pub fn new_record(kind: &ChangeKind, summary: ChangeSummary, state: ChangeState, at: i64) -> ChangeRecord {
-    ChangeRecord {
-        id: next_change_id(),
-        family: kind.family,
-        title: summary.title,
-        track: summary.track,
-        from: summary.from,
-        to: summary.to,
-        range: summary.range,
-        colors: summary.colors,
-        clip: summary.clip,
-        devices: summary.devices,
-        state,
-        score: None,
-        note: None,
-        at,
-        picture: summary.picture.and_then(ChangePicture::bounded),
-    }
+    crate::integrations::shared::changes::new_record(kind.family, summary, state, at)
 }

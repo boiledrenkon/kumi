@@ -1,5 +1,6 @@
 //! What a change did, as HISTORY shows it: neutral, so every DAW's integration summarises its changes the same way.
 use crate::core::contracts::*;
+use crate::core::history::next_change_id;
 use crate::core::refs::KnownTrack;
 use serde::{Deserialize, Serialize};
 
@@ -28,5 +29,24 @@ pub struct ChangeSummary {
 impl ChangeSummary {
     pub fn title(title: impl Into<String>) -> Self {
         Self { title: title.into(), ..Default::default() }
+    }
+}
+pub fn new_record(family: ChangeFamily, summary: ChangeSummary, state: ChangeState, at: i64) -> ChangeRecord {
+    ChangeRecord {
+        id: next_change_id(),
+        family,
+        title: summary.title,
+        track: summary.track,
+        from: summary.from,
+        to: summary.to,
+        range: summary.range,
+        colors: summary.colors,
+        clip: summary.clip,
+        devices: summary.devices,
+        state,
+        score: None,
+        note: None,
+        at,
+        picture: summary.picture.and_then(ChangePicture::bounded),
     }
 }
