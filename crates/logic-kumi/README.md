@@ -105,6 +105,51 @@ checks the shapes and blesses `crates/daw-mcp-server/tests/vectors/
 logic-reads.json` with `KUMI_BLESS=1`. Fixtures are the only Logic-version-
 specific data: a new Logic is a re-recording.
 
+## What it does (M3)
+
+The bridge changes the project and undoes, answering `change_preview`,
+`change_apply` and `change_restore` (and `transport_play`, `transport_stop`,
+`cursor_set`, `undo_step_begin`, `undo_step_end`) over the same wire the REAPER
+extension's changes use; the host's journal (`daw-mcp-server/src/changes.rs`)
+is the arbiter. `src/changes/` holds it:
+
+- `mod.rs` dispatches each kind through one macOS channel, checks the fence at
+  preview and again at apply, reads the value back, and answers `applied` only
+  when Logic shows it, else `uncertain`. The kinds: a track's volume, pan,
+  mute, solo, arm (its header's slider or a click at its checkbox),
+  rename (the Inspector's field), add and delete (the Track menu); markers
+  added, moved and deleted (the Marker List); the tempo (the control bar); a
+  take's notes added, changed and deleted (the Event List); a plug-in's bypass
+  (the Mixer strip). The kinds Logic's Accessibility won't let the bridge make
+  from outside (`loop-range`, `fx-add`/`-delete`/`-param`/`-move`,
+  `send-add`/`-volume`, `track-move`, `marker-rename`) are refused with why.
+- `nudge.rs` moves Logic's sliders and scrubbers: a set steps one, an increment
+  ten, so an exact value is reached by tens then ones, read back after each
+  step; a value that shows only as text (a fader's dB) is stepped toward until
+  the text says it. `front.rs` brings Logic in front for a menu item, a key or
+  a click, refusing `busy` when another app keeps the front, and refreshes the
+  Edit menu's Undo and Redo titles (a key command of Logic's own doesn't make
+  it validate them).
+- Restore is by value where the value can be set, else by Logic's own undo
+  (Cmd-Z through the Edit menu) while the change is still Logic's top Undo step.
+  A restore's refs are from the change's own epoch, carried to where the track
+  or region stands now (`Project::carry_track`), so undoing a fader or a rename
+  after a track was added or deleted doesn't answer `stale`.
+- `undo.rs` names the producer's own undo back to Kumi: it keeps a stack of
+  Kumi's steps with the title Logic gave each at apply time and, for what the
+  focus tick reads anyway, a probe (a header's value, the tempo); each tick it
+  watches the probes and the Edit menu's titles and sends `undone_in_daw` with
+  the `desc`s that moved. Logic keeps no undo block, so `plan_steps` is false
+  and a plan is several steps of its undo.
+
+The exact shapes, the channels, the fences and the differences from REAPER are
+`docs/en/LOGIC_CONTRACT.md`, "Changes". The change scenes
+(`tests/fixtures/change-<kind>/scene.json.gz`) are recorded from the real Logic
+by `examples/record_changes.rs` and replayed by `tests/changes.rs`, which
+compares every answer to what Logic gave and checks the `uncertain`, `busy`,
+carried-ref and undo-stack paths; the M2 scenes and `tests/reads.rs` are
+untouched.
+
 ## Arguments
 
 ```sh
@@ -184,7 +229,8 @@ cargo run -p logic-kumi --example record_fixtures -- --out crates/logic-kumi/tes
 `cargo test -p logic-kumi` runs without Logic or the helper: the Logic model
 on canned windows, the helper's supervision on a mock and on shell scripts,
 the server against daw-bridge's conformance vectors over real sockets, the
-whole bridge on the mock helper (`tests/status.rs`), and the reads over the
-recorded scenes (`tests/reads.rs`). The isolated run
+whole bridge on the mock helper (`tests/status.rs`), the reads over the
+recorded scenes (`tests/reads.rs`) and the changes over the recorded
+change scenes (`tests/changes.rs`). The isolated run
 `KUMI_PACKAGES="daw-bridge logic-kumi" sh scripts/test-isolated.sh` keeps the
 tests away from this machine's Kumi folder.
