@@ -3101,7 +3101,7 @@ fn an_undo_and_a_new_edit_within_one_look_tell_nothing_and_kumis_undo_still_chec
     lab.tick();
     assert!(lab.events.take().is_empty());
     let restored = lab.undo("track-volume", &preview, &applied, "Kumi: undo (kund1)").unwrap();
-    assert!(restored.get("unwritten").is_none() || restored["unwritten"] == true || restored["display"].is_object(), "{restored}");
+    assert_eq!(restored["display"]["note"], "It was back already: nothing was written.", "{restored}");
     // Bare edits that make no point, and the producer's own, say nothing.
     state(|s| s.state_count += 1);
     lab.tick();

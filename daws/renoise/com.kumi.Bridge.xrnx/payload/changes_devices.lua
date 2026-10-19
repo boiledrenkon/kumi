@@ -479,7 +479,7 @@ local function delete_restore(song, env, restore, desc)
   if present and present.device_path == saved.path then
     local state = material_.device_state(present)
     if state.state == (material.state or {}).state and state.display == (material.state or {}).display then
-      return { restored = { deleted = false }, display = { title = string.format("%s is back on %s already", q(label), q(track_name)) }, undo = { desc = desc, entry = false } }
+      return { restored = { deleted = false }, display = { title = string.format("%s is back on %s already", q(label), q(track_name)) }, undo = { desc = desc, entry = false }, unwritten = true }
     end
   end
   local pattern_now = material_.pool_now(song, env, material.pool)
@@ -604,7 +604,7 @@ local function move_restore(song, env, restore, desc)
   if is_it(to) then
     found = to
   elseif is_it(from) then
-    return { restored = { index = from }, display = { title = "The device is back at place " .. from .. " already" }, undo = { desc = desc, entry = false } }
+    return { restored = { index = from }, display = { title = "The device is back at place " .. from .. " already" }, undo = { desc = desc, entry = false }, unwritten = true }
   elseif restore.discard then
     fail("gone", "the device isn't on the track any more")
   else

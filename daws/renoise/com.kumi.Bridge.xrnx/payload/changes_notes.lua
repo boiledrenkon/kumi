@@ -505,8 +505,8 @@ local function only_emptied(applied)
   return true
 end
 
-local MOVED = "the pattern changed in Renoise since Kumi wrote these lines (lines at or above them were changed, inserted or deleted), so Kumi left them as they are: Renoise's own undo can take them back"
-local MOVED_CLEARED = "the pattern changed in Renoise since Kumi emptied these lines, so where they are now can't be told: Kumi left them as they are, and Renoise's own undo can take them back"
+local MOVED = "the pattern changed in Renoise since Kumi wrote these lines (lines at or above them were changed, inserted or deleted), so Kumi left them as they are: Renoise's own undo can take them back, after the edits made since, which it takes back first"
+local MOVED_CLEARED = "the pattern changed in Renoise since Kumi emptied these lines, so where they are now can't be told: Kumi left them as they are, and Renoise's own undo can take them back, after the edits made since, which it takes back first"
 
 local function apply_of(song, env, input, fence, desc, kind, verb)
   local ok, preview, plan = pcall(preview_of, song, env, input, kind, verb)
@@ -652,7 +652,7 @@ local function restore_of(spec_kind, noun)
     if #todo == 0 then
       lower_columns(song, index, track, restore.prior.columns, restore.applied.columns)
       base.note_restored(env.journal, spec_kind, place, restore.applied, spec)
-      return { restored = { done = true }, display = { title = noun .. " in " .. label .. " is back already" }, undo = { desc = desc, entry = false } }
+      return { restored = { done = true }, display = { title = noun .. " in " .. label .. " is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
     end
     local chunks = chunks_of(todo)
     local display = { title = string.format("%s put back in %s", noun, label), before = counts_of(todo), after = counts_of(restore.prior.cells) }
