@@ -8,10 +8,91 @@ use daw_bridge::auth::Secret;
 use daw_mcp_server::client::{BridgeClient, RequestError};
 use daw_mcp_server::simulator::logic::LogicScript;
 use daw_mcp_server::simulator::Simulator;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(5);
+
+/// The fixed request set of M2's brief, in its order and with its exact parameters: what the bridge's own tests ask the
+/// real Logic over the Scratch project to record tests/vectors/logic-reads.json, and what the simulator replays.
+fn fixed_request_set() -> Vec<(&'static str, Value)> {
+    vec![
+        ("status", json!({})),
+        ("read", json!({"kind": "project"})),
+        ("read", json!({"kind": "track"})),
+        ("read", json!({"kind": "track", "limit": 1})),
+        ("read", json!({"kind": "track", "cursor": "1.1"})),
+        ("read", json!({"kind": "region"})),
+        ("read", json!({"kind": "region", "parent": "1:track:2"})),
+        ("read", json!({"kind": "note"})),
+        ("read", json!({"kind": "note", "parent": "1:region:1"})),
+        ("read", json!({"kind": "plugin", "parent": "1:track:1"})),
+        ("read", json!({"kind": "send", "parent": "1:track:1"})),
+        ("read", json!({"kind": "marker"})),
+        ("read", json!({"kind": "tempo"})),
+        ("read", json!({"ref": "1:track:2"})),
+        ("read", json!({"ref": "1:track:9"})),
+        ("read", json!({"kind": "bogus"})),
+        ("read", json!({"kind": "region", "parent": "0:track:2"})),
+        ("snapshot", json!({})),
+        ("focus", json!({})),
+        ("focus_body", json!({"kind": "tree", "ref": "1:track:1"})),
+        ("focus_body", json!({"kind": "tree"})),
+        ("focus_body", json!({"kind": "notes", "ref": "1:region:1"})),
+        ("focus_body", json!({"kind": "notes"})),
+        ("focus_body", json!({"kind": "timeline"})),
+        ("focus_body", json!({"kind": "timeline", "around": "1:track:2", "window": {"from": 0, "to": 16}, "limit": 1})),
+        ("focus_body", json!({"kind": "routing", "ref": "1:track:1"})),
+    ]
+}
+
+/// `value` with every object's keys in order, so the file reads as the Renoise tool writes its vectors.
+fn sorted(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            Value::Object(keys.into_iter().map(|key| (key.clone(), sorted(&map[key]))).collect())
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The fixed request set, asked over the wire, is answered as tests/vectors/logic-reads.json records: today the
+/// simulator's hand-written rows of the Scratch project, which KUMI_BLESS=1 here writes into the file; from then on
+/// what the bridge's own tests recorded over the real Logic (crates/logic-kumi/tests/reads.rs), replayed verbatim.
+#[tokio::test]
+async fn the_fixed_request_set_is_what_the_vectors_record() {
+    let secret = Secret::new("simulated-secret-0123456789-abcdefghijklmnop").unwrap();
+    let script = LogicScript::new();
+    let simulator = Simulator::start(script.config(secret.clone(), "com.apple.logic10")).await.unwrap();
+    let client = BridgeClient::connect(simulator.address(), secret, "daw-mcp-server/test").await.unwrap();
+    let mut cases = Vec::new();
+    for (method, params) in fixed_request_set() {
+        let response = match client.request(method, params.clone(), WAIT).await {
+            Ok(result) => json!({"ok": true, "result": result}),
+            Err(RequestError::Bridge { code, message }) => json!({"ok": false, "error": {"code": code, "message": message}}),
+            Err(other) => panic!("{method} {params}: {other:?}"),
+        };
+        cases.push(json!({"request": {"method": method, "params": params}, "response": response}));
+    }
+    simulator.stop();
+    let made = json!({"cases": cases, "epoch": "1"});
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("vectors").join("logic-reads.json");
+    if std::env::var("KUMI_BLESS").is_ok_and(|value| value == "1") {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&sorted(&made)).unwrap())).unwrap();
+        return;
+    }
+    let kept = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{} is missing; run with KUMI_BLESS=1", path.display()));
+    let kept: Value = serde_json::from_str(&kept).expect("the vectors are JSON");
+    for (made, kept) in made["cases"].as_array().unwrap().iter().zip(kept["cases"].as_array().unwrap()) {
+        assert_eq!(made, kept, "{} {} is answered otherwise than recorded", made["request"]["method"], made["request"]["params"]);
+    }
+    assert_eq!(made["cases"].as_array().unwrap().len(), kept["cases"].as_array().unwrap().len(), "the recorded set differs in length");
+}
 
 fn refused_as(result: Result<serde_json::Value, RequestError>, wanted: &str) -> bool {
     matches!(result, Err(RequestError::Bridge { code, .. }) if code == wanted)
