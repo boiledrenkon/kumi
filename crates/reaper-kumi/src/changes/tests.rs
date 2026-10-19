@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -74,6 +75,9 @@ impl Lab {
             json!({"kind": kind, "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": desc});
         if let Some(material) = applied.get("material") {
             params["material"] = material.clone();
+        }
+        if let Some(created) = applied.get("created") {
+            params["created"] = created.clone();
         }
         self.call("change_restore", params)
     }
@@ -376,7 +380,7 @@ fn depths() -> Vec<i32> {
 #[test]
 fn adding_a_track_makes_it_where_asked_and_undo_takes_it_away_by_its_id() {
     let lab = Lab::new();
-    let (preview, applied) = lab.make("track-add", json!({"name": "Pad", "color": "#102030", "index": 1}), "Kumi: Added track Pad (kadd1)");
+    let (preview, applied) = lab.make("track-add", json!({"name": "Pad", "color": "#102030", "index": 2}), "Kumi: Added track Pad (kadd1)");
     assert_eq!(preview["display"]["title"], "Added track “Pad”");
     assert_eq!(preview["target"], json!({"ref": null, "kind": "track", "index": 1}));
     assert_eq!(names(), ["Drums", "Pad", "Kick", "Snare", "Reverb"]);
@@ -386,8 +390,9 @@ fn adding_a_track_makes_it_where_asked_and_undo_takes_it_away_by_its_id() {
     assert_eq!((applied["applied"]["index"].clone(), applied["applied"]["name"].clone()), (json!(1), json!("Pad")));
     // The sends that named a track by place still reach it: Drums sends to Reverb, now one further on.
     assert_eq!(state(|s| s.tracks[0].sends[0].dest), 4);
-    let restored = lab.undo("track-add", &preview, &applied, "Kumi: undo Added track Pad (kund1)");
     // (undo of an add is told what was created)
+    let without = json!({"kind": "track-add", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": "Kumi: undo (kund0)", "epoch": lab.reads.epoch()});
+    let restored = lab.call("change_restore", without);
     assert!(restored.is_err(), "created is needed: {restored:?}");
     let mut params = json!({"kind": "track-add", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo Added track Pad (kund1)"});
     params["epoch"] = lab.reads.epoch().into();
@@ -438,6 +443,8 @@ fn a_bad_add_is_refused_and_one_whose_place_moved_is_changed() {
     let lab = Lab::new();
     for (input, why) in [
         (json!({"index": 9}), "index"),
+        (json!({"index": 0}), "from 1"),
+        (json!({"index": 6}), "from 1"),
         (json!({"index": -1}), "index"),
         (json!({"name": "a\nb"}), "name"),
         (json!({"color": "red"}), "color"),
@@ -451,12 +458,12 @@ fn a_bad_add_is_refused_and_one_whose_place_moved_is_changed() {
         assert_eq!(code, "bad-params", "{input}");
         assert!(message.contains(why), "{input}: {message}");
     }
-    let preview = lab.call("change_preview", json!({"kind": "track-add", "input": {"name": "Pad", "index": 1}})).unwrap();
+    let preview = lab.call("change_preview", json!({"kind": "track-add", "input": {"name": "Pad", "index": 2}})).unwrap();
     state(|s| s.tracks.insert(1, crate::reaper::fake::FakeTrack::new("{OTHER}", "Other")));
     let (code, _) = lab
         .call(
             "change_apply",
-            json!({"kind": "track-add", "input": {"name": "Pad", "index": 1}, "fence": preview["fence"], "desc": "Kumi: x (k1111)"}),
+            json!({"kind": "track-add", "input": {"name": "Pad", "index": 2}, "fence": preview["fence"], "desc": "Kumi: x (k1111)"}),
         )
         .unwrap_err();
     assert_eq!(code, "changed");
@@ -469,7 +476,7 @@ fn moving_a_track_puts_it_there_keeps_the_selection_and_undo_puts_it_and_the_dep
     state(|s| {
         s.tracks[3].selected = true;
     });
-    let (preview, applied) = lab.make("track-move", json!({"ref": KICK, "index": 3}), "Kumi: Moved track Kick to position 4 (kmov1)");
+    let (preview, applied) = lab.make("track-move", json!({"ref": KICK, "index": 4}), "Kumi: Moved track Kick to position 4 (kmov1)");
     assert_eq!(preview["display"]["title"], "Moved track “Kick” to position 4");
     assert_eq!(names(), ["Drums", "Snare", "Reverb", "Kick"]);
     assert_eq!(applied["applied"]["index"], 3);
@@ -487,17 +494,17 @@ fn moving_a_track_puts_it_there_keeps_the_selection_and_undo_puts_it_and_the_dep
 #[test]
 fn a_move_is_refused_when_the_tracks_around_it_changed_before_or_after() {
     let lab = Lab::new();
-    let preview = lab.call("change_preview", json!({"kind": "track-move", "input": {"ref": KICK, "index": 2}})).unwrap();
+    let preview = lab.call("change_preview", json!({"kind": "track-move", "input": {"ref": KICK, "index": 3}})).unwrap();
     state(|s| s.tracks.swap(2, 3));
     let (code, _) = lab
         .call(
             "change_apply",
-            json!({"kind": "track-move", "input": {"ref": KICK, "index": 2}, "fence": preview["fence"], "desc": "Kumi: x (k1111)"}),
+            json!({"kind": "track-move", "input": {"ref": KICK, "index": 3}, "fence": preview["fence"], "desc": "Kumi: x (k1111)"}),
         )
         .unwrap_err();
     assert_eq!(code, "changed");
     state(|s| s.tracks.swap(2, 3));
-    let (preview, applied) = lab.make("track-move", json!({"ref": KICK, "index": 2}), "Kumi: Moved (kmov1)");
+    let (preview, applied) = lab.make("track-move", json!({"ref": KICK, "index": 3}), "Kumi: Moved (kmov1)");
     assert_eq!(names(), ["Drums", "Snare", "Kick", "Reverb"]);
     // The producer moved another track next to it since.
     state(|s| s.tracks.swap(0, 1));
@@ -506,8 +513,13 @@ fn a_move_is_refused_when_the_tracks_around_it_changed_before_or_after() {
     assert!(message.contains("moved or changed in REAPER since"), "{message}");
     assert_eq!(names(), ["Snare", "Drums", "Kick", "Reverb"]);
     // Index out of range, the master, and no ref are refused up front.
-    for input in [json!({"ref": KICK, "index": 4}), json!({"ref": KICK}), json!({"ref": "r:track:master", "index": 0}), json!({"index": 0})]
-    {
+    for input in [
+        json!({"ref": KICK, "index": 5}),
+        json!({"ref": KICK, "index": 0}),
+        json!({"ref": KICK}),
+        json!({"ref": "r:track:master", "index": 1}),
+        json!({"index": 1}),
+    ] {
         assert_eq!(lab.call("change_preview", json!({"kind": "track-move", "input": input})).unwrap_err().0, "bad-params", "{input}");
     }
 }
@@ -515,7 +527,7 @@ fn a_move_is_refused_when_the_tracks_around_it_changed_before_or_after() {
 #[test]
 fn moving_a_track_to_where_it_is_changes_nothing() {
     let lab = Lab::new();
-    let (preview, applied) = lab.make("track-move", json!({"ref": KICK, "index": 1}), "Kumi: Moved (kmov1)");
+    let (preview, applied) = lab.make("track-move", json!({"ref": KICK, "index": 2}), "Kumi: Moved (kmov1)");
     assert_eq!(preview["display"]["unchanged"], true);
     assert_eq!(applied["undo"]["entry"], false, "nothing was written, so REAPER made no point");
     assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb"]);
@@ -612,7 +624,9 @@ fn adding_a_send_makes_it_with_its_settings_and_undo_removes_exactly_that_one() 
     let input = json!({"ref": KICK, "toRef": "r:track:{DDDD}", "volumeDb": -9.0, "mode": "pre-fader"});
     let (preview, applied) = lab.make("send-add", input, "Kumi: Added send Kick → Reverb (ksa01)");
     assert_eq!(preview["display"]["title"], "Added send “Kick” → “Reverb”");
-    assert_eq!(applied["created"], json!({"ref": "r:send:{BBBB}:0:{DDDD}", "kind": "send"}));
+    assert_eq!(applied["created"]["ref"], "r:send:{BBBB}:0:{DDDD}");
+    assert_eq!(applied["created"]["kind"], "send");
+    assert!(applied["created"]["stamp"].as_str().is_some_and(|stamp| !stamp.is_empty()), "Kumi's own send carries its mark");
     assert_eq!(state(|s| s.tracks[1].sends.len()), 1);
     assert!((state(|s| s.tracks[1].sends[0].volume) - 10f64.powf(-9.0 / 20.0)).abs() < 1e-12);
     assert_eq!(state(|s| s.tracks[1].sends[0].mode), 3);
@@ -1911,7 +1925,7 @@ fn a_track_called_track_005_reads_without_stuttering_in_every_title_and_its_rest
 
     // A move, a send, an FX and a track added by that name.
     let (preview, applied) =
-        lab.make("track-move", json!({"ref": five, "index": 0}), "Kumi: Moved track “Track 005” to position 1 (kst04)");
+        lab.make("track-move", json!({"ref": five, "index": 1}), "Kumi: Moved track “Track 005” to position 1 (kst04)");
     assert_eq!(title(&preview), "Moved track “Track 005” to position 1");
     let restored = lab.undo("track-move", &preview, &applied, "Kumi: undo (kund4)").unwrap();
     assert_eq!(restored["display"]["title"], "“Track 005” back at position 5");
@@ -1941,4 +1955,681 @@ fn a_track_called_track_005_reads_without_stuttering_in_every_title_and_its_rest
     for text in [title(&preview), restored["display"]["title"].as_str().unwrap().to_string()] {
         no_stutter(&text);
     }
+}
+
+// ----- sends by identity (M1) -----
+
+/// Kick sends twice to Reverb: s1 at -12 dB and s2 at -6 dB (the producer's own sends, with no mark).
+fn two_sends() -> (String, String) {
+    state(|s| {
+        let mut first = FakeSend::to(3);
+        first.volume = 0.25;
+        let mut second = FakeSend::to(3);
+        second.volume = 0.5;
+        s.tracks[1].sends = vec![first, second];
+        s.state_count += 1;
+    });
+    ("r:send:{BBBB}:0:{DDDD}:1of2".into(), "r:send:{BBBB}:0:{DDDD}:2of2".into())
+}
+
+fn send_volumes() -> Vec<(f64, bool)> {
+    state(|s| s.tracks[1].sends.iter().map(|send| ((send.volume * 100.0).round() / 100.0, send.mute)).collect())
+}
+
+/// The producer removes the first send and makes a new one (a fresh send is at 0 dB).
+fn producer_swaps_the_first_send() {
+    state(|s| {
+        s.tracks[1].sends.remove(0);
+        s.tracks[1].sends.push(FakeSend::to(3));
+        s.state_count += 1;
+    });
+}
+
+#[test]
+fn a_send_ref_that_names_another_send_after_the_producer_removed_one_and_added_one_is_refused_at_the_apply() {
+    let lab = Lab::new();
+    let (first, _) = two_sends();
+    let input = json!({"ref": first, "mute": true});
+    let preview = lab.call("change_preview", json!({"kind": "send-mute", "input": input})).unwrap();
+    producer_swaps_the_first_send();
+    let before = send_volumes();
+    let entries = state(|s| s.undo_entries);
+    let apply = json!({"kind": "send-mute", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    let (code, message) = lab.call("change_apply", apply).unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("changed") || message.contains("another send"), "{message}");
+    assert_eq!((send_volumes(), state(|s| s.undo_entries)), (before.clone(), entries), "no send was muted");
+    assert!(before.iter().all(|(_, mute)| !mute));
+}
+
+#[test]
+fn kumis_undo_of_a_send_change_leaves_the_producers_sends_when_the_pair_changed() {
+    let lab = Lab::new();
+    let (first, _) = two_sends();
+    let (preview, applied) = lab.make("send-mute", json!({"ref": first, "mute": true}), "Kumi: Send “Kick” → “Reverb” muted (ksi01)");
+    // The producer mutes the second send too, removes the first and adds a new one.
+    state(|s| s.tracks[1].sends[1].mute = true);
+    producer_swaps_the_first_send();
+    let before = send_volumes();
+    let (code, _) = lab.undo("send-mute", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert_eq!(send_volumes(), before, "the producer's mute of the other send stays");
+    // The sends as Kumi left them: the same undo goes through.
+    state(|s| {
+        s.tracks[1].sends.pop();
+        s.tracks[1].sends.insert(0, {
+            let mut send = FakeSend::to(3);
+            send.volume = 0.25;
+            send.mute = true;
+            send
+        });
+        s.tracks[1].sends[1].mute = false;
+    });
+    lab.undo("send-mute", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(send_volumes(), [(0.25, false), (0.5, false)]);
+}
+
+#[test]
+fn kumis_undo_of_a_send_it_added_finds_that_send_by_its_mark_and_never_the_producers() {
+    let lab = Lab::new();
+    state(|s| s.tracks[1].sends.clear());
+    let input = json!({"ref": KICK, "toRef": "r:track:{DDDD}"});
+    let (preview, applied) = lab.make("send-add", input, "Kumi: Added send “Kick” → “Reverb” (ksi02)");
+    let kumis_stamp = applied["created"]["stamp"].as_str().unwrap().to_string();
+    // The producer deletes it and makes their own send to the same track.
+    state(|s| {
+        s.tracks[1].sends.clear();
+        s.tracks[1].sends.push(FakeSend::to(3));
+        s.state_count += 1;
+    });
+    let (code, message) = lab.undo("send-add", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "gone", "{message}: Kumi's send is not there, and the producer's is not Kumi's to take away");
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 1);
+    // The producer puts another send in front of Kumi's: the mark finds Kumi's, whatever its place.
+    state(|s| {
+        s.tracks[1].sends.clear();
+        let mut mine = FakeSend::to(3);
+        mine.ext.insert("P_EXT:kumi_id".into(), kumis_stamp.clone());
+        s.tracks[1].sends = vec![FakeSend::to(3), mine];
+        s.state_count += 1;
+    });
+    lab.undo("send-add", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 1);
+    assert!(state(|s| s.tracks[1].sends[0].ext.is_empty()), "the one left is the producer's");
+}
+
+#[test]
+fn a_send_kumi_removed_is_made_again_even_when_an_identical_one_is_left_and_keeps_its_mark() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tracks[1].sends = vec![FakeSend::to(3), FakeSend::to(3)];
+        s.state_count += 1;
+    });
+    let (preview, applied) =
+        lab.make("send-remove", json!({"ref": "r:send:{BBBB}:0:{DDDD}:1of2"}), "Kumi: Removed send “Kick” → “Reverb” (ksi03)");
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 1);
+    lab.undo("send-remove", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 2, "the one that was left is not taken for the one removed");
+    // A retry makes no third.
+    lab.undo("send-remove", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 2);
+    // A send with a mark comes back with it.
+    state(|s| {
+        s.tracks[1].sends = vec![{
+            let mut send = FakeSend::to(3);
+            send.ext.insert("P_EXT:kumi_id".into(), "abc".into());
+            send
+        }];
+        s.state_count += 1;
+    });
+    let (preview, applied) =
+        lab.make("send-remove", json!({"ref": "r:send:{BBBB}:0:{DDDD}"}), "Kumi: Removed send “Kick” → “Reverb” (ksi04)");
+    assert!(state(|s| s.tracks[1].sends.is_empty()));
+    lab.undo("send-remove", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    assert_eq!(state(|s| s.tracks[1].sends[0].ext.get("P_EXT:kumi_id").cloned()), Some("abc".to_string()));
+}
+
+#[test]
+fn a_deleted_tracks_sends_come_back_with_their_marks() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tracks[0].sends[0].ext.insert("P_EXT:kumi_id".into(), "def".into());
+    });
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{AAAA}"}), "Kumi: Deleted track “Drums” (ksi05)");
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    let marks: Vec<_> =
+        state(|s| s.tracks.iter().flat_map(|t| t.sends.iter().filter_map(|send| send.ext.get("P_EXT:kumi_id").cloned())).collect());
+    assert_eq!(marks, ["def"]);
+}
+
+// ----- the undo of an add leaves what the producer put on it (M3) -----
+
+#[test]
+fn undoing_an_added_track_is_refused_when_the_producer_drew_automation_on_it_or_made_it_a_folder() {
+    let lab = Lab::new();
+    // Automation: a volume envelope with points.
+    let (preview, applied) = lab.make("track-add", json!({"name": "Pad", "index": 2}), "Kumi: Added track “Pad” (kad01)");
+    state(|s| {
+        s.tracks[1].envelopes.push(fake::FakeEnvelope::own("Volume", "<VOLENV2", 24));
+        s.state_count += 1;
+    });
+    let entries = state(|s| s.tracks.len());
+    let (code, message) = lab.undo("track-add", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("automation"), "{message}");
+    assert_eq!(state(|s| s.tracks.len()), entries);
+    state(|s| s.tracks[1].envelopes.clear());
+    // A folder: the track opens one that holds the next track.
+    state(|s| {
+        s.tracks[1].folder = 1;
+        s.tracks[2].folder = -1;
+        s.state_count += 1;
+    });
+    let (code, message) = lab.undo("track-add", &preview, &applied, "Kumi: undo (kund2)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("folder"), "{message}");
+    assert_eq!(state(|s| s.tracks.len()), entries);
+    // Told to discard, it goes.
+    let mut params = json!({"kind": "track-add", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo (kund3)", "discard": true});
+    params["epoch"] = lab.reads.epoch().into();
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(state(|s| s.tracks.len()), entries - 1);
+}
+
+#[test]
+fn undoing_an_added_fx_is_refused_when_the_producer_automated_one_of_its_parameters() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added “ReaEQ” to “Kick” (kad02)");
+    let guid = applied["applied"]["guid"].as_str().unwrap().to_string();
+    state(|s| {
+        s.tracks[1].envelopes.push(fake::FakeEnvelope::for_param("ReaEQ: Gain", &guid, 0, 16));
+        s.state_count += 1;
+    });
+    let (code, message) = lab.undo("fx-add", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("automation"), "{message}");
+    assert_eq!(kick_fx().len(), 1);
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund2)");
+    params["kind"] = "fx-add".into();
+    params["discard"] = true.into();
+    lab.call("change_restore", params).unwrap();
+    assert!(kick_fx().is_empty());
+}
+
+// ----- folders around a deleted track, big tracks, a folder moved (M5, S2, S7) -----
+
+/// Replaces the lab's tracks with these (name, folder depth), ids {T-name}, and no sends.
+fn folder_tracks(spec: &[(&str, i32)]) {
+    state(|s| {
+        s.tracks = spec
+            .iter()
+            .map(|(name, depth)| {
+                let mut track = fake::FakeTrack::new(&format!("{{T-{name}}}"), name);
+                track.folder = *depth;
+                track
+            })
+            .collect();
+        s.state_count += 1;
+    });
+}
+
+fn track_depths() -> Vec<(String, i32)> {
+    state(|s| s.tracks.iter().map(|t| (t.name.clone(), t.folder)).collect())
+}
+
+fn depths_are(expected: &[(&str, i32)]) -> bool {
+    track_depths() == expected.iter().map(|(n, d)| (n.to_string(), *d)).collect::<Vec<_>>()
+}
+
+#[test]
+fn undoing_a_delete_writes_no_folder_depth_the_deletion_didnt_change() {
+    let lab = Lab::new();
+    folder_tracks(&[("Group", 1), ("A", 0), ("B", 0), ("C", -1), ("D", 0)]);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{T-B}"}), "Kumi: Deleted track “B” (kdp01)");
+    assert_eq!(applied["material"]["depths"], json!([]), "deleting a middle track changes no depth");
+    // The producer drags D into the folder: C no longer closes it, D does.
+    state(|s| {
+        s.tracks[2].folder = 0;
+        s.tracks[3].folder = -1;
+    });
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert!(depths_are(&[("Group", 1), ("A", 0), ("B", 0), ("C", 0), ("D", -1)]), "{:?}", track_depths());
+}
+
+#[test]
+fn a_folder_that_was_mended_by_a_delete_is_mended_back_unless_the_producer_rearranged_it() {
+    let lab = Lab::new();
+    folder_tracks(&[("G", 1), ("H", 1), ("A", 0), ("B", -2), ("D", 0)]);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{T-H}"}), "Kumi: Deleted track “H” (kdp02)");
+    // REAPER made B close one folder fewer, and Kumi kept what it made of it.
+    assert_eq!(applied["material"]["depths"], json!([{"guid": "{T-B}", "before": -2, "after": -1}]));
+    assert!(depths_are(&[("G", 1), ("A", 0), ("B", -1), ("D", 0)]), "{:?}", track_depths());
+    // The producer made B close nothing and D close the folder: B is not as the deletion left it.
+    state(|s| {
+        s.tracks[2].folder = 0;
+        s.tracks[3].folder = -1;
+    });
+    let (code, message) = lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("rearranged"), "{message}");
+    assert_eq!(state(|s| s.tracks.len()), 4, "nothing was made");
+    // As the deletion left it: B is put back to -2 and H is a folder again.
+    state(|s| {
+        s.tracks[2].folder = -1;
+        s.tracks[3].folder = 0;
+    });
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert!(depths_are(&[("G", 1), ("H", 1), ("A", 0), ("B", -2), ("D", 0)]), "{:?}", track_depths());
+}
+
+#[test]
+fn a_delete_whose_folders_the_producer_rearranged_is_put_back_when_told_to_discard() {
+    let lab = Lab::new();
+    folder_tracks(&[("G", 1), ("H", 1), ("A", 0), ("B", -2), ("D", 0)]);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{T-H}"}), "Kumi: Deleted track “H” (kdp03)");
+    state(|s| s.tracks[2].folder = 0);
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund1)");
+    params["kind"] = "track-delete".into();
+    params["material"] = applied["material"].clone();
+    params["discard"] = true.into();
+    lab.call("change_restore", params).unwrap();
+    assert!(depths_are(&[("G", 1), ("H", 1), ("A", 0), ("B", -2), ("D", 0)]), "{:?}", track_depths());
+}
+
+#[test]
+fn a_track_too_big_to_keep_is_not_deleted() {
+    let lab = Lab::new();
+    // A name of 25 MiB: the track's chunk is as big.
+    state(|s| s.tracks[1].name = "x".repeat(25 << 20));
+    let entries = state(|s| s.undo_entries);
+    let preview = lab.call("change_preview", json!({"kind": "track-delete", "input": {"ref": KICK}})).unwrap();
+    let apply = json!({"kind": "track-delete", "input": {"ref": KICK}, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    let (code, message) = lab.call("change_apply", apply).unwrap_err();
+    assert_eq!(code, "failed");
+    assert!(message.contains("won't delete what it can't put back"), "{}", &message[..message.len().min(300)]);
+    assert_eq!((state(|s| s.tracks.len()), state(|s| s.undo_entries)), (4, entries));
+}
+
+#[test]
+fn a_folder_is_not_moved_alone() {
+    let lab = Lab::new();
+    // Drums is a folder of Kick and Snare.
+    let (code, message) =
+        lab.call("change_preview", json!({"kind": "track-move", "input": {"ref": "r:track:{AAAA}", "index": 4}})).unwrap_err();
+    assert_eq!(code, "bad-params");
+    assert!(message.contains("folder"), "{message}");
+    assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb"]);
+}
+
+#[test]
+fn the_index_a_read_gives_is_the_index_a_change_takes() {
+    let lab = Lab::new();
+    let api = fake::api();
+    let read = |kind: &str, extra: Value| {
+        let mut params = json!({"kind": kind, "epoch": lab.reads.epoch()});
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        lab.reads.read(&Reaper::new(&api), &params).unwrap()
+    };
+    let guids = three_fx(&lab);
+    let fx = read("fx", json!({"parent": KICK}));
+    assert_eq!(fx["items"][2]["ref"], fx_ref_of(&guids[2]));
+    lab.make("fx-move", json!({"ref": fx_ref_of(&guids[2]), "index": 0}), "Kumi: Moved “ReaDelay” to place 1 on “Kick” (kix03)");
+    assert_eq!(kick_fx()[0].0, guids[2], "FX index 0 is the first place");
+    // Tracks are counted from 1 in a read, and a change takes the place it shows.
+    let tracks = read("track", json!({}));
+    assert_eq!(tracks["indexFrom"], 1);
+    let rows: Vec<(String, i64)> = tracks["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap().to_string(), r["index"].as_i64().unwrap()))
+        .collect();
+    // (The master comes first, as 0; the tracks are 1, 2, 3.)
+    let named: Vec<(&str, i64)> = rows.iter().map(|(n, i)| (n.as_str(), *i)).collect();
+    assert_eq!(named, [("MASTER", 0), ("Drums", 1), ("Kick", 2), ("Snare", 3), ("Reverb", 4)]);
+    lab.make("track-move", json!({"ref": KICK, "index": 3}), "Kumi: Moved track “Kick” to position 3 (kix01)");
+    assert_eq!(names(), ["Drums", "Snare", "Kick", "Reverb"], "Kick took the place its neighbour's row said");
+    lab.make("track-add", json!({"name": "Pad", "index": 1}), "Kumi: Added track “Pad” (kix02)");
+    assert_eq!(names()[0], "Pad", "index 1 is the first place");
+    // FX, parameters and notes are counted from 0 in a read, and in a change.
+    for kind in ["fx", "param", "note"] {
+        let parent = match kind {
+            "fx" => json!({"parent": "r:track:{AAAA}"}),
+            "param" => json!({"parent": "r:fx:{FX-EQ}"}),
+            _ => json!({"parent": SNARE_TAKE}),
+        };
+        let page = read(kind, parent);
+        assert_eq!(page["indexFrom"], 0, "{kind}");
+        assert_eq!(page["items"][0]["index"], 0, "{kind}");
+    }
+}
+
+// ----- an undo after a look at another tab and back (S3) -----
+
+#[test]
+fn an_undo_asked_in_an_earlier_epoch_of_the_same_project_goes_through_and_another_projects_does_not() {
+    let lab = Lab::new();
+    let api = fake::api();
+    let proj = Reaper::new(&api).current_project().unwrap().ptr;
+    lab.reads.note_project(proj);
+    let first = lab.reads.epoch();
+    let (preview, applied) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), "Kumi: Kick volume −6 dB (ktb01)");
+    // The producer looks at another tab and comes back: the epoch moved twice, to the same project.
+    for _ in 0..2 {
+        lab.reads.bump_epoch();
+        lab.reads.note_project(proj);
+    }
+    assert_ne!(lab.reads.epoch(), first);
+    let mut params = json!({"kind": "track-volume", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": "Kumi: undo (kund1)"});
+    params["epoch"] = first.clone().into();
+    // A change is not asked in a past epoch.
+    let apply = json!({"kind": "track-volume", "input": {"ref": KICK, "volumeDb": -3.0}, "fence": preview["fence"], "desc": "Kumi: x (k1111)", "epoch": first});
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "stale");
+    // An undo of it is: the id it names is the same.
+    let restored = lab.call("change_restore", params.clone()).unwrap();
+    assert_eq!(restored["epoch"], lab.reads.epoch().as_str(), "the answer carries the epoch now");
+    assert_eq!(state(|s| s.tracks[1].volume), 1.0);
+    // A different project took the tab: what was done in the project before is another project's.
+    let (preview, applied) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -9.0}), "Kumi: Kick volume −9 dB (ktb02)");
+    let before = lab.reads.epoch();
+    lab.reads.project_replaced(proj);
+    lab.reads.bump_epoch();
+    lab.reads.note_project(proj);
+    let mut params = json!({"kind": "track-volume", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": "Kumi: undo (kund2)"});
+    params["epoch"] = before.into();
+    assert_eq!(lab.call("change_restore", params).unwrap_err().0, "stale");
+    // An epoch that was never seen is not any project's.
+    let mut unknown = json!({"kind": "track-volume", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": "Kumi: undo (kund3)"});
+    unknown["epoch"] = "never-1".into();
+    assert_eq!(lab.call("change_restore", unknown).unwrap_err().0, "stale");
+}
+
+// ----- a write that goes wrong is taken back, or said to be unknown (S4); notes cost and undo overlaps (S5, S6) -----
+
+#[test]
+fn a_name_that_stands_for_several_plug_ins_is_refused_before_anything_is_added() {
+    let lab = Lab::new();
+    for name in ["FXADD:ReaEQ", "fxadd:", "  FXADD:x"] {
+        let (code, message) = lab.call("change_preview", json!({"kind": "fx-add", "input": {"ref": KICK, "name": name}})).unwrap_err();
+        assert_eq!(code, "bad-params", "{name}");
+        assert!(message.contains("one plug-in"), "{message}");
+    }
+    assert!(kick_fx().is_empty());
+}
+
+#[test]
+fn an_add_that_leaves_more_than_it_should_is_taken_back_inside_the_same_call() {
+    let lab = Lab::new();
+    // A name that adds two plug-ins where one was asked for.
+    let input = json!({"ref": KICK, "name": "ReaEQ twice"});
+    let preview = lab.call("change_preview", json!({"kind": "fx-add", "input": input})).unwrap();
+    let apply = json!({"kind": "fx-add", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    let (code, message) = lab.call("change_apply", apply.clone()).unwrap_err();
+    assert_eq!(code, "failed");
+    assert!(message.contains("taken back"), "{message}");
+    assert!(kick_fx().is_empty(), "nothing of it is left");
+    // Taken back inside a block that wrote nothing in the end: no entry the producer would find.
+    assert_eq!(state(|s| s.undo_depth), 0);
+    // If the plug-ins can't be taken off again, nobody knows what the track holds.
+    state(|s| s.fail_fx_delete = true);
+    let (code, message) = lab.call("change_apply", apply).unwrap_err();
+    assert_eq!(code, "uncertain");
+    assert!(message.contains("could not take back"), "{message}");
+    assert_eq!(kick_fx().len(), 2);
+}
+
+#[test]
+fn a_notes_write_that_goes_wrong_is_taken_back_or_called_uncertain() {
+    let lab = Lab::new();
+    let input =
+        json!({"ref": SNARE_TAKE, "notes": [{"pitch": 60, "start": 4.0, "length": 1.0}, {"pitch": 61, "start": 5.0, "length": 1.0}]});
+    let before = snare_notes();
+    let preview = lab.call("change_preview", json!({"kind": "notes-add", "input": input})).unwrap();
+    let apply = json!({"kind": "notes-add", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    // The write drops a note; putting the take back works.
+    state(|s| s.glitch_events = 1);
+    let (code, message) = lab.call("change_apply", apply.clone()).unwrap_err();
+    assert_eq!(code, "failed");
+    assert!(message.contains("taken back"), "{message}");
+    assert_eq!(snare_notes(), before);
+    // The write drops one and so does putting back.
+    state(|s| s.glitch_events = 2);
+    let (code, _) = lab.call("change_apply", apply.clone()).unwrap_err();
+    assert_eq!(code, "uncertain");
+    // And an undo that goes wrong the same way.
+    let (preview, applied) = lab.make("notes-add", input, "Kumi: Wrote 2 notes (kno01)");
+    let written = snare_notes();
+    state(|s| s.glitch_events = 1);
+    let (code, _) = lab.undo("notes-add", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "failed");
+    assert_eq!(snare_notes(), written);
+}
+
+#[test]
+fn undoing_a_notes_delete_is_refused_when_the_producer_wrote_a_note_over_one_it_would_put_back() {
+    let lab = Lab::new();
+    // The snare take has pitch 38 on channel 1 from tick 0 to 480.
+    let (preview, applied) = lab.make("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [0]}), "Kumi: Deleted 1 note (kno02)");
+    state(|s| {
+        s.tracks[2].items[0].takes[0].notes.insert(
+            0,
+            fake::FakeNote { start_ppq: 100.0, end_ppq: 600.0, channel: 0, pitch: 38, velocity: 70, selected: false, muted: false },
+        );
+    });
+    let notes = snare_notes();
+    let (code, message) = lab.undo("notes-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("overlap"), "{message}");
+    assert_eq!(snare_notes(), notes, "nothing was written");
+    // Told to discard, it is put back.
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund2)");
+    params["kind"] = "notes-delete".into();
+    params["discard"] = true.into();
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(snare_notes().len(), 3);
+}
+
+#[test]
+fn a_notes_change_in_a_big_take_costs_no_more_calls_than_in_a_small_one() {
+    let lab = Lab::new();
+    let fill = |count: i32| {
+        state(|s| {
+            s.tracks[2].items[0].takes[0].notes = (0..count)
+                .map(|n| fake::FakeNote {
+                    start_ppq: n as f64 * 960.0,
+                    end_ppq: n as f64 * 960.0 + 480.0,
+                    channel: 0,
+                    pitch: 40 + n % 40,
+                    velocity: 90,
+                    selected: false,
+                    muted: false,
+                })
+                .collect();
+        })
+    };
+    let notes: Vec<Value> = (0..100).map(|i| json!({"pitch": 100 + i % 20, "start": 200_000.0 + i as f64, "length": 0.5})).collect();
+    let mut costs = vec![];
+    for (n, count) in [100, 20_000, 100_000].into_iter().enumerate() {
+        fill(count);
+        let started = Instant::now();
+        let calls = state(|s| s.calls);
+        let (preview, applied) =
+            lab.make("notes-add", json!({"ref": SNARE_TAKE, "notes": notes}), &format!("Kumi: Wrote 100 notes (kno0{n})"));
+        let apply_calls = state(|s| s.calls) - calls;
+        let calls = state(|s| s.calls);
+        lab.undo("notes-add", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+        let undo_calls = state(|s| s.calls) - calls;
+        assert_eq!(snare_notes().len(), count as usize);
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "{count} notes: {:?}", started.elapsed());
+        costs.push((apply_calls, undo_calls));
+    }
+    // (The calls a note costs are the conversions of the 100 notes it writes; the take's size adds none.)
+    assert_eq!(costs[0], costs[1], "{costs:?}");
+    assert_eq!(costs[1], costs[2], "{costs:?}");
+}
+
+// ----- a restore that writes nothing makes no point (N1) -----
+
+#[test]
+fn a_restore_or_apply_that_writes_nothing_closes_without_a_point_so_it_commits_nothing_of_the_producers() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), "Kumi: Kick volume −6 dB (kn101)");
+    assert_eq!(applied["undo"]["entry"], true);
+    let restored = lab.undo("track-volume", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(restored["undo"]["entry"], true, "an undo that wrote is a point");
+    // The producer has bare edits that REAPER hasn't made a point of yet; the same undo is asked again (a retry).
+    state(|s| s.undo_dirty = true);
+    let entries = state(|s| s.undo_entries);
+    let again = lab.undo("track-volume", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(again["undo"]["entry"], false, "nothing was written, so there is no point");
+    assert_eq!(state(|s| s.undo_entries), entries);
+    assert!(state(|s| s.undo_dirty), "the producer's pending edits are not committed under Kumi's name");
+    // The same for an apply that finds it so already.
+    let (_, applied) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": 0.0}), "Kumi: Kick volume 0 dB (kn102)");
+    assert_eq!(applied["undo"]["entry"], false);
+    assert_eq!(state(|s| s.undo_entries), entries);
+    assert!(state(|s| s.undo_dirty));
+    // And the other kinds that can find it so: a send, an FX parameter, a note retry, a tempo, the loop.
+    let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added “ReaEQ” to “Kick” (kn103)");
+    lab.undo("fx-add", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    let entries = state(|s| s.undo_entries);
+    let (preview, applied) = lab.make("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [1]}), "Kumi: Deleted 1 note (kn104)");
+    lab.undo("notes-delete", &preview, &applied, "Kumi: undo (kund4)").unwrap();
+    let entries_after = state(|s| s.undo_entries);
+    assert_eq!(entries_after, entries + 2);
+    let retry = lab.undo("notes-delete", &preview, &applied, "Kumi: undo (kund5)").unwrap();
+    assert_eq!(retry["undo"]["entry"], false);
+    assert_eq!(state(|s| s.undo_entries), entries_after);
+}
+
+// ----- the undo watch with a long history, and an undo with an edit in one look (N2) -----
+
+#[test]
+fn an_undo_is_still_seen_when_hundreds_of_points_are_redoable() {
+    let lab = Lab::new();
+    let desc = "Kumi: Kick volume −6 dB (kn201)";
+    lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), desc);
+    for n in 0..300 {
+        fake::producer_edit(&format!("Edit {n}"));
+    }
+    lab.tick();
+    lab.events.take();
+    // The producer steps back over 300 of their own edits: none is Kumi's.
+    for _ in 0..300 {
+        fake::producer_undo();
+    }
+    lab.tick();
+    assert!(lab.events.take().is_empty());
+    // And then over Kumi's: more than 256 points can be redone now, which a look at the first 256 of them can't tell apart.
+    fake::producer_undo();
+    lab.tick();
+    assert_eq!(lab.events.take(), [("undone_in_daw".to_string(), json!({"descs": [desc], "how": "undo", "epoch": lab.reads.epoch()}))]);
+    fake::producer_redo();
+    lab.tick();
+    assert_eq!(lab.events.take(), [("undone_in_daw".to_string(), json!({"descs": [desc], "how": "redo", "epoch": lab.reads.epoch()}))]);
+}
+
+#[test]
+fn an_undo_and_a_new_edit_between_two_looks_still_tell_that_kumis_point_was_undone() {
+    let lab = Lab::new();
+    let desc = "Kumi: Kick volume −6 dB (kn202)";
+    lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), desc);
+    lab.tick();
+    lab.events.take();
+    // The same number of points, with the project at the same place, and Kumi's gone.
+    fake::producer_undo();
+    fake::producer_edit("Adjust track pan");
+    lab.tick();
+    assert_eq!(lab.events.take(), [("undone_in_daw".to_string(), json!({"descs": [desc], "how": "undo", "epoch": lab.reads.epoch()}))]);
+    // Bare edits that make no point, and the producer's own, say nothing.
+    state(|s| s.state_count += 1);
+    lab.tick();
+    fake::producer_edit("Adjust track mute");
+    lab.tick();
+    assert!(lab.events.take().is_empty());
+}
+
+#[test]
+fn a_track_put_back_does_not_join_the_selection_the_producer_has_made_since() {
+    let lab = Lab::new();
+    state(|s| s.tracks[3].selected = true);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{DDDD}"}), "Kumi: Deleted track “Reverb” (kn301)");
+    // The producer selects Kick; the track comes back without being selected beside it.
+    state(|s| s.tracks[1].selected = true);
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(state(|s| s.tracks.iter().map(|t| t.selected).collect::<Vec<_>>()), [false, true, false, false]);
+    // With nothing selected, it is the selection again, as it was.
+    state(|s| s.tracks[3].selected = true);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{DDDD}"}), "Kumi: Deleted track “Reverb” (kn302)");
+    state(|s| s.tracks.iter_mut().for_each(|t| t.selected = false));
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| s.tracks.iter().map(|t| t.selected).collect::<Vec<_>>()), [false, false, false, true]);
+}
+
+// ----- a marker made again (N3) -----
+
+#[test]
+fn a_marker_made_again_is_made_once_keeps_its_lane_and_a_region_its_render_matrix() {
+    let lab = Lab::new();
+    state(|s| {
+        s.markers[1].number = 7;
+        s.marker_lanes.insert("{REG-1}".into(), 2);
+        s.render_matrix.insert(7, vec!["{BBBB}".into(), "master".into()]);
+    });
+    let (preview, applied) = lab.make("marker-delete", json!({"ref": "r:region:{REG-1}"}), "Kumi: Deleted region “Verse” (kmk01)");
+    assert_eq!(applied["material"]["matrix"], json!(["{BBBB}", "master"]));
+    assert_eq!(applied["material"]["lane"], 2);
+    assert_eq!(state(|s| s.markers.len()), 1);
+    let restored = lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(state(|s| s.markers.len()), 2);
+    let made = restored["restored"]["ref"].as_str().unwrap().trim_start_matches("r:region:").to_string();
+    assert_eq!(state(|s| s.marker_lanes.get(&made).copied()), Some(2), "its ruler lane");
+    assert_eq!(state(|s| s.render_matrix.get(&7).cloned()), Some(vec!["{BBBB}".to_string(), "master".to_string()]), "its render matrix");
+    // The first answer was lost and the host asks again: the marker made is the one that comes back, and no second is made.
+    let entries = state(|s| s.undo_entries);
+    let retry = lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| s.markers.len()), 2, "no second marker");
+    assert_eq!(retry["restored"]["ref"], restored["restored"]["ref"]);
+    assert_eq!(retry["undo"]["entry"], false);
+    assert_eq!(state(|s| s.undo_entries), entries);
+    // A marker (not a region) the same way.
+    let (preview, applied) = lab.make("marker-delete", json!({"ref": "r:marker:{MARK-1}"}), "Kumi: Deleted marker “Drop” (kmk02)");
+    lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund4)").unwrap();
+    assert_eq!(state(|s| s.markers.len()), 2);
+}
+
+// ----- a plug-in with a meter among its parameters (N5) -----
+
+#[test]
+fn a_meter_shown_as_a_parameter_does_not_make_every_undo_of_an_fx_changed_but_a_tweak_still_does() {
+    let lab = Lab::new();
+    // A plug-in made now has two meters among its parameters: one called a meter, one that only moves by itself.
+    state(|s| s.meter_params = true);
+    let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added “ReaEQ” to “Kick” (kn501)");
+    assert_eq!(applied["applied"]["signature"]["volatile"], json!([4, 5]), "{}", applied["applied"]["signature"]);
+    // A real tweak is seen with the meters about.
+    state(|s| s.tracks[1].fx[0].params[0].value = 0.9);
+    let (code, _) = lab.undo("fx-add", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    state(|s| s.tracks[1].fx[0].params[0].value = 0.5);
+    lab.undo("fx-add", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert!(kick_fx().is_empty(), "the meters didn't refuse it");
+}
+
+#[test]
+fn deleting_an_fx_with_a_meter_in_it_is_not_refused_for_the_meter() {
+    let lab = Lab::new();
+    state(|s| s.meter_params = true);
+    lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added “ReaEQ” to “Kick” (kn502)");
+    let fx = fx_ref_of(&kick_fx()[0].0);
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx}), "Kumi: Deleted “ReaEQ” from “Kick” (kn503)");
+    assert_eq!(preview["fence"]["signature"]["volatile"], json!([4, 5]));
+    assert!(kick_fx().is_empty());
+    let dir = fx_folder();
+    lab.undo("fx-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(kick_fx().len(), 1);
+    drop(dir);
 }

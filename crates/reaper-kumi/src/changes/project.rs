@@ -74,6 +74,7 @@ pub fn tempo_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: None,
         display: json!({"title": format!("Tempo {} BPM", trimmed(after))}),
+        unwritten: close(now, wanted),
     })
 }
 
@@ -88,7 +89,11 @@ pub fn tempo_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             return Err(failed("REAPER wouldn't put the tempo back"));
         }
     }
-    Ok(Restored { restored: json!({"bpm": prior}), display: json!({"title": format!("Tempo back to {} BPM", trimmed(prior))}) })
+    Ok(Restored {
+        restored: json!({"bpm": prior}),
+        display: json!({"title": format!("Tempo back to {} BPM", trimmed(prior))}),
+        unwritten: close(now, prior),
+    })
 }
 
 // ----- tempo and time signature markers -----
@@ -203,7 +208,7 @@ pub fn marker_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if let Some(base) = base {
         applied["base"] = base;
     }
-    Ok(Applied { applied, created: None, material: None, display: json!({"title": marker_title(ctx, &plan)}) })
+    Ok(Applied { applied, created: None, material: None, display: json!({"title": marker_title(ctx, &plan)}), ..Default::default() })
 }
 
 pub fn marker_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -212,7 +217,7 @@ pub fn marker_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let now = marker_state(found.as_ref().map(|(_, m)| m));
     let title = format!("Tempo marker at {} put back", bar_text(ctx.reaper, ctx.proj, time));
     if same_marker(&now, restore.prior) {
-        return Ok(Restored { restored: now, display: json!({"title": title}) });
+        return Ok(Restored { restored: now, display: json!({"title": title}), unwritten: true });
     }
     if !restore.discard && !same_marker(&now, restore.applied) {
         return Err(changed("the tempo markers there have been changed in REAPER since Kumi set them"));
@@ -241,7 +246,7 @@ pub fn marker_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !same_marker(&after, restore.prior) {
         return Err(failed("REAPER kept the tempo marker as it was"));
     }
-    Ok(Restored { restored: after, display: json!({"title": title}) })
+    Ok(Restored { restored: after, display: json!({"title": title}), ..Default::default() })
 }
 
 /// A marker made, or written over, to hold what `state` says.
@@ -282,6 +287,7 @@ pub fn marker_delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Appl
         created: None,
         material: Some(json!({"time": marker.time, "state": now})),
         display: json!({"title": format!("Deleted tempo marker at {}", bar_text(ctx.reaper, ctx.proj, marker.time))}),
+        ..Default::default()
     })
 }
 
@@ -293,7 +299,7 @@ pub fn marker_delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if let Some((_, existing)) = marker_at(ctx, time) {
         let now = marker_state(Some(&existing));
         return if same_marker(&now, saved) || restore.discard {
-            Ok(Restored { restored: now, display: json!({"title": title}) })
+            Ok(Restored { restored: now, display: json!({"title": title}), unwritten: true })
         } else {
             Err(changed("there is a different tempo marker there now"))
         };
@@ -305,7 +311,7 @@ pub fn marker_delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !same_marker(&after, saved) {
         return Err(failed("REAPER made the tempo marker differently"));
     }
-    Ok(Restored { restored: after, display: json!({"title": title}) })
+    Ok(Restored { restored: after, display: json!({"title": title}), ..Default::default() })
 }
 
 // ----- the loop -----
@@ -372,19 +378,25 @@ pub fn loop_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: None,
         display: json!({"title": loop_title(ctx, &after), "before": now, "after": after}),
+        unwritten: same_loop(&now, &wanted),
     })
 }
 
 pub fn loop_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let now = loop_state(ctx);
-    let after = if same_loop(&now, restore.prior) {
+    let already = same_loop(&now, restore.prior);
+    let after = if already {
         now
     } else if restore.discard || same_loop(&now, restore.applied) {
         put_loop(ctx, restore.prior)?
     } else {
         return Err(changed("the loop has been changed in REAPER since Kumi set it"));
     };
-    Ok(Restored { restored: after.clone(), display: json!({"title": format!("{} (put back)", loop_title(ctx, &after))}) })
+    Ok(Restored {
+        restored: after.clone(),
+        display: json!({"title": format!("{} (put back)", loop_title(ctx, &after))}),
+        unwritten: already,
+    })
 }
 
 // ----- repeat -----
@@ -415,7 +427,13 @@ pub fn repeat_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if ctx.reaper.repeat(ctx.proj) != on {
         return Err(failed("REAPER kept repeat as it was"));
     }
-    Ok(Applied { applied: json!({"on": on}), created: None, material: None, display: json!({"title": format!("Repeat {}", on_off(on))}) })
+    Ok(Applied {
+        applied: json!({"on": on}),
+        created: None,
+        material: None,
+        display: json!({"title": format!("Repeat {}", on_off(on))}),
+        unwritten: now == on,
+    })
 }
 
 pub fn repeat_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -429,5 +447,9 @@ pub fn repeat_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             return Err(failed("REAPER kept repeat as it was"));
         }
     }
-    Ok(Restored { restored: json!({"on": prior}), display: json!({"title": format!("Repeat back {}", on_off(prior))}) })
+    Ok(Restored {
+        restored: json!({"on": prior}),
+        display: json!({"title": format!("Repeat back {}", on_off(prior))}),
+        unwritten: now == prior,
+    })
 }

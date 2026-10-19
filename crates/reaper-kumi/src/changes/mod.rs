@@ -49,11 +49,14 @@ pub struct Preview {
     pub display: Value,
 }
 
+#[derive(Default)]
 pub struct Applied {
     pub applied: Value,
     pub created: Option<Value>,
     pub material: Option<Value>,
     pub display: Value,
+    /// Nothing was written (it was so already): the block closes without a point, so it commits nothing of the producer's.
+    pub unwritten: bool,
 }
 
 /// What a restore is told: the change as the journal kept it.
@@ -66,9 +69,29 @@ pub struct Restore<'a> {
     pub discard: bool,
 }
 
+#[derive(Default)]
 pub struct Restored {
     pub restored: Value,
     pub display: Value,
+    /// Nothing was written (it was as it was already, or a retry): see `Applied`.
+    pub unwritten: bool,
+}
+
+/// What an apply or a restore says of itself that the block it ran in needs to know.
+trait Written {
+    fn unwritten(&self) -> bool;
+}
+
+impl Written for Applied {
+    fn unwritten(&self) -> bool {
+        self.unwritten
+    }
+}
+
+impl Written for Restored {
+    fn unwritten(&self) -> bool {
+        self.unwritten
+    }
 }
 
 /// A kind of change.
@@ -234,8 +257,15 @@ impl Changes {
     /// The project the request is about, if the epoch it names is this project's: a request made in another tab, or before
     /// the project in this one was replaced, names refs that mean something else now.
     fn context<'a, 'r>(&self, reaper: &'a Reaper<'r>, reads: &'a Reads, params: &Value) -> Done<Ctx<'a, 'r>> {
+        self.context_from(reaper, reads, params, false)
+    }
+
+    /// As `context`; with `past` (an undo, whose refs are ids that hold across a look at another tab and back) an earlier
+    /// epoch of the project that is open now is accepted too.
+    fn context_from<'a, 'r>(&self, reaper: &'a Reaper<'r>, reads: &'a Reads, params: &Value, past: bool) -> Done<Ctx<'a, 'r>> {
         let epoch = text(params, "epoch").map_err(|_| bad("epoch: the epoch the refs were read in"))?;
-        if epoch != reads.epoch() {
+        let of_this_project = past && reaper.current_project().is_some_and(|info| reads.epoch_is_of(epoch, info.ptr));
+        if epoch != reads.epoch() && !of_this_project {
             return Err((
                 daw_bridge::wire::code::STALE.into(),
                 format!(
@@ -285,7 +315,7 @@ impl Changes {
     }
 
     pub fn restore(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
-        let ctx = self.context(reaper, reads, params)?;
+        let ctx = self.context_from(reaper, reads, params, true)?;
         let kind = kind_of(params)?;
         let desc = text(params, "desc")?;
         let restore = Restore {
@@ -302,7 +332,7 @@ impl Changes {
 
     /// Runs a change as one undo block named `desc` (or inside the plan's block, when one is open) and says what REAPER's
     /// history shows after it: whether its top point is this one, and the state count then.
-    fn in_block<T>(&self, ctx: &Ctx, desc: &str, write: impl FnOnce(&Ctx) -> Done<T>) -> Done<(T, Value)> {
+    fn in_block<T: Written>(&self, ctx: &Ctx, desc: &str, write: impl FnOnce(&Ctx) -> Done<T>) -> Done<(T, Value)> {
         let in_plan = self.plan.borrow().is_some();
         if !in_plan && !ctx.reaper.undo_begin(ctx.proj) {
             return Err(failed("this REAPER has no undo blocks, so Kumi won't change anything in it"));
@@ -311,10 +341,11 @@ impl Changes {
         if in_plan {
             return result.map(|done| (done, json!({"desc": desc, "entry": null, "stateCount": null, "inPlan": true})));
         }
-        // A change that refused wrote nothing: its block makes no point (flags 0), and pending bare edits of the
-        // producer's stay where they were.
-        ctx.reaper.undo_end(ctx.proj, desc, if result.is_ok() { -1 } else { 0 });
-        let undo = self.after_block(ctx, desc, result.is_ok());
+        // A change that refused, or found everything as it should be, wrote nothing: its block makes no point (flags 0),
+        // and pending bare edits of the producer's stay where they were.
+        let wrote = result.as_ref().is_ok_and(|done| !done.unwritten());
+        ctx.reaper.undo_end(ctx.proj, desc, if wrote { -1 } else { 0 });
+        let undo = self.after_block(ctx, desc, wrote);
         result.map(|done| (done, undo))
     }
 

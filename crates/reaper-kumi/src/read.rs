@@ -88,6 +88,9 @@ pub struct Reads {
     /// What `GetTouchedOrFocusedFX` said (touched, focused) when the tab last changed: it names the track by its number in
     /// whichever project is active, and takes no project, so the same answer after a switch may be another project's.
     stale_fx: RefCell<[Option<crate::reaper::FxHit>; 2]>,
+    /// The project each recent epoch was about (its identity), so that a look at another tab and back doesn't make what
+    /// was done before it un-undoable: the epoch moved, the project is the same.
+    eras: RefCell<std::collections::VecDeque<(String, String)>>,
 }
 
 /// A serial number for each project open in a tab, from this REAPER's own counter: the same while the project stays open
@@ -247,6 +250,24 @@ impl Reads {
     /// The tab changed: what REAPER says is touched or focused now was said about the project before.
     pub fn forget_touched(&self, reaper: &Reaper) {
         *self.stale_fx.borrow_mut() = [reaper.touched_or_focused_fx(0), reaper.touched_or_focused_fx(1)];
+    }
+
+    /// Remembers which project the epoch now is about.
+    pub fn note_project(&self, proj: Project) {
+        let epoch = self.epoch();
+        let mut eras = self.eras.borrow_mut();
+        if eras.iter().all(|(known, _)| *known != epoch) {
+            eras.push_back((epoch, self.identity(proj)));
+            while eras.len() > 64 {
+                eras.pop_front();
+            }
+        }
+    }
+
+    /// Whether an epoch, current or past, was about this project.
+    pub fn epoch_is_of(&self, epoch: &str, proj: Project) -> bool {
+        let identity = self.identity(proj);
+        self.eras.borrow().iter().any(|(known, of)| known == epoch && *of == identity)
     }
 
     /// Refs stop meaning what they meant: a tab switch, or a new project in the tab.
@@ -473,7 +494,7 @@ impl Reads {
         let pager = Pager::new(request.limit, ANSWER_BYTES);
         let cursor = request.cursor.as_deref();
         let parent = request.parent.as_deref();
-        match kind {
+        let answer = match kind {
             "project" => {
                 let mut pager = pager;
                 pager.push(rows::project_row(reaper, proj, &info, &self.identity(proj), self.project_id(reaper, proj, &info).as_deref()));
@@ -490,7 +511,20 @@ impl Reads {
             "note" => self.read_notes(reaper, proj, pager, parent, cursor),
             "envelope" => self.read_envelopes(reaper, proj, pager, parent, cursor),
             other => Err(bad(format!("REAPER has no kind {other:?} to read"))),
-        }
+        };
+        // Where a row's `index` starts counting, which is where the change that takes the same index starts too: a track's
+        // place is counted from 1 (as REAPER numbers its tracks), an FX's place, a parameter's and a note's from 0.
+        let from = match kind {
+            "track" => Some(1),
+            "fx" | "param" | "note" => Some(0),
+            _ => None,
+        };
+        answer.map(|mut answer| {
+            if let Some(from) = from {
+                answer["indexFrom"] = from.into();
+            }
+            answer
+        })
     }
 
     /// `read {ref}`: the one object a ref names.

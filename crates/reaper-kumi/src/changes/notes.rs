@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use super::{Applied, Ctx, Done, Fault, Preview, Restore, Restored};
+use crate::midi::Event;
 use crate::read::{bad, failed, take_start_qn};
 use crate::reaper::{MidiNote, Take};
 use crate::refs;
@@ -70,18 +71,6 @@ impl Note {
     }
 }
 
-fn from_midi(note: MidiNote) -> Note {
-    Note {
-        channel: note.channel,
-        pitch: note.pitch,
-        start: note.start_ppq,
-        end: note.end_ppq,
-        velocity: note.velocity,
-        muted: note.muted,
-        selected: note.selected,
-    }
-}
-
 fn counts(notes: &[Note]) -> HashMap<Key, usize> {
     let mut counts = HashMap::new();
     for note in notes {
@@ -117,23 +106,46 @@ fn spec(note: &Note) -> crate::midi::NoteSpec {
     }
 }
 
-/// The notes in `remove` taken out of the take and the notes in `add` put in, all in one go: nothing else in the take changes.
-fn write_notes(ctx: &Ctx, take: Take, remove: &[Note], add: &[Note]) -> Done<()> {
-    let reaper = ctx.reaper;
-    let events = reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
+/// The notes in `remove` taken out of the take (as `events` has them) and the notes in `add` put in, all in one go:
+/// nothing else in the take changes.
+fn write_notes(ctx: &Ctx, take: Take, events: &[Event], remove: &[Note], add: &[Note]) -> Done<()> {
     let (remove, add): (Vec<_>, Vec<_>) = (remove.iter().map(spec).collect(), add.iter().map(spec).collect());
-    let edited = crate::midi::edit_notes(&events, &remove, &add).map_err(|message| changed(format!("the take changed: {message}")))?;
-    if !reaper.set_midi_events(take, &edited) {
+    let edited = crate::midi::edit_notes(events, &remove, &add).map_err(|message| changed(format!("the take changed: {message}")))?;
+    if !ctx.reaper.set_midi_events(take, &edited) {
         return Err(failed("REAPER wouldn't take the new MIDI"));
     }
     Ok(())
 }
 
-fn read_all(ctx: &Ctx, take: Take) -> Done<Vec<Note>> {
-    let (count, _, _) = ctx.reaper.midi_counts(take).ok_or_else(|| failed("REAPER wouldn't count the notes in that take"))?;
-    (0..count.max(0))
-        .map(|i| ctx.reaper.midi_note(take, i).map(from_midi).ok_or_else(|| failed("REAPER wouldn't read a note of that take")))
-        .collect()
+/// The take's notes in the order of the one buffer REAPER gives all its MIDI in (a call, where a note at a time is a call
+/// each), and the buffer.
+fn read_all(ctx: &Ctx, take: Take) -> Done<(Vec<Note>, Vec<Event>)> {
+    let events = ctx.reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
+    let notes = crate::midi::notes(&events).iter().map(from_spec).collect();
+    Ok((notes, events))
+}
+
+fn from_spec(note: &crate::midi::NoteSpec) -> Note {
+    Note {
+        channel: note.channel as i32,
+        pitch: note.pitch as i32,
+        start: note.start as f64,
+        end: note.end as f64,
+        velocity: note.velocity as i32,
+        muted: note.muted,
+        selected: note.selected,
+    }
+}
+
+/// A write that did not leave the take as it should be: what was written is taken back, as far as it can be checked. If
+/// it can't be, nobody knows what the take holds.
+fn take_back(ctx: &Ctx, take: Take, events: &[Event], was: &Value, message: &str) -> Fault {
+    let put_back = ctx.reaper.set_midi_events(take, events) && read_all(ctx, take).is_ok_and(|(notes, _)| fence_of(&notes) == *was);
+    if put_back {
+        failed(format!("{message}; what was written is taken back"))
+    } else {
+        ("uncertain".into(), format!("{message}, and Kumi could not take back what it wrote: read the take"))
+    }
 }
 
 /// The take's notes as one value, to fence an index with: their number and a hash of what they are.
@@ -199,6 +211,8 @@ struct Plan {
     take: Take,
     item_qn: f64,
     before: Vec<Note>,
+    /// The take's MIDI as it was read.
+    events: Vec<Event>,
     /// The places in `before` that go.
     remove: Vec<usize>,
     /// What is written.
@@ -309,7 +323,7 @@ fn changed_note(ctx: &Ctx, take: Take, item_qn: f64, was: &Note, spec: &Value) -
 
 /// REAPER shortens one of two notes of the same pitch on the same channel that overlap, which changes a note Kumi wasn't
 /// asked to touch (and can't be put back from the values it wrote): a note that would overlap one is refused.
-fn check_overlaps(before: &[Note], remove: &[usize], add: &[Note]) -> Done<()> {
+fn check_overlaps(before: &[Note], remove: &[usize], add: &[Note]) -> Result<(), String> {
     let gone: std::collections::HashSet<usize> = remove.iter().copied().collect();
     // Per channel and pitch: where each note starts and ends, and whether it is one of the new ones.
     type Spans = Vec<(f64, f64, bool)>;
@@ -328,10 +342,10 @@ fn check_overlaps(before: &[Note], remove: &[usize], add: &[Note]) -> Done<()> {
         let (mut latest_end, mut latest_new_end) = (f64::MIN, f64::MIN);
         for (start, end, new) in list {
             if (new && start < latest_end) || (!new && start < latest_new_end) {
-                return Err(bad(format!(
+                return Err(format!(
                     "a note of pitch {pitch} on channel {} would overlap another note of the same pitch (at tick {start}): REAPER would shorten one of them, so leave a gap or use another channel",
                     channel + 1
-                )));
+                ));
             }
             latest_end = latest_end.max(end);
             if new {
@@ -345,7 +359,7 @@ fn check_overlaps(before: &[Note], remove: &[usize], add: &[Note]) -> Done<()> {
 fn plan(ctx: &Ctx, input: &Value, mode: Mode) -> Done<Plan> {
     let take = take_of(ctx, &input["ref"])?;
     let item_qn = take_start_qn(ctx.reaper, ctx.proj, take);
-    let before = read_all(ctx, take)?;
+    let (before, events) = read_all(ctx, take)?;
     let (mut remove, mut add) = (Vec::new(), Vec::new());
     match mode {
         Mode::Add => {
@@ -375,8 +389,8 @@ fn plan(ctx: &Ctx, input: &Value, mode: Mode) -> Done<Plan> {
     if remove.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(bad("a note is named twice"));
     }
-    check_overlaps(&before, &remove, &add)?;
-    Ok(Plan { take, item_qn, before, remove, add })
+    check_overlaps(&before, &remove, &add).map_err(bad)?;
+    Ok(Plan { take, item_qn, before, events, remove, add })
 }
 
 // ----- preview, apply, restore -----
@@ -409,10 +423,10 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value, mode: Mode) -> Done<Applie
     }
     let take = plan.take;
     let remove: Vec<Note> = plan.remove.iter().map(|&i| plan.before[i]).collect();
-    write_notes(ctx, take, &remove, &plan.add)?;
-    let after = read_all(ctx, take)?;
+    write_notes(ctx, take, &plan.events, &remove, &plan.add)?;
+    let (after, _) = read_all(ctx, take)?;
     if after.len() + plan.remove.len() != plan.before.len() + plan.add.len() {
-        return Err(failed("the take doesn't hold the notes it should after the change"));
+        return Err(take_back(ctx, take, &plan.events, fence, "the take doesn't hold the notes it should after the change"));
     }
     let (removed, added) = (difference(&plan.before, &after), difference(&after, &plan.before));
     let label = take_label(ctx, take);
@@ -422,6 +436,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value, mode: Mode) -> Done<Applie
         created: None,
         material: None,
         display: json!({"title": title(mode.verb(), count, &label), "notes": after.len(), "written": rows_of(ctx, take, plan.item_qn, added.iter().copied().enumerate())}),
+        unwritten: removed.is_empty() && added.is_empty(),
     })
 }
 
@@ -438,7 +453,8 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let reference = &restore.target["ref"];
     let take = take_of(ctx, reference).map_err(|fault| if fault.0 == "failed" { ("gone".to_string(), fault.1) } else { fault })?;
     let (added, removed) = (notes_of(restore.applied, "added")?, notes_of(restore.applied, "removed")?);
-    let current = read_all(ctx, take)?;
+    let (current, events) = read_all(ctx, take)?;
+    let was = fence_of(&current);
     // The notes Kumi wrote, found by their values among those there now.
     let mut wanted = counts(&added);
     let mut found = Vec::new();
@@ -456,19 +472,25 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             return Err(changed("the notes Kumi wrote in that take have been changed in REAPER since"));
         }
     }
-    let kept: Vec<Note> = current.iter().enumerate().filter(|(i, _)| !found.contains(i)).map(|(_, n)| *n).collect();
+    let taken_out: std::collections::HashSet<usize> = found.iter().copied().collect();
+    let kept: Vec<Note> = current.iter().enumerate().filter(|(i, _)| !taken_out.contains(i)).map(|(_, n)| *n).collect();
     let to_insert = difference(&removed, &kept);
+    // A note the producer wrote since, over the place of one that goes back, would have REAPER shorten one of the two.
+    if !restore.discard {
+        check_overlaps(&kept, &[], &to_insert).map_err(|why| changed(format!("the notes can't all be put back: {why}")))?;
+    }
     if !found.is_empty() || !to_insert.is_empty() {
         let taken: Vec<Note> = found.iter().map(|&i| current[i]).collect();
-        write_notes(ctx, take, &taken, &to_insert)?;
+        write_notes(ctx, take, &events, &taken, &to_insert)?;
     }
-    let after = read_all(ctx, take)?;
+    let (after, _) = read_all(ctx, take)?;
     if after.len() != kept.len() + to_insert.len() || !difference(&removed, &after).is_empty() {
-        return Err(failed("the take doesn't hold the notes it should after the undo"));
+        return Err(take_back(ctx, take, &events, &was, "the take doesn't hold the notes it should after the undo"));
     }
     let label = take_label(ctx, take);
     Ok(Restored {
         restored: json!({"notes": after.len()}),
         display: json!({"title": format!("Notes in {label} put back ({} removed, {} written again)", found.len(), to_insert.len())}),
+        unwritten: found.is_empty() && to_insert.is_empty(),
     })
 }

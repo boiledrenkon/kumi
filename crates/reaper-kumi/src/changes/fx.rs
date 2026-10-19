@@ -108,9 +108,20 @@ fn position_of(chain: &[String], guid: &str) -> Option<usize> {
 
 /// What tells an FX apart from how Kumi left it: its name, whether it runs, its preset and its parameters' values.
 fn signature(ctx: &Ctx, fx: Fx) -> Value {
+    let volatile = volatile_params(ctx, fx);
+    signature_without(ctx, fx, &volatile)
+}
+
+/// The signature again, as one that was taken before: a parameter it found to move by itself is left out of this one too.
+fn signature_as(ctx: &Ctx, fx: Fx, recorded: &Value) -> Value {
+    let volatile: Vec<i32> = recorded["volatile"].as_array().into_iter().flatten().filter_map(Value::as_i64).map(|n| n as i32).collect();
+    signature_without(ctx, fx, &volatile)
+}
+
+fn signature_without(ctx: &Ctx, fx: Fx, volatile: &[i32]) -> Value {
     let reaper = ctx.reaper;
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for param in 0..reaper.fx_param_count(fx).min(SIGNATURE_PARAMS) {
+    for param in (0..reaper.fx_param_count(fx).min(SIGNATURE_PARAMS)).filter(|param| !volatile.contains(param)) {
         for byte in (reaper.param_normalized(fx, param) as f32).to_bits().to_le_bytes() {
             hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
         }
@@ -121,8 +132,25 @@ fn signature(ctx: &Ctx, fx: Fx) -> Value {
         "offline": reaper.fx_offline(fx),
         "preset": reaper.fx_preset(fx),
         "params": reaper.fx_param_count(fx),
+        "volatile": volatile,
         "hash": format!("{hash:016x}"),
     })
+}
+
+/// Parameters that move by themselves, a meter the plug-in shows as a parameter: what they hold says nothing of what the
+/// producer did. Found by their names, and by their changing between two looks.
+fn volatile_params(ctx: &Ctx, fx: Fx) -> Vec<i32> {
+    let reaper = ctx.reaper;
+    let count = reaper.fx_param_count(fx).min(SIGNATURE_PARAMS);
+    let before: Vec<f64> = (0..count).map(|param| reaper.param_normalized(fx, param)).collect();
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    (0..count)
+        .filter(|&param| {
+            let name = reaper.param_name(fx, param).to_lowercase();
+            let meter = ["meter", "gain reduction", "readout"].iter().any(|word| name.contains(word));
+            meter || (reaper.param_normalized(fx, param) as f32) != (before[param as usize] as f32)
+        })
+        .collect()
 }
 
 fn fx_target(ctx: &Ctx, located: &Located) -> Value {
@@ -178,6 +206,10 @@ fn plugin_name(input: &Value) -> Done<String> {
     if name.to_ascii_lowercase().ends_with(".rfxchain") {
         return Err(bad("name must be a plug-in's name, not an FX chain file"));
     }
+    // (REAPER takes "FXADD:" and a list for several plug-ins at once; one name is one plug-in.)
+    if name.to_ascii_uppercase().starts_with("FXADD:") {
+        return Err(bad("name must be one plug-in's name, not an FXADD: list"));
+    }
     Ok(name.to_string())
 }
 
@@ -229,7 +261,19 @@ fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let expected = position.map_or(before.len(), |p| p as usize);
     let guid = after.get(index as usize).cloned().unwrap_or_default();
     if after.len() != before.len() + 1 || index as usize != expected || guid.is_empty() || position_of(&before, &guid).is_some() {
-        return Err(failed("the FX chain isn't what it should be after adding the plug-in"));
+        // Whatever the add made is taken off again (every FX that was not in the chain before), inside this call: what is
+        // left would be there and unknown to HISTORY.
+        for (at, made) in after.iter().enumerate().rev() {
+            if position_of(&before, made).is_none() {
+                ctx.reaper.delete_fx(track, at as i32);
+            }
+        }
+        let message = "the FX chain isn't what it should be after adding the plug-in";
+        return Err(if chain(ctx, track) == before {
+            failed(format!("{message}; what was added is taken back"))
+        } else {
+            ("uncertain".into(), format!("{message}, and Kumi could not take back what it wrote: read the track's FX"))
+        });
     }
     let fx = Fx { owner: FxOwner::Track(track), index };
     let label = fx_label(ctx, fx);
@@ -238,6 +282,7 @@ fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: Some(json!({"ref": refs::fx_ref(&guid), "kind": "fx"})),
         material: None,
         display: json!({"title": format!("Added {} to {}", super::quoted(&label), track_label(ctx, track)), "ref": refs::fx_ref(&guid), "index": index}),
+        ..Default::default()
     })
 }
 
@@ -245,7 +290,11 @@ fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let guid = restore.applied["guid"].as_str().ok_or_else(|| bad("applied.guid: the FX that was added"))?;
     let located = locate_guid(ctx, guid).map_err(|fault| if fault.0 == "failed" { gone(fault.1) } else { fault })?;
     let fx = fx_of(&located);
-    if !restore.discard && signature(ctx, fx) != restore.applied["signature"] {
+    // Its automation goes with it, and is the producer's.
+    if !restore.discard && envelopes_of(ctx, &located) > 0 {
+        return Err(changed("the FX Kumi added has automation in it now"));
+    }
+    if !restore.discard && signature_as(ctx, fx, &restore.applied["signature"]) != restore.applied["signature"] {
         return Err(changed("the FX Kumi added has been changed in REAPER since"));
     }
     let label = fx_label(ctx, fx);
@@ -256,6 +305,7 @@ fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"deleted": guid}),
         display: json!({"title": format!("{} taken off {}", super::quoted(&label), track_label(ctx, located.track))}),
+        ..Default::default()
     })
 }
 
@@ -324,7 +374,7 @@ fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         }
     })?;
     let fx = fx_of(&located);
-    let now = json!({"guid": located.guid, "index": located.index, "signature": signature(ctx, fx)});
+    let now = json!({"guid": located.guid, "index": located.index, "signature": signature_as(ctx, fx, &fence["signature"])});
     if now != *fence {
         return Err(changed("the FX changed since the preview"));
     }
@@ -348,6 +398,7 @@ fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: Some(json!({"entry": entry, "index": located.index, "guid": located.guid, "name": name, "lostEnvelopes": lost})),
         display: json!({"title": format!("Deleted {} from {track_name}", super::quoted(&label))}),
+        ..Default::default()
     })
 }
 
@@ -386,6 +437,7 @@ fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         return Ok(Restored {
             restored: json!({"ref": refs::fx_ref(guid), "was": refs::fx_ref(guid)}),
             display: json!({"title": format!("{} is back already", super::quoted(&fx_label(ctx, fx)))}),
+            unwritten: true,
         });
     }
     let track = track_of(ctx, restore.target)?;
@@ -403,6 +455,7 @@ fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: json!({"ref": refs::fx_ref(&now), "was": refs::fx_ref(guid), "index": made}),
         display: json!({"title": format!("{} put back on {}", super::quoted(&fx_label(ctx, fx)), track_label(ctx, track))}),
+        ..Default::default()
     })
 }
 
@@ -465,7 +518,14 @@ fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     let after = chain(ctx, located.track);
     if after != expected {
-        return Err(failed("the FX chain isn't in the order it should be after the move"));
+        // Moved back to where it was, inside this call; else nobody knows how the chain stands.
+        let back = position_of(&after, &located.guid).is_some_and(|at| ctx.reaper.move_fx(located.track, at as i32, located.index));
+        let message = "the FX chain isn't in the order it should be after the move";
+        return Err(if back && chain(ctx, located.track) == before {
+            failed(format!("{message}; the FX is moved back"))
+        } else {
+            ("uncertain".into(), format!("{message}, and Kumi could not move the FX back: read the track's FX"))
+        });
     }
     let fx = Fx { owner: FxOwner::Track(located.track), index: to as i32 };
     Ok(Applied {
@@ -473,6 +533,7 @@ fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: None,
         display: json!({"title": format!("Moved {} to place {} on {}", super::quoted(&fx_label(ctx, fx)), to + 1, track_label(ctx, located.track))}),
+        unwritten: to as i32 == located.index,
     })
 }
 
@@ -499,6 +560,7 @@ fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         return Ok(Restored {
             restored: chain_fence(&now),
             display: json!({"title": format!("{} is where it was", super::quoted(&label))}),
+            unwritten: true,
         });
     }
     if !restore.discard && now != applied {
@@ -512,6 +574,7 @@ fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored {
         restored: chain_fence(&expected),
         display: json!({"title": format!("{} back to place {} on {}", super::quoted(&label), to + 1, track_label(ctx, located.track))}),
+        ..Default::default()
     })
 }
 
@@ -554,7 +617,8 @@ fn bypass_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if json!({"enabled": ctx.reaper.fx_enabled(fx)}) != *fence {
         return Err(changed("the FX was switched in REAPER since the preview"));
     }
-    if ctx.reaper.fx_enabled(fx) == bypass && !ctx.reaper.set_fx_enabled(located.track, located.index, !bypass) {
+    let already = ctx.reaper.fx_enabled(fx) != bypass;
+    if !already && !ctx.reaper.set_fx_enabled(located.track, located.index, !bypass) {
         return Err(failed("REAPER wouldn't switch the FX"));
     }
     if ctx.reaper.fx_enabled(fx) == bypass {
@@ -565,6 +629,7 @@ fn bypass_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         created: None,
         material: None,
         display: json!({"title": bypass_title(ctx, &located, bypass)}),
+        unwritten: already,
     })
 }
 
@@ -581,7 +646,11 @@ fn bypass_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             return Err(failed("REAPER wouldn't switch the FX back"));
         }
     }
-    Ok(Restored { restored: json!({"enabled": prior}), display: json!({"title": bypass_title(ctx, &located, !prior)}) })
+    Ok(Restored {
+        restored: json!({"enabled": prior}),
+        display: json!({"title": bypass_title(ctx, &located, !prior)}),
+        unwritten: now == prior,
+    })
 }
 
 /// The FX a restore's target names; one that is gone is `gone`.
@@ -807,7 +876,8 @@ fn param_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(failed("the plug-in kept the parameter as it was"));
     }
     let title = param_title(ctx, &at, after["display"].as_str().unwrap_or_default());
-    Ok(Applied { applied: after, created: None, material: None, display: json!({"title": title}) })
+    let unwritten = near(wanted, now["normalized"].as_f64().unwrap_or(f64::NAN));
+    Ok(Applied { applied: after, created: None, material: None, display: json!({"title": title}), unwritten })
 }
 
 fn param_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -815,7 +885,8 @@ fn param_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let param = restore.target["param"].as_i64().ok_or_else(|| bad("target.param"))? as i32;
     let at = ParamAt { located, param };
     let now = param_state(ctx, &at);
-    if !same_param(&now, restore.prior) {
+    let already = same_param(&now, restore.prior);
+    if !already {
         if !restore.discard && !same_param(&now, restore.applied) {
             return Err(changed("the parameter has been changed in REAPER since Kumi set it"));
         }
@@ -829,7 +900,7 @@ fn param_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         return Err(failed("the plug-in kept the parameter as it was"));
     }
     let title = param_title(ctx, &at, after["display"].as_str().unwrap_or_default());
-    Ok(Restored { restored: after, display: json!({"title": format!("{title} (put back)")}) })
+    Ok(Restored { restored: after, display: json!({"title": format!("{title} (put back)")}), unwritten: already })
 }
 
 #[cfg(test)]
