@@ -7,10 +7,13 @@
 //! windows, answers `ping` and `status`, sends `project` events, keeps its discovery file and goes when Logic does. The
 //! rows, focus, bodies and actions of `docs/en/LOGIC_CONTRACT.md` come with M2.
 
+pub mod ax;
 pub mod bridge;
 pub mod helper;
 pub mod log;
 pub mod logic;
+pub mod queue;
+pub mod refs;
 pub mod server;
 
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
