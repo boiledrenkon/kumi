@@ -218,7 +218,8 @@ pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
         return Err(Refused {
             why: value.get("error").and_then(Value::as_str).map(str::to_owned).unwrap_or(text),
             there: value.get("connected") != Some(&Value::Bool(false)),
-            busy: value.get("code").and_then(Value::as_str) == Some("busy"),
+            // The bridge's busy, or the host's own word that the DAW didn't answer in time (a dialog may be open).
+            busy: value.get("code").and_then(Value::as_str) == Some("busy") || value.get("busy") == Some(&Value::Bool(true)),
             code: value.get("code").and_then(Value::as_str).map(str::to_owned),
         });
     }

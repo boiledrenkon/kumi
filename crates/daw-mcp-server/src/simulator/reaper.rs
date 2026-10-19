@@ -30,6 +30,8 @@ struct State {
     open_step: Option<String>,
     /// A dialog shows for the next change preview only (it closes right after).
     busy_once: bool,
+    /// The next apply is made and then answered `uncertain` (a job the extension took and didn't finish in time).
+    uncertain_once: bool,
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -90,6 +92,7 @@ impl ReaperScript {
                 undo: vec![],
                 open_step: None,
                 busy_once: false,
+                uncertain_once: false,
             })),
         }
     }
@@ -202,6 +205,9 @@ impl ReaperScript {
                 state.tracks[index][field] = wanted.clone();
                 state.changed += 1;
                 Self::step(state, &desc);
+                if std::mem::take(&mut state.uncertain_once) {
+                    return Err(("uncertain".into(), "REAPER didn't finish the change in time; it may have been made".into()));
+                }
                 Ok(
                     json!({"epoch": epoch, "applied": {field: wanted}, "display": {"title": title}, "undo": {"desc": desc, "entry": true, "stateCount": state.changed}}),
                 )
@@ -277,6 +283,11 @@ impl ReaperScript {
         let desc = label.unwrap_or(begun);
         state.undo.push(desc.clone());
         Ok(json!({"desc": desc, "entry": true}))
+    }
+
+    /// The next apply is made, then answered `uncertain`, as the extension answers a job it took and didn't finish in time.
+    pub fn uncertain_once(&self) {
+        self.state.lock().unwrap().uncertain_once = true;
     }
 
     /// A dialog shows for the next change's preview, and closes right after.
