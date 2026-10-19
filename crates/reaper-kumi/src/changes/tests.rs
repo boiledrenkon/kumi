@@ -2257,6 +2257,77 @@ fn a_delete_whose_folders_the_producer_rearranged_is_put_back_when_told_to_disca
     assert!(depths_are(&[("G", 1), ("H", 1), ("A", 0), ("B", -2), ("D", 0)]), "{:?}", track_depths());
 }
 
+/// The producer drags track `from` to place `to` (places counted once it is taken out).
+fn drag(from: usize, to: usize) {
+    state(|s| {
+        let track = s.tracks.remove(from);
+        s.tracks.insert(to, track);
+        s.state_count += 1;
+    });
+}
+
+#[test]
+fn a_deleted_folders_last_track_goes_back_after_the_track_above_it_when_the_producer_dragged_another_in_before() {
+    let lab = Lab::new();
+    folder_tracks(&[("Group", 1), ("A", 0), ("B", -1), ("C", 0)]);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{T-B}"}), "Kumi: Deleted track “B” (kdp20)");
+    assert!(depths_are(&[("Group", 1), ("A", -1), ("C", 0)]), "{:?}", track_depths());
+    // The producer drags C into the folder, above A.
+    drag(2, 1);
+    state(|s| {
+        s.tracks[1].folder = 0;
+        s.tracks[2].folder = -1;
+    });
+    assert!(depths_are(&[("Group", 1), ("C", 0), ("A", -1)]), "{:?}", track_depths());
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert!(depths_are(&[("Group", 1), ("C", 0), ("A", 0), ("B", -1)]), "A stays in the folder, B closes it: {:?}", track_depths());
+}
+
+#[test]
+fn a_deleted_track_goes_back_beside_its_old_neighbours_wherever_the_producer_moved_them() {
+    // After the track that was above it.
+    let lab = Lab::new();
+    folder_tracks(&[("X", 0), ("A", 0), ("B", 0), ("C", 0)]);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{T-B}"}), "Kumi: Deleted track “B” (kdp21)");
+    drag(1, 2);
+    assert_eq!(names(), ["X", "C", "A"]);
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(names(), ["X", "C", "A", "B"]);
+
+    // Before the track that was below it, when the one above is gone.
+    let lab = Lab::new();
+    folder_tracks(&[("X", 0), ("A", 0), ("B", 0), ("C", 0)]);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{T-B}"}), "Kumi: Deleted track “B” (kdp22)");
+    state(|s| {
+        s.tracks.remove(1);
+        s.state_count += 1;
+    });
+    drag(1, 0);
+    assert_eq!(names(), ["C", "X"]);
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(names(), ["B", "C", "X"]);
+
+    // The first track goes back before the one that was below it.
+    let lab = Lab::new();
+    folder_tracks(&[("A", 0), ("B", 0), ("C", 0)]);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{T-A}"}), "Kumi: Deleted track “A” (kdp23)");
+    drag(0, 1);
+    assert_eq!(names(), ["C", "B"]);
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(names(), ["C", "A", "B"]);
+
+    // Its old place, when both are gone.
+    let lab = Lab::new();
+    folder_tracks(&[("X", 0), ("A", 0), ("B", 0), ("C", 0), ("D", 0)]);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{T-B}"}), "Kumi: Deleted track “B” (kdp24)");
+    state(|s| {
+        s.tracks.retain(|t| t.name != "A" && t.name != "C");
+        s.state_count += 1;
+    });
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(names(), ["X", "D", "B"], "its old place (third) is past the end now: it goes last");
+}
+
 // ----- folders over random layouts (N-1, N-2) -----
 
 /// A small random number generator, so the layouts of the tests are the same each time.

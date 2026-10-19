@@ -466,6 +466,9 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let parent = layout.parent[at].map(|parent| depths_before[parent].0.clone());
     let children: Vec<String> =
         (0..all.len()).filter(|other| layout.parent[*other] == Some(at)).map(|other| depths_before[other].0.clone()).collect();
+    // Its neighbours, by id: the undo puts it back beside them, wherever the producer has moved them since.
+    let above = at.checked_sub(1).map(|place| depths_before[place].0.clone());
+    let below = depths_before.get(at + 1).map(|(id, _)| id.clone());
     let routes: Vec<Value> = [0, -1]
         .into_iter()
         .flat_map(|category| (0..reaper.send_count(found.track, category)).filter_map(move |at| route(ctx, found.track, category, at)))
@@ -503,7 +506,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     let material = json!({
         "guid": guid, "index": index, "name": now["name"], "chunk": chunk,
-        "depths": depths, "parent": parent, "children": children, "routes": routes, "selected": selected,
+        "depths": depths, "parent": parent, "children": children, "above": above, "below": below, "routes": routes, "selected": selected,
         "folderDepth": now["folderDepth"], "lostEnvelopes": lost_envelopes,
     });
     Ok(Applied {
@@ -554,6 +557,23 @@ pub fn without_receives(chunk: &str) -> (String, usize) {
         kept.push_str(line);
     }
     (kept, dropped)
+}
+
+/// Where a deleted track goes back: after the track that was above it, else before the track that was below it, wherever the
+/// producer has moved them since; at its old place only when neither is in the project any more.
+fn back_at(ctx: &Ctx, material: &Value) -> i32 {
+    let place = |key: &str| {
+        let id = material[key].as_str()?;
+        let track = ctx.reads.track_by_id(ctx.reaper, ctx.proj, &TrackId::Guid(id.to_string())).ok()?;
+        Some(ctx.reaper.track_value(track, "IP_TRACKNUMBER") as i32 - 1)
+    };
+    if let Some(above) = place("above") {
+        return above + 1;
+    }
+    if let Some(below) = place("below") {
+        return below;
+    }
+    material["index"].as_i64().unwrap_or(0).max(0) as i32
 }
 
 /// Whether putting the track back would change which folder another track is in, as the folders are now: what the producer
@@ -638,7 +658,7 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             }
         }
     }
-    let index = material["index"].as_i64().unwrap_or(0).max(0) as i32;
+    let index = back_at(ctx, material);
     if !restore.discard {
         if let Some(reason) = would_refold(ctx, material, guid, index) {
             return Err(("changed".into(), reason));
