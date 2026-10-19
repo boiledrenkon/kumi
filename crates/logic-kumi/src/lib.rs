@@ -9,11 +9,16 @@
 
 pub mod ax;
 pub mod bridge;
+pub mod fixtures;
+pub mod focus;
 pub mod helper;
 pub mod log;
 pub mod logic;
+pub mod mcu;
 pub mod queue;
+pub mod read;
 pub mod refs;
+pub mod rows;
 pub mod server;
 
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
