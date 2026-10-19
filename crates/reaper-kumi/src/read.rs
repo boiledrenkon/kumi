@@ -873,24 +873,23 @@ impl Reads {
             }
             other => return Err(bad(format!("parent: a take ref, not r:{}", other.kind()))),
         };
-        let (notes, _, _) = reaper.midi_counts(take).ok_or_else(|| bad("that take isn't MIDI"))?;
+        reaper.midi_counts(take).ok_or_else(|| bad("that take isn't MIDI"))?;
+        // The notes as the changes see and write them, from the one buffer REAPER gives the take's MIDI in: `MIDI_GetNote`
+        // ends two overlapping notes of one pitch at the first note-off, where the buffer pairs them in order, and a model
+        // that reads a length and changes the note must see the length Kumi writes.
+        let events = reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
+        let notes = crate::midi::notes(&events);
         let item_qn = take_start_qn(reaper, proj, take);
-        let mut position = self.position_within(cursor, notes.max(0) as usize)?;
+        let mut position = self.position_within(cursor, notes.len())?;
         let mut next = None;
-        while position < notes.max(0) as usize {
-            if !pager.open() {
+        while let Some(note) = notes.get(position) {
+            if !pager.open() || !pager.push(rows::note_row(reaper, take, item_qn, position as i32, &note.midi())) {
                 next = Some(position);
                 break;
             }
-            if let Some(note) = reaper.midi_note(take, position as i32) {
-                if !pager.push(rows::note_row(reaper, take, item_qn, position as i32, &note)) {
-                    next = Some(position);
-                    break;
-                }
-            }
             position += 1;
         }
-        self.page(pager, next, Some(notes.max(0) as usize))
+        self.page(pager, next, Some(notes.len()))
     }
 
     // ----- envelopes -----

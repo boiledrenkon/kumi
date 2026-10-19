@@ -2407,6 +2407,51 @@ fn a_notes_write_that_goes_wrong_is_taken_back_or_called_uncertain() {
     assert_eq!(snare_notes(), written);
 }
 
+/// The notes of a take as `read` gives them.
+fn read_notes_of(lab: &Lab, parent: &str) -> Vec<Value> {
+    let api = fake::api();
+    let answer = lab.reads.read(&Reaper::new(&api), &json!({"kind": "note", "parent": parent})).unwrap();
+    answer["items"].as_array().unwrap().clone()
+}
+
+#[test]
+fn a_note_is_read_with_the_length_a_change_writes_back_when_two_notes_of_a_pitch_overlap() {
+    let lab = Lab::new();
+    let note = |start_ppq, end_ppq, pitch, velocity| fake::FakeNote {
+        start_ppq,
+        end_ppq,
+        channel: 0,
+        pitch,
+        velocity,
+        selected: false,
+        muted: false,
+    };
+    // The producer's take: two notes of one pitch and channel that overlap (REAPER does not correct a take it loaded), and
+    // one note beside them. REAPER's own `MIDI_GetNote` ends both overlapping notes at the first note-off.
+    state(|s| {
+        s.tracks[2].items[0].takes[0].notes = vec![note(0.0, 480.0, 72, 84), note(0.0, 1440.0, 72, 85), note(1000.0, 1480.0, 60, 90)]
+    });
+    let rows = read_notes_of(&lab, SNARE_TAKE);
+    assert_eq!(rows.iter().map(|r| r["length"].as_f64().unwrap()).collect::<Vec<_>>(), [0.5, 1.5, 0.5]);
+    // What a change would write back for each note is what was read.
+    for (i, row) in rows.iter().enumerate() {
+        let preview = lab.call("change_preview", json!({"kind": "notes-delete", "input": {"ref": SNARE_TAKE, "indexes": [i]}})).unwrap();
+        assert_eq!(preview["display"]["before"][0], *row, "note {i}");
+    }
+    // A change beside them writes the whole take back; the two keep the lengths that were read.
+    let (preview, applied) = lab.make(
+        "notes-change",
+        json!({"ref": SNARE_TAKE, "changes": [{"index": 2, "velocity": 33}]}),
+        "Kumi: Changed 1 note in snare.mid take (kov10)",
+    );
+    let after = read_notes_of(&lab, SNARE_TAKE);
+    assert_eq!((&after[0], &after[1]), (&rows[0], &rows[1]));
+    assert_eq!(after[2]["velocity"], 33);
+    assert_eq!(state(|s| s.tracks[2].items[0].takes[0].notes.iter().map(|n| n.end_ppq).collect::<Vec<_>>()), [480.0, 1440.0, 1480.0]);
+    lab.undo("notes-change", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(read_notes_of(&lab, SNARE_TAKE), rows);
+}
+
 #[test]
 fn undoing_a_notes_delete_is_refused_when_the_producer_wrote_a_note_over_one_it_would_put_back() {
     let lab = Lab::new();

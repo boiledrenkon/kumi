@@ -2419,13 +2419,20 @@ unsafe extern "C" fn midi_get_note(
     pitch: *mut c_int,
     velocity: *mut c_int,
 ) -> bool {
-    counted(|s| match take_of(s, take as u64).and_then(|t| t.notes.get(index as usize)) {
-        Some(n) => {
+    counted(|s| match take_of(s, take as u64).and_then(|t| t.notes.get(index as usize).map(|n| (t, n))) {
+        Some((t, n)) => {
+            // REAPER ends a note at the first note-off after its start that has its channel and pitch, whoever's it is: two
+            // overlapping notes of one pitch both end at the first.
+            let ends = t
+                .notes
+                .iter()
+                .filter(|m| m.channel == n.channel && m.pitch == n.pitch && m.end_ppq.round() > n.start_ppq.round())
+                .map(|m| m.end_ppq);
             unsafe {
                 *selected = n.selected;
                 *muted = n.muted;
                 *start = n.start_ppq;
-                *end = n.end_ppq;
+                *end = ends.fold(n.end_ppq, f64::min);
                 *channel = n.channel;
                 *pitch = n.pitch;
                 *velocity = n.velocity;
