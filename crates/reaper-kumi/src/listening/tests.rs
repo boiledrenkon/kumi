@@ -1403,6 +1403,28 @@ fn scratch_keep_makes_a_copy_the_producers_and_kumis_undo_takes_it_away() {
 }
 
 #[test]
+fn a_goal_keeps_its_best_copy_and_the_drop_takes_every_other_one() {
+    let rig = Rig::new();
+    let kick = copyable();
+    let made = make(&rig, "sg", &kick, 3);
+    // The best is the last copy: kept, it sits after the others with no scratch mark.
+    let best = made["copies"][2]["ref"].as_str().unwrap().to_string();
+    let preview = change(&rig, "change_preview", json!({"kind": "scratch-keep", "input": keep_input(&best)})).unwrap();
+    change(
+        &rig,
+        "change_apply",
+        json!({"kind": "scratch-keep", "input": keep_input(&best), "fence": preview["fence"], "desc": "Kumi: Kept (kg1)"}),
+    )
+    .unwrap();
+    let dropped = rig.ask("scratch", json!({"action": "drop", "scratchId": "sg"})).unwrap();
+    assert_eq!((dropped["dropped"].as_u64(), dropped["left"].as_u64()), (Some(2), Some(0)), "{dropped}");
+    assert_eq!(
+        fake::with(|s| s.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>()),
+        ["Drums", "Kick", "Snare", "Reverb", "Kumi · Goal best"]
+    );
+}
+
+#[test]
 fn scratch_keep_refuses_a_copy_changed_since_its_preview_and_writes_nothing() {
     let rig = Rig::new();
     let kick = copyable();

@@ -322,19 +322,15 @@ fn chain(reaper: &Reaper, track: Track) -> Vec<Fx> {
         .collect()
 }
 
-/// Whether the producer has made the copy theirs: renamed, moved in among their tracks or into a folder, sent somewhere.
-fn taken(reaper: &Reaper, proj: Project, track: Track, copy: &Copy) -> Option<String> {
+/// Whether the producer has made the copy theirs: renamed it, put it in a folder, or sent it somewhere. (Where it sits
+/// among the tracks says nothing: a copy kept with scratch-keep, or a track Kumi added, may come after the others.)
+fn taken(reaper: &Reaper, track: Track, copy: &Copy) -> Option<String> {
     let name = reaper.track_name(track);
     if name != copy.name {
         return Some(format!("{} was renamed {}", crate::changes::quoted(&copy.name), crate::changes::quoted(&name)));
     }
     if reaper.track_parent(track).is_some() {
         return Some(format!("{} was moved into a folder", crate::changes::quoted(&copy.name)));
-    }
-    let place = reaper.track_value(track, "IP_TRACKNUMBER") as i32;
-    let below = (place..reaper.track_count(proj)).filter_map(|i| reaper.track_at(proj, i));
-    if below.into_iter().any(|t| reaper.track_string(t, MARK).is_none_or(|m| m.is_empty())) {
-        return Some(format!("{} was moved in among the tracks", crate::changes::quoted(&copy.name)));
     }
     if reaper.track_value(track, "B_MAINSEND") != 0.0 || reaper.send_count(track, 0) > 0 || reaper.send_count(track, 1) > 0 {
         return Some(format!("{} sends somewhere now", crate::changes::quoted(&copy.name)));
@@ -617,7 +613,7 @@ impl Scratch {
                 kept += 1;
                 continue;
             }
-            if let Some(why) = taken(reaper, proj, track, copy) {
+            if let Some(why) = taken(reaper, track, copy) {
                 left.push(why);
                 continue;
             }
