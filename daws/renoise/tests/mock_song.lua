@@ -828,24 +828,55 @@ function M.make_song(options)
     })
   end
 
+  -- A member kept in the song's data: read live, written with its undo step and its notifier (`watched` holds the observables).
+  local function live(t, field, default)
+    return function()
+      local value = t[field]
+      if value == nil then return default end
+      return value
+    end
+  end
+  local function kept(t, field, watched, copy)
+    return function(value)
+      if copy then value = copy(value) end
+      local old = t[field]
+      t[field] = value
+      if watched[field] then M.fire(watched[field]) end
+      M.record(function()
+        t[field] = old
+        if watched[field] then M.fire(watched[field]) end
+      end, function()
+        t[field] = value
+        if watched[field] then M.fire(watched[field]) end
+      end)
+    end
+  end
+  local function pair(v) return { v[1], v[2] } end
+
   -- (what is watched lives in the data: the proxies are made anew on every read)
+  local SAMPLE_FIELDS = { name = "", volume = 1, panning = 0.5, transpose = 0, fine_tune = 0, beat_sync_enabled = false,
+    beat_sync_lines = 16, loop_mode = 1, new_note_action = 1, mute_group = 0, autofade = false, oneshot = false }
+  local MAPPING_FIELDS = { base_note = 48, note_range = { 0, 119 }, velocity_range = { 0, 127 }, layer = 1,
+    map_key_to_pitch = true, map_velocity_to_volume = true }
   local function sample_object(i, s)
     local sample = d.instruments[i].samples[s]
     sample.observables = sample.observables or {}
     local watched = sample.observables
-    for _, key in ipairs({ "name", "note_range", "velocity_range", "base_note", "layer", "map_key_to_pitch", "map_velocity_to_volume" }) do
+    local fields, getters, setters = {}, {}, {}
+    for key, default in pairs(SAMPLE_FIELDS) do
       watched[key] = watched[key] or M.observable()
+      fields[key .. "_observable"] = watched[key]
+      getters[key], setters[key] = live(sample, key, default), kept(sample, key, watched)
     end
-    local mapping = object("renoise.SampleMapping", {
-      base_note = sample.base_note, note_range = sample.note_range, velocity_range = sample.velocity_range,
-      layer = sample.layer or 1, map_key_to_pitch = sample.map_key_to_pitch ~= false,
-      map_velocity_to_volume = sample.map_velocity_to_volume ~= false,
-      base_note_observable = watched.base_note, note_range_observable = watched.note_range,
-      velocity_range_observable = watched.velocity_range, layer_observable = watched.layer,
-      map_key_to_pitch_observable = watched.map_key_to_pitch, map_velocity_to_volume_observable = watched.map_velocity_to_volume,
-    })
-    return object("renoise.Sample", { name = sample.name, loop_mode = sample.loop_mode, mute_group = sample.mute_group,
-      name_observable = watched.name, sample_mapping = mapping })
+    local mapping_fields, mapping_getters, mapping_setters = {}, {}, {}
+    for key, default in pairs(MAPPING_FIELDS) do
+      watched[key] = watched[key] or M.observable()
+      mapping_fields[key .. "_observable"] = watched[key]
+      mapping_getters[key] = live(sample, key, default)
+      mapping_setters[key] = kept(sample, key, watched, type(default) == "table" and pair or nil)
+    end
+    fields.sample_mapping = object("renoise.SampleMapping", mapping_fields, mapping_getters, mapping_setters)
+    return object("renoise.Sample", fields, getters, setters)
   end
 
   local function phrase_object(i, ph)
@@ -915,8 +946,10 @@ function M.make_song(options)
       macro = function(_, k)
         if not instrument.macros[k] then out_of_range("macro", k) end
         local macro = instrument.macros[k]
-        return object("renoise.InstrumentMacro", { name = macro.name, value = macro.value, name_observable = macro.name_observable,
-          value_observable = macro.value_observable })
+        local watched = { name = macro.name_observable, value = macro.value_observable }
+        return object("renoise.InstrumentMacro", { name_observable = macro.name_observable, value_observable = macro.value_observable },
+          { name = live(macro, "name", ""), value = live(macro, "value", 0) },
+          { name = kept(macro, "name", watched), value = kept(macro, "value", watched) })
       end,
     }, {
       name = function() return instrument.name end,
@@ -938,6 +971,8 @@ function M.make_song(options)
         end
         return macros
       end,
+    }, {
+      name = kept(instrument, "name", { name = instrument.name_observable }),
     })
   end
 

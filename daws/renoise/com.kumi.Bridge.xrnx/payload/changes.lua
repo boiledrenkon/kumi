@@ -10,6 +10,7 @@ import("changes_notes")
 import("changes_layout")
 import("changes_slots")
 import("changes_lua")
+import("changes_instruments")
 
 local M = {}
 
