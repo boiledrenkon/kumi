@@ -209,26 +209,30 @@ impl Journal {
     }
 
     /// Room for one more record of `bytes`: the oldest go, previewed ones first, then undone ones, then applied ones
-    /// (Kumi then can't undo them: its undo answers `unknown`). Only changes in flight stay whatever it takes.
+    /// (Kumi then can't undo them: its undo answers `unknown`). Past the bytes, the largest go first instead (what a
+    /// delete removed is what fills the journal). Only changes in flight stay whatever it takes.
     fn make_room(inner: &mut Inner, bytes: usize) -> Result<(), Refusal> {
         while inner.records.len() >= MAX_RECORDS || inner.total + bytes > MAX_BYTES {
-            let oldest = |states: &[State], big: bool| {
+            let oldest = |states: &[State]| inner.order.iter().find(|id| states.contains(&inner.records[*id].state)).cloned();
+            // (newest first, so that of records as large the oldest is the last found, which `max_by_key` takes)
+            let largest = |states: &[State]| {
                 inner
                     .order
                     .iter()
-                    .find(|id| states.contains(&inner.records[*id].state) && (!big || inner.records[*id].material.is_some()))
+                    .rev()
+                    .filter(|id| states.contains(&inner.records[*id].state))
+                    .max_by_key(|id| inner.sizes.get(*id).copied().unwrap_or(0))
                     .cloned()
             };
-            // Past the bytes, what deletes removed goes first (it's what fills the journal); then the oldest, as for count.
             let by_size = inner.total + bytes > MAX_BYTES;
             let big = || match by_size {
-                true => oldest(&[State::Undone], true).or_else(|| oldest(&[State::Applied, State::Uncertain], true)),
+                true => largest(&[State::Undone]).or_else(|| largest(&[State::Applied, State::Uncertain])),
                 false => None,
             };
-            let Some(oldest) = oldest(&[State::Previewed], false)
+            let Some(oldest) = oldest(&[State::Previewed])
                 .or_else(big)
-                .or_else(|| oldest(&[State::Undone], false))
-                .or_else(|| oldest(&[State::Applied, State::Uncertain], false))
+                .or_else(|| oldest(&[State::Undone]))
+                .or_else(|| oldest(&[State::Applied, State::Uncertain]))
             else {
                 return Err(refuse("full", format!("the DAW is busy with {} changes at once: try again in a moment", inner.records.len())));
             };
@@ -408,6 +412,10 @@ impl Journal {
         record.state = State::Uncertain;
         record.undo_unanswered = true;
         let mut reply = error.clone();
+        // (the DAW answered, and couldn't say how it ended: its words say what to look for)
+        if error.get("code").and_then(Value::as_str) == Some(daw_bridge::wire::code::UNCERTAIN) {
+            reply["answered"] = true.into();
+        }
         reply["code"] = "undo-uncertain".into();
         reply["state"] = "uncertain".into();
         if let Some(answer) = reply.as_object_mut() {
@@ -942,6 +950,27 @@ mod tests {
         let roomy = json!({"prior": {}, "fence": {}, "display": {"title": "x".repeat(70_000)}});
         assert!(journal.previewed("track-volume", &json!({}), &roomy, None).is_ok());
         assert!(journal.get(&big.id).is_none() && journal.get(&small.id).is_some(), "the big delete went, the older small change stays");
+    }
+
+    #[test]
+    fn past_its_bytes_the_largest_record_goes_first_whatever_small_material_older_ones_hold() {
+        let journal = Journal::default();
+        // Thirty adds and moves, each with a small material of its own (Renoise's `{track}`), then a big delete.
+        let small: Vec<Record> = (0..30)
+            .map(|_| {
+                let record = preview(&journal);
+                journal.begin_apply(&record.id, &record.confirmation, "a", None).unwrap().unwrap();
+                journal.end_apply(&record.id, "a", Ok(&json!({"applied": {}, "material": {"track": 3}})));
+                record
+            })
+            .collect();
+        let big = preview(&journal);
+        journal.begin_apply(&big.id, &big.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&big.id, "a", Ok(&json!({"applied": {}, "material": {"chunk": "x".repeat(MAX_BYTES - 64 * 1024)}})));
+        let roomy = json!({"prior": {}, "fence": {}, "display": {"title": "x".repeat(70_000)}});
+        assert!(journal.previewed("track-volume", &json!({}), &roomy, None).is_ok());
+        assert!(journal.get(&big.id).is_none(), "the big delete went");
+        assert!(small.iter().all(|record| journal.get(&record.id).is_some()), "every small change stays");
     }
 
     #[test]
