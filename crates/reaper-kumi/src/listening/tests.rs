@@ -1324,6 +1324,9 @@ fn copies_a_crash_left_are_swept_when_the_bridge_loads_and_the_host_is_told() {
     fresh.set_listening_folder(folder.clone());
     fresh.tick(Driver::Timer);
     assert_eq!(out.events(), [("scratch_swept".to_string(), json!({"count": 1, "names": [names[0]]}))]);
+    // A host that connects after the sweep reads it in the status.
+    fresh.tick(Driver::Timer);
+    assert_eq!(fresh.snapshot().status["listening"]["swept"], json!({"count": 1, "names": [names[0]]}));
     assert_eq!(
         fake::with(|s| s.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>()),
         ["Drums", "Kick", "Snare", "Reverb", "Mine now"]

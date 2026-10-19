@@ -122,6 +122,8 @@ pub struct Listening {
     beat: Cell<Option<Instant>>,
     /// Ticks inside the render now running (for the log: whether the platform's timer reached it).
     inside_ticks: Cell<u32>,
+    /// Copies swept since the bridge loaded (a sweep at load comes before any host connects): `status` carries them.
+    swept_names: RefCell<Vec<String>>,
 }
 
 /// What a render asks of its runner, from inside REAPER's render loop too.
@@ -193,6 +195,7 @@ impl Listening {
             swept: Cell::new(false),
             beat: Cell::new(None),
             inside_ticks: Cell::new(0),
+            swept_names: RefCell::new(Vec::new()),
         }
     }
 
@@ -584,6 +587,10 @@ impl Listening {
         if !names.is_empty() {
             crate::log::line(&format!("swept {} scratch copies an earlier session left", names.len()));
             out.event(SWEPT, json!({"count": names.len(), "names": names}));
+            let mut swept = self.swept_names.borrow_mut();
+            swept.extend(names);
+            let over = swept.len().saturating_sub(64);
+            swept.drain(..over);
         }
     }
 
@@ -601,14 +608,19 @@ impl Listening {
         let render =
             folder && api.GetSetProjectInfo().is_some() && api.GetSetProjectInfo_String().is_some() && api.Main_OnCommandEx().is_some();
         let audio = reaper.audio_heard();
-        json!({
+        let mut flags = json!({
             "render": render,
             "capture": folder && audio && api.Audio_RegHardwareHook().is_some(),
             "audition": audio && api.PlayPreviewEx().is_some() && api.StopPreview().is_some() && api.PCM_Source_CreateFromFile().is_some(),
             "grid": api.TrackFX_FormatParamValueNormalized().is_some(),
             "scratch": folder && api.GetTrackStateChunk().is_some() && api.SetTrackStateChunk().is_some() && api.InsertTrackAtIndex().is_some(),
             "version": VERSION,
-        })
+        });
+        let swept = self.swept_names.borrow();
+        if !swept.is_empty() {
+            flags["swept"] = json!({"count": swept.len(), "names": *swept});
+        }
+        flags
     }
 
     /// The bridge is going: the preview stops, the hook comes out, what was running ends (its files deleted); the scratch
