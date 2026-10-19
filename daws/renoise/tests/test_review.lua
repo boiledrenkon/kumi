@@ -535,11 +535,20 @@ test("review N-5: letter commands in the volume, panning and effect columns are 
   column = mock.song:pattern(1):track(3):line(1):note_column(1)
   eq(column.volume_string, "G3")
   eq(column.effect_number_string, "ZB")
-  -- and the notes restore puts the empty cell back
+  -- the notes restore refuses now (the track Kumi put back wrote the pattern since), and one made again and undone at once
+  -- puts the empty cell back
+  failure(restore(peer, "notes-write", { target = done.result.target, prior = previewed.result.prior, applied = done.result.applied },
+    "Kumi: undo n (kr37)", undone.result.epoch, undone.result.layout), "changed")
+  epoch, layout = place(peer)
+  input.pattern, input.track = pattern_ref(epoch, 1), track_ref(epoch, 3)
+  input.lines[1].line = 2
+  previewed = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
+  done = apply(peer, "notes-write", input, "Kumi: n (kr38)", previewed.result.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
   local back = restore(peer, "notes-write", { target = done.result.target, prior = previewed.result.prior, applied = done.result.applied },
-    "Kumi: undo n (kr37)", undone.result.epoch, undone.result.layout)
+    "Kumi: undo n (kr39)", done.result.epoch, done.result.layout)
   ok(back.result, json.encode(back.error or {}))
-  eq(mock.song:pattern(1):track(3):line(1):note_column(1).volume_string, "..")
+  eq(mock.song:pattern(1):track(3):line(2):note_column(1).volume_string, "..")
   H.no_dialogs()
 end)
 
@@ -565,9 +574,10 @@ test("review M-1: a sliced notes restore stops when the producer makes a track b
   eq(steps(), 1, "step 1 is written")
   mock.ops.insert_track(1, { name = "New" })
   local response = wait(peer, id, 300, 20)
-  failure(response, "changed")
-  ok(response.error.message:find("1 of 3 steps are put back", 1, true), response.error.message)
-  ok(response.error.message:find("undo again", 1, true), response.error.message)
+  -- (lines half put back: neither as Kumi made them nor as they were)
+  failure(response, "uncertain")
+  ok(response.error.message:find("Kumi stopped part way and wrote nothing further", 1, true), response.error.message)
+  ok(response.error.message:find("Renoise's own undo", 1, true), response.error.message)
   eq(steps(), 1, "no step after the insert")
   eq(cell(3, 1), "---", "Hat's first lines are clear (step 1)")
   eq(cell(3, 12), "C-3", "and its last are as Kumi left them: the rest waits")
@@ -2124,13 +2134,12 @@ test("touches × a run of like notes across Kumi's lines shifted one row: refuse
   failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kpb1)", done.epoch, done.layout), "changed")
 end)
 
-test("touches × lines touched only below Kumi's: the undo puts them back", function()
+test("touches × an edit anywhere in the pattern since, even far below Kumi's lines: refused, nothing written", function()
   local env, peer = setup(nil, { pattern_lines = 64 })
   local previewed, done = bass_notes(peer, 2, 4, "kpb2")
   mock.song:pattern(1):track(3):line(20):note_column(1).note_string = "E-4"
-  local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kpb3)", done.epoch, done.layout)
-  ok(undone.result, json.encode(undone.error or {}))
-  eq(c4_lines(), "")
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kpb3)", done.epoch, done.layout), "changed")
+  eq(c4_lines(), "2,3,4")
 end)
 
 test("touches × lines Kumi emptied with lines on one side only, a row inserted between: refused", function()
@@ -2141,15 +2150,14 @@ test("touches × lines Kumi emptied with lines on one side only, a row inserted 
   failure(restore(peer, "notes-clear", record_of(previewed, done), "Kumi: undo c (kpb5)", done.epoch, done.layout), "changed")
 end)
 
-test("touches × a notes change on a track Kumi deleted and put back since: its undo still knows the lines didn't move", function()
+test("touches × a notes change on a track Kumi deleted and put back since: refused (Kumi's put-back wrote the pattern)", function()
   local env, peer = setup()
   local previewed, done = bass_notes(peer, 2, 4, "kpb6")
   local deleted, gone = delete_track(peer, 3, "Kumi: d (kpb7)")
   local back = restore(peer, "track-delete", record_of(deleted, gone), "Kumi: undo d (kpb8)", gone.epoch, gone.layout)
   ok(back.result, json.encode(back.error or {}))
-  local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kpb9)", back.result.epoch, back.result.layout)
-  ok(undone.result, json.encode(undone.error or {}))
-  eq(c4_lines(), "")
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kpb9)", back.result.epoch, back.result.layout), "changed")
+  eq(c4_lines(), "2,3,4")
 end)
 
 test("places, slot × patterns repeating every two: a block made or deleted at the front can't say where a mute went: left out, said", function()
@@ -2183,4 +2191,409 @@ test("places, value × Dest. Track None is the value -1: set through value, and 
   eq(mock.data.tracks[1].devices[2].params[1].value, -1, "None again")
   local _, again = set_param(peer, place(peer) .. ":device:1.2", { param = "Dest. Track", value = -1 }, "Kumi: none (kpc6)")
   ok(again.result, json.encode(again.error or {}))
+end)
+
+-- MUST 5–7 of the review at 7cd4cf4e: a shift that shows only below Kumi's lines, Renoise's undo past Kumi's step to an older
+-- row insert, and a sliced undo with the producer between its steps.
+
+local function copy(v)
+  if type(v) ~= "table" then return v end
+  local out = {}
+  for k, x in pairs(v) do out[k] = copy(x) end
+  return out
+end
+
+local function line_text(t, k)
+  local line = mock.song:pattern(1):track(t):line(k)
+  local parts = {}
+  for c = 1, 12 do
+    local n = line:note_column(c)
+    parts[#parts + 1] = n.note_string .. n.instrument_string .. n.volume_string .. n.panning_string .. n.delay_string
+      .. n.effect_number_string .. n.effect_amount_string
+  end
+  for c = 1, 8 do
+    local e = line:effect_column(c)
+    parts[#parts + 1] = e.number_string .. e.amount_string
+  end
+  return table.concat(parts, "|")
+end
+
+-- Track `t`'s lines in pattern 1 set to `to`, as Renoise's undo and redo do it: a line notifier for each line whose content
+-- changed (lab).
+local function set_lines(t, to)
+  local n = mock.data.patterns[1].lines
+  local old = {}
+  for k = 1, n do old[k] = line_text(t, k) end
+  mock.data.patterns[1].tracks[t].lines = copy(to)
+  for k = 1, n do
+    if line_text(t, k) ~= old[k] then notify_lines(1, t, k) end
+  end
+end
+
+-- An edit of the producer's on track `t` as one undo step of Renoise's.
+local function producer_step(t, edit)
+  local before = copy(mock.data.patterns[1].tracks[t].lines)
+  edit()
+  local after = copy(mock.data.patterns[1].tracks[t].lines)
+  mock.record(function() set_lines(t, before) end, function() set_lines(t, after) end)
+  H.tick(2)
+end
+
+-- A row inserted or deleted at `r` in the pattern editor (in note column `column` alone, or the whole track), as Renoise does it:
+-- one undo step, and a line notifier only for each line whose content changed (lab).
+local function shift_rows(t, r, how, column)
+  local pattern = mock.data.patterns[1]
+  local data = pattern.tracks[t]
+  local n = pattern.lines
+  local before = copy(data.lines)
+  local function from_of(k)
+    if how == "insert" then
+      if k < r then return k elseif k == r then return nil end
+      return k - 1
+    end
+    if k < r then return k elseif k < n then return k + 1 end
+    return nil
+  end
+  local after = {}
+  for k = 1, n do
+    local f = from_of(k)
+    if column then
+      local line = copy(before[k] or { notes = {}, effects = {} })
+      line.notes = line.notes or {}
+      line.notes[column] = f and before[f] and before[f].notes and copy(before[f].notes[column]) or nil
+      after[k] = line
+    else
+      after[k] = f and copy(before[f]) or nil
+    end
+  end
+  set_lines(t, after)
+  mock.record(function() set_lines(t, before) end, function() set_lines(t, after) end)
+  H.tick(2)
+end
+
+local function bass_column(first, last, col)
+  local out = {}
+  for k = first, last do
+    local s = mock.song:pattern(1):track(3):line(k):note_column(col or 1).note_string
+    if s ~= "---" then out[#out + 1] = k .. ":" .. s end
+  end
+  return table.concat(out, " ")
+end
+
+local function bass_set(lines_, note, col)
+  for _, l in ipairs(lines_) do mock.ops.set_note(1, 3, l, col or 1, { note = note, instrument = 0 }) end
+  H.tick(2)
+end
+
+local C4, D4, E4, F4, G4 = 48, 50, 52, 53, 55
+
+test("review MUST 5: a row deleted inside a run of like notes that goes on below Kumi's: refused, the producer's notes as they are", function()
+  for _, at in ipairs({ 98, 101 }) do
+    local env, peer = setup(nil, { pattern_lines = 128 })
+    bass_set({ 96, 97, 98, 99, 104, 105, 106, 107 }, C4)
+    local previewed, done = bass_notes(peer, 100, 103, "km5a")
+    shift_rows(3, at, "delete") -- (only 107 changes)
+    local now = bass_column(90, 115)
+    failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km5b)", done.epoch, done.layout), "changed")
+    eq(bass_column(90, 115), now, "nothing written (row deleted at " .. at .. ")")
+  end
+end)
+
+test("review MUST 5: one like note just below Kumi's, Kumi's first row deleted: refused, the producer's note kept", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  bass_set({ 104 }, C4)
+  local previewed, done = bass_notes(peer, 100, 103, "km5c")
+  shift_rows(3, 100, "delete") -- (only 104 changes)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km5d)", done.epoch, done.layout), "changed")
+  eq(bass_column(90, 115), "100:C-4 101:C-4 102:C-4 103:C-4")
+end)
+
+test("review MUST 5: a row inserted among the lines a write emptied, the empty stretch going on below: refused, nothing put on the wrong rows", function()
+  for _, at in ipairs({ 101, 102 }) do
+    local env, peer = setup(nil, { pattern_lines = 128 })
+    bass_set({ 101 }, E4)
+    bass_set({ 102 }, F4)
+    bass_set({ 103 }, G4)
+    bass_set({ 110 }, D4)
+    local epoch, layout = place(peer)
+    local lines = { { line = 100, notes = { { col = 1, note = "C-4", instrument = "00" } } } }
+    for l = 101, 103 do lines[#lines + 1] = { line = l, notes = { { col = 1, note = "---", instrument = ".." } } } end
+    local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = lines }
+    local previewed = preview(peer, "notes-write", input)
+    local done = apply(peer, "notes-write", input, "Kumi: n (km5e)", previewed.fence, epoch, layout)
+    ok(done.result, json.encode(done.error or {}))
+    shift_rows(3, at, "insert") -- (only 110 and 111 change)
+    local now = bass_column(90, 115)
+    failure(restore(peer, "notes-write", record_of(previewed, done.result), "Kumi: undo n (km5f)", done.result.epoch, done.result.layout), "changed")
+    eq(bass_column(90, 115), now, "nothing written (row inserted at " .. at .. ")")
+  end
+end)
+
+test("review MUST 5: a row deleted in Kumi's column alone, where only that column's run goes on below: refused", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  bass_set({ 104, 105 }, C4, 2)
+  bass_set({ 104 }, D4, 1) -- (the whole line differs at 104: only column 2's run reaches 105)
+  local epoch, layout = place(peer)
+  local lines = {}
+  for l = 100, 103 do lines[#lines + 1] = { line = l, notes = { { col = 2, note = "C-4", instrument = "00" } } } end
+  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = lines }
+  local previewed = preview(peer, "notes-write", input)
+  local done = apply(peer, "notes-write", input, "Kumi: n (km5g)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  shift_rows(3, 100, "delete", 2) -- (only 105 changes)
+  failure(restore(peer, "notes-write", record_of(previewed, done.result), "Kumi: undo n (km5h)", done.result.epoch, done.result.layout), "changed")
+  eq(bass_column(90, 115, 2), "100:C-4 101:C-4 102:C-4 103:C-4 104:C-4")
+end)
+
+test("plain rule: an untouched pattern undoes exactly, every cell as it was", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  bass_set({ 99, 104 }, C4)
+  bass_set({ 101 }, E4, 2)
+  local before = {}
+  for k = 90, 115 do before[k] = line_text(3, k) end
+  local previewed, done = bass_notes(peer, 100, 103, "km5i")
+  local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km5j)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  for k = 90, 115 do eq(line_text(3, k), before[k], "line " .. k) end
+end)
+
+test("plain rule: an edit in another pattern, or Kumi's change there, doesn't block the undo", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  local previewed, done = bass_notes(peer, 100, 103, "km5k")
+  mock.song:pattern(2):track(3):line(100):note_column(1).note_string = "E-4"
+  local epoch, layout = place(peer)
+  local input = { pattern = pattern_ref(epoch, 3), track = track_ref(epoch, 3), lines = { { line = 1, notes = { { col = 1, note = "D-4", instrument = "00" } } } } }
+  local other = preview(peer, "notes-write", input)
+  ok(apply(peer, "notes-write", input, "Kumi: n (km5l)", other.fence, epoch, layout).result)
+  H.tick(2)
+  local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km5m)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(bass_column(90, 115), "")
+end)
+
+test("review MUST 6: Renoise's undo past Kumi's step to an older row insert puts like lines back: unsure, not redone, and Kumi's undo refuses", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  bass_set({ 100, 101, 102, 103 }, C4)
+  shift_rows(3, 50, "insert") -- (the producer's C-4 on 101-104)
+  local previewed, done = bass_notes(peer, 100, 103, "km6a") -- (only 100 changes)
+  H.tick(2)
+  H.events(peer, "undone_in_daw")
+  mock.song:undo()
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(told[#told].data.how, "undo")
+  mock.song:undo() -- (the row insert: the producer's C-4 back on 100-103, as Kumi wrote them)
+  H.tick(3)
+  drain(peer)
+  told = H.events(peer, "undone_in_daw")
+  eq(#told, 1)
+  eq(told[1].data.how, "unsure")
+  bass_set({ 120 }, E4) -- (far below: Renoise's redo is gone)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km6b)", done.epoch, done.layout), "changed")
+  eq(bass_column(90, 115), "100:C-4 101:C-4 102:C-4 103:C-4")
+end)
+
+test("review MUST 6: the producer's real redo of Kumi's lines: unsure, and Kumi's undo refuses (Renoise's undo and redo changed the pattern)", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  local previewed, done = bass_notes(peer, 10, 13, "km6c")
+  H.tick(2)
+  H.events(peer, "undone_in_daw")
+  mock.song:undo()
+  H.tick(3)
+  drain(peer)
+  eq(H.events(peer, "undone_in_daw")[1].data.how, "undo")
+  mock.song:redo()
+  H.tick(3)
+  drain(peer)
+  eq(H.events(peer, "undone_in_daw")[1].data.how, "unsure")
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km6d)", done.epoch, done.layout), "changed")
+  eq(bass_column(1, 30), "10:C-4 11:C-4 12:C-4 13:C-4")
+end)
+
+-- (Kumi's C-4 on 100-111 undone in three steps of four; the producer's D-4 on 112-115; `disrupt` between steps 1 and 2)
+local function between_steps(disrupt, check)
+  local env, peer = setup({ patch = constants({ SLICE_WRITES = 30 }) }, { pattern_lines = 128 })
+  bass_set({ 112, 113, 114, 115 }, D4)
+  local previewed, done = bass_notes(peer, 100, 111, "km7a")
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local id = send(peer, "change_restore", restore_params("notes-write", record_of(previewed, done), "Kumi: undo n (km7b)", done.epoch, done.layout))
+  for _ = 1, 50 do
+    mock.advance(10)
+    if steps() > 0 then break end
+  end
+  eq(steps(), 1, "step 1 is written")
+  disrupt()
+  local response = wait(peer, id, 300, 20)
+  failure(response, "uncertain")
+  ok(response.error.message:find("Kumi stopped part way and wrote nothing further", 1, true), response.error.message)
+  ok(not response.error.message:find("of 3 steps", 1, true), "no count: " .. response.error.message)
+  local kumis = 0
+  for _, step in ipairs(mock.data.undo.stack) do
+    if step.desc:find("km7b", 1, true) then kumis = kumis + 1 end
+  end
+  eq(kumis, 1, "no step of Kumi's after the producer's change")
+  check()
+end
+
+test("review MUST 7: a row deleted above between a sliced undo's steps: stopped uncertain, the producer's D-4 kept", function()
+  between_steps(function() shift_rows(3, 50, "delete") end, function()
+    eq(bass_column(90, 120), "103:C-4 104:C-4 105:C-4 106:C-4 107:C-4 108:C-4 109:C-4 110:C-4 111:D-4 112:D-4 113:D-4 114:D-4")
+  end)
+end)
+
+test("review MUST 7: a row inserted above between a sliced undo's steps: stopped uncertain, nothing further written", function()
+  between_steps(function() shift_rows(3, 50, "insert") end, function()
+    eq(bass_column(90, 120), "105:C-4 106:C-4 107:C-4 108:C-4 109:C-4 110:C-4 111:C-4 112:C-4 113:D-4 114:D-4 115:D-4 116:D-4")
+  end)
+end)
+
+test("review MUST 7: the producer types a note between a sliced undo's steps: stopped uncertain, the note kept", function()
+  between_steps(function() bass_set({ 109 }, E4) end, function()
+    eq(bass_column(108, 109), "108:C-4 109:E-4")
+  end)
+end)
+
+-- The final verify at cefc5aeb: MUST 9 (Kumi's own writes hide a shift from an earlier change) and MUST 10 (Renoise's undo past
+-- Kumi's step to an edit that also changed Kumi's lines). Under the plain rule, both refuse.
+
+test("review MUST 9: Kumi's later write beside an earlier one, then a row deleted: the earlier undo refuses, nothing written", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  local previewed, done = bass_notes(peer, 100, 103, "km9a")
+  bass_notes(peer, 104, 107, "km9b")
+  shift_rows(3, 101, "delete") -- (only 107 changes)
+  local now = bass_column(90, 115)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km9c)", done.epoch, done.layout), "changed")
+  eq(bass_column(90, 115), now)
+end)
+
+test("review MUST 9: Kumi clears the producer's notes, writes beside them, and undoes the clear: refused, and so is the write's undo after a row deleted", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  bass_set({ 104, 105, 106, 107 }, C4)
+  local cleared, clear_done = bass_clear(peer, 104, 107, "km9d")
+  local previewed, done = bass_notes(peer, 100, 103, "km9e")
+  failure(restore(peer, "notes-clear", record_of(cleared, clear_done), "Kumi: undo c (km9f)", clear_done.epoch, clear_done.layout), "changed")
+  shift_rows(3, 101, "delete")
+  local now = bass_column(90, 115)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km9g)", done.epoch, done.layout), "changed")
+  eq(bass_column(90, 115), now)
+end)
+
+test("review MUST 10: the producer clears Kumi's lines and another in one step, Kumi writes the same, two Cmd-Z (one tick apart or within one): refused, the producer's notes kept", function()
+  for _, apart in ipairs({ true, false }) do
+    local env, peer = setup(nil, { pattern_lines = 512 })
+    bass_set({ 100, 101, 102, 103, 300 }, C4)
+    producer_step(3, function()
+      for _, l in ipairs({ 100, 101, 102, 103, 300 }) do mock.ops.set_note(1, 3, l, 1, {}) end
+    end)
+    local previewed, done = bass_notes(peer, 100, 103, "km10a")
+    mock.song:undo()
+    if apart then H.tick(3) end
+    mock.song:undo()
+    H.tick(3)
+    eq(bass_column(90, 310), "100:C-4 101:C-4 102:C-4 103:C-4 300:C-4", "the producer's notes back")
+    failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km10b)", done.epoch, done.layout), "changed")
+    eq(bass_column(90, 310), "100:C-4 101:C-4 102:C-4 103:C-4 300:C-4", "nothing written")
+  end
+end)
+
+test("review MUST 10: the producer clears two columns of lines, Kumi writes the same in one, two Cmd-Z: refused, both columns kept", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  bass_set({ 100, 101, 102, 103 }, C4, 1)
+  bass_set({ 100, 101, 102, 103 }, E4, 2)
+  producer_step(3, function()
+    for l = 100, 103 do
+      mock.ops.set_note(1, 3, l, 1, {})
+      mock.ops.set_note(1, 3, l, 2, {})
+    end
+  end)
+  local previewed, done = bass_notes(peer, 100, 103, "km10c")
+  mock.song:undo()
+  H.tick(3)
+  mock.song:undo()
+  H.tick(3)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km10d)", done.epoch, done.layout), "changed")
+  eq(bass_column(90, 115, 1), "100:C-4 101:C-4 102:C-4 103:C-4")
+  eq(bass_column(90, 115, 2), "100:E-4 101:E-4 102:E-4 103:E-4")
+end)
+
+-- The verify at 74c206e1: MUST 11 (a sliced undo's first step went unchecked), SHOULD 4 (a discard after the pattern changed),
+-- and aliases (lab L1: an edit through an alias notifies the pattern it shows; making a track an alias notifies no line).
+
+-- (Kumi's C-4 on 100-111 undone in three steps; the producer's D-4 on 112-115; `disrupt` after the request was handled, its
+-- check passed, and before its first step runs on a later turn)
+local function before_first_step(disrupt, check)
+  local env, peer = setup({ patch = constants({ SLICE_WRITES = 30 }) }, { pattern_lines = 128 })
+  bass_set({ 112, 113, 114, 115 }, D4)
+  local previewed, done = bass_notes(peer, 100, 111, "km11a")
+  local before = steps()
+  local id = send(peer, "change_restore", restore_params("notes-write", record_of(previewed, done), "Kumi: undo n (km11b)", done.epoch, done.layout))
+  eq(steps(), before, "the first step isn't written inside the request")
+  disrupt()
+  failure(wait(peer, id, 300, 20), "changed")
+  for _, step in ipairs(mock.data.undo.stack) do ok(not step.desc:find("km11b", 1, true), "a step of Kumi's undo: " .. step.desc) end
+  check()
+end
+
+test("review MUST 11: a row deleted before a sliced undo's first step: refused, nothing written", function()
+  before_first_step(function() shift_rows(3, 50, "delete") end, function()
+    eq(bass_column(90, 120), "99:C-4 100:C-4 101:C-4 102:C-4 103:C-4 104:C-4 105:C-4 106:C-4 107:C-4 108:C-4 109:C-4 110:C-4 "
+      .. "111:D-4 112:D-4 113:D-4 114:D-4")
+  end)
+end)
+
+test("review MUST 11: a note typed in Kumi's lines before a sliced undo's first step: refused, the note kept", function()
+  before_first_step(function() bass_set({ 101 }, E4) end, function()
+    eq(bass_column(100, 102), "100:C-4 101:E-4 102:C-4")
+  end)
+end)
+
+test("review MUST 11: another tool's notes in the pattern before a sliced undo's first step: refused, its notes kept", function()
+  before_first_step(function() bass_set({ 100, 101, 102, 103 }, D4) end, function()
+    eq(bass_column(100, 104), "100:D-4 101:D-4 102:D-4 103:D-4 104:C-4")
+  end)
+end)
+
+test("review SHOULD 4: a discard of a notes change after a row inserted refuses too: lines have no identity but their place", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  bass_set({ 104 }, C4)
+  local previewed, done = bass_notes(peer, 100, 103, "km12a")
+  shift_rows(3, 50, "insert")
+  local now = bass_column(90, 115)
+  local params = restore_params("notes-write", record_of(previewed, done), "Kumi: undo n (km12b)", done.epoch, done.layout)
+  params.discard = true
+  local response = call(peer, "change_restore", params, 800)
+  failure(response, "changed")
+  ok(response.error.message:find("can't tell where its lines are now", 1, true), response.error.message)
+  eq(bass_column(90, 115), now, "nothing written")
+end)
+
+test("aliases: Kumi doesn't write lines through an alias (they are the pattern's it shows)", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  mock.ops.alias(2, 3, 1)
+  H.tick(2)
+  local epoch, layout = place(peer)
+  local input = { pattern = pattern_ref(epoch, 2), track = track_ref(epoch, 3), lines = { { line = 1, notes = { { col = 1, note = "C-4", instrument = "00" } } } } }
+  local response = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
+  ok(response.error and response.error.message:find("alias", 1, true), json.encode(response))
+end)
+
+test("aliases (lab L1): the producer's edit through an alias of Kumi's lines refuses Kumi's undo", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  mock.ops.alias(2, 3, 1)
+  H.tick(2)
+  local previewed, done = bass_notes(peer, 100, 103, "km13a")
+  mock.song:pattern(2):track(3):line(104):note_column(1).note_string = "E-4" -- (through the alias: pattern 1's line)
+  H.tick(2)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km13b)", done.epoch, done.layout), "changed")
+  eq(bass_column(100, 104), "100:C-4 101:C-4 102:C-4 103:C-4 104:E-4")
+end)
+
+test("aliases: Kumi's track in the pattern made an alias and back since refuses Kumi's undo (no line notifies it)", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  local previewed, done = bass_notes(peer, 100, 103, "km13c")
+  mock.song:pattern(1):track(3).alias_pattern_index = 3
+  mock.song:pattern(1):track(3).alias_pattern_index = 0
+  H.tick(2)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km13d)", done.epoch, done.layout), "changed")
 end)

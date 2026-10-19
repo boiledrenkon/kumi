@@ -1,6 +1,6 @@
 [package]
 name = "kumi-runtime"
-version = "1.19.2"
+version = "1.19.3"
 description = "Kumi's runtime: the agent kernel, model providers, the MCP client, the Ableton integration, audio, video, web and the producer's library."
 edition.workspace = true
 license.workspace = true
@@ -71,6 +71,8 @@ libc.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# The GenExpr interpreter the building blocks' tests run their gen~ code in (optimized even in tests).
+kumi-genexpr.workspace = true
 tempfile.workspace = true
 # REAPER's and Renoise's integrations, end to end against Kumi's host and its simulated bridges.
 daw-bridge.workspace = true

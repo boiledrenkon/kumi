@@ -273,9 +273,6 @@ local function gather(song, env, index, track, kind)
     end
   end
   material.pool = material_.keep_pool(song, env, numbers)
-  -- (the track's identity for its lines' touches: the track put back takes it over, so an older notes change on it still
-  -- knows whether its lines moved)
-  material.tid = env.track_identity and env.track_identity(index) or nil
   material.instruments = material_.keep_instruments(song, env, instruments)
   for s = 1, #sequencer.pattern_sequence do
     if sequencer:track_sequence_slot_is_muted(index, s) then material.slotMutes[#material.slotMutes + 1] = s end
@@ -434,7 +431,6 @@ end
 
 local function restore_first_phase(song, env, material, phases, moved)
   local index = make_track(song, material)
-  if env.adopt_identity then env.adopt_identity(index, material.tid) end
   local made, since = index, env.layout()
   local note
   local tally = material_.new_tally()
@@ -630,16 +626,11 @@ local function delete_restore(song, env, restore, desc, journal)
           if not at then fail("changed", "the track being put back isn't where it was made any more") end
           live:describe_undo(step(k))
           local done = {}
-          if env.writing then env.writing(true) end
-          local wrote, err = pcall(function()
-            for _, entry in ipairs(phases[k]) do
-              material_.write_lines(live, at, entry, material.instrument_map)
-              done[entry.pattern] = true
-            end
-            material_.write_automation(live, live:track(at), at, material.automation, done)
-          end)
-          if env.writing then env.writing(false) end
-          if not wrote then error(err, 0) end
+          for _, entry in ipairs(phases[k]) do
+            material_.write_lines(live, at, entry, material.instrument_map)
+            done[entry.pattern] = true
+          end
+          material_.write_automation(live, live:track(at), at, material.automation, done)
         end
       end)
       if not ok then

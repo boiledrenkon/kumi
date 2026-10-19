@@ -472,6 +472,25 @@ impl Journal {
         (back, again)
     }
 
+    /// The DAW's undo or redo put back what an undone change wrote, and can't say which step it took (Renoise's lines: its
+    /// redo of the change, or its undo past it of an older edit that moved like lines there): the change may be made again,
+    /// so Kumi may undo it, and the bridge's restore decides whether that is safe. The changes it names.
+    pub fn follow_unsure(&self, descs: &[String]) -> Vec<String> {
+        let mut inner = self.inner.lock().expect("journal lock");
+        let order = inner.order.clone();
+        let mut unsure = vec![];
+        for id in order {
+            let Some(record) = inner.records.get_mut(&id) else { continue };
+            let named = [&record.desc, &record.step_desc].into_iter().flatten().any(|desc| descs.contains(desc));
+            if record.in_daw_undo && named && record.state == State::Undone {
+                record.state = State::Applied;
+                record.undo_answers.clear();
+                unsure.push(id.clone());
+            }
+        }
+        unsure
+    }
+
     /// A plan's DAW step label, with a nonce of its own, so the DAW's undo of the plan names its changes.
     pub fn step_label(&self, label: &str) -> String {
         let mut inner = self.inner.lock().expect("journal lock");
@@ -515,8 +534,8 @@ impl Journal {
 }
 
 /// The producer undid (or redid) Kumi's changes with the DAW's own undo: the bridge names their step descriptions, the
-/// journal follows, and Kumi is told which changes that took back (`undone`) and which it put back (`redone`), with
-/// `transactionIds` naming the changes whose own steps those were. Any other event goes on as it came.
+/// journal follows, and Kumi is told which changes that took back (`undone`) and which it put back (`redone`), or may have
+/// (`unsure`), with `transactionIds` naming the changes whose own steps those were. Any other event goes on as it came.
 pub fn undone_in_daw(journal: &Journal, name: &str, mut data: Value) -> Value {
     if name != "undone_in_daw" {
         return data;
@@ -524,7 +543,14 @@ pub fn undone_in_daw(journal: &Journal, name: &str, mut data: Value) -> Value {
     let descs: Vec<String> =
         data.get("descs").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
     data["transactionIds"] = json!(journal.by_descs(&descs));
-    let (undone, redone) = journal.follow_daw(&descs, data.get("how").and_then(Value::as_str) != Some("redo"));
+    let how = data.get("how").and_then(Value::as_str);
+    if how == Some("unsure") {
+        data["unsure"] = json!(journal.follow_unsure(&descs));
+        data["undone"] = json!([]);
+        data["redone"] = json!([]);
+        return data;
+    }
+    let (undone, redone) = journal.follow_daw(&descs, how != Some("redo"));
     data["undone"] = json!(undone);
     data["redone"] = json!(redone);
     data
@@ -1028,6 +1054,25 @@ mod tests {
         // The event Kumi gets says which were taken back and which put back.
         let data = undone_in_daw(&journal, "undone_in_daw", json!({"descs": [restore], "how": "undo"}));
         assert_eq!((&data["undone"], &data["redone"]), (&json!([]), &json!([record.id])));
+    }
+
+    #[test]
+    fn lines_back_as_kumi_wrote_them_after_an_undo_are_unsure_and_kumi_may_undo_them_again() {
+        let journal = Journal::default();
+        let record = preview(&journal);
+        let Ok(Ok(applying)) = journal.begin_apply(&record.id, &record.confirmation, "a", None) else { panic!("applying") };
+        journal.end_apply(&record.id, "a", Ok(&json!({"applied": {"cells": []}})));
+        let own = applying.desc.unwrap();
+        journal.follow_daw(std::slice::from_ref(&own), true);
+        assert_eq!(journal.get(&record.id).unwrap().state, State::Undone);
+        // Renoise's undo past Kumi's step, or its redo of it: the bridge can't tell, so neither is told.
+        let data = undone_in_daw(&journal, "undone_in_daw", json!({"descs": [own], "how": "unsure"}));
+        assert_eq!((&data["undone"], &data["redone"], &data["unsure"]), (&json!([]), &json!([]), &json!([record.id])));
+        // Kumi's undo is sent (the bridge reads back and decides), and the DAW's undo still takes it back.
+        assert!(matches!(journal.begin_undo(&record.id, "u1"), Ok(Ok(_))));
+        journal.end_undo(&record.id, "u1", Err(&json!({"error": "moved", "code": "changed"})));
+        let data = undone_in_daw(&journal, "undone_in_daw", json!({"descs": [own], "how": "undo"}));
+        assert_eq!(data["undone"], json!([record.id]));
     }
 
     #[test]
