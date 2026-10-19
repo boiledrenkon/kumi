@@ -1108,7 +1108,7 @@ mod tests {
         assert_eq!(refs_of(&drums["routes"]), ["r:send:{AAAA}:0:{DDDD}"]);
         // (r-tracks) A track's MIDI hardware output, when it has one.
         assert!(drums.get("midiOut").is_none());
-        fake::with(|s| s.tracks[0].extra.insert("I_MIDIHWOUT".into(), ((0 << 5) | 4) as f64));
+        fake::with(|s| s.tracks[0].extra.insert("I_MIDIHWOUT".into(), 4.0));
         let drums = body(&reads, json!({"kind": "routing", "ref": "r:track:{AAAA}"})).unwrap();
         assert_eq!(drums["midiOut"], json!({"device": 0, "name": "Fake Synth", "channel": 4}));
         assert_eq!((&drums["routes"][0]["otherName"], &drums["parentSend"]), (&json!("Reverb"), &json!(true)));
