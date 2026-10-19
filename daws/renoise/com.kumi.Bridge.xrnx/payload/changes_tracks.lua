@@ -254,7 +254,11 @@ local function delete_apply(song, env, input, fence, desc)
   local ok, index, track, kind = pcall(find_to_delete, song, env, input)
   if not ok then base.gone_is_changed(index) end
   local now = signature(song, index, track)
-  if not same_table(now, fence) then fail("changed", named(index, track) .. " changed since the preview") end
+  if not same_table(now, fence) then
+    -- (another track at the ref's place is not the one that was previewed: name that one)
+    if type(fence.name) == "string" and (fence.name ~= now.name or fence.kind ~= now.kind) then fail("changed", base.moved_text(fence.name)) end
+    fail("changed", named(index, track) .. " changed since the preview")
+  end
   local name = named(index, track)
   local material = gather(song, index, track, kind)
   local size = #json.encode(material)

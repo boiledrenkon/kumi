@@ -217,12 +217,18 @@ local function unwire(spec, state, env)
   return state
 end
 
-local function with_id(state, id)
+-- (`label` is what the producer calls the located object, for the refusal that names it)
+local function with_id(state, id, label)
   if id == nil then return state end
   local copy = {}
   for k, v in pairs(state) do copy[k] = v end
-  copy.id = id
+  copy.id, copy.label = id, label
   return copy
+end
+
+-- The refusal for a ref that names another track than the one previewed: the previewed one is named, not the one at its place now.
+function M.moved_text(label)
+  return string.format("%s isn't at that place any more (a track was made, deleted or renamed): read again", M.q(label or "the track"))
 end
 
 function M.prop_preview(song, env, spec, input)
@@ -234,7 +240,7 @@ function M.prop_preview(song, env, spec, input)
   if not spec.undoable then display.note = NOT_UNDOABLE end
   local shown = wire(spec, now, env)
   -- (the fence names what was located as well as its value: another track at the ref's place is not this one)
-  return { target = loc.target, prior = shown, fence = with_id(shown, loc.id), display = display }
+  return { target = loc.target, prior = shown, fence = with_id(shown, loc.id, loc.name), display = display }
 end
 
 local function gone_is_changed(err)
@@ -249,7 +255,7 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   local ok, loc = pcall(spec.locate, song, env, input)
   if not ok then gone_is_changed(loc) end
   if loc.id ~= nil and fence.id ~= nil and fence.id ~= loc.id then
-    fail("changed", loc.name .. " isn't what was previewed (the ref names another one now): read again")
+    fail("changed", M.moved_text(fence.label or loc.name))
   end
   local fenced = unwire(spec, fence, env)
   local now = spec.read(loc.object, fenced)
