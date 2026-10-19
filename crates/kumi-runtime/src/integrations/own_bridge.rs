@@ -548,6 +548,10 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             .or_else(|| identity.clone().map(|identity| format!("{}:{identity}", self.daw.host_flag)))
             .unwrap_or_else(|| place.clone());
         *self.previous.borrow_mut() = Some((key.clone(), saved.map(|_| ProjectRef { id: place.clone(), name: name.clone() })));
+        // KUMI_TRACE=1: which project each look took the DAW to be, so a restart's key can be checked without a turn.
+        if let Some(trace) = &self.options.context.on_dispatch {
+            trace(format!("look: {key}"));
+        }
         self.looks_again.set(0);
         let tool = self.read_tool();
         Observation {

@@ -340,6 +340,13 @@ function M.load_song(options)
   return M.song
 end
 
+-- Renoise started with a file: it opens its empty song and then the file, with no release in between.
+function M.open_over_startup_song(options)
+  M.song = M.make_song(options)
+  M.fire(M.tool.app_new_document_observable)
+  return M.song
+end
+
 function M.save_song(path)
   -- (which comes first, the file name or the announcement, is Renoise's: M.name_first sets the other order)
   if M.name_first then impl_of[M.song].file_name = path end
