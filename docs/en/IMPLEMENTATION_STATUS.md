@@ -43,14 +43,24 @@ and migration checks do not replace a new real-Live acceptance run.
   macOS gives Kumi to read and change Logic, a go or no-go per channel (M0), and
   the bridge beside Logic attaching through its Accessibility helper and
   answering `ping` and `status`, set up by `kumi --daw logic bridge`, found by
-  the doctor and started by Kumi's host from a session (M1). M2, observation,
-  is in progress: the host replays what the bridge records of the real Logic in
+  the doctor and started by Kumi's host from a session (M1). M2, observation:
+  the bridge's reads over the real Logic are recorded in
   `crates/daw-mcp-server/tests/vectors/logic-reads.json` (the rows, the refs,
-  the focus and FOCUS's bodies), the runtime reads them, opens a kept
-  conversation's project again and tells whether Logic records, and
+  the focus and FOCUS's bodies), the host replays them, the runtime reads them,
+  opens a kept conversation's project again and tells whether Logic records, and
   `crates/kumi/examples/accept_logic.rs` is the opt-in run against the real
-  Logic for the gate; the bridge's reads over the real Logic and that run are
-  not recorded yet. Nothing in Logic changes before M3.
+  Logic for the gate. M3, changes and undo, is wired on Kumi's side: Logic's
+  change set (`crates/kumi-runtime/src/integrations/logic_changes.rs`: the
+  strip's fader, pan, mute, solo, arm and name, tracks added and deleted,
+  markers, the tempo, the cycle area, a region's notes, a plug-in's bypass,
+  parameters and removal, each a step of Logic's own undo, since it has no undo
+  block), the simulated Logic's changes over the recorded project, the host's
+  journal keeping an apply or an undo the bridge couldn't confirm uncertain and
+  never sent twice, HISTORY over Logic with the producer's Cmd-Z named back by
+  `undone_in_daw`, and the acceptance run's M3 checks (a plan of a fader, a
+  rename, a track added and muted, each undone through Kumi; a Cmd-Z named
+  back). The bridge's change ops over the real Logic and the M3 gate are not
+  recorded yet.
 
 ## Evidence
 
@@ -87,16 +97,21 @@ bridge, the version given is the one in the commit that added it.
   bindings were tested through Python in Live, not yet through Kumi's own edits;
   see [Willington](WILLINGTON_INTEGRATION.md).
 - Kumi and the bridge are unsigned; see [releases and distribution](DISTRIBUTION_POLICY.md).
-- Logic Pro support reads the project and changes nothing yet (M2 in progress;
-  changes and undo are M3); Logic Pro 11 and Intel Macs are out of scope. See
+- Logic Pro support reads the project; its changes and undo (M3) are wired on
+  Kumi's side and land in Logic once its bridge's change ops merge. A plug-in
+  inserted, a send made or set, and a marker renamed may stay out: Logic's slot
+  pop-up menus and the Marker List's name cell can't be driven from outside, as
+  M2 found. Logic has no undo block, so a plan of several changes is as many
+  steps of its undo, and a track deleted comes back through Logic's own undo only
+  while that step is on top. Logic Pro 11 and Intel Macs are out of scope. See
   [the Logic contract](LOGIC_CONTRACT.md).
 
 ## Open work
 
 - Support for Renoise and Reaper.
-- Logic Pro: M2's reads over the real Logic (the bridge recording
-  `logic-reads.json` over its fixtures, and the acceptance run), then M3's
-  changes and undo.
+- Logic Pro: the bridge's change ops over the real Logic (M3's bridge side)
+  and the M3 gate with `accept_logic` (a plan with undo, a Cmd-Z named back),
+  then M4.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.
