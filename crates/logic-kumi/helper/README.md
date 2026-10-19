@@ -128,7 +128,8 @@ builds the helper if needed, and `tests/midi_echo.swift`, a small CoreMIDI count
 the helper's destination and listens on its source, then drives the helper over its pipes: ids, errors,
 the ops that need no grant, the MIDI ports both ways, EOF and `quit`. It passes on a Mac without Logic and
 without the Accessibility grant; the ops that need the grant are checked for a well-formed error there.
-The only MIDI byte it sends is Active Sensing, which a DAW listening on every input ignores.
+The only MIDI byte it sends is Active Sensing, which a DAW listening on every input ignores; a DAW that scans every new
+port for a control surface (Logic sends its Mackie device queries) is heard on the test port and left out of the check.
 
 ## What the lab found that the helper lives with
 
