@@ -88,6 +88,18 @@ function M.spans(job, params, epoch, page)
   end)
 end
 
+-- A sequence row's place in beats (contract §9: an audition candidate given as a pattern is heard where its slot plays): where
+-- the slot starts and how long it plays, as Renoise counts beats (its ZL changes included). The timeline is worked out once a read.
+function M.slot_beats()
+  local timeline
+  return function(row, s)
+    timeline = timeline or listening.timeline(rows.the_song(), M.pattern_mark)
+    local slot = timeline.slots[s]
+    if slot then row.positionBeats, row.lengthBeats = slot.beat, slot.endBeat - slot.beat end
+    return row
+  end
+end
+
 -- The option `grid`: Renoise has no text for a value it isn't set to, and setting each point and putting it back is an undo step
 -- that marks the song modified (measured, 3.5.4), so a row answers only its current point, and says so.
 function M.grid_of(params)

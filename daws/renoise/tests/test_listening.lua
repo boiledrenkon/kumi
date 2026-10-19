@@ -813,6 +813,28 @@ test("listening: read spans says where each track plays, in beats: muted columns
   H.no_dialogs()
 end)
 
+test("listening: sequence rows say where each slot plays in beats, its ZL changes included (contract §9)", function()
+  local env, peer = setup()
+  local function command(text)
+    local digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return 256 + (digits:find(text:sub(1, 1), 1, true) - 1) * 36 + (digits:find(text:sub(2, 2), 1, true) - 1)
+  end
+  -- (ZL08 on slot 2's line 9: its first 8 lines are 2 beats, the other 8 one beat; slot 3 stays at LPB 8, 2 beats)
+  mock.ops.set_effect(2, 4, 9, 1, command("ZL"), 8)
+  local epoch = place(peer)
+  local page = result(call(peer, "read", { kind = "sequence" }), "sequence")
+  eq(page.items[1].positionBeats, 0)
+  eq(page.items[1].lengthBeats, 4)
+  eq(page.items[2].positionBeats, 4)
+  eq(page.items[2].lengthBeats, 3)
+  eq(page.items[3].positionBeats, 7)
+  eq(page.items[3].lengthBeats, 2)
+  local one = result(call(peer, "read", { ref = epoch .. ":seq:3" }))
+  eq(one.items[1].positionBeats, 7)
+  eq(one.items[1].lengthBeats, 2)
+  H.no_dialogs()
+end)
+
 test("listening: read param with grid answers only the current point, gridShort (a set and put back is an undo step in Renoise)", function()
   local env, peer = setup()
   local epoch = place(peer)

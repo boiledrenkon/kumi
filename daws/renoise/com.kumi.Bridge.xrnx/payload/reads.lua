@@ -143,7 +143,7 @@ local function one(params, epoch)
     row = track_row(song, epoch, n[1], group_parents(song))
   elseif kind == "seq" then
     need(n[1] <= #song.sequencer.pattern_sequence)
-    row = sequence_row(song, epoch, n[1], track_count(song))
+    row = reads_listening.slot_beats()(sequence_row(song, epoch, n[1], track_count(song)), n[1])
   elseif kind == "pattern" then
     need(n[1] <= #song.patterns)
     row = pattern_row(song, epoch, n[1], track_count(song))
@@ -184,7 +184,8 @@ function M.read(job, params, epoch)
     return page(job, epoch, params, count, function(i) return track_row(the_song(), epoch, i, parents) end)
   elseif kind == "sequence" then
     local tracks = track_count(song)
-    return page(job, epoch, params, #song.sequencer.pattern_sequence, function(s) return sequence_row(the_song(), epoch, s, tracks) end)
+    local beats = reads_listening.slot_beats()
+    return page(job, epoch, params, #song.sequencer.pattern_sequence, function(s) return beats(sequence_row(the_song(), epoch, s, tracks), s) end)
   elseif kind == "pattern" then
     local tracks = track_count(song)
     return page(job, epoch, params, #song.patterns, function(p) return pattern_row(the_song(), epoch, p, tracks) end)
