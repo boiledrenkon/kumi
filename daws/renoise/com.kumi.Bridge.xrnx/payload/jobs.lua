@@ -35,6 +35,15 @@ function M:add(record, request, fn)
     if ctx.now_ms() >= job.deadline then coroutine.yield() end
     job.check()
   end
+  -- The next step of work in a callback of its own (a restore's numbered steps), checked as it resumes.
+  function job.step()
+    coroutine.yield()
+    job.check()
+  end
+  -- The work changed the song's shape itself (it made a track): that is not a change to stop for.
+  function job.rebase()
+    job.shape, job.layout = ctx.shape(), ctx.layout()
+  end
   job.co = coroutine.create(fn)
   self.list[#self.list + 1] = job
   if #self.list == 1 then ctx.on_active(true) end
