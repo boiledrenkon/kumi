@@ -1851,3 +1851,67 @@ test("places, track × a member before a track taken out of its group deleted: i
   ok(undone.result, json.encode(undone.error or {}))
   eq(order(), "Kick,Hat,Pad(in),Group[G],Master,Send 1")
 end)
+
+-- run-lua: Lua run in Renoise, one step of Renoise's undo; only Renoise's undo can take it back.
+
+local function run_lua(peer, code, desc, extra)
+  local epoch, layout = place(peer)
+  local input = { code = code }
+  for k, v in pairs(extra or {}) do input[k] = v end
+  local previewed = call(peer, "change_preview", { kind = "run-lua", input = input, epoch = epoch, layout = layout })
+  if not previewed.result then return previewed end
+  return apply(peer, "run-lua", input, desc, previewed.result.fence, epoch, layout), previewed.result
+end
+
+test("run-lua: a chunk changes the song in one named step, says what it printed and returned, and Kumi's undo is Renoise's", function()
+  local env, peer = setup()
+  local before = steps()
+  local done, previewed = run_lua(peer, "song.transport.bpm = 140\nprint('set', 140)\nreturn { bpm = song.transport.bpm, name = song.name }", "Kumi: Ran Lua (kl01)")
+  ok(done.result, json.encode(done.error or {}))
+  eq(previewed.display.title, "Ran Lua: song.transport.bpm = 140")
+  eq(mock.song.transport.bpm, 140)
+  eq(done.result.applied.changed, true)
+  eq(done.result.applied.printed[1], "set\t140")
+  eq(done.result.applied.result.bpm, 140)
+  eq(done.result.undo.entry, true)
+  eq(steps(), before + 1, "one step of Renoise's undo")
+  local undone = restore(peer, "run-lua", { target = done.result.target, prior = {}, applied = done.result.applied }, "Kumi: undo (kl02)", done.result.epoch, done.result.layout)
+  failure(undone, "daw-only")
+  ok(undone.error.message:find("Renoise's own undo", 1, true), undone.error.message)
+end)
+
+test("run-lua: a chunk that only reads changes nothing and makes no step", function()
+  local env, peer = setup()
+  local before = steps()
+  local done = run_lua(peer, "local names = {}\nfor i = 1, song.sequencer_track_count do names[i] = song:track(i).name end\nreturn names", "Kumi: Ran Lua (kl03)")
+  ok(done.result, json.encode(done.error or {}))
+  eq(done.result.applied.changed, false)
+  eq(done.result.applied.result[1], "Kick")
+  eq(done.result.undo.entry, false)
+  eq(done.result.display.unchanged, true)
+  eq(steps(), before)
+end)
+
+test("run-lua: Lua that doesn't compile is refused at the preview; an error while it runs is said, with what it changed", function()
+  local env, peer = setup()
+  local response = run_lua(peer, "song.transport.bpm = = 1", "Kumi: Ran Lua (kl04)")
+  failure(response, "bad-params")
+  ok(response.error.message:find("doesn't compile", 1, true), response.error.message)
+  local done = run_lua(peer, "song.transport.bpm = 150\nerror('half way')", "Kumi: Ran Lua (kl05)")
+  ok(done.result, json.encode(done.error or {}))
+  eq(mock.song.transport.bpm, 150)
+  ok(done.result.applied.failed and done.result.applied.failed.message:find("half way", 1, true), json.encode(done.result.applied))
+  ok(done.result.display.note:find("what it changed before that stays", 1, true), done.result.display.note)
+end)
+
+test("run-lua: a chunk that runs too long is stopped where it is, inside its time", function()
+  local env, peer = setup()
+  local started = os.time()
+  mock.clock_step_ms = 1 -- (the mock's clock moves only as it is read: each look costs a millisecond)
+  local done = run_lua(peer, "local n = 0\nwhile true do n = n + 1 end", "Kumi: Ran Lua (kl06)", { timeoutMs = 50 })
+  mock.clock_step_ms = nil
+  ok(done.result, json.encode(done.error or {}))
+  ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 50 ms", 1, true), json.encode(done.result.applied))
+  ok(os.time() - started < 5, "stopped")
+  failure(run_lua(peer, "return 1", "Kumi: Ran Lua (kl07)", { timeoutMs = 5000 }), "bad-params")
+end)

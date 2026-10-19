@@ -704,6 +704,8 @@ local function change_env()
     epoch = epoch, layout = function() b.layout_told = true return b.layout end, journal = b.journal, watch_params = watch_params,
     watch_param = watch_param, busy = busy, now_ms = function() return M.now_ms() end, shifted = shifted, place_shifted = place_shifted,
     survives = function(from, kind) return survives(from, kind) end,
+    -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
+    changes = function() return b.changed or 0 end,
   }
   for name, fn in pairs(place_env) do env[name] = fn end
   return env
