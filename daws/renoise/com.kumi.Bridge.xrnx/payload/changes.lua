@@ -139,7 +139,7 @@ local function prop(spec)
 end
 
 prop {
-  kind = "track-volume", noun = "volume", master = true, undoable = true,
+  kind = "track-volume", noun = "volume", master = true, undoable = true, watch = true,
   read = function(track, source)
     local stage = stage_of(source)
     local value = (stage == "post" and track.postfx_volume or track.prefx_volume).value
@@ -163,7 +163,7 @@ prop {
 }
 
 prop {
-  kind = "track-pan", noun = "pan", master = true, undoable = true,
+  kind = "track-pan", noun = "pan", master = true, undoable = true, watch = true,
   read = function(track, source)
     local stage = stage_of(source)
     local value = (stage == "post" and track.postfx_panning or track.prefx_panning).value
@@ -280,6 +280,7 @@ local function prop_apply(song, env, spec, input, fence, desc)
   end
   local wanted = spec.wanted(track, input)
   if spec.undoable then song:describe_undo(desc) end
+  if spec.watch then env.watch_params(index) end
   if not spec.same(now, wanted) then spec.write(track, wanted) end
   local after = spec.read(track, wanted)
   if not spec.same(after, wanted) then fail("failed", "Renoise kept " .. name .. "'s " .. spec.noun .. " as it was") end
@@ -307,6 +308,7 @@ local function prop_restore(song, env, spec, restore, desc)
       fail("changed", name .. "'s " .. spec.noun .. " changed in Renoise since Kumi set it")
     end
     if spec.undoable then song:describe_undo(desc) end
+    if spec.watch then env.watch_params(index) end
     spec.write(track, restore.prior)
     local after = spec.read(track, restore.prior)
     if not spec.same(after, restore.prior) then fail("failed", "Renoise kept " .. name .. "'s " .. spec.noun .. " as it was") end
@@ -660,8 +662,11 @@ end
 -- A track with this name and kind is at the place already: it came back some other way, or was never gone.
 local function already_there(song, material)
   local top = rows.track_count(song)
-  local track = material.index <= top and song:track(material.index) or nil
-  return track ~= nil and track.name == material.name and rows.track_type(track) == material.kind
+  for _, at in ipairs({ material.index, material.indexThen or material.index }) do
+    local track = at >= 1 and at <= top and song:track(at) or nil
+    if track ~= nil and track.name == material.name and rows.track_type(track) == material.kind then return true end
+  end
+  return false
 end
 
 local function delete_restore(song, env, restore, desc, journal)
@@ -911,6 +916,7 @@ function M.carry_restore(params, shifts, since)
     for k, v in pairs(material) do copy.material[k] = v end
     -- a place that was the deleted track's own is still its place (the track after it moved up into it); one before it moved
     copy.material.index = moved or material.index
+    copy.material.indexThen = material.index
     return copy
   end
   return params

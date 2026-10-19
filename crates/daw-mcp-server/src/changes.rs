@@ -242,6 +242,13 @@ impl Journal {
         let (reply, is_error) = match answer {
             Ok(applied) => {
                 record.state = State::Applied;
+                // Where the DAW's refs are now (Renoise: a deleted track moved the layout): an undo is asked from there.
+                if let Some(epoch) = applied.get("epoch").and_then(Value::as_str) {
+                    record.epoch = Some(epoch.to_string());
+                }
+                if let Some(layout) = applied.get("layout").and_then(Value::as_u64) {
+                    record.layout = Some(layout);
+                }
                 record.applied = applied.get("applied").cloned();
                 record.created = applied.get("created").cloned().filter(|created| !created.is_null());
                 record.material = applied.get("material").cloned().filter(|material| !material.is_null());
@@ -580,6 +587,22 @@ mod tests {
         assert!(!is_error && undone["state"] == "undone");
         assert_eq!(journal.begin_undo(&record.id, "u1").unwrap().unwrap_err(), (undone, false));
         assert_eq!(journal.begin_undo(&record.id, "u2").unwrap_err().code, "undone");
+    }
+
+    #[test]
+    fn an_undo_is_asked_from_the_epoch_and_layout_the_apply_answered() {
+        let journal = Journal::default();
+        let answer = json!({"epoch": "e1", "layout": 4, "target": {"ref": "e1:track:3", "kind": "track"}, "prior": {"deleted": false}, "fence": {}, "display": {"title": "Deleted track Bass"}});
+        let record = journal.previewed("track-delete", &json!({"ref": "e1:track:3"}), &answer, Some(4)).unwrap();
+        let Ok(Ok(_)) = journal.begin_apply(&record.id, &record.confirmation, "a1", None) else { panic!("applying") };
+        // Deleting the track moved Renoise's layout from 4 to 5 (and a device list, in another change, would move the epoch).
+        journal.end_apply(
+            &record.id,
+            "a1",
+            Ok(&json!({"epoch": "e1", "layout": 5, "applied": {"deleted": true}, "undo": {"desc": "x", "entry": true}})),
+        );
+        let Ok(Ok((undoing, _))) = journal.begin_undo(&record.id, "u1") else { panic!("undoing") };
+        assert_eq!((undoing.epoch.as_deref(), undoing.layout), (Some("e1"), Some(5)));
     }
 
     #[test]

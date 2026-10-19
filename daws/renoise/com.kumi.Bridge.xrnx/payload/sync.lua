@@ -20,7 +20,10 @@ function M.new(guard, state, hooks)
 end
 
 local function count(self)
-  self.state.changed = (self.state.changed or 0) + 1
+  local state = self.state
+  state.changed = (state.changed or 0) + 1
+  local undoing = self.hooks.undoing
+  if undoing and undoing() then state.undone = true end
 end
 
 local function reshape(self)
@@ -61,6 +64,15 @@ function M:watch(observable, key)
   add(self, observable, self.guard("notifier " .. key, function()
     self.dirty[key] = true
     count(self)
+  end))
+end
+
+-- Not even counted: what the producer's undo may move and that a producer's hand or an automation moves all the time (a
+-- fader). It only asks whether the change that fired it was an undo or redo.
+function M:watch_undo(observable)
+  add(self, observable, self.guard("undo notifier", function()
+    local undoing = self.hooks.undoing
+    if undoing and undoing() then self.state.undone = true end
   end))
 end
 
