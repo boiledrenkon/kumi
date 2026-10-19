@@ -1225,3 +1225,192 @@ fn the_timeline_kinds_are_refused_for_another_epoch_and_while_reaper_is_busy() {
     }
     assert_eq!((state(|s| s.bpm), state(|s| s.loop_range), state(|s| s.repeat), tempo_markers().len()), (120.0, (0.0, 0.0), false, 0));
 }
+
+// ----- notes -----
+
+const SNARE_TAKE: &str = "r:take:{TAKE-S1}";
+
+/// (pitch, start, end, velocity, channel, selected) of the snare take's notes, in order.
+fn snare_notes() -> Vec<(i32, f64, f64, i32, i32, bool)> {
+    state(|s| {
+        s.tracks[2].items[0].takes[0].notes.iter().map(|n| (n.pitch, n.start_ppq, n.end_ppq, n.velocity, n.channel, n.selected)).collect()
+    })
+}
+
+#[test]
+fn notes_are_written_where_asked_in_beats_and_undo_takes_exactly_those_away() {
+    let lab = Lab::new();
+    let before = snare_notes();
+    let input = json!({"ref": SNARE_TAKE, "notes": [
+        {"pitch": 60, "start": 1.0, "length": 0.5, "velocity": 90, "channel": 2},
+        {"pitch": 64, "start": 2.0, "length": 1.0},
+        {"pitch": 67, "start": 0.5, "length": 0.25, "muted": true},
+    ]});
+    let (preview, applied) = lab.make("notes-add", input, "Kumi: Wrote 3 notes in snare.mid take (kna01)");
+    assert_eq!(preview["display"]["title"], "Wrote 3 notes in snare.mid take");
+    assert_eq!(preview["target"], json!({"ref": SNARE_TAKE, "kind": "take"}));
+    assert_eq!(top().as_deref(), Some("Kumi: Wrote 3 notes in snare.mid take (kna01)"));
+    let now = snare_notes();
+    assert_eq!(now.len(), 5);
+    assert!(now.windows(2).all(|pair| pair[0].1 <= pair[1].1), "in order of start: {now:?}");
+    assert!(now.contains(&(60, 960.0, 1440.0, 90, 1, false)) && now.contains(&(64, 1920.0, 2880.0, 100, 0, false)));
+    assert_eq!(applied["applied"]["added"].as_array().unwrap().len(), 3);
+    assert_eq!(applied["applied"]["removed"], json!([]));
+    // The notes that were there are untouched, the selection too.
+    assert!(before.iter().all(|n| now.contains(n)));
+    // The producer changed one since: undo is refused and nothing is touched, unless discarded.
+    state(|s| s.tracks[2].items[0].takes[0].notes.iter_mut().find(|n| n.pitch == 64).unwrap().velocity = 20);
+    let (code, message) = lab.undo("notes-add", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("changed in REAPER"), "{message}");
+    assert_eq!(snare_notes().len(), 5);
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund1)");
+    params["kind"] = "notes-add".into();
+    params["discard"] = true.into();
+    lab.call("change_restore", params).unwrap();
+    // The note the producer changed is theirs now and stays; the two Kumi wrote and nobody touched are gone.
+    let mut expected = [before, vec![(64, 1920.0, 2880.0, 20, 0, false)]].concat();
+    expected.sort_by(|a, b| a.1.total_cmp(&b.1));
+    assert_eq!(snare_notes(), expected);
+}
+
+#[test]
+fn notes_are_changed_by_index_and_put_back_by_their_values() {
+    let lab = Lab::new();
+    let before = snare_notes();
+    let input = json!({"ref": SNARE_TAKE, "changes": [
+        {"index": 0, "pitch": 36, "start": 0.5},
+        {"index": 1, "velocity": 127, "length": 2.0, "muted": true},
+    ]});
+    let (preview, applied) = lab.make("notes-change", input, "Kumi: Changed 2 notes in snare.mid take (knc01)");
+    assert_eq!(preview["display"]["before"].as_array().unwrap().len(), 2);
+    assert_eq!(preview["display"]["after"][0]["pitch"], 36);
+    let now = snare_notes();
+    // The first: moved half a beat later, the same length. The second: longer and louder.
+    assert_eq!(now, [(36, 480.0, 960.0, 100, 0, false), (40, 960.0, 2880.0, 127, 9, true)]);
+    assert!(state(|s| s.tracks[2].items[0].takes[0].notes[1].muted));
+    lab.undo("notes-change", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(snare_notes().len(), 2);
+    let after: Vec<_> = snare_notes().into_iter().map(|n| (n.0, n.1, n.2, n.3, n.4)).collect();
+    assert_eq!(after, before.iter().map(|n| (n.0, n.1, n.2, n.3, n.4)).collect::<Vec<_>>());
+    assert!(!state(|s| s.tracks[2].items[0].takes[0].notes[1].muted));
+    // Undone already: nothing more happens.
+    lab.undo("notes-change", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(snare_notes().len(), 2);
+    // Changing a note to what it is says so.
+    let same = lab
+        .call("change_preview", json!({"kind": "notes-change", "input": {"ref": SNARE_TAKE, "changes": [{"index": 0, "pitch": 38}]}}))
+        .unwrap();
+    assert_eq!(same["display"]["unchanged"], true);
+}
+
+#[test]
+fn deleted_notes_are_written_again_with_their_selection_and_a_retry_changes_nothing() {
+    let lab = Lab::new();
+    let before = snare_notes();
+    let (preview, applied) =
+        lab.make("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [1]}), "Kumi: Deleted 1 note in snare.mid take (knd01)");
+    assert_eq!(preview["display"]["title"], "Deleted 1 note in snare.mid take");
+    assert_eq!(snare_notes().len(), 1);
+    lab.undo("notes-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(snare_notes(), before, "the second note is selected, and is again");
+    lab.undo("notes-delete", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(snare_notes(), before);
+    // The producer wrote the same note by hand since: nothing is written twice.
+    let (preview, applied) =
+        lab.make("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [0, 1]}), "Kumi: Deleted 2 notes in snare.mid take (knd02)");
+    assert!(snare_notes().is_empty());
+    state(|s| {
+        s.tracks[2].items[0].takes[0].notes.push(fake::FakeNote {
+            start_ppq: 0.0,
+            end_ppq: 480.0,
+            channel: 0,
+            pitch: 38,
+            velocity: 100,
+            selected: false,
+            muted: false,
+        })
+    });
+    lab.undo("notes-delete", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    assert_eq!(snare_notes().len(), 2);
+}
+
+#[test]
+fn a_notes_change_is_refused_when_the_take_changed_since_the_preview_and_nothing_is_written() {
+    let lab = Lab::new();
+    for (kind, input) in [
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": [{"pitch": 60, "start": 1.0, "length": 1.0}]})),
+        ("notes-change", json!({"ref": SNARE_TAKE, "changes": [{"index": 0, "pitch": 50}]})),
+        ("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [0]})),
+    ] {
+        let preview = lab.call("change_preview", json!({"kind": kind, "input": input})).unwrap();
+        // The producer moved a note, without changing how many there are.
+        state(|s| s.tracks[2].items[0].takes[0].notes[1].pitch += 1);
+        let entries = state(|s| s.undo_entries);
+        let before = snare_notes();
+        let apply = json!({"kind": kind, "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+        assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed", "{kind}");
+        assert_eq!((snare_notes(), state(|s| s.undo_entries)), (before, entries));
+        state(|s| s.tracks[2].items[0].takes[0].notes[1].pitch -= 1);
+    }
+}
+
+#[test]
+fn a_bad_notes_request_is_refused_before_anything_is_written() {
+    let lab = Lab::new();
+    let note = |extra: Value| {
+        let mut note = json!({"pitch": 60, "start": 1.0, "length": 1.0});
+        for (key, value) in extra.as_object().unwrap() {
+            note[key] = value.clone();
+        }
+        note
+    };
+    let cases = [
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": []})),
+        ("notes-add", json!({"ref": SNARE_TAKE})),
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": [note(json!({"pitch": 128}))]})),
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": [note(json!({"velocity": 0}))]})),
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": [note(json!({"channel": 17}))]})),
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": [note(json!({"start": -1.0}))]})),
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": [note(json!({"length": 0.0}))]})),
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": [note(json!({"muted": "yes"}))]})),
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": [{"start": 1.0, "length": 1.0}]})),
+        ("notes-add", json!({"ref": "r:track:{CCCC}", "notes": [note(json!({}))]})),
+        ("notes-add", json!({"notes": [note(json!({}))]})),
+        ("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [5]})),
+        ("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [0, 0]})),
+        ("notes-delete", json!({"ref": SNARE_TAKE, "indexes": ["a"]})),
+        ("notes-change", json!({"ref": SNARE_TAKE, "changes": [{"pitch": 50}]})),
+        ("notes-change", json!({"ref": SNARE_TAKE, "changes": [{"index": 9, "pitch": 50}]})),
+        ("notes-change", json!({"ref": SNARE_TAKE, "changes": [{"index": 0, "length": -1.0}]})),
+    ];
+    for (kind, input) in cases {
+        let (code, message) = lab.call("change_preview", json!({"kind": kind, "input": input})).unwrap_err();
+        assert_eq!(code, "bad-params", "{kind} {input}: {message}");
+    }
+    // A take that isn't MIDI.
+    let audio = state(|s| s.tracks[1].items[0].takes[0].guid.clone());
+    let (code, _) = lab
+        .call("change_preview", json!({"kind": "notes-add", "input": {"ref": format!("r:take:{audio}"), "notes": [note(json!({}))]}}))
+        .unwrap_err();
+    assert_eq!(code, "bad-params");
+    assert_eq!(snare_notes().len(), 2);
+}
+
+#[test]
+fn a_thousand_notes_are_one_change_and_one_undo() {
+    let lab = Lab::new();
+    let notes: Vec<Value> =
+        (0..1000).map(|i| json!({"pitch": 36 + i % 24, "start": i as f64 * 0.25, "length": 0.25, "velocity": 1 + i % 127})).collect();
+    let (preview, applied) =
+        lab.make("notes-add", json!({"ref": SNARE_TAKE, "notes": notes}), "Kumi: Wrote 1000 notes in snare.mid take (knb01)");
+    assert_eq!(preview["display"]["count"], 1000);
+    assert_eq!(snare_notes().len(), 1002);
+    lab.undo("notes-add", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(snare_notes().len(), 2);
+    let too_many: Vec<Value> = (0..10_001).map(|i| json!({"pitch": 60, "start": i as f64, "length": 1.0})).collect();
+    assert_eq!(
+        lab.call("change_preview", json!({"kind": "notes-add", "input": {"ref": SNARE_TAKE, "notes": too_many}})).unwrap_err().0,
+        "bad-params"
+    );
+}

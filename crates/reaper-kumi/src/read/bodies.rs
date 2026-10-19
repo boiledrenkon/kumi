@@ -267,7 +267,7 @@ impl Reads {
     // ----- a MIDI take as a piano roll -----
 
     /// The MIDI take a body is about: the ref's, else the MIDI editor's, else the selected item's.
-    fn midi_take(&self, reaper: &Reaper, proj: Project, reference: Option<&str>) -> Result<Take, (String, String)> {
+    pub(crate) fn midi_take(&self, reaper: &Reaper, proj: Project, reference: Option<&str>) -> Result<Take, (String, String)> {
         let take = match reference {
             Some(reference) => match Ref::parse(reference).map_err(bad)? {
                 Ref::Take(guid) => self.take_by_guid(reaper, proj, &guid)?,
@@ -991,6 +991,7 @@ mod tests {
                     pitch: 36 + (i % 12),
                     velocity: 90,
                     selected: false,
+                    muted: false,
                 })
                 .collect();
             take.ccs = (0..1000).map(|i| FakeCc { ppq: i as f64 * 3.0, kind: 0xB0, channel: 0, data1: 1, data2: i % 128 }).collect();
@@ -1221,6 +1222,7 @@ mod tests {
                     pitch: 40 + n % 40,
                     velocity: 90,
                     selected: false,
+                    muted: false,
                 })
                 .collect();
         });
@@ -1253,6 +1255,7 @@ mod tests {
                     pitch: 60,
                     velocity: 90,
                     selected: false,
+                    muted: false,
                 })
                 .collect();
         });

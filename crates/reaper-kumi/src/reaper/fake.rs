@@ -67,6 +67,7 @@ pub struct FakeNote {
     pub pitch: i32,
     pub velocity: i32,
     pub selected: bool,
+    pub muted: bool,
 }
 
 #[derive(Clone)]
@@ -2057,7 +2058,7 @@ unsafe extern "C" fn midi_get_note(
         Some(n) => {
             unsafe {
                 *selected = n.selected;
-                *muted = false;
+                *muted = n.muted;
                 *start = n.start_ppq;
                 *end = n.end_ppq;
                 *channel = n.channel;
@@ -2069,6 +2070,62 @@ unsafe extern "C" fn midi_get_note(
         None => false,
     })
 }
+fn take_mut(s: &mut State, handle: u64) -> Option<&mut FakeTake> {
+    let (kind, a, b, c) = unpack(handle);
+    if kind != TAKE && kind != SOURCE {
+        return None;
+    }
+    s.tracks.get_mut(a as usize)?.items.get_mut(b as usize)?.takes.get_mut(c as usize)
+}
+
+fn sort_notes(take: &mut FakeTake) {
+    take.notes.sort_by(|a, b| a.start_ppq.total_cmp(&b.start_ppq));
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn midi_insert_note(
+    take: *mut MediaItem_Take,
+    selected: bool,
+    muted: bool,
+    start: f64,
+    end: f64,
+    channel: c_int,
+    pitch: c_int,
+    velocity: c_int,
+    no_sort: *const bool,
+) -> bool {
+    let no_sort = !no_sort.is_null() && unsafe { *no_sort };
+    counted(|s| {
+        let Some(t) = take_mut(s, take as u64) else { return false };
+        t.notes.push(FakeNote { start_ppq: start, end_ppq: end, channel, pitch, velocity, selected, muted });
+        if !no_sort {
+            sort_notes(t);
+        }
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn midi_delete_note(take: *mut MediaItem_Take, index: c_int) -> bool {
+    counted(|s| {
+        let Some(t) = take_mut(s, take as u64) else { return false };
+        if index < 0 || index as usize >= t.notes.len() {
+            return false;
+        }
+        t.notes.remove(index as usize);
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn midi_sort(take: *mut MediaItem_Take) {
+    counted(|s| {
+        if let Some(t) = take_mut(s, take as u64) {
+            sort_notes(t);
+        }
+    })
+}
+
 unsafe extern "C" fn midi_get_cc(
     take: *mut MediaItem_Take,
     index: c_int,
@@ -2272,6 +2329,9 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetEnvelopeInfo_String" => get_set_envelope_info_string as unsafe extern "C" fn(*mut TrackEnvelope, *const c_char, *mut c_char, bool) -> bool,
         b"MIDI_CountEvts" => midi_count_evts as unsafe extern "C" fn(*mut MediaItem_Take, *mut c_int, *mut c_int, *mut c_int) -> c_int,
         b"MIDI_GetNote" => midi_get_note as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut bool, *mut bool, *mut f64, *mut f64, *mut c_int, *mut c_int, *mut c_int) -> bool,
+        b"MIDI_InsertNote" => midi_insert_note as unsafe extern "C" fn(*mut MediaItem_Take, bool, bool, f64, f64, c_int, c_int, c_int, *const bool) -> bool,
+        b"MIDI_DeleteNote" => midi_delete_note as unsafe extern "C" fn(*mut MediaItem_Take, c_int) -> bool,
+        b"MIDI_Sort" => midi_sort as unsafe extern "C" fn(*mut MediaItem_Take),
         b"MIDI_GetCC" => midi_get_cc as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut bool, *mut bool, *mut f64, *mut c_int, *mut c_int, *mut c_int, *mut c_int) -> bool,
         b"MIDI_GetPPQPosFromProjQN" => midi_get_ppq_pos_from_proj_qn as unsafe extern "C" fn(*mut MediaItem_Take, f64) -> f64,
         b"MIDI_GetProjQNFromPPQPos" => midi_get_proj_qn_from_ppq_pos as unsafe extern "C" fn(*mut MediaItem_Take, f64) -> f64,
@@ -2346,8 +2406,8 @@ pub fn lab_project() {
         snare.folder = -1;
         let mut take = FakeTake::midi("{TAKE-S1}", "snare.mid");
         take.notes = vec![
-            FakeNote { start_ppq: 0.0, end_ppq: 480.0, channel: 0, pitch: 38, velocity: 100, selected: false },
-            FakeNote { start_ppq: 960.0, end_ppq: 1440.0, channel: 9, pitch: 40, velocity: 64, selected: true },
+            FakeNote { start_ppq: 0.0, end_ppq: 480.0, channel: 0, pitch: 38, velocity: 100, selected: false, muted: false },
+            FakeNote { start_ppq: 960.0, end_ppq: 1440.0, channel: 9, pitch: 40, velocity: 64, selected: true, muted: false },
         ];
         take.ccs = vec![
             FakeCc { ppq: 0.0, kind: 0xB0, channel: 0, data1: 7, data2: 100 },

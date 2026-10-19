@@ -8,6 +8,7 @@
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
 mod marks;
+mod notes;
 mod project;
 mod sends;
 mod structure;
@@ -76,6 +77,7 @@ enum Kind {
     TrackDelete,
     TrackAdd,
     TrackMove,
+    Notes(notes::Mode),
     Tempo,
     TempoMarker,
     TempoMarkerDelete,
@@ -101,6 +103,9 @@ fn kind(name: &str) -> Option<Kind> {
         return Some(Kind::MarkProp(prop));
     }
     match name {
+        "notes-add" => Some(Kind::Notes(notes::Mode::Add)),
+        "notes-change" => Some(Kind::Notes(notes::Mode::Change)),
+        "notes-delete" => Some(Kind::Notes(notes::Mode::Delete)),
         "tempo-set" => Some(Kind::Tempo),
         "tempo-marker-set" => Some(Kind::TempoMarker),
         "tempo-marker-delete" => Some(Kind::TempoMarkerDelete),
@@ -132,6 +137,7 @@ impl Kind {
             Kind::MarkerAdd => marks::add_preview(ctx, input, false),
             Kind::RegionAdd => marks::add_preview(ctx, input, true),
             Kind::MarkerDelete => marks::delete_preview(ctx, input),
+            Kind::Notes(mode) => notes::preview(ctx, input, mode),
             Kind::Tempo => project::tempo_preview(ctx, input),
             Kind::TempoMarker => project::marker_preview(ctx, input),
             Kind::TempoMarkerDelete => project::marker_delete_preview(ctx, input),
@@ -153,6 +159,7 @@ impl Kind {
             Kind::MarkerAdd => marks::add_apply(ctx, input, false),
             Kind::RegionAdd => marks::add_apply(ctx, input, true),
             Kind::MarkerDelete => marks::delete_apply(ctx, input, fence),
+            Kind::Notes(mode) => notes::apply(ctx, input, fence, mode),
             Kind::Tempo => project::tempo_apply(ctx, input, fence),
             Kind::TempoMarker => project::marker_apply(ctx, input, fence),
             Kind::TempoMarkerDelete => project::marker_delete_apply(ctx, input, fence),
@@ -173,6 +180,7 @@ impl Kind {
             Kind::MarkProp(prop) => marks::prop_restore(ctx, prop, restore),
             Kind::MarkerAdd | Kind::RegionAdd => marks::add_restore(ctx, restore),
             Kind::MarkerDelete => marks::delete_restore(ctx, restore),
+            Kind::Notes(_) => notes::restore(ctx, restore),
             Kind::Tempo => project::tempo_restore(ctx, restore),
             Kind::TempoMarker => project::marker_restore(ctx, restore),
             Kind::TempoMarkerDelete => project::marker_delete_restore(ctx, restore),

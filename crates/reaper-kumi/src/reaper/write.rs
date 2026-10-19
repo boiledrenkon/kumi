@@ -4,7 +4,7 @@
 use std::ffi::{c_char, c_int, CString};
 use std::ptr;
 
-use super::{Project, Reaper, Track};
+use super::{Project, Reaper, Take, Track};
 use crate::api::{self, ProjectMarker};
 
 /// The most a track's chunk may grow to when it is read: the plug-in states in it are what take the room.
@@ -271,6 +271,41 @@ impl Reaper<'_> {
         match self.api.SetEditCurPos2() {
             Some(f) => {
                 unsafe { f(proj.0, time, false, false) };
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Notes in a MIDI take. Inserts and deletes leave the order alone until `sort_midi`.
+impl Reaper<'_> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_note(
+        &self,
+        take: Take,
+        selected: bool,
+        muted: bool,
+        start_ppq: f64,
+        end_ppq: f64,
+        channel: i32,
+        pitch: i32,
+        velocity: i32,
+    ) -> bool {
+        let no_sort = true;
+        self.api
+            .MIDI_InsertNote()
+            .is_some_and(|f| unsafe { f(take.0, selected, muted, start_ppq, end_ppq, channel, pitch, velocity, &no_sort) })
+    }
+
+    pub fn delete_note(&self, take: Take, index: i32) -> bool {
+        self.api.MIDI_DeleteNote().is_some_and(|f| unsafe { f(take.0, index) })
+    }
+
+    pub fn sort_midi(&self, take: Take) -> bool {
+        match self.api.MIDI_Sort() {
+            Some(f) => {
+                unsafe { f(take.0) };
                 true
             }
             None => false,
