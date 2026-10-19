@@ -215,7 +215,7 @@ local function delete_restore(song, env, restore, desc)
       if k ~= index then without[#without + 1] = now[k] end
     end
     if base.follow_slot(material.after, without, 1) ~= nil then
-      return { restored = { index = index }, display = { title = slot_title(index) .. " is back already" }, undo = { desc = desc, entry = false } }
+      return { restored = { index = index }, display = { title = slot_title(index) .. " is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
     end
   end
   local placed = type(material.after) == "table" and base.follow_slot(material.after, now, index, true) or nil
