@@ -8,7 +8,7 @@ use daw_mcp_server::{
     simulator::{logic::LogicScript, reaper::ReaperScript, renoise::RenoiseScript, Simulator},
 };
 use futures::FutureExt;
-use kumi_common::abort::Signal;
+use kumi_common::abort::{self, Signal};
 use kumi_runtime::core::{
     context::IntegrationContext,
     contracts::*,
@@ -16,7 +16,7 @@ use kumi_runtime::core::{
 };
 use kumi_runtime::integrations::{
     logic::create_logic_integration,
-    own_bridge::{Connect, OwnOptions},
+    own_bridge::{Connect, OpenFile, OwnOptions},
     reaper::create_reaper_integration,
     renoise::create_renoise_integration,
 };
@@ -65,7 +65,8 @@ async fn reapers_integration_reads_what_kumis_host_answers() {
             let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
             context.on_focus = Some(Rc::new(move |focus| into.borrow_mut().push(focus)));
             context.focus_interval_ms = Some(50);
-            let reaper = create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            let reaper =
+                create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
 
             reaper.start(Signal::new()).await.unwrap();
             let observed = reaper.observe(Signal::new(), None).await.unwrap();
@@ -140,7 +141,8 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
             context.on_focus = Some(Rc::new(move |focus| into.borrow_mut().push(focus)));
             context.focus_interval_ms = Some(50);
-            let renoise = create_renoise_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            let renoise =
+                create_renoise_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
 
             renoise.start(Signal::new()).await.unwrap();
             let observed = renoise.observe(Signal::new(), None).await.unwrap();
@@ -321,7 +323,8 @@ async fn logics_integration_reads_what_kumis_host_answers_from_the_bridge_beside
             let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
             context.on_focus = Some(Rc::new(move |focus| into.borrow_mut().push(focus)));
             context.focus_interval_ms = Some(50);
-            let logic = create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            let logic =
+                create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
 
             logic.start(Signal::new()).await.unwrap();
             let observed = logic.observe(Signal::new(), None).await.unwrap();
@@ -418,6 +421,102 @@ async fn logics_integration_reads_what_kumis_host_answers_from_the_bridge_beside
         .await;
 }
 
+/// A kept conversation's project opens again in Logic from where a look saw it: Kumi hands the package to Logic's
+/// opener (here a stand-in that opens it in the simulated Logic), losing the project open meanwhile is the switch Kumi
+/// asked for, and the bridge's `project` event ends the wait; the producer's own switch is told apart, and the
+/// recording state is read from the same bridge.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_project_opens_again_from_a_kept_conversations_place() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Rc::new(Simulator::start(config).await.unwrap());
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let states: Rc<RefCell<Vec<(ConnectionState, Option<DisconnectCause>)>>> = Rc::default();
+            let into = states.clone();
+            let mut context = IntegrationContext::new(Rc::new(move |state, cause| into.borrow_mut().push((state, cause))));
+            // (the focus is watched, as the app watches it: that is what notices the project changing)
+            let seen: Rc<RefCell<Vec<Option<DawFocus>>>> = Rc::default();
+            let focuses = seen.clone();
+            context.on_focus = Some(Rc::new(move |focus| focuses.borrow_mut().push(focus)));
+            context.focus_interval_ms = Some(50);
+            let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+            let open_file: OpenFile = {
+                let (script, simulator, opened) = (script.clone(), simulator.clone(), opened.clone());
+                Rc::new(move |path| {
+                    opened.borrow_mut().push(path);
+                    // Logic takes the package: the recorded project is open again, and the bridge says so.
+                    script.open_project(0);
+                    simulator.open_project(Some(script.project())).unwrap();
+                    async { Ok(()) }.boxed_local()
+                })
+            };
+            let options = OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: Some(open_file) };
+            let logic = create_logic_integration(options);
+            logic.start(Signal::new()).await.unwrap();
+            let first = logic.observe(Signal::new(), None).await.unwrap();
+            let place = first.project.as_ref().map(|project| project.id.clone()).expect("Scratch is saved");
+            assert_eq!(logic.open_set().as_deref(), Some("/lab/Scratch.logicx"));
+            assert_eq!(logic.recording(Signal::new()).await.unwrap(), Some(false), "the transport, as the focus carries it");
+            let switched = |states: &[(ConnectionState, Option<DisconnectCause>)], cause: DisconnectCause| {
+                states
+                    .iter()
+                    .position(|state| *state == (ConnectionState::Disconnected, Some(cause)))
+                    .is_some_and(|at| states.get(at + 1) == Some(&(ConnectionState::Connected, None)))
+            };
+
+            for _ in 0..200 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                if !seen.borrow().is_empty() {
+                    break;
+                }
+            }
+            assert!(!seen.borrow().is_empty(), "the focus was read");
+
+            // The producer opens another project: the look is of that project, and the switch is theirs.
+            script.open_project(1);
+            simulator.open_project(Some(script.project())).unwrap();
+            for _ in 0..200 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                if switched(&states.borrow(), DisconnectCause::Set) {
+                    break;
+                }
+            }
+            assert!(switched(&states.borrow(), DisconnectCause::Set), "{:?}", states.borrow());
+            let other = logic.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(other.label, "Logic Pro — Scratch 1");
+            assert_ne!(other.project.as_ref().map(|project| project.id.clone()), Some(place.clone()), "another place");
+            assert_eq!(logic.open_set().as_deref(), Some("/lab/Scratch 1.logicx"));
+
+            // The kept conversation's project opens again: the switch Kumi asked for, over once the bridge says so.
+            let before = states.borrow().len();
+            assert_eq!(logic.open_place(&place, abort::timeout(5_000)).await.unwrap(), Ok(()));
+            assert_eq!(*opened.borrow(), ["/lab/Scratch.logicx"]);
+            for _ in 0..200 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                if switched(&states.borrow()[before..], DisconnectCause::AskedSet) {
+                    break;
+                }
+            }
+            assert!(switched(&states.borrow()[before..], DisconnectCause::AskedSet), "{:?}", states.borrow());
+            let back = logic.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(back.project.as_ref().map(|project| project.id.clone()), Some(place));
+            assert_eq!(logic.open_set().as_deref(), Some("/lab/Scratch.logicx"));
+            logic.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
 /// One of the observation's tools, by name.
 fn tool(observed: &Observation, name: &str) -> Rc<dyn KernelTool> {
     observed.tools.iter().find(|tool| tool.name() == name).cloned().unwrap_or_else(|| panic!("no {name} tool"))
@@ -447,7 +546,8 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
             let into = told.clone();
             let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
             context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
-            let reaper = create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            let reaper =
+                create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
             reaper.start(Signal::new()).await.unwrap();
             let observed = reaper.observe(Signal::new(), None).await.unwrap();
             let tracks: Value = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"].clone();
@@ -594,7 +694,8 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
             let into = told.clone();
             let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
             context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
-            let renoise = create_renoise_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            let renoise =
+                create_renoise_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
             renoise.start(Signal::new()).await.unwrap();
             let observed = renoise.observe(Signal::new(), None).await.unwrap();
             assert!(observed.instructions.contains("devices go at 2 or later"), "{}", observed.instructions);

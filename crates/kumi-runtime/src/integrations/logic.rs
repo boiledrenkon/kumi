@@ -13,6 +13,7 @@ use crate::core::{
     view::*,
 };
 use crate::mcp::client::BridgeDescriptor;
+use futures::{future::LocalBoxFuture, FutureExt};
 use regex::Regex;
 use serde_json::Value;
 use std::{rc::Rc, sync::LazyLock};
@@ -36,7 +37,34 @@ pub const DAW: OwnDaw = OwnDaw {
     busy_words,
     permission_words,
     changes: &super::logic_changes::CHANGES,
+    open_project: Some(open_project),
 };
+
+/// Logic's bundle id: what a project is opened with when the bridge hasn't said which Logic it attached to.
+const BUNDLE_ID: &str = "com.apple.logic10";
+
+/// Opens a saved project's package with the Logic that's running (`resource`: its bundle id as the bridge attached to
+/// it, else Logic's own), through the system as a double-click on the package would: Logic asks about the project it
+/// has open itself, and the bridge's `project` event says when the other one is open. The bridge has no method for
+/// it. Err(why) when the package is gone, or the system didn't take it.
+fn open_project(resource: Option<String>, path: String) -> LocalBoxFuture<'static, Result<(), String>> {
+    async move {
+        if !std::path::Path::new(&path).exists() {
+            return Err(format!("That project isn't at {path} any more."));
+        }
+        if !cfg!(target_os = "macos") {
+            return Err("Kumi can't open projects in Logic Pro from here.".into());
+        }
+        let bundle = resource.filter(|resource| !resource.is_empty()).unwrap_or_else(|| BUNDLE_ID.into());
+        let opened = tokio::process::Command::new("open").args(["-b", &bundle, &path]).status().await.is_ok_and(|status| status.success());
+        if opened {
+            Ok(())
+        } else {
+            Err(format!("Logic Pro didn't take {path}."))
+        }
+    }
+    .boxed_local()
+}
 
 /// Why Logic answers late, from the bridge's `busy` (the contract's `modal`, `away` and `loading`).
 fn busy_words(code: &str) -> String {

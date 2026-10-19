@@ -539,7 +539,7 @@ async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
                 let mut context = IntegrationContext::new(listener);
                 let into = into.clone();
                 context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
-                create_reaper_integration(OwnOptions { context, kumi_home: home.clone(), connect: Some(connect) })
+                create_reaper_integration(OwnOptions { context, kumi_home: home.clone(), connect: Some(connect), open_file: None })
             });
             let main = Rc::new(Recorded::default());
             let events = Rc::new(RefCell::new(vec![]));

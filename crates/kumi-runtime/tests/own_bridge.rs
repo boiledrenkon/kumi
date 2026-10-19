@@ -61,6 +61,7 @@ fn options(host: Rc<Host>, states: Rc<RefCell<Vec<ConnectionState>>>) -> OwnOpti
         context: IntegrationContext::new(Rc::new(move |state, _| states.borrow_mut().push(state))),
         kumi_home: std::env::temp_dir(),
         connect: Some(connect),
+        open_file: None,
     }
 }
 
@@ -860,6 +861,62 @@ async fn logics_look_without_accessibility_says_what_to_allow_and_never_counts_a
             for words in ["note under a region", "region under a track", "plugin under a track", "bar, beat, division"] {
                 assert!(tool.description().contains(words), "{words}: {}", tool.description());
             }
+        })
+        .await;
+}
+
+/// Logic's recording state is its transport's, as the focus carries it (none while the bridge lacks Accessibility,
+/// and never busy), and a kept conversation's project opens again from where a look saw it: the integration keeps
+/// each saved project's file by its place, says when it doesn't know one, and hands the file to Logic's opener (here
+/// a stand-in), whose refusal is passed on in its words.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_recording_is_its_transports_and_a_kept_conversations_project_opens_from_a_look() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let focus = |transport: Value| json!({"epoch": "1", "view": "tracks", "selection": {"trackRef": "1:track:1"}, "transport": transport});
+            let status = json!({"connected": true, "busy": false, "permission": null, "resource": "com.apple.logic10", "project": {"id": PROJECT_ID, "name": "Scratch", "path": "/lab/Scratch.logicx"}});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![
+                    ("status", status, false),
+                    ("snapshot", logic_snapshot(), false),
+                    ("focus", focus(json!({"playing": true, "recording": true, "cycle": false})), false),
+                ]),
+                asked: RefCell::default(),
+            });
+            let states = Rc::new(RefCell::new(vec![]));
+            let asked_to_open: Rc<RefCell<Vec<String>>> = Rc::default();
+            let mut options = options(host.clone(), states.clone());
+            let into = asked_to_open.clone();
+            options.open_file = Some(Rc::new(move |path| {
+                into.borrow_mut().push(path.clone());
+                async move { Err(format!("Logic Pro didn't take {path}.")) }.boxed_local()
+            }));
+            let logic = create_logic_integration(options);
+            assert_eq!(logic.recording(Signal::new()).await.unwrap(), None, "not connected yet");
+            logic.start(Signal::new()).await.unwrap();
+            assert_eq!(logic.open_set().as_deref(), Some("/lab/Scratch.logicx"), "the status's project, before any look");
+            assert_eq!(logic.recording(Signal::new()).await.unwrap(), Some(true));
+            host.answers.borrow_mut().push(("focus", focus(json!({"playing": false, "recording": false, "cycle": false})), false));
+            assert_eq!(logic.recording(Signal::new()).await.unwrap(), Some(false));
+            host.answers.borrow_mut().push(("focus", json!({"epoch": "1", "view": "tracks", "selection": {}}), false));
+            assert_eq!(logic.recording(Signal::new()).await.unwrap(), None, "a transport that doesn't say");
+            let refused = json!({"error": "Accessibility isn't granted to Kumi's helper", "code": "failed", "connected": true});
+            host.answers.borrow_mut().push(("focus", refused, true));
+            assert_eq!(logic.recording(Signal::new()).await.unwrap(), None, "refused in words: not busy, and nothing to tell");
+            assert!(!states.borrow().contains(&ConnectionState::Disconnected), "{:?}", states.borrow());
+
+            // A place this run never saw can't be opened; the project a look saw opens from its file.
+            let unknown = format!("logic-{}", "f".repeat(32));
+            assert_eq!(logic.open_place(&unknown, Signal::new()).await.unwrap(), Err("Kumi doesn't know where that project is.".into()));
+            let seen = logic.observe(Signal::new(), None).await.unwrap();
+            let place = seen.project.as_ref().map(|project| project.id.clone()).expect("a saved project's place");
+            assert_eq!(place, format!("logic-{PROJECT_ID}"));
+            let refused = logic.open_place(&place, Signal::new()).await.unwrap();
+            assert_eq!(refused, Err("Logic Pro didn't take /lab/Scratch.logicx.".into()));
+            assert_eq!(*asked_to_open.borrow(), ["/lab/Scratch.logicx"]);
+            logic.close().await.unwrap();
+            assert_eq!(logic.open_place(&place, Signal::new()).await.unwrap(), Err("Kumi isn't connected to Logic Pro.".into()));
+            assert_eq!(logic.recording(Signal::new()).await.unwrap(), None);
         })
         .await;
 }

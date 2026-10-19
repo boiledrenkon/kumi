@@ -45,6 +45,10 @@ const FOCUS_MS: u64 = 150;
 const UNDRAWN_FOCUS_MS: u64 = 1_000;
 /// The most a page of the model's read asks for.
 const MOST_ROWS: u64 = 200;
+/// How long after Kumi asked the DAW for another project losing the open one still reads as that switch.
+const PROJECT_OPENING_MS: u64 = 120_000;
+/// How long `open_place` waits for the bridge to say the project changed before leaving the switch expected.
+const PROJECT_EVENT_MS: u64 = 10_000;
 
 /// What one DAW gives the shared integration: its profile, how its host is started, its instructions, and the kinds
 /// its read tool takes.
@@ -73,10 +77,21 @@ pub struct OwnDaw {
     pub permission_words: fn(&str) -> String,
     /// What Kumi can change in it, and how.
     pub changes: &'static super::own_changes::OwnChangeSet,
+    /// Opens a saved project's file with the DAW that's running, for a DAW whose bridge has no method for it (Logic's
+    /// `.logicx` package, opened with Logic's own app as a double-click would); None for a DAW Kumi can't open
+    /// projects in from here.
+    pub open_project: Option<OpenProject>,
 }
+
+/// Opens a project's file with the DAW that's running (`resource`: the running DAW as the host's status names it,
+/// Logic's bundle id), or says why not, in the DAW's words.
+pub type OpenProject = fn(Option<String>, String) -> LocalBoxFuture<'static, Result<(), String>>;
 
 /// Starts Kumi's host for a DAW: the production one runs `daw-mcp-server`; a test's stand-in answers in its place.
 pub type Connect = Rc<dyn Fn(Signal) -> LocalBoxFuture<'static, Result<Rc<dyn McpEndpoint>, RuntimeError>>>;
+
+/// Opens a project's file with the DAW in the place of the DAW's own opener (a test's stand-in), or says why not.
+pub type OpenFile = Rc<dyn Fn(String) -> LocalBoxFuture<'static, Result<(), String>>>;
 
 /// What the app gives a DAW's integration beside the neutral context.
 #[derive(Clone)]
@@ -85,6 +100,8 @@ pub struct OwnOptions {
     /// Kumi's folder, where the host finds the bridge's secret and discovery files.
     pub kumi_home: PathBuf,
     pub connect: Option<Connect>,
+    /// What opens a project's file in the DAW, in the place of the DAW's own opener; None for that opener.
+    pub open_file: Option<OpenFile>,
 }
 
 /// One DAW's integration through Kumi's host.
@@ -129,6 +146,18 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     file: Rc<RefCell<Option<String>>>,
     /// Hosts started: one started again has lost its journal, so Kumi's changes before can't be undone through it.
     hosts: Cell<u32>,
+    /// The running DAW as the host's status names it (Logic's bundle id): what a project is opened with.
+    resource: RefCell<Option<String>>,
+    /// Where each saved project seen this run is, by its place: what opens to go back to its conversation.
+    paths: RefCell<HashMap<String, String>>,
+    /// Kumi asked the DAW for another project, until this instant: the one open going meanwhile is that switch, not
+    /// the producer's.
+    project_wanted: Rc<Cell<Option<tokio::time::Instant>>>,
+    /// The bridge's latest `project` event, for whoever waits on the project changing.
+    projects: Rc<tokio::sync::watch::Sender<Option<Value>>>,
+    /// A `project` event came since the focus was last read: the next read checks whose project it is, whatever the
+    /// epoch says.
+    project_changed: Rc<Cell<bool>>,
 }
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
@@ -170,6 +199,11 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         tempo: link.tempo.clone(),
         file: link.file.clone(),
         hosts: Cell::new(0),
+        resource: RefCell::default(),
+        paths: RefCell::default(),
+        project_wanted: Rc::default(),
+        projects: Rc::new(tokio::sync::watch::channel(None).0),
+        project_changed: Rc::default(),
     })
 }
 
@@ -273,12 +307,22 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         // Tracks inserted, removed or moved where refs are positions: the book's refs follow what they named.
         let (book, layout, epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
         let changes = Rc::downgrade(&self.changes);
+        let (file, projects, project_changed) = (self.file.clone(), self.projects.clone(), self.project_changed.clone());
         let unlisten = endpoint.on_live_event(Rc::new(move |event| {
             // The producer undid (or redid) Kumi's changes with the DAW's own undo: HISTORY follows.
             if event.get("name").and_then(Value::as_str) == Some("undone_in_daw") {
                 if let (Some(changes), Some(data)) = (changes.upgrade(), event.get("data")) {
                     changes.undone_in_daw(data);
                 }
+                return;
+            }
+            // The project changed (another one opened, the open one saved under a name): whoever waits on it is told,
+            // and the next focus read checks whose project it is now.
+            if event.get("name").and_then(Value::as_str) == Some("project") {
+                let data = event.get("data").cloned().unwrap_or(Value::Null);
+                *file.borrow_mut() = data.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).map(str::to_owned);
+                project_changed.set(true);
+                projects.send_replace(Some(data));
                 return;
             }
             // Events were dropped on the way: a track shift among them is unknown, so positional refs are read again.
@@ -381,6 +425,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let back_at = self.back_at.clone();
         let (book, layout, book_epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
         let (look_when_free, look_again) = (self.look_when_free.clone(), self.options.context.on_look_again.clone());
+        let (project_changed, project_wanted) = (self.project_changed.clone(), self.project_wanted.clone());
         let drawn = if self.options.context.focus_drawn { FOCUS_MS } else { UNDRAWN_FOCUS_MS };
         let period = self.options.context.focus_interval_ms.unwrap_or(drawn).max(50);
         tokio::task::spawn_local(async move {
@@ -432,7 +477,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                     }
                 }
                 let epoch = focus.get("epoch").and_then(Value::as_str).map(str::to_owned);
-                if last_epoch.is_some() && epoch != last_epoch {
+                // (a project event before the first read is kept for the read that can compare)
+                let announced = last_epoch.is_some() && project_changed.replace(false);
+                if last_epoch.is_some() && (epoch != last_epoch || announced) {
                     let mut args = JsonObject::new();
                     args.insert("kind".into(), daw.project_kind.into());
                     let row = host.call("read", args, abort::timeout(2_000)).await.ok().and_then(|result| answer_of(&result).ok());
@@ -440,7 +487,10 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                     let before = identity.borrow().clone();
                     if now.is_some() && before.is_some() && now != before {
                         *identity.borrow_mut() = now;
-                        on_connection(ConnectionState::Disconnected, Some(DisconnectCause::Set));
+                        // The switch Kumi asked for (a kept conversation's project, opened again), or the producer's.
+                        let asked = project_wanted.take().is_some_and(|until| tokio::time::Instant::now() <= until);
+                        let cause = if asked { DisconnectCause::AskedSet } else { DisconnectCause::Set };
+                        on_connection(ConnectionState::Disconnected, Some(cause));
                         on_connection(ConnectionState::Connected, None);
                     }
                 }
@@ -622,6 +672,10 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             Some(id) => Place::Saved { daw: self.id(), id: id.into() }.text(),
             None => unsaved(self.id()).into(),
         };
+        // Where the project is, for a kept conversation of its place to open it again.
+        if let (Some(_), Some(file)) = (saved, project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty())) {
+            self.paths.borrow_mut().insert(place.clone(), file.to_owned());
+        }
         let mut book = self.book.borrow_mut();
         let rows = snapshot.get("tracks").and_then(Value::as_array).into_iter().flatten();
         // Each track is named in the project's order before any ref in a row (a group's, a send's) names one out of it.
@@ -742,9 +796,78 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
         (self.options.context.on_connection)(ConnectionState::Connecting, None);
         let status = self.call("status", json!({}), signal).await?;
+        if let Ok(status) = &status {
+            // The running DAW, and the project it has open, as the host names them.
+            *self.resource.borrow_mut() = status.get("resource").and_then(Value::as_str).filter(|r| !r.is_empty()).map(str::to_owned);
+            if let Some(path) = status.pointer("/project/path").and_then(Value::as_str).filter(|path| !path.is_empty()) {
+                *self.file.borrow_mut() = Some(path.to_owned());
+            }
+        }
         self.set_connected(status.is_ok_and(|status| status.get("connected") != Some(&Value::Bool(false))));
         self.watch_focus();
         Ok(())
+    }
+    /// The saved project the DAW has open, by its file: from the last look, the status that started the session, or
+    /// the bridge's `project` event since. None for one not saved yet.
+    fn open_set(&self) -> Option<String> {
+        self.file.borrow().clone()
+    }
+    /// Opens the saved project a kept conversation belongs to, where this run last saw it, with the DAW's own opener
+    /// (Logic's `open`): the DAW asks about the project open itself. Losing that project meanwhile is the switch Kumi
+    /// asked for (`AskedSet`), and the bridge's `project` event says when the other one is open: waited for a while,
+    /// since the conversation goes on only then; past it (a dialog about the project open, say) the switch stays
+    /// expected. `Err(why)` inside when it can't: a project this run never saw, or one the DAW didn't take.
+    async fn open_place(&self, place: &str, signal: Signal) -> Result<Result<(), String>, RuntimeError> {
+        let words = self.daw.profile.words;
+        if self.closed.get() || !self.connected.get() {
+            return Ok(Err(format!("Kumi isn't connected to {}.", words.app)));
+        }
+        let Some(path) = self.paths.borrow().get(place).cloned() else {
+            return Ok(Err(format!("Kumi doesn't know where that {} is.", words.place)));
+        };
+        if self.options.open_file.is_none() && self.daw.open_project.is_none() {
+            return Ok(Err(format!("Kumi can't open {} in {} from here.", words.places, words.app)));
+        }
+        self.project_wanted.set(Some(tokio::time::Instant::now() + std::time::Duration::from_millis(PROJECT_OPENING_MS)));
+        // (subscribed before the file is opened: an event during the opening isn't missed)
+        let mut events = self.projects.subscribe();
+        let opening = match (&self.options.open_file, self.daw.open_project) {
+            (Some(open), _) => open(path.clone()),
+            (None, Some(open)) => open(self.resource.borrow().clone(), path.clone()),
+            (None, None) => unreachable!("checked above"),
+        };
+        if let Err(why) = opening.await {
+            self.project_wanted.set(None);
+            return Ok(Err(why));
+        }
+        let waiting = abort::any([signal, abort::timeout(PROJECT_EVENT_MS)]);
+        loop {
+            tokio::select! {
+                changed = events.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let opened = events.borrow().as_ref().and_then(|project| project.get("path")).and_then(Value::as_str) == Some(path.as_str());
+                    if opened {
+                        break;
+                    }
+                }
+                _ = waiting.cancelled() => break,
+            }
+        }
+        Ok(Ok(()))
+    }
+    /// Whether the DAW records now, as its focus's transport says (Logic's and REAPER's carry `recording`); None when
+    /// it isn't there, its transport doesn't say (Renoise's), or it can't be asked (a bridge lacking Accessibility
+    /// answers in words, never busy).
+    async fn recording(&self, signal: Signal) -> Result<Option<bool>, RuntimeError> {
+        if self.closed.get() || !self.connected.get() {
+            return Ok(None);
+        }
+        Ok(match self.call("focus", json!({}), signal).await? {
+            Ok(focus) => focus.pointer("/transport/recording").and_then(Value::as_bool),
+            Err(_) => None,
+        })
     }
     fn can_show(&self, kind: BodyKind) -> bool {
         self.daw.bodies.contains(&kind)

@@ -457,13 +457,18 @@ impl DawProvider for Own {
     }
     fn integration(&self, context: IntegrationContext, session: &DawSession) -> Rc<dyn Integration> {
         let connect = session.factory.own_host.as_ref().map(|host| host(self.id));
-        (self.create)(OwnOptions { context, kumi_home: kumi_home(&session.env), connect })
+        (self.create)(OwnOptions { context, kumi_home: kumi_home(&session.env), connect, open_file: None })
     }
     fn probe(&self, _bridge_config: String, _factory: &DawFactory, env: &Env) -> LocalBoxFuture<'static, LiveProbe> {
         let create = self.create;
         let home = kumi_home(env);
         async move {
-            let integration = create(OwnOptions { context: IntegrationContext::new(Rc::new(|_, _| {})), kumi_home: home, connect: None });
+            let integration = create(OwnOptions {
+                context: IntegrationContext::new(Rc::new(|_, _| {})),
+                kumi_home: home,
+                connect: None,
+                open_file: None,
+            });
             if let Err(error) = integration.start(abort::timeout(20_000)).await {
                 let _ = integration.close().await;
                 return LiveProbe { started: false, said: Some(error.to_string()), ..Default::default() };
