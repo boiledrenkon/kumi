@@ -276,11 +276,9 @@ local function watch_track(song, i)
   local track = song:track(i)
   local token = b.groups.tracks[i]
   token.devices = {}
-  -- (the track's devices' log: a new one for every watch, so a place from before the track was watched anew is unknown; and
-  -- the track's identity for the touches of its lines, which a track Kumi puts back takes over from the one it deleted)
+  -- (the track's devices' log: a new one for every watch, so a place from before the track was watched anew is unknown)
   b.ids = (b.ids or 0) + 1
   token.dlog = places.new("d" .. b.ids)
-  token.tid = token.tid or ("t" .. b.ids)
   observers:owned(token, nil, function()
     observers:watch_changes(track.name_observable)
     observers:watch_changes(track.color_observable)
@@ -310,6 +308,9 @@ end
 local function watch_pattern(song, p, tracks)
   local pattern = song:pattern(p)
   local token = b.groups.patterns[p]
+  -- (the count of its changed lines, under an id of this watch: a mark from before the pattern was watched anew is unknown)
+  b.ids = (b.ids or 0) + 1
+  token.pid, token.touches = "p" .. b.ids, 0
   observers:owned(token, nil, function()
     observers:watch_lines(pattern)
     observers:watch_changes(pattern.name_observable)
@@ -679,11 +680,6 @@ end
 
 local function unknown_log() return nil, "unknown" end
 
-local function track_identity(t)
-  local token = b.groups and b.groups.tracks[t]
-  return token and token.tid or nil
-end
-
 local place_env = {
   device_mark = function(t)
     local log_ = device_log(t)
@@ -700,54 +696,18 @@ local place_env = {
     if not log_ then return unknown_log() end
     return places.after(log_, n, mark, 1)
   end,
-  -- (the touches of pattern `p`'s track now at `t` so far, as a mark; and since a mark: whether the producer touched a line,
-  -- the lowest, the lines Renoise's own undo or redo changed (a set), and how many changes of lines that undo or redo made
-  -- (with the pattern's count, whether it changed other tracks); nil and "unknown" when the mark is of another track or watch)
-  touch_mark = function(p, t)
-    local tid = track_identity(t)
-    if not tid then return nil end
-    local key = p .. ":" .. tid
-    local touches = b.touches[key]
-    return key .. "=" .. (touches and touches.seq or 0) .. "/" .. (touches and touches.useq or 0)
+  -- (the count of pattern `p`'s changed lines so far, as a mark; and whether any changed since one: nil and "unknown" when the
+  -- mark is of another pattern or watch)
+  pattern_touch_mark = function(p)
+    local token = b.groups and b.groups.patterns[p]
+    return token and token.pid and (token.pid .. "=" .. token.touches) or nil
   end,
-  touched_since = function(p, t, mark)
-    local tid = track_identity(t)
-    local key, seq, useq
-    if type(mark) == "string" then key, seq, useq = mark:match("^(.*)=(%d+)/(%d+)$") end
-    if not tid or not key or key ~= p .. ":" .. tid then return nil, "unknown" end
-    seq, useq = tonumber(seq), tonumber(useq)
-    local touches = b.touches[key]
-    if not touches then return false, nil, {}, 0 end
-    -- (a payload from before undo was kept apart left none: its marks don't parse, so none is asked of it)
-    local now_useq, undone = touches.useq or 0, {}
-    if now_useq > useq then
-      for line, at in pairs(touches.undo) do
-        if at > useq then undone[line] = true end
-      end
-    end
-    if touches.seq <= seq then return false, nil, undone, now_useq - useq end
-    for _, touch in ipairs(touches.stack) do
-      if touch.seq > seq then return true, touch.line, undone, now_useq - useq end
-    end
-    return true, nil, undone, now_useq - useq
-  end,
-  -- (the touches of the whole of pattern `p` so far, as a mark; and since one: whether the producer touched it, and how many
-  -- lines Renoise's own undo or redo changed in it)
-  pattern_touch_mark = function(p) return "p" .. p .. "=" .. (b.touches[p] or 0) .. "/" .. (b.touches["u" .. p] or 0) end,
   pattern_touched_since = function(p, mark)
-    local seq, useq
-    if type(mark) == "string" then seq, useq = mark:match("^p" .. p .. "=(%d+)/(%d+)$") end
-    seq, useq = tonumber(seq), tonumber(useq)
-    if not seq or not useq then return nil, "unknown" end
-    return (b.touches[p] or 0) > seq, (b.touches["u" .. p] or 0) - useq
-  end,
-  -- (Kumi's own writes, while it makes a change or puts one back: no touch of the producer's)
-  writing = function(on) b.kumi_writing = on end,
-  -- (a track's identity for its lines' touches; a track Kumi put back takes over the one it had)
-  track_identity = function(t) return track_identity(t) end,
-  adopt_identity = function(t, tid)
-    local token = b.groups and b.groups.tracks[t]
-    if token and type(tid) == "string" then token.tid = tid end
+    local token = b.groups and b.groups.patterns[p]
+    local pid, count
+    if type(mark) == "string" then pid, count = mark:match("^(.*)=(%d+)$") end
+    if not token or not pid or pid ~= token.pid then return nil, "unknown" end
+    return token.touches > tonumber(count)
   end,
   pattern_mark = function() return places.mark(b.plog) end,
   pattern_at = function(p, mark) return places.item(b.plog, p, mark) end,
@@ -968,7 +928,6 @@ function M.start(h, reloading)
   b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
   b.layout, b.shifts, b.shape = b.layout or 0, b.shifts or {}, b.shape or 0
   b.ids = b.ids or 0
-  b.touches = b.touches or {}
   b.plog, b.ilog = b.plog or places.new("p"), b.ilog or places.new("i")
   b.cat, b.snap = b.cat or {}, b.snap or {}
   if not b.snap[b.epoch_n] then
@@ -986,37 +945,11 @@ function M.start(h, reloading)
   observers = sync.new(guard, b, {
     structural = on_structural,
     tracks = on_tracks,
-    -- (which line of which pattern track the producer changed: a notes change knows whether lines at or above its own
-    -- were touched since, which is how a row inserted or deleted above it shows. Kumi's own writes aren't touches. The
-    -- producer's undo and redo are kept apart, by line: undoing Kumi's own step changes only Kumi's lines, and undoing past it
-    -- to an older row insert changes others too. Each touch is O(1): a stack of the lowest lines since each touch, both
-    -- rising; and for undo and redo, the last count each line was changed at.)
+    -- (every changed line counts for its pattern: the producer's edits, Renoise's undo and redo, Kumi's own writes. A notes
+    -- change's undo goes through only if none came since its step; see changes_notes.lua)
     lines = function(pos)
-      if b.kumi_writing then return end
-      local token = type(pos) == "table" and type(pos.track) == "number" and b.groups and b.groups.tracks[pos.track]
-      if not (token and token.tid and type(pos.pattern) == "number" and type(pos.line) == "number") then return end
-      local key = pos.pattern .. ":" .. token.tid
-      local touches = b.touches[key]
-      if not touches then
-        touches = { seq = 0, stack = {}, useq = 0, undo = {} }
-        b.touches[key] = touches
-      elseif not touches.undo then
-        -- (kept from a payload before undo was kept apart: the tool's state outlives a reload)
-        touches.useq, touches.undo = 0, {}
-      end
-      local song = renoise.song()
-      if song and song:is_undo_redoing() then
-        b.touches["u" .. pos.pattern] = (b.touches["u" .. pos.pattern] or 0) + 1
-        touches.useq = touches.useq + 1
-        touches.undo[pos.line] = touches.useq
-        return
-      end
-      -- (the whole pattern's touches too: a row inserted in the pattern moves every track's lines, an empty one's unseen)
-      b.touches[pos.pattern] = (b.touches[pos.pattern] or 0) + 1
-      touches.seq = touches.seq + 1
-      local stack = touches.stack
-      while stack[#stack] and stack[#stack].line >= pos.line do stack[#stack] = nil end
-      stack[#stack + 1] = { seq = touches.seq, line = pos.line }
+      local token = type(pos) == "table" and type(pos.pattern) == "number" and b.groups and b.groups.patterns[pos.pattern]
+      if token and token.touches then token.touches = token.touches + 1 end
     end,
     -- (asked of every notifier once Kumi has made a change: was the producer's undo or redo what moved it?)
     undoing = function()
