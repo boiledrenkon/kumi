@@ -34,6 +34,8 @@ struct State {
     uncertain_once: bool,
     /// The next restore is made and then answered `uncertain`.
     uncertain_restore_once: bool,
+    /// The next restore is made in part: its answer says what it left out.
+    left_out_once: Option<String>,
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -96,6 +98,7 @@ impl ReaperScript {
                 busy_once: false,
                 uncertain_once: false,
                 uncertain_restore_once: false,
+                left_out_once: None,
             })),
         }
     }
@@ -229,7 +232,11 @@ impl ReaperScript {
                 if std::mem::take(&mut state.uncertain_restore_once) {
                     return Err(("uncertain".into(), "REAPER didn't finish putting it back in time; it may have been".into()));
                 }
-                Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": {"title": format!("{title} (put back)")}}))
+                let mut display = json!({"title": format!("{title} (put back)")});
+                if let Some(note) = state.left_out_once.take() {
+                    display["note"] = note.into();
+                }
+                Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": display}))
             }
         }
     }
@@ -299,6 +306,11 @@ impl ReaperScript {
     /// The next restore is made, then answered `uncertain`.
     pub fn uncertain_restore_once(&self) {
         self.state.lock().unwrap().uncertain_restore_once = true;
+    }
+
+    /// The next restore is made in part, and its answer says what it left out (`display.note`).
+    pub fn left_out_once(&self, note: &str) {
+        self.state.lock().unwrap().left_out_once = Some(note.into());
     }
 
     /// A dialog shows for the next change's preview, and closes right after.

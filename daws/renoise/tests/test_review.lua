@@ -1387,7 +1387,7 @@ test("places, device × reorder of two of a kind: each LFO is aimed at the Gaine
   eq(lfo_dest(1, 3), "2/1/0", "A drives the first")
 end)
 
-test("places, device × the device it was aimed at isn't what it was: left unaimed, and the answer says so", function()
+test("places, device × the device it was aimed at replaced by another of its kind: left unaimed, and the answer says so", function()
   routing_catalog()
   local env, peer = setup()
   mock.song:track(3):insert_device_at("Audio/Effects/Native/Gainer", 2).display_name = "Duck"
@@ -1399,7 +1399,9 @@ test("places, device × the device it was aimed at isn't what it was: left unaim
   local previewed = preview(peer, "device-delete", { ref = epoch .. ":device:1.2" })
   local done = apply(peer, "device-delete", { ref = epoch .. ":device:1.2" }, "Kumi: dd (kp18)", previewed.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
-  mock.data.tracks[3].devices[2].display_name = "Boost" -- the producer makes it another thing
+  -- the producer deletes the Gainer and puts another in its place (a name is no identity: a renamed one would be the same)
+  mock.song:track(3):delete_device_at(2)
+  mock.song:track(3):insert_device_at("Audio/Effects/Native/Gainer", 2)
   local undone = undo_device_delete(peer, previewed, done.result, "kp19")
   ok(undone.result, json.encode(undone.error or {}))
   eq(lfo_dest(1, 2), "-1/-1/-1")
@@ -1448,22 +1450,22 @@ test("places, pattern × append: nothing moves", function()
   eq(lines_in(3, 3), 10)
 end)
 
-test("places, pattern × the pattern itself removed or changed: the track comes back without those lines, and says so", function()
-  for _, change in ipairs({ "removed", "renamed" }) do
+test("places, pattern × the pattern itself removed or made shorter: the track comes back without those lines, and says so", function()
+  for _, change in ipairs({ "removed", "shortened" }) do
     local env, peer = setup()
     local previewed, done = bass_in_verse(peer, "kp24")
     if change == "removed" then
       mock.data.sequence = { 1, 2, 1, 2 }
       mock.ops.remove_pattern(3)
     else
-      mock.data.patterns[3].name = "Chorus"
+      mock.data.patterns[3].lines = 16
     end
     H.tick(2)
     local undone = undo_track_delete(peer, previewed, done, "kp25")
     ok(undone.result, change .. ": " .. json.encode(undone.error or {}))
     eq(names(), "Kick,Hat,Bass,Pad,Master,Send 1")
     ok(undone.result.display.note and undone.result.display.note:find("Its lines in 1 pattern aren't put back", 1, true), json.encode(undone.result.display))
-    if change == "renamed" then eq(lines_in(3, 3), 0, "nothing written into the pattern that isn't what it was") end
+    if change == "shortened" then eq(lines_in(3, 3), 0, "nothing written into the pattern that isn't what it was") end
   end
 end)
 
@@ -1914,4 +1916,173 @@ test("run-lua: a chunk that runs too long is stopped where it is, inside its tim
   ok(done.result.applied.failed and done.result.applied.failed.message:find("ran longer than 50 ms", 1, true), json.encode(done.result.applied))
   ok(os.time() - started < 5, "stopped")
   failure(run_lua(peer, "return 1", "Kumi: Ran Lua (kl07)", { timeoutMs = 5000 }), "bad-params")
+end)
+
+
+test("places, names × a pattern or an instrument renamed is the same one: the lines go back into it, playing it", function()
+  local env, peer = setup(nil, INSTRUMENTS)
+  local previewed, done = bass_in_verse(peer, "kp80")
+  mock.data.patterns[3].name = "Verse 2"
+  mock.data.instruments[1].name = "Drums (loaded)"
+  H.tick(2)
+  local undone = undo_track_delete(peer, previewed, done, "kp81")
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(lines_in(3, 3), 10)
+  eq(undone.result.display.note, nil)
+end)
+
+-- Slots where patterns repeat: a slot made or deleted before a run of one pattern leaves the sequence up to the slot as it was.
+
+local function mute_in_slot_3_after(sequence, act, tag)
+  local env, peer = setup(nil, { patterns = 2, sequence = sequence, sequence_length = #sequence })
+  mock.song.sequencer:set_track_sequence_slot_is_muted(3, 3, true)
+  H.tick(2)
+  local previewed, done = delete_track(peer, 3, "Kumi: d (" .. tag .. ")")
+  delete_track_mutes(3)
+  act()
+  H.tick(2)
+  local undone = undo_track_delete(peer, previewed, done, tag .. "u")
+  ok(undone.result, json.encode(undone.error or {}))
+  local muted = {}
+  for s = 1, #mock.data.sequence do
+    if mock.song.sequencer:track_sequence_slot_is_muted(3, s) then muted[#muted + 1] = s end
+  end
+  return table.concat(muted, ","), undone.result.display.note
+end
+
+test("places, slot × patterns that repeat: a slot made or deleted before a run of its pattern leaves the mute out, and says so", function()
+  for _, act in ipairs({
+    function() mock.song.sequencer:insert_sequence_at(1, 1) end,
+    function() mock.song.sequencer:delete_sequence_at(1) end,
+  }) do
+    local muted, note = mute_in_slot_3_after({ 1, 1, 1, 1 }, act, "kp82")
+    eq(muted, "")
+    ok(note and note:find("isn't put back", 1, true), tostring(note))
+  end
+  -- A slot whose neighbours are other patterns: an append after it, or nothing at all, leaves its place as it was.
+  for _, act in ipairs({ function() mock.song.sequencer:insert_sequence_at(5, 2) end, function() end }) do
+    local muted, note = mute_in_slot_3_after({ 1, 2, 1, 2 }, act, "kp83")
+    eq(muted, "3")
+    eq(note, nil)
+  end
+  -- And when nothing changed, a run of one pattern is no doubt.
+  local muted = mute_in_slot_3_after({ 1, 1, 1, 1 }, function() end, "kp84")
+  eq(muted, "3")
+end)
+
+test("places, slot × a deleted slot in a run of its pattern: refused stale after a slot made before it, put back when nothing changed", function()
+  for _, changed in ipairs({ true, false }) do
+    local env, peer = setup(nil, { patterns = 2, sequence = { 1, 1, 1, 1 }, sequence_length = 4 })
+    local epoch, layout = place(peer)
+    local previewed = preview(peer, "slot-delete", { ref = seq_ref(epoch, 3) })
+    local done = apply(peer, "slot-delete", { ref = seq_ref(epoch, 3) }, "Kumi: delete slot 3 (kp85)", previewed.fence, epoch, layout)
+    ok(done.result, json.encode(done.error or {}))
+    if changed then
+      mock.song.sequencer:insert_sequence_at(1, 1)
+      H.tick(2)
+    end
+    local undone = restore(peer, "slot-delete", record_of(previewed, done.result), "Kumi: undo (kp86)", done.result.epoch, done.result.layout)
+    if changed then failure(undone, "stale") else ok(undone.result, json.encode(undone.error or {})) end
+  end
+end)
+
+-- Cells moved in ways no shift or column move explains, and cleared lines: the undo finds Kumi's cells anywhere in the track.
+
+local function rows_moved(t, map)
+  local data = mock.data.patterns[1].tracks[t]
+  local moved = {}
+  for k, line in pairs(data.lines) do
+    local to = map(k)
+    if to and to >= 1 and to <= mock.data.patterns[1].lines then moved[to] = line end
+  end
+  data.lines = moved
+  notify_lines(1, 3, 1)
+  H.tick(2)
+end
+
+test("places, cell × Expand x2, many rows inserted, a row among like notes, a row and a column: refused changed, nothing written", function()
+  for _, how in ipairs({ "expand", "rows 70", "like", "row and column" }) do
+    local env, peer = setup(nil, { pattern_lines = 512 })
+    local previewed, done = bass_notes(peer, 2, 5, "kp90")
+    if how == "expand" then
+      rows_moved(3, function(k) return 2 * k - 1 end)
+    elseif how == "rows 70" then
+      rows_moved(3, function(k) return k + 70 end)
+    elseif how == "like" then
+      rows_moved(3, function(k) return k >= 4 and k + 1 or k end) -- a row inserted among Kumi's four C-4
+    else
+      rows_moved(3, function(k) return k + 1 end)
+      swap_note_columns(3, 1, 2)
+    end
+    local before = steps()
+    local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kp91)", done.epoch, done.layout)
+    failure(undone, "changed")
+    eq(steps(), before, how)
+  end
+end)
+
+local function bass_clear(peer, first, last, tag)
+  local epoch, layout = place(peer)
+  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), first = first, last = last }
+  local previewed = preview(peer, "notes-clear", input)
+  local done = apply(peer, "notes-clear", input, "Kumi: c (" .. tag .. ")", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  return previewed, done.result
+end
+
+local function set_c4(lines_)
+  for _, l in ipairs(lines_) do mock.ops.set_note(1, 3, l, 1, { note = 48, instrument = 0 }) end
+  H.tick(2)
+end
+
+test("places, cleared lines × a row inserted above: refused changed when the lines around them moved, or with none, when the track was touched", function()
+  for _, around in ipairs({ true, false }) do
+    local env, peer = setup()
+    set_c4(around and { 2, 3, 4, 5, 10 } or { 2, 3, 4, 5 })
+    local previewed, done = bass_clear(peer, 2, 5, "kp92")
+    rows_moved(3, function(k) return k + 1 end)
+    local before = steps()
+    failure(restore(peer, "notes-clear", record_of(previewed, done), "Kumi: undo c (kp93)", done.epoch, done.layout), "changed")
+    eq(steps(), before)
+  end
+end)
+
+test("places, cleared lines × nothing touched: put back where they were", function()
+  local env, peer = setup()
+  set_c4({ 2, 3, 4, 5 })
+  local previewed, done = bass_clear(peer, 2, 5, "kp94")
+  local undone = restore(peer, "notes-clear", record_of(previewed, done), "Kumi: undo c (kp95)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(c4_lines(), "2,3,4,5")
+end)
+
+test("places, value × given as text: a number is the send it names, fenced as a number; other text is refused", function()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  local epoch, layout = kick_send(peer)
+  local input = { ref = epoch .. ":device:1.2", param = "Receiver", valueString = "1" }
+  local previewed = preview(peer, "device-param", input)
+  mock.ops.insert_track(6, { kind = "send", name = "New send" })
+  H.tick(2)
+  failure(apply(peer, "device-param", input, "Kumi: Receiver (kp96)", previewed.fence, epoch, layout), "changed")
+  local now, now_layout = place(peer)
+  local response = call(peer, "change_preview", { kind = "device-param", input = { ref = now .. ":device:1.2", param = "Receiver", valueString = "Send 2" }, epoch = now, layout = now_layout })
+  failure(response, "bad-params")
+end)
+
+test("places, track × a member made among those before a track taken out of its group: it goes back after the one it was after", function()
+  local env, peer = setup(nil, { tracks = { { name = "Kick" }, { name = "Hat" }, { name = "Bass" }, { name = "Pad" }, { name = "Lead" },
+    { kind = "group", name = "Group 06", members = 4 } } })
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 4), group = json.null } -- Pad, after Hat and Bass
+  local previewed = preview(peer, "track-group", input)
+  local done = apply(peer, "track-group", input, "Kumi: out (kp97)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(names():sub(1, 23), "Kick,Pad,Hat,Bass,Lead,")
+  mock.song:insert_track_at(4) -- a member made between Hat and Bass
+  mock.ops.rename_track(4, "New")
+  H.tick(2)
+  local undone = restore(peer, "track-group", record_of(previewed, done.result), "Kumi: undo (kp98)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  ok(names():find("Kick,Hat,New,Bass,Pad,Lead", 1, true), names())
 end)

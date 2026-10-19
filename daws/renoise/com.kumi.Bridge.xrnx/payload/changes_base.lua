@@ -232,10 +232,16 @@ function M.moved_text(label)
   return string.format("%s isn't at that place any more (a track was made, deleted or renamed): read again", M.q(label or "the track"))
 end
 
+-- What a property change wants: by what was located, where the kind needs that (`wanted_at`), else by the object.
+local function wanted_of(spec, loc, input)
+  if spec.wanted_at then return spec.wanted_at(loc, input) end
+  return spec.wanted(loc.object, input)
+end
+
 function M.prop_preview(song, env, spec, input)
   local loc = spec.locate(song, env, input)
   local now = spec.read(loc.object, input)
-  local wanted = spec.wanted(loc.object, input)
+  local wanted = wanted_of(spec, loc, input)
   local display = { title = spec.title(loc.name, now, wanted), before = now, after = wanted }
   if spec.same(now, wanted) then display.unchanged = true end
   if not spec.undoable then display.note = NOT_UNDOABLE end
@@ -271,7 +277,7 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   if not spec.same(now, fenced) then
     fail("changed", loc.name .. "'s " .. spec.noun .. " changed since the preview")
   end
-  local wanted = spec.wanted(loc.object, input)
+  local wanted = wanted_of(spec, loc, input)
   -- (a value that is a place: what it named at the preview, where that is now, is what is written, or nothing)
   if type(fence.wanted) == "table" and not spec.same(unwire(spec, fence.wanted, env, loc), wanted) then
     fail("changed", string.format("what %s's %s names moved since the preview: read again", loc.name, spec.noun))

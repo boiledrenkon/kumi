@@ -138,7 +138,7 @@ local function delete_info(song, s)
   local before = {}
   for k = 1, s - 1 do before[k] = sequencer.pattern_sequence[k] end
   local info = {
-    index = s, pattern = p, count = slot_count(song), before = before,
+    index = s, pattern = p, count = slot_count(song), before = before, beside = { sequencer.pattern_sequence[s - 1], sequencer.pattern_sequence[s + 1] },
     section = { start = start, name = start and sequencer:sequence_section_name(s) or "" },
     mutes = mutes,
   }
@@ -211,6 +211,14 @@ local function delete_restore(song, env, restore, desc)
     for k = 1, index - 1 do
       if sequencer.pattern_sequence[k] ~= before[k] then holds = false break end
     end
+  end
+  -- (patterns repeat: a slot whose pattern a neighbour had can't be told from it once a slot is made or deleted before it, unless
+  -- the sequence is as the delete left it)
+  local beside = type(material.beside) == "table" and material.beside or {}
+  if holds and n ~= material.count - 1 then
+    local own = not material.gone and type(material.pattern) == "string" and refs.parse(material.pattern) or nil
+    local mine = own and own.n[1] or nil
+    if mine and (beside[1] == mine or beside[2] == mine) then holds = false end
   end
   if not holds then
     fail("stale", string.format("the sequence before %s changed in Renoise since Kumi deleted it, so Kumi can't tell where it goes: nothing was put back", slot_text(index)))
