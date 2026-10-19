@@ -375,7 +375,7 @@ local function on_structural(reason, kind, op, owner, token)
   if token then
     lists.devices, lists.samples, lists.phrases = token.devices, token.samples, token.phrases
   end
-  if kind == "sequence" and op then changes.journal_sequence_event(b.journal, op.type, op.index, song:is_undo_redoing()) end
+  if kind == "sequence" and op then changes.journal_sequence_event(b.journal, song:is_undo_redoing()) end
   local list = lists[kind]
   if not list then return end -- (the sequence: nothing is watched per slot)
   if kind == "devices" and op then

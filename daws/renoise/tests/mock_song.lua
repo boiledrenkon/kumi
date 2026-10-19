@@ -1029,6 +1029,14 @@ function M.make_song(options)
       slot = tonumber(slot)
       muted[t .. "," .. (slot >= i and slot + 1 or slot)] = true
     end
+    -- (measured: the slot made in the middle gets the section start and the muted tracks of the slot it pushes up)
+    if d.sequence[i + 1] then
+      sections[i], names[i] = sections[i + 1], names[i + 1]
+      for key in pairs(muted) do
+        local t, slot = key:match("^(%d+),(%d+)$")
+        if tonumber(slot) == i + 1 then muted[t .. "," .. i] = true end
+      end
+    end
     d.sections, d.section_names, d.muted = sections, names, muted
     M.fire(d.sequence_observable, { type = "insert", index = i })
   end
@@ -1038,6 +1046,8 @@ function M.make_song(options)
     for s, name in pairs(d.sections) do
       if s ~= i then sections[s > i and s - 1 or s] = name end
     end
+    -- (measured: deleting the slot where a section starts makes the next slot start it)
+    if d.sections[i] ~= nil and sections[i] == nil and d.sequence[i] then sections[i] = d.sections[i] end
     for s, name in pairs(d.section_names) do
       if s ~= i then names[s > i and s - 1 or s] = name end
     end
@@ -1054,6 +1064,8 @@ function M.make_song(options)
       if v == p then return nil end
     end
     if not pattern_object(p).is_empty then return nil end
+    -- (measured: Renoise removes the last pattern of the pool, whatever its name or length, and keeps an earlier one)
+    if p ~= #d.patterns then return nil end
     local data = table.remove(d.patterns, p)
     for k, v in ipairs(d.sequence) do
       if v > p then d.sequence[k] = v - 1 end
@@ -1417,13 +1429,13 @@ function M.api.add_track_to_group(index, group)
   local at = index
   if index < group then
     while at < group - 1 do
-      M.api.swap_tracks_at(at, at + 1)
+      M.api.swap_tracks_at(at, at + 1, true)
       at = at + 1
     end
   else
     -- (a track after the group takes its place and the group moves up)
     while at > group do
-      M.api.swap_tracks_at(at - 1, at)
+      M.api.swap_tracks_at(at - 1, at, true)
       at = at - 1
     end
     group = group + 1
@@ -1444,7 +1456,7 @@ function M.api.remove_track_from_group(index)
   local start = group - tracks[group].members
   local at = index
   while at > start do
-    M.api.swap_tracks_at(at - 1, at)
+    M.api.swap_tracks_at(at - 1, at, true)
     at = at - 1
   end
   local grouped = tracks[group]
@@ -1460,7 +1472,7 @@ function M.api.delete_track_at(index)
   M.record(function() put_track(index, data, pattern_data) end, function() take_track(index) end)
 end
 
-function M.api.swap_tracks_at(a, b)
+function M.api.swap_tracks_at(a, b, internal)
   local tracks = M.data.tracks
   if not tracks[a] or not tracks[b] then error("track index out of range", 2) end
   local function class(t) return t.kind == "master" and "master" or t.kind == "send" and "send" or "sequencer" end
@@ -1478,10 +1490,19 @@ function M.api.swap_tracks_at(a, b)
     for i = a + 1, b - 1 do pairs_[#pairs_ + 1] = { i, i + 1 } end
   end
   for _, pair in ipairs(pairs_) do ops.swap_tracks(pair[1], pair[2]) end
+  -- (measured: a track a swap leaves just before an EMPTY group becomes its track, unless the swap passes the group)
+  local joined
+  for g, t in ipairs(tracks) do
+    if not internal and t.kind == "group" and t.members == 0 and g - 1 >= 1 and (a == g - 1 or b == g - 1) and b < g then
+      t.members, joined = 1, t
+    end
+  end
   M.record(function()
+    if joined then joined.members = joined.members - 1 end
     for i = #pairs_, 1, -1 do ops.swap_tracks(pairs_[i][1], pairs_[i][2]) end
   end, function()
     for _, pair in ipairs(pairs_) do ops.swap_tracks(pair[1], pair[2]) end
+    if joined then joined.members = joined.members + 1 end
   end)
 end
 

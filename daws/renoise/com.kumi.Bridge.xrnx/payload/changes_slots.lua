@@ -1,9 +1,9 @@
 -- Kumi's changes to the song's sequence: making a slot, deleting one, giving one another pattern, a section's start and name, a
 -- track's mute in a slot. A slot is `E:seq:n`; a track's mute in it is `E:slot:track.n`.
 --
--- Renoise removes a pattern that no slot uses once nothing is in it (measured, 3.5.4), and numbers the patterns after it
--- again; a pattern with something in it stays in the pool, unused. So a slot deleted over an empty pattern of its own keeps the
--- pattern's name and length (`material.gone`) to make it again.
+-- Renoise removes the last pattern of the pool when no slot uses it and nothing is in it (measured, 3.5.4: whatever its name or
+-- length; a pattern earlier in the pool, or with something in it, stays, unused). So a slot deleted over such a pattern keeps
+-- the pattern's name and length (`material.gone`) to make it again.
 
 local import = ...
 local refs = import("refs")
@@ -37,6 +37,11 @@ local function used_elsewhere(song, p, s)
     if value == p and k ~= s then return true end
   end
   return false
+end
+
+-- Renoise would remove this pattern if the slot let go of it.
+local function goes_with(song, p, s)
+  return p == #song.patterns and not used_elsewhere(song, p, s) and song:pattern(p).is_empty
 end
 
 -- slot-insert
@@ -83,7 +88,7 @@ local function insert_apply(song, env, input, fence, desc)
     display = {
       title = insert_title(song, plan), before = { slots = plan.slots }, after = { slots = plan.slots + 1, index = plan.index },
     },
-    undo = { desc = desc, entry = true }, prior = { slots = plan.slots }, place = { seq = plan.index }, shape = "made",
+    undo = { desc = desc, entry = true }, prior = { slots = plan.slots }, place = { seq = plan.index }, shape = "made", follows = "slots",
   }
 end
 
@@ -121,23 +126,28 @@ local function delete_info(song, s)
     if sequencer:track_sequence_slot_is_muted(t, s) then mutes[#mutes + 1] = { track = t } end
   end
   local start = sequencer:sequence_is_start_of_section(s)
-  return {
+  local info = {
     index = s, pattern = p, count = slot_count(song),
     section = { start = start, name = start and sequencer:sequence_section_name(s) or "" },
     mutes = mutes,
-  }, p
+  }
+  -- (deleting a slot where a section starts makes the next slot start it: the next slot's own start is kept to put back)
+  if s < slot_count(song) then
+    local next_start = sequencer:sequence_is_start_of_section(s + 1)
+    info.next = { start = next_start, name = next_start and sequencer:sequence_section_name(s + 1) or "" }
+  end
+  return info, p
 end
 
 local function delete_preview(song, env, input)
   local s = seq_of(song, env, input.ref, "slot-delete")
   if slot_count(song) <= 1 then bad("the song's only slot can't be deleted") end
   local info, p = delete_info(song, s)
-  local pattern = song:pattern(p)
   local display = {
     title = string.format("Deleted %s (%s)", slot_text(s), pattern_label(song, p)),
     before = { slots = info.count }, after = { slots = info.count - 1 },
   }
-  if not used_elsewhere(song, p, s) and pattern.is_empty then
+  if goes_with(song, p, s) then
     display.note = "The pattern is empty and no other slot uses it, so Renoise removes it; Kumi keeps its name and length to put back."
   end
   return {
@@ -162,8 +172,9 @@ local function delete_apply(song, env, input, fence, desc)
   song.sequencer:delete_sequence_at(s)
   if #song.patterns < before then info.gone = saved end
   return {
-    applied = { deleted = true }, material = info, display = { title = title, before = { slots = info.count }, after = { slots = info.count - 1 } },
-    undo = { desc = desc, entry = true }, prior = { deleted = false }, place = { seq = s }, shape = "deleted",
+    applied = { deleted = true, slots = info.count - 1 }, material = info,
+    display = { title = title, before = { slots = info.count }, after = { slots = info.count - 1 } },
+    undo = { desc = desc, entry = true }, prior = { deleted = false, slots = info.count }, place = { seq = s }, shape = "deleted", follows = "slots",
   }
 end
 
@@ -192,13 +203,24 @@ local function delete_restore(song, env, restore, desc)
   else
     sequencer:insert_sequence_at(at, p)
   end
+  -- (Renoise gives a slot made in the middle the section start and the muted tracks of the slot it pushes up: both slots are
+  -- put as they were)
   local section = material.section or {}
   if section.start then
     sequencer:set_sequence_is_start_of_section(at, true)
     sequencer:set_sequence_section_name(at, section.name or "")
+  else
+    sequencer:set_sequence_is_start_of_section(at, false)
   end
-  for _, mute in ipairs(material.mutes or {}) do
-    if mute.track >= 1 and mute.track <= rows.track_count(song) then sequencer:set_track_sequence_slot_is_muted(mute.track, at, true) end
+  local next_slot = material.next
+  if next_slot and at + 1 <= slot_count(song) then
+    sequencer:set_sequence_is_start_of_section(at + 1, next_slot.start == true)
+    if next_slot.start then sequencer:set_sequence_section_name(at + 1, next_slot.name or "") end
+  end
+  local muted = {}
+  for _, mute in ipairs(material.mutes or {}) do muted[mute.track] = true end
+  for t = 1, rows.track_count(song) do
+    if sequencer:track_sequence_slot_is_muted(t, at) ~= (muted[t] == true) then sequencer:set_track_sequence_slot_is_muted(t, at, muted[t] == true) end
   end
   base.note_restored(env.journal, "slot-delete", { seq = at })
   return {
@@ -229,7 +251,7 @@ do
       if input.pattern ~= nil then
         local p = pattern_input(song, env, input)
         local current = song.sequencer.pattern_sequence[s]
-        if p ~= current and not used_elsewhere(song, current, s) and song:pattern(current).is_empty then
+        if p ~= current and goes_with(song, current, s) then
           bad(string.format("%s's pattern %s is empty and no other slot uses it: Renoise would remove it and the change couldn't be put back. Make a slot with the pattern you want (slot-insert), then delete this one",
             loc.name, pattern_label(song, current)))
         end

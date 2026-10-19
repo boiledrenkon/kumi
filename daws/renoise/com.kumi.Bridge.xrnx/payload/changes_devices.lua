@@ -95,9 +95,15 @@ local param_spec = {
       parameter.value_string = state.valueString
     end
   end,
+  -- (text is read by Renoise, which answers the value in its own words: "0.5" is read back as "0.500 dB". Text matches what
+  -- it was read as when it begins that, case aside)
   same = function(a, b)
     if a.value ~= nil and b.value ~= nil then return base.close(a.value, b.value) end
-    return a.valueString == b.valueString
+    local read, wanted = a, b
+    if a.value == nil then read, wanted = b, a end
+    if read.value == nil or wanted.valueString == nil then return a.valueString == b.valueString end
+    local text, asked = tostring(read.valueString):lower(), tostring(wanted.valueString):lower():gsub("^%s+", ""):gsub("%s+$", "")
+    return text == asked or text:sub(1, #asked) == asked
   end,
   title = function(name, _, to) return name .. " " .. (to.valueString or tostring(to.value)) end,
 }

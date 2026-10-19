@@ -1850,6 +1850,8 @@ test("changes: a deleted slot comes back with its pattern, section and muted tra
   eq(done.result.material.section.name, "Drop")
   eq(#done.result.material.mutes, 2)
   eq(done.result.material.gone, nil, "pattern 1 is used by slot 1 still")
+  eq(done.result.material.next.start, false)
+  eq(mock.song.sequencer:sequence_is_start_of_section(3), true, "(Renoise makes the next slot start the section)")
   local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied, material = done.result.material }
   local undone = restore(peer, "slot-delete", record, "Kumi: undo delete slot (kl02)", done.result.epoch, done.result.layout)
   ok(undone.result, json.encode(undone.error or {}))
@@ -1860,6 +1862,8 @@ test("changes: a deleted slot comes back with its pattern, section and muted tra
   eq(q:track_sequence_slot_is_muted(2, 3), true)
   eq(q:track_sequence_slot_is_muted(4, 3), true)
   eq(q:track_sequence_slot_is_muted(1, 3), false)
+  eq(q:sequence_is_start_of_section(4), false, "the slot after it started no section")
+  eq(q:track_sequence_slot_is_muted(2, 4), false)
   eq(undone.result.restored.ref, undone.result.epoch .. ":seq:3")
   eq(steps(), 2)
   -- asked again: it is back, nothing is written
@@ -1885,26 +1889,43 @@ test("changes: a deleted slot over a pattern of its own keeps the pattern with s
     "Kumi: undo (kl12)", d4.result.epoch, d4.result.layout)
   ok(r4.result, json.encode(r4.error or {}))
   eq(seq_text(), "1,2,1,3")
-  -- slot 2 is pattern 2: empty and used by no other slot, so Renoise removes it
+  -- slot 2 is pattern 2: empty and used by no other slot, but not the last of the pool: Renoise keeps it
   mock.song:pattern(2).name = "Verse"
-  mock.song:pattern(2).number_of_lines = 48
+  local e1, l1 = place(peer)
+  local named = preview(peer, "slot-delete", { ref = seq_ref(e1, 2) })
+  eq(named.display.note, nil)
+  local dn = apply(peer, "slot-delete", { ref = seq_ref(e1, 2) }, "Kumi: d (kl13)", named.fence, e1, l1)
+  ok(dn.result, json.encode(dn.error or {}))
+  eq(#mock.data.patterns, 3, "an earlier pattern stays")
+  eq(dn.result.material.gone, nil)
+  local rn = restore(peer, "slot-delete", { target = named.target, prior = named.prior, applied = dn.result.applied, material = dn.result.material },
+    "Kumi: undo (kl14)", dn.result.epoch, dn.result.layout)
+  ok(rn.result, json.encode(rn.error or {}))
+  eq(seq_text(), "1,2,1,3")
+  -- a slot made at the end holds the pool's last pattern, empty: Renoise removes it with the slot
+  local e0, l0 = place(peer)
+  local added = apply(peer, "slot-insert", {}, "Kumi: slot (kl20)", preview(peer, "slot-insert", {}).fence, e0, l0)
+  ok(added.result, json.encode(added.error or {}))
+  eq(#mock.data.patterns, 4)
+  mock.song:pattern(4).name = "Outro"
+  mock.song:pattern(4).number_of_lines = 48
   local e2, l2 = place(peer)
-  local ref2 = seq_ref(e2, 2)
+  local ref2 = seq_ref(e2, 5)
   local p2 = preview(peer, "slot-delete", { ref = ref2 })
   ok(p2.display.note:find("removes it", 1, true), p2.display.note)
-  local d2 = apply(peer, "slot-delete", { ref = ref2 }, "Kumi: d (kl13)", p2.fence, e2, l2)
+  local d2 = apply(peer, "slot-delete", { ref = ref2 }, "Kumi: d (kl15)", p2.fence, e2, l2)
   ok(d2.result, json.encode(d2.error or {}))
-  eq(#mock.data.patterns, 2, "Renoise removed the empty pattern")
-  eq(d2.result.material.gone.name, "Verse")
+  eq(#mock.data.patterns, 3, "Renoise removed the last, empty pattern")
+  eq(d2.result.material.gone.name, "Outro")
   eq(d2.result.material.gone.lines, 48)
-  eq(seq_text(), "1,1,2", "the slot after it is pattern 2 now")
+  eq(seq_text(), "1,2,1,3")
   local r2 = restore(peer, "slot-delete", { target = p2.target, prior = p2.prior, applied = d2.result.applied, material = d2.result.material },
-    "Kumi: undo (kl14)", d2.result.epoch, d2.result.layout)
+    "Kumi: undo (kl16)", d2.result.epoch, d2.result.layout)
   ok(r2.result, json.encode(r2.error or {}))
-  eq(#mock.data.patterns, 3)
-  eq(mock.song.sequencer.pattern_sequence[2], 3, "the pattern is made again, last in the pool")
-  eq(mock.song:pattern(3).name, "Verse")
-  eq(mock.song:pattern(3).number_of_lines, 48)
+  eq(#mock.data.patterns, 4)
+  eq(seq_text(), "1,2,1,3,4")
+  eq(mock.song:pattern(4).name, "Outro")
+  eq(mock.song:pattern(4).number_of_lines, 48)
   H.no_dialogs()
 end)
 
@@ -1923,8 +1944,8 @@ end)
 test("changes: a slot plays another pattern unless that would make Renoise remove the one it played", function()
   local env, peer = setup()
   local epoch, layout = place(peer)
-  -- slot 2 holds pattern 2, empty and used by no other slot
-  local refused = ask(peer, "change_preview", "slot-pattern", { ref = seq_ref(epoch, 2), pattern = pattern_ref(epoch, 3) })
+  -- slot 4 holds pattern 3, the pool's last, empty and used by no other slot
+  local refused = ask(peer, "change_preview", "slot-pattern", { ref = seq_ref(epoch, 4), pattern = pattern_ref(epoch, 2) })
   failure(refused, "bad-params")
   ok(refused.error.message:find("slot-insert", 1, true), refused.error.message)
   -- slot 3 (pattern 1) is used by slot 1 as well

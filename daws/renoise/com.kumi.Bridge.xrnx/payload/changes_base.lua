@@ -193,7 +193,11 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   if not spec.same(now, wanted) then spec.write(loc.object, wanted) end
   -- (a setting Renoise applies a moment later answers its old value when read at once: `eventual` trusts the write)
   local after = spec.eventual and wanted or spec.read(loc.object, wanted)
-  if not spec.same(after, wanted) then fail("failed", "Renoise kept " .. loc.name .. "'s " .. spec.noun .. " as it was") end
+  if not spec.same(after, wanted) then
+    -- (Renoise took something else: what was there goes back, so nothing half-done stays)
+    pcall(spec.write, loc.object, now)
+    fail("failed", "Renoise kept " .. loc.name .. "'s " .. spec.noun .. " as it was")
+  end
   local display = { title = spec.title(loc.name, now, after), before = now, after = after }
   if not spec.undoable then display.note = NOT_UNDOABLE end
   return {
@@ -347,27 +351,14 @@ function M.journal_device_event(journal, track, type_, index, index2, undoing)
   end
 end
 
--- A sequence slot made or deleted: the slots the journal knows are numbered by their place and move with it, and a change that
--- made or removed a slot is told when the producer's undo or redo does it again.
-function M.journal_sequence_event(journal, type_, index, undoing)
+-- A slot made or deleted in the sequence: Renoise's list operations name the wrong slot when patterns repeat (measured: an
+-- insert at slot 1 is told as an insert at slot 2), so the slots the journal knows can't be followed; what is known of a slot
+-- is dropped. A change that made or removed a slot is told by the length of the sequence instead (`follows = "slots"`); that
+-- holds only while nothing else changed the length, so a change of the sequence that is no undo or redo drops those too.
+function M.journal_sequence_event(journal, undoing)
   for i = #journal.entries, 1, -1 do
     local entry = journal.entries[i]
-    local place = entry.place
-    if place and place.seq then
-      local handled = false
-      if entry.shape then handled = structural(journal, entry, type_, index, undoing, place.seq) end
-      if not handled then
-        if type_ == "insert" then
-          if place.seq >= index then place.seq = place.seq + 1 end
-        elseif type_ == "remove" then
-          if place.seq == index and not entry.shape then
-            table.remove(journal.entries, i) -- (the slot is gone: nothing left to compare)
-          elseif place.seq > index then
-            place.seq = place.seq - 1
-          end
-        end
-      end
-    end
+    if entry.place and entry.place.seq and (entry.follows ~= "slots" or not undoing) then table.remove(journal.entries, i) end
   end
 end
 
@@ -389,6 +380,26 @@ function M.journal_pattern_event(journal, type_, index)
   end
 end
 
+-- The changes that made or deleted a slot are told by the length of the sequence (Renoise's list operations name the wrong
+-- slot). That says little when there are several: a change is told only when it is the one length fits.
+local function check_slots(journal, song)
+  local now = #song.sequencer.pattern_sequence
+  local candidates = {}
+  for _, entry in ipairs(journal.entries) do
+    if entry.follows == "slots" then
+      if entry.state == "applied" and now == entry.prior.slots and now ~= entry.applied.slots then
+        candidates[#candidates + 1] = { entry = entry, how = "undo", state = "undone" }
+      elseif entry.state == "undone" and now == entry.applied.slots then
+        candidates[#candidates + 1] = { entry = entry, how = "redo", state = "applied" }
+      end
+    end
+  end
+  if #candidates == 1 then
+    candidates[1].entry.state = candidates[1].state
+    queue(journal, candidates[1].entry.desc, candidates[1].how)
+  end
+end
+
 -- After a producer's undo or redo: the journalled properties are read again and compared with what Kumi wrote and what it
 -- replaced.
 function M.journal_check(journal)
@@ -396,7 +407,9 @@ function M.journal_check(journal)
   if not song then return end
   for _, entry in ipairs(journal.entries) do
     local spec = entry.spec
-    if entry.follows then
+    if entry.follows == "slots" then
+      -- (decided below, over all of them)
+    elseif entry.follows then
       -- (a device or track moved: its place is followed through the swaps, and is where it started or where Kumi put it)
       local now = entry.place[entry.follows]
       if entry.state == "applied" and now == entry.prior.index and now ~= entry.applied.index then
@@ -423,6 +436,7 @@ function M.journal_check(journal)
       end
     end
   end
+  check_slots(journal, song)
 end
 
 -- Kumi put a change back itself: the change is not the producer's to undo any more (the producer's undo of that restore then
