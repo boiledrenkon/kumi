@@ -8,6 +8,7 @@
 //! rows, focus, bodies and actions of `docs/en/LOGIC_CONTRACT.md` come with M2.
 
 pub mod ax;
+pub mod bodies;
 pub mod bridge;
 pub mod fixtures;
 pub mod focus;
@@ -15,6 +16,7 @@ pub mod helper;
 pub mod log;
 pub mod logic;
 pub mod mcu;
+pub mod project;
 pub mod queue;
 pub mod read;
 pub mod refs;

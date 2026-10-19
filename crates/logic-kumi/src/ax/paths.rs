@@ -186,7 +186,12 @@ pub fn item_count(list: &Node, strings: &Strings) -> Option<usize> {
     text.value_text().split_whitespace().next()?.parse().ok()
 }
 
-/// The channel strip's parts, by the labels of its controls (the Mixer's, which the Inspector's strips share).
+/// The channel strip's parts, by the labels of its controls (the Mixer's, which the Inspector's strips share). Logic
+/// lists a strip's controls from the bottom up: the name first, then the buttons, the fader, the output and send
+/// slots, the inserts from the lowest slot to the highest, the instrument slot, the EQ display and the setting button
+/// last; the slots are kept here in that order, so the first insert here is the strip's last. An occupied slot is an
+/// `AXGroup` named after the plug-in or the bus, holding its `bypass` checkbox; an empty one a button named for what
+/// it takes ("audio plug-in", "send button").
 #[derive(Debug, Default)]
 pub struct Strip<'a> {
     pub name: Option<&'a Node>,
@@ -199,16 +204,28 @@ pub struct Strip<'a> {
     pub output: Option<&'a Node>,
     pub inputs: Vec<&'a Node>,
     pub instrument: Option<&'a Node>,
+    /// The send slots, bottom-up, empty ones included.
     pub sends: Vec<&'a Node>,
+    /// The insert slots, bottom-up, empty ones included.
     pub inserts: Vec<&'a Node>,
     pub eq: Option<&'a Node>,
     pub bounce: Option<&'a Node>,
     pub channel_mode: Option<&'a Node>,
+    /// Whether a MIDI effect slot was listed after the inserts: the group just before it is the instrument's.
+    had_midi_slot: bool,
+}
+
+/// Whether a slot's node is an occupied one (a group with a bypass checkbox) rather than an empty slot's button.
+pub fn occupied(slot: &Node) -> bool {
+    slot.role == "AXGroup"
 }
 
 impl<'a> Strip<'a> {
     pub fn of(strip: &'a Node, strings: &Strings) -> Strip<'a> {
         let mut found = Strip::default();
+        // Occupied slots are groups between the empty slots' buttons; which kind of slot a group is follows from the
+        // kind of the empty slot before it (an insert bar sits between inserts).
+        let mut last_slot = "";
         for child in &strip.children {
             let desc = child.desc.as_str();
             let help = child.help.as_str();
@@ -223,17 +240,49 @@ impl<'a> Strip<'a> {
                 "AXSlider" if strings.is(desc, "volume fader") => found.volume = Some(child),
                 "AXSlider" if strings.is(desc, "pan") => found.pan = Some(child),
                 "AXButton" if strings.is(desc, "EQ") => found.eq = Some(child),
+                "AXButton" if strings.is(desc, "insert bar") => {}
                 "AXButton" if strings.starts_with(help, "Output slot") => found.output = Some(child),
                 "AXButton" if strings.starts_with(help, "Input slot") => found.inputs.push(child),
-                "AXButton" if strings.starts_with(help, "Instrument slot") => found.instrument = Some(child),
-                "AXButton" if strings.starts_with(help, "Send slot") => found.sends.push(child),
-                "AXButton" if strings.starts_with(help, "Audio Effect slot") || strings.starts_with(help, "MIDI Effect slot") => {
-                    found.inserts.push(child)
+                "AXButton" if strings.starts_with(help, "Instrument slot") => {
+                    found.instrument = Some(child);
+                    last_slot = "instrument";
                 }
+                "AXButton" if strings.starts_with(help, "Send slot") || strings.is(desc, "send button") => {
+                    found.sends.push(child);
+                    last_slot = "send";
+                }
+                "AXButton" if strings.starts_with(help, "Audio Effect slot") || strings.is(desc, "audio plug-in") => {
+                    found.inserts.push(child);
+                    last_slot = "insert";
+                }
+                "AXButton" if strings.starts_with(help, "MIDI Effect slot") || strings.is(desc, "MIDI plug-in") => {
+                    last_slot = "midi";
+                    found.had_midi_slot = true;
+                }
+                "AXGroup" if child.children.iter().any(|c| c.role == "AXCheckBox" && strings.is(&c.desc, "bypass")) => match last_slot {
+                    "send" => found.sends.push(child),
+                    "insert" => found.inserts.push(child),
+                    _ => {}
+                },
                 _ => {}
             }
         }
+        found.settle_instrument();
         found
+    }
+
+    /// The group above the highest insert that is followed by the MIDI effect slot (or nothing) is the instrument's:
+    /// Logic lists the instrument slot right after the inserts, and the inserts hold no instrument.
+    fn settle_instrument(&mut self) {
+        if self.instrument.is_some() {
+            return;
+        }
+        // Among the inserts, a group whose next sibling in the strip is the MIDI plug-in slot is the instrument.
+        let Some(last) = self.inserts.last().copied() else { return };
+        if occupied(last) && self.had_midi_slot {
+            self.inserts.pop();
+            self.instrument = Some(last);
+        }
     }
 }
 
@@ -354,5 +403,25 @@ mod tests {
         assert_eq!((strip.sends.len(), strip.inserts.len()), (1, 1));
         assert!(strip.eq.is_some() && strip.bounce.is_none() && strip.instrument.is_none());
         assert!(Strip::of(found.strips[1], &strings).bounce.is_some());
+        // An instrument strip as the Mixer lists it, bottom-up: the empty insert, the occupied ones with insert bars
+        // between, the instrument's group, then the MIDI effect slot.
+        let keys = node(json!({"role": "AXLayoutItem", "desc": "Keys", "c": [
+            {"role": "AXTextField", "desc": "name", "value": "Keys"},
+            {"role": "AXButton", "desc": "Stereo Output", "help": "Output slot. Click and hold."},
+            {"role": "AXButton", "desc": "send button", "help": "Send slot. Route the signal."},
+            {"role": "AXButton", "desc": "audio plug-in", "help": "Audio Effect slot. Insert an audio effect."},
+            {"role": "AXButton", "desc": "insert bar"},
+            {"role": "AXGroup", "desc": "ChromaVerb", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}]},
+            {"role": "AXButton", "desc": "insert bar"},
+            {"role": "AXGroup", "desc": "Channel EQ", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": true}]},
+            {"role": "AXGroup", "desc": "Piano", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}]},
+            {"role": "AXButton", "desc": "MIDI plug-in", "help": "MIDI Effect slot. Insert a MIDI effect."},
+            {"role": "AXButton", "desc": "EQ", "value": "on"}
+        ]}));
+        let strip = Strip::of(&keys, &strings);
+        assert_eq!(strip.instrument.map(|n| n.desc.as_str()), Some("Piano"));
+        assert_eq!(strip.inserts.iter().map(|n| n.desc.as_str()).collect::<Vec<_>>(), ["audio plug-in", "ChromaVerb", "Channel EQ"]);
+        assert!(occupied(strip.inserts[1]) && !occupied(strip.inserts[0]));
+        assert!(strip.inputs.is_empty());
     }
 }

@@ -410,22 +410,20 @@ impl StripState {
         } else {
             "audio"
         };
+        // Logic lists the slots bottom-up; the rows count them from the top.
         let mut inserts: Vec<(String, bool, &'static str)> = vec![];
-        if let Some(instrument) = parts.instrument {
-            inserts.push((clip(&instrument.desc), !instrument.enabled.unwrap_or(true) && false, "instrument"));
+        if let Some(instrument) = parts.instrument.filter(|slot| paths::occupied(slot)) {
+            inserts.push((clip(&instrument.desc), bypassed(instrument, strings), "instrument"));
         }
-        for insert in &parts.inserts {
-            if strings.is(&insert.desc, "audio plug-in") || strings.is(&insert.desc, "MIDI plug-in") || insert.desc.is_empty() {
-                // An empty slot.
-                continue;
-            }
-            inserts.push((clip(&insert.desc), insert.value_text() == "off" || strings.is(&insert.value_text(), "bypassed"), "effect"));
+        for insert in parts.inserts.iter().rev().filter(|slot| paths::occupied(slot)) {
+            inserts.push((clip(&insert.desc), bypassed(insert, strings), "effect"));
         }
         let sends = parts
             .sends
             .iter()
-            .filter(|send| !strings.is(&send.desc, "send button") && !send.desc.is_empty())
-            .map(|send| (clip(&send.desc), db_of(&send.value_desc)))
+            .rev()
+            .filter(|send| paths::occupied(send) || !(strings.is(&send.desc, "send button") || send.desc.is_empty()))
+            .map(|send| (clip(&send.desc), send_level(send, strings)))
             .collect();
         StripState {
             name: parts.name.map(Node::value_text).unwrap_or_else(|| strip.desc.clone()),
@@ -442,6 +440,17 @@ impl StripState {
             sends,
         }
     }
+}
+
+/// Whether an occupied slot's bypass checkbox is on.
+fn bypassed(slot: &Node, strings: &Strings) -> bool {
+    slot.children.iter().any(|c| c.role == "AXCheckBox" && strings.is(&c.desc, "bypass") && c.is_on())
+}
+
+/// A send slot's level in dB: its knob's description, when the slot shows one.
+fn send_level(slot: &Node, strings: &Strings) -> Option<f64> {
+    let knob = slot.find(&|n| n.role == "AXSlider" && (strings.is(&n.desc, "send knob") || strings.is(&n.desc, "send level")));
+    knob.and_then(|k| db_of(&k.value_desc)).or_else(|| db_of(&slot.value_desc))
 }
 
 /// A track's row: the header's live state, the strip's kind and routing when known.
@@ -764,10 +773,11 @@ mod tests {
             {"role": "AXSlider", "desc": "volume fader", "value": 173, "valueDesc": "0.0 dB"},
             {"role": "AXSlider", "desc": "pan", "value": 0, "valueDesc": "0"},
             {"role": "AXButton", "desc": "Stereo Output", "help": "Output slot. Click and hold."},
-            {"role": "AXButton", "desc": "Bus 1", "valueDesc": "-6.0 dB", "help": "Send slot. Route the signal."},
             {"role": "AXButton", "desc": "send button", "help": "Send slot. Route the signal."},
-            {"role": "AXButton", "desc": "Channel EQ", "value": "on", "help": "Audio Effect slot. Insert an audio effect."},
+            {"role": "AXGroup", "desc": "Bus 1", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}, {"role": "AXSlider", "desc": "send knob", "valueDesc": "-6.0 dB"}]},
             {"role": "AXButton", "desc": "audio plug-in", "help": "Audio Effect slot. Insert an audio effect."},
+            {"role": "AXButton", "desc": "insert bar"},
+            {"role": "AXGroup", "desc": "Channel EQ", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}]},
             {"role": "AXButton", "desc": "Input 1", "help": "Input slot. Choose the input."},
             {"role": "AXButton", "desc": "EQ", "value": "on"}
         ]}));
@@ -779,11 +789,19 @@ mod tests {
         assert_eq!(state.sends, [("Bus 1".to_string(), Some(-6.0))]);
         let instrument = node(json!({"role": "AXLayoutItem", "c": [
             {"role": "AXTextField", "desc": "name", "value": "Keys"},
-            {"role": "AXButton", "desc": "Studio Grand", "help": "Instrument slot. Insert a software instrument."}
+            {"role": "AXButton", "desc": "audio plug-in", "help": "Audio Effect slot. Insert an audio effect."},
+            {"role": "AXButton", "desc": "insert bar"},
+            {"role": "AXGroup", "desc": "ChromaVerb", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}]},
+            {"role": "AXButton", "desc": "insert bar"},
+            {"role": "AXGroup", "desc": "Compressor", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": true}]},
+            {"role": "AXGroup", "desc": "Piano", "c": [{"role": "AXCheckBox", "desc": "bypass", "value": false}]},
+            {"role": "AXButton", "desc": "MIDI plug-in", "help": "MIDI Effect slot. Insert a MIDI effect."}
         ]}));
         let state = StripState::of(&instrument, &strings);
-        assert_eq!((state.kind, state.inserts.len()), ("instrument", 1));
-        assert_eq!(state.inserts[0], ("Studio Grand".to_string(), false, "instrument"));
+        assert_eq!((state.kind, state.inserts.len()), ("instrument", 3));
+        assert_eq!(state.inserts[0], ("Piano".to_string(), false, "instrument"));
+        assert_eq!(state.inserts[1], ("Compressor".to_string(), true, "effect"));
+        assert_eq!(state.inserts[2], ("ChromaVerb".to_string(), false, "effect"));
         let output = node(
             json!({"role": "AXLayoutItem", "c": [{"role": "AXTextField", "desc": "name", "value": "Stereo Out"}, {"role": "AXButton", "subrole": "AXSwitch", "desc": "bounce", "value": "off"}]}),
         );
