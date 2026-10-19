@@ -254,3 +254,42 @@ fn a_deleted_tracks_routes_come_back_where_they_were_with_their_slot_and_pan_law
     lab.undo("track-delete", &preview, &made, "Kumi: undo (kn002)").unwrap();
     assert_eq!(routes(), before, "every route in its place, the producer's slot and pan law kept");
 }
+
+#[test]
+fn an_output_the_producer_removed_is_gone_to_undo_and_one_put_back_by_hand_is_back_already() {
+    let lab = Lab::new();
+    state(|s| s.tracks[1].hw_outs = vec![FakeSend::to(0)]);
+    let output = kick_output_ref(&lab, 0);
+    let (preview, made) = lab.make("hw-out-volume", json!({"ref": output, "volumeDb": -6.0}), "Kumi: x (kg001)");
+    // The producer puts the volume back by hand: nothing is written.
+    state(|s| s.tracks[1].hw_outs[0].volume = 1.0);
+    let again = lab.undo("hw-out-volume", &preview, &made, "Kumi: undo (kg002)").unwrap();
+    assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+    // Changed again, then removed: gone (its mark is nowhere), and nothing else is touched.
+    let (preview, made) = lab.make("hw-out-mute", json!({"ref": output, "mute": true}), "Kumi: x (kg003)");
+    state(|s| s.tracks[1].hw_outs.clear());
+    let (code, _) = lab.undo("hw-out-mute", &preview, &made, "Kumi: undo (kg004)").unwrap_err();
+    assert_eq!(code, "gone");
+    // An added one the producer changed since: refused, discard takes it away.
+    let (preview, made) = lab.make("hw-out-add", json!({"ref": KICK, "output": {"first": 1}}), "Kumi: x (kg005)");
+    state(|s| s.tracks[1].hw_outs[0].pan = 0.5);
+    assert_eq!(lab.undo("hw-out-add", &preview, &made, "Kumi: undo (kg006)").unwrap_err().0, "changed");
+    lab.undo_anyway("hw-out-add", &preview, &made, "Kumi: undo (kg007)").unwrap();
+    assert!(kick_outputs().is_empty());
+}
+
+#[test]
+fn a_receive_change_put_back_by_hand_is_back_already_and_one_whose_route_went_is_refused() {
+    let lab = Lab::new();
+    let (preview, made) = lab.make("send-phase", json!({"ref": REVERB_FROM_DRUMS, "inverted": true}), "Kumi: x (kh001)");
+    // The producer turns the polarity back by hand: the undo finds it back already and writes nothing.
+    state(|s| s.tracks[0].sends[0].extra.insert("B_PHASE".into(), 0.0));
+    let again = lab.undo("send-phase", &preview, &made, "Kumi: undo (kh002)").unwrap();
+    assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+    // The route Kumi marked is removed: its mark is nowhere, and no other route is written.
+    let (preview, made) = lab.make("send-mono", json!({"ref": REVERB_FROM_DRUMS, "mono": true}), "Kumi: x (kh003)");
+    state(|s| s.tracks[0].sends.clear());
+    let (code, message) = lab.undo("send-mono", &preview, &made, "Kumi: undo (kh004)").unwrap_err();
+    assert_eq!(code, "changed", "{message}");
+    assert!(message.contains("isn't there with its mark"), "{message}");
+}

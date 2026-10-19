@@ -201,3 +201,16 @@ fn the_project_row_says_its_lanes_named_groups_grid_timebase_title_and_notes() {
     assert_eq!(row["notes"].as_str().unwrap().len(), 2000);
     assert_eq!(row["grid"], json!({"division": 0.0625, "swing": 0.25, "measure": false}));
 }
+
+#[test]
+fn a_ruler_lane_added_and_then_taken_away_by_the_producer_is_gone_to_undo() {
+    let lab = Lab::new();
+    let (preview, made) = lab.make("ruler-lane-add", json!({}), "Kumi: x (kg001)");
+    fake::extra(|e| e.project_info.insert("RULER_LANE_COUNT".into(), 2.0));
+    assert_eq!(lab.undo("ruler-lane-add", &preview, &made, "Kumi: undo (kg002)").unwrap_err().0, "gone");
+    // A grid set back by hand: back already, nothing written.
+    let (preview, made) = lab.make("project-grid", json!({"division": "1/8"}), "Kumi: x (kg003)");
+    fake::extra(|e| e.grid = (0.25, 0, 0.0));
+    let again = lab.undo("project-grid", &preview, &made, "Kumi: undo (kg004)").unwrap();
+    assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+}
