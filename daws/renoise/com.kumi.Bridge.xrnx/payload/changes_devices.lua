@@ -73,23 +73,26 @@ local function param_state(parameter)
   return { value = parameter.value, valueString = parameter.value_string }
 end
 
-local function receiver_check(device, parameter, value, song)
-  if device.device_path:find("#Send", 1, true) and parameter.name == "Receiver" then
-    local sends = song.send_track_count
-    if value ~= math.floor(value) or value < 0 or value >= sends then
-      bad(string.format("Receiver is a send track's number from 0 to %d (there are %d send tracks)", sends - 1, sends))
-    end
-  end
-end
-
--- A parameter whose value is a place: a #Send's Receiver (a send track, counted among the sends from 0) and a meta device's
--- track (Dest. Track and the like: a track counted from 0). Renoise moves these values with the tracks made and deleted, so
--- a record keeps the track the value names as a track ref, which the layout carries; the value is worked out from it again.
+-- A parameter whose value is a place: a #Send's or #Multiband Send's Receiver (a send track, counted among the sends from
+-- 0) and a meta device's or #Sidechain's track (Dest. Track, *Hydra's OutN Track and the like: a track counted from 0).
+-- Renoise moves these values with the tracks made and deleted, so a record keeps the track the value names as a track ref,
+-- which the layout carries; the value is worked out from it again.
 local function points_at(device, parameter)
   local path, name = device.device_path, parameter.name
   if (path:find("#Send", 1, true) or path:find("#Multiband Send", 1, true)) and name:match("^Receiver") then return "send" end
-  if path:find("/Native/*", 1, true) and name:match("Track$") then return "track" end
+  if (path:find("/Native/*", 1, true) or path:find("/Native/#Sidechain", 1, true)) and name:match("Track$") then return "track" end
   return nil
+end
+
+-- A Receiver (any of #Send's and #Multiband Send's) is a send track among the sends, from 0: Renoise takes any number
+-- silently, so a number past the sends, or -1, is refused here.
+local function receiver_check(device, parameter, value, song)
+  if points_at(device, parameter) == "send" then
+    local sends = song.send_track_count
+    if value ~= math.floor(value) or value < 0 or value >= sends then
+      bad(string.format("%s is a send track's number from 0 to %d (there are %d send tracks)", parameter.name, sends - 1, sends))
+    end
+  end
 end
 
 local function master_of(song) return song.sequencer_track_count + 1 end
@@ -168,8 +171,9 @@ local param_spec = {
 -- value). It is fenced as the number is. Text without a number Renoise ignores, and "-1" or "None" would set the first entry,
 -- not none: Kumi refuses those.
 param_spec.wanted_at = function(loc, input)
-  -- (None, -1, is a place value too, though the parameter's minimum is 0: Renoise takes it as a value, not as text)
-  if loc.points and input.value == -1 then return { value = -1 } end
+  -- (None, -1, is a track parameter's place value too, though its minimum is 0: Renoise takes it as a value, not as text;
+  -- a Receiver has no None)
+  if loc.points == "track" and input.value == -1 then return { value = -1 } end
   if loc.points and type(input.valueString) == "string" then
     local n = tonumber(input.valueString:match("^%s*(%d+)"))
     local first = loc.points == "send" and 0 or 1
@@ -496,7 +500,7 @@ local function delete_restore(song, env, restore, desc)
   end
   local lost = 0
   local ok, err = pcall(function()
-    material_.count(tally, material_.restore_destination(song, device, saved, index, moved, env))
+    for _, status in ipairs(material_.restore_destinations(song, device, saved, index, moved, env)) do material_.count(tally, status) end
     local list = {}
     for _, entry in ipairs(material.automation or {}) do
       local p = pattern_now(entry.pattern)

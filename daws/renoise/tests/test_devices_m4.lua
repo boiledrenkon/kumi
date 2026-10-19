@@ -387,3 +387,108 @@ test("devices m4: host-made edits go only to the devices they are for, with thei
   eq(steps(), 0)
   H.no_dialogs()
 end)
+
+-- Routing (M4 n-devices): every Receiver checked, #Sidechain's track a place, and the routes a delete clears set again.
+
+local function params_of(list)
+  local out = {}
+  for i, entry in ipairs(list) do out[i] = { name = entry[1], value = entry[2], min = entry[3] or 0, max = entry[4] or 1 } end
+  return out
+end
+
+local function hydra()
+  local list = { { "Input", 0.5 } }
+  for n = 1, 2 do
+    for _, part in ipairs({ { " Track", -1, 0, 255 }, { " Effect", -1, 0, 255 }, { " Parameter", -1, 0, 255 }, { " Min", 0 }, { " Max", 1 } }) do
+      list[#list + 1] = { "Out" .. n .. part[1], part[2], part[3], part[4] }
+    end
+  end
+  return { name = "*Hydra", path = "Audio/Effects/Native/*Hydra", params = params_of(list) }
+end
+
+local function sidechain()
+  return { name = "#Sidechain", path = "Audio/Effects/Native/#Sidechain",
+    params = params_of({ { "Amount", 1 }, { "Panning", 0.5 }, { "Dest. Track", -1, 0, 255 }, { "Dest. Effect", -1, 0, 255 } }) }
+end
+
+local function multiband()
+  return { name = "#Multiband Send", path = "Audio/Effects/Native/#Multiband Send",
+    params = params_of({ { "Amount 1", 1 }, { "Receiver 1", 0, 0, 255 }, { "Amount 2", 1 }, { "Receiver 2", 0, 0, 255 }, { "Amount 3", 1 }, { "Receiver 3", 0, 0, 255 }, { "Low", 0.33 }, { "High", 0.78 } }) }
+end
+
+local function plain_gainer()
+  return { name = "Gainer", path = "Audio/Effects/Native/Gainer", params = params_of({ { "Gain", 1, 0, 4 }, { "Panning", 0.5 } }) }
+end
+
+local function values(t, d, from, to)
+  local out = {}
+  for k = from, to do out[#out + 1] = tostring(device_data(t, d).params[k].value) end
+  return table.concat(out, "/")
+end
+
+test("devices m4: every Receiver of a #Multiband Send is checked against the send tracks, and none (-1) is refused (SHOULD 3)", function()
+  local _, peer = setup({ { name = "Kick", devices = { multiband() } }, { name = "Bass" } })
+  local epoch, layout = place(peer)
+  for _, case in ipairs({ { value = -1 }, { value = 1 }, { value = 0.5 } }) do
+    local response = call(peer, "change_preview", { kind = "device-param", input = { ref = epoch .. ":param:1.2.4", value = case.value }, epoch = epoch, layout = layout })
+    failure(response, "bad-params", "Receiver 2 is a send track's number from 0 to 0")
+  end
+  local fine = call(peer, "change_preview", { kind = "device-param", input = { ref = epoch .. ":param:1.2.6", value = 0 }, epoch = epoch, layout = layout })
+  ok(fine.result, json.encode(fine.error or {}))
+end)
+
+test("devices m4: #Sidechain's Dest. Track reads its text from 1 and is kept as the track it names through tracks made since", function()
+  local _, peer = setup({ { name = "Kick", devices = { sidechain() } }, { name = "Bass", devices = { plain_gainer() } }, { name = "Pad", devices = { plain_gainer() } } })
+  local epoch = place(peer)
+  local record, previewed = change(peer, "device-param", { ref = epoch .. ":param:1.2.3", valueString = "3" })
+  eq(device_data(1, 2).params[3].value, 2, "track 3 is the value 2")
+  ok(type(record.applied.at) == "string" and record.applied.at:match(":track:3$"), json.encode(record.applied))
+  eq(previewed.prior.value, -1)
+  -- A track made before it: Renoise follows it (the value is 3 now); Kumi's undo still finds what it wrote.
+  mock.api.insert_track_at(1)
+  H.tick(2)
+  eq(device_data(2, 2).params[3].value, 3)
+  local back = restore(peer, "device-param", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(device_data(2, 2).params[3].value, -1, "None again")
+end)
+
+test("devices m4: a deleted track's routings from *Hydra outputs and #Sidechain are set again by Kumi's undo (S-5)", function()
+  local kick = { name = "Kick", devices = { hydra(), sidechain() } }
+  local _, peer = setup({ kick, { name = "Bass", devices = { plain_gainer() } }, { name = "Pad" } })
+  -- Out2 drives Bass's Gainer's Gain; the #Sidechain feeds Bass's Gainer.
+  local h, sc = device_data(1, 2), device_data(1, 3)
+  h.params[7].value, h.params[8].value, h.params[9].value = 1, 1, 1
+  sc.params[3].value, sc.params[4].value = 1, 1
+  local epoch = place(peer)
+  local record, previewed = change(peer, "track-delete", { ref = epoch .. ":track:2" })
+  ok(previewed and record.material and #record.material.routes == 2, json.encode(record.material and record.material.routes or {}))
+  eq(values(1, 2, 7, 9), "-1/-1/-1", "Renoise let go of Out2")
+  eq(values(1, 3, 3, 4), "-1/-1", "and of the #Sidechain")
+  local back = restore(peer, "track-delete", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(values(1, 2, 7, 9), "1/1/1", "Out2 drives the Gainer again")
+  eq(values(1, 3, 3, 4), "1/1", "the #Sidechain feeds it again")
+  ok(back.result.display.note and back.result.display.note:find("2 routings aimed at it set again"), json.encode(back.result.display))
+end)
+
+test("devices m4: a deleted device's own *Hydra outputs, and an output aimed at a deleted device, are aimed again by Kumi's undo", function()
+  local _, peer = setup({ { name = "Kick", devices = { hydra() } }, { name = "Bass", devices = { plain_gainer(), plain_gainer() } } })
+  -- (a device made again has its device's parameters, at their defaults)
+  mock.device_catalog = { ["Audio/Effects/Native/*Hydra"] = hydra().params, ["Audio/Effects/Native/Gainer"] = plain_gainer().params }
+  local h = device_data(1, 2)
+  h.params[2].value, h.params[3].value, h.params[4].value = 1, 2, 1 -- Out1: Bass, its second Gainer (device 3), Gain
+  local epoch = place(peer)
+  -- The Gainer it drives deleted, then put back.
+  local record = change(peer, "device-delete", { ref = epoch .. ":device:2.3" })
+  eq(values(1, 2, 2, 4), "1/-1/-1")
+  local back = restore(peer, "device-delete", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(values(1, 2, 2, 4), "1/2/1", "aimed at the Gainer again")
+  -- The *Hydra itself deleted and put back: its output is aimed again (its preset data doesn't hold it).
+  local record2 = change(peer, "device-delete", { ref = place(peer) .. ":device:1.2" })
+  local back2 = restore(peer, "device-delete", record2)
+  ok(back2.result, json.encode(back2.error or {}))
+  eq(values(1, 2, 2, 4), "1/2/1", "its own output again")
+  mock.device_catalog = nil
+end)

@@ -441,7 +441,9 @@ local function restore_first_phase(song, env, material, phases, moved)
     note = put_in_group(song, env, index, material, moved)
     -- (where a meta device sends its values: after the track has its place, and its devices are all there)
     for i, saved in ipairs(material.devices or {}) do
-      if saved.destination then material_.count(tally, material_.restore_destination(song, song:track(index):device(i + 1), saved, index, moved, env)) end
+      if saved.destinations or saved.destination then
+        for _, status in ipairs(material_.restore_destinations(song, song:track(index):device(i + 1), saved, index, moved, env)) do material_.count(tally, status) end
+      end
     end
     local sequencer = song.sequencer
     local lost = 0

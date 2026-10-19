@@ -1518,6 +1518,21 @@ end
 -- What Renoise does with routing aimed at tracks (measured in 3.5.4): a #Send's Receiver (the send's number among the sends, -1 for
 -- none) and a meta device's Dest. Track (the track's number less one) follow tracks made and deleted, and are cleared (-1, with the
 -- destination's effect and parameter) when their target is deleted.
+-- (M4 n-devices) A device's destinations: each "…Track" parameter with its "…Effect" (and "…Parameter"): a meta device's
+-- and #Sidechain's "Dest. …", *Hydra's and *XY Pad's "OutN …". Renoise follows and clears them all alike.
+local function destinations_of(device)
+  local named = {}
+  for _, parameter in ipairs(device.params or {}) do named[parameter.name] = parameter end
+  local out = {}
+  for _, parameter in ipairs(device.params or {}) do
+    local prefix = parameter.name:match("^(.*)Track$")
+    if prefix and named[prefix .. "Effect"] then
+      out[#out + 1] = { track = parameter, effect = named[prefix .. "Effect"], parameter = named[prefix .. "Parameter"] }
+    end
+  end
+  return out
+end
+
 local function follow_routes(removed, index)
   local tracks = M.data.tracks
   local target = tracks[index]
@@ -1527,7 +1542,6 @@ local function follow_routes(removed, index)
   end
   for _, track in ipairs(tracks) do
     for _, device in ipairs(track.devices or {}) do
-      local dest
       for _, parameter in ipairs(device.params or {}) do
         if parameter.name:match("^Receiver") and target.kind == "send" then
           if removed then
@@ -1535,25 +1549,28 @@ local function follow_routes(removed, index)
           elseif parameter.value >= sends_before then
             parameter.value = parameter.value + 1
           end
-        elseif parameter.name == "Dest. Track" and target.kind == "sequencer" then
-          dest = parameter
-          if removed then
-            if parameter.value == index - 1 then parameter.value = -1 elseif parameter.value > index - 1 then parameter.value = parameter.value - 1 end
-          elseif parameter.value >= index - 1 then
-            parameter.value = parameter.value + 1
-          end
         end
       end
-      if dest and dest.value == -1 and removed then
-        for _, parameter in ipairs(device.params) do
-          if parameter.name == "Dest. Effect" or parameter.name == "Dest. Parameter" then parameter.value = -1 end
+      -- (a destination counts every track: sequencer, group, send and master)
+      for _, destination in ipairs(destinations_of(device)) do
+        local dest = destination.track
+        if removed then
+          if dest.value == index - 1 then
+            dest.value = -1
+            destination.effect.value = -1
+            if destination.parameter then destination.parameter.value = -1 end
+          elseif dest.value > index - 1 then
+            dest.value = dest.value - 1
+          end
+        elseif dest.value >= index - 1 then
+          dest.value = dest.value + 1
         end
       end
     end
   end
 end
 
--- The same for a meta device's Dest. Effect (the device's number less one), aimed at a device of `track`.
+-- The same for a destination's Effect (the device's number less one), aimed at a device of `track`.
 function M.follow_device_routes(track, device_index, removed)
   local at
   for i, t in ipairs(M.data.tracks) do
@@ -1561,22 +1578,19 @@ function M.follow_device_routes(track, device_index, removed)
   end
   for _, other in ipairs(M.data.tracks) do
     for _, device in ipairs(other.devices or {}) do
-      local dtrack, deffect, dparameter
-      for _, parameter in ipairs(device.params or {}) do
-        if parameter.name == "Dest. Track" then dtrack = parameter
-        elseif parameter.name == "Dest. Effect" then deffect = parameter
-        elseif parameter.name == "Dest. Parameter" then dparameter = parameter end
-      end
-      if dtrack and deffect and dtrack.value == at - 1 then
-        if removed then
-          if deffect.value == device_index - 1 then
-            deffect.value = -1
-            if dparameter then dparameter.value = -1 end
-          elseif deffect.value > device_index - 1 then
-            deffect.value = deffect.value - 1
+      for _, destination in ipairs(destinations_of(device)) do
+        local dtrack, deffect, dparameter = destination.track, destination.effect, destination.parameter
+        if dtrack.value == at - 1 then
+          if removed then
+            if deffect.value == device_index - 1 then
+              deffect.value = -1
+              if dparameter then dparameter.value = -1 end
+            elseif deffect.value > device_index - 1 then
+              deffect.value = deffect.value - 1
+            end
+          elseif deffect.value >= device_index - 1 then
+            deffect.value = deffect.value + 1
           end
-        elseif deffect.value >= device_index - 1 then
-          deffect.value = deffect.value + 1
         end
       end
     end
