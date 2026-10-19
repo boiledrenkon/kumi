@@ -61,6 +61,11 @@ pub struct Record {
     pub step_desc: Option<String>,
     /// The DAW step Kumi's undo of it made ("Kumi: undo …"): the DAW's own undo of that brings the change back.
     pub undo_desc: Option<String>,
+    /// The DAW's own undo takes the change back with its step (or its plan's): not when the apply said its step makes no
+    /// undo point (`undo.entry` false) or a plan's point doesn't cover it (`undo.covered` false).
+    pub in_daw_undo: bool,
+    /// Kumi's undo of it was sent and never answered.
+    pub undo_unanswered: bool,
     pub applied: Option<Value>,
     pub created: Option<Value>,
     pub material: Option<Value>,
@@ -178,6 +183,8 @@ impl Journal {
             desc: None,
             step_desc: None,
             undo_desc: None,
+            in_daw_undo: true,
+            undo_unanswered: false,
             applied: None,
             created: None,
             material: None,
@@ -197,9 +204,23 @@ impl Journal {
     /// (Kumi then can't undo them: its undo answers `unknown`). Only changes in flight stay whatever it takes.
     fn make_room(inner: &mut Inner, bytes: usize) -> Result<(), Refusal> {
         while inner.records.len() >= MAX_RECORDS || inner.total + bytes > MAX_BYTES {
-            let oldest = |states: &[State]| inner.order.iter().find(|id| states.contains(&inner.records[*id].state)).cloned();
-            let Some(oldest) =
-                oldest(&[State::Previewed]).or_else(|| oldest(&[State::Undone])).or_else(|| oldest(&[State::Applied, State::Uncertain]))
+            let oldest = |states: &[State], big: bool| {
+                inner
+                    .order
+                    .iter()
+                    .find(|id| states.contains(&inner.records[*id].state) && (!big || inner.records[*id].material.is_some()))
+                    .cloned()
+            };
+            // Past the bytes, what deletes removed goes first (it's what fills the journal); then the oldest, as for count.
+            let by_size = inner.total + bytes > MAX_BYTES;
+            let big = || match by_size {
+                true => oldest(&[State::Undone], true).or_else(|| oldest(&[State::Applied, State::Uncertain], true)),
+                false => None,
+            };
+            let Some(oldest) = oldest(&[State::Previewed], false)
+                .or_else(big)
+                .or_else(|| oldest(&[State::Undone], false))
+                .or_else(|| oldest(&[State::Applied, State::Uncertain], false))
             else {
                 return Err(refuse("full", format!("the DAW is busy with {} changes at once: try again in a moment", inner.records.len())));
             };
@@ -260,6 +281,8 @@ impl Journal {
                     record.layout = Some(layout);
                 }
                 record.applied = applied.get("applied").cloned();
+                let skipped = |field: &str| applied.get("undo").and_then(|undo| undo.get(field)) == Some(&Value::Bool(false));
+                record.in_daw_undo = !skipped("entry") && !skipped("covered");
                 // What the apply found (in its answer's layout): the undo is asked for that.
                 if let Some(target) = applied.get("target").filter(|target| !target.is_null()) {
                     record.target = target.clone();
@@ -316,8 +339,14 @@ impl Journal {
             State::Applied => {}
             State::Undone => return Err(refuse("undone", "this change was undone already")),
             State::Undoing => return Err(refuse("in-flight", "this change is being undone now")),
+            State::Uncertain if record.undo_unanswered => {
+                return Err(refuse(
+                    "undo-uncertain",
+                    "whether Kumi's undo of this went through isn't known, so Kumi won't undo it again blindly",
+                ))
+            }
             State::Uncertain => {
-                return Err(refuse("uncertain", "whether this change reached the DAW isn't known, so Kumi won't undo it blindly"))
+                return Err(refuse("uncertain", "whether this change went through isn't known, so Kumi won't undo it blindly"))
             }
             State::Previewed | State::Applying => return Err(refuse("not-applied", "this change wasn't applied")),
         }
@@ -369,8 +398,9 @@ impl Journal {
         let mut inner = self.inner.lock().expect("journal lock");
         let Some(record) = inner.records.get_mut(id) else { return (json!({"error": "the change was released meanwhile"}), true) };
         record.state = State::Uncertain;
+        record.undo_unanswered = true;
         let mut reply = error.clone();
-        reply["code"] = "uncertain".into();
+        reply["code"] = "undo-uncertain".into();
         reply["state"] = "uncertain".into();
         if let Some(answer) = reply.as_object_mut() {
             answer.remove("busy");
@@ -403,7 +433,8 @@ impl Journal {
         let order = inner.order.clone();
         for id in order {
             let Some(record) = inner.records.get_mut(&id) else { continue };
-            let own = named(&record.desc) || named(&record.step_desc);
+            // A change the DAW's own undo doesn't take back stays as it is when its step (or its plan's) is undone.
+            let own = record.in_daw_undo && (named(&record.desc) || named(&record.step_desc));
             let restore = named(&record.undo_desc);
             let taken_back = match (own, restore) {
                 (true, _) => undo,
@@ -606,8 +637,12 @@ impl crate::host::Host {
         place(&mut params, record.epoch.as_deref(), record.layout);
         match self.call("change_restore", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
             Ok(answer) => self.journal().end_undo(&id, &key, Ok(&answer)),
-            // Sent, and no answer: the restore may have run. Kumi won't undo it blindly again.
+            // Sent, and no answer (or the bridge couldn't say how it ended): the restore may have run. Kumi won't undo it
+            // blindly again.
             Err(error @ (crate::host::CallError::Timeout | crate::host::CallError::Closed(_))) => {
+                self.journal().end_undo_unanswered(&id, &self.call_error(&error))
+            }
+            Err(error @ crate::host::CallError::Bridge { .. }) if matches!(&error, crate::host::CallError::Bridge { code, .. } if code == daw_bridge::wire::code::UNCERTAIN) => {
                 self.journal().end_undo_unanswered(&id, &self.call_error(&error))
             }
             Err(error) => self.journal().end_undo(&id, &key, Err(&self.call_error(&error))),
@@ -839,8 +874,39 @@ mod tests {
         journal.end_apply(&record.id, "a", Ok(&json!({"applied": {"volumeDb": -6.0}})));
         journal.begin_undo(&record.id, "u1").unwrap().unwrap();
         let (reply, is_error) = journal.end_undo_unanswered(&record.id, &json!({"error": "REAPER didn't answer in time", "busy": true}));
-        assert!(is_error && reply["code"] == "uncertain" && reply.get("busy").is_none(), "{reply}");
-        assert_eq!(journal.begin_undo(&record.id, "u2").unwrap_err().code, "uncertain");
+        assert!(is_error && reply["code"] == "undo-uncertain" && reply.get("busy").is_none(), "{reply}");
+        assert_eq!(journal.begin_undo(&record.id, "u2").unwrap_err().code, "undo-uncertain");
+    }
+
+    #[test]
+    fn a_change_the_daws_undo_skips_stays_as_it_is_when_its_plan_is_undone() {
+        let journal = Journal::default();
+        let label = journal.step_label("Kumi");
+        journal.step(Some(label.clone()));
+        let (volume, repeat) = (preview(&journal), preview(&journal));
+        journal.begin_apply(&volume.id, &volume.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&volume.id, "a", Ok(&json!({"applied": {}, "undo": {"entry": null, "inPlan": true, "covered": true}})));
+        journal.begin_apply(&repeat.id, &repeat.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&repeat.id, "a", Ok(&json!({"applied": {}, "undo": {"entry": null, "inPlan": true, "covered": false}})));
+        journal.step(None);
+        let (undone, _) = journal.follow_daw(std::slice::from_ref(&label), true);
+        assert_eq!(undone, vec![volume.id.clone()], "the repeat isn't in the plan's undo point");
+        assert_eq!(journal.get(&repeat.id).unwrap().state, State::Applied);
+    }
+
+    #[test]
+    fn past_its_bytes_the_journal_lets_what_deletes_removed_go_first() {
+        let journal = Journal::default();
+        let small = preview(&journal);
+        journal.begin_apply(&small.id, &small.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&small.id, "a", Ok(&json!({"applied": {}})));
+        let big = preview(&journal);
+        journal.begin_apply(&big.id, &big.confirmation, "a", None).unwrap().unwrap();
+        let material = "x".repeat(MAX_BYTES - 64 * 1024);
+        journal.end_apply(&big.id, "a", Ok(&json!({"applied": {}, "material": {"chunk": material}})));
+        let roomy = json!({"prior": {}, "fence": {}, "display": {"title": "x".repeat(70_000)}});
+        assert!(journal.previewed("track-volume", &json!({}), &roomy, None).is_ok());
+        assert!(journal.get(&big.id).is_none() && journal.get(&small.id).is_some(), "the big delete went, the older small change stays");
     }
 
     #[test]
