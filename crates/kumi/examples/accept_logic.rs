@@ -310,6 +310,16 @@ impl Accept {
         self.say(discover.ok && instances >= 1, Some(discover.ms), &format!("discover: {instances} Logic Pro instance(s)"));
 
         println!("\nM2: the focus's latency");
+        // The bridge fills its focus cache on its first pass over the project after attaching: the latency is measured
+        // from the first answer on, not against that pass.
+        let warm = perf_now();
+        loop {
+            let focus = self.tool("focus", json!({})).await;
+            if focus.ok || perf_now() - warm > 10_000.0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let mut times = Vec::with_capacity(FOCUS_CALLS);
         let mut last = Value::Null;
         for _ in 0..FOCUS_CALLS {
@@ -359,6 +369,9 @@ impl Accept {
         self.say(recording.is_some(), None, &format!("recording: {recording:?} (from the focus's transport)"));
         let selected_track = context["selection"]["trackRef"].as_str().map(str::to_owned);
         let selected_region = context["selection"]["regionRef"].as_str().map(str::to_owned);
+        // The look's refs are the model's short ones; FOCUS's bodies and the selection check take the focus's long ones.
+        let focus_track = last["selection"]["trackRef"].as_str().map(str::to_owned);
+        let focus_region = last["selection"]["regionRef"].as_str().map(str::to_owned);
         let read = observation.tools.iter().find(|tool| tool.name() == "logic_read").cloned();
         if let Some(read) = read {
             let kinds: Vec<(&str, Option<&str>)> = vec![
@@ -394,10 +407,10 @@ impl Accept {
             }
         }
         let bodies: Vec<(&str, Option<BodyRequest>)> = vec![
-            ("tree", selected_track.clone().map(|track_ref| BodyRequest::Tree { track_ref })),
-            ("notes", selected_region.clone().map(|item_ref| BodyRequest::Notes { item_ref })),
+            ("tree", focus_track.clone().map(|track_ref| BodyRequest::Tree { track_ref })),
+            ("notes", focus_region.clone().map(|item_ref| BodyRequest::Notes { item_ref })),
             ("timeline", Some(BodyRequest::Timeline)),
-            ("routing", selected_track.clone().map(|track_ref| BodyRequest::Routing { track_ref })),
+            ("routing", focus_track.clone().map(|track_ref| BodyRequest::Routing { track_ref })),
         ];
         for (name, request) in bodies {
             let Some(request) = request else {
@@ -418,7 +431,7 @@ impl Accept {
         }
 
         println!("\nM2: with you at Logic Pro");
-        self.select_follows(selected_track.as_deref()).await;
+        self.select_follows(focus_track.as_deref()).await;
         if self.stopping.get() {
             return Ok(self.exit_code());
         }

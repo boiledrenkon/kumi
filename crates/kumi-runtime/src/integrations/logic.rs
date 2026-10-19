@@ -49,7 +49,9 @@ const BUNDLE_ID: &str = "com.apple.logic10";
 /// it. Err(why) when the package is gone, or the system didn't take it.
 fn open_project(resource: Option<String>, path: String) -> LocalBoxFuture<'static, Result<(), String>> {
     async move {
-        if !std::path::Path::new(&path).exists() {
+        // Only a package that is known to be gone is refused: a folder this process may not read (macOS keeps ~/Music
+        // from a terminal without the grant) is left to Logic, which opens its own files.
+        if matches!(std::fs::metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
             return Err(format!("That project isn't at {path} any more."));
         }
         if !cfg!(target_os = "macos") {
