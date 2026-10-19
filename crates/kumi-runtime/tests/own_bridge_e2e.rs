@@ -801,10 +801,11 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
 }
 
 /// Logic's changes through Kumi's host into HISTORY and back out: a plan of a fader, a mute, a track added (which
-/// moves Logic's epoch) and named by what the step before made, each change one step of Logic's own undo in Logic's
-/// words; the producer's Cmd-Z named back by the bridge; an undo as a new step; a kept change after the producer moved
-/// the fader; a refused step (a dialog, a ref the turn never gave); and a step Logic didn't show back, unsure in
-/// HISTORY and never undone blindly, as is an undo Logic didn't show back, never sent twice.
+/// moves Logic's epoch) and named by what the step before made, in Logic's words, the fader and the mute no step of
+/// Logic's own undo and the add and the rename each one; the producer's Cmd-Z on the rename named back by the bridge;
+/// an undo of the added track by its deletion; a kept change after the producer moved the fader; a refused step (a
+/// dialog, a ref the turn never gave); and a step Logic didn't answer after, unsure in HISTORY and never undone
+/// blindly, as is an undo Logic didn't answer after, never sent twice.
 #[tokio::test(flavor = "current_thread")]
 async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_steps() {
     tokio::task::LocalSet::new()
@@ -831,13 +832,16 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
             let observed = logic.observe(Signal::new(), None).await.unwrap();
             let tracks: Value = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"].clone();
             let (vocal, keys) = (tracks[0]["ref"].as_str().unwrap().to_owned(), tracks[1]["ref"].as_str().unwrap().to_owned());
-            for words in ["a plan of several changes is as many steps", "undo_change takes back one of yours as a new step"] {
+            for words in
+                ["none for a fader, pan, mute, solo, arm, tempo or bypass", "undo_change takes back any change of yours as a new write"]
+            {
                 assert!(observed.instructions.contains(words), "{words}: {}", observed.instructions);
             }
             let state_of = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).map(|record| record.state);
 
-            // A plan: a fader, a mute, a track added (Logic's epoch moves) and named by what the step before made. Each
-            // step is one change in HISTORY, in Logic's words, and one step of Logic's own undo, named by its change.
+            // A plan: a fader, a mute, a track added below the last one (Logic's epoch moves) and named by what the step
+            // before made. Each step is one change in HISTORY, in Logic's words; the add and the rename are steps of
+            // Logic's own undo, named by their changes, the fader and the mute none.
             let plan = tool(&observed, "make_changes");
             let steps = json!({"steps": [
                 {"tool": "track_volume", "input": {"ref": vocal, "volumeDb": -6}},
@@ -853,7 +857,7 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
                 (-6.0, json!(true), json!("Pads"))
             );
             let titles: Vec<String> = told.borrow().iter().map(|record| record.title.clone()).collect();
-            assert_eq!(titles, ["Vocal volume -6 dB", "Keys muted", "Added track “Pad”", "Renamed track “Pad” → “Pads”"]);
+            assert_eq!(titles, ["Vocal volume −6 dB", "Keys muted", "Added audio track “Pad”", "Renamed track “Pad” → “Pads”"]);
             let fader = told.borrow()[0].clone();
             assert_eq!((fader.from, fader.to, fader.range), (Some(0.0), Some(-6.0), Some([-60.0, 12.0])));
             assert!(
@@ -862,13 +866,13 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
                 done.text
             );
             let undo_steps = script.undo_history();
-            assert_eq!(undo_steps.len(), 4, "no undo block: a step per change: {undo_steps:?}");
+            assert_eq!(undo_steps.len(), 2, "no undo block, and none for the fader or the mute: {undo_steps:?}");
             assert!(
-                undo_steps[0].starts_with("Kumi: Vocal volume -6 dB (k")
-                    && undo_steps[3].starts_with("Kumi: Renamed track “Pad” → “Pads” (k"),
+                undo_steps[0].starts_with("Kumi: Added audio track “Pad” (k")
+                    && undo_steps[1].starts_with("Kumi: Renamed track “Pad” → “Pads” (k"),
                 "{undo_steps:?}"
             );
-            assert_eq!(script.undo_titles()[2], "Undo Create Track", "the Edit menu's title, as the bridge keeps it");
+            assert_eq!(script.undo_titles(), ["Undo Create Track", "Undo Renaming"], "the Edit menu's titles, as the bridge keeps them");
 
             // The next look lists them for the model, each applied; the add moved the epoch, so the refs are new ones.
             let again = logic.observe(Signal::new(), None).await.unwrap();
@@ -882,9 +886,9 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
             // The producer presses Cmd-Z in Logic: its last step (the rename) comes off, the bridge names it by the desc
             // it kept, and HISTORY marks the change undone with Logic's own undo.
             let (title, desc) = script.undo_last().expect("Logic's last step");
-            assert_eq!(title, "Undo Rename Track");
+            assert_eq!(title, "Undo Renaming");
             script.set_track(3, "name", json!("Pad"));
-            simulator.emit("undone_in_daw", json!({"descs": [desc.unwrap()], "how": "undo", "epoch": "2"}));
+            simulator.emit("undone_in_daw", json!({"descs": [desc.unwrap()], "how": "undo", "epoch": "3"}));
             for _ in 0..100 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 if state_of("Renamed track “Pad” → “Pads”") == Some(ChangeState::Undone) {
@@ -896,15 +900,18 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
                 (row.state, row.note.as_deref()),
                 (ChangeState::Undone, Some("Undone with Logic Pro's own undo (Cmd-Z in Logic Pro)."))
             );
-            assert_eq!(state_of("Added track “Pad”"), Some(ChangeState::Applied), "the steps before it stand");
+            assert_eq!(state_of("Added audio track “Pad”"), Some(ChangeState::Applied), "the steps before it stand");
 
-            // Undo the last still standing: the track Kumi added goes, as a new step of Logic's undo (and the epoch moves).
+            // Undo the last still standing: the track Kumi added goes by its deletion (a step of Logic's undo the bridge
+            // doesn't name, and the epoch moves).
             let undo = tool(&again, "undo_change");
             let undone = undo.execute(input(json!({"change": "last", "final": true})), Signal::new()).await.unwrap();
             assert!(!undone.is_error, "{}", undone.text);
-            assert_eq!(undone.reply.as_deref(), Some("Undone: Added track “Pad”."));
-            assert_eq!((script.track_count(), script.undo_history().len()), (2, 4), "the undo is a new step");
-            assert_eq!(script.undo_titles().last().map(String::as_str), Some("Undo Delete Track"));
+            assert_eq!(undone.reply.as_deref(), Some("Undone: Added audio track “Pad”."));
+            assert_eq!(
+                (script.track_count(), script.undo_titles()),
+                (2, vec!["Undo Create Track".to_string(), "Undo Delete Tracks".to_string()])
+            );
 
             // The producer moved the fader since: Kumi leaves it, says why, and HISTORY keeps the change.
             script.set_volume(1, -3.0);
@@ -912,10 +919,10 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
             let kept = undo.execute(input(json!({"change": volume})), Signal::new()).await.unwrap();
             assert!(kept.is_error && kept.text.contains("changed in Logic Pro since Kumi set it"), "{}", kept.text);
             assert_eq!(script.volume(1), -3.0);
-            assert_eq!(state_of("Vocal volume -6 dB"), Some(ChangeState::Kept));
+            assert_eq!(state_of("Vocal volume −6 dB"), Some(ChangeState::Kept));
 
-            // A change on its own is a step of its own, named by its title; /undo in the app takes back the latest change
-            // still standing.
+            // A rename on its own is a step of Logic's undo named by its title; /undo in the app takes back the latest
+            // change still standing, by value.
             let latest = logic.observe(Signal::new(), None).await.unwrap();
             let context: Value = serde_json::from_str(&latest.context).unwrap();
             let (vocal, keys) =
@@ -933,6 +940,11 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
             let record = logic.undo(None, Signal::new()).await.unwrap();
             assert_eq!(record.title, "Renamed track “Keys” → “Lead”");
             assert_eq!(script.track(2)["name"], json!("Keys"));
+            assert_eq!(script.undo_titles().last().map(String::as_str), Some("Undo Renaming"), "the put-back is Logic's step too, unnamed");
+            // (the rename and its put-back moved the epoch, as a renamed header does: a fresh look gives this turn's refs)
+            let latest = logic.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&latest.context).unwrap();
+            let vocal = context["tracks"][0]["ref"].as_str().unwrap().to_owned();
 
             // A value it already has: nothing to change, no step and no row. A ref this turn never gave: refused in
             // Kumi's words, nothing sent.
@@ -967,8 +979,8 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
             let previews = script.asked()[asked_before..].iter().filter(|(method, _)| method == "change_preview").count();
             assert_eq!((previews, script.volume(1), script.track(1)["mute"].clone()), (1, -3.0, json!(false)));
 
-            // A write Logic doesn't show back: the plan stops and says to read first, HISTORY's row is unsure, and Kumi
-            // won't undo it blindly.
+            // A write Logic doesn't answer after: the plan stops and says to read first, HISTORY's row is unsure, and
+            // Kumi won't undo it blindly.
             script.uncertain_once();
             let unsure = tool(&latest, "make_changes")
                 .execute(
@@ -1005,7 +1017,7 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
                 "{listed}"
             );
 
-            // An undo Logic doesn't show back: unsure too, and never sent again.
+            // An undo Logic doesn't answer after: unsure too, and never sent again.
             let soloed = tool(&look, "make_changes")
                 .execute(input(json!({"steps": [{"tool": "track_solo", "input": {"ref": vocal, "solo": true}}]})), Signal::new())
                 .await
@@ -1014,7 +1026,7 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
             let solo = told.borrow().iter().rev().find(|record| record.title == "Vocal soloed").cloned().unwrap();
             script.uncertain_once();
             let unsure = tool(&look, "undo_change").execute(input(json!({"change": solo.id})), Signal::new()).await.unwrap();
-            assert!(unsure.is_error && unsure.text.contains("didn't show the value"), "{}", unsure.text);
+            assert!(unsure.is_error && unsure.text.contains("didn't answer after the change was sent"), "{}", unsure.text);
             assert_eq!(script.track(1)["solo"], json!(false), "Logic put it back");
             let row = told.borrow().iter().rev().find(|record| record.title == "Vocal soloed").cloned().unwrap();
             assert_eq!(

@@ -49,18 +49,21 @@ and migration checks do not replace a new real-Live acceptance run.
   the focus and FOCUS's bodies), the host replays them, the runtime reads them,
   opens a kept conversation's project again and tells whether Logic records, and
   `crates/kumi/examples/accept_logic.rs` is the opt-in run against the real
-  Logic for the gate. M3, changes and undo, is wired on Kumi's side: Logic's
-  change set (`crates/kumi-runtime/src/integrations/logic_changes.rs`: the
-  strip's fader, pan, mute, solo, arm and name, tracks added and deleted,
-  markers, the tempo, the cycle area, a region's notes, a plug-in's bypass,
-  parameters and removal, each a step of Logic's own undo, since it has no undo
-  block), the simulated Logic's changes over the recorded project, the host's
-  journal keeping an apply or an undo the bridge couldn't confirm uncertain and
-  never sent twice, HISTORY over Logic with the producer's Cmd-Z named back by
-  `undone_in_daw`, and the acceptance run's M3 checks (a plan of a fader, a
-  rename, a track added and muted, each undone through Kumi; a Cmd-Z named
-  back). The bridge's change ops over the real Logic and the M3 gate are not
-  recorded yet.
+  Logic for the gate. M3, changes and undo: the bridge makes sixteen kinds over
+  the real Logic (the header's fader, pan, mute, solo and arm, the Inspector's
+  name, tracks added below the selected one and deleted, markers made, moved
+  and deleted, the tempo, a region's notes as Event List rows, a plug-in's
+  bypass), each read back, and names the producer's own undo back; Kumi's
+  change set declares exactly those (`logic_changes.rs`), the simulated Logic
+  answers their shapes over the recorded project, the host's journal keeps an
+  apply or an undo the bridge couldn't confirm uncertain and never sent twice,
+  HISTORY over Logic follows a Cmd-Z through `undone_in_daw`, and the
+  acceptance run's M3 checks are a plan of a fader, a rename, a track added and
+  muted, each undone through Kumi, and a rename taken back with Cmd-Z. Logic
+  keeps no undo step for a fader, pan, mute, solo, arm, tempo or bypass, so
+  those are put back by value; a deleted track comes back only through Logic's
+  own undo while that step is on top. The M3 gate on this Mac is not recorded
+  yet.
 
 ## Evidence
 
@@ -97,21 +100,22 @@ bridge, the version given is the one in the commit that added it.
   bindings were tested through Python in Live, not yet through Kumi's own edits;
   see [Willington](WILLINGTON_INTEGRATION.md).
 - Kumi and the bridge are unsigned; see [releases and distribution](DISTRIBUTION_POLICY.md).
-- Logic Pro support reads the project; its changes and undo (M3) are wired on
-  Kumi's side and land in Logic once its bridge's change ops merge. A plug-in
-  inserted, a send made or set, and a marker renamed may stay out: Logic's slot
-  pop-up menus and the Marker List's name cell can't be driven from outside, as
-  M2 found. Logic has no undo block, so a plan of several changes is as many
-  steps of its undo, and a track deleted comes back through Logic's own undo only
-  while that step is on top. Logic Pro 11 and Intel Macs are out of scope. See
-  [the Logic contract](LOGIC_CONTRACT.md).
+- Logic Pro support can't change the cycle locators, name or rename a marker,
+  insert, remove, move or set a plug-in, make or set a send, or move a track:
+  the locators have no field Accessibility can set, a marker's name cell isn't
+  a text field, the slots' pop-up menus can't be driven from outside, a plug-in's
+  controls aren't reached yet and the headers can't be dragged; the bridge
+  refuses each saying why. Logic has no undo block and keeps no undo step for a
+  fader, pan, mute, solo, arm, tempo or bypass, so Kumi puts those back by
+  value; a deleted track comes back through Logic's own undo only while that
+  step is on top. The tempo takes whole BPM. Logic Pro 11 and Intel Macs are out
+  of scope. See [the Logic contract](LOGIC_CONTRACT.md).
 
 ## Open work
 
 - Support for Renoise and Reaper.
-- Logic Pro: the bridge's change ops over the real Logic (M3's bridge side)
-  and the M3 gate with `accept_logic` (a plan with undo, a Cmd-Z named back),
-  then M4.
+- Logic Pro: the M3 gate with `accept_logic` on this Mac (a plan with undo, a
+  Cmd-Z named back), then M4.
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.

@@ -968,16 +968,13 @@ mod tests {
         const KIND: &str = r#"kind: "([a-z]+(?:-[a-z]+)+)"|"([a-z]+(?:-[a-z]+)+)" => Some\(Kind"#;
         let reaper = registered("crates/reaper-kumi/src/changes", "", KIND);
         let renoise = registered("daws/renoise/com.kumi.Bridge.xrnx/payload", "changes", r#"(?:kind = |register\()"([a-z]+(?:-[a-z]+)+)""#);
-        // Logic's bridge takes its kinds on in the shared brief's order (M3's bridge lane: a changes module in
-        // crates/logic-kumi/src, as a file or a folder): once it registers any, Kumi's declaration is pruned to exactly
-        // those; until then the declaration is the brief's, and there is nothing to compare it with.
-        let logic = [("crates/logic-kumi/src/changes", ""), ("crates/logic-kumi/src", "changes")]
-            .into_iter()
-            .filter(|(folder, _)| Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(folder).is_dir())
-            .map(|(folder, prefix)| registered(folder, prefix, KIND))
-            .find(|kinds| !kinds.is_empty());
-        for ((app, set), bridge) in sets().into_iter().zip([Some(reaper), Some(renoise), logic]) {
-            let Some(bridge) = bridge else { continue };
+        // Logic's bridge names what it makes as `kind: "track-volume"` in its props table and as
+        // `"track-rename" => Some(Kind::…)` in its kind match (crates/logic-kumi/src/changes); the kinds it can't make
+        // yet sit in its NOT_YET pairs (`("loop-range", "why")`) and its KINDS list names them bare, neither of which the
+        // pattern takes, so only the kinds it makes count.
+        let logic = registered("crates/logic-kumi/src/changes", "", KIND);
+        assert!(!logic.is_empty(), "Logic's bridge registers no kinds the pattern finds");
+        for ((app, set), bridge) in sets().into_iter().zip([reaper, renoise, logic]) {
             let ours: BTreeSet<String> = set.kinds.iter().map(|kind| kind.kind.to_string()).collect();
             assert_eq!(ours, bridge, "{app}: Kumi's kinds against its bridge's");
         }

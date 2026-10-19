@@ -596,10 +596,10 @@ async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
 }
 
 /// A session in Logic Pro through Kumi's host (in process, in front of the simulated Logic): the model changes the
-/// project with a plan (a fader, a track added, which moves Logic's epoch, and a rename of it), undoes a change, and
-/// the producer undoes another with /undo. What the model is sent (its tools, the plan's and undo's answers, the
-/// observations with kumiChanges) and what the producer is told (the changes in HISTORY, notices) is in Logic's words,
-/// never Live's.
+/// project with a plan (a fader, which is no step of Logic's undo, a track added below the last one, which moves
+/// Logic's epoch, and a rename of it), undoes a change, and the producer undoes another with /undo. What the model is
+/// sent (its tools, the plan's and undo's answers, the observations with kumiChanges) and what the producer is told
+/// (the changes in HISTORY, notices) is in Logic's words, never Live's.
 #[tokio::test(flavor = "current_thread")]
 async fn a_logic_session_changes_and_undoes_in_logics_words() {
     use daw_bridge::{files::ensure_secret, paths::BridgePaths, Daw};
@@ -662,18 +662,23 @@ async fn a_logic_session_changes_and_undoes_in_logics_words() {
             ]);
             session.submit("Pull the vocal down and add a pad track.", None).await.unwrap();
             assert_eq!(script.volume(1), -6.0, "the plan ran");
-            assert_eq!(script.track(3)["name"], json!("Pad"), "the rename was undone");
-            assert_eq!(script.undo_history().len(), 4, "each change and the undo a step of Logic's own undo: {:?}", script.undo_history());
-            // The producer's /undo takes back the latest change still standing: the track Kumi added.
+            assert_eq!(script.track(3)["name"], json!("Pad"), "the track below Keys, its rename undone");
+            assert_eq!(
+                script.undo_titles(),
+                ["Undo Create Track", "Undo Renaming", "Undo Renaming"],
+                "the add, the rename and its put-back are Logic's steps; the fader none: {:?}",
+                script.undo_history()
+            );
+            // The producer's /undo takes back the latest change still standing: the track Kumi added, by its deletion.
             let undone = session.undo(None).await.unwrap();
-            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Added track “Pad”"));
+            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Added audio track “Pad”"));
             assert_eq!(script.track_count(), 2);
             session.submit("What changed?", None).await.unwrap();
             session.close().await.unwrap();
             simulator.stop();
 
             let titles: Vec<String> = changes.borrow().iter().map(|record| record.title.clone()).collect();
-            assert!(titles.iter().any(|title| title == "Vocal volume -6 dB"), "{titles:?}");
+            assert!(titles.iter().any(|title| title == "Vocal volume −6 dB"), "{titles:?}");
             let mut said: Vec<String> = main.requests.borrow().clone();
             assert!(said.iter().any(|request| request.contains("kumiChanges")), "the model sees its changes");
             assert!(said.iter().any(|request| request.contains("Logic Pro's own undo")), "in Logic's words");

@@ -4,9 +4,10 @@
 //! every kind read through logic_read, the four bodies, and, with an operator at Logic, the selection following, a
 //! dialog counting as busy, a project switched and refs held across a track moved. M3: a plan of several changes (a
 //! fader, a rename, a track added, the new track muted) through Kumi's plan tool, each in HISTORY, then each undone
-//! through Kumi as a new step of Logic's undo; and, with the operator, a Cmd-Z in Logic named back by the bridge. It
-//! leaves the project as it found it: every change it makes is undone before it ends (the operator's own steps of M2
-//! aside). It prints a Markdown summary for docs/evidence/ at the end (and writes it to --report, when given). The
+//! through Kumi (the fader and the mute put back by value, the rename as a fresh step of Logic's undo, the added track
+//! by its deletion); and, with the operator, a rename made through Kumi and a Cmd-Z in Logic named back by the bridge.
+//! It leaves the project as it found it: every change it makes is undone before it ends (the operator's own steps of
+//! M2 aside). It prints a Markdown summary for docs/evidence/ at the end (and writes it to --report, when given). The
 //! bridge must be set up in the home (`kumi --daw logic bridge`) and Accessibility allowed; build the host first:
 //!   cargo build --release -p daw-mcp-server --bins
 //!   cargo run --release -p kumi --example accept_logic -- [--kumi-home <dir>] [--report <file>] [--no-operator]
@@ -627,8 +628,9 @@ impl Accept {
     }
 
     /// M3: a plan of several changes through Kumi's own plan tool (the first track's fader, the second track renamed,
-    /// a track added, that track muted), each in HISTORY with undo; then each undone through Kumi, last first, as a
-    /// new step of Logic's undo. The project reads as before when it's done.
+    /// a track added below it, that track muted), each in HISTORY with undo; then each undone through Kumi, last first:
+    /// the mute and the fader put back by value, the added track by its deletion, the rename by value as a fresh step
+    /// of Logic's undo. The project reads as before when it's done.
     async fn plan_and_undo(&self) -> Result<(), RuntimeError> {
         let observation = self.observe().await?;
         let context: Value = serde_json::from_str(&observation.context).unwrap_or(Value::Null);
@@ -642,14 +644,15 @@ impl Accept {
             return Ok(());
         };
         let volume = first["volumeDb"].as_f64().unwrap_or(0.0);
-        // The fader moved down 6 dB (up 3 when it is low already), the second track's name marked, a track added and muted.
+        // The fader moved down 6 dB (up 3 when it is low already), the second track's name marked, a track added below
+        // the last one and muted.
         let target = if volume > -60.0 { volume - 6.0 } else { volume + 3.0 };
         let (first_name, second_name) =
             (first["name"].as_str().unwrap_or("?").to_owned(), second["name"].as_str().unwrap_or("?").to_owned());
         let steps = json!({"steps": [
             {"tool": "track_volume", "input": {"ref": first["ref"], "volumeDb": target}},
             {"tool": "track_rename", "input": {"ref": second["ref"], "name": format!("{second_name} (Kumi)")}},
-            {"tool": "track_add", "as": "pad", "input": {"name": "Kumi Pad"}},
+            {"tool": "track_add", "as": "pad", "input": {"name": "Kumi Pad", "kind": "instrument", "index": tracks.len().max(1)}},
             {"tool": "track_mute", "input": {"ref": "@pad", "mute": true}},
         ]});
         let heard = self.changes.borrow().len();
@@ -672,12 +675,13 @@ impl Accept {
             Some(ms),
             &format!("a plan of 4 changes: {} in HISTORY ({}){stopped}", rows.len(), listed.join("; ")),
         );
-        // Each undone through Kumi, last first: a new step of Logic's undo each.
+        // Each undone through Kumi, last first: the mute and the fader put back by value, the added track by its deletion,
+        // the rename by value as a fresh step of Logic's undo.
         for row in rows.iter().rev().filter(|row| matches!(row.state, ChangeState::Applied | ChangeState::Unsure)) {
             let t0 = perf_now();
             let result = undo.execute(json!({"change": row.id}).as_object().cloned().unwrap_or_default(), signal()).await?;
             let undone = !result.is_error && self.change(&row.id).is_some_and(|now| now.state == ChangeState::Undone);
-            let what = if undone { "undone, as a new step of Logic Pro's undo".to_string() } else { short(&result.text, 200) };
+            let what = if undone { "undone".to_string() } else { short(&result.text, 200) };
             self.say(undone, Some(perf_now() - t0), &format!("undo “{}”: {what}", row.title));
         }
         // The project as it was, read again.
@@ -699,9 +703,9 @@ impl Accept {
         Ok(())
     }
 
-    /// M3, with the operator: a change made through Kumi, then Cmd-Z in Logic: the bridge names it back
-    /// (`undone_in_daw`), and HISTORY marks the change undone with Logic's own undo. Without the Cmd-Z, Kumi undoes
-    /// it, so nothing of the run is left in the project.
+    /// M3, with the operator: a rename made through Kumi (a step of Logic's undo, where a fader move is none), then
+    /// Cmd-Z in Logic: the bridge names it back (`undone_in_daw`), and HISTORY marks the change undone with Logic's
+    /// own undo. Without the Cmd-Z, Kumi undoes it, so nothing of the run is left in the project.
     async fn cmd_z_named(&self) -> Result<(), RuntimeError> {
         let observation = self.observe().await?;
         let context: Value = serde_json::from_str(&observation.context).unwrap_or(Value::Null);
@@ -709,15 +713,14 @@ impl Accept {
             self.say(false, None, "Cmd-Z: the project has no track to change");
             return Ok(());
         };
-        let (Some(fader), Some(undo)) = (tool_named(&observation, "track_volume"), tool_named(&observation, "undo_change")) else {
-            self.say(false, None, "Cmd-Z: no track_volume and undo_change tools");
+        let (Some(plan), Some(undo)) = (tool_named(&observation, "make_changes"), tool_named(&observation, "undo_change")) else {
+            self.say(false, None, "Cmd-Z: no make_changes and undo_change tools");
             return Ok(());
         };
-        let volume = first["volumeDb"].as_f64().unwrap_or(0.0);
-        let target = if volume > -60.0 { volume - 3.0 } else { volume + 3.0 };
+        let name = first["name"].as_str().unwrap_or("Track 1").to_owned();
         let heard = self.changes.borrow().len();
-        let made =
-            fader.execute(json!({"ref": first["ref"], "volumeDb": target}).as_object().cloned().unwrap_or_default(), signal()).await?;
+        let steps = json!({"steps": [{"tool": "track_rename", "input": {"ref": first["ref"], "name": format!("{name} (Kumi)")}}]});
+        let made = plan.execute(steps.as_object().cloned().unwrap_or_default(), signal()).await?;
         let Some(record) = self.changes.borrow()[heard..].first().cloned() else {
             self.say(false, None, &format!("Cmd-Z: the change wasn't made: {}", short(&made.text, 200)));
             return Ok(());
