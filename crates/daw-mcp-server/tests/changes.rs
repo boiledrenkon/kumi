@@ -159,10 +159,14 @@ async fn an_undo_the_daw_couldnt_say_it_finished_is_never_sent_again() {
 async fn reapers_saves_go_to_the_bridge_by_name_and_are_no_change() {
     let mut lab = Lab::start().await;
     let (answer, is_error) = lab.tool("project_save", json!({"version": true, "epoch": "e1"})).await;
-    assert!(is_error, "{answer}");
-    assert!(answer.to_string().contains("no method project_save"), "the simulated REAPER was asked by name: {answer}");
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["saved"], "/lab/Projects/Sim.rpp");
     let (answer, is_error) = lab.tool("track_template_save", json!({"trackRefs": ["r:track:{T0001}"], "name": "Kit"})).await;
-    assert!(is_error && answer.to_string().contains("no method track_template_save"), "{answer}");
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["saved"], "/lab/REAPER/TrackTemplates/Kit.RTrackTemplate");
+    let asked = lab.script.asked();
+    let (_, sent) = asked.iter().find(|(method, _)| method == "project_save").expect("asked by name");
+    assert_eq!(sent, &json!({"version": true, "epoch": "e1"}), "the arguments as they came");
     // Nothing is kept for undo.
     let (released, _) = lab.tool("change_release", json!({"transactionIds": ["t1"]})).await;
     assert_eq!(released["released"], 0, "{released}");
