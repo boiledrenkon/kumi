@@ -21,6 +21,7 @@ mod structure;
 mod tracks;
 mod undo;
 // (r-tracks) M4: track properties, routing, project items, actions; NIT-7.
+mod hwout;
 mod trackprops;
 mod volatile;
 
@@ -108,6 +109,12 @@ enum Kind {
     TrackProp(&'static tracks::Prop),
     /// (r-tracks) A track setting beyond the fader: polarity, record arm and input, monitoring, the parent send, pan mode…
     TrackSetting(&'static trackprops::Prop),
+    /// (r-tracks) A receive made from the receiving track: the send from the other one.
+    ReceiveAdd,
+    /// (r-tracks) A track's hardware outputs.
+    HwOutProp(&'static hwout::Prop),
+    HwOutAdd,
+    HwOutRemove,
     TrackDelete,
     TrackAdd,
     TrackMove,
@@ -140,6 +147,9 @@ fn kind(name: &str) -> Option<Kind> {
     if let Some(prop) = trackprops::prop(name) {
         return Some(Kind::TrackSetting(prop));
     }
+    if let Some(prop) = hwout::prop(name) {
+        return Some(Kind::HwOutProp(prop));
+    }
     if let Some(prop) = sends::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::SendProp(prop));
     }
@@ -165,6 +175,9 @@ fn kind(name: &str) -> Option<Kind> {
         "marker-delete" => Some(Kind::MarkerDelete),
         "send-add" => Some(Kind::SendAdd),
         "send-remove" => Some(Kind::SendRemove),
+        "receive-add" => Some(Kind::ReceiveAdd),
+        "hw-out-add" => Some(Kind::HwOutAdd),
+        "hw-out-remove" => Some(Kind::HwOutRemove),
         "track-delete" => Some(Kind::TrackDelete),
         "track-add" => Some(Kind::TrackAdd),
         "track-move" => Some(Kind::TrackMove),
@@ -185,6 +198,10 @@ impl Kind {
         match self {
             Kind::TrackProp(prop) => tracks::prop_preview(ctx, prop, input),
             Kind::TrackSetting(prop) => trackprops::preview(ctx, prop, input),
+            Kind::ReceiveAdd => sends::receive_add_preview(ctx, input),
+            Kind::HwOutProp(prop) => hwout::prop_preview(ctx, prop, input),
+            Kind::HwOutAdd => hwout::add_preview(ctx, input),
+            Kind::HwOutRemove => hwout::remove_preview(ctx, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
             Kind::TrackAdd => structure::add_preview(ctx, input),
             Kind::TrackMove => structure::move_preview(ctx, input),
@@ -212,6 +229,10 @@ impl Kind {
         match self {
             Kind::TrackProp(prop) => tracks::prop_apply(ctx, prop, input, fence),
             Kind::TrackSetting(prop) => trackprops::apply(ctx, prop, input, fence),
+            Kind::ReceiveAdd => sends::receive_add_apply(ctx, input, fence),
+            Kind::HwOutProp(prop) => hwout::prop_apply(ctx, prop, input, fence),
+            Kind::HwOutAdd => hwout::add_apply(ctx, input, fence),
+            Kind::HwOutRemove => hwout::remove_apply(ctx, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
             Kind::TrackAdd => structure::add_apply(ctx, input, fence),
             Kind::TrackMove => structure::move_apply(ctx, input, fence),
@@ -239,6 +260,10 @@ impl Kind {
         match self {
             Kind::TrackProp(prop) => tracks::prop_restore(ctx, prop, restore),
             Kind::TrackSetting(prop) => trackprops::restore(ctx, prop, restore),
+            Kind::ReceiveAdd => sends::add_restore(ctx, restore),
+            Kind::HwOutProp(prop) => hwout::prop_restore(ctx, prop, restore),
+            Kind::HwOutAdd => hwout::add_restore(ctx, restore),
+            Kind::HwOutRemove => hwout::remove_restore(ctx, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
             Kind::TrackAdd => structure::add_restore(ctx, restore),
             Kind::TrackMove => structure::move_restore(ctx, restore),
@@ -578,5 +603,7 @@ mod tests;
 mod tests_carried;
 #[cfg(test)]
 mod tests_lab;
+#[cfg(test)]
+mod tests_routing;
 #[cfg(test)]
 mod tests_tracks;

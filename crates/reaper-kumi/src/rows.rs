@@ -516,14 +516,25 @@ pub fn pair_hash(reaper: &Reaper, owner: Track, receiver: Track) -> String {
     format!("{hash:016x}")
 }
 
-/// What a send ref carries of the sends to the same track, when there are two or more of them: their state as one short
-/// hash. None for a send alone to its track, a receive or a hardware output (Kumi changes only sends).
+/// What a send or receive ref carries of the sends between the same two tracks, when there are two or more of them: their
+/// state as one short hash. None for one alone between its tracks, or a hardware output.
 pub fn pair_seen(reaper: &Reaper, owner: Track, category: i32, index: i32, key: &SendKey) -> Option<String> {
-    if category != 0 || key.of < 2 {
+    if key.of < 2 {
         return None;
     }
-    let receiver = reaper.send_peer(owner, 0, index)?;
-    Some(pair_hash(reaper, owner, receiver)[..8].to_string())
+    match category {
+        0 => {
+            let receiver = reaper.send_peer(owner, 0, index)?;
+            Some(pair_hash(reaper, owner, receiver)[..8].to_string())
+        }
+        // (r-tracks) A receive is the send seen from the other end: its ref carries the pair's state from the sending
+        // side, as that send's ref does, and Kumi changes it through that send.
+        c if c < 0 => {
+            let sender = reaper.send_peer(owner, c, index)?;
+            Some(pair_hash(reaper, sender, owner)[..8].to_string())
+        }
+        _ => None,
+    }
 }
 
 /// A send (`category` 0), receive (-1) or hardware output (1) of `track`, with the key `send_keys` gave it.

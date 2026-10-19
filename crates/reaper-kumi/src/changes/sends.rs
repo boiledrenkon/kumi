@@ -41,10 +41,25 @@ fn track_by_id(ctx: &Ctx, id: &TrackId) -> Option<Track> {
     ctx.reads.track_by_id(ctx.reaper, ctx.proj, id).ok()
 }
 
+/// (r-tracks) A receive is the send seen from the receiving track (REAPER keeps one object for both; the k-th receive of a
+/// track from another is the k-th send between them, 7.82 lab): its ref is turned into that send's, which every change
+/// works on, so its stamp and seal are the send's. A hardware output has kinds of its own.
+pub(super) fn canonical(reference: &str) -> Done<String> {
+    match Ref::parse(reference).map_err(bad)? {
+        Ref::Send { track, category: -1, other: SendEnd::Track(sender), repeat, of, seen } => {
+            Ok(refs::send_ref(&sender, 0, &SendEnd::Track(track), repeat, of, seen.as_deref()))
+        }
+        Ref::Send { category: 0, .. } => Ok(reference.to_string()),
+        Ref::Send { .. } => Err(bad("that is a hardware output: change it with the hw_out kinds")),
+        other => Err(bad(format!("ref must be a send or receive ref (r:send:…), not r:{}", other.kind()))),
+    }
+}
+
 /// Finds the send a ref names: its track, and where it is in that track's sends now. A ref to one of two or more sends to
 /// the same track names it only while those sends are as the ref saw them, or as Kumi's own writes have made them since
 /// (`check`): once the producer has added, taken away or changed one, the place may name another send.
 fn find(ctx: &Ctx, reference: &str, check: bool) -> Done<Found> {
+    let reference = &canonical(reference)?;
     let Ref::Send { track, category, other, repeat, of, seen } = Ref::parse(reference).map_err(bad)? else {
         return Err(bad("ref must be a send ref (r:send:…)"));
     };
@@ -169,7 +184,7 @@ fn find_by_stamp(reaper: &Reaper, owner: Track, receiver: Track, stamp: &str) ->
     Ok(first)
 }
 
-fn fresh_stamp() -> String {
+pub(super) fn fresh_stamp() -> String {
     static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
     let count = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -227,6 +242,7 @@ fn seal(reaper: &Reaper, found: &Found) -> Value {
 /// sends beside it (`check`), else it may be another send, which is not written.
 fn find_sealed(ctx: &Ctx, reference: &str, seal: &Value, check: bool) -> Done<Found> {
     let reaper = ctx.reaper;
+    let reference = &canonical(reference)?;
     if let Some(stamp) = seal["stamp"].as_str() {
         let Ref::Send { track, other, .. } = Ref::parse(reference).map_err(bad)? else {
             return Err(bad("ref must be a send ref (r:send:…)"));
@@ -311,13 +327,15 @@ fn close(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
 }
 
-const MODES: [(&str, i64); 3] = [("post-fader", 0), ("pre-fader", 3), ("pre-fx", 1)];
+/// (r-tracks) Pre-receive (8, REAPER 7.78): the track's media and monitoring before its receives, so MIDI can go to a sampler
+/// and its audio come back to the same track with no feedback loop.
+pub(super) const MODES: [(&str, i64); 4] = [("post-fader", 0), ("pre-fader", 3), ("pre-fx", 1), ("pre-receive", 8)];
 
 fn mode_state(mode: i64) -> Value {
     json!({"mode": mode, "modeName": rows::send_mode_name(mode)})
 }
 
-pub static PROPS: [Prop; 5] = [
+pub static PROPS: [Prop; 7] = [
     Prop {
         kind: "send-volume",
         read: |reaper, track, index| {
@@ -378,9 +396,9 @@ pub static PROPS: [Prop; 5] = [
         kind: "send-mode",
         read: |reaper, track, index| mode_state(reaper.send_value(track, 0, index, "I_SENDMODE") as i64),
         wanted: |input| {
-            let word = input.get("mode").and_then(Value::as_str).ok_or_else(|| bad("mode must be post-fader, pre-fader or pre-fx"))?;
-            let (_, mode) =
-                MODES.iter().find(|(name, _)| *name == word).ok_or_else(|| bad("mode must be post-fader, pre-fader or pre-fx"))?;
+            let modes = "mode must be post-fader, pre-fader, pre-fx or pre-receive";
+            let word = input.get("mode").and_then(Value::as_str).ok_or_else(|| bad(modes))?;
+            let (_, mode) = MODES.iter().find(|(name, _)| *name == word).ok_or_else(|| bad(modes))?;
             Ok(mode_state(*mode))
         },
         write: |reaper, track, index, state| reaper.set_send_value(track, 0, index, "I_SENDMODE", number(state, "mode")),
@@ -422,6 +440,37 @@ pub static PROPS: [Prop; 5] = [
         noun: "channels",
         check: Some(fits),
     },
+    // (r-tracks) Its polarity, and whether it sums to mono.
+    Prop {
+        kind: "send-phase",
+        read: |reaper, track, index| json!({"inverted": reaper.send_value(track, 0, index, "B_PHASE") != 0.0}),
+        wanted: |input| {
+            let inverted = input.get("inverted").and_then(Value::as_bool).ok_or_else(|| bad("inverted must be true or false"))?;
+            Ok(json!({"inverted": inverted}))
+        },
+        write: |reaper, track, index, state| {
+            reaper.set_send_value(track, 0, index, "B_PHASE", if state["inverted"] == true { 1.0 } else { 0.0 })
+        },
+        same: |a, b| a["inverted"] == b["inverted"],
+        title: |route, to| format!("Send {route} polarity {}", if to["inverted"] == true { "inverted" } else { "back to normal" }),
+        noun: "polarity",
+        check: None,
+    },
+    Prop {
+        kind: "send-mono",
+        read: |reaper, track, index| json!({"mono": reaper.send_value(track, 0, index, "B_MONO") != 0.0}),
+        wanted: |input| {
+            let mono = input.get("mono").and_then(Value::as_bool).ok_or_else(|| bad("mono must be true or false"))?;
+            Ok(json!({"mono": mono}))
+        },
+        write: |reaper, track, index, state| {
+            reaper.set_send_value(track, 0, index, "B_MONO", if state["mono"] == true { 1.0 } else { 0.0 })
+        },
+        same: |a, b| a["mono"] == b["mono"],
+        title: |route, to| format!("Send {route} {}", if to["mono"] == true { "summed to mono" } else { "in stereo" }),
+        noun: "mono",
+        check: None,
+    },
 ];
 
 // ----- a send's channels -----
@@ -448,7 +497,7 @@ fn with_words(mut state: Value) -> Value {
 }
 
 /// How many channels a source code takes: (code >> 10) is 0 for stereo, 1 for mono, n for 2n channels; -1 is none.
-fn src_count(code: i64) -> i64 {
+pub(super) fn src_count(code: i64) -> i64 {
     match code {
         c if c < 0 => 0,
         c => match c >> 10 {
@@ -459,14 +508,14 @@ fn src_count(code: i64) -> i64 {
     }
 }
 
-fn src_words(code: i64) -> Value {
+pub(super) fn src_words(code: i64) -> Value {
     if code < 0 {
         return "none".into();
     }
     json!({"offset": (code & 1023) + 1, "count": src_count(code)})
 }
 
-fn dst_words(code: i64) -> Value {
+pub(super) fn dst_words(code: i64) -> Value {
     json!({"offset": (code & 1023) + 1, "mono": code & 1024 != 0})
 }
 
@@ -478,10 +527,23 @@ fn midi_words(code: i64) -> Value {
         n => n.into(),
     };
     let to: Value = if to == 0 { "same".into() } else { to.into() };
-    json!({"from": from, "to": to})
+    let mut words = json!({"from": from, "to": to});
+    // (r-tracks) The buses (128 a track) and the faders sending MIDI volume and pan, when set.
+    match (code >> 14) & 255 {
+        0 => {}
+        bus => words["fromBus"] = bus.into(),
+    }
+    match (code >> 22) & 255 {
+        0 => {}
+        bus => words["toBus"] = bus.into(),
+    }
+    if code & 1024 != 0 {
+        words["faders"] = true.into();
+    }
+    words
 }
 
-fn whole(value: &Value, key: &str, low: i64, high: i64) -> Done<i64> {
+pub(super) fn whole(value: &Value, key: &str, low: i64, high: i64) -> Done<i64> {
     value
         .get(key)
         .and_then(Value::as_i64)
@@ -491,7 +553,7 @@ fn whole(value: &Value, key: &str, low: i64, high: i64) -> Done<i64> {
 
 /// REAPER's source code for {offset, count} (channels counted from 1; count 1, 2 or an even number up to 64), or "none"
 /// (no audio: a MIDI-only send).
-fn src_code(value: &Value) -> Done<i64> {
+pub(super) fn src_code(value: &Value) -> Done<i64> {
     if value == "none" {
         return Ok(-1);
     }
@@ -512,7 +574,7 @@ fn src_code(value: &Value) -> Done<i64> {
 }
 
 /// REAPER's destination code for {offset, mono?} (counted from 1).
-fn dst_code(value: &Value) -> Done<i64> {
+pub(super) fn dst_code(value: &Value) -> Done<i64> {
     let offset = whole(value, "offset", 1, 128)?;
     let mono = match value.get("mono") {
         None | Some(Value::Null) => false,
@@ -537,10 +599,28 @@ fn midi_code(value: &Value) -> Done<i64> {
         Some(v) if v == "same" => 0,
         Some(v) => v.as_i64().filter(|n| (1..=16).contains(n)).ok_or_else(|| bad("midi.to must be \"same\" or 1 to 16"))?,
     };
-    Ok(from | (to << 5))
+    // (r-tracks) Buses: from "all" (0) or a bus 1 to 128, to "same" (0) or a bus; faders: the send's faders send MIDI volume
+    // and pan.
+    let bus = |key: &str, any: &str| -> Done<i64> {
+        match value.get(key) {
+            None | Some(Value::Null) => Ok(0),
+            Some(v) if v == any => Ok(0),
+            Some(v) => v
+                .as_i64()
+                .filter(|n| (1..=128).contains(n))
+                .ok_or_else(|| bad(format!("midi.{key} must be \"{any}\" or a bus from 1 to 128"))),
+        }
+    };
+    let (from_bus, to_bus) = (bus("fromBus", "all")?, bus("toBus", "same")?);
+    let faders = match value.get("faders") {
+        None | Some(Value::Null) => 0,
+        Some(Value::Bool(on)) => i64::from(*on) << 10,
+        Some(_) => return Err(bad("midi.faders must be true or false")),
+    };
+    Ok(from | (to << 5) | faders | (from_bus << 14) | (to_bus << 22))
 }
 
-fn span_text(first: i64, count: i64) -> String {
+pub(super) fn span_text(first: i64, count: i64) -> String {
     match count {
         1 => format!("{first}"),
         2 => format!("{first}/{}", first + 1),
@@ -576,6 +656,14 @@ fn channels_text(state: &Value) -> String {
         } else {
             let to = words["to"].as_str().map_or_else(|| words["to"].to_string(), str::to_string);
             parts.push(format!("MIDI {from} \u{2192} {to}"));
+            // (r-tracks)
+            if words.get("fromBus").is_some() || words.get("toBus").is_some() {
+                let bus = |key: &str, any: &str| words.get(key).map_or(any.to_string(), |bus| format!("bus {bus}"));
+                parts.push(format!("{} \u{2192} {}", bus("fromBus", "all buses"), bus("toBus", "the same bus")));
+            }
+            if words.get("faders").is_some() {
+                parts.push("faders send MIDI volume and pan".to_string());
+            }
         }
     }
     parts.join(", ")
@@ -611,7 +699,7 @@ fn fits(reaper: &Reaper, from: Track, to: Track, wanted: &Value) -> Done<()> {
 }
 
 pub fn prop_preview(ctx: &Ctx, prop: &Prop, input: &Value) -> Done<Preview> {
-    let reference = input["ref"].as_str().unwrap_or_default();
+    let reference = &canonical(input["ref"].as_str().unwrap_or_default())?;
     let found = find(ctx, reference, true)?;
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     let wanted = (prop.wanted)(input)?;
@@ -887,10 +975,33 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     })
 }
 
+// ----- a receive made from the receiving side (r-tracks) -----
+
+/// A receive made on the receiving track is the send from the other one, as send-add makes it: `ref` the receiving track,
+/// `fromRef` the sending one.
+fn as_send_add(input: &Value) -> Done<Value> {
+    let from = input.get("fromRef").filter(|v| v.is_string()).cloned().ok_or_else(|| bad("fromRef: the track it receives from"))?;
+    let mut send = input.clone();
+    send["toRef"] = input.get("ref").cloned().unwrap_or(Value::Null);
+    send["ref"] = from;
+    if let Some(fields) = send.as_object_mut() {
+        fields.remove("fromRef");
+    }
+    Ok(send)
+}
+
+pub fn receive_add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
+    add_preview(ctx, &as_send_add(input)?)
+}
+
+pub fn receive_add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
+    add_apply(ctx, &as_send_add(input)?, fence)
+}
+
 // ----- removing a send -----
 
 pub fn remove_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
-    let reference = input["ref"].as_str().unwrap_or_default();
+    let reference = &canonical(input["ref"].as_str().unwrap_or_default())?;
     let found = find(ctx, reference, true)?;
     let now = send_state(ctx.reaper, found.track, found.index);
     let mut display = json!({"title": format!("Removed send {}", route_text(&found.from, &found.to)), "before": now});

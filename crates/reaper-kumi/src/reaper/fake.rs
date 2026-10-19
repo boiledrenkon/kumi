@@ -1985,7 +1985,12 @@ unsafe extern "C" fn get_track_send_info_value(track: *mut MediaTrack, category:
             "I_SENDMODE" => send.mode as f64,
             "I_SRCCHAN" => send.src_chan as f64,
             "I_DSTCHAN" => send.dst_chan as f64,
-            other => send.extra.get(other).copied().unwrap_or(if other == "I_AUTOMODE" { -1.0 } else { 0.0 }),
+            // (r-tracks) A send follows the track's automation mode and the project's pan law, and has no slot hint, at first.
+            other => send.extra.get(other).copied().unwrap_or(if matches!(other, "I_AUTOMODE" | "D_PANLAW" | "I_SLOT_HINT") {
+                -1.0
+            } else {
+                0.0
+            }),
         }
     })
 }
@@ -2033,10 +2038,24 @@ unsafe extern "C" fn get_set_track_send_info_string(
     let value = if set { name_of(buf) } else { String::new() };
     counted(|s| {
         if set {
-            // The fake writes a send of the track itself (a send of category 0).
-            let Some(send) = track_mut(s, track as u64).filter(|_| category == 0).and_then(|t| t.sends.get_mut(index as usize)) else {
-                return false;
+            // A send of the track (category 0), a hardware output of it (above 0), or a receive (below 0: the sending
+            // track's send, the one object REAPER keeps for both).
+            let own = unpack(track as u64).1;
+            let place = match category {
+                0 => Some((own as usize, false, index as usize)),
+                c if c > 0 => Some((own as usize, true, index as usize)),
+                _ if own != MASTER => receives(s, own as usize).get(index.max(0) as usize).map(|&(src, n)| (src, false, n)),
+                _ => None,
             };
+            let send = place.and_then(|(at, hw, n)| {
+                let t = if at as u64 == MASTER { Some(&mut s.master) } else { s.tracks.get_mut(at) }?;
+                if hw {
+                    t.hw_outs.get_mut(n)
+                } else {
+                    t.sends.get_mut(n)
+                }
+            });
+            let Some(send) = send else { return false };
             send.ext.insert(parm, value);
             s.undo_dirty = true;
             return true;
@@ -2181,9 +2200,12 @@ unsafe extern "C" fn create_track_send(track: *mut MediaTrack, dest: *mut MediaT
         s.undo_dirty = true;
         let Some(t) = track_mut(s, track as u64) else { return -1 };
         match dest_at {
+            // (r-tracks) REAPER lists a track's sends by their destination's place, two to one track in the order they were
+            // made (7.82 lab): a new one goes in its place there, and its index says where.
             Some(dest) => {
-                t.sends.push(FakeSend::to(dest));
-                t.sends.len() as c_int - 1
+                let at = t.sends.iter().position(|send| send.dest > dest).unwrap_or(t.sends.len());
+                t.sends.insert(at, FakeSend::to(dest));
+                at as c_int
             }
             None => {
                 t.hw_outs.push(FakeSend::to(0));
@@ -2279,6 +2301,8 @@ unsafe extern "C" fn reorder_selected_tracks(before: c_int, _folder: c_int) -> b
             for send in track.sends.iter_mut() {
                 send.dest = position[send.dest];
             }
+            // (r-tracks) Still listed by their destination's place.
+            track.sends.sort_by_key(|send| send.dest);
         }
         s.undo_dirty = true;
         true
