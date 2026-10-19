@@ -836,6 +836,37 @@ test("changes: a parameter is set by value or by text, kept in its range, and a 
   H.no_dialogs()
 end)
 
+test("changes: a parameter is named by its device's ref and its number or name too", function()
+  local env, peer = device_song()
+  local epoch = place(peer)
+  local device = epoch .. ":device:3.2"
+  local by_name = preview(peer, "device-param", { ref = device, param = "gain", value = 0.25 })
+  eq(by_name.target.ref, epoch .. ":param:3.2.1", "the answer names the parameter")
+  eq(by_name.display.title, "EQ 5 on Bass Gain 0.25")
+  local done = apply(peer, "device-param", { ref = device, param = "Gain", value = 0.25 }, "Kumi: gain (kd21)", by_name.fence, epoch, 0)
+  ok(done.result, json.encode(done.error or {}))
+  eq(mock.data.tracks[3].devices[2].params[1].value, 0.25)
+  -- the start of a name is enough when it names one parameter
+  eq(preview(peer, "device-param", { ref = device, param = "Ga", value = 0.5 }).target.ref, epoch .. ":param:3.2.1")
+  local by_number = preview(peer, "device-param", { ref = device, param = 1, valueString = "0.5" })
+  eq(by_number.target.ref, epoch .. ":param:3.2.1")
+  -- the restore finds it by the parameter's ref alone
+  local undone = restore(peer, "device-param", { target = by_name.target, prior = by_name.prior, applied = done.result.applied }, "Kumi: undo (kd22)", epoch, 0)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(mock.data.tracks[3].devices[2].params[1].value, 0.5)
+  local missing = ask(peer, "change_preview", "device-param", { ref = device, param = "Nope", value = 0.5 })
+  failure(missing, "bad-params")
+  ok(missing.error.message:find("Gain", 1, true), missing.error.message)
+  failure(ask(peer, "change_preview", "device-param", { ref = device, value = 0.5 }), "bad-params")
+  failure(ask(peer, "change_preview", "device-param", { ref = device, param = 9, value = 0.5 }), "bad-params")
+  failure(ask(peer, "change_preview", "device-param", { ref = epoch .. ":device:3.1", param = 1, value = 0.5 }), "bad-params")
+  -- text with a unit: the read-back "0.75" has no unit, so a number alone is matched to the digits shown
+  local unit = apply(peer, "device-param", { ref = device, param = 1, valueString = "0.7500" }, "Kumi: gain (kd23)",
+    preview(peer, "device-param", { ref = device, param = 1, valueString = "0.7500" }).fence, epoch, 0)
+  ok(unit.result, json.encode(unit.error or {}))
+  H.no_dialogs()
+end)
+
 test("changes: the producer's undo of a parameter change is told, and the device's place follows the devices made before it", function()
   local env, peer = device_song()
   local epoch = place(peer)
@@ -972,7 +1003,7 @@ test("changes: a device the producer changed since is not taken out unless Kumi 
   ok(forced.result, json.encode(forced.error or {}))
   eq(paths_of(3), "Mixer,EQ 5,#Send")
   -- another epoch is stale
-  local made = apply(peer, "device-add", input, "Kumi: add (ke23)", previewed.fence, place(peer), 0)
+  local made = apply(peer, "device-add", input, "Kumi: add (ke23)", previewed.fence, "ffff", 0)
   failure(made, "stale")
   H.no_dialogs()
 end)
@@ -2176,6 +2207,32 @@ test("changes: a track ref from before a device change is still that track, and 
   H.no_dialogs()
 end)
 
+test("changes: a request in the epoch now may name a track by a ref from an earlier one the tracks kept through", function()
+  local env, peer = device_song()
+  local e1, l1 = place(peer)
+  local old_ref = track_ref(e1, 2)
+  local add = { ref = track_ref(e1, 1), path = "Gainer" }
+  local added = apply(peer, "device-add", add, "Kumi: add (kk31)", preview(peer, "device-add", add).fence, e1, l1)
+  ok(added.result, json.encode(added.error or {}))
+  local e2, l2 = added.result.epoch, added.result.layout
+  ok(e2 ~= e1)
+  -- Kumi's request names the epoch now and the track by the ref it kept
+  local volume = { ref = old_ref, volumeDb = -6 }
+  local pv = call(peer, "change_preview", { kind = "track-volume", input = volume, epoch = e2, layout = l2 })
+  ok(pv.result, json.encode(pv.error or {}))
+  eq(pv.result.target.ref, track_ref(e2, 2), "the answer names the track in this epoch")
+  local done = apply(peer, "track-volume", volume, "Kumi: vol (kk32)", pv.result.fence, e2, l2)
+  ok(done.result, json.encode(done.error or {}))
+  -- a device ref of the old epoch is not kept
+  failure(call(peer, "change_preview", { kind = "device-bypass", input = { ref = e1 .. ":device:3.2", bypass = true }, epoch = e2, layout = l2 }), "stale")
+  -- nor a track ref across a swap
+  local mv = { ref = track_ref(e2, 1), index = 3 }
+  local moved = apply(peer, "track-move", mv, "Kumi: move (kk33)", preview(peer, "track-move", mv).fence, e2, l2)
+  ok(moved.result, json.encode(moved.error or {}))
+  failure(call(peer, "change_preview", { kind = "track-volume", input = { ref = old_ref, volumeDb = -3 }, epoch = moved.result.epoch, layout = moved.result.layout }), "stale")
+  H.no_dialogs()
+end)
+
 test("changes: a deleted track is put back after a device change made another epoch", function()
   local env, peer = device_song()
   local e1, l1 = place(peer)
@@ -2201,5 +2258,38 @@ test("changes: tracks that swapped places are not kept: an older track ref is st
   ok(moved.result, json.encode(moved.error or {}))
   eq(moved.result.kept, nil)
   failure(call(peer, "change_preview", { kind = "track-volume", input = { ref = ref, volumeDb = -3 }, epoch = e1, layout = l1 }), "stale")
+  H.no_dialogs()
+end)
+
+test("changes: a null in a request (taking a track out of its group) survives the refs being carried to the layout now", function()
+  local env, peer = with_group()
+  mock.song:add_track_to_group(1, 4)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  -- (Kick is the group's track, at 3: Hat and Bass are before it)
+  local member = track_ref(epoch, 3)
+  mock.api.insert_track_at(1) -- a track is made before: the layout moves, and the ref is carried
+  H.tick(3)
+  local pv = call(peer, "change_preview", { kind = "track-group", input = { ref = member, group = json.null }, epoch = epoch, layout = layout })
+  ok(pv.result, json.encode(pv.error or {}))
+  eq(pv.result.display.title, "Took Kick out of the group Bus")
+  H.no_dialogs()
+end)
+
+test("changes: a song setting made before a sequence or device change is put back after it", function()
+  local env, peer = device_song()
+  local e1, l1 = place(peer)
+  local pv = preview(peer, "loop-range", { first = 2, last = 3 })
+  local done = apply(peer, "loop-range", { first = 2, last = 3 }, "Kumi: loop (kj01)", pv.fence, e1, l1)
+  ok(done.result, json.encode(done.error or {}))
+  -- the sequence changes (the epoch moves, and slot refs with it)
+  local ins = apply(peer, "slot-insert", {}, "Kumi: slot (kj02)", preview(peer, "slot-insert", {}).fence, e1, l1)
+  ok(ins.result, json.encode(ins.error or {}))
+  ok(ins.result.epoch ~= e1)
+  local undone = restore(peer, "loop-range", { target = pv.target, prior = pv.prior, applied = done.result.applied }, "Kumi: undo loop (kj03)", e1, l1)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#mock.song.transport.loop_sequence_range, 0)
+  -- a slot ref from before is not kept
+  failure(call(peer, "change_preview", { kind = "slot-section", input = { ref = seq_ref(e1, 1), name = "A" }, epoch = e1, layout = l1 }), "stale")
   H.no_dialogs()
 end)

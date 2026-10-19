@@ -40,29 +40,64 @@ end
 -- Refs that name a track, or something on one (its devices and their parameters, a pattern's track): the number that is the track.
 local TRACK_KINDS = { track = 1, device = 1, param = 1, ptrack = 2, slot = 1 }
 
--- `params` with the epoch `old` made `new`: its `epoch` and every track ref of that epoch. Nil when a ref of that epoch names
--- something else than a track (a device, a pattern, a slot...): those numbers are not the same in a later epoch.
+-- Walks `value`, giving each leaf (a string, a number) to `leaf(value, key)`, which answers the value to put there and whether it
+-- is another. A table is copied only when something in it changed: JSON's null is a table that must stay the one it is.
+local function rebuild(value, key, leaf)
+  if type(value) == "table" then
+    local copy
+    for k, v in pairs(value) do
+      local moved, did = rebuild(v, k, leaf)
+      if did then
+        if not copy then
+          copy = {}
+          for k2, v2 in pairs(value) do copy[k2] = v2 end
+          setmetatable(copy, getmetatable(value))
+        end
+        copy[k] = moved
+      end
+    end
+    if copy then return copy, true end
+    return value, false
+  end
+  return leaf(value, key)
+end
+
+-- `params` with the epoch `old` made `new`: its `epoch` and every track and song ref of that epoch (the song is the one song).
+-- Nil when a ref of that epoch names something else (a device, a pattern, a slot...): those numbers are not the same in a later
+-- epoch.
 function M.relabel(params, old, new)
   local refused = false
-  local function walk(value, key)
-    if type(value) == "string" then
-      if key == "epoch" then return value == old and new or value end
-      local ref = M.parse(value)
-      if ref and ref.epoch == old then
-        if ref.kind ~= "track" then refused = true return value end
-        return M.make(new, ref.kind, unpack(ref.n))
-      end
-      return value
-    elseif type(value) == "table" then
-      local copy = {}
-      for k, v in pairs(value) do copy[k] = walk(v, k) end
-      return setmetatable(copy, getmetatable(value))
+  local moved = rebuild(params, nil, function(value, key)
+    if type(value) ~= "string" then return value, false end
+    if key == "epoch" then
+      if value == old then return new, true end
+      return value, false
     end
-    return value
-  end
-  local moved = walk(params, nil)
+    local ref = M.parse(value)
+    if ref and ref.epoch == old then
+      if ref.kind ~= "track" and ref.kind ~= "song" then
+        refused = true
+        return value, false
+      end
+      return M.make(new, ref.kind, unpack(ref.n)), true
+    end
+    return value, false
+  end)
   if refused then return nil end
   return moved
+end
+
+-- `params` with every track ref of an earlier epoch that `kept(epoch)` says still names the same tracks made one of `now`'s.
+-- (Kumi keeps the names of tracks through an epoch that moved for something else, and so the refs behind them.)
+function M.relabel_tracks(params, now, kept)
+  return (rebuild(params, nil, function(value, key)
+    if type(value) ~= "string" or key == "epoch" then return value, false end
+    local ref = M.parse(value)
+    if ref and (ref.kind == "track" or ref.kind == "song") and ref.epoch ~= now and kept(ref.epoch) then
+      return M.make(now, ref.kind, unpack(ref.n)), true
+    end
+    return value, false
+  end))
 end
 
 -- The shifts of the track list since layout `since`: each { layout, type = "insert" | "remove", index }, oldest first, one per
@@ -105,7 +140,7 @@ end
 -- (code `gone`) naming the first track that was deleted meanwhile.
 function M.carry(params, epoch, shifts, since)
   local gone
-  local function walk(value, key)
+  local carried = rebuild(params, nil, function(value, key)
     if type(value) == "string" then
       local ref = M.parse(value)
       if ref and ref.epoch == epoch and TRACK_KINDS[ref.kind] then
@@ -113,27 +148,21 @@ function M.carry(params, epoch, shifts, since)
         local moved = M.shift(ref.n[at], shifts, since)
         if not moved then
           gone = gone or { code = "gone", message = "track " .. ref.n[at] .. " (" .. value .. ") was deleted since that ref was made" }
-          return value
+          return value, false
         end
         ref.n[at] = moved
-        return M.make(ref.epoch, ref.kind, unpack(ref.n))
+        return M.make(ref.epoch, ref.kind, unpack(ref.n)), true
       end
-      return value
     elseif type(value) == "number" and key == "track" then
       local moved = M.shift(value, shifts, since)
       if not moved then
         gone = gone or { code = "gone", message = "track " .. value .. " was deleted since that number was made" }
-        return value
+        return value, false
       end
-      return moved
-    elseif type(value) == "table" then
-      local copy = {}
-      for k, v in pairs(value) do copy[k] = walk(v, k) end
-      return setmetatable(copy, getmetatable(value))
+      return moved, true
     end
-    return value
-  end
-  local carried = walk(params, nil)
+    return value, false
+  end)
   if gone then return nil, gone end
   return carried
 end

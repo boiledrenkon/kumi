@@ -716,6 +716,8 @@ function M.handle(_, request)
     if type(from) == "string" and from ~= epoch() and tracks_kept_since(from) then
       params = refs.relabel(params, from, epoch()) or params
     end
+    -- And a track ref of an earlier epoch with the track numbers still in place is that track, whatever epoch the request names.
+    params = refs.relabel_tracks(params, epoch(), tracks_kept_since)
     if request.method == "change_restore" and type(params) == "table" and params.kind == "track-delete" then
       -- (the deleted track's own ref is gone by design: only its place is carried)
       params = carried(params, changes.carry_restore)

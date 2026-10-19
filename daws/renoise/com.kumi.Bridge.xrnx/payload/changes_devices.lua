@@ -95,21 +95,63 @@ local param_spec = {
       parameter.value_string = state.valueString
     end
   end,
-  -- (text is read by Renoise, which answers the value in its own words: "0.5" is read back as "0.500 dB". Text matches what
-  -- it was read as when it begins that, case aside)
+  -- (text is read by Renoise, which answers the value in its own words: "0.5" is read back as "0.500 dB", "-3 dB" as "-3.00 dB".
+  -- Text matches what it was read as when it begins that, or has the same number to the digits shown and the same rest)
   same = function(a, b)
     if a.value ~= nil and b.value ~= nil then return base.close(a.value, b.value) end
     local read, wanted = a, b
     if a.value == nil then read, wanted = b, a end
     if read.value == nil or wanted.valueString == nil then return a.valueString == b.valueString end
-    local text, asked = tostring(read.valueString):lower(), tostring(wanted.valueString):lower():gsub("^%s+", ""):gsub("%s+$", "")
-    return text == asked or text:sub(1, #asked) == asked
+    local function plain(text) return (tostring(text):lower():gsub("\226\136\146", "-"):gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")) end
+    local text, asked = plain(read.valueString), plain(wanted.valueString)
+    if text == asked or text:sub(1, #asked) == asked then return true end
+    local n1, rest1 = text:match("^([%-+]?%d*%.?%d+)%s*(.*)$")
+    local n2, rest2 = asked:match("^([%-+]?%d*%.?%d+)%s*(.*)$")
+    if not n1 or not n2 or rest1 ~= rest2 then return false end
+    local digits = #(n1:match("%.(%d+)$") or "")
+    return math.abs(tonumber(n1) - tonumber(n2)) <= 0.5 * 10 ^ -digits + 1e-9
   end,
   title = function(name, _, to) return name .. " " .. (to.valueString or tostring(to.value)) end,
 }
 
+-- Which parameter of a device a request means: its number from 1, or its name (any case).
+local function parameter_number(device, wanted)
+  local count = #device.parameters
+  if type(wanted) == "number" then
+    if wanted ~= math.floor(wanted) or wanted < 1 or wanted > count then bad(string.format("param is a number from 1 to %d", count)) end
+    return wanted
+  end
+  if type(wanted) ~= "string" or wanted == "" then bad("param: a parameter's number (from 1) or its name, with a device ref") end
+  -- (the name as written, or else the start of one name: EQ 5 names its gains "Gain 1 (100 Hz)", which follow the frequency)
+  local lower = wanted:lower()
+  for _, exact in ipairs({ true, false }) do
+    local found
+    for k = 1, count do
+      local name = device:parameter(k).name:lower()
+      if (exact and name == lower) or (not exact and name:sub(1, #lower) == lower) then
+        if found then bad(string.format("%q names more than one parameter of this device: give its number", wanted)) end
+        found = k
+      end
+    end
+    if found then return found end
+  end
+  local names = {}
+  for k = 1, math.min(count, 24) do names[k] = device:parameter(k).name end
+  bad(string.format("this device has no parameter %q (it has %s%s)", wanted, table.concat(names, ", "), count > 24 and ", ..." or ""))
+end
+
+-- A parameter is named by its ref, or by its device's ref and `param`.
 param_spec.locate = function(song, env, input)
-  local index, at, _, device, name, k = device_of(song, env, input.ref, param_spec.kind, 3)
+  local parsed = type(input.ref) == "string" and refs.parse(input.ref) or nil
+  local index, at, device, name, k
+  if parsed and parsed.kind == "device" then
+    local _
+    index, at, _, device, name = device_of(song, env, input.ref, param_spec.kind, 2)
+    k = parameter_number(device, input.param)
+  else
+    local _
+    index, at, _, device, name, k = device_of(song, env, input.ref, param_spec.kind, 3)
+  end
   if k < 1 or k > #device.parameters then fail("gone", "that parameter isn't on the device any more") end
   local parameter = device:parameter(k)
   if input.value ~= nil then receiver_check(device, parameter, input.value, song) end

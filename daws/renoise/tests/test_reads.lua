@@ -1170,9 +1170,12 @@ test("reads: an edit that moves the epoch (a device added) after a track insert 
   ok(call(peer, "read", { kind = "pattern", layout = 1 }).result, "read pattern")
   ok(call(peer, "focus_body", { kind = "pattern", layout = 1 }).result, "the pattern body")
   ok(call(peer, "focus_body", { kind = "matrix", layout = 0 }).result, "the matrix, even with an older layout")
-  -- A track ref from before the device was added is stale: it's from the old epoch.
-  local old = call(peer, "read", { kind = "device", parent = E .. ":track:2", layout = 1 })
-  eq(old.error and old.error.code, "stale", json.encode(old))
+  -- A track ref from before the device was added still names that track (the track numbers are where they were; layout 1
+  -- is the numbering the ref was made in), and a device ref from then is stale: the devices moved.
+  local old = call(peer, "read", { ref = E .. ":track:2", layout = 1 })
+  ok(old.result and old.result.items[1], json.encode(old))
+  local device = call(peer, "read", { ref = E .. ":device:2.1", layout = 1 })
+  eq(device.error and device.error.code, "stale", json.encode(device))
   H.no_dialogs()
 end)
 
