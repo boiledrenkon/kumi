@@ -642,6 +642,16 @@ async fn a_change_the_daws_undo_put_back_is_undone_again_and_an_uncertain_one_is
             assert_eq!(state_of("Track 2 volume -4 dB"), Some(ChangeState::Unsure));
             let again = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
             assert!(again.is_error && again.text.contains("won't undo it again"), "{}", again.text);
+
+            // An undo REAPER made in part says what it left out, in its answer and on the row: never read as whole.
+            let made = volume.execute(input(json!({"ref": "track:2", "volumeDb": -5})), Signal::new()).await.unwrap();
+            assert!(!made.is_error, "{}", made.text);
+            script.left_out_once("Its 2 send envelope(s) were not put back.");
+            let partial = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(!partial.is_error && partial.text.contains("were not put back"), "{}", partial.text);
+            let row = told.borrow().iter().rev().find(|record| record.title == "Track 1 volume -5 dB").cloned().unwrap();
+            assert_eq!(row.state, ChangeState::Undone);
+            assert_eq!(row.note.as_deref(), Some("Its 2 send envelope(s) were not put back."));
             reaper.close().await.unwrap();
             simulator.stop();
         })
