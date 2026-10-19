@@ -133,12 +133,8 @@ local function delete_info(song, s)
     if sequencer:track_sequence_slot_is_muted(t, s) then mutes[#mutes + 1] = { track = t } end
   end
   local start = sequencer:sequence_is_start_of_section(s)
-  -- (the slot's place is the sequence before it: Renoise's sequence notifier can't say where a slot went, so the place holds
-  -- while the slots before it are the same, whatever is made or deleted after)
-  local before = {}
-  for k = 1, s - 1 do before[k] = sequencer.pattern_sequence[k] end
   local info = {
-    index = s, pattern = p, count = slot_count(song), before = before, beside = { sequencer.pattern_sequence[s - 1], sequencer.pattern_sequence[s + 1] },
+    index = s, pattern = p, count = slot_count(song),
     section = { start = start, name = start and sequencer:sequence_section_name(s) or "" },
     mutes = mutes,
   }
@@ -183,6 +179,9 @@ local function delete_apply(song, env, input, fence, desc)
   local saved = { name = pattern.name, lines = pattern.number_of_lines }
   song:describe_undo(desc)
   song.sequencer:delete_sequence_at(s)
+  -- (the sequence as the delete left it: where the slot goes back is followed from it, see base.follow_slot)
+  info.after = {}
+  for k = 1, slot_count(song) do info.after[k] = song.sequencer.pattern_sequence[k] end
   if #song.patterns < before then
     info.gone = saved
     info.pattern = nil
@@ -205,30 +204,25 @@ local function delete_restore(song, env, restore, desc)
   local sequencer = song.sequencer
   local n = slot_count(song)
   local index = material.index
-  local before = type(material.before) == "table" and material.before or nil
-  local holds = before ~= nil and #before == index - 1 and index - 1 <= n
-  if holds and before then
-    for k = 1, index - 1 do
-      if sequencer.pattern_sequence[k] ~= before[k] then holds = false break end
-    end
-  end
-  -- (patterns repeat: a slot whose pattern a neighbour had can't be told from it once a slot is made or deleted before it, unless
-  -- the sequence is as the delete left it)
-  local beside = type(material.beside) == "table" and material.beside or {}
-  if holds and n ~= material.count - 1 then
-    local own = not material.gone and type(material.pattern) == "string" and refs.parse(material.pattern) or nil
-    local mine = own and own.n[1] or nil
-    if mine and (beside[1] == mine or beside[2] == mine) then holds = false end
-  end
-  if not holds then
-    fail("stale", string.format("the sequence before %s changed in Renoise since Kumi deleted it, so Kumi can't tell where it goes: nothing was put back", slot_text(index)))
-  end
+  local now = {}
+  for k = 1, n do now[k] = sequencer.pattern_sequence[k] end
   -- (the pattern it played, if it stayed in the pool: a ref, `stale` when the pool was renumbered since)
   local kept_pattern = not material.gone and refs.expect(material.pattern, "pattern", 1, env.epoch())[1] or nil
-  -- back already: the song is as long as it was and the slot holds the pattern
-  if n == material.count and sequencer.pattern_sequence[index] == kept_pattern and not material.gone then
-    return { restored = { index = index }, display = { title = slot_title(index) .. " is back already" }, undo = { desc = desc, entry = false } }
+  -- back already (the producer's undo, or an earlier restore): the sequence is the delete's with the slot in its place
+  if kept_pattern and n == material.count and now[index] == kept_pattern and type(material.after) == "table" then
+    local without = {}
+    for k = 1, n do
+      if k ~= index then without[#without + 1] = now[k] end
+    end
+    if base.follow_slot(material.after, without, 1) ~= nil then
+      return { restored = { index = index }, display = { title = slot_title(index) .. " is back already" }, undo = { desc = desc, entry = false } }
+    end
   end
+  local placed = type(material.after) == "table" and base.follow_slot(material.after, now, index, true) or nil
+  if not placed then
+    fail("stale", string.format("the sequence changed in Renoise since Kumi deleted %s in a way that doesn't say where it goes: nothing was put back", slot_text(index)))
+  end
+  index = placed or index
   local at = math.max(1, math.min(index, n + 1))
   if kept_pattern and kept_pattern > #song.patterns then
     fail("failed", "the pattern the slot held isn't in the song any more")

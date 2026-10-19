@@ -103,32 +103,14 @@ impl Watch {
 /// Only Kumi's own points are looked at, and each is told by its description, which its nonce makes unique (REAPER gives the
 /// producer's points like descriptions, "Adjust track volume" for every fader move, so no place is told by theirs). A point
 /// of Kumi's that was applied and is redoable now was undone; one that was redoable and is applied now was redone. One that
-/// was applied and is in neither list was undone and replaced by a new edit when the look saw the whole history; past what a
-/// look sees (REAPER's oldest points dropped, or more points made than are looked at) where it is can't be told, and nothing
-/// is said of it.
+/// vanished from both lists is evidence of nothing: REAPER merges its oldest points away when its undo memory is full, and
+/// a look sees only so far. Its row keeps its state, and Kumi's undo checks the values as ever. (So an undo of Kumi's point
+/// and a new edit within one look leave the row at Applied: a known limit, safe because the undo checks.)
 fn changes(before: &View, now: &View) -> Vec<(&'static str, Vec<String>)> {
     let kumi = |list: &[String]| list.iter().filter(|desc| is_kumi(desc)).cloned().collect::<std::collections::HashSet<String>>();
     let (applied_now, redoable_now) = (kumi(&now.tail), kumi(&now.redo));
-    // The look sees the whole history only if nothing went from its front since the last: REAPER at its undo memory merges its
-    // oldest points into its first one (whose description changes), which leaves a point of Kumi's lower in the history, and
-    // a full look shorter.
-    let place_of =
-        |view: &View, desc: &String| view.tail.iter().position(|d| d == desc).map(|p| view.at + 1 - view.tail.len() as i32 + p as i32);
-    let full = |view: &View| view.tail.len() >= TAIL_SCAN as usize;
-    let trimmed = (!full(before) && before.tail.first() != now.tail.first())
-        || (full(before) && !full(now) && now.at < before.at)
-        || before
-            .tail
-            .iter()
-            .filter(|desc| is_kumi(desc))
-            .any(|desc| matches!((place_of(before, desc), place_of(now, desc)), (Some(then), Some(at)) if at < then));
-    let whole = !full(now) && !trimmed;
-    let undone: Vec<String> = before
-        .tail
-        .iter()
-        .filter(|desc| is_kumi(desc) && !applied_now.contains(*desc) && (redoable_now.contains(*desc) || whole))
-        .cloned()
-        .collect();
+    let undone: Vec<String> =
+        before.tail.iter().filter(|desc| is_kumi(desc) && !applied_now.contains(*desc) && redoable_now.contains(*desc)).cloned().collect();
     let redone: Vec<String> = before.redo.iter().filter(|desc| is_kumi(desc) && applied_now.contains(*desc)).cloned().collect();
     let mut found = Vec::new();
     if !undone.is_empty() {
@@ -172,22 +154,23 @@ mod tests {
         let mut undone: Vec<String> = full[246..745 - 61].to_vec();
         undone.push("Adjust track pan".into());
         let now = look(&undone[undone.len() - 128..].iter().map(String::as_str).collect::<Vec<_>>(), &[]);
-        // (undone and replaced, past a look that sees all of the history: where it went can't be told, so nothing is said)
+        // (undone and replaced: it vanished, which tells nothing)
         assert_eq!(told(&before, &now), []);
     }
 
     #[test]
     fn like_descriptions_dont_hide_an_undo() {
-        // Kumi's point among the producer's like edits; the producer undoes nine points and makes nine like ones.
+        // Kumi's point among the producer's like edits; the producer undoes nine points (Kumi's among them) in one look.
         let mut before: Vec<&str> = vec!["Adjust track volume"; 10];
         before.push("Kumi: Vocal volume −8 dB (kd3db)");
         before.extend(["Adjust track volume"; 8]);
+        let mut redo: Vec<&str> = vec!["Adjust track volume"; 8];
+        redo.push("Kumi: Vocal volume −8 dB (kd3db)");
+        let now = vec!["Adjust track volume"; 10];
+        assert_eq!(told(&look(&before, &[]), &look(&now, &redo)), [("undo", vec!["Kumi: Vocal volume −8 dB (kd3db)".to_string()])]);
+        // Undone and replaced by new edits within one look: it vanished, which tells nothing (a known limit).
         let now = vec!["Adjust track volume"; 19];
-        assert_eq!(told(&look(&before, &[]), &look(&now, &[])), [("undo", vec!["Kumi: Vocal volume −8 dB (kd3db)".to_string()])]);
-        // Undone three, two new: Kumi's was among the three.
-        let before = ["Init", "V", "Kumi: x (k0001)", "V", "V"];
-        let now = ["Init", "V", "V", "V"];
-        assert_eq!(told(&look(&before, &[]), &look(&now, &[])), [("undo", vec!["Kumi: x (k0001)".to_string()])]);
+        assert_eq!(told(&look(&before, &[]), &look(&now, &[])), []);
     }
 
     /// The last `n` points of a history of like fader moves with Kumi's change `depth` under the newest, and what can be

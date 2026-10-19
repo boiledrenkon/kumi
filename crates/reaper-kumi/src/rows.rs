@@ -460,12 +460,13 @@ pub fn send_keys(reaper: &Reaper, track: Track, category: i32) -> Vec<SendKey> {
 pub const SEND_STATE: [&str; 10] =
     ["D_VOL", "D_PAN", "B_MUTE", "I_SENDMODE", "I_SRCCHAN", "I_DSTCHAN", "I_MIDIFLAGS", "B_PHASE", "B_MONO", "I_AUTOMODE"];
 
-/// A send's envelopes, as what tells it from a send with the same settings: each one's being on and its number of points.
+/// A send's envelopes, as what tells it from a send with the same settings: which of them it has, and on. (Not their points:
+/// the producer draws automation on a send all the time, and that is no other send.)
 pub fn send_envelope_print(reaper: &Reaper, track: Track, index: i32) -> String {
     ["<VOLENV", "<PANENV", "<MUTEENV"]
         .into_iter()
         .map(|chunk| match reaper.send_envelope(track, index, chunk) {
-            Some(envelope) => format!("{}{}", u8::from(reaper.envelope_flag(envelope, "ACTIVE")), reaper.envelope_point_count(envelope)),
+            Some(envelope) => u8::from(reaper.envelope_flag(envelope, "ACTIVE")).to_string(),
             None => "-".to_string(),
         })
         .collect::<Vec<_>>()

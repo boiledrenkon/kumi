@@ -41,17 +41,27 @@ function M.preview(params, env)
   }
 end
 
+-- Kumi's own writes, while it makes or puts back a change, are no touch of the producer's (a Lua chunk's are: it can move
+-- anything).
+local function as_kumi(env, spec, fn)
+  local mine = env.writing and spec.kind ~= "run-lua"
+  if mine then env.writing(true) end
+  local ok, result = pcall(fn)
+  if mine then env.writing(false) end
+  if not ok then error(result, 0) end
+  return result
+end
+M.as_kumi = as_kumi
+
 function M.apply(params, env)
   local song = base.context(params, env)
   local spec = kind_of(params)
   local input, fence = base.need_object(params, "input"), base.need_object(params, "fence")
   local desc = base.need_text(params, "desc")
-  local done
-  if spec.custom then
-    done = spec.apply(song, env, input, fence, desc)
-  else
-    done = base.prop_apply(song, env, spec, input, fence, desc)
-  end
+  local done = as_kumi(env, spec, function()
+    if spec.custom then return spec.apply(song, env, input, fence, desc) end
+    return base.prop_apply(song, env, spec, input, fence, desc)
+  end)
   local answer = {
     epoch = env.epoch(), layout = env.layout(), applied = done.applied, display = done.display, undo = done.undo,
     target = done.target,
@@ -75,16 +85,15 @@ function M.restore(params, env)
     target = base.need_object(params, "target"), prior = params.prior, applied = params.applied, material = params.material,
     created = params.created, discard = params.discard == true, layout = params.layout,
   }
-  local done
-  if spec.custom then
-    done = spec.restore(song, env, restore, desc)
-    if done.kumi_job then return done end
-  else
+  local done = as_kumi(env, spec, function()
+    if spec.custom then return spec.restore(song, env, restore, desc) end
     if type(restore.prior) ~= "table" or type(restore.applied) ~= "table" then bad("prior and applied: the change's values") end
-    done = base.prop_restore(song, env, spec, restore, desc)
-    base.note_restored(env.journal, spec.kind, done.place, done.applied, spec)
-    done.place, done.applied = nil, nil
-  end
+    local put = base.prop_restore(song, env, spec, restore, desc)
+    base.note_restored(env.journal, spec.kind, put.place, put.applied, spec)
+    put.place, put.applied = nil, nil
+    return put
+  end)
+  if done.kumi_job then return done end
   done.epoch, done.layout = env.epoch(), env.layout()
   return done
 end

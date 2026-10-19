@@ -163,16 +163,19 @@ local param_spec = {
   title = function(name, _, to) return name .. " " .. (to.valueString or tostring(to.value)) end,
 }
 
--- A value that is a place may be given as text: a number in it is the track or send it names, fenced as a number is (Renoise's
--- own reading of such text is a lab question: 3.5.4 is taken to read a number, as the mock does); other text names no place.
+-- A value that is a place may be given as text, read as Renoise 3.5.4 reads it (lab, 2026-10-19): the number it begins with
+-- ("3: Hats" is 3), a track counted from 1 (Dest. Track's "2" is the value 1) and a send from 0 (a Receiver's text is its
+-- value). It is fenced as the number is. Text without a number Renoise ignores, and "-1" or "None" would set the first entry,
+-- not none: Kumi refuses those.
 param_spec.wanted_at = function(loc, input)
   if loc.points and type(input.valueString) == "string" then
-    local n = tonumber(input.valueString:match("^%s*(%-?%d+)%s*$"))
-    if not n then
-      bad(string.format("%s names a %s: give its number (%s), not text", loc.name, loc.points,
-        loc.points == "send" and "a send among the sends, from 0" or "a track, from 0; -1 for none"))
+    local n = tonumber(input.valueString:match("^%s*(%d+)"))
+    local first = loc.points == "send" and 0 or 1
+    if not n or n < first then
+      bad(string.format("%s names a %s: give its number (%s) as text, or value", loc.name, loc.points,
+        loc.points == "send" and "a send among the sends, from 0" or "a track, from 1"))
     end
-    return param_spec.wanted(loc.object, { value = n })
+    return param_spec.wanted(loc.object, { value = n - first })
   end
   return param_spec.wanted(loc.object, input)
 end

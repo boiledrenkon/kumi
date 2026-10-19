@@ -1268,9 +1268,11 @@ test("changes: a cell the producer changed since is not overwritten by a restore
   local forced = restore(peer, "notes-write", record, "Kumi: undo (kn22)", epoch, layout, { discard = true })
   ok(forced.result, json.encode(forced.error or {}))
   eq(cell(1, 3, 1, 1), "--- .. .. .. .. 0000")
-  -- asked again: it is back, nothing is written
+  -- asked again, told to discard: it is back, nothing is written (without discard the producer's edit in those lines is still
+  -- in the track's history, and Kumi refuses)
   local after_forced = steps()
-  local again = restore(peer, "notes-write", record, "Kumi: undo (kn23)", epoch, layout)
+  failure(restore(peer, "notes-write", record, "Kumi: undo (kn23)", epoch, layout), "changed")
+  local again = restore(peer, "notes-write", record, "Kumi: undo (kn23)", epoch, layout, { discard = true })
   ok(again.result, json.encode(again.error or {}))
   eq(again.result.undo.entry, false)
   eq(steps(), after_forced)

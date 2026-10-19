@@ -273,6 +273,9 @@ local function gather(song, env, index, track, kind)
     end
   end
   material.pool = material_.keep_pool(song, env, numbers)
+  -- (the track's identity for its lines' touches: the track put back takes it over, so an older notes change on it still
+  -- knows whether its lines moved)
+  material.tid = env.track_identity and env.track_identity(index) or nil
   material.instruments = material_.keep_instruments(song, env, instruments)
   for s = 1, #sequencer.pattern_sequence do
     if sequencer:track_sequence_slot_is_muted(index, s) then material.slotMutes[#material.slotMutes + 1] = s end
@@ -417,21 +420,11 @@ end
 -- sequence is the one the record saw (its patterns found where they are now, by `pattern_now`); or when the sequence up to it
 -- is, and its pattern is none of its neighbours': patterns repeat, and a slot made or deleted before a run of one pattern
 -- leaves the sequence up to it as it was. A slot made or deleted after it doesn't move it.
-local function slot_holds(kept, now, s, pattern_now)
-  if type(kept) ~= "table" or s > #now or s > #kept then return false end
-  local same = #kept == #now
-  for k = 1, #kept do
-    if pattern_now(kept[k]) ~= now[k] then
-      if k <= s then return false end
-      same = false
-    end
-  end
-  if same then return true end
-  local mine = pattern_now(kept[s])
-  if (s > 1 and pattern_now(kept[s - 1]) == mine) or (s < #kept and pattern_now(kept[s + 1]) == mine) then return false end
-  -- (one of its pattern made just before it would leave the sequence up to it as it was, and push it on)
-  if now[s + 1] ~= nil and now[s + 1] == mine then return false end
-  return true
+local function slot_now(kept, now, s, pattern_now)
+  if type(kept) ~= "table" or s > #kept then return nil end
+  local then_ = {}
+  for k = 1, #kept do then_[k] = pattern_now(kept[k]) or false end
+  return base.follow_slot(then_, now, s)
 end
 
 local function add_note(note, more)
@@ -441,6 +434,7 @@ end
 
 local function restore_first_phase(song, env, material, phases, moved)
   local index = make_track(song, material)
+  if env.adopt_identity then env.adopt_identity(index, material.tid) end
   local made, since = index, env.layout()
   local note
   local tally = material_.new_tally()
@@ -455,16 +449,19 @@ local function restore_first_phase(song, env, material, phases, moved)
     end
     local sequencer = song.sequencer
     local lost = 0
+    local now = {}
+    for k = 1, #sequencer.pattern_sequence do now[k] = sequencer.pattern_sequence[k] end
     for _, s in ipairs(material.slotMutes or {}) do
-      if slot_holds(material.sequence, sequencer.pattern_sequence, s, material.pattern_now) then
-        sequencer:set_track_sequence_slot_is_muted(index, s, true)
+      local at = slot_now(material.sequence, now, s, material.pattern_now)
+      if at then
+        sequencer:set_track_sequence_slot_is_muted(index, at, true)
       else
         lost = lost + 1
       end
     end
     if lost > 0 then
-      note = add_note(note, string.format("Its mute in %s isn't put back: the sequence before %s changed in Renoise since.",
-        lost == 1 and "1 slot" or (lost .. " slots"), lost == 1 and "it" or "them"))
+      note = add_note(note, string.format("Its mute in %s isn't put back: the sequence changed in Renoise since in a way that doesn't say where %s went.",
+        lost == 1 and "1 slot" or (lost .. " slots"), lost == 1 and "that slot" or "those slots"))
     end
     local done = {}
     for _, entry in ipairs(phases[1]) do
@@ -633,11 +630,16 @@ local function delete_restore(song, env, restore, desc, journal)
           if not at then fail("changed", "the track being put back isn't where it was made any more") end
           live:describe_undo(step(k))
           local done = {}
-          for _, entry in ipairs(phases[k]) do
-            material_.write_lines(live, at, entry, material.instrument_map)
-            done[entry.pattern] = true
-          end
-          material_.write_automation(live, live:track(at), at, material.automation, done)
+          if env.writing then env.writing(true) end
+          local wrote, err = pcall(function()
+            for _, entry in ipairs(phases[k]) do
+              material_.write_lines(live, at, entry, material.instrument_map)
+              done[entry.pattern] = true
+            end
+            material_.write_automation(live, live:track(at), at, material.automation, done)
+          end)
+          if env.writing then env.writing(false) end
+          if not wrote then error(err, 0) end
         end
       end)
       if not ok then
