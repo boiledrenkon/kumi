@@ -106,6 +106,35 @@ function M.carry_restore(params, shifts, since)
   return params
 end
 
+-- A slot delete's restore: the tracks muted in the slot are carried through the shifts since; one deleted meanwhile is left
+-- out (and counted, for the answer to say) rather than refusing the slot.
+function M.carry_slot_restore(params, shifts, since, now)
+  local refs = import("refs")
+  local material = params.material
+  if type(material) ~= "table" or type(material.mutes) ~= "table" then
+    local moved, err = refs.carry(params, now, shifts, since)
+    if not moved then error(err, 0) end
+    return moved
+  end
+  local copy = {}
+  for k, v in pairs(params) do copy[k] = v end
+  copy.material = {}
+  for k, v in pairs(material) do copy.material[k] = v end
+  copy.material.mutes = nil
+  local moved, err = refs.carry(copy, now, shifts, since)
+  if not moved then error(err, 0) end
+  local mutes, lost = {}, 0
+  for _, mute in ipairs(material.mutes) do
+    local t = type(mute) == "table" and type(mute.track) == "number" and refs.shift(mute.track, shifts, since) or nil
+    if t then mutes[#mutes + 1] = { track = t } else lost = lost + 1 end
+  end
+  moved.material.mutes, moved.material.mutesLost = mutes, lost
+  return moved
+end
+
+-- The restores that carry their params by hand, by kind.
+M.carry_for = { ["track-delete"] = M.carry_restore, ["slot-delete"] = M.carry_slot_restore }
+
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active
 M.journal_track_event, M.journal_check, M.journal_device_event = base.journal_track_event, base.journal_check, base.journal_device_event

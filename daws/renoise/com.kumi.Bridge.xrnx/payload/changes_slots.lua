@@ -242,9 +242,15 @@ local function delete_restore(song, env, restore, desc)
     if sequencer:track_sequence_slot_is_muted(t, at) ~= (muted[t] == true) then sequencer:set_track_sequence_slot_is_muted(t, at, muted[t] == true) end
   end
   base.note_restored(env.journal, "slot-delete", { seq = at })
+  local display = { title = slot_title(at) .. " put back" }
+  local lost = tonumber(material.mutesLost) or 0
+  if lost > 0 then
+    display.note = lost == 1 and "A track muted in it was deleted since, so it isn't there to mute."
+      or (lost .. " tracks muted in it were deleted since, so they aren't there to mute.")
+  end
   return {
     restored = { ref = refs.make(env.epoch(), "seq", at), pattern = p },
-    display = { title = slot_title(at) .. " put back" }, undo = { desc = desc, entry = true },
+    display = display, undo = { desc = desc, entry = true },
   }
 end
 

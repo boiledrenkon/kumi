@@ -1132,3 +1132,64 @@ test("review S-7: one notes-write is no more than a callback's budget", function
   ok(refused.error.message:find("split", 1, true), refused.error.message)
   H.no_dialogs()
 end)
+
+-- SW1: a deleted slot's mutes follow the tracks they muted
+
+local function muted_in(s)
+  local out = {}
+  for t = 1, #mock.data.tracks do
+    if mock.song.sequencer:track_sequence_slot_is_muted(t, s) then out[#out + 1] = mock.data.tracks[t].name end
+  end
+  return table.concat(out, ",")
+end
+
+-- Mutes `muted` (track numbers) in slot 2, deletes the slot the way Kumi does, lets the producer `act`, then undoes it.
+local function slot_mutes_after(muted, act)
+  local env, peer = setup()
+  for _, t in ipairs(muted) do mock.song.sequencer:set_track_sequence_slot_is_muted(t, 2, true) end
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local previewed = preview(peer, "slot-delete", { ref = seq_ref(epoch, 2) })
+  local done = apply(peer, "slot-delete", { ref = seq_ref(epoch, 2) }, "Kumi: delete slot 2 (kr70)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  act()
+  H.tick(2)
+  local undone = restore(peer, "slot-delete", record_of(previewed, done.result), "Kumi: undo (kr71)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  H.no_dialogs()
+  return muted_in(2), undone.result.display
+end
+
+test("review SW1: the producer swaps the muted track with another: the slot comes back muting the same track", function()
+  local muted, display = slot_mutes_after({ 1 }, function() mock.song:swap_tracks_at(1, 2) end)
+  eq(muted, "Kick")
+  eq(display.note, nil)
+end)
+
+test("review SW1: two swaps in a row, then a track made before it: still the same track", function()
+  local muted = slot_mutes_after({ 1 }, function()
+    mock.song:swap_tracks_at(1, 2)
+    H.tick(2)
+    mock.song:swap_tracks_at(2, 3)
+    H.tick(2)
+    mock.ops.insert_track(1, { name = "New" })
+  end)
+  eq(muted, "Kick")
+end)
+
+test("review SW1b: the producer deletes the muted track: the slot comes back, and says the track is gone", function()
+  local muted, display = slot_mutes_after({ 1 }, function() mock.ops.remove_track(1) end)
+  eq(muted, "")
+  eq(mock.data.sequence[2], 2, "slot 2 is back")
+  ok(display.note and display.note:find("deleted since"), "the answer says: " .. tostring(display.note))
+end)
+
+test("review SW1b: a swap, then the producer deletes one of two muted tracks: the other is muted, nothing else", function()
+  local muted, display = slot_mutes_after({ 1, 3 }, function()
+    mock.song:swap_tracks_at(1, 2)
+    H.tick(2)
+    mock.ops.remove_track(2) -- Kick, after the swap
+  end)
+  eq(muted, "Bass")
+  ok(display.note and display.note:find("A track muted in it"), tostring(display.note))
+end)

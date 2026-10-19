@@ -741,7 +741,7 @@ local function carried(params, carry)
   if b.layout - since > #b.shifts then
     error({ code = "stale", message = "that layout is too old to carry its refs to the present: read again" }, 0)
   end
-  if carry then return carry(params, b.shifts, since) end
+  if carry then return carry(params, b.shifts, since, epoch()) end
   local moved, err = refs.carry(params, epoch(), b.shifts, since)
   if not moved then error(err, 0) end
   return moved
@@ -783,9 +783,9 @@ function M.handle(_, request)
         params = copy
       end
     end
-    if request.method == "change_restore" and type(params) == "table" and params.kind == "track-delete" then
-      -- (the deleted track's own ref is gone by design: only its place is carried)
-      params = carried(params, changes.carry_restore)
+    if request.method == "change_restore" and type(params) == "table" and changes.carry_for[params.kind] then
+      -- (a deleted track's own ref is gone by design: only its place is carried; a deleted slot's mutes leave out a track gone)
+      params = carried(params, changes.carry_for[params.kind])
     else
       params = carried(params)
     end
