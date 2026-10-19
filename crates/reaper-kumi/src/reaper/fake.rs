@@ -17,6 +17,8 @@ pub struct FakeParam {
     pub shown: String,
     /// How it prints other values (`TrackFX_FormatParamValueNormalized`); `shown` for any, if not set.
     pub display: Display,
+    /// The formatted value (`TrackFX_GetFormattedParamValue`) leaves the unit off, as ReaEQ's does.
+    pub bare: bool,
 }
 
 /// How a fake plug-in prints a normalized value.
@@ -36,7 +38,7 @@ pub enum Display {
 
 impl FakeParam {
     pub fn new(name: &str, value: f64, shown: &str) -> Self {
-        FakeParam { name: name.into(), value, min: 0.0, max: 1.0, shown: shown.into(), display: Display::Fixed }
+        FakeParam { name: name.into(), value, min: 0.0, max: 1.0, shown: shown.into(), display: Display::Fixed, bare: false }
     }
 
     pub fn linear(name: &str, value: f64, min: f64, max: f64, decimals: usize, unit: &str) -> Self {
@@ -1256,10 +1258,13 @@ fn new_fx(s: &mut State, name: &str) -> Option<FakeFx> {
     };
     s.fx_made += 1;
     let mut fx = FakeFx::new(&format!("{{FX-NEW-{}}}", s.fx_made), &full);
+    let mut gain = FakeParam::linear("Gain", 0.5, -12.0, 12.0, 1, "dB");
+    gain.bare = true;
     fx.params = vec![
-        FakeParam::linear("Gain", 0.5, -12.0, 12.0, 1, "dB"),
+        gain,
         FakeParam::steps("Mode", 0.0, &["Low", "Mid", "High"]),
         FakeParam::new("Mix", 1.0, "100 %"),
+        FakeParam::linear("Offset", 0.5, -1.0, 1.0, 2, ""),
     ];
     Some(fx)
 }
@@ -1631,7 +1636,15 @@ fn fx_param_normalized(owner: u64, index: c_int, param: c_int) -> f64 {
     counted(|s| fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)).map_or(0.0, |p| p.value))
 }
 fn fx_param_formatted(owner: u64, index: c_int, param: c_int, buf: *mut c_char, size: c_int) -> bool {
-    counted(|s| fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)).map(|p| write(buf, size, &p.shown)).is_some())
+    counted(|s| {
+        fx_of(s, owner, index)
+            .and_then(|f| f.params.get(param as usize))
+            .map(|p| match &p.display {
+                Display::Linear { unit, .. } if p.bare => write(buf, size, p.shown.trim_end_matches(unit.as_str()).trim_end()),
+                _ => write(buf, size, &p.shown),
+            })
+            .is_some()
+    })
 }
 fn fx_param_ex(owner: u64, index: c_int, param: c_int, min: *mut f64, max: *mut f64, mid: *mut f64) -> f64 {
     counted(|s| match fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)) {
