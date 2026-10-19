@@ -723,8 +723,12 @@ pub fn comp_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     reaper.prevent_ui_refresh(-1);
     let made: Vec<String> = (0..reaper.track_item_count(track))
         .filter_map(|n| reaper.track_item(track, n))
-        .map(|item| reaper.item_guid(item))
-        .filter(|guid| !items_before.contains(guid))
+        .map(|item| (reaper.item_guid(item), item))
+        .filter(|(guid, _)| !items_before.contains(guid))
+        .map(|(guid, item)| {
+            ctx.reads.registry().note_item(ctx.proj, &guid, item);
+            guid
+        })
         .collect();
     let after = reaper
         .track_chunk(track)

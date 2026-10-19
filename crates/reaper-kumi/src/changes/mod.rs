@@ -12,11 +12,14 @@ mod call;
 mod chunks;
 mod folders;
 mod fx;
+mod glue;
 mod item_kinds;
 mod items;
 mod lanes;
 mod lua;
 mod marks;
+mod midi_events;
+pub(crate) use midi_events::{events_of as midi_events_of, row as midi_event_row};
 mod notes;
 mod pins;
 mod project;
@@ -576,8 +579,12 @@ pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::Track
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_glue;
+#[cfg(test)]
 mod tests_items;
 #[cfg(test)]
 mod tests_lanes;
+#[cfg(test)]
+mod tests_midi;
 #[cfg(test)]
 mod tests_takes;

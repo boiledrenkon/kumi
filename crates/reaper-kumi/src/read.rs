@@ -49,7 +49,8 @@ const SNAPSHOT_TRACKS: usize = 200;
 const SNAPSHOT_MARKERS: usize = 100;
 /// The snapshot's own share of the answer, so the tracks leave room for the markers and the selection.
 const SNAPSHOT_TRACK_BYTES: usize = 150 * 1024;
-const KINDS: [&str; 12] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "call"];
+const KINDS: [&str; 13] =
+    ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "call"];
 
 pub fn bad(message: impl Into<String>) -> (String, String) {
     ("bad-params".into(), message.into())
@@ -532,6 +533,7 @@ impl Reads {
             "marker" => self.read_markers(reaper, proj, pager, false, cursor),
             "region" => self.read_markers(reaper, proj, pager, true, cursor),
             "note" => self.read_notes(reaper, proj, pager, parent, cursor),
+            "event" => self.read_events(reaper, proj, pager, parent, cursor),
             "envelope" => self.read_envelopes(reaper, proj, pager, parent, cursor),
             other => Err(bad(format!("REAPER has no kind {other:?} to read"))),
         };
@@ -539,7 +541,7 @@ impl Reads {
         // place is counted from 1 (as REAPER numbers its tracks), an FX's place, a parameter's and a note's from 0.
         let from = match kind {
             "track" => Some(1),
-            "fx" | "param" | "note" => Some(0),
+            "fx" | "param" | "note" | "event" => Some(0),
             _ => None,
         };
         answer.map(|mut answer| {
@@ -941,6 +943,27 @@ impl Reads {
             position += 1;
         }
         self.page(pager, next, Some(notes.len()))
+    }
+
+    /// A MIDI take's events that aren't notes (controllers, pitch bend, program changes, pressure, text, sysex), from the
+    /// one buffer the changes edit, with the indexes the event changes take (from 0); the source's end marker isn't one.
+    fn read_events(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
+        let parent = parent.ok_or_else(|| bad("event: pass the MIDI take as parent"))?;
+        let take = self.midi_take(reaper, proj, Some(parent))?;
+        let buffer = reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
+        let events = crate::changes::midi_events_of(&buffer);
+        let item_qn = take_start_qn(reaper, proj, take);
+        let mut position = self.position_within(cursor, events.len())?;
+        let mut next = None;
+        while let Some((event, _)) = events.get(position) {
+            let beats = reaper.ppq_to_quarter_notes(take, event.pos as f64).map_or(0.0, |qn| qn - item_qn);
+            if !pager.open() || !pager.push(crate::changes::midi_event_row(event, position, beats)) {
+                next = Some(position);
+                break;
+            }
+            position += 1;
+        }
+        self.page(pager, next, Some(events.len()))
     }
 
     // ----- envelopes -----

@@ -80,8 +80,10 @@ pub fn take_details(reaper: &Reaper, take: Take, row: &mut Value, alone: bool) {
     let (stretch, markers) = (reaper.stretch_markers(take), reaper.take_markers(take));
     row["stretchMarkerCount"] = stretch.len().into();
     row["takeMarkerCount"] = markers.len().into();
+    // Its file's name, not the folders it is in (as the project row has it).
     if let Some(file) = reaper.take_file(take) {
-        row["file"] = rows::clip(&file).into();
+        let name = file.rsplit(['/', '\\']).next().unwrap_or(&file).to_string();
+        row["file"] = rows::clip(&name).into();
     }
     if !alone {
         return;

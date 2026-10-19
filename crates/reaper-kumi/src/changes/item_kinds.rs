@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 use super::take_marks::Which as Marks;
-use super::{items, lanes, take_marks, takes, Applied, Ctx, Done, Kind, Preview, Restore, Restored};
+use super::{glue, items, lanes, midi_events, take_marks, takes, Applied, Ctx, Done, Kind, Preview, Restore, Restored};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Which {
@@ -28,6 +28,9 @@ pub enum Which {
     LaneName,
     LaneComp,
     Razor,
+    Glue,
+    Render,
+    Events(midi_events::Which),
 }
 
 /// The kind a name is, if it is one of these.
@@ -58,6 +61,11 @@ pub(super) fn kind(name: &str) -> Option<Kind> {
         "lane-name" => Some(Kind::Items(Which::LaneName)),
         "lane-comp" => Some(Kind::Items(Which::LaneComp)),
         "razor-set" => Some(Kind::Items(Which::Razor)),
+        "items-glue" => Some(Kind::Items(Which::Glue)),
+        "items-render" => Some(Kind::Items(Which::Render)),
+        "midi-events-add" => Some(Kind::Items(Which::Events(midi_events::Which::Add))),
+        "midi-events-change" => Some(Kind::Items(Which::Events(midi_events::Which::Change))),
+        "midi-events-delete" => Some(Kind::Items(Which::Events(midi_events::Which::Delete))),
         _ => None,
     }
 }
@@ -86,6 +94,9 @@ impl Which {
             Which::LaneName => lanes::name_preview(ctx, input),
             Which::LaneComp => lanes::comp_preview(ctx, input),
             Which::Razor => lanes::razor_preview(ctx, input),
+            Which::Glue => glue::glue_preview(ctx, input),
+            Which::Render => glue::render_preview(ctx, input),
+            Which::Events(which) => midi_events::preview(ctx, input, which),
         }
     }
 
@@ -112,6 +123,9 @@ impl Which {
             Which::LaneName => lanes::name_apply(ctx, input, fence),
             Which::LaneComp => lanes::comp_apply(ctx, input, fence),
             Which::Razor => lanes::razor_apply(ctx, input, fence),
+            Which::Glue => glue::glue_apply(ctx, input, fence),
+            Which::Render => glue::render_apply(ctx, input, fence),
+            Which::Events(which) => midi_events::apply(ctx, input, fence, which),
         }
     }
 
@@ -136,6 +150,9 @@ impl Which {
             Which::LaneName => lanes::name_restore(ctx, restore),
             Which::LaneComp => lanes::comp_restore(ctx, restore),
             Which::Razor => lanes::razor_restore(ctx, restore),
+            Which::Glue => glue::glue_restore(ctx, restore),
+            Which::Render => glue::render_restore(ctx, restore),
+            Which::Events(_) => midi_events::restore(ctx, restore),
         }
     }
 }
