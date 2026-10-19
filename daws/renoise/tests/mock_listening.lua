@@ -33,34 +33,56 @@ function M.write_wav(path, frames, rate, channels)
   f:close()
 end
 
--- The seconds a render from `start` to `stop` (inclusive) lasts: every line at the LPB and BPM in force, which the ZL and ZT
--- commands in any track's effect columns change from the line they are on.
+-- The seconds a render from `start` to `stop` (inclusive) lasts, and the BPM and LPB it ends at, as Renoise 3.5.4 renders
+-- (measured): it starts at the last ZT and ZL before `start` (as playback from the song's start would have them), but for a kind
+-- with none before it, at the song's FIRST command of that kind anywhere in the sequence, else the transport's; then every
+-- command it meets applies from its line.
 function M.render_seconds(start, stop)
   local d = M.data
   local song = d.song
-  local lpb, bpm = d.transport_fields.lpb, d.transport_fields.bpm
-  local seconds = 0
-  for s = 1, stop.sequence do
+  local function commands(s, l)
     local p = d.sequence[s]
-    for l = 1, d.patterns[p].lines do
-      for t = 1, #d.tracks do
-        local columns = d.tracks[t].effect_columns or 1
-        local effects = ((d.patterns[p].tracks[t] or {}).lines or {})[l]
-        effects = effects and effects.effects or {}
-        for c = 1, columns do
-          local e = effects[c]
-          if e and e.number and e.number ~= 0 then
-            local text = song:pattern(p):track(t):line(l):effect_column(c).number_string
-            if text == "ZL" and e.amount > 0 then lpb = e.amount elseif text == "ZT" and e.amount >= 32 then bpm = e.amount end
-          end
+    local found = {}
+    for t = 1, #d.tracks do
+      local effects = ((d.patterns[p].tracks[t] or {}).lines or {})[l]
+      effects = effects and effects.effects or {}
+      for c = 1, d.tracks[t].effect_columns or 1 do
+        local e = effects[c]
+        if e and e.number and e.number ~= 0 then
+          local text = song:pattern(p):track(t):line(l):effect_column(c).number_string
+          if text == "ZL" and e.amount > 0 then found.lpb = e.amount elseif text == "ZT" and e.amount >= 32 then found.bpm = e.amount end
         end
       end
-      local inside = (s > start.sequence or (s == start.sequence and l >= start.line))
-      if inside then seconds = seconds + 60 / (bpm * lpb) end
-      if s == stop.sequence and l == stop.line then return seconds end
+    end
+    return found
+  end
+  local first = {}
+  for s = 1, #d.sequence do
+    for l = 1, d.patterns[d.sequence[s]].lines do
+      local c = commands(s, l)
+      first.lpb, first.bpm = first.lpb or c.lpb, first.bpm or c.bpm
     end
   end
-  return seconds
+  local lpb, bpm
+  for s = 1, start.sequence do
+    for l = 1, d.patterns[d.sequence[s]].lines do
+      if s == start.sequence and l >= start.line then break end
+      local c = commands(s, l)
+      lpb, bpm = c.lpb or lpb, c.bpm or bpm
+    end
+  end
+  lpb = lpb or first.lpb or d.transport_fields.lpb
+  bpm = bpm or first.bpm or d.transport_fields.bpm
+  local seconds = 0
+  for s = start.sequence, stop.sequence do
+    for l = (s == start.sequence) and start.line or 1, d.patterns[d.sequence[s]].lines do
+      local c = commands(s, l)
+      lpb, bpm = c.lpb or lpb, c.bpm or bpm
+      seconds = seconds + 60 / (bpm * lpb)
+      if s == stop.sequence and l == stop.line then return seconds, bpm, lpb end
+    end
+  end
+  return seconds, bpm, lpb
 end
 
 local LOGIC = "std::logic_error: "
@@ -81,7 +103,7 @@ local function install_render(song)
     if M.render_refuses then return false, M.render_refuses end
     local record = { path = path, options = options, done = done, tracks = {}, rate = options.sample_rate or 44100 }
     for k, t in ipairs(d.tracks) do record.tracks[k] = { mute = t.mute_state, solo = t.solo == true, name = t.name, kind = t.kind } end
-    record.seconds = M.render_seconds(options.start_pos, options.end_pos)
+    record.seconds, record.bpm, record.lpb = M.render_seconds(options.start_pos, options.end_pos)
     record.was_playing = d.transport_fields.playing
     M.renders[#M.renders + 1] = record
     M.pending_render = record
@@ -112,6 +134,13 @@ function M.finish_render(options)
   fields.rendering, fields.rendering_progress = false, 0
   d.transport_fields.playing = false
   M.fire(d.transport_fields.playing_observable)
+  -- (the render played the song's tempo commands into the transport, as playback does: no undo step)
+  local tf = d.transport_fields
+  if tf.bpm ~= record.bpm or tf.lpb ~= record.lpb then
+    tf.bpm, tf.lpb = record.bpm, record.lpb
+    M.fire(tf.bpm_observable)
+    M.fire(tf.lpb_observable)
+  end
   if not options.no_callback then
     local ok, err = M.run_callback(record.done)
     if not ok then M.errors[#M.errors + 1] = "render callback: " .. tostring(err) end

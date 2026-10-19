@@ -182,19 +182,25 @@ local function pattern_changes(song, p, tracks, mark_of)
   return changes, irregular
 end
 
--- The song's timeline: `slots[s] = {pattern, lines, segments = {{from, beat, second, lpb, bpm}...}, beat, second, endBeat,
--- endSecond}` in sequence order (a segment holds the lines from `from` to the next one's start at one LPB and BPM), the song's
--- total beats and seconds, and `irregular` when a pattern breaks or delays its lines, or the song keeps Renoise's old speed
+-- The song's timeline: `slots[s] = {pattern, lines, segments = {...}, beat, second, endBeat, endSecond}` in sequence order, a
+-- segment holding the lines from `from` to the next one's start at one LPB and BPM: {from, beat, second, lpb, bpm, line_seconds,
+-- sets_lpb, sets_bpm (the segment starts on such a command), lpb_met, bpm_met (one has come by its start, in sequence order)}.
+-- Beats and seconds are as Renoise plays the song from its start (its own beats, edit_pos_beats, follow them: measured), from the
+-- transport's LPB and BPM until the first commands; `first_lpb`, `first_bpm` are the song's first ZL and ZT values (a render
+-- starts at them: see render_state). `irregular` when a pattern breaks or delays its lines, or the song keeps Renoise's old speed
 -- timing: then the lines' times are Renoise's own and only said, not checked.
 function M.timeline(song, mark_of)
   local transport = song.transport
   local speed = transport.timing_model == renoise.Transport.TIMING_MODEL_SPEED
   local lpb, bpm, tpl = transport.lpb, transport.bpm, transport.tpl
+  local timeline = { lpb0 = lpb, bpm0 = bpm, tpl = tpl, speed = speed }
   local tracks = rows.track_count(song)
   local sequencer = song.sequencer
   local count = #sequencer.pattern_sequence
   local slots, beat, second = {}, 0, 0
   local irregular = speed
+  local lpb_met, bpm_met = false, false
+  local sets_lpb, sets_bpm = false, false
   for s = 1, count do
     local p = sequencer:pattern(s)
     local lines = song:pattern(p).number_of_lines
@@ -205,26 +211,42 @@ function M.timeline(song, mark_of)
     local function close_segment(to)
       if to <= from then return end
       local count_lines = to - from
-      -- (Renoise's old speed timing: a line lasts tpl ticks of 2.5/bpm s; beats are still counted in lines per beat)
-      local line_seconds = speed and (tpl * 2.5 / bpm) or (60 / (bpm * lpb))
-      slot.segments[#slot.segments + 1] = { from = from, beat = beat, second = second, lpb = lpb, bpm = bpm, line_seconds = line_seconds }
+      local line_seconds = M.line_seconds(timeline, bpm, lpb)
+      slot.segments[#slot.segments + 1] = {
+        from = from, beat = beat, second = second, lpb = lpb, bpm = bpm, line_seconds = line_seconds,
+        sets_lpb = sets_lpb, sets_bpm = sets_bpm, lpb_met = lpb_met, bpm_met = bpm_met,
+      }
       beat = beat + count_lines / lpb
       second = second + count_lines * line_seconds
       from = to
+      sets_lpb, sets_bpm = false, false
     end
     for l = 1, lines do
       local change = changes[l]
       if change then
         close_segment(l)
-        if change.lpb then lpb = change.lpb end
-        if change.bpm then bpm = change.bpm end
+        if change.lpb then
+          lpb, lpb_met, sets_lpb = change.lpb, true, true
+          timeline.first_lpb = timeline.first_lpb or change.lpb
+        end
+        if change.bpm then
+          bpm, bpm_met, sets_bpm = change.bpm, true, true
+          timeline.first_bpm = timeline.first_bpm or change.bpm
+        end
       end
     end
     close_segment(lines + 1)
     slot.endBeat, slot.endSecond = beat, second
     slots[s] = slot
   end
-  return { slots = slots, beats = beat, seconds = second, irregular = irregular }
+  timeline.slots, timeline.beats, timeline.seconds, timeline.irregular = slots, beat, second, irregular
+  return timeline
+end
+
+-- How long a line lasts at a BPM and LPB (Renoise's old speed timing: tpl ticks of 2.5/bpm s each).
+function M.line_seconds(timeline, bpm, lpb)
+  if timeline.speed then return timeline.tpl * 2.5 / bpm end
+  return 60 / (bpm * lpb)
 end
 
 -- The segment of a slot holding line `l`.
@@ -264,37 +286,83 @@ function M.line_at(timeline, wanted)
   return nil
 end
 
--- The second a beat falls at (within its line, at that segment's BPM).
-function M.second_at(timeline, wanted)
-  local s, l, b, sec = M.line_at(timeline, wanted)
-  if not s then return 0 end
+-- How Renoise renders time (measured, 3.5.4): a render starts at the BPM and LPB the last ZT and ZL before its first line set,
+-- as playback would; but for a kind with no command before it, at the song's FIRST command of that kind anywhere in its sequence
+-- (even one after the part), not at the transport's; then it applies the commands it meets. So a part before a song's first ZT
+-- renders at that ZT's tempo where playback plays it at the transport's. Answers {bpm, lpb} the render starts at, and whether
+-- that differs from how playback plays that line.
+function M.render_state(timeline, s, l)
   local segment = segment_of(timeline.slots[s], l)
-  return sec + (wanted - b) * 60 / segment.bpm
+  -- (a segment that starts on a command has it met: one on the render's first line is the render's own)
+  local state = {
+    bpm = segment.bpm_met and segment.bpm or (timeline.first_bpm or segment.bpm),
+    lpb = segment.lpb_met and segment.lpb or (timeline.first_lpb or segment.lpb),
+  }
+  state.differs = state.bpm ~= segment.bpm or state.lpb ~= segment.lpb
+  return state
 end
 
--- The line a second of the song falls in: slot, line (the last line for a second at the end or past it).
-function M.line_at_second(timeline, wanted)
-  local slots = timeline.slots
-  for s, slot in ipairs(slots) do
-    if wanted < slot.endSecond or s == #slots then
-      for k = #slot.segments, 1, -1 do
-        local segment = slot.segments[k]
-        if wanted >= segment.second or k == 1 then
-          local next_from = slot.segments[k + 1] and slot.segments[k + 1].from or (slot.lines + 1)
-          local l = segment.from + math.floor((wanted - segment.second) / segment.line_seconds + 1e-9)
-          return s, math.max(segment.from, math.min(next_from - 1, l))
-        end
+-- Walks the lines from (s1, l1) on as a render that started there plays them, a stretch of one line length at a time:
+-- visit(s, first, last, line_seconds) answers true to stop.
+local function walk_render(timeline, s1, l1, state, visit)
+  for s = s1, #timeline.slots do
+    local slot = timeline.slots[s]
+    for k, segment in ipairs(slot.segments) do
+      local last = (slot.segments[k + 1] and slot.segments[k + 1].from or (slot.lines + 1)) - 1
+      local first = (s == s1) and math.max(segment.from, l1) or segment.from
+      if first <= last then
+        -- (once a kind's command has come, before the render or in it, the render has it as playback does; until then it keeps
+        -- the value it started at)
+        local bpm = segment.bpm_met and segment.bpm or state.bpm
+        local lpb = segment.lpb_met and segment.lpb or state.lpb
+        if visit(s, first, last, M.line_seconds(timeline, bpm, lpb), segment) then return end
       end
     end
   end
-  return nil
 end
 
--- The line after (s, l): the next line, or the next slot's first; nil past the song's end.
-local function next_line(timeline, s, l)
-  if l < timeline.slots[s].lines then return s, l + 1 end
-  if s < #timeline.slots then return s + 1, 1 end
-  return nil
+-- The seconds a render of lines (s1, l1) to (s2, l2), both in, lasts.
+function M.render_time(timeline, s1, l1, s2, l2, state)
+  local total = 0
+  walk_render(timeline, s1, l1, state, function(s, first, last, line_seconds)
+    local stop = s == s2 and math.min(last, l2) or last
+    if s > s2 or (s == s2 and first > l2) then return true end
+    total = total + (stop - first + 1) * line_seconds
+    return s == s2 and stop >= l2
+  end)
+  return total
+end
+
+-- Where a beat of the song is in a render that started at (s1, l1): seconds from its start.
+function M.render_offset(timeline, s1, l1, state, wanted)
+  local s, l, b = M.line_at(timeline, wanted)
+  if not s then return 0 end
+  local before = 0
+  if s > s1 or l > l1 then
+    local ps, pl = s, l - 1
+    if pl < 1 then ps, pl = s - 1, timeline.slots[s - 1].lines end
+    before = M.render_time(timeline, s1, l1, ps, pl, state)
+  end
+  -- (and the part of its line before the beat, at that line's rendered length)
+  local line_seconds = M.render_time(timeline, s1, l1, s, l, state) - before
+  local segment = segment_of(timeline.slots[s], l)
+  return before + math.max(0, wanted - b) * segment.lpb * line_seconds
+end
+
+-- The line a render that started at (s1, l1) is at after `seconds`: slot, line.
+function M.render_line_at(timeline, s1, l1, state, seconds)
+  local at_s, at_l = s1, l1
+  local elapsed = 0
+  walk_render(timeline, s1, l1, state, function(s, first, last, line_seconds)
+    local span = (last - first + 1) * line_seconds
+    if elapsed + span > seconds + 1e-9 then
+      at_s, at_l = s, first + math.floor((seconds - elapsed) / line_seconds + 1e-9)
+      return true
+    end
+    elapsed = elapsed + span
+    at_s, at_l = s, last
+  end)
+  return at_s, at_l
 end
 
 local function beat_text(beat)
@@ -324,21 +392,28 @@ function M.plan_range(timeline, from_beat, beats, pre_roll)
       l2 = timeline.slots[s2].lines
     end
   end
-  local ns, nl = next_line(timeline, s2, l2)
-  local end_second = ns and select(2, M.line_start(timeline, ns, nl)) or timeline.seconds
+  return M.plan_lines(timeline, s1, l1, s2, l2, math.max(from_beat, b1), from_beat + beats > song_end + 1e-9)
+end
+
+-- A render of lines (s1, l1) to (s2, l2), timed as Renoise renders them (render_state): its length, where `part_beat` is in it,
+-- and how it starts.
+function M.plan_lines(timeline, s1, l1, s2, l2, part_beat, clipped)
   local lines = 0
   for s = s1, s2 do
     local first = s == s1 and l1 or 1
     local last = s == s2 and l2 or timeline.slots[s].lines
     lines = lines + (last - first + 1)
   end
+  local state = M.render_state(timeline, s1, l1)
+  local start_beat = M.line_start(timeline, s1, l1)
+  local segment = segment_of(timeline.slots[s1], l1)
   return {
-    start = { s1, l1 }, ["end"] = { s2, l2 }, lines = lines,
-    startBeat = b1, startSecond = sec1, endSecond = end_second,
-    seconds = end_second - sec1,
-    -- (where `fromBeat` is in the file: the pre-roll, and the part of the first line before it)
-    offset = M.second_at(timeline, math.max(from_beat, b1)) - sec1,
-    clipped = from_beat + beats > song_end + 1e-9,
+    start = { s1, l1 }, ["end"] = { s2, l2 }, lines = lines, startBeat = start_beat, state = state,
+    played = { bpm = segment.bpm, lpb = segment.lpb },
+    seconds = M.render_time(timeline, s1, l1, s2, l2, state),
+    -- (where the part begins in the file: the pre-roll, and the part of the first line before it)
+    offset = part_beat and M.render_offset(timeline, s1, l1, state, part_beat) or 0,
+    clipped = clipped,
   }
 end
 
@@ -434,7 +509,7 @@ local function remember_file(job, source)
   S.files[source.file] = {
     job = job.id, source = source.id, what = source.what, track = source.track, document = job.document, epoch = job.epoch,
     start = { job.range.start[1], job.range.start[2] }, ["end"] = { job.range["end"][1], job.range["end"][2] },
-    startBeat = job.range.startBeat, seconds = source.seconds, offset = job.range.offset, name = source.name,
+    startBeat = job.range.startBeat, seconds = source.seconds, offset = job.range.offset, name = source.name, state = job.range.state,
   }
   S.files_order[#S.files_order + 1] = source.file
   while #S.files_order > M.KEEP_FILES do S.files[table.remove(S.files_order, 1)] = nil end
@@ -532,9 +607,23 @@ local function delete_files(job)
   for _, source in ipairs(job.sources) do remove(source.file) end
 end
 
+-- A render plays the song's ZT and ZL commands into the transport, as playback does (measured: no undo step, the song not marked
+-- modified), from the tempo it starts at (render_state): what it leaves is said, for Kumi to set back if it wants (a song-bpm or
+-- song-lpb change of its own).
+local function note_tempo(job, env, song)
+  local before = job.tempo_before
+  if not before or not song or env.document() ~= job.document then return end
+  local transport = song.transport
+  if transport.bpm == before.bpm and transport.lpb == before.lpb then return end
+  job.tempo = { bpm = transport.bpm, lpb = transport.lpb, before = { bpm = before.bpm, lpb = before.lpb } }
+  job.notes[#job.notes + 1] = string.format("Renoise's render played the song's tempo commands into its transport: it is at %s BPM, LPB %d now (it was at %s BPM, LPB %d).",
+    beat_text(transport.bpm), transport.lpb, beat_text(before.bpm), before.lpb)
+end
+
 local function finish(job, env, state, code, message)
   local song = renoise.song()
   restore(job, env, song)
+  note_tempo(job, env, song)
   job.state = state
   job.rendering = nil
   if state ~= "done" then
@@ -750,11 +839,10 @@ local function plan(params, env, kind)
     if io.exists(source.file) then bad("a file of job " .. job_id .. " is in Kumi's folder already") end
     source.seconds = range.seconds
   end
-  local first_segment = timeline.slots[range.start[1]].segments[1]
   return {
     id = job_id, kind = "render", state = "running", sources = sources, order = render_order(sources), range = range,
     rate = rate, epoch = env.epoch(), layout = env.layout(), document = env.document(), notes = {}, done = 0, others = {},
-    irregular = timeline.irregular, line_seconds = first_segment and first_segment.line_seconds or 0.125, started_ms = now_ms(),
+    irregular = timeline.irregular, line_seconds = M.line_seconds(timeline, range.state.bpm, range.state.lpb), started_ms = now_ms(),
     only_solo = only_solo,
   }
 end
@@ -768,6 +856,12 @@ function M.launch(job, env)
   if song.transport.playing then
     job.notes[#job.notes + 1] = "Renoise stopped playback to render."
   end
+  local state, played = job.range.state, job.range.played
+  if state and state.differs and played then
+    job.notes[#job.notes + 1] = string.format("Renoise renders the part before the song's first tempo command at that command's %s BPM, LPB %d, not at the %s BPM, LPB %d playback has there: what Kumi heard there differs from playback.",
+      beat_text(state.bpm), state.lpb, beat_text(played.bpm), played.lpb)
+  end
+  job.tempo_before = { bpm = song.transport.bpm, lpb = song.transport.lpb }
   for _, source in ipairs(job.sources) do
     if source.what == "track" then job.snapshot = job.snapshot or snapshot(song) end
   end
@@ -848,6 +942,7 @@ function M.status(params, env)
   end
   if job.error then answer.error, answer.code = job.error, job.code end
   if #job.notes > 0 then answer.notes = json.array(job.notes) end
+  if job.tempo then answer.tempo = job.tempo end
   return answer
 end
 
@@ -974,10 +1069,7 @@ function M.audio_file(params, env)
   else
     sources = { { id = kind == "seq" and "slot" or "pattern", what = "master", name = label, kind = "rendered" } }
   end
-  local planned = {
-    start = { s, 1 }, ["end"] = { s, slot.lines }, lines = slot.lines, startBeat = slot.beat, startSecond = slot.second,
-    endSecond = slot.endSecond, seconds = slot.endSecond - slot.second, offset = 0,
-  }
+  local planned = M.plan_lines(timeline, s, 1, s, slot.lines, nil, false)
   local job = plan({ jobId = job_id, sources = sources, planned = planned, sampleRate = params.sampleRate }, env, "audio_file")
   M.launch(job, env)
   if job.state == "failed" then fail(job.code or "failed", job.error) end

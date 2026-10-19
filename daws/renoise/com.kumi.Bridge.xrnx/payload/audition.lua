@@ -18,6 +18,10 @@ local M = {}
 -- A move of the playhead farther than this from where the audition's own playing would have it is the producer's.
 M.MOVED_BEATS = 2
 M.SETTLE_MS = 300
+-- After a stop, follow mode moves the edit position to where playback stopped a moment after Kumi put it back (measured): for this
+-- long, an edit position within a few lines of that place is moved back again; one anywhere else is the producer's.
+M.EDIT_CHECK_MS = 1500
+M.EDIT_NEAR_LINES = 8
 
 local S
 
@@ -39,8 +43,9 @@ local function number(value, name)
   return value
 end
 
--- What playing moved, back as it was. `keep_position`: the producer took over the transport, which stays theirs.
-local function put_back(env, song, audition, keep_position)
+-- What playing moved, back as it was. `keep_position`: the producer took over the transport, which stays theirs. `stopped`: where
+-- playback was when Kumi stopped it (follow mode drags the edit position there a moment later: see check_edit).
+local function put_back(env, song, audition, keep_position, stopped)
   local transport = song.transport
   local saved = audition.saved
   env.quiet(function()
@@ -51,6 +56,30 @@ local function put_back(env, song, audition, keep_position)
       pcall(function() transport.edit_pos = renoise.SongPos(saved.edit[1], saved.edit[2]) end)
     end
   end)
+  if not keep_position and saved.edit and stopped then
+    S.edit_check = { edit = saved.edit, stopped = stopped, document = audition.document, until_ms = os.clock() * 1000 + M.EDIT_CHECK_MS }
+  end
+end
+
+-- The edit position follow mode moved after Kumi put it back is put back again (only while it is where playback stopped).
+local function check_edit(env, song)
+  local check = S.edit_check
+  if not check then return end
+  if os.clock() * 1000 > check.until_ms or env.document() ~= check.document then
+    S.edit_check = nil
+    return
+  end
+  local transport = song.transport
+  if transport.playing then return end
+  local now = transport.edit_pos
+  if now.sequence == check.edit[1] and now.line == check.edit[2] then return end
+  if now.sequence == check.stopped[1] and math.abs(now.line - check.stopped[2]) <= M.EDIT_NEAR_LINES then
+    env.quiet(function()
+      pcall(function() transport.edit_pos = renoise.SongPos(check.edit[1], check.edit[2]) end)
+    end)
+  else
+    S.edit_check = nil -- (the producer's)
+  end
 end
 
 -- Ends the audition: `stop` stops the transport (it is still Kumi's), `keep_position` leaves the playhead where the producer put it.
@@ -60,8 +89,13 @@ local function finish(env, why, stop, keep_position)
   S.now = nil
   local song = renoise.song()
   if not song or env.document() ~= audition.document then return true end
-  if stop and song.transport.playing then song.transport:stop() end
-  put_back(env, song, audition, keep_position)
+  local stopped
+  if stop and song.transport.playing then
+    local at = song.transport.playback_pos
+    stopped = { at.sequence, at.line }
+    song.transport:stop()
+  end
+  put_back(env, song, audition, keep_position, stopped)
   log.write("info", "audition " .. audition.id .. " ended: " .. why)
   return true
 end
@@ -102,8 +136,8 @@ function M.play(params, env)
   if not timeline.slots[start[1]] or start[2] > timeline.slots[start[1]].lines then
     fail("failed", "The song's sequence changed since Kumi rendered that part, so Renoise can't play it as it was")
   end
-  local _, first_second = listening.line_start(timeline, start[1], start[2])
-  local s, l = listening.line_at_second(timeline, first_second + from)
+  -- (the file's seconds are the render's: its line at `fromSeconds` is found the way Renoise rendered it)
+  local s, l = listening.render_line_at(timeline, start[1], start[2], origin.state or listening.render_state(timeline, start[1], start[2]), from)
   local start_beat = listening.line_start(timeline, s, l)
   local edit = transport.edit_pos
   local saved = {
@@ -145,9 +179,10 @@ end
 -- From the timer: the audition ends at its length, when the producer stops the transport, and when they move the playhead (then
 -- the transport is theirs and keeps playing).
 function M.tick(env)
+  local song = renoise.song()
+  if song and S.edit_check then check_edit(env, song) end
   local audition = S.now
   if not audition then return end
-  local song = renoise.song()
   if not song or env.document() ~= audition.document then
     S.now = nil
     return

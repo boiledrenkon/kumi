@@ -291,6 +291,40 @@ test("listening: ZL and ZT commands in any track move the lines' beats and secon
   H.no_dialogs()
 end)
 
+test("listening: a render times its lines as Renoise renders them: before the song's first ZT it runs at that ZT's tempo, and says so", function()
+  local env, peer = setup()
+  local function command(text)
+    local digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return 256 + (digits:find(text:sub(1, 1), 1, true) - 1) * 36 + (digits:find(text:sub(2, 2), 1, true) - 1)
+  end
+  -- (ZT3C (60 BPM) on slot 2's line 9 only: playback plays slot 1 at the transport's 120; Renoise renders it at 60)
+  mock.ops.set_effect(2, 4, 9, 1, command("ZT"), 0x3C)
+  local answer = result((start(peer, "j7b", { { id = "mix", what = "master" } }, { fromBeat = 1, beats = 2 }, { preRollBeats = 1 })))
+  ok(math.abs(answer.seconds - 3) < 1e-9, "beats 0-3, 12 lines at 60 BPM: " .. answer.seconds)
+  mock.finish_render()
+  local done = status(peer, "j7b")
+  eq(done.state, "done", "the file has the length Renoise renders")
+  ok(math.abs(done.files[1].start - 1) < 1e-9, "the part begins a beat (at 60 BPM) in: " .. done.files[1].start)
+  ok(done.notes and done.notes[1]:find("at that command's 60 BPM, LPB 4, not at the 120 BPM, LPB 4 playback has there", 1, true), json.encode(done.notes))
+  -- what the render left in the transport is said, and given
+  eq(done.tempo.bpm, 60)
+  eq(done.tempo.before.bpm, 120)
+  ok(done.notes[2]:find("it is at 60 BPM, LPB 4 now (it was at 120 BPM, LPB 4)", 1, true), json.encode(done.notes))
+  eq(#mock.data.undo.stack, 0, "the render's tempo is no undo step")
+  -- a part after the command renders as played
+  mock.data.transport_fields.bpm = 120
+  result((start(peer, "j7c", { { id = "mix", what = "master" } }, { fromBeat = 6, beats = 1 })))
+  local r = mock.renders[#mock.renders]
+  eq(r.options.start_pos.sequence, 2)
+  eq(r.options.start_pos.line, 9)
+  mock.finish_render()
+  local after = status(peer, "j7c")
+  ok(math.abs(after.files[1].seconds - 1) < 1e-9, "a beat at 60 BPM: " .. after.files[1].seconds)
+  eq(#after.notes, 1, "only what the transport was left at: the render starts on the command, as playback has it")
+  ok(after.notes[1]:find("it is at 60 BPM", 1, true), after.notes[1])
+  H.no_dialogs()
+end)
+
 -- Failures put everything back
 
 test("listening: a render that ends with no callback fails, puts the mutes back and deletes its files", function()
@@ -620,6 +654,28 @@ test("listening: audition plays the part a render came from with Renoise's trans
   eq(tf.edit_pos.sequence, 1)
   eq(tf.edit_pos.line, 5, "the edit position back")
   eq(#mock.data.undo.stack, 0)
+  H.no_dialogs()
+end)
+
+test("listening: after an audition, the edit position follow mode drags to where playback stopped is put back; a producer's click isn't", function()
+  local env, peer = setup()
+  local file = rendered_mix(peer, "j34")
+  local tf = mock.data.transport_fields
+  tf.edit_pos = { sequence = 1, line = 5 }
+  result(call(peer, "audition", { previewId = "p9", file = file.file }))
+  mock.ops.play_at(1, 12, 2.75) -- (where playback is as it stops)
+  H.tick(50)
+  eq(tf.playing, false)
+  eq(tf.edit_pos.line, 5, "put back at the stop")
+  -- Renoise's follow mode moves it a moment later, to where playback stopped (measured)
+  tf.edit_pos = { sequence = 1, line = 11 }
+  H.tick(2)
+  eq(tf.edit_pos.line, 5, "put back again")
+  -- the producer's click elsewhere is theirs
+  tf.edit_pos = { sequence = 3, line = 2 }
+  H.tick(2)
+  eq(tf.edit_pos.sequence, 3)
+  eq(tf.edit_pos.line, 2)
   H.no_dialogs()
 end)
 
