@@ -744,8 +744,10 @@ impl DawProfile {
         id: Some(DawId::Logic),
         words: DawWords { app: "Logic Pro", place: "project", places: "projects", master: "Stereo Out", timeline: "Tracks area" },
         // FOCUS follows Logic (M2): a channel strip's plug-ins, a region's notes, the Tracks area, the focus and transport
-        // as read; the bridge sees whether Logic records, can open a project, and works Logic's own window.
+        // as read; the bridge sees whether Logic records, can open a project, and works Logic's own window. Kumi's
+        // changes in Logic are undone through its host's journal (M3), each as a new step of Logic's own undo.
         caps: Capabilities {
+            undo: true,
             device_tree: true,
             note_view: true,
             timeline_strip: true,
@@ -977,7 +979,7 @@ mod tests {
         assert_eq!(DawProfile::LOGIC.note_name(60), "C3");
         assert_eq!(DawProfile::LOGIC.vocab.eq, "Channel EQ");
         assert!(DawProfile::LOGIC.caps.device_tree && DawProfile::LOGIC.caps.note_view && DawProfile::LOGIC.caps.timeline_strip);
-        assert!(DawProfile::LOGIC.caps.ui_hands && DawProfile::LOGIC.caps.scripting.is_none() && !DawProfile::LOGIC.caps.undo);
+        assert!(DawProfile::LOGIC.caps.ui_hands && DawProfile::LOGIC.caps.scripting.is_none() && DawProfile::LOGIC.caps.undo);
     }
 
     #[test]
