@@ -314,9 +314,18 @@ impl Journal {
         let (reply, is_error) = match answer {
             Ok(restored) => {
                 record.state = State::Undone;
+                // Where the DAW's refs are now (Renoise: a restore that made devices again moved the epoch).
+                if let Some(epoch) = restored.get("epoch").and_then(Value::as_str) {
+                    record.epoch = Some(epoch.to_string());
+                }
+                if let Some(layout) = restored.get("layout").and_then(Value::as_u64) {
+                    record.layout = Some(layout);
+                }
                 let mut reply = json!({"transactionId": record.id, "state": "undone"});
-                if let Some(display) = restored.get("display").filter(|display| !display.is_null()) {
-                    reply["display"] = display.clone();
+                for field in ["display", "restored", "epoch", "layout"] {
+                    if let Some(value) = restored.get(field).filter(|value| !value.is_null()) {
+                        reply[field] = value.clone();
+                    }
                 }
                 (reply, false)
             }
@@ -583,8 +592,11 @@ mod tests {
         assert_eq!(refused["code"], "changed");
         assert_eq!(journal.get(&record.id).unwrap().state, State::Applied);
         assert!(journal.begin_undo(&record.id, "u1").unwrap().is_ok());
-        let (undone, is_error) = journal.end_undo(&record.id, "u1", Ok(&json!({"restored": {"volumeDb": 0.0}})));
+        let (undone, is_error) = journal.end_undo(&record.id, "u1", Ok(&json!({"restored": {"volumeDb": 0.0}, "epoch": "e2"})));
         assert!(!is_error && undone["state"] == "undone");
+        // What the restore put back, and where the DAW's refs are now, for Kumi to follow.
+        assert_eq!((&undone["restored"], &undone["epoch"]), (&json!({"volumeDb": 0.0}), &json!("e2")));
+        assert_eq!(journal.get(&record.id).unwrap().epoch.as_deref(), Some("e2"));
         assert_eq!(journal.begin_undo(&record.id, "u1").unwrap().unwrap_err(), (undone, false));
         assert_eq!(journal.begin_undo(&record.id, "u2").unwrap_err().code, "undone");
     }
