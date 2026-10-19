@@ -951,4 +951,75 @@ function M.read(params, env)
   }
 end
 
+-- Actions (no step of Renoise's undo, nothing Kumi takes back): a device's own editor window, its settings saved as a preset.
+
+-- device_editor {ref, show?}: a plug-in's own editor window (or a *LFO's) shown, or hidden with show false.
+function M.editor(params, env)
+  local song = base.context(params, env)
+  local t, _, track, device = device_by_ref(song, env, params.ref, "device_editor")
+  local label = label_of(t, track, device)
+  if not device.external_editor_available then
+    bad(string.format("%s has no editor window of its own: Renoise shows its settings in the track's DSP lane", q(label)))
+  end
+  device.external_editor_visible = params.show ~= false
+  return { epoch = env.epoch(), layout = env.layout(), visible = device.external_editor_visible, label = label }
+end
+
+-- Renoise's user library, where it was made at its first start (Documents/Renoise/User Library).
+function M.user_library()
+  local home = os.getenv("HOME") or os.getenv("USERPROFILE")
+  if not home then return nil end
+  return home .. "/Documents/Renoise/User Library"
+end
+
+-- The folder a device's presets go in, as Renoise's library names them: a native device's name without its * or # ("LFO",
+-- "Send"), a plug-in's short name.
+local function preset_folder(device)
+  if device.device_path:find("/Native/", 1, true) then
+    return (device.name:gsub("^[%*#]", ""))
+  end
+  return device.short_name
+end
+
+-- preset_save {ref, name, replace?}: the device's settings (its preset data) saved as a preset file in the user library,
+-- Effect Presets/<device>/<name>.xrdp; one of that name is replaced only with replace.
+function M.save(params, env)
+  local song = base.context(params, env)
+  local t, _, track, device = device_by_ref(song, env, params.ref, "preset_save")
+  local label = label_of(t, track, device)
+  local name = params.name
+  if type(name) ~= "string" or name == "" or #name > 128 or name:find('[%c/\\:%*%?"<>|]') or name:match("^%.") or name:match("[%. ]$") then
+    bad('name: a preset\'s name, one line without / \\ : * ? " < > | that doesn\'t start with a dot or end with a dot or space')
+  end
+  local library = M.user_library()
+  if not library or not io.exists(library) then
+    fail("failed", string.format("Kumi can't find Renoise's user library at %s", tostring(library)))
+  end
+  local folder = preset_folder(device)
+  if type(folder) ~= "string" or folder == "" or folder:find('[%c/\\:%*%?"<>|]') then
+    bad(string.format("Kumi can't tell which folder of the user library %s's presets go in", q(label)))
+  end
+  local dir = library .. "/Effect Presets"
+  if not io.exists(dir) then os.mkdir(dir) end
+  dir = dir .. "/" .. folder
+  if not io.exists(dir) then os.mkdir(dir) end
+  if not io.exists(dir) then fail("failed", "Kumi couldn't make the folder " .. dir) end
+  local file = dir .. "/" .. name .. ".xrdp"
+  if io.exists(file) and params.replace ~= true then
+    bad(string.format("a preset named %s is in %s already: give another name, or replace it", q(name), dir))
+  end
+  local out, why = io.open(file, "wb")
+  if out then
+    out:write(device.active_preset_data)
+    out:close()
+  else
+    fail("failed", "Kumi couldn't write " .. file .. ": " .. tostring(why))
+  end
+  local listed = false
+  for _, preset in ipairs(device.presets) do
+    if preset == name then listed = true end
+  end
+  return { epoch = env.epoch(), layout = env.layout(), file = file, listed = listed, label = label }
+end
+
 return M

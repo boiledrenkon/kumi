@@ -926,3 +926,52 @@ test("devices m4: Kumi's own load of an instrument file isn't taken for a delete
     eq(ranges(1), "Cutoff 0-1 3, Resonance 0.2-0.8 3")
   end)
 end)
+
+-- Actions: a device's editor window, its settings saved as a preset
+
+test("devices m4: a plug-in's editor window is shown and hidden on request, and a device without one is refused", function()
+  local _, peer = setup({ { name = "Kick", devices = { { name = "AU: Apple: AUDelay", short_name = "AUDelay", path = "Audio/Effects/AU/aufx:dely:appl", editor = true, params = {} }, gainer() } } })
+  local epoch, layout = place(peer)
+  local shown = call(peer, "device_editor", { ref = epoch .. ":device:1.2", epoch = epoch, layout = layout })
+  ok(shown.result and shown.result.visible == true, json.encode(shown))
+  eq(device_data(1, 2).editor_visible, true)
+  local hidden = call(peer, "device_editor", { ref = epoch .. ":device:1.2", show = false, epoch = epoch, layout = layout })
+  ok(hidden.result and hidden.result.visible == false, json.encode(hidden))
+  failure(call(peer, "device_editor", { ref = epoch .. ":device:1.3", epoch = epoch, layout = layout }), "bad-params", "no editor window")
+  eq(steps(), 0, "no step of Renoise's undo")
+end)
+
+test("devices m4: a device's settings are saved as a preset in the user library's folder for it, and one of that name is replaced only when asked", function()
+  local env, peer = setup({ { name = "Kick", devices = { eq5(), lfo(), { name = "AU: Apple: AUDelay", short_name = "AUDelay", path = "Audio/Effects/AU/aufx:dely:appl", preset_data = "<FilterDevicePreset/>", params = {} } } } })
+  local home = env.dir .. "/home"
+  os.mkdir(home)
+  local real_getenv = os.getenv
+  os.getenv = function(name)
+    if name == "HOME" then return home end
+    return real_getenv(name)
+  end
+  local done, err = pcall(function()
+    local epoch, layout = place(peer)
+    local function save(d, name, replace)
+      return call(peer, "preset_save", { ref = epoch .. ":device:1." .. d, name = name, replace = replace, epoch = epoch, layout = layout })
+    end
+    failure(save(2, "Bright"), "failed", "user library")
+    os.execute("mkdir -p '" .. home .. "/Documents/Renoise/User Library'")
+    local saved = save(2, "Bright")
+    ok(saved.result, json.encode(saved.error or {}))
+    eq(saved.result.file, home .. "/Documents/Renoise/User Library/Effect Presets/EQ 5/Bright.xrdp")
+    local f = assert(io.open(saved.result.file, "rb"))
+    eq(f:read("*a"), mock.song:track(1):device(2).active_preset_data, "its preset data")
+    f:close()
+    failure(save(2, "Bright"), "bad-params", "already")
+    ok(save(2, "Bright", true).result, "replaced when asked")
+    -- A meta device's folder has no *; a plug-in's is its short name.
+    eq(save(3, "Slow").result.file, home .. "/Documents/Renoise/User Library/Effect Presets/LFO/Slow.xrdp")
+    eq(save(4, "Long").result.file, home .. "/Documents/Renoise/User Library/Effect Presets/AUDelay/Long.xrdp")
+    failure(save(2, "../x"), "bad-params", "name")
+    failure(save(2, "a:b"), "bad-params", "name")
+    eq(steps(), 0)
+  end)
+  os.getenv = real_getenv
+  if not done then error(err, 0) end
+end)

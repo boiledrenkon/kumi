@@ -187,6 +187,32 @@ pub fn tools(host: &Host) -> Value {
         list[5]["inputSchema"]["properties"]["hidden"] = hidden;
         // (M4 n-devices) A device read by ref says what a Doofer, Splitter or Notepad holds; its preset data on ask.
         list[2]["inputSchema"]["properties"]["presetData"] = json!({"type": "boolean", "description": "With ref of a device: also its preset data, its settings as Renoise's XML (for device_preset_data). A Doofer's, Splitter's or Notepad's contents come by themselves."});
+        // (M4 n-devices) Actions on a device, no step of Renoise's undo: its own editor window, its settings saved as a preset.
+        let own = |more: Value| {
+            merged(
+                &pick,
+                merged(
+                    &json!({"ref": {"type": "string", "description": "A device on a track"}, "epoch": {"type": "string"}, "layout": {"type": "integer", "minimum": 0}}),
+                    more,
+                ),
+            )
+        };
+        if let Some(tools) = list.as_array_mut() {
+            tools.push(json!({
+                "name": "device_editor",
+                "title": "Show a device's editor",
+                "description": "Shows a plug-in's own editor window (or a *LFO's), or hides it with show false. Only when the producer asks to see it.",
+                "inputSchema": {"type": "object", "properties": own(json!({"show": {"type": "boolean"}})), "required": ["ref"], "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+            }));
+            tools.push(json!({
+                "name": "preset_save",
+                "title": "Save a device's preset",
+                "description": "Saves a device's settings as a preset file named name in Renoise's user library (Effect Presets, in the device's folder), where its preset list finds it: {file, listed}. A preset of that name is replaced only with replace.",
+                "inputSchema": {"type": "object", "properties": own(json!({"name": {"type": "string", "maxLength": 128}, "replace": {"type": "boolean"}})), "required": ["ref", "name"], "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+            }));
+        }
     }
     list
 }
@@ -276,6 +302,11 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                         "focus" => host.focus(&arguments).await,
                         _ => host.focus_body(&arguments).await,
                     };
+                    result(id, tool_result(answer, is_error))
+                }
+                // (M4 n-devices) Renoise's actions on a device.
+                "device_editor" | "preset_save" if host.daw() == Daw::Renoise => {
+                    let (answer, is_error) = host.renoise_action(name, &arguments).await;
                     result(id, tool_result(answer, is_error))
                 }
                 "change_preview" | "change_apply" | "change_undo" | "change_release" | "transport_stop" | "transport_play"

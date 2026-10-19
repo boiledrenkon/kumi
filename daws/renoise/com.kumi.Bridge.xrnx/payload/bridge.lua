@@ -784,6 +784,15 @@ function handlers.macro_read(params)
   return changes.macro_read(params, change_env())
 end
 
+-- (M4 n-devices) Actions on a device: its own editor window, its settings saved as a preset in the user library.
+function handlers.device_editor(params)
+  return changes.device_editor(params, change_env())
+end
+
+function handlers.preset_save(params)
+  return changes.preset_save(params, change_env())
+end
+
 -- A step of undo around a plan: Renoise has none that spans callbacks, so every change stays its own step (merged: false).
 function handlers.undo_step_begin(params)
   local label = type(params) == "table" and params.label or nil
@@ -886,7 +895,7 @@ local function carried(params, carry)
 end
 
 local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true, preset_read = true,
-  instrument_export = true, macro_read = true }
+  instrument_export = true, macro_read = true, device_editor = true, preset_save = true }
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).

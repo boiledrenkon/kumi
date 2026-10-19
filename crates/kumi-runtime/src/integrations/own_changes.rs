@@ -902,8 +902,13 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     }
 
     /// One action through the host's tool: what the producer is told it did, or why it didn't.
-    async fn one_action(&self, action: &'static OwnAction, input: JsonObject, signal: Signal) -> ActionOutcome {
+    async fn one_action(&self, action: &'static OwnAction, asked: JsonObject, signal: Signal) -> ActionOutcome {
         let words = self.link().words().words;
+        // (M4 n-devices: an action on an object names it by a short ref, as a change does)
+        let input = match self.lengthened(&asked) {
+            Ok(input) => input,
+            Err(why) => return ActionOutcome::error(why),
+        };
         let mut args = Value::Object(input.clone());
         self.place(&mut args, &input);
         match self.link().call(action.method, args, signal).await {
@@ -912,7 +917,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 let playing = action.playing.or_else(|| answer.get("playing").and_then(Value::as_bool));
                 let recording = (action.playing == Some(false)).then_some(false);
                 let mut text = json!({"done": action.title});
-                for field in ["playing", "positionBeats", "position", "wasRecording"] {
+                for field in ["playing", "positionBeats", "position", "wasRecording", "visible", "file", "listed"] {
                     if let Some(value) = answer.get(field) {
                         text[field] = value.clone();
                     }
@@ -923,7 +928,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             Ok(Err(refused)) if refused.busy => {
                 ActionOutcome::error(format!("{} is busy ({}): try again in a moment", words.app, refused.why))
             }
-            Ok(Err(refused)) => ActionOutcome::error(self.refusal(&refused, &input)),
+            Ok(Err(refused)) => ActionOutcome::error(self.refusal(&refused, &asked)),
             Err(_) => ActionOutcome {
                 text: format!("{} didn't answer, so it may or may not have done it", words.app),
                 is_error: true,

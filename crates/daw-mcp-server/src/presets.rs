@@ -2080,6 +2080,24 @@ impl crate::host::Host {
         }
     }
 
+    /// `device_editor` / `preset_save`: Renoise's actions on a device (no step of its undo), sent on to the tool.
+    pub(crate) async fn renoise_action(&self, method: &str, arguments: &Value) -> (Value, bool) {
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        let mut params = json!({});
+        for field in ["ref", "show", "name", "replace", "epoch", "layout"] {
+            if let Some(value) = arguments.get(field) {
+                params[field] = value.clone();
+            }
+        }
+        match self.call(method, params, &pick, crate::changes::CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
     /// A Renoise DSP body: each Doofer's and Splitter's devices as its child nodes (the first containers of the chain).
     pub(crate) async fn renoise_dsp_children(&self, answer: &mut Value, pick: &crate::host::Pick) {
         let epoch = answer.get("epoch").and_then(Value::as_str).map(str::to_owned);

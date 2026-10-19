@@ -428,7 +428,9 @@ local function device(data)
   data.is_maximized_observable = data.is_maximized_observable or M.observable()
   data.active_preset_observable = data.active_preset_observable or M.observable()
   local proxy = object("renoise.AudioDevice", {
-    name = data.name, display_name = data.display_name or data.name, short_name = data.name,
+    name = data.name, display_name = data.display_name or data.name, short_name = data.short_name or data.name,
+    -- (M4 n-devices: a device with an editor window of its own, `editor` in the data)
+    external_editor_available = data.editor == true,
     device_path = data.path or ("Audio/Effects/Native/" .. data.name),
     is_active = data.active ~= false, is_active_observable = data.is_active_observable,
     display_name_observable = data.display_name_observable, is_maximized_observable = data.is_maximized_observable,
@@ -456,8 +458,13 @@ local function device(data)
       return data.preset_data or ""
     end,
     active_preset = function() return data.preset or 0 end,
+    external_editor_visible = function() return data.editor_visible == true end,
   }, (function()
     local setters = device_setters(data)
+    setters.external_editor_visible = function(visible)
+      if not data.editor then error("the device has no external editor", 2) end
+      data.editor_visible = visible
+    end
     -- (M4 n-devices: a device with an XML slot type takes preset data as Renoise does, and a preset choice sets its values)
     if data.slot then setters.active_preset_data = function(text) write_preset_xml(data, text) end end
     setters.active_preset = function(n) choose_preset(data, n) end

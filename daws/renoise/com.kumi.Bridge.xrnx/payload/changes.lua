@@ -158,6 +158,9 @@ function M.preset_read(params, env) return presets.read(params, env) end
 function M.instrument_export(params, env) return macros.export(params, env) end
 -- (M4 n-devices) An instrument's macros and mappings as the API reads them (`macro_read`).
 function M.macro_read(params, env) return macros.read(params, env) end
+-- (M4 n-devices) Actions: a device's editor window (`device_editor`), its settings saved as a preset (`preset_save`).
+function M.device_editor(params, env) return presets.editor(params, env) end
+function M.preset_save(params, env) return presets.save(params, env) end
 
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active

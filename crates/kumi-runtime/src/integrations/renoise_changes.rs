@@ -18,7 +18,7 @@ pub static CHANGES: OwnChangeSet = OwnChangeSet {
     most_track_adds: Some(32),
 };
 
-static ACTIONS: [OwnAction; 2] = [
+static ACTIONS: [OwnAction; 4] = [
     OwnAction {
         tool: "play",
         method: "transport_play",
@@ -36,6 +36,25 @@ static ACTIONS: [OwnAction; 2] = [
         core: true,
         playing: Some(false),
         title: "Stopped",
+    },
+    // (M4 n-devices) Actions on a device.
+    OwnAction {
+        tool: "plugin_editor",
+        method: "device_editor",
+        description: "Show a plug-in's own editor window (or a *LFO's), or hide it with show false: only when the producer asks to see it.",
+        schema: r#"{"type":"object","additionalProperties":false,"required":["ref"],"properties":{"ref":{"type":"string","description":"A device on a track"},"show":{"type":"boolean"}}}"#,
+        core: false,
+        playing: None,
+        title: "Showed or hid the device's editor window",
+    },
+    OwnAction {
+        tool: "save_device_preset",
+        method: "preset_save",
+        description: "Save a device's settings as a preset named name in Renoise's user library (Effect Presets, the device's folder), where its preset list finds it; replace: true replaces a preset of that name.",
+        schema: r#"{"type":"object","additionalProperties":false,"required":["ref","name"],"properties":{"ref":{"type":"string","description":"A device on a track"},"name":{"type":"string","minLength":1,"maxLength":128},"replace":{"type":"boolean"}}}"#,
+        core: false,
+        playing: None,
+        title: "Saved the device's preset",
     },
 ];
 
