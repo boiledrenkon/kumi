@@ -639,19 +639,20 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         check(ctx.reaper, found.track, found.receiver, &wanted)?;
     }
     let before = pair_seen(ctx.reaper, found.track, found.receiver);
-    // A send Kumi changes gets Kumi's mark, in the same step, if it has none: its undo then finds it by that and by no value
-    // (two sends at REAPER's defaults are alike in every value).
-    if !(prop.same)(&now, &wanted) && stamp_of(ctx.reaper, found.track, found.index).is_none() {
-        ctx.reaper.set_send_text(found.track, 0, found.index, STAMP, &fresh_stamp());
-    }
     if !(prop.same)(&now, &wanted) && !(prop.write)(ctx.reaper, found.track, found.index, &wanted) {
         return Err(failed(format!("REAPER wouldn't take the send's {}", prop.noun)));
     }
-    note_written(ctx.reaper, found.track, found.receiver, before);
     let after = (prop.read)(ctx.reaper, found.track, found.index);
     if !(prop.same)(&after, &wanted) {
         return Err(failed(format!("REAPER kept the send's {} as it was", prop.noun)));
     }
+    // A send Kumi changes gets Kumi's mark, in the same step, if it has none: its undo then finds it by that and by no value
+    // (two sends at REAPER's defaults are alike in every value). Only once REAPER took the value: a refused change leaves
+    // no mark behind.
+    if !(prop.same)(&now, &wanted) && stamp_of(ctx.reaper, found.track, found.index).is_none() {
+        ctx.reaper.set_send_text(found.track, 0, found.index, STAMP, &fresh_stamp());
+    }
+    note_written(ctx.reaper, found.track, found.receiver, before);
     let mut applied = after.clone();
     applied["send"] = seal(ctx.reaper, &found);
     Ok(Applied {
@@ -664,16 +665,21 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
 }
 
 pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored> {
-    // (a send Kumi marked when it changed it is the one with the mark: none there means it was removed or replaced since)
+    // (a send Kumi marked when it changed it is the one with the mark: none there means it was removed or replaced since, or
+    // REAPER's own undo took the change back with its mark, which leaves the send at its place as it was before)
     let marked = restore.applied["send"]["stamp"].is_string();
-    let found = find_for_restore(ctx, restore.target["ref"].as_str().unwrap_or_default(), &restore.applied["send"], !restore.discard)
-        .map_err(|fault| {
-            if marked && fault.0 == "gone" {
-                changed("the send Kumi changed isn't there with its mark any more: it was removed or replaced in REAPER since")
-            } else {
-                fault
-            }
-        })?;
+    let reference = restore.target["ref"].as_str().unwrap_or_default();
+    let found = find_for_restore(ctx, reference, &restore.applied["send"], !restore.discard).map_err(|fault| {
+        if !(marked && fault.0 == "gone") {
+            return fault;
+        }
+        let back = find(ctx, reference, false).is_ok_and(|at| (prop.same)(&(prop.read)(ctx.reaper, at.track, at.index), restore.prior));
+        if back {
+            changed("the send Kumi changed has lost its mark and is as it was before: it may have been undone in REAPER (Edit > Undo)")
+        } else {
+            changed("the send Kumi changed isn't there with its mark any more: it was removed or replaced in REAPER since")
+        }
+    })?;
     let route = route_text(&found.from, &found.to);
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     let already = (prop.same)(&now, restore.prior);
