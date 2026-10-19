@@ -123,7 +123,7 @@ M.phrase_data = phrase_data
 
 -- The modulation devices Renoise has, and their parameters (names as Renoise shows them).
 M.MODULATION_DEVICES = {
-  ["Modulation/AHDSR"] = { name = "AHDSR", params = { "Attack", "Hold", "Duration", "Sustain", "Release" }, sync = true },
+  ["Modulation/AHDSR"] = { name = "AHDSR", params = { "Attack", "Hold", "Decay", "Sustain", "Release", "Attack Scaling", "Decay Scaling", "Release Scaling" }, sync = true },
   ["Modulation/Envelope"] = { name = "Envelope", params = {}, points = true, sync = true },
   ["Modulation/Fader"] = { name = "Fader", params = { "From", "To", "Duration", "Delay" }, sync = true },
   ["Modulation/Key Tracking"] = { name = "Key Tracking", params = { "Min", "Max" } },
@@ -136,14 +136,20 @@ local MODULATION_PATHS = {}
 for path in pairs(M.MODULATION_DEVICES) do MODULATION_PATHS[#MODULATION_PATHS + 1] = path end
 table.sort(MODULATION_PATHS)
 
+-- (a device's name is "<Target> <Type>": "Volume AHDSR", lab)
+local TARGET_NAMES = { "Volume", "Panning", "Pitch", "Cutoff", "Resonance", "Drive" }
+
 local function modulation_device_data(path, target)
   local kind = M.MODULATION_DEVICES[path]
   local params = {}
   for k, name in ipairs(kind.params) do params[k] = { name = name, value = 0.5, min = 0, max = 1 } end
+  local name = TARGET_NAMES[target] .. " " .. kind.name
+  local stepper = path:find("Stepper", 1, true) ~= nil
   return {
-    path = path, name = kind.name, target = target, operator = 1, bipolar = false, tempo_synced = false, active = true,
-    display_name = kind.name, maximized = true, params = params, points = kind.points and { { time = 1, value = 1, scaling = 0 } } or nil,
-    length = kind.points and 64 or nil, play_mode = kind.points and 2 or nil, loop_mode = 1, loop_start = 1, loop_end = 64,
+    path = path, name = name, target = target, operator = target == 1 and 3 or 1, bipolar = false, tempo_synced = false, active = true,
+    display_name = name, maximized = true,
+    params = params, points = kind.points and { { time = 1, value = 1, scaling = 0 }, { time = 64, value = 0.5, scaling = 0 }, { time = 128, value = 0, scaling = 0 } } or nil,
+    length = kind.points and (stepper and 16 or 513) or nil, play_mode = kind.points and 2 or nil, loop_mode = 1, loop_start = 1, loop_end = 64,
     sustain_enabled = false, sustain_position = 1, fade_amount = 0, play_step = 0,
   }
 end
@@ -151,8 +157,8 @@ M.modulation_device_data = modulation_device_data
 
 local function set_data(spec)
   local set = {
-    name = "Modulation", pitch_range = 12, filter_version = 3, filter_type = "None",
-    inputs = { volume = 1, panning = 0.5, pitch = 0.5, cutoff = 1, resonance = 0, drive = 0 }, devices = {},
+    name = "Set 01", pitch_range = 12, filter_version = 3, filter_type = "None",
+    inputs = { volume = 1, panning = 0, pitch = 0, cutoff = 63.5, resonance = 63.5, drive = 0 }, devices = {},
   }
   for k, v in pairs(spec or {}) do set[k] = copy(v) end
   return set
@@ -161,8 +167,8 @@ M.set_data = set_data
 
 local function chain_data(spec)
   local chain = {
-    name = "FX", output_routing = "Current Track",
-    devices = { { name = "Sample Mixer", path = "Audio/Effects/Native/SampleVolPan", params = {
+    name = "FX Chain 01", output_routing = "Current Track",
+    devices = { { name = "Mixer", path = "Audio/Effects/Native/InstrumentVolPan", params = {
       { name = "Panning", value = 0.5, min = 0, max = 1 }, { name = "Volume", value = 1, min = 0, max = 1.4125 },
       { name = "Width", value = 0, min = 0, max = 1 } }, active = true } },
   }
@@ -172,13 +178,13 @@ end
 M.chain_data = chain_data
 
 local function macro_data(name)
-  return { name = name, value = 0, mappings = {} }
+  return { name = name, value = 0.5, mappings = {} }
 end
 
 function M.instrument_data(spec)
   spec = spec or {}
   local instrument = {
-    name = spec.name or "", volume = 1, transpose = 0, overlap = 0, phrase_playback_mode = 1, phrase_program = 0,
+    name = spec.name or "", volume = 1, transpose = 0, overlap = 0, phrase_playback_mode = 2, phrase_program = 0,
     tab = spec.tab or 1, comments = {},
     trigger = { quantize = 1, monophonic = false, monophonic_glide = 0, scale_mode = "None", scale_key = 1 },
     samples = {}, phrases = {}, mappings = {}, sets = {}, chains = {}, macros = {},
@@ -195,7 +201,8 @@ function M.instrument_data(spec)
   for k = 1, spec.samples or 0 do instrument.samples[k] = M.sample_data({ name = "Sample " .. k }) end
   for k, s in ipairs(spec.sample_specs or {}) do instrument.samples[k] = M.sample_data(s) end
   for k = 1, spec.phrases or 0 do instrument.phrases[k] = phrase_data({ name = "Phrase " .. k }) end
-  for k = 1, spec.sets or 0 do instrument.sets[k] = set_data({ name = "Modulation " .. k }) end
+  -- (a new instrument has one modulation set: lab)
+  for k = 1, spec.sets == nil and 1 or spec.sets do instrument.sets[k] = set_data({ name = string.format("Set %02d", k) }) end
   for k = 1, spec.chains or 0 do instrument.chains[k] = chain_data({ name = "FX " .. k }) end
   for k, v in pairs(spec.fields or {}) do instrument[k] = copy(v) end
   -- (the M3 tests' plug-in: a device of that name)
@@ -407,11 +414,9 @@ local function buffer_object(sample)
         return false
       end
       local old_buffer, old_name, old_loop = sample.buffer, sample.name, { sample.loop_start, sample.loop_end }
-      local name = loaded.name
       loaded.name = nil
       sample.buffer = loaded
-      -- (Renoise names a sample after the file it loads)
-      sample.name = name or sample.name
+      -- (Renoise keeps the sample's name: lab)
       sample.loop_start, sample.loop_end = 1, loaded.frames
       M.fire(obs(sample, "buffer"))
       local new_name = sample.name
@@ -549,7 +554,7 @@ local function rebuild_aliases(instrument)
   end
   local rebuilt = { master }
   for k, at in ipairs(master.markers) do
-    local alias = kept[at] or M.sample_data({ name = (master.name ~= "" and master.name or "Sample") .. " Slice #" .. k, base_note = 49 + k - 1 })
+    local alias = kept[at] or M.sample_data({ name = string.format("%s (S#%02d)", master.name, k), base_note = 49 + k - 1 })
     alias.slice_alias, alias.marker = true, at
     alias.note_range = { master.base_note + k, master.base_note + k }
     alias.base_note = master.base_note + k
@@ -733,12 +738,7 @@ local function mapping_object(instrument, m)
     write(mapping, "note_range", value)
   end
   fields.note_range_observable = obs(mapping, "note_range")
-  -- (the mapping's phrase: its settings are the phrase's own)
-  for _, field in ipairs({ "key_tracking", "base_note", "looping", "loop_start", "loop_end" }) do
-    getters[field] = function() return mapping.phrase[field] end
-    local inner = setters[field]
-    setters[field] = function(value) inner(value) write(mapping.phrase, field, value) end
-  end
+  -- (the mapping's key tracking, base note and loop are its own, not its phrase's: lab)
   getters.phrase = function()
     for k, p in ipairs(instrument.phrases) do if p == mapping.phrase then return M.phrase_proxy(instrument, k) end end
     error("mapping without phrase", 2)
@@ -857,6 +857,7 @@ local function modulation_device_object(set, k)
   if kind.points then
     class = data.path:find("Stepper") and "renoise.SampleStepperModulationDevice" or "renoise.SampleEnvelopeModulationDevice"
     getters.points = function() return copy(data.points) end
+  local _ = kind
     setters.points = function(value)
       local seen = {}
       for _, point in ipairs(value) do
@@ -895,6 +896,8 @@ local function modulation_device_object(set, k)
 end
 
 local INPUTS = { volume_input = "volume", panning_input = "panning", pitch_input = "pitch", cutoff_input = "cutoff", resonance_input = "resonance", drive_input = "drive" }
+-- (each input's range, as Renoise has it: lab)
+local INPUT_RANGES = { volume = { 0, 1 }, panning = { -1, 1 }, pitch = { -1, 1 }, cutoff = { 0, 127 }, resonance = { 0, 127 }, drive = { 0, 127 } }
 
 local function set_object(instrument, m)
   local set = instrument.sets[m]
@@ -914,12 +917,12 @@ local function set_object(instrument, m)
   fields.devices_observable = set.devices_observable
   for member, key in pairs(INPUTS) do
     set.input_params = set.input_params or {}
-    set.input_params[key] = set.input_params[key] or { name = key:sub(1, 1):upper() .. key:sub(2), min = 0, max = 1 }
+    set.input_params[key] = set.input_params[key] or { name = key:sub(1, 1):upper() .. key:sub(2), min = INPUT_RANGES[key][1], max = INPUT_RANGES[key][2] }
     local holder = set.input_params[key]
     holder.value = set.inputs[key]
     fields[member] = h.parameter(holder, {
       value = function(value)
-        check_range(member, value, 0, 1)
+        check_range(member, value, INPUT_RANGES[key][1], INPUT_RANGES[key][2])
         local old = set.inputs[key]
         if old == value then return end
         set.inputs[key], holder.value = value, value
@@ -1017,11 +1020,11 @@ local function chain_object(instrument, c)
   return object("renoise.SampleDeviceChain", fields, getters, setters)
 end
 
--- Where a chain may send its sound: the current track, or a track by name (Renoise lists the tracks).
+-- Where a chain may send its sound: the current track, or a sequencer track as "NN: name" (lab).
 function M.chain_routings()
   local out = { "Current Track" }
-  for _, t in ipairs(M.data.tracks) do
-    if t.kind ~= "send" then out[#out + 1] = t.name end
+  for t, data in ipairs(M.data.tracks) do
+    if data.kind == "sequencer" then out[#out + 1] = string.format("%02d: %s", t, data.name) end
   end
   return out
 end
@@ -1068,7 +1071,9 @@ end
 local function plugin_props_object(instrument)
   local props = instrument.plugin_props
   local getters, setters, fields = fields_of(props, {
-    channel = { 1, range(1, 16, true) }, transpose = { 0, range(-120, 120, true) }, volume = { 1, range(0, 4) }, auto_suspend = { false, boolean },
+    channel = { 1, range(1, 16, true) }, transpose = { 0, range(-120, 120, true) }, volume = { 1, range(0, 4) },
+    -- (auto-suspend is no undo step: lab)
+    auto_suspend = { false, boolean, true },
   })
   fields.plugin_device_observable = obs(instrument, "plugin")
   fields.alias_instrument_index, fields.alias_fx_track_index, fields.alias_fx_device_index, fields.midi_output_routing_index = 0, 0, 0, 0
@@ -1190,8 +1195,8 @@ function M.instrument_proxy(i)
   setters.phrase_playback_mode = function(value)
     check_range("phrase_playback_mode", value, 1, 3, true)
     write(instrument, "phrase_playback_mode", value)
-    -- (keymap is program 127; off is 0; program mode keeps a phrase's number)
-    local program = value == 3 and 127 or (value == 1 and 0 or (instrument.phrase_program >= 1 and instrument.phrase_program <= 126 and instrument.phrase_program or 1))
+    -- (keymap is program 127; off is 0; program mode keeps a phrase's number, or none: 0)
+    local program = value == 3 and 127 or (value == 1 and 0 or (instrument.phrase_program >= 1 and instrument.phrase_program <= 126 and instrument.phrase_program or 0))
     write(instrument, "phrase_program", program)
   end
   fields.phrase_playback_mode_observable = obs(instrument, "phrase_playback_mode")
@@ -1199,6 +1204,7 @@ function M.instrument_proxy(i)
   setters.phrase_program = function(value)
     check_range("phrase_program", value, 0, 127, true)
     write(instrument, "phrase_program", value)
+    -- (the program sets the mode: 0 off, 127 keymap, a phrase program mode; lab pending for 0 in program mode)
     write(instrument, "phrase_playback_mode", value == 0 and 1 or (value == 127 and 3 or 2))
   end
   fields.phrase_program_observable = obs(instrument, "phrase_program")
@@ -1295,6 +1301,8 @@ function M.instrument_proxy(i)
       for _, sample in ipairs(instrument.samples) do top = math.max(top, sample.note_range[2]) end
       spec.note_range, spec.base_note = { math.min(119, top + 1), math.min(119, top + 1) }, math.min(119, top + 1)
     end
+    -- (a new sample uses the instrument's first set: lab)
+    if #instrument.sets > 0 then spec.modulation_set_index = 1 end
     list_op(instrument.samples, instrument.samples_observable, "insert", s, nil, M.sample_data(spec))
     return sample_object(instrument, s)
   end
@@ -1315,7 +1323,9 @@ function M.instrument_proxy(i)
   fields.insert_phrase_at = function(_, ph)
     if #instrument.phrases >= 126 then error("can't have more than 126 phrases", 2) end
     if ph < 1 or ph > #instrument.phrases + 1 then out_of_range("phrase", ph) end
-    list_op(instrument.phrases, instrument.phrases_observable, "insert", ph, nil, phrase_data({ lpb = M.data.transport_fields.lpb }))
+    -- (Renoise's new phrase: lab)
+    list_op(instrument.phrases, instrument.phrases_observable, "insert", ph, nil, phrase_data({ name = string.format("Phrase %02d", #instrument.phrases + 1),
+      lpb = M.data.transport_fields.lpb, lines = 32, loop_end = 32, key_tracking = 2, autoseek = true, note_columns = 4, instrument_column_visible = false }))
     return M.phrase_proxy(instrument, ph)
   end
   fields.delete_phrase_at = function(_, ph)
@@ -1337,7 +1347,8 @@ function M.instrument_proxy(i)
     local low = instrument.mappings[m - 1] and instrument.mappings[m - 1].note_range[2] + 1 or 0
     local high = instrument.mappings[m] and instrument.mappings[m].note_range[1] - 1 or 119
     if low > high then error("no room for a phrase mapping there", 2) end
-    list_op(instrument.mappings, instrument.mappings_observable, "insert", m, nil, { phrase = phrase, note_range = { low, high } })
+    list_op(instrument.mappings, instrument.mappings_observable, "insert", m, nil, { phrase = phrase, note_range = { low, high },
+      key_tracking = phrase.key_tracking, base_note = phrase.base_note, looping = phrase.looping, loop_start = phrase.loop_start, loop_end = phrase.loop_end })
     return mapping_object(instrument, m)
   end
   fields.delete_phrase_mapping_at = function(_, m)
@@ -1346,7 +1357,7 @@ function M.instrument_proxy(i)
   end
   fields.insert_sample_modulation_set_at = function(_, m)
     if m < 1 or m > #instrument.sets + 1 then out_of_range("modulation set", m) end
-    list_op(instrument.sets, instrument.sets_observable, "insert", m, nil, set_data({ name = "Modulation " .. (#instrument.sets + 1) }))
+    list_op(instrument.sets, instrument.sets_observable, "insert", m, nil, set_data({ name = string.format("Set %02d", #instrument.sets + 1) }))
     M.renumber_assignments(instrument, "modulation_set_index", "insert", m)
     return set_object(instrument, m)
   end
@@ -1361,7 +1372,7 @@ function M.instrument_proxy(i)
   end
   fields.insert_sample_device_chain_at = function(_, c)
     if c < 1 or c > #instrument.chains + 1 then out_of_range("device chain", c) end
-    list_op(instrument.chains, instrument.chains_observable, "insert", c, nil, chain_data({ name = "FX " .. (#instrument.chains + 1) }))
+    list_op(instrument.chains, instrument.chains_observable, "insert", c, nil, chain_data({ name = string.format("FX Chain %02d", #instrument.chains + 1) }))
     M.renumber_assignments(instrument, "device_chain_index", "insert", c)
     return chain_object(instrument, c)
   end
@@ -1375,6 +1386,7 @@ function M.instrument_proxy(i)
     M.renumber_assignments(instrument, "device_chain_index", "swap", a, b)
   end
   fields.clear = function()
+    -- (what clear() leaves: no samples, phrases or chains, one set, no name: lab)
     M.replace_instrument(i, M.instrument_data({}))
   end
   fields.copy_from = function(_, other)
@@ -1476,7 +1488,8 @@ end
 function M.write_file(path, value)
   local f = io.open(path, "wb")
   if not f then return false end
-  f:write("MOCKRENOISE " .. serialize(value))
+  -- (an instrument file is a zip: it starts as one)
+  f:write((value.kind == "instrument" and "PK\3\4" or "") .. "MOCKRENOISE " .. serialize(value))
   f:close()
   M.files_written = (M.files_written or 0) + 1
   return true
@@ -1487,7 +1500,7 @@ function M.read_file(path)
   if not f then return nil end
   local text = f:read("*a")
   f:close()
-  local body = text:match("^MOCKRENOISE (.*)$")
+  local body = text:match("^MOCKRENOISE (.*)$") or text:match("^PK\3\4MOCKRENOISE (.*)$")
   if not body then return nil, text end
   local chunk = loadstring("return " .. body)
   return chunk and chunk() or nil
@@ -1501,40 +1514,58 @@ function M.read_audio(path)
     buffer.name = value.name
     return buffer
   end
-  if raw and path:lower():match("%.[wfa][ali][vfa]c?f?$") and not raw:find("not a wave", 1, true) then
+  -- (a file whose contents Renoise can't read, though its first bytes look right: `broken` in it)
+  if raw and path:lower():match("%.[wfa][ali][vfa]c?f?$") and not raw:find("broken", 1, true) and not raw:find("not a wave", 1, true) then
     local name = path:match("([^/\\]+)%.[^.]+$")
     return { frames = math.max(1, #raw), rate = 44100, channels = 1, bits = 16, content = "file:" .. path, name = name }
   end
   return nil
 end
 
--- renoise.app()'s instrument files, into or from the selected instrument.
+-- renoise.app()'s instrument files, into or from the selected instrument. An .xrni replaces the instrument: a new one is put after
+-- it and the old one taken out (insert@i+1, remove@i, no notes renumbered: lab); a multi-sample loads into the same instrument;
+-- anything else load_instrument doesn't know shows "Unknown instrument type!" in a dialog (lab).
 function M.app_load_instrument(path, how)
-  local song = M.data.song_fields
+  local d = M.data
+  local song = d.song_fields
   local i = song.selected_instrument_index
   local value, raw = M.read_file(path)
-  local contents
-  if value and value.kind == "instrument" then
-    contents = value.instrument
-  elseif raw and path:lower():match("%.sfz$") then
-    contents = M.instrument_data({ name = path:match("([^/\\]+)%.sfz$") })
+  if how == "multi" then
+    if not (raw and path:lower():match("%.sfz$")) then M.dialogs = (M.dialogs or 0) + 1 return false end
+    local contents = M.instrument_copy(d.instruments[i])
+    contents.name = path:match("([^/\\]+)%.sfz$")
+    contents.samples = {}
     for region in raw:gmatch("<region>([^\n]*)") do
       local file = region:match("sample=(%S+)")
       local lo, hi = tonumber(region:match("lokey=(%d+)")), tonumber(region:match("hikey=(%d+)"))
       local center = tonumber(region:match("pitch_keycenter=(%d+)"))
       contents.samples[#contents.samples + 1] = M.sample_data({ name = file and file:match("([^/]+)%.%w+$") or "Sample", frames = 100,
-        note_range = { lo or 0, hi or 119 }, base_note = center or 48, content = "sfz:" .. tostring(file) })
+        note_range = { lo or 0, hi or 119 }, base_note = center or lo or 48, content = "sfz:" .. tostring(file) })
     end
-  elseif raw and how ~= "multi" then
-    local audio = M.read_audio(path)
-    if not audio then M.dialogs = (M.dialogs or 0) + 1 return false end
-    contents = M.instrument_data({ name = audio.name })
-    contents.samples[1] = M.sample_data({ name = audio.name, frames = audio.frames, content = audio.content })
-  else
+    M.replace_instrument(i, contents)
+    return true
+  end
+  if not (value and value.kind == "instrument") then
     M.dialogs = (M.dialogs or 0) + 1
     return false
   end
-  M.replace_instrument(i, M.instrument_copy(contents))
+  local instruments = d.instruments
+  local old = instruments[i]
+  local made = M.instrument_copy(value.instrument)
+  local function swap_in()
+    table.insert(instruments, i + 1, made)
+    M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
+    table.remove(instruments, i)
+    M.fire(song.instruments_observable, { type = "remove", index = i })
+  end
+  local function swap_out()
+    table.insert(instruments, i + 1, old)
+    M.fire(song.instruments_observable, { type = "insert", index = i + 1 })
+    table.remove(instruments, i)
+    M.fire(song.instruments_observable, { type = "remove", index = i })
+  end
+  swap_in()
+  M.record(swap_out, swap_in)
   return true
 end
 

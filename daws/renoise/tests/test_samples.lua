@@ -106,7 +106,7 @@ test("places, sample × insert before, swap, delete before, Kumi's own load: the
     else
       local wav = mock.temp_dir .. "/clap.wav"
       local f = assert(io.open(wav, "wb"))
-      f:write(string.rep("c", 300))
+      f:write("RIFF\0\0\0\0WAVE" .. string.rep("c", 288))
       f:close()
       change(peer, "sample-load", { ref = iref(place(peer), 1), path = wav, index = 1 })
       at = 3
@@ -216,7 +216,7 @@ end)
 local function wav_file(name, size)
   local path = mock.temp_dir .. "/" .. name .. ".wav"
   local f = assert(io.open(path, "wb"))
-  f:write(string.rep("w", size or 256))
+  f:write("RIFF\0\0\0\0WAVE" .. string.rep("w", (size or 256) - 12))
   f:close()
   return path
 end

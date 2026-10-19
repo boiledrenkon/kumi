@@ -408,78 +408,162 @@ end
 
 base.register({ kind = "phrase-delete", custom = true, shape = "deleted", by_place = true, preview = delete_preview, apply = delete_apply, restore = delete_restore })
 
--- phrase-map {ref: phrase, noteRange: [low, high] | null}: the phrase's keys in keymap mode (mappings may not overlap).
+-- phrase-map {ref: phrase, noteRange?: [low, high] | null, keyTracking?, baseNote?, looping?, loopStart?, loopEnd?}: the phrase's
+-- keys in keymap mode (mappings may not overlap) and the mapping's own key tracking, base note and loop, which are its own, not
+-- the phrase's (lab: setting one leaves the other).
 
-local function map_plan(song, env, input)
-  local n, objects, label = places_.locate(song, env, "phrase", input, "phrase-map")
-  local wanted = input.noteRange
-  if wanted == json.null or wanted == false then wanted = nil
-  elseif not range_ok(wanted) then bad("noteRange is [low, high], notes from 0 to 119 (C-4 is 48), or null to unmap it")
-  else wanted = { wanted[1], wanted[2] } end
-  local current = mapping_of(objects.phrase)
-  if wanted and not mapping_slot(objects.instrument, wanted[1], wanted[2], current and current.noteRange[1] or nil) then
-    bad("those keys overlap another phrase's mapping")
-  end
-  return { n = n, label = label, wanted = wanted, current = current and current.noteRange or false }
-end
-
-local function map_title(plan)
-  if not plan.wanted then return "Unmapped " .. plan.label end
-  return string.format("Mapped %s to notes %d-%d", plan.label, plan.wanted[1], plan.wanted[2])
-end
+local MAPPING_FIELDS = {
+  keyTracking = { get = function(m) return KEY_TRACKING.get(m.key_tracking) end, set = function(m, v) m.key_tracking = KEY_TRACKING.parse(v) end,
+    check = function(v) return KEY_TRACKING.parse(v) ~= nil end, says = "keyTracking is none, transpose or offset" },
+  baseNote = { get = function(m) return m.base_note end, set = function(m, v) m.base_note = v end, check = whole(0, 119), says = "baseNote is a note from 0 to 119" },
+  looping = { get = function(m) return m.looping end, set = function(m, v) m.looping = v end, check = is_boolean, says = "looping is true or false" },
+  loopStart = { get = function(m) return m.loop_start end, set = function(m, v) m.loop_start = v end, check = whole(1, 512), says = "loopStart is a line of the phrase" },
+  loopEnd = { get = function(m) return m.loop_end end, set = function(m, v) m.loop_end = v end, check = whole(1, 512), says = "loopEnd is a line of the phrase" },
+}
+local MAPPING_ORDER = { "keyTracking", "baseNote", "looping", "loopStart", "loopEnd" }
 
 local function same_range(a, b)
   if not a or not b then return (not a) == (not b) end
   return a[1] == b[1] and a[2] == b[2]
 end
 
+-- The mapping's state for the keys a change names: its range (false when unmapped) and the fields asked.
+local function map_state(phrase, keys)
+  local mapping = phrase.mapping
+  local state = { noteRange = mapping and { mapping.note_range[1], mapping.note_range[2] } or false }
+  for _, key in ipairs(MAPPING_ORDER) do
+    if keys[key] ~= nil and mapping then state[key] = MAPPING_FIELDS[key].get(mapping) end
+  end
+  return state
+end
+
+local function same_map(a, b)
+  if not same_range(a.noteRange or nil, b.noteRange or nil) then return false end
+  for _, key in ipairs(MAPPING_ORDER) do
+    if (a[key] ~= nil or b[key] ~= nil) and a[key] ~= b[key] then return false end
+  end
+  return true
+end
+
+local function write_map(instrument, phrase, state)
+  local done, why = set_mapping(instrument, phrase, state.noteRange or nil)
+  if not done then return false, why end
+  local mapping = phrase.mapping
+  if mapping then
+    -- (the loop's ends in the order that keeps its start before its end)
+    if state.loopStart and state.loopEnd and state.loopStart > mapping.loop_end then
+      mapping.loop_end = state.loopEnd
+      mapping.loop_start = state.loopStart
+      state = (function() local c = {} for k, v in pairs(state) do c[k] = v end c.loopStart, c.loopEnd = nil, nil return c end)()
+    end
+    for _, key in ipairs(MAPPING_ORDER) do
+      if state[key] ~= nil then MAPPING_FIELDS[key].set(mapping, state[key]) end
+    end
+  end
+  return true
+end
+
+local function map_plan(song, env, input)
+  local n, objects, label = places_.locate(song, env, "phrase", input, "phrase-map")
+  local phrase = objects.phrase
+  local current = map_state(phrase, input)
+  local wanted = {}
+  local range = input.noteRange
+  if range == nil then
+    wanted.noteRange = current.noteRange
+  elseif range == json.null or range == false then
+    wanted.noteRange = false
+  elseif range_ok(range) then
+    wanted.noteRange = { range[1], range[2] }
+  else
+    bad("noteRange is [low, high], notes from 0 to 119 (C-4 is 48), or null to unmap it")
+  end
+  local any = range ~= nil
+  for _, key in ipairs(MAPPING_ORDER) do
+    if input[key] ~= nil then
+      if not MAPPING_FIELDS[key].check(input[key]) then bad(MAPPING_FIELDS[key].says) end
+      if not wanted.noteRange then bad("the phrase has no keys: give noteRange to map it (its key tracking, base note and loop are the mapping's)") end
+      wanted[key], any = input[key], true
+    end
+  end
+  if not any then bad("give noteRange (or null to unmap), keyTracking, baseNote, looping, loopStart or loopEnd") end
+  if wanted.loopStart and wanted.loopEnd and wanted.loopStart > wanted.loopEnd then bad("loopStart must not be after loopEnd") end
+  for _, key in ipairs({ "loopStart", "loopEnd" }) do
+    if wanted[key] and wanted[key] > phrase.number_of_lines then bad(key .. " is a line of the phrase (it has " .. phrase.number_of_lines .. ")") end
+  end
+  if wanted.noteRange and not mapping_slot(objects.instrument, wanted.noteRange[1], wanted.noteRange[2], current.noteRange and current.noteRange[1] or nil) then
+    bad("those keys overlap another phrase's mapping")
+  end
+  -- (the prior names every field the change sets: what the undo puts back)
+  local prior = map_state(phrase, wanted)
+  return { n = n, label = label, wanted = wanted, prior = prior, instrument = objects.instrument, phrase = phrase }
+end
+
+local function map_title(plan)
+  local wanted = plan.wanted
+  if not wanted.noteRange then return "Unmapped " .. plan.label end
+  local parts = {}
+  if not same_range(wanted.noteRange, plan.prior.noteRange or nil) then parts[#parts + 1] = string.format("notes %d-%d", wanted.noteRange[1], wanted.noteRange[2]) end
+  if wanted.keyTracking then parts[#parts + 1] = "key tracking " .. wanted.keyTracking end
+  if wanted.baseNote then parts[#parts + 1] = "base note " .. wanted.baseNote end
+  if wanted.looping ~= nil then parts[#parts + 1] = wanted.looping and "looping" or "one-shot" end
+  if wanted.loopStart then parts[#parts + 1] = "loop from line " .. wanted.loopStart end
+  if wanted.loopEnd then parts[#parts + 1] = "loop to line " .. wanted.loopEnd end
+  if #parts == 0 then parts[1] = string.format("notes %d-%d", wanted.noteRange[1], wanted.noteRange[2]) end
+  return string.format("Mapped %s: %s", plan.label, table.concat(parts, ", "))
+end
+
 base.register({
   kind = "phrase-map", custom = true, by_place = true,
   preview = function(song, env, input)
     local plan = map_plan(song, env, input)
-    local display = { title = map_title(plan), before = { noteRange = plan.current }, after = { noteRange = plan.wanted or false } }
-    if same_range(plan.current or nil, plan.wanted) then display.unchanged = true end
-    return { target = places_.target_of(env, "phrase", plan.n), prior = { noteRange = plan.current }, fence = { noteRange = plan.current }, display = display }
+    local display = { title = map_title(plan), before = plan.prior, after = plan.wanted }
+    if same_map(plan.prior, plan.wanted) then display.unchanged = true end
+    return { target = places_.target_of(env, "phrase", plan.n), prior = plan.prior, fence = plan.prior, display = display }
   end,
   apply = function(song, env, input, fence, desc)
     local ok, plan = pcall(map_plan, song, env, input)
     if not ok then base.gone_is_changed(plan) end
-    if not same_range(plan.current or nil, fence.noteRange or nil) then fail("changed", plan.label .. "'s mapping changed since the preview") end
-    local objects = places_.resolve(song, "phrase", plan.n)
-    local display = { title = map_title(plan), before = { noteRange = plan.current }, after = { noteRange = plan.wanted or false } }
-    if same_range(plan.current or nil, plan.wanted) then
+    if not same_map(plan.prior, fence) then fail("changed", plan.label .. "'s mapping changed since the preview") end
+    local display = { title = map_title(plan), before = plan.prior, after = plan.wanted }
+    if same_map(plan.prior, plan.wanted) then
       display.unchanged = true
-      return { applied = { noteRange = plan.current }, display = display, undo = { desc = desc, entry = false }, prior = { noteRange = plan.current }, target = places_.target_of(env, "phrase", plan.n) }
+      return { applied = plan.prior, display = display, undo = { desc = desc, entry = false }, prior = plan.prior, target = places_.target_of(env, "phrase", plan.n) }
     end
     song:describe_undo(desc)
-    local done, why = set_mapping(objects.instrument, objects.phrase, plan.wanted)
+    local done, why = write_map(plan.instrument, plan.phrase, plan.wanted)
     if not done then fail("failed", "Renoise didn't map it: " .. tostring(why)) end
-    local now = mapping_of(objects.phrase)
-    if env.watch_undo then env.watch_undo(objects.instrument.phrase_mappings_observable) end
+    local now = map_state(plan.phrase, plan.wanted)
+    if env.watch_undo then
+      env.watch_undo(plan.instrument.phrase_mappings_observable)
+      local mapping = plan.phrase.mapping
+      if mapping then
+        for _, field in ipairs({ "note_range", "key_tracking", "base_note", "looping", "loop_start", "loop_end" }) do env.watch_undo(mapping[field .. "_observable"]) end
+      end
+    end
     return {
-      applied = { noteRange = now and now.noteRange or false }, target = places_.target_of(env, "phrase", plan.n), display = display,
-      undo = { desc = desc, entry = true }, prior = { noteRange = plan.current }, place = places_.journal_place("phrase", plan.n),
+      applied = now, target = places_.target_of(env, "phrase", plan.n), display = display,
+      undo = { desc = desc, entry = true }, prior = plan.prior, place = places_.journal_place("phrase", plan.n),
     }
   end,
   restore = function(song, env, restore, desc)
     local prior, applied = restore.prior, restore.applied
     if type(prior) ~= "table" or type(applied) ~= "table" then bad("prior and applied: the mapping") end
     local n, objects, label = places_.locate(song, env, "phrase", { place = restore.target and restore.target.place }, "phrase-map")
-    local now = mapping_of(objects.phrase)
-    local now_range = now and now.noteRange or nil
-    if same_range(now_range, prior.noteRange or nil) then
-      return { restored = { noteRange = prior.noteRange }, display = { title = label .. "'s mapping is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
+    local now = map_state(objects.phrase, applied)
+    if same_map(now, prior) then
+      return { restored = prior, display = { title = label .. "'s mapping is back already" }, undo = { desc = desc, entry = false }, unwritten = true }
     end
-    if not restore.discard and not same_range(now_range, applied.noteRange or nil) then fail("changed", label .. "'s mapping changed in Renoise since Kumi set it") end
+    if not restore.discard and not same_map(now, applied) then fail("changed", label .. "'s mapping changed in Renoise since Kumi set it") end
     song:describe_undo(desc)
-    local done, why = set_mapping(objects.instrument, objects.phrase, prior.noteRange or nil)
+    local done, why = write_map(objects.instrument, objects.phrase, prior)
     if not done then fail("changed", "its old keys can't be mapped again: " .. tostring(why)) end
     base.note_restored(env.journal, "phrase-map", places_.journal_place("phrase", n), applied, base.KINDS["phrase-map"])
-    return { restored = { noteRange = prior.noteRange }, display = { title = label .. "'s mapping put back" }, undo = { desc = desc, entry = true } }
+    return { restored = prior, display = { title = label .. "'s mapping put back" }, undo = { desc = desc, entry = true } }
   end,
   reread = places_.reread("phrase"),
-  read = function(phrase) local m = mapping_of(phrase) return { noteRange = m and m.noteRange or false } end,
-  same = function(a, b) return same_range(a.noteRange or nil, b.noteRange or nil) end,
+  read = function(phrase, shape) return map_state(phrase, shape or {}) end,
+  same = same_map,
 })
 
 -- phrase-playback {ref: instrument, mode: off | program | keymap, programRef?}: the instrument's phrase playback; in program
@@ -497,17 +581,15 @@ local playback = instruments_.settings_kind({
       text = function(v) return "phrase " .. string.format("%02X", v - 1) end },
   },
 })
+-- (program mode with no phrase chosen, program 0, is what a new instrument has: lab. A state keeps both as Renoise has them)
 playback.read = function(instrument)
-  local mode = MODES.get(instrument.phrase_playback_mode)
-  local state = { mode = mode }
-  if mode == "program" then state.program = instrument.phrase_program end
-  return state
+  return { mode = MODES.get(instrument.phrase_playback_mode), program = instrument.phrase_program }
 end
 playback.wanted_at = function(loc, input)
   local instrument = loc.object
   local mode = input.mode
   if MODES.parse(mode) == nil then bad("mode is off, program or keymap") end
-  local state = { mode = mode }
+  local state = { mode = mode, program = mode == "off" and 0 or 127 }
   if mode == "program" then
     local program
     if input.programRef ~= nil then
@@ -527,19 +609,22 @@ playback.wanted_at = function(loc, input)
   return state
 end
 playback.wanted = nil
+-- (the program first: Renoise sets the mode from it; then the mode, which keeps a program of program mode)
 playback.write = function(instrument, state)
-  instrument.phrase_playback_mode = MODES.parse(state.mode)
-  if state.mode == "program" and state.program then instrument.phrase_program = state.program end
+  if type(state.program) == "number" and instrument.phrase_program ~= state.program then instrument.phrase_program = state.program end
+  local mode = MODES.parse(state.mode)
+  if instrument.phrase_playback_mode ~= mode then instrument.phrase_playback_mode = mode end
 end
-playback.same = function(a, b) return a.mode == b.mode and (a.mode ~= "program" or a.program == b.program) end
+playback.same = function(a, b) return a.mode == b.mode and a.program == b.program end
 playback.title = function(name, _, to)
-  if to.mode == "program" then return string.format("%s plays phrase %02X on every key", name, (to.program or 1) - 1) end
+  if to.mode == "program" and type(to.program) == "number" and to.program >= 1 then return string.format("%s plays phrase %02X on every key", name, to.program - 1) end
+  if to.mode == "program" then return name .. ": phrases by program, none chosen" end
   return name .. (to.mode == "off" and ": phrases off" or ": phrases by keymap")
 end
 playback.observables = function(instrument) return { instrument.phrase_playback_mode_observable, instrument.phrase_program_observable } end
 -- (the program's phrase on the wire is its place)
 playback.wire = function(state, env, loc)
-  if type(state) ~= "table" or type(state.program) ~= "number" or not loc or not loc.numbers then return state end
+  if type(state) ~= "table" or type(state.program) ~= "number" or state.program < 1 or not loc or not loc.numbers then return state end
   local out = {}
   for k, v in pairs(state) do out[k] = v end
   out.program = { place = places_.place_of(env, "phrase", { loc.numbers[1], state.program }) }
@@ -674,7 +759,8 @@ local function clear_input(phrase, input)
   return { lines = lines }
 end
 
-local function lines_kind(kind, verb, noun, build)
+local function lines_kind(spec)
+  local kind, verb, noun, build = spec.kind, spec.verb, spec.noun, spec.build
   local function plan(song, env, input)
     local n, objects, label = places_.locate(song, env, "phrase", input, kind)
     local phrase = objects.phrase
@@ -784,8 +870,8 @@ local function lines_kind(kind, verb, noun, build)
   })
 end
 
-lines_kind("phrase-write", "Wrote", "Lines", function(_, input) return input end)
-lines_kind("phrase-clear", "Cleared", "Cells", clear_input)
+lines_kind({ kind = "phrase-write", verb = "Wrote", noun = "Lines", build = function(_, input) return input end })
+lines_kind({ kind = "phrase-clear", verb = "Cleared", noun = "Cells", build = clear_input })
 
 -- phrase-script {ref: phrase, code, commit?}: the script's text (as its lines), committed for playback unless commit: false;
 -- the phrase plays its script. Renoise compiles a committed script in its player, a moment later: the apply waits for that

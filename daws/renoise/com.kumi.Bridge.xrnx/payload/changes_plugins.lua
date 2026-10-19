@@ -18,8 +18,10 @@ local M = {}
 -- The most plug-in state (its preset data) Kumi keeps to put a plug-in back.
 M.MAX_STATE_BYTES = 8 * 1024 * 1024
 
--- Which fields of these Renoise's own undo takes back (lab, Renoise 3.5.4): set from the measurements in the notes.
-M.UNDO_COVERS = { plugin = true, preset = true, midi = true, plugin_props = true }
+-- Which of these Renoise's own undo takes back (lab, Renoise 3.5.4, each alone in a callback and then undone): a plug-in load,
+-- its parameters, its program, its channel, transpose and volume, a MIDI output's fields are steps; auto-suspend is not
+-- (plugin-suspend says so).
+M.UNDO_COVERS = { plugin = true, preset = true, midi = true }
 local NOT_IN_UNDO = "Renoise's own undo won't take this back; Kumi can."
 
 local function state_hash(text)
@@ -232,7 +234,7 @@ base.register({
 local db_to_linear, linear_to_db = instruments_.db_to_linear, instruments_.linear_to_db
 
 instruments_.instrument_spec(instruments_.settings_kind({
-  kind = "plugin-set", noun = "plug-in settings", undoable = true, order = { "channel", "transpose", "volumeDb", "autoSuspend" },
+  kind = "plugin-set", noun = "plug-in settings", undoable = true, order = { "channel", "transpose", "volumeDb" },
   object = function(objects) return objects.instrument.plugin_properties end,
   label = function(label) return label .. "'s plug-in" end,
   fields = {
@@ -243,6 +245,16 @@ instruments_.instrument_spec(instruments_.settings_kind({
     volumeDb = { get = function(p) return linear_to_db(p.volume) end, set = function(p, v) p.volume = db_to_linear(v) end, field = "volume",
       check = function(v) return type(v) == "number" and v == v and v <= 12.0412 end, says = "volumeDb is a number up to +12 (-200 or less is silence)",
       text = function(v) return "volume " .. base.db_text(v > -200 and v or nil) .. " dB" end },
+  },
+}))
+
+-- plugin-suspend {ref: instrument, autoSuspend}: whether the plug-in sleeps when silent. Renoise's own undo skips it (lab).
+
+instruments_.instrument_spec(instruments_.settings_kind({
+  kind = "plugin-suspend", noun = "auto-suspend", undoable = false, order = { "autoSuspend" },
+  object = function(objects) return objects.instrument.plugin_properties end,
+  label = function(label) return label .. "'s plug-in" end,
+  fields = {
     autoSuspend = { get = function(p) return p.auto_suspend end, set = function(p, v) p.auto_suspend = v end, field = "auto_suspend", check = is_boolean,
       says = "autoSuspend is true or false", text = function(v) return v and "suspends when silent" or "always running" end },
   },

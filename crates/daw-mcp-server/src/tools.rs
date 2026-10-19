@@ -32,9 +32,10 @@ pub fn kinds(daw: Daw) -> Kinds {
             outside_undo: &["loop-repeat"],
         },
         Daw::Renoise => Kinds {
-            read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],
+            // (an instrument's modulation sets and sample FX chains: n-instruments)
+            read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param", "modset", "chain"],
             bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
-            outside_undo: &["track-mute", "track-solo", "loop-range", "loop-pattern"],
+            outside_undo: &["track-mute", "track-solo", "loop-range", "loop-pattern", "plugin-suspend"],
         },
     }
 }

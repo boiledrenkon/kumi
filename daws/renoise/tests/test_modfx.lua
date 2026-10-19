@@ -49,6 +49,8 @@ local function modset_ref(epoch, i, m) return epoch .. ":modset:" .. i .. "." ..
 local function moddevice_ref(epoch, i, m, d) return epoch .. ":moddevice:" .. i .. "." .. m .. "." .. d end
 local function chain_ref(epoch, i, c) return epoch .. ":chain:" .. i .. "." .. c end
 local function chaindevice_ref(epoch, i, c, d) return epoch .. ":chaindevice:" .. i .. "." .. c .. "." .. d end
+-- (for the reads' tests: Drums with its set and chain)
+T.modfx = { setup = setup_modfx, catalog = catalog }
 
 -- Modulation sets
 
@@ -106,7 +108,10 @@ test("modfx: a set's name, pitch range, filter and inputs change and go back; an
   eq(set.name, "Amp")
   eq(set.pitch_range, 12)
   eq(set.filter_type, "None")
-  eq(set.inputs.cutoff, 1)
+  eq(set.inputs.cutoff, 63.5)
+  -- (each input in its own range: panning -1 to 1, cutoff 0 to 127)
+  failure(call(peer, "change_preview", { kind = "modset-set", input = { ref = modset_ref(place(peer), 1, 1), panning = 1.5 }, epoch = place(peer) }), "bad-params")
+  ok(call(peer, "change_preview", { kind = "modset-set", input = { ref = modset_ref(place(peer), 1, 1), cutoff = 100 }, epoch = place(peer) }).result)
   failure(call(peer, "change_preview", { kind = "modset-set", input = { ref = modset_ref(place(peer), 1, 1), filterType = "Wah" }, epoch = place(peer) }), "bad-params")
 end)
 
@@ -117,7 +122,7 @@ test("modfx: a modulation device added by name for a target; Kumi's undo removes
   local record, done = change(peer, "moddevice-add", { ref = modset_ref(epoch, 1, 1), path = "LFO", target = "cutoff" })
   local set = instrument(1).sets[1]
   eq(#set.devices, 3)
-  eq(set.devices[3].name, "LFO")
+  eq(set.devices[3].name, "Cutoff LFO", "Renoise names it by its target")
   eq(set.devices[3].target, 4)
   ok(done.created.ref:match(":moddevice:1%.1%.3$"), done.created.ref)
   local undone = restore(peer, "moddevice-add", record)
@@ -139,14 +144,14 @@ test("modfx: a deleted modulation device comes back with its parameters and poin
   local undone = restore(peer, "moddevice-delete", record)
   ok(undone.result, json.encode(undone.error or {}))
   eq(#set.devices, 2)
-  eq(set.devices[2].name, "Envelope")
+  eq(set.devices[2].name, "Pitch Envelope")
   eq(set.devices[2].points[2].scaling, 0.5)
   local moved = change(peer, "moddevice-move", { ref = moddevice_ref(place(peer), 1, 1, 1), index = 2 })
-  eq(set.devices[2].name, "AHDSR")
+  eq(set.devices[2].name, "Volume AHDSR")
   eq(set.devices[2].params[1].value, 0.1, "its settings went with it")
   undone = restore(peer, "moddevice-move", moved)
   ok(undone.result, json.encode(undone.error or {}))
-  eq(set.devices[1].name, "AHDSR")
+  eq(set.devices[1].name, "Volume AHDSR")
   instrument(1).macros[1].mappings = { { name = "Attack" } }
   failure(call(peer, "change_preview", { kind = "moddevice-move", input = { ref = moddevice_ref(place(peer), 1, 1, 1), index = 2 }, epoch = place(peer) }), "bad-params")
 end)
@@ -165,7 +170,7 @@ test("modfx: a modulation device's operator, polarity and envelope points change
   eq(device.operator, 1)
   eq(#device.points, 2)
   eq(device.points[2].time, 32)
-  eq(device.length, 64)
+  eq(device.length, 513, "Renoise's default length")
   local param = change(peer, "moddevice-param", { ref = moddevice_ref(place(peer), 1, 1, 1), param = "Release", value = 0.75 })
   eq(instrument(1).sets[1].devices[1].params[5].value, 0.75)
   undone = restore(peer, "moddevice-param", param)
@@ -178,7 +183,7 @@ test("places, modulation device × a device made before it by the producer: the 
   local env, peer, epoch = setup_modfx()
   local record = change(peer, "moddevice-param", { ref = moddevice_ref(epoch, 1, 1, 1), param = 1, value = 0.3 })
   mock.song:instrument(1):sample_modulation_set(1):insert_device_at("Modulation/LFO", 1, 1)
-  eq(instrument(1).sets[1].devices[2].name, "AHDSR")
+  eq(instrument(1).sets[1].devices[2].name, "Volume AHDSR")
   local undone = restore(peer, "moddevice-param", record)
   ok(undone.result, json.encode(undone.error or {}))
   eq(instrument(1).sets[1].devices[2].params[1].value, 0.1)
@@ -189,9 +194,9 @@ end)
 
 test("modfx: a chain added with its output; Kumi's undo removes it, refused once a sample uses it; a bad output is bad-params", function()
   local env, peer, epoch = setup_modfx()
-  local record, done = change(peer, "chain-add", { ref = iref(epoch, 1), name = "Wet", outputRouting = "Pad" })
+  local record, done = change(peer, "chain-add", { ref = iref(epoch, 1), name = "Wet", outputRouting = "04: Pad" })
   eq(#instrument(1).chains, 2)
-  eq(instrument(1).chains[2].output_routing, "Pad")
+  eq(instrument(1).chains[2].output_routing, "04: Pad")
   eq(done.created.kind, "chain")
   local undone = restore(peer, "chain-add", record)
   ok(undone.result, json.encode(undone.error or {}))
@@ -205,7 +210,7 @@ end)
 test("modfx: a deleted chain comes back with its devices' settings, its mixer and output, and its sample uses it again", function()
   local env, peer, epoch = setup_modfx()
   instrument(1).chains[1].devices[1].params[2].value = 0.7 -- the chain's mixer volume
-  instrument(1).chains[1].output_routing = "Bass"
+  instrument(1).chains[1].output_routing = "03: Bass"
   local record = change(peer, "chain-delete", { ref = chain_ref(epoch, 1, 1) })
   eq(#instrument(1).chains, 0)
   eq(instrument(1).samples[2].device_chain_index, 0)
@@ -213,7 +218,7 @@ test("modfx: a deleted chain comes back with its devices' settings, its mixer an
   ok(undone.result, json.encode(undone.error or {}))
   local chain = instrument(1).chains[1]
   eq(chain.name, "Tone")
-  eq(chain.output_routing, "Bass")
+  eq(chain.output_routing, "03: Bass")
   eq(chain.devices[1].params[2].value, 0.7)
   eq(chain.devices[2].path, "Audio/Effects/Native/EQ 5")
   eq(chain.devices[2].preset_data, "<eq gain=3/>")
@@ -222,9 +227,9 @@ end)
 
 test("modfx: a chain's name and output change and go back", function()
   local env, peer, epoch = setup_modfx()
-  local record = change(peer, "chain-set", { ref = chain_ref(epoch, 1, 1), name = "Bright", outputRouting = "Hat" })
+  local record = change(peer, "chain-set", { ref = chain_ref(epoch, 1, 1), name = "Bright", outputRouting = "02: Hat" })
   eq(instrument(1).chains[1].name, "Bright")
-  eq(instrument(1).chains[1].output_routing, "Hat")
+  eq(instrument(1).chains[1].output_routing, "02: Hat")
   local undone = restore(peer, "chain-set", record)
   ok(undone.result, json.encode(undone.error or {}))
   eq(instrument(1).chains[1].output_routing, "Current Track")

@@ -373,12 +373,14 @@ local function phrase_body(job, params, epoch)
   return fit(result, entries, from, to, false)
 end
 
+-- An instrument's samples and their keyzones (the keyzone map: each zone's notes and velocities), its macros and its phrases with
+-- their keys (n-instruments: what plays the zones and the phrases, and how the zones overlap).
 local function instrument_body(job, params, epoch)
   local at = refs.expect(params.ref, "instrument", 1, epoch)[1]
   local song = the_song()
   if at > #song.instruments then fail("bad-params", "no instrument " .. at) end
   local instrument = song:instrument(at)
-  local keyzones, phrases = {}, {}
+  local keyzones, phrases, ranges = {}, {}, {}
   local sample_count, phrase_count = #instrument.samples, #instrument.phrases
   for s = 1, math.min(sample_count, M.MAX_BODY_ROWS) do
     job.slice()
@@ -387,10 +389,16 @@ local function instrument_body(job, params, epoch)
       sample = row.name, sampleRef = row.ref, noteRange = row.noteRange, velocityRange = row.velocityRange,
       baseNote = row.baseNote,
     }
+    if row.layer ~= "note-on" then keyzones[s].layer = row.layer end
+    if row.slice then keyzones[s].slice = true end
+    if row.muteGroup and row.muteGroup > 0 then keyzones[s].muteGroup = row.muteGroup end
   end
   for p = 1, math.min(phrase_count, M.MAX_BODY_ROWS) do
     job.slice()
-    phrases[p] = the_song():instrument(at):phrase(p).name
+    local phrase = the_song():instrument(at):phrase(p)
+    phrases[p] = phrase.name
+    local mapping = phrase.mapping
+    ranges[p] = mapping and array({ mapping.note_range[1], mapping.note_range[2] }) or json.null
   end
   local row = instrument_row(the_song(), epoch, at)
   local result = {
@@ -401,9 +409,17 @@ local function instrument_body(job, params, epoch)
     keyzones = array(keyzones),
     macros = row.macros,
     phrases = array(phrases),
+    -- n-instruments
+    kind = row.kind,
+    overlap = row.overlap,
+    phrasePlayback = row.phrasePlayback,
+    phraseRanges = array(ranges),
+    modsets = row.modsetCount,
+    chains = row.chainCount,
   }
+  if row.phraseProgramRef then result.phraseProgramRef, result.phraseProgram = row.phraseProgramRef, the_song():instrument(at).phrase_program end
   if sample_count > M.MAX_BODY_ROWS or phrase_count > M.MAX_BODY_ROWS then result.truncated = true end
-  return reads.bound(result, { "keyzones", "phrases" })
+  return reads.bound(result, { "keyzones", "phrases", "phraseRanges" })
 end
 
 -- The chain of a track. Flat until M4 reads the Doofers' and Splitters' XML: they are marked as containers.

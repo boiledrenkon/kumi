@@ -230,9 +230,12 @@ function M.instrument_print(instrument)
   }
 end
 
+-- Empty, as a new instrument is and clear() leaves one (measured): no samples, phrases, chains or plug-in, and at most its one
+-- modulation set, with no devices in it.
 function M.is_empty(instrument)
   local print = M.instrument_print(instrument)
-  return print.samples == 0 and print.phrases == 0 and print.plugin == "" and print.sets == 0 and print.chains == 0
+  if print.samples > 0 or print.phrases > 0 or print.plugin ~= "" or print.chains > 0 or print.sets > 1 then return false end
+  return print.sets == 0 or #instrument:sample_modulation_set(1).devices == 0
 end
 
 -- The notes of the song that play instrument value `v` (counting from 0), within `budget` reads: a list of {pattern, track,

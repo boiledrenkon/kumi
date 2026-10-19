@@ -20,7 +20,7 @@ local M = {}
 M.SCAN_BUDGET = 300000
 -- The most an instrument Kumi deletes may hold (its samples' bytes, as Renoise keeps them in memory), so that saving it and
 -- loading it back stay well inside one callback (measured: see the notes).
-M.MAX_INSTRUMENT_BYTES = 96 * 1024 * 1024
+M.MAX_INSTRUMENT_BYTES = 64 * 1024 * 1024
 -- The biggest file Kumi loads in one callback.
 M.MAX_LOAD_BYTES = 96 * 1024 * 1024
 -- The most swaps one move makes (each renumbers the notes of the whole song).
@@ -308,25 +308,19 @@ local function keep_selection(song, i, before)
   end)
 end
 
--- The devices on tracks aimed at an instrument (*Instr. Macros, *Instr. Automation, *Instr. MIDI Control): their "Instrument"
--- parameter counts the instruments from 0.
-local function instrument_links(song, v)
-  local found = {}
+-- The devices on tracks that are linked to an instrument (*Instr. Macros, *Instr. Automation, *Instr. MIDI Control): Renoise shows
+-- no parameter or preset field for the instrument they're linked to (lab 2026-10-19), so Kumi can only count them and say so.
+local function instrument_devices(song)
+  local count = 0
   for t = 1, rows.track_count(song) do
     local track = song:track(t)
     for d = 2, #track.devices do
-      local device = track:device(d)
-      if device.device_path:find("/Native/*Instr.", 1, true) then
-        for k = 1, #device.parameters do
-          local parameter = device:parameter(k)
-          if parameter.name == "Instrument" and parameter.value == v then found[#found + 1] = { t = t, d = d, k = k, path = device.device_path } end
-        end
-      end
+      if track:device(d).device_path:find("/Native/*Instr.", 1, true) then count = count + 1 end
     end
   end
-  return found
+  return count
 end
-M.instrument_links = instrument_links
+M.instrument_devices = instrument_devices
 
 -- Whether Kumi may take away an instrument it made (an add's, a load's, a duplicate's undo): nothing plays it, nothing is
 -- aimed at it, and it is as Kumi made it. `discard` takes it whatever is in it, as a track's add does.
@@ -342,9 +336,6 @@ local function check_removable(song, i, instrument, applied, discard, label)
   end
   if #notes > 0 then
     fail("changed", string.format("%d %s in the song play %s since Kumi made it: Kumi left it (Renoise would clear them)", #notes, #notes == 1 and "note" or "notes", q(label)))
-  end
-  if #instrument_links(song, i - 1) > 0 then
-    fail("changed", string.format("a device on a track is aimed at %s since Kumi made it: Kumi left it", q(label)))
   end
 end
 
@@ -461,6 +452,9 @@ local function delete_preview(song, env, input)
     title = "Deleted instrument " .. q(label), before = { instruments = #song.instruments }, after = { instruments = #song.instruments - 1 },
     note = "Kumi keeps it (saved as an instrument file) and the notes that play it, to put back. The instruments after it move down one; Renoise renumbers their notes.",
   }
+  if instrument_devices(song) > 0 then
+    display.note = display.note .. " Devices linked to instruments (*Instr. Macros and the like) may be linked to it: Renoise lets go of them, and Kumi can't see or put back such links."
+  end
   if bytes > M.MAX_INSTRUMENT_BYTES then
     display.note = string.format("It holds %.0f MB, more than Kumi can keep to put it back: the apply will refuse.", bytes / 1048576)
   end
@@ -553,7 +547,6 @@ local function delete_write(song, env, input, fence, desc, notes)
     fail("failed", "Renoise wouldn't save " .. q(label) .. " to keep it, so Kumi didn't delete it")
   end
   local stat = io.stat(file)
-  local links = instrument_links(song, i - 1)
   local patterns = {}
   for _, note in ipairs(notes) do patterns[note.p] = true end
   local material_ = import("changes_material")
@@ -564,7 +557,7 @@ local function delete_write(song, env, input, fence, desc, notes)
   -- (the place it goes back to: after the instrument before it, followed from here)
   local material = {
     file = file, bytes = stat and stat.size or nil, print = print_of_fence(fence), name = name, index = i,
-    after = env.instrument_mark and env.instrument_mark() or nil, notes = notes, pool = pool, links = links,
+    after = env.instrument_mark and env.instrument_mark() or nil, notes = notes, pool = pool,
   }
   if #json.encode(material) > base.MAX_MATERIAL_BYTES then
     -- (too many notes to keep: the instrument goes back, and nothing is lost)
@@ -652,30 +645,12 @@ local function delete_restore(song, env, restore, desc)
     end
     if column and column.is_empty then write_note(column, note, at - 1) else skipped = skipped + 1 end
   end
-  -- The devices aimed at it, where nothing re-aimed them since.
-  local relinked, unlinked = 0, 0
-  for _, link in ipairs(material.links or {}) do
-    local t = moved(link.t)
-    local done = false
-    if t and t <= rows.track_count(song) then
-      local track = song:track(t)
-      local device = link.d <= #track.devices and track:device(link.d) or nil
-      if device and device.device_path == link.path then
-        local parameter = device:parameter(link.k)
-        if parameter and parameter.name == "Instrument" and (parameter.value < 0 or parameter.value == at - 1 or parameter.value >= #song.instruments) then
-          done = pcall(function() parameter.value = at - 1 end)
-        end
-      end
-    end
-    if done then relinked = relinked + 1 else unlinked = unlinked + 1 end
-  end
   base.note_restored_at(env.journal, "instrument-delete", places_.journal_place("instrument", { at }))
   local parts = {}
   if #(material.notes or {}) > 0 then
     parts[#parts + 1] = skipped == 0 and string.format("Its %d %s %s back.", #material.notes, #material.notes == 1 and "note is" or "notes are", "put")
       or string.format("%d of its %d notes are back; %d weren't put back (their pattern, track or cell changed in Renoise since).", #material.notes - skipped, #material.notes, skipped)
   end
-  if unlinked > 0 then parts[#parts + 1] = string.format("%d %s aimed at it couldn't be aimed again: look at them.", unlinked, unlinked == 1 and "device" or "devices") end
   return {
     restored = { ref = places_.ref_of(env, "instrument", { at }) },
     display = { title = q(label) .. " put back", note = #parts > 0 and table.concat(parts, " ") or nil },
@@ -729,12 +704,32 @@ local function load_path(input, kinds)
   if stat and stat.type and stat.type ~= "file" then bad(path .. " isn't a file") end
   local extension = (path:match("%.([%w]+)$") or ""):lower()
   if not kinds[extension] then bad("Renoise loads instruments (.xrni), multi-samples (.sfz) and sample files (.wav, .flac, .aif, .ogg, .mp3) here; not ." .. extension) end
+  -- (a file that isn't what its name says would make Renoise show an error dialog and wait for a person: its first bytes tell)
+  if not M.looks_like(path, extension) then bad(path .. " isn't a ." .. extension .. " file Renoise can load (its contents say otherwise)") end
   if stat and stat.size and stat.size > M.MAX_LOAD_BYTES then
     fail("failed", string.format("%s is %.0f MB, more than Kumi loads in one go (%d MB): load it in Renoise", path, stat.size / 1048576, M.MAX_LOAD_BYTES / 1048576))
   end
   return path, extension
 end
 M.load_path = load_path
+
+-- Whether a file's first bytes are those of its kind: an instrument is a zip, a multi-sample text, a sample file its format's.
+local MAGIC = {
+  xrni = { "^PK\3\4" }, wav = { "^RIFF....WAVE", "^RIFX....WAVE", "^RF64....WAVE" }, flac = { "^fLaC" },
+  aif = { "^FORM....AIF[FC]" }, aiff = { "^FORM....AIF[FC]" }, ogg = { "^OggS" }, caf = { "^caff" },
+  mp3 = { "^ID3", "^\255[\224-\255]" }, mp4 = { "^....ftyp" }, m4a = { "^....ftyp" },
+}
+function M.looks_like(path, extension)
+  local f = io.open(path, "rb")
+  if not f then return false end
+  local head = f:read(1024) or ""
+  f:close()
+  if extension == "sfz" then return head ~= "" and not head:find("%z") end
+  for _, pattern in ipairs(MAGIC[extension] or {}) do
+    if head:find(pattern) then return true end
+  end
+  return MAGIC[extension] == nil
+end
 
 local LOADS = { xrni = true, sfz = true }
 for extension in pairs(SAMPLE_FILES) do LOADS[extension] = true end
@@ -974,11 +969,13 @@ base.register({
   same = function(a, b) return a.index == b.index end,
 })
 
--- instrument_save {ref, path, overwrite?, epoch}: the instrument written to an .xrni file (an action: nothing in the song
--- changes, so no undo). A file already there is replaced only when the request says overwrite.
+-- instrument_save {ref (or instrumentRef, as Kumi names it), path, overwrite?, epoch}: the instrument written to an .xrni file (an
+-- action: nothing in the song changes, so no undo). A file already there is replaced only when the request says overwrite.
 function M.save(params, env)
   local song = base.context(params, env)
-  local input = type(params) == "table" and params or {}
+  local input = {}
+  for k, v in pairs(type(params) == "table" and params or {}) do input[k] = v end
+  if input.ref == nil then input.ref = input.instrumentRef end
   local n, objects, label = places_.locate(song, env, "instrument", input, "instrument_save")
   local path = input.path
   if type(path) ~= "string" or path == "" or path:find("[%c]") or not absolute(path) then bad("path: the absolute path of the .xrni file to write") end
@@ -995,7 +992,10 @@ function M.save(params, env)
   local saved = with_selected(song, n[1], function() return renoise.app():save_instrument(path) end)
   if not saved or not io.exists(path) then fail("failed", "Renoise wouldn't save " .. q(label) .. " to " .. path) end
   local stat = io.stat(path)
-  return { epoch = env.epoch(), layout = env.layout(), saved = path, bytes = stat and stat.size or json.null, name = label }
+  return {
+    epoch = env.epoch(), layout = env.layout(), saved = path, bytes = stat and stat.size or json.null, name = label,
+    display = { title = string.format("Saved instrument %s to %s", q(label), path) },
+  }
 end
 
 return M

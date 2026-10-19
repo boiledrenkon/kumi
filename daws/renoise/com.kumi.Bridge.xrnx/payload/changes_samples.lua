@@ -608,7 +608,7 @@ local function delete_preview(song, env, input)
   local n, objects, label = places_.locate(song, env, "sample", input, "sample-delete")
   local sample = objects.sample
   if sample.is_slice_alias then bad(label .. " is a slice: delete its slice marker instead (sample-slices)") end
-  local display = { title = "Deleted sample " .. label, note = "Kumi keeps its audio and settings to put back." }
+  local display = { title = "Deleted sample " .. label, note = "Kumi keeps its audio and settings to put back. Phrases name samples by number (Renoise doesn't renumber them): the samples after it move down one until it is back." }
   if #sample.slice_markers > 0 then display.note = "Its slices go with it; Kumi keeps its audio, markers and every slice's settings to put back." end
   if buffer_bytes(sample.sample_buffer) > M.MAX_SAMPLE_BYTES then
     display.note = string.format("It holds %.0f MB, more than Kumi keeps to put it back: the apply will refuse.", buffer_bytes(sample.sample_buffer) / 1048576)

@@ -92,15 +92,23 @@ local function moddevice_state(device)
 end
 M.moddevice_state = moddevice_state
 
--- Renoise names a modulation device by its path in available_devices ("Modulation/AHDSR"): the one whose last part is its name.
+-- A modulation device's path in available_devices ("Modulation/AHDSR"): its name is "<Target> <Type>" ("Volume AHDSR": lab).
+local TARGET_WORDS = { "Volume ", "Panning ", "Pitch ", "Cutoff ", "Resonance ", "Drive " }
+function M.moddevice_type(name)
+  for _, word in ipairs(TARGET_WORDS) do
+    if name:sub(1, #word) == word then return name:sub(#word + 1) end
+  end
+  return name
+end
+
 function M.moddevice_path(device, set)
-  local name = device.name
+  local kind = M.moddevice_type(device.name)
   if set then
     for _, path in ipairs(set.available_devices) do
-      if (path:match("([^/]+)$") or path) == name then return path end
+      if (path:match("([^/]+)$") or path) == kind then return path end
     end
   end
-  return "Modulation/" .. name
+  return "Modulation/" .. kind
 end
 
 local function write_moddevice(device, state)
@@ -333,12 +341,17 @@ local SET_FIELDS = {
     end, says = "filterType is one of the set's filter types (as Renoise names them)", text = function(v) return "filter " .. v end },
 }
 local SET_ORDER = { "name", "pitchRange", "filterType" }
+-- (each input in its own range, as Renoise has it: volume 0..1, panning and pitch -1..1, cutoff, resonance and drive 0..127)
 for _, key in ipairs(INPUT_ORDER) do
   SET_FIELDS[key] = {
     get = function(s) return s[INPUTS[key]].value end, set = function(s, v) s[INPUTS[key]].value = v end,
     obs = function(s) return s[INPUTS[key]].value_observable end,
-    check = function(v) return type(v) == "number" and v >= 0 and v <= 1 end, says = key .. " (the set's " .. key .. " input) is from 0 to 1",
-    text = function(v) return key .. " " .. math.floor(v * 100 + 0.5) .. "%" end,
+    check = function(v, s)
+      local p = s[INPUTS[key]]
+      return type(v) == "number" and v == v and v >= p.value_min and v <= p.value_max
+    end,
+    says = key .. " is the set's " .. key .. " input, in its own range (volume 0 to 1, panning and pitch -1 to 1, cutoff, resonance and drive 0 to 127)",
+    text = function(v) return key .. " " .. string.format("%g", math.floor(v * 1000 + 0.5) / 1000) end,
   }
   SET_ORDER[#SET_ORDER + 1] = key
 end
@@ -360,7 +373,7 @@ local function resolve_modpath(set, wanted)
   bad(string.format("a modulation set has no device %q (it has %s)", wanted, table.concat(names, ", ")))
 end
 
-local function moddevice_print(device) return { path = device.name, target = device.target, hash = state_hash(moddevice_state(device)) } end
+local function moddevice_print(device) return { name = device.name, target = device.target, hash = state_hash(moddevice_state(device)) } end
 
 function M.any_device_state(of, device)
   if of == "moddevice" then return moddevice_state(device) end
@@ -376,7 +389,7 @@ local function moddevice_add(song, env, input, fence, desc, preview_only)
   local count = #set.devices
   local index = index_in(input.index, count, "index")
   local name = path:match("([^/]+)$") or path
-  local title = string.format("Added %s (%s) to %s", q(name), input.target, label)
+  local title = string.format("Added %s on %s to %s", q(name), input.target, label)
   if preview_only then
     return {
       target = places_.target_of(env, "modset", n), prior = { devices = count }, fence = { devices = count, index = index },
@@ -977,9 +990,9 @@ instruments_.instrument_spec({
   kind = "chaindevice-bypass", of = "chaindevice", noun = "bypass", undoable = true,
   read = function(device) return { bypass = not device.is_active } end,
   observables = function(device) return { device.is_active_observable } end,
-  wanted = function(device, input)
+  decorate = function(loc) if loc.numbers[3] == 1 then bad("a chain's first device is its mixer: it is always on") end end,
+  wanted = function(_, input)
     if type(input.bypass) ~= "boolean" then bad("bypass must be true or false") end
-    if device.device_path:find("SampleVolPan", 1, true) then bad("a chain's first device is its mixer: it is always on") end
     return { bypass = input.bypass }
   end,
   write = function(device, state) device.is_active = not state.bypass end,

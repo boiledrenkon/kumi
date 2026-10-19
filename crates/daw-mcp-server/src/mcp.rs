@@ -185,6 +185,24 @@ pub fn tools(host: &Host) -> Value {
         let hidden = json!({"type": "boolean", "description": "Also list data in the note and effect columns the track doesn't show, on every line (under `hidden`). Without it only a line with nothing in the shown columns is looked through."});
         list[2]["inputSchema"]["properties"]["hidden"] = hidden.clone();
         list[5]["inputSchema"]["properties"]["hidden"] = hidden;
+        // An instrument saved to a file (M4, n-instruments): not a change.
+        let save = json!({
+            "name": "instrument_save",
+            "title": "Save a Renoise instrument",
+            "description": "Saves an instrument to an .xrni file at path (absolute; the extension is added when missing), never over a file already there unless overwrite: true. Not a change: no undo.",
+            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                "instrumentRef": {"type": "string", "description": "The instrument."},
+                "ref": {"type": "string", "description": "The instrument (as instrumentRef)."},
+                "path": {"type": "string"},
+                "overwrite": {"type": "boolean"},
+                "epoch": {"type": "string"},
+                "layout": {"type": "integer", "minimum": 0},
+            })), "required": ["path"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        });
+        if let Some(tools) = list.as_array_mut() {
+            tools.push(save);
+        }
     }
     list
 }
@@ -274,6 +292,10 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                         "focus" => host.focus(&arguments).await,
                         _ => host.focus_body(&arguments).await,
                     };
+                    result(id, tool_result(answer, is_error))
+                }
+                "instrument_save" => {
+                    let (answer, is_error) = host.instrument_save(&arguments).await;
                     result(id, tool_result(answer, is_error))
                 }
                 "change_preview" | "change_apply" | "change_undo" | "change_release" | "transport_stop" | "transport_play"
