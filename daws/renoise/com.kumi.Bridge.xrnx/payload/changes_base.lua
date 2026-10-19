@@ -343,7 +343,17 @@ function M.journal_check(journal)
   if not song then return end
   for _, entry in ipairs(journal.entries) do
     local spec = entry.spec
-    if spec and spec.reread and not entry.shape then
+    if entry.follows == "device" then
+      -- (a device moved: its place is followed through the swaps, and is where it started or where Kumi put it)
+      local now = entry.place.device
+      if entry.state == "applied" and now == entry.prior.index and now ~= entry.applied.index then
+        entry.state = "undone"
+        queue(journal, entry.desc, "undo")
+      elseif entry.state == "undone" and now == entry.applied.index then
+        entry.state = "applied"
+        queue(journal, entry.desc, "redo")
+      end
+    elseif spec and spec.reread and not entry.shape then
       local ok, now = pcall(function()
         local object = spec.reread(song, entry.place)
         if object == nil then return nil end

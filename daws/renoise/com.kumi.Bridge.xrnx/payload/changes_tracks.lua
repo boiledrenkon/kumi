@@ -6,6 +6,7 @@ local json = import("json")
 local refs = import("refs")
 local rows = import("rows")
 local base = import("changes_base")
+local material_ = import("changes_material")
 
 local fail, bad, the_song = base.fail, base.bad, base.the_song
 local close, db_of, hex_of, rgb_of = base.close, base.db_of, base.hex_of, base.rgb_of
@@ -189,76 +190,6 @@ local function delete_preview(song, env, input)
   return { target = target(env, index), prior = now, fence = now, display = display }
 end
 
--- One note column's content, as exact values.
-local function note_cell(column, c)
-  return {
-    col = c, note = column.note_value, instrument = column.instrument_value, volume = column.volume_value,
-    panning = column.panning_value, delay = column.delay_value, fxn = column.effect_number_value, fxa = column.effect_amount_value,
-  }
-end
-
-local function effect_cell(column, c)
-  return { col = c, number = column.number_value, amount = column.amount_value }
-end
-
--- The lines of a pattern track that hold anything, and how many writes it takes to put them back.
-local function read_lines(pattern_track, total)
-  local out, writes = {}, 0
-  for l = 1, total do
-    local line = pattern_track:line(l)
-    if not line.is_empty then
-      local row = { line = l, notes = {}, effects = {} }
-      for c = 1, 12 do
-        local column = line:note_column(c)
-        if not column.is_empty then
-          row.notes[#row.notes + 1] = note_cell(column, c)
-          writes = writes + 7
-        end
-      end
-      for c = 1, 8 do
-        local column = line:effect_column(c)
-        if not column.is_empty then
-          row.effects[#row.effects + 1] = effect_cell(column, c)
-          writes = writes + 2
-        end
-      end
-      out[#out + 1] = row
-    end
-  end
-  return out, writes
-end
-
-local function read_device(device)
-  return {
-    path = device.device_path, name = device.name, display = device.display_name, active = device.is_active,
-    maximized = device.is_maximized, preset = device.active_preset, presetData = device.active_preset_data,
-  }
-end
-
--- The automation of the track's parameters that have any, in every pattern: by device and parameter place.
-local function read_automation(song, index, track)
-  local out = {}
-  for d = 2, #track.devices do
-    local device = track:device(d)
-    for k = 1, #device.parameters do
-      local parameter = device:parameter(k)
-      if parameter.is_automated then
-        for p = 1, #song.patterns do
-          local automation = song:pattern(p):track(index):find_automation(parameter)
-          if automation then
-            local points = {}
-            for i, point in ipairs(automation.points) do
-              points[i] = { time = point.time, value = point.value, scaling = point.scaling }
-            end
-            out[#out + 1] = { pattern = p, device = d, parameter = k, playmode = automation.playmode, points = points }
-          end
-        end
-      end
-    end
-  end
-  return out
-end
-
 local function gather(song, index, track, kind)
   local sequencer = song.sequencer
   local material = {
@@ -284,15 +215,15 @@ local function gather(song, index, track, kind)
   if parents[index] then
     material.group = { index = parents[index], name = song:track(parents[index]).name }
   end
-  for d = 2, #track.devices do material.devices[#material.devices + 1] = read_device(track:device(d)) end
-  material.automation = read_automation(song, index, track)
+  for d = 2, #track.devices do material.devices[#material.devices + 1] = material_.read_device(track:device(d)) end
+  material.automation = material_.read_automation(song, index, track)
   local writes = 0
   for p = 1, #song.patterns do
     local pattern_track = song:pattern(p):track(index)
     if pattern_track.is_alias then
       material.patterns[#material.patterns + 1] = { pattern = p, alias = pattern_track.alias_pattern_index }
     elseif not pattern_track.is_empty then
-      local lines, cost = read_lines(pattern_track, song:pattern(p).number_of_lines)
+      local lines, cost = material_.read_lines(pattern_track, song:pattern(p).number_of_lines)
       if #lines > 0 then material.patterns[#material.patterns + 1] = { pattern = p, lines = lines, writes = cost } end
       writes = writes + cost
     end
@@ -376,50 +307,6 @@ local function restore_properties(song, track, index, material)
   if material.muteState and rows.track_type(track) ~= "master" then try(function() track.mute_state = material.muteState end) end
 end
 
-local function restore_devices(track, material)
-  for i, saved in ipairs(material.devices or {}) do
-    local device = track:insert_device_at(saved.path, i + 1)
-    if not device then fail("failed", "Renoise wouldn't make the device " .. tostring(saved.path)) end
-    if saved.presetData and saved.presetData ~= "" then pcall(function() device.active_preset_data = saved.presetData end) end
-    if saved.display and saved.display ~= "" then device.display_name = saved.display end
-    device.is_active = saved.active ~= false
-    if saved.maximized ~= nil then pcall(function() device.is_maximized = saved.maximized end) end
-  end
-end
-
-local function write_lines(song, index, entry)
-  local pattern_track = song:pattern(entry.pattern):track(index)
-  if entry.alias then
-    pattern_track.alias_pattern_index = entry.alias
-    return
-  end
-  for _, row in ipairs(entry.lines) do
-    local line = pattern_track:line(row.line)
-    for _, cell in ipairs(row.notes) do
-      local column = line:note_column(cell.col)
-      column.note_value, column.instrument_value, column.volume_value = cell.note, cell.instrument, cell.volume
-      column.panning_value, column.delay_value = cell.panning, cell.delay
-      column.effect_number_value, column.effect_amount_value = cell.fxn, cell.fxa
-    end
-    for _, cell in ipairs(row.effects) do
-      local column = line:effect_column(cell.col)
-      column.number_value, column.amount_value = cell.number, cell.amount
-    end
-  end
-end
-
-local function write_automation(song, track, index, material, patterns)
-  for _, saved in ipairs(material.automation or {}) do
-    if patterns[saved.pattern] then
-      local parameter = track:device(saved.device):parameter(saved.parameter)
-      local pattern_track = song:pattern(saved.pattern):track(index)
-      local automation = pattern_track:find_automation(parameter) or pattern_track:create_automation(parameter)
-      automation.playmode = saved.playmode
-      automation.points = saved.points
-    end
-  end
-end
-
 -- Where the track goes back: its old place, moved by the tracks made and deleted since. A track made at or before the master's
 -- place is a sequencer track (the master moves up); one made after it is a send track (measured in Renoise 3.5.4: inserting AT
 -- the master's place makes a sequencer track, not a send).
@@ -461,7 +348,7 @@ local function restore_first_phase(song, material, phases)
   local ok, err = pcall(function()
     local track = song:track(index)
     restore_properties(song, track, index, material)
-    restore_devices(track, material)
+    for i, saved in ipairs(material.devices or {}) do material_.restore_device(track, i + 1, saved) end
     index = put_in_group(song, index, material)
     local sequencer = song.sequencer
     for _, s in ipairs(material.slotMutes or {}) do
@@ -469,10 +356,10 @@ local function restore_first_phase(song, material, phases)
     end
     local done = {}
     for _, entry in ipairs(phases[1]) do
-      write_lines(song, index, entry)
+      material_.write_lines(song, index, entry)
       done[entry.pattern] = true
     end
-    write_automation(song, song:track(index), index, material, done)
+    material_.write_automation(song, song:track(index), index, material.automation, done)
   end)
   if not ok then
     pcall(function() song:delete_track_at(index) end)
@@ -533,10 +420,10 @@ local function delete_restore(song, env, restore, desc, journal)
           live:describe_undo(step(k))
           local done = {}
           for _, entry in ipairs(phases[k]) do
-            write_lines(live, index, entry)
+            material_.write_lines(live, index, entry)
             done[entry.pattern] = true
           end
-          write_automation(live, live:track(index), index, material, done)
+          material_.write_automation(live, live:track(index), index, material.automation, done)
         end
       end)
       if not ok then

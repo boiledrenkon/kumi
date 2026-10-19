@@ -53,7 +53,7 @@ function M.apply(params, env)
   if done.undo.entry then
     base.remember(env.journal, {
       desc = desc, kind = spec.kind, place = done.place, spec = spec, prior = done.prior, applied = done.applied,
-      state = "applied", shape = done.shape or spec.shape,
+      state = "applied", shape = done.shape or spec.shape, follows = done.follows,
     })
   end
   return answer

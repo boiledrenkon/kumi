@@ -488,15 +488,47 @@ function M.make_song(options)
         end)
         return device(data)
       end,
+      swap_devices_at = function(_, a, b)
+        if type(a) ~= "number" or type(b) ~= "number" or not t.devices[a] or not t.devices[b] then out_of_range("device", a) end
+        if d.options.mixer_device and (a == 1 or b == 1) then error("the mixer device must stay first", 2) end
+        local function swap()
+          t.devices[a], t.devices[b] = t.devices[b], t.devices[a]
+          M.fire(t.devices_observable, { type = "swap", index = a, index2 = b })
+        end
+        swap()
+        M.record(swap, swap)
+      end,
       delete_device_at = function(_, index)
         if type(index) ~= "number" or not t.devices[index] then out_of_range("device", index) end
         if d.options.mixer_device and index == 1 then error("the mixer device can't be deleted", 2) end
         local data = table.remove(t.devices, index)
+        -- (Renoise takes a deleted device's automation with it, in every pattern; its undo brings it back)
+        local taken = {}
+        for _, pattern in ipairs(M.data.patterns) do
+          for _, pattern_track in pairs(pattern.tracks) do
+            for i = #(pattern_track.automation or {}), 1, -1 do
+              local entry = pattern_track.automation[i]
+              for _, parameter in ipairs(data.params) do
+                if entry.parameter == parameter then
+                  table.remove(pattern_track.automation, i)
+                  taken[#taken + 1] = { pattern_track, entry }
+                  break
+                end
+              end
+            end
+          end
+        end
         M.fire(t.devices_observable, { type = "remove", index = index })
         M.record(function()
           table.insert(t.devices, math.min(index, #t.devices + 1), data)
+          for _, pair in ipairs(taken) do table.insert(pair[1].automation, pair[2]) end
           M.fire(t.devices_observable, { type = "insert", index = math.min(index, #t.devices) })
         end, function()
+          for _, pair in ipairs(taken) do
+            for i, entry in ipairs(pair[1].automation) do
+              if entry == pair[2] then table.remove(pair[1].automation, i) break end
+            end
+          end
           for i, existing in ipairs(t.devices) do
             if existing == data then table.remove(t.devices, i) M.fire(t.devices_observable, { type = "remove", index = i }) break end
           end
@@ -505,6 +537,21 @@ function M.make_song(options)
     }
     local getters = {
       name = function() return t.name end,
+      -- (the devices a track can be given: tests say which in M.device_catalog; each is {path, name} to Renoise)
+      available_devices = function()
+        local paths = {}
+        for path in pairs(M.device_catalog or {}) do paths[#paths + 1] = path end
+        table.sort(paths)
+        return paths
+      end,
+      available_device_infos = function()
+        local infos = {}
+        for path in pairs(M.device_catalog or {}) do
+          infos[#infos + 1] = { path = path, name = path:match("([^/]+)$") or path, short_name = path:match("([^/]+)$") or path }
+        end
+        table.sort(infos, function(x, y) return x.path < y.path end)
+        return infos
+      end,
       color = function() return t.color or M.NIL end,
       type = function() return KIND[t.kind] end,
       mute_state = function() return t.mute_state end,

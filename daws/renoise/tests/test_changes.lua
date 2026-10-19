@@ -780,7 +780,8 @@ local function device_song()
   local env, peer = setup(nil, { send_tracks = 2 })
   mock.device_catalog = {
     ["Audio/Effects/Native/EQ 5"] = { { name = "Gain", value = 0.5, min = 0, max = 1 } },
-    ["Audio/Effects/Native/#Send"] = { { name = "Receiver", value = 0, min = 0, max = 255 } },
+    ["Audio/Effects/Native/#Send"] = { { name = "Receiver", value = 0, min = 0, max = 255 }, { name = "Amount", value = 1, min = 0, max = 1 } },
+    ["Audio/Effects/Native/Gainer"] = { { name = "Gain", value = 1, min = 0, max = 4 } },
   }
   local bass = mock.song:track(3)
   bass:insert_device_at("Audio/Effects/Native/EQ 5", 2)
@@ -851,5 +852,311 @@ test("changes: the producer's undo of a parameter change is told, and the device
   local told = H.events(peer, "undone_in_daw")
   eq(#told, 1, "told")
   eq(told[1].data.descs[1], "Kumi: send (kd11)")
+  H.no_dialogs()
+end)
+
+-- Putting a device in, taking it out, moving it
+
+local function devices_of(i) return mock.data.tracks[i].devices end
+local function paths_of(i)
+  local out = {}
+  for k, device in ipairs(devices_of(i)) do out[k] = k == 1 and "Mixer" or device.path:match("([^/]+)$") end
+  return table.concat(out, ",")
+end
+
+test("changes: a device is put in by its path or its name as one undo step, and taken out again", function()
+  local env, peer = device_song()
+  local epoch, layout = place(peer)
+  local ref = track_ref(epoch, 3)
+  eq(paths_of(3), "Mixer,EQ 5,#Send")
+  local input = { ref = ref, path = "Audio/Effects/Native/Gainer", index = 3 }
+  local previewed = preview(peer, "device-add", input)
+  eq(previewed.display.title, "Added Gainer to Bass")
+  eq(previewed.display.after.index, 3)
+  eq(previewed.target.ref, ref)
+  eq(paths_of(3), "Mixer,EQ 5,#Send", "a preview writes nothing")
+  eq(steps(), 0)
+  -- by name, in any case
+  eq(preview(peer, "device-add", { ref = ref, path = "gainer" }).display.after.index, 4)
+  local done = apply(peer, "device-add", input, "Kumi: add (ke01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(paths_of(3), "Mixer,EQ 5,Gainer,#Send")
+  eq(steps(), 1)
+  eq(newest(), "Kumi: add (ke01)")
+  ok(done.result.epoch ~= epoch, "the devices moved the epoch")
+  eq(done.result.created.ref, done.result.epoch .. ":device:3.3")
+  eq(done.result.created.kind, "device")
+  eq(done.result.applied.index, 3)
+  eq(done.result.undo.entry, true)
+  eq(done.result.material.track, 3)
+  -- put back from where the apply left the song
+  local undone = restore(peer, "device-add", { target = previewed.target, prior = previewed.prior, applied = done.result.applied,
+    created = done.result.created, material = done.result.material }, "Kumi: undo add (ke02)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(paths_of(3), "Mixer,EQ 5,#Send")
+  eq(steps(), 2)
+  eq(newest(), "Kumi: undo add (ke02)")
+  H.no_dialogs()
+end)
+
+test("changes: a device is refused when the song has none like it, the place is out of range or a send's settings are not for a send", function()
+  local env, peer = device_song()
+  local epoch = place(peer)
+  local ref = track_ref(epoch, 3)
+  local unknown = ask(peer, "change_preview", "device-add", { ref = ref, path = "Audio/Effects/Native/Gain" })
+  failure(unknown, "bad-params")
+  ok(unknown.error.message:find("Gainer", 1, true), unknown.error.message)
+  failure(ask(peer, "change_preview", "device-add", { ref = ref, path = "Nothing at all" }), "bad-params")
+  for _, index in ipairs({ 1, 5, 2.5 }) do
+    failure(ask(peer, "change_preview", "device-add", { ref = ref, path = "Gainer", index = index }), "bad-params")
+  end
+  failure(ask(peer, "change_preview", "device-add", { ref = ref, path = "Gainer", receiver = 0 }), "bad-params")
+  failure(ask(peer, "change_preview", "device-add", { ref = ref, path = "#Send", receiver = 2 }), "bad-params")
+  failure(ask(peer, "change_preview", "device-add", { ref = ref, path = "#Send", receiver = 0.5 }), "bad-params")
+  failure(ask(peer, "change_preview", "device-add", { ref = epoch .. ":track:9", path = "Gainer" }), "gone")
+  failure(ask(peer, "change_preview", "device-add", { path = "Gainer" }), "bad-params")
+  eq(steps(), 0)
+  H.no_dialogs()
+end)
+
+test("changes: a #Send is put in with its receiver and amount", function()
+  local env, peer = device_song()
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 1), path = "#Send", receiver = 1, amount = 0.5 }
+  local previewed = preview(peer, "device-add", input)
+  local done = apply(peer, "device-add", input, "Kumi: send (ke11)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(paths_of(1), "Mixer,#Send")
+  eq(devices_of(1)[2].params[1].value, 1, "the receiver")
+  eq(devices_of(1)[2].params[2].value, 0.5, "the amount")
+  eq(done.result.created.ref, done.result.epoch .. ":device:1.2")
+  local out_of_range = { ref = track_ref(done.result.epoch, 1), path = "#Send", amount = 3 }
+  local again = call(peer, "change_preview", { kind = "device-add", input = out_of_range, epoch = done.result.epoch, layout = done.result.layout })
+  ok(again.result, json.encode(again.error or {}))
+  local refused = apply(peer, "device-add", out_of_range, "Kumi: send (ke12)", again.result.fence, done.result.epoch, done.result.layout)
+  failure(refused, "bad-params")
+  H.no_dialogs()
+end)
+
+test("changes: a device the producer changed since is not taken out unless Kumi is told to", function()
+  local env, peer = device_song()
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 3), path = "Gainer", index = 2 }
+  local previewed = preview(peer, "device-add", input)
+  local done = apply(peer, "device-add", input, "Kumi: add (ke21)", previewed.fence, epoch, layout).result
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.applied, created = done.created, material = done.material }
+  devices_of(3)[2].params[1].value = 3
+  failure(restore(peer, "device-add", record, "Kumi: undo add (ke22)", done.epoch, done.layout), "changed")
+  eq(paths_of(3), "Mixer,Gainer,EQ 5,#Send")
+  eq(steps(), 1, "nothing was written")
+  local forced = restore(peer, "device-add", record, "Kumi: undo add (ke22)", done.epoch, done.layout, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(paths_of(3), "Mixer,EQ 5,#Send")
+  -- another epoch is stale
+  local made = apply(peer, "device-add", input, "Kumi: add (ke23)", previewed.fence, place(peer), 0)
+  failure(made, "stale")
+  H.no_dialogs()
+end)
+
+local function bass_with_automation()
+  local env, peer = device_song()
+  local d = devices_of(3)
+  d[2].preset_data, d[2].display_name, d[2].active = "<preset eq5/>", "Warm", false
+  mock.ops.automate(1, 3, 2, 1, { { time = 1, value = 0.2, scaling = 0 }, { time = 9, value = 0.9, scaling = 0 } })
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  return env, peer
+end
+
+test("changes: deleting a device keeps its settings and automation, and the restore makes it again where it was", function()
+  local env, peer = bass_with_automation()
+  local epoch, layout = place(peer)
+  local ref = epoch .. ":device:3.2"
+  local previewed = preview(peer, "device-delete", { ref = ref })
+  eq(previewed.display.title, "Deleted Warm on Bass")
+  eq(previewed.prior.deleted, false)
+  eq(steps(), 0)
+  local done = apply(peer, "device-delete", { ref = ref }, "Kumi: delete device (kf01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(paths_of(3), "Mixer,#Send")
+  eq(steps(), 1)
+  eq(done.result.applied.deleted, true)
+  eq(done.result.material.track, 3)
+  eq(done.result.material.index, 2)
+  eq(done.result.material.device.presetData, "<preset eq5/>")
+  eq(#done.result.material.automation, 1)
+  eq(done.result.material.automation[1].points[2].value, 0.9)
+  ok(done.result.epoch ~= epoch)
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied, material = done.result.material }
+  local undone = restore(peer, "device-delete", record, "Kumi: undo delete device (kf02)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(paths_of(3), "Mixer,EQ 5,#Send")
+  local back = devices_of(3)[2]
+  eq(back.preset_data, "<preset eq5/>")
+  eq(back.display_name, "Warm")
+  eq(back.active, false)
+  eq(steps(), 2)
+  eq(newest(), "Kumi: undo delete device (kf02)")
+  eq(undone.result.restored.ref, undone.result.epoch .. ":device:3.2")
+  local automation = mock.data.patterns[1].tracks[3].automation
+  eq(#automation, 1)
+  eq(automation[1].points[2].value, 0.9)
+  -- asked again: it is back, nothing is written
+  local again = restore(peer, "device-delete", record, "Kumi: undo delete device (kf03)", undone.result.epoch, undone.result.layout)
+  ok(again.result, json.encode(again.error or {}))
+  eq(again.result.undo.entry, false)
+  eq(steps(), 2)
+  H.no_dialogs()
+end)
+
+test("changes: a deleted device goes back to its track after tracks were made before it, and the mixer device is never touched", function()
+  local env, peer = bass_with_automation()
+  local epoch, layout = place(peer)
+  local ref = epoch .. ":device:3.3"
+  local previewed = preview(peer, "device-delete", { ref = ref })
+  local done = apply(peer, "device-delete", { ref = ref }, "Kumi: delete device (kf11)", previewed.fence, epoch, layout).result
+  eq(paths_of(3), "Mixer,EQ 5")
+  mock.api.insert_track_at(1)
+  H.tick(3)
+  local now = place(peer)
+  eq(now, done.epoch, "a made track moves the layout, not the epoch")
+  local undone = restore(peer, "device-delete", { target = previewed.target, prior = previewed.prior, applied = done.applied, material = done.material },
+    "Kumi: undo delete device (kf12)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(paths_of(4), "Mixer,EQ 5,#Send", "Bass is track 4 now")
+  eq(undone.result.restored.ref, undone.result.epoch .. ":device:4.3")
+  failure(ask(peer, "change_preview", "device-delete", { ref = undone.result.epoch .. ":device:4.1" }), "bad-params")
+  failure(ask(peer, "change_preview", "device-move", { ref = undone.result.epoch .. ":device:4.1", index = 2 }), "bad-params")
+  failure(ask(peer, "change_preview", "device-delete", { ref = undone.result.epoch .. ":device:4.9" }), "gone")
+  H.no_dialogs()
+end)
+
+test("changes: a device changed since the preview is not deleted", function()
+  local env, peer = bass_with_automation()
+  local epoch, layout = place(peer)
+  local ref = epoch .. ":device:3.2"
+  local previewed = preview(peer, "device-delete", { ref = ref })
+  devices_of(3)[2].params[1].value = 0.1
+  failure(apply(peer, "device-delete", { ref = ref }, "Kumi: delete device (kf21)", previewed.fence, epoch, layout), "changed")
+  eq(paths_of(3), "Mixer,EQ 5,#Send")
+  eq(steps(), 0)
+  H.no_dialogs()
+end)
+
+local function four_devices()
+  local env, peer = device_song()
+  devices_of(3)[4] = nil
+  mock.song:track(3):insert_device_at("Audio/Effects/Native/Gainer", 4)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  return env, peer
+end
+
+test("changes: a device is moved by swaps as one undo step, and moved back", function()
+  local env, peer = four_devices()
+  eq(paths_of(3), "Mixer,EQ 5,#Send,Gainer")
+  local epoch, layout = place(peer)
+  local ref = epoch .. ":device:3.2"
+  local previewed = preview(peer, "device-move", { ref = ref, index = 4 })
+  eq(previewed.display.title, "Moved EQ 5 on Bass to place 4")
+  eq(previewed.prior.index, 2)
+  eq(steps(), 0)
+  local done = apply(peer, "device-move", { ref = ref, index = 4 }, "Kumi: move (kg01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(paths_of(3), "Mixer,#Send,Gainer,EQ 5")
+  eq(steps(), 1)
+  eq(done.result.applied.index, 4)
+  eq(done.result.material.track, 3)
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied, material = done.result.material }
+  local undone = restore(peer, "device-move", record, "Kumi: undo move (kg02)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(paths_of(3), "Mixer,EQ 5,#Send,Gainer")
+  eq(steps(), 2)
+  -- already back: nothing written
+  local again = restore(peer, "device-move", record, "Kumi: undo move (kg03)", undone.result.epoch, undone.result.layout)
+  ok(again.result, json.encode(again.error or {}))
+  eq(again.result.undo.entry, false)
+  eq(steps(), 2)
+  -- to where it is: nothing to do
+  local same = preview(peer, "device-move", { ref = place(peer) .. ":device:3.2", index = 2 })
+  eq(same.display.unchanged, true)
+  H.no_dialogs()
+end)
+
+test("changes: a device the producer moved since is not moved back", function()
+  local env, peer = four_devices()
+  local epoch, layout = place(peer)
+  local ref = epoch .. ":device:3.2"
+  local previewed = preview(peer, "device-move", { ref = ref, index = 3 })
+  local done = apply(peer, "device-move", { ref = ref, index = 3 }, "Kumi: move (kg11)", previewed.fence, epoch, layout).result
+  eq(paths_of(3), "Mixer,#Send,EQ 5,Gainer")
+  mock.song:track(3):swap_devices_at(3, 4)
+  H.tick(2)
+  local now, layout_now = place(peer)
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.applied, material = done.material }
+  failure(restore(peer, "device-move", record, "Kumi: undo move (kg12)", now, layout_now), "changed")
+  eq(paths_of(3), "Mixer,#Send,Gainer,EQ 5")
+  failure(ask(peer, "change_preview", "device-move", { ref = now .. ":device:3.2", index = 9 }), "bad-params")
+  H.no_dialogs()
+end)
+
+test("changes: the producer's undo and redo of a device made, deleted or moved is told", function()
+  local env, peer = bass_with_automation()
+  local epoch, layout = place(peer)
+  local function told_after(action)
+    H.tick(2)
+    H.events(peer, "undone_in_daw")
+    action()
+    H.tick(3)
+    drain(peer)
+    return H.events(peer, "undone_in_daw")
+  end
+  -- made
+  local added = apply(peer, "device-add", { ref = track_ref(epoch, 3), path = "Gainer", index = 2 }, "Kumi: add (kh01)",
+    preview(peer, "device-add", { ref = track_ref(epoch, 3), path = "Gainer", index = 2 }).fence, epoch, layout).result
+  local told = told_after(function() mock.song:undo() end)
+  eq(#told, 1, "made, undone")
+  eq(told[1].data.how, "undo")
+  eq(told[1].data.descs[1], "Kumi: add (kh01)")
+  eq(paths_of(3), "Mixer,EQ 5,#Send")
+  told = told_after(function() mock.song:redo() end)
+  eq(#told, 1, "made, redone")
+  eq(told[1].data.how, "redo")
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  -- deleted
+  local epoch2, layout2 = place(peer)
+  local ref = epoch2 .. ":device:3.2"
+  local fence = preview(peer, "device-delete", { ref = ref }).fence
+  apply(peer, "device-delete", { ref = ref }, "Kumi: delete (kh02)", fence, epoch2, layout2)
+  told = told_after(function() mock.song:undo() end)
+  eq(#told, 1, "deleted, undone")
+  eq(told[1].data.how, "undo")
+  eq(told[1].data.descs[1], "Kumi: delete (kh02)")
+  told = told_after(function() mock.song:redo() end)
+  eq(#told, 1, "deleted, redone")
+  eq(told[1].data.how, "redo")
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  H.no_dialogs()
+end)
+
+test("changes: the producer's undo of a device move is told", function()
+  local env, peer = four_devices()
+  local epoch, layout = place(peer)
+  local ref = epoch .. ":device:3.2"
+  local fence = preview(peer, "device-move", { ref = ref, index = 4 }).fence
+  apply(peer, "device-move", { ref = ref, index = 4 }, "Kumi: move (ki01)", fence, epoch, layout)
+  H.tick(2)
+  H.events(peer, "undone_in_daw")
+  mock.song:undo()
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(#told, 1)
+  eq(told[1].data.how, "undo")
+  eq(told[1].data.descs[1], "Kumi: move (ki01)")
+  eq(paths_of(3), "Mixer,EQ 5,#Send,Gainer")
+  mock.song:redo()
+  H.tick(3)
+  drain(peer)
+  told = H.events(peer, "undone_in_daw")
+  eq(told[#told].data.how, "redo")
   H.no_dialogs()
 end)
