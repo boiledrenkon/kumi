@@ -650,7 +650,8 @@ mod tests {
     #[test]
     fn a_helper_that_exits_is_started_again_after_a_backoff_that_doubles() {
         let hands = MockHands::new();
-        let mut helper = Supervised::new(Box::new(hands.clone())).with_backoff(Duration::from_millis(40), Duration::from_millis(100));
+        // The backoff starts at 200 ms and caps at 500: wide enough for a busy runner to keep its place in the margins.
+        let mut helper = Supervised::new(Box::new(hands.clone())).with_backoff(Duration::from_millis(200), Duration::from_millis(500));
         assert!(helper.call("trusted", json!({})).is_ok());
         assert_eq!(hands.launches(), 1);
         hands.exit();
@@ -658,15 +659,15 @@ mod tests {
         assert!(matches!(helper.call("trusted", json!({})), Err(HelperError::Gone(_))));
         assert!(matches!(helper.call("trusted", json!({})), Err(HelperError::Gone(_))));
         assert_eq!(hands.launches(), 1);
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(300));
         assert!(helper.call("trusted", json!({})).is_ok());
         assert_eq!((hands.launches(), helper.starts()), (2, 2));
         // A second exit in a row waits twice as long.
         hands.exit();
         assert!(helper.call("trusted", json!({})).is_err());
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(150));
         assert!(helper.call("trusted", json!({})).is_err());
-        thread::sleep(Duration::from_millis(40));
+        thread::sleep(Duration::from_millis(350));
         assert!(helper.call("trusted", json!({})).is_ok());
         assert_eq!(hands.launches(), 3);
         // A start that fails is tried again too, and the events wait out the backoff instead of spinning.
@@ -677,7 +678,7 @@ mod tests {
         assert_eq!(helper.event(Duration::from_millis(30)), None);
         assert!(started.elapsed() >= Duration::from_millis(30));
         hands.fail_launches(None);
-        thread::sleep(Duration::from_millis(110));
+        thread::sleep(Duration::from_millis(650));
         assert!(helper.call("trusted", json!({})).is_ok());
         helper.quit();
         assert!(!helper.alive());

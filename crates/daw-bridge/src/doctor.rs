@@ -512,7 +512,8 @@ mod tests {
         assert_eq!(ids(&doctor(Daw::Logic, &inputs(&no_processes))), [("installed", Level::Note)]);
 
         // Logic Pro 11 is older than Kumi serves: nothing else is checked.
-        let app = root.path().join("sys/Applications/Logic Pro.app");
+        // Joined piece by piece: the doctor prints the path as the OS writes it, backslashes on Windows included.
+        let app = root.path().join("sys").join("Applications").join("Logic Pro.app");
         let arm64 = [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 0x01];
         let plist = |version: &str| {
             format!("<plist><dict><key>CFBundleIdentifier</key><string>com.apple.logic10</string><key>CFBundleShortVersionString</key><string>{version}</string></dict></plist>")
