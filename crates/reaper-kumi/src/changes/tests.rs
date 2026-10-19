@@ -645,7 +645,9 @@ fn a_second_send_to_the_same_track_is_told_apart_and_undone_alone() {
         json!({"ref": "r:track:{AAAA}", "toRef": "r:track:{DDDD}", "volumeDb": -6.0}),
         "Kumi: Added send Drums → Reverb (ksa01)",
     );
-    assert_eq!(applied["created"]["ref"], "r:send:{AAAA}:0:{DDDD}:2of2");
+    // One of two sends to Reverb: its ref carries the state of both, as a read would give it.
+    assert_eq!(applied["created"]["ref"].as_str(), Some(send_refs(0)[1].as_str()));
+    assert!(send_refs(0)[1].starts_with("r:send:{AAAA}:0:{DDDD}:2of2."), "{}", send_refs(0)[1]);
     assert_eq!(preview["display"]["note"], "There are 1 send(s) between them already.");
     // The old send's ref is now 1of2, so a ref made before reads nothing; the new one is told.
     let mut params = json!({"kind": "send-add", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "created": applied["created"], "desc": "Kumi: undo (kund1)"});
@@ -1980,7 +1982,19 @@ fn a_track_called_track_005_reads_without_stuttering_in_every_title_and_its_rest
 
 // ----- sends by identity (M1) -----
 
-/// Kick sends twice to Reverb: s1 at -12 dB and s2 at -6 dB (the producer's own sends, with no mark).
+/// The refs of a track's sends, as a read gives them.
+fn send_refs(track: i32) -> Vec<String> {
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    let owner = reaper.track_at(reaper.current_project().unwrap().ptr, track).unwrap();
+    crate::rows::send_keys(&reaper, owner, 0)
+        .iter()
+        .enumerate()
+        .map(|(index, key)| crate::rows::send_row(&reaper, owner, 0, index as i32, key)["ref"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Kick sends twice to Reverb: s1 at -12 dB and s2 at -6 dB (the producer's own sends, with no mark). Their refs, read.
 fn two_sends() -> (String, String) {
     state(|s| {
         let mut first = FakeSend::to(3);
@@ -1990,7 +2004,8 @@ fn two_sends() -> (String, String) {
         s.tracks[1].sends = vec![first, second];
         s.state_count += 1;
     });
-    ("r:send:{BBBB}:0:{DDDD}:1of2".into(), "r:send:{BBBB}:0:{DDDD}:2of2".into())
+    let refs = send_refs(1);
+    (refs[0].clone(), refs[1].clone())
 }
 
 fn send_volumes() -> Vec<(f64, bool)> {
@@ -2021,6 +2036,89 @@ fn a_send_ref_that_names_another_send_after_the_producer_removed_one_and_added_o
     assert!(message.contains("changed") || message.contains("another send"), "{message}");
     assert_eq!((send_volumes(), state(|s| s.undo_entries)), (before.clone(), entries), "no send was muted");
     assert!(before.iter().all(|(_, mute)| !mute));
+}
+
+/// A preview and an apply through a ref, as Kumi makes them; the error, if one refused.
+fn mute_through(lab: &Lab, reference: &str) -> Option<(String, String)> {
+    let input = json!({"ref": reference, "mute": true});
+    let preview = match lab.call("change_preview", json!({"kind": "send-mute", "input": input})) {
+        Ok(preview) => preview,
+        Err(fault) => return Some(fault),
+    };
+    lab.call("change_apply", json!({"kind": "send-mute", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k2222)"})).err()
+}
+
+#[test]
+fn a_send_ref_read_before_the_producer_removed_one_and_added_one_is_refused_at_the_preview_whatever_was_read_since() {
+    for poll_between in [false, true] {
+        let lab = Lab::new();
+        let (first, _) = two_sends();
+        producer_swaps_the_first_send();
+        if poll_between {
+            // FOCUS's routing body reads the sends again while the producer looks at them.
+            send_refs(1);
+        }
+        let before = send_volumes();
+        let (code, message) = mute_through(&lab, &first).expect("refused");
+        assert_eq!(code, "changed");
+        assert!(message.contains("read them again"), "{message}");
+        assert_eq!(send_volumes(), before, "no send was muted (poll between: {poll_between})");
+    }
+}
+
+#[test]
+fn a_send_ref_read_before_the_producer_changed_the_other_send_to_that_track_is_refused() {
+    let lab = Lab::new();
+    let (first, _) = two_sends();
+    state(|s| s.tracks[1].sends[1].volume = 0.9);
+    let (code, message) = mute_through(&lab, &first).expect("refused");
+    assert_eq!(code, "changed");
+    assert!(message.contains("read them again"), "{message}");
+    assert!(send_volumes().iter().all(|(_, mute)| !mute));
+}
+
+#[test]
+fn a_plan_over_two_sends_to_one_track_from_one_read_goes_through_until_the_producer_changes_them() {
+    let lab = Lab::new();
+    let (first, second) = two_sends();
+    lab.make("send-mute", json!({"ref": first, "mute": true}), "Kumi: Send muted (ksi10)");
+    lab.make("send-volume", json!({"ref": second, "volumeDb": -3.0}), "Kumi: Send -3 dB (ksi11)");
+    lab.make("send-volume", json!({"ref": first, "volumeDb": -20.0}), "Kumi: Send -20 dB (ksi12)");
+    assert_eq!(send_volumes(), [(0.1, true), (0.71, false)]);
+    // The producer pans one: Kumi's writes no longer lead to what is there, and the refs read before name nothing.
+    state(|s| s.tracks[1].sends[0].pan = 0.5);
+    let (code, _) = mute_through(&lab, &second).expect("refused");
+    assert_eq!(code, "changed");
+    // Read again: the refs name them again.
+    let refs = send_refs(1);
+    assert_eq!(mute_through(&lab, &refs[1]), None);
+    assert_eq!(send_volumes(), [(0.1, true), (0.71, true)]);
+}
+
+#[test]
+fn a_send_alone_to_its_track_is_the_send_to_that_track_even_after_the_producer_made_it_again() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tracks[1].sends = vec![FakeSend::to(3)];
+        s.state_count += 1;
+    });
+    let reference = send_refs(1).remove(0);
+    assert_eq!(reference, "r:send:{BBBB}:0:{DDDD}", "a send alone to its track carries nothing of its state");
+    state(|s| {
+        s.tracks[1].sends = vec![FakeSend { volume: 0.5, ..FakeSend::to(3) }];
+        s.state_count += 1;
+    });
+    assert_eq!(mute_through(&lab, &reference), None);
+    assert_eq!(send_volumes(), [(0.5, true)], "the new send to Reverb is muted");
+}
+
+#[test]
+fn a_ref_to_one_of_two_sends_without_their_state_is_refused() {
+    let lab = Lab::new();
+    two_sends();
+    let (code, message) = mute_through(&lab, "r:send:{BBBB}:0:{DDDD}:1of2").expect("refused");
+    assert_eq!(code, "changed");
+    assert!(message.contains("read them again"), "{message}");
 }
 
 #[test]
@@ -2121,8 +2219,7 @@ fn a_send_kumi_removed_is_made_again_even_when_an_identical_one_is_left_and_keep
         s.tracks[1].sends = vec![FakeSend::to(3), FakeSend::to(3)];
         s.state_count += 1;
     });
-    let (preview, applied) =
-        lab.make("send-remove", json!({"ref": "r:send:{BBBB}:0:{DDDD}:1of2"}), "Kumi: Removed send “Kick” → “Reverb” (ksi03)");
+    let (preview, applied) = lab.make("send-remove", json!({"ref": send_refs(1)[0]}), "Kumi: Removed send “Kick” → “Reverb” (ksi03)");
     assert_eq!(state(|s| s.tracks[1].sends.len()), 1);
     lab.undo("send-remove", &preview, &applied, "Kumi: undo (kund1)").unwrap();
     assert_eq!(state(|s| s.tracks[1].sends.len()), 2, "the one that was left is not taken for the one removed");

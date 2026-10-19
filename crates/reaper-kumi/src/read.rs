@@ -544,7 +544,7 @@ impl Reads {
                 }
                 rows::param_row(reaper, fx, &guid, index)
             }
-            Ref::Send { track, category, other, repeat, of } => {
+            Ref::Send { track, category, other, repeat, of, .. } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let keys = rows::send_keys(reaper, owner, category);
                 let key = rows::SendKey { other, repeat, of };
@@ -818,8 +818,9 @@ impl Reads {
             })
             .collect();
         let this = rows::track_id(reaper, track);
-        let key =
-            |position: usize| all.get(position).map(|(category, _, key)| refs::send_ref(&this, *category, &key.other, key.repeat, key.of));
+        let key = |position: usize| {
+            all.get(position).map(|(category, _, key)| refs::send_ref(&this, *category, &key.other, key.repeat, key.of, None))
+        };
         let mut position = self.resume_number(cursor, all.len(), key)?;
         let mut next = None;
         while position < all.len() {
@@ -2093,9 +2094,17 @@ mod tests {
         fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(3), FakeSend::to(1), loud, louder]);
         let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
         let refs: Vec<&str> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
+        // The three sends to Reverb carry the state of the three as one mark; the send alone to Kick carries none.
+        let seen = refs[0].rsplit_once('.').unwrap().1;
+        assert_eq!(seen.len(), 8);
         assert_eq!(
             refs,
-            ["r:send:{AAAA}:0:{DDDD}:1of3", "r:send:{AAAA}:0:{BBBB}", "r:send:{AAAA}:0:{DDDD}:2of3", "r:send:{AAAA}:0:{DDDD}:3of3"]
+            [
+                format!("r:send:{{AAAA}}:0:{{DDDD}}:1of3.{seen}"),
+                "r:send:{AAAA}:0:{BBBB}".into(),
+                format!("r:send:{{AAAA}}:0:{{DDDD}}:2of3.{seen}"),
+                format!("r:send:{{AAAA}}:0:{{DDDD}}:3of3.{seen}"),
+            ]
         );
         let volume = |lab: &Lab, reference: &str| lab.rows(json!({"ref": reference}))[0]["volumeDb"].clone();
         assert_eq!(volume(&lab, "r:send:{AAAA}:0:{DDDD}:3of3"), json!(-12.04));
@@ -2117,7 +2126,8 @@ mod tests {
         fake::with(|s| s.tracks[0].sends = vec![FakeSend::to(3), quiet]);
         let rows = lab.rows(json!({"kind": "send", "parent": "r:track:{AAAA}"}));
         let refs: Vec<&str> = rows.iter().map(|r| r["ref"].as_str().unwrap()).collect();
-        assert_eq!(refs, ["r:send:{AAAA}:0:{DDDD}:1of2", "r:send:{AAAA}:0:{DDDD}:2of2"]);
+        let plain: Vec<&str> = refs.iter().map(|r| r.rsplit_once('.').unwrap().0).collect();
+        assert_eq!(plain, ["r:send:{AAAA}:0:{DDDD}:1of2", "r:send:{AAAA}:0:{DDDD}:2of2"]);
         assert_eq!(lab.rows(json!({"ref": refs[0]}))[0]["volumeDb"], json!(0.0));
         // The producer deletes the 0 dB send. Its ref no longer reads the quiet one, and the quiet one's own ref says why.
         fake::with(|s| {

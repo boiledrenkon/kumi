@@ -67,13 +67,16 @@ pub enum Ref {
     /// A send or receive of `track`, named by the track at its other end, or a hardware output by the output it goes to:
     /// never by position, which a reorder moves. Two or more to the same place are told apart by which of them this is
     /// (`repeat`, from 1) among how many there are (`of`): the ref stops reading anything once that count changes,
-    /// since REAPER gives a send no identity of its own to follow.
+    /// since REAPER gives a send no identity of its own to follow. A send of two or more to one track also carries the
+    /// state of those sends as the ref was read (`seen`): a change through it is refused once the producer has changed
+    /// them, since the place may name another send by then.
     Send {
         track: TrackId,
         category: i32,
         other: SendEnd,
         repeat: u32,
         of: u32,
+        seen: Option<String>,
     },
     Marker(String),
     Region(String),
@@ -134,15 +137,23 @@ impl Ref {
             ("param", [guid, index]) => Ref::Param { fx: guid_of(guid, "an FX id")?, index: number(index, "a parameter index")? },
             ("send", [track, category, other]) | ("send", [track, category, other, _]) => {
                 let category = number(category, "a send category")?;
-                let (repeat, of) = match rest.get(3) {
-                    None => (1, 1),
-                    Some(text) => text
-                        .split_once("of")
-                        .and_then(|(k, n)| Some((k.parse::<u32>().ok()?, n.parse::<u32>().ok()?)))
-                        .filter(|&(k, n)| n >= 2 && (1..=n).contains(&k))
-                        .ok_or_else(|| {
-                            format!("{text:?} isn't a repeat such as 2of3: which of the sends to the same place, of how many")
-                        })?,
+                let (repeat, of, seen) = match rest.get(3) {
+                    None => (1, 1, None),
+                    Some(text) => {
+                        let (count, seen) = match text.split_once('.') {
+                            Some((count, seen)) => (count, Some(seen)),
+                            None => (*text, None),
+                        };
+                        let (repeat, of) = count
+                            .split_once("of")
+                            .and_then(|(k, n)| Some((k.parse::<u32>().ok()?, n.parse::<u32>().ok()?)))
+                            .filter(|&(k, n)| n >= 2 && (1..=n).contains(&k))
+                            .filter(|_| seen.is_none_or(|seen| !seen.is_empty() && seen.chars().all(|c| c.is_ascii_hexdigit())))
+                            .ok_or_else(|| {
+                                format!("{text:?} isn't a repeat such as 2of3: which of the sends to the same place, of how many")
+                            })?;
+                        (repeat, of, seen.map(str::to_string))
+                    }
                 };
                 let other = match other.strip_prefix("hw") {
                     Some(_) if category == 1 => SendEnd::parse_hardware(other).ok_or_else(bad)?,
@@ -150,7 +161,7 @@ impl Ref {
                     None if matches!(category, -1 | 0) => SendEnd::Track(TrackId::parse(other)?),
                     None => return Err(bad()),
                 };
-                Ref::Send { track: TrackId::parse(track)?, category, other, repeat, of }
+                Ref::Send { track: TrackId::parse(track)?, category, other, repeat, of, seen }
             }
             ("marker", [guid]) => Ref::Marker(guid_of(guid, "a marker id")?),
             ("region", [guid]) => Ref::Region(guid_of(guid, "a region id")?),
@@ -194,7 +205,7 @@ impl Ref {
             Ref::Take(guid) => take_ref(guid),
             Ref::Fx(guid) => fx_ref(guid),
             Ref::Param { fx, index } => param_ref(fx, *index),
-            Ref::Send { track, category, other, repeat, of } => send_ref(track, *category, other, *repeat, *of),
+            Ref::Send { track, category, other, repeat, of, seen } => send_ref(track, *category, other, *repeat, *of, seen.as_deref()),
             Ref::Marker(guid) => marker_ref(guid),
             Ref::Region(guid) => region_ref(guid),
             Ref::Envelope { track, which } => envelope_ref(track, which),
@@ -217,12 +228,12 @@ pub fn fx_ref(guid: &str) -> String {
 pub fn param_ref(fx_guid: &str, index: i32) -> String {
     format!("{PREFIX}:param:{fx_guid}:{index}")
 }
-pub fn send_ref(track: &TrackId, category: i32, other: &SendEnd, repeat: u32, of: u32) -> String {
+pub fn send_ref(track: &TrackId, category: i32, other: &SendEnd, repeat: u32, of: u32, seen: Option<&str>) -> String {
     let base = format!("{PREFIX}:send:{}:{category}:{}", track.text(), other.text());
-    if of >= 2 {
-        format!("{base}:{repeat}of{of}")
-    } else {
-        base
+    match seen {
+        _ if of < 2 => base,
+        Some(seen) => format!("{base}:{repeat}of{of}.{seen}"),
+        None => format!("{base}:{repeat}of{of}"),
     }
 }
 pub fn marker_ref(guid: &str) -> String {
@@ -500,11 +511,18 @@ mod tests {
             Ref::Take(guid.into()),
             Ref::Fx(fx.into()),
             Ref::Param { fx: fx.into(), index: 7 },
-            Ref::Send { track: track.clone(), category: -1, other: SendEnd::Track(TrackId::Guid(fx.into())), repeat: 1, of: 1 },
-            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 3, of: 3 },
-            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 1, of: 2 },
-            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2), repeat: 1, of: 1 },
-            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2 | 1024), repeat: 2, of: 2 },
+            Ref::Send { track: track.clone(), category: -1, other: SendEnd::Track(TrackId::Guid(fx.into())), repeat: 1, of: 1, seen: None },
+            Ref::Send {
+                track: track.clone(),
+                category: 0,
+                other: SendEnd::Track(TrackId::Master),
+                repeat: 3,
+                of: 3,
+                seen: Some("0a1b2c3d".into()),
+            },
+            Ref::Send { track: track.clone(), category: 0, other: SendEnd::Track(TrackId::Master), repeat: 1, of: 2, seen: None },
+            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2), repeat: 1, of: 1, seen: None },
+            Ref::Send { track: track.clone(), category: 1, other: SendEnd::Hardware(2 | 1024), repeat: 2, of: 2, seen: None },
             Ref::Marker(guid.into()),
             Ref::Region(fx.into()),
             Ref::Envelope { track: track.clone(), which: EnvelopeId::Guid(guid.into()) },

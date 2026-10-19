@@ -456,6 +456,38 @@ pub fn send_keys(reaper: &Reaper, track: Track, category: i32) -> Vec<SendKey> {
         .collect()
 }
 
+/// A send's attributes that make its state, as REAPER names them.
+pub const SEND_STATE: [&str; 10] =
+    ["D_VOL", "D_PAN", "B_MUTE", "I_SENDMODE", "I_SRCCHAN", "I_DSTCHAN", "I_MIDIFLAGS", "B_PHASE", "B_MONO", "I_AUTOMODE"];
+
+/// The states of all the sends from one track to another, in order, as one hash: it moves when one is added, taken away,
+/// or changed.
+pub fn pair_hash(reaper: &Reaper, owner: Track, receiver: Track) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for index in 0..reaper.send_count(owner, 0) {
+        if reaper.send_peer(owner, 0, index) != Some(receiver) {
+            continue;
+        }
+        for parm in SEND_STATE {
+            for byte in reaper.send_value(owner, 0, index, parm).to_bits().to_le_bytes() {
+                hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        hash = (hash ^ 0xff).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// What a send ref carries of the sends to the same track, when there are two or more of them: their state as one short
+/// hash. None for a send alone to its track, a receive or a hardware output (Kumi changes only sends).
+pub fn pair_seen(reaper: &Reaper, owner: Track, category: i32, index: i32, key: &SendKey) -> Option<String> {
+    if category != 0 || key.of < 2 {
+        return None;
+    }
+    let receiver = reaper.send_peer(owner, 0, index)?;
+    Some(pair_hash(reaper, owner, receiver)[..8].to_string())
+}
+
 /// A send (`category` 0), receive (-1) or hardware output (1) of `track`, with the key `send_keys` gave it.
 pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32, key: &SendKey) -> Value {
     let this = track_id(reaper, track);
@@ -466,7 +498,7 @@ pub fn send_row(reaper: &Reaper, track: Track, category: i32, index: i32, key: &
     };
     let mode = reaper.send_value(track, category, index, "I_SENDMODE") as i64;
     let mut row = json!({
-        "ref": refs::send_ref(&this, category, &key.other, key.repeat, key.of),
+        "ref": refs::send_ref(&this, category, &key.other, key.repeat, key.of, pair_seen(reaper, track, category, index, key).as_deref()),
         "category": category,
         "direction": match category { c if c < 0 => "receive", 0 => "send", _ => "hardware" },
         "index": index,
