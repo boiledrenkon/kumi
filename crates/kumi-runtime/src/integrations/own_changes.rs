@@ -1245,6 +1245,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_host_knows_the_kinds_each_daws_undo_never_takes_back_as_kumi_does() {
+        for ((app, set), daw) in sets().into_iter().zip([daw_bridge::Daw::Reaper, daw_bridge::Daw::Renoise]) {
+            let ours: BTreeSet<&str> = set.kinds.iter().filter(|kind| kind.skipped_by_daw_undo).map(|kind| kind.kind).collect();
+            let host: BTreeSet<&str> = daw_mcp_server::tools::kinds(daw).outside_undo.iter().copied().collect();
+            assert_eq!(ours, host, "{app}");
+        }
+    }
+
     fn engine<S: RefScheme + Default + 'static>(daw: &'static OwnDaw, file: Option<String>) -> Rc<OwnPlan<S>> {
         let link = Rc::new(Link {
             daw,

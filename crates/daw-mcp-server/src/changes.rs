@@ -61,8 +61,9 @@ pub struct Record {
     pub step_desc: Option<String>,
     /// The DAW step Kumi's undo of it made ("Kumi: undo …"): the DAW's own undo of that brings the change back.
     pub undo_desc: Option<String>,
-    /// The DAW's own undo takes the change back with its step (or its plan's): not when the apply said its step makes no
-    /// undo point (`undo.entry` false) or a plan's point doesn't cover it (`undo.covered` false).
+    /// The DAW's own undo takes the change back with its step (or its plan's): not for a kind the DAW's undo never takes
+    /// back (whether its apply was answered or not), nor when the apply said its step makes no undo point (`undo.entry`
+    /// false) or a plan's point doesn't cover it (`undo.covered` false).
     pub in_daw_undo: bool,
     /// Kumi's undo of it was sent and never answered.
     pub undo_unanswered: bool,
@@ -137,6 +138,8 @@ impl Inner {
 #[derive(Default)]
 pub struct Journal {
     inner: Mutex<Inner>,
+    /// The change kinds the DAW's own undo never takes back.
+    outside_undo: &'static [&'static str],
 }
 
 /// Four base-36 characters from a counter and the clock, unique among the records kept.
@@ -157,6 +160,11 @@ fn now_ms() -> u64 {
 }
 
 impl Journal {
+    /// The journal for a DAW: it knows which kinds the DAW's own undo never takes back.
+    pub fn for_daw(daw: daw_bridge::Daw) -> Self {
+        Journal { outside_undo: crate::tools::kinds(daw).outside_undo, ..Journal::default() }
+    }
+
     /// Keeps a previewed change (the bridge's `change_preview` answer): its id and confirmation.
     pub fn previewed(&self, kind: &str, input: &Value, answer: &Value, layout: Option<u64>) -> Result<Record, Refusal> {
         let mut inner = self.inner.lock().expect("journal lock");
@@ -183,7 +191,7 @@ impl Journal {
             desc: None,
             step_desc: None,
             undo_desc: None,
-            in_daw_undo: true,
+            in_daw_undo: !self.outside_undo.contains(&kind),
             undo_unanswered: false,
             applied: None,
             created: None,
@@ -282,7 +290,7 @@ impl Journal {
                 }
                 record.applied = applied.get("applied").cloned();
                 let skipped = |field: &str| applied.get("undo").and_then(|undo| undo.get(field)) == Some(&Value::Bool(false));
-                record.in_daw_undo = !skipped("entry") && !skipped("covered");
+                record.in_daw_undo = record.in_daw_undo && !skipped("entry") && !skipped("covered");
                 // What the apply found (in its answer's layout): the undo is asked for that.
                 if let Some(target) = applied.get("target").filter(|target| !target.is_null()) {
                     record.target = target.clone();
@@ -892,6 +900,33 @@ mod tests {
         let (undone, _) = journal.follow_daw(std::slice::from_ref(&label), true);
         assert_eq!(undone, vec![volume.id.clone()], "the repeat isn't in the plan's undo point");
         assert_eq!(journal.get(&repeat.id).unwrap().state, State::Applied);
+    }
+
+    #[test]
+    fn a_kind_the_daws_undo_never_takes_back_is_never_counted_undone_answered_or_not() {
+        let journal = Journal::for_daw(daw_bridge::Daw::Reaper);
+        let label = journal.step_label("Kumi");
+        journal.step(Some(label.clone()));
+        let volume = preview(&journal);
+        let repeat_answer = json!({"epoch": "e1", "target": {"ref": "r:project", "kind": "project"}, "prior": {"on": false}, "fence": {}, "display": {"title": "Repeat on"}});
+        let unanswered = journal.previewed("loop-repeat", &json!({"on": true}), &repeat_answer, None).unwrap();
+        let unflagged = journal.previewed("loop-repeat", &json!({"on": true}), &repeat_answer, None).unwrap();
+        journal.begin_apply(&volume.id, &volume.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&volume.id, "a", Ok(&json!({"applied": {}, "undo": {"entry": null, "inPlan": true}})));
+        // One repeat is sent and never answered; the other is answered without saying whether the plan's point covers it.
+        journal.begin_apply(&unanswered.id, &unanswered.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&unanswered.id, "a", Err((&json!({"error": "REAPER didn't answer in time"}), true)));
+        journal.begin_apply(&unflagged.id, &unflagged.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&unflagged.id, "a", Ok(&json!({"applied": {"on": true}, "undo": {"entry": null, "inPlan": true}})));
+        journal.step(None);
+        let (undone, _) = journal.follow_daw(std::slice::from_ref(&label), true);
+        assert_eq!(undone, vec![volume.id.clone()], "the plan's Cmd-Z takes back the volume only");
+        assert_eq!(journal.get(&unanswered.id).unwrap().state, State::Uncertain);
+        assert_eq!(journal.get(&unflagged.id).unwrap().state, State::Applied);
+        // Renoise's mutes, solos and loops alike; its other kinds are in its undo.
+        let renoise = Journal::for_daw(daw_bridge::Daw::Renoise);
+        assert!(!renoise.previewed("track-mute", &json!({}), &repeat_answer, None).unwrap().in_daw_undo);
+        assert!(renoise.previewed("track-volume", &json!({}), &repeat_answer, None).unwrap().in_daw_undo);
     }
 
     #[test]

@@ -116,7 +116,7 @@ impl Host {
             paths: BridgePaths::new(kumi_home, daw),
             current: tokio::sync::Mutex::new(None),
             events: tokio::sync::broadcast::channel(1024).0,
-            journal: std::sync::Arc::default(),
+            journal: std::sync::Arc::new(crate::changes::Journal::for_daw(daw)),
         }
     }
 
