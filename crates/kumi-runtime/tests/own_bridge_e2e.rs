@@ -799,3 +799,239 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
         })
         .await;
 }
+
+/// Logic's changes through Kumi's host into HISTORY and back out: a plan of a fader, a mute, a track added (which
+/// moves Logic's epoch) and named by what the step before made, each change one step of Logic's own undo in Logic's
+/// words; the producer's Cmd-Z named back by the bridge; an undo as a new step; a kept change after the producer moved
+/// the fader; a refused step (a dialog, a ref the turn never gave); and a step Logic didn't show back, unsure in
+/// HISTORY and never undone blindly, as is an undo Logic didn't show back, never sent twice.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_steps() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Logic);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = LogicScript::new();
+            let mut config = script.config(secret, "com.apple.logic10");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Logic, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let logic =
+                create_logic_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect), open_file: None });
+            logic.start(Signal::new()).await.unwrap();
+            let observed = logic.observe(Signal::new(), None).await.unwrap();
+            let tracks: Value = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"].clone();
+            let (vocal, keys) = (tracks[0]["ref"].as_str().unwrap().to_owned(), tracks[1]["ref"].as_str().unwrap().to_owned());
+            for words in ["a plan of several changes is as many steps", "undo_change takes back one of yours as a new step"] {
+                assert!(observed.instructions.contains(words), "{words}: {}", observed.instructions);
+            }
+            let state_of = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).map(|record| record.state);
+
+            // A plan: a fader, a mute, a track added (Logic's epoch moves) and named by what the step before made. Each
+            // step is one change in HISTORY, in Logic's words, and one step of Logic's own undo, named by its change.
+            let plan = tool(&observed, "make_changes");
+            let steps = json!({"steps": [
+                {"tool": "track_volume", "input": {"ref": vocal, "volumeDb": -6}},
+                {"tool": "track_mute", "input": {"ref": keys, "mute": true}},
+                {"tool": "track_add", "as": "pad", "input": {"name": "Pad"}},
+                {"tool": "track_rename", "input": {"ref": "@pad", "name": "Pads"}},
+            ]});
+            within_schema(&plan.input_schema(), &input(steps.clone()));
+            let done = plan.execute(input(steps), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            assert_eq!(
+                (script.volume(1), script.track(2)["mute"].clone(), script.track(3)["name"].clone()),
+                (-6.0, json!(true), json!("Pads"))
+            );
+            let titles: Vec<String> = told.borrow().iter().map(|record| record.title.clone()).collect();
+            assert_eq!(titles, ["Vocal volume -6 dB", "Keys muted", "Added track “Pad”", "Renamed track “Pad” → “Pads”"]);
+            let fader = told.borrow()[0].clone();
+            assert_eq!((fader.from, fader.to, fader.range), (Some(0.0), Some(-6.0), Some([-60.0, 12.0])));
+            assert!(
+                done.text.contains("\"ref\":\"track:") && !done.text.contains(":track:"),
+                "the track it made, in a short ref: {}",
+                done.text
+            );
+            let undo_steps = script.undo_history();
+            assert_eq!(undo_steps.len(), 4, "no undo block: a step per change: {undo_steps:?}");
+            assert!(
+                undo_steps[0].starts_with("Kumi: Vocal volume -6 dB (k")
+                    && undo_steps[3].starts_with("Kumi: Renamed track “Pad” → “Pads” (k"),
+                "{undo_steps:?}"
+            );
+            assert_eq!(script.undo_titles()[2], "Undo Create Track", "the Edit menu's title, as the bridge keeps it");
+
+            // The next look lists them for the model, each applied; the add moved the epoch, so the refs are new ones.
+            let again = logic.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&again.context).unwrap();
+            let latest = context["kumiChanges"].clone();
+            assert_eq!(latest.as_array().map(Vec::len), Some(4), "{latest}");
+            assert!(latest.as_array().unwrap().iter().all(|row| row["state"] == "applied"), "{latest}");
+            assert_eq!(context["tracks"].as_array().map(Vec::len), Some(3));
+            assert_ne!(context["tracks"][0]["ref"], vocal, "the tracks get names never used before: {context}");
+
+            // The producer presses Cmd-Z in Logic: its last step (the rename) comes off, the bridge names it by the desc
+            // it kept, and HISTORY marks the change undone with Logic's own undo.
+            let (title, desc) = script.undo_last().expect("Logic's last step");
+            assert_eq!(title, "Undo Rename Track");
+            script.set_track(3, "name", json!("Pad"));
+            simulator.emit("undone_in_daw", json!({"descs": [desc.unwrap()], "how": "undo", "epoch": "2"}));
+            for _ in 0..100 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                if state_of("Renamed track “Pad” → “Pads”") == Some(ChangeState::Undone) {
+                    break;
+                }
+            }
+            let row = told.borrow().iter().rev().find(|record| record.title == "Renamed track “Pad” → “Pads”").cloned().unwrap();
+            assert_eq!(
+                (row.state, row.note.as_deref()),
+                (ChangeState::Undone, Some("Undone with Logic Pro's own undo (Cmd-Z in Logic Pro)."))
+            );
+            assert_eq!(state_of("Added track “Pad”"), Some(ChangeState::Applied), "the steps before it stand");
+
+            // Undo the last still standing: the track Kumi added goes, as a new step of Logic's undo (and the epoch moves).
+            let undo = tool(&again, "undo_change");
+            let undone = undo.execute(input(json!({"change": "last", "final": true})), Signal::new()).await.unwrap();
+            assert!(!undone.is_error, "{}", undone.text);
+            assert_eq!(undone.reply.as_deref(), Some("Undone: Added track “Pad”."));
+            assert_eq!((script.track_count(), script.undo_history().len()), (2, 4), "the undo is a new step");
+            assert_eq!(script.undo_titles().last().map(String::as_str), Some("Undo Delete Track"));
+
+            // The producer moved the fader since: Kumi leaves it, says why, and HISTORY keeps the change.
+            script.set_volume(1, -3.0);
+            let volume = told.borrow()[0].id.clone();
+            let kept = undo.execute(input(json!({"change": volume})), Signal::new()).await.unwrap();
+            assert!(kept.is_error && kept.text.contains("changed in Logic Pro since Kumi set it"), "{}", kept.text);
+            assert_eq!(script.volume(1), -3.0);
+            assert_eq!(state_of("Vocal volume -6 dB"), Some(ChangeState::Kept));
+
+            // A change on its own is a step of its own, named by its title; /undo in the app takes back the latest change
+            // still standing.
+            let latest = logic.observe(Signal::new(), None).await.unwrap();
+            let context: Value = serde_json::from_str(&latest.context).unwrap();
+            let (vocal, keys) =
+                (context["tracks"][0]["ref"].as_str().unwrap().to_owned(), context["tracks"][1]["ref"].as_str().unwrap().to_owned());
+            let renamed = tool(&latest, "make_changes")
+                .execute(input(json!({"steps": [{"tool": "track_rename", "input": {"ref": keys, "name": "Lead"}}]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!renamed.is_error, "{}", renamed.text);
+            assert!(
+                script.undo_history().last().unwrap().starts_with("Kumi: Renamed track “Keys” → “Lead” (k"),
+                "{:?}",
+                script.undo_history()
+            );
+            let record = logic.undo(None, Signal::new()).await.unwrap();
+            assert_eq!(record.title, "Renamed track “Keys” → “Lead”");
+            assert_eq!(script.track(2)["name"], json!("Keys"));
+
+            // A value it already has: nothing to change, no step and no row. A ref this turn never gave: refused in
+            // Kumi's words, nothing sent.
+            let rows = told.borrow().len();
+            let same = tool(&latest, "track_volume").execute(input(json!({"ref": vocal, "volumeDb": -3})), Signal::new()).await.unwrap();
+            assert!(!same.is_error && same.text.contains("\"unchanged\":true"), "{}", same.text);
+            assert_eq!(told.borrow().len(), rows);
+            let unknown =
+                tool(&latest, "track_mute").execute(input(json!({"ref": "track:99", "mute": true})), Signal::new()).await.unwrap();
+            assert!(unknown.is_error && unknown.text.contains("isn't one of this turn's refs"), "{}", unknown.text);
+
+            // A dialog during the first step's preview, closed before the next: the plan stops there, nothing is written.
+            script.busy_once();
+            let asked_before = script.asked().len();
+            let held = tool(&latest, "make_changes")
+                .execute(
+                    input(json!({"steps": [
+                        {"tool": "track_volume", "input": {"ref": vocal, "volumeDb": -9}},
+                        {"tool": "track_mute", "input": {"ref": vocal, "mute": true}},
+                    ]})),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                held.is_error
+                    && held.text.contains("Logic Pro is busy (a dialog is up in Logic Pro")
+                    && held.text.contains("the steps after it weren't run"),
+                "{}",
+                held.text
+            );
+            let previews = script.asked()[asked_before..].iter().filter(|(method, _)| method == "change_preview").count();
+            assert_eq!((previews, script.volume(1), script.track(1)["mute"].clone()), (1, -3.0, json!(false)));
+
+            // A write Logic doesn't show back: the plan stops and says to read first, HISTORY's row is unsure, and Kumi
+            // won't undo it blindly.
+            script.uncertain_once();
+            let unsure = tool(&latest, "make_changes")
+                .execute(
+                    input(json!({"steps": [
+                        {"tool": "track_pan", "input": {"ref": vocal, "pan": 0.25}},
+                        {"tool": "track_mute", "input": {"ref": vocal, "mute": true}},
+                    ]})),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                unsure.is_error
+                    && unsure.text.contains("Logic Pro didn't confirm this change (Vocal pan 25% right)")
+                    && unsure.text.contains("read it before going on"),
+                "{}",
+                unsure.text
+            );
+            assert_eq!(
+                (script.track(1)["pan"].clone(), script.track(1)["mute"].clone()),
+                (json!(16), json!(false)),
+                "Logic took the pan; the mute was never asked"
+            );
+            let row = told.borrow().iter().rev().find(|record| record.title == "Vocal pan 25% right").cloned().unwrap();
+            assert_eq!((row.state, row.note.as_deref()), (ChangeState::Unsure, Some("Logic Pro didn't confirm this change.")));
+            let blind = tool(&latest, "undo_change").execute(input(json!({"change": row.id})), Signal::new()).await.unwrap();
+            assert!(blind.is_error && blind.text.contains("won't undo it blindly"), "{}", blind.text);
+            let row = told.borrow().iter().rev().find(|record| record.title == "Vocal pan 25% right").cloned().unwrap();
+            assert_eq!(row.note.as_deref(), Some("Whether this change reached Logic Pro isn't known, so Kumi won't undo it blindly."));
+            let look = logic.observe(Signal::new(), None).await.unwrap();
+            let listed = serde_json::from_str::<Value>(&look.context).unwrap()["kumiChanges"].clone();
+            assert!(
+                listed.as_array().unwrap().iter().any(|row| row["title"] == "Vocal pan 25% right" && row["state"] == "unsure"),
+                "{listed}"
+            );
+
+            // An undo Logic doesn't show back: unsure too, and never sent again.
+            let soloed = tool(&look, "make_changes")
+                .execute(input(json!({"steps": [{"tool": "track_solo", "input": {"ref": vocal, "solo": true}}]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!soloed.is_error, "{}", soloed.text);
+            let solo = told.borrow().iter().rev().find(|record| record.title == "Vocal soloed").cloned().unwrap();
+            script.uncertain_once();
+            let unsure = tool(&look, "undo_change").execute(input(json!({"change": solo.id})), Signal::new()).await.unwrap();
+            assert!(unsure.is_error && unsure.text.contains("didn't show the value"), "{}", unsure.text);
+            assert_eq!(script.track(1)["solo"], json!(false), "Logic put it back");
+            let row = told.borrow().iter().rev().find(|record| record.title == "Vocal soloed").cloned().unwrap();
+            assert_eq!(
+                (row.state, row.note.as_deref()),
+                (
+                    ChangeState::Unsure,
+                    Some("Logic Pro didn't confirm the undo, so whether it went through isn't known; Kumi won't send it again.")
+                )
+            );
+            // Asked again, the host answers the undo's key what it answered before, and nothing reaches Logic.
+            let restores = script.asked().iter().filter(|(method, _)| method == "change_restore").count();
+            let again = tool(&look, "undo_change").execute(input(json!({"change": solo.id})), Signal::new()).await.unwrap();
+            assert!(again.is_error && again.text == unsure.text, "{}", again.text);
+            assert_eq!(script.asked().iter().filter(|(method, _)| method == "change_restore").count(), restores, "nothing sent twice");
+            assert_eq!(state_of("Vocal soloed"), Some(ChangeState::Unsure));
+            logic.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

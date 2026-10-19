@@ -230,6 +230,9 @@ pub(super) struct Refused {
     pub(super) busy: bool,
     /// The host's code for it (`stale`, `changed`, `failed`…).
     pub(super) code: Option<String>,
+    /// Sent, and not confirmed: the DAW may have done it (no answer came, or the bridge wrote and couldn't read the
+    /// value back). The host's journal keeps such a change uncertain, never applied or undone again blindly.
+    pub(super) uncertain: bool,
 }
 
 /// The JSON a host tool answered with, or why it couldn't.
@@ -250,6 +253,7 @@ pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
             there: value.get("connected") != Some(&Value::Bool(false)),
             busy: value.get("code").and_then(Value::as_str) == Some("busy"),
             code: value.get("code").and_then(Value::as_str).map(str::to_owned),
+            uncertain: value.get("state").and_then(Value::as_str) == Some("uncertain"),
         });
     }
     Ok(value)

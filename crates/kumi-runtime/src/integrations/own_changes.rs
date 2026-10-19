@@ -347,6 +347,14 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
             Err(_) => return Ok(Some(UndoResult::error(cant_reach_to_undo(self.link.words())))),
         };
         let refused = match answer {
+            // Sent, and not confirmed (no answer came, or the DAW didn't show the values back): the host keeps the undo
+            // from going again, and HISTORY says why.
+            Err(refused) if refused.uncertain => {
+                let note =
+                    format!("{} didn't confirm the undo, so whether it went through isn't known; Kumi won't send it again.", words.app);
+                let why = self.link.in_short_refs(&refused.why);
+                return Ok(Some(UndoResult::with(history.update(entry, ChangeState::Unsure, Some(note)), why, true)));
+            }
             Ok(done) if done.get("state").and_then(Value::as_str) == Some("undone") => {
                 // A restore that made devices again moves Renoise's epoch: the book follows.
                 follow_epoch(&self.link.book, &self.link.epoch, &self.link.layout, &done);
@@ -369,6 +377,7 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
             ),
             Some("undone") => return Ok(Some(history.undone(entry))),
             Some("unknown") => (ChangeState::Expired, format!("Kumi can't undo this anymore; {} can.", self.link.words().vocab.own_undo)),
+            // The journal's refusal: the apply, or an undo sent before, that the DAW never confirmed.
             Some("uncertain") => {
                 (ChangeState::Unsure, format!("Whether this change reached {} isn't known, so Kumi won't undo it blindly.", words.app))
             }
@@ -626,7 +635,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         // Once asked, the apply runs to its answer: an Esc mid-way would leave the change's outcome unknown.
         let applied = match self.link().call("change_apply", apply, self.history.change_signal()).await {
             Ok(Ok(applied)) => applied,
-            Ok(Err(refused)) if refused.code.as_deref() == Some("uncertain") || refused.why.contains("uncertain") => {
+            Ok(Err(refused)) if refused.uncertain || refused.code.as_deref() == Some("uncertain") || refused.why.contains("uncertain") => {
                 self.remember(kind, kind.summary(&title, None, None), &transaction, ChangeState::Unsure, Some(format!("{} didn't confirm this change.", words.app)));
                 return ChangeOutcome::stop(format!("{} didn't confirm this change ({title}), so it may or may not have happened: read it before going on", words.app));
             }
