@@ -13,6 +13,7 @@ mod fx;
 mod lua;
 mod marks;
 mod notes;
+mod pins;
 mod project;
 mod sends;
 pub(crate) use sends::seen_holds as send_seen_holds;
@@ -119,6 +120,8 @@ enum Kind {
     MarkerDelete,
     SendAdd,
     SendRemove,
+    /// An FX's pins: the channels each takes from or gives to.
+    FxPins,
     /// A Lua chunk, run as a ReaScript (only REAPER's undo takes it back).
     RunLua,
     /// A REAPER API function that changes the project, called by name (only REAPER's undo takes it back).
@@ -157,6 +160,7 @@ fn kind(name: &str) -> Option<Kind> {
         "track-delete" => Some(Kind::TrackDelete),
         "track-add" => Some(Kind::TrackAdd),
         "track-move" => Some(Kind::TrackMove),
+        "fx-pins" => Some(Kind::FxPins),
         "run-lua" => Some(Kind::RunLua),
         "api-call" => Some(Kind::ApiCall),
         _ => None,
@@ -189,6 +193,7 @@ impl Kind {
             Kind::TempoMarkerDelete => project::marker_delete_preview(ctx, input),
             Kind::LoopRange => project::loop_preview(ctx, input),
             Kind::LoopRepeat => project::repeat_preview(ctx, input),
+            Kind::FxPins => pins::preview(ctx, input),
             Kind::RunLua => lua::preview(ctx, input),
             Kind::ApiCall => call::preview(ctx, input),
         }
@@ -214,6 +219,7 @@ impl Kind {
             Kind::TempoMarkerDelete => project::marker_delete_apply(ctx, input, fence),
             Kind::LoopRange => project::loop_apply(ctx, input, fence),
             Kind::LoopRepeat => project::repeat_apply(ctx, input, fence),
+            Kind::FxPins => pins::apply(ctx, input, fence),
             Kind::RunLua => lua::apply(ctx, input, fence),
             Kind::ApiCall => call::apply(ctx, input, fence),
         }
@@ -238,6 +244,7 @@ impl Kind {
             Kind::TempoMarkerDelete => project::marker_delete_restore(ctx, restore),
             Kind::LoopRange => project::loop_restore(ctx, restore),
             Kind::LoopRepeat => project::repeat_restore(ctx, restore),
+            Kind::FxPins => pins::restore(ctx, restore),
             Kind::RunLua => lua::restore(ctx, restore),
             Kind::ApiCall => call::restore(ctx, restore),
         }

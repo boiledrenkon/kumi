@@ -84,7 +84,7 @@ pub fn colour_of(state: &Value) -> i64 {
     }
 }
 
-pub static PROPS: [Prop; 6] = [
+pub static PROPS: [Prop; 7] = [
     Prop {
         kind: "track-volume",
         master: true,
@@ -134,6 +134,23 @@ pub static PROPS: [Prop; 6] = [
         same: |a, b| a["mute"] == b["mute"],
         title: |name, _, to| format!("{name} {}", if to["mute"] == true { "muted" } else { "unmuted" }),
         noun: "mute",
+    },
+    Prop {
+        kind: "track-channels",
+        master: true,
+        read: |reaper, track| json!({"channels": reaper.track_value(track, "I_NCHAN") as i64}),
+        wanted: |_, input| {
+            let channels = input
+                .get("channels")
+                .and_then(Value::as_i64)
+                .filter(|n| (2..=128).contains(n) && n % 2 == 0)
+                .ok_or_else(|| bad("channels must be an even number from 2 to 128"))?;
+            Ok(json!({"channels": channels}))
+        },
+        write: |reaper, track, state| reaper.set_track_value(track, "I_NCHAN", number(state, "channels")),
+        same: |a, b| a["channels"].as_i64() == b["channels"].as_i64(),
+        title: |name, _, to| format!("{name} {} channels", to["channels"]),
+        noun: "channels",
     },
     Prop {
         kind: "track-solo",

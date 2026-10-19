@@ -3339,6 +3339,16 @@ fn a_lua_chunk_runs_once_in_one_undo_point_and_only_reapers_undo_takes_it_back()
 }
 
 #[test]
+fn a_hundred_lua_chunks_leave_no_action_behind_and_never_write_reapers_key_map() {
+    let lab = Lab::new();
+    state(|s| s.on_script = Some(lua_ok));
+    for n in 0..100 {
+        lab.make("run-lua", json!({"code": "return 1"}), &format!("Kumi: Ran Lua (k{n:04})"));
+    }
+    assert_eq!(state(|s| (s.kb_writes, s.scripts.len())), (0, 0), "reaper-kb.ini untouched, and no script left registered");
+}
+
+#[test]
 fn a_lua_chunk_that_doesnt_compile_is_refused_at_the_preview_and_one_that_fails_says_where_and_what_stays() {
     let lab = Lab::new();
     state(|s| s.on_script = Some(lua_syntax));
@@ -3405,4 +3415,89 @@ fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
     assert!(looped["error"]["message"].as_str().unwrap().contains("stopped after 50 ms"), "{looped}");
     // A chunk that closes the wrapper's own long bracket is still one string.
     assert_eq!(run("return ']]'", 1000, false)["result"], "]]");
+}
+
+// ----- sidechains: a send's channels, a track's channels, an FX's pins (S8) -----
+
+const SNARE: &str = "r:track:{CCCC}";
+const REVERB: &str = "r:track:{DDDD}";
+
+#[test]
+fn a_send_to_channels_the_track_doesnt_have_is_refused_until_it_has_them() {
+    let lab = Lab::new();
+    let input = json!({"ref": DRUMS_TO_REVERB, "dstChannels": {"offset": 3}});
+    let (code, message) = lab.call("change_preview", json!({"kind": "send-channels", "input": input})).unwrap_err();
+    assert_eq!(code, "bad-params");
+    assert!(message.contains("“Reverb” has 2 channels") && message.contains("track_channels"), "{message}");
+    // Odd channel counts aren't REAPER's.
+    assert!(lab
+        .call("change_preview", json!({"kind": "track-channels", "input": {"ref": REVERB, "channels": 3}}))
+        .unwrap_err()
+        .1
+        .contains("even"));
+    let (channels_preview, channels_applied) =
+        lab.make("track-channels", json!({"ref": REVERB, "channels": 4}), "Kumi: Reverb 4 channels (ks801)");
+    assert_eq!(channels_applied["display"]["title"], "Reverb 4 channels");
+    let (preview, applied) = lab.make("send-channels", input, "Kumi: Send channels (ks802)");
+    assert_eq!(preview["display"]["title"], "Send “Drums” → “Reverb” to channels 3/4");
+    assert_eq!(state(|s| s.tracks[0].sends[0].dst_chan), 2, "destination channel 3 is REAPER's index 2");
+    assert_eq!(applied["applied"]["dstChannels"], json!({"offset": 3, "mono": false}));
+    // Undone in turn: the send's channels, then the track's.
+    lab.undo("send-channels", &preview, &applied, "Kumi: undo (ks803)").unwrap();
+    assert_eq!(state(|s| s.tracks[0].sends[0].dst_chan), 0);
+    lab.undo("track-channels", &channels_preview, &channels_applied, "Kumi: undo (ks804)").unwrap();
+    assert_eq!(state(|s| s.tracks[3].extra.get("I_NCHAN").copied()), Some(2.0));
+}
+
+#[test]
+fn a_send_is_added_as_a_sidechain_with_its_channels_and_midi_and_undone_whole() {
+    let lab = Lab::new();
+    lab.make("track-channels", json!({"ref": SNARE, "channels": 4}), "Kumi: Snare 4 channels (ks805)");
+    let input = json!({"ref": KICK, "toRef": SNARE, "srcChannels": {"offset": 1, "count": 2}, "dstChannels": {"offset": 3}, "midi": {"from": "none"}});
+    let (preview, applied) = lab.make("send-add", input, "Kumi: Added send (ks806)");
+    assert_eq!(preview["display"]["title"], "Added send “Kick” → “Snare”, channels 1/2 \u{2192} 3/4, no MIDI");
+    let send =
+        state(|s| s.tracks[1].sends.last().map(|send| (send.src_chan, send.dst_chan, send.extra.get("I_MIDIFLAGS").copied())).unwrap());
+    assert_eq!(send, (0, 2, Some(31.0)));
+    lab.undo("send-add", &preview, &applied, "Kumi: undo (ks807)").unwrap();
+    assert!(state(|s| s.tracks[1].sends.iter().all(|send| send.dest != 2)));
+    // A source past the sending track's channels, a mono count that isn't REAPER's, MIDI to channel 17: refused.
+    let refused = |input: Value| lab.call("change_preview", json!({"kind": "send-add", "input": input})).unwrap_err().1;
+    assert!(refused(json!({"ref": KICK, "toRef": SNARE, "srcChannels": {"offset": 3}})).contains("“Kick” has 2 channels"));
+    assert!(refused(json!({"ref": KICK, "toRef": SNARE, "srcChannels": {"offset": 1, "count": 3}})).contains("count"));
+    assert!(refused(json!({"ref": KICK, "toRef": SNARE, "midi": {"to": 17}})).contains("midi.to"));
+}
+
+#[test]
+fn reapers_channel_numbers_read_back_as_words_and_mono_and_midi_round_trip() {
+    let lab = Lab::new();
+    let input = json!({"ref": DRUMS_TO_REVERB, "srcChannels": {"offset": 2, "count": 1}, "dstChannels": {"offset": 1, "mono": true}, "midi": {"from": 1, "to": 2}});
+    let (_, applied) = lab.make("send-channels", input, "Kumi: Send channels (ks808)");
+    assert_eq!(applied["applied"]["srcChannels"], json!({"offset": 2, "count": 1}));
+    assert_eq!(applied["applied"]["dstChannels"], json!({"offset": 1, "mono": true}));
+    assert_eq!(applied["applied"]["midi"], json!({"from": 1, "to": 2}));
+    assert_eq!(state(|s| (s.tracks[0].sends[0].src_chan, s.tracks[0].sends[0].dst_chan)), (1 | 1024, 1024));
+    assert_eq!(applied["display"]["title"], "Send “Drums” → “Reverb” channels 2 \u{2192} 1 (mono), MIDI 1 \u{2192} 2");
+}
+
+#[test]
+fn an_fxs_pins_are_mapped_whole_put_back_and_refused_when_the_producer_remapped_them() {
+    let lab = Lab::new();
+    state(|s| s.tracks[3].fx[0].io = (4, 2));
+    let input = json!({"ref": "r:fx:{FX-VERB}", "pins": [{"pin": 3, "channels": [3]}, {"pin": 4, "channels": [4]}, {"pin": 1, "output": true, "channels": [1, 3]}]});
+    let (preview, applied) = lab.make("fx-pins", input, "Kumi: Pins (ks809)");
+    assert_eq!(preview["display"]["title"], "Pins of “ReaVerb” on “Reverb”: in 3 \u{2190} 3, in 4 \u{2190} 4, out 1 \u{2192} 1+3");
+    assert_eq!(state(|s| s.tracks[3].fx[0].pins.get(&(true, 0)).copied()), Some(0b101));
+    lab.undo("fx-pins", &preview, &applied, "Kumi: undo (ks810)").unwrap();
+    assert_eq!(state(|s| s.tracks[3].fx[0].pins.get(&(true, 0)).copied()), Some(1), "back to channel 1");
+    // The producer maps a pin since: Kumi's undo leaves it.
+    let (preview, applied) =
+        lab.make("fx-pins", json!({"ref": "r:fx:{FX-VERB}", "pins": [{"pin": 2, "channels": []}]}), "Kumi: Pins (ks811)");
+    state(|s| s.tracks[3].fx[0].pins.insert((false, 1), 0b1000));
+    assert_eq!(lab.undo("fx-pins", &preview, &applied, "Kumi: undo (ks812)").unwrap_err().0, "changed");
+    assert_eq!(state(|s| s.tracks[3].fx[0].pins.get(&(false, 1)).copied()), Some(0b1000));
+    // A pin it doesn't have, one given twice: refused.
+    let refused = |input: Value| lab.call("change_preview", json!({"kind": "fx-pins", "input": input})).unwrap_err().1;
+    assert!(refused(json!({"ref": "r:fx:{FX-VERB}", "pins": [{"pin": 5, "channels": [1]}]})).contains("from 1 to 4"));
+    assert!(refused(json!({"ref": "r:fx:{FX-VERB}", "pins": [{"pin": 1, "channels": [1]}, {"pin": 1, "channels": [2]}]})).contains("twice"));
 }

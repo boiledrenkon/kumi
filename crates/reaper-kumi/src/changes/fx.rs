@@ -88,7 +88,7 @@ fn short_name(name: &str) -> String {
     rest.to_string()
 }
 
-fn fx_label(ctx: &Ctx, fx: Fx) -> String {
+pub(super) fn fx_label(ctx: &Ctx, fx: Fx) -> String {
     let renamed = ctx.reaper.fx_config(fx, "renamed_name").unwrap_or_default();
     rows::clip(&if renamed.is_empty() { short_name(&ctx.reaper.fx_name(fx)) } else { renamed })
 }

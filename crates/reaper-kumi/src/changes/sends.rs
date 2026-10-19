@@ -288,6 +288,9 @@ fn target(reference: &str) -> Value {
 
 // ----- a send's attributes -----
 
+/// A check of the wanted state against the send's tracks: (sender, receiver).
+type Check = fn(&Reaper, Track, Track, &Value) -> Done<()>;
+
 pub struct Prop {
     pub kind: &'static str,
     read: fn(&Reaper, Track, i32) -> Value,
@@ -296,6 +299,8 @@ pub struct Prop {
     same: fn(&Value, &Value) -> bool,
     title: fn(&str, &Value) -> String,
     noun: &'static str,
+    /// What the tracks at both ends must allow for the wanted state (the channels a send uses).
+    check: Option<Check>,
 }
 
 fn number(value: &Value, key: &str) -> f64 {
@@ -312,7 +317,7 @@ fn mode_state(mode: i64) -> Value {
     json!({"mode": mode, "modeName": rows::send_mode_name(mode)})
 }
 
-pub static PROPS: [Prop; 4] = [
+pub static PROPS: [Prop; 5] = [
     Prop {
         kind: "send-volume",
         read: |reaper, track, index| {
@@ -335,6 +340,7 @@ pub static PROPS: [Prop; 4] = [
         same: |a, b| close(number(a, "volume"), number(b, "volume")),
         title: |route, to| format!("Send {route} {} dB", super::tracks::db_text(number(to, "volumeDb"))),
         noun: "volume",
+        check: None,
     },
     Prop {
         kind: "send-pan",
@@ -351,6 +357,7 @@ pub static PROPS: [Prop; 4] = [
         same: |a, b| close(number(a, "pan"), number(b, "pan")),
         title: |route, to| format!("Send {route} pan {}", super::tracks::pan_text(number(to, "pan"))),
         noun: "pan",
+        check: None,
     },
     Prop {
         kind: "send-mute",
@@ -365,6 +372,7 @@ pub static PROPS: [Prop; 4] = [
         same: |a, b| a["mute"] == b["mute"],
         title: |route, to| format!("Send {route} {}", if to["mute"] == true { "muted" } else { "unmuted" }),
         noun: "mute",
+        check: None,
     },
     Prop {
         kind: "send-mode",
@@ -384,14 +392,232 @@ pub static PROPS: [Prop; 4] = [
         },
         title: |route, to| format!("Send {route} {}", to["modeName"].as_str().unwrap_or("")),
         noun: "mode",
+        check: None,
+    },
+    Prop {
+        kind: "send-channels",
+        read: |reaper, track, index| channels_state(reaper, track, index),
+        wanted: |input| {
+            let mut wanted = json!({});
+            if let Some(src) = input.get("srcChannels").filter(|v| !v.is_null()) {
+                wanted["srcChan"] = src_code(src)?.into();
+            }
+            if let Some(dst) = input.get("dstChannels").filter(|v| !v.is_null()) {
+                wanted["dstChan"] = dst_code(dst)?.into();
+            }
+            if let Some(midi) = input.get("midi").filter(|v| !v.is_null()) {
+                wanted["midiFlags"] = midi_code(midi)?.into();
+            }
+            if wanted.as_object().is_some_and(|w| w.is_empty()) {
+                return Err(bad("give srcChannels, dstChannels or midi"));
+            }
+            Ok(with_words(wanted))
+        },
+        write: |reaper, track, index, state| {
+            CHANNEL_KEYS.iter().all(|(parm, key)| state[key].as_f64().is_none_or(|v| reaper.set_send_value(track, 0, index, parm, v)))
+        },
+        // (only what both say is compared: a change of the destination alone leaves the source as it is)
+        same: |a, b| CHANNEL_KEYS.iter().all(|(_, key)| a[key].is_null() || b[key].is_null() || a[key].as_i64() == b[key].as_i64()),
+        title: |route, to| format!("Send {route} {}", channels_text(to)),
+        noun: "channels",
+        check: Some(fits),
     },
 ];
+
+// ----- a send's channels -----
+
+const CHANNEL_KEYS: [(&str, &str); 3] = [("I_SRCCHAN", "srcChan"), ("I_DSTCHAN", "dstChan"), ("I_MIDIFLAGS", "midiFlags")];
+
+/// The channels a send takes from and gives to, and its MIDI, as REAPER's numbers and in words.
+fn channels_state(reaper: &Reaper, track: Track, index: i32) -> Value {
+    let value = |parm: &str| reaper.send_value(track, 0, index, parm) as i64;
+    with_words(json!({"srcChan": value("I_SRCCHAN"), "dstChan": value("I_DSTCHAN"), "midiFlags": value("I_MIDIFLAGS")}))
+}
+
+fn with_words(mut state: Value) -> Value {
+    if let Some(src) = state["srcChan"].as_i64() {
+        state["srcChannels"] = src_words(src);
+    }
+    if let Some(dst) = state["dstChan"].as_i64() {
+        state["dstChannels"] = dst_words(dst);
+    }
+    if let Some(midi) = state["midiFlags"].as_i64() {
+        state["midi"] = midi_words(midi);
+    }
+    state
+}
+
+/// How many channels a source code takes: (code >> 10) is 0 for stereo, 1 for mono, n for 2n channels; -1 is none.
+fn src_count(code: i64) -> i64 {
+    match code {
+        c if c < 0 => 0,
+        c => match c >> 10 {
+            0 => 2,
+            1 => 1,
+            n => n * 2,
+        },
+    }
+}
+
+fn src_words(code: i64) -> Value {
+    if code < 0 {
+        return "none".into();
+    }
+    json!({"offset": (code & 1023) + 1, "count": src_count(code)})
+}
+
+fn dst_words(code: i64) -> Value {
+    json!({"offset": (code & 1023) + 1, "mono": code & 1024 != 0})
+}
+
+fn midi_words(code: i64) -> Value {
+    let (from, to) = (code & 31, (code >> 5) & 31);
+    let from: Value = match from {
+        31 => "none".into(),
+        0 => "all".into(),
+        n => n.into(),
+    };
+    let to: Value = if to == 0 { "same".into() } else { to.into() };
+    json!({"from": from, "to": to})
+}
+
+fn whole(value: &Value, key: &str, low: i64, high: i64) -> Done<i64> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .filter(|n| (low..=high).contains(n))
+        .ok_or_else(|| bad(format!("{key} must be a whole number from {low} to {high}")))
+}
+
+/// REAPER's source code for {offset, count} (channels counted from 1; count 1, 2 or an even number up to 64), or "none"
+/// (no audio: a MIDI-only send).
+fn src_code(value: &Value) -> Done<i64> {
+    if value == "none" {
+        return Ok(-1);
+    }
+    let offset = whole(value, "offset", 1, 128)?;
+    let count = value.get("count").map_or(Ok(2), |_| whole(value, "count", 1, 64))?;
+    if count > 2 && count % 2 != 0 {
+        return Err(bad("srcChannels.count must be 1, 2 or an even number up to 64"));
+    }
+    if offset + count - 1 > 128 {
+        return Err(bad("srcChannels go past channel 128"));
+    }
+    let code = match count {
+        2 => 0,
+        1 => 1,
+        n => n / 2,
+    };
+    Ok((offset - 1) | (code << 10))
+}
+
+/// REAPER's destination code for {offset, mono?} (counted from 1).
+fn dst_code(value: &Value) -> Done<i64> {
+    let offset = whole(value, "offset", 1, 128)?;
+    let mono = match value.get("mono") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(bad("dstChannels.mono must be true or false")),
+    };
+    Ok((offset - 1) | if mono { 1024 } else { 0 })
+}
+
+/// REAPER's MIDI flags for {from: "all" | 1-16 | "none", to: "same" | 1-16}.
+fn midi_code(value: &Value) -> Done<i64> {
+    let from = match value.get("from") {
+        None | Some(Value::Null) => 0,
+        Some(v) if v == "all" => 0,
+        Some(v) if v == "none" => 31,
+        Some(v) => {
+            v.as_i64().filter(|n| (1..=16).contains(n)).ok_or_else(|| bad("midi.from must be \"all\", 1 to 16, or \"none\" (no MIDI)"))?
+        }
+    };
+    let to = match value.get("to") {
+        None | Some(Value::Null) => 0,
+        Some(v) if v == "same" => 0,
+        Some(v) => v.as_i64().filter(|n| (1..=16).contains(n)).ok_or_else(|| bad("midi.to must be \"same\" or 1 to 16"))?,
+    };
+    Ok(from | (to << 5))
+}
+
+fn span_text(first: i64, count: i64) -> String {
+    match count {
+        1 => format!("{first}"),
+        2 => format!("{first}/{}", first + 1),
+        n => format!("{first}\u{2013}{}", first + n - 1),
+    }
+}
+
+/// "channels 1/2 → 3/4, MIDI all → same", from what a state says.
+fn channels_text(state: &Value) -> String {
+    let mut parts = Vec::new();
+    let src = state["srcChan"].as_i64();
+    let from = match src {
+        Some(c) if c < 0 => Some("no audio".to_string()),
+        Some(c) => Some(span_text((c & 1023) + 1, src_count(c))),
+        None => None,
+    };
+    let to = state["dstChan"].as_i64().map(|d| {
+        let count = src.map_or(2, src_count).max(1);
+        let mono = if d & 1024 != 0 { " (mono)" } else { "" };
+        format!("{}{mono}", span_text((d & 1023) + 1, if d & 1024 != 0 { 1 } else { count }))
+    });
+    match (from, to) {
+        (Some(from), Some(to)) => parts.push(format!("channels {from} \u{2192} {to}")),
+        (Some(from), None) => parts.push(format!("from channels {from}")),
+        (None, Some(to)) => parts.push(format!("to channels {to}")),
+        (None, None) => {}
+    }
+    if let Some(midi) = state["midiFlags"].as_i64() {
+        let words = midi_words(midi);
+        let from = words["from"].as_str().map_or_else(|| words["from"].to_string(), str::to_string);
+        if from == "none" {
+            parts.push("no MIDI".to_string());
+        } else {
+            let to = words["to"].as_str().map_or_else(|| words["to"].to_string(), str::to_string);
+            parts.push(format!("MIDI {from} \u{2192} {to}"));
+        }
+    }
+    parts.join(", ")
+}
+
+/// Whether the tracks at both ends have the channels the wanted state uses: a send can't take from or give to channels a
+/// track doesn't have (REAPER keeps them, unheard).
+fn fits(reaper: &Reaper, from: Track, to: Track, wanted: &Value) -> Done<()> {
+    let channels = |track: Track| reaper.track_value(track, "I_NCHAN").max(2.0) as i64;
+    let src = wanted["srcChan"].as_i64();
+    if let Some(src) = src.filter(|c| *c >= 0) {
+        let last = (src & 1023) + src_count(src);
+        if last > channels(from) {
+            return Err(bad(format!(
+                "{} has {} channels, and the send would take from channel {last}: raise its channels first (track_channels)",
+                super::quoted(&name_of(reaper, from)),
+                channels(from)
+            )));
+        }
+    }
+    if let Some(dst) = wanted["dstChan"].as_i64() {
+        let count = if dst & 1024 != 0 { 1 } else { src.map_or(2, src_count).max(1) };
+        let last = (dst & 1023) + count;
+        if last > channels(to) {
+            return Err(bad(format!(
+                "{} has {} channels, and the send would reach channel {last}: raise its channels first (track_channels)",
+                super::quoted(&name_of(reaper, to)),
+                channels(to)
+            )));
+        }
+    }
+    Ok(())
+}
 
 pub fn prop_preview(ctx: &Ctx, prop: &Prop, input: &Value) -> Done<Preview> {
     let reference = input["ref"].as_str().unwrap_or_default();
     let found = find(ctx, reference, true)?;
     let now = (prop.read)(ctx.reaper, found.track, found.index);
     let wanted = (prop.wanted)(input)?;
+    if let Some(check) = prop.check {
+        check(ctx.reaper, found.track, found.receiver, &wanted)?;
+    }
     let route = route_text(&found.from, &found.to);
     let mut display = json!({"title": (prop.title)(&route, &wanted), "before": now, "after": wanted});
     if (prop.same)(&now, &wanted) {
@@ -409,6 +635,9 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
         return Err(changed(format!("{route}'s {} changed since the preview", prop.noun)));
     }
     let wanted = (prop.wanted)(input)?;
+    if let Some(check) = prop.check {
+        check(ctx.reaper, found.track, found.receiver, &wanted)?;
+    }
     let before = pair_seen(ctx.reaper, found.track, found.receiver);
     // A send Kumi changes gets Kumi's mark, in the same step, if it has none: its undo then finds it by that and by no value
     // (two sends at REAPER's defaults are alike in every value).
@@ -541,7 +770,33 @@ fn add_plan(ctx: &Ctx, input: &Value) -> Done<Add> {
     if input.get("mode").is_some_and(|v| !v.is_null()) {
         changes.push(("I_SENDMODE", number(&(PROPS[3].wanted)(input)?, "mode")));
     }
+    // A sidechain: the channels it takes from and gives to, and its MIDI.
+    if ["srcChannels", "dstChannels", "midi"].iter().any(|key| input.get(*key).is_some_and(|v| !v.is_null())) {
+        let wanted = (PROPS[4].wanted)(input)?;
+        fits(ctx.reaper, from, to, &wanted)?;
+        for (parm, key) in CHANNEL_KEYS {
+            if let Some(value) = wanted[key].as_i64() {
+                changes.push((parm, value as f64));
+            }
+        }
+    }
     Ok(Add { from, from_id, to, to_id, changes })
+}
+
+/// ", channels 1/2 → 3/4" for a send added as a sidechain.
+fn sidechain_text(plan: &Add) -> String {
+    let mut state = json!({});
+    for (parm, key) in CHANNEL_KEYS {
+        if let Some((_, value)) = plan.changes.iter().find(|(p, _)| *p == parm) {
+            state[key] = (*value as i64).into();
+        }
+    }
+    let text = channels_text(&state);
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!(", {text}")
+    }
 }
 
 fn add_fence(ctx: &Ctx, plan: &Add) -> Value {
@@ -552,7 +807,7 @@ pub fn add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let plan = add_plan(ctx, input)?;
     let route = route_text(&name_of(ctx.reaper, plan.from), &name_of(ctx.reaper, plan.to));
     let existing = rows::send_keys(ctx.reaper, plan.from, 0).iter().filter(|key| key.other == SendEnd::Track(plan.to_id.clone())).count();
-    let mut display = json!({"title": format!("Added send {route}")});
+    let mut display = json!({"title": format!("Added send {route}{}", sidechain_text(&plan))});
     if existing > 0 {
         display["note"] = format!("There are {existing} send(s) between them already.").into();
     }
@@ -601,7 +856,7 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         applied,
         created: Some(created),
         material: None,
-        display: json!({"title": format!("Added send {route}")}),
+        display: json!({"title": format!("Added send {route}{}", sidechain_text(&plan))}),
         ..Default::default()
     })
 }

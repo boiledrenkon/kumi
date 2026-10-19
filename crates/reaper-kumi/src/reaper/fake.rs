@@ -91,6 +91,10 @@ pub struct FakeFx {
     /// Some for a container, even an empty one.
     pub children: Option<Vec<FakeFx>>,
     pub instrument: bool,
+    /// Input and output pins.
+    pub io: (i32, i32),
+    /// Pin mappings set (output, pin) to channel bits; a pin not here takes or gives its own channel (pin n, channel n).
+    pub pins: HashMap<(bool, i32), u64>,
 }
 
 impl FakeFx {
@@ -106,6 +110,8 @@ impl FakeFx {
             params: vec![],
             children: None,
             instrument: false,
+            io: (2, 2),
+            pins: HashMap::new(),
         }
     }
 
@@ -441,6 +447,8 @@ pub struct State {
     pub on_script: Option<fn(&str)>,
     /// What scripts and extensions keep: (section, key) to value.
     pub ext_state: HashMap<(String, String), String>,
+    /// How often a script's registration was committed to REAPER's key map file (`reaper-kb.ini`).
+    pub kb_writes: u32,
 }
 
 impl Default for State {
@@ -501,6 +509,7 @@ impl Default for State {
             scripts: vec![],
             on_script: None,
             ext_state: HashMap::new(),
+            kb_writes: 0,
         }
     }
 }
@@ -887,9 +896,12 @@ unsafe extern "C" fn main_on_command_ex(command: c_int, _flag: c_int, _proj: *mu
         run(&std::fs::read_to_string(path).unwrap_or_default());
     }
 }
-unsafe extern "C" fn add_remove_rea_script(add: bool, _section: c_int, file: *const c_char, _commit: bool) -> c_int {
+unsafe extern "C" fn add_remove_rea_script(add: bool, _section: c_int, file: *const c_char, commit: bool) -> c_int {
     let file = name_of(file);
     with(|s| {
+        if commit {
+            s.kb_writes += 1;
+        }
         if add {
             let id = 60_000 + s.scripts.len() as c_int + s.actions.len() as c_int;
             s.scripts.push((id, file));
@@ -1443,6 +1455,44 @@ unsafe extern "C" fn track_fx_copy_to_track(src: *mut MediaTrack, from: c_int, d
     })
 }
 
+unsafe extern "C" fn track_fx_get_io_size(track: *mut MediaTrack, fx: c_int, ins: *mut c_int, outs: *mut c_int) -> c_int {
+    counted(|s| match fx_of(s, track as u64, fx) {
+        Some(f) => {
+            unsafe {
+                if !ins.is_null() {
+                    *ins = f.io.0;
+                }
+                if !outs.is_null() {
+                    *outs = f.io.1;
+                }
+            }
+            0
+        }
+        None => -1,
+    })
+}
+unsafe extern "C" fn track_fx_get_pin_mappings(track: *mut MediaTrack, fx: c_int, output: c_int, pin: c_int, high: *mut c_int) -> c_int {
+    let mask = counted(|s| fx_of(s, track as u64, fx).map(|f| f.pins.get(&(output != 0, pin)).copied().unwrap_or(1 << pin)).unwrap_or(0));
+    if !high.is_null() {
+        unsafe { *high = (mask >> 32) as u32 as c_int };
+    }
+    mask as u32 as c_int
+}
+unsafe extern "C" fn track_fx_set_pin_mappings(
+    track: *mut MediaTrack,
+    fx: c_int,
+    output: c_int,
+    pin: c_int,
+    low: c_int,
+    hi: c_int,
+) -> bool {
+    counted(|s| {
+        let Some(f) = track_mut(s, track as u64).and_then(|t| t.fx.get_mut(fx as usize)) else { return false };
+        f.pins.insert((output != 0, pin), (low as u32 as u64) | ((hi as u32 as u64) << 32));
+        s.undo_dirty = true;
+        true
+    })
+}
 unsafe extern "C" fn track_fx_set_enabled(track: *mut MediaTrack, fx: c_int, enabled: bool) {
     counted(|s| {
         if let Some(f) = track_mut(s, track as u64).and_then(|t| t.fx.get_mut(fx as usize)) {
@@ -2725,6 +2775,9 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"TrackFX_Delete" => track_fx_delete as unsafe extern "C" fn(*mut MediaTrack, c_int) -> bool,
         b"TrackFX_CopyToTrack" => track_fx_copy_to_track as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut MediaTrack, c_int, bool),
         b"TrackFX_SetEnabled" => track_fx_set_enabled as unsafe extern "C" fn(*mut MediaTrack, c_int, bool),
+        b"TrackFX_GetIOSize" => track_fx_get_io_size as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut c_int, *mut c_int) -> c_int,
+        b"TrackFX_GetPinMappings" => track_fx_get_pin_mappings as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, c_int, *mut c_int) -> c_int,
+        b"TrackFX_SetPinMappings" => track_fx_set_pin_mappings as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, c_int, c_int, c_int) -> bool,
         b"TrackFX_SetParamNormalized" => track_fx_set_param_normalized as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, f64) -> bool,
         b"TrackFX_FormatParamValueNormalized" => track_fx_format_param_value_normalized as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, f64, *mut c_char, c_int) -> bool,
         b"TrackFX_GetInstrument" => track_fx_get_instrument as unsafe extern "C" fn(*mut MediaTrack) -> c_int,

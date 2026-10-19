@@ -53,14 +53,12 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(bad("the function isn't the one previewed"));
     }
     let handles = CallRefs { reads: ctx.reads, reaper: ctx.reaper, proj: ctx.proj };
-    let before = ctx.reaper.state_change_count(ctx.proj);
     let (result, out) = ctx.reaper.call(index, &args, &handles, false).map_err(bad)?;
-    // (whether REAPER counted a change while the function ran: a hint only, as REAPER may count it when the block ends.
-    // The block is always closed as a write, so REAPER's undo covers whatever the function did and the producer's next
-    // edit never joins it; the answer's undo.entry says whether REAPER made a point of it)
-    let changed = ctx.reaper.state_change_count(ctx.proj) != before;
+    // (REAPER counts a block's changes only as it ends, so whether the function changed anything isn't known here: the
+    // block is always closed as a write, REAPER's undo covers whatever it did, the producer's next edit never joins it,
+    // and the answer's undo.entry says whether REAPER made a point of it)
     Ok(Applied {
-        applied: json!({"fn": name, "result": result, "out": out, "changed": changed}),
+        applied: json!({"fn": name, "result": result, "out": out}),
         display: json!({"title": title(name), "note": NOTE}),
         ..Default::default()
     })
