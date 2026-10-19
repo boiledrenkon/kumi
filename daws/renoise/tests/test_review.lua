@@ -341,6 +341,8 @@ test("review M-3: an apply that locates another track than the preview did is re
   local wrong = call(peer, "change_apply", { kind = "track-volume", input = input, fence = previewed.fence, desc = "Kumi: v (kr12)",
     epoch = previewed.epoch, layout = previewed.layout })
   failure(wrong, "changed")
+  ok(wrong.error.message:find("\226\128\156Bass\226\128\157 isn't at that place any more", 1, true), "it names the track that was previewed: " .. wrong.error.message)
+  ok(not wrong.error.message:find("Hat", 1, true), "and not the one at its place now: " .. wrong.error.message)
   eq(mock.data.tracks[3].volume, 1, "Hat was not changed")
   eq(mock.data.tracks[4].volume, 1)
   eq(steps(), 0)
@@ -368,6 +370,8 @@ test("review M-3: notes written under the wrong pairing go to no other track", f
   local wrong = call(peer, "change_apply", { kind = "notes-write", input = input, fence = previewed.fence, desc = "Kumi: n (kr14)",
     epoch = previewed.epoch, layout = previewed.layout })
   failure(wrong, "changed")
+  ok(wrong.error.message:find("\226\128\156Bass\226\128\157 isn't at that place any more", 1, true), "it names the track that was previewed: " .. wrong.error.message)
+  ok(not wrong.error.message:find("Hat", 1, true), "and not the one at its place now: " .. wrong.error.message)
   ok(mock.song:pattern(1):track(3):line(1).is_empty, "Hat's line is empty")
   ok(mock.song:pattern(1):track(4):line(1).is_empty, "and so is Bass's: nothing was written")
   eq(steps(), 0)
@@ -376,6 +380,22 @@ test("review M-3: notes written under the wrong pairing go to no other track", f
   ok(right.result, json.encode(right.error or {}))
   ok(not mock.song:pattern(1):track(4):line(1).is_empty, "Bass got the note")
   ok(right.result.target.ref:match(":ptrack:1%.4$"), json.encode(right.result.target))
+  H.no_dialogs()
+end)
+
+test("review M-3: a track delete under the wrong pairing is refused naming the track that was previewed", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 3) } -- Bass, in Kumi's book
+  mock.ops.insert_track(1, { name = "New" })
+  H.tick(2)
+  local previewed = call(peer, "change_preview", { kind = "track-delete", input = input, epoch = epoch, layout = layout }).result
+  ok(previewed, "previewed")
+  local wrong = call(peer, "change_apply", { kind = "track-delete", input = input, fence = previewed.fence, desc = "Kumi: d (kr54)",
+    epoch = previewed.epoch, layout = previewed.layout })
+  failure(wrong, "changed")
+  ok(wrong.error.message:find("\226\128\156Bass\226\128\157 isn't at that place any more", 1, true), wrong.error.message)
+  eq(names(), "New,Kick,Hat,Bass,Pad,Master,Send 1", "nothing was deleted")
   H.no_dialogs()
 end)
 

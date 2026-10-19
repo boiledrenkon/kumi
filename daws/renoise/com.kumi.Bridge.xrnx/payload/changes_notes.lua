@@ -482,7 +482,7 @@ local function preview_of(song, env, input, kind, verb)
   if needs.note > (columns.note or 0) then display.note = "It shows note column " .. needs.note .. " first." end
   return {
     target = target_of(env, p, index), prior = { cells = prior, columns = columns },
-    fence = { cells = #prior, hash = fingerprint(prior), id = base.track_id(track) },
+    fence = { cells = #prior, hash = fingerprint(prior), id = base.track_id(track), label = base.named(index, track) },
     display = display,
   }, { p = p, index = index, track = track, pattern_track = pattern_track, pattern = pattern, prior = prior, after = after, columns = columns }
 end
@@ -490,7 +490,10 @@ end
 local function apply_of(song, env, input, fence, desc, kind, verb)
   local ok, preview, plan = pcall(preview_of, song, env, input, kind, verb)
   if not ok then base.gone_is_changed(preview) end
-  if preview.fence.cells ~= fence.cells or preview.fence.hash ~= fence.hash or (fence.id ~= nil and fence.id ~= preview.fence.id) then
+  if fence.id ~= nil and fence.id ~= preview.fence.id then
+    fail("changed", base.moved_text(fence.label or base.named(plan.index, plan.track)))
+  end
+  if preview.fence.cells ~= fence.cells or preview.fence.hash ~= fence.hash then
     fail("changed", string.format("%s in %s changed since the preview", base.named(plan.index, plan.track), pattern_label(plan.pattern, plan.p)))
   end
   local display = preview.display
