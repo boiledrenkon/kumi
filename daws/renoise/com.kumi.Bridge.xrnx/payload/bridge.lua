@@ -663,6 +663,12 @@ local function shifted(index, since)
   return moved
 end
 
+-- A place among the tracks carried the same way: a track removed there leaves the place (nil and "unknown" as above).
+local function place_shifted(index, since)
+  if type(since) ~= "number" or since > b.layout or b.layout - since > #b.shifts then return nil, "unknown" end
+  return refs.shift_place(index, b.shifts, since)
+end
+
 -- The places a change keeps of devices (on the track now at `t`), patterns and instruments: a mark, and where the object is now.
 local function device_log(t)
   local token = b.groups and b.groups.tracks[t]
@@ -696,7 +702,7 @@ local place_env = {
 local function change_env()
   local env = {
     epoch = epoch, layout = function() b.layout_told = true return b.layout end, journal = b.journal, watch_params = watch_params,
-    watch_param = watch_param, busy = busy, now_ms = function() return M.now_ms() end, shifted = shifted,
+    watch_param = watch_param, busy = busy, now_ms = function() return M.now_ms() end, shifted = shifted, place_shifted = place_shifted,
     survives = function(from, kind) return survives(from, kind) end,
   }
   for name, fn in pairs(place_env) do env[name] = fn end

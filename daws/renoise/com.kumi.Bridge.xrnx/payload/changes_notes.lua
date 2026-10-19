@@ -542,9 +542,57 @@ end
 
 -- Restore
 
-local function restore_plan(pattern_track, restore)
+-- Kumi's cells moved as a whole in the pattern track since it wrote them: rows inserted or deleted above them (up to 64), or
+-- their column moved. Renoise tells neither apart from an edit, and their places name other lines now: then nothing is
+-- written. (Each place is read once.)
+local SHIFTS_LOOKED_AT = 64
+
+local function moved_away(pattern_track, prior, applied, lines)
+  local mine = {}
+  for i = 1, #applied do
+    if not same_cell(applied[i], prior[i]) then mine[#mine + 1] = applied[i] end
+  end
+  if #mine == 0 then return false end
+  local seen = {}
+  local function holds(cell, line, col)
+    if line < 1 or line > lines or col < 1 or col > (cell.kind == "note" and 12 or 8) then return false end
+    local key = cell.kind .. line .. ":" .. col
+    if seen[key] == nil then seen[key] = read_cell(pattern_track, { line = line, kind = cell.kind, col = col }) end
+    return same_cell(seen[key], cell)
+  end
+  local function all_at(dl, columns)
+    for _, cell in ipairs(mine) do
+      if not holds(cell, cell.line + dl, columns and columns[cell.kind .. cell.col] or cell.col) then return false end
+    end
+    return true
+  end
+  if all_at(0) then return false end
+  for d = 1, SHIFTS_LOOKED_AT do
+    if all_at(d) or all_at(-d) then return true end
+  end
+  -- (a column moved: each of Kumi's columns found whole in another one, at the same lines)
+  local groups = {}
+  for _, cell in ipairs(mine) do groups[cell.kind .. cell.col] = { kind = cell.kind, col = cell.col } end
+  for key, group in pairs(groups) do
+    for c = 1, group.kind == "note" and 12 or 8 do
+      if c ~= group.col then
+        local whole = true
+        for _, cell in ipairs(mine) do
+          if cell.kind .. cell.col == key and not holds(cell, cell.line, c) then whole = false break end
+        end
+        if whole then return true end
+      end
+    end
+  end
+  return false
+end
+
+local function restore_plan(pattern_track, restore, lines)
   local prior, applied = restore.prior and restore.prior.cells, restore.applied and restore.applied.cells
   if type(prior) ~= "table" or type(applied) ~= "table" or #prior ~= #applied then bad("prior and applied: the cells the change wrote") end
+  if not restore.discard and moved_away(pattern_track, prior, applied, lines) then
+    fail("changed", "the lines Kumi wrote were moved in Renoise since (rows inserted or deleted above them, or their column moved), so Kumi left them")
+  end
   local todo = {}
   for i = 1, #prior do
     local now = read_cell(pattern_track, prior[i])
@@ -593,7 +641,7 @@ end
 local function restore_of(spec_kind, noun)
   return function(song, env, restore, desc)
     local p, index, track, pattern_track, pattern = locate_restored(song, env, restore)
-    local todo = restore_plan(pattern_track, restore)
+    local todo = restore_plan(pattern_track, restore, pattern.number_of_lines)
     local label = string.format("%s on %s", q(pattern_label(pattern, p)), q(base.named(index, track)))
     local place = { pattern = p, track = index }
     local spec = base.KINDS[spec_kind]
@@ -634,6 +682,8 @@ local function restore_of(spec_kind, noun)
             for _, cell in ipairs(chunks[k]) do write_cell(live_pattern_track, cell) end
             done_steps = k
             if k == 1 then job.rebase() end
+            -- (a stop from here leaves lines half put back: a tool stopped or reloaded says so, see jobs.lua)
+            job.wrote = string.format("Putting the lines back in %s (%d of %d steps are put back)", label, k, total)
           end
         end)
         if not ok then

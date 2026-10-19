@@ -82,8 +82,49 @@ local function receiver_check(device, parameter, value, song)
   end
 end
 
+-- A parameter whose value is a place: a #Send's Receiver (a send track, counted among the sends from 0) and a meta device's
+-- track (Dest. Track and the like: a track counted from 0). Renoise moves these values with the tracks made and deleted, so
+-- a record keeps the track the value names as a track ref, which the layout carries; the value is worked out from it again.
+local function points_at(device, parameter)
+  local path, name = device.device_path, parameter.name
+  if (path:find("#Send", 1, true) or path:find("#Multiband Send", 1, true)) and name:match("^Receiver") then return "send" end
+  if path:find("/Native/*", 1, true) and name:match("Track$") then return "track" end
+  return nil
+end
+
+local function master_of(song) return song.sequencer_track_count + 1 end
+
+local function track_of_value(song, points, value)
+  if type(value) ~= "number" or value < 0 or value ~= math.floor(value) then return nil end
+  local n = points == "send" and master_of(song) + 1 + value or value + 1
+  if n < 1 or n > rows.track_count(song) then return nil end
+  return n
+end
+
+local function value_of_track(song, points, n)
+  return points == "send" and n - master_of(song) - 1 or n - 1
+end
+
 local param_spec = {
   kind = "device-param", noun = "parameter", undoable = true,
+  wire = function(state, env, loc)
+    if not (loc and loc.points) or type(state) ~= "table" then return state end
+    local n = track_of_value(renoise.song(), loc.points, state.value)
+    if not n then return state end
+    local out = {}
+    for k, v in pairs(state) do out[k] = v end
+    out.at = refs.make(env.epoch(), "track", n)
+    return out
+  end,
+  unwire = function(state, env, loc)
+    if type(state) ~= "table" or type(state.at) ~= "string" or not (loc and loc.points) then return state end
+    -- (carried to where that track is now; a ref of another epoch is `stale`)
+    local n = refs.expect(state.at, "track", 1, env.epoch())[1]
+    local out = {}
+    for k, v in pairs(state) do out[k] = v end
+    out.at, out.value, out.valueString = nil, value_of_track(renoise.song(), loc.points, n), nil
+    return out
+  end,
   read = function(parameter) return param_state(parameter) end,
   wanted = function(parameter, input)
     if type(input.value) == "number" then
@@ -164,7 +205,7 @@ param_spec.locate = function(song, env, input)
   return {
     object = parameter, name = name .. " " .. parameter.name, place = { track = index, device = at, param = k },
     target = { ref = refs.make(env.epoch(), "param", index, at, k), kind = "param" },
-    id = base.track_id(track) .. "|" .. device.device_path .. "|" .. k,
+    id = base.track_id(track) .. "|" .. device.device_path .. "|" .. k, points = points_at(device, parameter),
   }
 end
 param_spec.reread = function(song, place)
@@ -248,6 +289,8 @@ local function add_preview(song, env, input)
   local index, track = base.find(song, env, input.ref, "device-add")
   local info, at = add_input(song, track, input)
   local now = add_signature(index, track)
+  -- (the send the receiver names, as a track the layout carries: one made before it by the apply refuses `changed`)
+  if input.receiver ~= nil then now.receiver = refs.make(env.epoch(), "track", song.sequencer_track_count + 2 + input.receiver) end
   local display = {
     title = string.format("Added %s to %s", q(short_name(info)), q(base.named(index, track))),
     before = { devices = now.devices }, after = { devices = now.devices + 1, path = info.path, index = at },
@@ -266,6 +309,11 @@ local function add_apply(song, env, input, fence, desc)
   local ok, index, track = pcall(base.find, song, env, input.ref, "device-add")
   if not ok then base.gone_is_changed(index) end
   local now = add_signature(index, track)
+  if type(fence.receiver) == "string" then
+    local send = refs.expect(fence.receiver, "track", 1, env.epoch())[1]
+    if input.receiver ~= send - song.sequencer_track_count - 2 then fail("changed", "the send the receiver names moved since the preview: read again") end
+    now.receiver = fence.receiver
+  end
   if not base.same_table(now, fence) then fail("changed", base.named(index, track) .. "'s devices changed since the preview") end
   local info, at = add_input(song, track, input)
   song:describe_undo(desc)

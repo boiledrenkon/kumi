@@ -207,13 +207,14 @@ end
 -- `place` is what the journal remembers to find it again (`spec.reread(song, place)`).
 -- (A kind may keep numbers that mean something only in an epoch as refs on the wire: `wire` makes the state's wire form,
 -- `unwire` takes it back and raises `stale` for a ref that is no longer one.)
-local function wire(spec, state, env)
-  if spec.wire then return spec.wire(state, env) end
+-- (`loc` is what was located: a value may be a place, by what it is on)
+local function wire(spec, state, env, loc)
+  if spec.wire then return spec.wire(state, env, loc) end
   return state
 end
 
-local function unwire(spec, state, env)
-  if spec.unwire then return spec.unwire(state, env) end
+local function unwire(spec, state, env, loc)
+  if spec.unwire then return spec.unwire(state, env, loc) end
   return state
 end
 
@@ -238,9 +239,17 @@ function M.prop_preview(song, env, spec, input)
   local display = { title = spec.title(loc.name, now, wanted), before = now, after = wanted }
   if spec.same(now, wanted) then display.unchanged = true end
   if not spec.undoable then display.note = NOT_UNDOABLE end
-  local shown = wire(spec, now, env)
-  -- (the fence names what was located as well as its value: another track at the ref's place is not this one)
-  return { target = loc.target, prior = shown, fence = with_id(shown, loc.id, loc.name), display = display }
+  local shown = wire(spec, now, env, loc)
+  -- (the fence names what was located as well as its value: another track at the ref's place is not this one; and, where the
+  -- value is a place, what the wanted value names)
+  local fence = with_id(shown, loc.id, loc.name)
+  if spec.wire then
+    local copy = {}
+    for k, v in pairs(fence) do copy[k] = v end
+    copy.wanted = wire(spec, wanted, env, loc)
+    fence = copy
+  end
+  return { target = loc.target, prior = shown, fence = fence, display = display }
 end
 
 local function gone_is_changed(err)
@@ -257,12 +266,16 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   if loc.id ~= nil and fence.id ~= nil and fence.id ~= loc.id then
     fail("changed", M.moved_text(fence.label or loc.name))
   end
-  local fenced = unwire(spec, fence, env)
+  local fenced = unwire(spec, fence, env, loc)
   local now = spec.read(loc.object, fenced)
   if not spec.same(now, fenced) then
     fail("changed", loc.name .. "'s " .. spec.noun .. " changed since the preview")
   end
   local wanted = spec.wanted(loc.object, input)
+  -- (a value that is a place: what it named at the preview, where that is now, is what is written, or nothing)
+  if type(fence.wanted) == "table" and not spec.same(unwire(spec, fence.wanted, env, loc), wanted) then
+    fail("changed", string.format("what %s's %s names moved since the preview: read again", loc.name, spec.noun))
+  end
   if spec.undoable then song:describe_undo(desc) end
   if spec.watch then spec.watch(env, loc) end
   if not spec.same(now, wanted) then spec.write(loc.object, wanted) end
@@ -276,7 +289,7 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   local display = { title = spec.title(loc.name, now, after), before = now, after = after }
   if not spec.undoable then display.note = NOT_UNDOABLE end
   return {
-    applied = wire(spec, after, env), journal_applied = after,
+    applied = wire(spec, after, env, loc), journal_applied = after,
     display = display,
     undo = { desc = desc, entry = spec.undoable },
     spec = spec, place = loc.place, prior = now, target = loc.target,
@@ -290,7 +303,7 @@ function M.prop_restore(song, env, spec, restore, desc)
     if type(loc) == "table" and loc.code == "failed" then loc.code = "gone" end
     error(loc, 0)
   end
-  local prior, applied = unwire(spec, restore.prior, env), unwire(spec, restore.applied, env)
+  local prior, applied = unwire(spec, restore.prior, env, loc), unwire(spec, restore.applied, env, loc)
   local now = spec.read(loc.object, prior)
   if not spec.same(now, prior) then
     if not restore.discard and not spec.same(now, applied) then
@@ -305,7 +318,7 @@ function M.prop_restore(song, env, spec, restore, desc)
   local after = spec.eventual and prior or spec.read(loc.object, prior)
   local display = { title = spec.title(loc.name, now, after) .. " (put back)", before = now, after = after }
   return {
-    restored = wire(spec, after, env), display = display, undo = { desc = desc, entry = spec.undoable }, place = loc.place,
+    restored = wire(spec, after, env, loc), display = display, undo = { desc = desc, entry = spec.undoable }, place = loc.place,
     applied = applied,
   }
 end

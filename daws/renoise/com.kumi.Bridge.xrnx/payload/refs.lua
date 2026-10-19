@@ -96,6 +96,21 @@ function M.shift(n, shifts, since)
   return n
 end
 
+-- The same for a place among the tracks rather than a track: where a track deleted from there would go back. A track removed
+-- at the place leaves it where it is (the next one took it); a swap moves no place.
+function M.shift_place(n, shifts, since)
+  for _, s in ipairs(shifts) do
+    if s.layout > since then
+      if s.type == "insert" then
+        if n >= s.index then n = n + 1 end
+      elseif s.type == "remove" then
+        if n > s.index then n = n - 1 end
+      end
+    end
+  end
+  return n
+end
+
 -- Whether a request names a track, or something on one (a ref of kind track, device or param, of any epoch, or a number
 -- under `track`): only those move with the track layout.
 function M.names_tracks(params)

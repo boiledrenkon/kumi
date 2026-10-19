@@ -1598,3 +1598,256 @@ test("places, instrument × more operations than kept: refused stale, nothing wr
   failure(undo_track_delete(peer, previewed, done, "kp45"), "stale")
   eq(steps(), before)
 end)
+
+-- Values that are places: a #Send's Receiver (a send) and a meta device's Dest. Track (a track). Renoise moves them with the tracks
+-- made and deleted; a record keeps the track they name, and a write is of the track the preview saw.
+
+-- Kick with a #Send feeding Send 1 (of Send 1 and Send 2).
+local function kick_send(peer)
+  routing_catalog()
+  mock.song:track(1):insert_device_at("Audio/Effects/Native/#Send", 2)
+  mock.data.tracks[1].devices[2].params[3].value = 0
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  return place(peer)
+end
+
+local function set_param(peer, ref, input, desc)
+  local epoch, layout = place(peer)
+  local merged = { ref = ref }
+  for k, v in pairs(input) do merged[k] = v end
+  local previewed = preview(peer, "device-param", merged)
+  local done = apply(peer, "device-param", merged, desc, previewed.fence, epoch, layout)
+  return previewed, done
+end
+
+test("places, value × a send deleted: the undo of a Receiver Kumi set says the send it fed is gone, and claims nothing", function()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  local epoch = kick_send(peer)
+  local previewed, done = set_param(peer, epoch .. ":device:1.2", { param = "Receiver", value = 1 }, "Kumi: Receiver (kp50)")
+  ok(done.result, json.encode(done.error or {}))
+  mock.ops.remove_track(6) -- Send 1: Renoise moves the Receiver to 0, still Send 2
+  H.tick(2)
+  eq(receiver(1, 2), 0)
+  local undone = restore(peer, "device-param", record_of(previewed, done.result), "Kumi: undo (kp51)", done.result.epoch, done.result.layout)
+  failure(undone, "gone")
+  eq(receiver(1, 2), 0, "it still feeds Send 2")
+end)
+
+test("places, value × a send made before: the undo of a Receiver Kumi set feeds the send it fed before", function()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  local epoch = kick_send(peer)
+  local previewed, done = set_param(peer, epoch .. ":device:1.2", { param = "Receiver", value = 1 }, "Kumi: Receiver (kp52)")
+  ok(done.result, json.encode(done.error or {}))
+  mock.ops.insert_track(6, { kind = "send", name = "New send" })
+  H.tick(2)
+  eq(receiver(1, 2), 2, "Renoise moved it: Send 2 is the third send")
+  local undone = restore(peer, "device-param", record_of(previewed, done.result), "Kumi: undo (kp53)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(receiver(1, 2), 1, "Send 1, the second send now")
+  eq(mock.data.tracks[7].name, "Send 1")
+end)
+
+test("places, value × a send made between the preview and the apply: refused changed, nothing written", function()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  local epoch, layout = kick_send(peer)
+  local input = { ref = epoch .. ":device:1.2", param = "Receiver", value = 1 }
+  local previewed = preview(peer, "device-param", input)
+  mock.ops.insert_track(6, { kind = "send", name = "New send" })
+  H.tick(2)
+  local before = steps()
+  failure(apply(peer, "device-param", input, "Kumi: Receiver (kp54)", previewed.fence, epoch, layout), "changed")
+  eq(receiver(1, 2), 1, "Renoise's own move of Send 1, nothing of Kumi's")
+  eq(steps(), before)
+end)
+
+test("places, value × device-add's receiver: a send made between the preview and the apply refuses, no device made", function()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  routing_catalog()
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 1), path = "Audio/Effects/Native/#Send", receiver = 1 }
+  local previewed = preview(peer, "device-add", input)
+  mock.ops.insert_track(6, { kind = "send", name = "New send" })
+  H.tick(2)
+  failure(apply(peer, "device-add", input, "Kumi: add (kp55)", previewed.fence, epoch, layout), "changed")
+  eq(#mock.data.tracks[1].devices, 1, "no device made")
+end)
+
+test("places, value × Dest. Track: a track made between the preview and the apply refuses; the undo after a track deleted is true", function()
+  local env, peer = setup()
+  routing_catalog()
+  mock.song:track(1):insert_device_at("Audio/Effects/Native/*LFO", 2)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local input = { ref = epoch .. ":device:1.2", param = "Dest. Track", value = 2 } -- Bass
+  local previewed = preview(peer, "device-param", input)
+  mock.ops.insert_track(1, { name = "New" })
+  H.tick(2)
+  failure(apply(peer, "device-param", input, "Kumi: aim (kp56)", previewed.fence, epoch, layout), "changed")
+  eq(mock.data.tracks[2].devices[2].params[1].value, -1, "aimed nowhere")
+  -- Aimed at Bass, then the producer deletes the track before it: Renoise moves the value, and the undo takes Kumi's aim back.
+  local previewed2, done = set_param(peer, place(peer) .. ":device:2.2", { param = "Dest. Track", value = 3 }, "Kumi: aim (kp57)")
+  ok(done.result, json.encode(done.error or {}))
+  mock.ops.remove_track(1)
+  H.tick(2)
+  eq(mock.data.tracks[1].devices[2].params[1].value, 2, "Renoise moved it with Bass")
+  local undone = restore(peer, "device-param", record_of(previewed2, done.result), "Kumi: undo (kp58)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(mock.data.tracks[1].devices[2].params[1].value, -1)
+end)
+
+-- Cells: Renoise moves a track's lines with a row inserted or deleted in the pattern editor, and its columns with a column moved,
+-- and tells neither apart from an edit. Kumi's lines moved as a whole are left where they are, and the undo says so.
+
+local function notify_lines(p, t, line)
+  for _, fn in ipairs(mock.data.patterns[p].notifiers) do pcall(fn, { pattern = p, track = t, line = line }) end
+end
+
+local function insert_row(p, t, r)
+  local pattern = mock.data.patterns[p]
+  local data = pattern.tracks[t]
+  local moved = {}
+  for k, line in pairs(data.lines) do
+    if k < r then moved[k] = line elseif k + 1 <= pattern.lines then moved[k + 1] = line end
+  end
+  data.lines = moved
+  notify_lines(p, t, r)
+  H.tick(2)
+end
+
+local function swap_note_columns(t, a, b)
+  for p, pattern in ipairs(mock.data.patterns) do
+    local data = pattern.tracks[t]
+    if data then
+      for _, line in pairs(data.lines or {}) do
+        line.notes = line.notes or {}
+        line.notes[a], line.notes[b] = line.notes[b], line.notes[a]
+      end
+      notify_lines(p, t, 1)
+    end
+  end
+  H.tick(2)
+end
+
+local function bass_notes(peer, first, last, tag)
+  local epoch, layout = place(peer)
+  local lines = {}
+  for l = first, last do lines[#lines + 1] = { line = l, notes = { { col = 1, note = "C-4", instrument = "00" } } } end
+  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = lines }
+  local previewed = preview(peer, "notes-write", input)
+  local done = apply(peer, "notes-write", input, "Kumi: n (" .. tag .. ")", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  return previewed, done.result
+end
+
+local function c4_lines(col)
+  local out = {}
+  for k = 1, 32 do
+    if mock.song:pattern(1):track(3):line(k):note_column(col or 1).note_string == "C-4" then out[#out + 1] = k end
+  end
+  return table.concat(out, ",")
+end
+
+test("places, cell × a row inserted above Kumi's lines: refused changed, the lines left where they are", function()
+  local env, peer = setup()
+  local previewed, done = bass_notes(peer, 2, 4, "kp60")
+  insert_row(1, 3, 1)
+  eq(c4_lines(), "3,4,5")
+  local before = steps()
+  local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kp61)", done.epoch, done.layout)
+  failure(undone, "changed")
+  ok(undone.error.message:find("moved in Renoise", 1, true), undone.error.message)
+  eq(c4_lines(), "3,4,5")
+  eq(steps(), before)
+end)
+
+test("places, cell × Kumi's column moved: refused changed, nothing written", function()
+  local env, peer = setup()
+  local previewed, done = bass_notes(peer, 1, 4, "kp62")
+  swap_note_columns(3, 1, 2)
+  eq(c4_lines(1), "")
+  eq(c4_lines(2), "1,2,3,4")
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kp63)", done.epoch, done.layout), "changed")
+  eq(c4_lines(2), "1,2,3,4")
+end)
+
+test("places, cell × nothing moved: the lines are put back as before", function()
+  local env, peer = setup()
+  local previewed, done = bass_notes(peer, 2, 4, "kp64")
+  local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kp65)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(c4_lines(), "")
+end)
+
+test("places, cell × tool reloaded during a sliced notes restore: uncertain, naming the lines", function()
+  local env, peer = setup({ patch = constants({ SLICE_WRITES = 40 }) })
+  local previewed, done = bass_notes(peer, 1, 24, "kp66")
+  local id = send(peer, "change_restore", restore_params("notes-write", record_of(previewed, done), "Kumi: undo n (kp67)", done.epoch, done.layout))
+  local before = steps()
+  for _ = 1, 50 do
+    mock.advance(10)
+    if steps() > before then break end
+  end
+  eq(steps(), before + 1, "step 1 is written")
+  local other = H.connect(env)
+  H.frames(other)
+  send(other, "renoise.reload", {})
+  local response = wait(peer, id, 400, 20)
+  ok(response and response.error, "an error")
+  eq(response.error.code, "uncertain", response.error.message)
+  ok(response.error.message:find("Putting the lines back in", 1, true), response.error.message)
+end)
+
+test("places, cell × a row deleted above Kumi's lines: refused changed, the lines left where they are", function()
+  local env, peer = setup()
+  local previewed, done = bass_notes(peer, 3, 6, "kp68")
+  local pattern = mock.data.patterns[1]
+  local data = pattern.tracks[3]
+  local moved = {}
+  for k, line in pairs(data.lines) do
+    if k < 1 then moved[k] = line elseif k > 1 then moved[k - 1] = line end
+  end
+  data.lines = moved
+  notify_lines(1, 3, 1)
+  H.tick(2)
+  eq(c4_lines(), "2,3,4,5")
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kp69)", done.epoch, done.layout), "changed")
+  eq(c4_lines(), "2,3,4,5")
+end)
+
+-- Where a moved track came from is a place among the tracks, which a track deleted there doesn't take away.
+
+test("places, track × the track at a moved track's old place deleted: the move is still put back", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 1), index = 3 }
+  local previewed = preview(peer, "track-move", input)
+  local done = apply(peer, "track-move", input, "Kumi: move (kp70)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(names(), "Hat,Bass,Kick,Pad,Master,Send 1")
+  mock.ops.remove_track(1) -- Hat, now at Kick's old place
+  H.tick(2)
+  local undone = restore(peer, "track-move", record_of(previewed, done.result), "Kumi: undo (kp71)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(names(), "Kick,Bass,Pad,Master,Send 1")
+end)
+
+test("places, track × a member before a track taken out of its group deleted: it goes back in, last", function()
+  local env, peer = setup()
+  mock.song:insert_group_at(5)
+  mock.song:add_track_to_group(3, 5) -- Bass
+  mock.song:add_track_to_group(3, 5) -- Pad
+  H.tick(2)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  eq(order(), "Kick,Hat,Bass(in),Pad(in),Group[G],Master,Send 1")
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 4), group = json.null }
+  local previewed = preview(peer, "track-group", input)
+  local done = apply(peer, "track-group", input, "Kumi: out (kp72)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(order(), "Kick,Hat,Pad,Bass(in),Group[G],Master,Send 1")
+  mock.ops.remove_track(4) -- Bass
+  H.tick(2)
+  local undone = restore(peer, "track-group", record_of(previewed, done.result), "Kumi: undo (kp73)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(order(), "Kick,Hat,Pad(in),Group[G],Master,Send 1")
+end)

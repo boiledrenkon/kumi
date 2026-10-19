@@ -227,7 +227,7 @@ local function move_apply(song, env, input, fence, desc)
   if to == index then
     display.unchanged = true
     return {
-      applied = { index = to, signature = now }, material = { track = to, back = { track = index } }, display = display,
+      applied = { index = to, signature = now }, material = { track = to, back = { at = index } }, display = display,
       undo = { desc = desc, entry = false }, prior = { index = index },
     }
   end
@@ -236,10 +236,21 @@ local function move_apply(song, env, input, fence, desc)
   local after = signature(to, song:track(to))
   if after.name ~= now.name or after.kind ~= now.kind then fail("failed", "Renoise didn't move " .. name) end
   return {
-    -- (the places go back under `track`, which the tool carries through the tracks made and deleted since)
-    applied = { index = to, signature = after }, material = { track = to, back = { track = index } }, display = display,
+    -- (the track is under `track`, which the tool carries through the tracks made and deleted since; where it was is a place,
+    -- `back.at`, which a track removed there doesn't take away)
+    applied = { index = to, signature = after }, material = { track = to, back = { at = index } }, display = display,
     target = base.target(env, to), undo = { desc = desc, entry = true }, prior = { index = index }, place = { track = to }, follows = "track",
   }
+end
+
+-- Where a track Kumi moved goes back: the place it was taken from, carried through the tracks made and deleted since.
+local function back_place(env, restore, material, prior)
+  local back = type(material.back) == "table" and material.back or {}
+  if type(back.at) == "number" then
+    if type(restore.layout) ~= "number" or not env.place_shifted then return back.at end
+    return env.place_shifted(back.at, restore.layout)
+  end
+  return back.track or prior.index
 end
 
 local function move_restore(song, env, restore, desc)
@@ -253,7 +264,8 @@ local function move_restore(song, env, restore, desc)
     local other = song:track(candidate)
     return base.track_id(other) == applied.signature.name and rows.track_type(other) == applied.signature.kind
   end
-  local from = type(material.back) == "table" and material.back.track or prior.index
+  local from, why = back_place(env, restore, material, prior)
+  if not from then fail("stale", "the tracks changed in a way Kumi couldn't follow since it moved the track (" .. why .. "): nothing was moved") end
   if not is_it(at) then
     fail(restore.discard and "gone" or "changed", "the track isn't where Kumi moved it to any more: it was moved or renamed in Renoise since")
   end
@@ -352,9 +364,15 @@ local function group_apply(song, env, input, fence, desc)
     fail("failed", "Renoise didn't " .. (want.into and "put " or "take ") .. name .. (want.into and " into " or " out of ") .. "the group")
   end
   local after = signature(final, placed)
+  local material = { track = final, groupRef = refs.make(env.epoch(), "track", want.group), back = { at = index } }
+  if not want.into then
+    -- (the group's tracks that were before it, where they are now: a member deleted since moves its place up)
+    material.ahead = {}
+    for k = 1, ordinal - 1 do material.ahead[k] = final + k end
+  end
   return {
     applied = { index = final, signature = after, into = want.into },
-    material = { track = final, groupRef = refs.make(env.epoch(), "track", want.group), back = { track = index } },
+    material = material,
     display = { title = group_title(name, holder_name, want.into) }, target = base.target(env, final),
     undo = { desc = desc, entry = true },
     prior = { index = index, group = want.into and 0 or want.group, ordinal = ordinal },
@@ -380,7 +398,8 @@ local function group_restore(song, env, restore, desc)
     -- put back: out of the group (Renoise moves it to just before the group's tracks), then back to where it was
     if parents[at] ~= group then fail("changed", name .. " is not in the group " .. holder_name .. " any more") end
     local run_start = group - #holder.members
-    local from = type(material.back) == "table" and material.back.track or prior.index
+    local from, why = back_place(env, restore, material, prior)
+    if not from then fail("stale", "the tracks changed in a way Kumi couldn't follow since it moved the track (" .. why .. "): nothing was moved") end
     if from > run_start then fail("changed", "the tracks before the group changed since: Kumi can't put the track back") end
     for j = from, run_start - 1 do
       if is_group(song:track(j)) or (parents[j] ~= nil and j ~= at) then
@@ -397,7 +416,18 @@ local function group_restore(song, env, restore, desc)
   if parents[at] ~= nil then fail("changed", name .. " is in a group now") end
   local run_start = group - #holder.members
   if at ~= run_start - 1 then fail("changed", name .. " is not just before the group's tracks any more") end
+  -- (its place among the group's tracks: after those that were before it and are still there)
   local ordinal = prior.ordinal or (#holder.members + 1)
+  if type(material.ahead) == "table" and type(restore.layout) == "number" then
+    local count = 0
+    for _, i in ipairs(material.ahead) do
+      local now, why = env.shifted(i, restore.layout)
+      if why == "unknown" then fail("stale", "the tracks changed in a way Kumi couldn't follow since it took the track out: nothing was moved") end
+      if now then count = count + 1 end
+    end
+    ordinal = count + 1
+  end
+  ordinal = math.min(ordinal, #holder.members + 1)
   song:describe_undo(desc)
   song:add_track_to_group(at, group)
   swaps(song, group - 1, at + ordinal - 1)
