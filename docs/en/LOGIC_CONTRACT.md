@@ -18,7 +18,7 @@ Everything here was measured in the lab of 2026-10-18 (`docs/evidence/logic-lab-
 
 ## Identity
 
-- `pid`: Logic's; `resource`: the app bundle path.
+- `pid`: Logic's; `resource`: Logic's bundle identifier (`com.apple.logic10`, or `com.apple.mobilelogic` for the Creator Studio build).
 - `project.id`: no UUID exists in every project, so the id is the 32-hex SHA-256 prefix of the saved package path; unsaved projects carry an `identity` from the window title.
 - `status.busy`: `modal` when `AXMainWindow` is an `AXDialog` or a sheet is open; `away` when Logic's windows are not on the current Space; `loading` while the window title is empty.
 - `status.permission`: `accessibility` missing when `AXIsProcessTrusted` is false; reads then answer `failed`, never `busy`.
