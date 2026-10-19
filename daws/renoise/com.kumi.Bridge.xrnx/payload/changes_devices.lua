@@ -95,9 +95,15 @@ local param_spec = {
       parameter.value_string = state.valueString
     end
   end,
+  -- (text is read by Renoise, which answers the value in its own words: "0.5" is read back as "0.500 dB". Text matches what
+  -- it was read as when it begins that, case aside)
   same = function(a, b)
     if a.value ~= nil and b.value ~= nil then return base.close(a.value, b.value) end
-    return a.valueString == b.valueString
+    local read, wanted = a, b
+    if a.value == nil then read, wanted = b, a end
+    if read.value == nil or wanted.valueString == nil then return a.valueString == b.valueString end
+    local text, asked = tostring(read.valueString):lower(), tostring(wanted.valueString):lower():gsub("^%s+", ""):gsub("%s+$", "")
+    return text == asked or text:sub(1, #asked) == asked
   end,
   title = function(name, _, to) return name .. " " .. (to.valueString or tostring(to.value)) end,
 }
@@ -171,7 +177,10 @@ local function add_input(song, track, input)
     bad("receiver and amount are for the #Send device")
   end
   if input.receiver ~= nil then sends_check(song, input.receiver) end
-  if input.amount ~= nil and (type(input.amount) ~= "number" or input.amount ~= input.amount) then bad("amount must be a number") end
+  -- (the #Send's Amount is 0 to 1: measured, 3.5.4. Checked before anything is written; apply checks the parameter's own range too)
+  if input.amount ~= nil and (type(input.amount) ~= "number" or input.amount ~= input.amount or input.amount < 0 or input.amount > 1) then
+    bad("amount must be a number from 0 to 1")
+  end
   local last = #track.devices + 1
   local at = input.index
   if at == nil then
@@ -216,18 +225,26 @@ local function add_apply(song, env, input, fence, desc)
     local why = made and "" or ": " .. tostring(device):gsub("^[^%s:]*%.lua:%d+: ", "")
     fail("failed", "Renoise wouldn't make the device " .. info.path .. why)
   end
-  if input.receiver ~= nil then
-    local parameter = parameter_named(device, "Receiver")
-    if not parameter then error({ code = "failed", message = "the #Send device has no Receiver parameter in this Renoise" }, 0) end
-    parameter.value = input.receiver
-  end
-  if input.amount ~= nil then
-    local parameter = parameter_named(device, "Amount")
-    if not parameter then error({ code = "failed", message = "the #Send device has no Amount parameter in this Renoise" }, 0) end
-    if input.amount < parameter.value_min or input.amount > parameter.value_max then
-      bad(string.format("amount must be from %s to %s", tostring(parameter.value_min), tostring(parameter.value_max)))
+  -- The device is set up in this callback; if that can't be done it goes again, so a refused change leaves no device behind.
+  local set, err = pcall(function()
+    if input.receiver ~= nil then
+      local parameter = parameter_named(device, "Receiver")
+      if not parameter then error({ code = "failed", message = "the #Send device has no Receiver parameter in this Renoise" }, 0) end
+      parameter.value = input.receiver
     end
-    parameter.value = input.amount
+    if input.amount ~= nil then
+      local parameter = parameter_named(device, "Amount")
+      if not parameter then error({ code = "failed", message = "the #Send device has no Amount parameter in this Renoise" }, 0) end
+      if input.amount < parameter.value_min or input.amount > parameter.value_max then
+        error({ code = "bad-params", message = string.format("amount must be from %s to %s", tostring(parameter.value_min), tostring(parameter.value_max)) }, 0)
+      end
+      parameter.value = input.amount
+    end
+  end)
+  if not set then
+    pcall(function() track:delete_device_at(at) end)
+    if type(err) ~= "table" then err = { code = "failed", message = "Renoise wouldn't set up the device: " .. tostring(err) } end
+    error(err, 0)
   end
   local state = material_.device_state(device)
   return {

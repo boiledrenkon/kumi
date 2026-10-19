@@ -184,9 +184,27 @@ local function move_preview(song, env, input)
   return { target = base.target(env, index), prior = { index = index }, fence = signature(index, track), display = display }
 end
 
+local function group_counts(song)
+  local counts = {}
+  for i = 1, rows.track_count(song) do
+    local track = song:track(i)
+    if is_group(track) then counts[i] = #track.members end
+  end
+  return counts
+end
+
+-- The track at `from` goes to `to` by neighbours' swaps. A track that a swap leaves just before an empty group is made one of
+-- its tracks by Renoise itself (measured, 3.5.4: not when the group has tracks, nor when the swap passes the group), which no
+-- move of Kumi's means: each such membership is taken off again, the first of the group's tracks leaving it where it stands.
 local function swaps(song, from, to)
   local step = to > from and 1 or -1
-  for i = from, to - step, step do song:swap_tracks_at(i, i + step) end
+  for i = from, to - step, step do
+    local before = group_counts(song)
+    song:swap_tracks_at(i, i + step)
+    for group, count in pairs(group_counts(song)) do
+      if before[group] and count == before[group] + 1 then song:remove_track_from_group(group - count) end
+    end
+  end
 end
 
 local function move_apply(song, env, input, fence, desc)

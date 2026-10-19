@@ -8,6 +8,7 @@ import("changes_song")
 import("changes_devices")
 import("changes_notes")
 import("changes_layout")
+import("changes_slots")
 
 local M = {}
 
@@ -19,6 +20,9 @@ local function kind_of(params)
   if not spec then bad("Renoise has no change kind " .. string.format("%q", name)) end
   return spec
 end
+
+-- The song, if the request's epoch is the song's and Renoise isn't busy (for the requests that are no change of the song).
+M.context = base.context
 
 function M.preview(params, env)
   local song = base.context(params, env)
@@ -104,6 +108,6 @@ end
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active
 M.journal_track_event, M.journal_check, M.journal_device_event = base.journal_track_event, base.journal_check, base.journal_device_event
-M.journal_pattern_event = base.journal_pattern_event
+M.journal_pattern_event, M.journal_sequence_event = base.journal_pattern_event, base.journal_sequence_event
 
 return M

@@ -23,7 +23,12 @@ local function count(self)
   local state = self.state
   state.changed = (state.changed or 0) + 1
   local undoing = self.hooks.undoing
-  if undoing and undoing() then state.undone = true end
+  if undoing and undoing() then
+    state.undone = true
+  else
+    -- (an edit of the producer's or of Kumi's: what an undo took back can't be redone any more)
+    state.edits = (state.edits or 0) + 1
+  end
 end
 
 local function reshape(self)

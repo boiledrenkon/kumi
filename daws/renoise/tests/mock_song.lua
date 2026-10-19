@@ -389,7 +389,8 @@ function M.make_song(options)
   -- The sequence: pattern indices; sections and muted slots hang off the slot
   d.sequence = {}
   for s = 1, options.sequence_length or #d.patterns do d.sequence[s] = options.sequence and options.sequence[s] or ((s - 1) % #d.patterns + 1) end
-  d.sections, d.muted = {}, {}
+  d.sections, d.muted, d.section_names = {}, {}, {}
+  d.new_pattern = new_pattern
 
   -- Instruments
   d.instruments = {}
@@ -757,6 +758,33 @@ function M.make_song(options)
     }, {
       name = function() return pattern.name end,
       number_of_lines = function() return pattern.lines end,
+      is_empty = function()
+        for _, pattern_track_data in pairs(pattern.tracks) do
+          if pattern_track_data.alias == 0 or pattern_track_data.alias == nil then
+            for _, line_data in pairs(pattern_track_data.lines or {}) do
+              if not line(line_data).is_empty then return false end
+            end
+            if #(pattern_track_data.automation or {}) > 0 then return false end
+          end
+        end
+        return true
+      end,
+    }, {
+      name = function(value)
+        local old = pattern.name
+        if old == value then return end
+        pattern.name = value
+        M.fire(pattern.name_observable)
+        M.record(function() pattern.name = old; M.fire(pattern.name_observable) end, function() pattern.name = value; M.fire(pattern.name_observable) end)
+      end,
+      number_of_lines = function(value)
+        local old = pattern.lines
+        if old == value then return end
+        pattern.lines = value
+        M.fire(pattern.number_of_lines_observable)
+        M.record(function() pattern.lines = old; M.fire(pattern.number_of_lines_observable) end,
+          function() pattern.lines = value; M.fire(pattern.number_of_lines_observable) end)
+      end,
     })
   end
 
@@ -890,7 +918,88 @@ function M.make_song(options)
     end,
     sequence_section_name = function(_, s)
       if not d.sequence[s] then out_of_range("sequence", s) end
-      return d.sections[s] or ""
+      return d.sections[s] or d.section_names[s] or ""
+    end,
+    -- (Renoise keeps a slot's section name when it is no longer the start of a section: measured)
+    set_sequence_is_start_of_section = function(_, s, flag)
+      if not d.sequence[s] then out_of_range("sequence", s) end
+      local old_flag, old_name = d.sections[s], d.section_names[s]
+      local name = d.section_names[s] or d.sections[s] or ""
+      if flag then d.sections[s], d.section_names[s] = name, nil else d.sections[s], d.section_names[s] = nil, d.sections[s] or d.section_names[s] end
+      local new_flag, new_name = d.sections[s], d.section_names[s]
+      M.fire(d.sections_observable)
+      M.record(function() d.sections[s], d.section_names[s] = old_flag, old_name; M.fire(d.sections_observable) end,
+        function() d.sections[s], d.section_names[s] = new_flag, new_name; M.fire(d.sections_observable) end)
+    end,
+    set_sequence_section_name = function(_, s, name)
+      if not d.sequence[s] then out_of_range("sequence", s) end
+      local old_flag, old_name = d.sections[s], d.section_names[s]
+      if d.sections[s] ~= nil then d.sections[s] = name else d.section_names[s] = name end
+      local new_flag, new_name = d.sections[s], d.section_names[s]
+      M.fire(d.sections_observable)
+      M.record(function() d.sections[s], d.section_names[s] = old_flag, old_name; M.fire(d.sections_observable) end,
+        function() d.sections[s], d.section_names[s] = new_flag, new_name; M.fire(d.sections_observable) end)
+    end,
+    insert_sequence_at = function(_, i, p)
+      if type(i) ~= "number" or i < 1 or i > #d.sequence + 1 then out_of_range("sequence", i) end
+      if type(p) ~= "number" or not d.patterns[p] then out_of_range("pattern", p) end
+      d.insert_slot(i, p)
+      M.record(function() d.remove_slot(i) end, function() d.insert_slot(i, p) end)
+    end,
+    insert_new_pattern_at = function(_, i)
+      if type(i) ~= "number" or i < 1 or i > #d.sequence + 1 then out_of_range("sequence", i) end
+      local made = d.new_pattern()
+      M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+      local p = #d.patterns
+      d.insert_slot(i, p)
+      M.record(function()
+        d.remove_slot(i)
+        table.remove(d.patterns, p)
+        M.fire(M.data.song_fields.patterns_observable, { type = "remove", index = p })
+      end, function()
+        d.patterns[#d.patterns + 1] = made
+        M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+        d.insert_slot(i, #d.patterns)
+      end)
+    end,
+    delete_sequence_at = function(_, i)
+      if type(i) ~= "number" or not d.sequence[i] then out_of_range("sequence", i) end
+      if #d.sequence == 1 then error("can not delete the last sequence slot", 2) end
+      local p = d.sequence[i]
+      local section, name, mutes = d.sections[i], d.section_names[i], {}
+      for key in pairs(d.muted) do
+        local t, slot = key:match("^(%d+),(%d+)$")
+        if tonumber(slot) == i then mutes[#mutes + 1] = tonumber(t) end
+      end
+      d.remove_slot(i)
+      local dropped = d.drop_unused(p)
+      M.record(function()
+        if dropped then d.restore_pool(p, dropped) end
+        d.insert_slot(i, p)
+        d.sections[i], d.section_names[i] = section, name
+        for _, t in ipairs(mutes) do d.muted[t .. "," .. i] = true end
+      end, function()
+        d.remove_slot(i)
+        if dropped then d.drop_unused(p) end
+      end)
+    end,
+    set_pattern = function(_, i, p)
+      if type(i) ~= "number" or not d.sequence[i] then out_of_range("sequence", i) end
+      if type(p) ~= "number" or not d.patterns[p] then out_of_range("pattern", p) end
+      local old = d.sequence[i]
+      if old == p then return end
+      d.sequence[i] = p
+      M.fire(d.assignments_observable)
+      local dropped = d.drop_unused(old)
+      M.record(function()
+        if dropped then d.restore_pool(old, dropped) end
+        d.sequence[i] = old
+        M.fire(d.assignments_observable)
+      end, function()
+        d.sequence[i] = p >= old and dropped and p - 1 or p
+        M.fire(d.assignments_observable)
+        if dropped then d.drop_unused(old) end
+      end)
     end,
     track_sequence_slot_is_muted = function(_, t, s)
       if not d.sequence[s] or not d.tracks[t] then out_of_range("slot", t .. "," .. s) end
@@ -909,6 +1018,69 @@ function M.make_song(options)
     pattern_sequence = function() return list(d.sequence) end,
   })
 
+  -- The slots and the pattern pool (Renoise removes a pattern that no slot uses and nothing is in)
+  d.insert_slot = function(i, p)
+    table.insert(d.sequence, i, p)
+    local sections, names, muted = {}, {}, {}
+    for s, name in pairs(d.sections) do sections[s >= i and s + 1 or s] = name end
+    for s, name in pairs(d.section_names) do names[s >= i and s + 1 or s] = name end
+    for key in pairs(d.muted) do
+      local t, slot = key:match("^(%d+),(%d+)$")
+      slot = tonumber(slot)
+      muted[t .. "," .. (slot >= i and slot + 1 or slot)] = true
+    end
+    -- (measured: the slot made in the middle gets the section start and the muted tracks of the slot it pushes up)
+    if d.sequence[i + 1] then
+      sections[i], names[i] = sections[i + 1], names[i + 1]
+      for key in pairs(muted) do
+        local t, slot = key:match("^(%d+),(%d+)$")
+        if tonumber(slot) == i + 1 then muted[t .. "," .. i] = true end
+      end
+    end
+    d.sections, d.section_names, d.muted = sections, names, muted
+    M.fire(d.sequence_observable, { type = "insert", index = i })
+  end
+  d.remove_slot = function(i)
+    table.remove(d.sequence, i)
+    local sections, names, muted = {}, {}, {}
+    for s, name in pairs(d.sections) do
+      if s ~= i then sections[s > i and s - 1 or s] = name end
+    end
+    -- (measured: deleting the slot where a section starts makes the next slot start it)
+    if d.sections[i] ~= nil and sections[i] == nil and d.sequence[i] then sections[i] = d.sections[i] end
+    for s, name in pairs(d.section_names) do
+      if s ~= i then names[s > i and s - 1 or s] = name end
+    end
+    for key in pairs(d.muted) do
+      local t, slot = key:match("^(%d+),(%d+)$")
+      slot = tonumber(slot)
+      if slot ~= i then muted[t .. "," .. (slot > i and slot - 1 or slot)] = true end
+    end
+    d.sections, d.section_names, d.muted = sections, names, muted
+    M.fire(d.sequence_observable, { type = "remove", index = i })
+  end
+  d.drop_unused = function(p)
+    for _, v in ipairs(d.sequence) do
+      if v == p then return nil end
+    end
+    if not pattern_object(p).is_empty then return nil end
+    -- (measured: Renoise removes the last pattern of the pool, whatever its name or length, and keeps an earlier one)
+    if p ~= #d.patterns then return nil end
+    local data = table.remove(d.patterns, p)
+    for k, v in ipairs(d.sequence) do
+      if v > p then d.sequence[k] = v - 1 end
+    end
+    M.fire(M.data.song_fields.patterns_observable, { type = "remove", index = p })
+    return data
+  end
+  d.restore_pool = function(p, data)
+    table.insert(d.patterns, p, data)
+    for k, v in ipairs(d.sequence) do
+      if v >= p then d.sequence[k] = v + 1 end
+    end
+    M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = p })
+  end
+
   local transport_fields = {
     playing = options.playing or false, bpm = options.bpm or 120, lpb = options.lpb or 4, tpl = options.tpl or 6,
     edit_mode = false, follow_player = false, loop_pattern = false, loop_block_enabled = false,
@@ -924,7 +1096,23 @@ function M.make_song(options)
     transport_fields.playing = false
     M.fire(transport_fields.playing_observable)
   end
+  transport_fields.start = function(_, mode)
+    transport_fields.playing, d.started_mode = true, mode
+    M.fire(transport_fields.playing_observable)
+  end
+  transport_fields.start_at = function(_, position)
+    transport_fields.playing, d.started_at = true, position
+    M.fire(transport_fields.playing_observable)
+  end
   local transport_setters = {}
+  -- (the loop is not an undo step; Renoise applies it a moment after it is written: a read right after still shows the old one)
+  transport_setters.loop_pattern = function(value)
+    transport_fields.loop_pattern = value
+    M.fire(transport_fields.loop_pattern_observable)
+  end
+  transport_setters.loop_sequence_range = function(value)
+    transport_fields.loop_range_seq = { value[1], value[2] }
+  end
   for _, key in ipairs({ "bpm", "lpb", "tpl" }) do
     transport_setters[key] = function(value)
       local old = transport_fields[key]
@@ -937,6 +1125,11 @@ function M.make_song(options)
   end
   local transport = object("renoise.Transport", transport_fields, {
     -- The edit position in quarter notes: the lines before it over the LPB (a test can set `edit_beats`, as a ZLxx would).
+    loop_sequence_range = function()
+      local r = transport_fields.loop_range_seq
+      if r and r[1] and r[1] > 0 then return { r[1], r[2] } end
+      return {}
+    end,
     edit_pos_beats = function()
       if transport_fields.edit_beats ~= nil then return transport_fields.edit_beats end
       local lines = 0
@@ -1236,13 +1429,13 @@ function M.api.add_track_to_group(index, group)
   local at = index
   if index < group then
     while at < group - 1 do
-      M.api.swap_tracks_at(at, at + 1)
+      M.api.swap_tracks_at(at, at + 1, true)
       at = at + 1
     end
   else
     -- (a track after the group takes its place and the group moves up)
     while at > group do
-      M.api.swap_tracks_at(at - 1, at)
+      M.api.swap_tracks_at(at - 1, at, true)
       at = at - 1
     end
     group = group + 1
@@ -1263,7 +1456,7 @@ function M.api.remove_track_from_group(index)
   local start = group - tracks[group].members
   local at = index
   while at > start do
-    M.api.swap_tracks_at(at - 1, at)
+    M.api.swap_tracks_at(at - 1, at, true)
     at = at - 1
   end
   local grouped = tracks[group]
@@ -1279,7 +1472,7 @@ function M.api.delete_track_at(index)
   M.record(function() put_track(index, data, pattern_data) end, function() take_track(index) end)
 end
 
-function M.api.swap_tracks_at(a, b)
+function M.api.swap_tracks_at(a, b, internal)
   local tracks = M.data.tracks
   if not tracks[a] or not tracks[b] then error("track index out of range", 2) end
   local function class(t) return t.kind == "master" and "master" or t.kind == "send" and "send" or "sequencer" end
@@ -1297,10 +1490,19 @@ function M.api.swap_tracks_at(a, b)
     for i = a + 1, b - 1 do pairs_[#pairs_ + 1] = { i, i + 1 } end
   end
   for _, pair in ipairs(pairs_) do ops.swap_tracks(pair[1], pair[2]) end
+  -- (measured: a track a swap leaves just before an EMPTY group becomes its track, unless the swap passes the group)
+  local joined
+  for g, t in ipairs(tracks) do
+    if not internal and t.kind == "group" and t.members == 0 and g - 1 >= 1 and (a == g - 1 or b == g - 1) and b < g then
+      t.members, joined = 1, t
+    end
+  end
   M.record(function()
+    if joined then joined.members = joined.members - 1 end
     for i = #pairs_, 1, -1 do ops.swap_tracks(pairs_[i][1], pairs_[i][2]) end
   end, function()
     for _, pair in ipairs(pairs_) do ops.swap_tracks(pair[1], pair[2]) end
+    if joined then joined.members = joined.members + 1 end
   end)
 end
 

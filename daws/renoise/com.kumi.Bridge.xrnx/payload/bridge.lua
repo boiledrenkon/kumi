@@ -43,11 +43,19 @@ local function epoch()
   return string.format("%x", b.epoch_n)
 end
 
-local function bump_epoch(reason, tracks_kept)
+-- The epoch moves when refs stop meaning what they meant. `tracks_kept`: the journal's places (tracks) still hold. `refs_kept`:
+-- the track numbers are what they were (a change to devices, patterns, instruments or the sequence), so a track ref of an
+-- earlier epoch of the same run is still one (b.track_group counts the runs; b.groups_of says which run each epoch is in).
+local function bump_epoch(reason, tracks_kept, refs_kept)
   b.epoch_n = b.epoch_n + 1
   -- The layout goes on counting across epochs (no event says when an epoch moves for a device or a pattern, so a layout
-  -- that started over would look older than the one Kumi holds); the shifts start over, since refs from before are stale.
-  b.shifts = {}
+  -- that started over would look older than the one Kumi holds). The shifts start over when track numbers can't be followed.
+  if not refs_kept then
+    b.shifts = {}
+    b.track_group = b.track_group + 1
+  end
+  b.groups_of[b.epoch_n] = b.track_group
+  b.groups_of[b.epoch_n - 512] = nil
   -- (the journal's places are tracks: a change to devices, patterns or instruments leaves them where they were)
   if b.journal and not tracks_kept then changes.journal_reset(b.journal) end
   log.write("info", "epoch " .. epoch() .. ": " .. reason)
@@ -370,13 +378,14 @@ end
 -- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
 -- asks for the whole song to be watched anew.
 local function on_structural(reason, kind, op, owner, token)
-  bump_epoch(reason, true)
+  bump_epoch(reason, true, true)
   local song = renoise.song()
   if not song then return end
   local lists = { instruments = b.groups.instruments, patterns = b.groups.patterns }
   if token then
     lists.devices, lists.samples, lists.phrases = token.devices, token.samples, token.phrases
   end
+  if kind == "sequence" and op then changes.journal_sequence_event(b.journal, song:is_undo_redoing()) end
   local list = lists[kind]
   if not list then return end -- (the sequence: nothing is watched per slot)
   if kind == "devices" and op then
@@ -424,7 +433,7 @@ local function on_tracks(op)
   local swapped = op.type == "swap" and expected == count and exchange(b.groups.tracks, op.index, op.index2)
   if swapped then
     -- (the tracks are the same objects in another order: they keep their watchers and their groups move with them)
-    bump_epoch("tracks were swapped", true)
+    bump_epoch("tracks were swapped", true, false)
     changes.journal_track_event(b.journal, "swap", op.index, song:is_undo_redoing(), op.index2)
     conns:event("tracks", { count = count, made = json.array(), gone = json.array(), layout = b.layout, epoch = epoch() })
     return
@@ -610,6 +619,43 @@ function handlers.transport_stop()
   return { stopped = running, wasRecording = recording }
 end
 
+-- Play: from where the pattern is (no arguments), or from a line of a sequence slot, or of the pattern being edited when only
+-- `line` is given. Not an undo step, and nothing to put back. A slot is a place in the sequence, so a request that names one
+-- may name the epoch it was read in.
+function handlers.transport_play(params)
+  local song = rows.the_song()
+  if song.rendering then error({ code = "busy", message = "Renoise is rendering the song" }, 0) end
+  params = type(params) == "table" and params or {}
+  local sequence, line = params.sequence, params.line
+  local function bad(message) error({ code = "bad-params", message = message }, 0) end
+  local transport = song.transport
+  local started = false
+  if sequence ~= nil or line ~= nil then
+    if params.epoch ~= nil and params.epoch ~= epoch() then
+      error({ code = "stale", message = "those slots are from an earlier epoch (" .. tostring(params.epoch) .. "; now " .. epoch() .. "): read again" }, 0)
+    end
+    local slots = #song.sequencer.pattern_sequence
+    if sequence ~= nil and (type(sequence) ~= "number" or sequence ~= math.floor(sequence) or sequence < 1 or sequence > slots) then
+      bad(string.format("sequence is a sequence slot from 1 to %d", slots))
+    end
+    local pattern = sequence and song:pattern(song.sequencer:pattern(sequence)) or song:pattern(song.selected_pattern_index)
+    if line == nil then line = 1 end
+    if type(line) ~= "number" or line ~= math.floor(line) or line < 1 or line > pattern.number_of_lines then
+      bad(string.format("line is a line of that pattern, from 1 to %d", pattern.number_of_lines))
+    end
+    if sequence ~= nil then transport:start_at(renoise.SongPos(sequence, line)) else transport:start_at(line) end
+    started = true
+  elseif not transport.playing then
+    transport:start(renoise.Transport.PLAYMODE_CONTINUE_PATTERN)
+    started = true
+  end
+  local position = transport.playback_pos
+  return {
+    epoch = epoch(), layout = b.layout, started = started, playing = transport.playing,
+    sequence = sequence or position.sequence, line = sequence and line or (line or position.line),
+  }
+end
+
 handlers["renoise.reload"] = function()
   host.request_reload()
   return { reloading = true }
@@ -644,11 +690,32 @@ end
 
 local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true }
 
+-- Whether epoch `from` and the epoch now have the same track numbers (every move between them was to devices, patterns,
+-- instruments or the sequence).
+local function tracks_kept_since(from)
+  local a, c = tonumber(from, 16), b.epoch_n
+  return a ~= nil and b.groups_of[a] ~= nil and b.groups_of[a] == b.groups_of[c]
+end
+
+-- An answer whose epoch is not the request's says what survives: the track refs the request held are still the same tracks.
+local function say_kept(result, from)
+  if type(result) ~= "table" or type(from) ~= "string" or type(result.epoch) ~= "string" or result.epoch == from then return result end
+  local a, c = tonumber(from, 16), tonumber(result.epoch, 16)
+  if a and c and b.groups_of[a] ~= nil and b.groups_of[a] == b.groups_of[c] then result.kept = { from = from, tracks = true } end
+  return result
+end
+
 function M.handle(_, request)
   local handler = handlers[request.method]
   if not handler then error({ code = "unknown-method", message = "no method " .. request.method }) end
   local params = request.params
+  local from
   if CARRIED[request.method] then
+    from = type(params) == "table" and params.epoch or nil
+    -- A request made in an earlier epoch of the same run of track numbers, which names only tracks, is made in this one.
+    if type(from) == "string" and from ~= epoch() and tracks_kept_since(from) then
+      params = refs.relabel(params, from, epoch()) or params
+    end
     if request.method == "change_restore" and type(params) == "table" and params.kind == "track-delete" then
       -- (the deleted track's own ref is gone by design: only its place is carried)
       params = carried(params, changes.carry_restore)
@@ -656,7 +723,13 @@ function M.handle(_, request)
       params = carried(params)
     end
   end
-  return handler(params)
+  local result = handler(params)
+  if type(result) == "table" and type(result.kumi_job) == "function" then
+    local work = result.kumi_job
+    result.kumi_job = function(job) return say_kept(work(job), from) end
+    return result
+  end
+  return say_kept(result, from)
 end
 
 -- Lifecycle, called by main.lua
@@ -666,6 +739,7 @@ function M.start(h, reloading)
   st.bridge = st.bridge or { memory = {}, retry_ms = 0, started_ms = 0 }
   b = st.bridge
   b.journal = b.journal or changes.journal_new()
+  b.journal.edits = function() return b.edits or 0 end
   if b.started_ms == 0 then b.started_ms = unix_ms() end
   conns = server.new({
     connections = st.connections,
@@ -691,6 +765,8 @@ function M.start(h, reloading)
   })
   b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
   b.layout, b.shifts, b.shape = b.layout or 0, b.shifts or {}, b.shape or 0
+  b.track_group, b.groups_of = b.track_group or 1, b.groups_of or {}
+  b.groups_of[b.epoch_n] = b.groups_of[b.epoch_n] or b.track_group
   b.changed = b.changed or 0
   b.document = b.document or 1
   -- A song's id (the one in the project row) and which opening of a song this is: the same while it stays open.
