@@ -108,9 +108,20 @@ fn position_of(chain: &[String], guid: &str) -> Option<usize> {
 
 /// What tells an FX apart from how Kumi left it: its name, whether it runs, its preset and its parameters' values.
 fn signature(ctx: &Ctx, fx: Fx) -> Value {
+    let volatile = volatile_params(ctx, fx);
+    signature_without(ctx, fx, &volatile)
+}
+
+/// The signature again, as one that was taken before: a parameter it found to move by itself is left out of this one too.
+fn signature_as(ctx: &Ctx, fx: Fx, recorded: &Value) -> Value {
+    let volatile: Vec<i32> = recorded["volatile"].as_array().into_iter().flatten().filter_map(Value::as_i64).map(|n| n as i32).collect();
+    signature_without(ctx, fx, &volatile)
+}
+
+fn signature_without(ctx: &Ctx, fx: Fx, volatile: &[i32]) -> Value {
     let reaper = ctx.reaper;
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for param in 0..reaper.fx_param_count(fx).min(SIGNATURE_PARAMS) {
+    for param in (0..reaper.fx_param_count(fx).min(SIGNATURE_PARAMS)).filter(|param| !volatile.contains(param)) {
         for byte in (reaper.param_normalized(fx, param) as f32).to_bits().to_le_bytes() {
             hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
         }
@@ -121,8 +132,25 @@ fn signature(ctx: &Ctx, fx: Fx) -> Value {
         "offline": reaper.fx_offline(fx),
         "preset": reaper.fx_preset(fx),
         "params": reaper.fx_param_count(fx),
+        "volatile": volatile,
         "hash": format!("{hash:016x}"),
     })
+}
+
+/// Parameters that move by themselves, a meter the plug-in shows as a parameter: what they hold says nothing of what the
+/// producer did. Found by their names, and by their changing between two looks.
+fn volatile_params(ctx: &Ctx, fx: Fx) -> Vec<i32> {
+    let reaper = ctx.reaper;
+    let count = reaper.fx_param_count(fx).min(SIGNATURE_PARAMS);
+    let before: Vec<f64> = (0..count).map(|param| reaper.param_normalized(fx, param)).collect();
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    (0..count)
+        .filter(|&param| {
+            let name = reaper.param_name(fx, param).to_lowercase();
+            let meter = ["meter", "gain reduction", "readout"].iter().any(|word| name.contains(word));
+            meter || (reaper.param_normalized(fx, param) as f32) != (before[param as usize] as f32)
+        })
+        .collect()
 }
 
 fn fx_target(ctx: &Ctx, located: &Located) -> Value {
@@ -262,7 +290,7 @@ fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let guid = restore.applied["guid"].as_str().ok_or_else(|| bad("applied.guid: the FX that was added"))?;
     let located = locate_guid(ctx, guid).map_err(|fault| if fault.0 == "failed" { gone(fault.1) } else { fault })?;
     let fx = fx_of(&located);
-    if !restore.discard && signature(ctx, fx) != restore.applied["signature"] {
+    if !restore.discard && signature_as(ctx, fx, &restore.applied["signature"]) != restore.applied["signature"] {
         return Err(changed("the FX Kumi added has been changed in REAPER since"));
     }
     // Its automation goes with it, and is the producer's.
@@ -346,7 +374,7 @@ fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         }
     })?;
     let fx = fx_of(&located);
-    let now = json!({"guid": located.guid, "index": located.index, "signature": signature(ctx, fx)});
+    let now = json!({"guid": located.guid, "index": located.index, "signature": signature_as(ctx, fx, &fence["signature"])});
     if now != *fence {
         return Err(changed("the FX changed since the preview"));
     }

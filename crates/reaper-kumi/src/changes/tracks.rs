@@ -347,6 +347,11 @@ pub fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     Ok(Preview { target: target(&found.id), prior: now.clone(), fence: now, display })
 }
 
+/// A track's id: the master by name, any other by GUID.
+pub(super) fn track_id_of(ctx: &Ctx, track: Track) -> TrackId {
+    rows::track_id(ctx.reaper, track)
+}
+
 /// The most of a deleted track's state Kumi keeps to put it back: the chunk goes in a frame and sits in the host's journal.
 const MOST_MATERIAL: usize = 24 << 20;
 
@@ -555,9 +560,14 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         }
         remade += 1;
     }
-    if material["selected"] == true {
-        reaper.set_track_value(track, "I_SELECTED", 1.0);
-    }
+    // The producer's selection stands: the track joins it only to be the selection again where nothing else is selected
+    // (the track's own state may bring a selection with it, which is not the producer's now).
+    let others_selected = reaper.master_track(ctx.proj).is_some_and(|master| reaper.track_value(master, "I_SELECTED") != 0.0)
+        || (0..reaper.track_count(ctx.proj))
+            .filter_map(|at| reaper.track_at(ctx.proj, at))
+            .any(|other| other != track && reaper.track_value(other, "I_SELECTED") != 0.0);
+    let select = material["selected"] == true && !others_selected;
+    reaper.set_track_value(track, "I_SELECTED", if select { 1.0 } else { 0.0 });
     let name = super::track_name(reaper, track);
     let mut restored = Map::new();
     restored.insert("ref".into(), refs::track_ref(&id).into());

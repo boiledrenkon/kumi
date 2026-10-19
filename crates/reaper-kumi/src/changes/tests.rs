@@ -2550,3 +2550,86 @@ fn an_undo_and_a_new_edit_between_two_looks_still_tell_that_kumis_point_was_undo
     lab.tick();
     assert!(lab.events.take().is_empty());
 }
+
+#[test]
+fn a_track_put_back_does_not_join_the_selection_the_producer_has_made_since() {
+    let lab = Lab::new();
+    state(|s| s.tracks[3].selected = true);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{DDDD}"}), "Kumi: Deleted track “Reverb” (kn301)");
+    // The producer selects Kick; the track comes back without being selected beside it.
+    state(|s| s.tracks[1].selected = true);
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(state(|s| s.tracks.iter().map(|t| t.selected).collect::<Vec<_>>()), [false, true, false, false]);
+    // With nothing selected, it is the selection again, as it was.
+    state(|s| s.tracks[3].selected = true);
+    let (preview, applied) = lab.make("track-delete", json!({"ref": "r:track:{DDDD}"}), "Kumi: Deleted track “Reverb” (kn302)");
+    state(|s| s.tracks.iter_mut().for_each(|t| t.selected = false));
+    lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| s.tracks.iter().map(|t| t.selected).collect::<Vec<_>>()), [false, false, false, true]);
+}
+
+// ----- a marker made again (N3) -----
+
+#[test]
+fn a_marker_made_again_is_made_once_keeps_its_lane_and_a_region_its_render_matrix() {
+    let lab = Lab::new();
+    state(|s| {
+        s.markers[1].number = 7;
+        s.marker_lanes.insert("{REG-1}".into(), 2);
+        s.render_matrix.insert(7, vec!["{BBBB}".into(), "master".into()]);
+    });
+    let (preview, applied) = lab.make("marker-delete", json!({"ref": "r:region:{REG-1}"}), "Kumi: Deleted region “Verse” (kmk01)");
+    assert_eq!(applied["material"]["matrix"], json!(["{BBBB}", "master"]));
+    assert_eq!(applied["material"]["lane"], 2);
+    assert_eq!(state(|s| s.markers.len()), 1);
+    let restored = lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(state(|s| s.markers.len()), 2);
+    let made = restored["restored"]["ref"].as_str().unwrap().trim_start_matches("r:region:").to_string();
+    assert_eq!(state(|s| s.marker_lanes.get(&made).copied()), Some(2), "its ruler lane");
+    assert_eq!(state(|s| s.render_matrix.get(&7).cloned()), Some(vec!["{BBBB}".to_string(), "master".to_string()]), "its render matrix");
+    // The first answer was lost and the host asks again: the marker made is the one that comes back, and no second is made.
+    let entries = state(|s| s.undo_entries);
+    let retry = lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| s.markers.len()), 2, "no second marker");
+    assert_eq!(retry["restored"]["ref"], restored["restored"]["ref"]);
+    assert_eq!(retry["undo"]["entry"], false);
+    assert_eq!(state(|s| s.undo_entries), entries);
+    // A marker (not a region) the same way.
+    let (preview, applied) = lab.make("marker-delete", json!({"ref": "r:marker:{MARK-1}"}), "Kumi: Deleted marker “Drop” (kmk02)");
+    lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    lab.undo("marker-delete", &preview, &applied, "Kumi: undo (kund4)").unwrap();
+    assert_eq!(state(|s| s.markers.len()), 2);
+}
+
+// ----- a plug-in with a meter among its parameters (N5) -----
+
+#[test]
+fn a_meter_shown_as_a_parameter_does_not_make_every_undo_of_an_fx_changed_but_a_tweak_still_does() {
+    let lab = Lab::new();
+    // A plug-in made now has two meters among its parameters: one called a meter, one that only moves by itself.
+    state(|s| s.meter_params = true);
+    let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added “ReaEQ” to “Kick” (kn501)");
+    assert_eq!(applied["applied"]["signature"]["volatile"], json!([4, 5]), "{}", applied["applied"]["signature"]);
+    // A real tweak is seen with the meters about.
+    state(|s| s.tracks[1].fx[0].params[0].value = 0.9);
+    let (code, _) = lab.undo("fx-add", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    state(|s| s.tracks[1].fx[0].params[0].value = 0.5);
+    lab.undo("fx-add", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert!(kick_fx().is_empty(), "the meters didn't refuse it");
+}
+
+#[test]
+fn deleting_an_fx_with_a_meter_in_it_is_not_refused_for_the_meter() {
+    let lab = Lab::new();
+    state(|s| s.meter_params = true);
+    lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added “ReaEQ” to “Kick” (kn502)");
+    let fx = fx_ref_of(&kick_fx()[0].0);
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx}), "Kumi: Deleted “ReaEQ” from “Kick” (kn503)");
+    assert_eq!(preview["fence"]["signature"]["volatile"], json!([4, 5]));
+    assert!(kick_fx().is_empty());
+    let dir = fx_folder();
+    lab.undo("fx-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(kick_fx().len(), 1);
+    drop(dir);
+}

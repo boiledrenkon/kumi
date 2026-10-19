@@ -7,7 +7,7 @@ use super::tracks::colour_of;
 use super::{Applied, Ctx, Done, Fault, Preview, Restore, Restored};
 use crate::read::{bad, failed};
 use crate::reaper::{Marker, Reaper};
-use crate::refs::{self, Ref};
+use crate::refs::{self, Ref, TrackId};
 use crate::rows;
 
 fn changed(message: impl Into<String>) -> Fault {
@@ -251,7 +251,22 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if !same_state(&state(&marker), fence) {
         return Err(changed(format!("{} changed since the preview", label(&marker))));
     }
-    let material = json!({"region": marker.is_region, "state": state(&marker), "was": reference(&marker)});
+    // What a marker is besides its state: the ruler lane it sits in, and for a region the tracks it renders in the region
+    // render matrix (by id, "master" for the master).
+    let matrix: Vec<String> = if marker.is_region {
+        ctx.reaper
+            .region_render_tracks(ctx.proj, marker.number)
+            .into_iter()
+            .map(|track| match super::tracks::track_id_of(ctx, track) {
+                TrackId::Master => "master".to_string(),
+                TrackId::Guid(guid) => guid,
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    let material =
+        json!({"region": marker.is_region, "state": state(&marker), "was": reference(&marker), "lane": marker.lane, "matrix": matrix});
     if !ctx.reaper.delete_marker(ctx.proj, &marker.guid) {
         return Err(failed("REAPER wouldn't delete the marker"));
     }
@@ -279,6 +294,19 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         }
         return Err(changed("a marker with that id is in the project again"));
     }
+    // One made again is a new id, so a retry (the first answer was lost) must know it by what it is: the same kind of
+    // marker in the same place, with the same name, colour and number, is the one made already.
+    let reaper = ctx.reaper;
+    let same = (0..reaper.marker_count(ctx.proj))
+        .filter_map(|index| reaper.marker(ctx.proj, index))
+        .find(|candidate| candidate.is_region == region && same_state(&state(candidate), saved));
+    if let Some(made) = same {
+        return Ok(Restored {
+            restored: json!({"ref": reference(&made), "was": material["was"]}),
+            display: json!({"title": format!("{} is back already", label(&made))}),
+            unwritten: true,
+        });
+    }
     let start = saved["start"].as_f64().unwrap_or(0.0);
     let end = saved["end"].as_f64().unwrap_or(start);
     let guid = ctx
@@ -289,7 +317,20 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if let Some(number) = saved["number"].as_i64() {
         ctx.reaper.set_marker_value(ctx.proj, &guid, "I_NUMBER", number as f64);
     }
+    // The ruler lane it sat in, and the render matrix a region had (the tracks that no longer exist are left out).
+    if let Some(lane) = material["lane"].as_i64().filter(|lane| *lane != 0) {
+        ctx.reaper.set_marker_value(ctx.proj, &guid, "I_LANENUMBER", lane as f64);
+    }
     let marker = ctx.reaper.marker_by_guid(ctx.proj, &guid).ok_or_else(|| failed("the marker made again isn't in the project"))?;
+    for id in material["matrix"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        let track = match id {
+            "master" => ctx.reaper.master_track(ctx.proj),
+            guid => ctx.reads.track_by_id(ctx.reaper, ctx.proj, &TrackId::Guid(guid.to_string())).ok(),
+        };
+        if let Some(track) = track {
+            ctx.reaper.add_to_region_render(ctx.proj, marker.number, track);
+        }
+    }
     Ok(Restored {
         restored: json!({"ref": reference(&marker), "was": material["was"]}),
         display: json!({"title": format!("{} put back", label(&marker)), "note": "REAPER gives a marker made again a new id."}),

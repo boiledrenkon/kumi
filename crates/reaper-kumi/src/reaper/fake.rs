@@ -19,6 +19,8 @@ pub struct FakeParam {
     pub display: Display,
     /// The formatted value (`TrackFX_GetFormattedParamValue`) leaves the unit off, as ReaEQ's does.
     pub bare: bool,
+    /// A meter shown as a parameter: it reads differently every time it is read.
+    pub wobbles: bool,
 }
 
 /// How a fake plug-in prints a normalized value.
@@ -38,7 +40,16 @@ pub enum Display {
 
 impl FakeParam {
     pub fn new(name: &str, value: f64, shown: &str) -> Self {
-        FakeParam { name: name.into(), value, min: 0.0, max: 1.0, shown: shown.into(), display: Display::Fixed, bare: false }
+        FakeParam {
+            name: name.into(),
+            value,
+            min: 0.0,
+            max: 1.0,
+            shown: shown.into(),
+            display: Display::Fixed,
+            bare: false,
+            wobbles: false,
+        }
     }
 
     pub fn linear(name: &str, value: f64, min: f64, max: f64, decimals: usize, unit: &str) -> Self {
@@ -370,9 +381,15 @@ pub struct State {
     pub chunks: Vec<FakeTrack>,
     /// A GUID counter for tracks made by `InsertTrackAtIndex`.
     pub made: u32,
+    /// The ruler lane of each marker, by its id (0 where none is set).
+    pub marker_lanes: HashMap<String, i32>,
+    /// The tracks each region (by its number) renders in the region render matrix: their ids, "master" for the master.
+    pub render_matrix: HashMap<i32, Vec<String>>,
     pub fx_made: u32,
     /// TrackFX_Delete answers false and does nothing.
     pub fail_fx_delete: bool,
+    /// A plug-in made by name has two meters among its parameters.
+    pub meter_params: bool,
     /// How many of the next MIDI_SetAllEvts drop the last note they were given (a write that goes wrong).
     pub glitch_events: u32,
     /// How often the screen was told to redraw.
@@ -436,8 +453,11 @@ impl Default for State {
             undo_dirty: false,
             chunks: vec![],
             made: 0,
+            marker_lanes: HashMap::new(),
+            render_matrix: HashMap::new(),
             fx_made: 0,
             fail_fx_delete: false,
+            meter_params: false,
             glitch_events: 0,
             redraws: 0,
             master: FakeTrack::new("{MASTER}", "MASTER"),
@@ -929,6 +949,7 @@ unsafe extern "C" fn get_region_or_marker_info_value(_proj: *mut ReaProject, mar
             "I_NUMBER" => m.number as f64,
             "I_CUSTOMCOLOR" => m.color as f64,
             "I_INDEX" => index as f64,
+            "I_LANENUMBER" => s.marker_lanes.get(&m.guid).copied().unwrap_or(0) as f64,
             _ => 0.0,
         }
     })
@@ -1013,10 +1034,44 @@ unsafe extern "C" fn set_region_or_marker_info_value(
             "D_ENDPOS" if m.is_region => m.end = value,
             "I_NUMBER" => m.number = value as i32,
             "I_CUSTOMCOLOR" => m.color = value as i32,
+            "I_LANENUMBER" => {
+                let guid = m.guid.clone();
+                s.marker_lanes.insert(guid, value as i32);
+            }
             _ => return 0.0,
         }
         s.undo_dirty = true;
         1.0
+    })
+}
+
+unsafe extern "C" fn enum_region_render_matrix(_proj: *mut ReaProject, number: c_int, n: c_int) -> *mut MediaTrack {
+    counted(|s| {
+        let Some(id) = s.render_matrix.get(&number).and_then(|list| list.get(n as usize)) else { return ptr::null_mut() };
+        if id == "master" {
+            return master_ptr();
+        }
+        s.tracks.iter().position(|t| t.guid == *id).map_or(ptr::null_mut(), track_ptr)
+    })
+}
+
+unsafe extern "C" fn set_region_render_matrix(_proj: *mut ReaProject, number: c_int, track: *mut MediaTrack, flag: c_int) {
+    counted(|s| {
+        let (kind, at, _, _) = unpack(track as u64);
+        let id = match (kind, at) {
+            (TRACK, MASTER) => "master".to_string(),
+            (TRACK, at) => match s.tracks.get(at as usize) {
+                Some(t) => t.guid.clone(),
+                None => return,
+            },
+            _ => return,
+        };
+        let list = s.render_matrix.entry(number).or_default();
+        list.retain(|known| *known != id);
+        if flag > 0 {
+            list.push(id);
+        }
+        s.undo_dirty = true;
     })
 }
 
@@ -1274,6 +1329,13 @@ fn new_fx(s: &mut State, name: &str) -> Option<FakeFx> {
         FakeParam::new("Mix", 1.0, "100 %"),
         FakeParam::linear("Offset", 0.5, -1.0, 1.0, 2, ""),
     ];
+    if s.meter_params {
+        let mut meter = FakeParam::new("Gain Reduction Meter", 0.0, "0 dB");
+        meter.wobbles = true;
+        let mut out = FakeParam::new("Out", 0.0, "0");
+        out.wobbles = true;
+        fx.params.extend([meter, out]);
+    }
     Some(fx)
 }
 
@@ -1650,7 +1712,17 @@ fn fx_param_name(owner: u64, index: c_int, param: c_int, buf: *mut c_char, size:
     counted(|s| fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)).map(|p| write(buf, size, &p.name)).is_some())
 }
 fn fx_param_normalized(owner: u64, index: c_int, param: c_int) -> f64 {
-    counted(|s| fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)).map_or(0.0, |p| p.value))
+    counted(|s| {
+        let calls = s.calls;
+        // (A meter reads another value every time it is read.)
+        fx_of(s, owner, index).and_then(|f| f.params.get(param as usize)).map_or(0.0, |p| {
+            if p.wobbles {
+                (calls % 997) as f64 / 1000.0
+            } else {
+                p.value
+            }
+        })
+    })
 }
 fn fx_param_formatted(owner: u64, index: c_int, param: c_int, buf: *mut c_char, size: c_int) -> bool {
     counted(|s| {
@@ -2540,6 +2612,8 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"ValidatePtr2" => validate_ptr2 as unsafe extern "C" fn(*mut ReaProject, *mut c_void, *const c_char) -> bool,
         b"GetNumRegionsOrMarkers" => get_num_regions_or_markers as unsafe extern "C" fn(*mut ReaProject) -> c_int,
         b"GetRegionOrMarker" => get_region_or_marker as unsafe extern "C" fn(*mut ReaProject, c_int, *const c_char) -> *mut api::ProjectMarker,
+        b"EnumRegionRenderMatrix" => enum_region_render_matrix as unsafe extern "C" fn(*mut ReaProject, c_int, c_int) -> *mut MediaTrack,
+        b"SetRegionRenderMatrix" => set_region_render_matrix as unsafe extern "C" fn(*mut ReaProject, c_int, *mut MediaTrack, c_int),
         b"GetRegionOrMarkerInfo_Value" => get_region_or_marker_info_value as unsafe extern "C" fn(*mut ReaProject, *mut api::ProjectMarker, *const c_char) -> f64,
         b"GetSetRegionOrMarkerInfo_String" => get_set_region_or_marker_info_string as unsafe extern "C" fn(*mut ReaProject, *mut api::ProjectMarker, *const c_char, *mut c_char, bool) -> bool,
         b"CountTempoTimeSigMarkers" => count_tempo_time_sig_markers as unsafe extern "C" fn(*mut ReaProject) -> c_int,

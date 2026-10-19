@@ -229,6 +229,17 @@ impl Reaper<'_> {
         true
     }
 
+    /// Puts a track in the region render matrix of the region with this number.
+    pub fn add_to_region_render(&self, proj: Project, number: i32, track: Track) -> bool {
+        match self.api.SetRegionRenderMatrix() {
+            Some(f) => {
+                unsafe { f(proj.0, number, track.0, 1) };
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn set_marker_name(&self, proj: Project, guid: &str, name: &str) -> bool {
         let (Some(marker), Some(f)) = (self.marker_pointer(proj, guid), self.api.GetSetRegionOrMarkerInfo_String()) else { return false };
         let mut buf = cstring(name).into_bytes_with_nul();
