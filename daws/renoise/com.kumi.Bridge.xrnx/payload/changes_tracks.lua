@@ -512,7 +512,11 @@ local function delete_restore(song, env, restore, desc, journal)
         if at and not env.busy() then
           pcall(function() the_song():delete_track_at(at) end)
           job.rebase()
-          error(err, 0)
+          local text = type(err) == "table" and err.message or tostring(err)
+          error({
+            code = type(err) == "table" and err.code or "failed",
+            message = string.format("Putting %s back stopped (%s): the half-made track is taken out again, and nothing else was touched", base.q(material.name), text),
+          }, 0)
         end
         job.rebase()
         local why = at and "a dialog is open, so Kumi left it" or "it isn't where Kumi made it any more, so Kumi deleted nothing"

@@ -73,10 +73,11 @@ end
 -- A track's first device, the mixer: its parameters are the track's volume, panning and width, which have automation like any.
 function M.mixer_device_data()
   return {
-    name = "Track Vol/Pan", path = "Audio/Effects/Native/#Track Vol/Pan",
+    name = "Track Vol/Pan", path = "Audio/Effects/Native/TrackVolPan",
     params = {
-      { name = "Volume", value = 1, min = 0, max = 1.4125 }, { name = "Panning", value = 0.5, min = 0, max = 1 },
-      { name = "Width", value = 0, min = 0, max = 1 },
+      { name = "Panning", value = 0.5, min = 0, max = 1 }, { name = "Volume", value = 1, min = 0, max = 1.4125 },
+      { name = "Width", value = 0, min = 0, max = 1 }, { name = "Post Panning", value = 0.5, min = 0, max = 1 },
+      { name = "Post Volume", value = 1, min = 0, max = 1.4125 },
     },
   }
 end

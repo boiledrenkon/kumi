@@ -607,7 +607,8 @@ M.DIALOG_MS = 400
 local function busy()
   local song = renoise.song()
   if song and song.rendering then return "Renoise is rendering the song" end
-  if b.alive_ms and M.now_ms() - b.alive_ms >= M.DIALOG_MS then return "a Renoise dialog is open (its timers aren't running)" end
+  -- (What a socket callback does itself before it asks, decoding a big request, is its own time, not a dialog's: from its start.)
+  if b.alive_ms and (b.work_ms or M.now_ms()) - b.alive_ms >= M.DIALOG_MS then return "a Renoise dialog is open (its timers aren't running)" end
   return nil
 end
 
@@ -929,8 +930,13 @@ end
 
 -- (Every message also gives the reads in progress a slice if the timers haven't: see jobs.lua.)
 function M.on_message(client, data)
-  conns:receive(client, data)
-  jobs:run_if_stale(M.STALE_JOBS_MS, M.STALE_SLICE_MS)
+  b.work_ms = M.now_ms()
+  local ok, err = pcall(function()
+    conns:receive(client, data)
+    jobs:run_if_stale(M.STALE_JOBS_MS, M.STALE_SLICE_MS)
+  end)
+  b.work_ms = nil
+  if not ok then error(err, 0) end
 end
 
 -- Only noted, whatever the error: it may be one client's (a reset, a timeout) and the server serves the others. Closing

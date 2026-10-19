@@ -258,6 +258,19 @@ test("review M-7: a dialog is open when an apply or a preview arrives: busy, not
   H.no_dialogs()
 end)
 
+test("review M-7: a request that takes long to receive and decode is not taken for a dialog", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 1), volumeDb = -6 }
+  local previewed = preview(peer, "track-volume", input)
+  mock.advance(100)
+  mock.clock_step_ms = 100 -- each look at the clock costs 100 ms, as the decoding of a megabyte of material does
+  local done = apply(peer, "track-volume", input, "Kumi: v (kr53)", previewed.fence, epoch, layout)
+  mock.clock_step_ms = 0
+  ok(done.result, json.encode(done.error or {}))
+  H.no_dialogs()
+end)
+
 test("review M-7: a restore asked behind a dialog is busy too, and writes nothing", function()
   local env, peer = setup()
   local epoch, layout = place(peer)
