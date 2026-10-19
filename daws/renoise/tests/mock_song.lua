@@ -447,6 +447,7 @@ function M.make_song(options)
       insert_device_at = function(_, path, index)
         if type(index) ~= "number" or index < 1 or index > #t.devices + 1 then out_of_range("device", index) end
         if d.options.mixer_device and index == 1 then error("the mixer device must stay first", 2) end
+        if path:find("Missing", 1, true) then error("std::logic_error: 'unknown device " .. path .. "'", 2) end
         local data = { name = path:match("([^/]+)$") or path, path = path, params = {}, active = true }
         -- (a device made from a path has the parameters of that device: tests say which in M.device_catalog)
         for k, template in ipairs((M.device_catalog or {})[path] or {}) do
@@ -497,7 +498,12 @@ function M.make_song(options)
       delay_column_visible = function() return t.delay_column == true end,
       sample_effects_column_visible = function() return t.sample_effects_column == true end,
       available_output_routings = function() return { "Master" } end,
-      group_parent = function() return M.NIL end,
+      group_parent = function()
+        for g = i + 1, #d.tracks do
+          if d.tracks[g].kind == "group" and g - d.tracks[g].members <= i then return track(g) end
+        end
+        return nil
+      end,
       devices = function()
         local devices = {}
         for k, spec in ipairs(t.devices) do devices[k] = device(spec) end
@@ -530,7 +536,10 @@ function M.make_song(options)
       sample_effects_column_visible = recorded(t, "sample_effects_column"),
       collapsed = recorded(t, "collapsed"),
       output_routing = recorded(t, "output_routing"),
-      output_delay = recorded(t, "output_delay"),
+      output_delay = function(value)
+        if t.kind ~= "sequencer" then error("std::logic_error: 'can not change the output_delay of group, master or send tracks.'", 2) end
+        recorded(t, "output_delay")(value)
+      end,
     }
     return object(class, fields, getters, setters)
   end
@@ -830,6 +839,8 @@ function M.make_song(options)
     insert_track_at = function(_, index) return M.api.insert_track_at(index) end,
     delete_track_at = function(_, index) M.api.delete_track_at(index) end,
     swap_tracks_at = function(_, a, b) M.api.swap_tracks_at(a, b) end,
+    add_track_to_group = function(_, track_index, group_index) M.api.add_track_to_group(track_index, group_index) end,
+    insert_group_at = function(_, index) return M.api.insert_group_at(index) end,
     describe_undo = function(_, text) d.undo.desc = text end,
     can_undo = function() return #d.undo.stack > 0 end,
     can_redo = function() return #d.undo.redo > 0 end,
@@ -1043,26 +1054,73 @@ end
 -- What a script does to the song through the API: the same, with an undo step recorded for it.
 M.api = {}
 
+-- Measured in Renoise 3.5.4: a track made at or before the master's place is a sequencer track (the master moves up), one made
+-- after it is a send track; a sequencer track made just before a group (but not before its first member) joins the group.
 function M.api.insert_track_at(index)
   local tracks = M.data.tracks
   local master
   for i, t in ipairs(tracks) do
     if t.kind == "master" then master = i end
   end
-  if type(index) ~= "number" or index < 1 or index > master then error("track index out of range: " .. tostring(index), 2) end
+  if type(index) ~= "number" or index < 1 or index > #tracks + 1 then error("track index out of range: " .. tostring(index), 2) end
   local spec
-  if index == master then
-    -- inserting at the master's place makes a send track, after the others
-    local sends = #tracks - master
-    index = master + sends + 1
-    spec = track_spec({ kind = "send", name = "Send " .. (sends + 1) })
+  if index > master then
+    spec = track_spec({ kind = "send", name = "S" .. string.format("%02d", index - master) })
   else
     spec = track_spec({ name = string.format("Track %02d", index) })
   end
   local made = index
   put_track(index, spec)
-  M.record(function() take_track(made) end, function() put_track(made, spec) end)
+  local joined
+  for g, t in ipairs(tracks) do
+    if t.kind == "group" and spec.kind == "sequencer" and g > made and g - 1 - t.members < made and made <= g - 1 then
+      t.members = t.members + 1
+      joined = t
+    end
+  end
+  M.record(function()
+    take_track(made)
+  end, function()
+    put_track(made, spec)
+    if joined then joined.members = joined.members + 1 end
+  end)
   return M.data.track_proxy(index)
+end
+
+function M.api.insert_group_at(index)
+  local tracks = M.data.tracks
+  local master
+  for i, t in ipairs(tracks) do
+    if t.kind == "master" then master = i end
+  end
+  if type(index) ~= "number" or index < 1 or index > master then error("a group is made before the master", 2) end
+  local spec = track_spec({ kind = "group", name = "Group" })
+  put_track(index, spec)
+  M.record(function() take_track(index) end, function() put_track(index, spec) end)
+  return M.data.track_proxy(index)
+end
+
+-- The track becomes the last member of the group: it is moved to just before it.
+function M.api.add_track_to_group(index, group)
+  local tracks = M.data.tracks
+  if not tracks[index] or not tracks[group] or tracks[group].kind ~= "group" then error("not a track and a group", 2) end
+  local function move(from, to)
+    local data, pattern_data = take_track(from)
+    put_track(to, data, pattern_data)
+    return data
+  end
+  local target = group > index and group - 1 or group
+  local data = move(index, target)
+  local grouped = tracks[target + 1]
+  grouped.members = grouped.members + 1
+  M.record(function()
+    grouped.members = grouped.members - 1
+    move(target, index)
+  end, function()
+    move(index, target)
+    grouped.members = grouped.members + 1
+  end)
+  return data
 end
 
 function M.api.delete_track_at(index)

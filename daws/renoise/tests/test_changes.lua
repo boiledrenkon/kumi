@@ -651,3 +651,77 @@ test("changes: a producer's insert of a track moves the places the journal knows
   eq(mock.data.tracks[4].name, "Bass")
   H.no_dialogs()
 end)
+
+-- Send tracks and groups (the places Renoise gives a track made again)
+
+local function order()
+  local out = {}
+  for i, t in ipairs(mock.data.tracks) do out[i] = t.name .. (t.kind == "group" and "[G]" or "") .. (mock.song:track(i).group_parent and "(in)" or "") end
+  return table.concat(out, ",")
+end
+
+local function delete_and_restore(peer, index)
+  local epoch = place(peer)
+  local previewed, _, layout = preview(peer, "track-delete", { ref = track_ref(epoch, index) })
+  local done = apply(peer, "track-delete", { ref = track_ref(epoch, index) }, "Kumi: d (kg01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  local undone = restore(peer, "track-delete", { target = previewed.target, prior = previewed.prior, applied = done.result.applied, material = done.result.material },
+    "Kumi: undo d (kg02)", epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  return done.result.material, undone.result
+end
+
+test("changes: a send track goes back after the master, where it was", function()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  local before = order()
+  eq(before, "Kick,Hat,Bass,Pad,Master,Send 1,Send 2")
+  local material, restored = delete_and_restore(peer, 6)
+  eq(material.kind, "send")
+  eq(order(), before)
+  eq(mock.data.tracks[6].kind, "send")
+  H.no_dialogs()
+end)
+
+test("changes: a group's first member goes back first, its last member back last, and both are members again", function()
+  local env, peer = setup()
+  local song = mock.song
+  song:insert_group_at(5)
+  song:add_track_to_group(3, 5) -- Bass joins
+  song:add_track_to_group(3, 5) -- Pad joins
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local before = order()
+  eq(before, "Kick,Hat,Bass(in),Pad(in),Group[G],Master,Send 1")
+  local first = delete_and_restore(peer, 3)
+  eq(first.group.name, "Group")
+  eq(order(), before, "the first member is the first member again")
+  local last = delete_and_restore(peer, 4)
+  eq(last.group.index, 5)
+  eq(order(), before, "and the last is the last")
+  eq(mock.data.tracks[5].members, 2)
+  -- a track that is not in a group is not put in one
+  local plain = delete_and_restore(peer, 2)
+  eq(plain.group, nil)
+  eq(order(), before)
+  H.no_dialogs()
+end)
+
+test("changes: a restore Renoise can't finish takes back the track it began, and says so", function()
+  local env, peer = setup()
+  local song = mock.song
+  local bass = song:track(3)
+  bass:insert_device_at("Audio/Effects/Native/EQ 5", 2)
+  bass:insert_device_at("Audio/Effects/Native/Gainer", 3)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch = place(peer)
+  local previewed, _, layout = preview(peer, "track-delete", { ref = track_ref(epoch, 3) })
+  local done = apply(peer, "track-delete", { ref = track_ref(epoch, 3) }, "Kumi: d (kf01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  done.result.material.devices[2].path = "Audio/Effects/Native/Missing Device" -- a plug-in this Renoise doesn't have
+  local before = #mock.data.tracks
+  local undone = restore(peer, "track-delete", { target = previewed.target, prior = previewed.prior, applied = done.result.applied, material = done.result.material },
+    "Kumi: undo d (kf02)", epoch, done.result.layout)
+  failure(undone, "failed")
+  ok(undone.error.message:find("wouldn't put the track back", 1, true), undone.error.message)
+  eq(#mock.data.tracks, before, "no track was left behind")
+  H.no_dialogs()
+end)

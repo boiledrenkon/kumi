@@ -24,6 +24,9 @@ local INFINITY = "\226\136\158" -- U+221E
 
 -- Writes that make one slice of a restore (about a second of Renoise's time), and the most a journalled change may hold.
 M.SLICE_WRITES = 15000
+-- The wait between the numbered steps of a restore. Renoise made one undo step of two callbacks 10 ms apart (measured), and
+-- kept callbacks 300 ms apart apart.
+M.STEP_GAP_MS = 400
 M.MAX_MATERIAL_BYTES = 8 * 1024 * 1024
 M.JOURNAL_MAX = 64
 
@@ -523,6 +526,8 @@ local function plan_phases(material)
   return phases
 end
 
+-- What Renoise lets a track of this kind have: a send track has no output delay (it raises), no note columns, and the other
+-- settings are tried and left as they are if Renoise refuses (they are looks, not content).
 local function restore_properties(song, track, index, material)
   track.name = material.name
   local color = rgb_of(material.color)
@@ -532,21 +537,26 @@ local function restore_properties(song, track, index, material)
   track.postfx_volume.value = material.volume.post
   track.prefx_panning.value = material.panning.pre
   track.postfx_panning.value = material.panning.post
-  track.prefx_width.value = material.width
-  if material.outputRouting then pcall(function() track.output_routing = material.outputRouting end) end
-  if type(material.outputDelay) == "number" then track.output_delay = material.outputDelay end
-  track.collapsed = material.collapsed == true
+  local function try(write) pcall(write) end
+  try(function() track.prefx_width.value = material.width end)
+  if material.outputRouting then try(function() track.output_routing = material.outputRouting end) end
+  if material.kind == "sequencer" and type(material.outputDelay) == "number" then
+    try(function() track.output_delay = material.outputDelay end)
+  end
+  try(function() track.collapsed = material.collapsed == true end)
   local columns = material.columns or {}
-  if track.max_note_columns > 0 then track.visible_note_columns = columns.note end
-  track.visible_effect_columns = columns.effect
-  track.volume_column_visible = columns.volume == true
-  track.panning_column_visible = columns.panning == true
-  track.delay_column_visible = columns.delay == true
-  track.sample_effects_column_visible = columns.sampleEffects == true
-  for c, name in pairs(columns.names or {}) do track:set_column_name(tonumber(c), name) end
-  for _, c in ipairs(columns.muted or {}) do track:set_column_is_muted(c, true) end
-  if material.solo and rows.track_type(track) ~= "master" then track.solo_state = true end
-  if material.muteState and rows.track_type(track) ~= "master" then track.mute_state = material.muteState end
+  if track.max_note_columns > 0 then
+    track.visible_note_columns = columns.note
+    try(function() track.volume_column_visible = columns.volume == true end)
+    try(function() track.panning_column_visible = columns.panning == true end)
+    try(function() track.delay_column_visible = columns.delay == true end)
+    try(function() track.sample_effects_column_visible = columns.sampleEffects == true end)
+  end
+  try(function() track.visible_effect_columns = columns.effect end)
+  for c, name in pairs(columns.names or {}) do try(function() track:set_column_name(tonumber(c), name) end) end
+  for _, c in ipairs(columns.muted or {}) do try(function() track:set_column_is_muted(c, true) end) end
+  if material.solo and rows.track_type(track) ~= "master" then try(function() track.solo_state = true end) end
+  if material.muteState and rows.track_type(track) ~= "master" then try(function() track.mute_state = material.muteState end) end
 end
 
 local function restore_devices(track, material)
@@ -593,59 +603,65 @@ local function write_automation(song, track, index, material, patterns)
   end
 end
 
--- Where the track goes back: its old place, moved by the tracks made and deleted since.
+-- Where the track goes back: its old place, moved by the tracks made and deleted since. A track made at or before the master's
+-- place is a sequencer track (the master moves up); one made after it is a send track (measured in Renoise 3.5.4: inserting AT
+-- the master's place makes a sequencer track, not a send).
 local function restore_index(song, material)
-  local top = rows.track_count(song)
-  if material.kind == "send" then return top end
-  return math.max(1, math.min(material.index, top - song.send_track_count))
+  local master = song.sequencer_track_count + 1
+  if material.kind == "send" then
+    return math.max(master + 1, math.min(material.index, rows.track_count(song) + 1))
+  end
+  return math.max(1, math.min(material.index, master))
 end
 
 local function make_track(song, material)
   local index = restore_index(song, material)
-  if material.kind == "send" then
-    -- a send track is made by inserting at the master's place; it lands among the sends, and is moved into its own place
-    local master = song.sequencer_track_count + 1
-    song:insert_track_at(master)
-    local at = rows.track_count(song)
-    local wanted = math.min(material.index, at)
-    while at > wanted and at > master + 1 do
-      song:swap_tracks_at(at, at - 1)
-      at = at - 1
-    end
-    return at
-  end
   song:insert_track_at(index)
   return index
 end
 
+-- A member of a group goes back into it: Renoise makes a track inserted just before a group (but not before its first member)
+-- a member by itself; otherwise it is added, which puts it last among the members, and moved to its own place by swaps.
 local function put_in_group(song, index, material)
-  if not material.group then return end
-  local track = song:track(index)
-  if track.group_parent then return end
+  if not material.group then return index end
+  if song:track(index).group_parent then return index end
   local group = math.min(material.group.index, rows.track_count(song))
   local candidate = song:track(group)
-  if candidate.type == renoise.Track.TRACK_TYPE_GROUP and candidate.name == material.group.name then
-    song:add_track_to_group(index, group)
+  if candidate.type ~= renoise.Track.TRACK_TYPE_GROUP or candidate.name ~= material.group.name then return index end
+  song:add_track_to_group(index, group)
+  -- it is the last member now, just before the group, which has moved up one
+  local at = group - 1
+  while at > index do
+    song:swap_tracks_at(at, at - 1)
+    at = at - 1
   end
+  return index
 end
 
--- Phase one, in the callback that made the track.
+-- Phase one, in the callback that made the track. Nothing half-done stays: a track that couldn't be finished is deleted again.
 local function restore_first_phase(song, material, phases)
   local index = make_track(song, material)
-  local track = song:track(index)
-  restore_properties(song, track, index, material)
-  restore_devices(track, material)
-  put_in_group(song, index, material)
-  local sequencer = song.sequencer
-  for _, s in ipairs(material.slotMutes or {}) do
-    if s <= #sequencer.pattern_sequence then sequencer:set_track_sequence_slot_is_muted(index, s, true) end
+  local ok, err = pcall(function()
+    local track = song:track(index)
+    restore_properties(song, track, index, material)
+    restore_devices(track, material)
+    index = put_in_group(song, index, material)
+    local sequencer = song.sequencer
+    for _, s in ipairs(material.slotMutes or {}) do
+      if s <= #sequencer.pattern_sequence then sequencer:set_track_sequence_slot_is_muted(index, s, true) end
+    end
+    local done = {}
+    for _, entry in ipairs(phases[1]) do
+      write_lines(song, index, entry)
+      done[entry.pattern] = true
+    end
+    write_automation(song, song:track(index), index, material, done)
+  end)
+  if not ok then
+    pcall(function() song:delete_track_at(index) end)
+    if type(err) ~= "table" then err = { code = "failed", message = "Renoise wouldn't put the track back: " .. tostring(err):gsub("^[^%s:]*%.lua:%d+: ", "") } end
+    error(err, 0)
   end
-  local done = {}
-  for _, entry in ipairs(phases[1]) do
-    write_lines(song, index, entry)
-    done[entry.pattern] = true
-  end
-  write_automation(song, song:track(index), index, material, done)
   return index
 end
 
@@ -694,7 +710,7 @@ local function delete_restore(song, env, restore, desc, journal)
       job.rebase()
       local ok, err = pcall(function()
         for k = 2, total do
-          job.step()
+          job.step(M.STEP_GAP_MS)
           local live = the_song()
           if live.rendering then fail("busy", "Renoise is rendering the song") end
           live:describe_undo(step(k))
