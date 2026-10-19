@@ -212,8 +212,8 @@ case!(no_notification_over_a_take_being_recorded_until_it_stops, async {
     h.close().await;
 });
 
-/// In Logic Pro too: nothing over a take being recorded (the session reads it from Logic's transport, as the bridge's
-/// focus carries it), the notification once recording stops, and the screen in Logic's words throughout.
+// In Logic Pro too: nothing over a take being recorded (the session reads it from Logic's transport, as the bridge's
+// focus carries it), the notification once recording stops, and the screen in Logic's words throughout.
 case!(no_notification_over_a_take_being_recorded_in_logic_pro_either, async {
     kumi::daw::work_with(kumi_runtime::core::daw::DawId::Logic);
     let control = Rc::new(Control::default());
