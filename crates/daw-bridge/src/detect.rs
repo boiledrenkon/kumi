@@ -505,6 +505,34 @@ pub fn quarantined(path: &Path) -> bool {
     }
 }
 
+/// Takes macOS's downloaded mark off a file or folder and everything in it: a copy keeps the mark of what it was copied
+/// from, and a DAW won't load a marked library. For Kumi's own copies only, never what isn't Kumi's.
+pub fn unquarantine(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = c"com.apple.quarantine";
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
+        if unsafe { libc::removexattr(c_path.as_ptr(), name.as_ptr(), libc::XATTR_NOFOLLOW) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ENOATTR) {
+                return Err(error);
+            }
+        }
+        if std::fs::symlink_metadata(path)?.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                unquarantine(&entry?.path())?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

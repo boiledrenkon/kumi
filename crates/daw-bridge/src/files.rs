@@ -370,7 +370,7 @@ mod tests {
         ] {
             assert_eq!(alive(answer), running, "{answer:?}");
         }
-        // Each system's own answers: tests/processes.rs, which macOS and Windows run too.
+        // Each system's own answers: tests/system.rs, which macOS and Windows run too.
     }
 
     #[test]

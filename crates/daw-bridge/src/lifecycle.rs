@@ -378,6 +378,11 @@ impl Lifecycle {
             let _ = remove_tree(&new);
             return Err(LifecycleError::Invalid("the copy beside the bridge differs from its generation".into()));
         }
+        // A copy keeps macOS's downloaded mark of what it came from (a bundle a browser fetched): the DAW wouldn't load it.
+        if let Err(error) = crate::detect::unquarantine(&new) {
+            let _ = remove_tree(&new);
+            return Err(error.into());
+        }
         let replaced = if !self.target.folder { std::fs::rename(&new, &target).is_ok() } else { false };
         if !replaced {
             if target.exists() {
