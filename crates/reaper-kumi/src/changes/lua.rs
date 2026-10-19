@@ -211,9 +211,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if fence["chars"] != code.chars().count() {
         return Err(bad("the chunk isn't the one previewed"));
     }
-    let before = ctx.reaper.state_change_count(ctx.proj);
     let ran = run(ctx, code, timeout_ms, false)?;
-    let changed = ctx.reaper.state_change_count(ctx.proj) != before;
     let Some(ran) = ran else {
         // (REAPER was asked to run it and nothing came back: whether it ran, and what it did, can't be told)
         return Err((
@@ -226,16 +224,17 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     let printed = ran.get("printed").cloned().unwrap_or(json!([]));
     let mut display = json!({"title": title(code), "note": NOTE});
-    // (`changed`: whether REAPER counted a change while the chunk ran, a hint only. The block is always closed as a write,
-    // so REAPER's undo covers whatever the chunk did; the answer's undo.entry says whether REAPER made a point of it)
+    // (REAPER counts a block's changes only as it ends, so whether the chunk changed anything isn't known here: the block
+    // is always closed as a write, REAPER's undo covers whatever it did, and the answer's undo.entry says whether REAPER
+    // made a point of it)
     let applied = if ran["ok"] == true {
-        json!({"result": ran["result"], "printed": printed, "changed": changed})
+        json!({"result": ran["result"], "printed": printed})
     } else {
         let error = &ran["error"];
         let at = error["line"].as_i64().map(|line| format!(" at line {line}")).unwrap_or_default();
-        let stays = " What it changed before the error stays: REAPER's undo takes it back.";
+        let stays = " Anything it changed before the error stays: REAPER's undo takes it back.";
         display["note"] = format!("It stopped with an error{at}: {}.{stays}", error["message"].as_str().unwrap_or("")).into();
-        json!({"failed": error, "printed": printed, "changed": changed})
+        json!({"failed": error, "printed": printed})
     };
     Ok(Applied { applied, display, ..Default::default() })
 }
