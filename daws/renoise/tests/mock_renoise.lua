@@ -86,6 +86,7 @@ function M.observable()
   fields.add_notifier = function(_, a, b)
     local i, fn, obj = find(a, b)
     if i then error("the notifier was already added", 2) end
+    M.notifier_adds = (M.notifier_adds or 0) + 1 -- (how many the code under test added: a cost that doesn't depend on the clock)
     fields.notifiers[#fields.notifiers + 1] = { fn = fn, obj = obj }
   end
   fields.remove_notifier = function(_, a, b)
@@ -334,6 +335,13 @@ assert(loadfile(tests_dir .. "mock_song.lua"))()(M, object)
 -- Replaces the song as Renoise does: release the old document, then announce the new one.
 function M.load_song(options)
   if M.song then M.fire(M.tool.app_release_document_observable) end
+  M.song = M.make_song(options)
+  M.fire(M.tool.app_new_document_observable)
+  return M.song
+end
+
+-- Renoise started with a file: it opens its empty song and then the file, with no release in between.
+function M.open_over_startup_song(options)
   M.song = M.make_song(options)
   M.fire(M.tool.app_new_document_observable)
   return M.song

@@ -494,6 +494,21 @@ test("bridge: a saved song without a stored id keeps one id across reopening", f
   no_dialogs()
 end)
 
+test("bridge: a song file Renoise opens over its empty startup song is named by its path, not the empty song's id", function()
+  -- Started with a file: the empty song first, then the file, with no release in between (as real Renoise does).
+  local env = setup({ song = { name = "" } })
+  local _, welcome = connect(env)
+  local empty = welcome.project.id
+  mock.open_over_startup_song({ file_name = "/s/bears.xrns" })
+  local peer = connect(env)
+  local id = request(peer, "status").result.project.id
+  ok(id ~= empty, "not the empty song's id")
+  -- The same file opened in another run (a restart): the same id.
+  mock.load_song({ file_name = "/s/bears.xrns" })
+  eq(request(connect(env), "status").result.project.id, id)
+  no_dialogs()
+end)
+
 test("bridge: other keys in tool_data are kept", function()
   local env = setup({ song = { tool_data = '{"note":"keep me"}' } })
   connect(env)
@@ -1433,6 +1448,35 @@ test("bridge: a huge song title is cut to 256 characters in the discovery file, 
   ok(#discovery_text < 2048, "discovery file: " .. #discovery_text .. " bytes")
   check(json.decode(discovery_text).project, "discovery")
   no_dialogs()
+end)
+
+-- Names the files of a folder (the mock's os.filenames).
+local function files_in(dir)
+  return os.filenames(dir, { "*.json" })
+end
+
+test("bridge: a resource folder cut for the wire names the discovery file by the text written in it, as a host hashes it", function()
+  -- (the cut is made small here so an ordinary path is cut; the real one is 1,024 characters)
+  local env = setup({ patch = function(env)
+    local path = env.bundle .. "payload/status.lua"
+    local text = read(path)
+    local changed = text:gsub("M%.MAX_PATH_CHARS = 1024", "M.MAX_PATH_CHARS = 40")
+    assert(changed ~= text, "the cap was not found to lower")
+    write(path, changed)
+  end })
+  local names = files_in(env.discovery_dir)
+  eq(#names, 1, "one discovery file: " .. table.concat(names, ","))
+  local written = json.decode(read(env.discovery_dir .. "/" .. names[1]))
+  ok(written.resource:sub(-3) == "\226\128\166", "the resource was cut: " .. written.resource)
+  eq(names[1], "renoise-4242-" .. sha256.hex(written.resource):sub(1, 16) .. ".json", "named by the text in the file")
+  ok(names[1] ~= "renoise-4242-" .. sha256.hex(env.resource):sub(1, 16) .. ".json", "not by the whole path")
+  no_dialogs()
+end)
+
+test("bridge: the discovery key of a cut resource is the one a host computes (the same vector as the host's test)", function()
+  local discovery = T.load_payload_module("discovery")
+  local cut = "/Users/K\195\188mi/Library/Preferences/Renoise/V3.5.4/\230\151\165\230\151\165\230\151\165\226\128\166"
+  eq(discovery.key(cut), "7596818ce6a714b1")
 end)
 
 test("bridge: a huge song path or resource folder is cut too, so the discovery file stays small", function()

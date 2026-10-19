@@ -565,3 +565,219 @@ async fn reads_and_looks_stay_plain_short_and_whole() {
         })
         .await;
 }
+
+/// Renoise quit and started again on the same song: it opens on its empty song first and loads the file a moment later.
+/// The look waits for the file, so the conversation stays the song's; a song still unsaved after a while is a new one.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_song_reopened_after_a_restart_keeps_its_conversation_not_the_empty_song_renoise_starts_on() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let song = |identity: &str| {
+                json!({"epoch": "1", "layout": 0, "project": {"id": PROJECT_ID, "identity": identity, "name": "Acid", "path": "/songs/Acid.xrns", "bpm": 140}, "tracks": [], "selection": {}})
+            };
+            let empty = |identity: &str| {
+                json!({"epoch": "1", "layout": 0, "project": {"id": "9999999999999999999999999999abcd", "identity": identity, "name": "", "path": null, "bpm": 120}, "tracks": [], "selection": {}})
+            };
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", song("t1:1"), false)]),
+                asked: RefCell::default(),
+            });
+            let traced: Rc<RefCell<Vec<String>>> = Rc::default();
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            let into = traced.clone();
+            options.context.on_dispatch = Some(Rc::new(move |line| into.borrow_mut().push(line)));
+            let renoise = create_renoise_integration(options);
+            renoise.start(Signal::new()).await.unwrap();
+            let before = renoise.observe(Signal::new(), None).await.unwrap().key;
+            // KUMI_TRACE shows the key each look took the song to be.
+            assert_eq!(traced.borrow().last().cloned(), Some(format!("look: {before}")));
+            // Renoise quits.
+            host.answers.borrow_mut().push(("snapshot", json!({"error": "Renoise closed", "connected": false}), true));
+            renoise.observe(Signal::new(), None).await.unwrap();
+            // Started again: its empty song first, the file half a second later.
+            host.answers.borrow_mut().push(("snapshot", empty("t2:1"), false));
+            let later = host.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                later.answers.borrow_mut().push(("snapshot", song("t2:2"), false));
+            });
+            let after = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(after.key, before, "the same song, the same conversation");
+            // A song still unsaved once Renoise has settled is a new one.
+            host.answers.borrow_mut().push(("snapshot", json!({"error": "Renoise closed", "connected": false}), true));
+            renoise.observe(Signal::new(), None).await.unwrap();
+            host.answers.borrow_mut().push(("snapshot", empty("t3:1"), false));
+            let started = tokio::time::Instant::now();
+            let fresh = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_ne!(fresh.key, before);
+            assert!(started.elapsed() >= std::time::Duration::from_millis(2_500), "waited for a file that never came");
+            // Settled: the next look doesn't wait.
+            let started = tokio::time::Instant::now();
+            renoise.observe(Signal::new(), None).await.unwrap();
+            assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        })
+        .await;
+}
+
+/// A look that runs into Renoise's own change is taken again; one that fails while Renoise is there keeps the project and
+/// Renoise's tools (no fresh conversation), and asks the session to look again by itself.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_look_the_daw_interrupts_is_taken_again_and_a_failed_one_keeps_the_tools_and_looks_again() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let song = json!({"epoch": "1", "layout": 0, "project": {"id": PROJECT_ID, "identity": "t1:1", "name": "Acid", "path": "/songs/Acid.xrns", "bpm": 140}, "tracks": [], "selection": {}});
+            let changed = json!({"error": "the song changed while this was being read: read again", "code": "epoch-changed", "connected": true});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", song.clone(), false)]),
+                asked: RefCell::default(),
+            });
+            let looks_again = Rc::new(std::cell::Cell::new(0));
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            let counted = looks_again.clone();
+            options.context.on_look_again = Some(Rc::new(move || counted.set(counted.get() + 1)));
+            let renoise = create_renoise_integration(options);
+            renoise.start(Signal::new()).await.unwrap();
+            let first = renoise.observe(Signal::new(), None).await.unwrap();
+            // Interrupted once: taken again a moment later, the same look.
+            host.answers.borrow_mut().push(("snapshot", changed.clone(), true));
+            let later = host.clone();
+            let song_again = song.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                later.answers.borrow_mut().push(("snapshot", song_again, false));
+            });
+            let again = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!((again.key.as_str(), again.label.as_str()), (first.key.as_str(), first.label.as_str()));
+            assert_eq!(looks_again.get(), 0);
+            // Interrupted for good: the project and the tools stay, and the session is asked to look again.
+            host.answers.borrow_mut().push(("snapshot", changed, true));
+            let failed = renoise.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(failed.key, first.key, "the same song's conversation");
+            assert_eq!(failed.revision, first.revision, "no tools change for the session");
+            assert_eq!(failed.tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>(), ["renoise_read"]);
+            assert!(failed.label.starts_with("Renoise — couldn't look just now"), "{}", failed.label);
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+            assert_eq!(looks_again.get(), 1, "looked again without a turn");
+        })
+        .await;
+}
+
+/// An answer read in another track layout than the book's: newer (a tracks event lost on the way) retires the book's
+/// names so none reads the wrong track; older (a shift landed first) is read again, carried to now.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_answer_in_another_track_layout_never_leaves_a_name_on_the_wrong_track() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let snapshot = json!({"epoch": "1", "layout": 0, "project": {"id": PROJECT_ID, "identity": "t1:1", "name": "Acid", "path": "/songs/Acid.xrns"}, "tracks": [{"ref": "1:track:1", "name": "Kick"}, {"ref": "1:track:2", "name": "Bass"}], "selection": {}});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            let seen = renoise.observe(Signal::new(), None).await.unwrap();
+            let read = seen.tools[0].clone();
+            let context: Value = serde_json::from_str(&seen.context).unwrap();
+            assert_eq!(context["tracks"][0]["ref"], "track:1");
+            // Two tracks were inserted at the top and Kumi never heard: the answer is two shifts on.
+            host.answers.borrow_mut().push((
+                "read",
+                json!({"epoch": "1", "layout": 2, "items": [{"ref": "1:track:3", "name": "Kick"}]}),
+                false,
+            ));
+            let page = read.execute(json!({"kind": "track"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            let page: Value = serde_json::from_str(&page.text).unwrap();
+            assert_ne!(page["items"][0]["ref"], "track:1", "Kick's new name isn't the old track:1");
+            let old = read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert!(old.is_error && old.text.contains("isn't one of this turn's refs"), "{}", old.text);
+            // An answer from before a shift the book follows (layout 1 against 2): read again, a few times at most.
+            host.answers.borrow_mut().push(("read", json!({"epoch": "1", "layout": 1, "items": []}), false));
+            let before = host.asked.borrow().iter().filter(|(tool, _)| tool == "read").count();
+            let stale = read.execute(json!({"kind": "track"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            let reads = host.asked.borrow().iter().filter(|(tool, _)| tool == "read").count() - before;
+            assert_eq!(reads, 5, "read again, carried to now");
+            // Still older after that: refused, never shortened into the book's newer names.
+            assert!(stale.is_error && stale.text.contains("changed while reading"), "{}", stale.text);
+        })
+        .await;
+}
+
+/// Renoise moves its epoch for a device, pattern or instrument edit, and no event says so: the next answer from that
+/// epoch retires the track names, and a request that names no track never carries a layout to be refused for.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn an_edit_no_event_tells_of_never_leaves_renoise_unreadable() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let snapshot = json!({"epoch": "1", "layout": 0, "project": {"id": PROJECT_ID, "identity": "t1:1", "name": "Acid", "path": "/songs/Acid.xrns"}, "tracks": [{"ref": "1:track:1", "name": "Kick"}], "selection": {}});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", snapshot, false)]),
+                asked: RefCell::default(),
+            });
+            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            renoise.start(Signal::new()).await.unwrap();
+            let read = renoise.observe(Signal::new(), None).await.unwrap().tools[0].clone();
+            let last_read = || host.asked.borrow().iter().rev().find(|(tool, _)| tool == "read").unwrap().1.clone();
+            // A track was inserted (layout 1), as an answer shows.
+            host.answers.borrow_mut().push(("read", json!({"epoch": "1", "layout": 1, "items": [{"ref": "1:track:2", "name": "Kick"}]}), false));
+            let page = read.execute(json!({"kind": "track"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert!(last_read().get("layout").is_none(), "a read naming no track names no layout: {}", last_read());
+            let kick = serde_json::from_str::<Value>(&page.text).unwrap()["items"][0]["ref"].as_str().unwrap().to_owned();
+            host.answers.borrow_mut().push(("read", json!({"epoch": "1", "layout": 1, "items": []}), false));
+            read.execute(json!({"kind": "device", "parent": kick}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert_eq!(last_read()["layout"], 1, "a read naming a track names the layout its ref is at");
+            // Then a device was added: Renoise's epoch moved, with no event. The next answer shows it.
+            host.answers.borrow_mut().push(("read", json!({"epoch": "2", "layout": 0, "items": [{"ref": "2:pattern:1"}]}), false));
+            let song = read.execute(json!({"kind": "pattern"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert!(!song.is_error, "{}", song.text);
+            // The track names from before the edit are retired, so none reads the wrong object.
+            let old = read.execute(json!({"kind": "device", "parent": kick}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+            assert!(old.is_error && old.text.contains("isn't one of this turn's refs"), "{}", old.text);
+        })
+        .await;
+}
+
+/// A look that fails because the DAW is busy behind a dialog doesn't keep asking, every second, for a look that would
+/// wait again: the next is asked for once the focus says the dialog is gone.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_busy_daw_is_looked_at_again_once_it_is_free_not_every_second() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let busy = json!({"error": "REAPER is busy: a dialog is open", "code": "busy", "connected": true});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![
+                    ("status", json!({"connected": true, "busy": "modal"}), false),
+                    ("snapshot", reaper_snapshot(), false),
+                    (
+                        "focus",
+                        json!({"epoch": "1", "view": "arrange", "selection": {}, "transport": {"playing": false}, "busy": "modal"}),
+                        false,
+                    ),
+                ]),
+                asked: RefCell::default(),
+            });
+            let looks_again = Rc::new(std::cell::Cell::new(0));
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            let counted = looks_again.clone();
+            options.context.on_look_again = Some(Rc::new(move || counted.set(counted.get() + 1)));
+            options.context.on_focus = Some(Rc::new(|_| {}));
+            let reaper = create_reaper_integration(options);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            // A dialog opens: the look waits a while, then keeps the project and REAPER's tools.
+            host.answers.borrow_mut().push(("snapshot", busy, true));
+            let failed = reaper.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(failed.tools.len(), 1);
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            assert_eq!(looks_again.get(), 0, "no look asked for while the dialog stays");
+            // The dialog closes: one look is asked for.
+            host.answers.borrow_mut().push(("status", json!({"connected": true}), false));
+            host.answers.borrow_mut().push((
+                "focus",
+                json!({"epoch": "1", "view": "arrange", "selection": {}, "transport": {"playing": false}}),
+                false,
+            ));
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            assert_eq!(looks_again.get(), 1, "looked at again once it was free");
+        })
+        .await;
+}

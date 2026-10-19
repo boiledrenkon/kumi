@@ -88,7 +88,8 @@ end
 local function write_discovery()
   if not (b.cfg and b.port) then return end
   local pid = status.pid() or 0
-  local resource = status.resource(host.bundle_path)
+  -- (the file's name is made from the resource as written in it, cut or not: that is what a host hashes)
+  local resource = status.resource_text(host.bundle_path)
   local path = b.cfg.discovery_dir .. "/" .. discovery.file_name(pid, resource)
   local ok, err = discovery.write(path, {
     schema = discovery.SCHEMA,
@@ -99,7 +100,7 @@ local function write_discovery()
     protocol = wire.PROTOCOL,
     version = VERSION,
     dawVersion = renoise.RENOISE_VERSION,
-    resource = status.resource_text(host.bundle_path),
+    resource = resource,
     project = status.project(b.memory),
     startedMs = b.started_ms,
   })
@@ -193,75 +194,107 @@ local SELECTION_OBSERVABLES = {
   "selected_track_device_observable",
 }
 
+-- Each object is watched in a group of its own (see sync.lua), kept in a list in the order of the song's own, so the operation
+-- that deletes or swaps an object (which names its index) can say whose watchers are dead or moved.
+local group = sync.group
+
 -- What each kind of object is watched for. A new object gets its watchers where it is made (inside the notifier that saw
 -- it), so there is no turn on which it goes unseen.
-local function watch_device(device)
-  observers:watch_changes(device.is_active_observable)
-  observers:watch_changes(device.display_name_observable)
+local function watch_device(device, token, track_token)
+  observers:owned(token, track_token, function()
+    observers:watch_changes(device.is_active_observable)
+    observers:watch_changes(device.display_name_observable)
+  end)
 end
 
 local function watch_track(song, i)
   local track = song:track(i)
-  observers:watch_changes(track.name_observable)
-  observers:watch_changes(track.color_observable)
-  observers:watch_changes(track.mute_state_observable)
-  observers:watch_changes(track.solo_state_observable)
-  observers:watch_changes(track.visible_note_columns_observable)
-  observers:watch_changes(track.visible_effect_columns_observable)
-  for c = 1, track.max_note_columns do
-    observers:watch_changes(track:column_is_muted_observable(c))
-    observers:watch_changes(track:column_name_observable(c))
+  local token = b.groups.tracks[i]
+  token.devices = {}
+  observers:owned(token, nil, function()
+    observers:watch_changes(track.name_observable)
+    observers:watch_changes(track.color_observable)
+    observers:watch_changes(track.mute_state_observable)
+    observers:watch_changes(track.solo_state_observable)
+    observers:watch_changes(track.visible_note_columns_observable)
+    observers:watch_changes(track.visible_effect_columns_observable)
+    for c = 1, track.max_note_columns do
+      observers:watch_changes(track:column_is_muted_observable(c))
+      observers:watch_changes(track:column_name_observable(c))
+    end
+    observers:watch_structural(track.devices_observable, "a track's devices changed", "devices", track, token)
+  end)
+  for d = 1, #track.devices do
+    token.devices[d] = group()
+    watch_device(track:device(d), token.devices[d], token)
   end
-  for d = 1, #track.devices do watch_device(track:device(d)) end
-  observers:watch_structural(track.devices_observable, "a track's devices changed", "devices", track)
 end
 
--- What a pattern's track shows is another pattern's when it is an alias.
-local function watch_pattern_track(pattern, t)
-  observers:watch_changes(pattern:track(t).alias_pattern_index_observable)
+-- What a pattern's track shows is another pattern's when it is an alias. (Its watcher belongs to the pattern and the track.)
+local function watch_pattern_track(pattern, t, pattern_token, track_token)
+  observers:owned(pattern_token, track_token, function()
+    observers:watch_changes(pattern:track(t).alias_pattern_index_observable)
+  end)
 end
 
 local function watch_pattern(song, p, tracks)
   local pattern = song:pattern(p)
-  observers:watch_lines(pattern)
-  observers:watch_changes(pattern.name_observable)
-  observers:watch_layout(pattern.number_of_lines_observable)
-  for t = 1, tracks do watch_pattern_track(pattern, t) end
+  local token = b.groups.patterns[p]
+  observers:owned(token, nil, function()
+    observers:watch_lines(pattern)
+    observers:watch_changes(pattern.name_observable)
+    observers:watch_layout(pattern.number_of_lines_observable)
+  end)
+  for t = 1, tracks do watch_pattern_track(pattern, t, token, b.groups.tracks[t]) end
 end
 
-local function watch_sample(sample)
-  observers:watch_changes(sample.name_observable)
-  local mapping = sample.sample_mapping
-  if not mapping then return end
-  observers:watch_changes(mapping.note_range_observable)
-  observers:watch_changes(mapping.velocity_range_observable)
-  observers:watch_changes(mapping.base_note_observable)
-  observers:watch_changes(mapping.layer_observable)
-  observers:watch_changes(mapping.map_key_to_pitch_observable)
-  observers:watch_changes(mapping.map_velocity_to_volume_observable)
+local function watch_sample(sample, token, instrument_token)
+  observers:owned(token, instrument_token, function()
+    observers:watch_changes(sample.name_observable)
+    local mapping = sample.sample_mapping
+    if not mapping then return end
+    observers:watch_changes(mapping.note_range_observable)
+    observers:watch_changes(mapping.velocity_range_observable)
+    observers:watch_changes(mapping.base_note_observable)
+    observers:watch_changes(mapping.layer_observable)
+    observers:watch_changes(mapping.map_key_to_pitch_observable)
+    observers:watch_changes(mapping.map_velocity_to_volume_observable)
+  end)
 end
 
-local function watch_phrase(phrase)
-  observers:watch_lines(phrase)
-  observers:watch_changes(phrase.name_observable)
-  observers:watch_layout(phrase.number_of_lines_observable)
-  observers:watch_changes(phrase.lpb_observable)
-  observers:watch_changes(phrase.visible_note_columns_observable)
-  observers:watch_changes(phrase.visible_effect_columns_observable)
+local function watch_phrase(phrase, token, instrument_token)
+  observers:owned(token, instrument_token, function()
+    observers:watch_lines(phrase)
+    observers:watch_changes(phrase.name_observable)
+    observers:watch_layout(phrase.number_of_lines_observable)
+    observers:watch_changes(phrase.lpb_observable)
+    observers:watch_changes(phrase.visible_note_columns_observable)
+    observers:watch_changes(phrase.visible_effect_columns_observable)
+  end)
 end
 
 local function watch_instrument(song, i)
   local instrument = song:instrument(i)
-  observers:watch_changes(instrument.name_observable)
-  for k = 1, #instrument.macros do
-    local macro = instrument:macro(k)
-    observers:watch_changes(macro.value_observable)
-    observers:watch_changes(macro.name_observable)
+  local token = b.groups.instruments[i]
+  token.samples, token.phrases = {}, {}
+  observers:owned(token, nil, function()
+    observers:watch_changes(instrument.name_observable)
+    for k = 1, #instrument.macros do
+      local macro = instrument:macro(k)
+      observers:watch_changes(macro.value_observable)
+      observers:watch_changes(macro.name_observable)
+    end
+    observers:watch_structural(instrument.samples_observable, "an instrument's samples changed", "samples", instrument, token)
+    observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed", "phrases", instrument, token)
+  end)
+  for s = 1, #instrument.samples do
+    token.samples[s] = group()
+    watch_sample(instrument:sample(s), token.samples[s], token)
   end
-  for s = 1, #instrument.samples do watch_sample(instrument:sample(s)) end
-  for ph = 1, #instrument.phrases do watch_phrase(instrument:phrase(ph)) end
-  observers:watch_structural(instrument.samples_observable, "an instrument's samples changed", "samples", instrument)
-  observers:watch_structural(instrument.phrases_observable, "an instrument's phrases changed", "phrases", instrument)
+  for ph = 1, #instrument.phrases do
+    token.phrases[ph] = group()
+    watch_phrase(instrument:phrase(ph), token.phrases[ph], token)
+  end
 end
 
 -- Everything the focus pane and the reads depend on is watched: events for what Kumi is told as it happens, a counter
@@ -269,6 +302,11 @@ end
 local function attach(song)
   observers:detach()
   if not song then return end
+  local tracks = track_total(song)
+  b.groups = { tracks = {}, patterns = {}, instruments = {} }
+  for t = 1, tracks do b.groups.tracks[t] = group() end
+  for p = 1, #song.patterns do b.groups.patterns[p] = group() end
+  for i = 1, #song.instruments do b.groups.instruments[i] = group() end
   for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection") end
   for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport") end
   observers:watch(song.name_observable, "project")
@@ -280,11 +318,10 @@ local function attach(song)
   observers:watch_changes(sequencer.pattern_assignments_observable)
   observers:watch_changes(sequencer.pattern_slot_mutes_observable)
   observers:watch_changes(sequencer:sequence_sections_changed_observable())
-  local tracks = track_total(song)
   for p = 1, #song.patterns do watch_pattern(song, p, tracks) end
   for t = 1, tracks do watch_track(song, t) end
   for i = 1, #song.instruments do watch_instrument(song, i) end
-  b.track_count = track_total(song)
+  b.track_count = tracks
   b.reattach = false
   observers:changed("selection", selection(song))
   observers:changed("transport", transport(song))
@@ -298,31 +335,67 @@ local function send_project()
   write_discovery()
 end
 
+-- The group of a deleted owner is marked dead (its watchers are dropped when enough have piled up); a swap moves the groups
+-- with their objects. Returns false when the list doesn't match the operation, which asks for the song to be watched anew.
+local function forget(list, index)
+  if type(index) ~= "number" or not list[index] then return false end
+  table.remove(list, index).dead = true
+  observers.dead = observers.dead + 1
+  return true
+end
+
+local function exchange(list, a, b_)
+  if type(a) ~= "number" or type(b_) ~= "number" or not list[a] or not list[b_] then return false end
+  list[a], list[b_] = list[b_], list[a]
+  return true
+end
+
+-- A group for an object made at `index`. A list that doesn't reach that far (it should) is filled up so the object is watched
+-- at once; false says the list was out of step, which asks for the song to be watched anew on the next tick.
+local function remember(list, index)
+  if type(index) ~= "number" or index < 1 then return false end
+  local exact = index <= #list + 1
+  while #list < index - 1 do list[#list + 1] = group() end
+  table.insert(list, index, group())
+  return exact
+end
+
 -- A change to the lists refs index into: the epoch moves (so every answer after it is in the new epoch, and a ref from
--- before is refused), and what was made gets its watchers. A deleted object's watchers stay until the song is watched
--- anew, which happens once enough of them have piled up.
-local function on_structural(reason, kind, op, owner)
+-- before is refused), and what was made gets its watchers. What was deleted loses its group, and a swap moves the groups
+-- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
+-- asks for the whole song to be watched anew.
+local function on_structural(reason, kind, op, owner, token)
   bump_epoch(reason)
   local song = renoise.song()
   if not song then return end
-  local made, lost = op and op.type == "insert", op and op.type == "remove"
-  if made then
-    if kind == "instruments" then
-      watch_instrument(song, op.index)
-    elseif kind == "patterns" then
-      watch_pattern(song, op.index, track_total(song))
-    elseif kind == "devices" then
-      watch_device(owner:device(op.index))
-    elseif kind == "samples" then
-      watch_sample(owner:sample(op.index))
-    elseif kind == "phrases" then
-      watch_phrase(owner:phrase(op.index))
-    end
-  elseif lost then
-    observers.dead = observers.dead + 1
-  elseif kind == "instruments" or kind == "patterns" then
-    b.reattach = true
+  local lists = { instruments = b.groups.instruments, patterns = b.groups.patterns }
+  if token then
+    lists.devices, lists.samples, lists.phrases = token.devices, token.samples, token.phrases
   end
+  local list = lists[kind]
+  if not list then return end -- (the sequence: nothing is watched per slot)
+  local fine = false
+  if op and op.type == "insert" then
+    fine = remember(list, op.index)
+    if type(op.index) == "number" and op.index >= 1 then
+      if kind == "instruments" then
+        watch_instrument(song, op.index)
+      elseif kind == "patterns" then
+        watch_pattern(song, op.index, track_total(song))
+      elseif kind == "devices" then
+        watch_device(owner:device(op.index), list[op.index], token)
+      elseif kind == "samples" then
+        watch_sample(owner:sample(op.index), list[op.index], token)
+      elseif kind == "phrases" then
+        watch_phrase(owner:phrase(op.index), list[op.index], token)
+      end
+    end
+  elseif op and op.type == "remove" then
+    fine = forget(list, op.index)
+  elseif op and op.type == "swap" then
+    fine = exchange(list, op.index, op.index2)
+  end
+  if not fine then b.reattach = true end
 end
 
 -- A change to the track list. An insert or removal keeps the epoch and moves the layout: the shift is kept, so a request
@@ -334,6 +407,13 @@ local function on_tracks(op)
   local count = track_total(song)
   local expected = b.track_count
   if op.type == "insert" then expected = expected + 1 elseif op.type == "remove" then expected = expected - 1 end
+  local swapped = op.type == "swap" and expected == count and exchange(b.groups.tracks, op.index, op.index2)
+  if swapped then
+    -- (the tracks are the same objects in another order: they keep their watchers and their groups move with them)
+    bump_epoch("tracks were swapped")
+    conns:event("tracks", { count = count, made = json.array(), gone = json.array(), layout = b.layout, epoch = epoch() })
+    return
+  end
   if (op.type ~= "insert" and op.type ~= "remove") or expected ~= count or type(op.index) ~= "number" then
     bump_epoch(op.type == "swap" and "tracks were swapped" or "the tracks changed in a way the tool can't follow")
     b.track_count = count
@@ -345,12 +425,19 @@ local function on_tracks(op)
   b.layout = b.layout + 1
   b.shifts[#b.shifts + 1] = { layout = b.layout, type = op.type, index = op.index }
   if #b.shifts > M.SHIFT_HISTORY then table.remove(b.shifts, 1) end
+  local listed = true
   if op.type == "insert" then
-    watch_track(song, op.index)
-    for p = 1, #song.patterns do watch_pattern_track(song:pattern(p), op.index) end
+    listed = remember(b.groups.tracks, op.index)
+    if type(op.index) == "number" and op.index >= 1 then
+      watch_track(song, op.index)
+      for p = 1, #song.patterns do
+        watch_pattern_track(song:pattern(p), op.index, b.groups.patterns[p], b.groups.tracks[op.index])
+      end
+    end
   else
-    observers.dead = observers.dead + 1
+    listed = forget(b.groups.tracks, op.index)
   end
+  if not listed then b.reattach = true end
   conns:event("tracks", {
     count = count,
     made = json.array(op.type == "insert" and { op.index } or {}),
@@ -374,7 +461,11 @@ local function flush_events()
     if observers:changed("transport", value) then conns:event("transport", value) end
   end
   if dirty.project and observers:changed("project", status.project(b.memory)) then send_project() end
-  if b.reattach or observers.dead > M.MAX_DEAD then attach(song) end
+  if b.reattach then
+    attach(song)
+  elseif observers.dead > M.MAX_DEAD then
+    observers:prune() -- (no call to Renoise: the entries of deleted objects are dropped)
+  end
 end
 
 -- Requests
@@ -601,7 +692,9 @@ end
 function M.on_new_document()
   b.quitting = false
   b.document = b.document + 1
-  b.memory.born_unsaved = nil
+  -- Another song: its id is worked out afresh. (Starting with a file, Renoise opens its empty song and then the file
+  -- without releasing the first, so the empty song's id would otherwise stay with the file.)
+  b.memory.song_id, b.memory.born_unsaved = nil, nil
   if renoise.song() then status.note_document(b.memory, renoise.song()) end
   bump_epoch("a song was opened")
   attach(renoise.song())

@@ -314,6 +314,23 @@ mod tests {
         assert!(Reference::read(&file).is_err());
     }
 
+    /// The Renoise tool cuts a long resource folder and names the file by the text it writes (the same key in its Lua tests):
+    /// a host finds the file by hashing what it reads.
+    #[test]
+    fn a_resource_cut_by_the_bridge_is_keyed_by_the_cut_text() {
+        let cut = "/Users/K\u{fc}mi/Library/Preferences/Renoise/V3.5.4/\u{65e5}\u{65e5}\u{65e5}\u{2026}";
+        assert_eq!(discovery_key(cut), "7596818ce6a714b1");
+        let dir = tempfile::tempdir().unwrap();
+        let me = std::process::id();
+        let mut long = discovery(me, cut, 1);
+        long.daw = "renoise".into();
+        write_discovery(dir.path(), &long).unwrap();
+        assert!(long.file_name().ends_with("-7596818ce6a714b1.json"));
+        let found = scan_discovery(dir.path(), Daw::Renoise);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].discovery.as_ref().unwrap(), &long, "a file named by the cut text is trusted");
+    }
+
     #[test]
     fn discovery_files_are_keyed_by_pid_and_resource_and_checked() {
         let dir = tempfile::tempdir().unwrap();

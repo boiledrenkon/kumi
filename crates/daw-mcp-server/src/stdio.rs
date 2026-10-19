@@ -37,7 +37,13 @@ where
                         break;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                // Events dropped on the way: the client is told, so it never stays a track shift behind.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let lost = serde_json::json!({"jsonrpc": "2.0", "method": "notifications/daw_event", "params": {"name": "events_lost", "data": {}}});
+                    if notices.send(encode(&lost)).is_err() {
+                        break;
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }

@@ -244,7 +244,8 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             let asked = script.asked();
             assert_eq!(
                 asked.iter().rev().find(|(method, _)| method == "focus_body").unwrap().1,
-                json!({"kind": "pattern", "ref": "1:pattern:1", "layout": 0})
+                // (No layout: a pattern isn't on a track, so no track shift moves it.)
+                json!({"kind": "pattern", "ref": "1:pattern:1"})
             );
             assert_eq!((grid.lines, grid.from, grid.cursor), (32, 0, Some(0)));
             let kick = &grid.tracks[0];
@@ -286,6 +287,43 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             }
             let asked = script.asked().last().unwrap().1.clone();
             assert_eq!(asked, json!({"kind": "device", "parent": "1:track:2", "layout": 1}), "track:1 follows Kick");
+
+            // The same shift again (it reached Kumi after the book was past it): nothing moves twice.
+            simulator.emit("tracks", json!({"count": 8, "made": [1], "gone": [], "layout": 1}));
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await;
+            assert_eq!(script.asked().last().unwrap().1["parent"], "1:track:2", "track:1 is still Kick, not moved again");
+            // A gap (layout 3 after 1): the shifts between are unknown, so the track names go.
+            simulator.emit("tracks", json!({"count": 10, "made": [1], "gone": [], "layout": 3}));
+            let mut last = String::new();
+            for _ in 0..200 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                last = read
+                    .execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new())
+                    .await
+                    .unwrap()
+                    .text;
+                if last.contains("isn't one of this turn's refs") {
+                    break;
+                }
+            }
+            assert!(last.contains("isn't one of this turn's refs"), "{last}");
+
+            // Events dropped on the way (the host fell behind): a shift among them is unknown, so the track names go and are
+            // read again; none is left on the wrong track.
+            simulator.emit("events_lost", json!({}));
+            // (Until the event lands, the read goes to the simulator, which has nothing scripted for that track's devices.)
+            let mut last = String::new();
+            for _ in 0..200 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                let answer =
+                    read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
+                last = answer.text;
+                if answer.is_error && last.contains("isn't one of this turn's refs") {
+                    break;
+                }
+            }
+            assert!(last.contains("isn't one of this turn's refs"), "{last}");
 
             // Another song opens: the old song's refs are retired, so a stale track:1 reads nothing of the new song.
             script.switch_song();

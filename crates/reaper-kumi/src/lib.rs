@@ -244,6 +244,11 @@ fn load(info: &PluginInfo) -> c_int {
     // REAPER 7.55+; older ones still call the entry point to unload.
     loaded.register(c"atexit", on_exit as *mut c_void);
     LOADED.with(|l| *l.borrow_mut() = Some(loaded.clone()));
+    // The load hook counts each load for the project REAPER says it's loading.
+    projectconfig::ask_with(
+        || LOADED.with(|l| l.try_borrow().ok()?.as_ref()?.extension.reaper().project_in_load_save().map(|project| project.addr())),
+        || LOADED.with(|l| l.try_borrow().ok()?.as_ref()?.extension.reaper().current_project().map(|project| project.ptr.addr())),
+    );
     // The server starts from the first tick: once registered, REAPER keeps calling this module, so nothing after the
     // registrations may fail the entry (a panic there would have REAPER unload a module it still has callbacks into).
     1

@@ -19,7 +19,7 @@ local function ansi_unsafe(path)
   return windows() and path:find("[\128-\255]") ~= nil
 end
 
--- The first 16 hex of the SHA-256 of the resource folder's path as given.
+-- The first 16 hex of the SHA-256 of the resource folder's path as the file will carry it.
 function M.key(resource)
   return sha256.hex(resource):sub(1, 16)
 end
