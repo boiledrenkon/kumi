@@ -114,6 +114,24 @@ pub fn tools(host: &Host) -> Value {
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
         },
         {
+            "name": "transport_play",
+            "title": format!("Play {daw}"),
+            "description": format!("Starts {daw}'s playback from where it is."),
+            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        },
+        {
+            "name": "cursor_set",
+            "title": format!("Move {daw}'s cursor"),
+            "description": format!("Moves {daw}'s edit cursor to positionBeats (quarter notes from the start) or position (seconds); the play position follows while it plays."),
+            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                "positionBeats": {"type": "number", "minimum": 0},
+                "position": {"type": "number", "minimum": 0},
+                "epoch": {"type": "string"},
+            })), "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+        },
+        {
             "name": "undo_step_begin",
             "title": format!("Begin one {daw} undo step"),
             "description": format!("Opens one step of {daw}'s undo around the changes that follow, where {daw} gives one: {{stepId}}. Close it with undo_step_end."),
@@ -123,8 +141,8 @@ pub fn tools(host: &Host) -> Value {
         {
             "name": "undo_step_end",
             "title": format!("End the {daw} undo step"),
-            "description": "Closes the step undo_step_begin opened.",
-            "inputSchema": {"type": "object", "properties": {"stepId": {"type": "string"}}, "required": ["stepId"], "additionalProperties": false},
+            "description": format!("Closes the step undo_step_begin opened; label names it in {daw}'s undo by what it did."),
+            "inputSchema": {"type": "object", "properties": {"stepId": {"type": "string"}, "label": {"type": "string", "maxLength": 200}}, "required": ["stepId"], "additionalProperties": false},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
         },
         {
@@ -254,13 +272,14 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     };
                     result(id, tool_result(answer, is_error))
                 }
-                "change_preview" | "change_apply" | "change_undo" | "change_release" | "transport_stop" | "undo_step_begin"
-                | "undo_step_end" => {
+                "change_preview" | "change_apply" | "change_undo" | "change_release" | "transport_stop" | "transport_play"
+                | "cursor_set" | "undo_step_begin" | "undo_step_end" => {
                     let (answer, is_error) = match name {
                         "change_preview" => host.change_preview(&arguments).await,
                         "change_apply" => host.change_apply(&arguments).await,
                         "change_undo" => host.change_undo(&arguments).await,
                         "transport_stop" => host.transport_stop(&arguments).await,
+                        "transport_play" | "cursor_set" => host.transport(name, &arguments).await,
                         "undo_step_begin" | "undo_step_end" => host.undo_step(name, &arguments).await,
                         _ => host.change_release(&arguments),
                     };

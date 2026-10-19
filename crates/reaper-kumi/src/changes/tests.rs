@@ -1840,3 +1840,18 @@ fn a_note_that_would_overlap_one_of_the_same_pitch_is_refused_so_no_note_is_shor
         "Kumi: Wrote 1 note in snare.mid take (kov02)",
     );
 }
+
+#[test]
+fn a_plan_is_named_by_what_it_did_when_it_ends() {
+    let lab = Lab::new();
+    let id = lab.call("undo_step_begin", json!({"label": "Kumi: Kumi (kplan)"})).unwrap()["stepId"].as_str().unwrap().to_string();
+    lab.make("track-mute", json!({"ref": KICK, "mute": true}), "Kumi: Kick muted (kp001)");
+    lab.make("track-pan", json!({"ref": KICK, "pan": 0.2}), "Kumi: Kick pan 20% right (kp002)");
+    let ended = lab.call("undo_step_end", json!({"stepId": id, "label": "Kumi: Kick muted and 1 more (kplan)"})).unwrap();
+    assert_eq!((ended["desc"].clone(), ended["entry"].clone()), (json!("Kumi: Kick muted and 1 more (kplan)"), json!(true)));
+    assert_eq!(top().as_deref(), Some("Kumi: Kick muted and 1 more (kplan)"), "REAPER's undo menu says what the plan did");
+    // A label that isn't text is refused, and the step stays open to be ended.
+    let id = lab.call("undo_step_begin", json!({"label": "Kumi: Kumi (kplan)"})).unwrap()["stepId"].as_str().unwrap().to_string();
+    assert_eq!(lab.call("undo_step_end", json!({"stepId": id, "label": 7})).unwrap_err().0, "bad-params");
+    assert!(lab.call("undo_step_end", json!({"stepId": id})).is_ok());
+}

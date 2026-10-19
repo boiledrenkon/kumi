@@ -20,7 +20,19 @@ async fn the_read_methods_on_the_wire() {
     let client = BridgeClient::connect(simulator.address(), secret, "daw-mcp-server/test").await.unwrap();
     assert_eq!(
         client.welcome().methods,
-        ["ping", "status", "read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore"]
+        [
+            "ping",
+            "status",
+            "read",
+            "snapshot",
+            "focus",
+            "focus_body",
+            "change_preview",
+            "change_apply",
+            "change_restore",
+            "undo_step_begin",
+            "undo_step_end"
+        ]
     );
 
     let page = client.request("read", json!({"kind": "track", "limit": 2}), WAIT).await.unwrap();
