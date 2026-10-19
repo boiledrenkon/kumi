@@ -144,6 +144,13 @@ end
 -- The restores that carry their params by hand, by kind.
 M.carry_for = { ["track-delete"] = M.carry_restore, ["slot-delete"] = M.carry_slot_restore }
 
+-- (M4 n-devices) Whether a kind finds what it changed by places alone (its material): a restore of it isn't held back by
+-- refs of an earlier epoch in its target or `created`.
+function M.follows_places(kind)
+  local spec = base.KINDS[kind]
+  return spec ~= nil and spec.places == true
+end
+
 -- (M4 n-devices) A device's preset data, for Kumi's host to edit (`preset_read`).
 function M.preset_read(params, env) return presets.read(params, env) end
 

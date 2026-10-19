@@ -375,3 +375,57 @@ fn a_dsp_body_gets_each_containers_devices_as_branches_a_splitters_second_lane_s
     assert!(lanes[0].get("parallel").is_none() && lanes[1]["parallel"] == true, "{lanes:?}");
     assert!(child_nodes(NOTEPAD).is_empty());
 }
+
+fn make_read(reference: &str, label: &str, name: &str, xml: &str, parameters: Value) -> (String, Value) {
+    (
+        reference.into(),
+        json!({"label": label, "name": name, "active": true, "presetData": xml, "parameters": parameters, "trackName": "Bass"}),
+    )
+}
+
+#[test]
+fn a_doofer_is_made_of_devices_with_their_settings_names_bypass_aims_and_the_macros_asked() {
+    let eq5 = "<?xml version=\"1.0\"?>\n<FilterDevicePreset doc_version=\"14\">\n  <DeviceSlot type=\"Eq5Device\">\n    <Gain0>\n      <Value>-5</Value>\n    </Gain0>\n  </DeviceSlot>\n</FilterDevicePreset>\n";
+    let lfo = "<?xml version=\"1.0\"?>\n<FilterDevicePreset doc_version=\"14\">\n  <DeviceSlot type=\"LfoDevice\">\n    <Amplitude>\n      <Value>0.5</Value>\n    </Amplitude>\n  </DeviceSlot>\n</FilterDevicePreset>\n";
+    // The LFO (Bass's device 3) drives the EQ (Bass's device 2) Gain 1.
+    let aims = json!([{"name": "Dest. Track", "value": 1}, {"name": "Dest. Effect", "value": 1}, {"name": "Dest. Parameter", "value": 1}, {"name": "Amplitude", "value": 0.5}]);
+    let lanes =
+        vec![vec![make_read("e1:device:2.2", "Low cut", "EQ 5", eq5, json!([])), make_read("e1:device:2.3", "*LFO", "*LFO", lfo, aims)]];
+    let input = json!({"macros": [{"name": "Wobble", "mappings": [{"device": 2, "param": "Amplitude"}]}]});
+    let made = make(&input, &lanes, "Bass").unwrap();
+    let text = made.document.to_xml();
+    let document = xml::parse(&text).unwrap();
+    let slot_ = slot(&document).unwrap();
+    let list = devices_in(slot_, DOOFER_TYPE, 0);
+    assert_eq!(list.iter().map(|d| d.name()).collect::<Vec<_>>(), ["Eq5Device", "LfoDevice"]);
+    assert_eq!(list[0].child_text("CustomDeviceName").as_deref(), Some("Low cut"));
+    assert_eq!(value_of(list[0], "Gain0"), Some(-5.0), "its settings");
+    assert_eq!(value_of(list[0], "IsActive"), Some(1.0));
+    assert_eq!(
+        (value_of(list[1], "DestTrack"), value_of(list[1], "DestEffect"), value_of(list[1], "DestParameter")),
+        (Some(-1.0), Some(0.0), Some(1.0))
+    );
+    assert_eq!(slot_.child("Macro0").and_then(|m| m.child_text("Name")).as_deref(), Some("Wobble"));
+    assert!(text.contains("<DestDeviceIndex>1</DestDeviceIndex>") && text.contains("<DestParameterIndex>4</DestParameterIndex>"), "{text}");
+    assert_eq!(made.title, "Made a Doofer of \u{201c}Low cut\u{201d} and \u{201c}*LFO\u{201d} on \u{201c}Bass\u{201d}");
+    // A meta device aimed at a device staying outside: refused.
+    let outside =
+        json!([{"name": "Dest. Track", "value": 1}, {"name": "Dest. Effect", "value": 4}, {"name": "Dest. Parameter", "value": 1}]);
+    let lanes = vec![vec![make_read("e1:device:2.3", "*LFO", "*LFO", lfo, outside)]];
+    assert!(matches!(make(&json!({}), &lanes, "Bass"), Err(Refusal::Bad(m)) if m.contains("stays outside")));
+    // A routing device: refused. A Splitter: its lanes and split.
+    let send =
+        "<?xml version=\"1.0\"?>\n<FilterDevicePreset doc_version=\"14\">\n  <DeviceSlot type=\"SendDevice\"/>\n</FilterDevicePreset>\n";
+    let lanes = vec![vec![make_read("e1:device:2.2", "#Send", "#Send", send, json!([]))]];
+    assert!(matches!(make(&json!({}), &lanes, "Bass"), Err(Refusal::Bad(m)) if m.contains("routing devices")));
+    let lanes = vec![
+        vec![make_read("e1:device:2.2", "EQ 5", "EQ 5", eq5, json!([]))],
+        vec![make_read("e1:device:2.4", "EQ 5", "EQ 5", eq5, json!([]))],
+    ];
+    let split = make(&json!({"type": "splitter", "split": "frequency"}), &lanes, "Bass").unwrap();
+    let text = split.document.to_xml();
+    assert!(text.contains("<Type>Frequency</Type>"));
+    let document = xml::parse(&text).unwrap();
+    assert_eq!(devices_in(slot(&document).unwrap(), "SplitterDevice", 1).len(), 1);
+    assert!(matches!(make(&json!({"type": "doofer"}), &lanes, "Bass"), Err(Refusal::Bad(m)) if m.contains("second lane")));
+}

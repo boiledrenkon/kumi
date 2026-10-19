@@ -874,6 +874,15 @@ function M.handle(_, request)
     -- A ref of an earlier epoch that names the same thing now is made in this one, whatever epoch the request names (Kumi keeps
     -- the names of what a device or a sequence change left alone); so is the request's own epoch, when every ref of it was.
     if type(params) == "table" then
+      -- (M4 n-devices) A restore of a kind that finds things by places only: the refs in its target and `created` name
+      -- nothing it uses, and one of an earlier epoch mustn't hold the request back.
+      if request.method == "change_restore" and changes.follows_places(params.kind) and (params.created ~= nil or params.target ~= nil) then
+        local copy = {}
+        for k, v in pairs(params) do copy[k] = v end
+        copy.created = nil
+        if type(copy.target) == "table" then copy.target = { kind = copy.target.kind, track = copy.target.track, device = copy.target.device } end
+        params = copy
+      end
       local left
       params, left = refs.relabel_surviving(params, epoch(), survives)
       if type(from) == "string" and from ~= epoch() and not left[from] and survives(from, "song") then

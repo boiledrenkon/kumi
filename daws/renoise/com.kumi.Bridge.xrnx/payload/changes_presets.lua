@@ -15,6 +15,7 @@ local base = import("changes_base")
 local material_ = import("changes_material")
 local devices_ = import("changes_devices")
 local json_null = import("json").null
+local json_encode = import("json").encode
 
 local bad, fail, q = base.bad, base.fail, base.q
 local M = {}
@@ -721,6 +722,191 @@ base.register({
     return { prefix = (state or {}).prefix }
   end,
   same = function(a, b) return a.prefix == b.prefix and same_numbers(a, b) end,
+})
+
+-- doofer-make: a Doofer or Splitter made of devices on a track, in one step: the container (with the preset data Kumi's host
+-- composed: the devices inside, meta devices aimed at each other, the macros asked) goes in where the first of them was,
+-- and they go out. Refused before anything is written when a device has automation (Renoise drops it with the device),
+-- something outside aims at one of them (it would lose its target), or one changed since the host read it. Kumi's undo
+-- takes the container out and puts the devices back with their settings, names, bypass and aims, at their places when
+-- nothing else moved on the track since, else together where the container was (and says so).
+
+local CONTAINER_PATHS = { doofer = "Audio/Effects/Native/Doofer", splitter = "Audio/Effects/Native/Splitter" }
+
+local function moving(song, env, input, fence, what)
+  if type(input.deviceRefs) ~= "table" or #input.deviceRefs == 0 then bad("deviceRefs: the devices to put in it") end
+  local own = type(input.trackRef) == "string" and refs.expect(input.trackRef, "track", 1, env.epoch())[1] or nil
+  local list, seen = {}, {}
+  for i, reference in ipairs(input.deviceRefs) do
+    local ok, t, d, track, device = pcall(device_by_ref, song, env, reference, what)
+    if not ok then base.gone_is_changed(t) end
+    if own and t ~= own then bad("every device must be on the track trackRef names") end
+    if seen[d] then bad("a device is named twice") end
+    seen[d] = true
+    local label = label_of(t, track, device)
+    if fence and fence.ids and fence.ids[i] ~= identity(track, device) then fail("changed", base.moved_text(label)) end
+    if type(input.shapes) == "table" and input.shapes[i] ~= nil and input.shapes[i] ~= M.shape_of(device.active_preset_data) then
+      fail("changed", string.format("%s changed in Renoise since Kumi read it: read it again", q(label)))
+    end
+    list[i] = { t = t, d = d, track = track, device = device, label = label }
+  end
+  return list
+end
+
+local function make_checks(song, env, list)
+  local moved = {}
+  for _, m in ipairs(list) do moved[m.d] = true end
+  for _, m in ipairs(list) do
+    for k = 1, #m.device.parameters do
+      if m.device:parameter(k).is_automated then
+        bad(string.format("%s has automation (on %s), which Renoise drops with the device: Kumi won't move it into a Doofer", q(m.label), q(m.device:parameter(k).name)))
+      end
+    end
+    for _, route in ipairs(material_.read_routes(song, m.t, m.d, env)) do
+      if not (route.at == m.t and moved[route.device]) then
+        bad(string.format("a device on %s aims at %s: inside a Doofer it would lose its target", q(base.named(route.at, song:track(route.at))), q(m.label)))
+      end
+    end
+  end
+end
+
+local function all_back(song, t, saved)
+  if t < 1 or t > rows.track_count(song) then return false end
+  local track = song:track(t)
+  for _, entry in ipairs(saved or {}) do
+    local d = entry.index
+    if d > #track.devices or track:device(d).device_path ~= entry.device.path then return false end
+  end
+  return true
+end
+
+base.register({
+  kind = "doofer-make", custom = true, places = true, shape = "made", host_made = true,
+  preview = function()
+    bad("doofer-make is made by Kumi's host from the devices' preset data: ask it through the host's change_preview")
+  end,
+  apply = function(song, env, input, fence, desc)
+    local list = moving(song, env, input, fence, "doofer-make")
+    local t, track = list[1].t, list[1].track
+    local path = CONTAINER_PATHS[input.type or "doofer"]
+    if not path then bad("type is doofer or splitter") end
+    make_checks(song, env, list)
+    local first = math.huge
+    for _, m in ipairs(list) do first = math.min(first, m.d) end
+    local at = input.index
+    if at == nil or at == json_null then at = first end
+    if type(at) ~= "number" or at ~= math.floor(at) or at < 2 or at > #track.devices + 1 then
+      bad(string.format("index must be a whole number from 2 (after the mixer device) to %d", #track.devices + 1))
+    end
+    if type(input.presetData) ~= "string" or #input.presetData > M.MAX_PRESET_BYTES then bad("presetData: the container's preset data") end
+    -- What goes back on the undo: each device as it is (ascending places), and which of the others each meta device aims at.
+    local by_place = {}
+    for i, m in ipairs(list) do by_place[i] = m end
+    table.sort(by_place, function(a, b) return a.d < b.d end)
+    local saved = {}
+    for i, m in ipairs(by_place) do
+      local aims = {}
+      for _, destination in ipairs(material_.destinations(m.device)) do
+        if destination.track.value == t - 1 then
+          for j, other in ipairs(by_place) do
+            if destination.effect.value == other.d - 1 then
+              aims[#aims + 1] = { prefix = destination.prefix, to = j, parameter = destination.parameter and destination.parameter.value }
+            end
+          end
+        end
+      end
+      saved[i] = { index = m.d, device = material_.read_device(m.device), aims = #aims > 0 and aims or nil }
+    end
+    local size = #json_encode(saved)
+    if size > base.MAX_MATERIAL_BYTES then
+      fail("failed", string.format("the devices hold %.1f MB, more than Kumi keeps to put them back, so it won't move them", size / 1048576))
+    end
+    song:describe_undo(desc)
+    local made, container = pcall(function() return track:insert_device_at(path, at) end)
+    if not made or not container then fail("failed", "Renoise wouldn't make the " .. (input.type or "doofer")) end
+    local ok, err = pcall(function()
+      check_preset_data(container, input.presetData, label_of(t, track, container))
+      container.active_preset_data = input.presetData
+    end)
+    if not ok then
+      pcall(function() track:delete_device_at(at) end)
+      if type(err) ~= "table" then err = { code = "failed", message = "Renoise refused the preset data: " .. tostring(err) } end
+      error(err, 0)
+    end
+    -- The devices out, from the last: each place past the container's moved one on by its insert.
+    for i = #by_place, 1, -1 do
+      local d = by_place[i].d
+      track:delete_device_at(d >= at and d + 1 or d)
+    end
+    local before = 0
+    for _, m in ipairs(by_place) do if m.d < at then before = before + 1 end end
+    local final = at - before
+    if type(input.name) == "string" and input.name ~= "" then container.display_name = input.name end
+    local kept = keep(env, t, final, track, container)
+    kept.devices, kept.mark = saved, env.device_mark and env.device_mark(t) or nil
+    return {
+      applied = { shape = M.shape_of(container.active_preset_data), count = #saved }, material = kept,
+      created = { ref = refs.make(env.epoch(), "device", t, final), kind = "device" }, target = target_of(t, final),
+      display = display_from(input.display, "Made a Doofer on " .. q(base.named(t, track))), undo = { desc = desc, entry = true },
+      prior = { count = 0 }, place = { track = t, device = final }, shape = "made",
+    }
+  end,
+  restore = function(song, env, restore, desc)
+    local material, applied = restore.material, restore.applied
+    if type(material) ~= "table" or type(material.devices) ~= "table" or type(applied) ~= "table" then bad("material: the devices the container took in") end
+    local ok, t, d, track, container = pcall(device_by_place, song, env, material, "Kumi made it")
+    if not ok then
+      local err = t
+      if type(err) == "table" and err.code == "gone" and all_back(song, material.track, material.devices) then
+        return { restored = { count = 0 }, display = { title = "The devices are back already" }, undo = { desc = desc, entry = false }, unwritten = true }
+      end
+      error(err, 0)
+    end
+    local label = label_of(t, track, container)
+    if M.shape_of(container.active_preset_data) ~= applied.shape then
+      fail("changed", string.format("the devices or macros inside %s changed in Renoise since Kumi made it, so it can't take it apart", q(label)))
+    end
+    for k = 1, #container.parameters do
+      if container:parameter(k).is_automated then fail("changed", string.format("%s's macros have automation since, which taking it apart would lose", q(label))) end
+    end
+    for _, route in ipairs(material_.read_routes(song, t, d, env)) do
+      fail("changed", string.format("a device on %s aims at %s since: taking it apart would lose that", q(base.named(route.at, song:track(route.at))), q(label)))
+    end
+    -- At their own places when nothing moved on the track since; else together where the container is.
+    local exact = material.mark ~= nil and env.device_mark and env.device_mark(t) == material.mark
+    song:describe_undo(desc)
+    track:delete_device_at(d)
+    local places = {}
+    for i, entry in ipairs(material.devices) do
+      local at = exact and entry.index or (d + i - 1)
+      at = math.max(2, math.min(at, #track.devices + 1))
+      material_.restore_device(track, at, entry.device)
+      places[i] = at
+    end
+    for i, entry in ipairs(material.devices) do
+      for _, aim in ipairs(entry.aims or {}) do
+        local device = track:device(places[i])
+        for _, destination in ipairs(material_.destinations(device)) do
+          if destination.prefix == aim.prefix and places[aim.to] then
+            pcall(function()
+              destination.track.value = t - 1
+              destination.effect.value = places[aim.to] - 1
+              if destination.parameter and type(aim.parameter) == "number" then destination.parameter.value = aim.parameter end
+            end)
+          end
+        end
+      end
+    end
+    base.note_restored(env.journal, "doofer-make", { track = t, device = d })
+    return {
+      restored = { count = #material.devices },
+      display = {
+        title = string.format("Took %s apart (put back)", q(label)),
+        note = not exact and "The track's devices changed since, so they went back together where it was." or nil,
+      },
+      undo = { desc = desc, entry = true },
+    }
+  end,
 })
 
 -- preset_read {ref | at, epoch, layout}: a device's preset data and what Kumi's host needs to edit it (its shape, its

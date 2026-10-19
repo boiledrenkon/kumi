@@ -678,7 +678,7 @@ impl crate::host::Host {
             Err(why) => return refusal(why),
         };
         let discard = arguments.get("discard") == Some(&Value::Bool(true));
-        let params = if crate::presets::is_host_kind(self.daw(), &record.kind) {
+        let params = if crate::presets::composes_undo(self.daw(), &record.kind) {
             match self.preset_restore_params(&record, &desc, discard).await {
                 Ok(Ok(params)) => params,
                 // (it is back already: nothing to write)

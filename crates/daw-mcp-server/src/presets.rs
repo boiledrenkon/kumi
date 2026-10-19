@@ -28,6 +28,11 @@ pub fn is_host_kind(daw: daw_bridge::Daw, kind: &str) -> bool {
     daw == daw_bridge::Daw::Renoise && KINDS.contains(&kind)
 }
 
+/// Whether the host takes this kind back too (doofer-make's undo is the tool's own: it makes the devices again).
+pub fn composes_undo(daw: daw_bridge::Daw, kind: &str) -> bool {
+    is_host_kind(daw, kind) && kind != "doofer-make"
+}
+
 /// The most preset data edited (as the tool's bound).
 pub const MAX_PRESET_BYTES: usize = 8 * 1024 * 1024;
 
@@ -1392,6 +1397,156 @@ fn write_paragraphs(element: &mut Element, lines: &[String]) {
     element.insert_element(count, list);
 }
 
+// doofer-make: a Doofer or Splitter made of devices on a track (the multi-device sound): its preset data holds them in
+// order (a Splitter's second lane too), meta devices aimed at each other inside, and the macros asked; the tool puts it in
+// and takes the devices out in one step.
+
+const DOOFER_DEFAULT: &str = include_str!("../tests/fixtures/renoise/doofer_default.xml");
+const SPLITTER_DEFAULT: &str = include_str!("../tests/fixtures/renoise/splitter_default.xml");
+
+/// A device's place from its ref (`E:device:t.d`): its track and its place on it.
+fn device_numbers(reference: &str) -> Option<(i64, i64)> {
+    let rest = reference.rsplit_once(":device:")?.1;
+    let (t, d) = rest.split_once('.')?;
+    Some((t.parse().ok()?, d.parse().ok()?))
+}
+
+/// A device as it goes inside a container, from what preset_read gave of it: its preset slot's settings under its type's
+/// element, its name and bypass, and a meta device's destinations as places in its new chain (`chain`: the moved devices'
+/// places on the track, in the chain's order).
+fn inner_from(read: &Value, own_track: i64, chain: &[(i64, i64)]) -> Result<Element, Refusal> {
+    let label = read.get("label").and_then(Value::as_str).unwrap_or("the device").to_string();
+    let text = read.get("presetData").and_then(Value::as_str).unwrap_or_default();
+    let document = xml::parse(text).map_err(|e| Refusal::Bad(format!("the preset data of {} can't be read: {e}", q(&label))))?;
+    let slot_ = slot(&document)?;
+    let kind = type_of(slot_, true).to_string();
+    if let Some(native) = renoise_devices::by_xml(&kind) {
+        if !native.nests {
+            return bad(format!("{} can't go inside a Doofer or Splitter (Renoise crashes on routing devices there)", q(&label)));
+        }
+    } else if kind != PLUGIN {
+        return bad(format!("Kumi doesn't know the device {kind} of {}", q(&label)));
+    }
+    let mut element = Element::new(&kind).with_attribute("type", &kind);
+    let name = read.get("name").and_then(Value::as_str).unwrap_or_default();
+    if !label.is_empty() && label != name {
+        element = element.with_child(Element::new("CustomDeviceName").with_text(&label));
+    }
+    let active = read.get("active").and_then(Value::as_bool).unwrap_or(true);
+    element = element.with_child(Element::new("IsActive").with_child(Element::new("Value").with_text(if active { "1.0" } else { "0.0" })));
+    for child in slot_.elements() {
+        element = element.with_child(child.clone());
+    }
+    // A meta device's destinations: kept only when they aim at a device going into the same chain.
+    let params: Vec<&Value> = read.get("parameters").and_then(Value::as_array).map(|list| list.iter().collect()).unwrap_or_default();
+    let value = |name: &str| {
+        params.iter().find(|p| p.get("name").and_then(Value::as_str) == Some(name)).and_then(|p| p.get("value")).and_then(Value::as_f64)
+    };
+    let prefixes: Vec<String> = params
+        .iter()
+        .filter_map(|p| p.get("name").and_then(Value::as_str)?.strip_suffix("Track").map(str::to_owned))
+        .filter(|prefix| value(&format!("{prefix}Effect")).is_some())
+        .collect();
+    for prefix in prefixes {
+        let track = value(&format!("{prefix}Track")).unwrap_or(-1.0);
+        if track < 0.0 {
+            continue;
+        }
+        let effect = value(&format!("{prefix}Effect")).unwrap_or(-1.0);
+        let place = chain.iter().position(|&(t, d)| t == track as i64 + 1 && d == effect as i64 + 1);
+        let Some(place) = place.filter(|_| track as i64 + 1 == own_track) else {
+            return bad(format!(
+                "{} aims at a device that stays outside (or in the other lane): a meta device inside a Doofer or Splitter drives only devices in its own chain",
+                q(&label)
+            ));
+        };
+        let xml_prefix = if prefix == "Dest. " { String::new() } else { prefix.trim_end().to_string() };
+        set_value(&mut element, &format!("{xml_prefix}DestTrack"), -1.0);
+        set_value(&mut element, &format!("{xml_prefix}DestEffect"), place as f64);
+        if let Some(parameter) = value(&format!("{prefix}Parameter")) {
+            set_value(&mut element, &format!("{xml_prefix}DestParameter"), parameter);
+        }
+    }
+    Ok(element)
+}
+
+/// The container doofer-make makes, from the reads of the devices going into it (`lanes`: one list a Doofer, two a
+/// Splitter), and its words. `prior` names the devices and where they were.
+pub fn make(input: &Value, lanes: &[Vec<(String, Value)>], track_name: &str) -> Result<Edited, Refusal> {
+    let kind = match input.get("type").and_then(Value::as_str).unwrap_or("doofer") {
+        "doofer" => DOOFER,
+        "splitter" => SPLITTER,
+        _ => return bad("type is doofer or splitter"),
+    };
+    if kind == DOOFER && lanes.get(1).is_some_and(|lane| !lane.is_empty()) {
+        return bad("laneRefs is a Splitter's second lane");
+    }
+    let mut document = xml::parse(if kind == SPLITTER { SPLITTER_DEFAULT } else { DOOFER_DEFAULT }).expect("Renoise's own default");
+    let own_track = lanes.iter().flatten().find_map(|(reference, _)| device_numbers(reference)).map_or(0, |(t, _)| t);
+    let mut names = vec![];
+    for (lane, list) in lanes.iter().enumerate() {
+        let chain: Vec<(i64, i64)> = list.iter().filter_map(|(reference, _)| device_numbers(reference)).collect();
+        for (place, (_, read)) in list.iter().enumerate() {
+            let element = inner_from(read, own_track, &chain)?;
+            names.push(inner_label(&element));
+            let locus = Locus { container: vec![], lane, place, asked: vec![] };
+            list_mut(slot_mut(&mut document), &locus.container, lane).insert_element(locus.place, element);
+        }
+    }
+    if kind == SPLITTER {
+        if let Some(split) = input.get("split").and_then(Value::as_str) {
+            let Some((_, xml_word)) = SPLITS.iter().find(|(w, _)| *w == split) else {
+                return bad("split is parallel, mid-side or frequency");
+            };
+            slot_mut(&mut document).set_child_text("Type", xml_word);
+        }
+    }
+    // The macros asked, as doofer_macro takes them, numbered in order unless they say which.
+    for (i, asked) in input.get("macros").and_then(Value::as_array).into_iter().flatten().enumerate() {
+        let m = asked.get("macro").and_then(Value::as_i64).unwrap_or(i as i64 + 1);
+        if m < 1 || m as usize > macro_count(kind) {
+            return bad(format!(
+                "macros: a {} has macros 1 to {}",
+                if kind == SPLITTER { "Splitter" } else { "Doofer" },
+                macro_count(kind)
+            ));
+        }
+        let mut values = Map::new();
+        values.insert("macro".into(), m.into());
+        if let Some(name) = asked.get("name").and_then(Value::as_str) {
+            if name.chars().count() > 64 || name.chars().any(char::is_control) {
+                return bad("a macro's name is one line of at most 64 letters");
+            }
+            values.insert("name".into(), name.into());
+        }
+        if let Some(value) = asked.get("value").and_then(Value::as_f64) {
+            if !(0.0..=100.0).contains(&value) {
+                return bad("a macro's value is from 0 to 100 (%)");
+            }
+            values.insert("value".into(), value.into());
+        }
+        if let Some(mappings) = asked.get("mappings") {
+            values.insert("mappings".into(), Value::Array(checked_mappings(slot(&document)?, kind, mappings)?));
+        }
+        write_macro(slot_mut(&mut document), kind, &Value::Object(values));
+    }
+    if let Some(active) = input.get("activeMacros").and_then(Value::as_i64) {
+        if !(0..=macro_count(kind) as i64).contains(&active) {
+            return bad(format!("activeMacros is from 0 to {}", macro_count(kind)));
+        }
+        slot_mut(&mut document).set_child_text("NumActiveMacros", &active.to_string());
+    }
+    let word = if kind == SPLITTER { "Splitter" } else { "Doofer" };
+    let listed = match names.len() {
+        0 => return bad("deviceRefs: the devices to put in it"),
+        1 => q(&names[0]),
+        2 => format!("{} and {}", q(&names[0]), q(&names[1])),
+        n => format!("{}, {} and {} more", q(&names[0]), q(&names[1]), n - 2),
+    };
+    let title = format!("Made a {word} of {listed} on {}", q(track_name));
+    Ok(Edited { document, title, note: None, prior: json!({"devices": names}), applied: json!({"type": word}) })
+}
+
 // Kumi's undo: the edit taken back from what is there now.
 
 /// What a record keeps of an edit, to take it back: the kind, what was there (`prior`), what the edit left (`applied`),
@@ -1957,6 +2112,9 @@ impl crate::host::Host {
         epoch: Option<&str>,
         layout: Option<u64>,
     ) -> (Value, bool) {
+        if kind == "doofer-make" {
+            return self.make_preview(pick, input, epoch, layout).await;
+        }
         if !input.get("ref").is_some_and(Value::is_string) {
             return (json!({"error": "ref: the device", "code": "bad-params"}), true);
         }
@@ -1993,6 +2151,9 @@ impl crate::host::Host {
     /// What the bridge's `change_apply` is sent for a kind made here: the edit made again on the preset data as it is now
     /// (refused `changed`, nothing written, when what the preview found moved), with the shape it was made from.
     pub(crate) async fn preset_apply_params(&self, record: &crate::changes::Record) -> Result<Value, Value> {
+        if record.kind == "doofer-make" {
+            return self.make_apply_params(record).await;
+        }
         let mut params = read_params(&record.input, &record.kind);
         crate::changes::place(&mut params, record.epoch.as_deref(), record.input_layout);
         let read = self
@@ -2017,6 +2178,120 @@ impl crate::host::Host {
             "kind": record.kind,
             "input": {"ref": record.input.get("ref").cloned().unwrap_or(Value::Null), "presetData": composed, "shape": read.get("shape").cloned().unwrap_or(Value::Null), "display": display_of(&edited, false), "edit": edited.applied},
             "fence": {"id": read.get("id").cloned().unwrap_or(Value::Null)},
+            "desc": record.desc,
+        });
+        crate::changes::place(&mut apply, record.epoch.as_deref(), record.input_layout);
+        Ok(apply)
+    }
+
+    /// The reads of the devices doofer-make puts in a container, by lane (each its ref and its preset_read), checked to be
+    /// on the track it names.
+    async fn make_reads(
+        &self,
+        input: &Value,
+        epoch: Option<&str>,
+        layout: Option<u64>,
+        pick: &crate::host::Pick,
+    ) -> Result<(Vec<Vec<(String, Value)>>, String), Value> {
+        let bad_params = |message: &str| json!({"error": message, "code": "bad-params"});
+        let track = input.get("trackRef").and_then(Value::as_str).ok_or_else(|| bad_params("trackRef: the track the devices are on"))?;
+        let own = track
+            .rsplit_once(":track:")
+            .and_then(|(_, n)| n.parse::<i64>().ok())
+            .ok_or_else(|| bad_params("trackRef must be a track ref"))?;
+        let mut lanes = vec![];
+        let mut seen = std::collections::BTreeSet::new();
+        for field in ["deviceRefs", "laneRefs"] {
+            let refs: Vec<&str> = match input.get(field) {
+                None | Some(Value::Null) => vec![],
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|item| item.as_str().ok_or_else(|| bad_params(&format!("{field}: device refs"))))
+                    .collect::<Result<_, _>>()?,
+                Some(_) => return Err(bad_params(&format!("{field}: a list of device refs"))),
+            };
+            if field == "deviceRefs" && refs.is_empty() {
+                return Err(bad_params("deviceRefs: the devices to put in it, in order"));
+            }
+            let mut lane = vec![];
+            for reference in refs {
+                let Some((t, _)) = device_numbers(reference) else { return Err(bad_params(&format!("{reference} isn't a device ref"))) };
+                if t != own {
+                    return Err(bad_params("every device must be on the track trackRef names"));
+                }
+                if !seen.insert(reference.to_string()) {
+                    return Err(bad_params(&format!("{reference} is named twice")));
+                }
+                let mut params = json!({"ref": reference});
+                crate::changes::place(&mut params, epoch, layout);
+                let read = self.call("preset_read", params, pick, crate::changes::CHANGE_TIMEOUT).await.map_err(|e| self.call_error(&e))?;
+                lane.push((reference.to_string(), read));
+            }
+            lanes.push(lane);
+        }
+        if lanes.iter().flatten().count() > 16 {
+            return Err(bad_params("at most 16 devices go into one container at once"));
+        }
+        let track_name =
+            lanes.iter().flatten().find_map(|(_, read)| read.get("trackName").and_then(Value::as_str)).unwrap_or("the track").to_string();
+        Ok((lanes, track_name))
+    }
+
+    async fn make_preview(&self, pick: &crate::host::Pick, input: &Value, epoch: Option<&str>, layout: Option<u64>) -> (Value, bool) {
+        let (lanes, track_name) = match self.make_reads(input, epoch, layout, pick).await {
+            Ok(found) => found,
+            Err(answer) => return (answer, true),
+        };
+        let edited = match make(input, &lanes, &track_name) {
+            Ok(edited) => edited,
+            Err(refusal) => return (refusal_answer(&refusal), true),
+        };
+        let first = &lanes[0][0].1;
+        let ids: Vec<Value> = lanes.iter().flatten().map(|(_, read)| read.get("id").cloned().unwrap_or(Value::Null)).collect();
+        let answer = json!({
+            "epoch": first.get("epoch").cloned().unwrap_or(Value::Null),
+            "layout": first.get("layout").cloned().unwrap_or(Value::Null),
+            "target": {"kind": "track", "track": first["target"]["track"]},
+            "prior": edited.prior,
+            "fence": {"ids": ids},
+            "display": display_of(&edited, false),
+        });
+        match self.journal().previewed("doofer-make", input, &answer, layout) {
+            Ok(record) => {
+                let mut reply = json!({"transactionId": record.id, "confirmation": record.confirmation, "prior": record.prior, "display": record.display, "target": record.target});
+                crate::changes::place(&mut reply, record.epoch.as_deref(), record.layout);
+                (reply, false)
+            }
+            Err(why) => (json!({"error": why.message, "code": why.code}), true),
+        }
+    }
+
+    async fn make_apply_params(&self, record: &crate::changes::Record) -> Result<Value, Value> {
+        let (lanes, track_name) =
+            self.make_reads(&record.input, record.epoch.as_deref(), record.input_layout, &crate::host::Pick::default()).await?;
+        let ids: Vec<Value> = lanes.iter().flatten().map(|(_, read)| read.get("id").cloned().unwrap_or(Value::Null)).collect();
+        if Value::Array(ids.clone()) != record.fence["ids"] {
+            return Err(
+                json!({"error": "the devices aren't the ones previewed any more (a device was made, deleted or moved): read again", "code": "changed"}),
+            );
+        }
+        let edited = make(&record.input, &lanes, &track_name).map_err(|r| refusal_answer(&r))?;
+        if edited.prior != record.prior {
+            return Err(json!({"error": "the devices changed in Renoise since the preview: preview it again", "code": "changed"}));
+        }
+        let shapes: Vec<Value> = lanes.iter().flatten().map(|(_, read)| read.get("shape").cloned().unwrap_or(Value::Null)).collect();
+        let refs: Vec<Value> = lanes.iter().flatten().map(|(reference, _)| Value::from(reference.as_str())).collect();
+        let mut apply = json!({
+            "kind": "doofer-make",
+            "input": {
+                "trackRef": record.input.get("trackRef").cloned().unwrap_or(Value::Null),
+                "deviceRefs": refs, "shapes": shapes, "presetData": edited.document.to_xml(),
+                "type": record.input.get("type").cloned().unwrap_or_else(|| "doofer".into()),
+                "index": record.input.get("index").cloned().unwrap_or(Value::Null),
+                "name": record.input.get("name").cloned().unwrap_or(Value::Null),
+                "display": display_of(&edited, false),
+            },
+            "fence": {"ids": ids},
             "desc": record.desc,
         });
         crate::changes::place(&mut apply, record.epoch.as_deref(), record.input_layout);

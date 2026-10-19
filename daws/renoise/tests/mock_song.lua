@@ -660,8 +660,11 @@ function M.make_song(options)
         local data = { name = path:match("([^/]+)$") or path, path = path, params = {}, active = true }
         -- (a device made from a path has the parameters of that device: tests say which in M.device_catalog)
         for k, template in ipairs((M.device_catalog or {})[path] or {}) do
-          data.params[k] = { name = template.name, value = template.value, min = template.min, max = template.max }
+          data.params[k] = { name = template.name, value = template.value, min = template.min, max = template.max, element = template.element }
         end
+        -- (M4 n-devices: a device whose XML slot type a test names takes preset data as Renoise does)
+        local slot = (M.device_slots or {})[path]
+        if slot then data.slot, data.xml_body = slot.slot, slot.body end
         table.insert(t.devices, index, data)
         M.follow_device_routes(t, index, false)
         M.fire(t.devices_observable, { type = "insert", index = index })

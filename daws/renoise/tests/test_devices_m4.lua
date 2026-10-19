@@ -584,3 +584,139 @@ test("devices m4: a meta destination is fenced, outputs are named, #Sidechain fe
   eq(none.display.title, "#Sidechain on Kick sends nowhere")
   failure(call(peer, "change_preview", { kind = "meta-destination", input = { ref = e2 .. ":device:1.2", targetRef = e2 .. ":device:1.2", param = 1 }, epoch = e2, layout = l2 }), "bad-params", "itself")
 end)
+
+-- doofer-make
+
+local DOOFER_XML = '<?xml version="1.0" encoding="UTF-8"?>\n<FilterDevicePreset doc_version="14">\n  <DeviceSlot type="DooferDevice">\n'
+  .. '    <Macro0>\n      <Value>50</Value>\n      <Name>Tone</Name>\n    </Macro0>\n    <DeviceChain>\n      <Devices>\n'
+  .. '        <Eq5Device type="Eq5Device"/>\n        <GainerDevice type="GainerDevice"/>\n      </Devices>\n    </DeviceChain>\n  </DeviceSlot>\n</FilterDevicePreset>\n'
+
+local function make_song(extra)
+  local env, peer = setup(extra or {
+    { name = "Kick", devices = { lfo() } },
+    { name = "Bass", devices = { eq5(), gainer(), lfo() } },
+    { name = "Pad" },
+  })
+  local macros = {}
+  for k = 1, 8 do macros[k] = { name = "Macro " .. k, value = 50, min = 0, max = 100, element = "Macro" .. (k - 1) } end
+  mock.device_catalog = { ["Audio/Effects/Native/Doofer"] = macros, ["Audio/Effects/Native/EQ 5"] = eq5().params,
+    ["Audio/Effects/Native/Gainer"] = gainer().params, ["Audio/Effects/Native/*LFO"] = lfo().params }
+  mock.device_slots = { ["Audio/Effects/Native/Doofer"] = { slot = "DooferDevice" }, ["Audio/Effects/Native/EQ 5"] = { slot = "Eq5Device" },
+    ["Audio/Effects/Native/Gainer"] = { slot = "GainerDevice" } }
+  return env, peer
+end
+
+local function make(peer, refs_list, more)
+  local epoch, layout = place(peer)
+  local shapes, ids = {}, {}
+  for i, reference in ipairs(refs_list) do
+    local read = call(peer, "preset_read", { ref = reference, epoch = epoch, layout = layout }).result
+    shapes[i], ids[i] = read.shape, read.id
+  end
+  local input = { trackRef = epoch .. ":track:2", deviceRefs = refs_list, shapes = shapes, presetData = DOOFER_XML, type = "doofer",
+    display = { title = "Made a Doofer" } }
+  for k, v in pairs(more or {}) do input[k] = v end
+  return call(peer, "change_apply", { kind = "doofer-make", input = input, fence = { ids = ids }, desc = "Kumi: make (k1)", epoch = epoch, layout = layout })
+end
+
+local function paths(t)
+  local out = {}
+  for d = 2, #mock.data.tracks[t].devices do out[#out + 1] = mock.data.tracks[t].devices[d].name end
+  return table.concat(out, ", ")
+end
+
+test("devices m4: a Doofer is made of devices on a track in one step, and Kumi's undo takes it apart with their settings and names", function()
+  local _, peer = make_song()
+  local epoch = place(peer)
+  device_data(2, 2).params[1].value = -5
+  device_data(2, 3).display_name = "Trim"
+  local done = make(peer, { epoch .. ":device:2.2", epoch .. ":device:2.3" }, { name = "Tone" })
+  ok(done.result, json.encode(done.error or {}))
+  eq(paths(2), "Doofer, *LFO")
+  eq(device_data(2, 2).display_name, "Tone")
+  ok(device_data(2, 2).preset_data:find("<Name>Tone</Name>", 1, true))
+  eq(done.result.created.ref, done.result.epoch .. ":device:2.2")
+  eq(steps(), 1, "one step")
+  eq(#done.result.material.devices, 2)
+  -- Kumi's undo, after a device made on another track (an unrelated device change).
+  mock.song:track(1):insert_device_at("Audio/Effects/Native/Gainer", 2)
+  H.tick(2)
+  local back = restore(peer, "doofer-make", done.result)
+  ok(back.result, json.encode(back.error or {}))
+  eq(paths(2), "EQ 5, Gainer, *LFO")
+  eq(value(2, 2, 1), -5, "the EQ's settings")
+  eq(device_data(2, 3).display_name, "Trim", "the Gainer's name")
+  eq(back.result.display.note, nil, "at their own places")
+end)
+
+test("devices m4: a Doofer isn't made of a device with automation, or one something outside aims at; a meta device inside keeps its aim", function()
+  local _, peer = make_song()
+  local epoch = place(peer)
+  -- Kick's LFO aims at Bass's Gainer: it would lose its target.
+  local l = device_data(1, 2)
+  l.params[1].value, l.params[2].value, l.params[3].value = 1, 2, 1
+  local refused = make(peer, { epoch .. ":device:2.2", epoch .. ":device:2.3" })
+  failure(refused, "bad-params", "lose its target")
+  l.params[1].value, l.params[2].value, l.params[3].value = -1, -1, -1
+  -- Automation.
+  device_data(2, 2).params[1].automated = true
+  failure(make(peer, { epoch .. ":device:2.2" }), "bad-params", "automation")
+  device_data(2, 2).params[1].automated = false
+  -- Bass's own LFO aims at its Gainer: both go in, and the undo aims it again.
+  local own = device_data(2, 4)
+  own.params[1].value, own.params[2].value, own.params[3].value = 1, 2, 1
+  local done = make(peer, { epoch .. ":device:2.3", epoch .. ":device:2.4" })
+  ok(done.result, json.encode(done.error or {}))
+  eq(paths(2), "EQ 5, Doofer")
+  local back = restore(peer, "doofer-make", done.result)
+  ok(back.result, json.encode(back.error or {}))
+  eq(paths(2), "EQ 5, Gainer, *LFO")
+  eq(values(2, 4, 1, 3), "1/2/1", "the LFO drives the Gainer again")
+  eq(steps(), 2)
+end)
+
+test("devices m4: a made Doofer's undo puts the devices back together when the track's devices changed, refuses an edited inside, and sees Renoise's own undo", function()
+  local _, peer = make_song()
+  local epoch = place(peer)
+  local done = make(peer, { epoch .. ":device:2.2", epoch .. ":device:2.3" })
+  ok(done.result, json.encode(done.error or {}))
+  -- A device made on the track before the Doofer since.
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/Gainer", 2)
+  H.tick(2)
+  local back = restore(peer, "doofer-make", done.result)
+  ok(back.result, json.encode(back.error or {}))
+  eq(paths(2), "Gainer, EQ 5, Gainer, *LFO")
+  ok(back.result.display.note and back.result.display.note:find("together"), json.encode(back.result.display))
+  -- Edited inside since: refused.
+  local _, peer2 = make_song()
+  local e2 = place(peer2)
+  local done2 = make(peer2, { e2 .. ":device:2.2", e2 .. ":device:2.3" })
+  device_data(2, 2).preset_data = device_data(2, 2).preset_data:gsub("<Name>Tone</Name>", "<Name>Theirs</Name>", 1)
+  failure(restore(peer2, "doofer-make", done2.result), "changed", "inside")
+  -- Renoise's own undo took it back: back already.
+  local _, peer3 = make_song()
+  local e3 = place(peer3)
+  local done3 = make(peer3, { e3 .. ":device:2.2", e3 .. ":device:2.3" })
+  mock.api.undo()
+  H.tick(2)
+  eq(paths(2), "EQ 5, Gainer, *LFO")
+  local again = restore(peer3, "doofer-make", done3.result)
+  ok(again.result and again.result.undo.entry == false, json.encode(again))
+  mock.device_catalog, mock.device_slots = nil, nil
+end)
+
+test("devices m4: a Doofer isn't made when a device changed since the host read it (its shape), or another is at its place (its id)", function()
+  local _, peer = make_song()
+  local epoch, layout = place(peer)
+  local reference = epoch .. ":device:2.2"
+  local read = call(peer, "preset_read", { ref = reference, epoch = epoch, layout = layout }).result
+  -- A structural edit by the producer (an element changes): the EQ's shape moves.
+  device_data(2, 2).preset_data = mock.song:track(2):device(2).active_preset_data:gsub("<IsMaximized>true</IsMaximized>", "<IsMaximized>false</IsMaximized>", 1)
+  local input = { trackRef = epoch .. ":track:2", deviceRefs = { reference }, shapes = { read.shape }, presetData = DOOFER_XML, type = "doofer" }
+  failure(call(peer, "change_apply", { kind = "doofer-make", input = input, fence = { ids = { read.id } }, desc = "Kumi: make (k1)", epoch = epoch, layout = layout }), "changed", "read it again")
+  input.shapes = nil
+  failure(call(peer, "change_apply", { kind = "doofer-make", input = input, fence = { ids = { "track:Other|Audio/Effects/Native/EQ 5" } }, desc = "Kumi: make (k1)", epoch = epoch, layout = layout }), "changed")
+  eq(steps(), 0, "nothing written")
+  eq(paths(2), "EQ 5, Gainer, *LFO")
+  mock.device_catalog, mock.device_slots = nil, nil
+end)
