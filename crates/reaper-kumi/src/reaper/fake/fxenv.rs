@@ -69,8 +69,6 @@ pub(super) fn lookup(name: &CStr) -> Option<*mut c_void> {
         b"TrackFX_SetPinMappings" => track_fx_set_pin_mappings as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, c_int, c_int, c_int) -> bool,
         b"TakeFX_SetPinMappings" => take_fx_set_pin_mappings as unsafe extern "C" fn(*mut MediaItem_Take, c_int, c_int, c_int, c_int, c_int) -> bool,
         b"TakeFX_GetIOSize" => take_fx_get_io_size as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut c_int, *mut c_int) -> c_int,
-        b"GetTrackStateChunk" => get_track_state_chunk as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int, bool) -> bool,
-        b"GetItemStateChunk" => get_item_state_chunk as unsafe extern "C" fn(*mut MediaItem, *mut c_char, c_int, bool) -> bool,
         b"GetFXEnvelope" => get_fx_envelope as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, bool) -> *mut TrackEnvelope,
         b"TakeFX_GetEnvelope" => take_fx_get_envelope as unsafe extern "C" fn(*mut MediaItem_Take, c_int, c_int, bool) -> *mut TrackEnvelope,
         b"Envelope_GetParentTrack" => envelope_get_parent_track as unsafe extern "C" fn(*mut TrackEnvelope, *mut c_int, *mut c_int) -> *mut MediaTrack,
@@ -101,10 +99,6 @@ pub(super) fn lookup(name: &CStr) -> Option<*mut c_void> {
         b"InsertAutomationItem" => insert_automation_item as unsafe extern "C" fn(*mut TrackEnvelope, c_int, f64, f64) -> c_int,
         b"GetGlobalAutomationOverride" => get_global_automation_override as unsafe extern "C" fn() -> c_int,
         b"SetGlobalAutomationOverride" => set_global_automation_override as unsafe extern "C" fn(c_int),
-        b"Main_OnCommandEx" => main_on_command_ex as unsafe extern "C" fn(c_int, c_int, *mut ReaProject),
-        b"SelectAllMediaItems" => select_all_media_items as unsafe extern "C" fn(*mut ReaProject, bool),
-        b"SetMediaItemSelected" => set_media_item_selected as unsafe extern "C" fn(*mut MediaItem, bool),
-        b"SetActiveTake" => set_active_take as unsafe extern "C" fn(*mut MediaItem_Take),
     }
 }
 
@@ -280,8 +274,15 @@ fn entry_text(s: &mut State, owner: u64, fx: &FakeFx) -> String {
             text += ">\n";
         }
     }
-    s.fx_store.push(fx.clone());
-    text += &format!("FAKEFX {}\n", s.fx_store.len() - 1);
+    // Equal states share a number, so an unchanged FX reads the same each time (print fences hash chunk text).
+    let n = match s.fx_store.iter().position(|kept| kept == fx) {
+        Some(n) => n,
+        None => {
+            s.fx_store.push(fx.clone());
+            s.fx_store.len() - 1
+        }
+    };
+    text += &format!("FAKEFX {n}\n");
     if !fx.renamed.is_empty() {
         text += &format!("RENAMED \"{}\"\n", fx.renamed);
     }
@@ -494,7 +495,7 @@ fn parse_chain(s: &mut State, text: &str) -> Vec<Parsed> {
 }
 
 /// A chain's entries as REAPER writes a chain block of a chunk.
-fn chain_block(s: &mut State, owner: u64, name: &str, chain: &[FakeFx]) -> String {
+pub(super) fn chain_block(s: &mut State, owner: u64, name: &str, chain: &[FakeFx]) -> String {
     if chain.is_empty() {
         return String::new();
     }
@@ -503,52 +504,6 @@ fn chain_block(s: &mut State, owner: u64, name: &str, chain: &[FakeFx]) -> Strin
         text += &entry_text(s, owner, fx);
     }
     text + ">\n"
-}
-
-fn item_text(s: &mut State, track: usize, item: usize) -> String {
-    let Some(it) = s.tracks.get(track).and_then(|t| t.items.get(item)).cloned() else { return String::new() };
-    let mut text = format!("<ITEM\nPOSITION {}\nLENGTH {}\nIGUID {}\n", it.position, it.length, it.guid);
-    for (n, take) in it.takes.iter().enumerate() {
-        if n > 0 {
-            text += "TAKE\n";
-        }
-        text += &format!("NAME \"{}\"\nGUID {}\n<SOURCE {}\n>\n", take.name, take.guid, take.source.clone().unwrap_or_default());
-        text += &chain_block(s, take_ptr(track, item, n) as u64, "TAKEFX", &take.fx);
-    }
-    text + ">\n"
-}
-
-unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
-    counted(|s| {
-        let Some(mut t) = track_of(s, track as u64).cloned() else { return false };
-        // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
-        t.sends.clear();
-        let mut text = format!("<TRACK {}\nNAME \"{}\"\nFAKECHUNK {}\n", t.guid, t.name, s.chunks.len());
-        s.chunks.push(t.clone());
-        text += &chain_block(s, track as u64, "FXCHAIN", &t.fx);
-        text += &chain_block(s, track as u64, "FXCHAIN_REC", &t.input_fx);
-        let at = unpack(track as u64).1;
-        if at != MASTER {
-            for item in 0..t.items.len() {
-                text += &item_text(s, at as usize, item);
-            }
-        }
-        text += ">\n";
-        write(buf, size, &text);
-        true
-    })
-}
-
-unsafe extern "C" fn get_item_state_chunk(item: *mut MediaItem, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
-    counted(|s| {
-        let (kind, a, b, _) = unpack(item as u64);
-        if kind != ITEM || item_of(s, item as u64).is_none() {
-            return false;
-        }
-        let text = item_text(s, a as usize, b as usize);
-        write(buf, size, &text);
-        true
-    })
 }
 
 // ----- adds, deletes, copies -----
@@ -2078,7 +2033,7 @@ unsafe extern "C" fn set_global_automation_override(mode: c_int) {
 const TAKE_ACTIONS: [(c_int, &str, &str); 4] =
     [(40693, "Volume", "VOLENV"), (40694, "Pan", "PANENV"), (40695, "Mute", "MUTEENV"), (41612, "Pitch", "PITCHENV")];
 
-unsafe extern "C" fn main_on_command_ex(command: c_int, flag: c_int, proj: *mut ReaProject) {
+pub(super) unsafe extern "C" fn main_on_command_ex(command: c_int, flag: c_int, proj: *mut ReaProject) {
     unsafe { super::main_on_command_ex(command, flag, proj) };
     let Some((_, name, kind)) = TAKE_ACTIONS.iter().find(|(c, _, _)| *c == command) else { return };
     with(|s| {
@@ -2102,36 +2057,4 @@ unsafe extern "C" fn main_on_command_ex(command: c_int, flag: c_int, proj: *mut 
             }
         }
     });
-}
-
-unsafe extern "C" fn select_all_media_items(_proj: *mut ReaProject, selected: bool) {
-    with(|s| {
-        for item in s.tracks.iter_mut().flat_map(|t| t.items.iter_mut()) {
-            item.selected = selected;
-        }
-    })
-}
-
-unsafe extern "C" fn set_media_item_selected(item: *mut MediaItem, selected: bool) {
-    with(|s| {
-        let (kind, a, b, _) = unpack(item as u64);
-        if kind == ITEM {
-            if let Some(it) = s.tracks.get_mut(a as usize).and_then(|t| t.items.get_mut(b as usize)) {
-                it.selected = selected;
-            }
-        }
-    })
-}
-
-unsafe extern "C" fn set_active_take(take: *mut MediaItem_Take) {
-    with(|s| {
-        let (kind, a, b, c) = unpack(take as u64);
-        if kind == TAKE {
-            if let Some(item) = s.tracks.get_mut(a as usize).and_then(|t| t.items.get_mut(b as usize)) {
-                if (c as usize) < item.takes.len() {
-                    item.active = c as usize;
-                }
-            }
-        }
-    })
 }

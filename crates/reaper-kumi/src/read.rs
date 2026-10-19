@@ -15,6 +15,7 @@ use crate::refs::{self, EnvelopeId, Epoch, Ref, Registry, TrackId};
 use crate::rows;
 
 mod bodies;
+pub(crate) mod item_rows;
 // m4-r-fxenv: points, automation items and take envelopes.
 mod envelopes;
 
@@ -50,8 +51,9 @@ const SNAPSHOT_TRACKS: usize = 200;
 const SNAPSHOT_MARKERS: usize = 100;
 /// The snapshot's own share of the answer, so the tracks leave room for the markers and the selection.
 const SNAPSHOT_TRACK_BYTES: usize = 150 * 1024;
-const KINDS: [&str; 14] =
-    ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "call", "point", "autoitem"];
+const KINDS: [&str; 15] = [
+    "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "call", "point", "autoitem",
+];
 
 pub fn bad(message: impl Into<String>) -> (String, String) {
     ("bad-params".into(), message.into())
@@ -534,6 +536,7 @@ impl Reads {
             "marker" => self.read_markers(reaper, proj, pager, false, cursor),
             "region" => self.read_markers(reaper, proj, pager, true, cursor),
             "note" => self.read_notes(reaper, proj, pager, parent, cursor),
+            "event" => self.read_events(reaper, proj, pager, parent, cursor),
             "envelope" => self.read_envelopes(reaper, proj, pager, parent, cursor),
             // m4-r-fxenv
             "point" => self.read_points(reaper, proj, pager, parent, cursor),
@@ -544,7 +547,7 @@ impl Reads {
         // place is counted from 1 (as REAPER numbers its tracks), an FX's place, a parameter's and a note's from 0.
         let from = match kind {
             "track" => Some(1),
-            "fx" | "param" | "note" | "point" | "autoitem" => Some(0),
+            "fx" | "param" | "note" | "event" | "point" | "autoitem" => Some(0),
             _ => None,
         };
         answer.map(|mut answer| {
@@ -953,6 +956,27 @@ impl Reads {
         self.page(pager, next, Some(notes.len()))
     }
 
+    /// A MIDI take's events that aren't notes (controllers, pitch bend, program changes, pressure, text, sysex), from the
+    /// one buffer the changes edit, with the indexes the event changes take (from 0); the source's end marker isn't one.
+    fn read_events(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
+        let parent = parent.ok_or_else(|| bad("event: pass the MIDI take as parent"))?;
+        let take = self.midi_take(reaper, proj, Some(parent))?;
+        let buffer = reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
+        let events = crate::changes::midi_events_of(&buffer);
+        let item_qn = take_start_qn(reaper, proj, take);
+        let mut position = self.position_within(cursor, events.len())?;
+        let mut next = None;
+        while let Some((event, _)) = events.get(position) {
+            let beats = reaper.ppq_to_quarter_notes(take, event.pos as f64).map_or(0.0, |qn| qn - item_qn);
+            if !pager.open() || !pager.push(crate::changes::midi_event_row(event, position, beats)) {
+                next = Some(position);
+                break;
+            }
+            position += 1;
+        }
+        self.page(pager, next, Some(events.len()))
+    }
+
     // ----- envelopes -----
 
     /// A track's envelopes, each with the GUID its ref is made of (none if REAPER gives it none): in the order REAPER lists
@@ -1092,6 +1116,7 @@ fn take_row(reaper: &Reaper, take: Take, place: Option<(usize, bool)>) -> Value 
         row["noteCount"] = notes.into();
         row["ccCount"] = ccs.into();
     }
+    item_rows::take_details(reaper, take, &mut row, place.is_none());
     row
 }
 
@@ -2092,7 +2117,8 @@ mod tests {
             ask(&format!("r:item:{{I{t}-3}}"));
         }
         let calls = fake::with(|s| s.calls);
-        assert!(calls < 3 * 40, "{calls} calls for three cached items");
+        // (a row reads some 50 attributes, an item's fades and lock among them; a walk would be thousands)
+        assert!(calls < 3 * 60, "{calls} calls for three cached items");
     }
 
     fn snapshot(lab: &Lab) -> Answer {

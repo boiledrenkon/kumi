@@ -4,7 +4,7 @@
 
 use std::ffi::{c_char, c_int, CString};
 
-use super::{Envelope, Fx, FxOwner, Item, Reaper, Take, Track};
+use super::{Envelope, Fx, FxOwner, Reaper, Take, Track};
 use crate::api;
 
 /// The most an FX's state or an envelope's chunk may be when it is read.
@@ -242,43 +242,7 @@ impl Reaper<'_> {
         (!envelope.is_null()).then_some(Envelope(envelope))
     }
 
-    /// The item's whole state as a project file writes it, its takes' FX among it.
-    pub fn item_chunk(&self, item: Item) -> Option<String> {
-        let f = self.api.GetItemStateChunk()?;
-        grown(|buf, size| unsafe { f(item.0, buf, size, false) })
-    }
-
-    /// Selects (or unselects) every item of the project.
-    pub fn select_all_items(&self, proj: super::Project, selected: bool) -> bool {
-        match self.api.SelectAllMediaItems() {
-            Some(f) => {
-                unsafe { f(proj.0, selected) };
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Makes a take its item's active take.
-    pub fn set_active_take(&self, take: Take) -> bool {
-        match self.api.SetActiveTake() {
-            Some(f) => {
-                unsafe { f(take.0) };
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub fn set_item_selected(&self, item: Item, selected: bool) -> bool {
-        match self.api.SetMediaItemSelected() {
-            Some(f) => {
-                unsafe { f(item.0, selected) };
-                true
-            }
-            None => false,
-        }
-    }
+    // (the item chunk, the item selection and the active take: m4-r-items' wrappers in `reaper/items.rs`)
 }
 
 /// Envelopes, their points and automation items. `item` is an automation item's index, or -1 for the envelope itself.

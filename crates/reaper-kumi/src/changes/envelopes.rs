@@ -928,7 +928,9 @@ fn on_item_alone(ctx: &Ctx, take: Take, action: i32) -> Done<()> {
     let item = reaper.take_item(take).ok_or_else(|| failed("REAPER doesn't say which item the take is on"))?;
     let (_, selected) = reaper.selected_items_up_to(ctx.proj, usize::MAX);
     let active_before = reaper.active_take(item);
-    if !reaper.select_all_items(ctx.proj, false) || !reaper.set_item_selected(item, true) {
+    reaper.select_all_items(ctx.proj, false);
+    reaper.set_item_selected(item, true);
+    if reaper.item_value(item, "B_UISEL") == 0.0 {
         return Err(failed("REAPER can't select the item to make its envelope"));
     }
     // (the action works on the item's active take: the take asked for is made active for it, and put back)

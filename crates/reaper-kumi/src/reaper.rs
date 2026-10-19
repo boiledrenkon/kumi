@@ -9,8 +9,10 @@ use serde_json::{json, Value};
 use crate::api::{self, Api, MediaItem, MediaItem_Take, MediaTrack, ReaProject, TrackEnvelope};
 
 pub mod generic;
+mod items;
 mod objects;
 mod write;
+pub use items::*;
 pub use objects::*;
 // m4-r-fxenv: FX in any chain, envelopes, points and automation items.
 mod fxenv;

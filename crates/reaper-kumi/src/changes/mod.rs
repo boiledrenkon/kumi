@@ -8,14 +8,25 @@
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
 mod call;
+// Items, takes, lanes, razor areas and MIDI events (m4-r-items).
+mod chunks;
 mod folders;
 mod fx;
+mod glue;
+mod item_kinds;
+mod items;
+mod lanes;
 mod lua;
 mod marks;
+mod midi_events;
+pub(crate) use midi_events::{events_of as midi_events_of, row as midi_event_row};
 mod notes;
 mod pins;
 mod project;
 mod sends;
+mod take_marks;
+mod takes;
+mod transforms;
 pub(crate) use sends::seen_holds as send_seen_holds;
 mod structure;
 mod tracks;
@@ -137,9 +148,14 @@ enum Kind {
     ApiCall,
     // m4-r-fxenv
     FxEnv(fxkinds::Kind),
+    /// Items, takes, lanes, razor areas and MIDI events (m4-r-items).
+    Items(item_kinds::Which),
 }
 
 fn kind(name: &str) -> Option<Kind> {
+    if let Some(kind) = item_kinds::kind(name) {
+        return Some(kind);
+    }
     if let Some(prop) = tracks::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::TrackProp(prop));
     }
@@ -217,6 +233,7 @@ impl Kind {
             Kind::RunLua => lua::preview(ctx, input),
             Kind::ApiCall => call::preview(ctx, input),
             Kind::FxEnv(kind) => kind.preview(ctx, input),
+            Kind::Items(which) => which.preview(ctx, input),
         }
     }
 
@@ -244,6 +261,7 @@ impl Kind {
             Kind::RunLua => lua::apply(ctx, input, fence),
             Kind::ApiCall => call::apply(ctx, input, fence),
             Kind::FxEnv(kind) => kind.apply(ctx, input, fence),
+            Kind::Items(which) => which.apply(ctx, input, fence),
         }
     }
 
@@ -270,6 +288,7 @@ impl Kind {
             Kind::RunLua => lua::restore(ctx, restore),
             Kind::ApiCall => call::restore(ctx, restore),
             Kind::FxEnv(kind) => kind.restore(ctx, restore),
+            Kind::Items(which) => which.restore(ctx, restore),
         }
     }
 }
@@ -596,3 +615,13 @@ mod tests;
 // m4-r-fxenv
 #[cfg(test)]
 mod tests_fxenv;
+#[cfg(test)]
+mod tests_glue;
+#[cfg(test)]
+mod tests_items;
+#[cfg(test)]
+mod tests_lanes;
+#[cfg(test)]
+mod tests_midi;
+#[cfg(test)]
+mod tests_takes;

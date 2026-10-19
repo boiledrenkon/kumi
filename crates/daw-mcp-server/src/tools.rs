@@ -27,7 +27,10 @@ pub struct Kinds {
 pub fn kinds(daw: Daw) -> Kinds {
     match daw {
         Daw::Reaper => Kinds {
-            read: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "point", "autoitem"],
+            read: &[
+                "project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "event", "envelope", "point",
+                "autoitem",
+            ],
             bodies: &["arrange", "midi", "fx", "routing"],
             outside_undo: &["loop-repeat", "fx-eq-band", "automation-override"],
         },
