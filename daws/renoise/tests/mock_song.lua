@@ -561,6 +561,7 @@ function M.make_song(options)
           data.params[k] = { name = template.name, value = template.value, min = template.min, max = template.max }
         end
         table.insert(t.devices, index, data)
+        M.follow_device_routes(t, index, false)
         M.fire(t.devices_observable, { type = "insert", index = index })
         M.record(function()
           for i, existing in ipairs(t.devices) do
@@ -585,6 +586,7 @@ function M.make_song(options)
       delete_device_at = function(_, index)
         if type(index) ~= "number" or not t.devices[index] then out_of_range("device", index) end
         if d.options.mixer_device and index == 1 then error("the mixer device can't be deleted", 2) end
+        M.follow_device_routes(t, index, true)
         local data = table.remove(t.devices, index)
         -- (Renoise takes a deleted device's automation with it, in every pattern; its undo brings it back)
         local taken = {}
@@ -1376,8 +1378,77 @@ local function move_pattern_tracks(shift)
 end
 
 -- A track's data put into the song at `index` (with the pattern data that went with it, when it comes back).
+-- What Renoise does with routing aimed at tracks (measured in 3.5.4): a #Send's Receiver (the send's number among the sends, -1 for
+-- none) and a meta device's Dest. Track (the track's number less one) follow tracks made and deleted, and are cleared (-1, with the
+-- destination's effect and parameter) when their target is deleted.
+local function follow_routes(removed, index)
+  local tracks = M.data.tracks
+  local target = tracks[index]
+  local sends_before = 0
+  for i = 1, index - 1 do
+    if tracks[i].kind == "send" then sends_before = sends_before + 1 end
+  end
+  for _, track in ipairs(tracks) do
+    for _, device in ipairs(track.devices or {}) do
+      local dest
+      for _, parameter in ipairs(device.params or {}) do
+        if parameter.name:match("^Receiver") and target.kind == "send" then
+          if removed then
+            if parameter.value == sends_before then parameter.value = -1 elseif parameter.value > sends_before then parameter.value = parameter.value - 1 end
+          elseif parameter.value >= sends_before then
+            parameter.value = parameter.value + 1
+          end
+        elseif parameter.name == "Dest. Track" and target.kind == "sequencer" then
+          dest = parameter
+          if removed then
+            if parameter.value == index - 1 then parameter.value = -1 elseif parameter.value > index - 1 then parameter.value = parameter.value - 1 end
+          elseif parameter.value >= index - 1 then
+            parameter.value = parameter.value + 1
+          end
+        end
+      end
+      if dest and dest.value == -1 and removed then
+        for _, parameter in ipairs(device.params) do
+          if parameter.name == "Dest. Effect" or parameter.name == "Dest. Parameter" then parameter.value = -1 end
+        end
+      end
+    end
+  end
+end
+
+-- The same for a meta device's Dest. Effect (the device's number less one), aimed at a device of `track`.
+function M.follow_device_routes(track, device_index, removed)
+  local at
+  for i, t in ipairs(M.data.tracks) do
+    if t == track then at = i end
+  end
+  for _, other in ipairs(M.data.tracks) do
+    for _, device in ipairs(other.devices or {}) do
+      local dtrack, deffect, dparameter
+      for _, parameter in ipairs(device.params or {}) do
+        if parameter.name == "Dest. Track" then dtrack = parameter
+        elseif parameter.name == "Dest. Effect" then deffect = parameter
+        elseif parameter.name == "Dest. Parameter" then dparameter = parameter end
+      end
+      if dtrack and deffect and dtrack.value == at - 1 then
+        if removed then
+          if deffect.value == device_index - 1 then
+            deffect.value = -1
+            if dparameter then dparameter.value = -1 end
+          elseif deffect.value > device_index - 1 then
+            deffect.value = deffect.value - 1
+          end
+        elseif deffect.value >= device_index - 1 then
+          deffect.value = deffect.value + 1
+        end
+      end
+    end
+  end
+end
+
 local function put_track(index, data, pattern_data)
   table.insert(M.data.tracks, index, data)
+  follow_routes(false, index)
   move_pattern_tracks(function(t) return t >= index and t + 1 or t end)
   for p, kept in pairs(pattern_data or {}) do
     if M.data.patterns[p] then M.data.patterns[p].tracks[index] = kept end
@@ -1394,6 +1465,7 @@ local function take_track(index)
   end
   local pattern_data = {}
   for p, pattern in ipairs(M.data.patterns) do pattern_data[p] = pattern.tracks[index] end
+  follow_routes(true, index)
   local data = table.remove(M.data.tracks, index)
   move_pattern_tracks(function(t) if t == index then return nil end return t > index and t - 1 or t end)
   M.data.recount()

@@ -542,6 +542,193 @@ test("review M-1: a sliced notes restore stops when the producer makes a track b
   H.no_dialogs()
 end)
 
+-- S-5 (lab): Renoise names the tracks it numbers itself by their place, so a send put back is not "in the song again"
+
+test("review S-5: a deleted send called S01 comes back though the send after it is called S01 now (Renoise numbers default names)", function()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  mock.ops.rename_track(6, "S01")
+  mock.ops.rename_track(7, "S02")
+  H.tick(2)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 6)
+  mock.ops.rename_track(6, "S01") -- (what was S02 is the first send now)
+  H.tick(2)
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr40)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#mock.data.tracks, 7)
+  H.no_dialogs()
+end)
+
+test("review S-5: a deleted track called Track 03 with lines comes back though the track after it is called Track 03 now", function()
+  local env, peer = setup()
+  mock.ops.rename_track(3, "Track 03")
+  mock.ops.rename_track(4, "Track 04")
+  fill(3, 1, 4)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 3)
+  mock.ops.rename_track(3, "Track 03") -- (Renoise renumbers what was Track 04)
+  H.tick(2)
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr42)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(#mock.data.tracks, 6)
+  -- asked again, it is there: with the lines it had
+  failure(restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr43)", undone.result.epoch, undone.result.layout), "changed")
+  H.no_dialogs()
+end)
+
+test("review S-4: a group called Group 04 is found again when a track made before it renumbered it", function()
+  local env, peer = setup()
+  mock.song:insert_group_at(5)
+  mock.song:add_track_to_group(3, 5)
+  mock.song:add_track_to_group(3, 5)
+  mock.ops.rename_track(5, "Group 05")
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 3)
+  mock.ops.insert_track(1, { name = "New" })
+  mock.ops.rename_track(5, "Group 05") -- (Renoise renumbers: the group is at 5 again after the insert, was at 4 after the delete)
+  H.tick(2)
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr41)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  ok(not undone.result.display.note, "it is a member again: " .. json.encode(undone.result.display))
+  H.no_dialogs()
+end)
+
+-- S-5 (lab): routing aimed at what is deleted. Renoise clears it when the target goes and doesn't set it again when it comes back.
+
+local function routing_catalog()
+  mock.device_catalog = {
+    ["Audio/Effects/Native/#Send"] = {
+      { name = "Amount", value = 1, min = 0, max = 1.4 }, { name = "Panning", value = 0.5, min = 0, max = 1 },
+      { name = "Receiver", value = 0, min = -1, max = 8 },
+    },
+    ["Audio/Effects/Native/*LFO"] = {
+      { name = "Dest. Track", value = -1, min = -1, max = 16 }, { name = "Dest. Effect", value = -1, min = -1, max = 16 },
+      { name = "Dest. Parameter", value = -1, min = -1, max = 16 },
+    },
+    ["Audio/Effects/Native/Gainer"] = { { name = "Gain", value = 1, min = 0, max = 4 } },
+  }
+end
+
+local function receiver(t, d) return mock.data.tracks[t].devices[d].params[3].value end
+local function dest(t, d, k) return mock.data.tracks[t].devices[d].params[k].value end
+
+test("review S-5: the sends that fed a deleted send track are fed by it again when it is put back", function()
+  routing_catalog()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  for t = 1, 3 do mock.song:track(t):insert_device_at("Audio/Effects/Native/#Send", 2) end
+  mock.data.tracks[1].devices[2].params[3].value = 0
+  mock.data.tracks[2].devices[2].params[3].value = 0
+  mock.data.tracks[3].devices[2].params[3].value = 1
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 6) -- the first send
+  eq(receiver(1, 2), -1, "(Renoise lets go of what was aimed at it)")
+  eq(receiver(3, 2), 0, "(and renumbers the other send)")
+  ok(done.display.note and done.display.note:find("2 routings", 1, true), json.encode(done.display))
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr44)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(receiver(1, 2), 0)
+  eq(receiver(2, 2), 0)
+  eq(receiver(3, 2), 1, "Renoise renumbers the other again")
+  ok(undone.result.display.note and undone.result.display.note:find("2 routings aimed at it set again", 1, true), json.encode(undone.result.display))
+  H.no_dialogs()
+end)
+
+test("review S-5: a send the producer re-aimed since is not aimed again", function()
+  routing_catalog()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  for t = 1, 2 do mock.song:track(t):insert_device_at("Audio/Effects/Native/#Send", 2) end
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 6)
+  mock.data.tracks[2].devices[2].params[3].value = 0 -- the producer aims Hat at the send that is left
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr45)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(receiver(1, 2), 0, "Kick is fed by the send again")
+  eq(receiver(2, 2), 1, "Hat stays aimed at the send that was left, which is the second send again")
+  H.no_dialogs()
+end)
+
+test("review S-5: a meta device aimed at a deleted track is aimed at it again, with its effect and parameter", function()
+  routing_catalog()
+  local env, peer = setup()
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/*LFO", 2)
+  mock.data.tracks[2].devices[2].params[1].value = 0 -- track 1
+  mock.data.tracks[2].devices[2].params[2].value = 1
+  mock.data.tracks[2].devices[2].params[3].value = 0
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 1)
+  eq(dest(1, 2, 1), -1, "(Hat is track 1 now, its LFO let go)")
+  eq(dest(1, 2, 2), -1)
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr46)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(dest(2, 2, 1), 0)
+  eq(dest(2, 2, 2), 1)
+  eq(dest(2, 2, 3), 0)
+  H.no_dialogs()
+end)
+
+test("review S-5: a deleted device that a meta device was aimed at is aimed at again when it is put back", function()
+  routing_catalog()
+  local env, peer = setup()
+  local bass = mock.song:track(3)
+  bass:insert_device_at("Audio/Effects/Native/Gainer", 2)
+  bass:insert_device_at("Audio/Effects/Native/Gainer", 3)
+  bass:insert_device_at("Audio/Effects/Native/*LFO", 4)
+  mock.data.tracks[3].devices[4].params[1].value = 2 -- track 3 (Bass)
+  mock.data.tracks[3].devices[4].params[2].value = 2 -- device 3
+  mock.data.tracks[3].devices[4].params[3].value = 0
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local previewed = preview(peer, "device-delete", { ref = epoch .. ":device:3.3" })
+  local done = apply(peer, "device-delete", { ref = epoch .. ":device:3.3" }, "Kumi: dd (kr47)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  ok(done.result.display.note and done.result.display.note:find("1 routing aimed at it (sends", 1, true), json.encode(done.result.display))
+  eq(dest(3, 3, 2), -1, "(the LFO is device 3 now and let go)")
+  local undone = restore(peer, "device-delete", record_of(previewed, done.result), "Kumi: undo dd (kr48)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(dest(3, 4, 1), 2)
+  eq(dest(3, 4, 2), 2)
+  eq(dest(3, 4, 3), 0)
+  H.no_dialogs()
+end)
+
+test("review S-5: a meta device put back with its track, or by itself, sends its values where it did", function()
+  routing_catalog()
+  local env, peer = setup()
+  -- Bass holds a Gainer and an LFO aimed at it; Pad holds an LFO aimed at the Gainer on Bass
+  local bass, pad = mock.song:track(3), mock.song:track(4)
+  bass:insert_device_at("Audio/Effects/Native/Gainer", 2)
+  bass:insert_device_at("Audio/Effects/Native/*LFO", 3)
+  pad:insert_device_at("Audio/Effects/Native/*LFO", 2)
+  local own = mock.data.tracks[3].devices[3].params
+  own[1].value, own[2].value, own[3].value = 2, 1, 0
+  local other = mock.data.tracks[4].devices[2].params
+  other[1].value, other[2].value, other[3].value = 2, 1, 0
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  -- the LFO by itself
+  local epoch, layout = place(peer)
+  local previewed = preview(peer, "device-delete", { ref = epoch .. ":device:3.3" })
+  local done = apply(peer, "device-delete", { ref = epoch .. ":device:3.3" }, "Kumi: dd (kr49)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  local undone = restore(peer, "device-delete", record_of(previewed, done.result), "Kumi: undo dd (kr50)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  local params = mock.data.tracks[3].devices[3].params
+  eq(params[1].value, 2, "its track")
+  eq(params[2].value, 1, "its effect")
+  eq(params[3].value, 0, "its parameter")
+  -- the whole track, with the LFO on it and the other LFO aimed at its Gainer
+  local deleted, gone = delete_track(peer, 3, "Kumi: d (kr51)")
+  eq(mock.data.tracks[3].devices[2].params[1].value, -1, "(Renoise lets go of the Pad's LFO)")
+  local back = restore(peer, "track-delete", record_of(deleted, gone), "Kumi: undo d (kr52)", gone.epoch, gone.layout)
+  ok(back.result, json.encode(back.error or {}))
+  params = mock.data.tracks[3].devices[3].params
+  eq(params[1].value, 2, "the LFO on the track aims at the track again")
+  eq(params[2].value, 1)
+  params = mock.data.tracks[4].devices[2].params
+  eq(params[1].value, 2, "so does the one on the next track")
+  eq(params[2].value, 1)
+  H.no_dialogs()
+end)
+
 -- S-3 / S-4: places that follow the tracks made since
 
 test("review S-3: a move put back after the producer made a track before both places", function()
