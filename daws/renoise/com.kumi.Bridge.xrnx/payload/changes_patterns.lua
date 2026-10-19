@@ -49,9 +49,11 @@ end
 base.register({
   kind = "pattern-name", noun = "name", undoable = true,
   locate = function(song, env, input)
-    local p = M.pattern_of(song, env, input.ref, "pattern-name")
+    local p = input.material and base.pattern_now(song, env, input.material.pattern) or M.pattern_of(song, env, input.ref, "pattern-name")
     return { object = song:pattern(p), name = M.pattern_label(song, p), place = { pattern = p }, target = pattern_target(env, p) }
   end,
+  material = function(env, loc) return { pattern = base.pattern_place(env, loc.place.pattern) } end,
+  restore_input = function(restore) return { material = restore.material } end,
   reread = pattern_reread,
   read = function(pattern) return { name = pattern.name } end,
   wanted = function(_, input) return { name = base.text_of(input.name, "name", 256) } end,
@@ -87,7 +89,13 @@ local function color_text(color) return color and color or "none" end
 base.register({
   kind = "slot-color", noun = "slot colour", undoable = true,
   locate = function(song, env, input)
-    local p, t, track = M.pattern_track_of(song, env, input, "slot-color")
+    local p, t, track
+    if input.material then
+      p, t = base.pattern_now(song, env, input.material.pattern), input.material.track
+      track = base.track_at(song, t)
+    else
+      p, t, track = M.pattern_track_of(song, env, input, "slot-color")
+    end
     return {
       object = song:pattern(p):track(t), name = string.format("%s on %s", q(M.pattern_label(song, p)), q(base.named(t, track))),
       place = { pattern = p, track = t }, target = { ref = refs.make(env.epoch(), "ptrack", p, t), kind = "pattern-track" },
@@ -116,6 +124,9 @@ base.register({
   watch = function(env, loc)
     if env.watch_pattern_track then env.watch_pattern_track(loc.place.pattern, loc.place.track, "color_observable") end
   end,
+  -- (the track under `track`, which the layout carries; the pattern as a place in the pool)
+  material = function(env, loc) return { pattern = base.pattern_place(env, loc.place.pattern), track = loc.place.track } end,
+  restore_input = function(restore) return { material = restore.material } end,
 })
 
 -- pattern-length: lines past a shorter pattern's end are kept by Renoise, hidden; a longer pattern shows what was kept there.
@@ -226,6 +237,7 @@ local function length_apply(song, env, input, fence, desc)
   return {
     applied = { lines = new, region = fence.region, from = low + 1, to = high }, display = display, undo = { desc = desc, entry = true },
     prior = { lines = old }, place = { pattern = p }, target = pattern_target(env, p),
+    material = { pattern = base.pattern_place(env, p) },
   }
 end
 
@@ -234,11 +246,13 @@ local function length_restore(song, env, restore, desc)
   if type(prior) ~= "table" or type(applied) ~= "table" or type(prior.lines) ~= "number" or type(applied.lines) ~= "number" then
     bad("prior and applied: the pattern's lines before and after")
   end
-  local ok, p, pattern, label = pcall(length_locate, song, env, restore.target and restore.target.ref)
-  if not ok then
-    if type(p) == "table" and p.code == "failed" then p.code = "gone" end
-    error(p, 0)
+  local p
+  if type(restore.material) == "table" then
+    p = base.pattern_now(song, env, restore.material.pattern)
+  else
+    p = M.pattern_of(song, env, restore.target and restore.target.ref, "pattern-length")
   end
+  local pattern, label = song:pattern(p), M.pattern_label(song, p)
   local now = pattern.number_of_lines
   local title = length_title(label, prior.lines) .. " (put back)"
   if now == prior.lines then
@@ -381,6 +395,11 @@ local function alias_apply(song, env, input, fence, desc)
   else
     material = { alias = plan.now }
   end
+  -- (the pattern and the patterns it was and is an alias of, as places in the pool; the track under `track`, which the layout
+  -- carries)
+  material.track, material.pattern = plan.t, base.pattern_place(env, plan.p)
+  if plan.now > 0 then material.was = base.pattern_place(env, plan.now) end
+  if plan.want > 0 then material.source = base.pattern_place(env, plan.want) end
   song:describe_undo(desc)
   if plan.want > 0 then
     plan.pattern_track.alias_pattern_index = plan.want
@@ -403,20 +422,27 @@ end
 local function alias_restore(song, env, restore, desc)
   local applied, material, prior = restore.applied, restore.material, restore.prior
   if type(applied) ~= "table" or type(prior) ~= "table" or type(material) ~= "table" then bad("applied and material: what the change did and kept") end
-  local reference = restore.target and restore.target.ref
-  local numbers = refs.expect(reference, "ptrack", 2, env.epoch())
-  local p, t = numbers[1], numbers[2]
-  if p > #song.patterns then fail("gone", "that pattern isn't in the song any more") end
+  local p, t
+  if type(material.pattern) == "table" then
+    p, t = base.pattern_now(song, env, material.pattern), material.track
+  else
+    local numbers = refs.expect(restore.target and restore.target.ref, "ptrack", 2, env.epoch())
+    p, t = numbers[1], numbers[2]
+    if p > #song.patterns then fail("gone", "that pattern isn't in the song any more") end
+  end
   local track = base.track_at(song, t)
   local pattern_track = song:pattern(p):track(t)
+  -- (the patterns it was and is an alias of, where they are now)
+  local was = prior.alias > 0 and (material.was and base.pattern_now(song, env, material.was) or material.alias) or 0
+  local want = applied.alias > 0 and (material.source and base.pattern_now(song, env, material.source) or applied.alias) or 0
   local label = string.format("%s on %s", q(M.pattern_label(song, p)), q(base.named(t, track)))
   local title = label .. (prior.alias > 0 and " is an alias again" or " is no alias again") .. " (put back)"
   local now = pattern_track.alias_pattern_index
   -- back already: the alias it was, or (an alias Kumi made of a track with lines of its own) those lines as they were
-  if (prior.alias > 0 and now == prior.alias) or (prior.alias == 0 and now == 0 and own_print(song, p, t) == applied.before) then
+  if (was > 0 and now == was) or (prior.alias == 0 and now == 0 and own_print(song, p, t) == applied.before) then
     return { restored = { alias = now }, display = { title = title }, undo = { desc = desc, entry = false }, unwritten = true }
   end
-  if now ~= applied.alias then fail("changed", label .. " was made an alias or not in Renoise since Kumi changed it") end
+  if now ~= want then fail("changed", label .. " was made an alias or not in Renoise since Kumi changed it") end
   if env.pattern_touched_since then
     local since = env.pattern_touched_since(p, applied.touch)
     if since == nil then fail("changed", "Kumi can't tell whether the pattern changed in Renoise since (the tool watched the song anew), so Kumi left it as it is") end
@@ -446,7 +472,7 @@ local function alias_restore(song, env, restore, desc)
       note = string.format("Its automation of %s isn't put back: the devices on the track changed in Renoise since.", lost == 1 and "1 parameter" or (lost .. " parameters"))
     end
   else
-    pattern_track.alias_pattern_index = material.alias
+    pattern_track.alias_pattern_index = was
   end
   base.note_restored(env.journal, "pattern-alias", { pattern = p, track = t }, applied, base.KINDS["pattern-alias"])
   return { restored = { alias = pattern_track.alias_pattern_index }, display = { title = title, note = note }, undo = { desc = desc, entry = true } }
@@ -645,11 +671,39 @@ local function same_envelope(a, b)
   return true
 end
 
+-- (a restore finds the parameter by its places: the track under `track`, the device by its place on the track (its devices' log),
+-- the parameter's number and name, the pattern by its place in the pool; a device made on another track, or a pattern made
+-- elsewhere in the pool, moves none of them)
+local function parameter_at(song, env, material)
+  local t = material.track
+  local track = base.track_at(song, t)
+  local d, why = material_.device_now(song, env, t, material.device)
+  if not d then
+    if why == "gone" then fail("gone", "the device isn't on the track any more") end
+    if why == "changed" then fail("changed", "the device at its place on the track is another one now") end
+    fail("stale", "the devices on the track changed in a way Kumi couldn't follow since (the tool watched them anew): read again")
+  end
+  local device = track:device(d)
+  local k = material.param
+  if type(k) ~= "number" or k > #device.parameters or device:parameter(k).name ~= material.paramName then
+    fail("changed", "the device's parameters aren't what they were")
+  end
+  local parameter = device:parameter(k)
+  local device_label = device.display_name ~= "" and device.display_name or device.name
+  return t, d, k, track, device, parameter, device_label .. " " .. parameter.name
+end
+
 local envelope_spec = {
   kind = "automation-write", noun = "automation", undoable = true,
   locate = function(song, env, input)
-    local t, d, k, track, _, parameter, label = M.parameter_of(song, env, input, "automation-write")
-    local p = M.pattern_of(song, env, input.pattern, "automation-write")
+    local t, d, k, track, parameter, label, p, _
+    if input.material then
+      t, d, k, track, _, parameter, label = parameter_at(song, env, input.material)
+      p = base.pattern_now(song, env, input.material.pattern)
+    else
+      t, d, k, track, _, parameter, label = M.parameter_of(song, env, input, "automation-write")
+      p = M.pattern_of(song, env, input.pattern, "automation-write")
+    end
     local pattern_track = song:pattern(p):track(t)
     if pattern_track.is_alias then
       bad(string.format("that track in pattern %d is an alias of pattern %d: automate it there", p, pattern_track.alias_pattern_index))
@@ -686,26 +740,16 @@ local envelope_spec = {
       env.watch_pattern_track(place.pattern, place.track, key .. ":playmode", automation.playmode_observable)
     end
   end,
-  -- (the pattern is part of what the change is about: the record keeps it as a ref, which a pool changed since makes stale)
-  wire = function(state, env, loc)
-    if type(state) ~= "table" or not loc then return state end
-    local out = {}
-    for key, value in pairs(state) do out[key] = value end
-    out.pattern = refs.make(env.epoch(), "pattern", loc.object.p)
-    return out
+  material = function(env, loc)
+    local place = loc.place
+    local device = renoise.song():track(place.track):device(place.device)
+    return {
+      track = place.track, device = material_.device_place(env, place.track, place.device, device), param = place.param,
+      paramName = loc.object.parameter.name, pattern = base.pattern_place(env, place.pattern),
+    }
   end,
-  restore_input = function(restore)
-    return { ref = restore.target and restore.target.ref, pattern = type(restore.prior) == "table" and restore.prior.pattern or nil }
-  end,
+  restore_input = function(restore) return { material = restore.material } end,
 }
--- (`wanted` reads what it changes from the envelope; the pattern's ref in a record is only where it is)
-envelope_spec.unwire = function(state)
-  if type(state) ~= "table" then return state end
-  local out = {}
-  for key, value in pairs(state) do out[key] = value end
-  out.pattern = nil
-  return out
-end
 base.register(envelope_spec)
 
 return M

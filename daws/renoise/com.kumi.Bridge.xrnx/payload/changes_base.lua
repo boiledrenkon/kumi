@@ -301,6 +301,8 @@ function M.prop_apply(song, env, spec, input, fence, desc)
     display = display,
     undo = { desc = desc, entry = spec.undoable },
     spec = spec, place = loc.place, prior = now, target = loc.target,
+    -- (M4 n-song: where a kind keeps its object by the place mechanism rather than by its ref, for the restore to find it)
+    material = spec.material and spec.material(env, loc) or nil,
   }
 end
 
@@ -768,6 +770,23 @@ function M.settings(spec)
     return (text:gsub("^%l", string.upper))
   end
   return spec
+end
+
+-- M4 (n-song): a pattern as a place (the pool's log, places.lua): a record of it outlives patterns made or deleted elsewhere in the
+-- pool, which a pattern ref doesn't. Where it is now, or a refusal that touches nothing.
+function M.pattern_place(env, p)
+  return { n = p, mark = env.pattern_mark and env.pattern_mark() or nil }
+end
+
+function M.pattern_now(song, env, place)
+  if type(place) ~= "table" or not env.pattern_at then bad("material: where the pattern was") end
+  local p, why = env.pattern_at(place.n, place.mark)
+  if not p then
+    if why == "gone" then fail("gone", "that pattern was deleted in Renoise since") end
+    fail("stale", "the song's patterns changed in a way Kumi couldn't follow since (the tool watched the song anew): read again")
+  end
+  if p > #song.patterns then fail("gone", "that pattern isn't in the song any more") end
+  return p
 end
 
 return M

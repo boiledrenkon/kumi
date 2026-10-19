@@ -145,9 +145,13 @@ end
 -- The restores that carry their params by hand, by kind.
 M.carry_for = { ["track-delete"] = M.carry_restore, ["slot-delete"] = M.carry_slot_restore }
 
--- M4 (n-song): the kinds whose records find their slots by the sequence they left: a restore of theirs needs no slot ref, and one
--- gone stale with a sequence change since must not make the request stale (bridge.lua drops them).
-M.sequence_kinds = sequence_.KINDS
+-- M4 (n-song): the kinds whose records find what they changed by the place mechanism (the sequence they left; a pattern's place in
+-- the pool, a device's on its track) rather than by refs: the refs a restore of theirs carries are left out of it, so one gone
+-- stale with a change elsewhere doesn't make the request stale before the places are followed (bridge.lua). By kind, the
+-- fields: `created` (a slot ref) and `target` (its ref; kept as an object, without it).
+M.loose_refs = {}
+for kind in pairs(sequence_.KINDS) do M.loose_refs[kind] = { "created" } end
+for _, kind in ipairs({ "pattern-name", "pattern-length", "slot-color", "pattern-alias", "automation-write" }) do M.loose_refs[kind] = { "target" } end
 
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active

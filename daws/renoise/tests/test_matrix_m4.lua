@@ -69,7 +69,7 @@ test("matrix: a block copy's two places are carried through a track made before 
   H.no_dialogs()
 end)
 
-test("matrix: a transposition is followed through a track made before it; a slot colour's record is stale with the pool changed", function()
+test("matrix: a transposition is followed through a track made before it; a slot colour's record through a pattern made, and gone with it", function()
   local _, peer = K.setup()
   local E = K.place(peer)
   mock.ops.set_note(1, 3, 1, 1, { note = 48 })
@@ -78,9 +78,12 @@ test("matrix: a transposition is followed through a track made before it; a slot
   mock.ops.insert_track(1, { name = "Intro" })
   ok(K.restore(peer, transposed).result, "followed")
   eq(note_at(1, 4, 1), "C-4")
+  local second = K.change(peer, "slot-color", { ref = K.ref(K.place(peer), "pattern", 3), track = K.ref(K.place(peer), "track", 2), color = "#654321" })
   mock.ops.insert_pattern()
-  K.failure(K.restore(peer, colour), "stale")
-  ok(mock.data.patterns[2].tracks[2].color, "nothing written")
+  ok(K.restore(peer, colour).result, "followed")
+  eq(mock.data.patterns[2].tracks[2].color, nil)
+  mock.ops.remove_pattern(3)
+  K.failure(K.restore(peer, second), "gone")
   H.no_dialogs()
 end)
 

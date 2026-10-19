@@ -918,11 +918,14 @@ function M.handle(_, request)
   local from
   if CARRIED[request.method] then
     from = type(params) == "table" and params.epoch or nil
-    -- (M4 n-song: a sequence kind's restore finds its slots by the sequence it left; the slot it made isn't asked for)
-    if request.method == "change_restore" and type(params) == "table" and changes.sequence_kinds[params.kind] and params.created ~= nil then
+    -- (M4 n-song: a restore that finds what it changed by places leaves out the refs its record carries: see changes.lua)
+    local loose = request.method == "change_restore" and type(params) == "table" and changes.loose_refs[params.kind] or nil
+    if loose then
       local copy = {}
       for k, v in pairs(params) do copy[k] = v end
-      copy.created = nil
+      for _, field in ipairs(loose) do
+        if field == "target" and type(copy.target) == "table" then copy.target = { kind = copy.target.kind } else copy[field] = nil end
+      end
       params = copy
     end
     -- A ref of an earlier epoch that names the same thing now is made in this one, whatever epoch the request names (Kumi keeps
