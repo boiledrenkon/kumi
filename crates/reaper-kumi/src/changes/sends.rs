@@ -79,9 +79,8 @@ fn stamp_of(reaper: &Reaper, track: Track, index: i32) -> Option<String> {
 /// producer's copy of the receiving track brings a copy of the mark with it), and two with the mark are refused `changed`:
 /// which of them is Kumi's can't be told.
 fn find_by_stamp(reaper: &Reaper, owner: Track, receiver: Track, stamp: &str) -> Done<Option<i32>> {
-    let mut marked = (0..reaper.send_count(owner, 0)).filter(|&index| {
-        reaper.send_peer(owner, 0, index) == Some(receiver) && stamp_of(reaper, owner, index).as_deref() == Some(stamp)
-    });
+    let mut marked = (0..reaper.send_count(owner, 0))
+        .filter(|&index| reaper.send_peer(owner, 0, index) == Some(receiver) && stamp_of(reaper, owner, index).as_deref() == Some(stamp));
     let first = marked.next();
     if first.is_some() && marked.next().is_some() {
         let route = route_text(&name_of(reaper, owner), &name_of(reaper, receiver));
