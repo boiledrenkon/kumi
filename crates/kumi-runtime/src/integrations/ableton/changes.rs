@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashSet, sync::LazyLock};
 pub type KnownTrack = TrackChip;
+pub use crate::integrations::shared::changes::ChangeSummary;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleFile {
     pub path: String,
@@ -63,33 +64,6 @@ pub trait ChangeContext {
     }
     async fn value_for(&self, _parameter_ref: &str, _text: &str) -> Result<Result<f64, String>, RuntimeError> {
         unreachable!("optional valueFor")
-    }
-}
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ChangeSummary {
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub track: Option<KnownTrack>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub to: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub range: Option<[f64; 2]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clip: Option<ClipPicture>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub colors: Option<ColorChange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lines: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub devices: Option<DevicePlacement>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub picture: Option<ChangePicture>,
-}
-impl ChangeSummary {
-    pub fn title(title: impl Into<String>) -> Self {
-        Self { title: title.into(), ..Default::default() }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
