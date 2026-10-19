@@ -1406,9 +1406,9 @@ test("changes: a sequence slot names its pattern, and Renoise refusing the text 
   ok(done.result, json.encode(done.error or {}))
   eq(cell(3, 1, 2, 1), "C-5 .. .. .. .. 0000")
   eq(cell(1, 1, 2, 1), "--- .. .. .. .. 0000")
-  -- a text that Renoise itself refuses (the mock reads effect numbers as hex only) leaves the pattern as it was
+  -- a text that Renoise itself refuses (QQ is no effect command) leaves the pattern as it was
   local column = mock.song:pattern(1):track(2):line(3):note_column(1)
-  local refused = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 3, notes = { { col = 1, note = "C-4", fx = "ZT20" } } } } }
+  local refused = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 3, notes = { { col = 1, note = "C-4", fx = "QQ20" } } } } }
   local p2 = preview(peer, "notes-write", refused)
   local before = steps()
   failure(apply(peer, "notes-write", refused, "Kumi: bad (kn62)", p2.fence, epoch, layout), "failed")

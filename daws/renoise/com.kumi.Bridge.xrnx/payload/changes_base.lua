@@ -134,13 +134,20 @@ local function context(params, env)
   return song
 end
 
--- A track told apart from another by more than its place: its kind and its name (a track with no name of its own is named by
--- its place, which moves, so it has none here).
+-- A track told apart from another by more than its place: its kind and its name. The names Renoise numbers itself ("Track 04", "S01",
+-- "Group 03") follow the track's place, which moves, so they tell nothing and have none here (measured in Renoise 3.5.4).
+local DEFAULT_NAME = { sequencer = "^Track %d+$", send = "^S%d+$", group = "^Group %d+$" }
+local KIND_WORD = { sequencer = "track", group = "group", send = "send", master = "master" }
+
+-- (`kind` is a track's kind as the rows name it: sequencer, group, send or master.)
+function M.name_id(kind, name)
+  local pattern = DEFAULT_NAME[kind]
+  if name == nil or name == "" or (pattern and name:match(pattern)) then name = "" end
+  return (KIND_WORD[kind] or "track") .. ":" .. name
+end
+
 function M.track_id(track)
-  local name = track.name
-  if name == nil or name == "" or name:match("^Track %d+$") then name = "" end
-  return (track.type == renoise.Track.TRACK_TYPE_GROUP and "group" or track.type == renoise.Track.TRACK_TYPE_SEND and "send"
-    or track.type == renoise.Track.TRACK_TYPE_MASTER and "master" or "track") .. ":" .. name
+  return M.name_id(rows.track_type(track), track.name)
 end
 
 local function track_at(song, index)

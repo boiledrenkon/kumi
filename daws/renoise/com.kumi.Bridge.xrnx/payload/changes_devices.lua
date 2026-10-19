@@ -366,8 +366,9 @@ local function delete_apply(song, env, input, fence, desc)
   local state = delete_signature(track, at, device)
   if not base.same_table(state, fence) then fail("changed", name .. " changed since the preview") end
   local material = {
-    track = index, index = at, device = material_.read_device(device), state = state,
+    track = index, index = at, device = material_.read_device(device, song, index), state = state,
     automation = material_.read_automation(song, index, track, at),
+    routes = material_.read_routes(song, index, at),
   }
   local size = #json.encode(material)
   if size > base.MAX_MATERIAL_BYTES then
@@ -378,7 +379,7 @@ local function delete_apply(song, env, input, fence, desc)
   track:delete_device_at(at)
   return {
     applied = { deleted = true }, material = material,
-    display = { title = title }, target = device_target(env, index, at),
+    display = { title = title, note = material_.routes_note(#material.routes) }, target = device_target(env, index, at),
     undo = { desc = desc, entry = true },
     prior = { deleted = false }, place = { track = index, device = at }, shape = "deleted",
   }
@@ -406,12 +407,20 @@ local function delete_restore(song, env, restore, desc)
   song:describe_undo(desc)
   local device = material_.restore_device(track, at, saved)
   local ok, err = pcall(function()
+    material_.restore_destination(song, device, saved, index)
     local list = {}
     for i, entry in ipairs(material.automation or {}) do
       list[i] = { pattern = entry.pattern, device = at, parameter = entry.parameter, playmode = entry.playmode, points = entry.points }
     end
     material_.write_automation(song, track, index, list, nil)
   end)
+  local set, failed = 0, 0
+  if ok then
+    set, failed = material_.write_routes(song, material.routes, { on = index, device = at }, function(n)
+      if type(restore.layout) ~= "number" then return n end
+      return (env.shifted(n, restore.layout))
+    end)
+  end
   if not ok then
     pcall(function() track:delete_device_at(at) end)
     if type(err) ~= "table" then err = { code = "failed", message = "Renoise wouldn't put the device back: " .. tostring(err) } end
@@ -420,7 +429,8 @@ local function delete_restore(song, env, restore, desc)
   base.note_restored(env.journal, "device-delete", { track = index, device = at })
   return {
     restored = { ref = refs.make(env.epoch(), "device", index, at), name = device.display_name },
-    display = { title = string.format("%s put back on %s", q(label), q(track_name)) }, undo = { desc = desc, entry = true },
+    display = { title = string.format("%s put back on %s", q(label), q(track_name)), note = material_.routes_restored_note(set, failed) },
+    undo = { desc = desc, entry = true },
   }
 end
 

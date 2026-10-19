@@ -215,7 +215,7 @@ local function gather(song, index, track, kind)
   if parents[index] then
     material.group = { index = parents[index], name = song:track(parents[index]).name }
   end
-  for d = 2, #track.devices do material.devices[#material.devices + 1] = material_.read_device(track:device(d)) end
+  for d = 2, #track.devices do material.devices[#material.devices + 1] = material_.read_device(track:device(d), song, index) end
   material.automation = material_.read_automation(song, index, track)
   local writes, limit = 0, base.MAX_RESTORE_STEPS * base.SLICE_WRITES
   for p = 1, #song.patterns do
@@ -246,6 +246,7 @@ local function gather(song, index, track, kind)
     if sequencer:track_sequence_slot_is_muted(index, s) then material.slotMutes[#material.slotMutes + 1] = s end
   end
   material.writes = writes
+  if kind == "send" or kind == "sequencer" then material.routes = material_.read_routes(song, index, nil) end
   return material
 end
 
@@ -265,7 +266,7 @@ local function delete_apply(song, env, input, fence, desc)
   return {
     applied = { deleted = true },
     material = material,
-    display = { title = "Deleted track " .. base.q(name) }, target = target(env, index),
+    display = { title = "Deleted track " .. base.q(name), note = material_.routes_note(#(material.routes or {})) }, target = target(env, index),
     undo = { desc = desc, entry = true },
     prior = { deleted = false }, place = { track = index }, shape = "deleted",
   }
@@ -348,12 +349,13 @@ local function put_in_group(song, index, material)
   -- after its tracks).
   local group
   local hint = song:track(math.min(material.group.index, rows.track_count(song)))
-  if hint.type == renoise.Track.TRACK_TYPE_GROUP and hint.name == material.group.name then
+  local want = base.name_id("group", material.group.name)
+  if hint.type == renoise.Track.TRACK_TYPE_GROUP and base.track_id(hint) == want then
     group = math.min(material.group.index, rows.track_count(song))
   else
     for g = index + 1, rows.track_count(song) do
       local candidate = song:track(g)
-      if candidate.type == renoise.Track.TRACK_TYPE_GROUP and candidate.name == material.group.name then
+      if candidate.type == renoise.Track.TRACK_TYPE_GROUP and base.track_id(candidate) == want then
         group = g
         break
       end
@@ -374,7 +376,7 @@ end
 
 -- Phase one, in the callback that made the track. Nothing half-done stays: a track that couldn't be finished is deleted again.
 -- Answers the track's place and what to say about where it went.
-local function restore_first_phase(song, material, phases)
+local function restore_first_phase(song, material, phases, moved)
   local index = make_track(song, material)
   local note
   local ok, err = pcall(function()
@@ -382,6 +384,10 @@ local function restore_first_phase(song, material, phases)
     restore_properties(song, track, index, material)
     for i, saved in ipairs(material.devices or {}) do material_.restore_device(track, i + 1, saved) end
     index, note = put_in_group(song, index, material)
+    -- (where a meta device sends its values: after the track has its place, and its devices are all there)
+    for i, saved in ipairs(material.devices or {}) do
+      if saved.destination then material_.restore_destination(song, song:track(index):device(i + 1), saved, index) end
+    end
     local sequencer = song.sequencer
     for _, s in ipairs(material.slotMutes or {}) do
       if s <= #sequencer.pattern_sequence then sequencer:set_track_sequence_slot_is_muted(index, s, true) end
@@ -392,6 +398,9 @@ local function restore_first_phase(song, material, phases)
       done[entry.pattern] = true
     end
     material_.write_automation(song, song:track(index), index, material.automation, done)
+    local set, failed = material_.write_routes(song, material.routes, { track = index }, moved)
+    local routed = material_.routes_restored_note(set, failed)
+    if routed then note = note and (note .. " " .. routed) or routed end
   end)
   if not ok then
     pcall(function() song:delete_track_at(index) end)
@@ -399,6 +408,15 @@ local function restore_first_phase(song, material, phases)
     error(err, 0)
   end
   return index, note
+end
+
+-- Where a track numbered as the song was after the delete (layout `since`) is now, with the deleted track put back at `inserted`
+-- (the layout already counts that: it is made in this callback). Nil when it is gone.
+local function moved_by(env, since)
+  return function(at, inserted)
+    if type(since) ~= "number" then return inserted and at >= inserted and at + 1 or at end
+    return (env.shifted(at, since))
+  end
 end
 
 local function restored_answer(env, song, index, material, note)
@@ -410,12 +428,24 @@ local function restored_answer(env, song, index, material, note)
   }
 end
 
--- A track with this name and kind is at the place already: it came back some other way, or was never gone.
-local function already_there(song, material)
+-- A track with this name and kind is at the place already: it came back some other way, or was never gone. A name Renoise numbers
+-- itself ("Track 03", "S01") tells nothing (the next track takes it when this one goes): then the same things on the track do, and
+-- an empty track can't be told from another empty one, so it is made again.
+local function already_there(song, material, prior)
   local top = rows.track_count(song)
+  local want = base.name_id(material.kind, material.name)
   for _, at in ipairs({ material.index, material.indexThen or material.index }) do
     local track = at >= 1 and at <= top and song:track(at) or nil
-    if track ~= nil and track.name == material.name and rows.track_type(track) == material.kind then return true end
+    if track ~= nil and rows.track_type(track) == material.kind and base.track_id(track) == want then
+      if not want:match(":$") then return true end
+      if type(prior) == "table" and (prior.devices or 0) + (prior.patternsWithLines or 0) > 0 then
+        local now = signature(song, at, track)
+        if now.devices == prior.devices and now.patternsWithLines == prior.patternsWithLines and now.noteColumns == prior.noteColumns
+          and now.effectColumns == prior.effectColumns then
+          return true
+        end
+      end
+    end
   end
   return false
 end
@@ -424,7 +454,7 @@ local function delete_restore(song, env, restore, desc, journal)
   local material = restore.material
   if type(material) ~= "table" or type(material.name) ~= "string" then bad("material: what the delete removed") end
   local phases = plan_phases(material)
-  if already_there(song, material) and #phases >= 1 and not restore.discard then
+  if already_there(song, material, restore.prior) and #phases >= 1 and not restore.discard then
     fail("changed", "a track with that name is in the song again")
   end
   if #phases > base.MAX_RESTORE_STEPS then
@@ -432,7 +462,7 @@ local function delete_restore(song, env, restore, desc, journal)
   end
   if #phases == 1 then
     song:describe_undo(desc)
-    local index, note = restore_first_phase(song, material, phases)
+    local index, note = restore_first_phase(song, material, phases, moved_by(env, restore.layout))
     local answer = restored_answer(env, song, index, material, note)
     answer.undo = { desc = desc, entry = true }
     base.note_restored(env.journal, "track-delete", { track = index })
@@ -445,7 +475,7 @@ local function delete_restore(song, env, restore, desc, journal)
       local function step(k) return string.format("%s (%d/%d)", desc, k, total) end
       song = the_song()
       song:describe_undo(step(1))
-      local index, note = restore_first_phase(song, material, phases)
+      local index, note = restore_first_phase(song, material, phases, moved_by(env, restore.layout))
       -- Phase one is one callback, so nothing else can land in it: the shape, the layout and the epoch it moved to (the devices
       -- and the swaps into a group move it) are the ones to hold to from here.
       job.rebase()
@@ -482,7 +512,11 @@ local function delete_restore(song, env, restore, desc, journal)
         if at and not env.busy() then
           pcall(function() the_song():delete_track_at(at) end)
           job.rebase()
-          error(err, 0)
+          local text = type(err) == "table" and err.message or tostring(err)
+          error({
+            code = type(err) == "table" and err.code or "failed",
+            message = string.format("Putting %s back stopped (%s): the half-made track is taken out again, and nothing else was touched", base.q(material.name), text),
+          }, 0)
         end
         job.rebase()
         local why = at and "a dialog is open, so Kumi left it" or "it isn't where Kumi made it any more, so Kumi deleted nothing"

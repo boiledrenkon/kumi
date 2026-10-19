@@ -73,10 +73,11 @@ end
 -- A track's first device, the mixer: its parameters are the track's volume, panning and width, which have automation like any.
 function M.mixer_device_data()
   return {
-    name = "Track Vol/Pan", path = "Audio/Effects/Native/#Track Vol/Pan",
+    name = "Track Vol/Pan", path = "Audio/Effects/Native/TrackVolPan",
     params = {
-      { name = "Volume", value = 1, min = 0, max = 1.4125 }, { name = "Panning", value = 0.5, min = 0, max = 1 },
-      { name = "Width", value = 0, min = 0, max = 1 },
+      { name = "Panning", value = 0.5, min = 0, max = 1 }, { name = "Volume", value = 1, min = 0, max = 1.4125 },
+      { name = "Width", value = 0, min = 0, max = 1 }, { name = "Post Panning", value = 0.5, min = 0, max = 1 },
+      { name = "Post Volume", value = 1, min = 0, max = 1.4125 },
     },
   }
 end
@@ -89,6 +90,24 @@ local CELL_FIELDS = {
 }
 local EFFECT_FIELDS = { number_value = "number", amount_value = "amount" }
 
+-- Letter commands: the volume and panning columns and the effect number take a letter and a digit ("G3", "0Z", "ZB") as well as two hex
+-- digits. The mock stores a command as 256 + 36 * first + second and shows the text again.
+local DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+local function command_value(text)
+  local first, second = DIGITS:find(text:sub(1, 1), 1, true), DIGITS:find(text:sub(2, 2), 1, true)
+  return 256 + (first - 1) * 36 + (second - 1)
+end
+local function command_text(value)
+  local code = value - 256
+  local first, second = math.floor(code / 36) + 1, code % 36 + 1
+  return DIGITS:sub(first, first) .. DIGITS:sub(second, second)
+end
+local function column_text(value, none)
+  if value == none then return ".." end
+  if value >= 256 then return command_text(value) end
+  return string.format("%02X", value)
+end
+
 -- The text Renoise reads into a cell's value, and the error it raises for text that isn't one.
 local SEMITONES = { C = 0, ["C#"] = 1, D = 2, ["D#"] = 3, E = 4, F = 5, ["F#"] = 6, G = 7, ["G#"] = 8, A = 9, ["A#"] = 10, B = 11 }
 local function cell_value(member, text)
@@ -98,13 +117,21 @@ local function cell_value(member, text)
     local letter, sep, octave = text:match("^([A-G])([-#])(%d)$")
     local semitone = letter and SEMITONES[letter .. (sep == "#" and "#" or "")]
     if semitone then return tonumber(octave) * 12 + semitone end
-  elseif member == "instrument_string" or member == "volume_string" or member == "panning_string" then
+  elseif member == "instrument_string" then
     if text == ".." then return 255 end
     if text:match("^%x%x$") then return tonumber(text, 16) end
+  elseif member == "volume_string" or member == "panning_string" then
+    if text == ".." then return 255 end
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+    if text:match("^[G-Z]%x$") then return command_value(text) end
   elseif member == "delay_string" then
     if text == ".." then return 0 end
     if text:match("^%x%x$") then return tonumber(text, 16) end
-  elseif member == "effect_number_string" or member == "number_string" or member == "effect_amount_string" or member == "amount_string" then
+  elseif member == "effect_number_string" or member == "number_string" then
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+    -- (the effect commands Renoise has: 0 and a letter, or Z and one of its six)
+    if text:match("^0[AUDGIOCQMSBRYVTNELPWXJHKZ]$") or text:match("^Z[TLKGBD]$") then return command_value(text) end
+  elseif member == "effect_amount_string" or member == "amount_string" then
     if text:match("^%x%x$") then return tonumber(text, 16) end
   end
   error("invalid value '" .. text .. "' for " .. member, 4)
@@ -153,13 +180,13 @@ local function note_column(data, w)
     instrument_value = function() return cur().instrument end,
     instrument_string = function() return cur().instrument == 255 and ".." or hex2(cur().instrument) end,
     volume_value = function() return cur().volume end,
-    volume_string = function() return cur().volume == 255 and ".." or hex2(cur().volume) end,
+    volume_string = function() return column_text(cur().volume, 255) end,
     panning_value = function() return cur().panning end,
-    panning_string = function() return cur().panning == 255 and ".." or hex2(cur().panning) end,
+    panning_string = function() return column_text(cur().panning, 255) end,
     delay_value = function() return cur().delay end,
     delay_string = function() return cur().delay == 0 and ".." or hex2(cur().delay) end,
     effect_number_value = function() return cur().fxn end,
-    effect_number_string = function() return hex2(cur().fxn) end,
+    effect_number_string = function() return column_text(cur().fxn) end,
     effect_amount_value = function() return cur().fxa end,
     effect_amount_string = function() return hex2(cur().fxa) end,
     is_empty = function()
@@ -181,7 +208,7 @@ local function effect_column(data, w)
     end,
   }, {
     number_value = function() return cur().number end,
-    number_string = function() return hex2(cur().number) end,
+    number_string = function() return column_text(cur().number) end,
     amount_value = function() return cur().amount end,
     amount_string = function() return hex2(cur().amount) end,
     is_empty = function() return cur().number == 0 and cur().amount == 0 end,
@@ -535,6 +562,7 @@ function M.make_song(options)
           data.params[k] = { name = template.name, value = template.value, min = template.min, max = template.max }
         end
         table.insert(t.devices, index, data)
+        M.follow_device_routes(t, index, false)
         M.fire(t.devices_observable, { type = "insert", index = index })
         M.record(function()
           for i, existing in ipairs(t.devices) do
@@ -559,6 +587,7 @@ function M.make_song(options)
       delete_device_at = function(_, index)
         if type(index) ~= "number" or not t.devices[index] then out_of_range("device", index) end
         if d.options.mixer_device and index == 1 then error("the mixer device can't be deleted", 2) end
+        M.follow_device_routes(t, index, true)
         local data = table.remove(t.devices, index)
         -- (Renoise takes a deleted device's automation with it, in every pattern; its undo brings it back)
         local taken = {}
@@ -1350,8 +1379,77 @@ local function move_pattern_tracks(shift)
 end
 
 -- A track's data put into the song at `index` (with the pattern data that went with it, when it comes back).
+-- What Renoise does with routing aimed at tracks (measured in 3.5.4): a #Send's Receiver (the send's number among the sends, -1 for
+-- none) and a meta device's Dest. Track (the track's number less one) follow tracks made and deleted, and are cleared (-1, with the
+-- destination's effect and parameter) when their target is deleted.
+local function follow_routes(removed, index)
+  local tracks = M.data.tracks
+  local target = tracks[index]
+  local sends_before = 0
+  for i = 1, index - 1 do
+    if tracks[i].kind == "send" then sends_before = sends_before + 1 end
+  end
+  for _, track in ipairs(tracks) do
+    for _, device in ipairs(track.devices or {}) do
+      local dest
+      for _, parameter in ipairs(device.params or {}) do
+        if parameter.name:match("^Receiver") and target.kind == "send" then
+          if removed then
+            if parameter.value == sends_before then parameter.value = -1 elseif parameter.value > sends_before then parameter.value = parameter.value - 1 end
+          elseif parameter.value >= sends_before then
+            parameter.value = parameter.value + 1
+          end
+        elseif parameter.name == "Dest. Track" and target.kind == "sequencer" then
+          dest = parameter
+          if removed then
+            if parameter.value == index - 1 then parameter.value = -1 elseif parameter.value > index - 1 then parameter.value = parameter.value - 1 end
+          elseif parameter.value >= index - 1 then
+            parameter.value = parameter.value + 1
+          end
+        end
+      end
+      if dest and dest.value == -1 and removed then
+        for _, parameter in ipairs(device.params) do
+          if parameter.name == "Dest. Effect" or parameter.name == "Dest. Parameter" then parameter.value = -1 end
+        end
+      end
+    end
+  end
+end
+
+-- The same for a meta device's Dest. Effect (the device's number less one), aimed at a device of `track`.
+function M.follow_device_routes(track, device_index, removed)
+  local at
+  for i, t in ipairs(M.data.tracks) do
+    if t == track then at = i end
+  end
+  for _, other in ipairs(M.data.tracks) do
+    for _, device in ipairs(other.devices or {}) do
+      local dtrack, deffect, dparameter
+      for _, parameter in ipairs(device.params or {}) do
+        if parameter.name == "Dest. Track" then dtrack = parameter
+        elseif parameter.name == "Dest. Effect" then deffect = parameter
+        elseif parameter.name == "Dest. Parameter" then dparameter = parameter end
+      end
+      if dtrack and deffect and dtrack.value == at - 1 then
+        if removed then
+          if deffect.value == device_index - 1 then
+            deffect.value = -1
+            if dparameter then dparameter.value = -1 end
+          elseif deffect.value > device_index - 1 then
+            deffect.value = deffect.value - 1
+          end
+        elseif deffect.value >= device_index - 1 then
+          deffect.value = deffect.value + 1
+        end
+      end
+    end
+  end
+end
+
 local function put_track(index, data, pattern_data)
   table.insert(M.data.tracks, index, data)
+  follow_routes(false, index)
   move_pattern_tracks(function(t) return t >= index and t + 1 or t end)
   for p, kept in pairs(pattern_data or {}) do
     if M.data.patterns[p] then M.data.patterns[p].tracks[index] = kept end
@@ -1368,6 +1466,7 @@ local function take_track(index)
   end
   local pattern_data = {}
   for p, pattern in ipairs(M.data.patterns) do pattern_data[p] = pattern.tracks[index] end
+  follow_routes(true, index)
   local data = table.remove(M.data.tracks, index)
   move_pattern_tracks(function(t) if t == index then return nil end return t > index and t - 1 or t end)
   M.data.recount()

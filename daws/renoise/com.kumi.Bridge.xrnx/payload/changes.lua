@@ -72,7 +72,7 @@ function M.restore(params, env)
   local desc = base.need_text(params, "desc")
   local restore = {
     target = base.need_object(params, "target"), prior = params.prior, applied = params.applied, material = params.material,
-    created = params.created, discard = params.discard == true,
+    created = params.created, discard = params.discard == true, layout = params.layout,
   }
   local done
   if spec.custom then
