@@ -698,6 +698,8 @@ function M.make_song(options)
         recorded(t, "output_delay")(value)
       end,
     }
+    -- (M5 m5-renoise: Renoise's own solo, which rewrites the other tracks' mute states; see mock_listening.lua)
+    if M.track_extras then M.track_extras(i, t, fields, getters, setters) end
     return object(class, fields, getters, setters)
   end
 
@@ -876,6 +878,8 @@ function M.make_song(options)
       mapping_setters[key] = kept(sample, key, watched, type(default) == "table" and pair or nil)
     end
     fields.sample_mapping = object("renoise.SampleMapping", mapping_fields, mapping_getters, mapping_setters)
+    -- (M5 m5-renoise: the sample's audio and slices; see mock_listening.lua)
+    if M.sample_extras then M.sample_extras(sample, fields, getters, setters) end
     return object("renoise.Sample", fields, getters, setters)
   end
 
@@ -1198,7 +1202,7 @@ function M.make_song(options)
         function() transport_fields[key] = value; M.fire(transport_fields[key .. "_observable"]) end)
     end
   end
-  local transport = object("renoise.Transport", transport_fields, {
+  local transport_getters = {
     -- The edit position in quarter notes: the lines before it over the LPB (a test can set `edit_beats`, as a ZLxx would).
     loop_sequence_range = function()
       local r = transport_fields.loop_range_seq
@@ -1211,7 +1215,10 @@ function M.make_song(options)
       for s = 1, d.song_fields.selected_sequence_index - 1 do lines = lines + d.patterns[d.sequence[s]].lines end
       return (lines + d.song_fields.selected_line_index - 1) / transport_fields.lpb
     end,
-  }, transport_setters)
+  }
+  -- (M5 m5-renoise: the play position as it plays, the song's length, the edit position; see mock_listening.lua)
+  if M.transport_extras then M.transport_extras(transport_fields, transport_getters, transport_setters, d) end
+  local transport = object("renoise.Transport", transport_fields, transport_getters, transport_setters)
 
   local song_fields = {
     name = options.name or "", name_observable = simple_observable(), file_name = options.file_name or "",

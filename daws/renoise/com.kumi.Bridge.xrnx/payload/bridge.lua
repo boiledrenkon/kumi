@@ -17,6 +17,9 @@ local config = import("config")
 local discovery = import("discovery")
 local log = import("log")
 local VERSION = import("version")
+-- (M5 m5-renoise: listening)
+local listening = import("listening")
+local audition = import("audition")
 
 local M = {}
 
@@ -547,6 +550,11 @@ local function flush_events()
   local song = renoise.song()
   if not song then return end
   local dirty = observers:take_dirty()
+  if dirty.transport and listening.active() then
+    -- (M5 m5-renoise: Renoise reads as playing while it renders; Kumi's render isn't the producer's transport, told once it ends)
+    observers.dirty.transport = true
+    dirty.transport = nil
+  end
   if dirty.selection then
     local value = selection(song)
     if observers:changed("selection", value) then conns:event("selection", value) end
@@ -650,6 +658,8 @@ M.DIALOG_MS = 400
 
 local function busy()
   local song = renoise.song()
+  local listening_reason = listening.busy_reason()
+  if listening_reason then return listening_reason end
   if song and song.rendering then return "Renoise is rendering the song" end
   -- (What a socket callback does itself before it asks, decoding a big request, is its own time, not a dialog's: from its start.)
   if b.alive_ms and (b.work_ms or M.now_ms()) - b.alive_ms >= M.DIALOG_MS then return "a Renoise dialog is open (its timers aren't running)" end
@@ -813,6 +823,36 @@ handlers["renoise.reload"] = function()
   return { reloading = true }
 end
 
+-- (M5 m5-renoise) Listening: renders as jobs, the audio behind a ref, a render played out loud, scratch copies. See listening.lua,
+-- audition.lua. Kumi's own solo, mute and loop writes for them are quiet: the song's notifiers don't count them as edits.
+local function quiet(fn)
+  b.quiet = (b.quiet or 0) + 1
+  local ok, err = pcall(fn)
+  b.quiet = b.quiet - 1
+  if not ok then error(err, 0) end
+end
+
+local function listen_env()
+  local env = change_env()
+  env.document = function() return b.document end
+  env.cfg = function() return b.cfg end
+  env.quiet = quiet
+  env.pattern_mark = place_env.pattern_touch_mark
+  -- (a render stops playback: an audition playing ends first)
+  env.before_render = function() audition.halt(env, "a render") end
+  return env
+end
+
+-- Answered at once while Kumi's render runs (contract §3); anything else waits, refused busy with nothing written.
+local LISTEN_FREE = { ping = true, status = true, focus = true, listen_status = true, listen_cancel = true, audition_stop = true }
+
+function handlers.render_start(params) return listening.render_start(params, listen_env()) end
+function handlers.listen_status(params) return listening.status(params, listen_env()) end
+function handlers.listen_cancel(params) return listening.cancel(params, listen_env()) end
+function handlers.audio_file(params) return listening.audio_file(params, listen_env()) end
+function handlers.audition(params) return audition.play(params, listen_env()) end
+function handlers.audition_stop(params) return audition.stop(params, listen_env()) end
+
 -- (Exposed for the tests, which add methods of their own.)
 M.handlers = handlers
 
@@ -841,6 +881,8 @@ local function carried(params, carry)
 end
 
 local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true }
+-- (M5 m5-renoise: the listening requests that name refs)
+CARRIED.render_start, CARRIED.audio_file, CARRIED.scratch = true, true, true
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).
@@ -860,6 +902,11 @@ end
 function M.handle(_, request)
   local handler = handlers[request.method]
   if not handler then error({ code = "unknown-method", message = "no method " .. request.method }) end
+  -- (M5 m5-renoise: while Kumi's render runs, only the requests that read its state are answered)
+  if not LISTEN_FREE[request.method] then
+    listening.check(listen_env())
+    if listening.active() then error({ code = "busy", message = "Renoise is rendering for Kumi; nothing changed" }, 0) end
+  end
   local params = request.params
   local from
   if CARRIED[request.method] then
@@ -939,6 +986,12 @@ function M.start(h, reloading)
   end
   b.changed = b.changed or 0
   b.document = b.document or 1
+  -- (M5 m5-renoise: the listening state, kept across reloads)
+  listening.init(b)
+  audition.init(b)
+  status.listening = function() return listening.flags(b.cfg) end
+  status.kumi_busy = function() return listening.busy_reason() end
+  focus.rendering = function() return listening.active() ~= nil end
   -- A song's id (the one in the project row) and which opening of a song this is: the same while it stays open.
   rows.song_extra = function(song)
     -- (where the pid is unknown, when this Renoise was started stands in for it: `0:1` would be the same after every restart)
@@ -992,6 +1045,14 @@ function M.start(h, reloading)
 end
 
 function M.stop(_, reloading)
+  -- (M5 m5-renoise: an audition ends; a render job puts back what it changed and lets go of its files)
+  if b and host then
+    pcall(function()
+      local env = listen_env()
+      audition.halt(env, "the tool stopped")
+      listening.abort(env, "the tool was stopped or reloaded during the render: ask again")
+    end)
+  end
   if observers then observers:detach() end
   if jobs then jobs:abort_all("reloading", "the tool was stopped or reloaded: ask again") end
   if not reloading then
@@ -1027,6 +1088,13 @@ function M.tick()
   -- One failing step mustn't skip the others: connections still need their tick.
   local ok, err = xpcall(flush_events, debug.traceback)
   if not ok then M.log_error("events", err) end
+  -- (M5 m5-renoise: a render that ended with no callback, an audition's end)
+  ok, err = xpcall(function()
+    local env = listen_env()
+    listening.check(env)
+    audition.tick(env)
+  end, debug.traceback)
+  if not ok then M.log_error("listening", err) end
   jobs:run()
   conns:tick()
   b.ticks = (b.ticks or 0) + 1
@@ -1076,6 +1144,12 @@ end
 
 function M.on_new_document()
   b.quitting = false
+  -- (M5 m5-renoise: what a job or an audition had of the song that went is nothing to put back)
+  pcall(function()
+    local env = listen_env()
+    listening.song_closed(env)
+    audition.halt(env, "another song")
+  end)
   b.document = b.document + 1
   -- Another song: its id is worked out afresh. (Starting with a file, Renoise opens its empty song and then the file
   -- without releasing the first, so the empty song's id would otherwise stay with the file.)
@@ -1088,6 +1162,11 @@ end
 
 function M.on_release_document()
   b.quitting = true
+  pcall(function()
+    local env = listen_env()
+    listening.song_closed(env)
+    audition.halt(env, "the song closed")
+  end)
   observers:detach()
   b.memory.song_id, b.memory.born_unsaved = nil, nil
   conns:event("project", json.null)

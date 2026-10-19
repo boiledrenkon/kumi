@@ -68,10 +68,13 @@ local function selection_of(song, epoch)
   return selection
 end
 
+-- (M5 m5-renoise: set by the bridge; Renoise reads as playing while it renders, which Kumi's own render isn't)
+M.rendering = function() return false end
+
 -- The play position while it plays, else the edit cursor.
 local function transport_of(song)
   local transport = song.transport
-  local playing = transport.playing
+  local playing = transport.playing and not M.rendering()
   local sequence, line, beat
   if playing then
     local at = transport.playback_pos
