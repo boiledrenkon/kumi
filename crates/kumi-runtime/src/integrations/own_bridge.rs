@@ -83,7 +83,8 @@ pub struct OwnIntegration<S: RefScheme> {
     options: OwnOptions,
     endpoint: Rc<RefCell<Option<Rc<dyn McpEndpoint>>>>,
     book: Rc<RefCell<Book<S>>>,
-    epoch: RefCell<Option<String>>,
+    /// The epoch the book's refs are from (the latest any answer showed).
+    epoch: Rc<RefCell<Option<String>>>,
     connected: Rc<Cell<bool>>,
     closed: Rc<Cell<bool>>,
     watching: Cell<bool>,
@@ -96,6 +97,8 @@ pub struct OwnIntegration<S: RefScheme> {
     layout: Rc<Cell<Option<u64>>>,
     /// Looks asked for again since the last one that read the project (a failed look asks for another, a few times).
     looks_again: Rc<Cell<u32>>,
+    /// A look failed because the DAW was busy (a dialog): the next is asked for once the focus says it's free.
+    look_when_free: Rc<Cell<bool>>,
     /// When the DAW last came back (or first answered): a DAW starting on its empty song and then loading the file
     /// isn't taken for a switch while it settles.
     back_at: Rc<Cell<Option<tokio::time::Instant>>>,
@@ -115,7 +118,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         options,
         endpoint: Rc::new(RefCell::new(None)),
         book: Rc::new(RefCell::new(Book::default())),
-        epoch: RefCell::new(None),
+        epoch: Rc::default(),
         connected: Rc::default(),
         closed: Rc::new(Cell::new(false)),
         watching: Cell::new(false),
@@ -125,6 +128,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         seen_in: Rc::default(),
         back_at: Rc::default(),
         looks_again: Rc::default(),
+        look_when_free: Rc::default(),
         unlisten: RefCell::default(),
         previous: RefCell::default(),
     })
@@ -215,7 +219,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         };
         *self.endpoint.borrow_mut() = Some(endpoint.clone());
         // Tracks inserted, removed or moved where refs are positions: the book's refs follow what they named.
-        let (book, layout) = (self.book.clone(), self.layout.clone());
+        let (book, layout, epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
         let unlisten = endpoint.on_live_event(Rc::new(move |event| {
             // Events were dropped on the way: a track shift among them is unknown, so positional refs are read again.
             if event.get("name").and_then(Value::as_str) == Some("events_lost") {
@@ -234,9 +238,31 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             let places = |key: &str| -> Vec<usize> {
                 data.get(key).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).map(|n| n as usize).collect()
             };
-            book.borrow_mut().shift(&Shift { tracks_made: places("made"), tracks_gone: places("gone"), ..Shift::default() });
-            if let Some(now) = data.get("layout").and_then(Value::as_u64) {
-                layout.set(Some(now));
+            // Another epoch (a swap, notifications that don't add up): the names go and the event's layout is taken.
+            if data.get("epoch").and_then(Value::as_str).is_some_and(|now| epoch.borrow().as_deref().is_some_and(|before| before != now)) {
+                follow_epoch(&book, &epoch, &layout, &data);
+                return;
+            }
+            let Some(now) = data.get("layout").and_then(Value::as_u64) else { return };
+            match layout.get() {
+                // The next shift: the names follow it.
+                Some(before) if now == before + 1 => {
+                    book.borrow_mut().shift(&Shift { tracks_made: places("made"), tracks_gone: places("gone"), ..Shift::default() });
+                    layout.set(Some(now));
+                }
+                // One the book is already past (taken from an answer, or after events were lost): nothing to move.
+                Some(before) if now <= before => {}
+                // A gap: shifts in between are unknown, so the names go.
+                Some(_) => {
+                    if book.borrow().scheme.positional() {
+                        let mut book = book.borrow_mut();
+                        book.clear_names();
+                        book.cursors.clear();
+                    }
+                    layout.set(Some(now));
+                }
+                // No layout yet (names retired): this one is where the book is.
+                None => layout.set(Some(now)),
             }
         }));
         if let Some(before) = self.unlisten.replace(Some(unlisten)) {
@@ -293,6 +319,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let (connected, identity, on_connection) =
             (self.connected.clone(), self.identity.clone(), self.options.context.on_connection.clone());
         let back_at = self.back_at.clone();
+        let (book, layout, book_epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
+        let (look_when_free, look_again) = (self.look_when_free.clone(), self.options.context.on_look_again.clone());
         let drawn = if self.options.context.focus_drawn { FOCUS_MS } else { UNDRAWN_FOCUS_MS };
         let period = self.options.context.focus_interval_ms.unwrap_or(drawn).max(50);
         tokio::task::spawn_local(async move {
@@ -335,6 +363,14 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                     on_connection(ConnectionState::Connected, None);
                 }
                 // Another project in the same tab, or another song: the epoch moved, and the project's identity with it.
+                // An epoch no event told of (a device or pattern edit in Renoise): the book follows it.
+                follow_epoch(&book, &book_epoch, &layout, &focus);
+                // Free again after a look failed because it was busy: the session looks again now.
+                if focus.get("busy").is_none_or(Value::is_null) && look_when_free.replace(false) {
+                    if let Some(look_again) = &look_again {
+                        look_again();
+                    }
+                }
                 let epoch = focus.get("epoch").and_then(Value::as_str).map(str::to_owned);
                 if last_epoch.is_some() && epoch != last_epoch {
                     let mut args = JsonObject::new();
@@ -388,7 +424,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
 
     /// A look that failed while the DAW is there (busy, loading, changing): the project and the DAW's tools stay, so the
     /// conversation does; and Kumi looks again by itself, since no turn may come to.
-    fn unread(&self, why: &str) -> Observation {
+    fn unread(&self, why: &str, busy: bool) -> Observation {
         let mut observation = self.no_access(None);
         let app = self.daw.profile.words.app;
         observation.revision = None;
@@ -399,7 +435,12 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             "daw": app,
             "look": format!("{app} couldn't be read just now ({why}); Kumi looks again, and {} reads it meanwhile.", self.daw.read_tool),
         }));
-        self.look_again_later();
+        // Busy (a dialog): asked for again once the focus says it's free, not every second meanwhile.
+        if busy && self.watching.get() {
+            self.look_when_free.set(true);
+        } else {
+            self.look_again_later();
+        }
         observation
     }
 
@@ -425,6 +466,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             endpoint: self.endpoint.borrow().clone(),
             book: self.book.clone(),
             layout: self.layout.clone(),
+            epoch: self.epoch.clone(),
             seen_in: self.seen_in.clone(),
             description: read_description(self.daw, &self.book.borrow().scheme),
         })
@@ -605,12 +647,15 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         if let (BodyRequest::Timeline, Some(track)) = (request, self.selected.borrow().clone()) {
             args.insert("around".into(), track.into());
         }
-        if let Some(layout) = self.layout.get() {
+        if let Some(layout) = self.layout.get().filter(|_| names_tracks(&self.book.borrow().scheme, &args)) {
             args.insert("layout".into(), layout.into());
         }
         let args = Value::Object(args);
         Ok(match self.call("focus_body", args, signal).await? {
-            Ok(body) => (self.daw.to_body)(request, &body),
+            Ok(body) => {
+                follow_epoch(&self.book, &self.epoch, &self.layout, &body);
+                (self.daw.to_body)(request, &body)
+            }
             Err(_) => None,
         })
     }
@@ -652,13 +697,13 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
                 }
                 match self.look(&signal).await {
                     Ok(Ok(snapshot)) => Ok(self.observation(&snapshot, pinned)),
-                    Ok(Err(refused)) if refused.there => Ok(self.unread(&refused.why)),
+                    Ok(Err(refused)) if refused.there => Ok(self.unread(&refused.why, refused.busy)),
                     Ok(Err(refused)) => Ok(self.no_access(Some(&refused.why))),
                     Err(error) if error.is_aborted() => Err(error),
                     Err(_) => Ok(self.no_access(None)),
                 }
             }
-            Ok(Err(refused)) if refused.there => Ok(self.unread(&refused.why)),
+            Ok(Err(refused)) if refused.there => Ok(self.unread(&refused.why, refused.busy)),
             Ok(Err(refused)) => {
                 if self.connected.replace(false) {
                     (self.options.context.on_connection)(ConnectionState::Disconnected, Some(DisconnectCause::Live));
@@ -692,9 +737,39 @@ struct ReadTool<S: RefScheme> {
     endpoint: Option<Rc<dyn McpEndpoint>>,
     book: Rc<RefCell<Book<S>>>,
     layout: Rc<Cell<Option<u64>>>,
+    epoch: Rc<RefCell<Option<String>>>,
     seen_in: Rc<RefCell<HashMap<String, String>>>,
     /// The description, with which kinds are read under which parent.
     description: String,
+}
+
+/// An answer from another epoch than the book's: Renoise moves it for a device, sample, phrase, pattern, instrument or
+/// sequence edit, and no event says so. Positional names are retired, and the book takes the answer's epoch and layout.
+/// (A DAW whose refs hold across epochs keeps its names; `see_epoch` looks after it.)
+fn follow_epoch<S: RefScheme>(book: &RefCell<Book<S>>, epoch: &RefCell<Option<String>>, layout: &Cell<Option<u64>>, answer: &Value) {
+    let Some(now) = answer.get("epoch").and_then(Value::as_str) else { return };
+    if !book.borrow().scheme.positional() || epoch.borrow().as_deref() == Some(now) {
+        return;
+    }
+    if epoch.borrow().is_some() {
+        let mut book = book.borrow_mut();
+        book.refs.clear();
+        book.known.clear();
+        book.cursors.clear();
+        book.clear_names();
+    }
+    *epoch.borrow_mut() = Some(now.to_owned());
+    layout.set(answer.get("layout").and_then(Value::as_u64));
+}
+
+/// Whether a request names something on a track (a track, a device or a parameter), the refs a track shift moves: only
+/// those carry the layout they were made in.
+fn names_tracks<S: RefScheme>(scheme: &S, args: &JsonObject) -> bool {
+    ["ref", "parent", "trackRef", "track", "around"].iter().any(|key| match args.get(*key) {
+        Some(Value::String(reference)) => matches!(scheme.kind_of(reference), Some("track" | "device" | "param")),
+        Some(Value::Number(_)) => *key == "track",
+        _ => false,
+    })
 }
 
 /// An answer's layout against the book's.
@@ -829,7 +904,8 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
         if let Some(track) = args.remove("trackRef") {
             args.insert("track".into(), track);
         }
-        if let Some(layout) = self.layout.get() {
+        // Only refs on a track are carried through track shifts: a request without one names no layout.
+        if let Some(layout) = self.layout.get().filter(|_| names_tracks(&self.book.borrow().scheme, &args)) {
             args.insert("layout".into(), layout.into());
         }
         // Refs that hold across projects are read only in the project they came from: the DAW refuses another (`stale`).
@@ -845,9 +921,15 @@ impl<S: RefScheme + 'static> KernelTool for ReadTool<S> {
             let result = endpoint.call("read", args.clone(), abort::any([signal.clone(), abort::timeout(CALL_MS)])).await?;
             match answer_of(&result) {
                 Ok(page) => {
-                    if layout_of(&self.book, &self.layout, page.get("layout").and_then(Value::as_u64)).await == Layout::Older && tries < 4 {
-                        tries += 1;
-                        continue;
+                    follow_epoch(&self.book, &self.epoch, &self.layout, &page);
+                    if layout_of(&self.book, &self.layout, page.get("layout").and_then(Value::as_u64)).await == Layout::Older {
+                        if tries < 4 {
+                            tries += 1;
+                            continue;
+                        }
+                        // Still from before a shift the book follows: its refs would get the wrong names.
+                        let app = self.daw.profile.words.app;
+                        return Ok(ToolResult::error(format!("{app} changed while reading (tracks were added or removed): read it again")));
                     }
                     note_epoch(&self.seen_in, &self.book.borrow().scheme, &page);
                     let text = stringify(&self.book.borrow_mut().shorten(&page));

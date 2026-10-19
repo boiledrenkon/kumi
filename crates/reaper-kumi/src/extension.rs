@@ -1332,12 +1332,12 @@ mod tests {
         let before = epoch_and_identity(&extension, &tx);
         let active = extension.reaper().current_project().unwrap().ptr.addr();
         // REAPER loads something into another project (the render queue, a subproject): this tab is the same.
-        crate::projectconfig::ask_with(move || Some(active + 16 * 7));
+        crate::projectconfig::ask_with(move || Some(active + 16 * 7), move || Some(active));
         crate::projectconfig::note_load();
         extension.tick(Driver::Timer);
         assert_eq!(epoch_and_identity(&extension, &tx), before);
         // A load into this tab's project is another project.
-        crate::projectconfig::ask_with(move || Some(active));
+        crate::projectconfig::ask_with(move || Some(active), move || Some(active));
         crate::projectconfig::note_load();
         extension.tick(Driver::Timer);
         let after = epoch_and_identity(&extension, &tx);
@@ -1365,7 +1365,7 @@ mod tests {
         });
         extension.tick(Driver::Timer);
         // B closed and C opened at B's pointer within one tick, while A was in front: a load into that pointer.
-        crate::projectconfig::ask_with(move || Some(b_ptr));
+        crate::projectconfig::ask_with(move || Some(b_ptr), || None);
         crate::projectconfig::note_load();
         fake::with(|s| {
             s.other_tabs = vec![a];
@@ -1373,6 +1373,38 @@ mod tests {
         });
         extension.tick(Driver::Timer);
         assert_ne!(epoch_and_identity(&extension, &tx).1, b.1, "C isn't B, though it has B's pointer");
+    }
+
+    #[test]
+    fn a_load_reaper_doesnt_name_is_the_front_tabs_and_leaves_background_tabs_alone() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        let a = fake::with(|s| s.project_id);
+        fake::with(|s| s.other_tabs = vec![a + 1]);
+        extension.tick(Driver::Timer);
+        // B in front once, then A again.
+        fake::with(|s| {
+            s.other_tabs = vec![a];
+            s.project_id = a + 1;
+        });
+        extension.tick(Driver::Timer);
+        let b = epoch_and_identity(&extension, &tx);
+        fake::with(|s| {
+            s.other_tabs = vec![a + 1];
+            s.project_id = a;
+        });
+        extension.tick(Driver::Timer);
+        // A load REAPER doesn't name, with A in front: A's, not B's.
+        let front = extension.reaper().current_project().unwrap().ptr.addr();
+        crate::projectconfig::ask_with(|| None, move || Some(front));
+        crate::projectconfig::note_load();
+        extension.tick(Driver::Timer);
+        fake::with(|s| {
+            s.other_tabs = vec![a];
+            s.project_id = a + 1;
+        });
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx).1, b.1, "B nobody touched is still B");
     }
 
     #[test]
