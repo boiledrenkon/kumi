@@ -35,9 +35,11 @@ function M:add(record, request, fn)
     if ctx.now_ms() >= job.deadline then coroutine.yield() end
     job.check()
   end
-  -- The next step of work in a callback of its own (a restore's numbered steps), checked as it resumes.
-  function job.step()
-    coroutine.yield()
+  -- The next step of work in a callback of its own (a restore's numbered steps), checked as it resumes. `gap_ms` is how
+  -- long to wait first: Renoise has been seen to take callbacks 10 ms apart for one undo step.
+  function job.step(gap_ms)
+    local resume_at = ctx.now_ms() + (gap_ms or 0)
+    repeat coroutine.yield() until ctx.now_ms() >= resume_at
     job.check()
   end
   -- The work changed the song's shape itself (it made a track): that is not a change to stop for.

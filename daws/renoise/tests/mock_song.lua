@@ -78,6 +78,33 @@ local CELL_FIELDS = {
 }
 local EFFECT_FIELDS = { number_value = "number", amount_value = "amount" }
 
+-- The text Renoise reads into a cell's value, and the error it raises for text that isn't one.
+local SEMITONES = { C = 0, ["C#"] = 1, D = 2, ["D#"] = 3, E = 4, F = 5, ["F#"] = 6, G = 7, ["G#"] = 8, A = 9, ["A#"] = 10, B = 11 }
+local function cell_value(member, text)
+  if type(text) ~= "string" then error("bad argument: string expected", 4) end
+  if member == "note_string" then
+    if text == "---" then return 121 elseif text == "OFF" then return 120 end
+    local letter, sep, octave = text:match("^([A-G])([-#])(%d)$")
+    local semitone = letter and SEMITONES[letter .. (sep == "#" and "#" or "")]
+    if semitone then return tonumber(octave) * 12 + semitone end
+  elseif member == "instrument_string" or member == "volume_string" or member == "panning_string" then
+    if text == ".." then return 255 end
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+  elseif member == "delay_string" then
+    if text == ".." then return 0 end
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+  elseif member == "effect_number_string" or member == "number_string" or member == "effect_amount_string" or member == "amount_string" then
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+  end
+  error("invalid value '" .. text .. "' for " .. member, 4)
+end
+
+local STRING_MEMBERS = {
+  note_string = "note_value", instrument_string = "instrument_value", volume_string = "volume_value",
+  panning_string = "panning_value", delay_string = "delay_value", effect_number_string = "effect_number_value",
+  effect_amount_string = "effect_amount_value", number_string = "number_value", amount_string = "amount_value",
+}
+
 -- Setters for the members of a column: `w.cell()` is the data to write (made if there is none), `w.changed()` tells the
 -- pattern's line notifiers.
 local function cell_setters(w, fields)
@@ -92,12 +119,24 @@ local function cell_setters(w, fields)
       M.record(function() cell[field] = old; w.changed() end, function() cell[field] = value; w.changed() end)
     end
   end
+  for member, value_member in pairs(STRING_MEMBERS) do
+    if out[value_member] then
+      out[member] = function(text) out[value_member](cell_value(member, text)) end
+    end
+  end
   return out
 end
 
 local function note_column(data, w)
   local function cur() return w and w.peek() or data end
-  return object("renoise.NoteColumn", { is_selected = false }, {
+  local setters = w and cell_setters(w, CELL_FIELDS) or nil
+  return object("renoise.NoteColumn", { is_selected = false,
+    clear = function()
+      if not setters then return end
+      for member, value in pairs({ note_value = 121, instrument_value = 255, volume_value = 255, panning_value = 255,
+        delay_value = 0, effect_number_value = 0, effect_amount_value = 0 }) do setters[member](value) end
+    end,
+  }, {
     note_value = function() return cur().note end,
     note_string = function() return note_text(cur().note) end,
     instrument_value = function() return cur().instrument end,
@@ -117,18 +156,25 @@ local function note_column(data, w)
       return c.note == 121 and c.instrument == 255 and c.volume == 255 and c.panning == 255
         and c.delay == 0 and c.fxn == 0 and c.fxa == 0
     end,
-  }, w and cell_setters(w, CELL_FIELDS) or nil)
+  }, setters)
 end
 
 local function effect_column(data, w)
   local function cur() return w and w.peek() or data end
-  return object("renoise.EffectColumn", { is_selected = false }, {
+  local setters = w and cell_setters(w, EFFECT_FIELDS) or nil
+  return object("renoise.EffectColumn", { is_selected = false,
+    clear = function()
+      if not setters then return end
+      setters.number_value(0)
+      setters.amount_value(0)
+    end,
+  }, {
     number_value = function() return cur().number end,
     number_string = function() return hex2(cur().number) end,
     amount_value = function() return cur().amount end,
     amount_string = function() return hex2(cur().amount) end,
     is_empty = function() return cur().number == 0 and cur().amount == 0 end,
-  }, w and cell_setters(w, EFFECT_FIELDS) or nil)
+  }, setters)
 end
 
 local function empty_note() return { note = 121, instrument = 255, volume = 255, panning = 255, delay = 0, fxn = 0, fxa = 0 } end
@@ -190,6 +236,7 @@ end
 -- Devices
 
 local function parameter(data, set)
+  data.value_observable = data.value_observable or M.observable()
   local proxy = object("renoise.DeviceParameter", {
     name = data.name, name_observable = data.name_observable or M.observable(),
     value_min = data.min or 0, value_max = data.max or 1, value_default = data.default or 0,
@@ -231,7 +278,23 @@ end
 
 local function device(data)
   local params = {}
-  for i, p in ipairs(data.params or {}) do params[i] = parameter(p) end
+  for i, p in ipairs(data.params or {}) do
+    local function write(value)
+      local old = p.value
+      if old == value then return end
+      p.value = value
+      M.fire(p.value_observable)
+      M.record(function() p.value = old; M.fire(p.value_observable) end, function() p.value = value; M.fire(p.value_observable) end)
+    end
+    params[i] = parameter(p, {
+      value = write,
+      value_string = function(text)
+        local number = tonumber(tostring(text):match("-?%d+%.?%d*"))
+        if not number then error("could not parse " .. tostring(text), 2) end
+        write(number)
+      end,
+    })
+  end
   -- (the proxy is made anew on every read: what is watched lives in the data)
   data.is_active_observable = data.is_active_observable or M.observable()
   data.display_name_observable = data.display_name_observable or M.observable()
@@ -254,7 +317,13 @@ local function device(data)
       if not params[i] then out_of_range("parameter", i) end
       return params[i]
     end,
-  }, nil, device_setters(data))
+  }, {
+    -- (read from the data: the proxy a caller holds sees a write made through it)
+    is_active = function() return data.active ~= false end,
+    display_name = function() return data.display_name or data.name end,
+    is_maximized = function() return data.maximized == true end,
+    active_preset_data = function() return data.preset_data or "" end,
+  }, device_setters(data))
   return proxy
 end
 
@@ -447,6 +516,7 @@ function M.make_song(options)
       insert_device_at = function(_, path, index)
         if type(index) ~= "number" or index < 1 or index > #t.devices + 1 then out_of_range("device", index) end
         if d.options.mixer_device and index == 1 then error("the mixer device must stay first", 2) end
+        if path:find("Missing", 1, true) then error("std::logic_error: 'unknown device " .. path .. "'", 2) end
         local data = { name = path:match("([^/]+)$") or path, path = path, params = {}, active = true }
         -- (a device made from a path has the parameters of that device: tests say which in M.device_catalog)
         for k, template in ipairs((M.device_catalog or {})[path] or {}) do
@@ -464,15 +534,47 @@ function M.make_song(options)
         end)
         return device(data)
       end,
+      swap_devices_at = function(_, a, b)
+        if type(a) ~= "number" or type(b) ~= "number" or not t.devices[a] or not t.devices[b] then out_of_range("device", a) end
+        if d.options.mixer_device and (a == 1 or b == 1) then error("the mixer device must stay first", 2) end
+        local function swap()
+          t.devices[a], t.devices[b] = t.devices[b], t.devices[a]
+          M.fire(t.devices_observable, { type = "swap", index1 = a, index2 = b })
+        end
+        swap()
+        M.record(swap, swap)
+      end,
       delete_device_at = function(_, index)
         if type(index) ~= "number" or not t.devices[index] then out_of_range("device", index) end
         if d.options.mixer_device and index == 1 then error("the mixer device can't be deleted", 2) end
         local data = table.remove(t.devices, index)
+        -- (Renoise takes a deleted device's automation with it, in every pattern; its undo brings it back)
+        local taken = {}
+        for _, pattern in ipairs(M.data.patterns) do
+          for _, pattern_track in pairs(pattern.tracks) do
+            for i = #(pattern_track.automation or {}), 1, -1 do
+              local entry = pattern_track.automation[i]
+              for _, parameter in ipairs(data.params) do
+                if entry.parameter == parameter then
+                  table.remove(pattern_track.automation, i)
+                  taken[#taken + 1] = { pattern_track, entry }
+                  break
+                end
+              end
+            end
+          end
+        end
         M.fire(t.devices_observable, { type = "remove", index = index })
         M.record(function()
           table.insert(t.devices, math.min(index, #t.devices + 1), data)
+          for _, pair in ipairs(taken) do table.insert(pair[1].automation, pair[2]) end
           M.fire(t.devices_observable, { type = "insert", index = math.min(index, #t.devices) })
         end, function()
+          for _, pair in ipairs(taken) do
+            for i, entry in ipairs(pair[1].automation) do
+              if entry == pair[2] then table.remove(pair[1].automation, i) break end
+            end
+          end
           for i, existing in ipairs(t.devices) do
             if existing == data then table.remove(t.devices, i) M.fire(t.devices_observable, { type = "remove", index = i }) break end
           end
@@ -481,6 +583,21 @@ function M.make_song(options)
     }
     local getters = {
       name = function() return t.name end,
+      -- (the devices a track can be given: tests say which in M.device_catalog; each is {path, name} to Renoise)
+      available_devices = function()
+        local paths = {}
+        for path in pairs(M.device_catalog or {}) do paths[#paths + 1] = path end
+        table.sort(paths)
+        return paths
+      end,
+      available_device_infos = function()
+        local infos = {}
+        for path in pairs(M.device_catalog or {}) do
+          infos[#infos + 1] = { path = path, name = "Effects: " .. (path:match("([^/]+)$") or path), short_name = path:match("([^/]+)$") or path }
+        end
+        table.sort(infos, function(x, y) return x.path < y.path end)
+        return infos
+      end,
       color = function() return t.color or M.NIL end,
       type = function() return KIND[t.kind] end,
       mute_state = function() return t.mute_state end,
@@ -497,7 +614,12 @@ function M.make_song(options)
       delay_column_visible = function() return t.delay_column == true end,
       sample_effects_column_visible = function() return t.sample_effects_column == true end,
       available_output_routings = function() return { "Master" } end,
-      group_parent = function() return M.NIL end,
+      group_parent = function()
+        for g = i + 1, #d.tracks do
+          if d.tracks[g].kind == "group" and g - d.tracks[g].members <= i then return track(g) end
+        end
+        return nil
+      end,
       devices = function()
         local devices = {}
         for k, spec in ipairs(t.devices) do devices[k] = device(spec) end
@@ -530,7 +652,10 @@ function M.make_song(options)
       sample_effects_column_visible = recorded(t, "sample_effects_column"),
       collapsed = recorded(t, "collapsed"),
       output_routing = recorded(t, "output_routing"),
-      output_delay = recorded(t, "output_delay"),
+      output_delay = function(value)
+        if t.kind ~= "sequencer" then error("std::logic_error: 'can not change the output_delay of group, master or send tracks.'", 2) end
+        recorded(t, "output_delay")(value)
+      end,
     }
     return object(class, fields, getters, setters)
   end
@@ -799,6 +924,17 @@ function M.make_song(options)
     transport_fields.playing = false
     M.fire(transport_fields.playing_observable)
   end
+  local transport_setters = {}
+  for _, key in ipairs({ "bpm", "lpb", "tpl" }) do
+    transport_setters[key] = function(value)
+      local old = transport_fields[key]
+      if old == value then return end
+      transport_fields[key] = value
+      M.fire(transport_fields[key .. "_observable"])
+      M.record(function() transport_fields[key] = old; M.fire(transport_fields[key .. "_observable"]) end,
+        function() transport_fields[key] = value; M.fire(transport_fields[key .. "_observable"]) end)
+    end
+  end
   local transport = object("renoise.Transport", transport_fields, {
     -- The edit position in quarter notes: the lines before it over the LPB (a test can set `edit_beats`, as a ZLxx would).
     edit_pos_beats = function()
@@ -807,7 +943,7 @@ function M.make_song(options)
       for s = 1, d.song_fields.selected_sequence_index - 1 do lines = lines + d.patterns[d.sequence[s]].lines end
       return (lines + d.song_fields.selected_line_index - 1) / transport_fields.lpb
     end,
-  })
+  }, transport_setters)
 
   local song_fields = {
     name = options.name or "", name_observable = simple_observable(), file_name = options.file_name or "",
@@ -830,6 +966,9 @@ function M.make_song(options)
     insert_track_at = function(_, index) return M.api.insert_track_at(index) end,
     delete_track_at = function(_, index) M.api.delete_track_at(index) end,
     swap_tracks_at = function(_, a, b) M.api.swap_tracks_at(a, b) end,
+    add_track_to_group = function(_, track_index, group_index) M.api.add_track_to_group(track_index, group_index) end,
+    remove_track_from_group = function(_, track_index) M.api.remove_track_from_group(track_index) end,
+    insert_group_at = function(_, index) return M.api.insert_group_at(index) end,
     describe_undo = function(_, text) d.undo.desc = text end,
     can_undo = function() return #d.undo.stack > 0 end,
     can_redo = function() return #d.undo.redo > 0 end,
@@ -1043,26 +1182,93 @@ end
 -- What a script does to the song through the API: the same, with an undo step recorded for it.
 M.api = {}
 
+-- Measured in Renoise 3.5.4: a track made at or before the master's place is a sequencer track (the master moves up), one made
+-- after it is a send track; a sequencer track made just before a group (but not before its first member) joins the group.
 function M.api.insert_track_at(index)
   local tracks = M.data.tracks
   local master
   for i, t in ipairs(tracks) do
     if t.kind == "master" then master = i end
   end
-  if type(index) ~= "number" or index < 1 or index > master then error("track index out of range: " .. tostring(index), 2) end
+  if type(index) ~= "number" or index < 1 or index > #tracks + 1 then error("track index out of range: " .. tostring(index), 2) end
   local spec
-  if index == master then
-    -- inserting at the master's place makes a send track, after the others
-    local sends = #tracks - master
-    index = master + sends + 1
-    spec = track_spec({ kind = "send", name = "Send " .. (sends + 1) })
+  if index > master then
+    spec = track_spec({ kind = "send", name = "S" .. string.format("%02d", index - master) })
   else
     spec = track_spec({ name = string.format("Track %02d", index) })
   end
   local made = index
   put_track(index, spec)
-  M.record(function() take_track(made) end, function() put_track(made, spec) end)
+  local joined
+  for g, t in ipairs(tracks) do
+    if t.kind == "group" and spec.kind == "sequencer" and g > made and g - 1 - t.members < made and made <= g - 1 then
+      t.members = t.members + 1
+      joined = t
+    end
+  end
+  M.record(function()
+    take_track(made)
+  end, function()
+    put_track(made, spec)
+    if joined then joined.members = joined.members + 1 end
+  end)
   return M.data.track_proxy(index)
+end
+
+function M.api.insert_group_at(index)
+  local tracks = M.data.tracks
+  local master
+  for i, t in ipairs(tracks) do
+    if t.kind == "master" then master = i end
+  end
+  if type(index) ~= "number" or index < 1 or index > master then error("a group is made before the master", 2) end
+  local spec = track_spec({ kind = "group", name = "Group" })
+  put_track(index, spec)
+  M.record(function() take_track(index) end, function() put_track(index, spec) end)
+  return M.data.track_proxy(index)
+end
+
+-- The track becomes the last member of the group: it is moved to just before it, by swaps (as Renoise does it).
+function M.api.add_track_to_group(index, group)
+  local tracks = M.data.tracks
+  if not tracks[index] or not tracks[group] or tracks[group].kind ~= "group" then error("not a track and a group", 2) end
+  if index == group then error("indices are the same, can't add track to itself", 2) end
+  local at = index
+  if index < group then
+    while at < group - 1 do
+      M.api.swap_tracks_at(at, at + 1)
+      at = at + 1
+    end
+  else
+    -- (a track after the group takes its place and the group moves up)
+    while at > group do
+      M.api.swap_tracks_at(at - 1, at)
+      at = at - 1
+    end
+    group = group + 1
+  end
+  local grouped = tracks[group]
+  grouped.members = grouped.members + 1
+  M.record(function() grouped.members = grouped.members - 1 end, function() grouped.members = grouped.members + 1 end)
+end
+
+-- The track leaves its group: it is moved to just before the group's tracks, by swaps; the tracks it passed keep their order.
+function M.api.remove_track_from_group(index)
+  local tracks = M.data.tracks
+  local group
+  for g = index + 1, #tracks do
+    if tracks[g].kind == "group" and g - tracks[g].members <= index then group = g break end
+  end
+  if not group then error("track is not a member of a group", 2) end
+  local start = group - tracks[group].members
+  local at = index
+  while at > start do
+    M.api.swap_tracks_at(at - 1, at)
+    at = at - 1
+  end
+  local grouped = tracks[group]
+  grouped.members = grouped.members - 1
+  M.record(function() grouped.members = grouped.members + 1 end, function() grouped.members = grouped.members - 1 end)
 end
 
 function M.api.delete_track_at(index)
@@ -1076,8 +1282,26 @@ end
 function M.api.swap_tracks_at(a, b)
   local tracks = M.data.tracks
   if not tracks[a] or not tracks[b] then error("track index out of range", 2) end
-  ops.swap_tracks(a, b)
-  M.record(function() ops.swap_tracks(a, b) end, function() ops.swap_tracks(a, b) end)
+  local function class(t) return t.kind == "master" and "master" or t.kind == "send" and "send" or "sequencer" end
+  if class(tracks[a]) ~= class(tracks[b]) then
+    error("can not swap a sequencer track with a send track or a send or sequencer track with the master track.", 2)
+  end
+  if a == b then return end
+  if a > b then a, b = b, a end
+  -- (Renoise swaps tracks that are not neighbours by neighbours' swaps: the last one up to the first's place, then the first up)
+  local pairs_ = {}
+  if b == a + 1 then
+    pairs_[1] = { a, b }
+  else
+    for i = b - 1, a, -1 do pairs_[#pairs_ + 1] = { i, i + 1 } end
+    for i = a + 1, b - 1 do pairs_[#pairs_ + 1] = { i, i + 1 } end
+  end
+  for _, pair in ipairs(pairs_) do ops.swap_tracks(pair[1], pair[2]) end
+  M.record(function()
+    for i = #pairs_, 1, -1 do ops.swap_tracks(pairs_[i][1], pairs_[i][2]) end
+  end, function()
+    for _, pair in ipairs(pairs_) do ops.swap_tracks(pair[1], pair[2]) end
+  end)
 end
 
 function M.api.undo()
@@ -1139,7 +1363,7 @@ end
 function ops.swap_tracks(a, b)
   M.data.tracks[a], M.data.tracks[b] = M.data.tracks[b], M.data.tracks[a]
   move_pattern_tracks(function(t) if t == a then return b elseif t == b then return a end return t end)
-  fire(song_fields().tracks_observable, { type = "swap", index = a, index2 = b })
+  fire(song_fields().tracks_observable, { type = "swap", index1 = a, index2 = b })
 end
 
 function ops.rename_track(index, name)
@@ -1201,7 +1425,7 @@ end
 function ops.swap_instruments(a, b)
   local instruments = M.data.instruments
   instruments[a], instruments[b] = instruments[b], instruments[a]
-  fire(song_fields().instruments_observable, { type = "swap", index = a, index2 = b })
+  fire(song_fields().instruments_observable, { type = "swap", index1 = a, index2 = b })
 end
 
 function ops.insert_instrument(spec)
