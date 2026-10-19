@@ -106,8 +106,15 @@ impl SimulatorConfig {
                 resource: resource.into(),
                 project: Some(logic::project()),
             },
+            // (the bridge's events: the four of M2, and its naming of the producer's own undo of Kumi's changes)
             offer: Offer {
-                events: vec![event::PROJECT.into(), event::TRANSPORT.into(), event::TRACKS.into(), event::SELECTION.into()],
+                events: vec![
+                    event::PROJECT.into(),
+                    event::TRANSPORT.into(),
+                    event::TRACKS.into(),
+                    event::SELECTION.into(),
+                    event::UNDONE_IN_DAW.into(),
+                ],
                 ..Offer::default()
             },
             status_extra: Map::new(),

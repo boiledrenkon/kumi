@@ -88,14 +88,15 @@ async fn the_read_methods_on_the_wire() {
     let script = LogicScript::new();
     let simulator = Simulator::start(script.config(secret.clone(), "com.apple.logic10")).await.unwrap();
     let client = BridgeClient::connect(simulator.address(), secret, "daw-mcp-server/test").await.unwrap();
+    // The welcome as the bridge gives it: its methods and events, in its order.
     assert_eq!(
         client.welcome().methods,
         [
             "ping",
             "status",
+            "focus",
             "read",
             "snapshot",
-            "focus",
             "focus_body",
             "change_preview",
             "change_apply",
@@ -107,6 +108,7 @@ async fn the_read_methods_on_the_wire() {
             "undo_step_end"
         ]
     );
+    assert_eq!(client.welcome().events, ["project", "transport", "tracks", "selection", "undone_in_daw"]);
     assert_eq!(client.welcome().identity.daw_version, "12.3.1");
 
     // Every kind of the contract: the project, the tracks (a page at a time), the children under their parent, one
