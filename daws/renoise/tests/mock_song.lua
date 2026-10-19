@@ -406,6 +406,11 @@ function M.make_song(options)
     d.tracks[#d.tracks + 1] = { kind = "send", name = "Send " .. i, members = 0, mute_state = 1, volume = 1, panning = 0.5,
       note_columns = 1, effect_columns = 1, devices = {} }
   end
+  -- (M4 n-song: a track given as soloed is a solo's root; Renoise's other tracks follow it, see M.solo_set)
+  d.solo_roots = {}
+  for _, t in ipairs(d.tracks) do
+    if t.solo then d.solo_roots[#d.solo_roots + 1] = t end
+  end
   for _, t in ipairs(d.tracks) do
     -- (Renoise's first device on every track is its mixer device, which can't be deleted or moved)
     if options.mixer_device then table.insert(t.devices, 1, M.mixer_device_data()) end
@@ -716,7 +721,8 @@ function M.make_song(options)
       color = recorded(t, "color", "color_observable", false, function(v) return { v[1], v[2], v[3] } end),
       color_blend = recorded(t, "color_blend", "color_blend_observable"),
       mute_state = recorded(t, "mute_state", "mute_state_observable", true),
-      solo_state = recorded(t, "solo", "solo_state_observable", true),
+      -- (M4 n-song: Renoise solos by rewriting every track's mute state, see M.solo_set)
+      solo_state = function(value) M.solo_set(t, value) end,
       visible_note_columns = recorded(t, "note_columns", "visible_note_columns_observable"),
       visible_effect_columns = recorded(t, "effect_columns", "visible_effect_columns_observable"),
       volume_column_visible = recorded(t, "volume_column", "volume_column_observable"),
@@ -1810,6 +1816,8 @@ function M.follow_device_routes(track, device_index, removed)
 end
 
 local function put_track(index, data, pattern_data)
+  -- (M4 n-song: a track made during a solo is Off, measured)
+  if M.data.solo_roots and #M.data.solo_roots > 0 and data.kind ~= "master" then data.mute_state, data.solo = 2, false end
   table.insert(M.data.tracks, index, data)
   follow_routes(false, index)
   move_pattern_tracks(function(t) return t >= index and t + 1 or t end)
@@ -1833,6 +1841,14 @@ local function take_track(index)
   move_pattern_tracks(function(t) if t == index then return nil end return t > index and t - 1 or t end)
   M.data.recount()
   fire(song_fields().tracks_observable, { type = "remove", index = index })
+  -- (M4 n-song: deleting the soloed track ends the solo: every track Active, measured)
+  for _, root in ipairs(M.data.solo_roots or {}) do
+    if root == data then
+      M.data.solo_roots = {}
+      M.solo_refresh()
+      break
+    end
+  end
   return data, pattern_data
 end
 
@@ -2080,6 +2096,99 @@ function ops.mute_track(index, state)
   local t = M.data.tracks[index]
   t.mute_state = state
   fire(t.mute_state_observable)
+end
+
+-- M4 (n-song): Renoise's solo, measured in 3.5.4 (n-song lab 6 and 7). The soloed track (a root) and what it plays through
+-- read soloed and are Active: its groups, a group's own tracks, the send tracks it feeds and, for a send, the tracks feeding
+-- it; every other non-master track is Off. A script's solo is exclusive, and its setter toggles the track's own solo when the
+-- value differs from what `solo_state` reads (false on a track soloed along with another solos that one on its own); an
+-- un-solo of a root (or deleting it) turns every track Active, solos cleared. A producer's solo of several tracks in the GUI
+-- (`ops.add_solo`) keeps several roots; un-soloing one of them ends them all here (not measured).
+local function send_numbers(track)
+  local out = {}
+  for _, device in ipairs(track.devices or {}) do
+    for _, parameter in ipairs(device.params or {}) do
+      if parameter.name:match("^Receiver") and parameter.value >= 0 then out[#out + 1] = parameter.value end
+    end
+  end
+  return out
+end
+
+local function solo_needs(i)
+  local tracks = M.data.tracks
+  local t = tracks[i]
+  local set = { [i] = true }
+  for g, u in ipairs(tracks) do
+    if u.kind == "group" and g > i and i >= g - u.members then set[g] = true end
+  end
+  if t.kind == "group" then
+    for k = i - t.members, i - 1 do set[k] = true end
+  end
+  local sends, n, mine = {}, 0, nil
+  for k, u in ipairs(tracks) do
+    if u.kind == "send" then
+      sends[n] = k
+      if k == i then mine = n end
+      n = n + 1
+    end
+  end
+  for _, number in ipairs(send_numbers(t)) do
+    if sends[number] then set[sends[number]] = true end
+  end
+  if mine then
+    for k, u in ipairs(tracks) do
+      for _, number in ipairs(send_numbers(u)) do
+        if number == mine then set[k] = true end
+      end
+    end
+  end
+  return set
+end
+
+function M.solo_refresh()
+  local tracks = M.data.tracks
+  local roots = M.data.solo_roots or {}
+  local soloed = {}
+  for _, root in ipairs(roots) do
+    for k, u in ipairs(tracks) do
+      if u == root then
+        for j in pairs(solo_needs(k)) do soloed[j] = true end
+      end
+    end
+  end
+  for k, u in ipairs(tracks) do
+    if u.kind ~= "master" then
+      local was_solo, was_mute = u.solo or false, u.mute_state
+      u.solo = soloed[k] or false
+      u.mute_state = (#roots == 0 or soloed[k]) and 1 or 2
+      if u.mute_state ~= was_mute then fire(u.mute_state_observable) end
+      if u.solo ~= was_solo then fire(u.solo_state_observable) end
+    end
+  end
+end
+
+function M.solo_set(t, value)
+  if t.kind == "master" then
+    -- (measured: no error, it reads false, and every track turns Active)
+    M.data.solo_roots = {}
+    M.solo_refresh()
+    return
+  end
+  if (t.solo or false) == (value == true) then return end
+  local root = false
+  for _, r in ipairs(M.data.solo_roots or {}) do root = root or r == t end
+  M.data.solo_roots = root and {} or { t }
+  M.solo_refresh()
+end
+
+-- The producer's solo button (exclusive, as a script's), and a solo added to another one (Renoise's GUI can; a script can't).
+function ops.solo(index, value) M.solo_set(M.data.tracks[index], value) end
+
+function ops.add_solo(index)
+  local roots = M.data.solo_roots or {}
+  roots[#roots + 1] = M.data.tracks[index]
+  M.data.solo_roots = roots
+  M.solo_refresh()
 end
 
 function ops.insert_device(index, spec, at)

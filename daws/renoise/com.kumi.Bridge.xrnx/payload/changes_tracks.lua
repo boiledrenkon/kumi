@@ -98,17 +98,420 @@ prop {
   title = function(name, _, to) return name .. (to.mute and " muted" or " unmuted") end,
 }
 
-prop {
-  kind = "track-solo", noun = "solo", master = false, undoable = false,
-  read = function(track) return { solo = track.solo_state == true } end,
-  wanted = function(_, input)
-    if type(input.solo) ~= "boolean" then bad("solo must be true or false") end
-    return { solo = input.solo }
-  end,
-  write = function(track, state) track.solo_state = state.solo end,
-  same = function(a, b) return a.solo == b.solo end,
-  title = function(name, _, to) return name .. (to.solo and " soloed" or " unsoloed") end,
-}
+-- track-solo. Renoise solos by rewriting mute states (measured in 3.5.4, n-song lab 6 and 7): a solo turns every other
+-- non-master track Off but what the soloed track plays through (its groups, a group's own tracks, the send tracks it feeds;
+-- for a send, the tracks feeding it), which reads soloed with it; a script's solo is exclusive; an un-solo turns every track
+-- Active, so the mutes from before the solo are gone. The solo setter toggles the track's own solo when the value differs
+-- from what `solo_state` reads: `false` on a track soloed only along with another solos that track on its own, and `true` on
+-- one that reads soloed changes nothing. So the record keeps every track's mute and solo (`prior.tracks`, by place and name;
+-- the bridge carries the places to a restore), the fence is a fingerprint of them all, and the restore writes them back where
+-- each track still holds what the apply left (`changed` otherwise, unless discard). A script can solo one track at a time:
+-- `with`, the other tracks to hear alone with it, are turned Active with what each plays through (Renoise's own solo of each
+-- says what that is). Neither mute nor solo is an undo step.
+
+local SOLO_ROUNDS = 64 -- (un-solo rounds: a solo takes two at most, the first making a track soloed along with another the soloed one)
+
+local function solo_snapshot(song)
+  local out = {}
+  for t = 1, rows.track_count(song) do
+    local track = song:track(t)
+    if not is_master(track) then
+      out[#out + 1] = { t = t, id = base.track_id(track), mute = track.mute_state, solo = track.solo_state == true }
+    end
+  end
+  return out
+end
+
+-- What the fence keeps of a snapshot: a fingerprint of every track's place, name, mute and solo.
+local function solo_print(list)
+  local a, b = 5381, 0
+  for _, e in ipairs(list) do
+    local text = string.format("%d:%s:%d:%s|", e.t, e.id, e.mute, e.solo and "1" or "0")
+    for i = 1, #text do
+      local byte = text:byte(i)
+      a = (a * 33 + byte) % 4294967296
+      b = (b * 65599 + byte) % 4294967296
+    end
+  end
+  return string.format("%08x%08x", a, b)
+end
+
+-- The tracks that read soloed now, as a set and as a key ("2,6").
+local function soloed_now(song)
+  local set, key = {}, {}
+  for t = 1, rows.track_count(song) do
+    local track = song:track(t)
+    if not is_master(track) and track.solo_state then
+      set[t] = true
+      key[#key + 1] = t
+    end
+  end
+  return set, table.concat(key, ",")
+end
+
+-- Every solo taken away (Renoise turns every track Active); false when one stays.
+local function unsolo_all(song)
+  for _ = 1, SOLO_ROUNDS do
+    local first
+    for t = 1, rows.track_count(song) do
+      local track = song:track(t)
+      if not is_master(track) and track.solo_state then
+        first = track
+        break
+      end
+    end
+    if not first then return true end
+    first.solo_state = false
+  end
+  return false
+end
+
+-- Tracks by name for a sentence: “Hat”, “Hat” and “Bass”, “Hat”, “Bass”, “Pad” and 2 more.
+local function solo_names(song, list)
+  local names = {}
+  for i, t in ipairs(list) do
+    if i > 3 then
+      names[#names + 1] = (#list - 3) .. " more"
+      break
+    end
+    names[#names + 1] = base.q(named(t, song:track(t)))
+  end
+  if #names <= 1 then return names[1] or "" end
+  return table.concat(names, ", ", 1, #names - 1) .. " and " .. names[#names]
+end
+
+local function solo_input(song, env, input)
+  local index, track = find(song, env, input.ref, "track-solo")
+  if is_master(track) then bad("the master track has no solo") end
+  if type(input.solo) ~= "boolean" then bad("solo must be true or false") end
+  local with = {}
+  if input.with ~= nil and input.with ~= json.null then
+    if not input.solo then bad("with is for a solo: the other tracks to hear alone with it") end
+    if type(input.with) ~= "table" then bad("with: a list of track refs") end
+    -- (each one is a solo of its own while the change is made, every track's mute written each time)
+    if #input.with > 64 then bad("with: 64 tracks at most") end
+    local seen = { [index] = true }
+    for _, reference in ipairs(input.with) do
+      local w, other = find(song, env, reference, "track-solo")
+      if is_master(other) then bad("with: the master track plays anyway") end
+      if not seen[w] then
+        seen[w] = true
+        with[#with + 1] = w
+      end
+    end
+    table.sort(with)
+  end
+  return { index = index, track = track, name = named(index, track), solo = input.solo, with = with }
+end
+
+local function solo_title(song, plan)
+  if not plan.solo then return plan.name .. " unsoloed" end
+  if #plan.with == 0 then return plan.name .. " soloed" end
+  return plan.name .. " soloed, with " .. solo_names(song, plan.with)
+end
+
+local ACTIVE = function() return renoise.Track.MUTE_STATE_ACTIVE end
+local OFF = function() return renoise.Track.MUTE_STATE_OFF end
+local MUTED = function() return renoise.Track.MUTE_STATE_MUTED end
+
+local function solo_preview(song, env, input)
+  local plan = solo_input(song, env, input)
+  local tracks = solo_snapshot(song)
+  local soloed = plan.track.solo_state == true
+  local display = { title = solo_title(song, plan), before = { solo = soloed }, after = { solo = plan.solo } }
+  local notes = {}
+  if plan.solo then
+    local others = {}
+    for _, e in ipairs(tracks) do
+      if e.solo and e.t ~= plan.index then others[#others + 1] = e.t end
+    end
+    notes[#notes + 1] = "Renoise solos by turning every other track Off but what it plays through (its group, the send tracks it feeds); "
+      .. "the end of a solo turns every track back on, muted ones too. Kumi's undo puts each track back as it was."
+    if #others > 0 and not soloed then
+      notes[#notes + 1] = string.format("Renoise's solo is exclusive: %s stops being soloed.", solo_names(song, others))
+    end
+    if #plan.with > 0 then
+      notes[#notes + 1] = string.format("Renoise lets a script solo one track: %s %s turned on instead, with what %s through.",
+        solo_names(song, plan.with), #plan.with == 1 and "is" or "are", #plan.with == 1 and "it plays" or "they play")
+    end
+  elseif soloed then
+    local quiet = {}
+    for _, e in ipairs(tracks) do
+      if e.mute ~= ACTIVE() then quiet[#quiet + 1] = e.t end
+    end
+    notes[#notes + 1] = "Renoise ends the whole solo and turns every track back on, muted ones too"
+      .. (#quiet > 0 and string.format(" (%s now)", solo_names(song, quiet) .. (#quiet == 1 and " is Off or muted" or " are Off or muted")) or "")
+      .. ". Kumi's undo puts each track back as it was."
+  else
+    display.unchanged = true
+  end
+  notes[#notes + 1] = NOT_UNDOABLE
+  display.note = table.concat(notes, " ")
+  return {
+    target = target(env, plan.index), prior = { solo = soloed, tracks = tracks },
+    fence = { id = base.track_id(plan.track), label = plan.name, tracks = solo_print(tracks) },
+    display = display,
+  }
+end
+
+-- What Renoise did to the other tracks, from the snapshots before and after (the same tracks, in order).
+local function solo_effects(song, plan, before, after)
+  local off, on, unsoloed, muted = {}, {}, {}, {}
+  for k, b in ipairs(before) do
+    local a = after[k]
+    if a and b.t ~= plan.index then
+      if b.mute ~= a.mute and a.mute == OFF() then off[#off + 1] = b.t end
+      if b.mute ~= a.mute and a.mute == ACTIVE() then
+        on[#on + 1] = b.t
+        if b.mute == MUTED() then muted[#muted + 1] = b.t end
+      end
+      if b.solo and not a.solo then unsoloed[#unsoloed + 1] = b.t end
+    end
+  end
+  local notes = {}
+  if #off > 0 then notes[#notes + 1] = string.format("Renoise turned %s Off.", #off > 3 and (#off .. " other tracks") or solo_names(song, off)) end
+  if plan.solo and #unsoloed > 0 then
+    notes[#notes + 1] = string.format("%s %s soloed any more (a solo is exclusive).", solo_names(song, unsoloed), #unsoloed == 1 and "isn't" or "aren't")
+  end
+  if #on > 0 then
+    local text = #on > 3 and (#on .. " tracks") or solo_names(song, on)
+    if #muted > 0 then text = text .. string.format(" (%s muted before)", #muted == 1 and solo_names(song, muted) or (#muted .. " of them")) end
+    notes[#notes + 1] = string.format("Renoise turned %s back on.", text)
+  end
+  return notes
+end
+
+-- Writes `wanted` (a snapshot by place now: t -> {mute, solo}) back over the tracks `places`: every solo taken away, the solo
+-- that makes its soloed tracks (the track whose own solo gives exactly them, tried from the last back, each from no solo), then
+-- every mute state. Tracks out of the snapshot keep a mute the producer gave them. Returns the tracks a script can't solo again
+-- along with the others (soloed in the snapshot by a solo of several, as Renoise's GUI can).
+local function solo_write_back(song, wanted, places, x_index, x_solo)
+  local count = rows.track_count(song)
+  local kept = {}
+  for t = 1, count do
+    local track = song:track(t)
+    if not wanted[t] and t ~= x_index and not is_master(track) and track.mute_state == MUTED() then kept[#kept + 1] = t end
+  end
+  if not unsolo_all(song) then fail("failed", "Renoise kept a solo on") end
+  local soloed, set = {}, {}
+  for _, t in ipairs(places) do
+    if wanted[t].solo then
+      soloed[#soloed + 1] = t
+      set[t] = true
+    end
+  end
+  if x_solo and not set[x_index] then
+    soloed[#soloed + 1] = x_index
+    set[x_index] = true
+    table.sort(soloed)
+  end
+  local key = table.concat(soloed, ",")
+  local found, best, best_score = false, nil, nil
+  for k = #soloed, 1, -1 do
+    local candidate = soloed[k]
+    if not unsolo_all(song) then fail("failed", "Renoise kept a solo on") end
+    song:track(candidate).solo_state = true
+    local now, now_key = soloed_now(song)
+    if now_key == key then
+      found = true
+      break
+    end
+    local score = 0
+    for t in pairs(now) do score = score + (set[t] and 1 or -2) end
+    if best_score == nil or score > best_score then best, best_score = candidate, score end
+  end
+  if not found and best then
+    unsolo_all(song)
+    song:track(best).solo_state = true
+  end
+  for _, t in ipairs(places) do
+    local track = song:track(t)
+    if track.mute_state ~= wanted[t].mute then track.mute_state = wanted[t].mute end
+  end
+  for _, t in ipairs(kept) do
+    local track = song:track(t)
+    if track.mute_state ~= MUTED() then track.mute_state = MUTED() end
+  end
+  local unsoloed = {}
+  for _, t in ipairs(soloed) do
+    if not song:track(t).solo_state then unsoloed[#unsoloed + 1] = t end
+  end
+  return unsoloed
+end
+
+local function soloed_key(list)
+  local key = {}
+  for _, e in ipairs(list) do
+    if e.solo then key[#key + 1] = e.t end
+  end
+  return table.concat(key, ",")
+end
+
+local function solo_apply(song, env, input, fence, desc)
+  local ok, plan = pcall(solo_input, song, env, input)
+  if not ok then base.gone_is_changed(plan) end
+  if fence.id ~= nil and fence.id ~= base.track_id(plan.track) then fail("changed", base.moved_text(fence.label or plan.name)) end
+  local before = solo_snapshot(song)
+  if solo_print(before) ~= fence.tracks then
+    fail("changed", "a track's mute or solo changed since the preview, or a track was made, deleted or renamed: read again")
+  end
+  local soloed = plan.track.solo_state == true
+  local same = false
+  if plan.solo and (soloed or #plan.with > 0) then
+    -- (each other track soloed first, from no solo: what Renoise solos with it is what it plays through)
+    local needs = {}
+    for _, w in ipairs(plan.with) do
+      if not unsolo_all(song) then fail("failed", "Renoise kept a solo on") end
+      song:track(w).solo_state = true
+      for t in pairs((soloed_now(song))) do needs[t] = true end
+    end
+    -- (a track that reads soloed may be soloed only along with another: its own solo is made from no solo)
+    if not unsolo_all(song) then fail("failed", "Renoise kept a solo on") end
+    plan.track.solo_state = true
+    for t in pairs(needs) do
+      local track = song:track(t)
+      if not track.solo_state and track.mute_state ~= ACTIVE() then track.mute_state = ACTIVE() end
+    end
+    -- (it was soloed on its own already: the producer's mutes since that solo go back as they were)
+    if #plan.with == 0 and select(2, soloed_now(song)) == soloed_key(before) then
+      for _, e in ipairs(before) do
+        local track = song:track(e.t)
+        if track.mute_state ~= e.mute then track.mute_state = e.mute end
+      end
+      same = true
+    end
+  elseif plan.solo then
+    plan.track.solo_state = true
+  elseif soloed then
+    -- (a track soloed along with another becomes the soloed one at the first un-solo, and the second ends the solo)
+    for _ = 1, SOLO_ROUNDS do
+      if not plan.track.solo_state then break end
+      plan.track.solo_state = false
+    end
+  end
+  local after = solo_snapshot(song)
+  if (plan.track.solo_state == true) ~= plan.solo then
+    -- (Renoise took something else: every track goes back as it was, so nothing half-done stays)
+    local wanted, places = {}, {}
+    for _, e in ipairs(before) do
+      wanted[e.t] = e
+      places[#places + 1] = e.t
+    end
+    pcall(solo_write_back, song, wanted, places, plan.index, soloed)
+    fail("failed", "Renoise kept " .. plan.name .. "'s solo as it was")
+  end
+  local notes = solo_effects(song, plan, before, after)
+  if #plan.with > 0 then
+    notes[#notes + 1] = string.format("A script solos one track at a time: %s %s on instead.", solo_names(song, plan.with), #plan.with == 1 and "is" or "are")
+  end
+  if same then
+    notes[#notes + 1] = "It was soloed on its own already: nothing changed."
+  elseif #notes > 0 then
+    notes[#notes + 1] = "Kumi's undo puts each track back as it was."
+  end
+  notes[#notes + 1] = NOT_UNDOABLE
+  local applied = {}
+  for k, e in ipairs(after) do applied[k] = { t = e.t, mute = e.mute, solo = e.solo } end
+  return {
+    applied = { solo = plan.track.solo_state == true, tracks = applied },
+    display = { title = solo_title(song, plan), before = { solo = soloed }, after = { solo = plan.solo }, note = table.concat(notes, " ") },
+    undo = { desc = desc, entry = false },
+    target = target(env, plan.index),
+  }
+end
+
+local function solo_restore(song, env, restore, desc)
+  local reference = restore.target and restore.target.ref
+  local ok, index, track = pcall(find, song, env, reference, "track-solo")
+  if not ok then
+    if type(index) == "table" and index.code == "failed" then index.code = "gone" end
+    error(index, 0)
+  end
+  local prior, applied = restore.prior, restore.applied
+  if type(prior) ~= "table" or type(applied) ~= "table" then bad("prior and applied: the solo's tracks") end
+  -- (the snapshots' places are carried to now by the bridge, which leaves out a track deleted since: `prior.lost`)
+  local wanted, left = {}, {}
+  for _, e in ipairs(type(prior.tracks) == "table" and prior.tracks or {}) do
+    if type(e) == "table" and type(e.t) == "number" then wanted[e.t] = e end
+  end
+  for _, e in ipairs(type(applied.tracks) == "table" and applied.tracks or {}) do
+    if type(e) == "table" and type(e.t) == "number" then left[e.t] = e end
+  end
+  local count = rows.track_count(song)
+  local places, strangers = {}, {}
+  for t, e in pairs(wanted) do
+    if t >= 1 and t <= count and not is_master(song:track(t)) and base.track_id(song:track(t)) == e.id then
+      places[#places + 1] = t
+    else
+      strangers[#strangers + 1] = t
+    end
+  end
+  table.sort(places)
+  table.sort(strangers)
+  local function holds(t, state)
+    local now = song:track(t)
+    return state ~= nil and now.mute_state == state.mute and (now.solo_state == true) == (state.solo == true)
+  end
+  local name = named(index, track)
+  local x_prior = prior.solo == true
+  local back = (track.solo_state == true) == x_prior
+  for _, t in ipairs(places) do back = back and holds(t, wanted[t]) end
+  if back and #strangers == 0 then
+    return {
+      restored = { solo = x_prior }, display = { title = name .. (x_prior and " soloed" or " unsoloed") .. " (put back)" },
+      undo = { desc = desc, entry = false }, unwritten = true,
+    }
+  end
+  local moved = {}
+  for _, t in ipairs(places) do
+    if not holds(t, left[t]) then moved[#moved + 1] = t end
+  end
+  if (track.solo_state == true) ~= (applied.solo == true) and not wanted[index] then moved[#moved + 1] = index end
+  if not restore.discard then
+    if #moved > 0 then
+      fail("changed", string.format("%s mute or solo changed in Renoise since Kumi's solo", #moved > 3 and (#moved .. " tracks'") or (solo_names(song, moved) .. "'s")))
+    end
+    if #strangers > 0 then
+      fail("changed", string.format("%s at %s place%s isn't the track it was (renamed, or another track): discard puts back the rest",
+        #strangers == 1 and "the track" or (#strangers .. " tracks"), #strangers == 1 and "its" or "their", #strangers == 1 and "" or "s"))
+    end
+  end
+  local before = {}
+  for _, t in ipairs(places) do before[t] = song:track(t).mute_state end
+  local unsoloed = solo_write_back(song, wanted, places, index, x_prior)
+  local notes, again, missed = {}, {}, {}
+  for _, t in ipairs(places) do
+    if wanted[t].mute == MUTED() and before[t] ~= MUTED() then again[#again + 1] = t end
+    if not holds(t, wanted[t]) then missed[#missed + 1] = t end
+  end
+  if #missed == 0 then
+    notes[#notes + 1] = "Every track's mute and solo are as they were" .. (#again > 0 and string.format(" (%s muted again).", solo_names(song, again)) or ".")
+  end
+  if #unsoloed > 0 then
+    notes[#notes + 1] = string.format("Renoise lets a script solo one track at a time: %s %s but %s shown soloed.", solo_names(song, unsoloed),
+      #unsoloed == 1 and "plays" or "play", #unsoloed == 1 and "isn't" or "aren't")
+  end
+  local other_missed = {}
+  for _, t in ipairs(missed) do
+    local in_unsoloed = false
+    for _, u in ipairs(unsoloed) do in_unsoloed = in_unsoloed or u == t end
+    if not in_unsoloed then other_missed[#other_missed + 1] = t end
+  end
+  if #other_missed > 0 then notes[#notes + 1] = string.format("Renoise kept %s as the solo left %s.", solo_names(song, other_missed), #other_missed == 1 and "it" or "them") end
+  local lost = type(prior.lost) == "number" and prior.lost or 0
+  if lost > 0 then notes[#notes + 1] = string.format("%s deleted since %s.", lost == 1 and "A track" or (lost .. " tracks"), lost == 1 and "isn't in it" or "aren't in it") end
+  if #strangers > 0 then
+    notes[#notes + 1] = string.format("%s that %s the track%s %s left as Renoise left %s.", #strangers == 1 and "A track" or (#strangers .. " tracks"),
+      #strangers == 1 and "isn't" or "aren't", #strangers == 1 and " it was" or "s they were", #strangers == 1 and "is" or "are", #strangers == 1 and "it" or "them")
+  end
+  return {
+    restored = { solo = track.solo_state == true },
+    display = { title = name .. (x_prior and " soloed" or " unsoloed") .. " (put back)", note = #notes > 0 and table.concat(notes, " ") or nil },
+    undo = { desc = desc, entry = false },
+  }
+end
+
+base.register({ kind = "track-solo", custom = true, preview = solo_preview, apply = solo_apply, restore = solo_restore })
 
 prop {
   kind = "track-rename", noun = "name", master = false, undoable = true,
