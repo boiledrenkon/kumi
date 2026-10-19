@@ -1,0 +1,98 @@
+-- M4 (n-song): the disruption matrix for the places the n-song kinds keep: each record against a track, device, pattern or
+-- slot made, deleted or swapped before what it holds. Each cell follows the object or refuses with nothing touched.
+local T = ...
+local mock = T.mock
+local test, eq, ok = T.test, T.eq, T.ok
+local H = T.harness
+local K = assert(loadfile(T.tests_dir .. "change_kit.lua"))(T)
+
+local function seq() return table.concat(mock.data.sequence, ",") end
+local function note_at(p, t, l) return mock.song:pattern(p):track(t):line(l):note_column(1).note_string end
+
+test("matrix: a cloned block is followed through a slot the producer deleted before it", function()
+  local _, peer = K.setup(nil, { patterns = 4, sequence = { 1, 2, 3, 4 }, sequence_length = 4 })
+  local E = K.place(peer)
+  local record = K.change(peer, "slot-clone", { ref = K.ref(E, "seq", 3) })
+  eq(seq(), "1,2,3,5,4")
+  mock.run_callback(function() mock.song.sequencer:delete_sequence_at(1) end)
+  eq(seq(), "2,3,5,4")
+  ok(K.restore(peer, record).result, "followed")
+  eq(seq(), "2,3,4")
+  H.no_dialogs()
+end)
+
+test("matrix: a moved slot whose sequence lost a slot after it, and one whose pattern pool grew, is followed", function()
+  local _, peer = K.setup(nil, { patterns = 4, sequence = { 1, 2, 3, 4 }, sequence_length = 4 })
+  local E = K.place(peer)
+  local record = K.change(peer, "slot-move", { ref = K.ref(E, "seq", 1), index = 2 })
+  eq(seq(), "2,1,3,4")
+  mock.ops.insert_pattern()
+  mock.run_callback(function() mock.song.sequencer:delete_sequence_at(4) end)
+  eq(seq(), "2,1,3")
+  ok(K.restore(peer, record).result)
+  eq(seq(), "1,2,3")
+  H.no_dialogs()
+end)
+
+test("matrix: an alias's kept automation finds its device through a device the producer made before it on the track", function()
+  local gainer = { name = "Gainer", path = "Audio/Effects/Native/Gainer", params = { { name = "Gain", value = 1, min = 0, max = 4 } } }
+  local _, peer = K.setup(nil, { tracks = { { name = "Kick" }, { name = "Bass", devices = { gainer } } } })
+  local E = K.place(peer)
+  mock.ops.automate(2, 2, 2, 1, { { time = 3, value = 0.3, scaling = 0 } }, 2)
+  mock.ops.set_note(2, 2, 1, 1, { note = 50 })
+  local record = K.change(peer, "pattern-alias", { ref = K.ref(E, "pattern", 2), track = K.ref(E, "track", 2), alias = K.ref(E, "pattern", 1) })
+  -- the producer puts a device before the Gainer: Kumi's own undo needs the pattern untouched, which a device doesn't touch
+  mock.run_callback(function() mock.song:track(2):insert_device_at("Audio/Effects/Native/Delay", 2) end)
+  local undone = K.restore(peer, record)
+  -- (the record's own ref is a pattern track's: a device made doesn't move it)
+  ok(undone.result, "restored: " .. tostring(undone.error and undone.error.message))
+  eq(note_at(2, 2, 1), "D-4")
+  local automation = mock.data.patterns[2].tracks[2].automation
+  eq(#automation, 1)
+  eq(automation[1].parameter, mock.data.tracks[2].devices[3].params[1], "the Gainer, one place further now")
+  H.no_dialogs()
+end)
+
+test("matrix: a block copy's two places are carried through a track made before them; its source track deleted is gone", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  mock.ops.set_note(1, 3, 1, 1, { note = 48 })
+  local record = K.change(peer, "lines-copy", { pattern = K.ref(E, "pattern", 1), track = K.ref(E, "track", 3), first = 1, last = 2, toTrack = K.ref(E, "track", 4), move = true })
+  mock.ops.set_note(2, 2, 1, 1, { note = 55 })
+  local other = K.change(peer, "lines-copy", { pattern = K.ref(E, "pattern", 2), track = K.ref(E, "track", 2), first = 1, last = 2, toTrack = K.ref(E, "track", 1), move = true })
+  mock.ops.insert_track(1, { name = "Intro" })
+  ok(K.restore(peer, record).result, "followed")
+  eq(note_at(1, 4, 1), "C-4", "back on Bass, now the fourth")
+  eq(note_at(1, 5, 1), "---")
+  mock.ops.remove_track(3) -- Hat, the second record's source
+  K.failure(K.restore(peer, other), "gone")
+  H.no_dialogs()
+end)
+
+test("matrix: a transposition is followed through a track made before it; a slot colour's record is stale with the pool changed", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  mock.ops.set_note(1, 3, 1, 1, { note = 48 })
+  local transposed = K.change(peer, "notes-transpose", { pattern = K.ref(E, "pattern", 1), track = K.ref(E, "track", 3), semitones = 2 })
+  local colour = K.change(peer, "slot-color", { ref = K.ref(E, "pattern", 2), track = K.ref(E, "track", 1), color = "#123456" })
+  mock.ops.insert_track(1, { name = "Intro" })
+  ok(K.restore(peer, transposed).result, "followed")
+  eq(note_at(1, 4, 1), "C-4")
+  mock.ops.insert_pattern()
+  K.failure(K.restore(peer, colour), "stale")
+  ok(mock.data.patterns[2].tracks[2].color, "nothing written")
+  H.no_dialogs()
+end)
+
+test("matrix: a song setting's record is stale once another song is open; a track setting's after a swap", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  local headroom = K.change(peer, "song-headroom", { headroomDb = -3 })
+  local collapse = K.change(peer, "track-collapse", { ref = K.ref(E, "track", 2), collapsed = true })
+  mock.ops.swap_tracks(3, 4)
+  K.failure(K.restore(peer, collapse), "stale")
+  ok(K.restore(peer, headroom).result, "a swap leaves the song's settings alone")
+  mock.fire(mock.tool.app_new_document_observable)
+  K.failure(K.restore(peer, headroom), "stale")
+  H.no_dialogs()
+end)
