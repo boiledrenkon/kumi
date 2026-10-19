@@ -62,42 +62,20 @@ local function rebuild(value, key, leaf)
   return leaf(value, key)
 end
 
--- `params` with the epoch `old` made `new`: its `epoch` and every track and song ref of that epoch (the song is the one song).
--- Nil when a ref of that epoch names something else (a device, a pattern, a slot...): those numbers are not the same in a later
--- epoch.
-function M.relabel(params, old, new)
-  local refused = false
+-- `params` with every ref of an earlier epoch than `now` that `survives(epoch, kind)` says still names the same thing made one of
+-- `now`'s. (Kumi keeps the names of what an epoch that moved for something else left alone, and so the refs behind them.) Also
+-- answers the epochs of the refs left as they were.
+function M.relabel_surviving(params, now, survives)
+  local left = {}
   local moved = rebuild(params, nil, function(value, key)
-    if type(value) ~= "string" then return value, false end
-    if key == "epoch" then
-      if value == old then return new, true end
-      return value, false
-    end
-    local ref = M.parse(value)
-    if ref and ref.epoch == old then
-      if ref.kind ~= "track" and ref.kind ~= "song" then
-        refused = true
-        return value, false
-      end
-      return M.make(new, ref.kind, unpack(ref.n)), true
-    end
-    return value, false
-  end)
-  if refused then return nil end
-  return moved
-end
-
--- `params` with every track ref of an earlier epoch that `kept(epoch)` says still names the same tracks made one of `now`'s.
--- (Kumi keeps the names of tracks through an epoch that moved for something else, and so the refs behind them.)
-function M.relabel_tracks(params, now, kept)
-  return (rebuild(params, nil, function(value, key)
     if type(value) ~= "string" or key == "epoch" then return value, false end
     local ref = M.parse(value)
-    if ref and (ref.kind == "track" or ref.kind == "song") and ref.epoch ~= now and kept(ref.epoch) then
-      return M.make(now, ref.kind, unpack(ref.n)), true
-    end
+    if not ref or ref.epoch == now then return value, false end
+    if survives(ref.epoch, ref.kind) then return M.make(now, ref.kind, unpack(ref.n)), true end
+    left[ref.epoch] = true
     return value, false
-  end))
+  end)
+  return moved, left
 end
 
 -- The shifts of the track list since layout `since`: each { layout, type = "insert" | "remove", index }, oldest first, one per

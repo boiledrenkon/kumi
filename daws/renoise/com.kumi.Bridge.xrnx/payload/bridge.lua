@@ -43,22 +43,52 @@ local function epoch()
   return string.format("%x", b.epoch_n)
 end
 
--- The epoch moves when refs stop meaning what they meant. `tracks_kept`: the journal's places (tracks) still hold. `refs_kept`:
--- the track numbers are what they were (a change to devices, patterns, instruments or the sequence), so a track ref of an
--- earlier epoch of the same run is still one (b.track_group counts the runs; b.groups_of says which run each epoch is in).
-local function bump_epoch(reason, tracks_kept, refs_kept)
+-- The epoch moves when refs stop meaning what they meant. `tracks_kept`: the journal's places (tracks) still hold. `broken`: the
+-- lists whose numbers moved (a set of CATEGORIES); a ref of an earlier epoch is still the same thing when none of the categories
+-- its kind is numbered by moved since (b.snap keeps the count of each, per epoch).
+local CATEGORIES = { "document", "tracks", "devices", "samples", "phrases", "patterns", "instruments", "sequence" }
+local DEPENDS = {
+  song = { "document" }, track = { "document", "tracks" }, device = { "document", "tracks", "devices" },
+  param = { "document", "tracks", "devices" }, ptrack = { "document", "tracks", "patterns" },
+  slot = { "document", "tracks", "sequence" }, seq = { "document", "sequence" }, pattern = { "document", "patterns" },
+  instrument = { "document", "instruments" }, sample = { "document", "instruments", "samples" },
+  phrase = { "document", "instruments", "phrases" },
+}
+-- The lists a notifier's change moves the numbers of.
+local BREAKS = {
+  devices = { "devices" }, samples = { "samples" }, phrases = { "phrases" }, patterns = { "patterns" },
+  instruments = { "instruments" }, sequence = { "sequence" },
+}
+local EVERYTHING = { "document", "tracks", "devices", "samples", "phrases", "patterns", "instruments", "sequence" }
+
+local function bump_epoch(reason, tracks_kept, broken)
   b.epoch_n = b.epoch_n + 1
+  broken = broken or EVERYTHING
   -- The layout goes on counting across epochs (no event says when an epoch moves for a device or a pattern, so a layout
   -- that started over would look older than the one Kumi holds). The shifts start over when track numbers can't be followed.
-  if not refs_kept then
-    b.shifts = {}
-    b.track_group = b.track_group + 1
+  for _, category in ipairs(broken) do
+    b.cat[category] = (b.cat[category] or 0) + 1
+    if category == "tracks" or category == "document" then b.shifts = {} end
   end
-  b.groups_of[b.epoch_n] = b.track_group
-  b.groups_of[b.epoch_n - 512] = nil
+  local snapshot = {}
+  for _, category in ipairs(CATEGORIES) do snapshot[category] = b.cat[category] or 0 end
+  b.snap[b.epoch_n] = snapshot
+  b.snap[b.epoch_n - 512] = nil
   -- (the journal's places are tracks: a change to devices, patterns or instruments leaves them where they were)
   if b.journal and not tracks_kept then changes.journal_reset(b.journal) end
   log.write("info", "epoch " .. epoch() .. ": " .. reason)
+end
+
+-- Whether a ref of `kind` made in epoch `from` (hex) names the same thing in epoch `to` (default: now).
+local function survives(from, kind, to)
+  local a, c = tonumber(from, 16), to and tonumber(to, 16) or b.epoch_n
+  local before, after = b.snap[a], b.snap[c]
+  local depends = DEPENDS[kind]
+  if not before or not after or not depends then return false end
+  for _, category in ipairs(depends) do
+    if before[category] ~= after[category] then return false end
+  end
+  return true
 end
 
 -- How many shifts of the track list the tool keeps to carry refs through.
@@ -378,7 +408,7 @@ end
 -- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
 -- asks for the whole song to be watched anew.
 local function on_structural(reason, kind, op, owner, token)
-  bump_epoch(reason, true, true)
+  bump_epoch(reason, true, BREAKS[kind])
   local song = renoise.song()
   if not song then return end
   local lists = { instruments = b.groups.instruments, patterns = b.groups.patterns }
@@ -433,7 +463,7 @@ local function on_tracks(op)
   local swapped = op.type == "swap" and expected == count and exchange(b.groups.tracks, op.index, op.index2)
   if swapped then
     -- (the tracks are the same objects in another order: they keep their watchers and their groups move with them)
-    bump_epoch("tracks were swapped", true, false)
+    bump_epoch("tracks were swapped", true, { "tracks" })
     changes.journal_track_event(b.journal, "swap", op.index, song:is_undo_redoing(), op.index2)
     conns:event("tracks", { count = count, made = json.array(), gone = json.array(), layout = b.layout, epoch = epoch() })
     return
@@ -690,18 +720,18 @@ end
 
 local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true }
 
--- Whether epoch `from` and the epoch now have the same track numbers (every move between them was to devices, patterns,
--- instruments or the sequence).
-local function tracks_kept_since(from)
-  local a, c = tonumber(from, 16), b.epoch_n
-  return a ~= nil and b.groups_of[a] ~= nil and b.groups_of[a] == b.groups_of[c]
-end
-
--- An answer whose epoch is not the request's says what survives: the track refs the request held are still the same tracks.
+-- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
+-- in the answer's epoch (`tracks` too, for a reader that knows only that).
+local ALL_KINDS = { "song", "track", "device", "param", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase" }
 local function say_kept(result, from)
   if type(result) ~= "table" or type(from) ~= "string" or type(result.epoch) ~= "string" or result.epoch == from then return result end
-  local a, c = tonumber(from, 16), tonumber(result.epoch, 16)
-  if a and c and b.groups_of[a] ~= nil and b.groups_of[a] == b.groups_of[c] then result.kept = { from = from, tracks = true } end
+  local kinds = {}
+  for _, kind in ipairs(ALL_KINDS) do
+    if survives(from, kind, result.epoch) then kinds[#kinds + 1] = kind end
+  end
+  if #kinds > 0 then
+    result.kept = { from = from, tracks = survives(from, "track", result.epoch), kinds = kinds }
+  end
   return result
 end
 
@@ -712,12 +742,18 @@ function M.handle(_, request)
   local from
   if CARRIED[request.method] then
     from = type(params) == "table" and params.epoch or nil
-    -- A request made in an earlier epoch of the same run of track numbers, which names only tracks, is made in this one.
-    if type(from) == "string" and from ~= epoch() and tracks_kept_since(from) then
-      params = refs.relabel(params, from, epoch()) or params
+    -- A ref of an earlier epoch that names the same thing now is made in this one, whatever epoch the request names (Kumi keeps
+    -- the names of what a device or a sequence change left alone); so is the request's own epoch, when every ref of it was.
+    if type(params) == "table" then
+      local left
+      params, left = refs.relabel_surviving(params, epoch(), survives)
+      if type(from) == "string" and from ~= epoch() and not left[from] and survives(from, "song") then
+        local copy = {}
+        for k, v in pairs(params) do copy[k] = v end
+        copy.epoch = epoch()
+        params = copy
+      end
     end
-    -- And a track ref of an earlier epoch with the track numbers still in place is that track, whatever epoch the request names.
-    params = refs.relabel_tracks(params, epoch(), tracks_kept_since)
     if request.method == "change_restore" and type(params) == "table" and params.kind == "track-delete" then
       -- (the deleted track's own ref is gone by design: only its place is carried)
       params = carried(params, changes.carry_restore)
@@ -767,8 +803,12 @@ function M.start(h, reloading)
   })
   b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
   b.layout, b.shifts, b.shape = b.layout or 0, b.shifts or {}, b.shape or 0
-  b.track_group, b.groups_of = b.track_group or 1, b.groups_of or {}
-  b.groups_of[b.epoch_n] = b.groups_of[b.epoch_n] or b.track_group
+  b.cat, b.snap = b.cat or {}, b.snap or {}
+  if not b.snap[b.epoch_n] then
+    local snapshot = {}
+    for _, category in ipairs(CATEGORIES) do snapshot[category] = b.cat[category] or 0 end
+    b.snap[b.epoch_n] = snapshot
+  end
   b.changed = b.changed or 0
   b.document = b.document or 1
   -- A song's id (the one in the project row) and which opening of a song this is: the same while it stays open.

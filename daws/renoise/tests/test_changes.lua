@@ -2256,7 +2256,12 @@ test("changes: tracks that swapped places are not kept: an older track ref is st
   local ref = track_ref(e1, 1)
   local moved = apply(peer, "track-move", { ref = ref, index = 3 }, "Kumi: move (kk21)", preview(peer, "track-move", { ref = ref, index = 3 }).fence, e1, l1)
   ok(moved.result, json.encode(moved.error or {}))
-  eq(moved.result.kept, nil)
+  -- what the swap left alone is said; the tracks and what hangs on them are not
+  eq(moved.result.kept.tracks, false)
+  local kinds = {}
+  for _, kind in ipairs(moved.result.kept.kinds) do kinds[kind] = true end
+  ok(kinds.pattern and kinds.seq and kinds.instrument and kinds.song, json.encode(moved.result.kept))
+  ok(not kinds.track and not kinds.device and not kinds.param and not kinds.slot and not kinds.ptrack, json.encode(moved.result.kept))
   failure(call(peer, "change_preview", { kind = "track-volume", input = { ref = ref, volumeDb = -3 }, epoch = e1, layout = l1 }), "stale")
   H.no_dialogs()
 end)
@@ -2291,5 +2296,43 @@ test("changes: a song setting made before a sequence or device change is put bac
   eq(#mock.song.transport.loop_sequence_range, 0)
   -- a slot ref from before is not kept
   failure(call(peer, "change_preview", { kind = "slot-section", input = { ref = seq_ref(e1, 1), name = "A" }, epoch = e1, layout = l1 }), "stale")
+  H.no_dialogs()
+end)
+
+local function kinds_of(kept)
+  local out = {}
+  for _, kind in ipairs(kept.kinds) do out[kind] = true end
+  return out
+end
+
+test("changes: a device change leaves tracks, patterns, slots and instruments as they were, and a slot change leaves the slots alone no more", function()
+  local env, peer = device_song()
+  local e1, l1 = place(peer)
+  local add = { ref = track_ref(e1, 1), path = "Gainer" }
+  local added = apply(peer, "device-add", add, "Kumi: add (kl01)", preview(peer, "device-add", add).fence, e1, l1)
+  ok(added.result, json.encode(added.error or {}))
+  local kinds = kinds_of(added.result.kept)
+  ok(kinds.track and kinds.song and kinds.pattern and kinds.ptrack and kinds.seq and kinds.slot and kinds.instrument and kinds.sample and kinds.phrase,
+    json.encode(added.result.kept))
+  ok(not kinds.device and not kinds.param, "the device numbers moved: " .. json.encode(added.result.kept))
+  eq(added.result.kept.tracks, true)
+  -- notes are written to a pattern and a track the request names by refs from before the device was made
+  local notes = { pattern = pattern_ref(e1, 1), track = track_ref(e1, 3), lines = { { line = 1, notes = { { col = 1, note = "C-4" } } } } }
+  local e2, l2 = added.result.epoch, added.result.layout
+  local pv = call(peer, "change_preview", { kind = "notes-write", input = notes, epoch = e2, layout = l2 })
+  ok(pv.result, json.encode(pv.error or {}))
+  eq(pv.result.target.ref, e2 .. ":ptrack:1.3")
+  -- a slot made: the slots are not kept, the rest is
+  local existing = { pattern = pattern_ref(e2, 1) }
+  local ins = apply(peer, "slot-insert", existing, "Kumi: slot (kl02)", preview(peer, "slot-insert", existing).fence, e2, l2)
+  ok(ins.result, json.encode(ins.error or {}))
+  local after = kinds_of(ins.result.kept)
+  ok(not after.seq and not after.slot, json.encode(ins.result.kept))
+  ok(after.track and after.pattern and after.device and after.param and after.instrument, json.encode(ins.result.kept))
+  -- and a device ref from before the slot was made still names the device (the sequence moved no devices)
+  local e3, l3 = ins.result.epoch, ins.result.layout
+  local bypass = call(peer, "change_preview", { kind = "device-bypass", input = { ref = e2 .. ":device:1.2", bypass = true }, epoch = e3, layout = l3 })
+  ok(bypass.result, json.encode(bypass.error or {}))
+  failure(call(peer, "change_preview", { kind = "slot-section", input = { ref = seq_ref(e2, 1), name = "A" }, epoch = e3, layout = l3 }), "stale")
   H.no_dialogs()
 end)
