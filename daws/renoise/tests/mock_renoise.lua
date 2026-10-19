@@ -419,6 +419,12 @@ local function install_os_shims()
   io.exists = function(path)
     return real_rename(path, path) ~= nil
   end
+  -- (n-instruments: Renoise's temporary files, which it removes as it quits, are in the test's folder)
+  local temp_files = 0
+  os.tmpname = function(extension)
+    temp_files = temp_files + 1
+    return (M.temp_dir or "/tmp") .. "/renoise-tmp-" .. temp_files .. (extension or ".tmp")
+  end
   io.stat = function(path)
     if not (M.stat_modes[path] or io.exists(path)) then return nil, "no such file", 2 end
     return { type = "file", mode = M.stat_modes[path] or 33152, size = 0, mtime = M.stat_mtimes[path] or os.time() }
@@ -468,6 +474,7 @@ function M.reset(options)
   M.song = nil
   M.name_first = false
   M.platform = options.platform or "MACINTOSH"
+  M.temp_dir = options.temp_dir
   M.move_replaces = options.move_replaces ~= false
   M.fresh_wrappers = options.fresh_wrappers ~= false
   install_os_shims()

@@ -49,7 +49,7 @@ local function setup(options)
   if not options.no_reference then reference(env, options.reference) end
   if options.patch then options.patch(env) end
   mock.reset({ bundle_path = env.bundle, version = options.version, platform = options.platform, fresh_wrappers = options.fresh_wrappers,
-    move_replaces = options.move_replaces })
+    move_replaces = options.move_replaces, temp_dir = env.dir })
   for _, port in ipairs(options.busy_ports or {}) do mock.busy_ports[port] = true end
   if options.song ~= false then mock.song = mock.make_song(options.song) end
   dofile(env.bundle .. "main.lua")
