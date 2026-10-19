@@ -442,8 +442,13 @@ impl Shared {
     fn stalled(&self) -> Option<Busy> {
         let snapshot = lock(&self.snapshot);
         match snapshot.last_tick {
-            // (Running a request it claimed, the main thread doesn't tick: that isn't a stall.)
-            Some(tick) if tick.elapsed() > STALL && !snapshot.working => Some(snapshot.busy.unwrap_or(Busy::Modal)),
+            Some(tick) if tick.elapsed() > STALL => match snapshot.working {
+                // Running a request it claimed, the main thread doesn't tick: that isn't a stall while the request is young.
+                // One that runs longer may be inside a dialog it opened: what comes meanwhile is answered busy.
+                Some(since) if since.elapsed() <= STALL => None,
+                Some(_) => Some(Busy::Working),
+                None => Some(snapshot.busy.unwrap_or(Busy::Modal)),
+            },
             None => Some(Busy::Starting),
             _ => None,
         }
@@ -464,7 +469,10 @@ impl Shared {
             status["busyReason"] = busy.reason().into();
         }
         status["lastTickMs"] = snapshot.last_tick.map(|t| t.elapsed().as_millis() as u64).into();
-        status["working"] = snapshot.working.into();
+        status["working"] = snapshot.working.is_some().into();
+        if let Some(since) = snapshot.working {
+            status["workingMs"] = (since.elapsed().as_millis() as u64).into();
+        }
         status["connections"] = self.hub.connections().into();
         if let Value::Object(extra) = snapshot.status {
             for (key, value) in extra {
@@ -552,7 +560,9 @@ impl Shared {
             return Frame::error(id, code::FAILED, CLOSING);
         }
         // Whatever stops REAPER taking work while the request waits ends the wait: nothing would run it until that is over.
-        let cannot_run = || self.busy().is_some();
+        // Once the main thread runs it, the request waits for its own answer.
+        let claimed = waiter.claimed();
+        let cannot_run = || !claimed() && self.busy().is_some();
         match waiter.wait_unless(wait.min(MAX_WAIT), &self.stopping, &cannot_run) {
             Outcome::Answered(Ok(result)) => {
                 if let (Some(label), Some(step)) = (begun, result["stepId"].as_str()) {
@@ -826,7 +836,7 @@ mod tests {
                 status: json!({"tracks": 3}),
                 focus: Value::Null,
                 focus_at: None,
-                working: false,
+                working: None,
             }));
             let hub = Hub::default();
             let (tx, jobs) = queue::channel();
@@ -1144,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn the_main_thread_running_a_slow_request_is_working_not_stalled_and_the_request_is_answered() {
+    fn the_main_thread_running_a_slow_request_is_working_and_that_request_is_answered_while_others_are_told_busy() {
         let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
         let (mut stream, mut reader, _) = lab.authenticated();
         let jobs = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
@@ -1152,33 +1162,46 @@ mod tests {
         let main = thread::spawn(move || {
             let job = jobs.recv_timeout(Duration::from_secs(5)).unwrap();
             assert!(job.claim());
-            // A plug-in loads for longer than the stall limit: the main thread doesn't tick, and says it is working.
+            // A plug-in loads, or the request opened a licence prompt: the main thread doesn't tick, and says it is working.
             {
                 let mut snapshot = snapshot.lock().unwrap();
-                snapshot.working = true;
+                snapshot.working = Some(Instant::now());
                 snapshot.last_tick = Some(Instant::now() - Duration::from_secs(5));
             }
-            thread::sleep(Duration::from_millis(2000));
+            thread::sleep(Duration::from_millis(2600));
             {
                 let mut snapshot = snapshot.lock().unwrap();
-                snapshot.working = false;
+                snapshot.working = None;
                 snapshot.last_tick = Some(Instant::now());
             }
             job.answer(Ok(json!({"added": true})));
         });
         let frame = Request { id: 1, method: "change_apply".into(), params: json!({}), deadline_ms: Some(unix_ms() + 15_000) };
         stream.write_all(&Frame::Request(frame).encode()).unwrap();
-        // While it works, status (on another connection) says so and not that REAPER is stuck.
-        thread::sleep(Duration::from_millis(1700));
+        // While it is young, status (on another connection) says it works and not that REAPER is stuck.
+        thread::sleep(Duration::from_millis(800));
         let (mut other, mut other_reader, _) = lab.authenticated();
         let status = request(&mut other, &mut other_reader, 2, "status")["result"].clone();
         assert_eq!((&status["busy"], &status["working"]), (&json!(false), &json!(true)));
+        // Past the stall limit, what else comes is answered busy at once, not after its deadline.
+        thread::sleep(Duration::from_millis(1000));
+        let status = request(&mut other, &mut other_reader, 3, "status")["result"].clone();
+        assert_eq!((&status["busy"], &status["working"]), (&json!("working"), &json!(true)));
+        assert!(status["workingMs"].as_u64().unwrap() >= 1500, "{status}");
+        let started = Instant::now();
+        let read = Request { id: 4, method: "read".into(), params: json!({"kind": "track"}), deadline_ms: Some(unix_ms() + 15_000) };
+        other.write_all(&Frame::Request(read).encode()).unwrap();
+        let refused = read_frame(&mut other_reader);
+        assert_eq!(refused["error"]["code"], code::BUSY, "{refused}");
+        assert!(refused["error"]["message"].as_str().unwrap().contains("long request"), "{refused}");
+        assert!(started.elapsed() < Duration::from_millis(500), "waited {:?}", started.elapsed());
+        // The request that runs is answered when it ends.
         let response = read_frame(&mut reader);
         assert_eq!(response["result"], json!({"added": true}), "{response}");
         main.join().unwrap();
         // The main thread that stops ticking without a job to run is stalled, as before.
         lab.snapshot.lock().unwrap().last_tick = Some(Instant::now() - Duration::from_secs(5));
-        let status = request(&mut other, &mut other_reader, 3, "status")["result"].clone();
+        let status = request(&mut other, &mut other_reader, 5, "status")["result"].clone();
         assert_eq!(status["busy"], "modal");
     }
 

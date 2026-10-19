@@ -86,9 +86,10 @@ pub struct Snapshot {
     pub focus: Value,
     /// When `focus` was polled.
     pub focus_at: Option<Instant>,
-    /// The main thread is running a request it claimed: it isn't ticking, and it isn't stuck (a plug-in loading, a big
-    /// take). The sockets wait for the answer as long as the request allows.
-    pub working: bool,
+    /// The main thread is running a request it claimed, since then: it isn't ticking, and it isn't stuck (a plug-in
+    /// loading, a big take). That request's socket waits for its answer as long as the request allows; others are told
+    /// REAPER is busy once it has run longer than a stall.
+    pub working: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -392,7 +393,7 @@ impl Extension {
             refresh.hold();
             // The socket threads are told the main thread is working, not stalled, for as long as this takes; whatever
             // unwinds, they are told it stopped.
-            self.snapshot.lock().unwrap_or_else(|e| e.into_inner()).working = true;
+            self.snapshot.lock().unwrap_or_else(|e| e.into_inner()).working = Some(Instant::now());
             let _working = StopWorking(&self.snapshot);
             // A job before this one switched tabs or loaded a project (an action, a script): the project is looked at
             // again first, so this one is answered about the project REAPER has now, under its epoch.
@@ -734,7 +735,7 @@ struct StopWorking<'a>(&'a Mutex<Snapshot>);
 
 impl Drop for StopWorking<'_> {
     fn drop(&mut self) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).working = false;
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).working = None;
     }
 }
 

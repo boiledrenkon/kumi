@@ -233,6 +233,7 @@ fn busy_words(code: &str, profile: &DawProfile) -> String {
         "modal" => "a dialog is open".into(),
         "loading" => format!("a {} is loading", profile.words.place),
         "rendering" => "it's rendering".into(),
+        "working" => "it's still running a long request (a plug-in loading, or a dialog that request opened)".into(),
         other => other.into(),
     }
 }
