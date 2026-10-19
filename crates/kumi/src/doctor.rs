@@ -467,6 +467,10 @@ pub async fn doctor_checks(io: &DoctorIo) -> Result<Vec<Check>, RuntimeError> {
     let sign_in = sign_in_check(env, &servers).await?;
     let said = servers.iter().find(|s| sign_in.text.starts_with(&format!("{} isn't running", s.server.name))).map(|s| s.server.id.as_str());
     let mut checks = io.node_version.is_some().then(|| node.clone()).into_iter().chain([sign_in]).collect::<Vec<_>>();
+    // A KUMI_DAW Kumi doesn't know stops every session from starting.
+    if let Some(problem) = crate::config::daw_env_problem(env) {
+        checks.insert(0, Check::fix(format!("Kumi won't start: {problem}"), Some("Set KUMI_DAW to one of those, or unset it".into())));
+    }
     checks.extend(server_checks(&servers, env, said));
     // Each DAW's bridge and whether Kumi reaches the DAW through it.
     for provider in crate::daw::providers().into_iter().filter(|provider| crate::daw::in_use(*provider, env)) {

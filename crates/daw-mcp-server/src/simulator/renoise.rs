@@ -38,6 +38,12 @@ struct State {
     keeps_bound: bool,
     /// What the simulator was asked, in order: method and params.
     asked: Vec<(String, Value)>,
+    /// Renoise started again and is still on its empty song: the file it was opened with isn't loaded yet.
+    empty: bool,
+    /// How often Renoise was started again: each start is another process, so the song's identity is another.
+    restarts: u32,
+    /// The file loads while the next snapshot of the empty song is being read: that read ends `epoch-changed`.
+    load_during_look: bool,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -129,7 +135,16 @@ impl RenoiseScript {
     /// The song of the vectors: what the tool answers for the demo song.
     pub fn new() -> Self {
         RenoiseScript {
-            state: Arc::new(Mutex::new(State { epoch: VECTORS_EPOCH, cases: load_cases(), bulk: None, keeps_bound: true, asked: vec![] })),
+            state: Arc::new(Mutex::new(State {
+                epoch: VECTORS_EPOCH,
+                cases: load_cases(),
+                bulk: None,
+                keeps_bound: true,
+                asked: vec![],
+                empty: false,
+                restarts: 0,
+                load_during_look: false,
+            })),
         }
     }
 
@@ -150,6 +165,39 @@ impl RenoiseScript {
     /// The simulator stops keeping its pages inside the frame bound, as a bridge that doesn't know it would.
     pub fn ignore_the_frame_bound(&self) {
         self.state.lock().unwrap().keeps_bound = false;
+    }
+
+    /// Renoise started again (another process, so another identity for the song), on its empty unsaved song first, as
+    /// it starts before it loads the file it was opened with.
+    pub fn start_again_on_the_empty_song(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.restarts += 1;
+        state.empty = true;
+    }
+
+    /// The file it was opened with is loaded: the same song as before (its id is its path's), in the new process.
+    pub fn load_the_file(&self) {
+        self.state.lock().unwrap().empty = false;
+    }
+
+    /// The file loads while the next look at the empty song is being read, as on real Renoise: that read ends
+    /// `epoch-changed`, and the next one finds the file.
+    pub fn load_the_file_during_the_next_look(&self) {
+        self.state.lock().unwrap().load_during_look = true;
+    }
+
+    /// The empty song Renoise starts on: unsaved, an id of its own, nothing in it.
+    fn empty_song(state: &State, method: &str, params: &Value) -> Option<Result<Value, (String, String)>> {
+        let epoch = (state.epoch + 100).to_string();
+        let project = json!({"id": format!("{:032x}", 0xe0e0 + state.restarts), "identity": format!("4243:{}", state.restarts), "name": "", "path": null, "bpm": 120, "lpb": 4});
+        Some(Ok(match method {
+            "snapshot" => {
+                json!({"epoch": epoch, "layout": 0, "project": project, "tracks": [], "selection": {}, "transport": {"playing": false}})
+            }
+            "focus" => json!({"epoch": epoch, "layout": 0, "view": "pattern", "selection": {}, "transport": {"playing": false}}),
+            "read" if params["kind"] == "song" => json!({"epoch": epoch, "layout": 0, "items": [project]}),
+            _ => return Some(Err(("stale".into(), "the song changed: read again".into()))),
+        }))
     }
 
     /// Every request the simulator answered, in order.
@@ -173,6 +221,15 @@ impl RenoiseScript {
         }
         let mut state = self.state.lock().unwrap();
         state.asked.push((method.to_string(), params.clone()));
+        if state.empty && state.load_during_look && method == "snapshot" {
+            state.empty = false;
+            state.load_during_look = false;
+            return Some(Err(("epoch-changed".into(), "the song changed while this was being read: read again".into())));
+        }
+        if state.empty {
+            return Self::empty_song(&state, method, params);
+        }
+        let restarts = state.restarts;
         let epoch = state.epoch;
         let stale = |from: u32| ("stale".to_string(), format!("that ref is from an earlier epoch ({from}; now {epoch}): read again"));
         // The vectors were made in epoch 1. In a later one the same questions have that epoch's refs, and anything from
@@ -197,12 +254,31 @@ impl RenoiseScript {
         }
         let wanted = normal(&asked);
         if let Some(case) = state.cases.iter().find(|case| case.method == method && case.params == wanted) {
-            return Some(case.response.clone().map(|result| retag(&result, VECTORS_EPOCH, epoch, None)));
+            return Some(case.response.clone().map(|result| restarted(retag(&result, VECTORS_EPOCH, epoch, None), restarts)));
         }
         if let Some(from) = from_another_epoch(params, epoch) {
             return Some(Err(stale(from)));
         }
         Some(Err(("bad-params".into(), format!("the simulator has no answer scripted for {method} {params}"))))
+    }
+}
+
+/// An answer from a Renoise started `restarts` times since: the song's identity is another process's; its id stays.
+fn restarted(value: Value, restarts: u32) -> Value {
+    if restarts == 0 {
+        return value;
+    }
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| match (key.as_str(), value) {
+                    ("identity", Value::String(identity)) => (key, Value::String(format!("{identity}.r{restarts}"))),
+                    (_, value) => (key, restarted(value, restarts)),
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(|item| restarted(item, restarts)).collect()),
+        other => other,
     }
 }
 

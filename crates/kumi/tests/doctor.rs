@@ -758,3 +758,36 @@ async fn a_live_producer_who_opened_renoise_once_gets_a_note_not_a_fix() {
     assert_eq!(note.status, CheckStatus::Note);
     assert!(note.next.as_deref().is_some_and(|next| next.contains("--daw renoise bridge")), "{note:?}");
 }
+
+/// A KUMI_DAW Kumi doesn't know: the doctor still runs, and says that's why Kumi won't start.
+#[tokio::test(flavor = "current_thread")]
+async fn a_kumi_daw_kumi_doesnt_know_is_a_fix_the_doctor_names() {
+    let root = tempfile::tempdir().unwrap();
+    let path = |p: &str| root.path().join(p).display().to_string();
+    let env = Env::from([
+        ("KUMI_DAW".into(), "bitwig".into()),
+        ("KUMI_MODEL".into(), "openai/gpt-fixture".into()),
+        ("OPENAI_API_KEY".into(), "sk-fixture-never-printed".into()),
+        ("KUMI_AUTH_FILE".into(), path("auth.json")),
+        ("KUMI_SETTINGS_FILE".into(), path("settings.json")),
+        ("KUMI_PROJECTS_DIR".into(), path("projects")),
+        ("KUMI_LIBRARY_DIR".into(), path("library")),
+        ("KUMI_LIVE_EXTENSIONS_DIR".into(), path("Ableton/Extensions")),
+        ("KUMI_HOME".into(), path(".kumi")),
+        ("HOME".into(), root.path().display().to_string()),
+    ]);
+    let mut io = DoctorIo::new(Rc::new(Out::default()), env.clone());
+    io.terminal = Some(TerminalInfo { is_tty: true, columns: Some(120), rows: Some(36) });
+    io.video_programs = Some(Rc::new(|| {
+        async { Ok(VideoPrograms { ffmpeg: Some("/usr/bin/ffmpeg".into()), whisper: Some("/usr/bin/whisper-cli".into()) }) }.boxed_local()
+    }));
+    io.hands = Some(Rc::new(|| async { Ok(None) }.boxed_local()));
+    io.voice = Some(Rc::new(|| async { Ok(ready()) }.boxed_local()));
+    io.model_servers = Some(Rc::new(|| async { Ok(vec![]) }.boxed_local()));
+    io.installation = quiet_installation();
+    let sections = doctor_sections(&io).await.unwrap();
+    let fix = sections.iter().flat_map(|s| &s.checks).find(|c| c.text.contains("KUMI_DAW")).expect("the doctor names KUMI_DAW");
+    assert_eq!(fix.status, CheckStatus::Fix);
+    assert_eq!(fix.text, "Kumi won't start: KUMI_DAW must be one of: ableton, reaper, renoise.");
+    assert_eq!(fix.next.as_deref(), Some("Set KUMI_DAW to one of those, or unset it"));
+}

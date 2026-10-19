@@ -1310,7 +1310,7 @@ end)
 
 test("reads: a device, sample or phrase made later is watched too, with no tick and no new watching of the song", function()
   local env, peer = setup()
-  fill_demo()
+  mock.ops.insert_device(1, { name = "EQ 5", params = {} }) -- (made the way Renoise makes one, not poked into the song)
   H.tick(2)
   local attached = env.payload().watching()
   mock.ops.insert_device(1, { name = "Gainer", params = {} })
@@ -1609,5 +1609,60 @@ test("reads: only Renoise's own Doofer and Splitter are containers, not a plug-i
   local chain = call(peer, "focus_body", { kind = "dsp", ref = E .. ":track:1" }).result
   eq(chain.nodes[1].container, true)
   eq(chain.nodes[3].container, false)
+  H.no_dialogs()
+end)
+
+test("reads: swapping two tracks or two instruments adds no notifier and leaves every object watched", function()
+  local env, peer = setup()
+  H.tick(2)
+  local watching = env.payload().watching()
+  mock.notifier_adds = 0
+  mock.ops.swap_tracks(1, 3)
+  mock.ops.swap_instruments(1, 2)
+  H.tick(3)
+  eq(mock.notifier_adds, 0, "nothing was watched anew")
+  eq(env.payload().watching(), watching)
+  local function moves(what, change)
+    local base = call(peer, "focus").result.changed
+    change()
+    ok(call(peer, "focus").result.changed > base, what .. " counts")
+  end
+  moves("a rename of the track now first", function() mock.ops.rename_track(1, "Renamed") end)
+  moves("a rename of the track now third", function() mock.ops.rename_track(3, "Renamed too") end)
+  moves("a rename of the instrument now first", function() mock.ops.rename_instrument(1, "Renamed") end)
+  H.no_dialogs()
+end)
+
+test("reads: past 256 deleted objects their watchers are dropped without watching the song anew", function()
+  local env, peer = setup()
+  H.tick(2)
+  local base = env.payload().watching()
+  for i = 1, 300 do
+    mock.ops.insert_track(1, { name = "x" })
+    if i % 50 == 0 then drain(peer) end -- (a host reads its events)
+  end
+  local grown = env.payload().watching()
+  ok(grown > base + 300 * 20, "each made track is watched: " .. (grown - base))
+  for i = 1, 300 do
+    mock.ops.remove_track(1)
+    if i % 50 == 0 then drain(peer) end
+  end
+  mock.notifier_adds = 0
+  H.tick(3)
+  eq(mock.notifier_adds, 0, "nothing was added to drop the dead watchers")
+  eq(env.payload().watching(), base, "and they are gone: the song is watched through what it was")
+  -- what is left is still watched
+  local probe = call(peer, "focus")
+  ok(probe.result, "focus answers: " .. json.encode(probe.error or {}))
+  local before = probe.result.changed
+  mock.ops.rename_track(2, "Still watched")
+  ok(call(peer, "focus").result.changed > before, "a track that was never deleted still counts")
+  -- devices and patterns too
+  mock.ops.insert_device(1, { name = "Gainer", params = {} })
+  mock.ops.remove_device(1, 1)
+  mock.ops.insert_device(1, { name = "Gainer", params = {} })
+  before = call(peer, "focus").result.changed
+  mock.ops.set_device(1, 1, "active", false)
+  ok(call(peer, "focus").result.changed > before, "a device made after another was deleted counts")
   H.no_dialogs()
 end)

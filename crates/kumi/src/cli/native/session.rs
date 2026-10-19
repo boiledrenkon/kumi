@@ -416,6 +416,17 @@ pub(super) async fn run_session(io: CliIo, config: AppConfig, secrets: &mut Vec<
                 let emit = emit.clone();
                 Rc::new(move |on| emit(SessionEvent::Watching { on }))
             });
+            // A look that failed while the DAW was there (it was loading a file): the session looks again by itself.
+            options.on_look_again = Some({
+                let controller = controller.clone();
+                Rc::new(move || {
+                    if let Some(c) = controller.borrow().as_ref().and_then(Weak::upgrade) {
+                        tokio::task::spawn_local(async move {
+                            let _ = c.refresh().await;
+                        });
+                    }
+                })
+            });
             options.on_audition = Some({
                 let emit = emit.clone();
                 let controller = controller.clone();
