@@ -13,10 +13,13 @@ returns false, with no block and no queue, so the tool retires that host and the
 freeze Renoise's GUI thread (every callback of every tool) until the host reads; a queue would grow Renoise's memory.
 
   A  a reader that keeps up: the answers' sizes and times, the baseline
-  B  a host that grants the most credit with a 1 KiB receive buffer, asks for answers, and never reads; meanwhile a
-     second connection pings every 100 ms, and the probe watches Renoise's memory and the tool's log for the stalled
-     host's retirement
-  C  that host then reads: what reached it, and whether its last line is whole
+  B  a host that grants the most credit, asks for a 1 KiB receive buffer (macOS grows it on loopback; the probe says what
+     it got), asks for up to the credit's worth of answers, and never reads; meanwhile a second connection pings every
+     100 ms, and the probe watches Renoise's memory and the tool's log for the stalled host's retirement
+  C  that host then reads: what reached it (heartbeats aside), and whether its last answer is whole
+
+The answers have to outgrow the sockets' buffers for B to show anything: with a small song they fit, and the probe
+says so; open a song with many tracks and patterns (its snapshot is the biggest answer) and run it again.
 
 It prints what it saw and a verdict (returns false / blocks / queues). Kumi's tool and Renoise are left running; the
 stalled connection is closed by this side at the end.
@@ -27,6 +30,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -107,17 +111,20 @@ class Client:
 
 
 def bridge(kumi_home: Path) -> tuple[str, int, int]:
-    """The secret, and the port and pid of the running tool's discovery file."""
+    """The secret, and the port and pid of the running tool's discovery file (the newest whose Renoise runs: files of
+    Renoises that ended stay until Kumi prunes them)."""
     folder = kumi_home / "bridges" / "renoise"
     secret = (folder / "bridge.secret").read_text(encoding="ascii").strip()
+    running = set(renoise_pids())
     found = []
     for path in sorted((folder / "discovery").glob("*.json")):
         discovery = json.loads(path.read_text(encoding="utf-8"))
-        found.append((path.stat().st_mtime, discovery))
+        if int(discovery.get("pid") or 0) in running:
+            found.append((path.stat().st_mtime, discovery))
     if not found:
-        raise SystemExit(f"no Renoise is serving Kumi's tool: no discovery file in {folder / 'discovery'}")
+        raise SystemExit(f"no running Renoise is serving Kumi's tool: no discovery file of one in {folder / 'discovery'}")
     discovery = max(found, key=lambda item: item[0])[1]
-    return secret, int(discovery["port"]), int(discovery.get("pid") or 0)
+    return secret, int(discovery["port"]), int(discovery["pid"])
 
 
 def renoise_pids() -> list[int]:
@@ -186,7 +193,6 @@ def main() -> None:
     parser.add_argument("--seconds", type=float, default=20, help="how long B watches the stalled host")
     args = parser.parse_args()
     secret, port, pid = bridge(args.kumi_home)
-    pid = pid or next(iter(renoise_pids()), 0)
     print(f"{platform.system()} {platform.release()} ({platform.machine()}), Python {platform.python_version()}; "
           f"the tool on port {port}, Renoise pid {pid or 'unknown'}, memory {memory_mb(pid) if pid else None} MB", flush=True)
 
@@ -211,11 +217,12 @@ def main() -> None:
     stalled = Client(port, secret, "send-probe-stalled", receive_buffer=1024)
     local = stalled.socket.getsockname()[1]
     stalled.grant(CREDIT_MAX)
-    asked = min(QUEUED_ANSWERS, max(8, (2 * 1024 * 1024) // max(sizes[method], 1)))
+    asked = min(QUEUED_ANSWERS, max(8, math.ceil(CREDIT_MAX / max(sizes[method], 1))))
+    asked_bytes = asked * sizes[method]
     for _ in range(asked):
         stalled.ask(method)
     print(f"B  the stalled host (port {local}, receive buffer {stalled.held} bytes) asked for {asked} {method} answers "
-          f"(about {asked * sizes[method] // 1024} KiB) and reads nothing", flush=True)
+          f"(about {asked_bytes // 1024} KiB) and reads nothing", flush=True)
     start = time.monotonic()
     froze, before = None, memory_mb(pid) if pid else None
     for second in range(int(args.seconds)):
@@ -229,20 +236,25 @@ def main() -> None:
     after = memory_mb(pid) if pid else None
     retired = [line[-160:] for line in log_lines(args.kumi_home, local) if "retir" in line or "send failed" in line]
 
-    # C: the stalled host reads what reached it.
-    stalled.socket.settimeout(2)
-    got = b""
-    try:
-        while True:
+    # C: the stalled host reads what reached it: every answer, or until none has come for 3 s (heartbeats keep arriving
+    # each second, so they don't count), at most 30 s.
+    got, answers, last, end = b"", 0, time.monotonic(), time.monotonic() + 30
+    stalled.socket.settimeout(0.5)
+    while answers < asked and time.monotonic() < end and time.monotonic() - last < 3:
+        try:
             data = stalled.socket.recv(1 << 20)
-            if not data:
-                break
-            got += data
-    except (socket.timeout, OSError):
-        pass
-    whole = got.endswith(b"\n")
-    answers = sum(1 for line in got.split(b"\n") if line.startswith(b'{"type":"response"'))
-    print(f"C  the stalled host then read {len(got)} bytes: {answers} whole answers, its last line {'whole' if whole else 'torn'}", flush=True)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        if not data:
+            break
+        got += data
+        counted = got.count(b'\n{"type":"response"') + got.startswith(b'{"type":"response"')
+        if counted > answers:
+            answers, last = counted, time.monotonic()
+    torn = bool(got) and not got.endswith(b"\n")
+    print(f"C  the stalled host then read {len(got)} bytes: {answers} of {asked} answers, the stream {'torn' if torn else 'whole'}", flush=True)
     stalled.socket.close()
     print(f"   pings while it stalled: {pinger.since(start)}", flush=True)
     pinger.running = False
@@ -255,8 +267,11 @@ def main() -> None:
         verdict = "UNDECIDED: the tool retired the stalled host for another reason (its log, below); run it again"
     elif before is not None and after is not None and after - before > 32:
         verdict = f"QUEUES: no block and no failed send, and Renoise's memory grew {after - before:.0f} MB"
+    elif answers == asked and asked_bytes < 4 * stalled.held:
+        verdict = (f"UNDECIDED: the {asked_bytes // 1024} KiB asked for fit in the sockets' buffers (this host's alone holds "
+                   f"{stalled.held // 1024} KiB), so nothing filled: open a song with more tracks and patterns and run it again")
     else:
-        verdict = "UNDECIDED: no block, no failed send, no memory growth; ask for more (a bigger song) and run it again"
+        verdict = "UNDECIDED: no block, no failed send, no memory growth; open a bigger song and run it again"
     print(f"\nVerdict: {verdict}\nThe tool's log about the stalled host:\n  " + "\n  ".join(retired or ["(nothing)"]), flush=True)
 
 
