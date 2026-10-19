@@ -225,3 +225,55 @@ impl Reaper<'_> {
         unsafe { delete(proj.0, index) }
     }
 }
+
+/// The timeline: tempo, time signature, loop, cursor.
+impl Reaper<'_> {
+    pub fn set_current_bpm(&self, proj: Project, bpm: f64) -> bool {
+        match self.api.SetCurrentBPM() {
+            Some(f) => {
+                unsafe { f(proj.0, bpm, false) };
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A tempo or time signature marker: the existing one at `index`, or a new one for -1. `num` and `denom` 0 leave the
+    /// time signature alone; `bpm` 0 keeps the tempo in force.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_tempo_marker(&self, proj: Project, index: i32, time: f64, bpm: f64, num: i32, denom: i32, linear: bool) -> bool {
+        self.api.SetTempoTimeSigMarker().is_some_and(|f| unsafe { f(proj.0, index, time, -1, -1.0, bpm, num, denom, linear) })
+    }
+
+    pub fn delete_tempo_marker(&self, proj: Project, index: i32) -> bool {
+        self.api.DeleteTempoTimeSigMarker().is_some_and(|f| unsafe { f(proj.0, index) })
+    }
+
+    pub fn set_loop_points(&self, proj: Project, start: f64, end: f64) -> bool {
+        let Some(f) = self.api.GetSet_LoopTimeRange2() else { return false };
+        let (mut start, mut end) = (start, end);
+        unsafe { f(proj.0, true, true, &mut start, &mut end, false) };
+        true
+    }
+
+    pub fn set_repeat(&self, proj: Project, on: bool) -> bool {
+        match self.api.GetSetRepeatEx() {
+            Some(f) => {
+                unsafe { f(proj.0, on as c_int) };
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The edit cursor, without moving the view or the play position.
+    pub fn set_cursor(&self, proj: Project, time: f64) -> bool {
+        match self.api.SetEditCurPos2() {
+            Some(f) => {
+                unsafe { f(proj.0, time, false, false) };
+                true
+            }
+            None => false,
+        }
+    }
+}

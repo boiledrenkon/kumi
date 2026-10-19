@@ -722,12 +722,12 @@ mod tests {
                 color: 0,
             });
             s.tempo_markers = vec![
-                FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4 },
-                FakeTempo { time: 6.0, bpm: 90.0, num: 3, denom: 4 },
-                FakeTempo { time: 50.0, bpm: 70.0, num: 4, denom: 4 },
+                FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4, linear: false },
+                FakeTempo { time: 6.0, bpm: 90.0, num: 3, denom: 4, linear: false },
+                FakeTempo { time: 50.0, bpm: 70.0, num: 4, denom: 4, linear: false },
             ];
             // A marker that changes only the tempo has no time signature: REAPER says -1 and -1.
-            s.tempo_markers.insert(1, FakeTempo { time: 4.0, bpm: 100.0, num: -1, denom: -1 });
+            s.tempo_markers.insert(1, FakeTempo { time: 4.0, bpm: 100.0, num: -1, denom: -1, linear: false });
             s.tracks[1].items[1].selected = true;
             s.cursor = 3.0;
             s.loop_range = (4.0, 8.0);

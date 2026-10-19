@@ -74,13 +74,13 @@ pub fn bar_text(reaper: &Reaper, proj: crate::reaper::Project, time: f64) -> Str
     }
 }
 
-fn trimmed(value: f64) -> String {
+pub(super) fn trimmed(value: f64) -> String {
     let text = format!("{:.2}", value);
     text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// A time in the input, in seconds: given as `…Beats` (quarter notes from the start) or in seconds, not both.
-fn moment(ctx: &Ctx, input: &Value, beats: &str, seconds: &str) -> Done<Option<f64>> {
+pub(super) fn moment(ctx: &Ctx, input: &Value, beats: &str, seconds: &str) -> Done<Option<f64>> {
     let number = |key: &str| -> Done<Option<f64>> {
         match input.get(key) {
             None | Some(Value::Null) => Ok(None),

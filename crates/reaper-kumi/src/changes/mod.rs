@@ -8,6 +8,7 @@
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
 mod marks;
+mod project;
 mod sends;
 mod structure;
 mod tracks;
@@ -75,6 +76,11 @@ enum Kind {
     TrackDelete,
     TrackAdd,
     TrackMove,
+    Tempo,
+    TempoMarker,
+    TempoMarkerDelete,
+    LoopRange,
+    LoopRepeat,
     SendProp(&'static sends::Prop),
     MarkProp(&'static marks::Prop),
     MarkerAdd,
@@ -95,6 +101,11 @@ fn kind(name: &str) -> Option<Kind> {
         return Some(Kind::MarkProp(prop));
     }
     match name {
+        "tempo-set" => Some(Kind::Tempo),
+        "tempo-marker-set" => Some(Kind::TempoMarker),
+        "tempo-marker-delete" => Some(Kind::TempoMarkerDelete),
+        "loop-range" => Some(Kind::LoopRange),
+        "loop-repeat" => Some(Kind::LoopRepeat),
         "marker-add" => Some(Kind::MarkerAdd),
         "region-add" => Some(Kind::RegionAdd),
         "marker-delete" => Some(Kind::MarkerDelete),
@@ -121,6 +132,11 @@ impl Kind {
             Kind::MarkerAdd => marks::add_preview(ctx, input, false),
             Kind::RegionAdd => marks::add_preview(ctx, input, true),
             Kind::MarkerDelete => marks::delete_preview(ctx, input),
+            Kind::Tempo => project::tempo_preview(ctx, input),
+            Kind::TempoMarker => project::marker_preview(ctx, input),
+            Kind::TempoMarkerDelete => project::marker_delete_preview(ctx, input),
+            Kind::LoopRange => project::loop_preview(ctx, input),
+            Kind::LoopRepeat => project::repeat_preview(ctx, input),
         }
     }
 
@@ -137,6 +153,11 @@ impl Kind {
             Kind::MarkerAdd => marks::add_apply(ctx, input, false),
             Kind::RegionAdd => marks::add_apply(ctx, input, true),
             Kind::MarkerDelete => marks::delete_apply(ctx, input, fence),
+            Kind::Tempo => project::tempo_apply(ctx, input, fence),
+            Kind::TempoMarker => project::marker_apply(ctx, input, fence),
+            Kind::TempoMarkerDelete => project::marker_delete_apply(ctx, input, fence),
+            Kind::LoopRange => project::loop_apply(ctx, input, fence),
+            Kind::LoopRepeat => project::repeat_apply(ctx, input, fence),
         }
     }
 
@@ -152,6 +173,11 @@ impl Kind {
             Kind::MarkProp(prop) => marks::prop_restore(ctx, prop, restore),
             Kind::MarkerAdd | Kind::RegionAdd => marks::add_restore(ctx, restore),
             Kind::MarkerDelete => marks::delete_restore(ctx, restore),
+            Kind::Tempo => project::tempo_restore(ctx, restore),
+            Kind::TempoMarker => project::marker_restore(ctx, restore),
+            Kind::TempoMarkerDelete => project::marker_delete_restore(ctx, restore),
+            Kind::LoopRange => project::loop_restore(ctx, restore),
+            Kind::LoopRepeat => project::repeat_restore(ctx, restore),
         }
     }
 }

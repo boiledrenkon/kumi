@@ -967,3 +967,261 @@ fn a_send_that_is_not_in_the_project_any_more_is_skipped_when_a_deleted_track_is
     let restored = lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
     assert_eq!(restored["restored"]["routes"], 0);
 }
+
+// ----- the timeline -----
+
+fn restore_params(preview: &Value, applied: &Value, desc: &str) -> Value {
+    json!({"kind": "", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": desc})
+}
+
+fn tempo_markers() -> Vec<(f64, f64, i32, i32, bool)> {
+    state(|s| s.tempo_markers.iter().map(|m| (m.time, m.bpm, m.num, m.denom, m.linear)).collect())
+}
+
+#[test]
+fn the_tempo_is_set_in_one_named_block_and_put_back_by_value() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("tempo-set", json!({"bpm": 90.0}), "Kumi: Tempo 90 BPM (ktm01)");
+    assert_eq!((&preview["display"]["title"], &preview["prior"]), (&json!("Tempo 90 BPM"), &json!({"bpm": 120.0})));
+    assert_eq!((state(|s| s.bpm), top().as_deref()), (90.0, Some("Kumi: Tempo 90 BPM (ktm01)")));
+    assert_eq!(applied["applied"], json!({"bpm": 90.0}));
+    // The producer moved it since: undo is refused, unless discarded.
+    state(|s| s.bpm = 100.0);
+    let (code, message) = lab.undo("tempo-set", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("tempo"), "{message}");
+    assert_eq!(state(|s| s.bpm), 100.0);
+    state(|s| s.bpm = 90.0);
+    lab.undo("tempo-set", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!((state(|s| s.bpm), top().as_deref()), (120.0, Some("Kumi: undo (kund1)")));
+    // Undone already: nothing to write, and no complaint.
+    lab.undo("tempo-set", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund3)");
+    params["kind"] = "tempo-set".into();
+    params["discard"] = true.into();
+    state(|s| s.bpm = 77.0);
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(state(|s| s.bpm), 120.0);
+}
+
+#[test]
+fn a_tempo_change_is_refused_when_the_tempo_moved_or_the_project_has_a_tempo_map() {
+    let lab = Lab::new();
+    let preview = lab.call("change_preview", json!({"kind": "tempo-set", "input": {"bpm": 90.0}})).unwrap();
+    state(|s| s.bpm = 110.0);
+    let entries = state(|s| s.undo_entries);
+    let apply = json!({"kind": "tempo-set", "input": {"bpm": 90.0}, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
+    assert_eq!((state(|s| s.bpm), state(|s| s.undo_entries)), (110.0, entries));
+    for bpm in [json!(0.5), json!(2000.0), json!("fast"), Value::Null] {
+        assert_eq!(lab.call("change_preview", json!({"kind": "tempo-set", "input": {"bpm": bpm}})).unwrap_err().0, "bad-params");
+    }
+    // Setting what it already is says so.
+    let same = lab.call("change_preview", json!({"kind": "tempo-set", "input": {"bpm": 110.0}})).unwrap();
+    assert_eq!(same["display"]["unchanged"], true);
+    // With a tempo map the project has no one tempo.
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 0.0, bpm: 110.0, num: -1, denom: -1, linear: false }));
+    let (code, message) = lab.call("change_preview", json!({"kind": "tempo-set", "input": {"bpm": 90.0}})).unwrap_err();
+    assert_eq!(code, "bad-params");
+    assert!(message.contains("tempo-marker-set"), "{message}");
+}
+
+#[test]
+fn a_tempo_marker_is_made_where_asked_with_its_time_signature_and_undo_takes_that_one_away() {
+    let lab = Lab::new();
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4, linear: false }));
+    let before = tempo_markers();
+    let input = json!({"positionBeats": 32.0, "bpm": 140.0, "timeSignature": [3, 4]});
+    let (preview, applied) = lab.make("tempo-marker-set", input, "Kumi: Tempo 140 BPM and time signature 3/4 at bar 9 (ktm02)");
+    assert_eq!(preview["prior"], json!({"exists": false}));
+    assert_eq!(preview["target"]["kind"], "tempo-marker");
+    assert_eq!(tempo_markers(), [before[0], (16.0, 140.0, 3, 4, false)]);
+    assert_eq!(applied["applied"], json!({"exists": true, "bpm": 140.0, "num": 3, "den": 4, "linear": false}));
+    // The producer changed it since: undo is refused, unless discarded.
+    state(|s| s.tempo_markers[1].bpm = 150.0);
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund1)");
+    params["kind"] = "tempo-marker-set".into();
+    assert_eq!(lab.call("change_restore", params.clone()).unwrap_err().0, "changed");
+    assert_eq!(tempo_markers().len(), 2);
+    state(|s| s.tempo_markers[1].bpm = 140.0);
+    lab.call("change_restore", params.clone()).unwrap();
+    assert_eq!(tempo_markers(), before);
+    // Undone already.
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(tempo_markers(), before);
+}
+
+#[test]
+fn a_marker_that_is_there_is_changed_by_the_part_asked_and_put_back_whole() {
+    let lab = Lab::new();
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 8.0, bpm: 100.0, num: 3, denom: 4, linear: true }));
+    // Only the tempo: the time signature and the shape stay.
+    let (preview, applied) = lab.make("tempo-marker-set", json!({"position": 8.0, "bpm": 128.0}), "Kumi: Tempo 128 BPM at bar 5 (ktm03)");
+    assert_eq!(preview["prior"], json!({"exists": true, "bpm": 100.0, "num": 3, "den": 4, "linear": true}));
+    assert_eq!(tempo_markers(), [(8.0, 128.0, 3, 4, true)]);
+    // Only the time signature, and the shape back to a jump.
+    let (preview2, applied2) = lab.make(
+        "tempo-marker-set",
+        json!({"position": 8.0, "timeSignature": {"num": 7, "den": 8}, "linear": false}),
+        "Kumi: Time signature 7/8 at bar 5 (ktm04)",
+    );
+    assert_eq!(tempo_markers(), [(8.0, 128.0, 7, 8, false)]);
+    lab.undo("tempo-marker-set", &preview2, &applied2, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(tempo_markers(), [(8.0, 128.0, 3, 4, true)]);
+    lab.undo("tempo-marker-set", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(tempo_markers(), [(8.0, 100.0, 3, 4, true)]);
+}
+
+#[test]
+fn a_tempo_marker_request_names_a_place_and_something_to_change() {
+    let lab = Lab::new();
+    for input in [
+        json!({"bpm": 120.0}),
+        json!({"position": 4.0}),
+        json!({"position": 4.0, "positionBeats": 8.0, "bpm": 120.0}),
+        json!({"position": 4.0, "bpm": 0.0}),
+        json!({"position": 4.0, "timeSignature": [4, 3]}),
+        json!({"position": 4.0, "timeSignature": [0, 4]}),
+        json!({"position": 4.0, "timeSignature": "3/4"}),
+        json!({"position": 4.0, "bpm": 100.0, "linear": "yes"}),
+        json!({"position": -1.0, "bpm": 100.0}),
+    ] {
+        let (code, message) = lab.call("change_preview", json!({"kind": "tempo-marker-set", "input": input})).unwrap_err();
+        assert_eq!(code, "bad-params", "{input}: {message}");
+    }
+    assert!(tempo_markers().is_empty());
+}
+
+#[test]
+fn a_tempo_marker_change_is_refused_when_the_markers_there_moved() {
+    let lab = Lab::new();
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 8.0, bpm: 100.0, num: -1, denom: -1, linear: false }));
+    let input = json!({"position": 8.0, "bpm": 128.0});
+    let preview = lab.call("change_preview", json!({"kind": "tempo-marker-set", "input": input})).unwrap();
+    state(|s| s.tempo_markers[0].bpm = 90.0);
+    let entries = state(|s| s.undo_entries);
+    let apply = json!({"kind": "tempo-marker-set", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    assert_eq!(lab.call("change_apply", apply.clone()).unwrap_err().0, "changed");
+    // The marker went altogether.
+    state(|s| s.tempo_markers.clear());
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
+    assert_eq!((tempo_markers().len(), state(|s| s.undo_entries)), (0, entries));
+}
+
+#[test]
+fn deleting_a_tempo_marker_keeps_it_to_make_again_exactly() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tempo_markers.push(fake::FakeTempo { time: 0.0, bpm: 120.0, num: 4, denom: 4, linear: false });
+        s.tempo_markers.push(fake::FakeTempo { time: 8.0, bpm: 90.0, num: 3, denom: 4, linear: true });
+    });
+    let before = tempo_markers();
+    let (preview, applied) = lab.make("tempo-marker-delete", json!({"position": 8.0}), "Kumi: Deleted tempo marker at bar 5 (ktm05)");
+    assert_eq!(preview["display"]["title"], "Deleted tempo marker at bar 5");
+    assert_eq!(tempo_markers(), [before[0]]);
+    assert_eq!(applied["material"]["state"], json!({"exists": true, "bpm": 90.0, "num": 3, "den": 4, "linear": true}));
+    let restored = lab.undo("tempo-marker-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(restored["restored"]["bpm"], 90.0);
+    assert_eq!(tempo_markers(), before);
+    // Made again already: nothing more.
+    lab.undo("tempo-marker-delete", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(tempo_markers(), before);
+    // A different marker took its place: refused, unless discarded.
+    lab.make("tempo-marker-delete", json!({"position": 8.0}), "Kumi: Deleted tempo marker at bar 5 (ktm06)");
+    state(|s| s.tempo_markers.push(fake::FakeTempo { time: 8.0, bpm: 70.0, num: -1, denom: -1, linear: false }));
+    let (code, _) = lab.undo("tempo-marker-delete", &preview, &applied, "Kumi: undo (kund3)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert_eq!(lab.call("change_preview", json!({"kind": "tempo-marker-delete", "input": {"position": 40.0}})).unwrap_err().0, "failed");
+}
+
+#[test]
+fn the_loop_is_set_cleared_and_put_back_and_end_must_follow_start() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("loop-range", json!({"startBeats": 8.0, "endBeats": 16.0}), "Kumi: Loop bar 3 to bar 5 (klp01)");
+    assert_eq!(preview["display"]["title"], "Loop bar 3 to bar 5");
+    assert_eq!(preview["prior"], json!({"start": 0.0, "end": 0.0}));
+    assert_eq!(state(|s| s.loop_range), (4.0, 8.0));
+    // Moved by the producer: undo is refused, unless discarded.
+    state(|s| s.loop_range = (4.0, 12.0));
+    assert_eq!(lab.undo("loop-range", &preview, &applied, "Kumi: undo (kund1)").unwrap_err().0, "changed");
+    state(|s| s.loop_range = (4.0, 8.0));
+    lab.undo("loop-range", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(state(|s| s.loop_range), (0.0, 0.0));
+    // Cleared, in seconds.
+    state(|s| s.loop_range = (2.0, 6.0));
+    let (preview, applied) = lab.make("loop-range", json!({"start": 0.0, "end": 0.0}), "Kumi: Loop cleared (klp02)");
+    assert_eq!(preview["display"]["title"], "Loop cleared");
+    assert_eq!(state(|s| s.loop_range), (0.0, 0.0));
+    lab.undo("loop-range", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(state(|s| s.loop_range), (2.0, 6.0));
+    for input in [
+        json!({"start": 4.0, "end": 4.0}),
+        json!({"start": 6.0, "end": 2.0}),
+        json!({"start": 2.0}),
+        json!({"startBeats": 4.0, "start": 2.0, "end": 6.0}),
+        json!({"start": "a", "end": 6.0}),
+    ] {
+        assert_eq!(lab.call("change_preview", json!({"kind": "loop-range", "input": input})).unwrap_err().0, "bad-params", "{input}");
+    }
+}
+
+#[test]
+fn a_loop_change_is_refused_when_the_loop_moved_since_the_preview() {
+    let lab = Lab::new();
+    let input = json!({"start": 2.0, "end": 6.0});
+    let preview = lab.call("change_preview", json!({"kind": "loop-range", "input": input})).unwrap();
+    state(|s| s.loop_range = (1.0, 3.0));
+    let entries = state(|s| s.undo_entries);
+    let apply = json!({"kind": "loop-range", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
+    assert_eq!((state(|s| s.loop_range), state(|s| s.undo_entries)), ((1.0, 3.0), entries));
+}
+
+#[test]
+fn repeat_is_switched_and_put_back_unless_the_producer_switched_it_since() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("loop-repeat", json!({"on": true}), "Kumi: Repeat on (krp01)");
+    assert_eq!((preview["prior"].clone(), state(|s| s.repeat)), (json!({"on": false}), true));
+    state(|s| s.repeat = false);
+    assert_eq!(
+        lab.undo("loop-repeat", &preview, &applied, "Kumi: undo (kund1)").unwrap().get("restored").map(|r| r["on"].clone()),
+        Some(json!(false))
+    );
+    state(|s| s.repeat = true);
+    lab.undo("loop-repeat", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert!(!state(|s| s.repeat));
+    for input in [json!({}), json!({"on": "yes"})] {
+        assert_eq!(lab.call("change_preview", json!({"kind": "loop-repeat", "input": input})).unwrap_err().0, "bad-params");
+    }
+    // The producer switched it since the preview.
+    let preview = lab.call("change_preview", json!({"kind": "loop-repeat", "input": {"on": true}})).unwrap();
+    state(|s| s.repeat = true);
+    let apply = json!({"kind": "loop-repeat", "input": {"on": true}, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
+    // And after the apply: a changed restore is refused.
+    state(|s| s.repeat = false);
+    let (preview, applied) = lab.make("loop-repeat", json!({"on": true}), "Kumi: Repeat on (krp02)");
+    state(|s| s.repeat = false);
+    // Already at its prior: nothing to write, and no complaint.
+    assert!(lab.undo("loop-repeat", &preview, &applied, "Kumi: undo (kund3)").unwrap().get("restored").is_some());
+}
+
+#[test]
+fn the_timeline_kinds_are_refused_for_another_epoch_and_while_reaper_is_busy() {
+    let lab = Lab::new();
+    for (kind, input) in [
+        ("tempo-set", json!({"bpm": 90.0})),
+        ("tempo-marker-set", json!({"position": 4.0, "bpm": 90.0})),
+        ("loop-range", json!({"start": 2.0, "end": 6.0})),
+        ("loop-repeat", json!({"on": true})),
+    ] {
+        let (code, _) = lab.call("change_preview", json!({"kind": kind, "input": input, "epoch": "old-1"})).unwrap_err();
+        assert_eq!(code, "stale", "{kind}");
+        let preview = lab.call("change_preview", json!({"kind": kind, "input": input})).unwrap();
+        state(|s| s.loading = true);
+        let apply = json!({"kind": kind, "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+        assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "busy", "{kind}");
+        state(|s| s.loading = false);
+    }
+    assert_eq!((state(|s| s.bpm), state(|s| s.loop_range), state(|s| s.repeat), tempo_markers().len()), (120.0, (0.0, 0.0), false, 0));
+}

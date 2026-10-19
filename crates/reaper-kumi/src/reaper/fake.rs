@@ -292,6 +292,7 @@ pub struct FakeTempo {
     pub bpm: f64,
     pub num: i32,
     pub denom: i32,
+    pub linear: bool,
 }
 
 #[derive(Clone)]
@@ -646,8 +647,17 @@ unsafe extern "C" fn get_set_loop_time_range2(
     end: *mut f64,
     _seek: bool,
 ) {
-    assert!(!set, "the fake only reads");
     counted(|s| {
+        if set {
+            let (from, to) = unsafe { (*start, *end) };
+            if is_loop {
+                s.loop_range = (from, to);
+            } else {
+                s.time_selection = (from, to);
+            }
+            s.undo_dirty = true;
+            return;
+        }
         let (from, to) = if is_loop { s.loop_range } else { s.time_selection };
         unsafe {
             *start = from;
@@ -655,8 +665,68 @@ unsafe extern "C" fn get_set_loop_time_range2(
         }
     })
 }
-unsafe extern "C" fn get_set_repeat_ex(_proj: *mut ReaProject, _value: c_int) -> c_int {
-    counted(|s| s.repeat as c_int)
+unsafe extern "C" fn get_set_repeat_ex(_proj: *mut ReaProject, value: c_int) -> c_int {
+    counted(|s| {
+        if value >= 0 {
+            s.repeat = value != 0;
+            s.undo_dirty = true;
+        }
+        s.repeat as c_int
+    })
+}
+
+/// With tempo markers the project's tempo is the first one's; with none it is the project's own.
+unsafe extern "C" fn set_current_bpm(_proj: *mut ReaProject, bpm: f64, _undo: bool) {
+    counted(|s| {
+        s.bpm = bpm;
+        if let Some(first) = s.tempo_markers.first_mut() {
+            first.bpm = bpm;
+        }
+        s.undo_dirty = true;
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn set_tempo_time_sig_marker(
+    _proj: *mut ReaProject,
+    index: c_int,
+    time: f64,
+    _measure: c_int,
+    _beat: f64,
+    bpm: f64,
+    num: c_int,
+    denom: c_int,
+    linear: bool,
+) -> bool {
+    counted(|s| {
+        let current = s.tempo_markers.iter().rev().find(|m| m.time <= time).map_or(s.bpm, |m| m.bpm);
+        let bpm = if bpm > 0.0 { bpm } else { current };
+        let (num, denom) = if num > 0 && denom > 0 { (num, denom) } else { (-1, -1) };
+        if index >= 0 {
+            let Some(m) = s.tempo_markers.get_mut(index as usize) else { return false };
+            *m = FakeTempo { time, bpm, num, denom, linear };
+        } else {
+            let at = s.tempo_markers.iter().position(|m| m.time > time).unwrap_or(s.tempo_markers.len());
+            s.tempo_markers.insert(at, FakeTempo { time, bpm, num, denom, linear });
+        }
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn delete_tempo_time_sig_marker(_proj: *mut ReaProject, index: c_int) -> bool {
+    counted(|s| {
+        if index < 0 || index as usize >= s.tempo_markers.len() {
+            return false;
+        }
+        s.tempo_markers.remove(index as usize);
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn set_edit_cur_pos2(_proj: *mut ReaProject, time: f64, _move_view: bool, _seek: bool) {
+    counted(|s| s.cursor = time)
 }
 unsafe extern "C" fn time_map_get_time_sig_at_time(_proj: *mut ReaProject, time: f64, num: *mut c_int, denom: *mut c_int, bpm: *mut f64) {
     counted(|s| {
@@ -923,7 +993,7 @@ unsafe extern "C" fn get_tempo_time_sig_marker(
                 *bpm = m.bpm;
                 *num = m.num;
                 *denom = m.denom;
-                *linear = false;
+                *linear = m.linear;
             }
             true
         }
@@ -2117,6 +2187,10 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"AddRegionOrMarker" => add_region_or_marker as unsafe extern "C" fn(*mut ReaProject, bool, f64, f64, *const c_char, c_int, c_int) -> *mut api::ProjectMarker,
         b"SetRegionOrMarkerInfo_Value" => set_region_or_marker_info_value as unsafe extern "C" fn(*mut ReaProject, *mut api::ProjectMarker, *const c_char, f64) -> f64,
         b"DeleteProjectMarkerByIndex" => delete_project_marker_by_index as unsafe extern "C" fn(*mut ReaProject, c_int) -> bool,
+        b"SetCurrentBPM" => set_current_bpm as unsafe extern "C" fn(*mut ReaProject, f64, bool),
+        b"SetTempoTimeSigMarker" => set_tempo_time_sig_marker as unsafe extern "C" fn(*mut ReaProject, c_int, f64, c_int, f64, f64, c_int, c_int, bool) -> bool,
+        b"DeleteTempoTimeSigMarker" => delete_tempo_time_sig_marker as unsafe extern "C" fn(*mut ReaProject, c_int) -> bool,
+        b"SetEditCurPos2" => set_edit_cur_pos2 as unsafe extern "C" fn(*mut ReaProject, f64, bool, bool),
         b"ColorToNative" => color_to_native as unsafe extern "C" fn(c_int, c_int, c_int) -> c_int,
         b"UpdateArrange" => update_arrange as unsafe extern "C" fn(),
         b"TrackList_AdjustWindows" => track_list_adjust_windows as unsafe extern "C" fn(bool),
