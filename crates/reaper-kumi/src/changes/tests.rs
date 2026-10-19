@@ -2304,3 +2304,43 @@ fn the_index_a_read_gives_is_the_index_a_change_takes() {
         assert_eq!(page["items"][0]["index"], 0, "{kind}");
     }
 }
+
+// ----- an undo after a look at another tab and back (S3) -----
+
+#[test]
+fn an_undo_asked_in_an_earlier_epoch_of_the_same_project_goes_through_and_another_projects_does_not() {
+    let lab = Lab::new();
+    let api = fake::api();
+    let proj = Reaper::new(&api).current_project().unwrap().ptr;
+    lab.reads.note_project(proj);
+    let first = lab.reads.epoch();
+    let (preview, applied) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), "Kumi: Kick volume −6 dB (ktb01)");
+    // The producer looks at another tab and comes back: the epoch moved twice, to the same project.
+    for _ in 0..2 {
+        lab.reads.bump_epoch();
+        lab.reads.note_project(proj);
+    }
+    assert_ne!(lab.reads.epoch(), first);
+    let mut params = json!({"kind": "track-volume", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": "Kumi: undo (kund1)"});
+    params["epoch"] = first.clone().into();
+    // A change is not asked in a past epoch.
+    let apply = json!({"kind": "track-volume", "input": {"ref": KICK, "volumeDb": -3.0}, "fence": preview["fence"], "desc": "Kumi: x (k1111)", "epoch": first});
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "stale");
+    // An undo of it is: the id it names is the same.
+    let restored = lab.call("change_restore", params.clone()).unwrap();
+    assert_eq!(restored["epoch"], lab.reads.epoch().as_str(), "the answer carries the epoch now");
+    assert_eq!(state(|s| s.tracks[1].volume), 1.0);
+    // A different project took the tab: what was done in the project before is another project's.
+    let (preview, applied) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -9.0}), "Kumi: Kick volume −9 dB (ktb02)");
+    let before = lab.reads.epoch();
+    lab.reads.project_replaced(proj);
+    lab.reads.bump_epoch();
+    lab.reads.note_project(proj);
+    let mut params = json!({"kind": "track-volume", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": "Kumi: undo (kund2)"});
+    params["epoch"] = before.into();
+    assert_eq!(lab.call("change_restore", params).unwrap_err().0, "stale");
+    // An epoch that was never seen is not any project's.
+    let mut unknown = json!({"kind": "track-volume", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": "Kumi: undo (kund3)"});
+    unknown["epoch"] = "never-1".into();
+    assert_eq!(lab.call("change_restore", unknown).unwrap_err().0, "stale");
+}

@@ -86,6 +86,9 @@ pub struct Snapshot {
     pub focus: Value,
     /// When `focus` was polled.
     pub focus_at: Option<Instant>,
+    /// The main thread is running a request it claimed: it isn't ticking, and it isn't stuck (a plug-in loading, a big
+    /// take). The sockets wait for the answer as long as the request allows.
+    pub working: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -387,6 +390,10 @@ impl Extension {
         let mut seen = mark();
         queue::drain(&self.jobs, self.budget, |job| {
             refresh.hold();
+            // The socket threads are told the main thread is working, not stalled, for as long as this takes; whatever
+            // unwinds, they are told it stopped.
+            self.snapshot.lock().unwrap_or_else(|e| e.into_inner()).working = true;
+            let _working = StopWorking(&self.snapshot);
             // A job before this one switched tabs or loaded a project (an action, a script): the project is looked at
             // again first, so this one is answered about the project REAPER has now, under its epoch.
             let now = mark();
@@ -548,6 +555,7 @@ impl Extension {
         }
         // Noticed on every settled tick, so an id that came with a template is seen while the project is unsaved.
         if let Some(info) = info.as_ref().filter(|_| settled) {
+            self.reads.note_project(info.ptr);
             self.reads.project_id(&reaper, info.ptr, info);
         }
         if (changed && !first) || replaced {
@@ -1770,5 +1778,14 @@ mod tests {
         extension.tick(Driver::Surface);
         let beats = recorder.0.borrow().iter().filter(|(n, _)| n == "heartbeat").count();
         assert_eq!(beats, 1);
+    }
+}
+
+/// Tells the socket threads the main thread is done with the request it was running.
+struct StopWorking<'a>(&'a Mutex<Snapshot>);
+
+impl Drop for StopWorking<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).working = false;
     }
 }

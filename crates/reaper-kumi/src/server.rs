@@ -259,6 +259,7 @@ impl Server {
             config: config.clone(),
             hub: hub.clone(),
             jobs: Mutex::new(jobs),
+            step: Mutex::new(None),
             snapshot,
             stopping: stopping.clone(),
             flushed: flushed.clone(),
@@ -413,6 +414,9 @@ struct Shared {
     config: Config,
     hub: Hub,
     jobs: Mutex<Sender<Job>>,
+    /// The plan's undo step as it was begun: its id and the label it was begun with, so that a close asked while REAPER is
+    /// busy can be accepted for the next free tick and say what it will be named.
+    step: Mutex<Option<(String, String)>>,
     snapshot: Arc<Mutex<Snapshot>>,
     stopping: Arc<AtomicBool>,
     flushed: Arc<AtomicBool>,
@@ -438,7 +442,8 @@ impl Shared {
     fn stalled(&self) -> Option<Busy> {
         let snapshot = lock(&self.snapshot);
         match snapshot.last_tick {
-            Some(tick) if tick.elapsed() > STALL => Some(snapshot.busy.unwrap_or(Busy::Modal)),
+            // (Running a request it claimed, the main thread doesn't tick: that isn't a stall.)
+            Some(tick) if tick.elapsed() > STALL && !snapshot.working => Some(snapshot.busy.unwrap_or(Busy::Modal)),
             None => Some(Busy::Starting),
             _ => None,
         }
@@ -459,6 +464,7 @@ impl Shared {
             status["busyReason"] = busy.reason().into();
         }
         status["lastTickMs"] = snapshot.last_tick.map(|t| t.elapsed().as_millis() as u64).into();
+        status["working"] = snapshot.working.into();
         status["connections"] = self.hub.connections().into();
         if let Value::Object(extra) = snapshot.status {
             for (key, value) in extra {
@@ -489,6 +495,24 @@ impl Shared {
         Frame::ok(id, focus)
     }
 
+    /// `undo_step_end` while REAPER is busy: queued for the first tick it can run, answered `{deferred, desc}` with the name
+    /// the block will have.
+    fn defer_step_end(&self, id: u64, params: Value) -> Frame {
+        let step = params["stepId"].as_str().unwrap_or_default().to_string();
+        let begun = match lock(&self.step).clone() {
+            Some((open, label)) if open == step => label,
+            _ => return Frame::error(id, code::FAILED, "that step isn't open (it ended already, or the project changed under it)"),
+        };
+        let desc = params["label"].as_str().filter(|label| !label.is_empty()).map_or(begun, str::to_string);
+        // Nobody waits for the job's answer: it runs when the main thread is free, and the host has the name already.
+        let (job, _waiter) = queue::job("undo_step_end", params);
+        if lock(&self.jobs).send(job).is_err() {
+            return Frame::error(id, code::FAILED, CLOSING);
+        }
+        *lock(&self.step) = None;
+        Frame::ok(id, json!({"deferred": true, "desc": desc}))
+    }
+
     fn answer(&self, request: Request) -> Frame {
         let id = request.id;
         match request.method.as_str() {
@@ -514,8 +538,15 @@ impl Shared {
         // REAPER can't take work (a dialog has the main window, it loads, saves or renders, or the main thread isn't
         // ticking): the work would sit until the wait ran out, and then be cancelled. Say so now, and why.
         if let Some(busy) = self.busy() {
+            // A plan's step that Kumi stopped because REAPER went busy must still be closed: it is taken for the first free
+            // tick, and answered as such, so that the block isn't left open over the producer's own edits.
+            if request.method == "undo_step_end" {
+                return self.defer_step_end(id, request.params);
+            }
             return Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason()));
         }
+        let begun = (request.method == "undo_step_begin").then(|| request.params["label"].as_str().unwrap_or_default().to_string());
+        let ending = (request.method == "undo_step_end").then(|| request.params["stepId"].as_str().unwrap_or_default().to_string());
         let (job, waiter) = queue::job(&request.method, request.params);
         if lock(&self.jobs).send(job).is_err() {
             return Frame::error(id, code::FAILED, CLOSING);
@@ -523,7 +554,15 @@ impl Shared {
         // Whatever stops REAPER taking work while the request waits ends the wait: nothing would run it until that is over.
         let cannot_run = || self.busy().is_some();
         match waiter.wait_unless(wait.min(MAX_WAIT), &self.stopping, &cannot_run) {
-            Outcome::Answered(Ok(result)) => Frame::ok(id, result),
+            Outcome::Answered(Ok(result)) => {
+                if let (Some(label), Some(step)) = (begun, result["stepId"].as_str()) {
+                    *lock(&self.step) = Some((step.to_string(), label));
+                }
+                if ending.is_some() {
+                    *lock(&self.step) = None;
+                }
+                Frame::ok(id, result)
+            }
             Outcome::Answered(Err((code, message))) => Frame::error(id, &code, message),
             Outcome::Cancelled => match self.busy() {
                 Some(busy) => Frame::error(id, code::BUSY, format!("{}; nothing changed", busy.reason())),
@@ -787,6 +826,7 @@ mod tests {
                 status: json!({"tracks": 3}),
                 focus: Value::Null,
                 focus_at: None,
+                working: false,
             }));
             let hub = Hub::default();
             let (tx, jobs) = queue::channel();
@@ -1041,6 +1081,105 @@ mod tests {
             let status = request(&mut stream, &mut reader, 10 + n as u64, "status")["result"].clone();
             assert_eq!(status["busy"], busy.code());
         }
+    }
+
+    fn send(stream: &mut TcpStream, id: u64, method: &str, params: Value) {
+        stream.write_all(&Frame::Request(Request { id, method: method.into(), params, deadline_ms: None }).encode()).unwrap();
+    }
+
+    #[test]
+    fn a_plans_step_asked_closed_while_reaper_is_busy_is_taken_for_the_first_free_tick() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        let jobs = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
+        let main = thread::spawn(move || {
+            let job = jobs.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(job.claim());
+            assert_eq!(job.method, "undo_step_begin");
+            job.answer(Ok(json!({"stepId": "s1"})));
+            jobs
+        });
+        send(&mut stream, 1, "undo_step_begin", json!({"label": "Kumi: Kumi (k1111)"}));
+        assert_eq!(read_frame(&mut reader)["result"], json!({"stepId": "s1"}));
+        let jobs = main.join().unwrap();
+
+        // REAPER goes busy: a change is refused, the step's close is not.
+        lab.snapshot.lock().unwrap().busy = Some(Busy::Rendering);
+        send(&mut stream, 2, "change_apply", json!({}));
+        assert_eq!(read_frame(&mut reader)["error"]["code"], code::BUSY);
+        let started = Instant::now();
+        send(&mut stream, 3, "undo_step_end", json!({"stepId": "s1"}));
+        let response = read_frame(&mut reader);
+        assert_eq!(response["result"], json!({"deferred": true, "desc": "Kumi: Kumi (k1111)"}), "{response}");
+        assert!(started.elapsed() < Duration::from_millis(500), "waited for REAPER instead of taking the close");
+        // It is in the queue, for the first tick that can run it.
+        let job = jobs.try_recv().expect("the close is queued");
+        assert_eq!((job.method.as_str(), job.params["stepId"].as_str()), ("undo_step_end", Some("s1")));
+        // Asked again, there is no step to close; nor is there one it never began.
+        send(&mut stream, 4, "undo_step_end", json!({"stepId": "s1"}));
+        assert_eq!(read_frame(&mut reader)["error"]["code"], code::FAILED);
+        send(&mut stream, 5, "undo_step_end", json!({"stepId": "s9"}));
+        assert_eq!(read_frame(&mut reader)["error"]["code"], code::FAILED);
+        assert!(jobs.try_recv().is_err(), "nothing else was queued");
+    }
+
+    #[test]
+    fn a_close_with_a_new_label_is_deferred_under_that_label() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        let jobs = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
+        let main = thread::spawn(move || {
+            let job = jobs.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(job.claim());
+            job.answer(Ok(json!({"stepId": "s7"})));
+            jobs
+        });
+        send(&mut stream, 1, "undo_step_begin", json!({"label": "Kumi: Kumi (k2222)"}));
+        read_frame(&mut reader);
+        let jobs = main.join().unwrap();
+        lab.snapshot.lock().unwrap().busy = Some(Busy::Modal);
+        send(&mut stream, 2, "undo_step_end", json!({"stepId": "s7", "label": "Kumi: Vocal volume −4.5 dB and 1 more (k2222)"}));
+        assert_eq!(read_frame(&mut reader)["result"], json!({"deferred": true, "desc": "Kumi: Vocal volume −4.5 dB and 1 more (k2222)"}));
+        assert_eq!(jobs.try_recv().unwrap().params["label"], "Kumi: Vocal volume −4.5 dB and 1 more (k2222)");
+    }
+
+    #[test]
+    fn the_main_thread_running_a_slow_request_is_working_not_stalled_and_the_request_is_answered() {
+        let mut lab = Lab::start(VECTOR_SECRET, ServerConnection::new);
+        let (mut stream, mut reader, _) = lab.authenticated();
+        let jobs = std::mem::replace(&mut lab.jobs, mpsc::channel().1);
+        let snapshot = lab.snapshot.clone();
+        let main = thread::spawn(move || {
+            let job = jobs.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(job.claim());
+            // A plug-in loads for longer than the stall limit: the main thread doesn't tick, and says it is working.
+            {
+                let mut snapshot = snapshot.lock().unwrap();
+                snapshot.working = true;
+                snapshot.last_tick = Some(Instant::now() - Duration::from_secs(5));
+            }
+            thread::sleep(Duration::from_millis(2000));
+            {
+                let mut snapshot = snapshot.lock().unwrap();
+                snapshot.working = false;
+                snapshot.last_tick = Some(Instant::now());
+            }
+            job.answer(Ok(json!({"added": true})));
+        });
+        let frame = Request { id: 1, method: "change_apply".into(), params: json!({}), deadline_ms: Some(unix_ms() + 15_000) };
+        stream.write_all(&Frame::Request(frame).encode()).unwrap();
+        // While it works, status (on another connection) says so and not that REAPER is stuck.
+        thread::sleep(Duration::from_millis(1700));
+        let (mut other, mut other_reader, _) = lab.authenticated();
+        let status = request(&mut other, &mut other_reader, 2, "status")["result"].clone();
+        assert_eq!((&status["busy"], &status["working"]), (&json!(false), &json!(true)));
+        let response = read_frame(&mut reader);
+        assert_eq!(response["result"], json!({"added": true}), "{response}");
+        main.join().unwrap();
+        // The main thread that stops ticking without a job to run is stalled, as before.
+        lab.snapshot.lock().unwrap().last_tick = Some(Instant::now() - Duration::from_secs(5));
+        let status = request(&mut other, &mut other_reader, 3, "status")["result"].clone();
+        assert_eq!(status["busy"], "modal");
     }
 
     #[test]

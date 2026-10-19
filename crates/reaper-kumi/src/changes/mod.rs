@@ -234,8 +234,15 @@ impl Changes {
     /// The project the request is about, if the epoch it names is this project's: a request made in another tab, or before
     /// the project in this one was replaced, names refs that mean something else now.
     fn context<'a, 'r>(&self, reaper: &'a Reaper<'r>, reads: &'a Reads, params: &Value) -> Done<Ctx<'a, 'r>> {
+        self.context_from(reaper, reads, params, false)
+    }
+
+    /// As `context`; with `past` (an undo, whose refs are ids that hold across a look at another tab and back) an earlier
+    /// epoch of the project that is open now is accepted too.
+    fn context_from<'a, 'r>(&self, reaper: &'a Reaper<'r>, reads: &'a Reads, params: &Value, past: bool) -> Done<Ctx<'a, 'r>> {
         let epoch = text(params, "epoch").map_err(|_| bad("epoch: the epoch the refs were read in"))?;
-        if epoch != reads.epoch() {
+        let of_this_project = past && reaper.current_project().is_some_and(|info| reads.epoch_is_of(epoch, info.ptr));
+        if epoch != reads.epoch() && !of_this_project {
             return Err((
                 daw_bridge::wire::code::STALE.into(),
                 format!(
@@ -285,7 +292,7 @@ impl Changes {
     }
 
     pub fn restore(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
-        let ctx = self.context(reaper, reads, params)?;
+        let ctx = self.context_from(reaper, reads, params, true)?;
         let kind = kind_of(params)?;
         let desc = text(params, "desc")?;
         let restore = Restore {
