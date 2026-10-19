@@ -112,5 +112,10 @@ fn doctor_and_report_take_the_daw_asked_for() {
     chosen.insert("KUMI_DAW".into(), "renoise".into());
     assert_eq!(config(&["report"], &chosen).unwrap(), r#"{"mode":"report","daw":"renoise"}"#);
     assert!(config(&["--daw", "logic", "doctor"], &env).unwrap_err().starts_with("Use: --daw <daw>"));
+    // A KUMI_DAW Kumi doesn't know never stops the doctor or the report (the doctor says so).
+    let mut wrong = env.clone();
+    wrong.insert("KUMI_DAW".into(), "bitwig".into());
+    assert_eq!(config(&["doctor"], &wrong).unwrap(), r#"{"mode":"doctor","json":false}"#);
+    assert_eq!(config(&["report"], &wrong).unwrap(), r#"{"mode":"report"}"#);
     assert!(config(&["doctor", "--verbose"], &env).is_err());
 }

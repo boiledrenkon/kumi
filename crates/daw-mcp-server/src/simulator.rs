@@ -123,6 +123,8 @@ struct State {
     flow: Flow,
     /// Connections numbered up to this have been let go of without a word: they answer nothing, send nothing.
     silent_upto: usize,
+    /// The whole DAW is frozen (a plug-in loading, a long script): every connection, new ones too, answers nothing.
+    frozen: bool,
     /// Connections numbered up to this are retired as the Renoise tool retires a host: the line part sent is finished, a bye
     /// follows it, and only credit frames are taken from then on.
     retired_upto: usize,
@@ -161,6 +163,7 @@ impl Simulator {
             connections: 0,
             flow: Flow::default(),
             silent_upto: 0,
+            frozen: false,
             retired_upto: 0,
         }));
         let (events, _) = broadcast::channel(256);
@@ -253,6 +256,18 @@ impl Simulator {
         let mut state = self.state.lock().unwrap();
         state.silent_upto = state.connections;
         drop(state);
+        self.wake.send_modify(|n| *n += 1);
+    }
+
+    /// The DAW freezes: the socket still takes connections, but nothing is answered on any, new ones included (the
+    /// handshake never completes), until `thaw`.
+    pub fn freeze(&self) {
+        self.state.lock().unwrap().frozen = true;
+        self.wake.send_modify(|n| *n += 1);
+    }
+
+    pub fn thaw(&self) {
+        self.state.lock().unwrap().frozen = false;
         self.wake.send_modify(|n| *n += 1);
     }
 
@@ -438,7 +453,7 @@ async fn serve(
         }
         let (silent, retire) = {
             let state = state.lock().unwrap();
-            (number <= state.silent_upto, number <= state.retired_upto)
+            (number <= state.silent_upto || state.frozen, number <= state.retired_upto)
         };
         if silent {
             // Let go of: nothing it was asked or told reaches the host.

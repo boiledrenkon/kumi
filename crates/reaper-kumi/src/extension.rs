@@ -1008,10 +1008,11 @@ mod tests {
         set_id(Some(TEMPLATE_ID));
         extension.tick(Driver::Timer);
         assert_eq!(project_id(&extension, &tx), Value::Null, "an unsaved project has no id of its own");
-        // The first save writes the file with the template's id in it. It still isn't this project's.
+        // The first save writes the file with the template's id in it. It still isn't this project's: until one is
+        // written, the project is named by its path.
         fake::with(|s| s.project = Some(("/lab/Projects/Mix.rpp".into(), "Mix.rpp".into())));
         extension.tick(Driver::Timer);
-        assert_eq!(project_id(&extension, &tx), Value::Null);
+        assert_eq!(project_id(&extension, &tx), crate::read::path_id("/lab/Projects/Mix.rpp"));
         // Kumi writes the project's own id over it (M6): that is the id from then on, through Save As too.
         set_id(Some(OWN_ID));
         extension.tick(Driver::Timer);
@@ -1022,11 +1023,12 @@ mod tests {
     }
 
     #[test]
-    fn a_project_without_an_id_has_none_until_one_is_written_and_the_snapshot_agrees() {
+    fn a_saved_project_without_an_id_is_named_by_its_path_until_one_is_written_and_the_snapshot_agrees() {
         let (extension, tx, _, _) = setup();
         fake::lab_project();
         extension.tick(Driver::Timer);
-        assert_eq!(project_id(&extension, &tx), Value::Null);
+        // The same file reopened after a restart is the same project.
+        assert_eq!(project_id(&extension, &tx), crate::read::path_id("/lab/Projects/Song.rpp"));
         set_id(Some(OWN_ID));
         assert_eq!(project_id(&extension, &tx), OWN_ID);
         assert_eq!(ask_with(&extension, &tx, "snapshot", json!({})).unwrap()["project"]["id"], OWN_ID);
@@ -1214,7 +1216,7 @@ mod tests {
         project_with_history("/lab/Projects/Mix.rpp", 5);
         extension.tick(Driver::Timer);
         assert_eq!(epoch_and_identity(&extension, &tx), unsaved);
-        assert_eq!(project_id(&extension, &tx), Value::Null, "still the template's id, not this project's own");
+        assert_eq!(project_id(&extension, &tx), crate::read::path_id("/lab/Projects/Mix.rpp"), "still not the template's id: its path's");
         // A copy of the template's file opened in the tab: a load, the undo history starts over, whatever the tracks.
         project_with_history("/lab/Projects/Template copy.rpp", 1);
         extension.tick(Driver::Timer);

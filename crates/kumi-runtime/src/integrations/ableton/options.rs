@@ -137,6 +137,7 @@ impl AbletonOptions {
             on_action: self.on_action.clone(),
             low_disk: self.low_disk.clone(),
             on_watch: self.on_watch.clone(),
+            on_look_again: None,
             change_timeout_ms: self.change_timeout_ms,
             on_catch_up: self.on_catch_up.clone(),
             reconnect_interval_ms: self.reconnect_interval_ms,

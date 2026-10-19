@@ -10,8 +10,8 @@ local byte, sub = string.byte, string.sub
 
 local M = {}
 
-M.METHODS = { "ping", "status", "renoise.reload", "read", "snapshot", "focus", "focus_body" }
-M.EVENTS = { "project", "tracks", "selection", "transport" }
+M.METHODS = { "ping", "status", "renoise.reload", "read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore", "undo_step_begin", "undo_step_end", "transport_stop" }
+M.EVENTS = { "project", "tracks", "selection", "transport", "undone_in_daw" }
 
 -- Kept across payload reloads (the bridge sets it to its own state).
 M.cache = {}
@@ -51,7 +51,7 @@ function M.resource(bundle_path)
 end
 
 -- The resource folder as the wire carries it: a path is long on Windows (extended paths run to 32,767 characters), so it is cut
--- like a title. (The discovery file's name is made from the whole path.)
+-- like a title. (The discovery file's name is made from this text, since a host hashes the resource it reads in the file.)
 function M.resource_text(bundle_path)
   return M.cap(M.resource(bundle_path), M.MAX_PATH_CHARS)
 end

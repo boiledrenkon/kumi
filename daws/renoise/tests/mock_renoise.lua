@@ -35,9 +35,10 @@ function M.impl(proxy)
 end
 
 -- A strict object of a Renoise class. getters compute members on each read.
-local function object(class_name, fields, getters)
+local function object(class_name, fields, getters, setters)
   assert(api[class_name], "mock: unknown class " .. class_name)
   getters = getters or {}
+  setters = setters or {}
   local proxy = {}
   impl_of[proxy] = fields
   return setmetatable(proxy, {
@@ -56,6 +57,11 @@ local function object(class_name, fields, getters)
     __newindex = function(_, key, value)
       if not has_member(class_name, key) then
         error("renoise mock: " .. class_name .. " has no member '" .. tostring(key) .. "'", 2)
+      end
+      -- (a member the song keeps in its data: written there, with its undo step and notifiers)
+      if setters[key] then
+        setters[key](value)
+        return
       end
       local old = fields[key]
       fields[key] = value == nil and M.NIL or value
@@ -86,6 +92,7 @@ function M.observable()
   fields.add_notifier = function(_, a, b)
     local i, fn, obj = find(a, b)
     if i then error("the notifier was already added", 2) end
+    M.notifier_adds = (M.notifier_adds or 0) + 1 -- (how many the code under test added: a cost that doesn't depend on the clock)
     fields.notifiers[#fields.notifiers + 1] = { fn = fn, obj = obj }
   end
   fields.remove_notifier = function(_, a, b)
@@ -97,6 +104,14 @@ function M.observable()
     return find(a, b) ~= nil
   end
   return object("renoise.Document.Observable", fields)
+end
+
+-- One of Renoise's callbacks (a timer, a socket message): everything it writes is one undo step, whatever it names.
+function M.run_callback(fn, ...)
+  if M.callback_begin then M.callback_begin() end
+  local ok, err = pcall(fn, ...)
+  if M.callback_end then M.callback_end() end
+  return ok, err
 end
 
 -- Calls the notifiers as Renoise does: one that raises is reported and disabled.
@@ -235,7 +250,7 @@ end
 local function callback(server, name, ...)
   local notifier = server.notifier
   if not server.running or not notifier or not notifier[name] then return end
-  local ok, err = pcall(notifier[name], ...)
+  local ok, err = M.run_callback(notifier[name], ...)
   if not ok then record_error("socket " .. name, err) end
 end
 
@@ -320,7 +335,7 @@ function M.advance(ms)
     if not next_timer then break end
     M.time = next_timer.due
     next_timer.due = next_timer.due + next_timer.interval
-    local ok, err = pcall(next_timer.fn)
+    local ok, err = M.run_callback(next_timer.fn)
     if not ok then record_error("timer", err) end
   end
   M.time = math.max(M.time, target)
