@@ -112,7 +112,9 @@ base.register({
       fail("failed", "Renoise wouldn't load the plug-in " .. plan.path)
     end
     if plan.now.path == "" and name ~= "" and plan.instrument.name ~= name then plan.instrument.name = name end
-    if plan.instrument.name ~= name then
+    if plan.instrument.name ~= name and plan.instrument.name == "" then
+      display.note = string.format("Renoise left the instrument unnamed as its plug-in went; Kumi's undo names it %s again.", q(name))
+    elseif plan.instrument.name ~= name then
       display.note = string.format("Renoise named the instrument %s after its plug-in; Kumi's undo names it %s again.", q(plan.instrument.name), q(name))
     end
     if not M.UNDO_COVERS.plugin then display.note = (display.note and (display.note .. " ") or "") .. NOT_IN_UNDO end
