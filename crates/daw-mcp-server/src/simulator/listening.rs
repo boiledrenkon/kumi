@@ -40,6 +40,10 @@ struct State {
     steps: u32,
     /// Each track's level (its noise's peak), by ref; the master is their sum.
     levels: HashMap<String, f64>,
+    /// The master's level when a test sets it (the mix as a change left it).
+    master_level: Option<f64>,
+    /// What the master's own gain FX add, in dB (a bridge script keeps it).
+    master_gain_db: f64,
     /// Scratch copies by set: each copy's ref, name, the source's ref and the values set on it.
     scratch: HashMap<String, Vec<(String, String, String, Vec<Value>)>>,
     previews: Vec<Value>,
@@ -108,6 +112,8 @@ impl SimListening {
                 jobs: HashMap::new(),
                 steps: 1,
                 levels: HashMap::new(),
+                master_level: None,
+                master_gain_db: 0.,
                 scratch: HashMap::new(),
                 previews: vec![],
                 playing: None,
@@ -139,6 +145,16 @@ impl SimListening {
     /// A track's level (0: silent).
     pub fn set_level(&self, reference: &str, level: f64) {
         self.state.lock().unwrap().levels.insert(reference.into(), level);
+    }
+
+    /// The master's level from now on (the mix as a change left it).
+    pub fn set_master_level(&self, level: f64) {
+        self.state.lock().unwrap().master_level = Some(level);
+    }
+
+    /// What the master's gain FX add from now on, in dB.
+    pub fn set_master_gain_db(&self, db: f64) {
+        self.state.lock().unwrap().master_gain_db = db;
     }
 
     /// How many polls of its status a job takes to finish.
@@ -306,7 +322,8 @@ impl SimListening {
             files.push((source_id, path, start, seconds, level, stage));
         }
         // The master is every track: the sources' levels, or the default's when none was asked.
-        let master = if master > 0. { master.min(0.9) } else { DEFAULT_LEVEL };
+        let master = state.master_level.unwrap_or(if master > 0. { master.min(0.9) } else { DEFAULT_LEVEL })
+            * 10f64.powf(state.master_gain_db / 20.);
         for file in files.iter_mut().filter(|file| file.4 < 0.) {
             file.4 = master;
         }

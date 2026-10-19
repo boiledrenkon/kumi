@@ -801,6 +801,12 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     async fn audio_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError> {
         self.listening.audio_file(named, signal).await
     }
+    fn has_goal(&self) -> bool {
+        self.connected.get() && self.listening.goal_ready()
+    }
+    async fn goal(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
+        self.listening.goal(request, signal).await
+    }
     fn can_show(&self, kind: BodyKind) -> bool {
         self.daw.bodies.contains(&kind)
     }

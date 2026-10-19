@@ -268,3 +268,101 @@ async fn the_renoise_demo_and_an_older_bridge_offer_no_listening_and_say_why() {
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_judged_round_brings_reapers_level_back_with_a_volume_fx_it_adds_on_the_master() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, _) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let judge = tool(&observed, "judge");
+            let start = judge
+                .execute(object(json!({"goal": {"loudness": -6, "problems": false}, "from_beat": 0, "beats": 8})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!start.is_error, "{}", start.text);
+            // The model changes something that makes the mix louder, toward the goal: kept, and the rest of the way is the
+            // gain stage's (a gain FX added last on the master, and turned up).
+            script.listening().set_master_level(0.4);
+            let context: Value = serde_json::from_str(&observed.context).unwrap();
+            let bass = context["tracks"][2]["ref"].as_str().unwrap().to_owned();
+            let change =
+                tool(&observed, "track_volume").execute(object(json!({"ref": bass, "volumeDb": -3})), Signal::new()).await.unwrap();
+            assert!(!change.is_error, "{}", change.text);
+            let round = judge.execute(object(json!({"change": "Bass down 3 dB"})), Signal::new()).await.unwrap();
+            assert!(!round.is_error, "{}", round.text);
+            assert_eq!(script.fx_names("r:track:master"), ["JS: Volume Adjustment"], "the gain FX rebalancing added: {}", round.text);
+            let adjusted = script.fx_param("r:track:master", "Volume Adjustment", "Adjustment (dB)").unwrap();
+            assert!(adjusted > 0.5, "turned up toward −6 LUFS: {adjusted}");
+            assert!(round.text.contains("\"kept\":true"), "{}", round.text);
+            assert_ours(&[round.text]);
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner_on_the_track() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            script.add_fx("r:track:{T0002}", "ReaEQ");
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            reaper.observe(Signal::new(), None).await.unwrap();
+            assert!(reaper.has_goal());
+            let reference = home.path().join("reference.wav");
+            daw_mcp_server::simulator::listening::write_noise(&reference, 4., 0.4, 9).unwrap();
+            let request = AuditionRequest {
+                candidates: vec![AuditionCandidate { track: "Track 2".into(), clip: None, label: Some("pad".into()), mix: None }],
+                from_beat: Some(0.),
+                beats: Some(4.),
+                reference: Some(reference.to_string_lossy().into_owned()),
+                reference_from: None,
+                reference_seconds: None,
+                focus: None,
+            };
+            let rig = reaper.goal(&request, Signal::new()).await.unwrap().unwrap();
+            assert!(!rig.screens(), "two seconds: heard whole");
+            let slots = rig.slots();
+            assert_eq!(slots.len(), 1);
+            assert_eq!(script.fx_names("r:track:{T0002}"), ["VST: ReaEQ (Cockos)", "VST: ReaLimit (Cockos)"], "a safety limiter last");
+            assert!(slots[0].chain.contains("ReaEQ") && slots[0].knobs.iter().any(|knob| knob.name == "Gain-Band 2"), "{:?}", slots[0]);
+            // A generation: the trial's values on the slot's copy, its copy rendered and scored.
+            let knobs: Vec<_> = slots[0].knobs.iter().filter(|knob| knob.name == "Gain-Band 2").cloned().collect();
+            let trial = GenerationTrial { slot: slots[0].name.clone(), knobs: knobs.clone(), values: vec![0.7], fresh: None };
+            let generation = rig.generation(&[trial.clone()], Signal::new(), None).await.unwrap();
+            assert!(generation.scores.contains_key(&slots[0].name), "{generation:?}");
+            let rendered = script.listening().renders().last().cloned().unwrap();
+            let copy = rendered["sources"][0]["ref"].as_str().unwrap().to_owned();
+            assert!(copy.starts_with("r:track:{C"), "the copy is heard, not the track: {rendered}");
+            assert_eq!(script.listening().copy_values(&copy)[0]["normalized"], 0.7);
+            assert_eq!(
+                script.fx_param("r:track:{T0002}", "ReaEQ", "Gain-Band 2"),
+                Some(0.5),
+                "the track itself is untouched while searching"
+            );
+            // The same values again come from what was heard.
+            let again = rig.generation(&[trial], Signal::new(), None).await.unwrap();
+            assert_eq!(again.cached, 1);
+            // Keeping the best needs the bridge to keep a copy as a track; until then it says so.
+            let kept = rig.keep_best(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap();
+            assert!(kept.contains("update Kumi's bridge"), "{kept}");
+            // The winner settles on the track itself, as one change.
+            assert_eq!(rig.settle(&slots[0].name, &knobs, &[0.7], Signal::new()).await.unwrap(), None);
+            assert_eq!(script.fx_param("r:track:{T0002}", "ReaEQ", "Gain-Band 2"), Some(0.7));
+            rig.close().await.unwrap();
+            assert_eq!(script.listening().scratch_copies(), 0, "the copies are gone");
+            assert_ours(&told.borrow());
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

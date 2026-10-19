@@ -76,6 +76,8 @@ pub(super) struct Table {
     pub limiters: &'static [(&'static str, &'static str, bool)],
     /// The gain device rebalancing adds when there's no gain stage: what the add takes, and its name once there.
     pub gain_device: (&'static str, &'static str),
+    /// The limiter a goal's candidate gets last in its chain for safety: what the add takes, and its name once there.
+    pub safety_limiter: (&'static str, &'static str),
     /// The read kind of a track's devices ("fx", "device").
     pub device_kind: &'static str,
     /// The change kinds: a parameter, several of one device's parameters, a device added, a device deleted.
@@ -110,6 +112,7 @@ pub(super) const REAPER: Table = Table {
     linear: &[],
     limiters: &[("ReaLimit", "Threshold", true), ("Master Limiter", "Threshold", true)],
     gain_device: ("JS: Volume Adjustment", "Volume Adjustment"),
+    safety_limiter: ("VST: ReaLimit (Cockos)", "ReaLimit"),
     device_kind: "fx",
     param_tool: "fx_param",
     params_tool: "fx_params",
@@ -137,6 +140,7 @@ pub(super) const RENOISE: Table = Table {
     linear: &["Gainer", "EQ", "Filter", "DC Offset", "Stereo Expander", "Mixer"],
     limiters: &[("Maximizer", "Boost", false)],
     gain_device: ("Audio/Effects/Native/Gainer", "Gainer"),
+    safety_limiter: ("Audio/Effects/Native/Maximizer", "Maximizer"),
     device_kind: "device",
     param_tool: "device_param",
     params_tool: "device_params",
@@ -191,7 +195,7 @@ impl Flags {
 
 /// A track as a listen finds it: its ref, name and type, and its fader.
 #[derive(Debug, Clone)]
-struct TrackRow {
+pub(super) struct TrackRow {
     reference: String,
     name: String,
     kind: String,
@@ -200,12 +204,12 @@ struct TrackRow {
 
 /// One of a track's devices as listening reads it.
 #[derive(Debug, Clone)]
-struct DeviceRow {
-    reference: String,
-    name: String,
-    on: bool,
-    plugin: bool,
-    index: u64,
+pub(super) struct DeviceRow {
+    pub reference: String,
+    pub name: String,
+    pub on: bool,
+    pub plugin: bool,
+    pub index: u64,
 }
 
 /// What a scratch set keeps to set and drop its copies.
@@ -218,9 +222,9 @@ struct Scratch {
 
 /// The DAW as the listening tools meet it, through Kumi's host.
 pub struct OwnRenderer<S: RefScheme + 'static> {
-    link: Rc<Link<S>>,
-    plan: Rc<OwnPlan<S>>,
-    table: &'static Table,
+    pub(super) link: Rc<Link<S>>,
+    pub(super) plan: Rc<OwnPlan<S>>,
+    pub(super) table: &'static Table,
     on_action: Option<Rc<dyn Fn(ActionEvent)>>,
     change_timeout_ms: u64,
     folder: PathBuf,
@@ -228,7 +232,7 @@ pub struct OwnRenderer<S: RefScheme + 'static> {
     flags: Cell<Flags>,
     beats_per_bar: Cell<f64>,
     /// Scratch copies standing now: each name's ref.
-    copies: RefCell<IndexMap<String, String>>,
+    pub(super) copies: RefCell<IndexMap<String, String>>,
     tracks: RefCell<Option<(Instant, Vec<TrackRow>)>>,
 }
 
@@ -259,11 +263,11 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         }
     }
 
-    fn profile(&self) -> &'static DawProfile {
+    pub(super) fn profile(&self) -> &'static DawProfile {
         self.link.daw.profile
     }
 
-    fn app(&self) -> &'static str {
+    pub(super) fn app(&self) -> &'static str {
         self.profile().words.app
     }
 
@@ -281,18 +285,18 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         }
     }
 
-    fn cleanup_signal(&self) -> Signal {
+    pub(super) fn cleanup_signal(&self) -> Signal {
         abort::any([self.link.lifetime.clone(), abort::timeout(self.change_timeout_ms.saturating_mul(3))])
     }
 
-    fn tell_app(&self, title: &str) {
+    pub(super) fn tell_app(&self, title: &str) {
         if let Some(on_action) = &self.on_action {
             on_action(ActionEvent { title: title.into(), playing: None, recording: None });
         }
     }
 
     /// Why nothing can be heard now, in words: the DAW isn't there, its bridge is older than listening, or it's the demo.
-    fn why_not(&self) -> Option<String> {
+    pub(super) fn why_not(&self) -> Option<String> {
         let app = self.app();
         if !self.link.connected.get() || self.link.endpoint.borrow().is_none() {
             return Some(self.profile().vocab.cant_reach.into());
@@ -312,7 +316,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// A host tool's answer, with the request placed where its refs came from (their epoch, and Renoise's layout).
-    async fn ask(&self, tool: &str, args: Value, signal: Signal) -> Result<Result<Value, Refused>, RuntimeError> {
+    pub(super) async fn ask(&self, tool: &str, args: Value, signal: Signal) -> Result<Result<Value, Refused>, RuntimeError> {
         let mut args = args;
         let input = args.as_object().cloned().unwrap_or_default();
         self.plan.place_request(&mut args, &input);
@@ -355,7 +359,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// The project's tracks (read once a second at most).
-    async fn track_rows(&self, signal: &Signal) -> Result<Result<Vec<TrackRow>, String>, RuntimeError> {
+    pub(super) async fn track_rows(&self, signal: &Signal) -> Result<Result<Vec<TrackRow>, String>, RuntimeError> {
         if let Some((at, rows)) = self.tracks.borrow().as_ref() {
             if at.elapsed() < TRACKS_FRESH {
                 return Ok(Ok(rows.clone()));
@@ -382,7 +386,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
 
     /// A track by what the model or a round names it (a ref of this turn, a long ref, a scratch copy's or a track's
     /// name): its long ref and its name now.
-    async fn resolve(&self, named: &str, signal: &Signal) -> Result<Result<(String, String), String>, RuntimeError> {
+    pub(super) async fn resolve(&self, named: &str, signal: &Signal) -> Result<Result<(String, String), String>, RuntimeError> {
         if let Some(reference) = self.copies.borrow().get(named) {
             return Ok(Ok((reference.clone(), named.to_owned())));
         }
@@ -427,7 +431,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// A track's devices, in order.
-    async fn devices(&self, track: &str, signal: &Signal) -> Result<Result<Vec<DeviceRow>, String>, RuntimeError> {
+    pub(super) async fn devices(&self, track: &str, signal: &Signal) -> Result<Result<Vec<DeviceRow>, String>, RuntimeError> {
         let rows = match self.rows(json!({"kind": self.table.device_kind, "parent": track}), 8, signal).await? {
             Ok(rows) => rows,
             Err(why) => return Ok(Err(why)),
@@ -450,7 +454,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// A device's parameters (with their text across the range when `grid`).
-    async fn parameters(&self, device: &str, grid: bool, signal: &Signal) -> Result<Result<Vec<Value>, String>, RuntimeError> {
+    pub(super) async fn parameters(&self, device: &str, grid: bool, signal: &Signal) -> Result<Result<Vec<Value>, String>, RuntimeError> {
         let mut args = json!({"kind": "param", "parent": device});
         if grid {
             args["grid"] = GRID.into();
@@ -460,7 +464,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
 
     /// Follows a job to its end: its last status, or why it didn't finish. Stopping the call stops the job, and what it
     /// changed is put back by the bridge.
-    async fn wait(&self, started: &Value, signal: &Signal) -> Result<Result<Value, String>, RuntimeError> {
+    pub(super) async fn wait(&self, started: &Value, signal: &Signal) -> Result<Result<Value, String>, RuntimeError> {
         let Some(id) = started.get("jobId").and_then(Value::as_str).map(str::to_owned) else {
             return Ok(Err(format!("{} started no job", self.app())));
         };
@@ -513,7 +517,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
 
     /// Renders these sources over `window` (with a bar before it so effects are warm): the job's files by source id, with
     /// its notes.
-    async fn render_sources(
+    pub(super) async fn render_sources(
         &self,
         sources: Vec<Value>,
         window: Window,
@@ -543,7 +547,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
 
     /// Plays a render out loud where the producer listens (its part, at most `PLAYED_SECONDS`), without waiting: whether
     /// it's playing, and what the DAW says of how (Renoise plays the song over that part), or why it isn't.
-    async fn play(&self, render: &Render) -> (bool, Option<String>) {
+    pub(super) async fn play(&self, render: &Render) -> (bool, Option<String>) {
         if !self.flags.get().audition {
             return (false, None);
         }
@@ -655,7 +659,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// A change of the DAW's for listening (a gain stage turned, a device added or deleted): its id, or why not.
-    async fn change(&self, tool: &str, input: Value, signal: Signal) -> Result<(String, Value), String> {
+    pub(super) async fn change(&self, tool: &str, input: Value, signal: Signal) -> Result<(String, Value), String> {
         let outcome = self.plan.change_by(tool, object(input), signal).await;
         let answer: Value = serde_json::from_str(&outcome.text).unwrap_or(Value::String(outcome.text.clone()));
         if outcome.is_error || outcome.stops {
@@ -999,8 +1003,9 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         let mut input = json!({"ref": reference});
         input[self.table.text_field] = format!("{:.1} dB", (wanted * 10.).round() / 10.).into();
         self.change(self.table.param_tool, input, signal).await?;
-        let label =
-            if inverted { format!("{} level (its {knob})", device.name) } else { format!("{} {}", device.name, knob.to_lowercase()) };
+        // Said by the level it turns: "Volume Adjustment gain", "ReaLimit level (its Threshold)".
+        let named = plugin_name(&device.name);
+        let label = if inverted { format!("{named} level (its {knob})") } else { format!("{named} gain") };
         Ok((label, limited))
     }
     async fn limited(&self, track: Option<&str>, signal: Signal) -> bool {
@@ -1558,6 +1563,18 @@ impl<S: RefScheme + 'static> OwnListening<S> {
     /// The audio file a ref stands for (an item's, a sample's, a pattern rendered); None for a file.
     pub async fn audio_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError> {
         self.renderer.clip_file(named, signal).await
+    }
+
+    /// Whether a goal's rig can be opened now (the bridge renders and makes scratch copies).
+    pub fn goal_ready(&self) -> bool {
+        let flags = self.renderer.flags();
+        flags.known && flags.render && flags.scratch && !flags.demo
+    }
+
+    /// A goal's render rig over these candidates (`/goal`, a match run's search), or why not.
+    pub async fn goal(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
+        let _held = self.hold(&signal).await?;
+        super::own_goal::OwnGoalRig::open(self.renderer.clone(), &self.listening, request, signal).await
     }
 
     /// The listen tool's hearing of the project: what plays now (REAPER, while it plays), or a stretch rendered offline

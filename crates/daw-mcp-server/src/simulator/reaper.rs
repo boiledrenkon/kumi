@@ -42,6 +42,85 @@ struct State {
     left_out_once: Option<String>,
     /// Whether REAPER is playing (its transport, and what a capture needs).
     playing: bool,
+    /// Each track's FX chain, by the track's ref ("r:track:master" is the first row's): M5's listening reads and sets them.
+    fx: std::collections::HashMap<String, Vec<SimFx>>,
+    next_fx: u32,
+}
+
+/// An FX of the sim's: its GUID, name and parameters (normalized values; each shown by its kind).
+#[derive(Debug, Clone)]
+pub struct SimFx {
+    pub guid: String,
+    pub name: String,
+    pub params: Vec<(String, f64, ParamShows)>,
+}
+
+/// How an FX parameter of the sim's shows its normalized value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParamShows {
+    /// dB, linear from `min` to `max` dB across 0..1, shown bare ("6.0", as a JSFX shows it) or with its unit.
+    Db { min: f64, max: f64, unit: bool },
+    /// Hz, logarithmic from 20 Hz to 24 kHz.
+    Hz,
+    /// A plain number from `min` to `max`.
+    Plain { min: f64, max: f64 },
+}
+
+impl ParamShows {
+    pub fn shown(self, normalized: f64) -> f64 {
+        match self {
+            ParamShows::Db { min, max, .. } | ParamShows::Plain { min, max } => min + (max - min) * normalized,
+            ParamShows::Hz => 20. * (24_000f64 / 20.).powf(normalized),
+        }
+    }
+    fn text(self, normalized: f64) -> String {
+        let value = self.shown(normalized);
+        match self {
+            ParamShows::Db { unit: true, .. } => format!("{value:.1} dB"),
+            ParamShows::Db { unit: false, .. } | ParamShows::Plain { .. } => format!("{value:.1}"),
+            ParamShows::Hz => format!("{value:.0} Hz"),
+        }
+    }
+    /// The normalized value a text means (its leading number), clamped to the range.
+    fn normalized(self, text: &str) -> Option<f64> {
+        let number: String = text.trim().chars().take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
+        let value: f64 = number.parse().ok()?;
+        Some(match self {
+            ParamShows::Db { min, max, .. } | ParamShows::Plain { min, max } => ((value - min) / (max - min)).clamp(0., 1.),
+            ParamShows::Hz => ((value.max(20.) / 20.).ln() / (24_000f64 / 20.).ln()).clamp(0., 1.),
+        })
+    }
+}
+
+/// The FX the sim knows by name, as REAPER's would be (names as the M5 lab measured them).
+fn sim_fx(name: &str, guid: String) -> Option<SimFx> {
+    let db = |min: f64, max: f64, unit: bool| ParamShows::Db { min, max, unit };
+    let params: Vec<(String, f64, ParamShows)> = match name {
+        "VST: ReaLimit (Cockos)" | "ReaLimit" => {
+            vec![("Threshold".into(), 1., db(-60., 0., true)), ("Ceiling".into(), 0.99, db(-20., 0., true))]
+        }
+        "JS: Volume Adjustment" | "Volume Adjustment" => {
+            vec![("Adjustment (dB)".into(), 0.5, db(-150., 150., false)), ("Max Volume (dB)".into(), 0.5, db(-150., 150., false))]
+        }
+        "VST: ReaEQ (Cockos)" | "ReaEQ" => {
+            let mut params = vec![];
+            for (band, freq) in [("Low Shelf", 0.25), ("Band 2", 0.45), ("Band 3", 0.65), ("High Shelf 4", 0.85)] {
+                params.push((format!("Freq-{band}"), freq, ParamShows::Hz));
+                params.push((format!("Gain-{band}"), 0.5, db(-24., 24., true)));
+                params.push((format!("BW-{band}"), 0.25, ParamShows::Plain { min: 0.01, max: 4. }));
+            }
+            params.push(("Gain".into(), 0.5, db(-24., 24., true)));
+            params
+        }
+        _ => return None,
+    };
+    let name = match name {
+        "ReaLimit" => "VST: ReaLimit (Cockos)",
+        "Volume Adjustment" => "JS: Volume Adjustment",
+        "ReaEQ" => "VST: ReaEQ (Cockos)",
+        other => other,
+    };
+    Some(SimFx { guid, name: name.into(), params })
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -107,6 +186,8 @@ impl ReaperScript {
                 uncertain_restore_once: false,
                 left_out_once: None,
                 playing: false,
+                fx: std::collections::HashMap::new(),
+                next_fx: 0,
             })),
             listening: SimListening::new(daw_bridge::Daw::Reaper),
         }
@@ -115,6 +196,30 @@ impl ReaperScript {
     /// The bridge's listening side: renders, captures, previews, scratch copies.
     pub fn listening(&self) -> &SimListening {
         &self.listening
+    }
+
+    /// An FX the producer puts on a track (by a name the sim knows: ReaEQ, ReaLimit, JS Volume Adjustment): its ref.
+    pub fn add_fx(&self, track: &str, name: &str) -> String {
+        let mut state = self.state.lock().unwrap();
+        state.next_fx += 1;
+        let fx = sim_fx(name, format!("{{F{:04}}}", state.next_fx)).expect("an FX the sim knows");
+        let reference = format!("r:fx:{}", fx.guid);
+        state.fx.entry(track.to_owned()).or_default().push(fx);
+        state.changed += 1;
+        reference
+    }
+
+    /// A track's FX chain, by name, in order.
+    pub fn fx_names(&self, track: &str) -> Vec<String> {
+        self.state.lock().unwrap().fx.get(track).map(|chain| chain.iter().map(|fx| fx.name.clone()).collect()).unwrap_or_default()
+    }
+
+    /// An FX parameter's normalized value, by the FX's name on a track and the parameter's.
+    pub fn fx_param(&self, track: &str, fx: &str, param: &str) -> Option<f64> {
+        let state = self.state.lock().unwrap();
+        let chain = state.fx.get(track)?;
+        let found = chain.iter().find(|found| found.name.contains(fx))?;
+        found.params.iter().find(|(name, ..)| name == param).map(|(_, value, _)| *value)
     }
 
     /// The producer starts or stops REAPER: its transport says so, and a capture can hear it.
@@ -198,6 +303,9 @@ impl ReaperScript {
         let kind = params["kind"].as_str().unwrap_or_default();
         if kind == "track-add" {
             return Self::add_track(state, epoch, method, params);
+        }
+        if matches!(kind, "fx-add" | "fx-param" | "fx-delete") {
+            return Self::fx_change(state, epoch, method, params);
         }
         let field = match kind {
             "track-volume" => "volumeDb",
@@ -305,6 +413,109 @@ impl ReaperScript {
         }
     }
 
+    /// The track an FX ref's chain is on, and the FX's place in it.
+    fn find_fx(state: &State, reference: &str) -> Option<(String, usize)> {
+        let guid = reference.strip_prefix("r:fx:")?;
+        state.fx.iter().find_map(|(track, chain)| chain.iter().position(|fx| fx.guid == guid).map(|at| (track.clone(), at)))
+    }
+
+    /// `fx-add {ref: track, name}`, `fx-param {ref: param, value (text) | normalized}`, `fx-delete {ref: fx}`, fenced as the
+    /// extension fences them (the parameter's value, the chain's length), each a step of REAPER's undo.
+    fn fx_change(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let bad = |message: String| ("bad-params".to_string(), message);
+        let kind = params["kind"].as_str().unwrap_or_default();
+        let source = if method == "change_restore" { &params["target"] } else { &params["input"] };
+        let desc = params["desc"].as_str().unwrap_or_default().to_string();
+        match kind {
+            "fx-add" => {
+                let track = if method == "change_restore" { params["target"]["ref"].as_str() } else { params["input"]["ref"].as_str() };
+                let track = track.unwrap_or_default().to_string();
+                let name = params["input"]["name"].as_str().or(params["prior"]["name"].as_str()).unwrap_or_default().to_string();
+                match method {
+                    "change_preview" => {
+                        let count = state.fx.get(&track).map_or(0, Vec::len);
+                        sim_fx(&name, String::new()).ok_or_else(|| bad(format!("no FX named {name:?}")))?;
+                        Ok(
+                            json!({"epoch": epoch, "target": {"ref": track, "kind": "track"}, "prior": {"count": count, "name": name}, "fence": {"count": count}, "display": {"title": format!("Added “{name}”")}}),
+                        )
+                    }
+                    "change_apply" => {
+                        let count = state.fx.get(&track).map_or(0, Vec::len);
+                        if params["fence"]["count"].as_u64() != Some(count as u64) {
+                            return Err(("changed".into(), "the chain changed since the preview".into()));
+                        }
+                        state.next_fx += 1;
+                        let fx = sim_fx(&name, format!("{{F{:04}}}", state.next_fx)).ok_or_else(|| bad(format!("no FX named {name:?}")))?;
+                        let made = format!("r:fx:{}", fx.guid);
+                        state.fx.entry(track.clone()).or_default().push(fx);
+                        state.changed += 1;
+                        Self::step(state, &desc);
+                        Ok(
+                            json!({"epoch": epoch, "applied": {"count": count + 1}, "created": {"ref": made, "kind": "fx"}, "display": {"title": format!("Added “{name}”")}, "undo": {"desc": desc, "entry": true}}),
+                        )
+                    }
+                    _ => {
+                        let made = params["created"]["ref"].as_str().unwrap_or_default();
+                        let Some((on, at)) = Self::find_fx(state, made) else {
+                            return Err(("gone".into(), "the FX Kumi added is gone".into()));
+                        };
+                        state.fx.get_mut(&on).unwrap().remove(at);
+                        state.changed += 1;
+                        state.undo.push(desc);
+                        Ok(json!({"epoch": epoch, "restored": {"count": at}, "display": {"title": "FX taken away again"}}))
+                    }
+                }
+            }
+            "fx-param" => {
+                let reference = source["ref"].as_str().unwrap_or_default().to_string();
+                let (guid, index) = reference
+                    .strip_prefix("r:param:")
+                    .and_then(|rest| rest.rsplit_once(':'))
+                    .ok_or_else(|| bad(format!("{reference} isn't a parameter")))?;
+                let index: usize = index.parse().map_err(|_| bad(format!("{reference} isn't a parameter")))?;
+                let (track, at) =
+                    Self::find_fx(state, &format!("r:fx:{guid}")).ok_or(("gone".to_string(), "that FX isn't there".to_string()))?;
+                let (name, now, shows) = state.fx[&track][at].params.get(index).cloned().ok_or_else(|| bad("no such parameter".into()))?;
+                let wanted = match method {
+                    "change_restore" => params["prior"]["normalized"].as_f64(),
+                    _ => params["input"]["normalized"]
+                        .as_f64()
+                        .or_else(|| params["input"]["value"].as_str().and_then(|text| shows.normalized(text))),
+                }
+                .ok_or_else(|| bad("normalized or value".into()))?;
+                let title = format!("{name} → {}", shows.text(wanted));
+                match method {
+                    "change_preview" => Ok(
+                        json!({"epoch": epoch, "target": {"ref": reference, "kind": "param"}, "prior": {"normalized": now}, "fence": {"normalized": now}, "display": {"title": title, "unchanged": (now - wanted).abs() < 1e-9}}),
+                    ),
+                    "change_apply" => {
+                        if params["fence"]["normalized"].as_f64().is_none_or(|fence| (fence - now).abs() > 1e-9) {
+                            return Err(("changed".into(), format!("{name} changed since the preview")));
+                        }
+                        state.fx.get_mut(&track).unwrap()[at].params[index].1 = wanted;
+                        state.changed += 1;
+                        Self::step(state, &desc);
+                        Ok(
+                            json!({"epoch": epoch, "applied": {"normalized": wanted}, "display": {"title": title}, "undo": {"desc": desc, "entry": true}}),
+                        )
+                    }
+                    _ => {
+                        if params["applied"]["normalized"].as_f64().is_none_or(|applied| (applied - now).abs() > 1e-9)
+                            && params["discard"] != true
+                        {
+                            return Err(("changed".into(), format!("{name} changed since Kumi set it")));
+                        }
+                        state.fx.get_mut(&track).unwrap()[at].params[index].1 = wanted;
+                        state.changed += 1;
+                        state.undo.push(desc);
+                        Ok(json!({"epoch": epoch, "restored": {"normalized": wanted}, "display": {"title": format!("{title} (put back)")}}))
+                    }
+                }
+            }
+            _ => Err(bad("the sim deletes no FX".into())),
+        }
+    }
+
     /// A change's step in REAPER's undo: its own, or none inside a plan's (whose label names them all when it closes).
     fn step(state: &mut State, desc: &str) {
         if state.open_step.is_none() {
@@ -390,7 +601,20 @@ impl ReaperScript {
             }
         }
         Some(match method {
-            "change_preview" | "change_apply" | "change_restore" => Self::change(&mut state, &epoch, method, params),
+            "change_preview" | "change_apply" | "change_restore" => {
+                let answer = Self::change(&mut state, &epoch, method, params);
+                // The master's JS Volume Adjustment turns what its renders hold, as REAPER's would.
+                let gain: f64 = state
+                    .fx
+                    .get("r:track:master")
+                    .into_iter()
+                    .flatten()
+                    .filter(|fx| fx.name == "JS: Volume Adjustment")
+                    .filter_map(|fx| fx.params.first().map(|(_, value, shows)| shows.shown(*value)))
+                    .sum();
+                self.listening.set_master_gain_db(gain);
+                answer
+            }
             "undo_step_begin" | "undo_step_end" => Self::plan_step(&mut state, method, params),
             "read" => Self::read(&state, &epoch, params),
             "snapshot" => {
@@ -481,6 +705,11 @@ impl ReaperScript {
         Ok(body)
     }
 
+    /// An FX row as the extension reads it.
+    fn fx_row(fx: &SimFx, at: usize) -> Value {
+        json!({"ref": format!("r:fx:{}", fx.guid), "index": at, "name": fx.name, "enabled": true, "offline": false, "plugin": false, "paramCount": fx.params.len()})
+    }
+
     /// The project row: another project in the tab (`switch_tab`) is another identity.
     fn project(state: &State) -> Value {
         json!({"id": null, "identity": format!("sim:{}", state.epoch), "name": "Song.rpp", "path": "/lab/Song.rpp", "tempo": 120.0})
@@ -489,6 +718,11 @@ impl ReaperScript {
     fn read(state: &State, epoch: &str, params: &Value) -> Result<Value, (String, String)> {
         let bad = |message: &str| ("bad-params".to_string(), message.to_string());
         if let Some(reference) = params.get("ref").and_then(Value::as_str) {
+            if let Some((track, at)) = Self::find_fx(state, reference) {
+                let mut row = Self::fx_row(&state.fx[&track][at], at);
+                row["trackRef"] = track.into();
+                return Ok(json!({"items": [row], "epoch": epoch}));
+            }
             return match state.tracks.iter().find(|row| row["ref"] == reference) {
                 Some(row) => Ok(json!({"items": [row], "epoch": epoch})),
                 None => Err(("failed".into(), format!("{reference} isn't in the project (deleted, or another tab)"))),
@@ -522,6 +756,31 @@ impl ReaperScript {
             ("item", Some(parent)) => {
                 state.tracks.iter().filter(|row| row["ref"] == parent).map(|row| item_row(row["ref"].as_str().unwrap())).collect()
             }
+            ("fx", Some(parent)) => state
+                .fx
+                .get(parent)
+                .map(|chain| chain.iter().enumerate().map(|(at, fx)| Self::fx_row(fx, at)).collect())
+                .unwrap_or_default(),
+            ("param", Some(parent)) => match Self::find_fx(state, parent) {
+                Some((track, at)) => {
+                    let fx = &state.fx[&track][at];
+                    let points = params.get("grid").and_then(Value::as_u64);
+                    fx.params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (name, value, shows))| {
+                            let mut row = json!({"ref": format!("r:param:{}:{index}", fx.guid), "index": index, "name": name, "value": value, "formatted": shows.text(*value), "min": 0.0, "max": 1.0});
+                            if let Some(points) = points {
+                                let grid: Vec<Value> =
+                                    (0..points).map(|n| n as f64 / (points - 1) as f64).map(|at| json!([at, shows.text(at)])).collect();
+                                row["grid"] = grid.into();
+                            }
+                            row
+                        })
+                        .collect()
+                }
+                None => return Err(("failed".into(), format!("{parent} isn't an FX in the project"))),
+            },
             ("item", None) | ("fx", None) | ("param", None) | ("send", None) | ("note", None) | ("envelope", None) | ("take", None) => {
                 return Err(bad(&format!("{kind}: pass the parent")))
             }
