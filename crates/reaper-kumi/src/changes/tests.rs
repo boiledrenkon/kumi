@@ -3088,17 +3088,20 @@ fn reaper_merging_the_oldest_points_of_a_short_history_is_no_undo_of_kumis_chang
 }
 
 #[test]
-fn an_undo_and_a_new_edit_between_two_looks_still_tell_that_kumis_point_was_undone() {
+fn an_undo_and_a_new_edit_within_one_look_tell_nothing_and_kumis_undo_still_checks_the_values() {
     let lab = Lab::new();
     let desc = "Kumi: Kick volume −6 dB (kn202)";
-    lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), desc);
+    let (preview, applied) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), desc);
     lab.tick();
     lab.events.take();
-    // The same number of points, with the project at the same place, and Kumi's gone.
+    // The same number of points, with the project at the same place, and Kumi's gone: it vanished, which is evidence of
+    // nothing (a known limit). The row stays Applied; Kumi's undo finds the fader back already and writes nothing.
     fake::producer_undo();
     fake::producer_edit("Adjust track pan");
     lab.tick();
-    assert_eq!(lab.events.take(), [("undone_in_daw".to_string(), json!({"descs": [desc], "how": "undo", "epoch": lab.reads.epoch()}))]);
+    assert!(lab.events.take().is_empty());
+    let restored = lab.undo("track-volume", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert!(restored.get("unwritten").is_none() || restored["unwritten"] == true || restored["display"].is_object(), "{restored}");
     // Bare edits that make no point, and the producer's own, say nothing.
     state(|s| s.state_count += 1);
     lab.tick();

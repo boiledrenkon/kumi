@@ -568,11 +568,9 @@ impl Reads {
                 // them (or as Kumi's own writes made them): never another send at that place.
                 if category == 0 && of >= 2 {
                     let receiver = reaper.send_peer(owner, 0, index as i32);
+                    // (answered in these words, not as a ref of another project: the project is the same, the sends aren't)
                     if !receiver.is_some_and(|receiver| crate::changes::send_seen_holds(reaper, owner, receiver, seen.as_deref())) {
-                        return Err((
-                            daw_bridge::wire::code::STALE.into(),
-                            "the sends between those tracks changed since that ref was read: read the track's sends again".into(),
-                        ));
+                        return Err(failed("the sends between those tracks changed since that ref was read: read the track's sends again"));
                     }
                 }
                 rows::send_row(reaper, owner, category, index as i32, &key)
@@ -2124,10 +2122,11 @@ mod tests {
         assert_eq!(volume(&lab, refs[2]), json!(-6.02));
         assert_eq!(volume(&lab, refs[3]), json!(-12.04));
         // A ref without the state of the sends it is one of names none of them.
-        assert_eq!(lab.read(json!({"ref": "r:send:{AAAA}:0:{DDDD}:3of3"})).unwrap_err().0, "stale");
+        assert_eq!(lab.read(json!({"ref": "r:send:{AAAA}:0:{DDDD}:3of3"})).unwrap_err().0, "failed");
         // The producer changes one of the sends to Reverb: a ref read before reads none of them, never the send at its place now.
         fake::with(|s| s.tracks[0].sends[1].volume = 0.9);
-        assert_eq!(lab.read(json!({"ref": refs[3]})).unwrap_err().0, "stale");
+        let (code, message) = lab.read(json!({"ref": refs[3]})).unwrap_err();
+        assert_eq!((code.as_str(), message.contains("read the track's sends again")), ("failed", true));
         assert_eq!(lab.rows(json!({"ref": "r:send:{AAAA}:0:{BBBB}"}))[0]["index"], 0);
     }
 
