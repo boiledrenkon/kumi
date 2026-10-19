@@ -13,6 +13,7 @@ import("changes_lua")
 import("changes_instruments")
 -- (M4 n-devices: presets, names, and the Doofer, Splitter and Notepad edits Kumi's host composes)
 local presets = import("changes_presets")
+local macros = import("changes_macros")
 
 local M = {}
 
@@ -153,6 +154,10 @@ end
 
 -- (M4 n-devices) A device's preset data, for Kumi's host to edit (`preset_read`).
 function M.preset_read(params, env) return presets.read(params, env) end
+-- (M4 n-devices) An instrument saved to Kumi's work folder (`instrument_export`).
+function M.instrument_export(params, env) return macros.export(params, env) end
+-- (M4 n-devices) An instrument's macros and mappings as the API reads them (`macro_read`).
+function M.macro_read(params, env) return macros.read(params, env) end
 
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active

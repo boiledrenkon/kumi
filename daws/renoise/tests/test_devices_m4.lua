@@ -720,3 +720,209 @@ test("devices m4: a Doofer isn't made when a device changed since the host read 
   eq(paths(2), "EQ 5, Gainer, *LFO")
   mock.device_catalog, mock.device_slots = nil, nil
 end)
+
+-- instrument-macro-map
+
+local function mapped_song()
+  local env, peer = setup()
+  local instrument = mock.data.instruments[1]
+  instrument.name = "Lead"
+  instrument.macros[1].mappings = {
+    { param = "Cutoff", min = 0, max = 1, scaling = 3 },
+    { param = "Resonance", min = 0.2, max = 0.8, scaling = 3 },
+  }
+  return env, peer
+end
+
+local function ranges(k)
+  local out = {}
+  for _, mapping in ipairs(mock.data.instruments[1].macros[k].mappings or {}) do
+    out[#out + 1] = string.format("%s %g-%g %d", mapping.param, mapping.min, mapping.max, mapping.scaling)
+  end
+  return table.concat(out, ", ")
+end
+
+-- renoise.app()'s instrument files for these tests: the file holds the instrument's name and macro mappings; a load names
+-- the instrument after the file and tells an insert after its slot and a remove of it, as Renoise 3.5.4 does.
+local function with_instrument_files(fn)
+  local saved_save, saved_load = mock.app_save_instrument, mock.app_load_instrument
+  local fields = mock.data.song_fields
+  mock.app_save_instrument = function(path)
+    local instrument = mock.data.instruments[fields.selected_instrument_index]
+    local macros = {}
+    for k = 1, 8 do macros[k] = instrument.macros[k].mappings or {} end
+    local f = assert(io.open(path, "wb"))
+    f:write(json.encode({ name = instrument.name, macros = macros }))
+    f:close()
+    return true
+  end
+  mock.app_load_instrument = function(path)
+    local f = io.open(path, "rb")
+    if not f then return false end
+    local data = json.decode(f:read("*a"))
+    f:close()
+    local i = fields.selected_instrument_index
+    local instrument = mock.data.instruments[i]
+    local before = { name = instrument.name, macros = {} }
+    for k = 1, 8 do before.macros[k] = instrument.macros[k].mappings or {} end
+    local after = { name = path:match("([^/]+)%.xrni$"), macros = data.macros }
+    local function put(state)
+      instrument.name = state.name
+      for k = 1, 8 do instrument.macros[k].mappings = state.macros[k] end
+    end
+    put(after)
+    mock.fire(fields.instruments_observable, { type = "insert", index = i + 1 })
+    mock.fire(fields.instruments_observable, { type = "remove", index = i })
+    mock.record(function() put(before) end, function() put(after) end)
+    return true
+  end
+  local ok_, err = pcall(fn)
+  mock.app_save_instrument, mock.app_load_instrument = saved_save, saved_load
+  if not ok_ then error(err, 0) end
+end
+
+-- What Kumi's host does with an exported file (here: the JSON above): the macro's mappings made `mappings`, written beside it.
+local function host_edit(file, k, mappings)
+  local f = assert(io.open(file, "rb"))
+  local data = json.decode(f:read("*a"))
+  f:close()
+  os.remove(file)
+  data.macros[k] = mappings
+  local edited = file:gsub("%.xrni$", ".kumi.xrni")
+  local out = assert(io.open(edited, "wb"))
+  out:write(json.encode(data))
+  out:close()
+  return edited
+end
+
+test("devices m4: a macro's mappings get their ranges and scaling in one step, and Kumi's undo writes back what they were", function()
+  local _, peer = mapped_song()
+  local epoch = place(peer)
+  local record = change(peer, "instrument-macro-map", { ref = epoch .. ":instrument:1", macro = 1, set = { { mapping = 2, min = 0.25, max = 0.5, scaling = "exp-fast" } } })
+  eq(ranges(1), "Cutoff 0-1 3, Resonance 0.25-0.5 5")
+  eq(steps(), 1)
+  ok(record.display.title:find("Lead macro 1"), record.display.title)
+  local back = restore(peer, "instrument-macro-map", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(ranges(1), "Cutoff 0-1 3, Resonance 0.2-0.8 3")
+  eq(steps(), 2)
+  -- Back already: nothing written.
+  local again = restore(peer, "instrument-macro-map", record)
+  ok(again.result and again.result.undo.entry == false, json.encode(again))
+  -- The producer's edit since: refused, unless discarded.
+  local record2 = change(peer, "instrument-macro-map", { ref = epoch .. ":instrument:1", macro = 1, set = { { mapping = 1, max = 0.5 } } })
+  mock.data.instruments[1].macros[1].mappings[1].max = 0.7
+  failure(restore(peer, "instrument-macro-map", record2), "changed", "since Kumi set them")
+  local discarded = restore(peer, "instrument-macro-map", record2, nil, { discard = true })
+  ok(discarded.result, json.encode(discarded.error or {}))
+  eq(ranges(1), "Cutoff 0-1 3, Resonance 0.2-0.8 3")
+  -- A mapping that isn't there, a scaling that isn't one: refused before anything is written.
+  local e = place(peer)
+  failure(call(peer, "change_preview", { kind = "instrument-macro-map", input = { ref = e .. ":instrument:1", macro = 1, set = { { mapping = 3, min = 0 } } }, epoch = e }), "bad-params", "from 1 to 2")
+  failure(call(peer, "change_preview", { kind = "instrument-macro-map", input = { ref = e .. ":instrument:1", macro = 1, set = { { mapping = 1, scaling = "cubic" } } }, epoch = e }), "bad-params", "scaling")
+end)
+
+test("devices m4: the API's mappings are fenced: one the producer adds between the preview and the apply refuses it", function()
+  local _, peer = mapped_song()
+  local input = { ref = place(peer) .. ":instrument:1", macro = 1, set = { { mapping = 1, min = 0.1 } } }
+  local previewed, epoch, layout = preview(peer, "instrument-macro-map", input)
+  table.insert(mock.data.instruments[1].macros[2].mappings or {}, { param = "Drive", min = 0, max = 1, scaling = 3 })
+  mock.data.instruments[1].macros[2].mappings = { { param = "Drive", min = 0, max = 1, scaling = 3 } }
+  failure(apply(peer, "instrument-macro-map", input, previewed, "Kumi: map (k1)", epoch, layout), "changed", "since the preview")
+  eq(steps(), 0)
+end)
+
+test("devices m4: macro_read lists each macro's mappings as Renoise's API reads them", function()
+  local _, peer = mapped_song()
+  local epoch, layout = place(peer)
+  local read = call(peer, "macro_read", { ref = epoch .. ":instrument:1", epoch = epoch, layout = layout }).result
+  eq(#read.macros, 8)
+  eq(read.macros[1].name, "Macro 1")
+  eq(read.macros[1].mappings[2].param, "Resonance")
+  eq(read.macros[1].mappings[2].mapping, 2)
+  eq(read.macros[1].mappings[2].scaling, "linear")
+  eq(#read.macros[2].mappings, 0)
+end)
+
+test("devices m4: mappings added through the instrument's file load back into the same slot in one step, its name and the selection kept, and Kumi's undo loads the host's restore file", function()
+  local env, peer = mapped_song()
+  mock.data.instruments[2] = nil
+  with_instrument_files(function()
+    mock.data.song_fields.selected_instrument_index = 1
+    local epoch, layout = place(peer)
+    local export = call(peer, "instrument_export", { ref = epoch .. ":instrument:1", epoch = epoch, layout = layout })
+    ok(export.result, json.encode(export.error or {}))
+    local work = env.discovery_dir:gsub("/discovery$", "") .. "/work/"
+    eq(export.result.file:sub(1, #work), work, "in Kumi's work folder")
+    eq(export.result.label, "Lead")
+    eq(#export.result.macros[1].mappings, 2)
+    -- The host adds a mapping and asks it loaded.
+    local mappings = { { param = "Cutoff", min = 0, max = 1, scaling = 3 }, { param = "Resonance", min = 0.2, max = 0.8, scaling = 3 },
+      { param = "Drive", min = 0, max = 0.5, scaling = 1 } }
+    local edited = host_edit(export.result.file, 1, mappings)
+    local input = { ref = epoch .. ":instrument:1", macro = 1, file = edited, print = export.result.print, display = { title = "Lead macro 1: mapped to Drive" } }
+    local done = call(peer, "change_apply", { kind = "instrument-macro-map", input = input, fence = {}, desc = "Kumi: map (k1)", epoch = epoch, layout = layout })
+    ok(done.result, json.encode(done.error or {}))
+    eq(ranges(1), "Cutoff 0-1 3, Resonance 0.2-0.8 3, Drive 0-0.5 1")
+    eq(mock.data.instruments[1].name, "Lead", "its name kept")
+    eq(steps(), 1, "one step")
+    eq(io.exists(edited), false, "the file removed")
+    eq(done.result.display.title, "Lead macro 1: mapped to Drive")
+    -- Kumi's undo: the host's restore file (the mappings as they were), made from the instrument as it is now.
+    local again = call(peer, "instrument_export", { at = done.result.material.at, epoch = done.result.epoch, layout = done.result.layout })
+    ok(again.result, json.encode(again.error or {}))
+    local restore_file = host_edit(again.result.file, 1, { mappings[1], mappings[2] })
+    local material = done.result.material
+    material.write = { file = restore_file, print = again.result.print, display = { title = "Lead macro 1's mappings put back" } }
+    local back = call(peer, "change_restore", { kind = "instrument-macro-map", target = done.result.target, prior = {}, applied = done.result.applied,
+      material = material, desc = "Kumi: undo map (k2)", epoch = done.result.epoch, layout = done.result.layout })
+    ok(back.result, json.encode(back.error or {}))
+    eq(ranges(1), "Cutoff 0-1 3, Resonance 0.2-0.8 3")
+    eq(mock.data.instruments[1].name, "Lead")
+    eq(steps(), 2)
+  end)
+end)
+
+test("devices m4: an instrument file is loaded only from Kumi's work folder, and only when the instrument is as the host read it", function()
+  local env, peer = mapped_song()
+  with_instrument_files(function()
+    mock.data.song_fields.selected_instrument_index = 1
+    local epoch, layout = place(peer)
+    local export = call(peer, "instrument_export", { ref = epoch .. ":instrument:1", epoch = epoch, layout = layout }).result
+    local edited = host_edit(export.file, 1, {})
+    local function apply_file(file, print_)
+      return call(peer, "change_apply", { kind = "instrument-macro-map", input = { ref = epoch .. ":instrument:1", macro = 1, file = file, print = print_ },
+        fence = {}, desc = "Kumi: map (k1)", epoch = epoch, layout = layout })
+    end
+    failure(apply_file(env.dir .. "/elsewhere.xrni", export.print), "bad-params", "work folder")
+    failure(apply_file(edited:gsub("[^/]+$", "../x.xrni"), export.print), "bad-params", "work folder")
+    mock.data.instruments[1].macros[1].mappings[1].max = 0.9
+    failure(apply_file(edited, export.print), "changed", "read it again")
+    eq(io.exists(edited), false, "the host's file removed, loaded or not")
+    eq(steps(), 0)
+    eq(ranges(1), "Cutoff 0-0.9 3, Resonance 0.2-0.8 3")
+    -- A preview of a file change goes through Kumi's host.
+    failure(call(peer, "change_preview", { kind = "instrument-macro-map", input = { ref = epoch .. ":instrument:1", macro = 1, file = edited }, epoch = epoch }), "bad-params", "host")
+  end)
+end)
+
+test("devices m4: Kumi's own load of an instrument file isn't taken for a delete: a change made to the instrument before still finds it", function()
+  local _, peer = mapped_song()
+  with_instrument_files(function()
+    mock.data.song_fields.selected_instrument_index = 1
+    local epoch = place(peer)
+    local first = change(peer, "instrument-macro-map", { ref = epoch .. ":instrument:1", macro = 1, set = { { mapping = 1, min = 0.1 } } })
+    local e2, l2 = place(peer)
+    local export = call(peer, "instrument_export", { ref = e2 .. ":instrument:1", epoch = e2, layout = l2 }).result
+    local mappings = mock.data.instruments[1].macros[1].mappings
+    local edited = host_edit(export.file, 2, { { param = "Drive", min = 0, max = 1, scaling = 3 } })
+    local done = call(peer, "change_apply", { kind = "instrument-macro-map", input = { ref = e2 .. ":instrument:1", macro = 2, file = edited, print = export.print },
+      fence = {}, desc = "Kumi: map (k2)", epoch = e2, layout = l2 })
+    ok(done.result, json.encode(done.error or {}))
+    eq(#mappings, 2)
+    -- The first change's undo still finds the instrument (its place), and writes its range back.
+    local back = restore(peer, "instrument-macro-map", first)
+    ok(back.result, json.encode(back.error or {}))
+    eq(ranges(1), "Cutoff 0-1 3, Resonance 0.2-0.8 3")
+  end)
+end)

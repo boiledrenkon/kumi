@@ -1051,8 +1051,34 @@ function M.make_song(options)
         if not instrument.macros[k] then out_of_range("macro", k) end
         local macro = instrument.macros[k]
         local watched = { name = macro.name_observable, value = macro.value_observable }
-        return object("renoise.InstrumentMacro", { name_observable = macro.name_observable, value_observable = macro.value_observable },
-          { name = live(macro, "name", ""), value = live(macro, "value", 0) },
+        -- (M4 n-devices: a macro's mappings, `macro.mappings` in the data: {param (the linked parameter's name), min, max,
+        -- scaling 1-5}; their range and scaling are written as Renoise does, each an undo step)
+        local function mapping_object(j)
+          local data = (macro.mappings or {})[j]
+          if not data then out_of_range("mapping", j) end
+          local function recorded(field)
+            return function(value)
+              local old = data[field]
+              if old == value then return end
+              data[field] = value
+              M.record(function() data[field] = old end, function() data[field] = value end)
+            end
+          end
+          return object("renoise.InstrumentMacroMapping", {
+            parameter = object("renoise.DeviceParameter", { name = data.param }),
+          }, {
+            parameter_min = function() return data.min end, parameter_max = function() return data.max end,
+            parameter_scaling = function() return data.scaling end,
+          }, { parameter_min = recorded("min"), parameter_max = recorded("max"), parameter_scaling = recorded("scaling") })
+        end
+        return object("renoise.InstrumentMacro", { name_observable = macro.name_observable, value_observable = macro.value_observable,
+          mapping = function(_, j) return mapping_object(j) end },
+          { name = live(macro, "name", ""), value = live(macro, "value", 0),
+            mappings = function()
+              local out = {}
+              for j = 1, #(macro.mappings or {}) do out[j] = mapping_object(j) end
+              return out
+            end },
           { name = kept(macro, "name", watched), value = kept(macro, "value", watched) })
       end,
     }, {

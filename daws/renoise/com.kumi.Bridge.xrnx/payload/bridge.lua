@@ -445,7 +445,19 @@ local function on_structural(reason, kind, op, owner, token)
   elseif kind == "patterns" then
     places.note(b.plog, op)
   elseif kind == "instruments" then
-    places.note(b.ilog, op)
+    -- (M4 n-devices: Kumi's own load of an instrument file into slot i is told as an insert after it and a remove of it, but
+    -- the slot keeps its instrument (pattern notes keep playing it, measured in 3.5.4): no delete in the places log)
+    local r, own = b.replacing, false
+    if r and r.deadline and os.clock() > r.deadline then b.replacing, r = nil, nil end
+    if r and op then
+      if r.insert and op.type == "insert" and op.index == r.i + 1 then
+        r.insert, own = false, true
+      elseif r.remove and not r.insert and op.type == "remove" and op.index == r.i then
+        r.remove, own = false, true
+      end
+      if not r.insert and not r.remove then b.replacing = nil end
+    end
+    if not own then places.note(b.ilog, op) end
   end
   local song = renoise.song()
   if not song then return end
@@ -724,6 +736,22 @@ local function change_env()
     survives = function(from, kind) return survives(from, kind) end,
     -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
     changes = function() return b.changed or 0 end,
+    -- (M4 n-devices) Kumi's work folder beside its discovery folder (instrument files the host edits), and a load of an
+    -- instrument file into slot i that the places log doesn't take for a delete.
+    work_dir = function()
+      local dir = b.cfg and b.cfg.discovery_dir
+      return dir and (dir:gsub("[/\\][^/\\]*[/\\]?$", "") .. "/work") or nil
+    end,
+    replacing_instrument = function(i, fn)
+      b.replacing = { i = i, insert = true, remove = true }
+      local ok, err = pcall(fn)
+      -- (told now or on a later pass: kept for those two ops for a moment)
+      if b.replacing then b.replacing.deadline = os.clock() + 2 end
+      if not ok then
+        b.replacing = nil
+        error(err, 0)
+      end
+    end,
   }
   for name, fn in pairs(place_env) do env[name] = fn end
   return env
@@ -744,6 +772,16 @@ end
 -- (M4 n-devices) A device's preset data and shape, for Kumi's host to edit Doofers, Splitters and Notepads.
 function handlers.preset_read(params)
   return changes.preset_read(params, change_env())
+end
+
+-- (M4 n-devices) An instrument saved to Kumi's work folder, for its host to edit its macro mappings.
+function handlers.instrument_export(params)
+  return changes.instrument_export(params, change_env())
+end
+
+-- (M4 n-devices) An instrument's macros and their mappings, for a read.
+function handlers.macro_read(params)
+  return changes.macro_read(params, change_env())
 end
 
 -- A step of undo around a plan: Renoise has none that spans callbacks, so every change stays its own step (merged: false).
@@ -847,7 +885,8 @@ local function carried(params, carry)
   return moved
 end
 
-local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true, preset_read = true }
+local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true, preset_read = true,
+  instrument_export = true, macro_read = true }
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).

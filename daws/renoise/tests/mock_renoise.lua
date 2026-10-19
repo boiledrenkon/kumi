@@ -500,6 +500,10 @@ function M.reset(options)
     prompt_for_path = modal("prompt_for_path"),
     log_filename = "Log.txt",
     window = M.window,
+    -- (n-instruments: the selected instrument's files; Renoise shows a load's errors in a dialog, which M.dialogs counts)
+    load_instrument = function(_, path) return M.app_load_instrument(path) end,
+    load_instrument_multi_sample = function(_, path) return M.app_load_instrument(path, "multi") end,
+    save_instrument = function(_, path) return M.app_save_instrument(path) end,
   })
 
   local function find_timer(fn)

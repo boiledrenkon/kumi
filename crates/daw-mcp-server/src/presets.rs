@@ -28,9 +28,14 @@ pub fn is_host_kind(daw: daw_bridge::Daw, kind: &str) -> bool {
     daw == daw_bridge::Daw::Renoise && KINDS.contains(&kind)
 }
 
-/// Whether the host takes this kind back too (doofer-make's undo is the tool's own: it makes the devices again).
-pub fn composes_undo(daw: daw_bridge::Daw, kind: &str) -> bool {
-    is_host_kind(daw, kind) && kind != "doofer-make"
+/// Whether the host makes this change: the kinds above, and an instrument's macro mappings added or removed.
+pub fn host_makes(daw: daw_bridge::Daw, kind: &str, input: &Value) -> bool {
+    is_host_kind(daw, kind) || crate::instruments::is_host_change(daw, kind, input)
+}
+
+/// Whether the host takes this change back too (doofer-make's undo is the tool's own: it makes the devices again).
+pub fn composes_undo(daw: daw_bridge::Daw, kind: &str, input: &Value) -> bool {
+    host_makes(daw, kind, input) && kind != "doofer-make"
 }
 
 /// The most preset data edited (as the tool's bound).
@@ -114,16 +119,16 @@ impl Refusal {
     }
 }
 
-fn bad<T>(message: impl Into<String>) -> Result<T, Refusal> {
+pub(crate) fn bad<T>(message: impl Into<String>) -> Result<T, Refusal> {
     Err(Refusal::Bad(message.into()))
 }
 
-fn changed<T>(message: impl Into<String>) -> Result<T, Refusal> {
+pub(crate) fn changed<T>(message: impl Into<String>) -> Result<T, Refusal> {
     Err(Refusal::Changed(message.into()))
 }
 
 /// Curly quotes around a name inside a sentence, as Kumi's titles have them.
-fn q(text: &str) -> String {
+pub(crate) fn q(text: &str) -> String {
     format!("\u{201c}{text}\u{201d}")
 }
 
@@ -691,10 +696,10 @@ pub fn edit(kind: &str, input: &Value, text: &str, device: &Device) -> Result<Ed
 
 // doofer-macro
 
-const SCALINGS: [(&str, &str); 5] =
+pub(crate) const SCALINGS: [(&str, &str); 5] =
     [("log-fast", "Log Fast"), ("log-slow", "Log Slow"), ("linear", "Linear"), ("exp-slow", "Exp Slow"), ("exp-fast", "Exp Fast")];
 
-fn scaling_word(xml: &str) -> &'static str {
+pub(crate) fn scaling_word(xml: &str) -> &'static str {
     SCALINGS.iter().find(|(_, x)| *x == xml).map_or("linear", |(word, _)| word)
 }
 
@@ -1976,7 +1981,7 @@ pub fn child_nodes(text: &str) -> Vec<Value> {
 
 const AU_PATH: &str = AU;
 
-fn refusal_answer(refusal: &Refusal) -> Value {
+pub(crate) fn refusal_answer(refusal: &Refusal) -> Value {
     json!({"error": refusal.message(), "code": refusal.code()})
 }
 
@@ -2035,6 +2040,7 @@ impl crate::host::Host {
     /// A Renoise read of one device by ref: a Doofer's or Splitter's contents (`inside`), a Notepad's text, and its
     /// preset data when asked, from the tool's `preset_read`; each left out, and said, past the frame bound.
     pub(crate) async fn renoise_inside(&self, answer: &mut Value, pick: &crate::host::Pick, preset_data: bool) {
+        self.renoise_macro_mappings(answer, pick).await;
         let Some(row) = answer.get("items").and_then(Value::as_array).and_then(|items| items.first()) else { return };
         let Some(reference) = row.get("ref").and_then(Value::as_str).filter(|r| r.contains(":device:")).map(str::to_owned) else { return };
         let contains = row.get("isDoofer") == Some(&Value::Bool(true))
@@ -2115,6 +2121,9 @@ impl crate::host::Host {
         if kind == "doofer-make" {
             return self.make_preview(pick, input, epoch, layout).await;
         }
+        if kind == crate::instruments::KIND {
+            return self.mapping_preview(pick, input, epoch, layout).await;
+        }
         if !input.get("ref").is_some_and(Value::is_string) {
             return (json!({"error": "ref: the device", "code": "bad-params"}), true);
         }
@@ -2153,6 +2162,9 @@ impl crate::host::Host {
     pub(crate) async fn preset_apply_params(&self, record: &crate::changes::Record) -> Result<Value, Value> {
         if record.kind == "doofer-make" {
             return self.make_apply_params(record).await;
+        }
+        if record.kind == crate::instruments::KIND {
+            return self.mapping_apply_params(record).await;
         }
         let mut params = read_params(&record.input, &record.kind);
         crate::changes::place(&mut params, record.epoch.as_deref(), record.input_layout);
@@ -2306,6 +2318,9 @@ impl crate::host::Host {
         desc: &str,
         discard: bool,
     ) -> Result<Result<Value, Value>, Value> {
+        if record.kind == crate::instruments::KIND {
+            return self.mapping_restore_params(record, desc).await;
+        }
         let material = record.material.clone().unwrap_or(Value::Null);
         let mut params = json!({"at": material});
         crate::changes::place(&mut params, record.epoch.as_deref(), record.layout);

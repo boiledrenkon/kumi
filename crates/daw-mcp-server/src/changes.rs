@@ -605,8 +605,9 @@ impl crate::host::Host {
             return (json!({"error": "input must be an object", "code": "bad-params"}), true);
         };
         let layout = arguments.get("layout").and_then(Value::as_u64);
-        // (M4 n-devices: the Doofer, Splitter and Notepad edits are made here from the device's preset data)
-        if crate::presets::is_host_kind(self.daw(), &kind) {
+        // (M4 n-devices: the Doofer, Splitter and Notepad edits are made here from the device's preset data, and an
+        // instrument's macro mappings added or removed from its file)
+        if crate::presets::host_makes(self.daw(), &kind, input) {
             return self.preset_preview(&pick, &kind, input, arguments.get("epoch").and_then(Value::as_str), layout).await;
         }
         let mut params = json!({"kind": kind, "input": input});
@@ -638,7 +639,7 @@ impl crate::host::Host {
             Ok(Err(answered)) => return answered,
             Err(why) => return refusal(why),
         };
-        let params = if crate::presets::is_host_kind(self.daw(), &record.kind) {
+        let params = if crate::presets::host_makes(self.daw(), &record.kind, &record.input) {
             match self.preset_apply_params(&record).await {
                 Ok(params) => params,
                 // (refused before anything was written: the change can be previewed again)
@@ -678,7 +679,7 @@ impl crate::host::Host {
             Err(why) => return refusal(why),
         };
         let discard = arguments.get("discard") == Some(&Value::Bool(true));
-        let params = if crate::presets::composes_undo(self.daw(), &record.kind) {
+        let params = if crate::presets::composes_undo(self.daw(), &record.kind, &record.input) {
             match self.preset_restore_params(&record, &desc, discard).await {
                 Ok(Ok(params)) => params,
                 // (it is back already: nothing to write)
