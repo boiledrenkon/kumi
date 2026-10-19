@@ -153,3 +153,17 @@ async fn an_undo_the_daw_couldnt_say_it_finished_is_never_sent_again() {
     assert!(is_error && again["code"] == "undo-uncertain", "{again}");
     assert_eq!(lab.script.undo_history().len(), restores);
 }
+
+// (r-tracks) REAPER's saves are no change: the host hands them to the bridge by name, its answer back, no journal.
+#[tokio::test]
+async fn reapers_saves_go_to_the_bridge_by_name_and_are_no_change() {
+    let mut lab = Lab::start().await;
+    let (answer, is_error) = lab.tool("project_save", json!({"version": true, "epoch": "e1"})).await;
+    assert!(is_error, "{answer}");
+    assert!(answer.to_string().contains("no method project_save"), "the simulated REAPER was asked by name: {answer}");
+    let (answer, is_error) = lab.tool("track_template_save", json!({"trackRefs": ["r:track:{T0001}"], "name": "Kit"})).await;
+    assert!(is_error && answer.to_string().contains("no method track_template_save"), "{answer}");
+    // Nothing is kept for undo.
+    let (released, _) = lab.tool("change_release", json!({"transactionIds": ["t1"]})).await;
+    assert_eq!(released["released"], 0, "{released}");
+}

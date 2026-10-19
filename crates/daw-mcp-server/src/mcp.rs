@@ -166,7 +166,36 @@ pub fn tools(host: &Host) -> Value {
             "description": "The epoch of the answer the ref, parent or cursor came from. If the project in the tab has changed since, the call is refused as stale instead of reading the other project.",
         });
         list[2]["inputSchema"]["properties"]["epoch"] = epoch.clone();
-        list[5]["inputSchema"]["properties"]["epoch"] = epoch;
+        list[5]["inputSchema"]["properties"]["epoch"] = epoch.clone();
+        // (r-tracks) Saving: files written, nothing in the project changed, so no change and no undo.
+        if let Some(tools) = list.as_array_mut() {
+            tools.push(json!({
+                "name": "project_save",
+                "title": "Save the REAPER project",
+                "description": "Saves the open REAPER project where it is, or as its next version (version: true). A project never saved is saved only under path, a .rpp inside the folder REAPER saves projects in, and never over a file.",
+                "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                    "version": {"type": "boolean"},
+                    "path": {"type": "string"},
+                    "epoch": epoch.clone(),
+                })), "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+            }));
+            tools.push(json!({
+                "name": "track_template_save",
+                "title": "Save REAPER tracks as a template",
+                "description": "Writes tracks as a track template (.RTrackTemplate) in REAPER's TrackTemplates folder (name) or at path; never over a file unless replace.",
+                "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                    "trackRefs": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "name": {"type": "string"},
+                    "path": {"type": "string"},
+                    "items": {"type": "boolean"},
+                    "envelopes": {"type": "boolean"},
+                    "replace": {"type": "boolean"},
+                    "epoch": epoch,
+                })), "required": ["trackRefs"], "additionalProperties": false},
+                "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false},
+            }));
+        }
     }
     if daw == Daw::Renoise {
         // A pattern's lines are read one track at a time.
@@ -287,6 +316,11 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                         "undo_step_begin" | "undo_step_end" => host.undo_step(name, &arguments).await,
                         _ => host.change_release(&arguments),
                     };
+                    result(id, tool_result(answer, is_error))
+                }
+                // (r-tracks) REAPER's saves.
+                "project_save" | "track_template_save" if host.daw() == Daw::Reaper => {
+                    let (answer, is_error) = host.passthrough(name, &arguments).await;
                     result(id, tool_result(answer, is_error))
                 }
                 _ => error(id, -32602, &format!("Unknown tool: {name}")),

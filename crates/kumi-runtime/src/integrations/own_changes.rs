@@ -880,6 +880,18 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &applied);
         note_epoch(&self.link().seen_in, &self.link().book.borrow().scheme, &applied);
         let title = applied.pointer("/display/title").and_then(Value::as_str).map(str::to_owned).unwrap_or(title);
+        // (r-tracks) Done, and nothing the DAW keeps changed (an action the DAW made no undo point of: a view, selection or
+        // transport one): no row in HISTORY, and the host forgets it.
+        if applied.pointer("/display/unchanged") == Some(&Value::Bool(true)) {
+            self.history.release(std::slice::from_ref(&transaction));
+            let why = applied.pointer("/display/note").and_then(Value::as_str).unwrap_or("it changed nothing the project keeps");
+            return ChangeOutcome {
+                text: stringify(&json!({"changed": format!("{title}: {}", why.trim_end_matches('.')), "unchanged": true})),
+                is_error: false,
+                missed: None,
+                stops: false,
+            };
+        }
         // What the producer should know of it (a step the DAW's own undo skips), on its row and in its answer.
         let own_undo = self.link().words().vocab.own_undo;
         // Not taken back by the DAW's own undo: its own step makes no undo point, or a plan's point doesn't cover it.
@@ -944,6 +956,11 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     /// One action through the host's tool: what the producer is told it did, or why it didn't.
     async fn one_action(&self, action: &'static OwnAction, input: JsonObject, signal: Signal) -> ActionOutcome {
         let words = self.link().words().words;
+        // (r-tracks) An action's refs (the tracks a template is saved from) are this turn's, as a change's are.
+        let input = match self.lengthened(&input) {
+            Ok(input) => input,
+            Err(why) => return ActionOutcome::error(why),
+        };
         let mut args = Value::Object(input.clone());
         self.place(&mut args, &input);
         match self.link().call(action.method, args, signal).await {
@@ -952,7 +969,8 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 let playing = action.playing.or_else(|| answer.get("playing").and_then(Value::as_bool));
                 let recording = (action.playing == Some(false)).then_some(false);
                 let mut text = json!({"done": action.title});
-                for field in ["playing", "positionBeats", "position", "wasRecording"] {
+                // (r-tracks) `saved`: the file a save wrote.
+                for field in ["playing", "positionBeats", "position", "wasRecording", "saved"] {
                     if let Some(value) = answer.get(field) {
                         text[field] = value.clone();
                     }

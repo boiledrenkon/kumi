@@ -379,6 +379,28 @@ unsafe extern "C" fn main_save_project_ex(_proj: *mut ReaProject, path: *const c
     }
 }
 
+// ----- item selection -----
+
+unsafe extern "C" fn set_media_item_selected(item: *mut MediaItem, selected: bool) {
+    with(|s| {
+        let (kind, a, b, _) = unpack(item as u64);
+        if kind == ITEM {
+            if let Some(i) = s.tracks.get_mut(a as usize).and_then(|t| t.items.get_mut(b as usize)) {
+                i.selected = selected;
+            }
+        }
+    });
+}
+unsafe extern "C" fn select_all_media_items(_proj: *mut ReaProject, selected: bool) {
+    with(|s| {
+        for t in s.tracks.iter_mut() {
+            for i in t.items.iter_mut() {
+                i.selected = selected;
+            }
+        }
+    });
+}
+
 /// What this module adds to the fake's table.
 pub fn lookup(name: &CStr) -> *mut c_void {
     macro_rules! table {
@@ -410,5 +432,7 @@ pub fn lookup(name: &CStr) -> *mut c_void {
         b"kbd_enumerateActions" => kbd_enumerate_actions as unsafe extern "C" fn(*mut api::KbdSectionInfo, c_int, *mut *const c_char) -> c_int,
         b"Main_openProject" => main_open_project as unsafe extern "C" fn(*const c_char),
         b"Main_SaveProjectEx" => main_save_project_ex as unsafe extern "C" fn(*mut ReaProject, *const c_char, c_int),
+        b"SetMediaItemSelected" => set_media_item_selected as unsafe extern "C" fn(*mut MediaItem, bool),
+        b"SelectAllMediaItems" => select_all_media_items as unsafe extern "C" fn(*mut ReaProject, bool),
     }
 }

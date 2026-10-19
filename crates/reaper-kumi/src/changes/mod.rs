@@ -21,9 +21,11 @@ mod structure;
 mod tracks;
 mod undo;
 // (r-tracks) M4: track properties, routing, project items, actions; NIT-7.
+mod actions;
 mod groups;
 mod hwout;
 mod projectitems;
+mod templates;
 mod trackprops;
 mod volatile;
 
@@ -129,6 +131,10 @@ enum Kind {
     /// (r-tracks) Track groups and VCAs.
     TrackGroup,
     TrackGroupName,
+    /// (r-tracks) Any action, by id or name: a row only when REAPER made an undo point of it.
+    RunAction,
+    /// (r-tracks) A track template inserted as tracks.
+    TemplateInsert,
     TrackDelete,
     TrackAdd,
     TrackMove,
@@ -202,6 +208,8 @@ fn kind(name: &str) -> Option<Kind> {
         "region-render" => Some(Kind::RegionRender),
         "track-group" => Some(Kind::TrackGroup),
         "track-group-name" => Some(Kind::TrackGroupName),
+        "run-action" => Some(Kind::RunAction),
+        "track-template-insert" => Some(Kind::TemplateInsert),
         "track-delete" => Some(Kind::TrackDelete),
         "track-add" => Some(Kind::TrackAdd),
         "track-move" => Some(Kind::TrackMove),
@@ -216,6 +224,12 @@ impl Kind {
     /// Whether a change of this kind leaves a point in REAPER's undo history: the repeat button does not.
     fn leaves_point(self) -> bool {
         !matches!(self, Kind::LoopRepeat)
+    }
+
+    /// (r-tracks) Whether REAPER alone decides whether it makes a point: an action marks what it changes itself, and its block
+    /// ends with flags 0, so a view, selection or transport action makes none (and commits none of the producer's edits).
+    fn marks_itself(self) -> bool {
+        matches!(self, Kind::RunAction)
     }
 
     fn preview(self, ctx: &Ctx, input: &Value) -> Done<Preview> {
@@ -236,6 +250,8 @@ impl Kind {
             Kind::RegionRender => projectitems::matrix_preview(ctx, input),
             Kind::TrackGroup => groups::preview(ctx, input),
             Kind::TrackGroupName => groups::name_preview(ctx, input),
+            Kind::RunAction => actions::preview(ctx, input),
+            Kind::TemplateInsert => templates::preview(ctx, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
             Kind::TrackAdd => structure::add_preview(ctx, input),
             Kind::TrackMove => structure::move_preview(ctx, input),
@@ -277,6 +293,8 @@ impl Kind {
             Kind::RegionRender => projectitems::matrix_apply(ctx, input, fence),
             Kind::TrackGroup => groups::apply(ctx, input, fence),
             Kind::TrackGroupName => groups::name_apply(ctx, input, fence),
+            Kind::RunAction => actions::apply(ctx, input, fence),
+            Kind::TemplateInsert => templates::apply(ctx, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
             Kind::TrackAdd => structure::add_apply(ctx, input, fence),
             Kind::TrackMove => structure::move_apply(ctx, input, fence),
@@ -318,6 +336,8 @@ impl Kind {
             Kind::RegionRender => projectitems::matrix_restore(ctx, restore),
             Kind::TrackGroup => groups::restore(ctx, restore),
             Kind::TrackGroupName => groups::name_restore(ctx, restore),
+            Kind::RunAction => actions::restore(ctx, restore),
+            Kind::TemplateInsert => templates::restore(ctx, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
             Kind::TrackAdd => structure::add_restore(ctx, restore),
             Kind::TrackMove => structure::move_restore(ctx, restore),
@@ -416,8 +436,11 @@ impl Changes {
         let ctx = self.context(reaper, reads, params)?;
         let kind = kind_of(params)?;
         let (input, fence, desc) = (object(params, "input")?, object(params, "fence")?, text(params, "desc")?);
-        let applied = self.in_block(&ctx, desc, kind.leaves_point(), |ctx| kind.apply(ctx, input, fence))?;
-        let (applied, undo) = applied;
+        let applied = self.in_block(&ctx, desc, kind.leaves_point(), kind.marks_itself(), |ctx| kind.apply(ctx, input, fence))?;
+        let (mut applied, undo) = applied;
+        if kind.marks_itself() {
+            actions::after(&mut applied, &undo);
+        }
         let mut answer = Map::new();
         answer.insert("epoch".into(), reads.epoch().into());
         answer.insert("applied".into(), applied.applied);
@@ -444,7 +467,7 @@ impl Changes {
             material: params.get("material").filter(|v| !v.is_null()),
             discard: params.get("discard") == Some(&Value::Bool(true)),
         };
-        let (restored, undo) = self.in_block(&ctx, desc, kind.leaves_point(), |ctx| kind.restore(ctx, &restore))?;
+        let (restored, undo) = self.in_block(&ctx, desc, kind.leaves_point(), false, |ctx| kind.restore(ctx, &restore))?;
         // (a restore that found it back already wrote nothing: said, so Kumi doesn't tell it as an undo it made)
         let mut display = restored.display;
         if restored.unwritten && display.get("note").is_none_or(Value::is_null) {
@@ -459,7 +482,14 @@ impl Changes {
     /// `point` is whether a change of this kind leaves a point in REAPER's history at all. Inside a plan the answer says
     /// whether the plan's point takes the change back (`covered`): not a change that wrote nothing, nor one REAPER keeps no
     /// history of (the repeat button).
-    fn in_block<T: Written>(&self, ctx: &Ctx, desc: &str, point: bool, write: impl FnOnce(&Ctx) -> Done<T>) -> Done<(T, Value)> {
+    fn in_block<T: Written>(
+        &self,
+        ctx: &Ctx,
+        desc: &str,
+        point: bool,
+        marks: bool,
+        write: impl FnOnce(&Ctx) -> Done<T>,
+    ) -> Done<(T, Value)> {
         let in_plan = self.plan.borrow().is_some();
         if !in_plan && !ctx.reaper.undo_begin(ctx.proj) {
             return Err(failed("this REAPER has no undo blocks, so Kumi won't change anything in it"));
@@ -474,7 +504,8 @@ impl Changes {
         // A change that refused, or found everything as it should be, wrote nothing: its block makes no point (flags 0),
         // and pending bare edits of the producer's stay where they were.
         let wrote = result.as_ref().is_ok_and(|done| !done.unwritten());
-        ctx.reaper.undo_end(ctx.proj, desc, if wrote { -1 } else { 0 });
+        // (r-tracks) An action's block ends with flags 0: REAPER makes a point only of what the action marked itself.
+        ctx.reaper.undo_end(ctx.proj, desc, if wrote && !marks { -1 } else { 0 });
         let undo = self.after_block(ctx, desc, wrote);
         result.map(|done| (done, undo))
     }
@@ -653,6 +684,8 @@ pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::Track
 #[cfg(test)]
 mod tests;
 // (r-tracks) M4's tests of its kinds and of M3's carried fixes.
+#[cfg(test)]
+mod tests_actions;
 #[cfg(test)]
 mod tests_carried;
 #[cfg(test)]

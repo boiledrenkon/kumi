@@ -61,6 +61,8 @@ impl Lab {
             "undo_step_begin" => self.changes.step_begin(&reaper, &self.reads, &params),
             "undo_step_end" => self.changes.step_end(&reaper, &self.reads, &params),
             "read" => self.reads.read(&reaper, &params),
+            "project_save" => self.changes.project_save(&reaper, &self.reads, &params),
+            "track_template_save" => self.changes.track_template_save(&reaper, &self.reads, &params),
             other => panic!("{other}"),
         }
     }

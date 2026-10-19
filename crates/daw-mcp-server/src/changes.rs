@@ -738,6 +738,24 @@ impl crate::host::Host {
         }
     }
 
+    /// (r-tracks) A bridge method that writes no change (REAPER's saves): its arguments go on as they came, less the instance
+    /// pick, and the bridge's answer comes back. Never asked again on a new connection (it writes a file).
+    pub async fn passthrough(&self, method: &str, arguments: &Value) -> (Value, bool) {
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        let mut params = arguments.clone();
+        if let Some(fields) = params.as_object_mut() {
+            fields.remove("pid");
+            fields.remove("resource");
+        }
+        match self.call(method, params, &pick, CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
     /// `undo_step_begin` / `undo_step_end`: one DAW undo step around a plan's changes, where the DAW gives one. Its
     /// label carries a nonce, so the DAW's own undo of the plan names the plan's changes.
     pub async fn undo_step(&self, method: &str, arguments: &Value) -> (Value, bool) {

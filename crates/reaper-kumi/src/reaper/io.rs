@@ -5,7 +5,7 @@
 use std::ffi::{c_char, c_int, CString};
 use std::ptr;
 
-use super::{Project, Reaper, Track};
+use super::{Item, Project, Reaper, Track};
 use crate::api;
 
 fn cstring(text: &str) -> CString {
@@ -204,6 +204,28 @@ impl Reaper<'_> {
             found.push((id, unsafe { api::string(name) }));
         }
         found
+    }
+
+    // ----- item selection -----
+
+    pub fn set_item_selected(&self, item: Item, selected: bool) {
+        if let Some(f) = self.api.SetMediaItemSelected() {
+            unsafe { f(item.0, selected) }
+        }
+    }
+
+    pub fn select_all_items(&self, proj: Project, selected: bool) {
+        if let Some(f) = self.api.SelectAllMediaItems() {
+            unsafe { f(proj.0, selected) }
+        }
+    }
+
+    /// Every item of the project, track by track.
+    pub fn all_items(&self, proj: Project) -> Vec<Item> {
+        (0..self.track_count(proj))
+            .filter_map(|at| self.track_at(proj, at))
+            .flat_map(|track| (0..self.track_item_count(track)).filter_map(move |n| self.track_item(track, n)))
+            .collect()
     }
 
     // ----- templates and saving -----
