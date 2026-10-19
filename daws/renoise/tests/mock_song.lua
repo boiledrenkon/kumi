@@ -1517,6 +1517,26 @@ function M.make_song(options)
     add_track_to_group = function(_, track_index, group_index) M.api.add_track_to_group(track_index, group_index) end,
     remove_track_from_group = function(_, track_index) M.api.remove_track_from_group(track_index) end,
     insert_group_at = function(_, index) return M.api.insert_group_at(index) end,
+    -- M4 (n-song): notes played for preview, as Renoise's tests see them (measured: they play with the transport stopped, on
+    -- any track; out-of-range arguments raise)
+    trigger_instrument_note_on = function(_, i, t, notes, volume)
+      if not d.instruments[i] then error("std::logic_error: 'invalid instrument index'", 2) end
+      if not d.tracks[t] then error("std::logic_error: 'invalid track index'", 2) end
+      for _, note in ipairs(type(notes) == "table" and notes or { notes or 48 }) do
+        if note < 0 or note > 119 then error("std::logic_error: 'invalid note value'", 2) end
+      end
+      M.triggers[#M.triggers + 1] = { "on", i, t, type(notes) == "table" and table.concat(notes, ",") or tostring(notes or 48), volume }
+    end,
+    trigger_instrument_note_off = function(_, i, t, notes)
+      M.triggers[#M.triggers + 1] = { "off", i, t, type(notes) == "table" and table.concat(notes, ",") or tostring(notes or 48) }
+    end,
+    trigger_sample_note_on = function(_, i, sample, t, note, volume)
+      if not d.instruments[i] or not d.instruments[i].samples[sample] then error("std::logic_error: 'invalid sample index'", 2) end
+      M.triggers[#M.triggers + 1] = { "sample on", i, t, tostring(note), volume, sample }
+    end,
+    trigger_sample_note_off = function(_, i, sample, t, note)
+      M.triggers[#M.triggers + 1] = { "sample off", i, t, tostring(note), nil, sample }
+    end,
     describe_undo = function(_, text) d.undo.desc = text end,
     can_undo = function() return #d.undo.stack > 0 end,
     can_redo = function() return #d.undo.redo > 0 end,

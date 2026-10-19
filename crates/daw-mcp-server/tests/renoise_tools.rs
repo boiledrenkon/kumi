@@ -196,3 +196,20 @@ async fn a_renoise_behind_a_dialog_is_said_busy_and_a_quit_one_is_gone() {
     let (answer, is_error) = lab.tool("read", json!({"kind": "track"})).await;
     assert!(is_error && answer["connected"] == false, "{answer}");
 }
+
+#[tokio::test]
+async fn renoises_actions_are_its_own_and_another_daws_host_refuses_them() {
+    // (M4) The Renoise host lists audition, select and song_save; REAPER's has none of them, and answers so if asked.
+    let mut lab = Lab::start(None).await;
+    let listed = lab.session.call_as(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": {}}), false).await;
+    let names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter().filter_map(|tool| tool["name"].as_str()).collect();
+    for name in ["audition", "select", "song_save"] {
+        assert!(names.contains(&name), "{name} in {names:?}");
+    }
+    let home = tempfile::tempdir().unwrap();
+    let mut reaper = Session::start(Daw::Reaper, home.path());
+    let listed = reaper.call_as(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}}), false).await;
+    assert!(!listed["result"]["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "audition"));
+    let (answer, is_error) = reaper.tool_full(9, "audition", json!({"instrumentRef": "1:instrument:1"}), false).await;
+    assert!(is_error && answer["error"].as_str().unwrap().contains("Renoise's"), "{answer}");
+}

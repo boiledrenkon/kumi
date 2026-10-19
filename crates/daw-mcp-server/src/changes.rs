@@ -722,6 +722,69 @@ impl crate::host::Host {
         }
     }
 
+    /// `audition` / `select` / `song_save` (Renoise, M4): a note played out loud for a while, things selected or shown, the song
+    /// saved to its own file. None is a change: the bridge answers what it did.
+    pub async fn action(&self, method: &str, arguments: &Value) -> (Value, bool) {
+        if self.daw() != daw_bridge::Daw::Renoise {
+            return (json!({"error": format!("{method} is Renoise's"), "code": "bad-params"}), true);
+        }
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        let fields: &[&str] = match method {
+            // (Kumi names refs as …Ref: both are passed as they come)
+            "audition" => &[
+                "instrument",
+                "instrumentRef",
+                "track",
+                "trackRef",
+                "note",
+                "notes",
+                "volume",
+                "durationMs",
+                "sample",
+                "sampleRef",
+                "stop",
+                "epoch",
+                "layout",
+            ],
+            "select" => &[
+                "track",
+                "trackRef",
+                "device",
+                "deviceRef",
+                "instrument",
+                "instrumentRef",
+                "sample",
+                "sampleRef",
+                "phrase",
+                "phraseRef",
+                "sequence",
+                "sequenceRef",
+                "pattern",
+                "patternRef",
+                "line",
+                "frame",
+                "lower",
+                "matrix",
+                "epoch",
+                "layout",
+            ],
+            _ => &["path"],
+        };
+        let mut params = json!({});
+        for field in fields {
+            if let Some(value) = arguments.get(*field) {
+                params[*field] = value.clone();
+            }
+        }
+        match self.call(method, params, &pick, CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
     /// `undo_step_begin` / `undo_step_end`: one DAW undo step around a plan's changes, where the DAW gives one. Its
     /// label carries a nonce, so the DAW's own undo of the plan names the plan's changes.
     pub async fn undo_step(&self, method: &str, arguments: &Value) -> (Value, bool) {

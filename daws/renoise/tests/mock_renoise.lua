@@ -73,6 +73,26 @@ local function object(class_name, fields, getters, setters)
 end
 M.object = object
 
+-- (M4 n-song) a save: the will-save notifier, the file written, the saved notifier; a folder that isn't there is a modal error
+function M.save_as(path)
+  local folder = path:match("^(.*)/[^/]+$")
+  local probe = folder and io.open(folder .. "/.mock-folder-check", "wb")
+  if not probe then
+    M.modals[#M.modals + 1] = { "save error", path }
+    return
+  end
+  probe:close()
+  os.remove(folder .. "/.mock-folder-check")
+  M.fire(M.tool.app_will_save_document_observable)
+  local file = assert(io.open(path, "wb"))
+  file:write("PK mock song")
+  file:close()
+  M.data.song_fields.file_name = path
+  M.saves = M.saves or {}
+  M.saves[#M.saves + 1] = path
+  M.fire(M.tool.app_saved_document_observable)
+end
+
 local function record_error(where, err)
   M.errors[#M.errors + 1] = where .. ": " .. tostring(err)
 end
@@ -455,6 +475,7 @@ end
 function M.reset(options)
   options = options or {}
   M.errors, M.modals, M.statuses, M.popen_calls = {}, {}, {}, {}
+  M.triggers, M.saves = {}, {}
   -- Calls that would crash the real Renoise.
   M.crashes = {}
   M.servers, M.busy_ports, M.timers, M.menu_entries = {}, {}, {}, {}
@@ -500,6 +521,14 @@ function M.reset(options)
     prompt_for_path = modal("prompt_for_path"),
     log_filename = "Log.txt",
     window = M.window,
+    -- M4 (n-song): saving, as Renoise does it (measured: a folder that isn't there shows a modal error; another file is
+    -- written over with no prompt; the document points at the file it was saved as)
+    save_song = function()
+      local song = M.song and M.data and M.data.song_fields
+      if not song or song.file_name == "" then M.modals[#M.modals + 1] = { "save_song without a file" } return end
+      M.save_as(song.file_name)
+    end,
+    save_song_as = function(_, path) M.save_as(path) end,
   })
 
   local function find_timer(fn)

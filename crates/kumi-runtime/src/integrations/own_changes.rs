@@ -904,6 +904,11 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     /// One action through the host's tool: what the producer is told it did, or why it didn't.
     async fn one_action(&self, action: &'static OwnAction, input: JsonObject, signal: Signal) -> ActionOutcome {
         let words = self.link().words().words;
+        // (an action may name what it acts on by ref: Renoise's audition, select)
+        let input = match self.lengthened(&input) {
+            Ok(input) => input,
+            Err(why) => return ActionOutcome::error(why),
+        };
         let mut args = Value::Object(input.clone());
         self.place(&mut args, &input);
         match self.link().call(action.method, args, signal).await {
@@ -911,13 +916,23 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &answer);
                 let playing = action.playing.or_else(|| answer.get("playing").and_then(Value::as_bool));
                 let recording = (action.playing == Some(false)).then_some(false);
-                let mut text = json!({"done": action.title});
-                for field in ["playing", "positionBeats", "position", "wasRecording"] {
+                // What the DAW says it did, in its words, when it says (Renoise's actions: the notes, what was selected, the file).
+                let title = answer.pointer("/display/title").and_then(Value::as_str).unwrap_or(action.title).to_owned();
+                let mut text = json!({"done": title});
+                for field in ["playing", "positionBeats", "position", "wasRecording", "stopped", "saved"] {
                     if let Some(value) = answer.get(field) {
                         text[field] = value.clone();
                     }
                 }
-                let done = ActionSummary { title: action.title.into(), playing, recording };
+                for field in ["auditioning", "selected"] {
+                    if let Some(value) = answer.get(field) {
+                        text[field] = super::own_bridge::shorten_anywhere(&mut self.link().book.borrow_mut(), value);
+                    }
+                }
+                if let Some(note) = answer.pointer("/display/note").and_then(Value::as_str) {
+                    text["note"] = note.into();
+                }
+                let done = ActionSummary { title, playing, recording };
                 ActionOutcome { text: stringify(&text), is_error: false, maybe: None, done: Some(done) }
             }
             Ok(Err(refused)) if refused.busy => {

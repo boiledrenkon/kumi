@@ -17,6 +17,7 @@ local config = import("config")
 local discovery = import("discovery")
 local log = import("log")
 local VERSION = import("version")
+local actions = import("actions")
 
 local M = {}
 
@@ -846,6 +847,19 @@ function handlers.transport_play(params)
   }
 end
 
+-- M4 (n-song): auditioning a note, selecting or showing, saving the song (actions.lua). None is an undo step or a change.
+function handlers.audition(params)
+  return actions.audition(params, change_env())
+end
+
+handlers.select = function(params)
+  return actions.select(params, change_env())
+end
+
+function handlers.song_save(params)
+  return actions.save(params, change_env())
+end
+
 handlers["renoise.reload"] = function()
   host.request_reload()
   return { reloading = true }
@@ -878,7 +892,9 @@ local function carried(params, carry)
   return moved
 end
 
-local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true }
+local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true,
+  -- (M4 n-song: the actions that name tracks)
+  audition = true, select = true }
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).
@@ -1038,6 +1054,7 @@ end
 
 function M.stop(_, reloading)
   if observers then observers:detach() end
+  pcall(actions.tick, M.now_ms(), true)
   if jobs then jobs:abort_all("reloading", "the tool was stopped or reloaded: ask again") end
   if not reloading then
     -- Renoise releases the song just before it quits; a tool disabled or reloaded sees no release.
@@ -1074,6 +1091,9 @@ function M.tick()
   if not ok then M.log_error("events", err) end
   jobs:run()
   conns:tick()
+  -- (the auditions whose time is up end: a note never hangs on)
+  local ended, audition_err = pcall(actions.tick, M.now_ms())
+  if not ended then M.log_error("auditions", audition_err) end
   b.ticks = (b.ticks or 0) + 1
   if b.ticks % 20 == 0 then log.flush() end
 end
