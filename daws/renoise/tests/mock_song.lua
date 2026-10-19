@@ -498,11 +498,13 @@ function M.make_song(options)
   local function level(t, key, default, max)
     return object("renoise.DeviceParameter", {
       name = key, name_observable = M.observable(), value_min = 0, value_max = max, value_default = default,
-      value_observable = M.observable(), value_string_observable = M.observable(), is_automated = false,
+      -- (M4 n-song: the value's observable is the track's, so a watcher sees writes and Renoise's undo of them)
+      value_observable = (function() t[key .. "_observable"] = t[key .. "_observable"] or M.observable() return t[key .. "_observable"] end)(),
+      value_string_observable = M.observable(), is_automated = false,
     }, {
       value = function() return t[key] or default end,
       value_string = function() return string.format("%.2f", t[key] or default) end,
-    }, { value = recorded(t, key) })
+    }, { value = recorded(t, key, key .. "_observable") })
   end
 
   local KIND = { sequencer = 1, master = 2, send = 3, group = 4 }
@@ -534,6 +536,14 @@ function M.make_song(options)
         return device(t.devices[k])
       end,
       color_blend_observable = (function() t.color_blend_observable = t.color_blend_observable or M.observable() return t.color_blend_observable end)(),
+      -- M4 (n-song): the observables of what the track kinds change
+      collapsed_observable = (function() t.collapsed_observable = t.collapsed_observable or M.observable() return t.collapsed_observable end)(),
+      output_routing_observable = (function() t.output_routing_observable = t.output_routing_observable or M.observable() return t.output_routing_observable end)(),
+      output_delay_observable = (function() t.output_delay_observable = t.output_delay_observable or M.observable() return t.output_delay_observable end)(),
+      volume_column_visible_observable = (function() t.volume_column_observable = t.volume_column_observable or M.observable() return t.volume_column_observable end)(),
+      panning_column_visible_observable = (function() t.panning_column_observable = t.panning_column_observable or M.observable() return t.panning_column_observable end)(),
+      delay_column_visible_observable = (function() t.delay_column_observable = t.delay_column_observable or M.observable() return t.delay_column_observable end)(),
+      sample_effects_column_visible_observable = (function() t.sample_effects_column_observable = t.sample_effects_column_observable or M.observable() return t.sample_effects_column_observable end)(),
       set_column_name = function(_, c, name)
         column_observable(t, "name", c)
         t.column_names = t.column_names or {}
@@ -645,16 +655,34 @@ function M.make_song(options)
       solo_state = function() return t.solo or false end,
       visible_note_columns = function() return t.note_columns end,
       visible_effect_columns = function() return t.effect_columns end,
-      max_note_columns = function() return (t.kind == "master" or t.kind == "send") and 0 or 12 end,
+      max_note_columns = function() return (t.kind == "master" or t.kind == "send" or t.kind == "group") and 0 or 12 end,
       max_effect_columns = function() return t.kind == "master" and 8 or 8 end,
       collapsed = function() return t.collapsed == true end,
-      output_routing = function() return t.output_routing or "Master" end,
+      output_routing = function()
+        if t.output_routing then return t.output_routing end
+        if t.kind == "master" then return "Built-in Output" end
+        -- (a group's track goes to its group)
+        for g = i + 1, #d.tracks do
+          if d.tracks[g].kind == "group" and g - d.tracks[g].members <= i then return d.tracks[g].name end
+        end
+        return "Master"
+      end,
       output_delay = function() return t.output_delay or 0 end,
       volume_column_visible = function() return t.volume_column == true end,
       panning_column_visible = function() return t.panning_column == true end,
       delay_column_visible = function() return t.delay_column == true end,
       sample_effects_column_visible = function() return t.sample_effects_column == true end,
-      available_output_routings = function() return { "Master" } end,
+      available_output_routings = function()
+        if t.kind == "master" then return { "Built-in Output" } end
+        local routings = {}
+        for g = i + 1, #d.tracks do
+          if d.tracks[g].kind == "group" and g - d.tracks[g].members <= i then routings[#routings + 1] = d.tracks[g].name break end
+        end
+        routings[#routings + 1] = "Master"
+        routings[#routings + 1] = "Built-in Output"
+        return routings
+      end,
+      min_effect_columns = function() return t.kind == "sequencer" and 0 or 1 end,
       group_parent = function()
         for g = i + 1, #d.tracks do
           if d.tracks[g].kind == "group" and g - d.tracks[g].members <= i then return track(g) end
@@ -675,6 +703,7 @@ function M.make_song(options)
         for k = 1, t.members do members[k] = track(i - k) end
         return members
       end
+      getters.group_collapsed = function() return t.group_collapsed == true end
     end
     -- Every track has a colour in Renoise (it assigns one), and a blend of how much of it shows.
     getters.color = function() return t.color or (t.kind == "master" and { 220, 220, 220 } or { 41, 166, 153 }) end
@@ -687,16 +716,23 @@ function M.make_song(options)
       solo_state = recorded(t, "solo", "solo_state_observable", true),
       visible_note_columns = recorded(t, "note_columns", "visible_note_columns_observable"),
       visible_effect_columns = recorded(t, "effect_columns", "visible_effect_columns_observable"),
-      volume_column_visible = recorded(t, "volume_column"),
-      panning_column_visible = recorded(t, "panning_column"),
-      delay_column_visible = recorded(t, "delay_column"),
-      sample_effects_column_visible = recorded(t, "sample_effects_column"),
-      collapsed = recorded(t, "collapsed"),
-      output_routing = recorded(t, "output_routing"),
+      volume_column_visible = recorded(t, "volume_column", "volume_column_observable"),
+      panning_column_visible = recorded(t, "panning_column", "panning_column_observable"),
+      delay_column_visible = recorded(t, "delay_column", "delay_column_observable"),
+      sample_effects_column_visible = recorded(t, "sample_effects_column", "sample_effects_column_observable"),
+      collapsed = recorded(t, "collapsed", "collapsed_observable"),
+      output_routing = function(value)
+        local known = false
+        for _, name in ipairs(getters.available_output_routings()) do known = known or name == value end
+        if not known then error("std::logic_error: 'unknown output routing string. pass one of 'available_output_routings''", 2) end
+        recorded(t, "output_routing", "output_routing_observable")(value)
+      end,
       output_delay = function(value)
         if t.kind ~= "sequencer" then error("std::logic_error: 'can not change the output_delay of group, master or send tracks.'", 2) end
-        recorded(t, "output_delay")(value)
+        if value < -100 or value > 100 then error("std::logic_error: 'invalid output_delay value'", 2) end
+        recorded(t, "output_delay", "output_delay_observable")(value)
       end,
+      group_collapsed = recorded(t, "group_collapsed"),
     }
     return object(class, fields, getters, setters)
   end
@@ -1198,7 +1234,52 @@ function M.make_song(options)
         function() transport_fields[key] = value; M.fire(transport_fields[key .. "_observable"]) end)
     end
   end
+  -- M4 (n-song): the groove, the metronome, the editing settings and the track headroom. Measured in 3.5.4: the groove, the
+  -- metronome's beats per bar, lines per beat and volume and the headroom are undo steps (recorded here); the metronome's
+  -- switch and precount, edit step, octave, record quantize, wrapped and single-track editing, keyboard velocity and the
+  -- parameter record mode are not (plain fields, their observables fire on a write).
+  for key, value in pairs({
+    metronome_enabled = false, metronome_precount_enabled = false, metronome_precount_bars = 1, edit_step = 1, octave = 3,
+    record_quantize_enabled = false, record_quantize_lines = 1, wrapped_pattern_edit = false, single_track_edit_mode = false,
+    keyboard_velocity_enabled = false, keyboard_velocity = 127, record_parameter_mode = 1,
+  }) do
+    transport_fields[key], transport_fields[key .. "_observable"] = value, simple_observable()
+  end
+  local groove = { enabled = false, amounts = { 0, 0, 0, 0 } }
+  transport_fields.groove_enabled_observable, transport_fields.groove_assignment_observable = simple_observable(), simple_observable()
+  transport_fields.metronome_beats_per_bar_observable = simple_observable()
+  for key, value in pairs({ metronome_lines_per_beat = 0, metronome_volume = 0.70794576406479, track_headroom = 0.50118720531464 }) do
+    transport_fields[key], transport_fields[key .. "_observable"] = value, simple_observable()
+  end
+  for _, key in ipairs({ "metronome_beats_per_bar", "metronome_lines_per_beat", "metronome_volume", "track_headroom" }) do
+    transport_setters[key] = function(value)
+      local old = transport_fields[key]
+      if old == value then return end
+      transport_fields[key] = value
+      M.fire(transport_fields[key .. "_observable"])
+      M.record(function() transport_fields[key] = old; M.fire(transport_fields[key .. "_observable"]) end,
+        function() transport_fields[key] = value; M.fire(transport_fields[key .. "_observable"]) end)
+    end
+  end
+  transport_setters.groove_enabled = function(value)
+    local old = groove.enabled
+    if old == value then return end
+    groove.enabled = value
+    M.fire(transport_fields.groove_enabled_observable)
+    M.record(function() groove.enabled = old; M.fire(transport_fields.groove_enabled_observable) end,
+      function() groove.enabled = value; M.fire(transport_fields.groove_enabled_observable) end)
+  end
+  transport_setters.groove_amounts = function(value)
+    local old, new = groove.amounts, { value[1], value[2], value[3], value[4] }
+    groove.amounts = new
+    M.fire(transport_fields.groove_assignment_observable)
+    M.record(function() groove.amounts = old; M.fire(transport_fields.groove_assignment_observable) end,
+      function() groove.amounts = new; M.fire(transport_fields.groove_assignment_observable) end)
+  end
+  d.groove = groove
   local transport = object("renoise.Transport", transport_fields, {
+    groove_enabled = function() return groove.enabled end,
+    groove_amounts = function() return { groove.amounts[1], groove.amounts[2], groove.amounts[3], groove.amounts[4] } end,
     -- The edit position in quarter notes: the lines before it over the LPB (a test can set `edit_beats`, as a ZLxx would).
     loop_sequence_range = function()
       local r = transport_fields.loop_range_seq
@@ -1245,7 +1326,34 @@ function M.make_song(options)
     is_undo_redoing = function() return d.undo.redoing end,
   }
   d.track_proxy = track
+  -- M4 (n-song): the song's name, artist and comments are undo steps (measured, 3.5.4); its comments observable is a list's,
+  -- fired once per paragraph.
+  -- (the name stays a field of the song's, which a test may take away)
+  local info = { artist = options.artist or "", comments = options.comments or {} }
+  song_fields.artist_observable, song_fields.comments_observable = simple_observable(), simple_observable()
+  song_fields.comments_assignment_observable = simple_observable()
+  local function info_setter(key, observable, copy)
+    local store = key == "name" and song_fields or info
+    return function(value)
+      local old, new = store[key], copy and copy(value) or value
+      store[key] = new
+      for _ = 1, key == "comments" and math.max(#old, #new, 1) or 1 do M.fire(song_fields[observable]) end
+      M.record(function() store[key] = old; M.fire(song_fields[observable]) end, function() store[key] = new; M.fire(song_fields[observable]) end)
+    end
+  end
+  local function lines_copy(value)
+    local out = {}
+    for i, line in ipairs(value) do out[i] = line end
+    return out
+  end
+  local song_setters = {
+    name = info_setter("name", "name_observable"), artist = info_setter("artist", "artist_observable"),
+    comments = info_setter("comments", "comments_observable", lines_copy),
+  }
+  d.info = info
   local song_getters = {
+    artist = function() return info.artist end,
+    comments = function() return lines_copy(info.comments) end,
     patterns = function()
       local patterns = {}
       for p in ipairs(d.patterns) do patterns[p] = pattern_object(p) end
@@ -1268,7 +1376,7 @@ function M.make_song(options)
     song_fields.sequencer_track_count, song_fields.send_track_count = sequencers, sends
   end
   d.recount()
-  song = object("renoise.Song", song_fields, song_getters)
+  song = object("renoise.Song", song_fields, song_getters, song_setters)
   d.song = song
   return song
 end

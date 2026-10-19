@@ -34,7 +34,15 @@ pub fn kinds(daw: Daw) -> Kinds {
         Daw::Renoise => Kinds {
             read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],
             bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
-            outside_undo: &["track-mute", "track-solo", "loop-range", "loop-pattern"],
+            outside_undo: &[
+                "track-mute",
+                "track-solo",
+                "loop-range",
+                "loop-pattern",
+                // M4 (n-song): the metronome switch and the editing settings (measured in 3.5.4)
+                "metronome-switch",
+                "edit-settings",
+            ],
         },
     }
 }

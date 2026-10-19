@@ -670,4 +670,276 @@ base.register({
   preview = delete_preview, apply = delete_apply, restore = delete_restore,
 })
 
+-- M4 (n-song): a track's collapse, width, output routing and delay, the columns it shows, and a note column's name and mute.
+-- Each is a Renoise undo step (measured in 3.5.4, lab 2026-10-19; a column's mute is one, unlike the track's mute). A group's
+-- `group_collapsed` has no observable, so Renoise's undo of it alone isn't seen: Kumi looks again at the next undo it sees.
+
+local flag, text_of = base.flag, base.text_of
+local T = renoise.Track
+
+local function number_text(value)
+  local text = string.format("%.2f", value):gsub("0+$", ""):gsub("%.$", "")
+  return (text:gsub("^%-", base.MINUS))
+end
+
+prop(base.settings {
+  kind = "track-collapse", noun = "collapse", master = true, undoable = true, named = true,
+  fields = {
+    {
+      name = "collapsed", read = function(t) return t.collapsed end, write = function(t, v) t.collapsed = v end,
+      check = flag, text = function(v) return v and "collapsed" or "expanded" end,
+    },
+    {
+      name = "groupCollapsed",
+      read = function(t) return t.type == T.TRACK_TYPE_GROUP and t.group_collapsed or false end,
+      write = function(t, v) t.group_collapsed = v end,
+      check = function(v, name, t)
+        if t.type ~= T.TRACK_TYPE_GROUP then bad("groupCollapsed is a group track's (it folds the group's tracks)") end
+        return flag(v, name)
+      end,
+      text = function(v) return v and "with its tracks folded" or "with its tracks shown" end,
+    },
+  },
+})
+
+prop(base.settings {
+  kind = "track-width", noun = "width", master = true, undoable = true, named = true, watch = true,
+  fields = {
+    {
+      name = "width",
+      read = function(t)
+        local w = t.prefx_width
+        return w.value / w.value_max * 100
+      end,
+      write = function(t, v)
+        local w = t.prefx_width
+        w.value = v / 100 * w.value_max
+      end,
+      check = function(v)
+        if type(v) ~= "number" or v ~= v or v < 0 or v > 100 then bad("width must be a number from 0 to 100 (percent, as Renoise shows it)") end
+        return v
+      end,
+      text = function(v) return "width " .. number_text(v) .. "%" end,
+    },
+  },
+})
+
+-- The routings a track may take are names: the master, a group around it, the audio device's outputs. A group's name moves with
+-- its place ("Group 04"), so a record keeps the group as a track ref (the layout carries it) and the name is read from it again.
+local function routing_named(track, wanted)
+  if type(wanted) ~= "string" or wanted == "" then bad("routing: one of the track's output routings, by name") end
+  local available, found = track.available_output_routings, nil
+  for _, name in ipairs(available) do
+    if name == wanted then return name end
+    if name:lower() == wanted:lower() then
+      if found then bad(string.format("%q names more than one routing: give it as Renoise writes it", wanted)) end
+      found = name
+    end
+  end
+  if found then return found end
+  bad(string.format("%s can't go to %q: its routings are %s", track.name, wanted, table.concat(available, ", ")))
+end
+
+local function group_named(song, name)
+  local found
+  for i = 1, rows.track_count(song) do
+    local track = song:track(i)
+    if track.type == T.TRACK_TYPE_GROUP and track.name == name then
+      if found then return nil end
+      found = i
+    end
+  end
+  return found
+end
+
+prop {
+  kind = "track-output", noun = "output routing", master = true, undoable = true,
+  read = function(track) return { routing = track.output_routing } end,
+  wanted = function(track, input) return { routing = routing_named(track, input.routing) } end,
+  write = function(track, state) track.output_routing = state.routing end,
+  same = function(a, b) return a.routing == b.routing end,
+  title = function(name, _, to) return name .. " routed to " .. base.q(to.routing) end,
+  wire = function(state, env)
+    if type(state) ~= "table" or type(state.routing) ~= "string" then return state end
+    local song = renoise.song()
+    local group = song and group_named(song, state.routing)
+    if not group then return state end
+    return { routing = state.routing, at = refs.make(env.epoch(), "track", group) }
+  end,
+  unwire = function(state, env)
+    if type(state) ~= "table" or type(state.at) ~= "string" then return state end
+    local song = the_song()
+    local group = refs.expect(state.at, "track", 1, env.epoch())[1]
+    if group > rows.track_count(song) or song:track(group).type ~= T.TRACK_TYPE_GROUP then
+      fail("changed", "the group " .. base.q(state.routing) .. " isn't where it was any more")
+    end
+    return { routing = song:track(group).name }
+  end,
+}
+
+prop {
+  kind = "track-delay", noun = "output delay", master = false, undoable = true,
+  read = function(track) return { delayMs = track.output_delay } end,
+  wanted = function(track, input)
+    if track.type ~= T.TRACK_TYPE_SEQUENCER then
+      bad("only a sequencer track has an output delay (Renoise refuses one on a group or a send track)")
+    end
+    local v = input.delayMs
+    if type(v) ~= "number" or v ~= v or v < -100 or v > 100 then bad("delayMs must be a number from -100 to 100") end
+    return { delayMs = v }
+  end,
+  write = function(track, state) track.output_delay = state.delayMs end,
+  same = function(a, b) return close(a.delayMs, b.delayMs) end,
+  title = function(name, _, to) return name .. " delay " .. number_text(to.delayMs) .. " ms" end,
+}
+
+-- The columns a track shows. Hiding a column hides what is in it (Renoise keeps it): the preview says so when it holds notes.
+local SUBCOLUMNS = {
+  { name = "volume", field = "volume_column_visible", word = "volume" },
+  { name = "panning", field = "panning_column_visible", word = "panning" },
+  { name = "delay", field = "delay_column_visible", word = "delay" },
+  { name = "sampleEffects", field = "sample_effects_column_visible", word = "sample effects" },
+}
+
+-- (only a sequencer track has note columns; a group raises on them, measured in 3.5.4)
+local function note_columns_of(track) return track.type == T.TRACK_TYPE_SEQUENCER and track.max_note_columns or 0 end
+
+local function has_notes(track, name)
+  if note_columns_of(track) == 0 then bad(name .. ": this track has no note columns (only a sequencer track has them)") end
+end
+
+local columns_fields = {
+  {
+    name = "noteColumns", read = function(t) return t.visible_note_columns end, write = function(t, v) t.visible_note_columns = v end,
+    check = function(v, name, t)
+      has_notes(t, name)
+      if type(v) ~= "number" or v ~= math.floor(v) or v < 1 or v > note_columns_of(t) then bad(string.format("noteColumns is from 1 to %d", note_columns_of(t))) end
+      return v
+    end,
+    text = function(v) return v == 1 and "1 note column" or (v .. " note columns") end,
+  },
+  {
+    name = "effectColumns", read = function(t) return t.visible_effect_columns end, write = function(t, v) t.visible_effect_columns = v end,
+    check = function(v, _, t)
+      local low, high = t.min_effect_columns, t.max_effect_columns
+      if type(v) ~= "number" or v ~= math.floor(v) or v < low or v > high then bad(string.format("effectColumns is from %d to %d on this track", low, high)) end
+      return v
+    end,
+    text = function(v) return v == 1 and "1 effect column" or (v .. " effect columns") end,
+  },
+}
+for _, sub in ipairs(SUBCOLUMNS) do
+  columns_fields[#columns_fields + 1] = {
+    name = sub.name, read = function(t) return note_columns_of(t) > 0 and t[sub.field] or false end, write = function(t, v) t[sub.field] = v end,
+    check = function(v, name, t)
+      has_notes(t, name)
+      return flag(v, name)
+    end,
+    text = function(v) return (v and "the " or "no ") .. sub.word .. " column" end,
+  }
+end
+
+-- What the track's patterns hold in the columns a change would hide: a note for the preview, or nil (and nil past what is worth
+-- reading through).
+local HIDDEN_READS = 40000
+local function hidden_note(loc, wanted)
+  local song, track, index = renoise.song(), loc.object, loc.place.track
+  if not song then return nil end
+  local notes_from = wanted.noteColumns and wanted.noteColumns < track.visible_note_columns and wanted.noteColumns + 1 or nil
+  local effects_from = wanted.effectColumns and wanted.effectColumns < track.visible_effect_columns and wanted.effectColumns + 1 or nil
+  local subs = {}
+  for _, sub in ipairs(SUBCOLUMNS) do
+    if wanted[sub.name] == false and note_columns_of(track) > 0 and track[sub.field] then subs[#subs + 1] = sub end
+  end
+  if not notes_from and not effects_from and #subs == 0 then return nil end
+  local patterns, reads = 0, 0
+  for p = 1, #song.patterns do
+    local pattern_track = song:pattern(p):track(index)
+    local found = false
+    if not pattern_track.is_alias and not pattern_track.is_empty then
+      for l = 1, song:pattern(p).number_of_lines do
+        local line = pattern_track:line(l)
+        reads = reads + 1
+        if not line.is_empty then
+          for c = 1, note_columns_of(track) do
+            local column = line:note_column(c)
+            reads = reads + 1
+            if not column.is_empty then
+              if notes_from and c >= notes_from then found = true end
+              for _, sub in ipairs(subs) do
+                if (sub.name == "volume" and column.volume_string ~= "..") or (sub.name == "panning" and column.panning_string ~= "..")
+                  or (sub.name == "delay" and column.delay_string ~= "..")
+                  or (sub.name == "sampleEffects" and (column.effect_number_value ~= 0 or column.effect_amount_value ~= 0)) then
+                  found = true
+                end
+              end
+            end
+          end
+          if effects_from then
+            for c = effects_from, track.max_effect_columns do
+              if not line:effect_column(c).is_empty then found = true end
+            end
+          end
+        end
+        if found or reads > HIDDEN_READS then break end
+      end
+    end
+    if found then patterns = patterns + 1 end
+    if reads > HIDDEN_READS then return nil end
+  end
+  if patterns == 0 then return nil end
+  return string.format("What it hides holds notes in %s: Renoise keeps them, hidden (and plays them).",
+    patterns == 1 and "1 pattern" or (patterns .. " patterns"))
+end
+
+local columns_spec = base.settings({
+  kind = "track-columns", noun = "columns", master = true, undoable = true, named = true, fields = columns_fields,
+})
+columns_spec.note = function(loc, _, wanted) return hidden_note(loc, wanted) end
+prop(columns_spec)
+
+-- A note column's name and mute: the column is part of what the change is about, so the record keeps it (`col`).
+local column_spec = base.settings({
+  kind = "track-column", noun = "column", undoable = true, named = true,
+  fields = {
+    {
+      name = "name", read = function(o) return o.track:column_name(o.c) end, write = function(o, v) o.track:set_column_name(o.c, v) end,
+      check = function(v, name) return text_of(v, name, 64) end,
+      text = function(v) return v == "" and "unnamed" or ("named " .. base.q(v)) end,
+    },
+    {
+      name = "mute", read = function(o) return o.track:column_is_muted(o.c) end, write = function(o, v) o.track:set_column_is_muted(o.c, v) end,
+      check = flag, text = function(v) return v and "muted" or "unmuted" end,
+    },
+  },
+})
+local column_fields = column_spec.read
+column_spec.read = function(object, source)
+  local state = column_fields(object, source)
+  state.col = object.c
+  return state
+end
+column_spec.locate = function(song, env, input)
+  local index, track = find(song, env, input.ref, "track-column")
+  if note_columns_of(track) == 0 then bad(named(index, track) .. " has no note columns: only a sequencer track has them") end
+  local c = input.col
+  if type(c) ~= "number" or c ~= math.floor(c) or c < 1 or c > note_columns_of(track) then
+    bad(string.format("col is a note column from 1 to %d", note_columns_of(track)))
+  end
+  return {
+    object = { track = track, c = c }, name = string.format("%s column %d", named(index, track), c), place = { track = index, column = c },
+    target = target(env, index), id = base.track_id(track) .. "|" .. c,
+  }
+end
+column_spec.reread = function(song, place)
+  if place.track < 1 or place.track > rows.track_count(song) then return nil end
+  local track = song:track(place.track)
+  if place.column > note_columns_of(track) then return nil end
+  return { track = track, c = place.column }
+end
+column_spec.restore_input = function(restore)
+  return { ref = restore.target and restore.target.ref, col = type(restore.prior) == "table" and restore.prior.col or nil }
+end
+base.register(column_spec)
+
 return M

@@ -245,6 +245,8 @@ function M.prop_preview(song, env, spec, input)
   local display = { title = spec.title(loc.name, now, wanted), before = now, after = wanted }
   if spec.same(now, wanted) then display.unchanged = true end
   if not spec.undoable then display.note = NOT_UNDOABLE end
+  -- (what the producer should know before it is made: columns hidden that hold notes)
+  if spec.note then display.note = spec.note(loc, now, wanted) or display.note end
   local shown = wire(spec, now, env, loc)
   -- (the fence names what was located as well as its value: another track at the ref's place is not this one; and, where the
   -- value is a place, what the wanted value names)
@@ -304,7 +306,9 @@ end
 
 function M.prop_restore(song, env, spec, restore, desc)
   local reference = restore.target and restore.target.ref
-  local ok, loc = pcall(spec.locate, song, env, { ref = reference })
+  -- (a kind whose object takes more than its target's ref to find, a track's note column, finds it from the record: `restore_input`)
+  local input = spec.restore_input and spec.restore_input(restore) or { ref = reference }
+  local ok, loc = pcall(spec.locate, song, env, input)
   if not ok then
     if type(loc) == "table" and loc.code == "failed" then loc.code = "gone" end
     error(loc, 0)
@@ -634,6 +638,78 @@ function M.note_restored(journal, kind, place, applied, spec)
       return
     end
   end
+end
+
+-- M4 (n-song): a kind of several settings of one object (the song's groove, a track's columns), any of which a change gives:
+-- only those are read, fenced, written and put back, so a setting of the same kind the producer changes meanwhile is left to
+-- them. `fields`: {name, read(object), write(object, value), check(value, name, object), text(value)}, in the order a title
+-- lists them; the title opens with `heading`, or with the located object's name when `named`.
+function M.same_value(a, b)
+  if type(a) == "table" and type(b) == "table" then
+    if #a ~= #b then return false end
+    for i = 1, #a do
+      if not M.same_value(a[i], b[i]) then return false end
+    end
+    return true
+  end
+  return close(a, b)
+end
+
+function M.flag(value, name)
+  if type(value) ~= "boolean" then bad(name .. " must be true or false") end
+  return value
+end
+
+function M.text_of(value, name, most)
+  if type(value) ~= "string" or #value > most or value:find("[%c]") then bad(string.format("%s must be one line of text, at most %d bytes", name, most)) end
+  return value
+end
+
+function M.settings(spec)
+  local fields, names = spec.fields, {}
+  for i, field in ipairs(fields) do names[i] = field.name end
+  spec.read = function(object, source)
+    local state = {}
+    for _, field in ipairs(fields) do
+      if type(source) == "table" and source[field.name] ~= nil then state[field.name] = field.read(object) end
+    end
+    return state
+  end
+  spec.wanted = function(object, input)
+    local state, any = {}, false
+    for _, field in ipairs(fields) do
+      if input[field.name] ~= nil then
+        state[field.name] = field.check(input[field.name], field.name, object)
+        any = true
+      end
+    end
+    if not any then bad("give any of " .. table.concat(names, ", ")) end
+    return state
+  end
+  spec.write = function(object, state)
+    for _, field in ipairs(fields) do
+      local value = state[field.name]
+      if value ~= nil and not M.same_value(field.read(object), value) then field.write(object, value) end
+    end
+  end
+  spec.same = function(a, b)
+    for _, field in ipairs(fields) do
+      local x, y = a[field.name], b[field.name]
+      if (x == nil) ~= (y == nil) or (x ~= nil and not M.same_value(x, y)) then return false end
+    end
+    return true
+  end
+  spec.title = function(name, _, to)
+    local parts = {}
+    for _, field in ipairs(fields) do
+      if to[field.name] ~= nil then parts[#parts + 1] = field.text(to[field.name]) end
+    end
+    local text = table.concat(parts, ", ")
+    local heading = spec.named and name or spec.heading
+    if heading then return heading .. " " .. text end
+    return (text:gsub("^%l", string.upper))
+  end
+  return spec
 end
 
 return M
