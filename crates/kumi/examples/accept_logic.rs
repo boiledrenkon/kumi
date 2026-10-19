@@ -684,16 +684,26 @@ impl Accept {
             let what = if undone { "undone".to_string() } else { short(&result.text, 200) };
             self.say(undone, Some(perf_now() - t0), &format!("undo “{}”: {what}", row.title));
         }
-        // The project as it was, read again.
-        let after = self.observe().await?;
-        let context: Value = serde_json::from_str(&after.context).unwrap_or(Value::Null);
+        // The project as it was, read again. Right after a structural change the bridge may still be settling its epoch
+        // and refuse the look as busy, which Kumi's session answers by looking again once it's free: so does this.
+        let t0 = perf_now();
+        let mut context = Value::Null;
+        for _ in 0..20 {
+            let after = self.observe().await?;
+            context = serde_json::from_str(&after.context).unwrap_or(Value::Null);
+            if context["tracks"].as_array().is_some_and(|tracks| !tracks.is_empty()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let waited = perf_now() - t0;
         let now = context["tracks"].as_array().cloned().unwrap_or_default();
         let volume_now = now.first().and_then(|track| track["volumeDb"].as_f64());
         let second_now = now.get(1).and_then(|track| track["name"].as_str()).unwrap_or("?").to_owned();
         let back = now.len() == tracks.len() && volume_now.is_some_and(|db| (db - volume).abs() < 0.05) && second_now == second_name;
         self.say(
             back,
-            None,
+            Some(waited),
             &format!(
                 "the project reads as before the plan: {} tracks, “{first_name}” at {} dB, “{second_now}”",
                 now.len(),
