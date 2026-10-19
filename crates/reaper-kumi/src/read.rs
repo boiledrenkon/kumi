@@ -1971,11 +1971,17 @@ mod tests {
             // A marker's GUID isn't a region's.
             "r:region:{MARK-1}",
             "r:marker:{REG-1}",
-            "r:env:{AAAA}:PANENV",
+            "r:env:{AAAA}:{NOPE}",
         ] {
             let (code, message) = lab.read(json!({"ref": reference})).unwrap_err();
             assert_eq!(code, "failed", "{reference}: {message}");
         }
+        // REAPER hands out a track's built-in envelope before it is shown (m4-r-fxenv, lab 7.82): hidden, off, no points.
+        let pan = lab.read(json!({"ref": "r:env:{AAAA}:PANENV"})).unwrap();
+        assert_eq!(
+            (pan["items"][0]["active"].clone(), pan["items"][0]["visible"].clone(), pan["items"][0]["pointCount"].clone()),
+            (json!(false), json!(false), json!(0))
+        );
         for reference in
             ["track:{AAAA}", "r:pattern:3", "r:track:", "r:param:{FX-EQ}:x", "r:send:{AAAA}:0:5", "r:send:{AAAA}:0", "r:marker:3"]
         {
