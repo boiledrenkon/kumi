@@ -727,3 +727,78 @@ impl<S: RefScheme + 'static> KernelTool for UndoTool<S> {
         undo_change(&self.engine.history, &input, signal).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{reaper_changes, renoise_changes};
+    use super::*;
+    use regex::Regex;
+    use std::collections::BTreeSet;
+
+    /// Live's words, whole: none may reach the model from another DAW's changes.
+    const LIVE_WORDS: &str = r"\b(Live|Set|Sets|Ableton|Session|Arrangement|Remote Script|Control Surface|Main|Drum Rack|Operator|[Rr]acks?|[Cc]lips?|[Cc]lip slots?|[Ss]cenes?)\b";
+
+    fn sets() -> [(&'static str, &'static OwnChangeSet); 2] {
+        [("REAPER", &reaper_changes::CHANGES), ("Renoise", &renoise_changes::CHANGES)]
+    }
+
+    /// The kinds a bridge's code registers, found with `pattern` in the files under `folder` whose names start with
+    /// `prefix`, less the kinds that only name a change's target.
+    fn registered(folder: &str, prefix: &str, pattern: &str) -> BTreeSet<String> {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(folder);
+        let found = Regex::new(pattern).unwrap();
+        let mut kinds = BTreeSet::new();
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().unwrap().to_string_lossy().starts_with(prefix) {
+                let text = std::fs::read_to_string(&path).unwrap();
+                kinds.extend(found.captures_iter(&text).filter_map(|c| c.iter().skip(1).flatten().next().map(|m| m.as_str().to_string())));
+            }
+        }
+        kinds.remove("pattern-track");
+        kinds
+    }
+
+    #[test]
+    fn each_daws_kinds_are_exactly_what_its_bridge_makes() {
+        let reaper =
+            registered("crates/reaper-kumi/src/changes", "", r#"kind: "([a-z]+(?:-[a-z]+)+)"|"([a-z]+(?:-[a-z]+)+)" => Some\(Kind"#);
+        let renoise = registered("daws/renoise/com.kumi.Bridge.xrnx/payload", "changes", r#"(?:kind = |register\()"([a-z]+(?:-[a-z]+)+)""#);
+        for ((app, set), bridge) in sets().into_iter().zip([reaper, renoise]) {
+            let ours: BTreeSet<String> = set.kinds.iter().map(|kind| kind.kind.to_string()).collect();
+            assert_eq!(ours, bridge, "{app}: Kumi's kinds against its bridge's");
+        }
+    }
+
+    #[test]
+    fn every_kind_has_a_schema_the_model_can_follow_in_the_daws_own_words() {
+        let live = Regex::new(LIVE_WORDS).unwrap();
+        for (app, set) in sets() {
+            for text in [set.plan_description, set.undo_description, set.instructions] {
+                assert!(!live.is_match(text), "{app}: {text}");
+            }
+            let mut tools = BTreeSet::new();
+            for kind in set.kinds {
+                assert!(tools.insert(kind.tool), "{app}: {} twice", kind.tool);
+                assert_eq!(kind.tool.replace('_', "-"), kind.kind, "{app}: the tool is its kind's name");
+                assert!(!live.is_match(kind.description), "{app} {}: {}", kind.tool, kind.description);
+                let schema = kind.input_schema();
+                let properties = schema["properties"].as_object().unwrap_or_else(|| panic!("{app} {}", kind.tool));
+                for required in schema.get("required").and_then(Value::as_array).into_iter().flatten() {
+                    assert!(properties.contains_key(required.as_str().unwrap()), "{app} {}: {required}", kind.tool);
+                }
+                // A field that holds a ref is named as refs are, so Kumi shortens and lengthens it; the bridge's other
+                // names for them are what `wire` sends.
+                for (ours, theirs) in kind.wire {
+                    assert!(properties.contains_key(*ours), "{app} {}: {ours}", kind.tool);
+                    assert!(ours.ends_with("Ref") || ours.ends_with("Refs"), "{app} {}: {ours}", kind.tool);
+                    assert!(!properties.contains_key(*theirs), "{app} {}: {theirs}", kind.tool);
+                }
+                for unnamed in ["track", "pattern", "group", "asFolderOf"] {
+                    assert!(!properties.contains_key(unnamed), "{app} {}: {unnamed} holds a ref", kind.tool);
+                }
+            }
+            assert!(set.kinds.iter().filter(|kind| kind.core).count() <= 8, "{app}: few tools on every request");
+        }
+    }
+}
