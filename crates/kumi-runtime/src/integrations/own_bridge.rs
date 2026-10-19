@@ -193,6 +193,15 @@ pub(super) struct Refused {
     pub(super) code: Option<String>,
 }
 
+/// A host call's outcome, with a failure that came of the call's own signal (the caller stopped, or its time ran out) as
+/// Aborted: the MCP client reports both as plain errors, and neither means the host is gone.
+pub(super) fn stopped_or<T>(outcome: Result<T, RuntimeError>, signal: &Signal) -> Result<T, RuntimeError> {
+    match outcome {
+        Err(_) if signal.is_cancelled() => Err(RuntimeError::Aborted),
+        other => other,
+    }
+}
+
 /// The JSON a host tool answered with, or why it couldn't.
 pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
     let text = result
@@ -315,6 +324,18 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                 None => layout.set(Some(now)),
             }
         }));
+        // The host went away (it exited, or its pipe closed): the next call starts another.
+        let (held, gone) = (self.endpoint.clone(), Rc::downgrade(&endpoint));
+        let undisconnect = endpoint.on_disconnect(Rc::new(move || {
+            let same = held.borrow().as_ref().zip(gone.upgrade()).is_some_and(|(now, it)| Rc::ptr_eq(now, &it));
+            if same {
+                held.borrow_mut().take();
+            }
+        }));
+        let unlisten: Box<dyn Fn()> = Box::new(move || {
+            unlisten();
+            undisconnect();
+        });
         if let Some(before) = self.unlisten.replace(Some(unlisten)) {
             before();
         }
@@ -322,18 +343,13 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     /// A host tool's answer: Ok with its JSON, Err with why (the host's words) when it answered an error.
+    /// The host stays through a failed call (the caller's stop, a time limit): only its going away (`on_disconnect`) lets
+    /// the next call start another, whose journal is empty.
     async fn call(&self, tool: &str, args: Value, signal: Signal) -> Result<Result<Value, Refused>, RuntimeError> {
         let endpoint = self.endpoint(signal.clone()).await?;
         let args = args.as_object().cloned().unwrap_or_default();
         let bounded = abort::any([signal, abort::timeout(CALL_MS)]);
-        match endpoint.call(tool, args, bounded).await {
-            Ok(result) => Ok(answer_of(&result)),
-            Err(error) => {
-                // The host went away: the next call starts it again.
-                self.endpoint.borrow_mut().take();
-                Err(error)
-            }
-        }
+        stopped_or(endpoint.call(tool, args, bounded.clone()).await.map(|result| answer_of(&result)), &bounded)
     }
 
     /// Refs a new epoch made stale go: a positional DAW's refs carry their epoch; a stable DAW's never change.

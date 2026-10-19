@@ -25,11 +25,21 @@ impl McpEndpoint for InProcess {
     async fn list(&self, _: Option<&str>, _: Signal) -> Result<ListToolsResult, RuntimeError> {
         Ok(serde_json::from_value(json!({"tools": daw_mcp_server::mcp::tools(&self.host)})).unwrap())
     }
-    async fn call(&self, name: &str, args: JsonObject, _: Signal) -> Result<CallToolResult, RuntimeError> {
+    /// As the real client does: a call whose signal fires fails at once (a plain error), and the host carries on with it,
+    /// as the real host does with each request it was sent.
+    async fn call(&self, name: &str, args: JsonObject, signal: Signal) -> Result<CallToolResult, RuntimeError> {
         self.id.set(self.id.get() + 1);
         let message = json!({"jsonrpc": "2.0", "id": self.id.get(), "method": "tools/call", "params": {"name": name, "arguments": args}});
-        let answer = daw_mcp_server::mcp::handle(&self.host, &message).await.expect("an answer");
-        Ok(serde_json::from_value(answer["result"].clone()).unwrap_or_else(|e| panic!("{answer}: {e}")))
+        let host = self.host.clone();
+        let handled = tokio::task::spawn_local(async move { daw_mcp_server::mcp::handle(&host, &message).await.expect("an answer") });
+        tokio::select! {
+            biased;
+            _ = signal.cancelled() => Err(RuntimeError::plain("MCP request cancelled")),
+            answer = handled => {
+                let answer = answer.expect("the host's answer");
+                Ok(serde_json::from_value(answer["result"].clone()).unwrap_or_else(|e| panic!("{answer}: {e}")))
+            }
+        }
     }
     fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
         Box::new(|| {})

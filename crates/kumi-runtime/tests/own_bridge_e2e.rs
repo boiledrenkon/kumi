@@ -11,6 +11,7 @@ use kumi_common::abort::Signal;
 use kumi_runtime::core::{
     context::IntegrationContext,
     contracts::*,
+    errors::RuntimeError,
     view::{BodyKind, BodyRequest, DawFocus, FocusBody},
 };
 use kumi_runtime::integrations::{
@@ -356,6 +357,19 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
             let undo_steps = script.undo_history();
             assert_eq!(undo_steps.len(), 1, "{undo_steps:?}");
             assert!(undo_steps[0].starts_with("Kumi: Track 1 volume -6 dB and 3 more (k"), "{undo_steps:?}");
+
+            // A look the producer stops (Esc) while REAPER is slow to answer: the host stays, with its journal, and HISTORY
+            // with it (a host started again would retire every change).
+            simulator.hold("snapshot");
+            let stop = Signal::new();
+            let stopper = stop.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                stopper.cancel();
+            });
+            let stopped = reaper.observe(stop, None).await;
+            assert!(stopped.as_ref().is_err_and(RuntimeError::is_aborted), "{:?}", stopped.map(|o| o.label));
+            simulator.release();
 
             // The next look lists them for the model, each applied.
             let again = reaper.observe(Signal::new(), None).await.unwrap();
