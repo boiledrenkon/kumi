@@ -328,3 +328,50 @@ fn a_macros_undo_puts_back_each_field_it_changed_and_refuses_one_changed_since()
     assert!(matches!(undone("doofer-macro", &edited, &renamed, "Doofer", true), Ok(Undo::Write { .. })));
     assert!(matches!(undone("doofer-macro", &edited, DOOFER, "Doofer", false), Ok(Undo::Back(_))));
 }
+
+#[test]
+fn a_read_says_what_a_container_holds_by_place_with_renoises_texts_and_a_notepads_words() {
+    let mapped =
+        ok("doofer-macro", json!({"macro": 1, "name": "Drive", "mappings": [{"device": 2, "param": 1, "max": 0.5}]}), DOOFER, "Doofer")
+            .document
+            .to_xml();
+    let (key, inside) = super::inside(&mapped, true).unwrap();
+    assert_eq!(key, "inside");
+    assert_eq!(inside["type"], "doofer");
+    assert_eq!(inside["macros"][0]["name"], "Drive");
+    assert_eq!(inside["macros"][0]["mappings"][0]["drives"], "Gain of Gainer");
+    assert!(inside["macros"][0]["mappings"][0].get("lane").is_none(), "a Doofer's mappings name no lane");
+    let devices = inside["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!((&devices[1]["at"], &devices[1]["name"], &devices[1]["device"]), (&json!([2]), &json!("Gainer"), &json!("Gainer")));
+    let gain = devices[1]["params"].as_array().unwrap().iter().find(|p| p["name"] == "Gain").unwrap();
+    assert_eq!((&gain["value"], &gain["text"]), (&json!(1.0), &json!("0 dB")));
+    let eq_gain = &devices[0]["params"][0];
+    assert_eq!((&eq_gain["param"], &eq_gain["text"]), (&json!(1), &json!("0 dB")));
+    // A Splitter: its split and its lanes, places with their lane.
+    let (_, split) = super::inside(SPLITTER, false).unwrap();
+    assert_eq!((&split["type"], &split["split"]), (&json!("splitter"), &json!("frequency")));
+    assert_eq!(split["lanes"][1][0]["at"], json!([2, 1]));
+    assert!(split["lanes"][1][0].get("params").is_none(), "no parameters when not asked");
+    assert_eq!(split["macros"][0]["mappings"][0]["lane"], 2);
+    // A Notepad's text; any other device, nothing.
+    assert_eq!(super::inside(NOTEPAD, true), Some(("text", json!("Bass: keep it mono & dry\nLine two \u{2014} \u{e9}t\u{e9}"))));
+    let eq5 =
+        "<?xml version=\"1.0\"?>\n<FilterDevicePreset doc_version=\"14\">\n  <DeviceSlot type=\"Eq5Device\"/>\n</FilterDevicePreset>\n";
+    assert_eq!(super::inside(eq5, true), None);
+}
+
+#[test]
+fn a_dsp_body_gets_each_containers_devices_as_branches_a_splitters_second_lane_starting_a_new_one() {
+    let nested = ok("doofer-device-add", json!({"path": "Doofer", "at": [3]}), DOOFER, "Doofer").document.to_xml();
+    let nested = ok("doofer-device-add", json!({"path": "Gainer", "at": [3, 1], "name": "Inner"}), &nested, "Doofer").document.to_xml();
+    let nodes = child_nodes(&nested);
+    assert_eq!(nodes.iter().map(|n| n["name"].as_str().unwrap()).collect::<Vec<_>>(), ["EQ 5", "Gainer", "Doofer"]);
+    assert_eq!(nodes[2]["container"], true);
+    assert_eq!(nodes[2]["childNodes"][0]["name"], "Inner");
+    assert_eq!(nodes[2]["childNodes"][0]["at"], json!([3, 1]));
+    let lanes = child_nodes(SPLITTER);
+    assert_eq!(lanes.len(), 2);
+    assert!(lanes[0].get("parallel").is_none() && lanes[1]["parallel"] == true, "{lanes:?}");
+    assert!(child_nodes(NOTEPAD).is_empty());
+}

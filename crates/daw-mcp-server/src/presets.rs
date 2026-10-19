@@ -1645,6 +1645,178 @@ fn close(a: &Value, b: &Value) -> bool {
     }
 }
 
+// Reads: what a Doofer or Splitter holds, and a Notepad's text, from its preset data (a device read by ref, the DSP body).
+
+/// The most devices and parameters a read lists inside one container (the answer stays inside the frame bound).
+const MOST_LISTED: usize = 64;
+const MOST_PARAMS: usize = 40;
+
+fn split_word(element: &Element) -> &'static str {
+    let now = element.child_text("Type").unwrap_or_else(|| "Parallel".into());
+    SPLITS.iter().find(|(_, x)| **x == now).map_or("parallel", |(w, _)| w)
+}
+
+/// A device inside, for a read: its place, names, bypass, its parameters (native ones, with Renoise's text) and, for a
+/// container, what it holds.
+fn describe_device(device: &Element, at: &[i64], with_params: bool) -> Value {
+    let mut row = json!({
+        "at": at,
+        "name": inner_label(device),
+        "device": renoise_devices::by_xml(device.name()).map_or_else(|| device.name().to_string(), |d| d.name.to_string()),
+        "bypassed": value_of(device, "IsActive").is_some_and(|v| v < 0.5),
+    });
+    if device.name() == PLUGIN {
+        row["plugin"] = device.child_text("PluginIdentifier").unwrap_or_default().into();
+    }
+    if device.name() == NOTEPAD {
+        row["text"] = paragraphs_of(device).join("\n").into();
+    }
+    if with_params {
+        if let Some(native) = renoise_devices::by_xml(device.name()) {
+            let params: Vec<Value> = native
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !p.element.is_empty())
+                .take(MOST_PARAMS)
+                .filter_map(|(k, p)| {
+                    let value = value_of(device, p.element)?;
+                    Some(json!({"param": k + 1, "name": parameter_name(device, k + 1), "value": value, "text": p.text.show(value, p.min)}))
+                })
+                .collect();
+            if !params.is_empty() {
+                row["params"] = Value::Array(params);
+            }
+        }
+    }
+    if is_container(device.name()) {
+        row["inside"] = describe_container(device, device.name(), at, with_params);
+    }
+    row
+}
+
+/// A container for a read: its split (a Splitter), how many macros it shows, its macros (name, value, what each drives,
+/// in words), and its devices by place.
+fn describe_container(container: &Element, kind: &str, at: &[i64], with_params: bool) -> Value {
+    let macros: Vec<Value> = macros_of(container, kind)
+        .into_iter()
+        .map(|(m, i)| {
+            let macro_ = container.element(i).expect("in range");
+            let mappings: Vec<Value> = mappings_of(macro_)
+                .into_iter()
+                .map(|mut mapping| {
+                    let lane = (mapping["lane"].as_i64().unwrap_or(1) - 1).max(0) as usize;
+                    let place = (mapping["device"].as_i64().unwrap_or(1) - 1).max(0) as usize;
+                    if let Some(target) = devices_in(container, kind, lane).get(place) {
+                        let k = mapping["param"].as_u64().unwrap_or(0) as usize;
+                        mapping["drives"] = format!("{} of {}", parameter_name(target, k), inner_label(target)).into();
+                    }
+                    if kind != SPLITTER {
+                        mapping.as_object_mut().expect("an object").remove("lane");
+                    }
+                    mapping
+                })
+                .collect();
+            let mut row = json!({
+                "macro": m + 1,
+                "name": macro_.child_text("Name").unwrap_or_else(|| format!("Macro {}", m + 1)),
+                "value": number(macro_.child("Value")).unwrap_or(50.0),
+            });
+            if !mappings.is_empty() {
+                row["mappings"] = Value::Array(mappings);
+            }
+            row
+        })
+        .collect();
+    let mut out = json!({
+        "type": if kind == SPLITTER { "splitter" } else { "doofer" },
+        "activeMacros": number(container.child("NumActiveMacros")).map_or(4, |n| n as i64),
+        "macros": macros,
+    });
+    let mut listed = 0;
+    let mut truncated = false;
+    let mut lanes = vec![];
+    for lane in 0..lanes_of(kind) {
+        let mut rows = vec![];
+        for (p, device) in devices_in(container, kind, lane).into_iter().enumerate() {
+            if listed >= MOST_LISTED {
+                truncated = true;
+                break;
+            }
+            listed += 1;
+            let mut place = at.to_vec();
+            if kind == SPLITTER {
+                place.push(lane as i64 + 1);
+            }
+            place.push(p as i64 + 1);
+            rows.push(describe_device(device, &place, with_params));
+        }
+        lanes.push(Value::Array(rows));
+    }
+    if kind == SPLITTER {
+        out["split"] = split_word(container).into();
+        out["lanes"] = Value::Array(lanes);
+    } else {
+        out["devices"] = lanes.into_iter().next().unwrap_or(Value::Array(vec![]));
+    }
+    if truncated {
+        out["truncated"] = true.into();
+    }
+    out
+}
+
+/// What a device's preset data holds, for a read: a container's macros and devices (`inside`), or a Notepad's text;
+/// none for another device. `with_params` lists the parameters of the devices inside.
+pub fn inside(text: &str, with_params: bool) -> Option<(&'static str, Value)> {
+    let document = xml::parse(text).ok()?;
+    let slot_ = document.root.child("DeviceSlot")?;
+    let kind = type_of(slot_, true);
+    if is_container(kind) {
+        return Some(("inside", describe_container(slot_, kind, &[], with_params)));
+    }
+    (kind == NOTEPAD).then(|| ("text", Value::from(paragraphs_of(slot_).join("\n"))))
+}
+
+/// A container's devices as the DSP body's child nodes: names, on or off, plug-in or not, a container's own children,
+/// and `parallel` on the first device of a Splitter's second lane (where the view starts a new branch).
+pub fn child_nodes(text: &str) -> Vec<Value> {
+    fn nodes(container: &Element, kind: &str, at: &[i64]) -> Vec<Value> {
+        let mut out = vec![];
+        for lane in 0..lanes_of(kind) {
+            for (p, device) in devices_in(container, kind, lane).into_iter().enumerate() {
+                let mut place = at.to_vec();
+                if kind == SPLITTER {
+                    place.push(lane as i64 + 1);
+                }
+                place.push(p as i64 + 1);
+                let mut node = json!({
+                    "at": place,
+                    "name": inner_label(device),
+                    "enabled": !value_of(device, "IsActive").is_some_and(|v| v < 0.5),
+                    "plugin": device.name() == PLUGIN,
+                    "container": is_container(device.name()),
+                    "childNodes": if is_container(device.name()) { Value::Array(nodes(device, device.name(), &place)) } else { json!([]) },
+                });
+                if lane == 1 && p == 0 {
+                    node["parallel"] = true.into();
+                }
+                out.push(node);
+                if out.len() >= MOST_LISTED {
+                    return out;
+                }
+            }
+        }
+        out
+    }
+    let Ok(document) = xml::parse(text) else { return vec![] };
+    let Some(slot_) = document.root.child("DeviceSlot") else { return vec![] };
+    let kind = type_of(slot_, true);
+    if !is_container(kind) {
+        return vec![];
+    }
+    nodes(slot_, kind, &[])
+}
+
 // The host's part: previews, applies and undos of these kinds (changes.rs hands them here).
 
 const AU_PATH: &str = AU;
@@ -1695,7 +1867,86 @@ fn display_of(edited: &Edited, unchanged: bool) -> Value {
     display
 }
 
+/// How long a read's look into preset data waits.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// The most containers of one DSP body looked into.
+const MOST_CONTAINERS: usize = 16;
+
+fn too_big(answer: &Value) -> bool {
+    serde_json::to_string(answer).map_or(true, |text| text.len() > crate::host::MAX_ANSWER_BYTES)
+}
+
 impl crate::host::Host {
+    /// A Renoise read of one device by ref: a Doofer's or Splitter's contents (`inside`), a Notepad's text, and its
+    /// preset data when asked, from the tool's `preset_read`; each left out, and said, past the frame bound.
+    pub(crate) async fn renoise_inside(&self, answer: &mut Value, pick: &crate::host::Pick, preset_data: bool) {
+        let Some(row) = answer.get("items").and_then(Value::as_array).and_then(|items| items.first()) else { return };
+        let Some(reference) = row.get("ref").and_then(Value::as_str).filter(|r| r.contains(":device:")).map(str::to_owned) else { return };
+        let contains = row.get("isDoofer") == Some(&Value::Bool(true))
+            || row.get("isSplitter") == Some(&Value::Bool(true))
+            || row.get("path").and_then(Value::as_str) == Some("Audio/Effects/Native/Notepad");
+        if !contains && !preset_data {
+            return;
+        }
+        let mut params = json!({"ref": reference});
+        crate::changes::place(&mut params, answer.get("epoch").and_then(Value::as_str), answer.get("layout").and_then(Value::as_u64));
+        let Ok(read) = self.call("preset_read", params, pick, READ_TIMEOUT).await else { return };
+        let text = read.get("presetData").and_then(Value::as_str).unwrap_or_default().to_string();
+        let found = inside(&text, true);
+        let item = &mut answer["items"][0];
+        if let Some((key, value)) = &found {
+            item[*key] = value.clone();
+        }
+        if preset_data {
+            item["presetData"] = text.clone().into();
+        }
+        if too_big(answer) {
+            if let Some((key, value)) = inside(&text, false) {
+                answer["items"][0][key] = value;
+            }
+        }
+        if too_big(answer) && preset_data {
+            let item = answer["items"][0].as_object_mut().expect("a row");
+            item.remove("presetData");
+            item.insert("presetDataTooBig".into(), true.into());
+        }
+        if too_big(answer) {
+            if let Some((key, _)) = found {
+                let item = answer["items"][0].as_object_mut().expect("a row");
+                item.remove(key);
+                item.insert(format!("{key}TooBig"), true.into());
+            }
+        }
+    }
+
+    /// A Renoise DSP body: each Doofer's and Splitter's devices as its child nodes (the first containers of the chain).
+    pub(crate) async fn renoise_dsp_children(&self, answer: &mut Value, pick: &crate::host::Pick) {
+        let epoch = answer.get("epoch").and_then(Value::as_str).map(str::to_owned);
+        let layout = answer.get("layout").and_then(Value::as_u64);
+        let Some(nodes) = answer.get("nodes").and_then(Value::as_array) else { return };
+        let wanted: Vec<(usize, String)> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.get("container") == Some(&Value::Bool(true)))
+            .filter_map(|(i, node)| node.get("ref").and_then(Value::as_str).map(|r| (i, r.to_owned())))
+            .take(MOST_CONTAINERS)
+            .collect();
+        for (i, reference) in wanted {
+            let mut params = json!({"ref": reference});
+            crate::changes::place(&mut params, epoch.as_deref(), layout);
+            if let Ok(read) = self.call("preset_read", params, pick, READ_TIMEOUT).await {
+                let children = child_nodes(read.get("presetData").and_then(Value::as_str).unwrap_or_default());
+                answer["nodes"][i]["childNodes"] = Value::Array(children);
+            }
+        }
+        if too_big(answer) {
+            for node in answer["nodes"].as_array_mut().into_iter().flatten() {
+                node["childNodes"] = json!([]);
+            }
+            answer["childNodesTooBig"] = true.into();
+        }
+    }
+
     /// `change_preview` of a kind made here: the device's preset data read, the edit made on it (nothing written), the
     /// record kept with what was there.
     pub(crate) async fn preset_preview(

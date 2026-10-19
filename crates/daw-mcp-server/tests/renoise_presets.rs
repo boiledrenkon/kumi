@@ -76,11 +76,19 @@ impl Lab {
                         json!({"epoch": "e1", "layout": 0, "restored": {"shape": shape_of(&song.xml)}, "display": write["display"], "undo": {"desc": params["desc"], "entry": true}}),
                     ))
                 }
+                "read" => Some(Ok(json!({"epoch": "e1", "layout": 0, "items": [{
+                    "ref": "e1:device:3.2", "index": 2, "name": "Doofer", "displayName": "Doofer", "path": "Audio/Effects/Native/Doofer",
+                    "active": true, "preset": null, "paramCount": 8, "plugin": false, "isDoofer": true, "isSplitter": false,
+                }]}))),
+                "focus_body" => Some(Ok(json!({"epoch": "e1", "layout": 0, "ref": "e1:track:3", "name": "Bass", "nodes": [
+                    {"ref": "e1:device:3.1", "name": "TrackVolPan", "enabled": true, "plugin": false, "container": false, "childNodes": []},
+                    {"ref": "e1:device:3.2", "name": "Doofer", "enabled": true, "plugin": false, "container": true, "childNodes": []},
+                ]}))),
                 _ => None,
             }
         });
-        let mut config =
-            SimulatorConfig::renoise(secret, "/lab/Renoise").with_methods(&["preset_read", "change_apply", "change_restore"], respond);
+        let mut config = SimulatorConfig::renoise(secret, "/lab/Renoise")
+            .with_methods(&["preset_read", "change_apply", "change_restore", "read", "focus_body"], respond);
         config.discovery_dir = Some(paths.discovery());
         let simulator = Simulator::start(config).await.unwrap();
         let session = Session::start(Daw::Renoise, home.path());
@@ -211,4 +219,21 @@ async fn an_undo_that_finds_it_back_already_writes_nothing_and_a_preview_never_s
     assert!(!is_error && back["state"] == "undone", "{back}");
     assert!(back["display"]["note"].as_str().unwrap().contains("back already"), "{back}");
     assert_eq!(lab.writes(), writes, "nothing written");
+}
+
+#[tokio::test]
+async fn a_doofer_read_by_ref_says_what_it_holds_its_preset_data_on_ask_and_the_dsp_body_gets_its_branches() {
+    let mut lab = Lab::start().await;
+    let (read, is_error) = lab.tool("read", json!({"ref": "e1:device:3.2", "epoch": "e1", "layout": 0})).await;
+    assert!(!is_error, "{read}");
+    let inside = &read["items"][0]["inside"];
+    assert_eq!(inside["type"], "doofer");
+    assert_eq!(inside["devices"][1]["name"], "Gainer");
+    assert!(read["items"][0].get("presetData").is_none(), "only on ask");
+    let (with_data, _) = lab.tool("read", json!({"ref": "e1:device:3.2", "epoch": "e1", "layout": 0, "presetData": true})).await;
+    assert_eq!(with_data["items"][0]["presetData"], DOOFER);
+    let (body, is_error) = lab.tool("focus_body", json!({"kind": "dsp", "ref": "e1:track:3", "layout": 0})).await;
+    assert!(!is_error, "{body}");
+    assert_eq!(body["nodes"][1]["childNodes"][0]["name"], "EQ 5");
+    assert_eq!(body["nodes"][0]["childNodes"], json!([]));
 }
