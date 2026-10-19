@@ -39,7 +39,7 @@ impl Lab {
     fn call(&self, method: &str, mut params: Value) -> Answer {
         let api = fake::api();
         let reaper = Reaper::new(&api);
-        if params.get("epoch").is_none() && !matches!(method, "transport_stop" | "undo_step_begin" | "undo_step_end") {
+        if params.get("epoch").is_none() && !matches!(method, "transport_stop" | "transport_play" | "undo_step_begin" | "undo_step_end") {
             params["epoch"] = self.reads.epoch().into();
         }
         match method {
@@ -47,6 +47,8 @@ impl Lab {
             "change_apply" => self.changes.apply(&reaper, &self.reads, &params),
             "change_restore" => self.changes.restore(&reaper, &self.reads, &params),
             "transport_stop" => self.changes.transport_stop(&reaper),
+            "transport_play" => self.changes.transport_play(&reaper),
+            "cursor_set" => self.changes.cursor_set(&reaper, &self.reads, &params),
             "undo_step_begin" => self.changes.step_begin(&reaper, &self.reads, &params),
             "undo_step_end" => self.changes.step_end(&reaper, &self.reads, &params),
             other => panic!("{other}"),
@@ -1713,4 +1715,36 @@ fn the_fx_kinds_are_refused_for_another_epoch_and_while_reaper_is_busy() {
         state(|s| s.loading = false);
     }
     assert_eq!((kick_fx().len(), snare_notes().len()), (3, 2));
+}
+
+#[test]
+fn transport_play_starts_what_isnt_playing_and_the_cursor_moves_without_an_undo_point() {
+    let lab = Lab::new();
+    assert_eq!(
+        lab.call("transport_play", json!({})).unwrap(),
+        json!({"started": false, "playing": false}),
+        "the fake's action doesn't start it"
+    );
+    assert_eq!(state(|s| s.actions.clone()), [1007]);
+    state(|s| {
+        s.actions.clear();
+        s.play_bits = 1;
+    });
+    assert_eq!(lab.call("transport_play", json!({})).unwrap(), json!({"started": false, "playing": true}));
+    assert!(state(|s| s.actions.is_empty()), "already playing: nothing to start");
+    state(|s| s.loading = true);
+    assert_eq!(lab.call("transport_play", json!({})).unwrap_err().0, "busy");
+    state(|s| s.loading = false);
+
+    let entries = state(|s| s.undo_entries);
+    let moved = lab.call("cursor_set", json!({"positionBeats": 8.0})).unwrap();
+    assert_eq!((moved["position"].clone(), moved["positionBeats"].clone()), (json!(4.0), json!(8.0)));
+    assert_eq!((state(|s| s.cursor), state(|s| s.undo_entries)), (4.0, entries));
+    assert_eq!(lab.call("cursor_set", json!({"position": 1.5})).unwrap()["position"], 1.5);
+    for params in [json!({}), json!({"position": 1.0, "positionBeats": 2.0}), json!({"position": -1.0}), json!({"position": "a"})] {
+        assert_eq!(lab.call("cursor_set", params).unwrap_err().0, "bad-params");
+    }
+    assert_eq!(lab.call("cursor_set", json!({"position": 1.0, "epoch": "old-1"})).unwrap_err().0, "stale");
+    state(|s| s.loading = true);
+    assert_eq!(lab.call("cursor_set", json!({"position": 1.0})).unwrap_err().0, "busy");
 }

@@ -400,6 +400,8 @@ impl Extension {
             "change_apply" => self.changes.apply(&self.reaper(), &self.reads, params),
             "change_restore" => self.changes.restore(&self.reaper(), &self.reads, params),
             "transport_stop" => self.changes.transport_stop(&self.reaper()),
+            "transport_play" => self.changes.transport_play(&self.reaper()),
+            "cursor_set" => self.changes.cursor_set(&self.reaper(), &self.reads, params),
             "undo_step_begin" => self.changes.step_begin(&self.reaper(), &self.reads, params),
             "undo_step_end" => self.changes.step_end(&self.reaper(), &self.reads, params),
             other => Err(("unknown-method".into(), format!("the REAPER bridge has no method {other:?}"))),

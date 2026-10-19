@@ -340,6 +340,34 @@ impl Changes {
         Ok(json!({"stopped": was_running, "wasRecording": state.recording}))
     }
 
+    /// `transport_play`: the DAW plays from the edit cursor (an action: no undo point, nothing in the project changes).
+    pub fn transport_play(&self, reaper: &Reaper) -> Answer {
+        if let Some(busy) = reaper.busy() {
+            return Err((daw_bridge::wire::code::BUSY.into(), format!("{}; nothing started", busy.reason())));
+        }
+        let info = reaper.current_project().ok_or_else(|| failed("REAPER has no project open"))?;
+        let before = reaper.play_state(info.ptr);
+        let was_playing = before.playing && !before.paused;
+        if !was_playing && !reaper.run_action(TRANSPORT_PLAY) {
+            return Err(failed("REAPER wouldn't start playing"));
+        }
+        let now = reaper.play_state(info.ptr);
+        Ok(json!({"started": !was_playing && now.playing, "playing": now.playing && !now.paused}))
+    }
+
+    /// `cursor_set {positionBeats | position}`: the edit cursor moves (an action: no undo point). Playing follows it.
+    pub fn cursor_set(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
+        let ctx = self.context(reaper, reads, params)?;
+        let time = marks::moment(&ctx, params, "positionBeats", "position")?
+            .ok_or_else(|| bad("pass positionBeats (quarter notes from the start) or position (seconds)"))?;
+        let playing = reaper.play_state(ctx.proj).playing;
+        if !reaper.set_cursor(ctx.proj, time, playing) {
+            return Err(failed("REAPER wouldn't move the cursor"));
+        }
+        let at = reaper.cursor(ctx.proj);
+        Ok(json!({"epoch": reads.epoch(), "position": at, "positionBeats": reaper.quarter_notes_at(ctx.proj, at), "playing": playing}))
+    }
+
     /// `undo_step_begin {label}`: one undo block around a plan's changes, which then open none of their own.
     pub fn step_begin(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
         let label = text(params, "label")?;
@@ -421,6 +449,7 @@ impl Changes {
 
 /// Transport: Stop.
 const TRANSPORT_STOP: i32 = 1016;
+const TRANSPORT_PLAY: i32 = 1007;
 
 /// The track a request's `ref` names.
 pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::TrackId> {

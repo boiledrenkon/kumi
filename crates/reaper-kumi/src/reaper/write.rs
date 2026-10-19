@@ -266,11 +266,11 @@ impl Reaper<'_> {
         }
     }
 
-    /// The edit cursor, without moving the view or the play position.
-    pub fn set_cursor(&self, proj: Project, time: f64) -> bool {
+    /// The edit cursor, without moving the view; the play position follows it when `seek` is set.
+    pub fn set_cursor(&self, proj: Project, time: f64, seek: bool) -> bool {
         match self.api.SetEditCurPos2() {
             Some(f) => {
-                unsafe { f(proj.0, time, false, false) };
+                unsafe { f(proj.0, time, false, seek) };
                 true
             }
             None => false,
