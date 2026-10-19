@@ -489,3 +489,192 @@ test("listening: the tool stopped during a job puts the mutes back now and answe
   ok(not exists(env.listening .. "/j20-kick.wav"), "the late file is deleted")
   H.no_dialogs()
 end)
+
+-- audio_file
+
+test("listening: audio_file saves a sample's audio into Kumi's folder, and a slice as its sample with where the slice is", function()
+  local env, peer = setup({}, { instrument_specs = { { name = "Drums", samples = 3 } } })
+  local samples = mock.data.instruments[1].samples
+  samples[1].name = "Break"
+  samples[1].buffer = { rate = 44100, frames = 44100, channels = 2 }
+  samples[1].markers = { 1, 22051 }
+  samples[2].slice_alias, samples[3].slice_alias = true, true
+  local epoch = place(peer)
+  local answer = result(call(peer, "audio_file", { ref = epoch .. ":sample:1.1", jobId = "j21", epoch = epoch }), "audio_file")
+  eq(answer.file, env.listening .. "/j21-sample.wav")
+  eq(answer.kind, "exported")
+  eq(answer.name, "Break")
+  eq(answer.channels, 2)
+  eq(answer.sampleRate, 44100)
+  ok(math.abs(answer.seconds - 1) < 1e-9)
+  eq(answer.offset, nil)
+  ok(exists(answer.file))
+  local slice = result(call(peer, "audio_file", { ref = epoch .. ":sample:1.3", jobId = "j22", epoch = epoch }), "audio_file of a slice")
+  eq(slice.file, env.listening .. "/j22-sample.wav")
+  ok(math.abs(slice.offset - 0.5) < 1e-9, "slice 2 starts half way: " .. tostring(slice.offset))
+  ok(math.abs(slice.length - 0.5) < 1e-9, "and lasts the rest: " .. tostring(slice.length))
+  eq(#mock.data.undo.stack, 0, "no undo step")
+  H.no_dialogs()
+end)
+
+test("listening: audio_file refuses a sample with no audio, a gone sample and a ref of another epoch", function()
+  local env, peer = setup({}, { instrument_specs = { { samples = 1 } } })
+  local epoch = place(peer)
+  failure(call(peer, "audio_file", { ref = epoch .. ":sample:1.1", jobId = "j23", epoch = epoch }), "failed", "That sample has no audio")
+  failure(call(peer, "audio_file", { ref = epoch .. ":sample:1.4", jobId = "j23", epoch = epoch }), "gone")
+  failure(call(peer, "audio_file", { ref = "77:sample:1.1", jobId = "j23", epoch = epoch }), "stale")
+  failure(call(peer, "audio_file", { ref = epoch .. ":device:1.1", jobId = "j23", epoch = epoch }), "bad-params")
+  eq(#mock.saved_samples, 0)
+  H.no_dialogs()
+end)
+
+test("listening: audio_file of a pattern, a slot or a pattern track renders its lines as a job (the track soloed), files `rendered`", function()
+  local env, peer = setup()
+  mock.data.patterns[2].name = "Verse"
+  local epoch = place(peer)
+  local job = result(call(peer, "audio_file", { ref = epoch .. ":pattern:2", jobId = "j24", epoch = epoch }), "audio_file of a pattern")
+  eq(job.jobId, "j24")
+  eq(job.kind, "render")
+  eq(job.files[1].id, "pattern")
+  local r = mock.renders[1]
+  eq(r.options.start_pos.sequence, 2)
+  eq(r.options.start_pos.line, 1)
+  eq(r.options.end_pos.sequence, 2)
+  eq(r.options.end_pos.line, 16)
+  mock.finish_render()
+  local done = status(peer, "j24")
+  eq(done.state, "done")
+  eq(done.files[1].kind, "rendered")
+  eq(done.files[1].name, "Verse")
+  eq(done.files[1].stage, "master")
+  -- a slot
+  result(call(peer, "audio_file", { ref = epoch .. ":seq:3", jobId = "j25", epoch = epoch }))
+  eq(mock.renders[2].options.start_pos.sequence, 3)
+  mock.finish_render()
+  eq(status(peer, "j25").files[1].id, "slot")
+  -- a pattern track: Bass soloed over pattern 1's slot
+  track(2).mute_state = MUTED
+  result(call(peer, "audio_file", { ref = epoch .. ":ptrack:1.3", jobId = "j26", epoch = epoch }))
+  eq(mock.renders[3].tracks[3].solo, true)
+  mock.finish_render()
+  local ptrack = status(peer, "j26")
+  eq(ptrack.files[1].stage, "post-fader")
+  eq(ptrack.files[1].name, "Bass · Pattern 00")
+  eq(track(2).mute_state, MUTED, "put back")
+  eq(track(3).solo, false)
+  H.no_dialogs()
+end)
+
+test("listening: audio_file of a pattern no slot plays is refused in words", function()
+  local env, peer = setup({}, { patterns = 3, sequence_length = 2, sequence = { 1, 2 } })
+  local epoch = place(peer)
+  failure(call(peer, "audio_file", { ref = epoch .. ":pattern:3", jobId = "j27", epoch = epoch }), "failed",
+    "That pattern isn't in the song's sequence, so Renoise can't render it")
+  eq(#mock.renders, 0)
+  H.no_dialogs()
+end)
+
+-- audition: the part of the song a render came from, played by Renoise's own transport
+
+local function rendered_mix(peer, job, range)
+  result((start(peer, job, { { id = "mix", what = "master" } }, range)))
+  mock.finish_render()
+  return status(peer, job).files[1]
+end
+
+test("listening: audition plays the part a render came from with Renoise's transport, and puts back the loops and the edit position", function()
+  local env, peer = setup()
+  local file = rendered_mix(peer, "j28", { fromBeat = 4, beats = 4 })
+  local tf = mock.data.transport_fields
+  tf.loop_pattern, tf.follow_player = true, true
+  tf.edit_pos = { sequence = 1, line = 5 }
+  local played = result(call(peer, "audition", { previewId = "p1", file = file.file, fromSeconds = 0.5, gainDb = 0 }), "audition")
+  eq(played.previewId, "p1")
+  eq(played.playing, true)
+  eq(played.via, "song")
+  ok(math.abs(played.seconds - 1.5) < 1e-9, "the rest of the file: " .. played.seconds)
+  ok(played.note:find("loop is off while Kumi plays", 1, true), played.note)
+  eq(tf.playing, true)
+  eq(mock.data.started_at.sequence, 2)
+  eq(mock.data.started_at.line, 5, "half a second (a beat) into slot 2")
+  eq(tf.loop_pattern, false)
+  H.tick(10)
+  eq(tf.playing, true, "still playing half way")
+  H.tick(25)
+  eq(tf.playing, false, "stopped at its length")
+  eq(tf.loop_pattern, true, "the loop back")
+  eq(tf.edit_pos.sequence, 1)
+  eq(tf.edit_pos.line, 5, "the edit position back")
+  eq(#mock.data.undo.stack, 0)
+  H.no_dialogs()
+end)
+
+test("listening: a track's render is heard in context, gainDb can't be applied, and both are said", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  result((start(peer, "j29", { { id = "kick", what = "track", ref = track_ref(epoch, 1) } })))
+  mock.finish_render()
+  local file = status(peer, "j29").files[1]
+  local played = result(call(peer, "audition", { previewId = "p2", file = file.file, gainDb = -6 }))
+  ok(played.note:find("heard with the rest of the song", 1, true), played.note)
+  ok(played.note:find("song's own level", 1, true), played.note)
+  eq(track(1).solo, false, "nothing soloed to play it")
+  eq(result(call(peer, "audition_stop", { previewId = "p2" })).stopped, true)
+  eq(mock.data.transport_fields.playing, false)
+  eq(result(call(peer, "audition_stop", {})).stopped, false, "none playing")
+  H.no_dialogs()
+end)
+
+test("listening: audition refuses a file Kumi didn't render here, and plays nothing while the producer plays", function()
+  local env, peer = setup()
+  failure(call(peer, "audition", { previewId = "p3", file = "/tmp/reference.wav" }), "failed",
+    "Renoise can only play out loud the parts of the song Kumi rendered")
+  local file = rendered_mix(peer, "j30")
+  mock.data.transport_fields.playing = true
+  failure(call(peer, "audition", { previewId = "p3", file = file.file }), "failed", "Renoise is playing: Kumi won't move your playhead")
+  mock.data.transport_fields.playing = false
+  failure(call(peer, "audition", { previewId = "x3", file = file.file }), "bad-params")
+  failure(call(peer, "audition", { previewId = "p3", file = file.file, fromSeconds = 5 }), "bad-params")
+  H.no_dialogs()
+end)
+
+test("listening: the producer stopping the transport or moving the playhead ends the audition (moved: the playback stays theirs)", function()
+  local env, peer = setup()
+  local file = rendered_mix(peer, "j31", { fromBeat = 0, beats = 8 })
+  local tf = mock.data.transport_fields
+  tf.loop_pattern = true
+  result(call(peer, "audition", { previewId = "p4", file = file.file }))
+  H.tick(10)
+  -- the producer starts playing from slot 3
+  mock.song.transport:start_at(renoise.SongPos(3, 1))
+  H.tick(3)
+  eq(tf.playing, true, "the producer's playback goes on")
+  eq(tf.loop_pattern, true, "the loop back")
+  eq(result(call(peer, "audition_stop", { previewId = "p4" })).stopped, false, "the audition was over")
+  tf.playing = false
+  -- again, and the producer stops it
+  result(call(peer, "audition", { previewId = "p5", file = file.file }))
+  H.tick(10)
+  mock.song.transport:stop()
+  H.tick(3)
+  eq(result(call(peer, "audition_stop", {})).stopped, false)
+  eq(tf.loop_pattern, true)
+  H.no_dialogs()
+end)
+
+test("listening: a render stops an audition playing; another song ends it too", function()
+  local env, peer = setup()
+  local file = rendered_mix(peer, "j32")
+  result(call(peer, "audition", { previewId = "p6", file = file.file }))
+  eq(mock.data.transport_fields.playing, true)
+  result((start(peer, "j33", { { id = "mix", what = "master" } })))
+  eq(mock.renders[#mock.renders].was_playing, false, "the audition stopped before the render")
+  mock.finish_render()
+  file = status(peer, "j33").files[1]
+  result(call(peer, "audition", { previewId = "p7", file = file.file }))
+  mock.load_song(song_options({ name = "Other" }))
+  H.tick(2)
+  eq(result(call(peer, "audition_stop", {})).stopped, false)
+  failure(call(peer, "audition", { previewId = "p8", file = file.file }), "failed", "another song")
+  H.no_dialogs()
+end)
