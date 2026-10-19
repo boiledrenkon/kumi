@@ -1,6 +1,6 @@
 # Native editing
 
-Exact-build adapter validated for **Live 12.4.15b5/b6 macOS ARM64** within the
+Exact-build adapter validated for **Live 12.4.15b5/b6/b7 macOS ARM64** within the
 [b5](../../evidence/native-editing/b5/README.md) and
 [b6 fixture coverage](../../evidence/live-12.4.15b6-arm64/README.md). All four
 feature families are included in normal matrix bundles and default profile
@@ -206,3 +206,8 @@ The [b6 receipts](../../evidence/live-12.4.15b6-arm64/README.md) cover native
 transactions, Max parsing, group mixer/Main routing, scene UI scheduling, MPE
 and Arrangement playback, snapshot edge cases, and save/reload persistence.
 The same documented ownership and stopped-transport limits apply.
+
+## Live 12.4.15b7 macOS ARM64
+
+The exact `live-12.4.15b7-arm64` profile participates in default selection and
+normal matrix bundles. See the [b7 evidence and coverage limits](../../evidence/live-12.4.15b7-arm64/README.md).

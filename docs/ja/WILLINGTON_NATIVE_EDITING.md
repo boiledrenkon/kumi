@@ -4,9 +4,11 @@
 
 Willington のリポジトリは非公開です。このガイドの上流リンクを開くにはアクセス権が必要です。
 
-このガイドはネイティブ Python API を説明します。Kumi の保護されたツールと、記録を確認する `/willington` の設定は [Willington 統合](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)を参照してください。ネイティブ編集にはインストール済みの検証済み **Live 12.4.15b5 または b6 macOS ARM64** コンポーネントが必要です。他のビルドと Windows は対象外です。
+このガイドはネイティブ Python API を説明します。Kumi の保護されたツールと、記録を確認する `/willington` の設定は [Willington 統合](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)を参照してください。ネイティブ編集にはインストール済みの検証済み **Live 12.4.15b5、b6 または b7 macOS ARM64** コンポーネントが必要です。他のビルドと Windows は対象外です。
 
 b6 には Willington `03b6efccd1c72ef816ae5be6f28ad33115ef3e9a`、または b6 プロファイルを含む後続のバンドルが必要です。古い Kumi バンドルは更新してください。[b6 の上流検証](https://github.com/xonedsp/willington/blob/03b6efccd1c72ef816ae5be6f28ad33115ef3e9a/evidence/live-12.4.15b6-arm64/README.md)と [Kumi CI バンドルの検証](../evidence/willington-b6-import.json)を参照してください。
+
+Apple Silicon の Live 12.4.15b7 には Willington `5361914b1b79230e51c8f051b8b2122176e94adb`、または `willington/WillingtonRuntime/matrix.json` に検証済みの `live-12.4.15b7-arm64` 行と必要なコンポーネントを含む後続バンドルが必要です。古い Kumi バンドルは更新してください。`willington/release.json` は取り込んだコミットを示します。Windows は引き続き b5 プロファイルのみ対応します。[b7 CI バンドルの検証](../evidence/willington-b7-import.json)を参照してください。マクロ割り当て解除の1回の Undo は Live タイマーと Max LiveAPI で検証済みです。`_Framework.ControlSurface.update_display` コールバックでは別の Custom Action の Undo 項目が追加される場合があります。ローカルのセルフテスト記録は選択したライブラリのハッシュと一致する必要があります。
 
 使い捨てのテスト用 Set での開発では、上流の[ビルドとインストール手順](https://github.com/xonedsp/willington/blob/main/integrations/WillingtonEditing/README.md)に従ってください。昇格済みパッケージをインストールすると、`api.install()` がビルドに一致するライブラリを自動で選択・検証します。書き込みは明示的に有効にするまで無効で、トランスポートは停止している必要があります。インストール後、full ポリシーが Python を許可していれば、`run_python`（ホスト側では `live_run_python`）からメソッドを呼べます。メソッドがない場合やビルドの検証で拒否された場合は、Kumi の Willington スイッチにかかわらず利用できません。
 

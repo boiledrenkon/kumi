@@ -1,0 +1,19 @@
+{
+  "platform": "macos",
+  "architecture": "arm64",
+  "version": "12.4.15b7 (2026-10-13_4b9fa49e05)",
+  "executable": "/Applications/Ableton Live 12 Beta.app/Contents/MacOS/Live",
+  "source_sha256": "ba0a4b90a3563d18877dda7d1284590956644eb3970f5b68575e3a9d6b096518",
+  "arm64_sha256": "8275d91df28dd9474ce9da3fe5cbd7e6d68684447ceb938e9845bed1041571c4",
+  "native_source_sha256": "75e383bf6439061a1a03cee51e9c9e89f33570ee24f363bf9b9b091a40ab6443",
+  "profile_id": "live-12.4.15b7-arm64",
+  "profile_sha256": "989234e54fbb67e7cff689bc18c57c444279a85bc84bfacd4ebe510d18858c6d",
+  "validation_status": "validated",
+  "runtime_notes": [
+    "All four components validated against this exact b7 ARM64 executable; retained evidence describes coverage and limits.",
+    "Macro single-undo behavior passes Live.Base.Timer and Max LiveAPI contexts. _Framework.ControlSurface.update_display can add an extra Custom Action undo entry; that context is not validated for single-step mapping undo.",
+    "Zone engine meters validate gating and attenuation trends, not exact gain curves or held-note/overlapping-chain behavior.",
+    "Scene scheduling is validated via Live UI launches. The global performance switch requires an explicit inverse; opaque Arrangement snapshots are bound to a live adapter session."
+  ],
+  "library_sha256": "446b8c76a896d156087401077d76e6f6c0d6713691cbd161f733ae5a8189f23c"
+}
