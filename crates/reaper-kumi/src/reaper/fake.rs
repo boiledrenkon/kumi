@@ -751,6 +751,11 @@ unsafe extern "C" fn set_tempo_time_sig_marker(
             let Some(m) = s.tempo_markers.get_mut(index as usize) else { return false };
             *m = FakeTempo { time, bpm, num, denom, linear };
         } else {
+            // The first marker brings one at the start with it, holding the tempo and time signature that were there.
+            if s.tempo_markers.is_empty() && time > 0.0 {
+                let (num, denom) = s.time_signature;
+                s.tempo_markers.push(FakeTempo { time: 0.0, bpm: s.bpm, num, denom, linear: false });
+            }
             let at = s.tempo_markers.iter().position(|m| m.time > time).unwrap_or(s.tempo_markers.len());
             s.tempo_markers.insert(at, FakeTempo { time, bpm, num, denom, linear });
         }
@@ -2285,51 +2290,74 @@ fn take_mut(s: &mut State, handle: u64) -> Option<&mut FakeTake> {
     s.tracks.get_mut(a as usize)?.items.get_mut(b as usize)?.takes.get_mut(c as usize)
 }
 
-fn sort_notes(take: &mut FakeTake) {
-    take.notes.sort_by(|a, b| a.start_ppq.total_cmp(&b.start_ppq));
+/// A take's notes and controller events as REAPER's event buffer holds them.
+fn midi_events_of(take: &FakeTake) -> Vec<crate::midi::Event> {
+    use crate::midi::Event;
+    let mut keyed: Vec<((i64, u8, usize), Event)> = Vec::new();
+    for (n, note) in take.notes.iter().enumerate() {
+        let flag = note.selected as u8 | (note.muted as u8) << 1;
+        let (start, end) = (note.start_ppq.round() as i64, note.end_ppq.round() as i64);
+        keyed
+            .push(((start, 2, n), Event { pos: start, flag, msg: vec![0x90 | note.channel as u8, note.pitch as u8, note.velocity as u8] }));
+        keyed.push(((end, 0, n), Event { pos: end, flag, msg: vec![0x80 | note.channel as u8, note.pitch as u8, 0] }));
+    }
+    for (n, cc) in take.ccs.iter().enumerate() {
+        let pos = cc.ppq.round() as i64;
+        keyed.push(((pos, 1, n), Event { pos, flag: 0, msg: vec![cc.kind as u8 | cc.channel as u8, cc.data1 as u8, cc.data2 as u8] }));
+    }
+    keyed.sort_by_key(|(key, _)| *key);
+    keyed.into_iter().map(|(_, event)| event).collect()
 }
 
-#[allow(clippy::too_many_arguments)]
-unsafe extern "C" fn midi_insert_note(
-    take: *mut MediaItem_Take,
-    selected: bool,
-    muted: bool,
-    start: f64,
-    end: f64,
-    channel: c_int,
-    pitch: c_int,
-    velocity: c_int,
-    no_sort: *const bool,
-) -> bool {
-    let no_sort = !no_sort.is_null() && unsafe { *no_sort };
+unsafe extern "C" fn midi_get_all_evts(take: *mut MediaItem_Take, buf: *mut c_char, size: *mut c_int) -> bool {
     counted(|s| {
-        let Some(t) = take_mut(s, take as u64) else { return false };
-        t.notes.push(FakeNote { start_ppq: start, end_ppq: end, channel, pitch, velocity, selected, muted });
-        if !no_sort {
-            sort_notes(t);
-        }
-        s.undo_dirty = true;
-        true
-    })
-}
-
-unsafe extern "C" fn midi_delete_note(take: *mut MediaItem_Take, index: c_int) -> bool {
-    counted(|s| {
-        let Some(t) = take_mut(s, take as u64) else { return false };
-        if index < 0 || index as usize >= t.notes.len() {
+        let Some(t) = take_of(s, take as u64) else { return false };
+        let bytes = crate::midi::encode(&midi_events_of(t));
+        let room = unsafe { *size } as usize;
+        unsafe { *size = bytes.len() as c_int };
+        if bytes.len() > room {
             return false;
         }
-        t.notes.remove(index as usize);
-        s.undo_dirty = true;
+        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast(), bytes.len()) };
         true
     })
 }
 
-unsafe extern "C" fn midi_sort(take: *mut MediaItem_Take) {
+unsafe extern "C" fn midi_set_all_evts(take: *mut MediaItem_Take, buf: *const c_char, size: c_int) -> bool {
+    let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size.max(0) as usize) }.to_vec();
     counted(|s| {
-        if let Some(t) = take_mut(s, take as u64) {
-            sort_notes(t);
+        let Some(events) = crate::midi::decode(&bytes) else { return false };
+        let Some(t) = take_mut(s, take as u64) else { return false };
+        let (mut notes, mut ccs) = (crate::midi::notes(&events), Vec::new());
+        notes.sort_by_key(|n| n.start);
+        t.notes = notes
+            .iter()
+            .map(|n| FakeNote {
+                start_ppq: n.start as f64,
+                end_ppq: n.end as f64,
+                channel: n.channel as i32,
+                pitch: n.pitch as i32,
+                velocity: n.velocity as i32,
+                selected: n.selected,
+                muted: n.muted,
+            })
+            .collect();
+        for e in &events {
+            if let [status, d1, d2] = e.msg.as_slice() {
+                if status & 0xF0 == 0xB0 {
+                    ccs.push(FakeCc {
+                        ppq: e.pos as f64,
+                        kind: 0xB0,
+                        channel: (status & 0x0F) as i32,
+                        data1: *d1 as i32,
+                        data2: *d2 as i32,
+                    });
+                }
+            }
         }
+        t.ccs = ccs;
+        s.undo_dirty = true;
+        true
     })
 }
 
@@ -2542,9 +2570,8 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetEnvelopeInfo_String" => get_set_envelope_info_string as unsafe extern "C" fn(*mut TrackEnvelope, *const c_char, *mut c_char, bool) -> bool,
         b"MIDI_CountEvts" => midi_count_evts as unsafe extern "C" fn(*mut MediaItem_Take, *mut c_int, *mut c_int, *mut c_int) -> c_int,
         b"MIDI_GetNote" => midi_get_note as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut bool, *mut bool, *mut f64, *mut f64, *mut c_int, *mut c_int, *mut c_int) -> bool,
-        b"MIDI_InsertNote" => midi_insert_note as unsafe extern "C" fn(*mut MediaItem_Take, bool, bool, f64, f64, c_int, c_int, c_int, *const bool) -> bool,
-        b"MIDI_DeleteNote" => midi_delete_note as unsafe extern "C" fn(*mut MediaItem_Take, c_int) -> bool,
-        b"MIDI_Sort" => midi_sort as unsafe extern "C" fn(*mut MediaItem_Take),
+        b"MIDI_GetAllEvts" => midi_get_all_evts as unsafe extern "C" fn(*mut MediaItem_Take, *mut c_char, *mut c_int) -> bool,
+        b"MIDI_SetAllEvts" => midi_set_all_evts as unsafe extern "C" fn(*mut MediaItem_Take, *const c_char, c_int) -> bool,
         b"MIDI_GetCC" => midi_get_cc as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut bool, *mut bool, *mut f64, *mut c_int, *mut c_int, *mut c_int, *mut c_int) -> bool,
         b"MIDI_GetPPQPosFromProjQN" => midi_get_ppq_pos_from_proj_qn as unsafe extern "C" fn(*mut MediaItem_Take, f64) -> f64,
         b"MIDI_GetProjQNFromPPQPos" => midi_get_proj_qn_from_ppq_pos as unsafe extern "C" fn(*mut MediaItem_Take, f64) -> f64,
