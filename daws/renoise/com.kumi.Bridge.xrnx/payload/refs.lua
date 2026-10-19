@@ -56,6 +56,25 @@ function M.shift(n, shifts, since)
   return n
 end
 
+-- Whether a request names a track, or something on one (a ref of kind track, device or param, of any epoch, or a number
+-- under `track`): only those move with the track layout.
+function M.names_tracks(params)
+  local found = false
+  local function walk(value, key)
+    if found then return end
+    if type(value) == "string" then
+      local ref = M.parse(value)
+      if ref and TRACK_KINDS[ref.kind] then found = true end
+    elseif type(value) == "number" and key == "track" then
+      found = true
+    elseif type(value) == "table" then
+      for k, v in pairs(value) do walk(v, k) end
+    end
+  end
+  walk(params, nil)
+  return found
+end
+
 -- `params` with every track number carried through the shifts since layout `since`: refs of the current epoch that name a
 -- track (kinds track, device and param) and a number under `track`. Returns the new params, or nil and an error table
 -- (code `gone`) naming the first track that was deleted meanwhile.

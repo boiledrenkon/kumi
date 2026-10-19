@@ -44,7 +44,9 @@ end
 
 local function bump_epoch(reason)
   b.epoch_n = b.epoch_n + 1
-  b.layout, b.shifts = 0, {}
+  -- The layout goes on counting across epochs (no event says when an epoch moves for a device or a pattern, so a layout
+  -- that started over would look older than the one Kumi holds); the shifts start over, since refs from before are stale.
+  b.shifts = {}
   log.write("info", "epoch " .. epoch() .. ": " .. reason)
 end
 
@@ -525,6 +527,8 @@ local function carried(params)
     error({ code = "bad-params", message = "layout must be a whole number from 0" }, 0)
   end
   if since == b.layout then return params end
+  -- Only refs on a track move with the layout: a request naming none is never refused for it.
+  if not refs.names_tracks(params) then return params end
   if since > b.layout then
     error({ code = "stale", message = "that layout (" .. since .. ") is from another epoch (now " .. epoch() .. "): read again" }, 0)
   end
