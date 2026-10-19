@@ -268,8 +268,9 @@ mod tests {
         let other = answer("snapshot", json!({})).unwrap();
         assert_eq!((other["epoch"].as_str(), other["tracks"][0]["ref"].as_str()), (Some("3"), Some("3:track:1")));
         assert_ne!(other["project"]["id"], json!(super::project().id));
-        assert_eq!(other["project"]["path"], "/lab/Scratch 1.logicx");
-        assert_eq!(script.project().path.as_deref(), Some("/lab/Scratch 1.logicx"));
+        let copy = super::project().path.map(|path| path.replace(".logicx", " 1.logicx")).expect("the recorded project has a path");
+        assert_eq!(other["project"]["path"], json!(copy));
+        assert_eq!(script.project().path.as_deref(), Some(copy.as_str()));
         script.open_project(0);
         assert_eq!(answer("snapshot", json!({})).unwrap()["project"]["id"], json!(super::project().id));
     }

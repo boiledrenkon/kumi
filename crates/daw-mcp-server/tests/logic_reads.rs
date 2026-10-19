@@ -109,16 +109,23 @@ async fn the_read_methods_on_the_wire() {
     assert_eq!((notes["items"][0]["pitch"].clone(), notes["items"][3]["pitch"].clone()), (json!(60), json!(72)));
     let plugins = client.request("read", json!({"kind": "plugin", "parent": "1:track:1"}), WAIT).await.unwrap();
     assert_eq!(plugins["items"][0]["name"], "Channel EQ");
+    // Sends as the recording has them (the Scratch project carries none: a send can't be set up from outside yet).
     let sends = client.request("read", json!({"kind": "send", "parent": "1:track:1"}), WAIT).await.unwrap();
-    assert_eq!(sends["items"][0]["destination"], "Bus 1");
-    assert_eq!(client.request("read", json!({"kind": "marker"}), WAIT).await.unwrap()["items"][0]["name"], "Chorus");
+    assert_eq!(sends["total"].as_u64().map(|n| n as usize), Some(sends["items"].as_array().unwrap().len()));
+    assert!(sends["items"].as_array().unwrap().iter().all(|send| send["destination"].is_string() && send["level"].is_number()), "{sends}");
+    let markers = client.request("read", json!({"kind": "marker"}), WAIT).await.unwrap();
+    assert!(
+        markers["items"][0]["name"].as_str().is_some_and(|name| !name.is_empty()) && markers["items"][0]["position"]["bar"] == 9,
+        "{markers}"
+    );
     assert_eq!(client.request("read", json!({"kind": "tempo"}), WAIT).await.unwrap()["items"][0]["bpm"], 160.0);
     let one = client.request("read", json!({"ref": "1:track:2"}), WAIT).await.unwrap();
     assert_eq!(one["items"][0]["name"], "Keys");
     let snapshot = client.request("snapshot", json!({}), WAIT).await.unwrap();
     assert_eq!((snapshot["tracks"].as_array().unwrap().len(), snapshot["markers"].as_array().unwrap().len()), (2, 1));
     let focus = client.request("focus", json!({}), WAIT).await.unwrap();
-    assert_eq!((focus["selection"]["regionRef"].clone(), focus["editor"].clone()), (json!("1:region:1"), json!("pianoRoll")));
+    assert_eq!(focus["selection"]["regionRef"], "1:region:1");
+    assert!(focus.get("editor").is_some_and(|editor| editor.is_null() || editor.is_string()), "the open editor, or none: {focus}");
     // The bodies: the selected strip, a region's notes, the Tracks area, a strip's routing.
     let tree = client.request("focus_body", json!({"kind": "tree"}), WAIT).await.unwrap();
     assert_eq!((tree["trackRef"].clone(), tree["strip"]["inserts"][0]["pluginRef"].clone()), (json!("1:track:1"), json!("1:plugin:1.1")));
@@ -127,7 +134,7 @@ async fn the_read_methods_on_the_wire() {
     let timeline = client.request("focus_body", json!({"kind": "timeline"}), WAIT).await.unwrap();
     assert_eq!(timeline["lanes"][1]["regions"][0]["ref"], "1:region:1");
     let routing = client.request("focus_body", json!({"kind": "routing", "ref": "1:track:1"}), WAIT).await.unwrap();
-    assert_eq!(routing["sends"][0]["sendRef"], "1:send:1.1");
+    assert_eq!((routing["trackRef"].clone(), routing["sends"].is_array()), (json!("1:track:1"), true));
 
     // What the bridge refuses: a kind it doesn't have, notes without their region, a ref that isn't in the project, a
     // ref from before the epoch.

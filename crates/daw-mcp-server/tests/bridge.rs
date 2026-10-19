@@ -75,11 +75,18 @@ async fn logic_session_transcript() {
         (identity.daw.as_str(), identity.daw_version.as_str(), identity.resource.as_str()),
         ("logic", "12.3.1", "com.apple.logic10")
     );
+    // The status is the recorded one: the bridge's answer over the real Logic, replayed by the simulator.
     let status = client.request("status", json!({}), WAIT).await.unwrap();
-    assert_eq!(
-        status,
-        json!({"project": {"id": "3f9c2a7b1d4e5f60718293a4b5c6d7e8", "name": "Scratch", "path": "/lab/Scratch.logicx"}, "busy": false, "permission": null})
-    );
+    let vectors: serde_json::Value = serde_json::from_str(include_str!("vectors/logic-reads.json")).unwrap();
+    let recorded = vectors["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["request"]["method"] == "status")
+        .map(|case| case["response"]["result"].clone())
+        .expect("the vectors record a status");
+    assert_eq!(status, recorded);
+    assert_eq!((status["busy"].clone(), status["permission"].clone()), (json!(false), json!(null)));
     // Without Accessibility the status says so, and reads fail in words, never busy.
     simulator.set_permission(Some("accessibility"));
     assert_eq!(client.request("status", json!({}), WAIT).await.unwrap()["permission"], "accessibility");

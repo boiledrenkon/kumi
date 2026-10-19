@@ -29,6 +29,19 @@ mod in_process;
 use in_process::InProcess;
 
 /// Every key of `input` is one the tool's schema offers (it takes no others), and what it requires is there.
+/// What the real bridge answered over the Scratch project, as the host's simulator replays it: Logic's expectations
+/// follow the recording, not a hand-written project.
+fn recorded(method: &str, params: Value) -> Value {
+    let vectors: Value = serde_json::from_str(include_str!("../../daw-mcp-server/tests/vectors/logic-reads.json")).unwrap();
+    vectors["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["request"]["method"] == method && case["request"]["params"] == params)
+        .map(|case| case["response"]["result"].clone())
+        .unwrap_or_else(|| panic!("no recorded {method} {params}"))
+}
+
 fn within_schema(schema: &JsonObject, input: &JsonObject) {
     let properties = schema["properties"].as_object().unwrap();
     for key in input.keys() {
@@ -339,7 +352,11 @@ async fn logics_integration_reads_what_kumis_host_answers_from_the_bridge_beside
                 (context["selection"]["trackRef"].as_str(), context["selection"]["regionRef"].as_str()),
                 (Some("track:1"), Some("region:1"))
             );
-            assert_eq!(context["markers"][0]["name"], "Chorus");
+            assert_eq!(
+                context["markers"][0]["name"],
+                recorded("read", json!({"kind": "marker"}))["items"][0]["name"],
+                "the marker, as recorded"
+            );
             assert!(!observed.context.contains("1:track:") && !observed.context.contains("1:region:"), "{}", observed.context);
             assert!(observed.project.as_ref().is_some_and(|project| project.id.starts_with("logic-")), "a saved project is its place");
 
@@ -367,7 +384,8 @@ async fn logics_integration_reads_what_kumis_host_answers_from_the_bridge_beside
             assert_eq!(focus.track_ref.as_deref(), Some("1:track:1"));
             assert_eq!(focus.item.as_ref().and_then(|item| item.item_ref.as_deref()), Some("1:region:1"));
             assert_eq!(focus.main_view.as_ref().map(|v| v.label.as_str()), Some("Tracks"));
-            assert_eq!(focus.editor_view.as_ref().map(|v| v.label.as_str()), Some("Piano Roll"));
+            let recorded_editor = recorded("focus", json!({}))["editor"].as_str().map(str::to_owned);
+            assert_eq!(focus.editor_view.is_some(), recorded_editor.is_some(), "an editor is open as recorded: {recorded_editor:?}");
             assert!(logic.can_show(BodyKind::Tree) && logic.can_show(BodyKind::Notes) && logic.can_show(BodyKind::Timeline));
             assert!(logic.can_show(BodyKind::Routing) && !logic.can_show(BodyKind::Tracker) && !logic.can_show(BodyKind::Grid));
 
@@ -400,10 +418,14 @@ async fn logics_integration_reads_what_kumis_host_answers_from_the_bridge_beside
             else {
                 panic!("the routing")
             };
-            assert_eq!(
-                routing.routes.iter().map(|route| (route.kind, route.other.as_str())).collect::<Vec<_>>(),
-                [(RouteKind::Receive, "Input 1"), (RouteKind::Send, "Bus 1"), (RouteKind::Hardware, "Stereo Out")]
-            );
+            // The routes as recorded: each input, each send's destination, then the output.
+            let recorded_routing = recorded("focus_body", json!({"kind": "routing", "ref": "1:track:1"}));
+            let text = |value: &Value| value.as_str().unwrap().to_owned();
+            let mut expected: Vec<(RouteKind, String)> =
+                recorded_routing["inputs"].as_array().unwrap().iter().map(|input| (RouteKind::Receive, text(input))).collect();
+            expected.extend(recorded_routing["sends"].as_array().unwrap().iter().map(|send| (RouteKind::Send, text(&send["destination"]))));
+            expected.push((RouteKind::Hardware, text(&recorded_routing["output"])));
+            assert_eq!(routing.routes.iter().map(|route| (route.kind, route.other.clone())).collect::<Vec<_>>(), expected);
 
             // A track or region changed: the epoch moves, so this turn's refs retire and the next look names afresh.
             script.change_tracks();
@@ -465,7 +487,9 @@ async fn logics_project_opens_again_from_a_kept_conversations_place() {
             logic.start(Signal::new()).await.unwrap();
             let first = logic.observe(Signal::new(), None).await.unwrap();
             let place = first.project.as_ref().map(|project| project.id.clone()).expect("Scratch is saved");
-            assert_eq!(logic.open_set().as_deref(), Some("/lab/Scratch.logicx"));
+            let scratch = recorded("status", json!({}))["project"]["path"].as_str().unwrap().to_owned();
+            let scratch_copy = scratch.replace(".logicx", " 1.logicx");
+            assert_eq!(logic.open_set().as_deref(), Some(scratch.as_str()));
             assert_eq!(logic.recording(Signal::new()).await.unwrap(), Some(false), "the transport, as the focus carries it");
             let switched = |states: &[(ConnectionState, Option<DisconnectCause>)], cause: DisconnectCause| {
                 states
@@ -495,12 +519,12 @@ async fn logics_project_opens_again_from_a_kept_conversations_place() {
             let other = logic.observe(Signal::new(), None).await.unwrap();
             assert_eq!(other.label, "Logic Pro — Scratch 1");
             assert_ne!(other.project.as_ref().map(|project| project.id.clone()), Some(place.clone()), "another place");
-            assert_eq!(logic.open_set().as_deref(), Some("/lab/Scratch 1.logicx"));
+            assert_eq!(logic.open_set().as_deref(), Some(scratch_copy.as_str()));
 
             // The kept conversation's project opens again: the switch Kumi asked for, over once the bridge says so.
             let before = states.borrow().len();
             assert_eq!(logic.open_place(&place, abort::timeout(5_000)).await.unwrap(), Ok(()));
-            assert_eq!(*opened.borrow(), ["/lab/Scratch.logicx"]);
+            assert_eq!(*opened.borrow(), [scratch.clone()]);
             for _ in 0..200 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 if switched(&states.borrow()[before..], DisconnectCause::AskedSet) {
@@ -510,7 +534,7 @@ async fn logics_project_opens_again_from_a_kept_conversations_place() {
             assert!(switched(&states.borrow()[before..], DisconnectCause::AskedSet), "{:?}", states.borrow());
             let back = logic.observe(Signal::new(), None).await.unwrap();
             assert_eq!(back.project.as_ref().map(|project| project.id.clone()), Some(place));
-            assert_eq!(logic.open_set().as_deref(), Some("/lab/Scratch.logicx"));
+            assert_eq!(logic.open_set().as_deref(), Some(scratch.as_str()));
             logic.close().await.unwrap();
             simulator.stop();
         })
