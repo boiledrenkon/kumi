@@ -372,6 +372,8 @@ pub struct State {
     /// The descriptions of entries 1 and on (a test's own entries may be missing: they read "Edit n"), and the one the
     /// project is at (None: the last).
     pub undo_descs: Vec<String>,
+    /// What the history's first point is called: REAPER merges the oldest points into it when its undo memory is full.
+    pub undo_first: Option<String>,
     pub undo_cur: Option<i32>,
     /// Blocks begun and not ended, and whether anything was written since the last point: a bare edit makes no point
     /// of its own and joins the next block that is ended with flags.
@@ -448,6 +450,7 @@ impl Default for State {
             state_count: 0,
             undo_entries: 1,
             undo_descs: vec![],
+            undo_first: None,
             undo_cur: None,
             undo_depth: 0,
             undo_dirty: false,
@@ -2206,7 +2209,7 @@ fn undo_cur_of(s: &State) -> i32 {
 
 fn undo_desc_at(s: &State, index: i32) -> String {
     match index {
-        0 => "--- Initial state ---".into(),
+        0 => s.undo_first.clone().unwrap_or_else(|| "--- Initial state ---".into()),
         n => s.undo_descs.get(n as usize - 1).cloned().unwrap_or_else(|| format!("Edit {n}")),
     }
 }
@@ -2251,6 +2254,7 @@ pub fn trim_history(n: usize) {
     with(|s| {
         let n = n.min(s.undo_descs.len());
         s.undo_descs.drain(..n);
+        s.undo_first = Some("Multiple changes".into());
         s.undo_entries -= n as i32;
         s.undo_cur = s.undo_cur.map(|cur| cur - n as i32);
         s.state_count += 1;

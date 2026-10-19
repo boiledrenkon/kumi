@@ -245,6 +245,8 @@ pub enum Ending {
     Restart,
     /// The host doesn't know the change any more.
     Unknown,
+    /// Past the changes only Kumi can take back that Kumi keeps for its undo (half the window).
+    Crowded,
 }
 
 impl<S: RefScheme> Link<S> {
@@ -271,6 +273,7 @@ impl<S: RefScheme> Link<S> {
             Ending::Window => format!("Past the {UNDO_WINDOW} changes Kumi keeps for its undo"),
             Ending::Restart => format!("Kumi's link to {app} started again, so Kumi can't undo this anymore"),
             Ending::Unknown => "Kumi can't undo this anymore".to_string(),
+            Ending::Crowded => format!("Past the {} changes only Kumi can take back that Kumi keeps for its undo", UNDO_WINDOW / 2),
         };
         if self.undo_unanswered.borrow().contains(transaction) {
             format!("{why}, and whether its undo went through isn't known: check it in {app}, and change it back by hand if it's still as Kumi set it.")
@@ -945,6 +948,8 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         };
         let (ours, theirs): (Vec<_>, Vec<_>) = older.iter().filter(|entry| !for_good(entry)).partition(|entry| only_kumi(entry));
         let crowding = ours.len().saturating_sub(UNDO_WINDOW / 2);
+        let crowded: std::collections::HashSet<String> =
+            ours[..crowding].iter().map(|entry| entry.borrow().transaction_id.clone()).collect();
         let order = older
             .iter()
             .filter(|entry| for_good(entry))
@@ -958,7 +963,8 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 (entry.record.state, entry.transaction_id.clone())
             };
             if matches!(state, ChangeState::Applied | ChangeState::Unsure | ChangeState::Kept) {
-                let note = self.link().ending_note(&transaction, Ending::Window);
+                let ending = if crowded.contains(&transaction) { Ending::Crowded } else { Ending::Window };
+                let note = self.link().ending_note(&transaction, ending);
                 self.history.update(entry, ChangeState::Expired, Some(note));
             }
             released.push(std::mem::take(&mut entry.borrow_mut().transaction_id));
@@ -1566,6 +1572,8 @@ mod tests {
         assert_eq!(gone.state, ChangeState::Expired);
         let note = gone.note.unwrap();
         assert!(note.contains("neither can now") && note.contains("by hand"), "{note}");
+        // (let go for the cap on changes only Kumi takes back, inside the 400: the note gives that reason)
+        assert!(note.starts_with("Past the 200 changes only Kumi can take back"), "{note}");
         assert_eq!(row(&plan, &mutes[51]).state, ChangeState::Applied, "only as many go as are over");
         // More changes after the flood: each stays undoable (changes only Kumi takes back hold at most half the window).
         let held = |plan: &OwnPlan<super::super::renoise::RenoiseRefs>, id: &str| {
@@ -1608,7 +1616,7 @@ mod tests {
         link.outside_daw_undo.borrow_mut().insert("t-repeat".into());
         link.undo_unanswered.borrow_mut().insert("t-sent".into());
         link.in_plan.borrow_mut().insert("t-step".into());
-        for ending in [Ending::Window, Ending::Restart, Ending::Unknown] {
+        for ending in [Ending::Window, Ending::Restart, Ending::Unknown, Ending::Crowded] {
             let repeat = link.ending_note("t-repeat", ending);
             assert!(repeat.contains("by hand") && !repeat.contains("may still take it back"), "{repeat}");
             let sent = link.ending_note("t-sent", ending);

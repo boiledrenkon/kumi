@@ -109,7 +109,20 @@ impl Watch {
 fn changes(before: &View, now: &View) -> Vec<(&'static str, Vec<String>)> {
     let kumi = |list: &[String]| list.iter().filter(|desc| is_kumi(desc)).cloned().collect::<std::collections::HashSet<String>>();
     let (applied_now, redoable_now) = (kumi(&now.tail), kumi(&now.redo));
-    let whole = now.tail.len() < TAIL_SCAN as usize;
+    // The look sees the whole history only if nothing went from its front since the last: REAPER at its undo memory merges its
+    // oldest points into its first one (whose description changes), which leaves a point of Kumi's lower in the history, and
+    // a full look shorter.
+    let place_of =
+        |view: &View, desc: &String| view.tail.iter().position(|d| d == desc).map(|p| view.at + 1 - view.tail.len() as i32 + p as i32);
+    let full = |view: &View| view.tail.len() >= TAIL_SCAN as usize;
+    let trimmed = (!full(before) && before.tail.first() != now.tail.first())
+        || (full(before) && !full(now) && now.at < before.at)
+        || before
+            .tail
+            .iter()
+            .filter(|desc| is_kumi(desc))
+            .any(|desc| matches!((place_of(before, desc), place_of(now, desc)), (Some(then), Some(at)) if at < then));
+    let whole = !full(now) && !trimmed;
     let undone: Vec<String> = before
         .tail
         .iter()

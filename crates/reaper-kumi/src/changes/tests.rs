@@ -2996,6 +2996,26 @@ fn reaper_dropping_its_oldest_points_when_its_history_is_full_is_no_undo_of_kumi
 }
 
 #[test]
+fn reaper_merging_the_oldest_points_of_a_short_history_is_no_undo_of_kumis_change_in_them() {
+    let lab = Lab::new();
+    for n in 0..10 {
+        fake::producer_edit(&format!("Edit {n}"));
+    }
+    let desc = "Kumi: Kick volume −6 dB (kn204)";
+    lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), desc);
+    for n in 0..80 {
+        fake::producer_edit(&format!("Edit after {n}"));
+    }
+    lab.tick();
+    lab.events.take();
+    // 94 points; REAPER's undo memory is full: the 31 oldest, Kumi's among them, go into its first point.
+    fake::producer_edit("Adjust track pan");
+    fake::trim_history(31);
+    lab.tick();
+    assert!(lab.events.take().is_empty(), "Kumi's change is still applied, merged into REAPER's first point");
+}
+
+#[test]
 fn an_undo_and_a_new_edit_between_two_looks_still_tell_that_kumis_point_was_undone() {
     let lab = Lab::new();
     let desc = "Kumi: Kick volume −6 dB (kn202)";
