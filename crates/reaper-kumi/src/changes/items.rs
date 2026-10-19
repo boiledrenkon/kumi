@@ -22,9 +22,15 @@ pub(super) fn gone(message: impl Into<String>) -> Fault {
     ("gone".into(), message.into())
 }
 
-/// Two numbers REAPER gave back for one Kumi set: equal but for its doubles' last digits.
+/// Two numbers REAPER gave back for one Kumi set, as far as its saved state keeps them: 14 decimals for most, 9 significant
+/// digits for stretch markers (lab, 7.82). A value back from REAPER's undo or redo is still the one Kumi wrote.
 pub(super) fn close(a: f64, b: f64) -> bool {
-    (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+    (a - b).abs() <= 1e-8 * a.abs().max(b.abs()).max(1.0)
+}
+
+/// The same for a volume, a pan or a fade's curve, which REAPER's saved state keeps to 6 decimals (lab, 7.82).
+pub(super) fn close6(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-6
 }
 
 fn number(value: &Value, key: &str) -> f64 {
@@ -814,7 +820,9 @@ fn fades_of(reaper: &Reaper, item: Item) -> Value {
 }
 
 fn same_fade(a: &Value, b: &Value) -> bool {
-    ["length", "curve", "s", "legacy"].iter().all(|key| close(number(a, key), number(b, key))) && a["shape"] == b["shape"]
+    close(number(a, "length"), number(b, "length"))
+        && ["curve", "s", "legacy"].iter().all(|key| close6(number(a, key), number(b, key)))
+        && a["shape"] == b["shape"]
 }
 
 fn same_fades(a: &Value, b: &Value) -> bool {
@@ -946,8 +954,8 @@ fn asks_hold(after: &Value, asks: &[(&'static str, FadeAsk)]) -> bool {
         ask.length.is_none_or(|length| close(number(fade, "length"), length))
             // (a shape given with its own curve or S values is the nearest preset of them, as REAPER names it)
             && ask.shape.is_none_or(|shape| ask.curve.is_some() || ask.s.is_some() || fade["shape"].as_i64() == Some(shape))
-            && ask.curve.is_none_or(|curve| close(number(fade, "curve"), curve))
-            && ask.s.is_none_or(|s| close(number(fade, "s"), s))
+            && ask.curve.is_none_or(|curve| close6(number(fade, "curve"), curve))
+            && ask.s.is_none_or(|s| close6(number(fade, "s"), s))
     })
 }
 
@@ -1067,6 +1075,11 @@ fn same_number(a: &Value, b: &Value) -> bool {
     close(a.as_f64().unwrap_or(f64::NAN), b.as_f64().unwrap_or(f64::NAN))
 }
 
+/// A volume or a pan: 6 decimals in REAPER's saved state.
+pub(super) fn same_number6(a: &Value, b: &Value) -> bool {
+    close6(a.as_f64().unwrap_or(f64::NAN), b.as_f64().unwrap_or(f64::NAN))
+}
+
 fn same_exact(a: &Value, b: &Value) -> bool {
     a == b
 }
@@ -1122,7 +1135,7 @@ pub(super) static ITEM_FIELDS: [Field<Item>; 7] = [
         read: |reaper, item| json!(reaper.item_value(item, "D_VOL")),
         parse: |_, value| gain_of(value, "volumeDb").map(|gain| json!(gain)),
         write: |reaper, item, value| reaper.set_item_value(item, "D_VOL", value.as_f64().unwrap_or(1.0)),
-        same: same_number,
+        same: same_number6,
         words: |value| format!("volume {} dB", super::tracks::db_text(rows::db(value.as_f64().unwrap_or(1.0)))),
         show: show_db,
     },

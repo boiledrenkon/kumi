@@ -434,3 +434,19 @@ fn a_stretch_marker_the_producer_put_where_one_goes_back_stops_the_undo() {
     assert!(message.contains("can't all be put back"), "{message}");
     assert_eq!(item("{ITEM-K1}").unwrap().1.takes[0].more.stretch, vec![(0.5, 0.5, 0.0), (1.0, 1.2, 0.0), (1.5, 1.5, 0.0)]);
 }
+
+#[test]
+fn a_take_and_its_stretch_markers_back_from_reapers_undo_and_redo_can_still_be_undone() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("take-props", json!({"ref": T1, "pan": -0.123456789}));
+    // REAPER's saved state keeps a pan to 6 decimals (lab, 7.82).
+    state(|s| s.tracks[1].items[0].takes[0].extra.insert("D_PAN".into(), -0.123457));
+    lab.undo("take-props", &preview, &applied).unwrap();
+    assert_eq!(item("{ITEM-K1}").unwrap().1.takes[0].extra["D_PAN"], 0.0);
+    // And a stretch marker to 9 significant digits.
+    let (preview, applied) =
+        lab.make("stretch-markers-add", json!({"ref": T1, "markers": [{"position": 1.2345678912, "sourcePosition": 1.1111111111}]}));
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch = vec![(1.23456789, 1.11111111, 0.0)]);
+    lab.undo("stretch-markers-add", &preview, &applied).unwrap();
+    assert!(item("{ITEM-K1}").unwrap().1.takes[0].more.stretch.is_empty());
+}

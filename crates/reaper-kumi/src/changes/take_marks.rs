@@ -89,8 +89,10 @@ fn fence_of(words: impl Iterator<Item = String>) -> Value {
 
 // ----- stretch markers -----
 
+/// A stretch marker to 9 significant digits, as REAPER's saved state keeps it (lab, 7.82): one back from REAPER's undo or
+/// redo has the same word.
 fn stretch_word(m: &StretchMarker) -> String {
-    format!("{:.9} {:.9} {:.9}", m.position, m.source, m.slope)
+    format!("{:.8e} {:.8e} {:.8e}", m.position, m.source, m.slope)
 }
 
 fn stretch_json(m: &StretchMarker) -> Value {

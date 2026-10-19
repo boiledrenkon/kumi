@@ -594,6 +594,24 @@ fn a_deleted_item_back_in_the_project_but_changed_is_the_producers() {
     assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
 }
 
+/// What REAPER's undo and redo give back is its saved state's text: volumes and fade curves to 6 decimals (lab, 7.82). A
+/// producer who undid and redid Kumi's change in REAPER can still have Kumi undo it.
+#[test]
+fn values_back_from_reapers_undo_and_redo_are_still_the_ones_kumi_wrote() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("item-props", json!({"ref": K1, "volumeDb": -6.0}));
+    state(|s| s.tracks[1].items[0].extra.insert("D_VOL".into(), 0.501187));
+    lab.undo("item-props", &preview, &applied).unwrap();
+    assert_eq!(item("{ITEM-K1}").unwrap().1.extra["D_VOL"], 1.0);
+    let (preview, applied) = lab.make("item-fade", json!({"ref": K1, "fadeIn": {"length": 0.25, "curve": 0.123456789}}));
+    state(|s| s.tracks[1].items[0].extra.insert("D_FADEINDIR_NEW".into(), 0.123457));
+    lab.undo("item-fade", &preview, &applied).unwrap();
+    // A change the producer made is still theirs.
+    let (preview, applied) = lab.make("item-props", json!({"ref": K1, "volumeDb": -6.0}));
+    state(|s| s.tracks[1].items[0].extra.insert("D_VOL".into(), 0.5012));
+    assert_eq!(code(lab.undo("item-props", &preview, &applied)), "changed");
+}
+
 // ----- copying -----
 
 #[test]

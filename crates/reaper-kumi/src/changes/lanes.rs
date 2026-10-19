@@ -168,6 +168,11 @@ pub fn lanes_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     reaper.set_track_value(found.track, "I_FREEMODE", mode as f64);
     reaper.update_timeline();
+    // REAPER settles a track's lanes later on its own (lab, 7.82: an empty track reads 2 lanes, then 1): settled now, in
+    // this step, what is kept as applied is what stays.
+    if mode == 2 {
+        reaper.update_item_lanes(ctx.proj);
+    }
     let after = lanes_state(reaper, found.track);
     if after["mode"] != mode {
         put_lanes(ctx, found.track, &now);
@@ -188,6 +193,7 @@ fn put_lanes(ctx: &Ctx, track: Track, state: &Value) {
     if mode != 2 {
         return;
     }
+    reaper.update_item_lanes(ctx.proj);
     // (only when REAPER didn't bring the lanes back itself: setting the count leaves lane names in the track's state)
     if let Some(n) = state["lanes"].as_i64().filter(|n| *n != reaper.track_value(track, "I_NUMFIXEDLANES") as i64) {
         reaper.set_track_value(track, "I_NUMFIXEDLANES", n as f64);

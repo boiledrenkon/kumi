@@ -143,7 +143,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
             let sign = if reaper.take_value(take, "D_VOL") < 0.0 { -1.0 } else { 1.0 };
             reaper.set_take_value(take, "D_VOL", sign * value.as_f64().unwrap_or(1.0).abs())
         },
-        same: same_number,
+        same: items::same_number6,
         words: |value| format!("volume {} dB", super::tracks::db_text(rows::db(value.as_f64().unwrap_or(1.0)))),
         show: items::show_db,
     },
@@ -167,7 +167,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
         read: |reaper, take| json!(reaper.take_value(take, "D_PAN")),
         parse: |_, value| bounded(value, "pan", -1.0, 1.0, " (-1 left, 1 right)"),
         write: |reaper, take, value| reaper.set_take_value(take, "D_PAN", value.as_f64().unwrap_or(0.0)),
-        same: same_number,
+        same: items::same_number6,
         words: |value| format!("pan {}", super::tracks::pan_text(value.as_f64().unwrap_or(0.0))),
         show: items::show_same,
     },
