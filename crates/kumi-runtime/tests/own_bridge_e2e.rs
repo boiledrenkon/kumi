@@ -346,7 +346,7 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
             assert_eq!(script.volume(1), -6.0);
             assert_eq!((script.track(4)["name"].clone(), script.track(2)["mute"].clone()), (json!("Pads"), json!(true)));
             let titles: Vec<String> = told.borrow().iter().map(|record| record.title.clone()).collect();
-            assert_eq!(titles, ["Track 1 volume -6 dB", "Added track Pad", "Renamed Pad to Pads", "Track 2 muted"]);
+            assert_eq!(titles, ["Track 1 volume -6 dB", "Added track “Pad”", "Renamed track “Pad” → “Pads”", "Track 2 muted"]);
             // The fader's picture: where it was, where it went, within its span.
             let fader = told.borrow()[0].clone();
             assert_eq!((fader.from, fader.to, fader.range), (Some(0.0), Some(-6.0), Some([-60.0, 12.0])));
@@ -386,10 +386,14 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
                 .await
                 .unwrap();
             assert!(!renamed.is_error, "{}", renamed.text);
-            assert!(script.undo_history().last().unwrap().starts_with("Kumi: Renamed Track 3 to Lead (k"), "{:?}", script.undo_history());
+            assert!(
+                script.undo_history().last().unwrap().starts_with("Kumi: Renamed track “Track 3” → “Lead” (k"),
+                "{:?}",
+                script.undo_history()
+            );
             // /undo in the app takes back the latest change still standing.
             let record = reaper.undo(None, Signal::new()).await.unwrap();
-            assert_eq!(record.title, "Renamed Track 3 to Lead");
+            assert_eq!(record.title, "Renamed track “Track 3” → “Lead”");
             assert_eq!(script.track(3)["name"], json!("Track 3"));
 
             // The producer presses REAPER's undo on the plan: the bridge names its step, and HISTORY marks the plan's
@@ -399,12 +403,12 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
             let state_of = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).map(|record| record.state);
             for _ in 0..100 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                if state_of("Added track Pad") == Some(ChangeState::Undone) {
+                if state_of("Added track “Pad”") == Some(ChangeState::Undone) {
                     break;
                 }
             }
             assert_eq!(
-                (state_of("Added track Pad"), state_of("Renamed Pad to Pads"), state_of("Track 1 volume -6 dB")),
+                (state_of("Added track “Pad”"), state_of("Renamed track “Pad” → “Pads”"), state_of("Track 1 volume -6 dB")),
                 (Some(ChangeState::Undone), Some(ChangeState::Undone), Some(ChangeState::Kept))
             );
 

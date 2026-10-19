@@ -552,7 +552,7 @@ async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
             assert_eq!(script.track(4)["name"], json!("Pad"), "the rename was undone");
             // The producer's /undo takes back the latest change still standing: the track Kumi added.
             let undone = session.undo(None).await.unwrap();
-            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Added track Pad"));
+            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Added track “Pad”"));
             session.submit("What changed?", None).await.unwrap();
             session.close().await.unwrap();
             simulator.stop();

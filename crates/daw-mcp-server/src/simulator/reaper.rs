@@ -184,7 +184,7 @@ impl ReaperScript {
             "volumeDb" => format!("{name} volume {} dB", wanted.as_f64().unwrap_or_default()),
             "mute" if wanted == true => format!("{name} muted"),
             "mute" => format!("{name} unmuted"),
-            _ => format!("Renamed {name} to {}", wanted.as_str().unwrap_or_default()),
+            _ => format!("Renamed track “{name}” → “{}”", wanted.as_str().unwrap_or_default()),
         };
         match method {
             "change_preview" => Ok(json!({
@@ -217,7 +217,7 @@ impl ReaperScript {
                 state.tracks[index][field] = wanted.clone();
                 state.changed += 1;
                 state.undo.push(desc);
-                Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": {"title": format!("{name} put back")}}))
+                Ok(json!({"epoch": epoch, "restored": {field: wanted}, "display": {"title": format!("{title} (put back)")}}))
             }
         }
     }
@@ -231,7 +231,7 @@ impl ReaperScript {
                 "target": {"ref": null, "kind": "track"},
                 "prior": {"tracks": state.tracks.len() - 1},
                 "fence": {"tracks": state.tracks.len() - 1},
-                "display": {"title": format!("Added track {name}")},
+                "display": {"title": format!("Added track “{name}”")},
             })),
             "change_apply" => {
                 let desc = params["desc"].as_str().unwrap_or_default().to_string();
@@ -242,7 +242,7 @@ impl ReaperScript {
                 state.changed += 1;
                 Self::step(state, &desc);
                 Ok(
-                    json!({"epoch": epoch, "applied": {"added": true}, "created": {"ref": made, "kind": "track"}, "display": {"title": format!("Added track {name}")}, "undo": {"desc": desc, "entry": true}}),
+                    json!({"epoch": epoch, "applied": {"added": true}, "created": {"ref": made, "kind": "track"}, "display": {"title": format!("Added track “{name}”")}, "undo": {"desc": desc, "entry": true}}),
                 )
             }
             _ => {
@@ -253,7 +253,7 @@ impl ReaperScript {
                 state.tracks.remove(index);
                 state.changed += 1;
                 state.undo.push(params["desc"].as_str().unwrap_or_default().to_string());
-                Ok(json!({"epoch": epoch, "restored": {"added": false}, "display": {"title": format!("Deleted track {name}")}}))
+                Ok(json!({"epoch": epoch, "restored": {"added": false}, "display": {"title": format!("“{name}” taken away again")}}))
             }
         }
     }
