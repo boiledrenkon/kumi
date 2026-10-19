@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -2343,4 +2344,128 @@ fn an_undo_asked_in_an_earlier_epoch_of_the_same_project_goes_through_and_anothe
     let mut unknown = json!({"kind": "track-volume", "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": "Kumi: undo (kund3)"});
     unknown["epoch"] = "never-1".into();
     assert_eq!(lab.call("change_restore", unknown).unwrap_err().0, "stale");
+}
+
+// ----- a write that goes wrong is taken back, or said to be unknown (S4); notes cost and undo overlaps (S5, S6) -----
+
+#[test]
+fn a_name_that_stands_for_several_plug_ins_is_refused_before_anything_is_added() {
+    let lab = Lab::new();
+    for name in ["FXADD:ReaEQ", "fxadd:", "  FXADD:x"] {
+        let (code, message) = lab.call("change_preview", json!({"kind": "fx-add", "input": {"ref": KICK, "name": name}})).unwrap_err();
+        assert_eq!(code, "bad-params", "{name}");
+        assert!(message.contains("one plug-in"), "{message}");
+    }
+    assert!(kick_fx().is_empty());
+}
+
+#[test]
+fn an_add_that_leaves_more_than_it_should_is_taken_back_inside_the_same_call() {
+    let lab = Lab::new();
+    // A name that adds two plug-ins where one was asked for.
+    let input = json!({"ref": KICK, "name": "ReaEQ twice"});
+    let preview = lab.call("change_preview", json!({"kind": "fx-add", "input": input})).unwrap();
+    let apply = json!({"kind": "fx-add", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    let (code, message) = lab.call("change_apply", apply.clone()).unwrap_err();
+    assert_eq!(code, "failed");
+    assert!(message.contains("taken back"), "{message}");
+    assert!(kick_fx().is_empty(), "nothing of it is left");
+    // Taken back inside a block that wrote nothing in the end: no entry the producer would find.
+    assert_eq!(state(|s| s.undo_depth), 0);
+    // If the plug-ins can't be taken off again, nobody knows what the track holds.
+    state(|s| s.fail_fx_delete = true);
+    let (code, message) = lab.call("change_apply", apply).unwrap_err();
+    assert_eq!(code, "uncertain");
+    assert!(message.contains("could not take back"), "{message}");
+    assert_eq!(kick_fx().len(), 2);
+}
+
+#[test]
+fn a_notes_write_that_goes_wrong_is_taken_back_or_called_uncertain() {
+    let lab = Lab::new();
+    let input =
+        json!({"ref": SNARE_TAKE, "notes": [{"pitch": 60, "start": 4.0, "length": 1.0}, {"pitch": 61, "start": 5.0, "length": 1.0}]});
+    let before = snare_notes();
+    let preview = lab.call("change_preview", json!({"kind": "notes-add", "input": input})).unwrap();
+    let apply = json!({"kind": "notes-add", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    // The write drops a note; putting the take back works.
+    state(|s| s.glitch_events = 1);
+    let (code, message) = lab.call("change_apply", apply.clone()).unwrap_err();
+    assert_eq!(code, "failed");
+    assert!(message.contains("taken back"), "{message}");
+    assert_eq!(snare_notes(), before);
+    // The write drops one and so does putting back.
+    state(|s| s.glitch_events = 2);
+    let (code, _) = lab.call("change_apply", apply.clone()).unwrap_err();
+    assert_eq!(code, "uncertain");
+    // And an undo that goes wrong the same way.
+    let (preview, applied) = lab.make("notes-add", input, "Kumi: Wrote 2 notes (kno01)");
+    let written = snare_notes();
+    state(|s| s.glitch_events = 1);
+    let (code, _) = lab.undo("notes-add", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "failed");
+    assert_eq!(snare_notes(), written);
+}
+
+#[test]
+fn undoing_a_notes_delete_is_refused_when_the_producer_wrote_a_note_over_one_it_would_put_back() {
+    let lab = Lab::new();
+    // The snare take has pitch 38 on channel 1 from tick 0 to 480.
+    let (preview, applied) = lab.make("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [0]}), "Kumi: Deleted 1 note (kno02)");
+    state(|s| {
+        s.tracks[2].items[0].takes[0].notes.insert(
+            0,
+            fake::FakeNote { start_ppq: 100.0, end_ppq: 600.0, channel: 0, pitch: 38, velocity: 70, selected: false, muted: false },
+        );
+    });
+    let notes = snare_notes();
+    let (code, message) = lab.undo("notes-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("overlap"), "{message}");
+    assert_eq!(snare_notes(), notes, "nothing was written");
+    // Told to discard, it is put back.
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund2)");
+    params["kind"] = "notes-delete".into();
+    params["discard"] = true.into();
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(snare_notes().len(), 3);
+}
+
+#[test]
+fn a_notes_change_in_a_big_take_costs_no_more_calls_than_in_a_small_one() {
+    let lab = Lab::new();
+    let fill = |count: i32| {
+        state(|s| {
+            s.tracks[2].items[0].takes[0].notes = (0..count)
+                .map(|n| fake::FakeNote {
+                    start_ppq: n as f64 * 960.0,
+                    end_ppq: n as f64 * 960.0 + 480.0,
+                    channel: 0,
+                    pitch: 40 + n % 40,
+                    velocity: 90,
+                    selected: false,
+                    muted: false,
+                })
+                .collect();
+        })
+    };
+    let notes: Vec<Value> = (0..100).map(|i| json!({"pitch": 100 + i % 20, "start": 200_000.0 + i as f64, "length": 0.5})).collect();
+    let mut costs = vec![];
+    for (n, count) in [100, 20_000, 100_000].into_iter().enumerate() {
+        fill(count);
+        let started = Instant::now();
+        let calls = state(|s| s.calls);
+        let (preview, applied) =
+            lab.make("notes-add", json!({"ref": SNARE_TAKE, "notes": notes}), &format!("Kumi: Wrote 100 notes (kno0{n})"));
+        let apply_calls = state(|s| s.calls) - calls;
+        let calls = state(|s| s.calls);
+        lab.undo("notes-add", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+        let undo_calls = state(|s| s.calls) - calls;
+        assert_eq!(snare_notes().len(), count as usize);
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "{count} notes: {:?}", started.elapsed());
+        costs.push((apply_calls, undo_calls));
+    }
+    // (The calls a note costs are the conversions of the 100 notes it writes; the take's size adds none.)
+    assert_eq!(costs[0], costs[1], "{costs:?}");
+    assert_eq!(costs[1], costs[2], "{costs:?}");
 }

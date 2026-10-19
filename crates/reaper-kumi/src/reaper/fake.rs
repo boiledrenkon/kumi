@@ -371,6 +371,10 @@ pub struct State {
     /// A GUID counter for tracks made by `InsertTrackAtIndex`.
     pub made: u32,
     pub fx_made: u32,
+    /// TrackFX_Delete answers false and does nothing.
+    pub fail_fx_delete: bool,
+    /// How many of the next MIDI_SetAllEvts drop the last note they were given (a write that goes wrong).
+    pub glitch_events: u32,
     /// How often the screen was told to redraw.
     pub redraws: u32,
     pub master: FakeTrack,
@@ -433,6 +437,8 @@ impl Default for State {
             chunks: vec![],
             made: 0,
             fx_made: 0,
+            fail_fx_delete: false,
+            glitch_events: 0,
             redraws: 0,
             master: FakeTrack::new("{MASTER}", "MASTER"),
             tracks: vec![],
@@ -1283,7 +1289,13 @@ unsafe extern "C" fn track_fx_add_by_name(track: *mut MediaTrack, name: *const c
         } else {
             new_fx(s, &name).map(|fx| vec![fx])
         };
-        let Some(made) = made.filter(|m| !m.is_empty()) else { return -1 };
+        let Some(mut made) = made.filter(|m| !m.is_empty()) else { return -1 };
+        // A name that stands for several plug-ins (as "FXADD:" does) adds them all.
+        if !name.ends_with(".RfxChain") && name.to_ascii_lowercase().contains("twice") {
+            if let Some(second) = new_fx(s, &name) {
+                made.push(second);
+            }
+        }
         let Some(t) = track_mut(s, track as u64) else { return -1 };
         let at = if instantiate <= -1000 { ((-1000 - instantiate) as usize).min(t.fx.len()) } else { t.fx.len() };
         let first = at as c_int;
@@ -1297,6 +1309,9 @@ unsafe extern "C" fn track_fx_add_by_name(track: *mut MediaTrack, name: *const c
 
 unsafe extern "C" fn track_fx_delete(track: *mut MediaTrack, fx: c_int) -> bool {
     counted(|s| {
+        if s.fail_fx_delete {
+            return false;
+        }
         let Some(t) = track_mut(s, track as u64) else { return false };
         if fx < 0 || fx as usize >= t.fx.len() {
             return false;
@@ -2393,9 +2408,14 @@ unsafe extern "C" fn midi_set_all_evts(take: *mut MediaItem_Take, buf: *const c_
     let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size.max(0) as usize) }.to_vec();
     counted(|s| {
         let Some(events) = crate::midi::decode(&bytes) else { return false };
+        let glitch = s.glitch_events > 0;
+        s.glitch_events = s.glitch_events.saturating_sub(1);
         let Some(t) = take_mut(s, take as u64) else { return false };
         let (mut notes, mut ccs) = (crate::midi::notes(&events), Vec::new());
         notes.sort_by_key(|n| n.start);
+        if glitch {
+            notes.pop();
+        }
         t.notes = notes
             .iter()
             .map(|n| FakeNote {

@@ -319,7 +319,14 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let moved = track_of(ctx, &plan.guid).ok_or_else(|| failed("the track went while it was moved"))?;
     let at = place(ctx.reaper, moved);
     if at != plan.to {
-        return Err(failed(format!("REAPER put the track at {} rather than {}", at + 1, plan.to + 1)));
+        // Put back where it was, inside this call; else nobody knows how the tracks stand.
+        let back = reorder(ctx, moved, plan.from, at) && place(ctx.reaper, moved) == plan.from;
+        let message = format!("REAPER put the track at {} rather than {}", at + 1, plan.to + 1);
+        return Err(if back {
+            failed(format!("{message}; the track is moved back"))
+        } else {
+            ("uncertain".into(), format!("{message}, and Kumi could not move it back: read the tracks"))
+        });
     }
     let name = super::track_name(ctx.reaper, moved);
     let after = json!({"index": at, "window": window(ctx.reaper, ctx, plan.from.min(plan.to) - 1, plan.from.max(plan.to))});

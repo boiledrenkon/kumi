@@ -178,6 +178,10 @@ fn plugin_name(input: &Value) -> Done<String> {
     if name.to_ascii_lowercase().ends_with(".rfxchain") {
         return Err(bad("name must be a plug-in's name, not an FX chain file"));
     }
+    // (REAPER takes "FXADD:" and a list for several plug-ins at once; one name is one plug-in.)
+    if name.to_ascii_uppercase().starts_with("FXADD:") {
+        return Err(bad("name must be one plug-in's name, not an FXADD: list"));
+    }
     Ok(name.to_string())
 }
 
@@ -229,7 +233,19 @@ fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let expected = position.map_or(before.len(), |p| p as usize);
     let guid = after.get(index as usize).cloned().unwrap_or_default();
     if after.len() != before.len() + 1 || index as usize != expected || guid.is_empty() || position_of(&before, &guid).is_some() {
-        return Err(failed("the FX chain isn't what it should be after adding the plug-in"));
+        // Whatever the add made is taken off again (every FX that was not in the chain before), inside this call: what is
+        // left would be there and unknown to HISTORY.
+        for (at, made) in after.iter().enumerate().rev() {
+            if position_of(&before, made).is_none() {
+                ctx.reaper.delete_fx(track, at as i32);
+            }
+        }
+        let message = "the FX chain isn't what it should be after adding the plug-in";
+        return Err(if chain(ctx, track) == before {
+            failed(format!("{message}; what was added is taken back"))
+        } else {
+            ("uncertain".into(), format!("{message}, and Kumi could not take back what it wrote: read the track's FX"))
+        });
     }
     let fx = Fx { owner: FxOwner::Track(track), index };
     let label = fx_label(ctx, fx);
@@ -469,7 +485,14 @@ fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     let after = chain(ctx, located.track);
     if after != expected {
-        return Err(failed("the FX chain isn't in the order it should be after the move"));
+        // Moved back to where it was, inside this call; else nobody knows how the chain stands.
+        let back = position_of(&after, &located.guid).is_some_and(|at| ctx.reaper.move_fx(located.track, at as i32, located.index));
+        let message = "the FX chain isn't in the order it should be after the move";
+        return Err(if back && chain(ctx, located.track) == before {
+            failed(format!("{message}; the FX is moved back"))
+        } else {
+            ("uncertain".into(), format!("{message}, and Kumi could not move the FX back: read the track's FX"))
+        });
     }
     let fx = Fx { owner: FxOwner::Track(located.track), index: to as i32 };
     Ok(Applied {
