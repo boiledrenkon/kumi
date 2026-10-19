@@ -2,6 +2,7 @@
 //! from a table of rows, the way the extension answers them (the M2 contract): pages by limit and cursor, a page that
 //! stops at the frame bound, an epoch that refuses a cursor from before it changed. Small on purpose: what the host
 //! tests are about is the plumbing, not what REAPER holds.
+use super::listening::SimListening;
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
 use serde_json::{json, Value};
@@ -13,7 +14,10 @@ const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
 /// The arrange body's page, in tracks.
 const MAX_ARRANGE: usize = 500;
-const KINDS: [&str; 11] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"];
+const KINDS: [&str; 12] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "spans"];
+/// What the bridge answers for listening (M5).
+pub const LISTENING_METHODS: [&str; 8] =
+    ["render_start", "capture_start", "listen_status", "listen_cancel", "audition", "audition_stop", "audio_file", "scratch"];
 const BODIES: [&str; 4] = ["arrange", "midi", "fx", "routing"];
 
 struct State {
@@ -42,6 +46,7 @@ struct State {
 #[derive(Clone)]
 pub struct ReaperScript {
     state: Arc<Mutex<State>>,
+    listening: SimListening,
 }
 
 fn track_row(index: usize, name: &str) -> Value {
@@ -100,7 +105,13 @@ impl ReaperScript {
                 uncertain_restore_once: false,
                 left_out_once: None,
             })),
+            listening: SimListening::new(daw_bridge::Daw::Reaper),
         }
+    }
+
+    /// The bridge's listening side: renders, captures, previews, scratch copies.
+    pub fn listening(&self) -> &SimListening {
+        &self.listening
     }
 
     /// The project switched tabs: refs and cursors from before are stale.
@@ -143,7 +154,7 @@ impl ReaperScript {
 
     /// The simulator's config for REAPER with this project behind it.
     pub fn config(&self, secret: Secret, resource: &str) -> SimulatorConfig {
-        SimulatorConfig::reaper(secret, resource).with_methods(
+        let mut config = SimulatorConfig::reaper(secret, resource).with_methods(
             &[
                 "read",
                 "snapshot",
@@ -156,7 +167,15 @@ impl ReaperScript {
                 "undo_step_end",
             ],
             self.respond(),
-        )
+        );
+        config.offer.methods.extend(LISTENING_METHODS.iter().map(|m| m.to_string()));
+        let listening = self.listening.clone();
+        config.status_more = Some(Arc::new(move || {
+            let mut more = serde_json::Map::new();
+            more.insert("listening".into(), listening.flags());
+            more
+        }));
+        config
     }
 
     /// The kinds the sim makes, the way the contract has every kind made: a preview that writes nothing, an apply
@@ -342,6 +361,17 @@ impl ReaperScript {
         let mut state = self.state.lock().unwrap();
         state.asked.push((method.to_string(), params.clone()));
         let epoch = Self::epoch_text(&state);
+        if LISTENING_METHODS.contains(&method) {
+            if let Some(sent) = params.get("epoch").and_then(Value::as_str).filter(|sent| *sent != epoch) {
+                let message =
+                    format!("those refs are from an earlier epoch ({sent}; now {epoch}): the project in the tab changed, read again");
+                return Some(Err(("stale".into(), message)));
+            }
+            let tracks: Vec<String> = state.tracks.iter().filter_map(|row| row["ref"].as_str().map(str::to_owned)).collect();
+            drop(state);
+            let known = |reference: &str| tracks.iter().any(|track| track == reference);
+            return self.listening.answer(method, params, &epoch, &known);
+        }
         // Refs that say which epoch they came from are refused once the project in the tab is another.
         if matches!(method, "read" | "focus_body" | "change_preview" | "change_apply" | "change_restore") {
             if let Some(sent) = params.get("epoch").and_then(Value::as_str).filter(|sent| *sent != epoch) {
@@ -476,6 +506,10 @@ impl ReaperScript {
         let all: Vec<Value> = match (kind, params.get("parent").and_then(Value::as_str)) {
             ("project", _) => vec![Self::project(state)],
             ("track", _) => state.tracks.clone(),
+            // Each track plays its one item, from the start for two bars.
+            ("spans", _) => {
+                state.tracks.iter().skip(1).map(|row| json!({"ref": row["ref"], "name": row["name"], "spans": [[0.0, 8.0]]})).collect()
+            }
             ("item", Some(parent)) => {
                 state.tracks.iter().filter(|row| row["ref"] == parent).map(|row| item_row(row["ref"].as_str().unwrap())).collect()
             }

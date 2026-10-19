@@ -7,6 +7,8 @@
 //! have pages as big as the tool makes them (pages by limit and cursor, cut at the frame bound), and the song can be
 //! switched, which moves the epoch as Renoise's tool does: refs and cursors from before are refused as `stale`, and
 //! the answers carry the new epoch.
+use super::listening::SimListening;
+use super::reaper::LISTENING_METHODS;
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
 use serde_json::{json, Value};
@@ -63,6 +65,7 @@ struct State {
 #[derive(Clone)]
 pub struct RenoiseScript {
     state: Arc<Mutex<State>>,
+    listening: SimListening,
 }
 
 /// The epoch a ref (`<epoch>:<kind>:…`) or a cursor (`<epoch>.<layout>.<n>`) names, if the text is one.
@@ -163,7 +166,13 @@ impl RenoiseScript {
                 undo: vec![],
                 run_start: VECTORS_EPOCH,
             })),
+            listening: SimListening::new(daw_bridge::Daw::Renoise),
         }
+    }
+
+    /// The tool's listening side: renders, previews, audio files, scratch copies.
+    pub fn listening(&self) -> &SimListening {
+        &self.listening
     }
 
     /// Another song is opened (or something refs index into is restructured): the epoch moves, so refs and cursors
@@ -401,7 +410,16 @@ impl RenoiseScript {
 
     /// The simulator's config for Renoise with this song behind it.
     pub fn config(&self, secret: Secret, resource: &str) -> SimulatorConfig {
-        SimulatorConfig::renoise(secret, resource).with_methods(&METHODS, self.respond())
+        let mut config = SimulatorConfig::renoise(secret, resource).with_methods(&METHODS, self.respond());
+        config.offer.methods.extend(LISTENING_METHODS.iter().map(|m| m.to_string()));
+        let listening = self.listening.clone();
+        config.status_more = Some(Arc::new(move || {
+            let mut more = serde_json::Map::new();
+            more.insert("listening".into(), listening.flags());
+            more.insert("demo".into(), listening.demo().into());
+            more
+        }));
+        config
     }
 
     /// The same, and Kumi's changes are made in the song (`change`).
@@ -410,6 +428,16 @@ impl RenoiseScript {
     }
 
     fn answer(&self, method: &str, params: &Value) -> Option<Result<Value, (String, String)>> {
+        if LISTENING_METHODS.contains(&method) {
+            let epoch = self.state.lock().unwrap().epoch;
+            if let Some(from) = from_another_epoch(params, epoch) {
+                return Some(Err(("stale".into(), format!("that ref is from an earlier epoch ({from}; now {epoch}): read again"))));
+            }
+            // Any track of the song's epoch (the sim's song has its tracks numbered from 1).
+            let prefix = format!("{epoch}:track:");
+            let known = |reference: &str| reference.strip_prefix(&prefix).is_some_and(|n| n.parse::<u32>().is_ok_and(|n| n >= 1));
+            return self.listening.answer(method, params, &epoch.to_string(), &known);
+        }
         if !METHODS.contains(&method) && !CHANGE_METHODS.contains(&method) {
             return None;
         }

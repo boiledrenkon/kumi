@@ -1,0 +1,531 @@
+//! The bridges' listening side, simulated (M5 contract §3), for the host's tests and Kumi's: render and capture jobs that
+//! write real WAV files (noise at each source's level) into a folder, previews played out loud, the audio behind a ref,
+//! and scratch copies. Shared by the REAPER and Renoise scripts. A job moves on each time its status is asked, so a test
+//! sees it running, then done.
+use daw_bridge::Daw;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// What the sim renders at: 32-bit float stereo.
+const RATE: u64 = 48_000;
+const DEFAULT_LEVEL: f64 = 0.3;
+
+type Answer = Result<Value, (String, String)>;
+
+fn bad(message: impl Into<String>) -> (String, String) {
+    ("bad-params".into(), message.into())
+}
+
+/// One job the sim runs: what it will write, and how far it has come.
+struct Job {
+    kind: &'static str,
+    state: &'static str,
+    polls: u32,
+    /// Each file: its source id, path, where the part starts in it (s), its length (s), its level and its stage.
+    files: Vec<(String, PathBuf, f64, f64, f64, &'static str)>,
+    /// A capture's marks.
+    marks: Option<Value>,
+    error: Option<(String, String)>,
+    notes: Vec<String>,
+}
+
+struct State {
+    daw: Daw,
+    folder: PathBuf,
+    tempo: f64,
+    jobs: HashMap<String, Job>,
+    /// Polls a job takes to finish (0: done at its first status).
+    steps: u32,
+    /// Each track's level (its noise's peak), by ref; the master is their sum.
+    levels: HashMap<String, f64>,
+    /// Scratch copies by set: each copy's ref, name, the source's ref and the values set on it.
+    scratch: HashMap<String, Vec<(String, String, String, Vec<Value>)>>,
+    previews: Vec<Value>,
+    playing: Option<String>,
+    /// What each render asked, in order.
+    renders: Vec<Value>,
+    /// Times a job put back what it changed (done, failed or cancelled).
+    restored: u32,
+    /// The next job fails with this, at its first status.
+    fail_next: Option<(String, String)>,
+    demo: bool,
+    playing_now: bool,
+    audition_works: bool,
+    next_copy: u32,
+    /// Refs whose audio is MIDI (REAPER) or that have no sample data (Renoise).
+    silent_refs: Vec<String>,
+}
+
+/// The listening side of a simulated bridge. Clones share it.
+#[derive(Clone)]
+pub struct SimListening {
+    state: Arc<Mutex<State>>,
+}
+
+/// A WAV of noise at `level` (peak) for `seconds`: 32-bit float, stereo, 48 kHz.
+pub fn write_noise(path: &Path, seconds: f64, level: f64, seed: u32) -> std::io::Result<()> {
+    let frames = (seconds.max(0.) * RATE as f64) as usize;
+    let mut data = Vec::with_capacity(frames * 8);
+    let mut state = seed | 1;
+    for _ in 0..frames {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let sample = (((state >> 8) as f64 / (1u32 << 24) as f64) * 2. - 1.) * level;
+        data.extend_from_slice(&(sample as f32).to_le_bytes());
+        data.extend_from_slice(&(sample as f32).to_le_bytes());
+    }
+    let mut file = Vec::with_capacity(44 + data.len());
+    file.extend_from_slice(b"RIFF");
+    file.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    file.extend_from_slice(b"WAVEfmt ");
+    file.extend_from_slice(&16u32.to_le_bytes());
+    file.extend_from_slice(&3u16.to_le_bytes());
+    file.extend_from_slice(&2u16.to_le_bytes());
+    file.extend_from_slice(&(RATE as u32).to_le_bytes());
+    file.extend_from_slice(&(RATE as u32 * 8).to_le_bytes());
+    file.extend_from_slice(&8u16.to_le_bytes());
+    file.extend_from_slice(&32u16.to_le_bytes());
+    file.extend_from_slice(b"data");
+    file.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    file.extend_from_slice(&data);
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    std::fs::write(path, file)
+}
+
+impl SimListening {
+    pub fn new(daw: Daw) -> Self {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let folder = std::env::temp_dir().join(format!("kumi-sim-listening-{}-{n}", std::process::id()));
+        SimListening {
+            state: Arc::new(Mutex::new(State {
+                daw,
+                folder,
+                tempo: 120.,
+                jobs: HashMap::new(),
+                steps: 1,
+                levels: HashMap::new(),
+                scratch: HashMap::new(),
+                previews: vec![],
+                playing: None,
+                renders: vec![],
+                restored: 0,
+                fail_next: None,
+                demo: false,
+                playing_now: false,
+                audition_works: true,
+                next_copy: 0,
+                silent_refs: vec![],
+            })),
+        }
+    }
+
+    /// Renders land here (a test points it at `<home>/bridges/<daw>/listening`, as the bridge's folder is).
+    pub fn set_folder(&self, folder: &Path) {
+        self.state.lock().unwrap().folder = folder.to_path_buf();
+    }
+
+    pub fn folder(&self) -> PathBuf {
+        self.state.lock().unwrap().folder.clone()
+    }
+
+    pub fn set_tempo(&self, tempo: f64) {
+        self.state.lock().unwrap().tempo = tempo;
+    }
+
+    /// A track's level (0: silent).
+    pub fn set_level(&self, reference: &str, level: f64) {
+        self.state.lock().unwrap().levels.insert(reference.into(), level);
+    }
+
+    /// How many polls of its status a job takes to finish.
+    pub fn set_steps(&self, steps: u32) {
+        self.state.lock().unwrap().steps = steps;
+    }
+
+    /// The next job fails at its first status, with this code and message.
+    pub fn fail_next(&self, code: &str, message: &str) {
+        self.state.lock().unwrap().fail_next = Some((code.into(), message.into()));
+    }
+
+    /// The Renoise demo: it can't render.
+    pub fn set_demo(&self, demo: bool) {
+        self.state.lock().unwrap().demo = demo;
+    }
+
+    pub fn demo(&self) -> bool {
+        self.state.lock().unwrap().demo
+    }
+
+    /// Whether the DAW is playing (a capture needs it to).
+    pub fn set_playing(&self, playing: bool) {
+        self.state.lock().unwrap().playing_now = playing;
+    }
+
+    /// Whether the DAW can play a file out loud.
+    pub fn set_audition(&self, works: bool) {
+        self.state.lock().unwrap().audition_works = works;
+    }
+
+    /// A ref with no audio of its own (a MIDI item, an empty sample).
+    pub fn set_silent_ref(&self, reference: &str) {
+        self.state.lock().unwrap().silent_refs.push(reference.into());
+    }
+
+    /// The previews played out loud, in order (each `audition`'s params).
+    pub fn previews(&self) -> Vec<Value> {
+        self.state.lock().unwrap().previews.clone()
+    }
+
+    /// What each render asked, in order.
+    pub fn renders(&self) -> Vec<Value> {
+        self.state.lock().unwrap().renders.clone()
+    }
+
+    /// Times a job put back what it changed.
+    pub fn restored(&self) -> u32 {
+        self.state.lock().unwrap().restored
+    }
+
+    /// The scratch copies standing now, by set.
+    pub fn scratch_copies(&self) -> usize {
+        self.state.lock().unwrap().scratch.values().map(Vec::len).sum()
+    }
+
+    /// The values set on each copy (by its ref), in order.
+    pub fn copy_values(&self, copy: &str) -> Vec<Value> {
+        let state = self.state.lock().unwrap();
+        state.scratch.values().flatten().find(|(reference, ..)| reference == copy).map(|(.., values)| values.clone()).unwrap_or_default()
+    }
+
+    /// The `listening` flags `status` carries.
+    pub fn flags(&self) -> Value {
+        let state = self.state.lock().unwrap();
+        json!({
+            "render": !state.demo,
+            "capture": state.daw == Daw::Reaper,
+            "audition": state.audition_works,
+            "grid": true,
+            "scratch": true,
+            "version": 1,
+        })
+    }
+
+    /// Whether a ref is one of the scratch copies.
+    pub fn is_copy(&self, reference: &str) -> bool {
+        self.state.lock().unwrap().scratch.values().flatten().any(|(copy, ..)| copy == reference)
+    }
+
+    /// The method's answer; None for one that isn't listening's. `known` says whether a track ref is in the project.
+    pub fn answer(&self, method: &str, params: &Value, epoch: &str, known: &dyn Fn(&str) -> bool) -> Option<Answer> {
+        let mut state = self.state.lock().unwrap();
+        Some(match method {
+            "render_start" => Self::render_start(&mut state, params, epoch, known),
+            "capture_start" => Self::capture_start(&mut state, params),
+            "listen_status" => Self::status(&mut state, params),
+            "listen_cancel" => Self::cancel(&mut state, params),
+            "audition" => Self::audition(&mut state, params),
+            "audition_stop" => {
+                let stopped = match params.get("previewId").and_then(Value::as_str) {
+                    Some(id) => state.playing.as_deref() == Some(id),
+                    None => state.playing.is_some(),
+                };
+                if stopped {
+                    state.playing = None;
+                }
+                Ok(json!({"stopped": stopped}))
+            }
+            "audio_file" => Self::audio_file(&mut state, params, epoch, known),
+            "scratch" => Self::scratch(&mut state, params, epoch, known),
+            _ => return None,
+        })
+    }
+
+    fn app(state: &State) -> &'static str {
+        if state.daw == Daw::Reaper {
+            "REAPER"
+        } else {
+            "Renoise"
+        }
+    }
+
+    fn level(state: &State, reference: &str) -> f64 {
+        if let Some((_, _, source, values)) = state.scratch.values().flatten().find(|(copy, ..)| copy == reference) {
+            // A copy is its source, turned by what was set on it: the first value's 0 to 1 halves to one and a half times it.
+            let base = state.levels.get(source).copied().unwrap_or(DEFAULT_LEVEL);
+            let turned = values.last().and_then(|value| value.get("normalized").or(value.get("value"))).and_then(Value::as_f64);
+            return base * turned.map_or(1., |at| 0.5 + at.clamp(0., 1.));
+        }
+        state.levels.get(reference).copied().unwrap_or(DEFAULT_LEVEL)
+    }
+
+    fn render_start(state: &mut State, params: &Value, epoch: &str, known: &dyn Fn(&str) -> bool) -> Answer {
+        if state.demo {
+            return Err((
+                "failed".into(),
+                "The Renoise demo can't render to a file, so Kumi can't hear the song: a licensed Renoise can".into(),
+            ));
+        }
+        if state.jobs.values().any(|job| !matches!(job.state, "done" | "failed" | "cancelled")) {
+            return Err(("busy".into(), format!("{} is rendering for Kumi; nothing changed", Self::app(state))));
+        }
+        let id = params["jobId"].as_str().ok_or_else(|| bad("jobId is missing"))?.to_string();
+        let range = &params["range"];
+        let (from, beats) = (range["fromBeat"].as_f64().unwrap_or(0.), range["beats"].as_f64().unwrap_or(0.));
+        let pre_roll = params["preRollBeats"].as_f64().unwrap_or(0.).min(from);
+        let seconds = (beats + pre_roll) * 60. / state.tempo;
+        let start = pre_roll * 60. / state.tempo;
+        let sources = params["sources"].as_array().cloned().unwrap_or_default();
+        let mut files = vec![];
+        let mut master = 0.;
+        for source in &sources {
+            let source_id = source["id"].as_str().unwrap_or_default().to_string();
+            let path = state.folder.join(format!("{id}-{source_id}.wav"));
+            if source["what"] == "master" {
+                if source["beforeChain"] == true && state.daw == Daw::Renoise {
+                    return Err(bad("Renoise renders the mix after its Master track's devices"));
+                }
+                files.push((source_id, path, start, seconds, -1., if source["beforeChain"] == true { "before-chain" } else { "master" }));
+                continue;
+            }
+            let reference = source["ref"].as_str().unwrap_or_default();
+            if !known(reference) && !state.scratch.values().flatten().any(|(copy, ..)| copy == reference) {
+                return Err(("gone".into(), format!("{reference} isn't in the project any more: read again")));
+            }
+            let level = Self::level(state, reference);
+            master += level;
+            let stage = match (state.daw, source["stage"].as_str()) {
+                (Daw::Renoise, _) => "post-fader",
+                (_, Some("post-fader")) => "post-fader",
+                (_, Some("items")) => "items",
+                _ => "pre-fader",
+            };
+            files.push((source_id, path, start, seconds, level, stage));
+        }
+        // The master is every track: the sources' levels, or the default's when none was asked.
+        let master = if master > 0. { master.min(0.9) } else { DEFAULT_LEVEL };
+        for file in files.iter_mut().filter(|file| file.4 < 0.) {
+            file.4 = master;
+        }
+        if let Some(free) = params.get("freeBytes").and_then(Value::as_u64) {
+            let needed = (seconds * RATE as f64 * 8. * files.len() as f64 * 1.5) as u64;
+            if needed > free {
+                return Err((
+                    "failed".into(),
+                    format!("Kumi's folder has {} MB free; this render needs about {} MB", free / 1_000_000, needed.div_ceil(1_000_000)),
+                ));
+            }
+        }
+        state.renders.push(params.clone());
+        let answer = json!({
+            "jobId": id,
+            "state": "running",
+            "seconds": seconds,
+            "files": files.iter().map(|(source, path, ..)| json!({"id": source, "file": path})).collect::<Vec<_>>(),
+            "epoch": epoch,
+        });
+        let error = state.fail_next.take();
+        state.jobs.insert(id, Job { kind: "render", state: "running", polls: 0, files, marks: None, error, notes: vec![] });
+        Ok(answer)
+    }
+
+    fn capture_start(state: &mut State, params: &Value) -> Answer {
+        if state.daw == Daw::Renoise {
+            return Err(("failed".into(), "Renoise's scripts can't hear what it plays".into()));
+        }
+        if !state.playing_now {
+            return Err(("failed".into(), "REAPER isn't playing: give from_beat and beats, and Kumi renders the part".into()));
+        }
+        let id = params["jobId"].as_str().ok_or_else(|| bad("jobId is missing"))?.to_string();
+        let seconds = params["seconds"].as_f64().unwrap_or(8.);
+        let path = state.folder.join(format!("{id}-master.wav"));
+        let answer = json!({"jobId": id, "state": "running", "seconds": seconds, "files": [{"id": "master", "file": path}]});
+        let marks = json!([[0, 10.0, 20.0, true]]);
+        let files = vec![("master".to_string(), path, 0., seconds, DEFAULT_LEVEL, "master")];
+        state.jobs.insert(id, Job { kind: "capture", state: "running", polls: 0, files, marks: Some(marks), error: None, notes: vec![] });
+        Ok(answer)
+    }
+
+    fn status(state: &mut State, params: &Value) -> Answer {
+        let id = params["jobId"].as_str().unwrap_or_default().to_string();
+        let (steps, daw) = (state.steps, state.daw);
+        let mut ended = false;
+        let mut failed = None;
+        {
+            let Some(job) = state.jobs.get_mut(&id) else { return Err(bad(format!("no job {id}"))) };
+            if job.state == "running" {
+                job.polls += 1;
+                if let Some((code, message)) = job.error.clone() {
+                    job.state = "failed";
+                    ended = true;
+                    failed = Some(json!({"jobId": id, "kind": job.kind, "state": "failed", "progress": 0, "error": message, "code": code}));
+                } else if job.polls > steps {
+                    for (n, (_, path, _, seconds, level, _)) in job.files.iter().enumerate() {
+                        if let Err(error) = write_noise(path, *seconds, *level, n as u32 + 7) {
+                            return Err(("failed".into(), format!("the sim couldn't write {}: {error}", path.display())));
+                        }
+                    }
+                    job.state = "done";
+                    ended = true;
+                }
+            }
+        }
+        if ended {
+            state.restored += 1;
+        }
+        if let Some(failed) = failed {
+            return Ok(failed);
+        }
+        let job = &state.jobs[&id];
+        let progress = if job.state == "done" { 1. } else { f64::from(job.polls) / f64::from(steps + 1) };
+        let mut answer = json!({"jobId": id, "kind": job.kind, "state": job.state, "progress": progress});
+        if job.state == "done" {
+            answer["files"] = job
+                .files
+                .iter()
+                .map(|(source, path, start, seconds, _, stage)| {
+                    let mut file = json!({"id": source, "file": path, "start": start, "seconds": seconds, "channels": 2, "sampleRate": RATE, "stage": stage, "throughMaster": daw == Daw::Renoise && *stage == "post-fader"});
+                    if job.kind == "capture" {
+                        file["partial"] = false.into();
+                    }
+                    file
+                })
+                .collect();
+            if let Some(marks) = &job.marks {
+                answer["marks"] = marks.clone();
+            }
+        }
+        if !job.notes.is_empty() {
+            answer["notes"] = json!(job.notes);
+        }
+        Ok(answer)
+    }
+
+    fn cancel(state: &mut State, params: &Value) -> Answer {
+        let id = params["jobId"].as_str().unwrap_or_default().to_string();
+        let mut stopped = false;
+        let now = {
+            let Some(job) = state.jobs.get_mut(&id) else { return Err(bad(format!("no job {id}"))) };
+            if job.state == "running" {
+                job.state = "cancelled";
+                for (_, path, ..) in &job.files {
+                    let _ = std::fs::remove_file(path);
+                }
+                stopped = true;
+            }
+            job.state
+        };
+        if stopped {
+            state.restored += 1;
+        }
+        Ok(json!({"jobId": id, "state": now}))
+    }
+
+    fn audition(state: &mut State, params: &Value) -> Answer {
+        if !state.audition_works {
+            return Err(("failed".into(), format!("{} can't play a file out loud", Self::app(state))));
+        }
+        let file = params["file"].as_str().unwrap_or_default();
+        let length = std::fs::metadata(file).map(|meta| (meta.len().saturating_sub(44)) as f64 / (RATE as f64 * 8.)).unwrap_or(0.);
+        let from = params["fromSeconds"].as_f64().unwrap_or(0.);
+        let seconds = params["seconds"].as_f64().unwrap_or(f64::INFINITY).min((length - from).max(0.));
+        let id = params["previewId"].as_str().unwrap_or_default().to_string();
+        state.previews.push(params.clone());
+        state.playing = Some(id.clone());
+        let via = if state.daw == Daw::Reaper { "preview" } else { "instrument" };
+        Ok(json!({"previewId": id, "playing": true, "seconds": seconds, "via": via}))
+    }
+
+    fn audio_file(state: &mut State, params: &Value, epoch: &str, known: &dyn Fn(&str) -> bool) -> Answer {
+        let reference = params["ref"].as_str().unwrap_or_default().to_string();
+        if state.silent_refs.contains(&reference) {
+            return Err(match state.daw {
+                Daw::Reaper => (
+                    "failed".into(),
+                    "That's a MIDI item, which has no sound of its own: listen to its track instead (Kumi renders it)".into(),
+                ),
+                Daw::Renoise => ("failed".into(), "That sample has no audio".into()),
+            });
+        }
+        let kind = reference.split(':').nth(1).unwrap_or_default();
+        match (state.daw, kind) {
+            (Daw::Reaper, "item" | "take") => {
+                let path = state.folder.join("media").join(format!("{}.wav", kind_file(&reference)));
+                write_noise(&path, 2., DEFAULT_LEVEL, 3).map_err(|error| ("failed".to_string(), error.to_string()))?;
+                Ok(json!({"file": path, "seconds": 2.0, "channels": 2, "sampleRate": RATE, "kind": "source", "name": "loop.wav"}))
+            }
+            (Daw::Renoise, "sample") => {
+                let id = params["jobId"].as_str().unwrap_or("j0");
+                let path = state.folder.join(format!("{id}-sample.wav"));
+                write_noise(&path, 1., DEFAULT_LEVEL, 5).map_err(|error| ("failed".to_string(), error.to_string()))?;
+                Ok(json!({"file": path, "seconds": 1.0, "channels": 2, "sampleRate": RATE, "kind": "exported", "name": "Kick"}))
+            }
+            (Daw::Renoise, "pattern" | "seq") => {
+                let render = json!({"jobId": params["jobId"], "sources": [{"id": "pattern", "what": "master"}], "range": {"fromBeat": 0, "beats": 16}, "preRollBeats": 0});
+                let mut answer = Self::render_start(state, &render, epoch, known)?;
+                answer["kind"] = "render".into();
+                Ok(answer)
+            }
+            _ => Err(bad(format!("{reference} has no audio of its own"))),
+        }
+    }
+
+    fn scratch(state: &mut State, params: &Value, epoch: &str, known: &dyn Fn(&str) -> bool) -> Answer {
+        let id = params["scratchId"].as_str().unwrap_or_default().to_string();
+        let steps = if state.daw == Daw::Renoise { 1 } else { 0 };
+        match params["action"].as_str() {
+            Some("make") => {
+                let source = params["ref"].as_str().unwrap_or_default().to_string();
+                if !known(&source) {
+                    return Err(("gone".into(), format!("{source} isn't in the project any more: read again")));
+                }
+                let count = params["count"].as_u64().unwrap_or(1);
+                let tag: String = id.chars().rev().take(4).collect();
+                let mut copies = vec![];
+                for n in 1..=count {
+                    state.next_copy += 1;
+                    let reference = match state.daw {
+                        Daw::Reaper => format!("r:track:{{C{:04}}}", state.next_copy),
+                        Daw::Renoise => format!("{epoch}:track:{}", 900 + state.next_copy),
+                    };
+                    copies.push((reference, format!("Kumi · try {tag} {n}"), source.clone(), vec![]));
+                }
+                let answer = json!({
+                    "scratchId": id,
+                    "copies": copies.iter().map(|(reference, name, ..)| json!({"ref": reference, "name": name})).collect::<Vec<_>>(),
+                    "epoch": epoch,
+                    "undo": {"steps": steps},
+                });
+                state.scratch.insert(id, copies);
+                Ok(answer)
+            }
+            Some("set") => {
+                let Some(copies) = state.scratch.get_mut(&id) else { return Err(bad(format!("no scratch copies {id}"))) };
+                let mut set = 0;
+                for value in params["values"].as_array().into_iter().flatten() {
+                    let reference = value["ref"].as_str().unwrap_or_default();
+                    let copy = copies
+                        .iter_mut()
+                        .find(|(copy, ..)| copy == reference)
+                        .ok_or_else(|| bad(format!("{reference} isn't one of {id}'s copies")))?;
+                    copy.3.push(value.clone());
+                    set += 1;
+                }
+                Ok(json!({"set": set, "undo": {"steps": steps}}))
+            }
+            Some("drop") => {
+                let dropped = state.scratch.remove(&id).map_or(0, |copies| copies.len());
+                Ok(json!({"dropped": dropped, "left": 0, "undo": {"steps": steps}}))
+            }
+            _ => Err(bad("action is make, set or drop")),
+        }
+    }
+}
+
+/// A file name from a ref's id.
+fn kind_file(reference: &str) -> String {
+    reference.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}

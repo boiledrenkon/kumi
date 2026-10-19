@@ -5,6 +5,7 @@ pub mod changes;
 pub mod client;
 pub mod flow;
 pub mod host;
+pub mod listening;
 pub mod mcp;
 pub mod simulator;
 pub mod stdio;
