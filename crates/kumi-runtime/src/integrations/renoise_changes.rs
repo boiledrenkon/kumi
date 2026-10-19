@@ -40,7 +40,7 @@ static ACTIONS: [OwnAction; 5] = [
     // M4 (n-song): a note auditioned, things selected or shown, the song saved.
     OwnAction {
         tool: "audition_note",
-        method: "audition",
+        method: "audition_note",
         description: "Play a note (or notes at once) on an instrument in Renoise, out loud, for durationMs (1000 by default), on trackRef (the selected track by default); sampleRef plays that sample alone; stop: true ends what is playing. Changes nothing in the song.",
         schema: r#"{"type":"object","additionalProperties":false,"properties":{"instrumentRef":{"type":"string","description":"The instrument"},"trackRef":{"type":"string","description":"The track to play on"},"note":{"type":["string","integer"],"description":"C-4, C#5, or 0 to 119 (48 is C-4)"},"notes":{"type":"array","items":{"type":["string","integer"]},"minItems":1,"maxItems":16},"volume":{"type":"number","minimum":0,"maximum":1},"durationMs":{"type":"number","minimum":1,"maximum":10000},"sampleRef":{"type":"string","description":"A sample of the instrument, to play it alone"},"stop":{"type":"boolean"}}}"#,
         core: false,
@@ -58,8 +58,8 @@ static ACTIONS: [OwnAction; 5] = [
     },
     OwnAction {
         tool: "save_song",
-        method: "song_save",
-        description: "Save the Renoise song to its own file; a song never saved needs path, a whole path to a .xrns file that isn't there yet.",
+        method: "project_save",
+        description: "Save the Renoise song to its own file, or as path (a whole path to a .xrns file that isn't there yet; the song is that file from then on); a song never saved needs path.",
         schema: r#"{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"}}}"#,
         core: false,
         playing: None,

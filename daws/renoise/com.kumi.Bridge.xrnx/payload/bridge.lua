@@ -848,7 +848,7 @@ function handlers.transport_play(params)
 end
 
 -- M4 (n-song): auditioning a note, selecting or showing, saving the song (actions.lua). None is an undo step or a change.
-function handlers.audition(params)
+function handlers.audition_note(params)
   return actions.audition(params, change_env())
 end
 
@@ -856,8 +856,8 @@ handlers.select = function(params)
   return actions.select(params, change_env())
 end
 
-function handlers.song_save(params)
-  return actions.save(params, change_env())
+function handlers.project_save(params)
+  return actions.project_save(params, change_env())
 end
 
 handlers["renoise.reload"] = function()
@@ -893,8 +893,8 @@ local function carried(params, carry)
 end
 
 local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true,
-  -- (M4 n-song: the actions that name tracks)
-  audition = true, select = true }
+  -- (M4 n-song: the actions that name tracks, and the save, whose epoch says which song)
+  audition_note = true, select = true, project_save = true }
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).

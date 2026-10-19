@@ -290,26 +290,13 @@ function M.select(params, env)
   }
 end
 
--- song_save {path?}: the song's own file; an unsaved song needs a path, of a .xrns that isn't there yet, in a folder that is.
+-- project_save {epoch?, version?, path?} (the host's neutral tool): the song to its own file; with `path`, saved as that file
+-- (Renoise's Save As: the song is that file from then on). An unsaved song needs `path`; `version` is REAPER's. A path is a whole
+-- path to a .xrns that isn't there yet (Renoise writes over another file with no prompt), in a folder that is and that Renoise can
+-- write in (it stops at a modal error otherwise): measured in 3.5.4.
 local function folder_of(path) return path:match("^(.*)[/\\][^/\\]+$") end
 
-function M.save(params, env)
-  local song = rows.the_song()
-  params = type(params) == "table" and params or {}
-  if song.rendering then fail("busy", "Renoise is rendering the song") end
-  local busy = env.busy()
-  if busy then fail("busy", busy .. "; nothing was saved") end
-  local own = song.file_name
-  local path = params.path
-  if path ~= nil and type(path) ~= "string" then bad("path: where to save an unsaved song (a .xrns file)") end
-  if own ~= "" then
-    if path ~= nil and path ~= own then
-      bad("the song is saved as " .. own .. ": Kumi saves only to its own file (saving it elsewhere is the producer's Save As)")
-    end
-    renoise.app():save_song()
-    return { epoch = env.epoch(), saved = own, display = { title = "Saved the song" } }
-  end
-  if path == nil then bad("the song has never been saved: give path, a .xrns file to save it as") end
+local function save_as(path)
   local absolute = path:match("^/") or path:match("^%a:[/\\]")
   if not absolute or not path:lower():match("%.xrns$") then bad("path is a whole path to a .xrns file") end
   local folder = folder_of(path)
@@ -325,7 +312,27 @@ function M.save(params, env)
     bad("Renoise can't write in " .. folder)
   end
   renoise.app():save_song_as(path)
-  return { epoch = env.epoch(), saved = path, display = { title = "Saved the song as " .. q(path:match("([^/\\]+)$")) } }
+end
+
+function M.project_save(params, env)
+  local song = rows.the_song()
+  params = type(params) == "table" and params or {}
+  if song.rendering then fail("busy", "Renoise is rendering the song") end
+  local busy = env.busy()
+  if busy then fail("busy", busy .. "; nothing was saved") end
+  epoch_check(params, env)
+  if params.version ~= nil then bad("version is REAPER's (a new version of the project): Renoise saves the song, or saves it as path") end
+  local own, path = song.file_name, params.path
+  if path ~= nil and (type(path) ~= "string" or path == "") then bad("path: a whole path to a .xrns file to save the song as") end
+  if path == nil or path == own then
+    if own == "" then bad("the song has never been saved: give path, a .xrns file to save it as") end
+    renoise.app():save_song()
+    return { epoch = env.epoch(), saved = own, display = { title = "Saved the song" } }
+  end
+  save_as(path)
+  local display = { title = "Saved the song as " .. q(path:match("([^/\\]+)$")) }
+  if own ~= "" then display.note = "The song is that file from now on (it was " .. own .. ")." end
+  return { epoch = env.epoch(), saved = path, display = display }
 end
 
 return M

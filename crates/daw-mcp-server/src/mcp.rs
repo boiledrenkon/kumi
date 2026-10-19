@@ -185,10 +185,11 @@ pub fn tools(host: &Host) -> Value {
         let hidden = json!({"type": "boolean", "description": "Also list data in the note and effect columns the track doesn't show, on every line (under `hidden`). Without it only a line with nothing in the shown columns is looked through."});
         list[2]["inputSchema"]["properties"]["hidden"] = hidden.clone();
         list[5]["inputSchema"]["properties"]["hidden"] = hidden;
-        // Renoise's actions (M4): a note auditioned, things selected or shown, the song saved. None is a change.
+        // Renoise's actions (M4): a note auditioned, things selected or shown. None is a change. (Saving is the neutral
+        // project_save, listed for both DAWs.)
         let actions = json!([
             {
-                "name": "audition",
+                "name": "audition_note",
                 "title": "Audition a note in Renoise",
                 "description": "Plays a note (or notes, at once) on an instrument, out loud, for durationMs, on track (the selected one by default); sample plays that sample alone. stop: true ends what is playing.",
                 "inputSchema": {"type": "object", "properties": merged(&pick, json!({
@@ -223,15 +224,6 @@ pub fn tools(host: &Host) -> Value {
                     "matrix": {"type": "boolean"},
                     "epoch": {"type": "string"},
                     "layout": {"type": "integer", "minimum": 0},
-                })), "additionalProperties": false},
-                "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
-            },
-            {
-                "name": "song_save",
-                "title": "Save the Renoise song",
-                "description": "Saves the song to its own file; a song never saved needs path, a .xrns file that isn't there yet, in a folder that is.",
-                "inputSchema": {"type": "object", "properties": merged(&pick, json!({
-                    "path": {"type": "string"},
                 })), "additionalProperties": false},
                 "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
             },
@@ -331,9 +323,9 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                     result(id, tool_result(answer, is_error))
                 }
                 "change_preview" | "change_apply" | "change_undo" | "change_release" | "transport_stop" | "transport_play"
-                | "cursor_set" | "undo_step_begin" | "undo_step_end" | "audition" | "select" | "song_save" => {
+                | "cursor_set" | "undo_step_begin" | "undo_step_end" | "audition_note" | "select" | "project_save" => {
                     let (answer, is_error) = match name {
-                        "audition" | "select" | "song_save" => host.action(name, &arguments).await,
+                        "audition_note" | "select" | "project_save" => host.action(name, &arguments).await,
                         "change_preview" => host.change_preview(&arguments).await,
                         "change_apply" => host.change_apply(&arguments).await,
                         "change_undo" => host.change_undo(&arguments).await,

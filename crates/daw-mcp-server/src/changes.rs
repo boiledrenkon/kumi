@@ -734,10 +734,11 @@ impl crate::host::Host {
         }
     }
 
-    /// `audition` / `select` / `song_save` (Renoise, M4): a note played out loud for a while, things selected or shown, the song
-    /// saved to its own file. None is a change: the bridge answers what it did.
+    /// `audition_note` / `select` (Renoise, M4): a note played out loud for a while, things selected or shown; `project_save`
+    /// (either DAW): the project saved. None is a change: the bridge answers what it did. Each method forwards only its own
+    /// fields.
     pub async fn action(&self, method: &str, arguments: &Value) -> (Value, bool) {
-        if self.daw() != daw_bridge::Daw::Renoise {
+        if method != "project_save" && self.daw() != daw_bridge::Daw::Renoise {
             return (json!({"error": format!("{method} is Renoise's"), "code": "bad-params"}), true);
         }
         let pick = match crate::host::Pick::from_arguments(arguments) {
@@ -746,7 +747,7 @@ impl crate::host::Host {
         };
         let fields: &[&str] = match method {
             // (Kumi names refs as …Ref: both are passed as they come)
-            "audition" => &[
+            "audition_note" => &[
                 "instrument",
                 "instrumentRef",
                 "track",
@@ -783,7 +784,8 @@ impl crate::host::Host {
                 "epoch",
                 "layout",
             ],
-            _ => &["path"],
+            "project_save" => &["epoch", "version", "path"],
+            _ => &[],
         };
         let mut params = json!({});
         for field in fields {

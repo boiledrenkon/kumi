@@ -15,7 +15,7 @@ end
 test("actions: a note auditioned plays out loud and is ended after its time; a chord, a sample, and stop", function()
   local _, peer = K.setup(nil, { instruments = 2, instrument_specs = { { name = "Piano" }, { name = "Kit", samples = 2 } } })
   local E = K.place(peer)
-  local answer = K.call(peer, "audition", { instrument = K.ref(E, "instrument", 1), track = K.ref(E, "track", 3), note = "E-4", durationMs = 300, epoch = E })
+  local answer = K.call(peer, "audition_note", { instrument = K.ref(E, "instrument", 1), track = K.ref(E, "track", 3), note = "E-4", durationMs = 300, epoch = E })
   ok(answer.result, T.load_payload_module("json").encode(answer.error or {}))
   eq(answer.result.display.title, "Auditioning E-4 on \226\128\156Piano\226\128\157 (\226\128\156Bass\226\128\157, 300 ms)")
   eq(answer.result.auditioning.notes[1], "E-4")
@@ -24,16 +24,16 @@ test("actions: a note auditioned plays out loud and is ended after its time; a c
   mock.advance(400)
   H.tick(2)
   eq(triggers(), "on 1 3 52 | off 1 3 52", "ended after its time")
-  local chord = K.call(peer, "audition", { instrument = K.ref(E, "instrument", 1), notes = { "C-4", 52, "G-4" }, volume = 0.5 }).result
+  local chord = K.call(peer, "audition_note", { instrument = K.ref(E, "instrument", 1), notes = { "C-4", 52, "G-4" }, volume = 0.5 }).result
   eq(chord.auditioning.trackRef, K.ref(E, "track", 1), "the selected track by default")
   eq(mock.triggers[#mock.triggers][4], "48,52,55")
   -- a new audition on the same instrument and track ends the one playing first
-  K.call(peer, "audition", { instrument = K.ref(E, "instrument", 1), note = 60 })
+  K.call(peer, "audition_note", { instrument = K.ref(E, "instrument", 1), note = 60 })
   eq(mock.triggers[#mock.triggers - 1][1], "off")
-  local sample = K.call(peer, "audition", { instrument = K.ref(E, "instrument", 2), sample = K.ref(E, "sample", 2, 2), note = "C-5" }).result
+  local sample = K.call(peer, "audition_note", { instrument = K.ref(E, "instrument", 2), sample = K.ref(E, "sample", 2, 2), note = "C-5" }).result
   eq(sample.auditioning.sampleRef, K.ref(E, "sample", 2, 2))
   eq(mock.triggers[#mock.triggers][1], "sample on")
-  local stopped = K.call(peer, "audition", { stop = true }).result
+  local stopped = K.call(peer, "audition_note", { stop = true }).result
   eq(stopped.stopped, 2)
   eq(mock.triggers[#mock.triggers][1], "sample off")
   H.no_dialogs()
@@ -42,7 +42,7 @@ end)
 test("actions: an audition asks nothing Renoise can't play, and waits for nothing while Renoise is busy", function()
   local _, peer = K.setup()
   local E = K.place(peer)
-  local function refused(params, code) K.failure(K.call(peer, "audition", params), code) end
+  local function refused(params, code) K.failure(K.call(peer, "audition_note", params), code) end
   refused({ instrument = K.ref(E, "instrument", 1), note = "H-4" }, "bad-params")
   refused({ instrument = K.ref(E, "instrument", 1), note = 120 }, "bad-params")
   refused({ instrument = K.ref(E, "instrument", 1), durationMs = 20000 }, "bad-params")
@@ -88,31 +88,40 @@ test("actions: select shows a track, its device, an instrument, a slot that play
   H.no_dialogs()
 end)
 
-test("actions: save writes the song's own file; an unsaved song needs a new .xrns in a folder that is there", function()
+test("actions: project_save writes the song's own file, or saves it as a new .xrns; an unsaved song needs the path", function()
   local env, peer = K.setup()
-  local own = mock.data.song_fields.file_name
   local dir = T.temp_dir("save")
   mock.data.song_fields.file_name = dir .. "/mine.xrns"
-  local saved = K.call(peer, "song_save", {}).result
+  local saved = K.call(peer, "project_save", {}).result
   eq(saved.saved, dir .. "/mine.xrns")
   eq(saved.display.title, "Saved the song")
   eq(mock.saves[#mock.saves], dir .. "/mine.xrns")
-  K.failure(K.call(peer, "song_save", { path = dir .. "/other.xrns" }), "bad-params")
+  local same = K.call(peer, "project_save", { path = dir .. "/mine.xrns" }).result
+  eq(same.display.title, "Saved the song", "its own path is a plain save")
+  K.failure(K.call(peer, "project_save", { version = true }), "bad-params")
+  -- saved as another file: the song is that file from then on
+  local other = K.call(peer, "project_save", { path = dir .. "/other.xrns" }).result
+  eq(other.saved, dir .. "/other.xrns")
+  eq(other.display.note, "The song is that file from now on (it was " .. dir .. "/mine.xrns).")
+  eq(mock.data.song_fields.file_name, dir .. "/other.xrns")
   -- an unsaved song
   mock.data.song_fields.file_name = ""
-  K.failure(K.call(peer, "song_save", {}), "bad-params")
-  K.failure(K.call(peer, "song_save", { path = "relative.xrns" }), "bad-params")
-  K.failure(K.call(peer, "song_save", { path = dir .. "/song.txt" }), "bad-params")
-  K.failure(K.call(peer, "song_save", { path = dir .. "/nowhere/song.xrns" }), "bad-params")
-  K.failure(K.call(peer, "song_save", { path = dir .. "/mine.xrns" }), "bad-params") -- there already
-  local new = K.call(peer, "song_save", { path = dir .. "/new.xrns" }).result
+  K.failure(K.call(peer, "project_save", {}), "bad-params")
+  K.failure(K.call(peer, "project_save", { path = "relative.xrns" }), "bad-params")
+  K.failure(K.call(peer, "project_save", { path = dir .. "/song.txt" }), "bad-params")
+  K.failure(K.call(peer, "project_save", { path = dir .. "/nowhere/song.xrns" }), "bad-params")
+  K.failure(K.call(peer, "project_save", { path = dir .. "/mine.xrns" }), "bad-params") -- there already: never written over
+  local new = K.call(peer, "project_save", { path = dir .. "/new.xrns" }).result
   eq(new.saved, dir .. "/new.xrns")
   eq(new.display.title, "Saved the song as \226\128\156new.xrns\226\128\157")
   eq(mock.data.song_fields.file_name, dir .. "/new.xrns")
+  -- another song open since the request's epoch: stale, nothing saved
+  local saves = #mock.saves
+  K.failure(K.call(peer, "project_save", { epoch = "0" }), "stale")
+  eq(#mock.saves, saves)
   mock.data.song_fields.rendering = true
-  K.failure(K.call(peer, "song_save", {}), "busy")
+  K.failure(K.call(peer, "project_save", {}), "busy")
   mock.data.song_fields.rendering = false
-  ok(own ~= nil)
   H.no_dialogs()
 end)
 
@@ -124,7 +133,7 @@ test("actions: the bridge says it has the actions", function()
   local status = H.request(peer, "status", {})
   ok(status.ok)
   local methods = table.concat(T.load_payload_module("status").METHODS, ",")
-  ok(methods:find("audition,select,song_save", 1, true), methods)
+  ok(methods:find("audition_note,select,project_save", 1, true), methods)
   H.no_dialogs()
 end)
 
@@ -132,7 +141,7 @@ test("actions: refs come as Kumi names them (instrumentRef, trackRef, sequenceRe
   local _, peer = K.setup()
   local E, layout = K.place(peer)
   mock.ops.insert_track(1, { name = "Intro" }) -- Bass is the fourth now
-  local answer = K.call(peer, "audition", { instrumentRef = K.ref(E, "instrument", 1), trackRef = K.ref(E, "track", 3), note = "C-4", epoch = E, layout = layout })
+  local answer = K.call(peer, "audition_note", { instrumentRef = K.ref(E, "instrument", 1), trackRef = K.ref(E, "track", 3), note = "C-4", epoch = E, layout = layout })
   ok(answer.result, T.load_payload_module("json").encode(answer.error or {}))
   eq(mock.triggers[#mock.triggers][3], 4, "Bass, where it went")
   local selected = K.call(peer, "select", { trackRef = K.ref(E, "track", 3), sequenceRef = K.ref(E, "seq", 2), epoch = E, layout = layout }).result
