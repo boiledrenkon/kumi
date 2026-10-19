@@ -11,6 +11,9 @@ import("changes_layout")
 import("changes_slots")
 import("changes_lua")
 import("changes_instruments")
+-- M4 (n-song)
+import("changes_patterns")
+local sequence_ = import("changes_sequence")
 
 local M = {}
 
@@ -141,6 +144,10 @@ end
 
 -- The restores that carry their params by hand, by kind.
 M.carry_for = { ["track-delete"] = M.carry_restore, ["slot-delete"] = M.carry_slot_restore }
+
+-- M4 (n-song): the kinds whose records find their slots by the sequence they left: a restore of theirs needs no slot ref, and one
+-- gone stale with a sequence change since must not make the request stale (bridge.lua drops them).
+M.sequence_kinds = sequence_.KINDS
 
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active

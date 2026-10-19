@@ -293,11 +293,15 @@ local function matrix_body(job, params, epoch)
     local sequencer = live.sequencer
     local pattern_at = sequencer:pattern(s)
     local pattern = live:pattern(pattern_at)
-    local aliases, muted = {}, {}
+    local aliases, muted, colors = {}, {}, {}
     for t = 1, tracks do
-      local alias = pattern:track(t).alias_pattern_index
+      local pattern_track = pattern:track(t)
+      local alias = pattern_track.alias_pattern_index
       if alias > 0 then aliases[tostring(t)] = alias end
       if sequencer:track_sequence_slot_is_muted(t, s) then muted[#muted + 1] = t end
+      -- M4 (n-song): the slot's colours (its pattern's tracks')
+      local color = pattern_track.color
+      if color then colors[tostring(t)] = hex(color) end
     end
     list[s] = {
       ref = refs.make(epoch, "seq", s),
@@ -307,6 +311,7 @@ local function matrix_body(job, params, epoch)
       aliases = next(aliases) and aliases or json.object(),
       mutedTracks = array(muted),
     }
+    if next(colors) then list[s].colors = colors end
   end
   local live = the_song()
   local transport = live.transport

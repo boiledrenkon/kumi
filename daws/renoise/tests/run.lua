@@ -78,7 +78,7 @@ T.mock = assert(loadfile(tests_dir .. "mock_renoise.lua"))(tests_dir)
 
 for _, file in ipairs({ "test_json.lua", "test_sha256.lua", "test_wire.lua", "test_vectors.lua", "test_mock.lua", "test_bridge.lua", "test_reads.lua", "test_retire.lua", "test_changes.lua", "test_review.lua",
   -- M4 (n-song)
-  "test_song.lua", "test_track_settings.lua" }) do
+  "test_song.lua", "test_track_settings.lua", "test_patterns.lua", "test_sequence.lua" }) do
   local chunk = loadfile(tests_dir .. file)
   if chunk then chunk(T) end
 end

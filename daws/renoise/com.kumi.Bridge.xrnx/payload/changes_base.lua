@@ -534,6 +534,21 @@ function M.journal_sequence_event(journal, undoing)
   for i = #journal.entries, 1, -1 do
     local entry = journal.entries[i]
     if entry.place and entry.place.seq and (entry.follows ~= "slots" or not undoing) then table.remove(journal.entries, i) end
+    -- (M4 n-song: a change told by the whole sequence holds only while nothing but Renoise's undo and redo changes it)
+    if entry.follows == "sequence" and not undoing then table.remove(journal.entries, i) end
+  end
+end
+
+-- M4 (n-song): the pattern numbers of a sequence a change keeps, moved with a pattern made or deleted in the pool: a pattern
+-- deleted is kept as its place, negative (Renoise's redo makes it again there), so the sequence it was in matches nothing now.
+local function shift_sequence(list, type_, index)
+  if type(list) ~= "table" then return end
+  for k, p in ipairs(list) do
+    if type_ == "insert" then
+      if p == -index then list[k] = index elseif p > 0 and p >= index then list[k] = p + 1 elseif p < 0 and -p > index then list[k] = p - 1 end
+    elseif type_ == "remove" then
+      if p == index then list[k] = -index elseif p > index then list[k] = p - 1 elseif p < 0 and -p > index then list[k] = p + 1 end
+    end
   end
 end
 
@@ -541,7 +556,10 @@ end
 function M.journal_pattern_event(journal, type_, index)
   for i = #journal.entries, 1, -1 do
     local place = journal.entries[i].place
-    if journal.entries[i].uses_patterns then
+    if journal.entries[i].follows == "sequence" then
+      shift_sequence(journal.entries[i].prior and journal.entries[i].prior.sequence, type_, index)
+      shift_sequence(journal.entries[i].applied and journal.entries[i].applied.sequence, type_, index)
+    elseif journal.entries[i].uses_patterns then
       table.remove(journal.entries, i) -- (it holds pattern numbers, which the pool's change moved)
     elseif place and place.pattern then
       if type_ == "insert" then
@@ -583,10 +601,26 @@ end
 function M.journal_check(journal)
   local song = renoise.song()
   if not song then return end
+  local sequence
   for _, entry in ipairs(journal.entries) do
     local spec = entry.spec
     if entry.follows == "slots" then
       -- (decided below, over all of them)
+    elseif entry.follows == "sequence" then
+      -- (M4 n-song: the whole sequence is the one before Kumi's change, or the one it left)
+      if not sequence then
+        sequence = {}
+        for k, p in ipairs(song.sequencer.pattern_sequence) do sequence[k] = p end
+      end
+      local same = M.same_value
+      if entry.state == "applied" and same(sequence, entry.prior.sequence) and not same(sequence, entry.applied.sequence) then
+        entry.state = "undone"
+        stamp(journal, entry)
+        queue(journal, entry.desc, "undo")
+      elseif entry.state == "undone" and same(sequence, entry.applied.sequence) and redoable(journal, entry) then
+        entry.state = "applied"
+        queue(journal, entry.desc, "redo")
+      end
     elseif entry.follows then
       -- (a device or track moved: its place is followed through the swaps, and is where it started or where Kumi put it)
       local now = entry.place[entry.follows]

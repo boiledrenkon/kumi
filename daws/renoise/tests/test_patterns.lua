@@ -1,0 +1,162 @@
+-- M4 (n-song): Kumi's changes to a pattern (its name and length) and to a pattern's track (its slot colour): preview, apply,
+-- restore, what the producer did in between, the places a record keeps.
+local T = ...
+local mock = T.mock
+local test, eq, ok = T.test, T.eq, T.ok
+local H = T.harness
+local K = assert(loadfile(T.tests_dir .. "change_kit.lua"))(T)
+
+local function pattern(p) return mock.data.patterns[p] end
+local function note_at(p, t, l)
+  local column = mock.song:pattern(p):track(t):line(l):note_column(1)
+  return column.note_string
+end
+
+test("patterns: a pattern renamed by its ref or by a slot that plays it, and put back", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  local record = K.change(peer, "pattern-name", { ref = K.ref(E, "seq", 2), name = "Verse" }, "Kumi: name (kp01)")
+  eq(record.result.display.title, "Named the pattern \226\128\156Verse\226\128\157")
+  eq(record.target.ref, K.ref(E, "pattern", 2))
+  eq(pattern(2).name, "Verse")
+  eq(K.steps(), 1)
+  local again = K.change(peer, "pattern-name", { ref = K.ref(E, "pattern", 2), name = "Chorus" })
+  eq(again.result.display.title, "Renamed pattern \226\128\156Verse\226\128\157 \226\134\146 \226\128\156Chorus\226\128\157")
+  ok(K.restore(peer, again).result)
+  ok(K.restore(peer, record).result)
+  eq(pattern(2).name, "")
+  -- the producer renames it in between: refused, and discard puts it back anyway
+  local third = K.change(peer, "pattern-name", { ref = K.ref(E, "pattern", 1), name = "Intro" })
+  pattern(1).name = "Mine"
+  K.failure(K.restore(peer, third), "changed")
+  eq(pattern(1).name, "Mine")
+  ok(K.restore(peer, third, nil, { discard = true }).result)
+  eq(pattern(1).name, "")
+  H.no_dialogs()
+end)
+
+test("patterns: a pattern made or deleted since makes a pattern's record stale, and nothing is written", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  local name = K.change(peer, "pattern-name", { ref = K.ref(E, "pattern", 3), name = "Outro" })
+  local length = K.change(peer, "pattern-length", { ref = K.ref(E, "pattern", 3), lines = 16 })
+  mock.ops.insert_pattern()
+  K.failure(K.restore(peer, name), "stale")
+  K.failure(K.restore(peer, length), "stale")
+  eq(pattern(3).name, "Outro")
+  eq(pattern(3).lines, 16)
+  H.no_dialogs()
+end)
+
+test("patterns: a slot colour set and cleared on a pattern's track, each a step, and Renoise's undo of it told", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  local record = K.change(peer, "slot-color", { ref = K.ref(E, "seq", 1), track = K.ref(E, "track", 2), color = "#FF8000" }, "Kumi: colour (kc01)")
+  eq(record.result.display.title, "Slot colour of \226\128\156Pattern 00\226\128\157 on \226\128\156Hat\226\128\157 #ff8000")
+  eq(record.target.ref, K.ref(E, "ptrack", 1, 2))
+  eq(pattern(1).tracks[2].color[1], 255)
+  eq(K.newest(), "Kumi: colour (kc01)")
+  local cleared = K.change(peer, "slot-color", { ref = K.ref(E, "ptrack", 1, 2), color = T.load_payload_module("json").null }, "Kumi: clear (kc02)")
+  eq(cleared.result.display.title, "Slot colour of \226\128\156Pattern 00\226\128\157 on \226\128\156Hat\226\128\157 cleared")
+  eq(pattern(1).tracks[2].color, nil)
+  K.told(peer)
+  mock.song:undo()
+  eq(K.told(peer), "undo:Kumi: clear (kc02)")
+  eq(pattern(1).tracks[2].color[2], 128)
+  -- Kumi's undo of the first: the colour goes
+  ok(K.restore(peer, record).result)
+  eq(pattern(1).tracks[2].color, nil)
+  K.failure(K.ask(peer, "change_preview", "slot-color", { ref = K.ref(E, "pattern", 1), track = K.ref(E, "track", 2), color = "orange" }), "bad-params")
+  H.no_dialogs()
+end)
+
+test("patterns: a slot colour's record follows its track through a track made before it, and is gone with the track", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  local record = K.change(peer, "slot-color", { ref = K.ref(E, "pattern", 2), track = K.ref(E, "track", 3), color = "#112233" })
+  local other = K.change(peer, "slot-color", { ref = K.ref(E, "pattern", 2), track = K.ref(E, "track", 4), color = "#445566" })
+  mock.ops.insert_track(1, { name = "Intro" })
+  ok(K.restore(peer, record).result, "followed")
+  eq(mock.data.tracks[4].name, "Bass")
+  eq(pattern(2).tracks[4].color, nil)
+  mock.ops.remove_track(5) -- Pad
+  K.failure(K.restore(peer, other), "gone")
+  H.no_dialogs()
+end)
+
+test("patterns: a shorter pattern keeps its lines hidden, and Kumi's undo shows them again", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  mock.ops.set_note(1, 1, 30, 1, { note = 48 })
+  local record = K.change(peer, "pattern-length", { ref = K.ref(E, "pattern", 1), lines = 16 }, "Kumi: length (kl01)")
+  eq(record.result.display.title, "Pattern 00 16 lines")
+  eq(record.result.display.note, "Lines 17 to 32 are kept, hidden: making it longer again shows them.")
+  eq(pattern(1).lines, 16)
+  eq(K.steps(), 1)
+  ok(K.restore(peer, record).result)
+  eq(pattern(1).lines, 32)
+  eq(note_at(1, 1, 30), "C-4", "the hidden line is back in sight")
+  local again = K.restore(peer, record)
+  eq(again.result.display.note, "It was back already: nothing was written.")
+  H.no_dialogs()
+end)
+
+test("patterns: Kumi's undo of a longer pattern is refused once the producer wrote in the lines it showed", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  local record = K.change(peer, "pattern-length", { ref = K.ref(E, "pattern", 2), lines = 48 })
+  eq(pattern(2).lines, 48)
+  mock.ops.set_note(2, 3, 40, 1, { note = 60 }) -- the producer, in a line the change showed
+  local message = K.failure(K.restore(peer, record), "changed")
+  ok(message:find("lines 33 to 48", 1, true), message)
+  eq(pattern(2).lines, 48, "left as it is")
+  ok(K.restore(peer, record, nil, { discard = true }).result, "discard hides them")
+  eq(pattern(2).lines, 32)
+  eq(note_at(2, 3, 40), "C-5", "hidden, not deleted")
+  -- a lengthening that shows what was kept says so
+  local shown = K.preview(peer, "pattern-length", { ref = K.ref(E, "pattern", 2), lines = 64 })
+  eq(shown.display.note, "Lines 33 to 64 hold what was kept there, hidden: it shows again.")
+  H.no_dialogs()
+end)
+
+test("patterns: a length changed in Renoise since refuses the undo; the apply is fenced by the lines it would show or hide", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  local record = K.change(peer, "pattern-length", { ref = K.ref(E, "pattern", 3), lines = 8 })
+  pattern(3).lines = 12
+  K.failure(K.restore(peer, record), "changed")
+  eq(pattern(3).lines, 12)
+  -- the fence: a hidden line changed between the preview and the apply of a lengthening
+  local previewed, epoch, layout = K.preview(peer, "pattern-length", { ref = K.ref(E, "pattern", 3), lines = 32 })
+  mock.ops.set_note(3, 1, 20, 1, { note = 50 })
+  local refused = K.apply(peer, "pattern-length", { ref = K.ref(E, "pattern", 3), lines = 32 }, "Kumi: l (kl09)", previewed.fence, epoch, layout)
+  K.failure(refused, "changed")
+  eq(pattern(3).lines, 12, "nothing written")
+  H.no_dialogs()
+end)
+
+test("patterns: bad lengths and names are bad-params", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  local function bad(kind, input) K.failure(K.ask(peer, "change_preview", kind, input), "bad-params") end
+  bad("pattern-length", { ref = K.ref(E, "pattern", 1), lines = 0 })
+  bad("pattern-length", { ref = K.ref(E, "pattern", 1), lines = 513 })
+  bad("pattern-length", { ref = K.ref(E, "pattern", 1), lines = 2.5 })
+  bad("pattern-name", { ref = K.ref(E, "pattern", 1), name = "a\nb" })
+  bad("pattern-name", { ref = K.ref(E, "track", 1), name = "x" })
+  H.no_dialogs()
+end)
+
+test("patterns: the pattern rows and the matrix show slot colours", function()
+  local _, peer = K.setup()
+  local E = K.place(peer)
+  mock.song:pattern(1):track(2).color = { 255, 0, 0 }
+  local rows = K.call(peer, "read", { kind = "pattern" }).result.items
+  eq(rows[1].colors["2"], "#ff0000")
+  eq(rows[2].colors, nil)
+  local matrix = K.call(peer, "focus_body", { kind = "matrix" }).result
+  eq(matrix.slots[1].colors["2"], "#ff0000")
+  eq(matrix.slots[3].colors["2"], "#ff0000", "every slot that plays the pattern")
+  eq(matrix.slots[2].colors, nil)
+  H.no_dialogs()
+end)

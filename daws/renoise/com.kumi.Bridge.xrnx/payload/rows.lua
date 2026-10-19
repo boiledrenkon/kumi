@@ -246,17 +246,23 @@ end
 
 local function pattern_row(song, epoch, p, tracks)
   local pattern = song:pattern(p)
-  local aliases = {}
+  local aliases, colors = {}, {}
   for t = 1, tracks do
-    local alias = pattern:track(t).alias_pattern_index
+    local pattern_track = pattern:track(t)
+    local alias = pattern_track.alias_pattern_index
     if alias > 0 then aliases[tostring(t)] = alias end
+    -- M4 (n-song): the slot colours of the pattern's tracks in the matrix
+    local color = pattern_track.color
+    if color then colors[tostring(t)] = hex(color) end
   end
-  return {
+  local row = {
     ref = refs.make(epoch, "pattern", p),
     name = pattern.name,
     lines = pattern.number_of_lines,
     aliases = next(aliases) and aliases or json.object(),
   }
+  if next(colors) then row.colors = colors end
+  return row
 end
 
 local function macros_of(instrument)

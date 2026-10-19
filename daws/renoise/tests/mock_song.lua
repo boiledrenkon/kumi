@@ -742,11 +742,16 @@ function M.make_song(options)
     pattern.tracks[t] = pattern.tracks[t] or { alias = 0, lines = {} }
     local data = pattern.tracks[t]
     data.alias_observable = data.alias_observable or M.observable()
+    -- M4 (n-song): the slot colour and the list of automation have observables of their own
+    data.color_observable = data.color_observable or M.observable()
+    data.automation_observable = data.automation_observable or M.observable()
     return object("renoise.PatternTrack", {
       alias_pattern_index_observable = data.alias_observable,
-      -- an alias shows (and writes to) the lines of the pattern it is an alias of
+      color_observable = data.color_observable, automation_observable = data.automation_observable,
+      -- an alias shows (and writes to) the lines of the pattern it is an alias of; lines past the pattern's end are kept
+      -- (measured, 3.5.4) and reached up to the most a pattern has
       line = function(_, k)
-        if type(k) ~= "number" or k < 1 or k > pattern.lines then out_of_range("line", k) end
+        if type(k) ~= "number" or k < 1 or k > 512 then out_of_range("line", k) end
         M.lines_read = (M.lines_read or 0) + 1
         local source_pattern = data.alias > 0 and d.patterns[data.alias] or pattern
         local source = data.alias > 0 and d.patterns[data.alias] and d.patterns[data.alias].tracks[t] or data
@@ -778,11 +783,48 @@ function M.make_song(options)
       create_automation = function(_, parameter)
         local identity = M.impl(parameter).__data
         data.automation = data.automation or {}
+        for _, automation in ipairs(data.automation) do
+          if automation.parameter == identity then error("std::logic_error: 'an automation for this parameter already exists'", 2) end
+        end
         local made = { parameter = identity, playmode = 2, points = {} }
         data.automation[#data.automation + 1] = made
+        M.fire(data.automation_observable, { type = "insert", index = #data.automation })
+        M.record(function()
+          for k, automation in ipairs(data.automation) do
+            if automation == made then table.remove(data.automation, k) M.fire(data.automation_observable, { type = "remove", index = k }) break end
+          end
+        end, function()
+          data.automation[#data.automation + 1] = made
+          M.fire(data.automation_observable, { type = "insert", index = #data.automation })
+        end)
         return M.api.automation_object(made)
       end,
+      delete_automation = function(_, parameter)
+        local identity = M.impl(parameter).__data
+        for k, automation in ipairs(data.automation or {}) do
+          if automation.parameter == identity then
+            table.remove(data.automation, k)
+            M.fire(data.automation_observable, { type = "remove", index = k })
+            M.record(function()
+              table.insert(data.automation, math.min(k, #data.automation + 1), automation)
+              M.fire(data.automation_observable, { type = "insert", index = k })
+            end, function()
+              for j, other in ipairs(data.automation) do
+                if other == automation then table.remove(data.automation, j) M.fire(data.automation_observable, { type = "remove", index = j }) break end
+              end
+            end)
+            return
+          end
+        end
+        error("std::logic_error: 'no automation for this parameter'", 2)
+      end,
     }, {
+      color = function() return data.color and { data.color[1], data.color[2], data.color[3] } or nil end,
+      automation = function()
+        local list = {}
+        for k, automation in ipairs(data.automation or {}) do list[k] = M.api.automation_object(automation) end
+        return list
+      end,
       alias_pattern_index = function() return data.alias end,
       is_alias = function() return data.alias > 0 end,
       is_empty = function()
@@ -792,6 +834,15 @@ function M.make_song(options)
         return true
       end,
     }, {
+      color = function(value)
+        if value ~= nil and (type(value) ~= "table" or #value ~= 3) then
+          error("std::logic_error: 'expected a table with 3 numbers (rgb) as track slot color argument.'", 2)
+        end
+        local old, new = data.color, value and { value[1], value[2], value[3] } or nil
+        data.color = new
+        M.fire(data.color_observable)
+        M.record(function() data.color = old; M.fire(data.color_observable) end, function() data.color = new; M.fire(data.color_observable) end)
+      end,
       alias_pattern_index = function(value)
         local old = data.alias
         if old == value then return end
@@ -818,6 +869,22 @@ function M.make_song(options)
         end
         M.notifier_adds = (M.notifier_adds or 0) + 1
         pattern.notifiers[#pattern.notifiers + 1] = fn
+      end,
+      -- (M4 n-song) every track's lines, automation and alias go; its line notifiers fire for the lines that had something
+      clear = function()
+        local old = pattern.tracks
+        local cleared = {}
+        for t, data in pairs(old) do
+          cleared[t] = { alias = 0, lines = {}, color = data.color, alias_observable = data.alias_observable,
+            color_observable = data.color_observable, automation_observable = data.automation_observable }
+        end
+        pattern.tracks = cleared
+        for t, data in pairs(old) do
+          for k in pairs(data.lines or {}) do
+            for _, fn in ipairs(list(pattern.notifiers)) do pcall(fn, { pattern = p, track = t, line = k }) end
+          end
+        end
+        M.record(function() pattern.tracks = old end, function() pattern.tracks = cleared end)
       end,
       remove_line_notifier = function(_, fn)
         for i, existing in ipairs(pattern.notifiers) do
@@ -1116,6 +1183,86 @@ function M.make_song(options)
       if not d.sequence[s] or not d.tracks[t] then out_of_range("slot", t .. "," .. s) end
       return d.muted[t .. "," .. s] == true
     end,
+    -- M4 (n-song): measured in 3.5.4: clone_range puts copies of slots a..b after b, each with a new pattern (a copy named "#"
+    -- and the name, at the pool's end), the slots' mutes and section starts copied (a section's name with "#" in front);
+    -- make_range_unique gives each slot in the range whose pattern another slot plays a copy of it.
+    clone_range = function(_, a, b)
+      if type(a) ~= "number" or not d.sequence[a] then out_of_range("from_sequence_pos", a) end
+      if type(b) ~= "number" or not d.sequence[b] or b < a then out_of_range("to_sequence_pos", b) end
+      local made, slots = {}, {}
+      for i = a, b do
+        local copy = d.copy_pattern(d.sequence[i])
+        d.patterns[#d.patterns + 1] = copy
+        M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+        made[#made + 1] = copy
+        local section = d.sections[i]
+        local mutes = {}
+        for key in pairs(d.muted) do
+          local t, slot = key:match("^(%d+),(%d+)$")
+          if tonumber(slot) == i then mutes[#mutes + 1] = tonumber(t) end
+        end
+        slots[#slots + 1] = { pattern = #d.patterns, section = section and ("#" .. section) or nil, mutes = mutes }
+      end
+      local function put()
+        for k, slot in ipairs(slots) do
+          local at = b + k
+          d.insert_slot(at, slot.pattern)
+          d.sections[at], d.section_names[at] = slot.section, nil
+          for key in pairs(d.muted) do
+            local t, s_ = key:match("^(%d+),(%d+)$")
+            if tonumber(s_) == at then d.muted[key] = nil end
+          end
+          for _, t in ipairs(slot.mutes) do d.muted[t .. "," .. at] = true end
+        end
+      end
+      put()
+      M.record(function()
+        for k = #slots, 1, -1 do d.remove_slot(b + k) end
+        for _ = #made, 1, -1 do
+          table.remove(d.patterns)
+          M.fire(M.data.song_fields.patterns_observable, { type = "remove", index = #d.patterns + 1 })
+        end
+      end, function()
+        for _, copy in ipairs(made) do
+          d.patterns[#d.patterns + 1] = copy
+          M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+        end
+        put()
+      end)
+    end,
+    make_range_unique = function(_, a, b)
+      if type(a) ~= "number" or not d.sequence[a] then out_of_range("from_sequence_pos", a) end
+      if type(b) ~= "number" or not d.sequence[b] or b < a then out_of_range("to_sequence_pos", b) end
+      local played = {}
+      for _, p in ipairs(d.sequence) do played[p] = (played[p] or 0) + 1 end
+      local changes = {}
+      for i = a, b do
+        local old = d.sequence[i]
+        if played[old] > 1 then
+          local copy = d.copy_pattern(old)
+          d.patterns[#d.patterns + 1] = copy
+          M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+          d.sequence[i] = #d.patterns
+          changes[#changes + 1] = { slot = i, old = old, copy = copy, p = #d.patterns }
+        end
+      end
+      if #changes > 0 then M.fire(d.assignments_observable) end
+      M.record(function()
+        for k = #changes, 1, -1 do
+          d.sequence[changes[k].slot] = changes[k].old
+          table.remove(d.patterns)
+          M.fire(M.data.song_fields.patterns_observable, { type = "remove", index = #d.patterns + 1 })
+        end
+        M.fire(d.assignments_observable)
+      end, function()
+        for _, change in ipairs(changes) do
+          d.patterns[#d.patterns + 1] = change.copy
+          M.fire(M.data.song_fields.patterns_observable, { type = "insert", index = #d.patterns })
+          d.sequence[change.slot] = change.p
+        end
+        M.fire(d.assignments_observable)
+      end)
+    end,
     set_track_sequence_slot_is_muted = function(_, t, s, muted)
       if not d.sequence[s] or not d.tracks[t] then out_of_range("slot", t .. "," .. s) end
       local key = t .. "," .. s
@@ -1183,6 +1330,24 @@ function M.make_song(options)
     end
     M.fire(M.data.song_fields.patterns_observable, { type = "remove", index = p })
     return data
+  end
+  -- (M4 n-song) a copy of a pattern as Renoise's clone and make-unique make it: its lines, automation, aliases and slot colours
+  local function deep(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for k, v in pairs(value) do out[k] = (k == "parameter" or (type(k) == "string" and k:find("_observable$"))) and v or deep(v) end
+    return out
+  end
+  d.copy_pattern = function(p)
+    local source = d.patterns[p]
+    local copy = {
+      name = "#" .. source.name, lines = source.lines, tracks = {}, name_observable = M.observable(),
+      number_of_lines_observable = M.observable(), notifiers = {},
+    }
+    for t, data in pairs(source.tracks) do
+      copy.tracks[t] = { alias = data.alias, lines = deep(data.lines), automation = deep(data.automation), color = deep(data.color) }
+    end
+    return copy
   end
   d.restore_pool = function(p, data)
     table.insert(d.patterns, p, data)

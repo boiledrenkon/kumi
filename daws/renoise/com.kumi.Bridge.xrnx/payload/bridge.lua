@@ -703,6 +703,20 @@ end
 
 local function unknown_log() return nil, "unknown" end
 
+-- M4 (n-song): a member of a pattern's track (its slot colour, an automation's points) watched for the producer's undo, once.
+local function watch_ptrack_undo(p, t, name, observable)
+  local pattern_token, track_token = b.groups and b.groups.patterns[p], b.groups and b.groups.tracks[t]
+  local song = renoise.song()
+  if not pattern_token or not track_token or not song or p > #song.patterns or t > track_total(song) then return end
+  pattern_token.undo_watched = pattern_token.undo_watched or setmetatable({}, { __mode = "k" })
+  local watched = pattern_token.undo_watched[track_token] or {}
+  pattern_token.undo_watched[track_token] = watched
+  if watched[name] then return end
+  watched[name] = true
+  observable = observable or song:pattern(p):track(t)[name]
+  observers:owned(pattern_token, track_token, function() observers:watch_undo(observable) end)
+end
+
 local place_env = {
   device_mark = function(t)
     local log_ = device_log(t)
@@ -742,6 +756,7 @@ local function change_env()
   local env = {
     epoch = epoch, layout = function() b.layout_told = true return b.layout end, journal = b.journal, watch_params = watch_params,
     watch_param = watch_param, busy = busy, now_ms = function() return M.now_ms() end, shifted = shifted, place_shifted = place_shifted,
+    watch_pattern_track = watch_ptrack_undo,
     survives = function(from, kind) return survives(from, kind) end,
     -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
     changes = function() return b.changed or 0 end,
@@ -887,6 +902,13 @@ function M.handle(_, request)
   local from
   if CARRIED[request.method] then
     from = type(params) == "table" and params.epoch or nil
+    -- (M4 n-song: a sequence kind's restore finds its slots by the sequence it left; the slot it made isn't asked for)
+    if request.method == "change_restore" and type(params) == "table" and changes.sequence_kinds[params.kind] and params.created ~= nil then
+      local copy = {}
+      for k, v in pairs(params) do copy[k] = v end
+      copy.created = nil
+      params = copy
+    end
     -- A ref of an earlier epoch that names the same thing now is made in this one, whatever epoch the request names (Kumi keeps
     -- the names of what a device or a sequence change left alone); so is the request's own epoch, when every ref of it was.
     if type(params) == "table" then
