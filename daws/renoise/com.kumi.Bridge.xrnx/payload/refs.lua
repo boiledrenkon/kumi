@@ -40,6 +40,31 @@ end
 -- Refs that name a track, or something on one (its devices and their parameters, a pattern's track): the number that is the track.
 local TRACK_KINDS = { track = 1, device = 1, param = 1, ptrack = 2, slot = 1 }
 
+-- `params` with the epoch `old` made `new`: its `epoch` and every track ref of that epoch. Nil when a ref of that epoch names
+-- something else than a track (a device, a pattern, a slot...): those numbers are not the same in a later epoch.
+function M.relabel(params, old, new)
+  local refused = false
+  local function walk(value, key)
+    if type(value) == "string" then
+      if key == "epoch" then return value == old and new or value end
+      local ref = M.parse(value)
+      if ref and ref.epoch == old then
+        if ref.kind ~= "track" then refused = true return value end
+        return M.make(new, ref.kind, unpack(ref.n))
+      end
+      return value
+    elseif type(value) == "table" then
+      local copy = {}
+      for k, v in pairs(value) do copy[k] = walk(v, k) end
+      return setmetatable(copy, getmetatable(value))
+    end
+    return value
+  end
+  local moved = walk(params, nil)
+  if refused then return nil end
+  return moved
+end
+
 -- The shifts of the track list since layout `since`: each { layout, type = "insert" | "remove", index }, oldest first, one per
 -- layout. Returns the new number for the track `n`, or nil when the track is gone.
 function M.shift(n, shifts, since)
