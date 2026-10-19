@@ -28,8 +28,8 @@ cat > "$tmp/luarc.json" <<JSON
 }
 JSON
 out=$(lua-language-server --check="$here/../com.kumi.Bridge.xrnx" --configpath="$tmp/luarc.json" \
-  --checklevel=Information --logpath="$tmp/log" 2>&1)
+  --checklevel=Information --logpath="$tmp/log" 2>&1) || true
 case "$out" in
   *"no problems found"*) echo "lua-language-server: no problems found" ;;
-  *) printf '%s\n' "$out" | tr '\r' '\n' | grep -v '^ *$' | grep -v '>>>' >&2; exit 1 ;;
+  *) printf '%s\n' "$out" | tr '\r' '\n' | grep -v '^ *$' | grep -v '^>' >&2; exit 1 ;;
 esac

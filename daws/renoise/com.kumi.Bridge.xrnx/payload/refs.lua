@@ -37,8 +37,8 @@ function M.expect(text, kind, count, epoch)
   return ref.n
 end
 
--- Refs that name a track, or something on one (its devices and their parameters): the first number is the track.
-local TRACK_KINDS = { track = true, device = true, param = true }
+-- Refs that name a track, or something on one (its devices and their parameters, a pattern's track): the number that is the track.
+local TRACK_KINDS = { track = 1, device = 1, param = 1, ptrack = 2 }
 
 -- The shifts of the track list since layout `since`: each { layout, type = "insert" | "remove", index }, oldest first, one per
 -- layout. Returns the new number for the track `n`, or nil when the track is gone.
@@ -56,8 +56,27 @@ function M.shift(n, shifts, since)
   return n
 end
 
+-- Whether a request names a track, or something on one (a ref of kind track, device or param, of any epoch, or a number
+-- under `track`): only those move with the track layout.
+function M.names_tracks(params)
+  local found = false
+  local function walk(value, key)
+    if found then return end
+    if type(value) == "string" then
+      local ref = M.parse(value)
+      if ref and TRACK_KINDS[ref.kind] then found = true end
+    elseif type(value) == "number" and key == "track" then
+      found = true
+    elseif type(value) == "table" then
+      for k, v in pairs(value) do walk(v, k) end
+    end
+  end
+  walk(params, nil)
+  return found
+end
+
 -- `params` with every track number carried through the shifts since layout `since`: refs of the current epoch that name a
--- track (kinds track, device and param) and a number under `track`. Returns the new params, or nil and an error table
+-- track (kinds track, device, param and ptrack) and a number under `track`. Returns the new params, or nil and an error table
 -- (code `gone`) naming the first track that was deleted meanwhile.
 function M.carry(params, epoch, shifts, since)
   local gone
@@ -65,12 +84,13 @@ function M.carry(params, epoch, shifts, since)
     if type(value) == "string" then
       local ref = M.parse(value)
       if ref and ref.epoch == epoch and TRACK_KINDS[ref.kind] then
-        local moved = M.shift(ref.n[1], shifts, since)
+        local at = TRACK_KINDS[ref.kind]
+        local moved = M.shift(ref.n[at], shifts, since)
         if not moved then
-          gone = gone or { code = "gone", message = "track " .. ref.n[1] .. " (" .. value .. ") was deleted since that ref was made" }
+          gone = gone or { code = "gone", message = "track " .. ref.n[at] .. " (" .. value .. ") was deleted since that ref was made" }
           return value
         end
-        ref.n[1] = moved
+        ref.n[at] = moved
         return M.make(ref.epoch, ref.kind, unpack(ref.n))
       end
       return value

@@ -9,6 +9,7 @@ local jobs_module = import("jobs")
 local reads = import("reads")
 local focus = import("focus")
 local rows = import("rows")
+local changes = import("changes")
 local refs = import("refs")
 local status = import("status")
 local config = import("config")
@@ -42,9 +43,13 @@ local function epoch()
   return string.format("%x", b.epoch_n)
 end
 
-local function bump_epoch(reason)
+local function bump_epoch(reason, tracks_kept)
   b.epoch_n = b.epoch_n + 1
-  b.layout, b.shifts = 0, {}
+  -- The layout goes on counting across epochs (no event says when an epoch moves for a device or a pattern, so a layout
+  -- that started over would look older than the one Kumi holds); the shifts start over, since refs from before are stale.
+  b.shifts = {}
+  -- (the journal's places are tracks: a change to devices, patterns or instruments leaves them where they were)
+  if b.journal and not tracks_kept then changes.journal_reset(b.journal) end
   log.write("info", "epoch " .. epoch() .. ": " .. reason)
 end
 
@@ -365,7 +370,7 @@ end
 -- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
 -- asks for the whole song to be watched anew.
 local function on_structural(reason, kind, op, owner, token)
-  bump_epoch(reason)
+  bump_epoch(reason, true)
   local song = renoise.song()
   if not song then return end
   local lists = { instruments = b.groups.instruments, patterns = b.groups.patterns }
@@ -374,6 +379,15 @@ local function on_structural(reason, kind, op, owner, token)
   end
   local list = lists[kind]
   if not list then return end -- (the sequence: nothing is watched per slot)
+  if kind == "devices" and op then
+    -- (the journal's places are device places: they move, and a change that made or removed a device is told on the producer's undo)
+    for track_index, candidate in ipairs(b.groups.tracks) do
+      if candidate == token then
+        changes.journal_device_event(b.journal, track_index, op.type, op.index, op.index2, song:is_undo_redoing())
+      end
+    end
+  end
+  if kind == "patterns" and op then changes.journal_pattern_event(b.journal, op.type, op.index) end
   local fine = false
   if op and op.type == "insert" then
     fine = remember(list, op.index)
@@ -410,7 +424,8 @@ local function on_tracks(op)
   local swapped = op.type == "swap" and expected == count and exchange(b.groups.tracks, op.index, op.index2)
   if swapped then
     -- (the tracks are the same objects in another order: they keep their watchers and their groups move with them)
-    bump_epoch("tracks were swapped")
+    bump_epoch("tracks were swapped", true)
+    changes.journal_track_event(b.journal, "swap", op.index, song:is_undo_redoing(), op.index2)
     conns:event("tracks", { count = count, made = json.array(), gone = json.array(), layout = b.layout, epoch = epoch() })
     return
   end
@@ -426,6 +441,7 @@ local function on_tracks(op)
   b.shifts[#b.shifts + 1] = { layout = b.layout, type = op.type, index = op.index }
   if #b.shifts > M.SHIFT_HISTORY then table.remove(b.shifts, 1) end
   local listed = true
+  changes.journal_track_event(b.journal, op.type, op.index, song:is_undo_redoing())
   if op.type == "insert" then
     listed = remember(b.groups.tracks, op.index)
     if type(op.index) == "number" and op.index >= 1 then
@@ -461,6 +477,13 @@ local function flush_events()
     if observers:changed("transport", value) then conns:event("transport", value) end
   end
   if dirty.project and observers:changed("project", status.project(b.memory)) then send_project() end
+  if b.undone then
+    b.undone = false
+    changes.journal_check(b.journal)
+  end
+  for _, event in ipairs(changes.journal_take(b.journal)) do
+    conns:event("undone_in_daw", { descs = json.array(event.descs), how = event.how, epoch = epoch() })
+  end
   if b.reattach then
     attach(song)
   elseif observers.dead > M.MAX_DEAD then
@@ -507,6 +530,86 @@ function handlers.focus_body(params)
   return as_job(function(job) return stamped(focus.focus_body(job, params, job.epoch), job.layout) end)
 end
 
+-- The faders and pans of a track Kumi changed are watched for the producer's undo (and for nothing else: an automation moves
+-- them all the time, and `changed` is not for that). Once per track.
+local function watch_params(index)
+  local token = b.groups and b.groups.tracks[index]
+  local song = renoise.song()
+  if not token or token.params_watched or not song or index > track_total(song) then return end
+  token.params_watched = true
+  local track = song:track(index)
+  observers:owned(token, nil, function()
+    for _, parameter in ipairs({ track.prefx_volume, track.prefx_panning, track.postfx_volume, track.postfx_panning }) do
+      observers:watch_undo(parameter.value_observable)
+    end
+  end)
+end
+
+-- A parameter's value is watched the same way, for the producer's undo only; once per parameter.
+local function watch_param(track_index, device_index, k)
+  local token = b.groups and b.groups.tracks[track_index]
+  local device_token = token and token.devices and token.devices[device_index]
+  local song = renoise.song()
+  if not device_token or not song then return end
+  device_token.params_watched = device_token.params_watched or {}
+  if device_token.params_watched[k] then return end
+  device_token.params_watched[k] = true
+  local parameter = song:track(track_index):device(device_index):parameter(k)
+  observers:owned(device_token, token, function() observers:watch_undo(parameter.value_observable) end)
+end
+
+-- Changes (M3): see changes.lua. Every request carries the epoch (and the layout) its refs were made in.
+local function change_env()
+  return {
+    epoch = epoch, layout = function() return b.layout end, journal = b.journal, watch_params = watch_params,
+    watch_param = watch_param,
+  }
+end
+
+function handlers.change_preview(params)
+  return changes.preview(params, change_env())
+end
+
+function handlers.change_apply(params)
+  return changes.apply(params, change_env())
+end
+
+function handlers.change_restore(params)
+  return changes.restore(params, change_env())
+end
+
+-- A step of undo around a plan: Renoise has none that spans callbacks, so every change stays its own step (merged: false).
+function handlers.undo_step_begin(params)
+  local label = type(params) == "table" and params.label or nil
+  if type(label) ~= "string" or label == "" then
+    error({ code = "bad-params", message = "label must be a string" }, 0)
+  end
+  b.steps = (b.steps or 0) + 1
+  b.open_step = { id = "s" .. b.steps, label = label }
+  return { stepId = b.open_step.id, merged = false }
+end
+
+function handlers.undo_step_end(params)
+  local id = type(params) == "table" and params.stepId or nil
+  local open = b.open_step
+  if type(id) ~= "string" or not open or open.id ~= id then
+    error({ code = "failed", message = "that step isn't open" }, 0)
+  end
+  b.open_step = nil
+  return { desc = open.label, entry = false, merged = false }
+end
+
+-- The emergency stop.
+function handlers.transport_stop()
+  local song = renoise.song()
+  if not song then error({ code = "no-song", message = "Renoise has no song open" }, 0) end
+  local transport = song.transport
+  local running = transport.playing
+  local recording = running and transport.edit_mode or false
+  if running then transport:stop() end
+  return { stopped = running, wasRecording = recording }
+end
+
 handlers["renoise.reload"] = function()
   host.request_reload()
   return { reloading = true }
@@ -518,31 +621,41 @@ M.handlers = handlers
 -- A request may name the track layout its refs were made in (`layout`): the refs that name a track, or something on one,
 -- are carried through the shifts since, to where the tracks are now. A track deleted meanwhile answers `gone`; a layout the
 -- tool no longer remembers (or does not know) answers `stale`.
-local function carried(params)
+local function carried(params, carry)
   local since = type(params) == "table" and params.layout or nil
   if since == nil then return params end
   if type(since) ~= "number" or since ~= math.floor(since) or since < 0 then
     error({ code = "bad-params", message = "layout must be a whole number from 0" }, 0)
   end
   if since == b.layout then return params end
+  -- Only refs on a track move with the layout: a request naming none is never refused for it.
+  if not refs.names_tracks(params) then return params end
   if since > b.layout then
     error({ code = "stale", message = "that layout (" .. since .. ") is from another epoch (now " .. epoch() .. "): read again" }, 0)
   end
   if b.layout - since > #b.shifts then
     error({ code = "stale", message = "that layout is too old to carry its refs to the present: read again" }, 0)
   end
+  if carry then return carry(params, b.shifts, since) end
   local moved, err = refs.carry(params, epoch(), b.shifts, since)
   if not moved then error(err, 0) end
   return moved
 end
 
-local CARRIED = { read = true, focus_body = true }
+local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true }
 
 function M.handle(_, request)
   local handler = handlers[request.method]
   if not handler then error({ code = "unknown-method", message = "no method " .. request.method }) end
   local params = request.params
-  if CARRIED[request.method] then params = carried(params) end
+  if CARRIED[request.method] then
+    if request.method == "change_restore" and type(params) == "table" and params.kind == "track-delete" then
+      -- (the deleted track's own ref is gone by design: only its place is carried)
+      params = carried(params, changes.carry_restore)
+    else
+      params = carried(params)
+    end
+  end
   return handler(params)
 end
 
@@ -552,6 +665,7 @@ function M.start(h, reloading)
   host, st = h, h.state
   st.bridge = st.bridge or { memory = {}, retry_ms = 0, started_ms = 0 }
   b = st.bridge
+  b.journal = b.journal or changes.journal_new()
   if b.started_ms == 0 then b.started_ms = unix_ms() end
   conns = server.new({
     connections = st.connections,
@@ -584,7 +698,15 @@ function M.start(h, reloading)
     -- (where the pid is unknown, when this Renoise was started stands in for it: `0:1` would be the same after every restart)
     return { id = status.song_id(b.memory, song), identity = (status.pid() or ("t" .. b.started_ms)) .. ":" .. b.document }
   end
-  observers = sync.new(guard, b, { structural = on_structural, tracks = on_tracks })
+  observers = sync.new(guard, b, {
+    structural = on_structural,
+    tracks = on_tracks,
+    -- (asked of every notifier once Kumi has made a change: was the producer's undo or redo what moved it?)
+    undoing = function()
+      local song = renoise.song()
+      return song ~= nil and changes.journal_active(b.journal) and song:is_undo_redoing()
+    end,
+  })
   jobs = jobs_module.new({
     now_ms = M.now_ms,
     unix_ms = unix_ms,

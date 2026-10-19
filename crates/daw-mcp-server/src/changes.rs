@@ -242,6 +242,13 @@ impl Journal {
         let (reply, is_error) = match answer {
             Ok(applied) => {
                 record.state = State::Applied;
+                // Where the DAW's refs are now (Renoise: a deleted track moved the layout): an undo is asked from there.
+                if let Some(epoch) = applied.get("epoch").and_then(Value::as_str) {
+                    record.epoch = Some(epoch.to_string());
+                }
+                if let Some(layout) = applied.get("layout").and_then(Value::as_u64) {
+                    record.layout = Some(layout);
+                }
                 record.applied = applied.get("applied").cloned();
                 record.created = applied.get("created").cloned().filter(|created| !created.is_null());
                 record.material = applied.get("material").cloned().filter(|material| !material.is_null());
@@ -307,9 +314,18 @@ impl Journal {
         let (reply, is_error) = match answer {
             Ok(restored) => {
                 record.state = State::Undone;
+                // Where the DAW's refs are now (Renoise: a restore that made devices again moved the epoch).
+                if let Some(epoch) = restored.get("epoch").and_then(Value::as_str) {
+                    record.epoch = Some(epoch.to_string());
+                }
+                if let Some(layout) = restored.get("layout").and_then(Value::as_u64) {
+                    record.layout = Some(layout);
+                }
                 let mut reply = json!({"transactionId": record.id, "state": "undone"});
-                if let Some(display) = restored.get("display").filter(|display| !display.is_null()) {
-                    reply["display"] = display.clone();
+                for field in ["display", "restored", "epoch", "layout"] {
+                    if let Some(value) = restored.get(field).filter(|value| !value.is_null()) {
+                        reply[field] = value.clone();
+                    }
                 }
                 (reply, false)
             }
@@ -576,10 +592,29 @@ mod tests {
         assert_eq!(refused["code"], "changed");
         assert_eq!(journal.get(&record.id).unwrap().state, State::Applied);
         assert!(journal.begin_undo(&record.id, "u1").unwrap().is_ok());
-        let (undone, is_error) = journal.end_undo(&record.id, "u1", Ok(&json!({"restored": {"volumeDb": 0.0}})));
+        let (undone, is_error) = journal.end_undo(&record.id, "u1", Ok(&json!({"restored": {"volumeDb": 0.0}, "epoch": "e2"})));
         assert!(!is_error && undone["state"] == "undone");
+        // What the restore put back, and where the DAW's refs are now, for Kumi to follow.
+        assert_eq!((&undone["restored"], &undone["epoch"]), (&json!({"volumeDb": 0.0}), &json!("e2")));
+        assert_eq!(journal.get(&record.id).unwrap().epoch.as_deref(), Some("e2"));
         assert_eq!(journal.begin_undo(&record.id, "u1").unwrap().unwrap_err(), (undone, false));
         assert_eq!(journal.begin_undo(&record.id, "u2").unwrap_err().code, "undone");
+    }
+
+    #[test]
+    fn an_undo_is_asked_from_the_epoch_and_layout_the_apply_answered() {
+        let journal = Journal::default();
+        let answer = json!({"epoch": "e1", "layout": 4, "target": {"ref": "e1:track:3", "kind": "track"}, "prior": {"deleted": false}, "fence": {}, "display": {"title": "Deleted track Bass"}});
+        let record = journal.previewed("track-delete", &json!({"ref": "e1:track:3"}), &answer, Some(4)).unwrap();
+        let Ok(Ok(_)) = journal.begin_apply(&record.id, &record.confirmation, "a1", None) else { panic!("applying") };
+        // Deleting the track moved Renoise's layout from 4 to 5 (and a device list, in another change, would move the epoch).
+        journal.end_apply(
+            &record.id,
+            "a1",
+            Ok(&json!({"epoch": "e1", "layout": 5, "applied": {"deleted": true}, "undo": {"desc": "x", "entry": true}})),
+        );
+        let Ok(Ok((undoing, _))) = journal.begin_undo(&record.id, "u1") else { panic!("undoing") };
+        assert_eq!((undoing.epoch.as_deref(), undoing.layout), (Some("e1"), Some(5)));
     }
 
     #[test]
