@@ -1437,7 +1437,8 @@ unsafe extern "C" fn get_track_envelope_by_chunk_name(track: *mut MediaTrack, na
     counted(|s| {
         let Some(t) = track_mut(s, track as u64) else { return ptr::null_mut() };
         if name.starts_with('{') {
-            let found = t.envelopes.iter().position(|e| e.guid.eq_ignore_ascii_case(&name));
+            // (only one in the track's list: REAPER finds no hidden, empty envelope by its id, lab 7.82)
+            let found = t.envelopes.iter().position(|e| e.guid.eq_ignore_ascii_case(&name) && listed(e));
             return found.map_or(ptr::null_mut(), |n| track_envelope_handle(track as u64, n));
         }
         if let Some(n) = t.envelopes.iter().position(|e| e.chunk.as_deref() == Some(name.as_str())) {
@@ -1849,6 +1850,17 @@ unsafe extern "C" fn set_envelope_state_chunk(envelope: *mut TrackEnvelope, chun
         }
         e.pts = Some(points);
         e.items = items;
+        // An emptied take envelope leaves its take's list (lab 7.82: CountTakeEnvelopes drops).
+        let emptied = !listed(e);
+        if let (TAKE_ENVELOPE, a, b, c) = unpack(envelope as u64) {
+            if emptied {
+                if let Some(take) =
+                    s.tracks.get_mut(a as usize).and_then(|t| t.items.get_mut(b as usize)).and_then(|i| i.takes.get_mut((c >> 10) as usize))
+                {
+                    take.envelopes.remove((c & 1023) as usize);
+                }
+            }
+        }
         let used: Vec<i64> = s
             .tracks
             .iter()

@@ -29,7 +29,7 @@ pub fn kinds(daw: Daw) -> Kinds {
         Daw::Reaper => Kinds {
             read: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "point", "autoitem"],
             bodies: &["arrange", "midi", "fx", "routing"],
-            outside_undo: &["loop-repeat", "automation-override"],
+            outside_undo: &["loop-repeat", "fx-eq-band", "automation-override"],
         },
         Daw::Renoise => Kinds {
             read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],

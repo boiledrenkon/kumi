@@ -292,7 +292,15 @@ pub fn auto_item_ref(track: &TrackId, envelope: &str, pool: i64, position: f64) 
 }
 /// A position as an automation item's ref holds it: the shortest text that reads back as the same number.
 pub fn position_text(position: f64) -> String {
-    format!("{}", if position == 0.0 { 0.0 } else { position })
+    // To a nanosecond: REAPER's undo and redo bring a position back from text with its last bits changed, and the ref
+    // should still read the same.
+    let text = format!("{:.9}", if position == 0.0 { 0.0 } else { position });
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".into()
+    } else {
+        text.to_string()
+    }
 }
 
 /// How long a map that was just rebuilt without finding a GUID is believed: a ref that isn't there stays missing until

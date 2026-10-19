@@ -221,8 +221,10 @@ impl Lane {
 fn find_item(ctx: &Ctx, at: &EnvAt, pool: i64, position: f64) -> Done<ItemAt> {
     let reaper = ctx.reaper;
     let found: Vec<i32> = (0..reaper.ai_count(at.envelope))
+        // (to a nanosecond: REAPER's undo and redo bring a position back from text, its last bits changed)
         .filter(|&i| {
-            reaper.ai_value(at.envelope, i, "D_POOL_ID") as i64 == pool && reaper.ai_value(at.envelope, i, "D_POSITION") == position
+            reaper.ai_value(at.envelope, i, "D_POOL_ID") as i64 == pool
+                && (reaper.ai_value(at.envelope, i, "D_POSITION") - position).abs() <= 1e-9
         })
         .collect();
     match found.as_slice() {
@@ -275,14 +277,28 @@ fn lane_points(ctx: &Ctx, lane: &Lane) -> Vec<EnvPoint> {
     (0..count).filter_map(|i| ctx.reaper.env_point(lane.at.envelope, lane.read(), i)).collect()
 }
 
-/// A lane's points as one hash: time, value, shape and tension (not the selection, which the producer's clicks change).
-fn points_hash(points: &[EnvPoint]) -> String {
+/// A number as REAPER's envelope state writes it, `places` after the point. REAPER's undo and redo bring envelopes back
+/// through that state (lab 7.82: a point keeps 8 places, its value as the state stores it; an automation item 14 for its
+/// times and 6 for baseline, amplitude and playrate), so Kumi compares what survives them, never the last bits.
+fn kept(value: f64, places: usize) -> String {
+    let text = format!("{value:.places$}");
+    // (−0 is 0)
+    if text.starts_with('-') && text.bytes().skip(1).all(|b| b == b'0' || b == b'.') {
+        return text[1..].to_string();
+    }
+    text
+}
+
+/// A lane's points as one hash: time, value, shape and tension as the envelope's state keeps them (a volume's value
+/// unscaled, as the state stores it), not the selection, which the producer's clicks change.
+fn points_hash(reaper: &Reaper, envelope: Envelope, points: &[EnvPoint]) -> String {
+    let mode = reaper.env_scaling(envelope);
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for point in points {
-        for word in [point.time.to_bits(), point.value.to_bits(), point.shape as u64, point.tension.to_bits()] {
-            for byte in word.to_le_bytes() {
-                hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
-            }
+        let value = if mode == 0 { point.value } else { reaper.scale_from_envelope(mode, point.value) };
+        let text = format!("{} {} {} {};", kept(point.time, 8), kept(value, 8), point.shape, kept(point.tension, 8));
+        for byte in text.bytes() {
+            hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
     format!("{hash:016x}-{}", points.len())
@@ -579,7 +595,7 @@ pub fn points_preview(ctx: &Ctx, edit: Edit, input: &Value) -> Done<Preview> {
     }
     let plan = plan_of(ctx, edit, &lane, units, &now, input)?;
     let count = plan_count(&plan, &now);
-    let hash = points_hash(&now);
+    let hash = points_hash(ctx.reaper, lane.at.envelope, &now);
     let mut display = json!({"title": plan_title(ctx, &lane, &plan, count), "units": units_word(units)});
     if count == 0 {
         display["unchanged"] = true.into();
@@ -596,7 +612,7 @@ pub fn points_apply(ctx: &Ctx, edit: Edit, input: &Value, fence: &Value) -> Done
     let lane = lane_named(ctx, &input["ref"]).map_err(went)?;
     let units = units_of(ctx, lane.at.envelope)?;
     let now = lane_points(ctx, &lane);
-    if points_hash(&now) != fence["hash"].as_str().unwrap_or_default() {
+    if points_hash(ctx.reaper, lane.at.envelope, &now) != fence["hash"].as_str().unwrap_or_default() {
         return Err(changed(format!("{} changed since the preview", lane_label(ctx, &lane))));
     }
     let plan = plan_of(ctx, edit, &lane, units, &now, input)?;
@@ -604,7 +620,7 @@ pub fn points_apply(ctx: &Ctx, edit: Edit, input: &Value, fence: &Value) -> Done
     let title = plan_title(ctx, &lane, &plan, count);
     if count == 0 {
         return Ok(Applied {
-            applied: json!({"hash": points_hash(&now)}),
+            applied: json!({"hash": points_hash(ctx.reaper, lane.at.envelope, &now)}),
             display: json!({"title": title}),
             unwritten: true,
             ..Default::default()
@@ -644,14 +660,14 @@ pub fn points_apply(ctx: &Ctx, edit: Edit, input: &Value, fence: &Value) -> Done
     if expected.is_some_and(|n| n != after.len()) {
         // What was written goes back: nothing half-done stays.
         write_lane(ctx, &lane, &now);
-        let back = points_hash(&lane_points(ctx, &lane)) == points_hash(&now);
+        let back = points_hash(reaper, envelope, &lane_points(ctx, &lane)) == points_hash(reaper, envelope, &now);
         return Err(if back {
             failed("REAPER didn't take the points as asked; the lane is put back")
         } else {
             ("uncertain".into(), "REAPER didn't take the points as asked, and Kumi could not put the lane back: read it".into())
         });
     }
-    Ok(Applied { applied: json!({"hash": points_hash(&after)}), display: json!({"title": title}), ..Default::default() })
+    Ok(Applied { applied: json!({"hash": points_hash(reaper, envelope, &after)}), display: json!({"title": title}), ..Default::default() })
 }
 
 pub fn points_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -659,23 +675,24 @@ pub fn points_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let prior = points_from(&restore.prior["points"])?;
     let now = lane_points(ctx, &lane);
     let label = lane_label(ctx, &lane);
-    if points_hash(&now) == restore.prior["hash"].as_str().unwrap_or_default() {
+    let hash = |points: &[EnvPoint]| points_hash(ctx.reaper, lane.at.envelope, points);
+    if hash(&now) == restore.prior["hash"].as_str().unwrap_or_default() {
         return Ok(Restored {
-            restored: json!({"hash": points_hash(&now)}),
+            restored: json!({"hash": hash(&now)}),
             display: json!({"title": format!("{label} is as it was")}),
             unwritten: true,
         });
     }
-    if !restore.discard && points_hash(&now) != restore.applied["hash"].as_str().unwrap_or_default() {
+    if !restore.discard && hash(&now) != restore.applied["hash"].as_str().unwrap_or_default() {
         return Err(changed(format!("{label} has been changed in REAPER since Kumi changed it")));
     }
     write_lane(ctx, &lane, &prior);
     let after = lane_points(ctx, &lane);
-    if points_hash(&after) != points_hash(&prior) {
+    if hash(&after) != hash(&prior) {
         return Err(failed(format!("REAPER wouldn't put {label}'s points back")));
     }
     Ok(Restored {
-        restored: json!({"hash": points_hash(&after)}),
+        restored: json!({"hash": hash(&after)}),
         display: json!({"title": format!("{label} put back ({} points)", after.len())}),
         ..Default::default()
     })
@@ -833,7 +850,7 @@ fn env_state(ctx: &Ctx, envelope: Envelope) -> Value {
     let lane_hash = {
         let count = ctx.reaper.env_point_count(envelope, -1);
         let points: Vec<EnvPoint> = (0..count).filter_map(|i| ctx.reaper.env_point(envelope, -1, i)).collect();
-        points_hash(&points)
+        points_hash(ctx.reaper, envelope, &points)
     };
     json!({"flags": flags_of(ctx.reaper, envelope), "points": lane_hash, "items": ctx.reaper.ai_count(envelope)})
 }
@@ -1036,10 +1053,16 @@ pub fn show_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
 pub fn show_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let reference = restore.applied["ref"].as_str().ok_or_else(|| bad("applied.ref: the envelope"))?;
     let reaper = ctx.reaper;
+    // One Kumi made, or one REAPER handed out hidden and Kumi's undo took out of the list again: not found is how it was.
+    let unlisted = |state: &Value| {
+        state["flags"].as_object().is_some_and(|flags| flags.values().all(|v| *v == false))
+            && state["items"] == 0
+            && state["points"].as_str().is_some_and(|hash| hash.ends_with("-0"))
+    };
     let at = match envelope_at(ctx, reference) {
         Ok(at) => at,
-        Err(fault) if fault.0 == "failed" && restore.prior["exists"] == false => {
-            return Ok(Restored { restored: json!({}), display: json!({"title": "The envelope is gone already"}), unwritten: true });
+        Err(fault) if fault.0 == "failed" && (restore.prior["exists"] == false || unlisted(&restore.prior["state"])) => {
+            return Ok(Restored { restored: json!({}), display: json!({"title": "The envelope is as it was"}), unwritten: true });
         }
         Err(fault) => return Err(gone_if_missing(fault)),
     };
@@ -1067,8 +1090,12 @@ pub fn show_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         if flags["visible"] == true || flags["active"] == true {
             return Err(failed(format!("REAPER kept {label}")));
         }
-        if matches!(at.owner, EnvOwner::Take(_)) {
-            display["note"] = "REAPER keeps a take's envelope once made: it is hidden and off, with no points.".into();
+        // (REAPER takes an emptied take envelope out of the take's list, lab 7.82; said if it ever keeps one)
+        if let EnvOwner::Take(take) = at.owner {
+            let guid = &at.guid;
+            if take_envelope(reaper, take, guid).is_some() {
+                display["note"] = "REAPER keeps the take's envelope: it is hidden and off, with no points.".into();
+            }
         }
     }
     Ok(Restored { restored: env_state(ctx, at.envelope), display, ..Default::default() })
@@ -1092,9 +1119,31 @@ fn item_state(reaper: &Reaper, envelope: Envelope, index: i32) -> Value {
     })
 }
 
-/// Every automation item of an envelope, and its own points: what an item edit is fenced by.
+/// An automation item's state as its envelope's state keeps it (times to 9 places, baseline, amplitude and playrate to 6):
+/// what a fence or an undo compares, so REAPER's own undo and redo in between don't read as a change.
+fn item_print(state: &Value) -> Value {
+    let time = |key: &str| kept(state[key].as_f64().unwrap_or(f64::NAN), 9);
+    let level = |key: &str| kept(state[key].as_f64().unwrap_or(f64::NAN), 6);
+    json!({
+        "pool": state["pool"],
+        "position": time("position"),
+        "length": time("length"),
+        "startOffset": time("startOffset"),
+        "playrate": level("playrate"),
+        "baseline": level("baseline"),
+        "amplitude": level("amplitude"),
+        "loop": state["loop"],
+        "mute": state["mute"],
+    })
+}
+
+fn same_item(a: &Value, b: &Value) -> bool {
+    item_print(a) == item_print(b)
+}
+
+/// Every automation item of an envelope, as kept: what an edit of its items is fenced by.
 fn items_print(ctx: &Ctx, envelope: Envelope) -> Value {
-    (0..ctx.reaper.ai_count(envelope)).map(|i| item_state(ctx.reaper, envelope, i)).collect::<Vec<_>>().into()
+    (0..ctx.reaper.ai_count(envelope)).map(|i| item_print(&item_state(ctx.reaper, envelope, i))).collect::<Vec<_>>().into()
 }
 
 fn track_env(ctx: &Ctx, reference: &Value) -> Done<EnvAt> {
@@ -1144,7 +1193,7 @@ pub fn item_add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     if points.len() > MAX_POINTS {
         return Err(failed(format!("that envelope has {} points: Kumi changes envelopes of at most {MAX_POINTS}", points.len())));
     }
-    let prior = json!({"underlying": points_json(&points), "hash": points_hash(&points), "items": items_print(ctx, at.envelope)});
+    let prior = json!({"underlying": points_json(&points), "hash": points_hash(ctx.reaper, at.envelope, &points), "items": items_print(ctx, at.envelope)});
     let what = match pool {
         Some(pool) => format!("a pooled copy (pool {pool})"),
         None => "an automation item".into(),
@@ -1175,7 +1224,9 @@ pub fn item_add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> 
     let length = length_of(ctx, input, position)?.ok_or_else(|| bad("pass lengthBeats or length"))?;
     let pool = pool_of(ctx, input)?;
     let reaper = ctx.reaper;
-    if points_hash(&underlying(ctx, &at)) != fence["hash"].as_str().unwrap_or_default() || items_print(ctx, at.envelope) != fence["items"] {
+    if points_hash(reaper, at.envelope, &underlying(ctx, &at)) != fence["hash"].as_str().unwrap_or_default()
+        || items_print(ctx, at.envelope) != fence["items"]
+    {
         return Err(changed(format!("{} changed since the preview", env_label(ctx, &at))));
     }
     let index = reaper.ai_insert(at.envelope, pool.map_or(-1, |p| p as i32), position, length);
@@ -1200,7 +1251,7 @@ pub fn item_add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> 
     let reference = item_ref(ctx, &at, made_pool, made_position)?;
     let points = underlying(ctx, &at);
     Ok(Applied {
-        applied: json!({"pool": made_pool, "position": made_position, "hash": points_hash(&points), "items": items_print(ctx, at.envelope)}),
+        applied: json!({"pool": made_pool, "position": made_position, "hash": points_hash(reaper, at.envelope, &points), "items": items_print(ctx, at.envelope)}),
         created: Some(json!({"ref": reference, "kind": "aitem"})),
         display: json!({"title": format!("Added an automation item to {label} at {} ({} long)", seconds(made_position), seconds(length)), "ref": reference}),
         ..Default::default()
@@ -1231,7 +1282,7 @@ fn delete_item(ctx: &Ctx, at: &EnvAt, item: ItemAt) -> Done<()> {
         return Err(failed("REAPER wouldn't take the automation item off"));
     }
     mark_envelope(reaper, at.envelope);
-    if items_print(ctx, at.envelope) != Value::from(others) {
+    if items_print(ctx, at.envelope) != Value::from(others.iter().map(item_print).collect::<Vec<_>>()) {
         return Err(("uncertain".into(), "the envelope's automation items aren't what they should be after the delete: read them".into()));
     }
     Ok(())
@@ -1254,13 +1305,13 @@ pub fn item_add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     };
     if !restore.discard
         && (items_print(ctx, at.envelope) != restore.applied["items"]
-            || points_hash(&underlying(ctx, &at)) != restore.applied["hash"].as_str().unwrap_or_default())
+            || points_hash(ctx.reaper, at.envelope, &underlying(ctx, &at)) != restore.applied["hash"].as_str().unwrap_or_default())
     {
         return Err(changed(format!("{label} has been changed in REAPER since Kumi added the automation item")));
     }
     delete_item(ctx, &at, item)?;
     let prior = points_from(&restore.prior["underlying"])?;
-    if points_hash(&underlying(ctx, &at)) != points_hash(&prior) {
+    if points_hash(ctx.reaper, at.envelope, &underlying(ctx, &at)) != points_hash(ctx.reaper, at.envelope, &prior) {
         write_lane(ctx, &Lane { at: at.clone(), item: None }, &prior);
     }
     Ok(Restored {
@@ -1341,7 +1392,8 @@ pub fn item_set_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let writes = item_set_parts(ctx, &lane, input)?;
     let now = item_state(ctx.reaper, lane.at.envelope, item.index);
     let target = json!({"ref": item_ref(ctx, &lane.at, item.pool, item.position)?, "kind": "aitem", "envelopeRef": env_ref(ctx, &lane.at)});
-    Ok(Preview { target, prior: now.clone(), fence: now, display: json!({"title": item_title(ctx, &lane.at, item.position, &writes)}) })
+    let display = json!({"title": item_title(ctx, &lane.at, item.position, &writes)});
+    Ok(Preview { target, fence: item_print(&now), prior: now, display })
 }
 
 fn write_item(reaper: &Reaper, envelope: Envelope, index: i32, state: &Value, keys: &[&str]) {
@@ -1378,7 +1430,7 @@ pub fn item_set_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> 
     let writes = item_set_parts(ctx, &lane, input)?;
     let reaper = ctx.reaper;
     let now = item_state(reaper, lane.at.envelope, item.index);
-    if now != *fence {
+    if item_print(&now) != *fence {
         return Err(changed("the automation item changed since the preview"));
     }
     for (key, value) in &writes {
@@ -1432,7 +1484,7 @@ pub fn item_set_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             // Back at its old place already (a retry)?
             let prior_position = restore.prior["position"].as_f64().unwrap_or(f64::NAN);
             if let Ok(back) = find_item(ctx, &at, pool, prior_position) {
-                if item_state(ctx.reaper, at.envelope, back.index) == *restore.prior {
+                if same_item(&item_state(ctx.reaper, at.envelope, back.index), restore.prior) {
                     return Ok(Restored {
                         restored: restore.prior.clone(),
                         display: json!({"title": "The automation item is as it was"}),
@@ -1445,15 +1497,15 @@ pub fn item_set_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         Err(fault) => return Err(fault),
     };
     let now = item_state(ctx.reaper, at.envelope, item.index);
-    if now == *restore.prior {
+    if same_item(&now, restore.prior) {
         return Ok(Restored { restored: now, display: json!({"title": "The automation item is as it was"}), unwritten: true });
     }
-    if !restore.discard && now != *restore.applied {
+    if !restore.discard && !same_item(&now, restore.applied) {
         return Err(changed("the automation item has been changed in REAPER since Kumi changed it"));
     }
     write_item(ctx.reaper, at.envelope, item.index, restore.prior, &ITEM_KEYS);
     mark_envelope(ctx.reaper, at.envelope);
-    if item_state(ctx.reaper, at.envelope, item.index) != *restore.prior {
+    if !same_item(&item_state(ctx.reaper, at.envelope, item.index), restore.prior) {
         return Err(failed("REAPER wouldn't put the automation item back"));
     }
     Ok(Restored {
@@ -1529,7 +1581,7 @@ pub fn item_delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     write_item(reaper, at.envelope, index, state, &ITEM_KEYS[..7]);
     mark_envelope(reaper, at.envelope);
     let back = find_item(ctx, &at, pool, position).map(|item| item_state(reaper, at.envelope, item.index));
-    if back.as_ref().ok() != Some(state) {
+    if !back.is_ok_and(|back| same_item(&back, state)) {
         return Err(failed("REAPER didn't put the automation item back as it was"));
     }
     Ok(Restored { restored: state.clone(), display, ..Default::default() })

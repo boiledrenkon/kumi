@@ -463,7 +463,8 @@ fn a_reaeq_bands_type_and_switch_change_and_undo_puts_them_back() {
         state(|s| (s.tracks[1].fx[0].config["BANDTYPE1"].clone(), s.tracks[1].fx[0].config["BANDENABLED1"].clone())),
         ("6".into(), "0".into())
     );
-    assert_eq!(applied["undo"]["entry"], true, "ReaEQ's band settings make no point by themselves: the nudge makes one");
+    assert_eq!(applied["undo"]["entry"], false, "REAPER's undo neither notices nor keeps a band's settings: no point is forced");
+    assert!(preview["display"]["note"].as_str().unwrap().contains("REAPER's undo doesn't take"));
     state(|s| s.tracks[1].fx[0].config.insert("BANDTYPE1".into(), "3".into()));
     assert_eq!(lab.undo("fx-eq-band", &preview, &applied).unwrap_err().0, "changed");
     lab.discard("fx-eq-band", &preview, &applied).unwrap();
@@ -1134,9 +1135,9 @@ fn a_takes_envelope_is_made_on_its_item_alone_and_the_producers_selection_is_kep
     );
     assert!(applied["applied"]["ref"].as_str().unwrap().starts_with("r:env:take:{TAKE-K1}:"));
     let undone = lab.undo("envelope-show", &preview, &applied).unwrap();
-    assert!(undone["display"]["note"].as_str().unwrap().contains("keeps a take's envelope"));
-    let env = state(|s| s.tracks[1].items[0].takes[0].envelopes[0].clone());
-    assert!(!env.visible && !env.active && fake::points_of(&env).is_empty(), "hidden, off, no points");
+    assert!(undone["display"].get("note").is_none(), "{}", undone["display"]);
+    assert_eq!(state(|s| s.tracks[1].items[0].takes[0].envelopes.len()), 0, "out of the take's list again");
+    assert_eq!(lab.undo("envelope-show", &preview, &applied).unwrap()["undo"]["entry"], false, "a retry writes nothing");
 }
 
 #[test]
@@ -1432,6 +1433,50 @@ fn reads_of_points_automation_items_and_a_big_state_stay_inside_the_frame_and_ev
     assert!(serde_json::to_string(&answer).unwrap().len() <= 256 * 1024);
     let detail = &answer["items"][0]["state"];
     assert_eq!((detail["bytes"].clone(), detail.get("chunk").is_none(), detail["hash"].is_string()), (json!(8000 * 17 - 1), true, true));
+}
+
+/// What REAPER's own undo and redo do to an envelope's numbers: they come back from its state's text (lab 7.82: a point's
+/// time, unscaled value and tension to 8 places; an automation item's position to 14, baseline, amplitude and playrate to 6).
+fn through_reapers_undo() {
+    let round = |v: f64, places: i32| (v * 10f64.powi(places)).round() / 10f64.powi(places);
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    let scaled: Vec<f64> = state(|s| fake::points_of(&s.tracks[1].envelopes[0]).iter().map(|p| p.value).collect());
+    let kept: Vec<f64> = scaled.iter().map(|v| reaper.scale_to_envelope(1, round(reaper.scale_from_envelope(1, *v), 8))).collect();
+    state(|s| {
+        let envelope = &mut s.tracks[1].envelopes[0];
+        for (point, value) in envelope.pts.as_mut().unwrap().iter_mut().zip(kept) {
+            (point.time, point.value, point.tension) = (round(point.time, 8), value, round(point.tension, 8));
+        }
+        for item in &mut envelope.items {
+            item.position = round(item.position, 14) + 2e-15;
+            (item.baseline, item.amplitude, item.rate) = (round(item.baseline, 6), round(item.amplitude, 6), round(item.rate, 6));
+        }
+        s.state_count += 1;
+    });
+}
+
+#[test]
+fn reapers_own_undo_and_redo_in_between_dont_make_kumis_undo_refuse() {
+    let lab = envelope_lab();
+    let before = state(|s| fake::points_of(&s.tracks[1].envelopes[0]).len());
+    let (preview, applied) = lab.make(
+        "envelope-points-add",
+        json!({"ref": KICK_VOLUME, "points": [{"position": 0.123456789012, "value": -6.123456789, "shape": "bezier", "tension": 0.123456789}]}),
+    );
+    through_reapers_undo();
+    lab.undo("envelope-points-add", &preview, &applied).unwrap();
+    assert_eq!(state(|s| fake::points_of(&s.tracks[1].envelopes[0]).len()), before);
+    // An automation item at an awkward place, then changed: both undos still find it and see it as Kumi left it.
+    let (add_preview, added) = lab.make("automation-item-add", json!({"ref": KICK_VOLUME, "position": 5.123456789012345, "length": 0.75}));
+    let item = added["created"]["ref"].as_str().unwrap().to_string();
+    assert!(item.ends_with(":5.123456789"), "a ref names its place to a nanosecond: {item}");
+    let (set_preview, set) = lab.make("automation-item-set", json!({"ref": item, "baseline": 0.123456789, "playrate": 1.23456789}));
+    through_reapers_undo();
+    assert_eq!(lab.read(json!({"ref": item}))["items"][0]["ref"], item, "the same ref after REAPER's round trip");
+    lab.undo("automation-item-set", &set_preview, &set).unwrap();
+    lab.undo("automation-item-add", &add_preview, &added).unwrap();
+    assert!(state(|s| s.tracks[1].envelopes[0].items.is_empty()));
 }
 
 // ----- FX chain files saved -----

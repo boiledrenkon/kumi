@@ -301,6 +301,9 @@ fn band_title(ctx: &Ctx, at: &FxAt, band: usize, state: &Value) -> String {
     format!("{} band {} {}", label(ctx, at), band + 1, parts.join(", "))
 }
 
+/// A band's type and switch are ReaEQ's own state, not parameters: REAPER's undo neither notices nor keeps them (lab 7.82:
+/// a wet nudge there and back makes no point, one left makes a point whose undo takes back only the nudge). So no point is
+/// forced: the change is outside REAPER's undo (`skipped_by_daw_undo`), and Kumi's undo puts the band back.
 fn band_write(ctx: &Ctx, fx: Fx, band: usize, state: &Value) {
     // (REAPER answers false for these and takes them all the same: the change reads them back.)
     if let Some(code) = state["type"].as_i64() {
@@ -309,7 +312,6 @@ fn band_write(ctx: &Ctx, fx: Fx, band: usize, state: &Value) {
     if let Some(on) = state["enabled"].as_bool() {
         ctx.reaper.fx_set_config(fx, &format!("BANDENABLED{band}"), if on { "1" } else { "0" });
     }
-    mark_fx(ctx.reaper, fx);
 }
 
 pub fn eq_band_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
@@ -319,7 +321,10 @@ pub fn eq_band_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let wanted =
         json!({"type": kind.map_or(now["type"].clone(), Value::from), "enabled": enabled.map_or(now["enabled"].clone(), Value::from)});
     let wanted = band_only(&wanted, kind.is_some(), enabled.is_some());
-    let mut display = json!({"title": band_title(ctx, &at, band, &wanted)});
+    let mut display = json!({
+        "title": band_title(ctx, &at, band, &wanted),
+        "note": "REAPER's undo doesn't take a band's type or switch back (they aren't parameters); Kumi's undo does.",
+    });
     if now == wanted {
         display["unchanged"] = true.into();
     }
