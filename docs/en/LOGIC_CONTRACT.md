@@ -20,8 +20,8 @@ Everything here was measured in the lab of 2026-10-18 (`docs/evidence/logic-lab-
 
 - `pid`: Logic's; `resource`: Logic's bundle identifier (`com.apple.logic10`, or `com.apple.mobilelogic` for the Creator Studio build).
 - `project.id`: no UUID exists in every project, so the id is the 32-hex SHA-256 prefix of the saved package path; unsaved projects carry an `identity` from the window title.
-- `status.busy`: `modal` when `AXMainWindow` is an `AXDialog` or a sheet is open; `away` when Logic's windows are not on the current Space; `loading` while the window title is empty.
-- `status.permission`: `accessibility` missing when `AXIsProcessTrusted` is false; reads then answer `failed`, never `busy`.
+- `status` is flat, as REAPER's: `{project, busy, permission}`. `busy` is `false` when free, else `modal` (the main or focused window is a dialog or a sheet is open), `away` (Logic reports no window, its Space not being the current one) or `loading` (the project window has no title and no document yet); the last project is kept through those.
+- `status.permission`: `null`, or `"accessibility"` while the helper is not trusted; reads then answer `failed`, never `busy`. The identity (daw, bridge, dawVersion, pid, resource, project) is in the welcome, as for every own bridge; the discovery file is `logic-<pid>-<key>.json` with the same fields.
 
 ## Rows (`read`)
 
