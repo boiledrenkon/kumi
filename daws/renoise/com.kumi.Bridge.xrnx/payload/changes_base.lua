@@ -259,6 +259,18 @@ local function queue(journal, desc, how)
   end
 end
 
+-- A change that was undone can be redone only until something else is edited (Renoise clears its redo steps then): the journal
+-- is told how many edits the notifiers counted (`journal.edits`), and a change remembers the count when it was undone.
+local function stamp(journal, entry)
+  entry.edits_at = journal.edits and journal.edits() or nil
+end
+
+local function redoable(journal, entry)
+  if entry.state ~= "undone" then return true end
+  if entry.edits_at == nil or not journal.edits then return false end -- (undone before the count was kept: not known to be redoable)
+  return journal.edits() <= entry.edits_at
+end
+
 -- The events to tell Kumi of, once.
 function M.journal_take(journal)
   local events = journal.events
@@ -277,9 +289,10 @@ local function structural(journal, entry, type_, at, undoing, where)
   if undoing and where == at then
     if returns and entry.state == "applied" then
       entry.state = "undone"
+      stamp(journal, entry)
       queue(journal, entry.desc, "undo")
       return true
-    elseif not returns and entry.state == "undone" then
+    elseif not returns and entry.state == "undone" and redoable(journal, entry) then
       entry.state = "applied"
       queue(journal, entry.desc, "redo")
       return true
@@ -389,13 +402,14 @@ local function check_slots(journal, song)
     if entry.follows == "slots" then
       if entry.state == "applied" and now == entry.prior.slots and now ~= entry.applied.slots then
         candidates[#candidates + 1] = { entry = entry, how = "undo", state = "undone" }
-      elseif entry.state == "undone" and now == entry.applied.slots then
+      elseif entry.state == "undone" and now == entry.applied.slots and redoable(journal, entry) then
         candidates[#candidates + 1] = { entry = entry, how = "redo", state = "applied" }
       end
     end
   end
   if #candidates == 1 then
     candidates[1].entry.state = candidates[1].state
+    if candidates[1].state == "undone" then stamp(journal, candidates[1].entry) end
     queue(journal, candidates[1].entry.desc, candidates[1].how)
   end
 end
@@ -414,8 +428,9 @@ function M.journal_check(journal)
       local now = entry.place[entry.follows]
       if entry.state == "applied" and now == entry.prior.index and now ~= entry.applied.index then
         entry.state = "undone"
+        stamp(journal, entry)
         queue(journal, entry.desc, "undo")
-      elseif entry.state == "undone" and now == entry.applied.index then
+      elseif entry.state == "undone" and now == entry.applied.index and redoable(journal, entry) then
         entry.state = "applied"
         queue(journal, entry.desc, "redo")
       end
@@ -428,8 +443,9 @@ function M.journal_check(journal)
       if ok and now ~= nil then
         if entry.state == "applied" and spec.same(now, entry.prior) and not spec.same(now, entry.applied) then
           entry.state = "undone"
+          stamp(journal, entry)
           queue(journal, entry.desc, "undo")
-        elseif entry.state == "undone" and spec.same(now, entry.applied) then
+        elseif entry.state == "undone" and spec.same(now, entry.applied) and redoable(journal, entry) then
           entry.state = "applied"
           queue(journal, entry.desc, "redo")
         end
@@ -446,6 +462,7 @@ function M.note_restored(journal, kind, place, applied, spec)
     if entry.kind == kind and entry.state == "applied" and
       (entry.shape or (M.same_table(entry.place, place) and spec and spec.same(entry.applied, applied))) then
       entry.state = "undone"
+      stamp(journal, entry)
       if entry.shape and place then entry.place = place end
       return
     end

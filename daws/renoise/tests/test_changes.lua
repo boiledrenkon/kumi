@@ -2109,3 +2109,30 @@ test("changes: playing starts the transport, starting at a line needs the epoch,
   mock.data.song_fields.rendering = false
   H.no_dialogs()
 end)
+
+test("changes: a change the producer undid is not told as redone by an unrelated undo once something was edited since", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local input = { name = "Lead", index = 3 }
+  local previewed = preview(peer, "track-add", input)
+  apply(peer, "track-add", input, "Kumi: add (kz01)", previewed.fence, epoch, layout)
+  H.tick(2)
+  H.events(peer, "undone_in_daw")
+  mock.song:undo() -- the producer takes it back
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(#told, 1)
+  eq(told[1].data.how, "undo")
+  -- the producer edits something else (Renoise can't redo the track now), deletes a track and takes that back
+  mock.song:track(2).name = "Edited"
+  H.tick(2)
+  mock.api.delete_track_at(3)
+  H.tick(3)
+  mock.song:undo()
+  H.tick(3)
+  drain(peer)
+  told = H.events(peer, "undone_in_daw")
+  eq(#told, 0, "the track the undo brings back at place 3 is not the one Kumi made")
+  H.no_dialogs()
+end)

@@ -690,6 +690,7 @@ function M.start(h, reloading)
   st.bridge = st.bridge or { memory = {}, retry_ms = 0, started_ms = 0 }
   b = st.bridge
   b.journal = b.journal or changes.journal_new()
+  b.journal.edits = function() return b.edits or 0 end
   if b.started_ms == 0 then b.started_ms = unix_ms() end
   conns = server.new({
     connections = st.connections,
