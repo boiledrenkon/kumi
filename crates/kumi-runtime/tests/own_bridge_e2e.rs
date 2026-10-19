@@ -494,7 +494,13 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
             // and Kumi says so.
             let steps_before = script.undo_history().len();
             let muted = tool(&observed, "track_mute").execute(input(json!({"ref": "track:1", "mute": true})), Signal::new()).await.unwrap();
-            assert!(!muted.is_error && muted.text.contains("Renoise's own undo won't take this back; Kumi can."), "{}", muted.text);
+            assert!(
+                !muted.is_error && muted.text.contains("Track 1 muted (Renoise's own undo won't take this back; Kumi can)"),
+                "{}",
+                muted.text
+            );
+            let row = told.borrow().iter().rev().find(|record| record.title == "Track 1 muted").cloned().unwrap();
+            assert_eq!(row.note.as_deref(), Some("Renoise's own undo won't take this back; Kumi can."), "HISTORY's row says so too");
             assert_eq!(script.track_state(1).1, true);
             assert_eq!(script.undo_history().len(), steps_before, "no step in Renoise's undo");
             // The device names from before are retired: refused in Kumi's words, nothing sent.

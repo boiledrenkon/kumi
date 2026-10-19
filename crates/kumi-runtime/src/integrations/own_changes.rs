@@ -604,8 +604,9 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         if preview.pointer("/display/unchanged") == Some(&Value::Bool(true)) {
             let id = preview.get("transactionId").and_then(Value::as_str).map(str::to_owned);
             self.history.release(&id.into_iter().collect::<Vec<_>>());
+            // (A plan's answer keeps only a step's `changed`: the reason goes there.)
             return ChangeOutcome {
-                text: stringify(&json!({"changed": title, "unchanged": true})),
+                text: stringify(&json!({"changed": format!("{title}: it was so already, so nothing changed"), "unchanged": true})),
                 is_error: false,
                 missed: None,
                 stops: false,
@@ -640,24 +641,27 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &applied);
         note_epoch(&self.link().seen_in, &self.link().book.borrow().scheme, &applied);
         let title = applied.pointer("/display/title").and_then(Value::as_str).map(str::to_owned).unwrap_or(title);
-        let note = applied.pointer("/display/note").and_then(Value::as_str).map(str::to_owned);
+        // What the producer should know of it (a step the DAW's own undo skips), on its row and in its answer.
+        let own_undo = self.link().words().vocab.own_undo;
+        let note = applied.pointer("/display/note").and_then(Value::as_str).map(str::to_owned).or_else(|| {
+            (applied.pointer("/undo/entry") == Some(&Value::Bool(false))).then(|| format!("{own_undo} can't take this back; Kumi can."))
+        });
         if kind.kind == "track-add" {
             self.added.set(self.added.get() + 1);
         }
         let summary = kind.summary(&title, prior.as_ref(), applied.get("applied"));
-        let id = self.remember(kind, summary, &transaction, ChangeState::Applied, None);
-        let mut reply = json!({"changed": title, "change": id});
+        let id = self.remember(kind, summary, &transaction, ChangeState::Applied, note.clone());
+        // A plan's answer keeps a step's `changed` and not its other fields, so the note goes in it.
+        let changed = match &note {
+            Some(note) => format!("{title} ({})", note.trim_end_matches('.')),
+            None => title,
+        };
+        let mut reply = json!({"changed": changed, "change": id});
         if let Some(made) = applied.pointer("/created/ref").and_then(Value::as_str) {
             reply["ref"] = json!(self.link().book.borrow_mut().short_ref(made));
         }
         if let Some(restored) = applied.pointer("/applied/base") {
             reply["base"] = self.link().book.borrow_mut().shorten(restored);
-        }
-        if let Some(note) = note {
-            reply["note"] = json!(note);
-        }
-        if applied.pointer("/undo/entry") == Some(&Value::Bool(false)) && reply.get("note").is_none() {
-            reply["note"] = json!(format!("{} can't take this back; Kumi can.", self.link().words().vocab.own_undo));
         }
         ChangeOutcome { text: stringify(&reply), is_error: false, missed: None, stops: false }
     }
@@ -1001,6 +1005,33 @@ mod tests {
         plan.new_turn();
         let next = plan.one_change(add, JsonObject::new(), Signal::new()).await;
         assert!(!next.text.contains("tracks added in one answer"), "a new answer starts again: {}", next.text);
+    }
+
+    #[test]
+    fn an_epoch_renoise_moved_only_for_devices_keeps_the_names_of_what_stayed() {
+        use super::super::{own_bridge::follow_epoch, renoise::RenoiseRefs};
+        let fresh = || {
+            let mut book = Book::<RenoiseRefs>::default();
+            for reference in ["1:track:3", "1:device:3.2", "1:seq:1"] {
+                book.short_ref(reference);
+            }
+            (RefCell::new(book), RefCell::new(Some("1".to_string())), Cell::new(Some(4)))
+        };
+        let named = |book: &RefCell<Book<RenoiseRefs>>| {
+            ["track:1", "device:1", "seq:1"].map(|short| book.borrow().lengthen(&json!({"ref": short}))["ref"] != short)
+        };
+        // Tracks kept: the track's name stays, the device's and the slot's go; the layout goes on as it was.
+        let (book, epoch, layout) = fresh();
+        follow_epoch(&book, &epoch, &layout, &json!({"epoch": "2", "layout": 9, "kept": {"from": "1", "tracks": true}}));
+        assert_eq!((named(&book), epoch.borrow().clone(), layout.get()), ([true, false, false], Some("2".into()), Some(4)));
+        // The kinds the tool names as kept stay too.
+        let (book, epoch, layout) = fresh();
+        follow_epoch(&book, &epoch, &layout, &json!({"epoch": "2", "kept": {"from": "1", "tracks": true, "kinds": ["track", "seq"]}}));
+        assert_eq!(named(&book), [true, false, true]);
+        // Kept from another epoch than the book's, or not kept: every name goes, and the answer's layout is taken.
+        let (book, epoch, layout) = fresh();
+        follow_epoch(&book, &epoch, &layout, &json!({"epoch": "3", "layout": 9, "kept": {"from": "2", "tracks": true}}));
+        assert_eq!((named(&book), layout.get()), ([false, false, false], Some(9)));
     }
 
     #[test]
