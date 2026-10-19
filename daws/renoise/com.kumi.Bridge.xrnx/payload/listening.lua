@@ -771,6 +771,8 @@ function M.launch(job, env)
   for _, source in ipairs(job.sources) do
     if source.what == "track" then job.snapshot = job.snapshot or snapshot(song) end
   end
+  -- (a change made while the mix renders, before Kumi's first solo, is someone else's too)
+  job.after = job.snapshot
   if env.before_render then env.before_render() end
   S.job = job
   start_render(job, env, 1)
