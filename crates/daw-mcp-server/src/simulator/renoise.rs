@@ -20,7 +20,9 @@ const VECTORS_EPOCH: u32 = 1; // (the same, as a number)
 const PAGE_BYTES: usize = 256 * 1024 - 4096;
 const DEFAULT_LIMIT: usize = 50;
 const MAX_LIMIT: usize = 200;
-const METHODS: [&str; 7] = ["read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore"];
+const METHODS: [&str; 4] = ["read", "snapshot", "focus", "focus_body"];
+/// What a song made to be changed answers besides (`config_with_changes`).
+const CHANGE_METHODS: [&str; 3] = ["change_preview", "change_apply", "change_restore"];
 
 struct Case {
     method: String,
@@ -367,8 +369,13 @@ impl RenoiseScript {
         SimulatorConfig::renoise(secret, resource).with_methods(&METHODS, self.respond())
     }
 
+    /// The same, and Kumi's changes are made in the song (`change`).
+    pub fn config_with_changes(&self, secret: Secret, resource: &str) -> SimulatorConfig {
+        self.config(secret, resource).with_methods(&CHANGE_METHODS, self.respond())
+    }
+
     fn answer(&self, method: &str, params: &Value) -> Option<Result<Value, (String, String)>> {
-        if !METHODS.contains(&method) {
+        if !METHODS.contains(&method) && !CHANGE_METHODS.contains(&method) {
             return None;
         }
         let mut state = self.state.lock().unwrap();

@@ -463,7 +463,7 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
             let paths = BridgePaths::new(home.path(), Daw::Renoise);
             let secret = ensure_secret(&paths.secret()).unwrap();
             let script = RenoiseScript::new();
-            let mut config = script.config(secret, "/lab/Renoise");
+            let mut config = script.config_with_changes(secret, "/lab/Renoise");
             config.discovery_dir = Some(paths.discovery());
             let simulator = Simulator::start(config).await.unwrap();
             let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Renoise, home.path())), id: Cell::new(0) });
