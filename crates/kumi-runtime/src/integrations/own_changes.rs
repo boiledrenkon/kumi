@@ -421,6 +421,10 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     /// and undo_change.
     pub fn tools(self: &Rc<Self>) -> Vec<Rc<dyn KernelTool>> {
         let set = self.link().daw.changes;
+        if set.kinds.is_empty() && set.actions.is_empty() {
+            // A DAW Kumi only reads so far (Logic, until M3): no change tools at all, not an empty plan.
+            return Vec::new();
+        }
         let mut tools: Vec<Rc<dyn KernelTool>> = Vec::new();
         let mut lines = Vec::new();
         for kind in set.kinds {

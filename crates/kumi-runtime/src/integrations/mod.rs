@@ -3,6 +3,7 @@
 pub mod ableton;
 pub mod fallback;
 pub mod logic;
+pub mod logic_changes;
 pub mod none;
 pub mod own_bridge;
 pub mod own_changes;

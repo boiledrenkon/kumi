@@ -30,9 +30,9 @@ pub const DAW: OwnDaw = OwnDaw {
     bodies: &[BodyKind::Tree, BodyKind::Tracker, BodyKind::Matrix, BodyKind::Keyzones],
     body_request,
     to_body,
-    changes: &super::renoise_changes::CHANGES,
     busy_words: |code| own_bridge::busy_words(code, &DawProfile::RENOISE),
     permission_words: |permission| own_bridge::permission_words(permission, &DawProfile::RENOISE),
+    changes: &super::renoise_changes::CHANGES,
 };
 
 /// What the producer looks at in Renoise: the middle frame (the pattern or phrase editor, an instrument, the mixer),

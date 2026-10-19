@@ -35,6 +35,7 @@ pub const DAW: OwnDaw = OwnDaw {
     to_body,
     busy_words,
     permission_words,
+    changes: &super::logic_changes::CHANGES,
 };
 
 /// Why Logic answers late, from the bridge's `busy` (the contract's `modal`, `away` and `loading`).

@@ -66,13 +66,13 @@ pub struct OwnDaw {
     pub bodies: &'static [BodyKind],
     pub body_request: fn(&BodyRequest) -> Option<JsonObject>,
     pub to_body: fn(&BodyRequest, &Value) -> Option<FocusBody>,
-    /// What Kumi can change in it, and how.
-    pub changes: &'static super::own_changes::OwnChangeSet,
     /// Why the DAW answers late, from its bridge's `busy` code (`modal`, `loading`…), in the DAW's words.
     pub busy_words: fn(&str) -> String,
     /// What the bridge lacks, from its status's `permission` (Logic's `accessibility`), in words that say how to grant
     /// it: a look fails for it, and never counts as busy.
     pub permission_words: fn(&str) -> String,
+    /// What Kumi can change in it, and how.
+    pub changes: &'static super::own_changes::OwnChangeSet,
 }
 
 /// Starts Kumi's host for a DAW: the production one runs `daw-mcp-server`; a test's stand-in answers in its place.
@@ -544,7 +544,10 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     fn instructions(&self) -> String {
-        format!("{} {}", self.daw.instructions, self.daw.changes.instructions)
+        match self.daw.changes.instructions {
+            "" => self.daw.instructions.to_string(),
+            changes => format!("{} {}", self.daw.instructions, changes),
+        }
     }
 
     fn read_tool(&self) -> Rc<dyn KernelTool> {

@@ -106,8 +106,6 @@ pub struct Host {
     current: tokio::sync::Mutex<Option<Current>>,
     /// The bridge's events (`{name, data}`), for the MCP client: whichever instance the host is connected to.
     events: tokio::sync::broadcast::Sender<Value>,
-    /// The changes previewed, applied and undone through this host (M3).
-    journal: std::sync::Arc<crate::changes::Journal>,
     /// What starts the bridge of a DAW whose bridge the host starts, in place of the installed binary (a test's).
     spawner: Option<Spawner>,
     /// The bridge binary to start instead of the installed one ([`LOGIC_BRIDGE_VAR`]).
@@ -115,6 +113,8 @@ pub struct Host {
     spawn_wait: Duration,
     /// The bridge the host started, while it runs it.
     spawned: tokio::sync::Mutex<Option<Box<dyn SpawnedBridge>>>,
+    /// The changes previewed, applied and undone through this host (M3).
+    journal: std::sync::Arc<crate::changes::Journal>,
 }
 
 /// Which running instance a tool means, when several run.
@@ -192,16 +192,11 @@ impl Host {
             paths: BridgePaths::new(kumi_home, daw),
             current: tokio::sync::Mutex::new(None),
             events: tokio::sync::broadcast::channel(1024).0,
-            journal: std::sync::Arc::default(),
-        }
-    }
-
-    pub(crate) fn journal(&self) -> &crate::changes::Journal {
-        &self.journal
             spawner: None,
             bridge_binary: None,
             spawn_wait: SPAWN_WAIT,
             spawned: tokio::sync::Mutex::new(None),
+            journal: std::sync::Arc::default(),
         }
     }
 
@@ -221,6 +216,10 @@ impl Host {
     pub fn with_spawn_wait(mut self, wait: Duration) -> Self {
         self.spawn_wait = wait;
         self
+    }
+
+    pub(crate) fn journal(&self) -> &crate::changes::Journal {
+        &self.journal
     }
 
     /// The bridge's events from now on, as `{name, data}` (a `tracks` shift, a project opened…).

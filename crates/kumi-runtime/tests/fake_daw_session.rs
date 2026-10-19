@@ -458,23 +458,6 @@ async fn everything_said(profile: DawProfile, instructions: &'static str) -> Vec
     said
 }
 
-/// Where `said` speaks Live's words, outside what's allowed: each with what's around it.
-fn leaks(said: &[String]) -> Vec<String> {
-    said.iter()
-        .map(|text| ALLOWED.iter().fold(text.clone(), |text, (_, phrase, _)| text.replace(phrase, "")))
-        .flat_map(|text| {
-            LIVE_WORDS
-                .find_iter(&text)
-                .map(|word| {
-                    let (start, end) = (word.start().saturating_sub(80), (word.end() + 80).min(text.len()));
-                    let (start, end) = (floor(&text, start), ceil(&text, end));
-                    format!("{:?}: …{}…", word.as_str(), &text[start..end])
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn a_whole_session_over_another_daw_says_nothing_in_lives_words() {
     tokio::task::LocalSet::new()
@@ -484,8 +467,20 @@ async fn a_whole_session_over_another_daw_says_nothing_in_lives_words() {
                 assert!(said.iter().any(|text| text.contains(phrase)), "{at} no longer says {phrase} ({why}): take it off the list");
             }
             assert_no_live_words(&said);
-            let found = leaks(&said);
-            assert!(found.is_empty(), "{} in Live's words:\n{}", found.len(), found.join("\n"));
+        })
+        .await;
+}
+
+/// Logic Pro's own profile (its words, its capabilities) through the same whole session: nothing the model or the
+/// producer gets is in Live's words.
+#[tokio::test(flavor = "current_thread")]
+async fn a_whole_session_over_logic_pro_says_nothing_in_lives_words() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let said = everything_said(DawProfile::LOGIC, LOGIC_INSTRUCTIONS).await;
+            assert!(said.iter().any(|text| text.contains("Logic Pro")), "Logic's words reach the model");
+            assert!(said.iter().any(|text| text.contains(DawProfile::LOGIC.vocab.cant_reach)), "and the producer, when it's away");
+            assert_no_live_words(&said);
         })
         .await;
 }
@@ -596,17 +591,6 @@ async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
             said.extend(events.borrow().iter().map(|event| serde_json::to_string(event).unwrap()));
             said.extend(changes.borrow().iter().map(|record| serde_json::to_string(record).unwrap()));
             assert_no_live_words(&said);
-/// Logic Pro's own profile (its words, its capabilities) through the same whole session: nothing the model or the
-/// producer gets is in Live's words.
-#[tokio::test(flavor = "current_thread")]
-async fn a_whole_session_over_logic_pro_says_nothing_in_lives_words() {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let said = everything_said(DawProfile::LOGIC, LOGIC_INSTRUCTIONS).await;
-            assert!(said.iter().any(|text| text.contains("Logic Pro")), "Logic's words reach the model");
-            assert!(said.iter().any(|text| text.contains(DawProfile::LOGIC.vocab.cant_reach)), "and the producer, when it's away");
-            let found = leaks(&said);
-            assert!(found.is_empty(), "{} in Live's words:\n{}", found.len(), found.join("\n"));
         })
         .await;
 }

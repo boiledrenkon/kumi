@@ -30,9 +30,9 @@ pub const DAW: OwnDaw = OwnDaw {
     bodies: &[BodyKind::Tree, BodyKind::Notes, BodyKind::Timeline, BodyKind::Routing],
     body_request,
     to_body,
-    changes: &super::reaper_changes::CHANGES,
     busy_words: |code| own_bridge::busy_words(code, &DawProfile::REAPER),
     permission_words: |permission| own_bridge::permission_words(permission, &DawProfile::REAPER),
+    changes: &super::reaper_changes::CHANGES,
 };
 
 /// What the producer looks at in REAPER: the arrange view always, with the MIDI editor, an FX chain or a track's
