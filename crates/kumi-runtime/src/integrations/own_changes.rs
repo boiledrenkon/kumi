@@ -58,6 +58,16 @@ pub struct OwnKind {
     /// Input fields the bridge names otherwise (the model's name, the bridge's): every ref field the model sees is named
     /// as refs are (`ref`, `…Ref`, `…Refs`), so Kumi shortens and lengthens it.
     pub wire: &'static [(&'static str, &'static str)],
+    /// What HISTORY draws of it, from the values it found and left.
+    pub picture: Picture,
+}
+
+/// What HISTORY draws of a change: a value moved within its span (a fader, a pan), or a colour's swatches.
+#[derive(Clone, Copy)]
+pub enum Picture {
+    None,
+    Meter { field: &'static str, min: f64, max: f64 },
+    Colors { field: &'static str },
 }
 
 impl OwnKind {
@@ -68,7 +78,37 @@ impl OwnKind {
         description: &'static str,
         schema: &'static str,
     ) -> Self {
-        Self { tool, kind, family, description, schema, core: false, structural: false, deletes: false, wire: &[] }
+        Self { tool, kind, family, description, schema, core: false, structural: false, deletes: false, wire: &[], picture: Picture::None }
+    }
+    pub const fn meter(mut self, field: &'static str, min: f64, max: f64) -> Self {
+        self.picture = Picture::Meter { field, min, max };
+        self
+    }
+    pub const fn colors(mut self, field: &'static str) -> Self {
+        self.picture = Picture::Colors { field };
+        self
+    }
+    /// HISTORY's summary of the change: its title, and its picture from the values before (`prior`) and after.
+    fn summary(&self, title: &str, prior: Option<&Value>, after: Option<&Value>) -> ChangeSummary {
+        let mut summary = ChangeSummary::title(title);
+        let (Some(prior), Some(after)) = (prior.filter(|v| v.is_object()), after.filter(|v| v.is_object())) else { return summary };
+        match self.picture {
+            Picture::Meter { field, min, max } => {
+                // A value the DAW leaves out (Renoise's volume at silence) is the bottom of its span.
+                let value = |values: &Value| values.get(field).and_then(Value::as_f64).unwrap_or(min).clamp(min, max);
+                if after.get(field).is_some() {
+                    (summary.from, summary.to, summary.range) = (Some(value(prior)), Some(value(after)), Some([min, max]));
+                }
+            }
+            Picture::Colors { field } => {
+                if let Some(to) = after.get(field).and_then(Value::as_str) {
+                    let from = prior.get(field).and_then(Value::as_str).map(str::to_owned);
+                    summary.colors = Some(ColorChange { from, to: to.to_owned() });
+                }
+            }
+            Picture::None => {}
+        }
+        summary
     }
     pub const fn wire(mut self, renamed: &'static [(&'static str, &'static str)]) -> Self {
         self.wire = renamed;
@@ -540,6 +580,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         };
         follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &preview);
         let title = preview.pointer("/display/title").and_then(Value::as_str).unwrap_or(kind.kind).to_owned();
+        let prior = preview.get("prior").cloned();
         // Nothing to change (already so): no step in the DAW's undo, no row in HISTORY.
         if preview.pointer("/display/unchanged") == Some(&Value::Bool(true)) {
             let id = preview.get("transactionId").and_then(Value::as_str).map(str::to_owned);
@@ -562,7 +603,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         let applied = match self.link().call("change_apply", apply, self.history.change_signal()).await {
             Ok(Ok(applied)) => applied,
             Ok(Err(refused)) if refused.code.as_deref() == Some("uncertain") || refused.why.contains("uncertain") => {
-                self.remember(kind, &title, &transaction, ChangeState::Unsure, Some(format!("{} didn't confirm this change.", words.app)));
+                self.remember(kind, kind.summary(&title, None, None), &transaction, ChangeState::Unsure, Some(format!("{} didn't confirm this change.", words.app)));
                 return ChangeOutcome::stop(format!("{} didn't confirm this change ({title}), so it may or may not have happened: read it before going on", words.app));
             }
             Ok(Err(refused)) if refused.busy => {
@@ -573,7 +614,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             }
             Ok(Err(refused)) => return ChangeOutcome::error(self.refusal(&refused, &asked)),
             Err(_) => {
-                self.remember(kind, &title, &transaction, ChangeState::Unsure, Some(format!("{} didn't answer this change.", words.app)));
+                self.remember(kind, kind.summary(&title, None, None), &transaction, ChangeState::Unsure, Some(format!("{} didn't answer this change.", words.app)));
                 return ChangeOutcome::stop(format!("{} didn't answer this change ({title}), so it may or may not have happened: read it before going on", words.app));
             }
         };
@@ -581,7 +622,8 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         note_epoch(&self.link().seen_in, &self.link().book.borrow().scheme, &applied);
         let title = applied.pointer("/display/title").and_then(Value::as_str).map(str::to_owned).unwrap_or(title);
         let note = applied.pointer("/display/note").and_then(Value::as_str).map(str::to_owned);
-        let id = self.remember(kind, &title, &transaction, ChangeState::Applied, None);
+        let summary = kind.summary(&title, prior.as_ref(), applied.get("applied"));
+        let id = self.remember(kind, summary, &transaction, ChangeState::Applied, None);
         let mut reply = json!({"changed": title, "change": id});
         if let Some(made) = applied.pointer("/created/ref").and_then(Value::as_str) {
             reply["ref"] = json!(self.link().book.borrow_mut().short_ref(made));
@@ -631,13 +673,13 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     }
 
     /// A change kept in HISTORY under its transaction: its id.
-    fn remember(&self, kind: &OwnKind, title: &str, transaction: &str, state: ChangeState, note: Option<String>) -> String {
-        let mut record = new_record(kind.family, ChangeSummary::title(title), state, self.history.host.now_ms());
+    fn remember(&self, kind: &OwnKind, summary: ChangeSummary, transaction: &str, state: ChangeState, note: Option<String>) -> String {
+        if let Some(titles) = self.link().step_titles.borrow_mut().as_mut() {
+            titles.push(summary.title.clone());
+        }
+        let mut record = new_record(kind.family, summary, state, self.history.host.now_ms());
         record.note = note;
         let id = record.id.clone();
-        if let Some(titles) = self.link().step_titles.borrow_mut().as_mut() {
-            titles.push(title.to_owned());
-        }
         self.history.remember(record, transaction.into(), None);
         self.history.made_by(&id, kind.tool);
         self.history.changes_this_turn.set(self.history.changes_this_turn.get() + 1);

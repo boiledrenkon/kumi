@@ -395,6 +395,10 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
             assert_eq!((script.track(4)["name"].clone(), script.track(2)["mute"].clone()), (json!("Pads"), json!(true)));
             let titles: Vec<String> = told.borrow().iter().map(|record| record.title.clone()).collect();
             assert_eq!(titles, ["Track 1 volume -6 dB", "Added track Pad", "Renamed Pad to Pads", "Track 2 muted"]);
+            // The fader's picture: where it was, where it went, within its span.
+            let fader = told.borrow()[0].clone();
+            assert_eq!((fader.from, fader.to, fader.range), (Some(0.0), Some(-6.0), Some([-60.0, 12.0])));
+            assert_eq!(told.borrow()[3].range, None, "a mute has no meter");
             assert!(!done.text.contains("r:track:"), "no long ref reaches the model: {}", done.text);
             // The plan is one step of REAPER's undo, named by what it did.
             let undo_steps = script.undo_history();
