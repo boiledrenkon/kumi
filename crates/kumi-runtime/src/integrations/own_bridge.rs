@@ -138,6 +138,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         lifetime: Signal::new(),
         tempo: Rc::default(),
         file: Rc::default(),
+        step_titles: RefCell::default(),
     });
     let context = &options.context;
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, context.on_change.clone(), context.on_action.clone());

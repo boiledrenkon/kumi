@@ -26,6 +26,10 @@ struct State {
     asked: Vec<(String, Value)>,
     /// The undo history's descriptions, oldest first (the changes applied and restored).
     undo: Vec<String>,
+    /// A plan's undo step, open: its label (the changes made meanwhile make no step of their own).
+    open_step: Option<String>,
+    /// A dialog shows for the next change preview only (it closes right after).
+    busy_once: bool,
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -77,7 +81,16 @@ impl ReaperScript {
             })
             .collect();
         ReaperScript {
-            state: Arc::new(Mutex::new(State { epoch: 1, tracks: rows, changed: 7, keeps_bound: true, asked: vec![], undo: vec![] })),
+            state: Arc::new(Mutex::new(State {
+                epoch: 1,
+                tracks: rows,
+                changed: 7,
+                keeps_bound: true,
+                asked: vec![],
+                undo: vec![],
+                open_step: None,
+                busy_once: false,
+            })),
         }
     }
 
@@ -121,8 +134,20 @@ impl ReaperScript {
 
     /// The simulator's config for REAPER with this project behind it.
     pub fn config(&self, secret: Secret, resource: &str) -> SimulatorConfig {
-        SimulatorConfig::reaper(secret, resource)
-            .with_methods(&["read", "snapshot", "focus", "focus_body", "change_preview", "change_apply", "change_restore"], self.respond())
+        SimulatorConfig::reaper(secret, resource).with_methods(
+            &[
+                "read",
+                "snapshot",
+                "focus",
+                "focus_body",
+                "change_preview",
+                "change_apply",
+                "change_restore",
+                "undo_step_begin",
+                "undo_step_end",
+            ],
+            self.respond(),
+        )
     }
 
     /// The kinds the sim makes, the way the contract has every kind made: a preview that writes nothing, an apply
@@ -130,6 +155,9 @@ impl ReaperScript {
     /// field each), and a track added at the end (its restore deletes it).
     fn change(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
         let bad = |message: &str| ("bad-params".to_string(), message.to_string());
+        if method == "change_preview" && std::mem::take(&mut state.busy_once) {
+            return Err(("busy".into(), "a dialog is open; nothing changed".into()));
+        }
         let kind = params["kind"].as_str().unwrap_or_default();
         if kind == "track-add" {
             return Self::add_track(state, epoch, method, params);
@@ -173,7 +201,7 @@ impl ReaperScript {
                 let desc = params["desc"].as_str().ok_or(bad("desc must be a string"))?.to_string();
                 state.tracks[index][field] = wanted.clone();
                 state.changed += 1;
-                state.undo.push(desc.clone());
+                Self::step(state, &desc);
                 Ok(
                     json!({"epoch": epoch, "applied": {field: wanted}, "display": {"title": title}, "undo": {"desc": desc, "entry": true, "stateCount": state.changed}}),
                 )
@@ -212,7 +240,7 @@ impl ReaperScript {
                 let made = row["ref"].clone();
                 state.tracks.push(row);
                 state.changed += 1;
-                state.undo.push(desc.clone());
+                Self::step(state, &desc);
                 Ok(
                     json!({"epoch": epoch, "applied": {"added": true}, "created": {"ref": made, "kind": "track"}, "display": {"title": format!("Added track {name}")}, "undo": {"desc": desc, "entry": true}}),
                 )
@@ -228,6 +256,32 @@ impl ReaperScript {
                 Ok(json!({"epoch": epoch, "restored": {"added": false}, "display": {"title": format!("Deleted track {name}")}}))
             }
         }
+    }
+
+    /// A change's step in REAPER's undo: its own, or none inside a plan's (whose label names them all when it closes).
+    fn step(state: &mut State, desc: &str) {
+        if state.open_step.is_none() {
+            state.undo.push(desc.to_string());
+        }
+    }
+
+    /// `undo_step_begin {label}` / `undo_step_end {stepId, label?}`: one step around a plan's changes, named by the label
+    /// it ends with (or began with).
+    fn plan_step(state: &mut State, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let label = params.get("label").and_then(Value::as_str).map(str::to_owned);
+        if method == "undo_step_begin" {
+            state.open_step = Some(label.unwrap_or_default());
+            return Ok(json!({"stepId": "s1"}));
+        }
+        let begun = state.open_step.take().ok_or(("failed".to_string(), "no step is open".to_string()))?;
+        let desc = label.unwrap_or(begun);
+        state.undo.push(desc.clone());
+        Ok(json!({"desc": desc, "entry": true}))
+    }
+
+    /// A dialog shows for the next change's preview, and closes right after.
+    pub fn busy_once(&self) {
+        self.state.lock().unwrap().busy_once = true;
     }
 
     /// The producer presses REAPER's undo: Kumi's last step comes off (its values back as the preview saw them is the
@@ -264,6 +318,7 @@ impl ReaperScript {
         }
         Some(match method {
             "change_preview" | "change_apply" | "change_restore" => Self::change(&mut state, &epoch, method, params),
+            "undo_step_begin" | "undo_step_end" => Self::plan_step(&mut state, method, params),
             "read" => Self::read(&state, &epoch, params),
             "snapshot" => {
                 let tracks: Vec<Value> = state.tracks.iter().take(MAX_LIMIT).cloned().collect();

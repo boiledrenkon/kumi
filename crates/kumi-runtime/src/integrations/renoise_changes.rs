@@ -1,15 +1,31 @@
 //! What Kumi can change in Renoise (M3): tracks (made, moved, grouped and deleted too), the song's tempo, lines per beat
 //! and ticks per line, a track's DSP devices and their parameters, and a pattern track's lines. Each kind is the tool's
 //! (`payload/changes_*.lua`).
-use super::own_changes::{OwnChangeSet, OwnKind};
+use super::own_changes::{OwnAction, OwnChangeSet, OwnKind};
 use crate::core::contracts::ChangeFamily::*;
 
 const PLAN: &str = "Make changes in Renoise in one call, in order: each step is one of your change tools or a step below with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new device). A wait step ({\"beats\": 8} or {\"seconds\": 4}) pauses between steps. Each change is one step of Renoise's undo. It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
 const UNDO: &str = "Undo one of your changes from this session: pass its change id (such as c3), or \"last\" for the latest one. Kumi puts back exactly what that change set, as a new step of Renoise's undo; it only works while nobody changed the same thing in Renoise since, and if so, say what happened (discard: true puts it back anyway, only when the producer asks). With final: true, when the undo is all that was asked, Kumi tells the producer and the answer ends there, with no reply from you.";
 const INSTRUCTIONS: &str = "Change Renoise with your change tools, or several changes at once with make_changes, using the refs your reads gave. Each change is one step of Renoise's undo (mute and solo aren't: Renoise's undo skips them), and undo_change takes back one of yours as a new step (Renoise's own undo is the producer's). Places count from 1 here, and a track's first device is its mixer, so devices go at 2 or later. Adding, deleting or moving a device makes Renoise's refs new: read again before using older ones (a ref the change made comes back with it). Pattern lines are written in Renoise's own notation (note \"C-4\", \"OFF\"; two-digit hex values; effect \"0A20\"). The observation's kumiChanges lists your latest changes and where each stands (applied, undone, kept, unsure); the producer can undo one in Renoise or in HISTORY without telling you, so go by kumiChanges and Renoise, not by memory.";
 
-pub static CHANGES: OwnChangeSet =
-    OwnChangeSet { kinds: &KINDS, plan_description: PLAN, undo_description: UNDO, instructions: INSTRUCTIONS, plan_steps: false };
+pub static CHANGES: OwnChangeSet = OwnChangeSet {
+    kinds: &KINDS,
+    actions: &ACTIONS,
+    plan_description: PLAN,
+    undo_description: UNDO,
+    instructions: INSTRUCTIONS,
+    plan_steps: false,
+};
+
+static ACTIONS: [OwnAction; 1] = [OwnAction {
+    tool: "stop",
+    method: "transport_stop",
+    description: "Stop Renoise's playback (and edit-mode recording).",
+    schema: r#"{"type":"object","additionalProperties":false,"properties":{}}"#,
+    core: true,
+    playing: Some(false),
+    title: "Stopped",
+}];
 
 static KINDS: [OwnKind; 20] = [
     OwnKind::new("track_volume", "track-volume", Mixer, "Change a track's volume in dB (-150 or less is silence, up to about +3), on its pre-fader (default) or post-fader stage; the master too.", r#"{"type":"object","additionalProperties":false,"required":["ref","volumeDb"],"properties":{"ref":{"type":"string","description":"The track (master allowed)"},"volumeDb":{"type":"number","minimum":-150,"maximum":3},"stage":{"type":"string","enum":["pre","post"]}}}"#).core(),

@@ -108,7 +108,7 @@ async fn reapers_observation_is_its_project_in_short_refs_at_its_place() {
             assert_eq!(context["tracks"][1]["ref"], "track:2");
             assert_eq!(context["selection"]["trackRef"], "track:2");
             assert!(!seen.context.contains("{8A5D"), "no GUID reaches the model: {}", seen.context);
-            // The read, REAPER's core change kinds, the plan and the undo.
+            // The read, REAPER's core change kinds and actions, the plan and the undo.
             assert_eq!(
                 seen.tools.iter().map(|tool| tool.name().to_string()).collect::<Vec<_>>(),
                 [
@@ -121,6 +121,8 @@ async fn reapers_observation_is_its_project_in_short_refs_at_its_place() {
                     "fx_add",
                     "fx_param",
                     "notes_add",
+                    "play",
+                    "stop",
                     "make_changes",
                     "undo_change"
                 ]

@@ -388,16 +388,24 @@ impl Changes {
         Ok(json!({"stepId": id}))
     }
 
-    /// `undo_step_end {stepId}`: closes the plan's block as one point named by its label.
+    /// `undo_step_end {stepId, label?}`: closes the plan's block as one point named by its label, or by `label` when given
+    /// (what the plan did, known only once it's done).
     pub fn step_end(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
         let id = text(params, "stepId")?;
-        let plan = {
+        let label = match params.get("label") {
+            None | Some(Value::Null) => None,
+            Some(_) => Some(text(params, "label")?.to_string()),
+        };
+        let mut plan = {
             let mut open = self.plan.borrow_mut();
             match open.as_ref() {
                 Some(plan) if plan.id == id => open.take().expect("the plan"),
                 _ => return Err(failed("that step isn't open (it ended already, or the project changed under it)")),
             }
         };
+        if let Some(label) = label {
+            plan.label = label;
+        }
         Ok(self.close(reaper, reads, plan))
     }
 
