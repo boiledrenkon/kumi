@@ -784,7 +784,9 @@ end
 function M.on_new_document()
   b.quitting = false
   b.document = b.document + 1
-  b.memory.born_unsaved = nil
+  -- Another song: its id is worked out afresh. (Starting with a file, Renoise opens its empty song and then the file
+  -- without releasing the first, so the empty song's id would otherwise stay with the file.)
+  b.memory.song_id, b.memory.born_unsaved = nil, nil
   if renoise.song() then status.note_document(b.memory, renoise.song()) end
   bump_epoch("a song was opened")
   attach(renoise.song())

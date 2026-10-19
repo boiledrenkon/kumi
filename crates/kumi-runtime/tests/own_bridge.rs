@@ -582,9 +582,15 @@ async fn a_song_reopened_after_a_restart_keeps_its_conversation_not_the_empty_so
                 answers: RefCell::new(vec![("status", json!({"connected": true}), false), ("snapshot", song("t1:1"), false)]),
                 asked: RefCell::default(),
             });
-            let renoise = create_renoise_integration(options(host.clone(), Rc::new(RefCell::new(vec![]))));
+            let traced: Rc<RefCell<Vec<String>>> = Rc::default();
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            let into = traced.clone();
+            options.context.on_dispatch = Some(Rc::new(move |line| into.borrow_mut().push(line)));
+            let renoise = create_renoise_integration(options);
             renoise.start(Signal::new()).await.unwrap();
             let before = renoise.observe(Signal::new(), None).await.unwrap().key;
+            // KUMI_TRACE shows the key each look took the song to be.
+            assert_eq!(traced.borrow().last().cloned(), Some(format!("look: {before}")));
             // Renoise quits.
             host.answers.borrow_mut().push(("snapshot", json!({"error": "Renoise closed", "connected": false}), true));
             renoise.observe(Signal::new(), None).await.unwrap();

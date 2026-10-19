@@ -178,6 +178,12 @@ impl<'a> Reaper<'a> {
         }
     }
 
+    /// The project REAPER is loading or saving now, if it is.
+    pub fn project_in_load_save(&self) -> Option<Project> {
+        let project = unsafe { self.api.GetCurrentProjectInLoadSave()?() };
+        (!project.is_null()).then_some(Project(project))
+    }
+
     /// Whether a project is loading or saving, or one is rendering: no edits then. REAPER reports loading and saving
     /// as one state, so both read as `loading`.
     pub fn busy(&self) -> Option<Busy> {

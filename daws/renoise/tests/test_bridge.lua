@@ -494,6 +494,21 @@ test("bridge: a saved song without a stored id keeps one id across reopening", f
   no_dialogs()
 end)
 
+test("bridge: a song file Renoise opens over its empty startup song is named by its path, not the empty song's id", function()
+  -- Started with a file: the empty song first, then the file, with no release in between (as real Renoise does).
+  local env = setup({ song = { name = "" } })
+  local _, welcome = connect(env)
+  local empty = welcome.project.id
+  mock.open_over_startup_song({ file_name = "/s/bears.xrns" })
+  local peer = connect(env)
+  local id = request(peer, "status").result.project.id
+  ok(id ~= empty, "not the empty song's id")
+  -- The same file opened in another run (a restart): the same id.
+  mock.load_song({ file_name = "/s/bears.xrns" })
+  eq(request(connect(env), "status").result.project.id, id)
+  no_dialogs()
+end)
+
 test("bridge: other keys in tool_data are kept", function()
   local env = setup({ song = { tool_data = '{"note":"keep me"}' } })
   connect(env)

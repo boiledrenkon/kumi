@@ -290,17 +290,18 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             // Events dropped on the way (the host fell behind): a shift among them is unknown, so the track names go and are
             // read again; none is left on the wrong track.
             simulator.emit("events_lost", json!({}));
-            let mut refused = None;
-            for _ in 0..100 {
+            // (Until the event lands, the read goes to the simulator, which has nothing scripted for that track's devices.)
+            let mut last = String::new();
+            for _ in 0..200 {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 let answer =
                     read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await.unwrap();
-                if answer.is_error {
-                    refused = Some(answer.text);
+                last = answer.text;
+                if answer.is_error && last.contains("isn't one of this turn's refs") {
                     break;
                 }
             }
-            assert!(refused.as_deref().is_some_and(|text| text.contains("isn't one of this turn's refs")), "{refused:?}");
+            assert!(last.contains("isn't one of this turn's refs"), "{last}");
 
             // Another song opens: the old song's refs are retired, so a stale track:1 reads nothing of the new song.
             script.switch_song();
