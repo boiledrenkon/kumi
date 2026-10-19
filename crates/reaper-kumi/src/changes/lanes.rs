@@ -19,7 +19,7 @@ const COMP_AREA_FROM_RAZOR: (i32, &str) = (42475, "Razor edit: Create fixed lane
 /// The most razor areas one change sets on a track.
 const MOST_AREAS: usize = 64;
 /// The most lanes a track has (REAPER 7).
-const MOST_LANES: i64 = 256;
+pub(super) const MOST_LANES: i64 = 256;
 
 struct TrackFound {
     track: Track,
@@ -85,11 +85,17 @@ fn lanes_state(reaper: &Reaper, track: Track) -> Value {
         .filter_map(|n| reaper.track_item(track, n))
         .map(|item| json!([reaper.item_guid(item), reaper.item_value(item, "I_FIXEDLANE") as i64]))
         .collect();
-    json!({"mode": mode, "lanes": count, "plays": plays_of(reaper, track, count), "items": items})
+    json!({"mode": mode, "lanes": count, "plays": plays_of(reaper, track, count), "all": all_of(reaper, track), "items": items})
 }
 
 fn plays_of(reaper: &Reaper, track: Track, count: i64) -> Vec<i64> {
     (0..count).map(|n| reaper.track_value(track, &format!("C_LANEPLAYS:{n}")) as i64).collect()
+}
+
+/// `C_ALLLANESPLAY`: 1 when no lane is picked to play (all play), 0 when none plays, 2 when lanes are picked, even every
+/// one of them (lab, 7.82). The plays alone can't tell the first from the last.
+fn all_of(reaper: &Reaper, track: Track) -> i64 {
+    reaper.track_value(track, "C_ALLLANESPLAY") as i64
 }
 
 /// Items compared by GUID, in any order (REAPER keeps a track's items in time order, which a move changes).
@@ -100,47 +106,42 @@ fn same_lanes(a: &Value, b: &Value) -> bool {
         list.sort();
         list
     };
-    a["mode"] == b["mode"] && a["lanes"] == b["lanes"] && a["plays"] == b["plays"] && items(a) == items(b)
+    a["mode"] == b["mode"] && a["lanes"] == b["lanes"] && a["plays"] == b["plays"] && a["all"] == b["all"] && items(a) == items(b)
 }
 
-fn lanes_wanted(input: &Value) -> Done<(i64, Option<i64>)> {
+/// The mode asked for. A lane count isn't asked: REAPER keeps as many lanes as its items use (it drops lanes left empty at
+/// the bottom whenever items change, lab 7.82), so lanes come from items put on them.
+fn lanes_wanted(input: &Value) -> Done<i64> {
+    if input.get("lanes").is_some_and(|v| !v.is_null()) {
+        return Err(bad("lanes isn't asked: REAPER keeps as many lanes as items use; put an item on the lane after the last (lane = the lane count) to add one"));
+    }
     let name = input.get("mode").and_then(Value::as_str).unwrap_or_default();
-    let mode = MODES
+    MODES
         .iter()
         .find(|(word, _)| *word == name)
         .map(|(_, mode)| *mode)
-        .ok_or_else(|| bad("mode must be lanes (fixed lanes), free (free item positioning) or normal"))?;
-    let lanes = match input.get("lanes").filter(|v| !v.is_null()) {
-        None => None,
-        Some(_) if mode != 2 => return Err(bad("lanes is for mode lanes")),
-        Some(value) => Some(
-            value.as_i64().filter(|n| (1..=MOST_LANES).contains(n)).ok_or_else(|| bad(format!("lanes must be from 1 to {MOST_LANES}")))?,
-        ),
-    };
-    Ok((mode, lanes))
+        .ok_or_else(|| bad("mode must be lanes (fixed lanes), free (free item positioning) or normal"))
 }
 
 fn mode_word(mode: i64) -> &'static str {
     MODES.iter().find(|(_, m)| *m == mode).map_or("normal", |(word, _)| word)
 }
 
-fn lanes_title(ctx: &Ctx, track: Track, mode: i64, lanes: Option<i64>) -> String {
+fn lanes_title(ctx: &Ctx, track: Track, mode: i64) -> String {
     let name = named(ctx, track);
-    match (mode, lanes) {
-        (2, Some(n)) => format!("{name}: fixed lanes ({n})"),
-        (2, None) => format!("{name}: fixed lanes"),
-        (1, _) => format!("{name}: free item positioning"),
+    match mode {
+        2 => format!("{name}: fixed lanes"),
+        1 => format!("{name}: free item positioning"),
         _ => format!("{name}: no lanes"),
     }
 }
 
 pub fn lanes_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let found = find(ctx, &input["ref"], "track-lanes")?;
-    let (mode, lanes) = lanes_wanted(input)?;
+    let mode = lanes_wanted(input)?;
     let now = lanes_state(ctx.reaper, found.track);
-    let mut display = json!({"title": lanes_title(ctx, found.track, mode, lanes)});
-    let current_lanes = now["lanes"].as_i64();
-    if now["mode"] == mode && lanes.is_none_or(|n| Some(n) == current_lanes) {
+    let mut display = json!({"title": lanes_title(ctx, found.track, mode)});
+    if now["mode"] == mode {
         display["unchanged"] = true.into();
     }
     // Lanes going off leave every item on one lane (REAPER keeps their lanes for when lanes come back).
@@ -160,19 +161,15 @@ pub fn lanes_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if !same_lanes(&now, fence) {
         return Err(changed(format!("{}'s lanes changed since the preview", named(ctx, found.track))));
     }
-    let (mode, lanes) = lanes_wanted(input)?;
-    let title = lanes_title(ctx, found.track, mode, lanes);
-    if now["mode"] == mode && lanes.is_none_or(|n| Some(n) == now["lanes"].as_i64()) {
+    let mode = lanes_wanted(input)?;
+    let title = lanes_title(ctx, found.track, mode);
+    if now["mode"] == mode {
         return Ok(Applied { applied: now, display: json!({"title": title}), unwritten: true, ..Default::default() });
     }
     reaper.set_track_value(found.track, "I_FREEMODE", mode as f64);
     reaper.update_timeline();
-    if let Some(n) = lanes {
-        reaper.set_track_value(found.track, "I_NUMFIXEDLANES", n as f64);
-        reaper.update_item_lanes(ctx.proj);
-    }
     let after = lanes_state(reaper, found.track);
-    if after["mode"] != mode || lanes.is_some_and(|n| after["lanes"].as_i64() != Some(n)) {
+    if after["mode"] != mode {
         put_lanes(ctx, found.track, &now);
         return Err(failed("REAPER didn't take that lane setting; the track is as it was"));
     }
@@ -191,7 +188,8 @@ fn put_lanes(ctx: &Ctx, track: Track, state: &Value) {
     if mode != 2 {
         return;
     }
-    if let Some(n) = state["lanes"].as_i64() {
+    // (only when REAPER didn't bring the lanes back itself: setting the count leaves lane names in the track's state)
+    if let Some(n) = state["lanes"].as_i64().filter(|n| *n != reaper.track_value(track, "I_NUMFIXEDLANES") as i64) {
         reaper.set_track_value(track, "I_NUMFIXEDLANES", n as f64);
     }
     let lanes: std::collections::HashMap<String, i64> =
@@ -205,15 +203,29 @@ fn put_lanes(ctx: &Ctx, track: Track, state: &Value) {
     }
     reaper.update_item_lanes(ctx.proj);
     if let Some(plays) = state["plays"].as_array() {
-        write_plays(reaper, track, &plays.iter().filter_map(Value::as_i64).collect::<Vec<_>>());
+        write_plays(reaper, track, &plays.iter().filter_map(Value::as_i64).collect::<Vec<_>>(), state["all"].as_i64());
     }
 }
 
-/// Lane by lane, which brings back any vector REAPER itself made (lab, 7.82): a lane set alone silences the others, one set
-/// with others makes a lone lane play with it.
-fn write_plays(reaper: &Reaper, track: Track, plays: &[i64]) {
-    for (lane, value) in plays.iter().enumerate() {
-        reaper.set_track_value(track, &format!("C_LANEPLAYS:{lane}"), *value as f64);
+/// Which lanes play, as `plays` and `all` (C_ALLLANESPLAY) say. REAPER 7.82 (lab): no lane picked or none playing is
+/// `C_ALLLANESPLAY` 1 or 0; picked lanes are one set to play alone (the others go silent), then each other one set to play
+/// with others. Lane by lane from no lanes picked would leave every lane picked, which plays the same until a lane is
+/// added.
+fn write_plays(reaper: &Reaper, track: Track, plays: &[i64], all: Option<i64>) {
+    let playing: Vec<usize> = (0..plays.len()).filter(|&lane| plays[lane] != 0).collect();
+    match (all, playing.split_first()) {
+        (Some(1), _) => {
+            reaper.set_track_value(track, "C_ALLLANESPLAY", 1.0);
+        }
+        (_, None) => {
+            reaper.set_track_value(track, "C_ALLLANESPLAY", 0.0);
+        }
+        (_, Some((first, others))) => {
+            reaper.set_track_value(track, &format!("C_LANEPLAYS:{first}"), 1.0);
+            for lane in others {
+                reaper.set_track_value(track, &format!("C_LANEPLAYS:{lane}"), 2.0);
+            }
+        }
     }
 }
 
@@ -275,7 +287,8 @@ pub fn plays_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     if plays_as_asked(&now, lane as usize, wanted) {
         display["unchanged"] = true.into();
     }
-    Ok(Preview { target: target(&found.guid), prior: json!({"plays": now.clone()}), fence: json!({"plays": now}), display })
+    let state = json!({"plays": now, "all": all_of(ctx.reaper, found.track)});
+    Ok(Preview { target: target(&found.guid), prior: state.clone(), fence: state, display })
 }
 
 pub fn plays_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
@@ -284,20 +297,28 @@ pub fn plays_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let lane = lane_of(ctx, input, found.track)?;
     let wanted = plays_wanted(input)?;
     let count = lane_count(reaper, found.track).unwrap_or(1);
-    let now = plays_of(reaper, found.track, count);
-    if json!(now) != fence["plays"] {
+    let now = json!({"plays": plays_of(reaper, found.track, count), "all": all_of(reaper, found.track)});
+    if &now != fence {
         return Err(changed(format!("which of {}'s lanes play changed since the preview", named(ctx, found.track))));
+    }
+    let plays_now: Vec<i64> = now["plays"].as_array().into_iter().flatten().filter_map(Value::as_i64).collect();
+    if plays_as_asked(&plays_now, lane as usize, wanted) {
+        return Ok(Applied {
+            applied: now,
+            display: json!({"title": plays_title(ctx, found.track, lane, wanted)}),
+            unwritten: true,
+            ..Default::default()
+        });
     }
     reaper.set_track_value(found.track, &format!("C_LANEPLAYS:{lane}"), wanted as f64);
     let after = plays_of(reaper, found.track, count);
     if !plays_as_asked(&after, lane as usize, wanted) {
-        write_plays(reaper, found.track, &now);
+        write_plays(reaper, found.track, &plays_now, now["all"].as_i64());
         return Err(failed("REAPER didn't take that; the lanes play as they did"));
     }
     Ok(Applied {
-        applied: json!({"plays": after.clone()}),
+        applied: json!({"plays": after, "all": all_of(reaper, found.track)}),
         display: json!({"title": plays_title(ctx, found.track, lane, wanted)}),
-        unwritten: after == now,
         ..Default::default()
     })
 }
@@ -307,31 +328,24 @@ pub fn plays_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let reaper = ctx.reaper;
     let prior: Vec<i64> = restore.prior["plays"].as_array().into_iter().flatten().filter_map(Value::as_i64).collect();
     let count = lane_count(reaper, found.track).ok_or_else(|| changed("the track has no fixed lanes now"))?;
-    let now = plays_of(reaper, found.track, count);
+    let state = |reaper: &Reaper| json!({"plays": plays_of(reaper, found.track, count), "all": all_of(reaper, found.track)});
+    let now = state(reaper);
     let name = named(ctx, found.track);
-    if now == prior {
-        return Ok(Restored {
-            restored: json!({"plays": now}),
-            display: json!({"title": format!("{name}'s lanes play as they did")}),
-            unwritten: true,
-        });
+    if &now == restore.prior {
+        return Ok(Restored { restored: now, display: json!({"title": format!("{name}'s lanes play as they did")}), unwritten: true });
     }
-    if !restore.discard && json!(now) != restore.applied["plays"] {
+    if !restore.discard && &now != restore.applied {
         return Err(changed(format!("which of {name}'s lanes play has been changed in REAPER since")));
     }
     if prior.len() as i64 != count {
         return Err(changed(format!("{name} has another number of lanes now")));
     }
-    write_plays(reaper, found.track, &prior);
-    let after = plays_of(reaper, found.track, count);
-    if after != prior {
+    write_plays(reaper, found.track, &prior, restore.prior["all"].as_i64());
+    let after = state(reaper);
+    if &after != restore.prior {
         return Err(failed("REAPER didn't make the lanes play as they did"));
     }
-    Ok(Restored {
-        restored: json!({"plays": after}),
-        display: json!({"title": format!("{name}'s lanes play as they did again")}),
-        unwritten: false,
-    })
+    Ok(Restored { restored: after, display: json!({"title": format!("{name}'s lanes play as they did again")}), unwritten: false })
 }
 
 // ----- lane names -----

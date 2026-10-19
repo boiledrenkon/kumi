@@ -106,8 +106,8 @@ impl Which {
 
     pub(super) fn apply(self, ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         match self {
-            Which::ItemAdd => items::make_apply(ctx, input, fence, false),
-            Which::ItemImport => items::make_apply(ctx, input, fence, true),
+            Which::ItemAdd => items::make_apply(ctx, input, false),
+            Which::ItemImport => items::make_apply(ctx, input, true),
             Which::ItemMove => items::move_apply(ctx, input, fence),
             Which::ItemSplit => items::split_apply(ctx, input, fence),
             Which::ItemTrim => items::trim_apply(ctx, input, fence),

@@ -288,6 +288,8 @@ pub fn props_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(changed(format!("{} changed since the preview", label_opening(ctx, found.take))));
     }
     refuse_locked(ctx, found.item)?;
+    // (named before a new name is written)
+    let opening = label_opening(ctx, found.take);
     items::write_state(ctx.reaper, found.take, &fields, &wanted);
     ctx.reaper.update_item(found.item);
     let after = items::state_of(ctx.reaper, found.take, &fields);
@@ -298,7 +300,7 @@ pub fn props_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     Ok(Applied {
         applied: after.clone(),
         display: json!({
-            "title": props_title(ctx, found.take, &fields, &after),
+            "title": format!("{opening}: {}", items::words_of(&fields, &after)),
             "before": items::shown(ctx.reaper, &fields, &now),
             "after": items::shown(ctx.reaper, &fields, &after),
         }),

@@ -398,3 +398,39 @@ fn an_items_row_says_its_gain_lock_loop_group_and_fades_and_a_track_its_razor_ar
     assert_eq!(track["razorAreas"][1]["envelopeRef"], "r:env:{AAAA}:{ENV-VOLENV2}");
     assert_eq!(daw_bridge::contract::misplaced_refs(&track), Vec::<String>::new());
 }
+
+// ----- what the producer changed between the preview and the apply -----
+
+#[test]
+fn a_take_apply_is_refused_when_the_producer_changed_the_take_or_item_since_the_preview() {
+    type Edit = fn(&mut fake::State);
+    let cases: [(&str, serde_json::Value, Edit); 3] = [
+        ("take-active", json!({"ref": "r:take:{TAKE-K1B}"}), |s| s.tracks[1].items[0].active = 2),
+        ("take-add", json!({"ref": K1, "name": "idea"}), |s| s.tracks[1].items[0].position = 0.25),
+        ("take-markers-add", json!({"ref": T1, "markers": [{"sourcePosition": 0.5, "name": "a"}]}), |s| {
+            s.tracks[1].items[0].takes[0].more.markers.push((0.2, "theirs".into(), 0));
+        }),
+    ];
+    for (kind, input, edit) in cases {
+        let lab = three_takes();
+        let preview = lab.preview(kind, input.clone()).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        state(edit);
+        let before = state(|s| s.tracks.clone());
+        let answer = lab.apply_with(kind, &input, &preview, "Kumi: x (k1)");
+        assert_eq!(answer.as_ref().err().map(|e| e.0.as_str()), Some("changed"), "{kind}: {answer:?}");
+        assert!(state(|s| s.tracks.clone()) == before, "{kind}: nothing written");
+    }
+}
+
+#[test]
+fn a_stretch_marker_the_producer_put_where_one_goes_back_stops_the_undo() {
+    let lab = Lab::new();
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch = vec![(0.5, 0.5, 0.0), (1.0, 1.0, 0.0), (1.5, 1.5, 0.0)]);
+    let (preview, applied) = lab.make("stretch-markers-delete", json!({"ref": T1, "indexes": [1]}));
+    // The producer puts a marker of their own at 1.0, from another place in the source.
+    state(|s| s.tracks[1].items[0].takes[0].more.stretch.insert(1, (1.0, 1.2, 0.0)));
+    let (code_, message) = lab.undo("stretch-markers-delete", &preview, &applied).unwrap_err();
+    assert_eq!(code_, "changed");
+    assert!(message.contains("can't all be put back"), "{message}");
+    assert_eq!(item("{ITEM-K1}").unwrap().1.takes[0].more.stretch, vec![(0.5, 0.5, 0.0), (1.0, 1.2, 0.0), (1.5, 1.5, 0.0)]);
+}

@@ -76,10 +76,20 @@ fn take_handle_of(s: &State, take: &str) -> Option<u64> {
 }
 
 /// A track's fixed lanes: whether it has them, how many, and how each plays (0 not, 1 alone, 2 with others).
+/// Whether lanes are picked to play (REAPER's `LANESOLO` line, here any `C_LANEPLAYS:n` kept): without, every lane plays
+/// and `C_ALLLANESPLAY` reads 1 (lab, 7.82).
+fn picked(t: &FakeTrack) -> bool {
+    t.extra.keys().any(|key| key.starts_with("C_LANEPLAYS:"))
+}
+
 fn lanes_of(t: &FakeTrack) -> (bool, usize, Vec<i32>) {
     let fixed = t.extra.get("I_FREEMODE").copied().unwrap_or(0.0) as i32 == 2;
     let count = t.extra.get("I_NUMFIXEDLANES").copied().unwrap_or(1.0).max(1.0) as usize;
-    let plays = (0..count).map(|n| t.extra.get(&format!("C_LANEPLAYS:{n}")).copied().unwrap_or(2.0) as i32).collect();
+    let plays = if picked(t) {
+        (0..count).map(|n| t.extra.get(&format!("C_LANEPLAYS:{n}")).copied().unwrap_or(2.0) as i32).collect()
+    } else {
+        vec![if count == 1 { 1 } else { 2 }; count]
+    };
     (fixed, count, plays)
 }
 
@@ -87,6 +97,10 @@ fn set_plays(t: &mut FakeTrack, plays: &[i32]) {
     for (n, v) in plays.iter().enumerate() {
         t.extra.insert(format!("C_LANEPLAYS:{n}"), *v as f64);
     }
+}
+
+fn unpick(t: &mut FakeTrack) {
+    t.extra.retain(|key, _| !key.starts_with("C_LANEPLAYS:"));
 }
 
 // ----- items -----
@@ -411,7 +425,33 @@ pub(super) unsafe extern "C" fn set_item_state_chunk(item: *mut MediaItem, chunk
 pub(super) unsafe extern "C" fn update_item_in_project(_item: *mut MediaItem) {
     with(|s| s.redraws += 1);
 }
+/// As REAPER 7.82 does with a track's default lane flags (lab): each track with fixed lanes keeps as many lanes as its items
+/// use, adding lanes an item is on and dropping those left empty at the bottom.
 pub(super) unsafe extern "C" fn update_item_lanes(_proj: *mut ReaProject) -> bool {
+    counted(|s| {
+        for t in s.tracks.iter_mut() {
+            let (fixed, count, plays) = lanes_of(t);
+            if !fixed {
+                continue;
+            }
+            let needed = t.items.iter().map(|item| item.lane.max(0) as usize + 1).max().unwrap_or(1);
+            if needed != count {
+                t.extra.insert("I_NUMFIXEDLANES".into(), needed as f64);
+                if picked(t) {
+                    let mut plays = plays;
+                    plays.resize(needed, 0);
+                    unpick(t);
+                    set_plays(t, &plays);
+                }
+                // (a lane REAPER adds is named by its number)
+                t.lane_names.truncate(needed);
+                while t.lane_names.len() < needed {
+                    let number = t.lane_names.len() + 1;
+                    t.lane_names.push(number.to_string());
+                }
+            }
+        }
+    });
     true
 }
 pub(super) unsafe extern "C" fn update_timeline() {
@@ -954,7 +994,8 @@ pub(super) unsafe extern "C" fn get_media_track_info_value(track: *mut MediaTrac
         let (fixed, count, plays) = lanes_of(t);
         match key.as_str() {
             "I_NUMFIXEDLANES" => Some(if fixed { count as f64 } else { t.extra.get(&key).copied().unwrap_or(0.0) }),
-            "C_ALLLANESPLAY" if fixed => Some(if plays.iter().all(|p| *p != 0) {
+            // 1: no lanes picked, all play; 0: none plays; 2: lanes picked (even every one of them).
+            "C_ALLLANESPLAY" if fixed => Some(if !picked(t) {
                 1.0
             } else if plays.iter().all(|p| *p == 0) {
                 0.0
@@ -988,18 +1029,30 @@ pub(super) unsafe extern "C" fn set_media_track_info_value(track: *mut MediaTrac
             }
             "I_NUMFIXEDLANES" => {
                 let n = value.max(1.0) as usize;
+                let was_picked = picked(t);
                 plays.resize(n, 2);
                 t.extra.insert(key, n as f64);
-                set_plays(t, &plays);
+                unpick(t);
+                if was_picked {
+                    set_plays(t, &plays);
+                }
             }
+            // 1 unpicks every lane (all play), 0 picks none (none plays).
             "C_ALLLANESPLAY" => {
                 if !fixed {
                     return false;
                 }
-                set_plays(t, &vec![if value != 0.0 { 2 } else { 0 }; count]);
+                unpick(t);
+                if value == 0.0 {
+                    set_plays(t, &vec![0; count]);
+                }
             }
             lane => {
                 let Some(n) = lane["C_LANEPLAYS:".len()..].parse::<usize>().ok().filter(|n| *n < count && fixed) else { return false };
+                // With no lanes picked, a lane that plays set to play with others stays as it is.
+                if !picked(t) && value as i32 == 2 {
+                    return true;
+                }
                 match value as i32 {
                     1 => plays = (0..count).map(|m| if m == n { 1 } else { 0 }).collect(),
                     2 => {

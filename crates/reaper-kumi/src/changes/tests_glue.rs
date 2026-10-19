@@ -93,3 +93,26 @@ fn every_glue_answer_names_refs_the_way_the_contract_says() {
         }
     }
 }
+
+#[test]
+fn a_render_is_refused_when_an_item_changed_since_the_preview() {
+    let lab = Lab::new();
+    let input = json!({"itemRefs": [K1]});
+    let preview = lab.preview("items-render", input.clone()).unwrap();
+    state(|s| s.tracks[1].items[0].length = 1.5);
+    let actions = state(|s| s.actions.len());
+    assert_eq!(code(lab.apply_with("items-render", &input, &preview, "Kumi: x (k1)")), "changed");
+    assert_eq!(state(|s| s.actions.len()), actions, "nothing run");
+}
+
+#[test]
+fn a_glue_whose_item_the_producer_deleted_stays_undone_by_them() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("items-glue", json!({"itemRefs": [K1, K2]}));
+    let glued = guid_in(&applied["created"]["ref"]);
+    // The producer deletes what the glue made: bringing the items back would undo their delete.
+    state(|s| s.tracks[1].items.retain(|i| i.guid != glued));
+    let (code_, message) = lab.undo("items-glue", &preview, &applied).unwrap_err();
+    assert_eq!(code_, "changed", "{message}");
+    assert!(item("{ITEM-K1}").is_none() && item("{ITEM-K2}").is_none(), "nothing brought back");
+}

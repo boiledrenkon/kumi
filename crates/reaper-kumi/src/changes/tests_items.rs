@@ -548,6 +548,52 @@ fn a_delete_is_refused_when_the_item_changed_since_the_preview() {
     assert!(item("{ITEM-K1}").is_some());
 }
 
+/// Each kind's apply is refused, writing nothing, when the producer changed what its preview looked at.
+#[test]
+fn an_apply_is_refused_when_the_producer_changed_the_item_since_the_preview() {
+    type Edit = fn(&mut fake::State);
+    let cases: [(&str, Value, Edit); 6] = [
+        ("item-trim", json!({"ref": K1, "end": 1.0}), |s| s.tracks[1].items[0].length = 1.5),
+        ("item-fade", json!({"ref": K1, "fadeIn": {"length": 0.2}}), |s| {
+            s.tracks[1].items[0].extra.insert("D_FADEINLEN".into(), 0.3);
+        }),
+        ("item-props", json!({"ref": K1, "mute": true, "volumeDb": -3.0}), |s| s.tracks[1].items[0].mute = true),
+        ("item-group", json!({"itemRefs": [K1, "r:item:{ITEM-K2}"], "grouped": true}), |s| {
+            s.tracks[1].items[1].extra.insert("I_GROUPID".into(), 4.0);
+        }),
+        ("item-duplicate", json!({"ref": K1, "toRef": SNARE, "position": 20.0}), |s| s.tracks[1].items[0].position = 0.5),
+        ("item-move", json!({"ref": K1, "position": 3.0}), |s| s.tracks[1].items[0].position = 0.5),
+    ];
+    for (kind, input, edit) in cases {
+        let lab = Lab::new();
+        let preview = lab.preview(kind, input.clone()).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        state(edit);
+        let before = state(|s| s.tracks.clone());
+        let answer = lab.apply_with(kind, &input, &preview, "Kumi: x (k1)");
+        assert_eq!(answer.as_ref().err().map(|e| e.0.as_str()), Some("changed"), "{kind}: {answer:?}");
+        assert!(state(|s| s.tracks.clone()) == before, "{kind}: nothing written");
+    }
+}
+
+#[test]
+fn a_deleted_item_back_in_the_project_but_changed_is_the_producers() {
+    let lab = Lab::new();
+    let was = item("{ITEM-K1}").unwrap().1;
+    let (preview, applied) = lab.make("item-delete", json!({"ref": K1}));
+    // REAPER's undo brings it back, and the producer moves it.
+    state(|s| {
+        let mut back = was.clone();
+        back.position = 3.0;
+        s.tracks[1].items.push(back);
+    });
+    assert_eq!(code(lab.undo("item-delete", &preview, &applied)), "changed");
+    assert_eq!(state(|s| s.tracks[1].items.iter().filter(|i| i.guid == "{ITEM-K1}").count()), 1, "no second item with its id");
+    // Back as it was: back already.
+    state(|s| s.tracks[1].items.iter_mut().find(|i| i.guid == "{ITEM-K1}").unwrap().position = was.position);
+    let again = lab.undo("item-delete", &preview, &applied).unwrap();
+    assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+}
+
 // ----- copying -----
 
 #[test]

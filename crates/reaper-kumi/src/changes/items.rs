@@ -176,14 +176,25 @@ pub(super) fn lane_count(reaper: &Reaper, track: Track) -> Option<i64> {
     (reaper.track_value(track, "I_FREEMODE") as i64 == 2).then(|| (reaper.track_value(track, "I_NUMFIXEDLANES") as i64).max(1))
 }
 
-/// A lane the input names (`lane`, from 0 as the reads count), checked against the track's lanes.
+/// A lane the input names (`lane`, from 0 as the reads count), checked against the track's lanes: the lane count itself is
+/// a new lane at the bottom, which REAPER adds for the item.
 fn lane_input(ctx: &Ctx, input: &Value, track: Track) -> Done<Option<i64>> {
     let Some(value) = input.get("lane").filter(|v| !v.is_null()) else { return Ok(None) };
     let lane = value.as_i64().filter(|n| *n >= 0).ok_or_else(|| bad("lane must be a whole number from 0"))?;
     match lane_count(ctx.reaper, track) {
         None => Err(bad("lane: that track has no fixed lanes (turn them on with track_lanes first)")),
-        Some(count) if lane >= count => Err(bad(format!("lane must be from 0 to {} on that track (it has {count} lanes)", count - 1))),
+        Some(count) if lane > count || lane >= super::lanes::MOST_LANES => {
+            Err(bad(format!("lane must be from 0 to {count} on that track: it has {count} lanes, and {count} adds one at the bottom")))
+        }
         Some(_) => Ok(Some(lane)),
+    }
+}
+
+/// After items come, go or change lanes on tracks with fixed lanes: REAPER adds the lanes an item needs and drops those left
+/// empty at the bottom (lab, 7.82), as its own edits do.
+pub(super) fn settle_lanes(ctx: &Ctx, tracks: &[Option<Track>]) {
+    if tracks.iter().flatten().any(|track| lane_count(ctx.reaper, *track).is_some()) {
+        ctx.reaper.update_item_lanes(ctx.proj);
     }
 }
 
@@ -202,7 +213,6 @@ fn refuse_locked(ctx: &Ctx, item: Item) -> Done<()> {
 
 struct Make {
     track: Track,
-    track_guid: String,
     start: f64,
     end: f64,
     name: Option<String>,
@@ -213,7 +223,7 @@ struct Make {
 
 fn make_plan(ctx: &Ctx, input: &Value, import: bool) -> Done<Make> {
     let what = if import { "item-import" } else { "item-add" };
-    let (track, track_guid) = track_of(ctx, &input["ref"], &format!("{what}: ref"))?;
+    let (track, _) = track_of(ctx, &input["ref"], &format!("{what}: ref"))?;
     let start = marks::moment(ctx, input, "positionBeats", "position")?
         .ok_or_else(|| bad("pass positionBeats (quarter notes from the start) or position (seconds)"))?;
     let file = if import {
@@ -252,7 +262,7 @@ fn make_plan(ctx: &Ctx, input: &Value, import: bool) -> Done<Make> {
     if end <= start + 1e-6 {
         return Err(bad("the item must end after it starts"));
     }
-    Ok(Make { track, track_guid, start, end, name: text_input(input, "name")?, lane: lane_input(ctx, input, track)?, file })
+    Ok(Make { track, start, end, name: text_input(input, "name")?, lane: lane_input(ctx, input, track)?, file })
 }
 
 fn make_title(ctx: &Ctx, make: &Make, import: bool) -> String {
@@ -277,12 +287,13 @@ pub fn make_preview(ctx: &Ctx, input: &Value, import: bool) -> Done<Preview> {
     Ok(Preview {
         target: json!({"ref": null, "kind": "item"}),
         prior: json!({"items": ctx.reaper.track_item_count(make.track)}),
-        fence: json!({"track": make.track_guid}),
+        // (nothing the producer changes on the track makes adding the item wrong: its undo is what is fenced)
+        fence: json!({}),
         display,
     })
 }
 
-pub fn make_apply(ctx: &Ctx, input: &Value, fence: &Value, import: bool) -> Done<Applied> {
+pub fn make_apply(ctx: &Ctx, input: &Value, import: bool) -> Done<Applied> {
     let make = make_plan(ctx, input, import).map_err(|(code, message)| {
         if code == "failed" {
             changed(format!("{message}: it went since the preview"))
@@ -290,9 +301,6 @@ pub fn make_apply(ctx: &Ctx, input: &Value, fence: &Value, import: bool) -> Done
             (code, message)
         }
     })?;
-    if fence["track"].as_str() != Some(make.track_guid.as_str()) {
-        return Err(changed("the track changed since the preview"));
-    }
     let reaper = ctx.reaper;
     let item = match &make.file {
         None => {
@@ -355,6 +363,7 @@ pub fn created_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !ctx.reaper.delete_item(track, item) {
         return Err(failed("REAPER wouldn't delete the item"));
     }
+    settle_lanes(ctx, &[Some(track)]);
     let mut title = format!("{words} taken away again");
     if let Some(first) = title.get_mut(0..1) {
         first.make_ascii_uppercase();
@@ -383,6 +392,7 @@ fn same_place(a: &Value, b: &Value) -> bool {
 fn put_place(ctx: &Ctx, guid: &str, place: &Value) -> Done<Item> {
     let reaper = ctx.reaper;
     let mut item = item_by_guid(ctx, guid).ok_or_else(|| gone("the item isn't in the project any more"))?;
+    let from = reaper.item_track(item);
     if let Some(dest) = place["track"].as_str() {
         let track = track_by_guid(ctx, dest).ok_or_else(|| gone("the track it goes on isn't in the project any more"))?;
         if reaper.item_track(item) != Some(track) {
@@ -395,8 +405,8 @@ fn put_place(ctx: &Ctx, guid: &str, place: &Value) -> Done<Item> {
     reaper.set_item_value(item, "D_POSITION", number(place, "position"));
     if let Some(lane) = place["lane"].as_i64() {
         reaper.set_item_value(item, "I_FIXEDLANE", lane as f64);
-        reaper.update_item_lanes(ctx.proj);
     }
+    settle_lanes(ctx, &[from, reaper.item_track(item)]);
     reaper.update_item(item);
     item_by_guid(ctx, guid).ok_or_else(|| failed("the item went while it was moved"))
 }
@@ -465,13 +475,10 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     refuse_locked(ctx, found.item)?;
     let wanted = move_wanted(ctx, input, &found)?;
+    // (said before the move: an item without a name is named by where it is)
+    let title = move_title(ctx, found.item, &wanted, &now);
     if same_place(&now, &wanted) {
-        return Ok(Applied {
-            applied: now.clone(),
-            display: json!({"title": move_title(ctx, found.item, &now, &now)}),
-            unwritten: true,
-            ..Default::default()
-        });
+        return Ok(Applied { applied: now.clone(), display: json!({"title": title}), unwritten: true, ..Default::default() });
     }
     let item = put_place(ctx, &found.guid, &wanted)?;
     let after = place_of(ctx.reaper, item);
@@ -484,11 +491,7 @@ pub fn move_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             ("uncertain".into(), "REAPER didn't put the item where it was asked to, and Kumi could not put it back: read it".into())
         });
     }
-    Ok(Applied {
-        applied: after.clone(),
-        display: json!({"title": move_title(ctx, item, &after, &now), "before": now, "after": after}),
-        ..Default::default()
-    })
+    Ok(Applied { applied: after.clone(), display: json!({"title": title, "before": now, "after": after}), ..Default::default() })
 }
 
 pub fn move_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -1510,6 +1513,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if !reaper.delete_item(found.track, found.item) {
         return Err(failed("REAPER wouldn't delete the item"));
     }
+    settle_lanes(ctx, &[Some(found.track)]);
     Ok(Applied { applied: json!({"deleted": true}), material: Some(material), display: json!({"title": title}), ..Default::default() })
 }
 
@@ -1523,6 +1527,7 @@ pub(super) fn remake(ctx: &Ctx, track_guid: &str, chunk: &str, guid: &str) -> Do
         reaper.delete_item(track, item);
         return Err(failed("REAPER wouldn't put the item's state back"));
     }
+    settle_lanes(ctx, &[Some(track)]);
     reaper.update_item(item);
     ctx.reads.registry().note_item(ctx.proj, guid, item);
     Ok(item)

@@ -29,12 +29,24 @@ fn plays() -> Vec<f64> {
 
 // ----- lanes on and off -----
 
+fn picked() -> bool {
+    state(|s| s.tracks[1].extra.keys().any(|key| key.starts_with("C_LANEPLAYS:")))
+}
+
+fn lane_count() -> f64 {
+    state(|s| s.tracks[1].extra.get("I_NUMFIXEDLANES").copied().unwrap_or(1.0))
+}
+
 #[test]
-fn fixed_lanes_go_on_with_a_lane_count_and_their_undo_puts_the_track_back() {
+fn fixed_lanes_go_on_and_their_undo_puts_the_track_back() {
     let lab = Lab::new();
-    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "lanes", "lanes": 3}));
-    assert_eq!(preview["display"]["title"], "Kick: fixed lanes (3)");
-    assert_eq!(state(|s| (s.tracks[1].extra["I_FREEMODE"], s.tracks[1].extra["I_NUMFIXEDLANES"])), (2.0, 3.0));
+    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "lanes"}));
+    assert_eq!(preview["display"]["title"], "Kick: fixed lanes");
+    assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 2.0);
+    // A lane count isn't asked: REAPER keeps as many lanes as items use.
+    let (code_, message) = lab.preview("track-lanes", json!({"ref": KICK, "mode": "lanes", "lanes": 3})).unwrap_err();
+    assert_eq!(code_, "bad-params");
+    assert!(message.contains("lane = the lane count"), "{message}");
     lab.undo("track-lanes", &preview, &applied).unwrap();
     assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 0.0);
     let again = lab.undo("track-lanes", &preview, &applied).unwrap();
@@ -62,9 +74,13 @@ fn lanes_going_off_say_what_then_plays_together_and_the_undo_brings_the_lanes_ba
 
 #[test]
 fn lanes_the_producer_changed_since_stay_theirs() {
-    let lab = lanes_lab();
-    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "lanes", "lanes": 4}));
-    state(|s| s.tracks[1].items[0].lane = 3);
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "lanes"}));
+    // The producer puts the second kick item on a lane of its own.
+    state(|s| {
+        s.tracks[1].items[1].lane = 1;
+        s.tracks[1].extra.insert("I_NUMFIXEDLANES".into(), 2.0);
+    });
     assert_eq!(code(lab.undo("track-lanes", &preview, &applied)), "changed");
     assert_eq!(code(lab.preview("track-lanes", json!({"ref": KICK, "mode": "free", "lanes": 2}))), "bad-params");
     assert_eq!(code(lab.preview("track-lanes", json!({"ref": "r:track:master", "mode": "lanes"}))), "bad-params");
@@ -80,6 +96,8 @@ fn a_lane_plays_alone_and_the_undo_makes_the_lanes_play_as_they_did() {
     assert_eq!(plays(), vec![0.0, 1.0]);
     lab.undo("lane-plays", &preview, &applied).unwrap();
     assert_eq!(plays(), vec![2.0, 2.0]);
+    // No lane was picked to play before (all played): none is after, so a lane added later plays too.
+    assert!(!picked(), "the lanes are unpicked, not each picked");
     // Silent, then the producer picks another lane: theirs.
     let (preview, applied) = lab.make("lane-plays", json!({"ref": KICK, "lane": 0, "plays": "no"}));
     assert_eq!(plays(), vec![0.0, 1.0], "the lane left playing plays alone");
@@ -220,7 +238,7 @@ fn a_comp_is_refused_on_a_changed_track_and_with_nothing_to_comp_and_its_undo_fe
 fn every_lane_answer_names_refs_the_way_the_contract_says() {
     let lab = lanes_lab();
     for (kind, input) in [
-        ("track-lanes", json!({"ref": KICK, "mode": "lanes", "lanes": 3})),
+        ("track-lanes", json!({"ref": KICK, "mode": "normal"})),
         ("lane-plays", json!({"ref": KICK, "lane": 0, "plays": "only"})),
         ("lane-name", json!({"ref": KICK, "lane": 0, "name": "x"})),
         ("razor-set", json!({"ref": KICK, "areas": [{"start": 0.0, "end": 1.0}]})),
@@ -232,4 +250,70 @@ fn every_lane_answer_names_refs_the_way_the_contract_says() {
             assert_eq!(daw_bridge::contract::misplaced_refs(answer), Vec::<String>::new(), "{kind}: {answer}");
         }
     }
+}
+
+// ----- what the producer changed between the preview and the apply -----
+
+#[test]
+fn a_lane_apply_is_refused_when_the_producer_changed_the_lanes_since_the_preview() {
+    type Edit = fn(&mut crate::reaper::fake::State);
+    let cases: [(&str, serde_json::Value, Edit); 4] = [
+        ("track-lanes", json!({"ref": KICK, "mode": "normal"}), |s| {
+            s.tracks[1].extra.insert("C_LANEPLAYS:1".into(), 1.0);
+        }),
+        ("lane-plays", json!({"ref": KICK, "lane": 0, "plays": "only"}), |s| {
+            s.tracks[1].extra.insert("C_LANEPLAYS:1".into(), 0.0);
+        }),
+        ("lane-name", json!({"ref": KICK, "lane": 0, "name": "A"}), |s| s.tracks[1].lane_names[0] = "B".into()),
+        ("razor-set", json!({"ref": KICK, "areas": [{"start": 0.0, "end": 1.0}]}), |s| {
+            s.items.razor.insert("{BBBB}".into(), "2.00000000000000 3.00000000000000 \"\" 0.000000 1.000000".into());
+        }),
+    ];
+    for (kind, input, edit) in cases {
+        let lab = lanes_lab();
+        let preview = lab.preview(kind, input.clone()).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        state(edit);
+        let before = state(|s| (s.tracks.clone(), s.items.razor.clone()));
+        let answer = lab.apply_with(kind, &input, &preview, "Kumi: x (k1)");
+        assert_eq!(answer.as_ref().err().map(|e| e.0.as_str()), Some("changed"), "{kind}: {answer:?}");
+        assert!(state(|s| (s.tracks.clone(), s.items.razor.clone())) == before, "{kind}: nothing written");
+    }
+}
+
+// ----- lanes come from items -----
+
+#[test]
+fn an_item_put_on_the_lane_after_the_last_adds_it_and_its_undo_drops_it() {
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("item-move", json!({"ref": "r:item:{ITEM-K1}", "lane": 2}));
+    assert_eq!((item("{ITEM-K1}").unwrap().1.lane, lane_count()), (2, 3.0), "REAPER adds the lane for it");
+    lab.undo("item-move", &preview, &applied).unwrap();
+    assert_eq!((item("{ITEM-K1}").unwrap().1.lane, lane_count()), (0, 2.0), "and drops it once it is empty");
+    let (preview, applied) = lab.make("item-add", json!({"ref": KICK, "position": 6.0, "length": 1.0, "lane": 2}));
+    assert_eq!(lane_count(), 3.0);
+    lab.undo("item-add", &preview, &applied).unwrap();
+    assert_eq!(lane_count(), 2.0);
+    let (code_, message) = lab.preview("item-move", json!({"ref": "r:item:{ITEM-K1}", "lane": 3})).unwrap_err();
+    assert_eq!(code_, "bad-params");
+    assert!(message.contains("2 adds one at the bottom"), "{message}");
+}
+
+#[test]
+fn picked_lanes_come_back_picked_and_a_track_whose_lanes_all_played_comes_back_unpicked() {
+    let lab = lanes_lab();
+    // The producer has both lanes picked to play (REAPER's LANESOLO with both): each picked, not all playing unpicked.
+    state(|s| {
+        s.tracks[1].extra.insert("C_LANEPLAYS:0".into(), 2.0);
+        s.tracks[1].extra.insert("C_LANEPLAYS:1".into(), 2.0);
+    });
+    let (preview, applied) = lab.make("lane-plays", json!({"ref": KICK, "lane": 0, "plays": "only"}));
+    assert_eq!(preview["prior"]["all"], 2);
+    lab.undo("lane-plays", &preview, &applied).unwrap();
+    assert!(picked() && plays() == vec![2.0, 2.0], "both picked again");
+    // Lanes turned off and on again by Kumi: unpicked lanes stay unpicked.
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "normal"}));
+    assert_eq!(preview["prior"]["all"], 1);
+    lab.undo("track-lanes", &preview, &applied).unwrap();
+    assert!(!picked());
 }
