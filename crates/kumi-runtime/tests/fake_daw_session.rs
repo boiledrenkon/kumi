@@ -27,6 +27,8 @@ use kumi_runtime::{
 };
 use regex::Regex;
 use serde_json::{json, Value};
+#[path = "support/in_process.rs"]
+mod in_process;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -457,21 +459,117 @@ async fn a_whole_session_over_another_daw_says_nothing_in_lives_words() {
             for (at, phrase, why) in ALLOWED {
                 assert!(said.iter().any(|text| text.contains(phrase)), "{at} no longer says {phrase} ({why}): take it off the list");
             }
-            let found: Vec<String> = said
-                .iter()
-                .map(|text| ALLOWED.iter().fold(text.clone(), |text, (_, phrase, _)| text.replace(phrase, "")))
-                .flat_map(|text| {
-                    LIVE_WORDS
-                        .find_iter(&text)
-                        .map(|word| {
-                            let (start, end) = (word.start().saturating_sub(80), (word.end() + 80).min(text.len()));
-                            let (start, end) = (floor(&text, start), ceil(&text, end));
-                            format!("{:?}: …{}…", word.as_str(), &text[start..end])
-                        })
-                        .collect::<Vec<_>>()
+            assert_no_live_words(&said);
+        })
+        .await;
+}
+
+/// Nothing said is in Live's words, but for what ALLOWED lets through.
+fn assert_no_live_words(said: &[String]) {
+    let found: Vec<String> = said
+        .iter()
+        .map(|text| ALLOWED.iter().fold(text.clone(), |text, (_, phrase, _)| text.replace(phrase, "")))
+        .flat_map(|text| {
+            LIVE_WORDS
+                .find_iter(&text)
+                .map(|word| {
+                    let (start, end) = (word.start().saturating_sub(80), (word.end() + 80).min(text.len()));
+                    let (start, end) = (floor(&text, start), ceil(&text, end));
+                    format!("{:?}: …{}…", word.as_str(), &text[start..end])
                 })
-                .collect();
-            assert!(found.is_empty(), "{} in Live's words:\n{}", found.len(), found.join("\n"));
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(found.is_empty(), "{} in Live's words:\n{}", found.len(), found.join("\n"));
+}
+
+/// A session in REAPER through Kumi's host (in process, in front of the simulated REAPER): the model changes the
+/// project with a plan, undoes a change, and the producer undoes another with /undo. What the model is sent (its tools,
+/// the plan's and undo's answers, the observations with kumiChanges) and what the producer is told (the changes in
+/// HISTORY, notices) is in REAPER's words, never Live's.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
+    use daw_bridge::{files::ensure_secret, paths::BridgePaths, Daw};
+    use daw_mcp_server::{host::Host, simulator::reaper::ReaperScript, simulator::Simulator};
+    use kumi_runtime::core::context::IntegrationContext;
+    use kumi_runtime::integrations::{
+        own_bridge::{Connect, OwnOptions},
+        reaper::create_reaper_integration,
+    };
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(dir.path(), Daw::Reaper);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = ReaperScript::new(3, 0);
+            let mut config = script.config(secret, "/lab/REAPER");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let host = Rc::new(in_process::InProcess { host: std::sync::Arc::new(Host::new(Daw::Reaper, dir.path())), id: Cell::new(0) });
+            let home = dir.path().to_path_buf();
+            let changes: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = changes.clone();
+            let integration: IntegrationFactory = Box::new(move |listener: ConnectionListener| {
+                let host = host.clone();
+                let connect: Connect = Rc::new(move |_| {
+                    let host = host.clone();
+                    async move { Ok(host as Rc<dyn kumi_runtime::mcp::client::McpEndpoint>) }.boxed_local()
+                });
+                let mut context = IntegrationContext::new(listener);
+                let into = into.clone();
+                context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+                create_reaper_integration(OwnOptions { context, kumi_home: home.clone(), connect: Some(connect) })
+            });
+            let main = Rc::new(Recorded::default());
+            let events = Rc::new(RefCell::new(vec![]));
+            let out = events.clone();
+            let mut options =
+                SessionOptions::new(recording(main.clone(), None), integration, Rc::new(move |event| out.borrow_mut().push(event)));
+            options.profile = DawProfile::REAPER;
+            options.timeout_ms = Some(20_000);
+            options.close_timeout_ms = Some(5_000);
+            options.conversations = Some(create_conversation_store(dir.path()));
+            let session = create_session(options).unwrap();
+            session.start().await.unwrap();
+
+            main.script.borrow_mut().extend([
+                step(|_| {
+                    call(
+                        "make_changes",
+                        json!({"steps": [
+                            {"tool": "track_volume", "input": {"ref": "track:2", "volumeDb": -6}},
+                            {"tool": "track_add", "as": "pad", "input": {"name": "Pad"}},
+                            {"tool": "track_rename", "input": {"ref": "@pad", "name": "Pads"}},
+                        ]}),
+                    )
+                }),
+                step(|_| call("undo_change", json!({"change": "last"}))),
+                step(|_| call("reaper_read", json!({"kind": "track"}))),
+                step(|_| answer("Done.")),
+            ]);
+            session.submit("Pull the first track down and add a pad track.", None).await.unwrap();
+            assert_eq!(script.volume(1), -6.0, "the plan ran");
+            assert_eq!(script.track(4)["name"], json!("Pad"), "the rename was undone");
+            // The producer's /undo takes back the latest change still standing: the track Kumi added.
+            let undone = session.undo(None).await.unwrap();
+            assert_eq!(undone.map(|record| record.title).as_deref(), Some("Added track Pad"));
+            session.submit("What changed?", None).await.unwrap();
+            session.close().await.unwrap();
+            simulator.stop();
+
+            let titles: Vec<String> = changes.borrow().iter().map(|record| record.title.clone()).collect();
+            assert!(titles.iter().any(|title| title == "Track 1 volume -6 dB"), "{titles:?}");
+            let mut said: Vec<String> = main.requests.borrow().clone();
+            assert!(said.iter().any(|request| request.contains("kumiChanges")), "the model sees its changes");
+            said.extend(
+                main.tools
+                    .borrow()
+                    .iter()
+                    .map(|tool| json!({"name":tool.name(),"description":tool.description(),"inputSchema":tool.input_schema()}).to_string()),
+            );
+            said.extend(events.borrow().iter().map(|event| serde_json::to_string(event).unwrap()));
+            said.extend(changes.borrow().iter().map(|record| serde_json::to_string(record).unwrap()));
+            assert_no_live_words(&said);
         })
         .await;
 }
