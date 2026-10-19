@@ -3,7 +3,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use daw_bridge::files::Reference;
