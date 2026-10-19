@@ -368,6 +368,22 @@ impl Journal {
         self.inner.lock().expect("journal lock").open_step = open;
     }
 
+    /// The open step named, as it closes, by what it did: its description keeps its nonce, and the changes made in it
+    /// are told by the new one. None when no step is open.
+    pub fn name_step(&self, label: &str) -> Option<String> {
+        let mut inner = self.inner.lock().expect("journal lock");
+        let before = inner.open_step.clone()?;
+        let nonce = before.rfind(" (k").map_or("", |at| &before[at..]).to_string();
+        let named = format!("Kumi: {label}{nonce}");
+        for record in inner.records.values_mut() {
+            if record.step_desc.as_deref() == Some(before.as_str()) {
+                record.step_desc = Some(named.clone());
+            }
+        }
+        inner.open_step = Some(named.clone());
+        Some(named)
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().expect("journal lock").records.len()
     }
@@ -515,6 +531,27 @@ impl crate::host::Host {
         }
     }
 
+    /// `transport_play` / `cursor_set`: the DAW starts playing, or its edit cursor moves (the play position follows while
+    /// it plays). Neither is a step of the DAW's undo.
+    pub async fn transport(&self, method: &str, arguments: &Value) -> (Value, bool) {
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        let mut params = json!({});
+        if method == "cursor_set" {
+            for field in ["positionBeats", "position", "epoch"] {
+                if let Some(value) = arguments.get(field) {
+                    params[field] = value.clone();
+                }
+            }
+        }
+        match self.call(method, params, &pick, CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
     /// `undo_step_begin` / `undo_step_end`: one DAW undo step around a plan's changes, where the DAW gives one. Its
     /// label carries a nonce, so the DAW's own undo of the plan names the plan's changes.
     pub async fn undo_step(&self, method: &str, arguments: &Value) -> (Value, bool) {
@@ -527,7 +564,14 @@ impl crate::host::Host {
                 Err(answer) => return answer,
             },
             _ => match text(arguments, "stepId") {
-                Ok(step) => (json!({"stepId": step}), None),
+                Ok(step) => {
+                    let mut params = json!({"stepId": step});
+                    // Named by what the plan did, as it closes (REAPER names a block when it ends it).
+                    if let Some(named) = arguments.get("label").and_then(Value::as_str).and_then(|label| self.journal().name_step(label)) {
+                        params["label"] = named.into();
+                    }
+                    (params, None)
+                }
                 Err(answer) => return answer,
             },
         };
@@ -679,11 +723,16 @@ mod tests {
             journal.begin_apply(&record.id, &record.confirmation, "a", None).unwrap().unwrap();
             journal.end_apply(&record.id, "a", Ok(&json!({"applied": {}})));
         }
+        // Named, as it closes, by what it did: the nonce stays, and the plan's changes are found by the new name.
+        let named = journal.name_step("Bass volume −6 dB and 1 more").unwrap();
+        assert_eq!(named, format!("Kumi: Bass volume −6 dB and 1 more{}", &label[label.rfind(" (k").unwrap()..]));
         journal.step(None);
+        assert_eq!(journal.name_step("nothing open"), None);
         let after = preview(&journal);
         journal.begin_apply(&after.id, &after.confirmation, "a", None).unwrap().unwrap();
         journal.end_apply(&after.id, "a", Ok(&json!({"applied": {}})));
-        assert_eq!(journal.by_descs(std::slice::from_ref(&label)), vec![first.id, second.id], "the plan's changes, not the one after");
+        assert_eq!(journal.by_descs(std::slice::from_ref(&named)), vec![first.id, second.id], "the plan's changes, not the one after");
+        assert!(journal.by_descs(std::slice::from_ref(&label)).is_empty(), "the name it began with is gone");
     }
 
     #[test]
