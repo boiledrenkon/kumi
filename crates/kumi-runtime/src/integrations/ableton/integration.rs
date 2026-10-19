@@ -427,15 +427,7 @@ impl KernelTool for LiveTool {
             "make_changes" => owner.mutations.make_changes(input, signal).await,
             "watch_me" => owner.watch.execute(input, signal).await,
             "arrange" => arrange::arrange(input, &owner.mutations.arrange_host(), owner.combined(signal)).await,
-            "undo_change" => {
-                let outcome = owner.history.undo(input.get("change").and_then(Value::as_str).unwrap_or("last"), signal, false).await?;
-                let reply = if input.get("final") == Some(&json!(true)) && !outcome.is_error {
-                    outcome.record.as_ref().filter(|r| !r.title.is_empty()).map(|r| format!("Undone: {}.", r.title))
-                } else {
-                    None
-                };
-                Ok(ToolResult { text: outcome.for_model(), is_error: outcome.is_error, reply, ..Default::default() })
-            }
+            "undo_change" => crate::integrations::shared::undo::undo_change(&owner.history, &input, signal).await,
             "audition" | "judge" | "tune" | "groove" | "form" | "sound" | "render" => {
                 match owner.rendering.call(&self.name, input, signal).await {
                     Some(result) => result,
