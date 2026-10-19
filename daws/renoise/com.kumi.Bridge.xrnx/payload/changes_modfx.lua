@@ -703,8 +703,13 @@ function M.param_kind(spec)
     return { object = parameter, name = label .. " " .. parameter.name, place = place, target = target }
   end
   kind.reread = function(song, place)
-    local device = places_.reread(spec.of)(song, place)
-    if not device or type(place.param) ~= "number" or place.param > #device.parameters then return nil end
+    local numbers = {}
+    for k, key in ipairs(places_.SHAPES[spec.of].keys) do
+      if type(place[key]) ~= "number" then return nil end
+      numbers[k] = place[key]
+    end
+    local ok, device = pcall(function() return spec.device_of(places_.resolve(song, spec.of, numbers)) end)
+    if not ok or not device or type(place.param) ~= "number" or place.param > #device.parameters then return nil end
     return device:parameter(place.param)
   end
   kind.watch = function(env, loc) if env.watch_undo then env.watch_undo(loc.object.value_observable) end end

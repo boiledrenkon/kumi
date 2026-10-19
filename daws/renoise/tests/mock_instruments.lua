@@ -750,7 +750,14 @@ function M.phrase_proxy(instrument, ph)
   local phrase = instrument.phrases[ph]
   local getters, setters, fields = fields_of(phrase, PHRASE_SPEC)
   getters.number_of_lines = function() return phrase.lines end
-  setters.number_of_lines = function(value) check_range("number_of_lines", value, 1, 512, true) write(phrase, "lines", value) M.fire(obs(phrase, "number_of_lines")) end
+  setters.number_of_lines = function(value)
+    check_range("number_of_lines", value, 1, 512, true)
+    write(phrase, "lines", value)
+    -- (Renoise keeps the loop inside the phrase)
+    if phrase.loop_end > value then write(phrase, "loop_end", value) end
+    if phrase.loop_start > value then write(phrase, "loop_start", value) end
+    M.fire(obs(phrase, "number_of_lines"))
+  end
   fields.number_of_lines_observable = obs(phrase, "number_of_lines")
   getters.visible_note_columns = function() return phrase.note_columns end
   setters.visible_note_columns = function(value) check_range("visible_note_columns", value, 1, 12, true) write(phrase, "note_columns", value) M.fire(obs(phrase, "visible_note_columns")) end
