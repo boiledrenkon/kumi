@@ -20,6 +20,8 @@ pub(crate) use sends::seen_holds as send_seen_holds;
 mod structure;
 mod tracks;
 mod undo;
+// M5 listening (m5-reaper): a scratch copy kept as the producer's track.
+mod scratch_keep;
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -126,6 +128,8 @@ enum Kind {
     RunLua,
     /// A REAPER API function that changes the project, called by name (only REAPER's undo takes it back).
     ApiCall,
+    /// M5 listening (m5-reaper): a scratch copy made a track of the producer's.
+    ScratchKeep,
 }
 
 fn kind(name: &str) -> Option<Kind> {
@@ -163,6 +167,8 @@ fn kind(name: &str) -> Option<Kind> {
         "fx-pins" => Some(Kind::FxPins),
         "run-lua" => Some(Kind::RunLua),
         "api-call" => Some(Kind::ApiCall),
+        // M5 listening (m5-reaper).
+        "scratch-keep" => Some(Kind::ScratchKeep),
         _ => None,
     }
 }
@@ -196,6 +202,7 @@ impl Kind {
             Kind::FxPins => pins::preview(ctx, input),
             Kind::RunLua => lua::preview(ctx, input),
             Kind::ApiCall => call::preview(ctx, input),
+            Kind::ScratchKeep => scratch_keep::preview(ctx, input),
         }
     }
 
@@ -222,6 +229,7 @@ impl Kind {
             Kind::FxPins => pins::apply(ctx, input, fence),
             Kind::RunLua => lua::apply(ctx, input, fence),
             Kind::ApiCall => call::apply(ctx, input, fence),
+            Kind::ScratchKeep => scratch_keep::apply(ctx, input, fence),
         }
     }
 
@@ -247,6 +255,7 @@ impl Kind {
             Kind::FxPins => pins::restore(ctx, restore),
             Kind::RunLua => lua::restore(ctx, restore),
             Kind::ApiCall => call::restore(ctx, restore),
+            Kind::ScratchKeep => scratch_keep::restore(ctx, restore),
         }
     }
 }

@@ -503,11 +503,17 @@ impl Reads {
     // ----- read -----
 
     pub fn read(&self, reaper: &Reaper, params: &Value) -> Answer {
+        // M5 listening (m5-reaper): what plays where.
+        if params.get("kind").and_then(Value::as_str) == Some("spans") {
+            return self.read_spans(reaper, params);
+        }
         let request = Request::parse(params)?;
         self.expect_epoch(params)?;
         let (proj, info) = active(reaper)?;
+        // M5 listening (m5-reaper): a parameter's text across its range.
+        let grid = crate::listening::reads::grid_points(params)?;
         if let Some(reference) = &request.reference {
-            return self.read_one(reaper, proj, reference);
+            return self.read_one(reaper, proj, reference, grid);
         }
         let kind = request.kind.as_deref().unwrap_or_default();
         if kind == "call" {
@@ -526,7 +532,7 @@ impl Reads {
             "item" => self.read_items(reaper, proj, pager, parent, cursor),
             "take" => self.read_takes(reaper, proj, pager, parent, cursor),
             "fx" => self.read_fx(reaper, proj, pager, parent, cursor),
-            "param" => self.read_params(reaper, proj, pager, parent, cursor),
+            "param" => self.read_params(reaper, proj, pager, parent, cursor, grid),
             "send" => self.read_sends(reaper, proj, pager, parent, cursor),
             "marker" => self.read_markers(reaper, proj, pager, false, cursor),
             "region" => self.read_markers(reaper, proj, pager, true, cursor),
@@ -568,7 +574,7 @@ impl Reads {
     }
 
     /// `read {ref}`: the one object a ref names.
-    fn read_one(&self, reaper: &Reaper, proj: Project, reference: &str) -> Answer {
+    fn read_one(&self, reaper: &Reaper, proj: Project, reference: &str, grid: Option<usize>) -> Answer {
         let row = match Ref::parse(reference).map_err(bad)? {
             Ref::Track(id) => rows::track_row(reaper, self.track_by_id(reaper, proj, &id)?),
             Ref::Item(guid) => rows::item_row(reaper, proj, self.item_by_guid(reaper, proj, &guid)?),
@@ -582,7 +588,11 @@ impl Reads {
                 if index < 0 || index >= reaper.fx_param_count(fx) {
                     return Err(failed(format!("that parameter isn't there: the FX has {} parameters", reaper.fx_param_count(fx))));
                 }
-                rows::param_row(reaper, fx, &guid, index)
+                let mut row = rows::param_row(reaper, fx, &guid, index);
+                if let Some(points) = grid {
+                    crate::listening::reads::add_grid(reaper, fx, index, points, &mut row);
+                }
+                row
             }
             Ref::Send { track, category, other, repeat, of, seen } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
@@ -833,7 +843,15 @@ impl Reads {
         self.page_keyed(pager, next, Some(total), key)
     }
 
-    fn read_params(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
+    fn read_params(
+        &self,
+        reaper: &Reaper,
+        proj: Project,
+        mut pager: Pager,
+        parent: Option<&str>,
+        cursor: Option<&str>,
+        grid: Option<usize>,
+    ) -> Answer {
         let parent = parent.ok_or_else(|| bad("param: pass the FX as parent"))?;
         let fx = self.parent_fx(reaper, proj, parent)?;
         let guid = reaper.fx_guid(fx);
@@ -845,7 +863,11 @@ impl Reads {
                 next = Some(position);
                 break;
             }
-            if !pager.push(rows::param_row(reaper, fx, &guid, position as i32)) {
+            let mut row = rows::param_row(reaper, fx, &guid, position as i32);
+            if let Some(points) = grid {
+                crate::listening::reads::add_grid(reaper, fx, position as i32, points, &mut row);
+            }
+            if !pager.push(row) {
                 next = Some(position);
                 break;
             }
@@ -993,6 +1015,39 @@ impl Reads {
             position += 1;
         }
         self.page_keyed(pager, next, Some(found.len()), key)
+    }
+
+    // ----- M5 listening (m5-reaper): what plays where -----
+
+    /// `read {kind: "spans", limit?, cursor?}`: the tracks in project order (64 by default, up to 200), each with the
+    /// stretches where it plays, in quarter notes from the project start.
+    fn read_spans(&self, reaper: &Reaper, params: &Value) -> Answer {
+        self.expect_epoch(params)?;
+        let (proj, _) = active(reaper)?;
+        let limit = match params.get("limit") {
+            None | Some(Value::Null) => crate::listening::reads::DEFAULT_LIMIT,
+            Some(_) => limit_param(params)?,
+        };
+        let cursor = text_param(params, "cursor")?;
+        let total = reaper.track_count(proj).max(0) as usize;
+        let key = |position: usize| reaper.track_at(proj, position as i32).map(|track| reaper.track_guid(track));
+        let mut position = self.resume_number(cursor.as_deref(), total, key)?;
+        let mut pager = Pager::new(limit, ANSWER_BYTES);
+        let mut next = None;
+        while position < total {
+            if !pager.open() {
+                next = Some(position);
+                break;
+            }
+            if let Some(track) = reaper.track_at(proj, position as i32) {
+                if !pager.push(crate::listening::reads::spans_row(reaper, proj, track)) {
+                    next = Some(position);
+                    break;
+                }
+            }
+            position += 1;
+        }
+        self.page_keyed(pager, next, Some(total), key)
     }
 
     // ----- snapshot -----

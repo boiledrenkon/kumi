@@ -12,6 +12,9 @@ pub mod generic;
 mod objects;
 mod write;
 pub use objects::*;
+// M5 listening (m5-reaper): render settings, the audio device, sources, previews, accessors.
+mod audio;
+pub use audio::*;
 
 /// File: Quit REAPER.
 pub const ACTION_QUIT: i32 = 40004;
@@ -88,6 +91,8 @@ pub enum Busy {
     /// The main thread has been running one request for longer than a stall: a plug-in loading, or a dialog that request
     /// opened (a licence prompt), which nothing else can get past.
     Working,
+    /// M5 listening (m5-reaper): a render Kumi asked for is queued or running (it holds the main thread inside REAPER's).
+    KumiRender,
 }
 
 impl Busy {
@@ -98,6 +103,7 @@ impl Busy {
             Busy::Modal => "modal",
             Busy::Starting => "starting",
             Busy::Working => "working",
+            Busy::KumiRender => "rendering",
         }
     }
 
@@ -108,6 +114,7 @@ impl Busy {
             Busy::Modal => "REAPER isn't answering: a dialog may be open",
             Busy::Starting => "REAPER is starting",
             Busy::Working => "REAPER is still running a long request (a plug-in loading, or a dialog that request opened)",
+            Busy::KumiRender => "REAPER is rendering for Kumi",
         }
     }
 }
