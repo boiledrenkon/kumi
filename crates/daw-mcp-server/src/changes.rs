@@ -43,7 +43,11 @@ pub struct Record {
     pub kind: String,
     pub input: Value,
     pub epoch: Option<String>,
+    /// The layout the DAW's refs are at as the DAW last answered (the preview's, then the apply's): `target` is in it.
     pub layout: Option<u64>,
+    /// The layout Kumi's refs in `input` were made in (Renoise): the apply sends `input` at it, so the DAW carries them
+    /// through the tracks moved since, as it did for the preview.
+    pub input_layout: Option<u64>,
     pub target: Value,
     pub prior: Value,
     pub fence: Value,
@@ -164,6 +168,7 @@ impl Journal {
             input: input.clone(),
             epoch: answer.get("epoch").and_then(Value::as_str).map(str::to_owned),
             layout: answer.get("layout").and_then(Value::as_u64).or(layout),
+            input_layout: layout,
             target: answer.get("target").cloned().unwrap_or(Value::Null),
             prior: answer.get("prior").cloned().unwrap_or(Value::Null),
             fence: answer.get("fence").cloned().unwrap_or(Value::Null),
@@ -255,6 +260,10 @@ impl Journal {
                     record.layout = Some(layout);
                 }
                 record.applied = applied.get("applied").cloned();
+                // What the apply found (in its answer's layout): the undo is asked for that.
+                if let Some(target) = applied.get("target").filter(|target| !target.is_null()) {
+                    record.target = target.clone();
+                }
                 record.created = applied.get("created").cloned().filter(|created| !created.is_null());
                 record.material = applied.get("material").cloned().filter(|material| !material.is_null());
                 if let Some(display) = applied.get("display").filter(|display| !display.is_null()) {
@@ -352,6 +361,21 @@ impl Journal {
         }
         inner.resize(id);
         (reply, is_error)
+    }
+
+    /// The restore was sent and never answered: whether the change is undone isn't known, so the record is Uncertain (its
+    /// undo is refused from now on rather than made twice).
+    pub fn end_undo_unanswered(&self, id: &str, error: &Value) -> (Value, bool) {
+        let mut inner = self.inner.lock().expect("journal lock");
+        let Some(record) = inner.records.get_mut(id) else { return (json!({"error": "the change was released meanwhile"}), true) };
+        record.state = State::Uncertain;
+        let mut reply = error.clone();
+        reply["code"] = "uncertain".into();
+        reply["state"] = "uncertain".into();
+        if let Some(answer) = reply.as_object_mut() {
+            answer.remove("busy");
+        }
+        (reply, true)
     }
 
     /// Forgets these changes (unknown ids are skipped): how many went.
@@ -463,6 +487,15 @@ pub fn undone_in_daw(journal: &Journal, name: &str, mut data: Value) -> Value {
 /// How long a change may take the DAW (it bounds each of its own steps; a big project takes a while).
 const CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// What the bridge's `change_apply` is sent: Kumi's input at the layout Kumi made its refs in (not the preview's, at
+/// which the DAW would carry nothing: a track inserted between the two would have the change land on its neighbour),
+/// and the fence and description the preview and journal gave.
+fn apply_params(record: &Record) -> Value {
+    let mut params = json!({"kind": record.kind, "input": record.input, "fence": record.fence, "desc": record.desc});
+    place(&mut params, record.epoch.as_deref(), record.input_layout);
+    params
+}
+
 fn refusal(refusal: Refusal) -> (Value, bool) {
     (json!({"error": refusal.message, "code": refusal.code}), true)
 }
@@ -529,9 +562,7 @@ impl crate::host::Host {
             Ok(Err(answered)) => return answered,
             Err(why) => return refusal(why),
         };
-        let mut params = json!({"kind": record.kind, "input": record.input, "fence": record.fence, "desc": record.desc});
-        place(&mut params, record.epoch.as_deref(), record.layout);
-        match self.call("change_apply", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
+        match self.call("change_apply", apply_params(&record), &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
             Ok(answer) => self.journal().end_apply(&id, &key, Ok(&answer)),
             // The bridge took it and couldn't say how it ended (a job it claimed and didn't finish in time): it may have
             // changed the DAW.
@@ -575,6 +606,10 @@ impl crate::host::Host {
         place(&mut params, record.epoch.as_deref(), record.layout);
         match self.call("change_restore", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
             Ok(answer) => self.journal().end_undo(&id, &key, Ok(&answer)),
+            // Sent, and no answer: the restore may have run. Kumi won't undo it blindly again.
+            Err(error @ (crate::host::CallError::Timeout | crate::host::CallError::Closed(_))) => {
+                self.journal().end_undo_unanswered(&id, &self.call_error(&error))
+            }
             Err(error) => self.journal().end_undo(&id, &key, Err(&self.call_error(&error))),
         }
     }
@@ -775,6 +810,37 @@ mod tests {
         assert!(journal.get(&ids[0]).is_none(), "then the oldest applied one (Kumi's undo of it answers unknown)");
         assert_eq!(journal.begin_undo(&ids[0], "u").unwrap_err().code, "unknown");
         assert_eq!(journal.len(), MAX_RECORDS);
+    }
+
+    #[test]
+    fn an_apply_sends_kumis_input_at_the_layout_kumi_made_its_refs_in_and_the_undo_takes_what_the_apply_found() {
+        let journal = Journal::default();
+        // Kumi read Bass as track 3 at layout 0; the producer inserted a track, so the preview answered at layout 1.
+        let answer = json!({"epoch": "e1", "layout": 1, "target": {"ref": "e1:track:4", "kind": "track"}, "prior": {"volumeDb": 0.0}, "fence": {}, "display": {"title": "Bass volume −6 dB"}});
+        let record = journal.previewed("track-volume", &json!({"ref": "e1:track:3", "volumeDb": -6.0}), &answer, Some(0)).unwrap();
+        let Ok(Ok(applying)) = journal.begin_apply(&record.id, &record.confirmation, "a", None) else { panic!("applying") };
+        let params = apply_params(&applying);
+        assert_eq!((&params["input"]["ref"], &params["layout"]), (&json!("e1:track:3"), &json!(0)), "the DAW carries it again");
+        // Another track moved before the apply landed: the apply says where it found Bass, and the undo is asked there.
+        journal.end_apply(
+            &record.id,
+            "a",
+            Ok(&json!({"layout": 2, "target": {"ref": "e1:track:5", "kind": "track"}, "applied": {"volumeDb": -6.0}})),
+        );
+        let kept = journal.get(&record.id).unwrap();
+        assert_eq!((&kept.target["ref"], kept.layout), (&json!("e1:track:5"), Some(2)));
+    }
+
+    #[test]
+    fn an_undo_sent_and_never_answered_is_uncertain_and_never_sent_again() {
+        let journal = Journal::default();
+        let record = preview(&journal);
+        journal.begin_apply(&record.id, &record.confirmation, "a", None).unwrap().unwrap();
+        journal.end_apply(&record.id, "a", Ok(&json!({"applied": {"volumeDb": -6.0}})));
+        journal.begin_undo(&record.id, "u1").unwrap().unwrap();
+        let (reply, is_error) = journal.end_undo_unanswered(&record.id, &json!({"error": "REAPER didn't answer in time", "busy": true}));
+        assert!(is_error && reply["code"] == "uncertain" && reply.get("busy").is_none(), "{reply}");
+        assert_eq!(journal.begin_undo(&record.id, "u2").unwrap_err().code, "uncertain");
     }
 
     #[test]
