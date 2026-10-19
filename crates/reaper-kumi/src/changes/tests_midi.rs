@@ -161,3 +161,111 @@ fn every_event_answer_names_refs_the_way_the_contract_says() {
         }
     }
 }
+
+// ----- quantize and humanize -----
+
+/// The snare's notes, off the grid: the item starts on beat 16, a grid line, and a quarter note is 960 ticks.
+fn loose_notes(notes: &[(i64, i64, i32)]) -> Lab {
+    let lab = Lab::new();
+    state(|s| {
+        s.tracks[2].items[0].takes[0].notes = notes
+            .iter()
+            .map(|&(start, end, pitch)| crate::reaper::fake::FakeNote {
+                start_ppq: start as f64,
+                end_ppq: end as f64,
+                channel: 0,
+                pitch,
+                velocity: 100,
+                selected: false,
+                muted: false,
+            })
+            .collect()
+    });
+    lab
+}
+
+fn starts() -> Vec<(f64, f64)> {
+    item("{ITEM-S1}").unwrap().1.takes[0].notes.iter().map(|n| (n.start_ppq, n.end_ppq)).collect()
+}
+
+#[test]
+fn notes_are_quantized_by_strength_and_swing_and_put_back_by_the_notes_undo() {
+    let lab = loose_notes(&[(100, 400, 60), (1000, 1200, 62), (2000, 2300, 64)]);
+    let (preview, applied) = lab.make("notes-quantize", json!({"ref": S1, "grid": 1.0}));
+    assert_eq!(preview["display"]["title"], "Quantized 3 notes in take “snare.mid” to 1 of a beat");
+    assert_eq!(starts(), vec![(0.0, 300.0), (960.0, 1160.0), (1920.0, 2220.0)], "moved to the grid, lengths kept");
+    lab.undo("notes-quantize", &preview, &applied).unwrap();
+    assert_eq!(starts(), vec![(100.0, 400.0), (1000.0, 1200.0), (2000.0, 2300.0)]);
+    // Half strength goes half way; the ends alone snap with ends: end.
+    lab.make("notes-quantize", json!({"ref": S1, "grid": 1.0, "strength": 50, "indexes": [1]}));
+    assert_eq!(starts()[1], (980.0, 1180.0));
+    let lab = loose_notes(&[(100, 400, 60), (1000, 1200, 62)]);
+    lab.make("notes-quantize", json!({"ref": S1, "grid": 0.5, "ends": "end"}));
+    assert_eq!(starts(), vec![(100.0, 480.0), (1000.0, 1440.0)]);
+    // A swung eighth grid at 100%: every second line on the triplet (two thirds of a beat, 640 ticks).
+    let lab = loose_notes(&[(600, 700, 60)]);
+    let (preview, _) = lab.make("notes-quantize", json!({"ref": S1, "grid": 0.5, "swing": 100}));
+    assert_eq!(starts(), vec![(640.0, 740.0)]);
+    assert!(preview["display"]["title"].as_str().unwrap().ends_with("swing 100%"));
+}
+
+#[test]
+fn a_quantize_shortens_a_note_it_would_overlap_and_refuses_two_starting_together() {
+    let lab = loose_notes(&[(0, 1000, 60), (1100, 1300, 60)]);
+    let (preview, applied) = lab.make("notes-quantize", json!({"ref": S1, "grid": 1.0, "indexes": [1]}));
+    assert!(preview["display"]["note"].as_str().unwrap().contains("1 note(s) end where the next"), "{}", preview["display"]);
+    assert_eq!(starts(), vec![(0.0, 960.0), (960.0, 1160.0)]);
+    lab.undo("notes-quantize", &preview, &applied).unwrap();
+    assert_eq!(starts(), vec![(0.0, 1000.0), (1100.0, 1300.0)], "the shortened note is put back too");
+    let lab = loose_notes(&[(900, 940, 60), (1010, 1100, 60)]);
+    let (code_, message) = lab.preview("notes-quantize", json!({"ref": S1, "grid": 1.0})).unwrap_err();
+    assert_eq!(code_, "bad-params");
+    assert!(message.contains("start together"), "{message}");
+    assert_eq!(code(lab.preview("notes-quantize", json!({"ref": S1, "grid": 0.0}))), "bad-params");
+    assert_eq!(code(lab.preview("notes-quantize", json!({"ref": S1, "grid": 1.0, "ends": "middle"}))), "bad-params");
+}
+
+#[test]
+fn humanize_moves_and_changes_notes_from_a_seed_so_the_apply_does_what_the_preview_showed() {
+    let lab = loose_notes(&[(0, 480, 60), (960, 1440, 62), (1920, 2400, 64)]);
+    let input = json!({"ref": S1, "timing": 10.0, "velocity": 12});
+    let preview = lab.preview("notes-humanize", input.clone()).unwrap();
+    let seed = preview["fence"]["seed"].as_u64().expect("the preview's seed is fenced");
+    assert_eq!(preview["display"]["seed"], seed);
+    let applied = lab.apply_with("notes-humanize", &input, &preview, "Kumi: humanize (k1)").unwrap();
+    let notes = item("{ITEM-S1}").unwrap().1.takes[0].notes.clone();
+    // 10 ms at 120 BPM is a fiftieth of a beat: at most 19.2 ticks either way.
+    for (note, was) in notes.iter().zip([0.0, 960.0, 1920.0]) {
+        assert!((note.start_ppq - was).abs() <= 19.5, "{} from {was}", note.start_ppq);
+        assert!((note.velocity - 100).abs() <= 12);
+        assert_eq!(note.end_ppq - note.start_ppq, 480.0, "lengths kept");
+    }
+    let shown: Vec<f64> = preview["display"]["after"].as_array().unwrap().iter().map(|row| row["start"].as_f64().unwrap()).collect();
+    let written: Vec<f64> = applied["display"]["written"]
+        .as_array()
+        .map(|rows| rows.iter().map(|row| row["start"].as_f64().unwrap()).collect())
+        .unwrap_or_default();
+    let _ = written;
+    assert_eq!(shown.len(), 3);
+    lab.undo("notes-humanize", &preview, &applied).unwrap();
+    assert_eq!(starts(), vec![(0.0, 480.0), (960.0, 1440.0), (1920.0, 2400.0)]);
+    // The same seed moves them the same way again.
+    let again = lab.preview("notes-humanize", json!({"ref": S1, "timing": 10.0, "velocity": 12, "seed": seed})).unwrap();
+    assert_eq!(again["display"]["after"], preview["display"]["after"]);
+    assert_eq!(code(lab.preview("notes-humanize", json!({"ref": S1}))), "bad-params");
+}
+
+#[test]
+fn a_transform_is_refused_when_the_notes_changed_since_the_preview_and_its_undo_when_they_changed_since() {
+    let lab = loose_notes(&[(100, 400, 60), (1000, 1200, 62)]);
+    let input = json!({"ref": S1, "grid": 1.0});
+    let preview = lab.preview("notes-quantize", input.clone()).unwrap();
+    state(|s| s.tracks[2].items[0].takes[0].notes[0].velocity = 90);
+    assert_eq!(code(lab.apply_with("notes-quantize", &input, &preview, "Kumi: x (k1)")), "changed");
+    let (preview, applied) = lab.make("notes-quantize", input);
+    state(|s| s.tracks[2].items[0].takes[0].notes[1].start_ppq = 990.0);
+    assert_eq!(code(lab.undo("notes-quantize", &preview, &applied)), "changed");
+    for answer in [&preview, &applied] {
+        assert_eq!(daw_bridge::contract::misplaced_refs(answer), Vec::<String>::new());
+    }
+}

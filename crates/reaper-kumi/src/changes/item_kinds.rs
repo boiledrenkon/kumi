@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 use super::take_marks::Which as Marks;
-use super::{glue, items, lanes, midi_events, take_marks, takes, Applied, Ctx, Done, Kind, Preview, Restore, Restored};
+use super::{glue, items, lanes, midi_events, notes, take_marks, takes, transforms, Applied, Ctx, Done, Kind, Preview, Restore, Restored};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Which {
@@ -31,6 +31,7 @@ pub enum Which {
     Glue,
     Render,
     Events(midi_events::Which),
+    Transform(transforms::Which),
 }
 
 /// The kind a name is, if it is one of these.
@@ -66,6 +67,8 @@ pub(super) fn kind(name: &str) -> Option<Kind> {
         "midi-events-add" => Some(Kind::Items(Which::Events(midi_events::Which::Add))),
         "midi-events-change" => Some(Kind::Items(Which::Events(midi_events::Which::Change))),
         "midi-events-delete" => Some(Kind::Items(Which::Events(midi_events::Which::Delete))),
+        "notes-quantize" => Some(Kind::Items(Which::Transform(transforms::Which::Quantize))),
+        "notes-humanize" => Some(Kind::Items(Which::Transform(transforms::Which::Humanize))),
         _ => None,
     }
 }
@@ -97,6 +100,7 @@ impl Which {
             Which::Glue => glue::glue_preview(ctx, input),
             Which::Render => glue::render_preview(ctx, input),
             Which::Events(which) => midi_events::preview(ctx, input, which),
+            Which::Transform(which) => transforms::preview(ctx, input, which),
         }
     }
 
@@ -126,6 +130,7 @@ impl Which {
             Which::Glue => glue::glue_apply(ctx, input, fence),
             Which::Render => glue::render_apply(ctx, input, fence),
             Which::Events(which) => midi_events::apply(ctx, input, fence, which),
+            Which::Transform(which) => transforms::apply(ctx, input, fence, which),
         }
     }
 
@@ -153,6 +158,8 @@ impl Which {
             Which::Glue => glue::glue_restore(ctx, restore),
             Which::Render => glue::render_restore(ctx, restore),
             Which::Events(_) => midi_events::restore(ctx, restore),
+            // (a transform's notes go back as a notes change's do: by value)
+            Which::Transform(_) => notes::restore(ctx, restore),
         }
     }
 }
