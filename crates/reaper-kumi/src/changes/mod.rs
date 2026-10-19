@@ -21,6 +21,7 @@ mod structure;
 mod tracks;
 mod undo;
 // (r-tracks) M4: track properties, routing, project items, actions; NIT-7.
+mod groups;
 mod hwout;
 mod projectitems;
 mod trackprops;
@@ -125,6 +126,9 @@ enum Kind {
     RulerLane,
     RulerLaneAdd,
     RegionRender,
+    /// (r-tracks) Track groups and VCAs.
+    TrackGroup,
+    TrackGroupName,
     TrackDelete,
     TrackAdd,
     TrackMove,
@@ -196,6 +200,8 @@ fn kind(name: &str) -> Option<Kind> {
         "ruler-lane" => Some(Kind::RulerLane),
         "ruler-lane-add" => Some(Kind::RulerLaneAdd),
         "region-render" => Some(Kind::RegionRender),
+        "track-group" => Some(Kind::TrackGroup),
+        "track-group-name" => Some(Kind::TrackGroupName),
         "track-delete" => Some(Kind::TrackDelete),
         "track-add" => Some(Kind::TrackAdd),
         "track-move" => Some(Kind::TrackMove),
@@ -228,6 +234,8 @@ impl Kind {
             Kind::RulerLane => projectitems::lane_preview(ctx, input),
             Kind::RulerLaneAdd => projectitems::lane_add_preview(ctx, input),
             Kind::RegionRender => projectitems::matrix_preview(ctx, input),
+            Kind::TrackGroup => groups::preview(ctx, input),
+            Kind::TrackGroupName => groups::name_preview(ctx, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
             Kind::TrackAdd => structure::add_preview(ctx, input),
             Kind::TrackMove => structure::move_preview(ctx, input),
@@ -267,6 +275,8 @@ impl Kind {
             Kind::RulerLane => projectitems::lane_apply(ctx, input, fence),
             Kind::RulerLaneAdd => projectitems::lane_add_apply(ctx, input, fence),
             Kind::RegionRender => projectitems::matrix_apply(ctx, input, fence),
+            Kind::TrackGroup => groups::apply(ctx, input, fence),
+            Kind::TrackGroupName => groups::name_apply(ctx, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
             Kind::TrackAdd => structure::add_apply(ctx, input, fence),
             Kind::TrackMove => structure::move_apply(ctx, input, fence),
@@ -306,6 +316,8 @@ impl Kind {
             Kind::RulerLane => projectitems::lane_restore(ctx, restore),
             Kind::RulerLaneAdd => projectitems::lane_add_restore(ctx, restore),
             Kind::RegionRender => projectitems::matrix_restore(ctx, restore),
+            Kind::TrackGroup => groups::restore(ctx, restore),
+            Kind::TrackGroupName => groups::name_restore(ctx, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
             Kind::TrackAdd => structure::add_restore(ctx, restore),
             Kind::TrackMove => structure::move_restore(ctx, restore),

@@ -353,3 +353,74 @@ fn a_track_row_says_where_it_sends_to_its_parent_and_what_a_power_user_set() {
     assert_eq!((&row["monitorItems"], &row["soloDefeat"]), (&json!(true), &json!(true)));
     assert_eq!(row["midiOut"], json!({"device": 0, "channel": 2}));
 }
+
+// ----- track groups and VCAs -----
+
+fn kick_roles(role: &str, high: bool) -> u32 {
+    let guid = state(|s| s.tracks[1].guid.clone());
+    fake::extra(|e| e.groups.get(&(guid, role.to_string(), high)).copied().unwrap_or(0))
+}
+
+#[test]
+fn a_track_joins_a_group_as_vca_follower_and_its_undo_puts_back_exactly_those_bits() {
+    let lab = Lab::new();
+    fake::extra(|e| e.project_text.insert("TRACK_GROUP_NAME:3".into(), "Drums VCA".into()));
+    // The producer's own membership of group 1 stays whatever Kumi does in group 3.
+    let guid = state(|s| s.tracks[1].guid.clone());
+    fake::extra(|e| e.groups.insert((guid.clone(), "VOLUME_VCA_FOLLOW".into(), false), 1));
+    let input = json!({"ref": KICK, "groupNumber": 3, "add": ["vca-follow", "mute-follow"]});
+    let (preview, made) = lab.make("track-group", input, "Kumi: x (kg001)");
+    assert_eq!(made["display"]["title"], "Kick in group 3 “Drums VCA” as vca-follow, mute-follow");
+    assert_eq!((kick_roles("VOLUME_VCA_FOLLOW", false), kick_roles("MUTE_FOLLOW", false)), (1 | 4, 4));
+    assert_eq!(made["undo"]["entry"], true);
+    // The track rows say it.
+    let rows = lab.call("read", json!({"kind": "track"})).unwrap();
+    let kick = rows["items"].as_array().unwrap().iter().find(|r| r["name"] == "Kick").cloned().unwrap();
+    assert_eq!(kick["groups"], json!([{"group": 1, "roles": ["vca-follow"]}, {"group": 3, "roles": ["vca-follow", "mute-follow"]}]));
+    lab.undo("track-group", &preview, &made, "Kumi: undo (kg002)").unwrap();
+    assert_eq!((kick_roles("VOLUME_VCA_FOLLOW", false), kick_roles("MUTE_FOLLOW", false)), (1, 0));
+    // Groups 33 to 64 are REAPER's other call.
+    let (preview, made) = lab.make("track-group", json!({"ref": KICK, "groupNumber": 40, "add": ["volume-lead"]}), "Kumi: x (kg003)");
+    assert_eq!(kick_roles("VOLUME_LEAD", true), 1 << 7);
+    lab.undo("track-group", &preview, &made, "Kumi: undo (kg004)").unwrap();
+    assert_eq!(kick_roles("VOLUME_LEAD", true), 0);
+}
+
+#[test]
+fn group_roles_changed_by_the_producer_are_refused_before_and_after() {
+    let lab = Lab::new();
+    let guid = state(|s| s.tracks[1].guid.clone());
+    let input = json!({"ref": KICK, "groupNumber": 2, "add": ["solo-lead"]});
+    let preview = lab.preview("track-group", input.clone()).unwrap();
+    fake::extra(|e| e.groups.insert((guid.clone(), "SOLO_LEAD".into(), false), 2));
+    let (code, _) = lab.apply("track-group", &input, &preview, "Kumi: x (kh001)").unwrap_err();
+    assert_eq!(code, "changed");
+    fake::extra(|e| e.groups.clear());
+    let (preview, made) =
+        lab.make("track-group", json!({"ref": KICK, "groupNumber": 2, "add": ["solo-lead"], "remove": ["solo-follow"]}), "Kumi: x (kh002)");
+    // The producer takes the track out of the group's solo lead: what Kumi set isn't there to undo.
+    fake::extra(|e| e.groups.insert((guid.clone(), "SOLO_FOLLOW".into(), false), 2));
+    assert_eq!(lab.undo("track-group", &preview, &made, "Kumi: undo (kh003)").unwrap_err().0, "changed");
+    for wrong in [
+        json!({"ref": KICK, "groupNumber": 0, "add": ["solo-lead"]}),
+        json!({"ref": KICK, "groupNumber": 65, "add": ["solo-lead"]}),
+        json!({"ref": KICK, "groupNumber": 1, "add": ["dance-lead"]}),
+        json!({"ref": KICK, "groupNumber": 1}),
+        json!({"ref": KICK, "groupNumber": 1, "add": ["mute-lead"], "remove": ["mute-lead"]}),
+        json!({"ref": "r:track:master", "groupNumber": 1, "add": ["mute-lead"]}),
+    ] {
+        assert_eq!(lab.preview("track-group", wrong.clone()).unwrap_err().0, "bad-params", "{wrong}");
+    }
+}
+
+#[test]
+fn a_group_is_named_and_its_name_put_back() {
+    let lab = Lab::new();
+    let (preview, made) = lab.make("track-group-name", json!({"groupNumber": 5, "name": "Backing vocals"}), "Kumi: x (ki001)");
+    assert_eq!(made["display"]["title"], "Group 5 named “Backing vocals”");
+    assert_eq!(fake::extra(|e| e.project_text.get("TRACK_GROUP_NAME:5").cloned()).as_deref(), Some("Backing vocals"));
+    fake::extra(|e| e.project_text.insert("TRACK_GROUP_NAME:5".into(), "BVs".into()));
+    assert_eq!(lab.undo("track-group-name", &preview, &made, "Kumi: undo (ki002)").unwrap_err().0, "changed");
+    lab.undo_anyway("track-group-name", &preview, &made, "Kumi: undo (ki003)").unwrap();
+    assert_eq!(fake::extra(|e| e.project_text.get("TRACK_GROUP_NAME:5").cloned()).as_deref(), Some(""));
+}

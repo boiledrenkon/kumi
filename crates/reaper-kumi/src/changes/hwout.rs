@@ -608,7 +608,7 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     Ok(Applied {
         applied: json!({"removed": true}),
         created: None,
-        material: Some(json!({"state": now, "stamp": stamp, "last": last, "track": refs::track_ref(&found.id)})),
+        material: Some(json!({"state": now, "stamp": stamp, "last": last, "trackRef": refs::track_ref(&found.id)})),
         display: json!({"title": format!("Removed hardware output {route}")}),
         ..Default::default()
     })

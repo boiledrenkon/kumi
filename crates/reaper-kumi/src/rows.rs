@@ -296,6 +296,10 @@ fn add_track_state(reaper: &Reaper, track: Track, master: bool, row: &mut Value)
     if midi_out >= 0 {
         row["midiOut"] = json!({"device": (midi_out >> 5) & 31, "channel": midi_out & 31});
     }
+    let groups = track_groups(reaper, track);
+    if !groups.is_empty() {
+        row["groups"] = groups.into();
+    }
     // Fixed lanes (comping): how many, what each is called and which play.
     let free_mode = value("I_FREEMODE") as i64;
     row["itemLayout"] = match free_mode {
@@ -317,6 +321,54 @@ fn add_track_state(reaper: &Reaper, track: Track, master: bool, row: &mut Value)
             .collect::<Vec<_>>();
         row["lanes"] = lanes.into();
     }
+}
+
+/// (r-tracks) A track's roles in REAPER's track groups, as Kumi names them and REAPER does (`GetSetTrackGroupMembership`).
+pub const GROUP_ROLES: [(&str, &str); 25] = [
+    ("volume-lead", "VOLUME_LEAD"),
+    ("volume-follow", "VOLUME_FOLLOW"),
+    ("vca-lead", "VOLUME_VCA_LEAD"),
+    ("vca-follow", "VOLUME_VCA_FOLLOW"),
+    ("pan-lead", "PAN_LEAD"),
+    ("pan-follow", "PAN_FOLLOW"),
+    ("width-lead", "WIDTH_LEAD"),
+    ("width-follow", "WIDTH_FOLLOW"),
+    ("mute-lead", "MUTE_LEAD"),
+    ("mute-follow", "MUTE_FOLLOW"),
+    ("solo-lead", "SOLO_LEAD"),
+    ("solo-follow", "SOLO_FOLLOW"),
+    ("record-arm-lead", "RECARM_LEAD"),
+    ("record-arm-follow", "RECARM_FOLLOW"),
+    ("polarity-lead", "POLARITY_LEAD"),
+    ("polarity-follow", "POLARITY_FOLLOW"),
+    ("automation-mode-lead", "AUTOMODE_LEAD"),
+    ("automation-mode-follow", "AUTOMODE_FOLLOW"),
+    ("media-edit-lead", "MEDIA_EDIT_LEAD"),
+    ("media-edit-follow", "MEDIA_EDIT_FOLLOW"),
+    ("volume-reverse", "VOLUME_REVERSE"),
+    ("pan-reverse", "PAN_REVERSE"),
+    ("width-reverse", "WIDTH_REVERSE"),
+    ("no-lead-when-follow", "NO_LEAD_WHEN_FOLLOW"),
+    ("vca-follow-pre-fx", "VOLUME_VCA_FOLLOW_ISPREFX"),
+];
+
+/// The groups a track is in, with its roles in each (groups 1-64): empty when it is in none.
+pub fn track_groups(reaper: &Reaper, track: Track) -> Vec<Value> {
+    let mut found: Vec<(i64, Vec<&str>)> = Vec::new();
+    for (role, name) in GROUP_ROLES {
+        for high in [false, true] {
+            let Some(mask) = reaper.group_membership(track, name, high).filter(|mask| *mask != 0) else { continue };
+            for bit in (0..32).filter(|bit| mask & (1u32 << bit) != 0) {
+                let group = bit as i64 + 1 + if high { 32 } else { 0 };
+                match found.iter_mut().find(|(g, _)| *g == group) {
+                    Some((_, roles)) => roles.push(role),
+                    None => found.push((group, vec![role])),
+                }
+            }
+        }
+    }
+    found.sort_by_key(|(group, _)| *group);
+    found.into_iter().map(|(group, roles)| json!({"group": group, "roles": roles})).collect()
 }
 
 /// What a take's source is called in a row: "wav", "mid", other types in lower case, "empty" for no take or source.
