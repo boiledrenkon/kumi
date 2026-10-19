@@ -375,6 +375,7 @@ local function on_structural(reason, kind, op, owner, token)
   if token then
     lists.devices, lists.samples, lists.phrases = token.devices, token.samples, token.phrases
   end
+  if kind == "sequence" and op then changes.journal_sequence_event(b.journal, op.type, op.index, song:is_undo_redoing()) end
   local list = lists[kind]
   if not list then return end -- (the sequence: nothing is watched per slot)
   if kind == "devices" and op then
@@ -606,6 +607,33 @@ function handlers.transport_stop()
   local recording = running and transport.edit_mode or false
   if running then transport:stop() end
   return { stopped = running, wasRecording = recording }
+end
+
+-- Play (not an undo step, and nothing to put back; Stop is the emergency one above).
+function handlers.transport_play()
+  local song = rows.the_song()
+  if song.rendering then error({ code = "busy", message = "Renoise is rendering the song" }, 0) end
+  local transport = song.transport
+  local was = transport.playing
+  if not was then transport:start(renoise.Transport.PLAYMODE_CONTINUE_PATTERN) end
+  return { started = not was, playing = transport.playing }
+end
+
+-- Start at a line of a sequence slot. The slot is a position in the sequence, so the request names the epoch it was read in.
+function handlers.transport_start_at(params)
+  local song = changes.context(params, change_env())
+  local slot, line = params.slot, params.line
+  local slots = #song.sequencer.pattern_sequence
+  if type(slot) ~= "number" or slot ~= math.floor(slot) or slot < 1 or slot > slots then
+    error({ code = "bad-params", message = string.format("slot is a sequence slot from 1 to %d", slots) }, 0)
+  end
+  local lines = song:pattern(song.sequencer:pattern(slot)).number_of_lines
+  if line == nil then line = 1 end
+  if type(line) ~= "number" or line ~= math.floor(line) or line < 1 or line > lines then
+    error({ code = "bad-params", message = string.format("line is a line of that slot's pattern, from 1 to %d", lines) }, 0)
+  end
+  song.transport:start_at(renoise.SongPos(slot, line))
+  return { epoch = epoch(), layout = b.layout, started = true, playing = song.transport.playing, slot = slot, line = line }
 end
 
 handlers["renoise.reload"] = function()

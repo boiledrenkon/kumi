@@ -38,7 +38,7 @@ function M.expect(text, kind, count, epoch)
 end
 
 -- Refs that name a track, or something on one (its devices and their parameters, a pattern's track): the number that is the track.
-local TRACK_KINDS = { track = 1, device = 1, param = 1, ptrack = 2 }
+local TRACK_KINDS = { track = 1, device = 1, param = 1, ptrack = 2, slot = 1 }
 
 -- The shifts of the track list since layout `since`: each { layout, type = "insert" | "remove", index }, oldest first, one per
 -- layout. Returns the new number for the track `n`, or nil when the track is gone.
@@ -57,7 +57,7 @@ function M.shift(n, shifts, since)
 end
 
 -- `params` with every track number carried through the shifts since layout `since`: refs of the current epoch that name a
--- track (kinds track, device, param and ptrack) and a number under `track`. Returns the new params, or nil and an error table
+-- track (kinds track, device, param, ptrack and slot) and a number under `track`. Returns the new params, or nil and an error table
 -- (code `gone`) naming the first track that was deleted meanwhile.
 function M.carry(params, epoch, shifts, since)
   local gone

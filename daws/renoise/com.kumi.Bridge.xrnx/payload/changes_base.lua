@@ -191,7 +191,8 @@ function M.prop_apply(song, env, spec, input, fence, desc)
   if spec.undoable then song:describe_undo(desc) end
   if spec.watch then spec.watch(env, loc) end
   if not spec.same(now, wanted) then spec.write(loc.object, wanted) end
-  local after = spec.read(loc.object, wanted)
+  -- (a setting Renoise applies a moment later answers its old value when read at once: `eventual` trusts the write)
+  local after = spec.eventual and wanted or spec.read(loc.object, wanted)
   if not spec.same(after, wanted) then fail("failed", "Renoise kept " .. loc.name .. "'s " .. spec.noun .. " as it was") end
   local display = { title = spec.title(loc.name, now, after), before = now, after = after }
   if not spec.undoable then display.note = NOT_UNDOABLE end
@@ -218,10 +219,10 @@ function M.prop_restore(song, env, spec, restore, desc)
     if spec.undoable then song:describe_undo(desc) end
     if spec.watch then spec.watch(env, loc) end
     spec.write(loc.object, restore.prior)
-    local after = spec.read(loc.object, restore.prior)
+    local after = spec.eventual and restore.prior or spec.read(loc.object, restore.prior)
     if not spec.same(after, restore.prior) then fail("failed", "Renoise kept " .. loc.name .. "'s " .. spec.noun .. " as it was") end
   end
-  local after = spec.read(loc.object, restore.prior)
+  local after = spec.eventual and restore.prior or spec.read(loc.object, restore.prior)
   local display = { title = spec.title(loc.name, now, after) .. " (put back)", before = now, after = after }
   return { restored = after, display = display, undo = { desc = desc, entry = spec.undoable }, place = loc.place }
 end
@@ -340,6 +341,30 @@ function M.journal_device_event(journal, track, type_, index, index2, undoing)
           end
         elseif type_ == "swap" then
           if place.device == index then place.device = index2 elseif place.device == index2 then place.device = index end
+        end
+      end
+    end
+  end
+end
+
+-- A sequence slot made or deleted: the slots the journal knows are numbered by their place and move with it, and a change that
+-- made or removed a slot is told when the producer's undo or redo does it again.
+function M.journal_sequence_event(journal, type_, index, undoing)
+  for i = #journal.entries, 1, -1 do
+    local entry = journal.entries[i]
+    local place = entry.place
+    if place and place.seq then
+      local handled = false
+      if entry.shape then handled = structural(journal, entry, type_, index, undoing, place.seq) end
+      if not handled then
+        if type_ == "insert" then
+          if place.seq >= index then place.seq = place.seq + 1 end
+        elseif type_ == "remove" then
+          if place.seq == index and not entry.shape then
+            table.remove(journal.entries, i) -- (the slot is gone: nothing left to compare)
+          elseif place.seq > index then
+            place.seq = place.seq - 1
+          end
         end
       end
     end
