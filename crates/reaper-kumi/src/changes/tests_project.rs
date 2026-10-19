@@ -52,6 +52,8 @@ fn the_notes_title_and_author_are_written_and_put_back_and_the_notes_say_reaper_
     // Title and author.
     let (preview, made) = lab.make("project-info", json!({"title": "Night Drive", "author": "K."}), "Kumi: x (kn005)");
     assert_eq!(made["display"]["title"], "Project title “Night Drive”, author “K.”");
+    // (7.82 lab: REAPER makes no undo point of them)
+    assert_eq!(made["display"]["note"], "REAPER's own undo won't take back the project's title and author; Kumi can.");
     assert_eq!(fake::extra(|e| e.project_text.get("PROJECT_TITLE").cloned()).as_deref(), Some("Night Drive"));
     lab.undo("project-info", &preview, &made, "Kumi: undo (kn006)").unwrap();
     assert_eq!(fake::extra(|e| e.project_text.get("PROJECT_TITLE").cloned()).as_deref(), Some(""));
@@ -124,6 +126,52 @@ fn a_ruler_lane_is_added_and_taken_away_again_only_while_nothing_is_on_it() {
     assert_eq!(code, "changed");
     assert!(message.contains("markers or regions on it"), "{message}");
     assert_eq!(lanes(), 3.0);
+    // The markers are the producer's: not even told to undo anyway.
+    let (code, _) = lab.undo_anyway("ruler-lane-add", &preview, &made, "Kumi: undo (ka005)").unwrap_err();
+    assert_eq!((code.as_str(), lanes()), ("changed", 3.0));
+}
+
+/// The producer reorders the first two ruler lanes: each lane keeps its id, at the other's number.
+fn swap_first_two_lanes() {
+    fake::extra(|e| {
+        e.project_text.insert("RULER_LANE_GUID:0".into(), "{LANE-1}".into());
+        e.project_text.insert("RULER_LANE_GUID:1".into(), "{LANE-0}".into());
+    });
+}
+
+#[test]
+fn a_ruler_lane_change_writes_the_lane_the_preview_named_or_none() {
+    let lab = Lab::new();
+    let input = json!({"lane": 1, "name": "Cues"});
+    let preview = lab.preview("ruler-lane", input.clone()).unwrap();
+    swap_first_two_lanes();
+    let (code, message) = lab.apply("ruler-lane", &input, &preview, "Kumi: x (kr001)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("another lane now"), "{message}");
+    assert_eq!(fake::extra(|e| e.project_text.get("RULER_LANE_NAME:1").cloned()), None, "nothing written");
+}
+
+#[test]
+fn a_marker_goes_back_to_its_lane_by_the_lanes_id_after_the_lanes_are_reordered() {
+    let lab = Lab::new();
+    fake::extra(|e| e.project_info.insert("RULER_LANE_COUNT".into(), 3.0));
+    let lane = || state(|s| s.marker_lanes.get("{MARK-1}").copied().unwrap_or(0));
+    state(|s| s.marker_lanes.insert("{MARK-1}".into(), 1));
+    let (preview, made) = lab.make("marker-lane", json!({"ref": "r:marker:{MARK-1}", "lane": 2}), "Kumi: x (kg001)");
+    assert_eq!((lane(), made["applied"]["laneGuid"].as_str()), (2, Some("{LANE-2}")));
+    // The lane it came from is first now.
+    swap_first_two_lanes();
+    lab.undo("marker-lane", &preview, &made, "Kumi: undo (kg002)").unwrap();
+    assert_eq!(lane(), 0, "back in its lane, wherever that is now");
+    // Its lane gone: nowhere to put it back to.
+    let (preview, made) = lab.make("marker-lane", json!({"ref": "r:marker:{MARK-1}", "lane": 2}), "Kumi: x (kg003)");
+    fake::extra(|e| {
+        e.project_text.insert("RULER_LANE_GUID:0".into(), "{LANE-9}".into());
+    });
+    let (code, message) = lab.undo_anyway("marker-lane", &preview, &made, "Kumi: undo (kg004)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("isn't in the project any more"), "{message}");
+    assert_eq!(lane(), 2);
 }
 
 #[test]

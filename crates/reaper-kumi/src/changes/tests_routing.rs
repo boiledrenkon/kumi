@@ -4,7 +4,7 @@
 use serde_json::json;
 
 use super::tests_lab::*;
-use crate::reaper::fake::{self, FakeSend};
+use crate::reaper::fake::{self, FakeEnvelope, FakeSend};
 
 const DRUMS_TO_REVERB: &str = "r:send:{AAAA}:0:{DDDD}";
 const REVERB_FROM_DRUMS: &str = "r:send:{DDDD}:-1:{AAAA}";
@@ -292,4 +292,72 @@ fn a_receive_change_put_back_by_hand_is_back_already_and_one_whose_route_went_is
     let (code, message) = lab.undo("send-mono", &preview, &made, "Kumi: undo (kh004)").unwrap_err();
     assert_eq!(code, "changed", "{message}");
     assert!(message.contains("isn't there with its mark"), "{message}");
+}
+
+/// A change as the journal keeps it when REAPER took no mark on the output (`P_EXT` refused): no stamp anywhere.
+fn unmarked(made: &serde_json::Value) -> serde_json::Value {
+    let mut made = made.clone();
+    made["applied"]["output"]["stamp"] = serde_json::Value::Null;
+    if let Some(created) = made.get_mut("created") {
+        created.as_object_mut().unwrap().remove("stamp");
+    }
+    state(|s| s.tracks[1].hw_outs.iter_mut().for_each(|o| o.ext.clear()));
+    made
+}
+
+#[test]
+fn an_unmarked_output_is_written_or_removed_only_as_kumi_left_it_even_told_to_undo_anyway() {
+    let lab = Lab::new();
+    state(|s| s.tracks[1].hw_outs = vec![FakeSend::to(0)]);
+    let output = kick_output_ref(&lab, 0);
+    let (preview, made) = lab.make("hw-out-volume", json!({"ref": output, "volumeDb": -6.0}), "Kumi: x (kn001)");
+    let made = unmarked(&made);
+    // The producer pans it: it may be another output now, and with no mark nothing tells.
+    state(|s| s.tracks[1].hw_outs[0].pan = 0.5);
+    let (code, _) = lab.undo_anyway("hw-out-volume", &preview, &made, "Kumi: undo (kn002)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!((kick_outputs()[0].volume - 10f64.powf(-6.0 / 20.0)).abs() < 1e-12, "not written");
+    // As Kumi left it, it is put back.
+    state(|s| s.tracks[1].hw_outs[0].pan = 0.0);
+    lab.undo("hw-out-volume", &preview, &made, "Kumi: undo (kn003)").unwrap();
+    assert_eq!(kick_outputs()[0].volume, 1.0);
+    // An added output without its mark is removed only as it was made.
+    state(|s| s.tracks[1].hw_outs = vec![FakeSend { dst_chan: 1 | 1024, ..FakeSend::to(0) }]);
+    let (preview, made) = lab.make("hw-out-add", json!({"ref": KICK, "output": {"first": 1}}), "Kumi: x (kn004)");
+    let made = unmarked(&made);
+    state(|s| s.tracks[1].hw_outs[1].volume = 0.5);
+    let (code, message) = lab.undo_anyway("hw-out-add", &preview, &made, "Kumi: undo (kn005)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("not as it was"), "{message}");
+    assert_eq!(kick_outputs().len(), 2, "not removed");
+    state(|s| s.tracks[1].hw_outs[1].volume = 1.0);
+    lab.undo("hw-out-add", &preview, &made, "Kumi: undo (kn006)").unwrap();
+    assert_eq!(kick_outputs().iter().map(|o| o.dst_chan).collect::<Vec<_>>(), [1 | 1024], "the producer's stays");
+}
+
+#[test]
+fn removing_an_output_with_automation_says_undo_cant_bring_its_envelopes_back() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tracks[1].hw_outs = vec![FakeSend::to(0)];
+        // REAPER keeps an output's envelopes with the track's; the fake names them "hw" and the chunk.
+        s.tracks[1].envelopes.push(FakeEnvelope::for_send("Volume", 0, "hw<VOLENV", 3));
+    });
+    let output = kick_output_ref(&lab, 0);
+    let (preview, made) = lab.make("hw-out-remove", json!({"ref": output}), "Kumi: x (ke001)");
+    assert_eq!(preview["display"]["note"], "Its 1 envelope(s) can't be put back by undo.");
+    assert_eq!(made["material"]["lostEnvelopes"], 1);
+    state(|s| s.tracks[1].envelopes.clear());
+    let undone = lab.undo("hw-out-remove", &preview, &made, "Kumi: undo (ke002)").unwrap();
+    assert_eq!(undone["display"]["note"], "Its 1 envelope(s) were not put back.");
+}
+
+#[test]
+fn a_midi_bus_is_one_of_reapers_sixteen() {
+    let lab = Lab::new();
+    let input = json!({"ref": DRUMS_TO_REVERB, "midi": {"fromBus": 17}});
+    let (code, message) = lab.preview("send-channels", input).unwrap_err();
+    assert_eq!(code, "bad-params");
+    assert!(message.contains("a bus from 1 to 16"), "{message}");
+    lab.preview("send-channels", json!({"ref": DRUMS_TO_REVERB, "midi": {"fromBus": 16, "toBus": 1}})).unwrap();
 }

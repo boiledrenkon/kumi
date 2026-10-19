@@ -2,6 +2,7 @@
 
 use serde_json::json;
 
+use super::templates;
 use super::tests_lab::*;
 use crate::reaper::fake::{self, FakeTrack};
 
@@ -24,6 +25,8 @@ fn actions(command: i32) {
             fake::mark_changed();
         }
         40297 => fake::with(|s| s.tracks.iter_mut().for_each(|t| t.selected = false)),
+        // A script of the producer's that steps REAPER's history back.
+        54001 => fake::producer_undo(),
         _ => {}
     }
 }
@@ -98,6 +101,29 @@ fn dialogs_quitting_closing_saving_and_rendering_are_never_run_as_a_change() {
     assert!(message.contains("no action named") && message.contains("“Track: Insert new track”"), "{message}");
     assert_eq!(lab.preview("run-action", json!({"action": 99999})).unwrap_err().0, "bad-params");
     assert_eq!(lab.preview("run-action", json!({"action": "_NOPE"})).unwrap_err().0, "bad-params");
+    // REAPER's undo and redo would move its history under Kumi's HISTORY.
+    for action in [json!(40029), json!(40030), json!("Edit: Undo"), json!("edit: redo")] {
+        let (code, message) = lab.preview("run-action", json!({"action": action})).unwrap_err();
+        assert_eq!(code, "bad-params", "{action}");
+        assert!(message.contains("moves REAPER's undo history"), "{action}: {message}");
+    }
+}
+
+#[test]
+fn an_action_that_steps_reapers_history_back_keeps_its_row_and_the_watch_tells_what_it_took_back() {
+    let lab = Lab::new();
+    state(|s| s.on_action = Some(actions));
+    let (_, volume) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -6.0}), "Kumi: Kick −6 dB (kv001)");
+    assert_eq!(volume["undo"]["entry"], true);
+    lab.tick();
+    lab.events.take();
+    let (_, made) = lab.make("run-action", json!({"action": "Script: tidy up.lua"}), "Kumi: Ran action (kv002)");
+    assert_eq!(made["undo"]["historyMoved"], true);
+    assert_eq!(made["applied"]["historyMoved"], true);
+    assert_eq!(made["display"].get("unchanged"), None, "a row: it changed the project");
+    assert!(made["display"]["note"].as_str().unwrap().starts_with("It moved REAPER's undo history itself"), "{made}");
+    lab.tick();
+    assert_eq!(lab.events.told("undo"), ["Kumi: Kick −6 dB (kv001)"], "the point it stepped back over");
 }
 
 #[test]
@@ -123,7 +149,14 @@ fn templates() -> tempfile::TempDir {
     )
     .unwrap();
     std::fs::write(dir.path().join("TrackTemplates/Open.RTrackTemplate"), "<TRACK\n  NAME \"Open\"\n  ISBUS 1 1\n>\n").unwrap();
+    std::fs::write(
+        dir.path().join("TrackTemplates/Synth.RTrackTemplate"),
+        "<TRACK\n  NAME \"Lead\"\n  <FXCHAIN\n    <VST \"VSTi: Synth (Maker)\" synth.vst 0\n    >\n  >\n>\n",
+    )
+    .unwrap();
     state(|s| s.resource = dir.path().to_string_lossy().into_owned());
+    // The template's undo compares the tracks' states, which the fake reads the same while they are the same.
+    fake::extra(|e| e.stable_chunks = true);
     dir
 }
 
@@ -196,6 +229,65 @@ fn a_template_insert_isnt_undone_once_the_producer_changed_its_tracks_or_moved_o
     });
     let (code, _) = lab.undo("track-template-insert", &preview, &made, "Kumi: undo (kp003)").unwrap_err();
     assert_eq!(code, "changed");
+    // Not even told to undo anyway: deleting the folder would move Reverb into another one.
+    let (code, message) = lab.undo_anyway("track-template-insert", &preview, &made, "Kumi: undo (kp004)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("inside the template's folder"), "{message}");
+    assert_eq!(names().len(), 6, "nothing deleted");
+}
+
+#[test]
+fn a_template_track_the_producer_mixed_edited_or_tweaked_keeps_it_but_one_only_selected_doesnt() {
+    let lab = Lab::new();
+    let _dir = templates();
+    let (preview, made) = lab.make("track-template-insert", json!({"name": "Synth"}), "Kumi: template (kq001)");
+    let lead = names().iter().position(|name| name == "Lead").unwrap();
+    let refused = |what: &str, n: u32| {
+        let (code, message) = lab.undo("track-template-insert", &preview, &made, &format!("Kumi: undo (kq10{n})")).unwrap_err();
+        assert_eq!(code, "changed", "{what}");
+        assert!(message.contains("“Lead” has been changed"), "{what}: {message}");
+        assert_eq!(names().last().map(String::as_str), Some("Lead"), "{what}: kept");
+    };
+    // Its fader.
+    state(|s| s.tracks[lead].volume = 0.5);
+    refused("the volume", 1);
+    state(|s| s.tracks[lead].volume = 1.0);
+    // A clip drawn on it.
+    state(|s| s.tracks[lead].items.push(fake::FakeItem::new("{MY-CLIP}", 0.0, 2.0, vec![])));
+    refused("an item", 2);
+    state(|s| s.tracks[lead].items.clear());
+    // Its synth's knob.
+    state(|s| s.tracks[lead].fx[0].params[0].value = 0.8);
+    refused("a parameter", 3);
+    state(|s| s.tracks[lead].fx[0].params[0].value = 0.5);
+    // Selected: nothing of the producer's to lose.
+    state(|s| s.tracks[lead].selected = true);
+    lab.undo("track-template-insert", &preview, &made, "Kumi: undo (kq104)").unwrap();
+    assert!(!names().contains(&"Lead".to_string()));
+}
+
+#[test]
+fn a_track_state_reads_the_same_selected_or_not_and_without_its_plug_ins_data() {
+    // Lines of a real track's state (REAPER 7.82 lab), and the same state as the producer only selected or looked at it.
+    let state = "<TRACK {T}\nNAME Chunky\nVOLPAN 1 0 -1 -1 1\nSHOWINMIX 1 0.6667 0.5 1 0.5 0 0 0 0\nTRACKHEIGHT 0 0 0 0 0 0 0\n<FXCHAIN\nSHOW 0\nLASTSEL 0\nDOCKED 0\nBYPASS 0 0 0\n<VST \"VST: ReaEQ (Cockos)\" reaeq.vst.dylib 0 \"\" 1919247729<5653> \"\"\ncWVlcu5e7f4CAAAAAQAAAAAAAAAC\nAAAQAAAA\n>\nFLOATPOS 0 0 0 0\nFXID {F}\n<PARMENV 0:_Freq 0 1 0.5\nACT 1 -1\nVIS 1 1 1\nLANEHEIGHT 0 0\nPT 0 0.25 0\nPT 1 0.75 0\n>\n>\n<ITEM\nPOSITION 0\nSEL 0\nIID 1\n<SOURCE MIDI\nE 0 90 3c 64\nE 960 80 3c 00\nEVTFILTER 0 -1\n>\n>\nAUXRECV 3 0 1 0 0 0 0 0 0 -1:U 0 -1 ''\n>\n";
+    let looked = state
+        .replace("SEL 0", "SEL 1")
+        .replace("E 0 90 3c 64", "e 0 90 3c 64")
+        .replace("PT 0 0.25 0", "PT 0 0.25 0 0 1")
+        .replace("TRACKHEIGHT 0 0", "TRACKHEIGHT 120 0")
+        .replace("FLOATPOS 0 0 0 0", "FLOATPOS 10 20 300 200")
+        .replace("cWVlcu5e7f4CAAAAAQAAAAAAAAAC", "cWVlcu5e7f4CAAAAAQAAAAAAAAAD")
+        .replace("AUXRECV 3", "AUXRECV 4");
+    assert_eq!(templates::content_hash(state), templates::content_hash(&looked));
+    for (what, edited) in [
+        ("a note", state.replace("E 0 90 3c 64", "E 0 90 3e 64")),
+        ("a point", state.replace("PT 1 0.75 0", "PT 1 0.5 0")),
+        ("the fader", state.replace("VOLPAN 1 0", "VOLPAN 0.5 0")),
+        ("a plug-in", state.replace("ReaEQ (Cockos)", "ReaComp (Cockos)")),
+        ("the item", state.replace("POSITION 0", "POSITION 2")),
+    ] {
+        assert_ne!(templates::content_hash(state), templates::content_hash(&edited), "{what}");
+    }
 }
 
 // ----- saving -----

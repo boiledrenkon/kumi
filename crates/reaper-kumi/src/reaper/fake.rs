@@ -2015,8 +2015,10 @@ unsafe extern "C" fn get_set_track_send_info(
         let own = unpack(track as u64).1;
         match (parm.as_str(), category) {
             ("P_DESTTRACK", 0) => send_of(s, track as u64, 0, index).map_or(ptr::null_mut(), |send| track_ptr(send.dest).cast()),
-            (env, 0) if env.starts_with("P_ENV:") => {
-                let chunk = &env["P_ENV:".len()..];
+            // (r-tracks) A hardware output's envelopes are the track's with "hw" before the chunk name.
+            (env, c) if c >= 0 && env.starts_with("P_ENV:") => {
+                let chunk = if c == 0 { env["P_ENV:".len()..].to_string() } else { format!("hw{}", &env["P_ENV:".len()..]) };
+                let chunk = chunk.as_str();
                 let t = track_of(s, track as u64);
                 let found = t.and_then(|t| {
                     t.envelopes.iter().position(|e| e.send.as_ref().is_some_and(|(send, c)| *send == index as usize && c == chunk))
@@ -2101,6 +2103,8 @@ unsafe extern "C" fn set_media_track_info_value(track: *mut MediaTrack, parm: *c
             "D_PAN" => t.pan = value,
             "B_MUTE" => t.mute = value != 0.0,
             "I_SOLO" => t.solo = value as i32,
+            // (r-tracks) A track whose controls are locked takes no arm (7.82 lab).
+            "I_RECARM" if t.extra.get("LOCK") == Some(&1.0) => {}
             "I_RECARM" => t.arm = value != 0.0,
             "I_SELECTED" => t.selected = value != 0.0,
             "I_FOLDERDEPTH" => t.folder = value as i32,
@@ -2170,6 +2174,11 @@ unsafe extern "C" fn delete_track(track: *mut MediaTrack) {
 unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
     counted(|s| {
         let Some(mut t) = track_of(s, track as u64).cloned() else { return false };
+        // (r-tracks) Chunks that read the same while the track is the same, for the tests that compare them.
+        if let Some(text) = m4::stable_chunk(&t, &fx_chain_text(&t.fx)) {
+            write(buf, size, &text);
+            return true;
+        }
         // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
         t.sends.clear();
         // (r-tracks) A track whose controls are locked says so in its state.

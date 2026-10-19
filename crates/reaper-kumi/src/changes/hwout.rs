@@ -448,20 +448,18 @@ pub fn prop_restore(ctx: &Ctx, prop: &Prop, restore: &Restore) -> Done<Restored>
     if let Some(fields) = prior.as_object_mut() {
         fields.remove("output");
     }
-    // An output without Kumi's mark (REAPER refused it) is the one at its ref's place only while it goes where it went and,
-    // unless told to put things back anyway, nothing else of it changed; another output is never written, even to undo.
+    // An output without Kumi's mark (REAPER refused it) is told only by all it is: as Kumi left it, or as it was before
+    // (back already). Anything else is another output, or this one changed past knowing, and is never written, even told
+    // to put things back anyway.
     if restore.applied["output"]["stamp"].is_null() {
-        let mut sealed = restore.applied["output"]["state"].clone();
-        let routing = ["srcChan", "dstChan"]
-            .iter()
-            .filter(|key| applied.get(**key).is_none())
-            .all(|key| close(number(&now, key), number(&sealed, key)));
-        for (key, value) in applied.as_object().into_iter().flatten() {
-            sealed[key] = value.clone();
+        let left = &restore.applied["output"]["state"];
+        let mut before = left.clone();
+        for (key, value) in prior.as_object().into_iter().flatten() {
+            before[key] = value.clone();
         }
-        if !routing || (!restore.discard && !same_state(&now, &sealed) && !holds(&now, &prior)) {
+        if !same_state(&now, left) && !same_state(&now, &before) {
             return Err(changed(format!(
-                "the hardware output {route} at that place isn't the one Kumi changed: Kumi won't write to another output"
+                "the hardware output {route} isn't as Kumi left it, and it has no mark of Kumi's to know it by: Kumi won't write to what may be another output"
             )));
         }
     }
@@ -564,9 +562,12 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
 pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let created = restore.created.ok_or_else(|| bad("created: the output that was added"))?;
     let reference = created["ref"].as_str().ok_or_else(|| bad("created: the output's ref"))?;
-    let found = find_sealed(ctx, reference, &restore.applied["output"], !restore.discard).map_err(for_restore)?;
+    // Without Kumi's mark the output is told only by its state: told to undo anyway or not, another output is never removed.
+    let stamped = restore.applied["output"]["stamp"].is_string();
+    let check = !restore.discard || !stamped;
+    let found = find_sealed(ctx, reference, &restore.applied["output"], check).map_err(for_restore)?;
     let now = state(ctx.reaper, found.track, found.index);
-    if !restore.discard && !same_state(&now, restore.applied) {
+    if check && !same_state(&now, restore.applied) {
         return Err(changed(format!("the hardware output {} has been changed in REAPER since Kumi added it", label(ctx, &found))));
     }
     let route = label(ctx, &found);
@@ -582,16 +583,26 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
 
 // ----- removing one -----
 
+/// The output's volume, pan and mute envelopes that are on: REAPER drops them with it, and undo makes the output again
+/// without them.
+fn active_envelopes(reaper: &Reaper, track: Track, index: i32) -> usize {
+    ["<VOLENV", "<PANENV", "<MUTEENV"]
+        .into_iter()
+        .filter_map(|chunk| reaper.send_envelope_in(track, HW, index, chunk))
+        .filter(|envelope| reaper.envelope_flag(*envelope, "ACTIVE"))
+        .count()
+}
+
 pub fn remove_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let reference = input["ref"].as_str().unwrap_or_default();
     let found = find(ctx, reference)?;
     let now = state(ctx.reaper, found.track, found.index);
-    Ok(Preview {
-        target: target(reference),
-        prior: now.clone(),
-        fence: json!({"output": seal(ctx.reaper, &found)}),
-        display: json!({"title": format!("Removed hardware output {}", label(ctx, &found)), "before": now}),
-    })
+    let mut display = json!({"title": format!("Removed hardware output {}", label(ctx, &found)), "before": now});
+    let envelopes = active_envelopes(ctx.reaper, found.track, found.index);
+    if envelopes > 0 {
+        display["note"] = format!("Its {envelopes} envelope(s) can't be put back by undo.").into();
+    }
+    Ok(Preview { target: target(reference), prior: now.clone(), fence: json!({"output": seal(ctx.reaper, &found)}), display })
 }
 
 pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
@@ -602,13 +613,14 @@ pub fn remove_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let route = label(ctx, &found);
     let last = found.index == reaper.send_count(found.track, HW) - 1;
     let stamp = stamp_of(reaper, found.track, found.index);
+    let lost = active_envelopes(reaper, found.track, found.index);
     if !reaper.remove_send(found.track, HW, found.index) {
         return Err(failed("REAPER wouldn't remove the hardware output"));
     }
     Ok(Applied {
         applied: json!({"removed": true}),
         created: None,
-        material: Some(json!({"state": now, "stamp": stamp, "last": last, "trackRef": refs::track_ref(&found.id)})),
+        material: Some(json!({"state": now, "stamp": stamp, "last": last, "lostEnvelopes": lost, "trackRef": refs::track_ref(&found.id)})),
         display: json!({"title": format!("Removed hardware output {route}")}),
         ..Default::default()
     })
@@ -640,8 +652,15 @@ pub fn remove_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     }
     let found = Found { track: owner, id: track, index };
     let mut display = json!({"title": format!("Hardware output {} put back", label(ctx, &found))});
+    let mut notes = Vec::new();
     if material["last"] == false {
-        display["note"] = "REAPER lists it after the track's other hardware outputs now.".into();
+        notes.push("REAPER lists it after the track's other hardware outputs now.".to_string());
+    }
+    if let Some(lost) = material["lostEnvelopes"].as_u64().filter(|lost| *lost > 0) {
+        notes.push(format!("Its {lost} envelope(s) were not put back."));
+    }
+    if !notes.is_empty() {
+        display["note"] = notes.join(" ").into();
     }
     Ok(Restored { restored: json!({"state": state(reaper, owner, index)}), display, ..Default::default() })
 }

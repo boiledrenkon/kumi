@@ -356,9 +356,10 @@ fn on_track(ctx: &Ctx, track: Track, command: i32) -> bool {
     ran
 }
 
-/// Whether a track's controls are locked: the `LOCK 1` line of its state.
+/// Whether a track's controls are locked: the `LOCK 1` line of its state (in the lighter state REAPER keeps for undo too:
+/// 7.82 lab).
 fn locked(ctx: &Ctx, track: Track) -> bool {
-    let Some(chunk) = ctx.reaper.track_chunk(track) else { return false };
+    let Some(chunk) = ctx.reaper.track_undo_chunk(track) else { return false };
     let mut depth = 0i32;
     for line in chunk.lines() {
         let line = line.trim();
@@ -604,7 +605,8 @@ pub static PROPS: [Prop; 15] = [
     Prop {
         kind: "track-width",
         master: true,
-        read: |ctx, track| json!({"panMode": value(ctx, track, "I_PANMODE") as i64, "width": value(ctx, track, "D_WIDTH")}),
+        // (the pan mode it pans in now, the project's when it follows that, is fenced: it decides what the change writes)
+        read: |ctx, track| json!({"panMode": value(ctx, track, "I_PANMODE") as i64, "panModeNow": effective_pan_mode(ctx, track), "width": value(ctx, track, "D_WIDTH")}),
         wanted: |ctx, track, input| {
             let width = input
                 .get("width")
@@ -628,7 +630,7 @@ pub static PROPS: [Prop; 15] = [
     Prop {
         kind: "track-dual-pan",
         master: true,
-        read: |ctx, track| json!({"panMode": value(ctx, track, "I_PANMODE") as i64, "left": value(ctx, track, "D_DUALPANL"), "right": value(ctx, track, "D_DUALPANR")}),
+        read: |ctx, track| json!({"panMode": value(ctx, track, "I_PANMODE") as i64, "panModeNow": effective_pan_mode(ctx, track), "left": value(ctx, track, "D_DUALPANL"), "right": value(ctx, track, "D_DUALPANR")}),
         wanted: |ctx, track, input| {
             let side = |key: &str| -> Done<Option<f64>> {
                 match input.get(key) {
@@ -723,13 +725,37 @@ pub static PROPS: [Prop; 15] = [
     Prop {
         kind: "track-lock",
         master: false,
-        read: |ctx, track| json!({"locked": locked(ctx, track)}),
-        wanted: |_, _, input| Ok(json!({"locked": boolean(input, "locked")?})),
-        write: |ctx, track, state| {
-            state.get("locked").is_none_or(|v| on_track(ctx, track, if v == true { LOCK_CONTROLS } else { UNLOCK_CONTROLS }))
+        read: |ctx, track| json!({"locked": locked(ctx, track), "arm": value(ctx, track, "I_RECARM") != 0.0}),
+        // REAPER's lock disarms the track for recording, and a locked track takes no arm (7.82 lab): locking an armed track
+        // disarms it as part of the change, so its undo unlocks it and arms it again.
+        wanted: |ctx, track, input| {
+            let lock = boolean(input, "locked")?;
+            let mut wanted = json!({"locked": lock});
+            if lock && !locked(ctx, track) && value(ctx, track, "I_RECARM") != 0.0 {
+                wanted["arm"] = false.into();
+            }
+            Ok(wanted)
         },
-        title: |_, name, to| format!("{name} controls {}", if to["locked"] == true { "locked" } else { "unlocked" }),
-        note: no_note,
+        write: |ctx, track, state| {
+            let arm = |ok: bool| ok && state.get("arm").and_then(Value::as_bool).is_none_or(|on| set(ctx, track, "I_RECARM", bit(on)));
+            match state.get("locked").and_then(Value::as_bool) {
+                Some(true) => arm(true) && on_track(ctx, track, LOCK_CONTROLS),
+                Some(false) => arm(on_track(ctx, track, UNLOCK_CONTROLS)),
+                None => arm(true),
+            }
+        },
+        title: |_, name, to| {
+            let lock = if to["locked"] == true { "locked" } else { "unlocked" };
+            match to.get("arm").and_then(Value::as_bool) {
+                Some(false) => format!("{name} controls {lock}, record arm off"),
+                Some(true) => format!("{name} controls {lock}, armed for recording"),
+                None => format!("{name} controls {lock}"),
+            }
+        },
+        note: |_, _, now, wanted| {
+            (wanted.get("arm") == Some(&Value::Bool(false)) && now["arm"] == true)
+                .then(|| "REAPER's lock disarms the track for recording; undo unlocks it and arms it again.".to_string())
+        },
         noun: "control lock",
     },
     Prop {
@@ -922,8 +948,13 @@ pub fn apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<Appli
     if !same(&after, &wanted) {
         // What was written is put back, inside this call: nothing half-done stays.
         let back = (prop.write)(ctx, found.track, &touched(&now, &wanted)) && same(&(prop.read)(ctx, found.track), &touched(&now, &wanted));
+        let why = if prop.kind != "track-lock" && locked(ctx, found.track) {
+            " (its controls are locked in REAPER: unlock them first)"
+        } else {
+            ""
+        };
         return Err(if back {
-            failed(format!("REAPER kept {name}'s {} as it was", prop.noun))
+            failed(format!("REAPER kept {name}'s {} as it was{why}", prop.noun))
         } else {
             (
                 "uncertain".into(),

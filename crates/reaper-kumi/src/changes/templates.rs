@@ -2,7 +2,8 @@
 //! or its path, at a place. REAPER inserts a template's tracks at the end of the track list (whatever is selected),
 //! selected, with new GUIDs and their folders (7.82 lab); Kumi then moves them where they were asked to go and puts the
 //! producer's selection back. The tracks made are the change's (`created`, by GUID); its undo deletes them, only while
-//! each is as the insert left it and no track of the producer's has gone into their folders.
+//! each is as the insert left it (its items and their MIDI, automation, mix, routing, plug-ins and their parameters) and,
+//! whatever it is told, no track of the producer's has gone into their folders.
 //!
 //! A template file that isn't there would make REAPER show an error dialog: it is checked first.
 
@@ -12,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::{Applied, Ctx, Done, Fault, Preview, Restore, Restored};
 use crate::read::{bad, failed};
-use crate::reaper::{FxOwner, Reaper, Track};
+use crate::reaper::{Fx, FxOwner, Reaper, Track};
 use crate::refs::{self, TrackId};
 
 fn changed(message: impl Into<String>) -> Fault {
@@ -139,24 +140,161 @@ pub fn preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     })
 }
 
-/// What tells a track made from the template from how it was left: its place in the block, name, items, FX, routes,
-/// envelopes with points, folder depth.
-fn signature(reaper: &Reaper, track: Track) -> Value {
-    let envelopes = (0..reaper.track_envelope_count(track))
-        .filter_map(|i| reaper.track_envelope(track, i))
-        .map(|e| reaper.envelope_point_count(e))
-        .sum::<i32>();
-    let fx = FxOwner::Track(track);
+/// The first words of a track's state lines that only show or select it: selection, heights, window places, the MIDI
+/// editor's view, an envelope's lane (7.82 lab: these move when the producer only looks or selects).
+const VIEW_WORDS: [&str; 20] = [
+    "SEL",
+    "TRACKHEIGHT",
+    "VU",
+    "SHOWINMIX",
+    "BUSCOMP",
+    "IID",
+    "SHOW",
+    "LASTSEL",
+    "DOCKED",
+    "FLOATPOS",
+    "FLOAT",
+    "WNDRECT",
+    "CFGEDITVIEW",
+    "CFGEDIT",
+    "EVTFILTER",
+    "KEYSNAP",
+    "TRACKSEL",
+    "VELLANE",
+    "VIS",
+    "LANEHEIGHT",
+];
+
+/// A plug-in's block in an FX chain: what it holds is the plug-in's own data, its parameters among it; those are its FX
+/// signature's (less what moves by itself), so the block's lines aren't hashed.
+const PLUGIN_WORDS: [&str; 7] = ["<VST", "<AU", "<JS", "<CLAP", "<LV2", "<DX", "<VIDEO_EFFECT"];
+
+/// A hash of a track's state as the producer can change it: its state chunk less the lines that only show or select
+/// (`VIEW_WORDS`; a MIDI event or envelope point told the same selected or not), less its receives (REAPER writes them by
+/// the sending track's number, which moves when tracks do: they are hashed by id apart), less its plug-ins' data (but not
+/// its input FX's, which have no signature here).
+pub(super) fn content_hash(chunk: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |text: &str| {
+        for byte in text.bytes().chain([b'\n']) {
+            hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    let (mut depth, mut plugin, mut input_chain) = (0i32, None::<i32>, None::<i32>);
+    for line in chunk.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let first = line.split_whitespace().next().unwrap_or_default();
+        if line == ">" {
+            if plugin == Some(depth) {
+                plugin = None;
+            } else if plugin.is_none() {
+                feed(line);
+            }
+            if input_chain == Some(depth) {
+                input_chain = None;
+            }
+            depth -= 1;
+            continue;
+        }
+        if plugin.is_some() {
+            depth += i32::from(line.starts_with('<'));
+            continue;
+        }
+        if line.starts_with('<') {
+            depth += 1;
+            if first == "<FXCHAIN_REC" {
+                input_chain = Some(depth);
+            } else if input_chain.is_none() && PLUGIN_WORDS.contains(&first) {
+                plugin = Some(depth);
+            }
+            feed(&unselected(line));
+            continue;
+        }
+        if VIEW_WORDS.contains(&first) || first == "AUXRECV" {
+            continue;
+        }
+        feed(&unselected(line));
+    }
+    format!("{hash:016x}")
+}
+
+/// A line as it reads unselected: a selected MIDI event is written `e`/`x` (`E`/`X` not), a selected envelope point has a
+/// fifth number 1 (`PT 2 0.5 0 0 1`; one at no tension and not selected has three).
+fn unselected(line: &str) -> String {
+    let mut words: Vec<&str> = line.split_whitespace().collect();
+    let Some(first) = words.first().copied() else { return String::new() };
+    let upper: String;
+    match first {
+        "e" | "em" | "x" | "xm" | "<x" | "<xm" => {
+            upper = first.replacen('e', "E", 1).replacen('x', "X", 1);
+            words[0] = upper.as_str();
+            words.join(" ")
+        }
+        "PT" => {
+            if words.len() == 4 {
+                words.push("0");
+            } else if words.len() >= 6 {
+                words.remove(5);
+            }
+            words.join(" ")
+        }
+        _ => words.join(" "),
+    }
+}
+
+/// A track's sends and receives, by the track at the other end: their settings, and the points of a send's envelopes (REAPER
+/// keeps those on the receiving track).
+fn routes_hash(reaper: &Reaper, track: Track) -> String {
+    let mut text = String::new();
+    for category in [0, -1] {
+        for index in 0..reaper.send_count(track, category) {
+            let peer = reaper.send_peer(track, category, index).map(|t| reaper.track_guid(t)).unwrap_or_default();
+            text += &format!("{category} {peer}");
+            for parm in crate::rows::SEND_STATE {
+                text += &format!(" {}", reaper.send_value(track, category, index, parm));
+            }
+            if category == 0 {
+                for chunk in ["<VOLENV", "<PANENV", "<MUTEENV"] {
+                    let points = reaper.send_envelope(track, index, chunk).map(|e| reaper.envelope_point_count(e));
+                    text += &format!(" {chunk}:{points:?}");
+                }
+            }
+            text.push('\n');
+        }
+    }
+    content_hash(&text)
+}
+
+/// The track's FX and its takes' FX, in order.
+fn all_fx(reaper: &Reaper, track: Track) -> Vec<Fx> {
+    let mut owners = vec![FxOwner::Track(track)];
+    for item in (0..reaper.track_item_count(track)).filter_map(|n| reaper.track_item(track, n)) {
+        owners.extend((0..reaper.take_count(item)).filter_map(|n| reaper.take_at(item, n)).map(FxOwner::Take));
+    }
+    owners.into_iter().flat_map(|owner| (0..reaper.fx_count(owner)).map(move |index| Fx { owner, index })).collect()
+}
+
+/// What tells a track made from the template from how the insert left it: its state as the producer can change it (items
+/// and their MIDI, envelopes and their points, mix, routing, plug-ins in and out), its sends and receives, and each FX's
+/// signature (its parameters, less those that move by themselves).
+fn signature(ctx: &Ctx, track: Track) -> Value {
+    let reaper = ctx.reaper;
     json!({
-        "name": reaper.track_name(track),
-        "items": reaper.track_item_count(track),
-        "fx": (0..reaper.fx_count(fx)).map(|index| reaper.fx_guid(crate::reaper::Fx { owner: fx, index })).collect::<Vec<_>>(),
-        "sends": reaper.send_count(track, 0),
-        "receives": reaper.send_count(track, -1),
-        "outputs": reaper.send_count(track, 1),
-        "points": envelopes,
-        "folderDepth": reaper.track_value(track, "I_FOLDERDEPTH") as i64,
+        "state": reaper.track_chunk(track).map(|chunk| content_hash(&chunk)),
+        "routes": routes_hash(reaper, track),
+        "fx": all_fx(reaper, track).into_iter().map(|fx| super::fx::signature(ctx, fx)).collect::<Vec<_>>(),
     })
+}
+
+/// Whether the track is as the insert left it, by its recorded signature.
+fn as_left(ctx: &Ctx, track: Track, recorded: &Value) -> bool {
+    let reaper = ctx.reaper;
+    let fx = all_fx(reaper, track);
+    let signatures = recorded["fx"].as_array().map(Vec::as_slice).unwrap_or_default();
+    recorded["state"].is_string()
+        && reaper.track_chunk(track).map(|chunk| content_hash(&chunk)).as_deref() == recorded["state"].as_str()
+        && recorded["routes"].as_str() == Some(routes_hash(reaper, track).as_str())
+        && fx.len() == signatures.len()
+        && fx.iter().zip(signatures).all(|(fx, recorded)| super::fx::signature_as(ctx, *fx, recorded) == *recorded)
 }
 
 fn selection(ctx: &Ctx) -> (Vec<String>, bool) {
@@ -254,7 +392,7 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(failed("REAPER put the template's tracks elsewhere than asked: they are taken away again"));
     }
     let tracks: Vec<Value> =
-        made.iter().filter_map(|guid| by_guid(ctx, guid).map(|t| json!({"guid": guid, "signature": signature(reaper, t)}))).collect();
+        made.iter().filter_map(|guid| by_guid(ctx, guid).map(|t| json!({"guid": guid, "signature": signature(ctx, t)}))).collect();
     let track_refs: Vec<String> = made.iter().map(|guid| refs::track_ref(&TrackId::Guid(guid.clone()))).collect();
     Ok(Applied {
         applied: json!({"index": at, "tracks": tracks}),
@@ -277,26 +415,29 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         if present.len() != made.len() {
             return Err(changed("some of the tracks the template made were deleted in REAPER since: the others stay"));
         }
-        for (entry, (_, track)) in tracks.iter().zip(&present) {
-            if signature(reaper, *track) != entry["signature"] {
+        for entry in tracks {
+            let Some((_, track)) = present.iter().find(|(guid, _)| entry["guid"].as_str() == Some(guid.as_str())) else { continue };
+            if !as_left(ctx, *track, &entry["signature"]) {
                 return Err(changed(format!(
-                    "{} has been changed in REAPER since the template made it",
+                    "{} has been changed in REAPER since the template made it (its items, automation, mix, routing or plug-ins)",
                     super::quoted(&super::track_name(reaper, *track))
                 )));
             }
         }
-        // Still one block, and no track of the producer's inside its folders.
+        // Still one block.
         let places: Vec<i64> = present.iter().map(|(_, t)| reaper.track_value(*t, "IP_TRACKNUMBER") as i64 - 1).collect();
         if places.windows(2).any(|w| w[1] != w[0] + 1) {
             return Err(changed("the template's tracks aren't together any more: other tracks were moved among them"));
         }
-        let inside = (0..reaper.track_count(ctx.proj)).filter_map(|at| reaper.track_at(ctx.proj, at)).any(|other| {
-            !present.iter().any(|(_, t)| *t == other)
-                && reaper.track_parent(other).is_some_and(|parent| present.iter().any(|(_, t)| *t == parent))
-        });
-        if inside {
-            return Err(changed("a track of the producer's is inside the template's folder now"));
-        }
+    }
+    // No track of the producer's inside its folders, even told to undo anyway: deleting the folder would move that track
+    // into another folder (or out of all), and it isn't the template's.
+    let inside = (0..reaper.track_count(ctx.proj)).filter_map(|at| reaper.track_at(ctx.proj, at)).any(|other| {
+        !present.iter().any(|(_, t)| *t == other)
+            && reaper.track_parent(other).is_some_and(|parent| present.iter().any(|(_, t)| *t == parent))
+    });
+    if inside {
+        return Err(changed("a track of the producer's is inside the template's folder now: Kumi won't delete the folder around it"));
     }
     let names: Vec<String> = present.iter().map(|(_, t)| super::track_name(reaper, *t)).collect();
     for (_, track) in present.iter().rev() {

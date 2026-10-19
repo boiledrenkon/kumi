@@ -23,6 +23,9 @@ pub struct Extra {
     /// REAPER marked a change of its own inside the open block (an action that makes an undo point): a block ended with
     /// flags 0 makes one.
     pub marked: bool,
+    /// Track chunks that read the same while the track is the same (a template's undo compares them), with no token to
+    /// put back by: for the tests of what compares chunks.
+    pub stable_chunks: bool,
     /// Files saved through `Main_SaveProjectEx`: (path, options).
     pub saved_as: Vec<(String, i32)>,
     pub made_from_templates: u32,
@@ -55,7 +58,10 @@ impl Default for Extra {
             (41824, "File: Render project, using the most recent render settings"),
             (41895, "File: Save new version of project (automatically increment project name)"),
             (42230, "File: Render project, using the most recent render settings, auto-close render dialog"),
+            (40029, "Edit: Undo"),
+            (40030, "Edit: Redo"),
             (54000, "Script: kumi.lua"),
+            (54001, "Script: tidy up.lua"),
         ];
         Extra {
             audio_inputs: vec!["Input 1".into(), "Input 2".into()],
@@ -70,6 +76,7 @@ impl Default for Extra {
             config: config.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             actions: actions.into_iter().map(|(id, name)| (id, name.to_string())).collect(),
             marked: false,
+            stable_chunks: false,
             saved_as: vec![],
             made_from_templates: 0,
         }
@@ -98,6 +105,39 @@ pub fn mark_changed() {
 /// Whether REAPER marked a change since the last block ended, and forgets it.
 pub fn take_marked() -> bool {
     extra(|e| std::mem::take(&mut e.marked))
+}
+
+/// A track's chunk as it reads with `stable_chunks`: its state in the shape of a real one, items with their selection.
+pub fn stable_chunk(t: &FakeTrack, fx_chain: &str) -> Option<String> {
+    if !extra(|e| e.stable_chunks) {
+        return None;
+    }
+    let lock = if t.extra.get("LOCK") == Some(&1.0) { "LOCK 1\n" } else { "" };
+    let mut items = String::new();
+    for item in &t.items {
+        items += &format!(
+            "<ITEM\nPOSITION {}\nLENGTH {}\nMUTE {}\nSEL {}\nIGUID {}\n",
+            item.position,
+            item.length,
+            u8::from(item.mute),
+            u8::from(item.selected),
+            item.guid
+        );
+        for take in &item.takes {
+            items += &format!("TAKE\nGUID {}\nNOTES {}\n", take.guid, take.notes.len());
+        }
+        items += ">\n";
+    }
+    Some(format!(
+        "<TRACK {}\nNAME \"{}\"\nVOLPAN {} {}\nMUTESOLO {} {}\nSEL {}\n{lock}{fx_chain}{items}>\n",
+        t.guid,
+        t.name,
+        t.volume,
+        t.pan,
+        u8::from(t.mute),
+        t.solo,
+        u8::from(t.selected)
+    ))
 }
 
 /// The action's name, for the fake's `kbd_getTextFromCmd`.
@@ -195,11 +235,12 @@ unsafe extern "C" fn get_set_project_info(_proj: *mut ReaProject, key: *const c_
     if key.starts_with("PROJECT_TIMEBASE") {
         return extra(|e| e.config.get("itemtimelock").and_then(|v| v.parse().ok()).unwrap_or(1.0));
     }
-    // A lane's number by its GUID: the fake's lanes never move, and their GUIDs say their number.
+    // A lane's number by its GUID: a lane's GUID is `{LANE-n}` from its first number unless a test moved them
+    // (`RULER_LANE_GUID:n` set), as when the producer reorders lanes.
     if let Some(guid) = key.strip_prefix("RULER_LANE_FROM_GUID:") {
         let count = extra(|e| e.project_info.get("RULER_LANE_COUNT").copied().unwrap_or(0.0)) as i64;
-        let lane = guid.strip_prefix("{LANE-").and_then(|rest| rest.strip_suffix('}')).and_then(|n| n.parse::<i64>().ok());
-        return lane.filter(|n| (0..count).contains(n)).map_or(-1.0, |n| n as f64);
+        let lane = (0..count).find(|n| lane_guid(*n) == guid);
+        return lane.map_or(-1.0, |n| n as f64);
     }
     let out = extra(|e| {
         if set {
@@ -224,6 +265,9 @@ unsafe extern "C" fn get_set_project_info_string(_proj: *mut ReaProject, key: *c
         extra(|e| e.project_text.get(&key).cloned().or_else(|| key.strip_prefix("RULER_LANE_GUID:").map(|n| format!("{{LANE-{n}}}"))));
     write(buf, 4096, text.as_deref().unwrap_or(""));
     true
+}
+fn lane_guid(lane: i64) -> String {
+    extra(|e| e.project_text.get(&format!("RULER_LANE_GUID:{lane}")).cloned()).unwrap_or_else(|| format!("{{LANE-{lane}}}"))
 }
 unsafe extern "C" fn get_set_project_notes(_proj: *mut ReaProject, set: bool, buf: *mut c_char, size: c_int) {
     if set {
@@ -334,7 +378,12 @@ unsafe extern "C" fn main_open_project(path: *const c_char) {
             .lines()
             .find_map(|l| l.trim().strip_prefix("ISBUS "))
             .and_then(|rest| rest.split_whitespace().nth(1)?.parse::<i32>().ok());
-        made.push((name, depth.unwrap_or(0)));
+        // A plug-in in it (`<VST "name"`), with one parameter at 0.5.
+        let fx: Vec<String> = block
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("<VST \"").and_then(|rest| rest.split('"').next()).map(str::to_string))
+            .collect();
+        made.push((name, depth.unwrap_or(0), fx));
     }
     let first = extra(|e| {
         let first = e.made_from_templates;
@@ -346,10 +395,20 @@ unsafe extern "C" fn main_open_project(path: *const c_char) {
             t.selected = false;
         }
         s.master.selected = false;
-        for (n, (name, depth)) in made.into_iter().enumerate() {
-            let mut track = FakeTrack::new(&format!("{{TPL-{}}}", first + n as u32 + 1), &name);
+        for (n, (name, depth, fx)) in made.into_iter().enumerate() {
+            let guid = format!("{{TPL-{}}}", first + n as u32 + 1);
+            let mut track = FakeTrack::new(&guid, &name);
             track.folder = depth;
             track.selected = true;
+            track.fx = fx
+                .iter()
+                .enumerate()
+                .map(|(at, fx_name)| {
+                    let mut fx = FakeFx::new(&format!("{{TPL-FX-{}-{at}}}", first + n as u32 + 1), fx_name);
+                    fx.params = vec![FakeParam::new("Gain", 0.5, "0.0 dB")];
+                    fx
+                })
+                .collect();
             s.tracks.push(track);
         }
         s.undo_dirty = true;

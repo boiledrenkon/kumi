@@ -162,6 +162,8 @@ async fn reapers_saves_go_to_the_bridge_by_name_and_are_no_change() {
     assert!(!is_error, "{answer}");
     assert_eq!(answer["saved"], "/lab/Projects/Sim.rpp");
     let (answer, is_error) = lab.tool("track_template_save", json!({"trackRefs": ["r:track:{T0001}"], "name": "Kit"})).await;
+    assert!(is_error, "the epoch is needed: {answer}");
+    let (answer, is_error) = lab.tool("track_template_save", json!({"trackRefs": ["r:track:{T0001}"], "name": "Kit", "epoch": "e1"})).await;
     assert!(!is_error, "{answer}");
     assert_eq!(answer["saved"], "/lab/REAPER/TrackTemplates/Kit.RTrackTemplate");
     let asked = lab.script.asked();

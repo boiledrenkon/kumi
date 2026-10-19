@@ -599,16 +599,16 @@ fn midi_code(value: &Value) -> Done<i64> {
         Some(v) if v == "same" => 0,
         Some(v) => v.as_i64().filter(|n| (1..=16).contains(n)).ok_or_else(|| bad("midi.to must be \"same\" or 1 to 16"))?,
     };
-    // (r-tracks) Buses: from "all" (0) or a bus 1 to 128, to "same" (0) or a bus; faders: the send's faders send MIDI volume
-    // and pan.
+    // (r-tracks) Buses: from "all" (0) or a bus 1 to 16 (REAPER's routing window has 16), to "same" (0) or a bus; faders:
+    // the send's faders send MIDI volume and pan.
     let bus = |key: &str, any: &str| -> Done<i64> {
         match value.get(key) {
             None | Some(Value::Null) => Ok(0),
             Some(v) if v == any => Ok(0),
             Some(v) => v
                 .as_i64()
-                .filter(|n| (1..=128).contains(n))
-                .ok_or_else(|| bad(format!("midi.{key} must be \"{any}\" or a bus from 1 to 128"))),
+                .filter(|n| (1..=16).contains(n))
+                .ok_or_else(|| bad(format!("midi.{key} must be \"{any}\" or a bus from 1 to 16"))),
         }
     };
     let (from_bus, to_bus) = (bus("fromBus", "all")?, bus("toBus", "same")?);
@@ -732,7 +732,17 @@ pub fn prop_apply(ctx: &Ctx, prop: &Prop, input: &Value, fence: &Value) -> Done<
     }
     let after = (prop.read)(ctx.reaper, found.track, found.index);
     if !(prop.same)(&after, &wanted) {
-        return Err(failed(format!("REAPER kept the send's {} as it was", prop.noun)));
+        // (r-tracks) What REAPER took otherwise than asked is put back, inside this call: nothing half-done stays.
+        let back = (prop.write)(ctx.reaper, found.track, found.index, &now)
+            && (prop.same)(&(prop.read)(ctx.reaper, found.track, found.index), &now);
+        return Err(if back {
+            failed(format!("REAPER kept the send's {} as it was", prop.noun))
+        } else {
+            (
+                "uncertain".into(),
+                format!("REAPER took the send's {} otherwise than asked, and Kumi could not put it back: read the routing", prop.noun),
+            )
+        });
     }
     // A send Kumi changes gets Kumi's mark, in the same step, if it has none: its undo then finds it by that and by no value
     // (two sends at REAPER's defaults are alike in every value). Only once REAPER took the value: a refused change leaves

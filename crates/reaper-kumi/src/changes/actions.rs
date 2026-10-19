@@ -25,11 +25,15 @@ use crate::refs::{self, Ref, TrackId};
 
 const NOTE: &str = "Only REAPER's own undo can take this back (Edit > Undo).";
 const NO_POINT: &str = "REAPER made no undo point of it: it changed nothing the project keeps (a view, selection or transport action), so it has no row in HISTORY.";
+const HISTORY_MOVED: &str = "It moved REAPER's undo history itself (an undo or redo inside it): what it took back or made again shows in HISTORY once Kumi looks again. Only REAPER's own undo can take it back (Edit > Undo).";
 
 /// Actions never run as a change, by id: quit; new, open, close and switch projects and tabs; save (save_project does);
-/// render (a progress window holds REAPER's main thread).
-const REFUSED: [(i32, &str); 15] = [
+/// render (a progress window holds REAPER's main thread); REAPER's undo and redo (they move REAPER's history under Kumi's
+/// HISTORY: change_undo takes back Kumi's changes, and REAPER's own Edit > Undo is the producer's).
+const REFUSED: [(i32, &str); 17] = [
     (40004, "quits REAPER"),
+    (40029, "moves REAPER's undo history under Kumi's HISTORY: Kumi's own changes are taken back by Kumi's undo, anything else is the producer's to undo in REAPER"),
+    (40030, "moves REAPER's undo history under Kumi's HISTORY: anything to redo is the producer's to redo in REAPER (Edit > Redo)"),
     (40023, "makes a new project in the tab"),
     (40025, "opens a project"),
     (40859, "makes a new project tab"),
@@ -66,6 +70,9 @@ fn refused_by_name(name: &str) -> Option<&'static str> {
     }
     if starts("file: save") {
         return Some("saves: use save_project");
+    }
+    if starts("edit: undo") || starts("edit: redo") {
+        return Some("moves REAPER's undo history under Kumi's HISTORY: Kumi's own changes are taken back by Kumi's undo, anything else is the producer's to undo or redo in REAPER");
     }
     if lower.contains("render project") || starts("file: render") {
         return Some("renders with a progress window that holds REAPER's main thread");
@@ -282,8 +289,14 @@ pub fn restore(_ctx: &Ctx, _restore: &Restore) -> Done<Restored> {
 }
 
 /// What the answer of an action says once its block is closed: with no point of REAPER's, it changed nothing the project
-/// keeps, and Kumi makes no row of it.
+/// keeps, and Kumi makes no row of it. One that moved REAPER's history itself (a script that undoes) keeps its row and says
+/// so: the watch tells HISTORY what it took back on its next look.
 pub fn after(applied: &mut Applied, undo: &Value) {
+    if undo["historyMoved"] == true {
+        applied.display["note"] = HISTORY_MOVED.into();
+        applied.applied["historyMoved"] = true.into();
+        return;
+    }
     if undo["entry"] == false {
         applied.display["unchanged"] = true.into();
         applied.display["note"] = NO_POINT.into();

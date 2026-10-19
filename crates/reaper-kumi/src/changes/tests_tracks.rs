@@ -234,16 +234,52 @@ fn a_parent_send_must_reach_only_channels_its_parent_has() {
     assert!(message.contains("“Master” has 2 channels"), "{message}");
 }
 
-/// The fake REAPER's lock actions: they lock or unlock the selected tracks, a change REAPER makes a point of.
+/// The fake REAPER's lock actions: they lock or unlock the selected tracks, a change REAPER makes a point of; locking
+/// disarms a track for recording (7.82 lab).
 fn lock_actions(command: i32) {
     if command == 41312 || command == 41313 {
         fake::with(|s| {
             for t in s.tracks.iter_mut().filter(|t| t.selected) {
                 t.extra.insert("LOCK".into(), if command == 41312 { 1.0 } else { 0.0 });
+                if command == 41312 {
+                    t.arm = false;
+                }
             }
         });
         fake::mark_changed();
     }
+}
+
+#[test]
+fn locking_an_armed_track_disarms_it_as_reaper_does_and_its_undo_unlocks_and_arms_it_again() {
+    let lab = Lab::new();
+    state(|s| s.on_action = Some(lock_actions));
+    state(|s| s.tracks[1].arm = true);
+    let (preview, made) = lab.make("track-lock", json!({"ref": KICK, "locked": true}), "Kumi: Kick controls locked (ka001)");
+    assert_eq!(made["display"]["title"], "Kick controls locked, record arm off");
+    assert_eq!(preview["display"]["note"], "REAPER's lock disarms the track for recording; undo unlocks it and arms it again.");
+    assert_eq!(state(|s| (s.tracks[1].arm, s.tracks[1].extra.get("LOCK").copied())), (false, Some(1.0)));
+    // A locked track takes no arm: a change of its arm says why REAPER kept it.
+    let (code, message) = lab.make_err("track-arm", json!({"ref": KICK, "arm": true}));
+    assert_eq!(code, "failed");
+    assert!(message.contains("its controls are locked in REAPER"), "{message}");
+    lab.undo("track-lock", &preview, &made, "Kumi: undo (ka002)").unwrap();
+    assert_eq!(state(|s| (s.tracks[1].arm, s.tracks[1].extra.get("LOCK").copied())), (true, Some(0.0)), "unlocked, then armed");
+}
+
+#[test]
+fn a_width_change_is_refused_when_the_pan_mode_the_track_follows_changed_since_the_preview() {
+    let lab = Lab::new();
+    // Kick follows the project's pan mode, stereo pan now: the width needs no switch.
+    state(|s| s.tracks[1].extra.insert("I_PANMODE".into(), -1.0));
+    fake::extra(|e| e.config.insert("panmode".into(), "5".into()));
+    let input = json!({"ref": KICK, "width": 0.5});
+    let preview = lab.preview("track-width", input.clone()).unwrap();
+    // The project's pan mode goes to balance: the same input would now switch the track's mode, which the preview didn't say.
+    fake::extra(|e| e.config.insert("panmode".into(), "3".into()));
+    let (code, _) = lab.apply("track-width", &input, &preview, "Kumi: x (kw001)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert_eq!(state(|s| s.tracks[1].extra.get("D_WIDTH").copied()), None, "nothing written");
 }
 
 #[test]

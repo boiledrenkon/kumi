@@ -177,7 +177,7 @@ pub fn tools(host: &Host) -> Value {
                     "version": {"type": "boolean"},
                     "path": {"type": "string"},
                     "epoch": epoch.clone(),
-                })), "additionalProperties": false},
+                })), "required": ["epoch"], "additionalProperties": false},
                 "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
             }));
             tools.push(json!({
@@ -192,7 +192,7 @@ pub fn tools(host: &Host) -> Value {
                     "envelopes": {"type": "boolean"},
                     "replace": {"type": "boolean"},
                     "epoch": epoch,
-                })), "required": ["trackRefs"], "additionalProperties": false},
+                })), "required": ["trackRefs", "epoch"], "additionalProperties": false},
                 "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false},
             }));
         }

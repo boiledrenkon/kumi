@@ -135,6 +135,8 @@ enum Kind {
     RunAction,
     /// (r-tracks) A track template inserted as tracks.
     TemplateInsert,
+    /// (r-tracks) The ruler lane a marker or region sits in, held by the lane's id.
+    MarkerLane,
     TrackDelete,
     TrackAdd,
     TrackMove,
@@ -210,6 +212,7 @@ fn kind(name: &str) -> Option<Kind> {
         "track-group-name" => Some(Kind::TrackGroupName),
         "run-action" => Some(Kind::RunAction),
         "track-template-insert" => Some(Kind::TemplateInsert),
+        "marker-lane" => Some(Kind::MarkerLane),
         "track-delete" => Some(Kind::TrackDelete),
         "track-add" => Some(Kind::TrackAdd),
         "track-move" => Some(Kind::TrackMove),
@@ -252,6 +255,7 @@ impl Kind {
             Kind::TrackGroupName => groups::name_preview(ctx, input),
             Kind::RunAction => actions::preview(ctx, input),
             Kind::TemplateInsert => templates::preview(ctx, input),
+            Kind::MarkerLane => marks::lane_preview(ctx, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
             Kind::TrackAdd => structure::add_preview(ctx, input),
             Kind::TrackMove => structure::move_preview(ctx, input),
@@ -295,6 +299,7 @@ impl Kind {
             Kind::TrackGroupName => groups::name_apply(ctx, input, fence),
             Kind::RunAction => actions::apply(ctx, input, fence),
             Kind::TemplateInsert => templates::apply(ctx, input, fence),
+            Kind::MarkerLane => marks::lane_apply(ctx, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
             Kind::TrackAdd => structure::add_apply(ctx, input, fence),
             Kind::TrackMove => structure::move_apply(ctx, input, fence),
@@ -338,6 +343,7 @@ impl Kind {
             Kind::TrackGroupName => groups::name_restore(ctx, restore),
             Kind::RunAction => actions::restore(ctx, restore),
             Kind::TemplateInsert => templates::restore(ctx, restore),
+            Kind::MarkerLane => marks::lane_restore(ctx, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
             Kind::TrackAdd => structure::add_restore(ctx, restore),
             Kind::TrackMove => structure::move_restore(ctx, restore),
@@ -494,6 +500,8 @@ impl Changes {
         if !in_plan && !ctx.reaper.undo_begin(ctx.proj) {
             return Err(failed("this REAPER has no undo blocks, so Kumi won't change anything in it"));
         }
+        // (r-tracks) Where REAPER's history stood before an action: one that moved it itself (a script that undoes) is told.
+        let history = (marks && !in_plan).then(|| (ctx.reaper.undo_can_undo(ctx.proj), ctx.reaper.undo_can_redo(ctx.proj)));
         let result = write(ctx);
         if in_plan {
             return result.map(|done| {
@@ -505,7 +513,19 @@ impl Changes {
         // and pending bare edits of the producer's stay where they were.
         let wrote = result.as_ref().is_ok_and(|done| !done.unwritten());
         // (r-tracks) An action's block ends with flags 0: REAPER makes a point only of what the action marked itself.
+        // Inside the block REAPER's history doesn't move, but for an undo or redo the action ran: then the watch isn't told
+        // the history is Kumi's own, and its next look tells HISTORY what was taken back or made again.
+        let moved = history.is_some_and(|before| before != (ctx.reaper.undo_can_undo(ctx.proj), ctx.reaper.undo_can_redo(ctx.proj)));
         ctx.reaper.undo_end(ctx.proj, desc, if wrote && !marks { -1 } else { 0 });
+        if moved {
+            if wrote {
+                ctx.reaper.refresh_after_change();
+            }
+            self.watch.borrow_mut().nudge();
+            let entry = ctx.reaper.undo_can_undo(ctx.proj).as_deref() == Some(desc);
+            let undo = json!({"desc": desc, "entry": entry, "stateCount": ctx.reaper.state_change_count(ctx.proj), "historyMoved": true});
+            return result.map(|done| (done, undo));
+        }
         let undo = self.after_block(ctx, desc, wrote);
         result.map(|done| (done, undo))
     }

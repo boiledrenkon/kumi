@@ -392,6 +392,10 @@ impl ReaperScript {
             "change_preview" | "change_apply" | "change_restore" => Self::change(&mut state, &epoch, method, params),
             "undo_step_begin" | "undo_step_end" => Self::plan_step(&mut state, method, params),
             // (r-tracks) Saving: a file written, nothing in the project changed.
+            // (as the extension: a save names the epoch its refs and project were read in)
+            "project_save" | "track_template_save" if params.get("epoch").and_then(Value::as_str).is_none() => {
+                Err(("bad-params".to_string(), "epoch: the epoch the refs were read in".to_string()))
+            }
             "project_save" => Ok(json!({"epoch": epoch, "saved": "/lab/Projects/Sim.rpp", "dirty": false})),
             "track_template_save" => Ok(
                 json!({"epoch": epoch, "saved": format!("/lab/REAPER/TrackTemplates/{}.RTrackTemplate", params["name"].as_str().unwrap_or("Template"))}),

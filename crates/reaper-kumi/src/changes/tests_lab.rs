@@ -87,6 +87,12 @@ impl Lab {
         (preview, applied)
     }
 
+    /// A change whose apply is refused: its code and message.
+    pub fn make_err(&self, kind: &str, input: Value) -> (String, String) {
+        let preview = self.preview(kind, input.clone()).unwrap_or_else(|e| panic!("preview {kind}: {e:?}"));
+        self.apply(kind, &input, &preview, &format!("Kumi: {kind} (kerr0)")).expect_err("refused")
+    }
+
     fn restore_params(kind: &str, preview: &Value, applied: &Value, desc: &str) -> Value {
         let mut params =
             json!({"kind": kind, "target": preview["target"], "prior": preview["prior"], "applied": applied["applied"], "desc": desc});

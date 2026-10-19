@@ -106,7 +106,7 @@ fn position_of(chain: &[String], guid: &str) -> Option<usize> {
 
 /// What tells an FX apart from how Kumi left it: its name, whether it runs, its preset and its parameters' values, less the
 /// parameters that move by themselves (`volatile`, NIT-7: found without holding REAPER's main thread).
-fn signature(ctx: &Ctx, fx: Fx) -> Value {
+pub(super) fn signature(ctx: &Ctx, fx: Fx) -> Value {
     let volatile = super::volatile::moving(ctx, fx);
     let signature = signature_without(ctx, fx, &volatile);
     super::volatile::remember(ctx, fx, &signature);
@@ -114,8 +114,8 @@ fn signature(ctx: &Ctx, fx: Fx) -> Value {
 }
 
 /// The signature again, as one that was taken before: a parameter it found to move by itself is left out of this one too,
-/// and so is one found to since (then the recorded signature is answered back: nothing else moved).
-fn signature_as(ctx: &Ctx, fx: Fx, recorded: &Value) -> Value {
+/// and so is one the watch right after it found (then the recorded signature is answered back: nothing else moved).
+pub(super) fn signature_as(ctx: &Ctx, fx: Fx, recorded: &Value) -> Value {
     let volatile: Vec<i32> = recorded["volatile"].as_array().into_iter().flatten().filter_map(Value::as_i64).map(|n| n as i32).collect();
     let now = signature_without(ctx, fx, &volatile);
     if now["hash"] != recorded["hash"] && same_but_hash(&now, recorded) && super::volatile::same_but_for_moving(ctx, fx, recorded) {

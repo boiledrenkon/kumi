@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use super::tests_lab::*;
+use super::volatile::{RELOOKS, RELOOK_EVERY};
 use crate::reaper::fake::{self, FakeParam, FakeTempo};
 
 // ----- the tempo-marker wording -----
@@ -132,17 +133,23 @@ fn a_plug_ins_parameter_names_are_read_once_not_on_every_change() {
     assert!(second + 1500 < first, "the second plug-in's names were read again: {first} calls, then {second}");
 }
 
+/// The ticks through one whole watch of what Kumi looked at last.
+fn watch_through(lab: &Lab, each: impl Fn(u8)) {
+    for n in 0..RELOOKS {
+        std::thread::sleep(RELOOK_EVERY + Duration::from_millis(2));
+        each(n);
+        lab.tick();
+    }
+}
+
 #[test]
 fn a_meter_found_moving_after_kumi_added_its_plug_in_does_not_refuse_the_undo_but_a_tweak_does() {
     let lab = Lab::new();
     let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added ReaEQ (km001)");
     assert_eq!(applied["applied"]["signature"]["volatile"], json!([]));
-    // A parameter that starts moving by itself once the plug-in plays: the ticks see it move twice.
+    // A parameter that moves by itself once the plug-in plays, right after Kumi added it: the watch sees it move to its end.
     state(|s| s.tracks[1].fx[0].params[3].wobbles = true);
-    for _ in 0..3 {
-        std::thread::sleep(Duration::from_millis(110));
-        lab.tick();
-    }
+    watch_through(&lab, |_| {});
     // A real tweak is still seen.
     state(|s| s.tracks[1].fx[0].params[0].value = 0.9);
     let (code, _) = lab.undo("fx-add", &preview, &applied, "Kumi: undo (km002)").unwrap_err();
@@ -165,5 +172,44 @@ fn a_tweak_the_ticks_see_once_is_never_taken_for_a_meter() {
     }
     let (code, _) = lab.undo("fx-add", &preview, &applied, "Kumi: undo (kt102)").unwrap_err();
     assert_eq!(code, "changed", "the producer's tweak keeps the plug-in");
+    assert_eq!(kick_fx_guids().len(), 1);
+}
+
+#[test]
+fn a_knob_turned_through_most_of_the_watch_and_left_is_never_taken_for_a_meter() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added ReaEQ (kd001)");
+    // The producer drags a knob of the new plug-in for most of a second, then lets go.
+    watch_through(&lab, |n| {
+        if n + 2 < RELOOKS {
+            state(|s| s.tracks[1].fx[0].params[0].value = 0.1 + 0.05 * f64::from(n));
+        }
+    });
+    let (code, _) = lab.undo("fx-add", &preview, &applied, "Kumi: undo (kd002)").unwrap_err();
+    assert_eq!(code, "changed", "the producer's knob keeps the plug-in");
+    assert_eq!(kick_fx_guids().len(), 1);
+}
+
+#[test]
+fn the_parameter_the_producer_touched_last_is_never_taken_for_a_meter() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added ReaEQ (kh001)");
+    // A drag longer than the watch: the knob moves to its end, and REAPER says it is the parameter touched last.
+    state(|s| s.touched_fx = Some((1, -1, -1, 0, 0)));
+    watch_through(&lab, |n| state(|s| s.tracks[1].fx[0].params[0].value = 0.1 + 0.05 * f64::from(n)));
+    let (code, _) = lab.undo("fx-add", &preview, &applied, "Kumi: undo (kh002)").unwrap_err();
+    assert_eq!(code, "changed", "the touched knob keeps the plug-in");
+    assert_eq!(kick_fx_guids().len(), 1);
+}
+
+#[test]
+fn a_parameter_that_starts_moving_after_the_watch_is_a_change_not_a_meter() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added ReaEQ (kl001)");
+    watch_through(&lab, |_| {});
+    // Later the producer sets up an LFO on a parameter: it moves by itself now, and that is their work.
+    state(|s| s.tracks[1].fx[0].params[2].wobbles = true);
+    let (code, _) = lab.undo("fx-add", &preview, &applied, "Kumi: undo (kl002)").unwrap_err();
+    assert_eq!(code, "changed");
     assert_eq!(kick_fx_guids().len(), 1);
 }

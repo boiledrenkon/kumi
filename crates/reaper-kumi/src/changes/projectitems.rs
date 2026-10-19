@@ -258,6 +258,9 @@ fn write_info(ctx: &Ctx, state: &Value) -> bool {
         .all(|(key, info)| state.get(*key).and_then(Value::as_str).is_none_or(|text| ctx.reaper.set_project_text(ctx.proj, info, text)))
 }
 
+/// (7.82 lab: setting them makes no point in REAPER's history.)
+const INFO_NOTE: &str = "REAPER's own undo won't take back the project's title and author; Kumi can.";
+
 pub fn info_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let wanted = info_wanted(input)?;
     let (read, write) = (|| info(ctx), |state: &Value| write_info(ctx, state));
@@ -265,14 +268,19 @@ pub fn info_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
         project_target("project"),
         &wanted,
         info_title(&wanted),
-        None,
+        Some(INFO_NOTE.into()),
     ))
 }
 
 pub fn info_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let wanted = info_wanted(input)?;
     let (read, write) = (|| info(ctx), |state: &Value| write_info(ctx, state));
-    Fields { ctx, read: &read, write: &write, noun: "project's title and author" }.apply(&wanted, fence, info_title(&wanted), None)
+    Fields { ctx, read: &read, write: &write, noun: "project's title and author" }.apply(
+        &wanted,
+        fence,
+        info_title(&wanted),
+        Some(INFO_NOTE.into()),
+    )
 }
 
 pub fn info_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -484,13 +492,17 @@ pub fn timebase_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
 // ----- ruler lanes -----
 
 /// A ruler lane is found by its GUID (REAPER keeps one for each), not its number, which reordering lanes moves.
-fn lane_by_guid(ctx: &Ctx, guid: &str) -> Option<i64> {
+pub(super) fn lane_by_guid(ctx: &Ctx, guid: &str) -> Option<i64> {
     let count = ctx.reaper.project_info(ctx.proj, "RULER_LANE_COUNT")? as i64;
     let at = ctx.reaper.project_info(ctx.proj, &format!("RULER_LANE_FROM_GUID:{guid}"))? as i64;
     (0..count).contains(&at).then_some(at).filter(|at| lane_guid(ctx, *at).as_deref() == Some(guid))
 }
 
-fn lane_guid(ctx: &Ctx, lane: i64) -> Option<String> {
+/// The id of a lane the project has.
+pub(super) fn lane_guid(ctx: &Ctx, lane: i64) -> Option<String> {
+    if !(0..lanes(ctx)).contains(&lane) {
+        return None;
+    }
     ctx.reaper.project_text(ctx.proj, &format!("RULER_LANE_GUID:{lane}")).filter(|guid| !guid.is_empty())
 }
 
@@ -615,21 +627,32 @@ pub fn lane_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let wanted = lane_wanted(ctx, input)?;
     let (read, write) = (|| lane_state(ctx, lane), |state: &Value| write_lane(ctx, lane, state));
     let target = json!({"ref": null, "kind": "ruler-lane", "lane": lane, "guid": guid});
-    Ok(Fields { ctx, read: &read, write: &write, noun: "ruler lane" }.preview(
+    let mut preview = Fields { ctx, read: &read, write: &write, noun: "ruler lane" }.preview(
         target,
         &wanted,
         lane_title(&lane_label(ctx, lane), &wanted),
         None,
-    ))
+    );
+    // The lane the number named at the preview: the apply writes to that one or none.
+    preview.fence = json!({"state": preview.fence, "guid": guid});
+    Ok(preview)
 }
 
 pub fn lane_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let lane = lane_of(ctx, input)?;
+    let guid = fence["guid"].as_str().ok_or_else(|| bad("fence: the ruler lane's id"))?;
+    if lane_by_guid(ctx, guid) != Some(lane) {
+        return Err(changed("the ruler lanes were reordered, added or taken away since the preview: that number is another lane now"));
+    }
     let wanted = lane_wanted(ctx, input)?;
     let (read, write) = (|| lane_state(ctx, lane), |state: &Value| write_lane(ctx, lane, state));
     let label = lane_label(ctx, lane);
-    let mut applied =
-        Fields { ctx, read: &read, write: &write, noun: "ruler lane" }.apply(&wanted, fence, lane_title(&label, &wanted), None)?;
+    let mut applied = Fields { ctx, read: &read, write: &write, noun: "ruler lane" }.apply(
+        &wanted,
+        &fence["state"],
+        lane_title(&label, &wanted),
+        None,
+    )?;
     applied.display["title"] = lane_title(&label, &wanted).into();
     Ok(applied)
 }
@@ -697,18 +720,15 @@ pub fn lane_add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let created = restore.created.ok_or_else(|| bad("created: the ruler lane that was added"))?;
     let guid = created["guid"].as_str().ok_or_else(|| bad("created: the ruler lane's id"))?;
     let lane = lane_by_guid(ctx, guid).ok_or_else(|| ("gone".to_string(), "that ruler lane isn't in the project any more".to_string()))?;
-    if !restore.discard {
-        if lane != lanes(ctx) - 1 {
-            return Err(changed("other ruler lanes come after the one Kumi added now: REAPER takes lanes away from the end only"));
-        }
-        if on_lane(ctx, lane) > 0 {
-            return Err(changed("the ruler lane Kumi added has markers or regions on it now"));
-        }
-        if !holds(&lane_state(ctx, lane), &restore.applied["state"]) {
-            return Err(changed("the ruler lane Kumi added has been changed in REAPER since"));
-        }
-    } else if lane != lanes(ctx) - 1 {
+    if lane != lanes(ctx) - 1 {
         return Err(changed("other ruler lanes come after the one Kumi added now: REAPER takes lanes away from the end only"));
+    }
+    // The markers and regions on it are the producer's, told to undo anyway or not.
+    if on_lane(ctx, lane) > 0 {
+        return Err(changed("the ruler lane Kumi added has markers or regions on it now: move them off it first"));
+    }
+    if !restore.discard && !holds(&lane_state(ctx, lane), &restore.applied["state"]) {
+        return Err(changed("the ruler lane Kumi added has been changed in REAPER since"));
     }
     if !ctx.reaper.set_project_info(ctx.proj, "RULER_LANE_COUNT", lane as f64) || lanes(ctx) != lane {
         return Err(failed("REAPER wouldn't take the ruler lane away"));

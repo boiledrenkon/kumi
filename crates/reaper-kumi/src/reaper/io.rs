@@ -62,6 +62,14 @@ impl Reaper<'_> {
             .collect()
     }
 
+    /// A send's, receive's (`category` below 0) or hardware output's (above 0) envelope, by its chunk name (`<VOLENV`…).
+    pub fn send_envelope_in(&self, track: Track, category: i32, index: i32, chunk: &str) -> Option<super::Envelope> {
+        let parm = cstring(&format!("P_ENV:{chunk}"));
+        let f = self.api.GetSetTrackSendInfo()?;
+        let envelope = unsafe { f(track.0, category, index, parm.as_ptr(), ptr::null_mut()) };
+        (!envelope.is_null()).then_some(super::Envelope(envelope.cast()))
+    }
+
     // ----- track groups -----
 
     /// A track's membership of one group role (`VOLUME_LEAD`…) in groups 1-32 (`high` false) or 33-64, one bit a group.
