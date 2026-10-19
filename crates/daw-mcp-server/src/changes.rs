@@ -258,7 +258,8 @@ impl Journal {
                 let mut reply = Map::new();
                 reply.insert("transactionId".into(), record.id.clone().into());
                 reply.insert("state".into(), "applied".into());
-                for field in ["applied", "created", "display", "undo", "epoch", "layout"] {
+                // `kept` (Renoise): the epoch moved only for devices, patterns or the sequence, and the tracks' refs hold.
+                for field in ["applied", "created", "display", "undo", "epoch", "layout", "kept"] {
                     if let Some(value) = applied.get(field).filter(|value| !value.is_null()) {
                         reply.insert(field.into(), value.clone());
                     }
@@ -322,7 +323,7 @@ impl Journal {
                     record.layout = Some(layout);
                 }
                 let mut reply = json!({"transactionId": record.id, "state": "undone"});
-                for field in ["display", "restored", "epoch", "layout"] {
+                for field in ["display", "restored", "epoch", "layout", "kept"] {
                     if let Some(value) = restored.get(field).filter(|value| !value.is_null()) {
                         reply[field] = value.clone();
                     }
@@ -531,19 +532,18 @@ impl crate::host::Host {
         }
     }
 
-    /// `transport_play` / `cursor_set`: the DAW starts playing, or its edit cursor moves (the play position follows while
-    /// it plays). Neither is a step of the DAW's undo.
+    /// `transport_play` / `cursor_set`: the DAW starts playing (Renoise: from a slot and line, if given), or its edit cursor
+    /// moves (the play position follows while it plays). Neither is a step of the DAW's undo.
     pub async fn transport(&self, method: &str, arguments: &Value) -> (Value, bool) {
         let pick = match crate::host::Pick::from_arguments(arguments) {
             Ok(pick) => pick,
             Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
         };
         let mut params = json!({});
-        if method == "cursor_set" {
-            for field in ["positionBeats", "position", "epoch"] {
-                if let Some(value) = arguments.get(field) {
-                    params[field] = value.clone();
-                }
+        let fields: &[&str] = if method == "cursor_set" { &["positionBeats", "position", "epoch"] } else { &["sequence", "line", "epoch"] };
+        for field in fields {
+            if let Some(value) = arguments.get(*field) {
+                params[*field] = value.clone();
             }
         }
         match self.call(method, params, &pick, CHANGE_TIMEOUT).await {
@@ -636,10 +636,12 @@ mod tests {
         assert_eq!(refused["code"], "changed");
         assert_eq!(journal.get(&record.id).unwrap().state, State::Applied);
         assert!(journal.begin_undo(&record.id, "u1").unwrap().is_ok());
-        let (undone, is_error) = journal.end_undo(&record.id, "u1", Ok(&json!({"restored": {"volumeDb": 0.0}, "epoch": "e2"})));
+        let kept = json!({"from": "e1", "tracks": true});
+        let (undone, is_error) =
+            journal.end_undo(&record.id, "u1", Ok(&json!({"restored": {"volumeDb": 0.0}, "epoch": "e2", "kept": kept})));
         assert!(!is_error && undone["state"] == "undone");
-        // What the restore put back, and where the DAW's refs are now, for Kumi to follow.
-        assert_eq!((&undone["restored"], &undone["epoch"]), (&json!({"volumeDb": 0.0}), &json!("e2")));
+        // What the restore put back, and where the DAW's refs are now (and that its tracks' refs hold), for Kumi to follow.
+        assert_eq!((&undone["restored"], &undone["epoch"], &undone["kept"]), (&json!({"volumeDb": 0.0}), &json!("e2"), &kept));
         assert_eq!(journal.get(&record.id).unwrap().epoch.as_deref(), Some("e2"));
         assert_eq!(journal.begin_undo(&record.id, "u1").unwrap().unwrap_err(), (undone, false));
         assert_eq!(journal.begin_undo(&record.id, "u2").unwrap_err().code, "undone");

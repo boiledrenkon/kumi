@@ -52,6 +52,9 @@ struct State {
     devices: std::collections::HashMap<u64, u64>,
     /// Renoise's undo history, as the changes named their steps.
     undo: Vec<String>,
+    /// The first epoch of the run the song is in: epochs moved only for devices keep the tracks, and the tool takes a
+    /// track ref from any epoch of the run (`kept`).
+    run_start: u32,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -156,6 +159,7 @@ impl RenoiseScript {
                 mute: Default::default(),
                 devices: Default::default(),
                 undo: vec![],
+                run_start: VECTORS_EPOCH,
             })),
         }
     }
@@ -163,7 +167,9 @@ impl RenoiseScript {
     /// Another song is opened (or something refs index into is restructured): the epoch moves, so refs and cursors
     /// from before are refused as stale and the answers carry the new one.
     pub fn switch_song(&self) {
-        self.state.lock().unwrap().epoch += 1;
+        let mut state = self.state.lock().unwrap();
+        state.epoch += 1;
+        state.run_start = state.epoch;
     }
 
     /// The same, and track 1 of pattern 1 (`1:pattern:1`) has `lines` lines with every column full: its lines are paged
@@ -254,7 +260,7 @@ impl RenoiseScript {
             _ => (params["input"]["ref"].as_str(), &params["input"]),
         };
         let Some((from, at)) = place(reference, "track") else { return Err(bad("ref must be a track's ref")) };
-        if method != "change_restore" && from != epoch {
+        if method != "change_restore" && !(state.run_start..=epoch).contains(&from) {
             return Err(("stale".into(), format!("that ref is from an earlier epoch ({from}; now {epoch}): read again")));
         }
         let track = at[0];
@@ -333,7 +339,8 @@ impl RenoiseScript {
                         let made = format!("{}:device:{track}.{}", state.epoch, count + 2);
                         Ok(answer(
                             state,
-                            json!({"applied": {"devices": count + 2}, "created": {"ref": made, "kind": "device"}, "display": {"title": format!("Added {path} to track {track}")}, "undo": {"desc": desc, "entry": true}}),
+                            // Only the devices moved: the tracks are where they were, and their refs from before still name them.
+                            json!({"applied": {"devices": count + 2}, "created": {"ref": made, "kind": "device"}, "display": {"title": format!("Added {path} to track {track}")}, "undo": {"desc": desc, "entry": true}, "kept": {"from": epoch.to_string(), "tracks": true}}),
                         ))
                     }
                     _ => {
@@ -346,7 +353,10 @@ impl RenoiseScript {
                         state.devices.insert(track, count - 1);
                         state.epoch += 1;
                         state.undo.push(desc);
-                        Ok(answer(state, json!({"restored": {"devices": count}, "display": {"title": "Device deleted"}})))
+                        Ok(answer(
+                            state,
+                            json!({"restored": {"devices": count}, "display": {"title": "Device deleted"}, "kept": {"from": epoch.to_string(), "tracks": true}}),
+                        ))
                     }
                 }
             }
