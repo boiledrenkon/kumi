@@ -473,7 +473,7 @@ impl Reads {
         let pager = Pager::new(request.limit, ANSWER_BYTES);
         let cursor = request.cursor.as_deref();
         let parent = request.parent.as_deref();
-        match kind {
+        let answer = match kind {
             "project" => {
                 let mut pager = pager;
                 pager.push(rows::project_row(reaper, proj, &info, &self.identity(proj), self.project_id(reaper, proj, &info).as_deref()));
@@ -490,7 +490,20 @@ impl Reads {
             "note" => self.read_notes(reaper, proj, pager, parent, cursor),
             "envelope" => self.read_envelopes(reaper, proj, pager, parent, cursor),
             other => Err(bad(format!("REAPER has no kind {other:?} to read"))),
-        }
+        };
+        // Where a row's `index` starts counting, which is where the change that takes the same index starts too: a track's
+        // place is counted from 1 (as REAPER numbers its tracks), an FX's place, a parameter's and a note's from 0.
+        let from = match kind {
+            "track" => Some(1),
+            "fx" | "param" | "note" => Some(0),
+            _ => None,
+        };
+        answer.map(|mut answer| {
+            if let Some(from) = from {
+                answer["indexFrom"] = from.into();
+            }
+            answer
+        })
     }
 
     /// `read {ref}`: the one object a ref names.

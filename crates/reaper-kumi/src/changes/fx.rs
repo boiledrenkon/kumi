@@ -248,6 +248,10 @@ fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if !restore.discard && signature(ctx, fx) != restore.applied["signature"] {
         return Err(changed("the FX Kumi added has been changed in REAPER since"));
     }
+    // Its automation goes with it, and is the producer's.
+    if !restore.discard && envelopes_of(ctx, &located) > 0 {
+        return Err(changed("the FX Kumi added has automation in it now"));
+    }
     let label = fx_label(ctx, fx);
     let before = chain(ctx, located.track);
     if !ctx.reaper.delete_fx(located.track, located.index) || chain(ctx, located.track).len() + 1 != before.len() {

@@ -74,10 +74,15 @@ fn add_plan(ctx: &Ctx, input: &Value) -> Done<Add> {
     let adopted = adopted(ctx, input)?;
     let at = match (input.get("index").filter(|v| !v.is_null()), adopted.first()) {
         (Some(_), Some(_)) => return Err(bad("pass index or asFolderOf, not both: a folder goes where its tracks are")),
-        (Some(index), None) => index
-            .as_i64()
-            .filter(|i| (0..=count).contains(i))
-            .ok_or_else(|| bad(format!("index must be a whole number from 0 to {count}")))?,
+        // The place the new track will have, counted from 1 as a read's track rows count (index).
+        (Some(index), None) => {
+            index.as_i64().filter(|i| (1..=count + 1).contains(i)).ok_or_else(|| {
+                bad(format!(
+                    "index must be the new track's place, a whole number from 1 to {} (counted from 1, as a read shows)",
+                    count + 1
+                ))
+            })? - 1
+        }
         (None, Some((track, _))) => place(ctx.reaper, *track),
         (None, None) => count,
     };
@@ -115,7 +120,7 @@ pub fn add_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
         (None, false) => "Added a folder".to_string(),
     };
     let fence = add_fence(ctx, &plan);
-    let mut display = json!({"title": words, "index": plan.at});
+    let mut display = json!({"title": words, "index": plan.at + 1});
     if !plan.adopted.is_empty() {
         display["note"] = format!("It holds the {} track(s) after it.", plan.adopted.len()).into();
     }
@@ -184,6 +189,21 @@ pub fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     if held > 0 && !restore.discard {
         return Err(changed("the track Kumi added has items, FX or sends in it now"));
     }
+    // Nor its automation, nor the tracks the producer has put under it.
+    if !restore.discard {
+        let drawn = (0..reaper.track_envelope_count(track))
+            .filter_map(|i| reaper.track_envelope(track, i))
+            .any(|envelope| reaper.envelope_point_count(envelope) > 0);
+        if drawn {
+            return Err(changed("the track Kumi added has automation in it now"));
+        }
+        let next = reaper.track_at(ctx.proj, place(reaper, track) as i32 + 1);
+        let opens = restore.applied["folder"] != true
+            && (depth(reaper, track) > 0 || next.is_some_and(|next| reaper.track_parent(next) == Some(track)));
+        if opens {
+            return Err(changed("the track Kumi added is a folder of other tracks now"));
+        }
+    }
     let closed = &restore.applied["closedAt"];
     if let (Some(last), false) = (closed["guid"].as_str().and_then(|g| track_of(ctx, g)), closed.is_null()) {
         let now = depth(reaper, last);
@@ -225,11 +245,14 @@ fn move_plan(ctx: &Ctx, input: &Value) -> Done<Move> {
     let guid = parse_track_ref(input["ref"].as_str().unwrap_or_default(), "ref")?;
     let track = track_of(ctx, &guid).ok_or_else(|| failed("that track isn't in the project (deleted, or another tab)"))?;
     let count = ctx.reaper.track_count(ctx.proj) as i64;
-    let to = input
-        .get("index")
-        .and_then(Value::as_i64)
-        .filter(|i| (0..count).contains(i))
-        .ok_or_else(|| bad(format!("index must be a whole number from 0 to {}", count - 1)))?;
+    // The place the track will have once moved, counted from 1 as a read's track rows count (index).
+    let to = input.get("index").and_then(Value::as_i64).filter(|i| (1..=count).contains(i)).ok_or_else(|| {
+        bad(format!("index must be the track's new place, a whole number from 1 to {count} (counted from 1, as a read shows)"))
+    })? - 1;
+    // A folder moved alone would leave its tracks to the folder above them; moving it with them is a different change.
+    if depth(ctx.reaper, track) > 0 {
+        return Err(bad("that track is a folder: moving it alone would leave its tracks in another folder; move the tracks in or out of it instead, or move them all"));
+    }
     Ok(Move { track, guid, from: place(ctx.reaper, track), to })
 }
 
@@ -241,7 +264,7 @@ pub fn move_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let plan = move_plan(ctx, input)?;
     let name = super::track_name(ctx.reaper, plan.track);
     let state = json!({"index": plan.from, "window": move_window(ctx, &plan)});
-    let mut display = json!({"title": format!("Moved track {} to position {}", super::quoted(&name), plan.to + 1), "before": plan.from, "after": plan.to});
+    let mut display = json!({"title": format!("Moved track {} to position {}", super::quoted(&name), plan.to + 1), "before": plan.from + 1, "after": plan.to + 1});
     if plan.from == plan.to {
         display["unchanged"] = true.into();
     }

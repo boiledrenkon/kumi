@@ -336,6 +336,17 @@ pub fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     Ok(Preview { target: target(&found.id), prior: now.clone(), fence: now, display })
 }
 
+/// The most of a deleted track's state Kumi keeps to put it back: the chunk goes in a frame and sits in the host's journal.
+const MOST_MATERIAL: usize = 24 << 20;
+
+/// Every track's folder depth, by id, in order.
+fn folder_depths(ctx: &Ctx) -> Vec<(String, i64)> {
+    (0..ctx.reaper.track_count(ctx.proj))
+        .filter_map(|at| ctx.reaper.track_at(ctx.proj, at))
+        .map(|track| (ctx.reaper.track_guid(track), ctx.reaper.track_value(track, "I_FOLDERDEPTH") as i64))
+        .collect()
+}
+
 /// A send or receive of the track, with everything that makes it the same one again.
 fn route(ctx: &Ctx, track: Track, category: i32, index: i32) -> Option<Value> {
     let other = ctx.reaper.send_peer(track, category, index)?;
@@ -380,13 +391,15 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         .ok_or_else(|| failed("REAPER wouldn't give the track's state, so Kumi won't delete what it could not put back"))?;
     let guid = reaper.track_guid(found.track);
     let index = (reaper.track_value(found.track, "IP_TRACKNUMBER") as i64 - 1).max(0);
-    // The folder depths of the neighbours the deletion may change.
-    let neighbours: Vec<Value> = [index - 1, index + 1]
-        .into_iter()
-        .filter(|&at| at >= 0)
-        .filter_map(|at| reaper.track_at(ctx.proj, at as i32))
-        .map(|track| json!({"guid": reaper.track_guid(track), "folderDepth": reaper.track_value(track, "I_FOLDERDEPTH") as i64}))
-        .collect();
+    // Too much to keep: the chunk travels in a frame and sits in the journal.
+    if chunk.len() > MOST_MATERIAL {
+        return Err(failed(format!(
+            "this track's state is {} MB, more than the {} MB Kumi can keep of a deleted track: Kumi won't delete what it can't put back",
+            chunk.len() >> 20,
+            MOST_MATERIAL >> 20
+        )));
+    }
+    let depths_before = folder_depths(ctx);
     let routes: Vec<Value> = [0, -1]
         .into_iter()
         .flat_map(|category| (0..reaper.send_count(found.track, category)).filter_map(move |at| route(ctx, found.track, category, at)))
@@ -397,9 +410,19 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if !reaper.delete_track(found.track) {
         return Err(failed("REAPER wouldn't delete the track"));
     }
+    // Exactly the folder depths the deletion changed (REAPER mends the folders around a track that goes), by id, with
+    // what each was and became: an undo puts back only those that are still as the deletion left them.
+    let depths_after: std::collections::HashMap<String, i64> = folder_depths(ctx).into_iter().collect();
+    let depths: Vec<Value> = depths_before
+        .iter()
+        .filter(|(track, _)| *track != guid)
+        .filter_map(|(track, before)| {
+            depths_after.get(track).filter(|after| *after != before).map(|after| json!({"guid": track, "before": before, "after": after}))
+        })
+        .collect();
     let material = json!({
         "guid": guid, "index": index, "name": now["name"], "chunk": chunk,
-        "neighbours": neighbours, "routes": routes, "selected": selected, "folderDepth": now["folderDepth"],
+        "depths": depths, "routes": routes, "selected": selected, "folderDepth": now["folderDepth"],
         "lostEnvelopes": lost_envelopes,
     });
     Ok(Applied {
@@ -465,6 +488,17 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             Err(("changed".into(), "a track with that id is in the project again".into()))
         };
     }
+    // The folders around it as the deletion left them: else the producer has rearranged them since, and putting the old
+    // depths back would break their folders.
+    if !restore.discard {
+        for change in material["depths"].as_array().into_iter().flatten() {
+            let Some(other) = change["guid"].as_str() else { continue };
+            let Ok(other) = ctx.reads.track_by_id(reaper, ctx.proj, &TrackId::Guid(other.to_string())) else { continue };
+            if reaper.track_value(other, "I_FOLDERDEPTH") as i64 != change["after"].as_i64().unwrap_or(0) {
+                return Err(("changed".into(), "the folders around the deleted track have been rearranged in REAPER since".into()));
+            }
+        }
+    }
     let index = material["index"].as_i64().unwrap_or(0).max(0) as i32;
     let track = reaper.insert_track(ctx.proj, index).ok_or_else(|| failed("REAPER wouldn't make a track to put it back in"))?;
     if !reaper.set_track_chunk(track, &without_receives(chunk).0) || reaper.track_guid(track) != guid {
@@ -472,10 +506,10 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         reaper.delete_track(track);
         return Err(failed("REAPER wouldn't put the track's state back"));
     }
-    for neighbour in material["neighbours"].as_array().into_iter().flatten() {
-        let Some(other) = neighbour["guid"].as_str() else { continue };
+    for change in material["depths"].as_array().into_iter().flatten() {
+        let Some(other) = change["guid"].as_str() else { continue };
         if let Ok(other) = ctx.reads.track_by_id(reaper, ctx.proj, &TrackId::Guid(other.to_string())) {
-            reaper.set_track_value(other, "I_FOLDERDEPTH", neighbour["folderDepth"].as_f64().unwrap_or(0.0));
+            reaper.set_track_value(other, "I_FOLDERDEPTH", change["before"].as_f64().unwrap_or(0.0));
         }
     }
     let mut remade = 0usize;

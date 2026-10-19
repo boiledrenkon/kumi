@@ -1928,7 +1928,20 @@ unsafe extern "C" fn delete_track(track: *mut MediaTrack) {
             return;
         }
         let at = at as usize;
-        s.tracks.remove(at);
+        let removed = s.tracks.remove(at);
+        // A folder that goes leaves the track that closed it closing one level fewer, where it closed several (7.82).
+        if removed.folder > 0 {
+            let mut open = removed.folder;
+            for other in s.tracks.iter_mut().skip(at) {
+                open += other.folder;
+                if open <= 0 {
+                    if other.folder <= -2 {
+                        other.folder += 1;
+                    }
+                    break;
+                }
+            }
+        }
         // Sends to it go with it, and the others' destinations close up.
         for other in s.tracks.iter_mut() {
             other.sends.retain(|send| send.dest != at);
