@@ -454,6 +454,15 @@ fn item_properties_are_set_together_and_each_put_back() {
         preview["display"]["title"],
         "kick.wav: muted, volume −6 dB, colour changed, loops its source, timebase beats, snap offset 0.25 s"
     );
+    // The display's before and after are in the request's words, not REAPER's numbers.
+    assert_eq!(
+        applied["display"]["before"],
+        json!({"mute": false, "volumeDb": 0.0, "color": null, "loop": false, "timebase": "project", "snapOffset": 0.0})
+    );
+    assert_eq!(
+        applied["display"]["after"],
+        json!({"mute": true, "volumeDb": -6.0, "color": "#ff0000", "loop": true, "timebase": "beats", "snapOffset": 0.25})
+    );
     let set = item("{ITEM-K1}").unwrap().1;
     assert!(set.mute && (set.extra["D_VOL"] - 0.501187).abs() < 1e-5 && set.color == fake::native_color(255, 0, 0));
     assert_eq!((set.extra["B_LOOPSRC"], set.extra["C_BEATATTACHMODE"], set.extra["D_SNAPOFFSET"]), (1.0, 1.0, 0.25));

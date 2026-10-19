@@ -44,10 +44,12 @@ fn controllers_pitch_bend_and_a_program_with_its_bank_are_written_and_undone_by_
     let (preview, applied) = lab.make("midi-events-add", input);
     assert_eq!(preview["display"]["title"], "Wrote 7 MIDI events in “snare.mid”");
     let now = raw();
-    // The program change and its bank before the note-on at its tick; the bezier tension right after its controller.
-    assert_eq!(now[1].msg, vec![0xB0, 0, 0]);
-    assert_eq!(now[2].msg, vec![0xB0, 32, 2]);
-    assert_eq!(now[3].msg, vec![0xC0, 7]);
+    // The program change and its bank first at their tick, as REAPER orders them when it reads the take back (lab, 7.82):
+    // before the controller already there and the note-on; the bezier tension right after its controller.
+    assert_eq!(now[0].msg, vec![0xB0, 0, 0]);
+    assert_eq!(now[1].msg, vec![0xB0, 32, 2]);
+    assert_eq!(now[2].msg, vec![0xC0, 7]);
+    assert_eq!(now[3].msg, vec![0xB0, 7, 100]);
     assert_eq!(now[4].msg, vec![0x90, 38, 100]);
     let at = now.iter().position(|e| e.msg == [0xB0, 74, 20]).unwrap();
     assert_eq!(now[at].flag, 0x50);

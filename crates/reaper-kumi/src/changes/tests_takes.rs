@@ -30,6 +30,11 @@ fn take_properties_are_set_together_and_each_put_back() {
         preview["display"]["title"],
         "kick.wav: volume −6 dB, pan 50% left, pitch +2 st, rate 1.5×, pitch kept with the rate, channels mono, named “kick tight”, colour changed"
     );
+    assert_eq!(preview["display"]["before"]["volumeDb"], 0.0);
+    assert_eq!(
+        (&preview["display"]["after"]["volumeDb"], &preview["display"]["after"]["channelMode"], &preview["display"]["after"]["color"]),
+        (&json!(-6.0), &json!("mono"), &json!("#00ff00"))
+    );
     let take = item("{ITEM-K1}").unwrap().1.takes[0].clone();
     assert!((take.extra["D_VOL"] - 0.501187).abs() < 1e-5);
     assert_eq!(
@@ -125,10 +130,12 @@ fn an_empty_take_is_added_and_plays_and_the_undo_puts_the_item_back_whole() {
     let before = item("{ITEM-K1}").unwrap().1;
     let (preview, applied) = lab.make("take-add", json!({"ref": K1, "name": "idea"}));
     assert_eq!(preview["display"]["title"], "Added the empty take “idea” to “kick.wav”");
+    assert_eq!(applied["display"]["title"], preview["display"]["title"], "said of the item as it was, not by its new take");
     let now = item("{ITEM-K1}").unwrap().1;
     assert_eq!((now.takes.len(), now.active, now.takes[1].name.as_str()), (2, 1, "idea"));
     assert_eq!(guid_in(&applied["created"]["ref"]), now.takes[1].guid);
-    lab.undo("take-add", &preview, &applied).unwrap();
+    let undone = lab.undo("take-add", &preview, &applied).unwrap();
+    assert_eq!(undone["display"]["title"], "kick.wav as it was before");
     assert!(item("{ITEM-K1}").unwrap().1 == before);
     let again = lab.undo("take-add", &preview, &applied).unwrap();
     assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
@@ -184,7 +191,10 @@ fn a_take_is_deleted_with_reapers_own_action_and_the_producers_selection_and_act
 #[test]
 fn the_take_that_plays_can_be_deleted_and_an_only_take_is_not() {
     let lab = three_takes();
-    lab.make("take-delete", json!({"ref": T1}));
+    let (preview, applied) = lab.make("take-delete", json!({"ref": T1}));
+    // The item is named after the take that plays, so it is named by its place here.
+    assert_eq!(preview["display"]["title"], "Deleted “kick.wav” from the item on “Kick” at bar 1");
+    assert_eq!(applied["display"]["title"], preview["display"]["title"]);
     let now = item("{ITEM-K1}").unwrap().1;
     assert_eq!(now.takes.len(), 2);
     assert_eq!(now.takes[now.active].guid, "{TAKE-K1B}", "REAPER plays the next one");

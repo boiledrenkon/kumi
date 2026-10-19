@@ -29,6 +29,11 @@ pub fn normalized(chunk: &str) -> String {
         if item_level || VIEW_LINES.iter().any(|prefix| trimmed.starts_with(prefix)) || trimmed == "FLOAT" {
             continue;
         }
+        // A track's default lane-recording line: REAPER writes it once it has put the track back from its undo history, and
+        // leaves it out before (lab, 7.82); it says the same either way.
+        if trimmed.trim_end() == "LANEREC -1 -1 -1 0" {
+            continue;
+        }
         // A selected MIDI event (`e`, `em`, `<x`) is the same event as an unselected one.
         let line = if trimmed.starts_with("e ") || trimmed.starts_with("em ") {
             format!("E{}", &trimmed[1..])
@@ -109,6 +114,15 @@ mod tests {
         assert_eq!(print_of(&track), print_of(&looked_at));
         // (a `SEL` right inside the track's own block is not an item's)
         assert_ne!(print_of(&track), print_of(&track.replacen("NAME \"Vox\"\nSEL 1", "NAME \"Vox\"\nSEL 0", 1)));
+    }
+
+    #[test]
+    fn a_tracks_default_lane_recording_line_is_the_same_as_none() {
+        let track = format!("<TRACK {{X}}\nNAME \"Vox\"\n{ITEM}>\n");
+        let put_back = track.replacen("NAME \"Vox\"\n", "NAME \"Vox\"\nLANEREC -1 -1 -1 0\n", 1);
+        assert_eq!(print_of(&track), print_of(&put_back));
+        // (one that names a lane is not)
+        assert_ne!(print_of(&track), print_of(&track.replacen("NAME \"Vox\"\n", "NAME \"Vox\"\nLANEREC -1 0 -1 0\n", 1)));
     }
 
     #[test]

@@ -145,6 +145,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
         },
         same: same_number,
         words: |value| format!("volume {} dB", super::tracks::db_text(rows::db(value.as_f64().unwrap_or(1.0)))),
+        show: items::show_db,
     },
     Field {
         key: "polarity",
@@ -159,6 +160,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
         },
         same: same_exact,
         words: |value| format!("polarity {}", value.as_str().unwrap_or("normal")),
+        show: items::show_same,
     },
     Field {
         key: "pan",
@@ -167,6 +169,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
         write: |reaper, take, value| reaper.set_take_value(take, "D_PAN", value.as_f64().unwrap_or(0.0)),
         same: same_number,
         words: |value| format!("pan {}", super::tracks::pan_text(value.as_f64().unwrap_or(0.0))),
+        show: items::show_same,
     },
     Field {
         key: "pitch",
@@ -178,6 +181,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
             let semitones = value.as_f64().unwrap_or(0.0);
             format!("pitch {}{} st", if semitones > 0.0 { "+" } else { "" }, plain(semitones))
         },
+        show: items::show_same,
     },
     Field {
         key: "playrate",
@@ -186,6 +190,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
         write: |reaper, take, value| reaper.set_take_value(take, "D_PLAYRATE", value.as_f64().unwrap_or(1.0)),
         same: same_number,
         words: |value| format!("rate {}×", plain(value.as_f64().unwrap_or(1.0))),
+        show: items::show_same,
     },
     Field {
         key: "preservePitch",
@@ -194,6 +199,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
         write: |reaper, take, value| reaper.set_take_value(take, "B_PPITCH", if value == &Value::Bool(true) { 1.0 } else { 0.0 }),
         same: same_exact,
         words: |value| if value == &Value::Bool(true) { "pitch kept with the rate".into() } else { "pitch follows the rate".into() },
+        show: items::show_same,
     },
     Field {
         key: "channelMode",
@@ -212,6 +218,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
             let name = CHANNEL_MODES.iter().find(|(_, mode)| Some(*mode) == value.as_i64()).map_or("its own", |(word, _)| word);
             format!("channels {name}")
         },
+        show: |_, value| CHANNEL_MODES.iter().find(|(_, mode)| Some(*mode) == value.as_i64()).map_or(Value::Null, |(word, _)| json!(word)),
     },
     Field {
         key: "name",
@@ -226,6 +233,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
             "" => "name cleared".into(),
             name => format!("named {}", quoted(&rows::clip(name))),
         },
+        show: items::show_same,
     },
     Field {
         key: "color",
@@ -240,6 +248,7 @@ pub(super) static TAKE_FIELDS: [Field<Take>; 9] = [
                 "colour changed".into()
             }
         },
+        show: items::show_color,
     },
 ];
 
@@ -260,7 +269,11 @@ pub fn props_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let found = find(ctx, &input["ref"], "take-props")?;
     let (fields, wanted) = props_plan(ctx, input)?;
     let now = items::state_of(ctx.reaper, found.take, &fields);
-    let mut display = json!({"title": props_title(ctx, found.take, &fields, &wanted), "before": now, "after": wanted});
+    let mut display = json!({
+        "title": props_title(ctx, found.take, &fields, &wanted),
+        "before": items::shown(ctx.reaper, &fields, &now),
+        "after": items::shown(ctx.reaper, &fields, &wanted),
+    });
     if items::same_state(&fields, &now, &wanted) {
         display["unchanged"] = true.into();
     }
@@ -284,7 +297,11 @@ pub fn props_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     Ok(Applied {
         applied: after.clone(),
-        display: json!({"title": props_title(ctx, found.take, &fields, &after), "before": now, "after": after}),
+        display: json!({
+            "title": props_title(ctx, found.take, &fields, &after),
+            "before": items::shown(ctx.reaper, &fields, &now),
+            "after": items::shown(ctx.reaper, &fields, &after),
+        }),
         unwritten: items::same_state(&fields, &now, &wanted),
         ..Default::default()
     })
@@ -412,6 +429,8 @@ pub(super) fn snapshot_restore(ctx: &Ctx, restore: &Restore, words: &str) -> Don
         return Err(changed(format!("{} has been changed in REAPER since Kumi {words}", items::label(ctx, found.item))));
     }
     items::put_chunk(ctx, found.item, chunk)?;
+    // (named as it is put back: its active take may be another again)
+    let name = items::label_opening(ctx, found.item);
     Ok(Restored {
         restored: json!({"ref": refs::item_ref(&found.guid)}),
         display: json!({"title": format!("{name} as it was before")}),
@@ -492,6 +511,8 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         return Err(changed(format!("{} changed since the preview", items::label(ctx, item))));
     }
     refuse_locked(ctx, item)?;
+    // (said before the take is added: a new active take gives the item its name)
+    let title = add_title(ctx, &add);
     let reaper = ctx.reaper;
     let take = reaper.add_take(item).ok_or_else(|| failed("REAPER wouldn't add a take"))?;
     // Nothing half-made stays: the item goes back as it was if any of it fails.
@@ -519,7 +540,7 @@ pub fn add_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     reaper.update_item(item);
     let guid = reaper.take_guid(take);
     let print = chunks::item_print(reaper, item).ok_or_else(|| undo("REAPER wouldn't give the item's state"))?;
-    let mut display = json!({"title": add_title(ctx, &add)});
+    let mut display = json!({"title": title});
     if add.path.is_some() {
         display["note"] = "The file stays where it is: REAPER plays it from there.".into();
     }
@@ -550,8 +571,18 @@ pub fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
         target: items::target(&found.item_guid),
         prior: json!({"print": print}),
         fence: json!({"print": print, "take": found.guid}),
-        display: json!({"title": format!("Deleted {} from {}", label(ctx, found.take), items::label(ctx, found.item))}),
+        display: json!({"title": delete_title(ctx, &found)}),
     })
+}
+
+/// "Deleted “take 2” from “vox.wav”"; the item by its place when its name is the take's own.
+fn delete_title(ctx: &Ctx, found: &TakeFound) -> String {
+    let item = if ctx.reaper.active_take(found.item) == Some(found.take) {
+        items::place_label(ctx, found.item)
+    } else {
+        items::label(ctx, found.item)
+    };
+    format!("Deleted {} from {item}", label(ctx, found.take))
 }
 
 pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
@@ -565,7 +596,7 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if reaper.take_count(found.item) < 2 {
         return Err(bad("that is the item's only take: delete the item instead (item_delete)"));
     }
-    let title = format!("Deleted {} from {}", label(ctx, found.take), items::label(ctx, found.item));
+    let title = delete_title(ctx, &found);
     let count = reaper.take_count(found.item);
     // The take that plays now, by GUID: it plays again after, unless it is the one deleted.
     let playing = reaper.active_take(found.item).map(|take| reaper.take_guid(take));

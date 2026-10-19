@@ -47,6 +47,15 @@ fn is_note_on(event: &Event) -> bool {
     matches!(event.msg.as_slice(), [status, _, velocity] if status & 0xF0 == 0x90 && *velocity > 0)
 }
 
+/// A bank select (controller 0 or 32) or a program change, which REAPER orders first among the events at a tick (lab, 7.82).
+fn leads(msg: &[u8]) -> bool {
+    match msg {
+        [status, ..] if status & 0xF0 == 0xC0 => true,
+        [status, 0 | 32, ..] if status & 0xF0 == 0xB0 => true,
+        _ => false,
+    }
+}
+
 fn is_bezier_data(msg: &[u8]) -> bool {
     msg.len() >= 7 && msg[0] == 0xFF && msg[1] == 0x0F && &msg[2..7] == b"CCBZ "
 }
@@ -164,14 +173,21 @@ pub(crate) fn edit(buffer: &[Event], remove: &[Ev], add: &[Ev]) -> Result<Vec<Ev
         }
     }
     let mut pending: Vec<&Ev> = add.iter().collect();
-    pending.sort_by_key(|event| event.pos);
+    // (a bank select or program change first at its tick: REAPER puts them first when it reads a take back)
+    pending.sort_by_key(|event| (event.pos, !leads(&event.msg)));
     let mut pending = pending.into_iter().peekable();
     let mut out = Vec::with_capacity(buffer.len() + add.len() * 2);
     let end = source_end(buffer).map(|_| buffer.len() - 1);
     for (at, event) in buffer.iter().enumerate() {
-        // New events at or before this tick go first when this is a note-on (or the end marker), else those strictly before.
-        let before_this = |pos: i64| if is_note_on(event) || Some(at) == end { pos <= event.pos } else { pos < event.pos };
-        while let Some(next) = pending.next_if(|next| before_this(next.pos)) {
+        // New events at or before this tick go first when this is a note-on (or the end marker), a bank select or program
+        // change before the other events at its tick, else those strictly before; never between a controller and its shape.
+        let before_this = |next: &Ev| {
+            next.pos < event.pos
+                || (next.pos == event.pos
+                    && !is_bezier_data(&event.msg)
+                    && (is_note_on(event) || Some(at) == end || (leads(&next.msg) && !leads(&event.msg))))
+        };
+        while let Some(next) = pending.next_if(|next| before_this(next)) {
             push(&mut out, next);
         }
         if !gone[at] {
@@ -845,8 +861,10 @@ mod tests {
         let late = Ev { pos: 960, flag: 0x50, msg: vec![0xB0, 7, 1], bezier: Some(bezier_data(-0.5)) };
         let out = edit(&buffer(), &[], &[program, late]).unwrap();
         let order: Vec<Vec<u8>> = out.iter().map(|e| e.msg.clone()).collect();
-        // After the CC already at 0, before the note-on there.
-        assert_eq!(order[1], vec![0xC0, 5]);
+        // A program change before the CC already at 0 (REAPER orders it first when it reads the take back), and so before
+        // the note-on there.
+        assert_eq!(order[0], vec![0xC0, 5]);
+        assert_eq!(order[1], vec![0xB0, 1, 64]);
         assert_eq!(order[2], vec![0x90, 60, 100]);
         // A bezier controller's tension right after it; the end marker last.
         let at = order.iter().position(|m| *m == vec![0xB0, 7, 1]).unwrap();
@@ -857,6 +875,25 @@ mod tests {
         let less = edit(&buffer(), &[events[1].0.clone()], &[]).unwrap();
         assert_eq!(less.len(), buffer().len() - 2);
         assert!(edit(&buffer(), &[Ev { pos: 1, flag: 0, msg: vec![0xB0, 1, 64], bezier: None }], &[]).is_err());
+    }
+
+    #[test]
+    fn a_bank_select_and_program_go_first_at_their_tick_but_never_between_a_controller_and_its_shape() {
+        let at_zero = vec![
+            Event { pos: 0, flag: 0x50, msg: vec![0xB0, 0, 1] },
+            Event { pos: 0, flag: 0, msg: bezier_data(0.2) },
+            ev(0, &[0xB0, 7, 100]),
+            ev(7680, &END_MARKER),
+        ];
+        let new = |msg: &[u8]| Ev { pos: 0, flag: 0, msg: msg.to_vec(), bezier: None };
+        // Given with a controller first: the bank select and program still lead, in the order given.
+        let out = edit(&at_zero, &[], &[new(&[0xB0, 74, 9]), new(&[0xB0, 32, 2]), new(&[0xC0, 7])]).unwrap();
+        let order: Vec<Vec<u8>> = out.iter().map(|e| e.msg.clone()).collect();
+        assert_eq!(order[0], vec![0xB0, 0, 1]);
+        assert!(is_bezier_data(&order[1]), "the shape stays with its controller");
+        assert_eq!(&order[2..5], &[vec![0xB0, 32, 2], vec![0xC0, 7], vec![0xB0, 7, 100]]);
+        assert_eq!(order[5], vec![0xB0, 74, 9], "a controller goes after those already at its tick");
+        assert_eq!(out.last().unwrap().msg, END_MARKER.to_vec());
     }
 
     #[test]

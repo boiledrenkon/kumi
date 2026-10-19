@@ -109,6 +109,11 @@ pub(super) fn label(ctx: &Ctx, item: Item) -> String {
     if !name.is_empty() {
         return quoted(&name);
     }
+    place_label(ctx, item)
+}
+
+/// The item by where it is: "the item on “Bass” at bar 5" (for when its name is the take a change is about).
+pub(super) fn place_label(ctx: &Ctx, item: Item) -> String {
     let track = ctx.reaper.item_track(item).map(|track| super::track_name(ctx.reaper, track)).unwrap_or_else(|| "a track".into());
     format!("the item on {} at {}", quoted(&track), marks::bar_text(ctx.reaper, ctx.proj, ctx.reaper.item_value(item, "D_POSITION")))
 }
@@ -1028,6 +1033,31 @@ pub(super) struct Field<O: Copy> {
     pub same: fn(&Value, &Value) -> bool,
     /// What the title says of the value it is set to: "muted", "volume −3 dB".
     pub words: fn(&Value) -> String,
+    /// The value as a request gives it, for the display's before and after: dB, not a gain; #rrggbb, not REAPER's number.
+    pub show: fn(&Reaper, &Value) -> Value,
+}
+
+pub(super) fn show_same(_: &Reaper, value: &Value) -> Value {
+    value.clone()
+}
+
+pub(super) fn show_db(_: &Reaper, gain: &Value) -> Value {
+    json!(rows::db(gain.as_f64().unwrap_or(1.0)))
+}
+
+/// A colour stored as REAPER's number with its "set" flag: #rrggbb, or null for none.
+pub(super) fn show_color(reaper: &Reaper, value: &Value) -> Value {
+    let native = value.as_i64().unwrap_or(0) as i32;
+    (native & 0x100_0000 != 0).then(|| reaper.color_hex(native)).flatten().map_or(Value::Null, Value::from)
+}
+
+/// A state's values as a request gives them.
+pub(super) fn shown<O: Copy>(reaper: &Reaper, fields: &[&Field<O>], state: &Value) -> Value {
+    let mut out = Map::new();
+    for field in fields {
+        out.insert(field.key.into(), (field.show)(reaper, &state[field.key]));
+    }
+    Value::Object(out)
 }
 
 fn same_number(a: &Value, b: &Value) -> bool {
@@ -1082,6 +1112,7 @@ pub(super) static ITEM_FIELDS: [Field<Item>; 7] = [
         write: |reaper, item, value| reaper.set_item_value(item, "B_MUTE", if value == &Value::Bool(true) { 1.0 } else { 0.0 }),
         same: same_exact,
         words: |value| if value == &Value::Bool(true) { "muted".into() } else { "unmuted".into() },
+        show: show_same,
     },
     Field {
         key: "volumeDb",
@@ -1090,6 +1121,7 @@ pub(super) static ITEM_FIELDS: [Field<Item>; 7] = [
         write: |reaper, item, value| reaper.set_item_value(item, "D_VOL", value.as_f64().unwrap_or(1.0)),
         same: same_number,
         words: |value| format!("volume {} dB", super::tracks::db_text(rows::db(value.as_f64().unwrap_or(1.0)))),
+        show: show_db,
     },
     Field {
         key: "color",
@@ -1104,6 +1136,7 @@ pub(super) static ITEM_FIELDS: [Field<Item>; 7] = [
                 "colour changed".into()
             }
         },
+        show: show_color,
     },
     Field {
         key: "loop",
@@ -1112,6 +1145,7 @@ pub(super) static ITEM_FIELDS: [Field<Item>; 7] = [
         write: |reaper, item, value| reaper.set_item_value(item, "B_LOOPSRC", if value == &Value::Bool(true) { 1.0 } else { 0.0 }),
         same: same_exact,
         words: |value| if value == &Value::Bool(true) { "loops its source".into() } else { "doesn't loop its source".into() },
+        show: show_same,
     },
     Field {
         key: "lock",
@@ -1125,6 +1159,7 @@ pub(super) static ITEM_FIELDS: [Field<Item>; 7] = [
         },
         same: same_exact,
         words: |value| if value == &Value::Bool(true) { "locked".into() } else { "unlocked".into() },
+        show: show_same,
     },
     Field {
         key: "timebase",
@@ -1143,6 +1178,7 @@ pub(super) static ITEM_FIELDS: [Field<Item>; 7] = [
             let name = TIMEBASES.iter().find(|(_, mode)| Some(*mode) == value.as_i64()).map_or("its own", |(word, _)| word);
             format!("timebase {name}")
         },
+        show: |_, value| TIMEBASES.iter().find(|(_, mode)| Some(*mode) == value.as_i64()).map_or(Value::Null, |(word, _)| json!(word)),
     },
     Field {
         key: "snapOffset",
@@ -1157,6 +1193,7 @@ pub(super) static ITEM_FIELDS: [Field<Item>; 7] = [
         write: |reaper, item, value| reaper.set_item_value(item, "D_SNAPOFFSET", value.as_f64().unwrap_or(0.0)),
         same: same_number,
         words: |value| format!("snap offset {}", seconds_text(value.as_f64().unwrap_or(0.0))),
+        show: show_same,
     },
 ];
 
@@ -1222,8 +1259,11 @@ pub fn props_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let found = find(ctx, &input["ref"], "item-props")?;
     let (fields, wanted) = props_plan(ctx, input, &found)?;
     let now = state_of(ctx.reaper, found.item, &fields);
-    let mut display =
-        json!({"title": format!("{}: {}", label_opening(ctx, found.item), words_of(&fields, &wanted)), "before": now, "after": wanted});
+    let mut display = json!({
+        "title": format!("{}: {}", label_opening(ctx, found.item), words_of(&fields, &wanted)),
+        "before": shown(ctx.reaper, &fields, &now),
+        "after": shown(ctx.reaper, &fields, &wanted),
+    });
     if same_state(&fields, &now, &wanted) {
         display["unchanged"] = true.into();
     }
@@ -1254,7 +1294,7 @@ pub fn props_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let title = format!("{}: {}", label_opening(ctx, found.item), words_of(&fields, &after));
     Ok(Applied {
         applied: after.clone(),
-        display: json!({"title": title, "before": now, "after": after}),
+        display: json!({"title": title, "before": shown(ctx.reaper, &fields, &now), "after": shown(ctx.reaper, &fields, &after)}),
         unwritten: same_state(&fields, &now, &wanted),
         ..Default::default()
     })
