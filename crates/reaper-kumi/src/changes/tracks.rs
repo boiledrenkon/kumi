@@ -3,7 +3,7 @@
 
 use serde_json::{json, Map, Value};
 
-use super::{track_ref_of, Applied, Ctx, Done, Preview, Restore, Restored};
+use super::{folders, track_ref_of, Applied, Ctx, Done, Preview, Restore, Restored};
 use crate::read::{bad, failed};
 use crate::reaper::{Reaper, Track};
 use crate::refs::{self, TrackId};
@@ -341,10 +341,51 @@ pub fn delete_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let now = signature(ctx.reaper, found.track);
     let held = now["items"].as_i64().unwrap_or(0) + now["fx"].as_i64().unwrap_or(0);
     let mut display = json!({"title": format!("Deleted track {}", super::quoted(&named(ctx, &found)))});
+    let mut notes = Vec::new();
     if held > 0 {
-        display["note"] = format!("It holds {} items and {} FX; Kumi keeps them to put back.", now["items"], now["fx"]).into();
+        notes.push(format!("It holds {} items and {} FX; Kumi keeps them to put back.", now["items"], now["fx"]));
+    }
+    if let Some(note) = folder_note(ctx, &found) {
+        notes.push(note);
+    }
+    if !notes.is_empty() {
+        display["note"] = notes.join(" ").into();
     }
     Ok(Preview { target: target(&found.id), prior: now.clone(), fence: now, display })
+}
+
+/// What a delete does to folders, when it changes any track's folder: the tracks of a folder that goes stay where they are,
+/// one level up.
+fn folder_note(ctx: &Ctx, found: &Found) -> Option<String> {
+    let tracks = folder_depths(ctx);
+    let guid = ctx.reaper.track_guid(found.track);
+    let at = tracks.iter().position(|(id, _)| *id == guid)?;
+    let layout = folders::layout(&tracks.iter().map(|(_, depth)| *depth).collect::<Vec<_>>());
+    let inside: Vec<String> =
+        (0..tracks.len()).filter(|other| layout.parent[*other] == Some(at)).map(|other| tracks[other].0.clone()).collect();
+    if inside.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = inside.iter().take(3).map(|id| super::quoted(&name_of(ctx, id))).collect();
+    let more = if inside.len() > 3 { format!(" and {} more", inside.len() - 3) } else { String::new() };
+    let up = match layout.parent[at] {
+        Some(parent) => format!("the folder {}", super::quoted(&name_of(ctx, &tracks[parent].0))),
+        None => "the top level".to_string(),
+    };
+    Some(format!(
+        "{}{} {} in this folder: they stay where they are and move up into {up}.",
+        names.join(", "),
+        more,
+        if inside.len() == 1 { "is" } else { "are" }
+    ))
+}
+
+/// A track's name by its id, for what is said of it.
+fn name_of(ctx: &Ctx, id: &str) -> String {
+    match ctx.reads.track_by_id(ctx.reaper, ctx.proj, &TrackId::Guid(id.to_string())) {
+        Ok(track) => super::track_name(ctx.reaper, track),
+        Err(_) => "a track".to_string(),
+    }
 }
 
 /// A track's id: the master by name, any other by GUID.
@@ -415,7 +456,16 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             MOST_MATERIAL >> 20
         )));
     }
+    // Every track stays in the folder it is in, but for the tracks of a folder that goes, which move up: the depths that make
+    // it so, worked out before REAPER deletes (it mends some folders and not others).
     let depths_before = folder_depths(ctx);
+    let at = depths_before.iter().position(|(id, _)| *id == guid).ok_or_else(|| failed("the track isn't in the project's track list"))?;
+    let all: Vec<i64> = depths_before.iter().map(|(_, depth)| *depth).collect();
+    let layout = folders::layout(&all);
+    let wanted = folders::after_delete(&all, at);
+    let parent = layout.parent[at].map(|parent| depths_before[parent].0.clone());
+    let children: Vec<String> =
+        (0..all.len()).filter(|other| layout.parent[*other] == Some(at)).map(|other| depths_before[other].0.clone()).collect();
     let routes: Vec<Value> = [0, -1]
         .into_iter()
         .flat_map(|category| (0..reaper.send_count(found.track, category)).filter_map(move |at| route(ctx, found.track, category, at)))
@@ -426,8 +476,19 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     if !reaper.delete_track(found.track) {
         return Err(failed("REAPER wouldn't delete the track"));
     }
-    // Exactly the folder depths the deletion changed (REAPER mends the folders around a track that goes), by id, with
-    // what each was and became: an undo puts back only those that are still as the deletion left them.
+    // What REAPER left of the folders is made what they should be.
+    let left = folder_depths(ctx);
+    if left.len() == wanted.len() {
+        for (place, ((_, now), want)) in left.iter().zip(&wanted).enumerate() {
+            if now != want {
+                if let Some(other) = reaper.track_at(ctx.proj, place as i32) {
+                    reaper.set_track_value(other, "I_FOLDERDEPTH", *want as f64);
+                }
+            }
+        }
+    }
+    // Exactly the folder depths the deletion changed, by id, with what each was and became: an undo puts back only those
+    // that are still as the deletion left them.
     let depths_after: std::collections::HashMap<String, i64> = folder_depths(ctx).into_iter().collect();
     let depths: Vec<Value> = depths_before
         .iter()
@@ -436,10 +497,14 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
             depths_after.get(track).filter(|after| *after != before).map(|after| json!({"guid": track, "before": before, "after": after}))
         })
         .collect();
+    let mended = folder_depths(ctx);
+    if mended.len() != wanted.len() || mended.iter().zip(&wanted).any(|((_, now), want)| now != want) {
+        return Err(("uncertain".into(), format!("Kumi deleted {name} but REAPER kept some folders as they were: read the tracks")));
+    }
     let material = json!({
         "guid": guid, "index": index, "name": now["name"], "chunk": chunk,
-        "depths": depths, "routes": routes, "selected": selected, "folderDepth": now["folderDepth"],
-        "lostEnvelopes": lost_envelopes,
+        "depths": depths, "parent": parent, "children": children, "routes": routes, "selected": selected,
+        "folderDepth": now["folderDepth"], "lostEnvelopes": lost_envelopes,
     });
     Ok(Applied {
         applied: json!({"deleted": true}),
@@ -491,6 +556,59 @@ pub fn without_receives(chunk: &str) -> (String, usize) {
     (kept, dropped)
 }
 
+/// Whether putting the track back would change which folder another track is in, as the folders are now: what the producer
+/// has done since is theirs, and a track put back in the middle of it would pull tracks in or out of folders. The tracks of a
+/// folder that went come back into it. `None` when it would not; else what it would do.
+fn would_refold(ctx: &Ctx, material: &Value, guid: &str, index: i32) -> Option<String> {
+    let now = folder_depths(ctx);
+    let mut then = now.clone();
+    // The depths the deletion changed are put back, and the track's own comes with its state.
+    for change in material["depths"].as_array().into_iter().flatten() {
+        let (Some(other), Some(before)) = (change["guid"].as_str(), change["before"].as_i64()) else { continue };
+        if let Some(entry) = then.iter_mut().find(|(id, _)| id == other) {
+            entry.1 = before;
+        }
+    }
+    let at = (index.max(0) as usize).min(then.len());
+    then.insert(at, (guid.to_string(), material["folderDepth"].as_i64().unwrap_or(0)));
+    let parents = |tracks: &[(String, i64)]| {
+        let layout = folders::layout(&tracks.iter().map(|(_, depth)| *depth).collect::<Vec<_>>());
+        tracks
+            .iter()
+            .enumerate()
+            .map(|(place, (id, _))| (id.clone(), layout.parent[place].map(|parent| tracks[parent].0.clone())))
+            .collect::<std::collections::HashMap<String, Option<String>>>()
+    };
+    let (parents_now, parents_then) = (parents(&now), parents(&then));
+    let inside: Vec<&str> = material["children"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let mut moved: Vec<&String> = parents_now
+        .iter()
+        .filter(|(id, parent)| {
+            let after = &parents_then[*id];
+            after != *parent && !(inside.contains(&id.as_str()) && after.as_deref() == Some(guid))
+        })
+        .map(|(id, _)| id)
+        .collect();
+    moved.sort();
+    if let Some(id) = moved.first() {
+        return Some(format!(
+            "putting {} back would move {} into or out of a folder: the folders have been rearranged in REAPER since it was deleted",
+            super::quoted(material["name"].as_str().unwrap_or("the track")),
+            super::quoted(&name_of(ctx, id))
+        ));
+    }
+    // And the folder it was in, if that is still there, is the one it goes back into.
+    let was_in = material["parent"].as_str();
+    let now_in = parents_then[guid].as_deref();
+    if material.get("parent").is_some() && was_in != now_in && was_in.is_none_or(|parent| parents_now.contains_key(parent)) {
+        return Some(format!(
+            "{} would not go back into the folder it was in: the folders have been rearranged in REAPER since it was deleted",
+            super::quoted(material["name"].as_str().unwrap_or("the track")),
+        ));
+    }
+    None
+}
+
 pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let material = restore.material.ok_or_else(|| bad("material: what the delete removed"))?;
     let guid = material["guid"].as_str().ok_or_else(|| bad("material: the track's id"))?;
@@ -521,6 +639,11 @@ pub fn delete_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         }
     }
     let index = material["index"].as_i64().unwrap_or(0).max(0) as i32;
+    if !restore.discard {
+        if let Some(reason) = would_refold(ctx, material, guid, index) {
+            return Err(("changed".into(), reason));
+        }
+    }
     let track = reaper.insert_track(ctx.proj, index).ok_or_else(|| failed("REAPER wouldn't make a track to put it back in"))?;
     if !reaper.set_track_chunk(track, &without_receives(chunk).0) || reaper.track_guid(track) != guid {
         // Not what was deleted: take away what was made, so nothing half-done stays.

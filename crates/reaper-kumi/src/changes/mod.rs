@@ -7,6 +7,7 @@
 //! and refuses `changed` before it writes anything), and how to put it back (`restore`, which refuses `changed` if the
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
+mod folders;
 mod fx;
 mod marks;
 mod notes;
@@ -154,6 +155,11 @@ fn kind(name: &str) -> Option<Kind> {
 }
 
 impl Kind {
+    /// Whether a change of this kind leaves a point in REAPER's undo history: the repeat button does not.
+    fn leaves_point(self) -> bool {
+        !matches!(self, Kind::LoopRepeat)
+    }
+
     fn preview(self, ctx: &Ctx, input: &Value) -> Done<Preview> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_preview(ctx, prop, input),
@@ -298,7 +304,7 @@ impl Changes {
         let ctx = self.context(reaper, reads, params)?;
         let kind = kind_of(params)?;
         let (input, fence, desc) = (object(params, "input")?, object(params, "fence")?, text(params, "desc")?);
-        let applied = self.in_block(&ctx, desc, |ctx| kind.apply(ctx, input, fence))?;
+        let applied = self.in_block(&ctx, desc, kind.leaves_point(), |ctx| kind.apply(ctx, input, fence))?;
         let (applied, undo) = applied;
         let mut answer = Map::new();
         answer.insert("epoch".into(), reads.epoch().into());
@@ -326,20 +332,27 @@ impl Changes {
             material: params.get("material").filter(|v| !v.is_null()),
             discard: params.get("discard") == Some(&Value::Bool(true)),
         };
-        let (restored, undo) = self.in_block(&ctx, desc, |ctx| kind.restore(ctx, &restore))?;
+        let (restored, undo) = self.in_block(&ctx, desc, kind.leaves_point(), |ctx| kind.restore(ctx, &restore))?;
         Ok(json!({"epoch": reads.epoch(), "restored": restored.restored, "display": restored.display, "undo": undo}))
     }
 
     /// Runs a change as one undo block named `desc` (or inside the plan's block, when one is open) and says what REAPER's
     /// history shows after it: whether its top point is this one, and the state count then.
-    fn in_block<T: Written>(&self, ctx: &Ctx, desc: &str, write: impl FnOnce(&Ctx) -> Done<T>) -> Done<(T, Value)> {
+    ///
+    /// `point` is whether a change of this kind leaves a point in REAPER's history at all. Inside a plan the answer says
+    /// whether the plan's point takes the change back (`covered`): not a change that wrote nothing, nor one REAPER keeps no
+    /// history of (the repeat button).
+    fn in_block<T: Written>(&self, ctx: &Ctx, desc: &str, point: bool, write: impl FnOnce(&Ctx) -> Done<T>) -> Done<(T, Value)> {
         let in_plan = self.plan.borrow().is_some();
         if !in_plan && !ctx.reaper.undo_begin(ctx.proj) {
             return Err(failed("this REAPER has no undo blocks, so Kumi won't change anything in it"));
         }
         let result = write(ctx);
         if in_plan {
-            return result.map(|done| (done, json!({"desc": desc, "entry": null, "stateCount": null, "inPlan": true})));
+            return result.map(|done| {
+                let covered = point && !done.unwritten();
+                (done, json!({"desc": desc, "entry": null, "stateCount": null, "inPlan": true, "covered": covered}))
+            });
         }
         // A change that refused, or found everything as it should be, wrote nothing: its block makes no point (flags 0),
         // and pending bare edits of the producer's stay where they were.

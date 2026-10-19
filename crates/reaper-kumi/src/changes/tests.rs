@@ -857,6 +857,27 @@ fn a_plan_is_one_undo_block_and_its_changes_open_none_of_their_own() {
 }
 
 #[test]
+fn a_step_in_a_plan_says_whether_the_plans_point_takes_it_back() {
+    let lab = Lab::new();
+    let step = lab.call("undo_step_begin", json!({"label": "Kumi: a plan (kcov1)"})).unwrap();
+    let covered = |answer: &Value| answer["undo"]["covered"].clone();
+    // A change that is written is in the plan's point.
+    let (_, volume) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -3.0}), "Kumi: Kick volume −3 dB (kcv01)");
+    assert_eq!(covered(&volume), json!(true));
+    // The repeat button leaves REAPER no history to take it back from.
+    let (_, repeat) = lab.make("loop-repeat", json!({"on": true}), "Kumi: Repeat on (kcv02)");
+    assert_eq!(covered(&repeat), json!(false));
+    assert!(state(|s| s.repeat));
+    // And a change that found everything as asked wrote nothing.
+    let (_, again) = lab.make("track-volume", json!({"ref": KICK, "volumeDb": -3.0}), "Kumi: Kick volume −3 dB (kcv03)");
+    assert_eq!(covered(&again), json!(false));
+    // Outside a plan the answer says what REAPER's history shows, as before.
+    lab.call("undo_step_end", json!({"stepId": step["stepId"]})).unwrap();
+    let (_, alone) = lab.make("track-pan", json!({"ref": KICK, "pan": 0.2}), "Kumi: Kick pan 20% right (kcv04)");
+    assert_eq!((alone["undo"]["entry"].clone(), alone["undo"].get("covered").cloned()), (json!(true), None));
+}
+
+#[test]
 fn a_plan_left_open_is_closed_when_the_project_changes_so_no_block_stays_open() {
     let lab = Lab::new();
     lab.call("undo_step_begin", json!({"label": "Kumi: plan (kplan)"})).unwrap();
@@ -2234,6 +2255,149 @@ fn a_delete_whose_folders_the_producer_rearranged_is_put_back_when_told_to_disca
     params["discard"] = true.into();
     lab.call("change_restore", params).unwrap();
     assert!(depths_are(&[("G", 1), ("H", 1), ("A", 0), ("B", -2), ("D", 0)]), "{:?}", track_depths());
+}
+
+// ----- folders over random layouts (N-1, N-2) -----
+
+/// A small random number generator, so the layouts of the tests are the same each time.
+struct Dice(u64);
+
+impl Dice {
+    fn new(seed: u64) -> Dice {
+        Dice(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        ((self.0 >> 11) % n as u64) as usize
+    }
+}
+
+/// A layout of 2 to 10 tracks, "t0", "t1"…: each opens a folder, closes one or two, or is plain.
+fn random_layout(dice: &mut Dice) -> Vec<(String, i32)> {
+    (0..2 + dice.below(9))
+        .map(|at| {
+            let depth = match dice.below(10) {
+                0..=2 => 1,
+                3..=6 => 0,
+                7..=8 => -1,
+                _ => -2,
+            };
+            (format!("t{at}"), depth)
+        })
+        .collect()
+}
+
+/// Each track's folder as the depths say, by name: the innermost one open when it comes.
+fn folders_of(layout: &[(String, i32)]) -> std::collections::BTreeMap<String, Option<String>> {
+    let mut open: Vec<&str> = Vec::new();
+    let mut parents = std::collections::BTreeMap::new();
+    for (name, depth) in layout {
+        parents.insert(name.clone(), open.last().map(|parent| parent.to_string()));
+        if *depth > 0 {
+            open.push(name);
+        }
+        for _ in 0..(-*depth).max(0) {
+            open.pop();
+        }
+    }
+    parents
+}
+
+fn spec_of(layout: &[(String, i32)]) -> Vec<(&str, i32)> {
+    layout.iter().map(|(name, depth)| (name.as_str(), *depth)).collect()
+}
+
+fn lab_layout() -> Vec<(String, i32)> {
+    track_depths()
+}
+
+#[test]
+fn a_delete_leaves_every_other_track_in_its_folder_but_for_the_tracks_of_a_folder_that_goes() {
+    for seed in 0..400 {
+        let mut dice = Dice::new(seed);
+        let layout = random_layout(&mut dice);
+        let gone = dice.below(layout.len());
+        let lab = Lab::new();
+        folder_tracks(&spec_of(&layout));
+        let before = folders_of(&layout);
+        lab.make("track-delete", json!({"ref": format!("r:track:{{T-t{gone}}}")}), "Kumi: Deleted track (kdp10)");
+        let after = folders_of(&lab_layout());
+        let name = format!("t{gone}");
+        for (track, parent) in &after {
+            let was = match &before[track] {
+                Some(parent) if *parent == name => before[&name].clone(),
+                other => other.clone(),
+            };
+            assert_eq!(*parent, was, "seed {seed}: {layout:?} without {name}: {track} is in {parent:?}, it was in {:?}", before[track]);
+        }
+        assert_eq!(after.len(), layout.len() - 1);
+    }
+}
+
+#[test]
+fn a_delete_and_its_undo_with_nothing_between_give_every_depth_back() {
+    for seed in 0..400 {
+        let mut dice = Dice::new(seed + 1000);
+        let layout = random_layout(&mut dice);
+        let gone = dice.below(layout.len());
+        let lab = Lab::new();
+        folder_tracks(&spec_of(&layout));
+        let (preview, applied) = lab.make("track-delete", json!({"ref": format!("r:track:{{T-t{gone}}}")}), "Kumi: Deleted track (kdp11)");
+        lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)")
+            .unwrap_or_else(|e| panic!("seed {seed}: {layout:?} without t{gone}: {e:?}"));
+        assert_eq!(lab_layout(), layout, "seed {seed}: t{gone} was deleted and put back");
+    }
+}
+
+#[test]
+fn a_delete_whose_folders_the_producer_refolded_is_refused_or_changes_no_other_tracks_folder() {
+    let (mut put_back, mut refused) = (0, 0);
+    for seed in 0..600 {
+        let mut dice = Dice::new(seed + 5000);
+        let layout = random_layout(&mut dice);
+        let gone = dice.below(layout.len());
+        let name = format!("t{gone}");
+        let lab = Lab::new();
+        folder_tracks(&spec_of(&layout));
+        let children: Vec<String> = folders_of(&layout)
+            .into_iter()
+            .filter(|(_, parent)| parent.as_deref() == Some(name.as_str()))
+            .map(|(track, _)| track)
+            .collect();
+        let (preview, applied) = lab.make("track-delete", json!({"ref": format!("r:track:{{T-t{gone}}}")}), "Kumi: Deleted track (kdp12)");
+        // The producer folds again: a few of the tracks left take another depth.
+        state(|s| {
+            for _ in 0..1 + dice.below(3) {
+                let at = dice.below(s.tracks.len());
+                s.tracks[at].folder = [-2, -1, 0, 0, 1][dice.below(5)];
+            }
+        });
+        let now = lab_layout();
+        let result = lab.undo("track-delete", &preview, &applied, "Kumi: undo (kund1)");
+        match result {
+            Err((code, _)) => {
+                assert_eq!(code, "changed", "seed {seed}");
+                assert_eq!(lab_layout(), now, "seed {seed}: nothing was written");
+                refused += 1;
+            }
+            Ok(_) => {
+                put_back += 1;
+                let (before, after) = (folders_of(&now), folders_of(&lab_layout()));
+                for (track, parent) in &before {
+                    let after = &after[track];
+                    let adopted = children.contains(track) && after.as_deref() == Some(name.as_str());
+                    assert!(
+                        after == parent || adopted,
+                        "seed {seed}: {layout:?} without {name}, refolded to {now:?}: {track} was in {parent:?} and is in {after:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(put_back > 20 && refused > 20, "put back {put_back}, refused {refused}");
 }
 
 #[test]
