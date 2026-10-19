@@ -1,7 +1,9 @@
 //! The render window's Cancel, pressed from a tick REAPER gives while its render runs (REAPER's render loop still calls
-//! the extension's timer). Each platform finds the window its own way: AppKit's windows by title on macOS, the process's
-//! top-level windows by title on Windows (not measured there). Elsewhere nothing is pressed, and the render runs to its
-//! end (its files are then deleted).
+//! Kumi's own timer, see `inside`). Each platform finds the progress window ("Rendering to file…") its own way and clicks
+//! its Cancel so that the caller returns first: AppKit's windows and a one-shot run-loop timer on macOS (measured), the
+//! process's windows and a posted click on Windows (not measured there). REAPER then asks whether to keep the incomplete
+//! files ("REAPER Render Incomplete!", unless its preference says): answered No. Elsewhere nothing is pressed, and the
+//! render runs to its end (its files are then deleted).
 
 /// Presses Cancel in REAPER's render window: false when no such window or button was found.
 #[cfg(not(test))]
@@ -270,19 +272,27 @@ mod platform {
     #[link(name = "user32")]
     unsafe extern "system" {
         fn EnumWindows(callback: extern "system" fn(*mut c_void, isize) -> i32, data: isize) -> i32;
+        fn EnumChildWindows(parent: *mut c_void, callback: extern "system" fn(*mut c_void, isize) -> i32, data: isize) -> i32;
         fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
         fn GetWindowTextW(hwnd: *mut c_void, text: *mut u16, max: i32) -> i32;
+        fn GetClassNameW(hwnd: *mut c_void, name: *mut u16, max: i32) -> i32;
         fn IsWindowVisible(hwnd: *mut c_void) -> i32;
-        fn GetDlgItem(hwnd: *mut c_void, id: i32) -> *mut c_void;
         fn PostMessageW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> i32;
     }
 
-    const IDCANCEL: i32 = 2;
     const BM_CLICK: u32 = 0x00F5;
+    const WM_COMMAND: u32 = 0x0111;
+    const IDNO: usize = 7;
 
-    fn title(hwnd: *mut c_void) -> String {
+    fn text_of(hwnd: *mut c_void, class: bool) -> String {
         let mut text = [0u16; 256];
-        let len = unsafe { GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32) };
+        let len = unsafe {
+            if class {
+                GetClassNameW(hwnd, text.as_mut_ptr(), text.len() as i32)
+            } else {
+                GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32)
+            }
+        };
         String::from_utf16_lossy(&text[..len.max(0) as usize])
     }
 
@@ -302,13 +312,29 @@ mod platform {
         found
     }
 
+    /// A window's buttons, with their text.
+    fn buttons(parent: *mut c_void) -> Vec<(*mut c_void, String)> {
+        extern "system" fn each(hwnd: *mut c_void, data: isize) -> i32 {
+            let found = unsafe { &mut *(data as *mut Vec<*mut c_void>) };
+            found.push(hwnd);
+            1
+        }
+        let mut children: Vec<*mut c_void> = Vec::new();
+        unsafe { EnumChildWindows(parent, each, &mut children as *mut Vec<*mut c_void> as isize) };
+        children
+            .into_iter()
+            .filter(|c| text_of(*c, true).eq_ignore_ascii_case("Button"))
+            .map(|c| (c, text_of(c, false).replace('&', "")))
+            .collect()
+    }
+
+    /// The progress window's Cancel, clicked by a message the dialog's own loop handles (the caller returns first).
     pub fn press() -> bool {
         for hwnd in windows() {
-            if !super::is_render_window(&title(hwnd)) {
+            if !super::is_render_window(&text_of(hwnd, false)) {
                 continue;
             }
-            let cancel = unsafe { GetDlgItem(hwnd, IDCANCEL) };
-            if !cancel.is_null() {
+            if let Some((cancel, _)) = buttons(hwnd).into_iter().find(|(_, label)| label == "Cancel") {
                 unsafe { PostMessageW(cancel, BM_CLICK, 0, 0) };
                 return true;
             }
@@ -316,13 +342,25 @@ mod platform {
         false
     }
 
-    pub fn titles() -> Vec<String> {
-        windows().into_iter().map(title).collect()
+    /// REAPER's "Save incomplete rendered files?" message box (titled "REAPER Render Incomplete!"), answered No.
+    pub fn answer_incomplete() -> bool {
+        for hwnd in windows() {
+            if text_of(hwnd, false).to_lowercase().contains("incomplete") {
+                unsafe { PostMessageW(hwnd, WM_COMMAND, IDNO, 0) };
+                return true;
+            }
+        }
+        false
     }
 
-    /// Not measured on Windows: REAPER's alert about incomplete files is left to its preference there.
-    pub fn answer_incomplete() -> bool {
-        false
+    pub fn titles() -> Vec<String> {
+        windows()
+            .into_iter()
+            .map(|hwnd| {
+                let labels: Vec<String> = buttons(hwnd).into_iter().map(|(_, l)| l).collect();
+                format!("{:?} buttons={labels:?}", text_of(hwnd, false))
+            })
+            .collect()
     }
 }
 
