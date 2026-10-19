@@ -36,6 +36,11 @@ fn within_schema(schema: &JsonObject, input: &JsonObject) {
     }
 }
 
+/// The last read the tool was asked (the focus is polled meanwhile, so it needn't be the last request).
+fn last_read(script: &RenoiseScript) -> Value {
+    script.asked().into_iter().rev().find(|(method, _)| method == "read").map(|(_, params)| params).unwrap_or(Value::Null)
+}
+
 /// The host's MCP, called in process.
 struct InProcess {
     host: Arc<Host>,
@@ -214,14 +219,14 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             within_schema(&read.input_schema(), &input);
             let _ = read.execute(input, Signal::new()).await.unwrap();
             assert_eq!(
-                script.asked().last().unwrap().1,
+                last_read(&script),
                 json!({"kind": "line", "parent": "1:pattern:1", "track": "1:track:1", "layout": 0})
             );
             // The columns the track hides, asked for as the schema allows.
             let input = json!({"kind": "line", "parent": "pattern:1", "trackRef": "track:1", "hidden": true}).as_object().unwrap().clone();
             within_schema(&read.input_schema(), &input);
             let _ = read.execute(input, Signal::new()).await.unwrap();
-            assert_eq!(script.asked().last().unwrap().1["hidden"], true);
+            assert_eq!(last_read(&script)["hidden"], true);
             assert!(
                 read.description().contains("line under a pattern") && read.description().contains("trackRef"),
                 "{}",
@@ -281,18 +286,18 @@ async fn renoises_integration_reads_what_kumis_host_answers_from_the_tool() {
             for _ in 0..100 {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 let _ = read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await;
-                if script.asked().last().is_some_and(|(_, params)| params["parent"] == "1:track:2") {
+                if last_read(&script)["parent"] == "1:track:2" {
                     break;
                 }
             }
-            let asked = script.asked().last().unwrap().1.clone();
+            let asked = last_read(&script);
             assert_eq!(asked, json!({"kind": "device", "parent": "1:track:2", "layout": 1}), "track:1 follows Kick");
 
             // The same shift again (it reached Kumi after the book was past it): nothing moves twice.
             simulator.emit("tracks", json!({"count": 8, "made": [1], "gone": [], "layout": 1}));
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let _ = read.execute(json!({"kind": "device", "parent": "track:1"}).as_object().unwrap().clone(), Signal::new()).await;
-            assert_eq!(script.asked().last().unwrap().1["parent"], "1:track:2", "track:1 is still Kick, not moved again");
+            assert_eq!(last_read(&script)["parent"], "1:track:2", "track:1 is still Kick, not moved again");
             // A gap (layout 3 after 1): the shifts between are unknown, so the track names go.
             simulator.emit("tracks", json!({"count": 10, "made": [1], "gone": [], "layout": 3}));
             let mut last = String::new();
