@@ -112,9 +112,10 @@ local function settings_kind(spec)
       if state[key] ~= nil then fields[key].set(object, state[key]) end
     end
   end
+  -- (only the settings count: a fence carries more, what it names and what it wants)
   spec.same = function(a, b)
-    for key, value in pairs(a) do
-      local other = b[key]
+    for _, key in ipairs(order) do
+      local value, other = a[key], b[key]
       if type(value) == "number" and type(other) == "number" then
         if not close(value, other) then return false end
       elseif type(value) == "table" and type(other) == "table" then
@@ -123,9 +124,6 @@ local function settings_kind(spec)
       elseif value ~= other then
         return false
       end
-    end
-    for key in pairs(b) do
-      if a[key] == nil then return false end
     end
     return true
   end

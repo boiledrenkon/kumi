@@ -407,8 +407,11 @@ local function buffer_object(sample)
         return false
       end
       local old_buffer, old_name, old_loop = sample.buffer, sample.name, { sample.loop_start, sample.loop_end }
+      local name = loaded.name
+      loaded.name = nil
       sample.buffer = loaded
-      sample.name = loaded.name or sample.name
+      -- (Renoise names a sample after the file it loads)
+      sample.name = name or sample.name
       sample.loop_start, sample.loop_end = 1, loaded.frames
       M.fire(obs(sample, "buffer"))
       local new_name = sample.name
@@ -434,6 +437,14 @@ local function buffer_object(sample)
       local new = sample.buffer
       M.record(function() sample.buffer = old; M.fire(obs(sample, "buffer")) end, function() sample.buffer = new; M.fire(obs(sample, "buffer")) end)
       return true
+    end,
+    -- (a value of the audio: made from what the buffer holds and the frame, the same on every read)
+    sample_data = function(_, channel, frame)
+      local buffer = need()
+      if frame < 1 or frame > buffer.frames or channel < 1 or channel > buffer.channels then error("frame or channel out of range", 2) end
+      local h = 7
+      for i = 1, #buffer.content do h = (h * 31 + buffer.content:byte(i)) % 1000003 end
+      return math.sin(h + frame * 0.001 + channel)
     end,
     delete_sample_data = function()
       local old = sample.buffer
