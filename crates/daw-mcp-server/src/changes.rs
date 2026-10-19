@@ -460,13 +460,24 @@ impl Journal {
                 (false, true) => !undo,
                 (false, false) => continue,
             };
+            // (the DAW's undo or redo settles a record whose undo by Kumi was never answered: Kumi may undo it again)
             match (taken_back, record.state) {
                 (true, State::Applied | State::Uncertain) => {
                     record.state = State::Undone;
+                    record.undo_unanswered = false;
                     back.push(id.clone());
                 }
                 (false, State::Undone) => {
                     record.state = State::Applied;
+                    record.undo_unanswered = false;
+                    record.undo_answers.clear();
+                    again.push(id.clone());
+                }
+                // Kumi's undo was never answered, and the DAW's undo just took its step back: it did run, and the
+                // change is back.
+                (false, State::Uncertain) if record.undo_unanswered && restore => {
+                    record.state = State::Applied;
+                    record.undo_unanswered = false;
                     record.undo_answers.clear();
                     again.push(id.clone());
                 }
@@ -488,6 +499,7 @@ impl Journal {
             let named = [&record.desc, &record.step_desc].into_iter().flatten().any(|desc| descs.contains(desc));
             if record.in_daw_undo && named && record.state == State::Undone {
                 record.state = State::Applied;
+                record.undo_unanswered = false;
                 record.undo_answers.clear();
                 unsure.push(id.clone());
             }
@@ -1102,6 +1114,27 @@ mod tests {
         journal.end_undo(&record.id, "u1", Err(&json!({"error": "moved", "code": "changed"})));
         let data = undone_in_daw(&journal, "undone_in_daw", json!({"descs": [own], "how": "undo"}));
         assert_eq!(data["undone"], json!([record.id]));
+    }
+
+    #[test]
+    fn the_daws_undo_settles_a_change_whose_undo_by_kumi_was_never_answered() {
+        let journal = Journal::default();
+        let record = preview(&journal);
+        let Ok(Ok(applying)) = journal.begin_apply(&record.id, &record.confirmation, "a", None) else { panic!("applying") };
+        journal.end_apply(&record.id, "a", Ok(&json!({"applied": {}})));
+        let Ok(Ok((_, restore))) = journal.begin_undo(&record.id, "u1") else { panic!("undoing") };
+        journal.end_undo_unanswered(&record.id, &json!({"error": "stopped part way", "code": "uncertain"}));
+        assert_eq!(journal.begin_undo(&record.id, "u2").unwrap_err().code, "undo-uncertain");
+        // The producer's undo takes Kumi's undo step back: it ran, and the change is back, so Kumi may undo it again.
+        let (back, again) = journal.follow_daw(std::slice::from_ref(&restore), true);
+        assert_eq!((back, again), (vec![], vec![record.id.clone()]));
+        assert_eq!(journal.get(&record.id).unwrap().state, State::Applied);
+        assert!(matches!(journal.begin_undo(&record.id, "u3"), Ok(Ok(_))), "a fresh undo is sent");
+        journal.end_undo_unanswered(&record.id, &json!({"error": "stopped part way", "code": "uncertain"}));
+        // Its own step undone takes it back for good, and the never-answered undo goes with it.
+        journal.follow_daw(std::slice::from_ref(applying.desc.as_ref().unwrap()), true);
+        let settled = journal.get(&record.id).unwrap();
+        assert_eq!((settled.state, settled.undo_unanswered), (State::Undone, false));
     }
 
     #[test]

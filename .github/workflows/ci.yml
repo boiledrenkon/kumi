@@ -248,7 +248,7 @@ jobs:
         run: cargo test -p reaper-kumi --locked --test loads
       # REAPER calls the extension through the C++ shim's vtable, laid out by each platform's C++ ABI.
       - name: REAPER's calls through the shim's vtable reach Rust
-        run: cargo test -p reaper-kumi --locked --lib csurf::
+        run: cargo test -p reaper-kumi --locked --lib csurf::tests
 
   renoise-tool:
     # The Renoise tool's Lua: its tests (LuaJIT, against a mock of Renoise's API, replaying the wire's conformance
