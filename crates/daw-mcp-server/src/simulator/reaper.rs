@@ -40,6 +40,8 @@ struct State {
     uncertain_restore_once: bool,
     /// The next restore is made in part: its answer says what it left out.
     left_out_once: Option<String>,
+    /// Whether REAPER is playing (its transport, and what a capture needs).
+    playing: bool,
 }
 
 /// A project that answers like the extension. Clones share the project.
@@ -104,6 +106,7 @@ impl ReaperScript {
                 uncertain_once: false,
                 uncertain_restore_once: false,
                 left_out_once: None,
+                playing: false,
             })),
             listening: SimListening::new(daw_bridge::Daw::Reaper),
         }
@@ -112,6 +115,12 @@ impl ReaperScript {
     /// The bridge's listening side: renders, captures, previews, scratch copies.
     pub fn listening(&self) -> &SimListening {
         &self.listening
+    }
+
+    /// The producer starts or stops REAPER: its transport says so, and a capture can hear it.
+    pub fn set_playing(&self, playing: bool) {
+        self.state.lock().unwrap().playing = playing;
+        self.listening.set_playing(playing);
     }
 
     /// The project switched tabs: refs and cursors from before are stale.
@@ -404,7 +413,7 @@ impl ReaperScript {
                 "epoch": epoch,
                 "view": "arrange",
                 "selection": {"trackRef": "r:track:{T0001}", "cursor": 0.0},
-                "transport": {"playing": false, "recording": false, "beat": 0.0, "tempo": 120.0, "beatsPerBar": 4.0, "seconds": 0.0},
+                "transport": {"playing": state.playing, "recording": false, "beat": 0.0, "tempo": 120.0, "beatsPerBar": 4.0, "seconds": 0.0},
                 "changed": state.changed,
                 "ageMs": 12,
             })),

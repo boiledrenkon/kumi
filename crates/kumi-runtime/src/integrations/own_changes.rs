@@ -251,7 +251,7 @@ pub enum Ending {
 
 impl<S: RefScheme> Link<S> {
     /// A host tool's answer, Ok with its JSON or Err with why; Err(RuntimeError) when the host isn't there.
-    async fn call(&self, tool: &str, args: Value, signal: Signal) -> Result<Result<Value, Refused>, RuntimeError> {
+    pub(super) async fn call(&self, tool: &str, args: Value, signal: Signal) -> Result<Result<Value, Refused>, RuntimeError> {
         let Some(endpoint) = self.endpoint.borrow().clone() else {
             return Err(RuntimeError::plain(self.daw.profile.vocab.cant_reach));
         };
@@ -532,6 +532,20 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
 
     fn link(&self) -> &Link<S> {
         &self.history.host.link
+    }
+
+    /// One change of the DAW's by its step's name (the listening tools' own: a gain stage turned, knobs set), made and
+    /// kept as the model's are; refused in words when the DAW has no such kind.
+    pub(super) async fn change_by(&self, tool: &str, input: JsonObject, signal: Signal) -> ChangeOutcome {
+        match self.link().daw.changes.kinds.iter().find(|kind| kind.tool == tool) {
+            Some(kind) => self.one_change(kind, input, signal).await,
+            None => ChangeOutcome::error(format!("{} has no {tool} change", self.link().words().words.app)),
+        }
+    }
+
+    /// The epoch (and, where refs are places, the layout) a request about these refs is asked from, as a change's is.
+    pub(super) fn place_request(&self, args: &mut Value, input: &JsonObject) {
+        self.place(args, input)
     }
 
     /// The tools for this DAW's changes: each core kind's and action's, make_changes with every kind and action as a step,
@@ -853,6 +867,15 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             .or_else(|| skipped.then(|| format!("{own_undo} can't take this back; Kumi can.")));
         if kind.kind == "track-add" {
             self.added.set(self.added.get() + 1);
+        }
+        // Code run in the DAW may have changed anything, outside what HISTORY can take back: a judged run hears again.
+        if matches!(kind.kind, "run-lua" | "api-call") {
+            let what = if self.link().daw.profile.id == Some(crate::core::daw::DawId::Renoise) {
+                "Lua run in Renoise"
+            } else {
+                "Lua or a call to REAPER's API"
+            };
+            self.history.outside.borrow_mut().push(what);
         }
         if skipped {
             self.link().outside_daw_undo.borrow_mut().insert(transaction.clone());

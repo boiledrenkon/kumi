@@ -15,6 +15,7 @@ use crate::{
     integrations::{
         none::no_access,
         own_changes::{Ending, Link, OwnPlan},
+        own_listening::{Flags, OwnListening},
     },
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
     mcp::types::{CallToolResult, ContentBlock},
@@ -124,7 +125,14 @@ pub struct OwnIntegration<S: RefScheme + 'static> {
     file: Rc<RefCell<Option<String>>>,
     /// Hosts started: one started again has lost its journal, so Kumi's changes before can't be undone through it.
     hosts: Cell<u32>,
+    /// Listening (M5): the shared listening tools over the host's renders, captures and previews.
+    listening: Rc<OwnListening<S>>,
+    /// When the bridge last said what listening it can do (its status's `listening`).
+    flags_at: Cell<Option<std::time::Instant>>,
 }
+
+/// How long what the bridge said it can do for listening is taken as standing (REAPER's audio may start or stop).
+const FLAGS_FRESH: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
     let link = Rc::new(Link {
@@ -145,6 +153,7 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
     });
     let context = &options.context;
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, context.on_change.clone(), context.on_action.clone());
+    let listening = OwnListening::new(link.clone(), changes.clone(), context, &options.kumi_home);
     Rc::new(OwnIntegration::<S> {
         daw,
         options,
@@ -168,6 +177,8 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         tempo: link.tempo.clone(),
         file: link.file.clone(),
         hosts: Cell::new(0),
+        listening,
+        flags_at: Cell::new(None),
     })
 }
 
@@ -552,11 +563,23 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         });
     }
 
-    /// The model's tools: the read, and the DAW's changes with their plan and undo.
+    /// The model's tools: the read, the DAW's changes with their plan and undo, and the listening tools it can run now.
     fn tools(&self) -> Vec<Rc<dyn KernelTool>> {
         let mut tools = vec![self.read_tool()];
         tools.extend(self.changes.tools());
+        tools.extend(self.listening.tools());
         tools
+    }
+
+    /// What the bridge can do for listening, as its status says (read again once it's been a while).
+    async fn read_flags(&self, signal: &Signal) {
+        if self.flags_at.get().is_some_and(|at| at.elapsed() < FLAGS_FRESH) {
+            return;
+        }
+        if let Ok(Ok(status)) = self.call("status", json!({}), signal.clone()).await {
+            self.listening.renderer.set_flags(Flags::of(&status));
+            self.flags_at.set(Some(std::time::Instant::now()));
+        }
     }
 
     fn instructions(&self) -> String {
@@ -694,6 +717,9 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             .iter()
             .find_map(|at| snapshot.pointer(at).and_then(Value::as_f64));
         self.tempo.set(tempo);
+        if let Some(beats) = snapshot.pointer("/transport/beatsPerBar").and_then(Value::as_f64) {
+            self.listening.renderer.set_beats_per_bar(beats);
+        }
         *self.file.borrow_mut() = project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).map(str::to_owned);
         // A saved project is its id, through a restart of the DAW; an unsaved one is this run's identity for it.
         let key = saved
@@ -742,9 +768,38 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         }
         (self.options.context.on_connection)(ConnectionState::Connecting, None);
         let status = self.call("status", json!({}), signal).await?;
+        if let Ok(found) = &status {
+            self.listening.renderer.set_flags(Flags::of(found));
+            self.flags_at.set(Some(std::time::Instant::now()));
+        }
         self.set_connected(status.is_ok_and(|status| status.get("connected") != Some(&Value::Bool(false))));
         self.watch_focus();
         Ok(())
+    }
+    fn steered(&self) {
+        self.listening.steered();
+    }
+    async fn settled(&self) {
+        self.listening.settled().await;
+    }
+    fn has_hear(&self) -> bool {
+        let flags = self.listening.renderer.flags();
+        self.connected.get() && flags.known && flags.render
+    }
+    fn has_audition(&self) -> bool {
+        self.has_hear()
+    }
+    fn has_audio_file(&self) -> bool {
+        self.connected.get() && self.listening.renderer.flags().known
+    }
+    async fn hear(&self, request: &HearRequest, signal: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
+        self.listening.hear(request, signal).await
+    }
+    async fn audition(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
+        self.listening.audition(request, signal).await
+    }
+    async fn audio_file(&self, named: &str, signal: Signal) -> Result<Option<String>, RuntimeError> {
+        self.listening.audio_file(named, signal).await
     }
     fn can_show(&self, kind: BodyKind) -> bool {
         self.daw.bodies.contains(&kind)
@@ -790,6 +845,8 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
         let pinned = hints.as_ref().and_then(|hints| hints.pinned.as_ref());
         signal.check()?;
         self.changes.new_turn();
+        // A match run's next round goes on with its answer's rounds; a new answer starts a judged run's changes afresh.
+        self.listening.new_turn(hints.as_ref().and_then(|hints| hints.continuing) == Some(true));
         if self.closed.get() {
             return Err(RuntimeError::plain("Integration is closed"));
         }
@@ -810,6 +867,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
                 }
                 let snapshot = self.settled(snapshot, &signal).await?;
                 self.set_connected(true);
+                self.read_flags(&signal).await;
                 Ok(self.observation(&snapshot, pinned))
             }
             // Busy (a dialog, a load): still there, and still connected. Kumi waits a little for it and looks once more
