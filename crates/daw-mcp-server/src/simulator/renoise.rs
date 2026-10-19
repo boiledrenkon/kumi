@@ -6,7 +6,9 @@
 //! answers verbatim, so the simulator cannot drift from the tool. A song of one very full pattern can be added, to
 //! have pages as big as the tool makes them (pages by limit and cursor, cut at the frame bound), and the song can be
 //! switched, which moves the epoch as Renoise's tool does: refs and cursors from before are refused as `stale`, and
-//! the answers carry the new epoch.
+//! the answers carry the new epoch. The cases, their lookup and the retagging of epochs are the replay module's, which
+//! Logic's simulator shares.
+use super::replay::{self, find, from_another_epoch, load_cases, Case, RECORDED_EPOCH};
 use super::{Respond, SimulatorConfig};
 use daw_bridge::auth::Secret;
 use serde_json::{json, Value};
@@ -15,7 +17,7 @@ use std::sync::{Arc, Mutex};
 const VECTORS: &str = include_str!("../../tests/vectors/renoise-reads.json");
 /// The epoch the vectors were made in.
 const EPOCH: &str = "1";
-const VECTORS_EPOCH: u32 = 1; // (the same, as a number)
+const VECTORS_EPOCH: u32 = RECORDED_EPOCH; // (the same, as a number)
 /// The most a page carries: the contract's 256 KiB less room for the envelope, as in the tool.
 const PAGE_BYTES: usize = 256 * 1024 - 4096;
 const DEFAULT_LIMIT: usize = 50;
@@ -25,12 +27,6 @@ const METHODS: [&str; 4] = ["read", "snapshot", "focus", "focus_body"];
 const KEPT_BY_DEVICES: [&str; 9] = ["song", "track", "ptrack", "slot", "seq", "pattern", "instrument", "sample", "phrase"];
 /// What a song made to be changed answers besides (`config_with_changes`).
 const CHANGE_METHODS: [&str; 3] = ["change_preview", "change_apply", "change_restore"];
-
-struct Case {
-    method: String,
-    params: Value,
-    response: Result<Value, (String, String)>,
-}
 
 struct State {
     /// The epoch the song is in now (the vectors were made in [`EPOCH`]).
@@ -65,74 +61,14 @@ pub struct RenoiseScript {
     state: Arc<Mutex<State>>,
 }
 
-/// The epoch a ref (`<epoch>:<kind>:…`) or a cursor (`<epoch>.<layout>.<n>`) names, if the text is one.
-fn epoch_of(text: &str) -> Option<u32> {
-    let end = text.find([':', '.'])?;
-    let (digits, rest) = text.split_at(end);
-    (!digits.is_empty() && rest.len() > 1 && digits.bytes().all(|b| b.is_ascii_digit())).then(|| digits.parse().ok()).flatten()
-}
-
-/// `value` with the epoch `from` made `to`: in every ref and cursor that names it, and in a field called `epoch`.
-fn retag(value: &Value, from: u32, to: u32, key: Option<&str>) -> Value {
-    match value {
-        Value::String(text) if key == Some("epoch") && *text == from.to_string() => Value::String(to.to_string()),
-        // Another song is another identity, and another id.
-        Value::String(text) if key == Some("identity") && from != to => Value::String(format!("{text}.{to}")),
-        Value::String(text) if key == Some("id") && from != to && text.len() == 32 => Value::String(format!("{}{to:02x}", &text[..30])),
-        Value::String(text) if epoch_of(text) == Some(from) => {
-            Value::String(format!("{to}{}", &text[text.find([':', '.']).expect("a ref or cursor")..]))
-        }
-        Value::Array(items) => Value::Array(items.iter().map(|item| retag(item, from, to, key)).collect()),
-        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), retag(v, from, to, Some(k)))).collect()),
-        other => other.clone(),
-    }
-}
-
-/// The first ref or cursor in `params` that is from another epoch than `epoch`.
-fn from_another_epoch(params: &Value, epoch: u32) -> Option<u32> {
-    match params {
-        Value::String(text) => epoch_of(text).filter(|from| *from != epoch),
-        Value::Array(items) => items.iter().find_map(|item| from_another_epoch(item, epoch)),
-        Value::Object(map) => map.values().find_map(|value| from_another_epoch(value, epoch)),
+/// `value` with the epoch `from` made `to`, as the tool's answers move with the song: in every ref and cursor that
+/// names it and in a field called `epoch`; and, another song being another identity and another id, in those too.
+fn retag(value: &Value, from: u32, to: u32) -> Value {
+    replay::retag_with(value, from, to, None, &|key, text| match key {
+        "identity" if from != to => Some(Value::String(format!("{text}.{to}"))),
+        "id" if from != to && text.len() == 32 => Some(Value::String(format!("{}{to:02x}", &text[..30]))),
         _ => None,
-    }
-}
-
-/// Whole numbers as integers, so 3 and 3.0 are the same parameter.
-fn normal(value: &Value) -> Value {
-    match value {
-        Value::Number(n) => match n.as_f64() {
-            Some(f) if f.fract() == 0.0 && f.abs() < 1e15 => json!(f as i64),
-            _ => value.clone(),
-        },
-        Value::Array(items) => Value::Array(items.iter().map(normal).collect()),
-        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), normal(v))).collect()),
-        other => other.clone(),
-    }
-}
-
-fn load_cases() -> Vec<Case> {
-    let vectors: Value = serde_json::from_str(VECTORS).expect("tests/vectors/renoise-reads.json is JSON");
-    vectors["cases"]
-        .as_array()
-        .expect("cases")
-        .iter()
-        .map(|case| {
-            let response = &case["response"];
-            Case {
-                method: case["request"]["method"].as_str().expect("method").to_string(),
-                params: normal(&case["request"]["params"]),
-                response: if response["ok"] == true {
-                    Ok(response["result"].clone())
-                } else {
-                    Err((
-                        response["error"]["code"].as_str().expect("code").to_string(),
-                        response["error"]["message"].as_str().expect("message").to_string(),
-                    ))
-                },
-            }
-        })
-        .collect()
+    })
 }
 
 /// A line of the very full pattern: twelve note columns and eight effect columns, all with something in them.
@@ -150,7 +86,7 @@ impl RenoiseScript {
         RenoiseScript {
             state: Arc::new(Mutex::new(State {
                 epoch: VECTORS_EPOCH,
-                cases: load_cases(),
+                cases: load_cases(VECTORS, "tests/vectors/renoise-reads.json"),
                 bulk: None,
                 keeps_bound: true,
                 asked: vec![],
@@ -419,16 +355,15 @@ impl RenoiseScript {
         if let Some(map) = without_layout.as_object_mut() {
             map.remove("layout");
         }
-        let asked = retag(&without_layout, epoch, VECTORS_EPOCH, None);
+        let asked = retag(&without_layout, epoch, VECTORS_EPOCH);
         if let Some(lines) = state.bulk {
             let parent = format!("{VECTORS_EPOCH}:pattern:1");
             if method == "read" && asked["kind"] == "line" && asked["parent"] == parent && asked["track"] == 1 {
-                return Some(full_page(lines, &asked, state.keeps_bound).map(|page| retag(&page, VECTORS_EPOCH, epoch, None)));
+                return Some(full_page(lines, &asked, state.keeps_bound).map(|page| retag(&page, VECTORS_EPOCH, epoch)));
             }
         }
-        let wanted = normal(&asked);
-        if let Some(case) = state.cases.iter().find(|case| case.method == method && case.params == wanted) {
-            return Some(case.response.clone().map(|result| restarted(retag(&result, VECTORS_EPOCH, epoch, None), restarts)));
+        if let Some(case) = find(&state.cases, method, &asked) {
+            return Some(case.response.clone().map(|result| restarted(retag(&result, VECTORS_EPOCH, epoch), restarts)));
         }
         if let Some(from) = from_another_epoch(params, epoch) {
             return Some(Err(stale(from)));
