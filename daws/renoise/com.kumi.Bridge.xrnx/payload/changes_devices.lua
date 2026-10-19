@@ -9,10 +9,16 @@ local material_ = import("changes_material")
 local json = import("json")
 
 local bad, fail = base.bad, base.fail
+local q = base.q
 local M = {}
 
 -- A device is found by its ref (`E:device:track.device`), a parameter by `E:param:track.device.parameter`; both are looked at
 -- again by their place. The track's first device is its mixer device, which is the track's fader and pan: not changed here.
+-- A device's name as the producer sees it: the name they gave it, or the device's own.
+function M.label(device)
+  return device.display_name ~= "" and device.display_name or device.name
+end
+
 local function device_of(song, env, reference, what, count)
   if type(reference) ~= "string" then bad(what .. ": ref must be a " .. (count == 3 and "parameter" or "device") .. " ref") end
   local numbers = refs.expect(reference, count == 3 and "param" or "device", count, env.epoch())
@@ -26,8 +32,7 @@ local function device_of(song, env, reference, what, count)
     bad("a track's first device is its mixer device: change its volume and pan with track-volume and track-pan")
   end
   local device = track:device(at)
-  local name = device.display_name ~= "" and device.display_name or device.name
-  return index, at, track, device, name .. " on " .. base.named(index, track), numbers[3]
+  return index, at, track, device, M.label(device) .. " on " .. base.named(index, track), numbers[3]
 end
 
 local function device_target(env, index, at)
@@ -242,7 +247,7 @@ local function add_preview(song, env, input)
   local info, at = add_input(song, track, input)
   local now = add_signature(index, track)
   local display = {
-    title = string.format("Added %s to %s", short_name(info), base.named(index, track)),
+    title = string.format("Added %s to %s", q(short_name(info)), q(base.named(index, track))),
     before = { devices = now.devices }, after = { devices = now.devices + 1, path = info.path, index = at },
   }
   return { target = base.target(env, index), prior = { devices = now.devices }, fence = now, display = display }
@@ -294,7 +299,7 @@ local function add_apply(song, env, input, fence, desc)
     created = { ref = refs.make(env.epoch(), "device", index, at), kind = "device" },
     material = { track = index },
     display = {
-      title = string.format("Added %s to %s", short_name(info), base.named(index, track)),
+      title = string.format("Added %s to %s", q(short_name(info)), q(base.named(index, track))),
       before = { devices = now.devices }, after = { devices = #track.devices, path = info.path, index = at },
     },
     undo = { desc = desc, entry = true },
@@ -317,11 +322,14 @@ local function add_restore(song, env, restore, desc)
   if not restore.discard and (now.path ~= applied.path or now.state ~= (applied.state or {}).state or now.active ~= (applied.state or {}).active) then
     fail("changed", title .. " changed in Renoise since Kumi made it")
   end
+  local device_name, track_name = M.label(device), base.named(index, track)
   song:describe_undo(desc)
   track:delete_device_at(at)
   base.note_restored(env.journal, "device-add", { track = index, device = at })
   return {
-    restored = { deleted = true }, display = { title = "Removed " .. title .. " (put back)" }, undo = { desc = desc, entry = true },
+    restored = { deleted = true },
+    display = { title = string.format("Removed %s from %s (put back)", q(device_name), q(track_name)) },
+    undo = { desc = desc, entry = true },
   }
 end
 
@@ -340,7 +348,10 @@ end
 local function delete_preview(song, env, input)
   local index, at, track, device, name = device_of(song, env, input.ref, "device-delete", 2)
   local state = delete_signature(index, at, device)
-  local display = { title = "Deleted " .. name, before = { devices = #track.devices }, after = { devices = #track.devices - 1 } }
+  local display = {
+    title = string.format("Deleted %s from %s", q(M.label(device)), q(base.named(index, track))),
+    before = { devices = #track.devices }, after = { devices = #track.devices - 1 },
+  }
   display.note = "Kumi keeps its settings (and any automation) to put back."
   return { target = device_target(env, index, at), prior = { deleted = false }, fence = state, display = display }
 end
@@ -358,10 +369,12 @@ local function delete_apply(song, env, input, fence, desc)
   if size > base.MAX_MATERIAL_BYTES then
     fail("failed", string.format("%s holds %.1f MB, more than Kumi can keep to put it back, so it won't delete it", name, size / 1048576))
   end
+  local title = string.format("Deleted %s from %s", q(M.label(device)), q(base.named(index, track)))
   song:describe_undo(desc)
   track:delete_device_at(at)
   return {
-    applied = { deleted = true }, material = material, display = { title = "Deleted " .. name },
+    applied = { deleted = true }, material = material,
+    display = { title = title },
     undo = { desc = desc, entry = true },
     prior = { deleted = false }, place = { track = index, device = at }, shape = "deleted",
   }
@@ -375,13 +388,14 @@ local function delete_restore(song, env, restore, desc)
   local index = material.track
   local track = base.track_at(song, index)
   local saved = material.device
-  local label = (saved.display ~= nil and saved.display ~= "" and saved.display or saved.name or saved.path) .. " on " .. base.named(index, track)
+  local label = (saved.display ~= nil and saved.display ~= "" and saved.display or saved.name or saved.path)
+  local track_name = base.named(index, track)
   -- It is back already (the producer's undo, or an earlier restore): nothing to write.
   local present = track.devices[material.index] and material.index >= 2 and track:device(material.index) or nil
   if present and present.device_path == saved.path then
     local state = material_.device_state(present)
     if state.state == (material.state or {}).state and state.display == (material.state or {}).display then
-      return { restored = { deleted = false }, display = { title = label .. " is back already" }, undo = { desc = desc, entry = false } }
+      return { restored = { deleted = false }, display = { title = string.format("%s is back on %s already", q(label), q(track_name)) }, undo = { desc = desc, entry = false } }
     end
   end
   local at = math.max(2, math.min(material.index or 2, #track.devices + 1))
@@ -402,7 +416,7 @@ local function delete_restore(song, env, restore, desc)
   base.note_restored(env.journal, "device-delete", { track = index, device = at })
   return {
     restored = { ref = refs.make(env.epoch(), "device", index, at), name = device.display_name },
-    display = { title = label .. " put back" }, undo = { desc = desc, entry = true },
+    display = { title = string.format("%s put back on %s", q(label), q(track_name)) }, undo = { desc = desc, entry = true },
   }
 end
 
@@ -425,7 +439,8 @@ local function move_preview(song, env, input)
   local to = move_wanted(track, input, at)
   local state = delete_signature(index, at, device)
   local display = {
-    title = string.format("Moved %s to place %d", name, to), before = { index = at }, after = { index = to },
+    title = string.format("Moved %s on %s to place %d", q(M.label(device)), q(base.named(index, track)), to),
+    before = { index = at }, after = { index = to },
   }
   if to == at then display.unchanged = true end
   return { target = device_target(env, index, at), prior = { index = at }, fence = state, display = display }
@@ -437,7 +452,10 @@ local function move_apply(song, env, input, fence, desc)
   local state = delete_signature(index, at, device)
   if not base.same_table(state, fence) then fail("changed", name .. " changed since the preview") end
   local to = move_wanted(track, input, at)
-  local display = { title = string.format("Moved %s to place %d", name, to), before = { index = at }, after = { index = to } }
+  local display = {
+    title = string.format("Moved %s on %s to place %d", q(M.label(device)), q(base.named(index, track)), to),
+    before = { index = at }, after = { index = to },
+  }
   if to == at then
     display.unchanged = true
     return {

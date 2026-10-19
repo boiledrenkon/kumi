@@ -27,6 +27,9 @@ function M.register(spec) M.KINDS[spec.kind] = spec end
 
 
 local MINUS = "\226\136\146" -- the true minus sign, U+2212
+-- A name inside a sentence of a title is in curly quotes, as Live's titles have it: Deleted track “Kick”. (A title that opens
+-- with the name of what changed, "Kick volume −6 dB", leaves it bare.)
+function M.q(text) return "\226\128\156" .. tostring(text) .. "\226\128\157" end
 local INFINITY = "\226\136\158" -- U+221E
 
 -- Writes that make one slice of a restore (about a second of Renoise's time), and the most a journalled change may hold.

@@ -11,6 +11,7 @@ local rows = import("rows")
 local base = import("changes_base")
 
 local bad, fail = base.bad, base.fail
+local q = base.q
 local M = {}
 
 local function slot_count(song) return #song.sequencer.pattern_sequence end
@@ -29,6 +30,9 @@ local function pattern_label(song, p)
 end
 
 local function slot_text(s) return "slot " .. s end
+local function slot_title(s) return "Slot " .. s end
+
+local function with_pattern(song, p) return "pattern " .. q(pattern_label(song, p)) end
 
 local function seq_target(env, s) return { ref = refs.make(env.epoch(), "seq", s), kind = "seq" } end
 
@@ -63,7 +67,7 @@ local function insert_plan(song, env, input)
 end
 
 local function insert_title(song, plan)
-  return string.format("Inserted slot %d (%s)", plan.index, plan.pattern and pattern_label(song, plan.pattern) or "a new pattern")
+  return string.format("Inserted slot %d (%s)", plan.index, plan.pattern and with_pattern(song, plan.pattern) or "a new pattern")
 end
 
 local function insert_preview(song, env, input)
@@ -144,7 +148,7 @@ local function delete_preview(song, env, input)
   if slot_count(song) <= 1 then bad("the song's only slot can't be deleted") end
   local info, p = delete_info(song, s)
   local display = {
-    title = string.format("Deleted %s (%s)", slot_text(s), pattern_label(song, p)),
+    title = string.format("Deleted %s (%s)", slot_text(s), with_pattern(song, p)),
     before = { slots = info.count }, after = { slots = info.count - 1 },
   }
   if goes_with(song, p, s) then
@@ -166,7 +170,7 @@ local function delete_apply(song, env, input, fence, desc)
   end
   local pattern = song:pattern(p)
   local before = #song.patterns
-  local title = string.format("Deleted %s (%s)", slot_text(s), pattern_label(song, p))
+  local title = string.format("Deleted %s (%s)", slot_text(s), with_pattern(song, p))
   local saved = { name = pattern.name, lines = pattern.number_of_lines }
   song:describe_undo(desc)
   song.sequencer:delete_sequence_at(s)
@@ -186,7 +190,7 @@ local function delete_restore(song, env, restore, desc)
   local index = material.index
   -- back already: the song is as long as it was and the slot holds the pattern
   if n == material.count and sequencer.pattern_sequence[index] == material.pattern and not material.gone then
-    return { restored = { index = index }, display = { title = slot_text(index) .. " is back already" }, undo = { desc = desc, entry = false } }
+    return { restored = { index = index }, display = { title = slot_title(index) .. " is back already" }, undo = { desc = desc, entry = false } }
   end
   local at = math.max(1, math.min(index, n + 1))
   if not material.gone and material.pattern > #song.patterns then
@@ -225,7 +229,7 @@ local function delete_restore(song, env, restore, desc)
   base.note_restored(env.journal, "slot-delete", { seq = at })
   return {
     restored = { ref = refs.make(env.epoch(), "seq", at), pattern = p },
-    display = { title = slot_text(at) .. " put back" }, undo = { desc = desc, entry = true },
+    display = { title = slot_title(at) .. " put back" }, undo = { desc = desc, entry = true },
   }
 end
 
@@ -272,7 +276,7 @@ do
     same = function(a, b) return a.pattern == b.pattern end,
     title = function(name, _, to)
       local label = name:gsub("^%l", string.upper)
-      return string.format("%s plays pattern %02X", label, to.pattern - 1)
+      return string.format("%s \226\134\146 %s", label, with_pattern(renoise.song(), to.pattern))
     end,
   }
   base.register(spec)
@@ -319,10 +323,9 @@ local function section_spec()
     end,
     same = function(a, b) return a.start == b.start and a.name == b.name end,
     title = function(name, _, to)
-      local label = name:gsub("^%l", string.upper)
-      if not to.start then return label .. " starts no section" end
-      if to.name == "" then return label .. " starts a section" end
-      return string.format("%s starts the section %s", label, to.name)
+      if not to.start then return "No section at " .. name end
+      if to.name == "" then return "Section at " .. name end
+      return string.format("Section %s at %s", q(to.name), name)
     end,
   }
 end

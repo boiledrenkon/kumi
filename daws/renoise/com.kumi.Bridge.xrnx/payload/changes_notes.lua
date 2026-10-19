@@ -8,6 +8,7 @@ local rows = import("rows")
 local base = import("changes_base")
 
 local bad, fail, the_song = base.bad, base.fail, base.the_song
+local q = base.q
 local M = {}
 
 -- The most writes one change makes (about 3 s of Renoise's time: a whole 512-line pattern of 12 note columns is 43,000).
@@ -447,7 +448,7 @@ end
 local function lines_text(n) return n == 1 and "1 line" or n .. " lines" end
 
 local function title_of(verb, cells, pattern, p, track, index)
-  return string.format("%s %s in %s · %s", verb, lines_text(lines_in(cells)), pattern_label(pattern, p), base.named(index, track))
+  return string.format("%s %s in %s on %s", verb, lines_text(lines_in(cells)), q(pattern_label(pattern, p)), q(base.named(index, track)))
 end
 
 local function preview_of(song, env, input, kind, verb)
@@ -577,7 +578,7 @@ local function restore_of(spec_kind, noun)
   return function(song, env, restore, desc)
     local p, index, track, pattern_track, pattern = locate_restored(song, env, restore)
     local todo = restore_plan(pattern_track, restore)
-    local label = string.format("%s · %s", pattern_label(pattern, p), base.named(index, track))
+    local label = string.format("%s on %s", q(pattern_label(pattern, p)), q(base.named(index, track)))
     local place = { pattern = p, track = index }
     local spec = base.KINDS[spec_kind]
     if #todo == 0 then
