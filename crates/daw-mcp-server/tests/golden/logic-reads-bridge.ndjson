@@ -1,7 +1,7 @@
 1 > {"type":"hello","protocol":"kumi-daw/1","nonce":"<nonce>","client":"daw-mcp-server/test"}
 1 < {"type":"challenge","nonce":"<nonce>","proof":"<proof>"}
 1 > {"type":"auth","proof":"<proof>"}
-1 < {"type":"welcome","session":"<session>","daw":"logic","bridge":"0.1.0","dawVersion":"12.3.1","pid":"<pid>","resource":"com.apple.logic10","project":{"id":"e805ab87b3ca9d66f0f62d47b97caa29","name":"Scratch","path":"/Users/me/Music/Logic/Scratch.logicx"},"maxFrameBytes":67108864,"heartbeatMs":1000,"methods":["ping","status","read","snapshot","focus","focus_body"],"events":["project","transport","tracks","selection"]}
+1 < {"type":"welcome","session":"<session>","daw":"logic","bridge":"0.1.0","dawVersion":"12.3.1","pid":"<pid>","resource":"com.apple.logic10","project":{"id":"e805ab87b3ca9d66f0f62d47b97caa29","name":"Scratch","path":"/Users/me/Music/Logic/Scratch.logicx"},"maxFrameBytes":67108864,"heartbeatMs":1000,"methods":["ping","status","read","snapshot","focus","focus_body","change_preview","change_apply","change_restore","transport_stop","transport_play","cursor_set","undo_step_begin","undo_step_end"],"events":["project","transport","tracks","selection"]}
 1 > {"type":"request","id":1,"method":"read","params":{"kind":"project"},"deadlineMs":"<deadline>"}
 1 < {"type":"response","id":1,"ok":true,"result":{"epoch":"1","items":[{"id":"e805ab87b3ca9d66f0f62d47b97caa29","identity":"Scratch","keySignature":"C Major","path":"/Users/me/Music/Logic/Scratch.logicx","sampleRate":null,"tempo":160.0,"timeSignature":"4/4","trackCount":2}],"total":1}}
 1 > {"type":"request","id":2,"method":"read","params":{"kind":"track"},"deadlineMs":"<deadline>"}
