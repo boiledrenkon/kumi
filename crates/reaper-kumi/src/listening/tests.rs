@@ -71,7 +71,10 @@ fn tick_inside_the_render() {
 impl Rig {
     fn new() -> Rig {
         fake::lab_project();
-        fake::with(|s| s.on_action = Some(fake::render_action));
+        fake::with(|s| {
+            s.on_action = Some(fake::render_action);
+            s.listening.sources_from_files = true;
+        });
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = queue::channel();
         let out = Recorder::default();

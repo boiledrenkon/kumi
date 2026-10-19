@@ -2692,7 +2692,7 @@ pub fn api_without(missing: &[&str]) -> Api {
 }
 
 fn lookup(name: &CStr) -> *mut c_void {
-    // M5 listening (m5-reaper): its functions first (it wraps the chunk calls and track strings).
+    // M5 listening (m5-reaper): its functions first; each passes on whatever isn't listening's to the rest below.
     if let Some(f) = listening::lookup(name) {
         return f;
     }

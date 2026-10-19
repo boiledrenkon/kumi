@@ -1,8 +1,13 @@
 //! The fake REAPER's listening side (M5, m5-reaper): the project's render settings and a render (action 42230) that
 //! writes the WAV files REAPER would, as measured in REAPER 7.82; the audio device, media sources and previews; audio
 //! accessors; the hardware hook; parameter steps; chunks that keep the GUIDs written into them; tracks' `P_EXT`.
+//!
+//! `fake::lookup` asks this module first. Where another part of the fake (another stream's, or the M3 fake's own) gives a
+//! function too, the one here answers only for what is listening's and passes every other call on to that part (`next`),
+//! so the fakes compose in one lookup whatever order the others are asked in.
 
 use super::*;
+use std::cell::Cell;
 
 /// What the fake renders, as each render saw the project when it began.
 #[derive(Clone, Debug)]
@@ -83,6 +88,9 @@ pub struct FakeListening {
     pub dirty_on_set: bool,
     /// Chunks carry their items' and takes' GUIDs, and setting one gives the track the GUIDs written in it.
     pub chunk_guids: bool,
+    /// `PCM_Source_CreateFromFile` makes listening's own sources (the file read as a WAV), as listening's tests want;
+    /// otherwise the call goes on to the rest of the fake.
+    pub sources_from_files: bool,
     pub track_ext: HashMap<(String, String), String>,
 }
 
@@ -159,6 +167,7 @@ impl Default for FakeListening {
             cancelled_render: false,
             dirty_on_set: false,
             chunk_guids: false,
+            sources_from_files: false,
             track_ext: HashMap::new(),
         }
     }
@@ -196,20 +205,58 @@ impl Clone for FakeListening {
             cancelled_render: self.cancelled_render,
             dirty_on_set: self.dirty_on_set,
             chunk_guids: self.chunk_guids,
+            sources_from_files: self.sources_from_files,
             track_ext: self.track_ext.clone(),
         }
     }
 }
 
-const FILE_SOURCE: u64 = 10;
-const SECTION_PARENT: u64 = 11;
-const ACCESSOR: u64 = 12;
+// Handle kinds of listening's own, apart from the M3 fake's and the other streams' kinds.
+const FILE_SOURCE: u64 = 0xA0;
+const SECTION_PARENT: u64 = 0xA1;
+const ACCESSOR: u64 = 0xA2;
 const SPEED_OFFSET: c_int = 0x10;
+
+// ----- the rest of the fake -----
+
+thread_local! {
+    /// Set while the rest of the fake is asked for a function this module gives too, so that the ask passes it by.
+    static PASSING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The function the rest of the fake gives for `name` (another stream's, or the M3 fake's own), as `fake::lookup` finds
+/// it past this module; null when there is none.
+fn next(name: &CStr) -> *mut c_void {
+    struct Passed;
+    impl Drop for Passed {
+        fn drop(&mut self) {
+            PASSING.with(|p| p.set(false));
+        }
+    }
+    PASSING.with(|p| p.set(true));
+    let _passed = Passed;
+    super::lookup(name)
+}
+
+/// `next` as a function of type `$ty`; None when the rest of the fake has none.
+macro_rules! next_fn {
+    ($name:literal as $ty:ty) => {{
+        let f = next($name);
+        // SAFETY: the fake's lookup gives each name the function with REAPER's signature for it.
+        (!f.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, $ty>(f) })
+    }};
+}
 
 // ----- render settings -----
 
-unsafe extern "C" fn get_set_project_info(_proj: *mut ReaProject, desc: *const c_char, value: f64, is_set: bool) -> f64 {
+unsafe extern "C" fn get_set_project_info(proj: *mut ReaProject, desc: *const c_char, value: f64, is_set: bool) -> f64 {
     let key = name_of(desc);
+    // The render settings and DIRTY are listening's; any other key is the rest of the fake's (kept here when it has none).
+    if key != "DIRTY" && !key.starts_with("RENDER_") {
+        if let Some(f) = next_fn!(c"GetSetProjectInfo" as unsafe extern "C" fn(*mut ReaProject, *const c_char, f64, bool) -> f64) {
+            return unsafe { f(proj, desc, value, is_set) };
+        }
+    }
     counted(|s| {
         if key == "DIRTY" {
             if is_set {
@@ -249,8 +296,15 @@ fn targets(s: &State) -> Option<Vec<String>> {
     Some(list)
 }
 
-unsafe extern "C" fn get_set_project_info_string(_proj: *mut ReaProject, desc: *const c_char, buf: *mut c_char, is_set: bool) -> bool {
+unsafe extern "C" fn get_set_project_info_string(proj: *mut ReaProject, desc: *const c_char, buf: *mut c_char, is_set: bool) -> bool {
     let key = name_of(desc);
+    if !key.starts_with("RENDER_") {
+        if let Some(f) =
+            next_fn!(c"GetSetProjectInfo_String" as unsafe extern "C" fn(*mut ReaProject, *const c_char, *mut c_char, bool) -> bool)
+        {
+            return unsafe { f(proj, desc, buf, is_set) };
+        }
+    }
     if is_set {
         let value = name_of(buf);
         return counted(|s| {
@@ -434,7 +488,14 @@ unsafe extern "C" fn audio_init() {
 }
 
 unsafe extern "C" fn get_num_audio_outputs() -> c_int {
-    with(|s| if s.listening.audio { s.listening.outputs } else { 0 })
+    // No device, no outputs; with one, as many as the rest of the fake lists (when it lists them).
+    if !with(|s| s.listening.audio) {
+        return 0;
+    }
+    match next_fn!(c"GetNumAudioOutputs" as unsafe extern "C" fn() -> c_int) {
+        Some(f) => unsafe { f() },
+        None => with(|s| s.listening.outputs),
+    }
 }
 
 unsafe extern "C" fn master_get_play_rate(_proj: *mut ReaProject) -> f64 {
@@ -442,7 +503,10 @@ unsafe extern "C" fn master_get_play_rate(_proj: *mut ReaProject) -> f64 {
 }
 
 unsafe extern "C" fn get_toggle_command_state(command: c_int) -> c_int {
-    with(|s| if command == 40364 { s.listening.metronome as c_int } else { -1 })
+    if command == 40364 {
+        return with(|s| s.listening.metronome as c_int);
+    }
+    next_fn!(c"GetToggleCommandState" as unsafe extern "C" fn(c_int) -> c_int).map_or(-1, |f| unsafe { f(command) })
 }
 
 /// `audio_hook_register_t` as REAPER holds what it was given.
@@ -503,6 +567,10 @@ fn take_media(s: &State, handle: u64) -> Option<FakeMedia> {
 }
 
 unsafe extern "C" fn pcm_source_create_from_file(path: *const c_char) -> *mut api::PCM_source {
+    if !with(|s| s.listening.sources_from_files) {
+        return next_fn!(c"PCM_Source_CreateFromFile" as unsafe extern "C" fn(*const c_char) -> *mut api::PCM_source)
+            .map_or(ptr::null_mut(), |f| unsafe { f(path) });
+    }
     let path = name_of(path);
     let Ok(info) = crate::listening::wav::read_info(std::path::Path::new(&path)) else { return ptr::null_mut() };
     with(|s| {
@@ -518,12 +586,16 @@ unsafe extern "C" fn pcm_source_create_from_file(path: *const c_char) -> *mut ap
 }
 
 unsafe extern "C" fn pcm_source_destroy(source: *mut api::PCM_source) {
+    let (kind, index, _, _) = unpack(source as u64);
+    if kind != FILE_SOURCE {
+        if let Some(f) = next_fn!(c"PCM_Source_Destroy" as unsafe extern "C" fn(*mut api::PCM_source)) {
+            unsafe { f(source) };
+        }
+        return;
+    }
     with(|s| {
-        let (kind, index, _, _) = unpack(source as u64);
-        if kind == FILE_SOURCE {
-            if let Some(source) = s.listening.sources.get_mut(index as usize) {
-                source.destroyed = true;
-            }
+        if let Some(source) = s.listening.sources.get_mut(index as usize) {
+            source.destroyed = true;
         }
     })
 }
@@ -536,8 +608,8 @@ unsafe extern "C" fn get_media_source_type(source: *mut api::PCM_source, buf: *m
             let section = with(|s| take_media(s, handle).is_some_and(|m| m.section.is_some()));
             if section {
                 write(buf, size, "SECTION");
-            } else {
-                unsafe { super::get_media_source_type(source, buf, size) }
+            } else if let Some(f) = next_fn!(c"GetMediaSourceType" as unsafe extern "C" fn(*mut api::PCM_source, *mut c_char, c_int)) {
+                unsafe { f(source, buf, size) }
             }
         }
     }
@@ -545,13 +617,19 @@ unsafe extern "C" fn get_media_source_type(source: *mut api::PCM_source, buf: *m
 
 unsafe extern "C" fn get_media_source_parent(source: *mut api::PCM_source) -> *mut api::PCM_source {
     let handle = source as u64;
-    with(|s| match source_kind(handle) {
-        SOURCE if take_media(s, handle).is_some_and(|m| m.section.is_some()) => {
-            let (_, a, b, c) = unpack(handle);
-            pack(SECTION_PARENT, a, b, c) as *mut api::PCM_source
-        }
-        _ => ptr::null_mut(),
-    })
+    let mine = matches!(source_kind(handle), FILE_SOURCE | SECTION_PARENT)
+        || with(|s| source_kind(handle) == SOURCE && take_media(s, handle).is_some());
+    if mine {
+        return match with(|s| take_media(s, handle).is_some_and(|m| m.section.is_some())) {
+            true if source_kind(handle) == SOURCE => {
+                let (_, a, b, c) = unpack(handle);
+                pack(SECTION_PARENT, a, b, c) as *mut api::PCM_source
+            }
+            _ => ptr::null_mut(),
+        };
+    }
+    next_fn!(c"GetMediaSourceParent" as unsafe extern "C" fn(*mut api::PCM_source) -> *mut api::PCM_source)
+        .map_or(ptr::null_mut(), |f| unsafe { f(source) })
 }
 
 unsafe extern "C" fn pcm_source_get_section_info(
@@ -561,6 +639,12 @@ unsafe extern "C" fn pcm_source_get_section_info(
     reversed: *mut bool,
 ) -> bool {
     let handle = source as u64;
+    let mine = matches!(source_kind(handle), FILE_SOURCE | SECTION_PARENT)
+        || with(|s| source_kind(handle) == SOURCE && take_media(s, handle).is_some());
+    if !mine {
+        return next_fn!(c"PCM_Source_GetSectionInfo" as unsafe extern "C" fn(*mut api::PCM_source, *mut f64, *mut f64, *mut bool) -> bool)
+            .is_some_and(|f| unsafe { f(source, offset, length, reversed) });
+    }
     with(|s| match take_media(s, handle).and_then(|m| m.section).filter(|_| source_kind(handle) == SOURCE) {
         Some((o, l, r)) => {
             unsafe {
@@ -590,25 +674,46 @@ fn media_of(s: &State, handle: u64) -> Option<(String, f64, i32, i32)> {
 }
 
 unsafe extern "C" fn get_media_source_length(source: *mut api::PCM_source, in_beats: *mut bool) -> f64 {
-    with(|s| {
+    let (midi, media) = with(|s| {
         let midi = take_of(s, source as u64).is_some_and(|t| t.source.as_deref() == Some("MIDI")) && source_kind(source as u64) == SOURCE;
-        if !in_beats.is_null() {
-            unsafe { *in_beats = midi };
+        (midi, media_of(s, source as u64))
+    });
+    if media.is_none() {
+        if let Some(f) = next_fn!(c"GetMediaSourceLength" as unsafe extern "C" fn(*mut api::PCM_source, *mut bool) -> f64) {
+            return unsafe { f(source, in_beats) };
         }
-        media_of(s, source as u64).map_or(0.0, |m| m.1)
-    })
+    }
+    if !in_beats.is_null() {
+        unsafe { *in_beats = midi };
+    }
+    media.map_or(0.0, |m| m.1)
 }
 
 unsafe extern "C" fn get_media_source_num_channels(source: *mut api::PCM_source) -> c_int {
-    with(|s| media_of(s, source as u64).map_or(0, |m| m.2))
+    match with(|s| media_of(s, source as u64)) {
+        Some(m) => m.2,
+        None => next_fn!(c"GetMediaSourceNumChannels" as unsafe extern "C" fn(*mut api::PCM_source) -> c_int)
+            .map_or(0, |f| unsafe { f(source) }),
+    }
 }
 
 unsafe extern "C" fn get_media_source_sample_rate(source: *mut api::PCM_source) -> c_int {
-    with(|s| media_of(s, source as u64).map_or(0, |m| m.3))
+    match with(|s| media_of(s, source as u64)) {
+        Some(m) => m.3,
+        None => {
+            next_fn!(c"GetMediaSourceSampleRate" as unsafe extern "C" fn(*mut api::PCM_source) -> c_int).map_or(0, |f| unsafe { f(source) })
+        }
+    }
 }
 
 unsafe extern "C" fn get_media_source_file_name(source: *mut api::PCM_source, buf: *mut c_char, size: c_int) {
-    with(|s| write(buf, size, &media_of(s, source as u64).map(|m| m.0).unwrap_or_default()))
+    match with(|s| media_of(s, source as u64)) {
+        Some(m) => write(buf, size, &m.0),
+        None => match next_fn!(c"GetMediaSourceFileName" as unsafe extern "C" fn(*mut api::PCM_source, *mut c_char, c_int)) {
+            Some(f) => unsafe { f(source, buf, size) },
+            None => write(buf, size, ""),
+        },
+    }
 }
 
 // ----- previews -----
@@ -702,21 +807,23 @@ unsafe extern "C" fn track_fx_get_parameter_step_sizes(
     large: *mut f64,
     toggle: *mut bool,
 ) -> bool {
-    counted(|s| {
-        let Some(p) = fx_of(s, track as u64, fx).and_then(|f| f.params.get(param as usize)) else { return false };
-        let Display::Steps(values) = &p.display else { return false };
-        if values.len() < 2 {
-            return false;
-        }
-        let size = (p.max - p.min) / (values.len() - 1) as f64;
-        unsafe {
-            *step = size;
-            *small = size;
-            *large = size;
-            *toggle = values.len() == 2;
-        }
-        true
-    })
+    let stepped = counted(|s| {
+        let p = fx_of(s, track as u64, fx).and_then(|f| f.params.get(param as usize))?;
+        let Display::Steps(values) = &p.display else { return None };
+        (values.len() >= 2).then(|| ((p.max - p.min) / (values.len() - 1) as f64, values.len() == 2))
+    });
+    let Some((size, two)) = stepped else {
+        type StepSizes = unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, *mut f64, *mut f64, *mut f64, *mut bool) -> bool;
+        return next_fn!(c"TrackFX_GetParameterStepSizes" as StepSizes)
+            .is_some_and(|f| unsafe { f(track, fx, param, step, small, large, toggle) });
+    };
+    unsafe {
+        *step = size;
+        *small = size;
+        *large = size;
+        *toggle = two;
+    }
+    true
 }
 
 // ----- chunks that keep the GUIDs written in them, and tracks' P_EXT -----
@@ -732,7 +839,8 @@ fn guids_in(chunk: &str, key: &str) -> Vec<String> {
 
 unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, isundo: bool) -> bool {
     if !with(|s| s.listening.chunk_guids) {
-        return unsafe { super::get_track_state_chunk(track, buf, size, isundo) };
+        return next_fn!(c"GetTrackStateChunk" as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int, bool) -> bool)
+            .is_some_and(|f| unsafe { f(track, buf, size, isundo) });
     }
     counted(|s| {
         let Some(mut t) = track_of(s, track as u64).cloned() else { return false };
@@ -761,7 +869,8 @@ unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_c
 }
 
 unsafe extern "C" fn set_track_state_chunk(track: *mut MediaTrack, chunk: *const c_char, isundo: bool) -> bool {
-    if !unsafe { super::set_track_state_chunk(track, chunk, isundo) } {
+    let set = next_fn!(c"SetTrackStateChunk" as unsafe extern "C" fn(*mut MediaTrack, *const c_char, bool) -> bool);
+    if !set.is_some_and(|f| unsafe { f(track, chunk, isundo) }) {
         return false;
     }
     if !with(|s| s.listening.chunk_guids) {
@@ -791,7 +900,8 @@ unsafe extern "C" fn set_track_state_chunk(track: *mut MediaTrack, chunk: *const
 unsafe extern "C" fn get_set_media_track_info_string(track: *mut MediaTrack, parm: *const c_char, buf: *mut c_char, set: bool) -> bool {
     let key = name_of(parm);
     if !key.starts_with("P_EXT:") {
-        return unsafe { super::get_set_media_track_info_string(track, parm, buf, set) };
+        return next_fn!(c"GetSetMediaTrackInfo_String" as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool)
+            .is_some_and(|f| unsafe { f(track, parm, buf, set) });
     }
     let Some(guid) = with(|s| track_of(s, track as u64).map(|t| t.guid.clone())) else { return false };
     if set {
@@ -815,8 +925,12 @@ unsafe extern "C" fn get_set_media_track_info_string(track: *mut MediaTrack, par
     })
 }
 
-/// Listening's functions, looked up before the rest of the fake's (and in place of its chunk calls and track strings).
+/// Listening's functions, looked up before the rest of the fake's (see the module's words); none while one of them asks
+/// the rest of the fake for its own (`next`).
 pub(super) fn lookup(name: &CStr) -> Option<*mut c_void> {
+    if PASSING.with(Cell::get) {
+        return None;
+    }
     macro_rules! table {
         ($($name:literal => $f:expr),* $(,)?) => {
             match name.to_bytes() {
