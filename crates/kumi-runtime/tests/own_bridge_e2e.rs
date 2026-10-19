@@ -647,17 +647,27 @@ async fn a_change_the_daws_undo_put_back_is_undone_again_and_an_uncertain_one_is
             let note = told.borrow().iter().rev().find(|record| record.title == "Track 1 muted").and_then(|record| record.note.clone());
             assert!(note.as_deref().is_some_and(|note| note.contains("together with the plan's other changes")), "{note:?}");
 
-            // Kumi's undo REAPER answered without being able to say how it ended: Unsure, with REAPER's own words, and
-            // never sent again.
+            // Kumi's undo REAPER answered without being able to say how it ended: Unsure, with REAPER's own words leading
+            // (in the answer and on the row), and never sent again.
             let made = volume.execute(input(json!({"ref": "track:3", "volumeDb": -4})), Signal::new()).await.unwrap();
             assert!(!made.is_error, "{}", made.text);
             script.uncertain_restore_once();
             let unsure = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
-            assert!(unsure.is_error && unsure.text.contains("REAPER didn't confirm Kumi's undo"), "{}", unsure.text);
+            assert!(unsure.is_error && unsure.text.contains("REAPER couldn't finish Kumi's undo"), "{}", unsure.text);
             assert!(unsure.text.contains("didn't finish putting it back in time"), "REAPER's words are kept: {}", unsure.text);
+            assert!(!unsure.text.contains("didn't confirm"), "REAPER answered: {}", unsure.text);
             assert_eq!(state_of("Track 2 volume -4 dB"), Some(ChangeState::Unsure));
+            let note =
+                told.borrow().iter().rev().find(|record| record.title == "Track 2 volume -4 dB").and_then(|record| record.note.clone());
+            assert!(
+                note.as_deref().is_some_and(|note| note.starts_with("Kumi's undo didn't finish: ") && note.contains("in time")),
+                "{note:?}"
+            );
             let again = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
             assert!(again.is_error && again.text.contains("won't undo it again"), "{}", again.text);
+            let kept =
+                told.borrow().iter().rev().find(|record| record.title == "Track 2 volume -4 dB").and_then(|record| record.note.clone());
+            assert_eq!(kept, note, "a refused repeat keeps what the row said of the undo before it");
 
             // An undo REAPER made in part says what it left out, in its answer and on the row: never read as whole.
             let made = volume.execute(input(json!({"ref": "track:2", "volumeDb": -5})), Signal::new()).await.unwrap();

@@ -234,6 +234,9 @@ pub struct Link<S: RefScheme> {
     pub undo_unanswered: RefCell<std::collections::HashSet<String>>,
     /// Changes made in a plan's step of the DAW's undo, by transaction.
     pub in_plan: RefCell<std::collections::HashSet<String>>,
+    /// Changes Kumi undid that the DAW's undo or redo may have put back (it can't say which step it took), by
+    /// transaction: Unsure until the DAW's undo or redo, or Kumi's undo, settles them.
+    pub maybe_redone: RefCell<std::collections::HashSet<String>>,
 }
 
 /// How Kumi's undo of a change came to an end for good.
@@ -265,9 +268,10 @@ impl<S: RefScheme> Link<S> {
     }
 
     /// What a row says once Kumi can't undo it anymore: how that came, and who can still take it back, from what the row
-    /// knows. Kumi's undo of it was never answered: it's checked, then changed by hand. Only Kumi could take it back:
-    /// nobody can now, so by hand. Else the DAW's own undo may (with the plan's other changes, for a plan's step).
-    fn ending_note(&self, transaction: &str, ending: Ending) -> String {
+    /// knows. Kumi's undo of it was never answered: it's checked, then changed by hand. An Unsure row stays unsure: the
+    /// DAW may have redone it, or Kumi never heard whether it went through. Only Kumi could take it back: nobody can
+    /// now, so by hand. Else the DAW's own undo may (with the plan's other changes, for a plan's step).
+    fn ending_note(&self, transaction: &str, state: ChangeState, ending: Ending) -> String {
         let (app, own_undo) = (self.words().words.app, self.words().vocab.own_undo);
         let why = match ending {
             Ending::Window => format!("Past the {UNDO_WINDOW} changes Kumi keeps for its undo"),
@@ -275,11 +279,20 @@ impl<S: RefScheme> Link<S> {
             Ending::Unknown => "Kumi can't undo this anymore".to_string(),
             Ending::Crowded => format!("Past the {} changes only Kumi can take back that Kumi keeps for its undo", UNDO_WINDOW / 2),
         };
+        let (only_kumi, in_plan) = (self.outside_daw_undo.borrow().contains(transaction), self.in_plan.borrow().contains(transaction));
         if self.undo_unanswered.borrow().contains(transaction) {
             format!("{why}, and whether its undo went through isn't known: check it in {app}, and change it back by hand if it's still as Kumi set it.")
-        } else if self.outside_daw_undo.borrow().contains(transaction) {
+        } else if state == ChangeState::Unsure && self.maybe_redone.borrow().contains(transaction) {
+            format!("{why}, and {app} may have redone it (Kumi can't tell): check it in {app}, and change it back by hand if it's there.")
+        } else if state == ChangeState::Unsure && only_kumi {
+            format!("{why}, and Kumi isn't sure it went through: check it in {app}, and change it back by hand if it did ({own_undo} doesn't take this back).")
+        } else if state == ChangeState::Unsure && in_plan {
+            format!("{why}, and Kumi isn't sure it went through: check it in {app}; if it did, {own_undo} takes it back only with the plan's other changes.")
+        } else if state == ChangeState::Unsure {
+            format!("{why}, and Kumi isn't sure it went through: check it in {app}; if it did, {own_undo} may still take it back.")
+        } else if only_kumi {
             format!("{why}, and {own_undo} doesn't take this back: neither can now, so change it by hand if needed.")
-        } else if self.in_plan.borrow().contains(transaction) {
+        } else if in_plan {
             // (true before the plan's undo and after it: the step goes with the plan, never alone)
             format!("{why}; {own_undo} takes it back only with the plan's other changes.")
         } else {
@@ -431,8 +444,11 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
             }
             Err(_) => return Ok(Some(UndoResult::error(cant_reach_to_undo(self.link.words())))),
         };
+        // (an answer settles whether the DAW redid it: the row now says what Kumi's undo found)
+        let settled = |link: &Link<S>| link.maybe_redone.borrow_mut().remove(&snapshot.transaction_id);
         let refused = match answer {
             Ok(done) if done.get("state").and_then(Value::as_str) == Some("undone") => {
+                settled(&self.link);
                 // A restore that made devices again moves Renoise's epoch: the book follows.
                 follow_epoch(&self.link.book, &self.link.epoch, &self.link.layout, &done);
                 note_epoch(&self.link.seen_in, &self.link.book.borrow().scheme, &done);
@@ -453,6 +469,9 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
             Err(refused) => refused,
         };
         let why = self.link.in_short_refs(&refused.why);
+        if matches!(refused.code.as_deref(), Some("changed" | "gone" | "stale" | "undone" | "daw-only" | "unknown")) {
+            settled(&self.link);
+        }
         let (state, note) = match refused.code.as_deref() {
             Some("changed") => (ChangeState::Kept, format!("It changed in {} since, so Kumi left it as it is.", words.app)),
             Some("gone") => (ChangeState::Kept, format!("What it changed is gone from the {}, so there's nothing to undo.", words.place)),
@@ -467,7 +486,9 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
             Some("undone") => return Ok(Some(history.undone(entry))),
             // (what Lua or a call through the DAW's API did: Kumi doesn't know what it changed, the DAW's own undo does)
             Some("daw-only") => (ChangeState::Kept, why.clone()),
-            Some("unknown") => (ChangeState::Expired, self.link.ending_note(&snapshot.transaction_id, Ending::Unknown)),
+            Some("unknown") => {
+                (ChangeState::Expired, self.link.ending_note(&snapshot.transaction_id, snapshot.record.state, Ending::Unknown))
+            }
             Some("not-applied" | "uncertain")
                 if snapshot.record.state == ChangeState::Unsure || refused.code.as_deref() == Some("uncertain") =>
             {
@@ -479,13 +500,22 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
             // it's undone isn't known. The DAW's own words say what to look for.
             Some("undo-uncertain") => {
                 let again = !self.link.undo_unanswered.borrow_mut().insert(snapshot.transaction_id.clone());
+                self.link.maybe_redone.borrow_mut().remove(&snapshot.transaction_id);
                 let note = unsure_undo_note(self.link.words(), &snapshot.record.title);
-                let text = if again {
-                    format!("Whether Kumi's undo of this went through isn't known, so Kumi won't undo it again: {note}")
+                let (note, text) = if again {
+                    // (refused before anything was sent: the row keeps what it says of the undo that went before)
+                    let kept = snapshot.record.note.clone().unwrap_or_else(|| note.clone());
+                    (kept, format!("Whether Kumi's undo of this went through isn't known, so Kumi won't undo it again: {note}"))
                 } else if refused.answered {
-                    format!("{} didn't confirm Kumi's undo ({why}), so whether it went through isn't known: {note}", words.app)
+                    // The DAW answered, and said how far its undo got (a sliced restore stopped part way, a job past its
+                    // time): its words lead, on the row too.
+                    (
+                        format!("Kumi's undo didn't finish: {why}"),
+                        format!("{} couldn't finish Kumi's undo: {why}. Kumi won't undo it again.", words.app),
+                    )
                 } else {
-                    format!("{} didn't answer Kumi's undo, so whether it went through isn't known: {note}", words.app)
+                    let text = format!("{} didn't answer Kumi's undo, so whether it went through isn't known: {note}", words.app);
+                    (note, text)
                 };
                 return Ok(Some(UndoResult::with(history.update(entry, ChangeState::Unsure, Some(note)), text, true)));
             }
@@ -637,16 +667,26 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             // A step the DAW's undo doesn't take back (REAPER's repeat, Renoise's mute) is in a plan's step, not undone by
             // it. (What the DAW puts back is exact: its undo of Kumi's own undo step.)
             let only_kumi = outside.contains(&transaction);
+            // (the DAW's undo or redo settles the row: what Kumi didn't know of it before is known now)
+            let settle = |link: &Link<S>| {
+                link.maybe_redone.borrow_mut().remove(&transaction);
+                link.undo_unanswered.borrow_mut().remove(&transaction);
+            };
             match state {
                 ChangeState::Applied | ChangeState::Unsure if undone.contains(&transaction) && !only_kumi => {
+                    settle(self.link());
                     self.history.update(&entry, ChangeState::Undone, Some(format!("Undone with {}.", profile.vocab.own_undo)));
                 }
-                ChangeState::Undone if redone.contains(&transaction) => {
+                // (Unsure: Kumi's undo of it was never answered, and the DAW's undo took that undo's step back)
+                ChangeState::Undone | ChangeState::Unsure if redone.contains(&transaction) => {
+                    settle(self.link());
                     // Kumi may undo it again: with a fresh undo, not the one that answered before.
                     entry.borrow_mut().undo_key = None;
                     self.history.update(&entry, ChangeState::Applied, Some(format!("Put back with {}.", profile.words.app)));
                 }
                 ChangeState::Undone if unsure.contains(&transaction) => {
+                    settle(self.link());
+                    self.link().maybe_redone.borrow_mut().insert(transaction.clone());
                     // (Kumi's undo of it reads back first, and writes only if what Kumi wrote is where it wrote it, untouched)
                     entry.borrow_mut().undo_key = None;
                     let note = format!("{} may have redone it; Kumi can't tell.", profile.words.app);
@@ -990,7 +1030,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             };
             if matches!(state, ChangeState::Applied | ChangeState::Unsure | ChangeState::Kept) {
                 let ending = if crowded.contains(&transaction) { Ending::Crowded } else { Ending::Window };
-                let note = self.link().ending_note(&transaction, ending);
+                let note = self.link().ending_note(&transaction, state, ending);
                 self.history.update(entry, ChangeState::Expired, Some(note));
             }
             released.push(std::mem::take(&mut entry.borrow_mut().transaction_id));
@@ -1008,7 +1048,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 (entry.record.state, entry.transaction_id.clone())
             };
             if matches!(state, ChangeState::Applied | ChangeState::Unsure) {
-                let note = self.link().ending_note(&transaction, ending);
+                let note = self.link().ending_note(&transaction, state, ending);
                 self.history.update(&entry, ChangeState::Expired, Some(note));
             }
         }
@@ -1386,6 +1426,7 @@ mod tests {
             outside_daw_undo: RefCell::default(),
             undo_unanswered: RefCell::default(),
             in_plan: RefCell::default(),
+            maybe_redone: RefCell::default(),
         });
         OwnPlan::new(link, None, None, None)
     }
@@ -1642,16 +1683,20 @@ mod tests {
         link.outside_daw_undo.borrow_mut().insert("t-repeat".into());
         link.undo_unanswered.borrow_mut().insert("t-sent".into());
         link.in_plan.borrow_mut().insert("t-step".into());
+        let applied = ChangeState::Applied;
         for ending in [Ending::Window, Ending::Restart, Ending::Unknown, Ending::Crowded] {
-            let repeat = link.ending_note("t-repeat", ending);
+            let repeat = link.ending_note("t-repeat", applied, ending);
             assert!(repeat.contains("by hand") && !repeat.contains("may still take it back"), "{repeat}");
-            let sent = link.ending_note("t-sent", ending);
+            let sent = link.ending_note("t-sent", ChangeState::Unsure, ending);
             assert!(sent.contains("check it in REAPER") && sent.contains("by hand") && !sent.contains("may still"), "{sent}");
-            let step = link.ending_note("t-step", ending);
+            let step = link.ending_note("t-step", applied, ending);
             assert!(step.contains("takes it back only with the plan's other changes") && !step.contains("may still"), "{step}");
-            assert!(link.ending_note("t-other", ending).ends_with("may still take it back."));
+            assert!(link.ending_note("t-other", applied, ending).ends_with("may still take it back."));
+            // An Unsure row whose apply Kumi never heard back from stays unsure, and says where to look.
+            let unheard = link.ending_note("t-step", ChangeState::Unsure, ending);
+            assert!(unheard.contains("isn't sure it went through") && unheard.contains("with the plan's other changes"), "{unheard}");
         }
-        assert!(link.ending_note("t-other", Ending::Restart).starts_with("Kumi's link to REAPER started again"));
+        assert!(link.ending_note("t-other", applied, Ending::Restart).starts_with("Kumi's link to REAPER started again"));
     }
 
     #[tokio::test]
@@ -1691,6 +1736,46 @@ mod tests {
         // The DAW's undo of it after that is told as ever.
         plan.undone_in_daw(&json!({"undone": ["t-notes"], "redone": []}));
         assert_eq!(entry.borrow().record.state, ChangeState::Undone);
+    }
+
+    #[test]
+    fn an_unsure_row_stays_unsure_when_kumi_can_no_longer_undo_it() {
+        let plan = engine::<super::super::renoise::RenoiseRefs>(&super::super::renoise::DAW, None);
+        let (notes, volume) = (plan.change_kind("notes_write").unwrap(), plan.change_kind("track_volume").unwrap());
+        let row = |id: &str| plan.history.entries.borrow().get(id).map(|entry| entry.borrow().record.clone()).unwrap();
+        // Renoise may have redone lines Kumi undid; an apply Kumi never heard back from; and lines the DAW settled.
+        let redone = plan.remember(notes, ChangeSummary::title("Bass lines"), "t-redone", ChangeState::Applied, None);
+        let unheard = plan.remember(volume, ChangeSummary::title("Kick volume −6 dB"), "t-unheard", ChangeState::Unsure, None);
+        let settled = plan.remember(notes, ChangeSummary::title("Lead lines"), "t-settled", ChangeState::Applied, None);
+        plan.undone_in_daw(&json!({"undone": ["t-redone", "t-settled"], "redone": []}));
+        plan.undone_in_daw(&json!({"undone": [], "redone": [], "unsure": ["t-redone", "t-settled"]}));
+        assert!(plan.link().maybe_redone.borrow().contains("t-settled"));
+        // Renoise's undo of the settled one after that: what it does is known again.
+        plan.undone_in_daw(&json!({"undone": ["t-settled"], "redone": []}));
+        assert!(!plan.link().maybe_redone.borrow().contains("t-settled"), "the DAW's undo settles it");
+        plan.undone_in_daw(&json!({"undone": [], "redone": ["t-settled"]}));
+        assert_eq!(row(&settled).state, ChangeState::Applied);
+        // Kumi's link starts again: each row says what Kumi knows of it.
+        plan.retire_all(Ending::Restart);
+        let note = row(&redone).note.unwrap();
+        assert!(note.contains("Renoise may have redone it (Kumi can't tell)") && note.contains("by hand if it's there"), "{note}");
+        let note = row(&unheard).note.unwrap();
+        assert!(note.contains("Kumi isn't sure it went through") && note.contains("check it in Renoise"), "{note}");
+        let note = row(&settled).note.unwrap();
+        assert!(note.ends_with("may still take it back.") && !note.contains("isn't sure"), "{note}");
+    }
+
+    #[test]
+    fn an_undo_never_answered_is_settled_by_the_daws_undo_of_its_step() {
+        let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, None);
+        let volume = plan.change_kind("track_volume").unwrap();
+        let id = plan.remember(volume, ChangeSummary::title("Vocal volume −6 dB"), "t-sent", ChangeState::Unsure, None);
+        plan.link().undo_unanswered.borrow_mut().insert("t-sent".into());
+        // REAPER's undo took Kumi's undo step back: the undo ran, and the change is back.
+        plan.undone_in_daw(&json!({"undone": [], "redone": ["t-sent"]}));
+        let record = plan.history.entries.borrow().get(&id).map(|entry| entry.borrow().record.clone()).unwrap();
+        assert_eq!(record.state, ChangeState::Applied);
+        assert!(!plan.link().undo_unanswered.borrow().contains("t-sent"), "Kumi may undo it again, as a fresh undo");
     }
 
     fn past_the_window() {
