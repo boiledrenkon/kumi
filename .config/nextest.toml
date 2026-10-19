@@ -38,7 +38,8 @@ fail-fast = false
 # What differs by platform: installing, launching and updating; the terminal and stdin; Hands; paths, files and child
 # processes; the store; and a few smoke tests. The Ableton bridge's install lifecycle runs in `ci` on Linux (in a
 # moment there) and on every platform in `extended` (minutes on Windows). For REAPER and Renoise: their bridges going
-# into the DAWs' own folders (own_providers), and Kumi's host on its loopback sockets to them (bridge, retire, credit).
+# into the DAWs' own folders (own_providers), Kumi's host on its loopback sockets to them (bridge, retire, credit), and
+# whether a bridge's process still runs (processes).
 # The extension REAPER loads is built, loaded and called through its C++ shim on every platform by CI's REAPER job.
 [profile.ci-os]
 default-filter = '''
@@ -53,7 +54,7 @@ default-filter = '''
   | binary(host_probes) | binary(analysis_runner) | binary(sqlite_reader) | binary(native_connected)
   | binary(remote_adapter) | binary(loopback) | binary(ai_transport) | binary(network) | binary(store)
   | binary(willington) | binary(windows_console_control) | binary(windows_stdin) | binary(windows_tty)
-  | binary(own_providers) | binary(bridge) | binary(retire) | binary(credit)
+  | binary(own_providers) | binary(bridge) | binary(retire) | binary(credit) | binary(processes)
 ) & not (
     binary_id(kumi-runtime::live_rendering) | binary_id(kumi-runtime::form) | binary_id(kumi-runtime::video)
   | binary_id(kumi-runtime::listening) | binary_id(kumi-runtime::effects) | binary_id(kumi-runtime::sound)

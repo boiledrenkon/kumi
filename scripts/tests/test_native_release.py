@@ -746,6 +746,20 @@ class NativeRelease(unittest.TestCase):
             with self.subTest(unfit=unfit), self.assertRaises(ValueError):
                 release.renoise_manifest_version(unfit)
 
+    def test_the_reaper_sdks_notice_ships_with_the_extension(self):
+        # Every bundle carries REAPER's extension and THIRD_PARTY_NOTICES.md (see the bundle's test): the notice names the
+        # vendored SDK commit and its copyright, and gives its license word for word; the shim that repeats the SDK's
+        # declaration names that license too.
+        sdk = release.ROOT / release.REAPER_CRATE / "sdk"
+        notices = (release.ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        section = notices.split("\n## REAPER extension SDK (Cockos)", 1)[1].split("\n## ", 1)[0]
+        self.assertIn((sdk / "LICENSE").read_text(encoding="utf-8").strip(), section)
+        self.assertIn(re.search(r"commit ([0-9a-f]{40})", (sdk / "SOURCE.txt").read_text(encoding="utf-8"))[1], section)
+        self.assertIn("Copyright (C) 2006-2015, Cockos Incorporated", section)
+        self.assertIn("Copyright (C) 2006-2015, Cockos Incorporated", (sdk / "reaper_plugin.h").read_text(encoding="utf-8"))
+        self.assertIn("reaper-rs", section)
+        self.assertIn("../sdk/LICENSE", (release.ROOT / release.REAPER_CRATE / "shim/csurf.cpp").read_text(encoding="utf-8"))
+
     def test_every_packaged_document_rewrites_its_links(self):
         revision = "a" * 40
         # A relative link to a missing file raises: every packaged document's links resolve, to another
