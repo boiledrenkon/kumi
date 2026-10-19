@@ -9,10 +9,11 @@ pub enum DawId {
     Ableton,
     Reaper,
     Renoise,
+    Logic,
 }
 
 impl DawId {
-    pub const ALL: [DawId; 3] = [DawId::Ableton, DawId::Reaper, DawId::Renoise];
+    pub const ALL: [DawId; 4] = [DawId::Ableton, DawId::Reaper, DawId::Renoise, DawId::Logic];
 
     /// Its name as files, settings and `--daw` say it.
     pub fn as_str(self) -> &'static str {
@@ -20,6 +21,7 @@ impl DawId {
             DawId::Ableton => "ableton",
             DawId::Reaper => "reaper",
             DawId::Renoise => "renoise",
+            DawId::Logic => "logic",
         }
     }
 
@@ -736,6 +738,64 @@ impl DawProfile {
         },
     };
 
+    /// Logic Pro, through Kumi's own bridge beside it (it reads Logic through macOS Accessibility): its words and
+    /// vocabulary. What it can do grows with each milestone.
+    pub const LOGIC: DawProfile = DawProfile {
+        id: Some(DawId::Logic),
+        words: DawWords { app: "Logic Pro", place: "project", places: "projects", master: "Stereo Out", timeline: "Tracks area" },
+        // FOCUS follows Logic (M2): a channel strip's plug-ins, a region's notes, the Tracks area, the focus and transport
+        // as read; the bridge sees whether Logic records, can open a project, and works Logic's own window.
+        caps: Capabilities {
+            device_tree: true,
+            note_view: true,
+            timeline_strip: true,
+            focus_stream: true,
+            transport_stream: true,
+            recording_state: true,
+            open_project: true,
+            ui_hands: true,
+            ..Capabilities::NONE
+        },
+        vocab: PromptVocab {
+            plan_tool: "make_changes",
+            ref_example: "track:3",
+            recipe_step_example: "a parameter set by its name on a plug-in an earlier step inserted",
+            missing_example: "setting a plug-in's oversampling",
+            goal_instruments: "Alchemy, Retro Synth, Sampler, Quick Sampler or an Audio Unit synth",
+            serial_parallel: "serial insert chains against parallel auxes fed by sends",
+            build_chains: "add aux tracks fed by sends, insert plug-ins on them",
+            keep_candidates: "don't undo them: the producer may want to A/B them",
+            layers: "a summing Track Stack of layers",
+            cant_reach: "Kumi can't reach Logic Pro. Is it open, with Kumi's Logic Pro bridge set up (kumi --daw logic bridge) and Accessibility allowed?",
+            crash_note: "If it crashed, your unsaved changes may be lost.",
+            goal_needs: "Goals need Logic Pro connected, with Kumi's Logic Pro bridge.",
+            render_leftovers: "Kumi couldn't clean up after bouncing; remove what it left in the project by hand.",
+            safety_limiter: "a Limiter",
+            listen_method: "Kumi bounces the part to hear it (seconds, 8 by default, or from_beat and beats), then plays what it chose out loud.",
+            write_notes_tool: "the tool that writes MIDI notes into a region",
+            eq: "Channel EQ",
+            middle_c_octave: 3,
+            structure_moves: UNKNOWN_STRUCTURE_MOVES,
+            library_places: "Logic Pro's Library (patches, channel strip settings and plug-in settings) and its Loop Browser",
+            preset_sources: "Logic Pro's patches, channel strip settings and plug-in settings, and Audio Units' own presets",
+            preset_examples: "(\"Channel EQ\", \"Alchemy\", \"Serum\")",
+            preset_device_hint: "The plug-in it's for: \"Compressor\", \"Alchemy\", \"Serum\"",
+            voice_project: "Logic Pro project",
+            voice_devices: "Channel EQ, Compressor, Alchemy, Retro Synth, Sampler, Quick Sampler, Drum Kit Designer, Space Designer, ChromaVerb and Tape Delay",
+            tutorial_words: "Logic Pro tutorial: Channel EQ, Compressor, Alchemy, Retro Synth, Sampler, Quick Sampler, Drum Kit Designer, Drum Machine Designer, Drummer, Space Designer, ChromaVerb, Tape Delay, Smart Controls, Track Stacks, busses, auxes, sends, Piano Roll, Step Sequencer, Flex Time, sidechain, LFO, envelope, oscillator, Serum, Vital.",
+            own_undo: "Logic Pro's own undo (Cmd-Z in Logic Pro)",
+            refs_retired: "Logic Pro may have moved the tracks, so Kumi's references are retired: read them again before using any.",
+            structure: "tracks",
+            gain_stage: "the channel strip's last Limiter, else a Gain plug-in it adds",
+            eq_name: "Channel EQ",
+            multiband: "Multipressor",
+            bass_mono: "",
+            drum_kit: "a Drum Kit Designer or Drum Machine Designer kit (a pad per sound)",
+            drum_stem_steps: "separate its stems (Stem Splitter), convert the drum stem to MIDI",
+            launcher_clip: "a grid cell",
+        },
+    };
+
     /// The same DAW with nothing it can do now: its words stay (the producer still calls it by its name).
     pub const fn without_caps(self) -> DawProfile {
         DawProfile { caps: Capabilities::NONE, ..self }
@@ -899,23 +959,30 @@ mod tests {
     }
 
     #[test]
-    fn reaper_and_renoise_speak_their_own_words_never_lives() {
+    fn reaper_renoise_and_logic_speak_their_own_words_never_lives() {
         let live = regex::Regex::new(
             r"\b(Live|Set|Sets|Ableton|Session|Arrangement|Remote Script|Control Surface|Main|Drum Rack|Operator|Simpler|EQ Eight|Utility|[Rr]acks?|[Cc]lip slots?|[Ss]cenes?)\b",
         )
         .unwrap();
-        for profile in [DawProfile::REAPER, DawProfile::RENOISE] {
+        for profile in [DawProfile::REAPER, DawProfile::RENOISE, DawProfile::LOGIC] {
             let said = format!("{:?}", profile);
             let found: Vec<&str> = live.find_iter(&said).map(|m| m.as_str()).collect();
             assert!(found.is_empty(), "{:?}: {found:?}", profile.id);
         }
         assert_eq!(DawProfile::REAPER.word_pair(), ("REAPER", "project"));
         assert_eq!(DawProfile::RENOISE.word_pair(), ("Renoise", "song"));
+        assert_eq!(DawProfile::LOGIC.word_pair(), ("Logic Pro", "project"));
+        assert_eq!((DawProfile::LOGIC.words.master, DawProfile::LOGIC.words.timeline), ("Stereo Out", "Tracks area"));
+        // Logic names middle C as Live does; its channel strips, regions and plug-ins are its own words.
+        assert_eq!(DawProfile::LOGIC.note_name(60), "C3");
+        assert_eq!(DawProfile::LOGIC.vocab.eq, "Channel EQ");
+        assert!(DawProfile::LOGIC.caps.device_tree && DawProfile::LOGIC.caps.note_view && DawProfile::LOGIC.caps.timeline_strip);
+        assert!(DawProfile::LOGIC.caps.ui_hands && DawProfile::LOGIC.caps.scripting.is_none() && !DawProfile::LOGIC.caps.undo);
     }
 
     #[test]
     fn every_profile_has_a_structural_change_for_every_gap() {
-        for profile in [DawProfile::ABLETON, DawProfile::UNKNOWN, DawProfile::REAPER, DawProfile::RENOISE] {
+        for profile in [DawProfile::ABLETON, DawProfile::UNKNOWN, DawProfile::REAPER, DawProfile::RENOISE, DawProfile::LOGIC] {
             for (kind, _) in crate::audio::matching::STRUCTURE_MOVES {
                 assert!(profile.vocab.structure_moves.iter().any(|(k, _)| k == kind), "{kind:?}");
             }
@@ -948,6 +1015,8 @@ mod tests {
 
     #[test]
     fn daw_ids_keep_their_names() {
-        assert_eq!(serde_json::to_string(&[DawId::Ableton, DawId::Reaper, DawId::Renoise]).unwrap(), r#"["ableton","reaper","renoise"]"#);
+        assert_eq!(serde_json::to_string(&DawId::ALL).unwrap(), r#"["ableton","reaper","renoise","logic"]"#);
+        assert_eq!(DawId::parse("logic"), Some(DawId::Logic));
+        assert_eq!(DawId::parse("Logic"), None);
     }
 }

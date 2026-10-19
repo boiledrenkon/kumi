@@ -1,6 +1,6 @@
-//! The DAWs whose bridges are Kumi's own (REAPER's extension, Renoise's tool), through Kumi's host, `daw-mcp-server`:
-//! one integration over the host's tools (`status`, `snapshot`, `read`, `focus`, `focus_body`), each DAW giving its
-//! words, its refs and its instructions.
+//! The DAWs whose bridges are Kumi's own (REAPER's extension, Renoise's tool, the bridge beside Logic Pro), through
+//! Kumi's host, `daw-mcp-server`: one integration over the host's tools (`status`, `snapshot`, `read`, `focus`,
+//! `focus_body`), each DAW giving its words, its refs and its instructions.
 use crate::{
     core::{
         context::IntegrationContext,
@@ -51,7 +51,7 @@ const MOST_ROWS: u64 = 200;
 pub struct OwnDaw {
     pub profile: &'static DawProfile,
     pub descriptor: BridgeDescriptor,
-    /// What `daw-mcp-server --daw` takes: "reaper", "renoise".
+    /// What `daw-mcp-server --daw` takes: "reaper", "renoise", "logic".
     pub host_flag: &'static str,
     pub instructions: &'static str,
     /// The model's read tool: its name, what it says and the kinds it takes.
@@ -68,6 +68,11 @@ pub struct OwnDaw {
     pub to_body: fn(&BodyRequest, &Value) -> Option<FocusBody>,
     /// What Kumi can change in it, and how.
     pub changes: &'static super::own_changes::OwnChangeSet,
+    /// Why the DAW answers late, from its bridge's `busy` code (`modal`, `loading`…), in the DAW's words.
+    pub busy_words: fn(&str) -> String,
+    /// What the bridge lacks, from its status's `permission` (Logic's `accessibility`), in words that say how to grant
+    /// it: a look fails for it, and never counts as busy.
+    pub permission_words: fn(&str) -> String,
 }
 
 /// Starts Kumi's host for a DAW: the production one runs `daw-mcp-server`; a test's stand-in answers in its place.
@@ -216,14 +221,19 @@ pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
     Ok(value)
 }
 
-/// Why the DAW may answer late, in words: REAPER's `busy` code.
-fn busy_words(code: &str, profile: &DawProfile) -> String {
+/// Why the DAW may answer late, in words, for a DAW whose `busy` codes are REAPER's (`modal`, `loading`, `rendering`).
+pub fn busy_words(code: &str, profile: &DawProfile) -> String {
     match code {
         "modal" => "a dialog is open".into(),
         "loading" => format!("a {} is loading", profile.words.place),
         "rendering" => "it's rendering".into(),
         other => other.into(),
     }
+}
+
+/// What a permission the bridge lacks means, for a DAW whose bridge runs inside it and lacks none.
+pub fn permission_words(permission: &str, profile: &DawProfile) -> String {
+    format!("Kumi's bridge in {} lacks the {permission} permission", profile.words.app)
 }
 
 impl<S: RefScheme + 'static> OwnIntegration<S> {
@@ -440,7 +450,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                 if last.as_ref() != Some(&seen) {
                     if let Some(on_focus) = &on_focus {
                         let mut filled = (daw.fill_focus)(&focus);
-                        filled.busy = focus.get("busy").and_then(Value::as_str).map(|code| busy_words(code, daw.profile));
+                        filled.busy = focus.get("busy").and_then(Value::as_str).map(|code| (daw.busy_words)(code));
                         on_focus(Some(filled));
                     }
                     last = Some(seen);
@@ -493,6 +503,21 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             self.look_again_later();
         }
         observation
+    }
+
+    /// A look that failed while the DAW is there: for what its bridge lacks (Logic's Accessibility), said in words that
+    /// say how to grant it, else for the reason the bridge gave.
+    async fn unread_for(&self, refused: Refused, signal: &Signal) -> Observation {
+        let lacking = if refused.busy { None } else { self.lacking(signal).await };
+        self.unread(lacking.as_deref().unwrap_or(&refused.why), refused.busy)
+    }
+
+    /// What the bridge lacks, as its status says (`permission`: Logic's `accessibility`), in the DAW's words; None when
+    /// it lacks nothing, or the status can't be read.
+    async fn lacking(&self, signal: &Signal) -> Option<String> {
+        let status = self.call("status", json!({}), signal.clone()).await.ok()?.ok()?;
+        let permission = status.get("permission").and_then(Value::as_str).filter(|permission| !permission.is_empty())?;
+        Some((self.daw.permission_words)(permission))
     }
 
     /// Asks the session for another look a second from now (a few times at most since the last good one).
@@ -784,13 +809,14 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
                 }
                 match self.look(&signal).await {
                     Ok(Ok(snapshot)) => Ok(self.observation(&snapshot, pinned)),
-                    Ok(Err(refused)) if refused.there => Ok(self.unread(&refused.why, refused.busy)),
+                    Ok(Err(refused)) if refused.there => Ok(self.unread_for(refused, &signal).await),
                     Ok(Err(refused)) => Ok(self.no_access(Some(&refused.why))),
                     Err(error) if error.is_aborted() => Err(error),
                     Err(_) => Ok(self.no_access(None)),
                 }
             }
-            Ok(Err(refused)) if refused.there => Ok(self.unread(&refused.why, refused.busy)),
+            // Still there, but the look failed: for what the bridge lacks (a permission), or the DAW's own change.
+            Ok(Err(refused)) if refused.there => Ok(self.unread_for(refused, &signal).await),
             Ok(Err(refused)) => {
                 if self.connected.replace(false) {
                     (self.options.context.on_connection)(ConnectionState::Disconnected, Some(DisconnectCause::Live));

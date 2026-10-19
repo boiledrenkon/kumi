@@ -2,6 +2,7 @@
 //! and the crate root name it: the crate root's constructors for Live come through here.
 pub mod ableton;
 pub mod fallback;
+pub mod logic;
 pub mod none;
 pub mod own_bridge;
 pub mod own_changes;
@@ -26,10 +27,10 @@ pub use ableton::{create_ableton_integration, create_inference_only_integration,
 pub use ableton::{ears, hands};
 
 /// The DAWs this build integrates, by profile: Live, and the DAWs whose bridges are Kumi's own.
-pub const REGISTERED: &[&DawProfile] = &[&DawProfile::ABLETON, &DawProfile::REAPER, &DawProfile::RENOISE];
+pub const REGISTERED: &[&DawProfile] = &[&DawProfile::ABLETON, &DawProfile::REAPER, &DawProfile::RENOISE, &DawProfile::LOGIC];
 
 /// The places a store takes: every registered DAW's.
-pub const PLACES: crate::core::place::Places = crate::core::place::Places(&[DawId::Ableton, DawId::Reaper, DawId::Renoise]);
+pub const PLACES: crate::core::place::Places = crate::core::place::Places(&[DawId::Ableton, DawId::Reaper, DawId::Renoise, DawId::Logic]);
 
 /// A registered DAW's profile; None for one this build doesn't integrate.
 pub fn profile(id: DawId) -> Option<&'static DawProfile> {
@@ -42,6 +43,7 @@ pub fn presentation(id: DawId) -> Option<&'static ToolPresentation> {
         DawId::Ableton => Some(&ableton::presentation::PRESENTATION),
         DawId::Reaper => Some(&reaper::PRESENTATION),
         DawId::Renoise => Some(&renoise::PRESENTATION),
+        DawId::Logic => Some(&logic::PRESENTATION),
     }
 }
 
@@ -51,6 +53,7 @@ pub fn view(id: DawId) -> Option<&'static ViewPresentation> {
         DawId::Ableton => Some(&ableton::presentation::VIEW),
         DawId::Reaper => Some(&reaper::VIEW),
         DawId::Renoise => Some(&renoise::VIEW),
+        DawId::Logic => Some(&logic::VIEW),
     }
 }
 

@@ -1,6 +1,6 @@
 //! Renoise, through Kumi's tool and host: its refs (positions, as Renoise numbers them, under the song's epoch), its
 //! read tool and its instructions. The integration itself is the one every bridge of Kumi's own shares (`own_bridge`).
-use super::own_bridge::{create_own_integration, OwnDaw, OwnOptions};
+use super::own_bridge::{self, create_own_integration, OwnDaw, OwnOptions};
 use super::own_views::{self, body_args, focus_track, selected, view};
 use crate::core::{
     contracts::{Integration, JsonObject},
@@ -31,6 +31,8 @@ pub const DAW: OwnDaw = OwnDaw {
     body_request,
     to_body,
     changes: &super::renoise_changes::CHANGES,
+    busy_words: |code| own_bridge::busy_words(code, &DawProfile::RENOISE),
+    permission_words: |permission| own_bridge::permission_words(permission, &DawProfile::RENOISE),
 };
 
 /// What the producer looks at in Renoise: the middle frame (the pattern or phrase editor, an instrument, the mixer),
