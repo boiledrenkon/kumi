@@ -11,6 +11,7 @@ use kumi_common::abort::Signal;
 use kumi_runtime::core::{
     context::IntegrationContext,
     contracts::*,
+    errors::RuntimeError,
     view::{BodyKind, BodyRequest, DawFocus, FocusBody},
 };
 use kumi_runtime::integrations::{
@@ -357,6 +358,19 @@ async fn reapers_changes_go_through_kumis_host_into_history_and_back_out_as_new_
             assert_eq!(undo_steps.len(), 1, "{undo_steps:?}");
             assert!(undo_steps[0].starts_with("Kumi: Track 1 volume -6 dB and 3 more (k"), "{undo_steps:?}");
 
+            // A look the producer stops (Esc) while REAPER is slow to answer: the host stays, with its journal, and HISTORY
+            // with it (a host started again would retire every change).
+            simulator.hold("snapshot");
+            let stop = Signal::new();
+            let stopper = stop.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                stopper.cancel();
+            });
+            let stopped = reaper.observe(stop, None).await;
+            assert!(stopped.as_ref().is_err_and(RuntimeError::is_aborted), "{:?}", stopped.map(|o| o.label));
+            simulator.release();
+
             // The next look lists them for the model, each applied.
             let again = reaper.observe(Signal::new(), None).await.unwrap();
             let latest = serde_json::from_str::<Value>(&again.context).unwrap()["kumiChanges"].clone();
@@ -547,6 +561,74 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
             let stale = tool(&latest, "track_volume").execute(input(json!({"ref": kick, "volumeDb": -2})), Signal::new()).await.unwrap();
             assert!(stale.is_error && stale.text.starts_with(&format!("{kick} is from before the song changed")), "{}", stale.text);
             renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_change_the_daws_undo_put_back_is_undone_again_and_an_uncertain_one_is_never_undone_blindly() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Reaper);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = ReaperScript::new(3, 0);
+            let mut config = script.config(secret, "/lab/REAPER");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Reaper, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let reaper = create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let state_of = |title: &str| told.borrow().iter().rev().find(|record| record.title == title).map(|record| record.state);
+
+            // Kumi undoes a change; the producer's Cmd-Z takes Kumi's undo back (REAPER names the undo's own step), so the
+            // change is back: HISTORY follows, and Kumi's next undo is made again, not answered from before.
+            let volume = tool(&observed, "track_volume");
+            let made = volume.execute(input(json!({"ref": "track:2", "volumeDb": -6})), Signal::new()).await.unwrap();
+            assert!(!made.is_error, "{}", made.text);
+            let undo = tool(&observed, "undo_change");
+            assert!(!undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap().is_error);
+            assert_eq!(script.volume(1), 0.0);
+            let restore = script.undo_history().last().cloned().unwrap();
+            assert!(restore.starts_with("Kumi: undo "), "{restore}");
+            script.set_volume(1, -6.0);
+            simulator.emit("undone_in_daw", json!({"descs": [restore], "how": "undo"}));
+            for _ in 0..100 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                if state_of("Track 1 volume -6 dB") == Some(ChangeState::Applied) {
+                    break;
+                }
+            }
+            assert_eq!(state_of("Track 1 volume -6 dB"), Some(ChangeState::Applied), "the change is back");
+            let again = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(!again.is_error, "{}", again.text);
+            assert_eq!(script.volume(1), 0.0, "undone again, for real");
+
+            // An apply REAPER took and couldn't say how it ended: Unsure, the plan stops, and Kumi never undoes it blindly.
+            script.uncertain_once();
+            let plan = tool(&observed, "make_changes");
+            let steps = json!({"steps": [
+                {"tool": "track_mute", "input": {"ref": "track:2", "mute": true}},
+                {"tool": "track_volume", "input": {"ref": "track:3", "volumeDb": -9}},
+            ]});
+            let stopped = plan.execute(input(steps), Signal::new()).await.unwrap();
+            assert!(stopped.is_error && stopped.text.contains("may or may not have happened"), "{}", stopped.text);
+            assert_eq!(script.volume(2), 0.0, "the step after it never ran");
+            assert_eq!(state_of("Track 1 muted"), Some(ChangeState::Unsure));
+            let blind = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(blind.is_error && blind.text.contains("won't undo it blindly"), "{}", blind.text);
+            assert_eq!(script.track(1)["mute"], json!(true), "left as REAPER has it");
+            reaper.close().await.unwrap();
             simulator.stop();
         })
         .await;

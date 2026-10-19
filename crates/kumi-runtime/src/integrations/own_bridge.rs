@@ -193,6 +193,15 @@ pub(super) struct Refused {
     pub(super) code: Option<String>,
 }
 
+/// A host call's outcome, with a failure that came of the call's own signal (the caller stopped, or its time ran out) as
+/// Aborted: the MCP client reports both as plain errors, and neither means the host is gone.
+pub(super) fn stopped_or<T>(outcome: Result<T, RuntimeError>, signal: &Signal) -> Result<T, RuntimeError> {
+    match outcome {
+        Err(_) if signal.is_cancelled() => Err(RuntimeError::Aborted),
+        other => other,
+    }
+}
+
 /// The JSON a host tool answered with, or why it couldn't.
 pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
     let text = result
@@ -209,7 +218,8 @@ pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
         return Err(Refused {
             why: value.get("error").and_then(Value::as_str).map(str::to_owned).unwrap_or(text),
             there: value.get("connected") != Some(&Value::Bool(false)),
-            busy: value.get("code").and_then(Value::as_str) == Some("busy"),
+            // The bridge's busy, or the host's own word that the DAW didn't answer in time (a dialog may be open).
+            busy: value.get("code").and_then(Value::as_str) == Some("busy") || value.get("busy") == Some(&Value::Bool(true)),
             code: value.get("code").and_then(Value::as_str).map(str::to_owned),
         });
     }
@@ -315,6 +325,18 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                 None => layout.set(Some(now)),
             }
         }));
+        // The host went away (it exited, or its pipe closed): the next call starts another.
+        let (held, gone) = (self.endpoint.clone(), Rc::downgrade(&endpoint));
+        let undisconnect = endpoint.on_disconnect(Rc::new(move || {
+            let same = held.borrow().as_ref().zip(gone.upgrade()).is_some_and(|(now, it)| Rc::ptr_eq(now, &it));
+            if same {
+                held.borrow_mut().take();
+            }
+        }));
+        let unlisten: Box<dyn Fn()> = Box::new(move || {
+            unlisten();
+            undisconnect();
+        });
         if let Some(before) = self.unlisten.replace(Some(unlisten)) {
             before();
         }
@@ -322,18 +344,13 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
     }
 
     /// A host tool's answer: Ok with its JSON, Err with why (the host's words) when it answered an error.
+    /// The host stays through a failed call (the caller's stop, a time limit): only its going away (`on_disconnect`) lets
+    /// the next call start another, whose journal is empty.
     async fn call(&self, tool: &str, args: Value, signal: Signal) -> Result<Result<Value, Refused>, RuntimeError> {
         let endpoint = self.endpoint(signal.clone()).await?;
         let args = args.as_object().cloned().unwrap_or_default();
         let bounded = abort::any([signal, abort::timeout(CALL_MS)]);
-        match endpoint.call(tool, args, bounded).await {
-            Ok(result) => Ok(answer_of(&result)),
-            Err(error) => {
-                // The host went away: the next call starts it again.
-                self.endpoint.borrow_mut().take();
-                Err(error)
-            }
-        }
+        stopped_or(endpoint.call(tool, args, bounded.clone()).await.map(|result| answer_of(&result)), &bounded)
     }
 
     /// Refs a new epoch made stale go: a positional DAW's refs carry their epoch; a stable DAW's never change.
@@ -883,16 +900,21 @@ pub(super) fn follow_epoch<S: RefScheme>(
 /// Whether a request names something on a track (a track, a device or a parameter), the refs a track shift moves: only
 /// those carry the layout they were made in.
 pub(super) fn names_tracks<S: RefScheme>(scheme: &S, args: &JsonObject) -> bool {
-    ["ref", "parent", "trackRef", "track", "around"].iter().any(|key| match args.get(*key) {
-        Some(Value::String(reference)) => matches!(scheme.kind_of(reference), Some("track" | "device" | "param")),
-        Some(Value::Number(_)) => *key == "track",
-        _ => false,
-    })
+    // Any string anywhere in it (a change's `group`, a list of refs), as the tool looks; a bare track number too.
+    fn walk<S: RefScheme>(scheme: &S, value: &Value, depth: usize) -> bool {
+        match value {
+            Value::String(text) => matches!(scheme.kind_of(text), Some("track" | "device" | "param" | "ptrack" | "slot")),
+            Value::Array(items) if depth < 8 => items.iter().any(|item| walk(scheme, item, depth + 1)),
+            Value::Object(row) if depth < 8 => row.values().any(|item| walk(scheme, item, depth + 1)),
+            _ => false,
+        }
+    }
+    args.get("track").is_some_and(Value::is_number) || args.values().any(|value| walk(scheme, value, 0))
 }
 
 /// An answer's layout against the book's.
 #[derive(Debug, PartialEq, Eq)]
-enum Layout {
+pub(super) enum Layout {
     /// The same (or the DAW's refs aren't positions): its refs name what the book's names do.
     Same,
     /// Newer, and no tracks event brought the book there (one was lost): the book's names went, and it takes the answer's.
@@ -902,7 +924,7 @@ enum Layout {
 }
 
 /// Where an answer's layout stands against the book's. A tracks event on its way is waited for a moment first.
-async fn layout_of<S: RefScheme>(book: &RefCell<Book<S>>, layout: &Cell<Option<u64>>, answered: Option<u64>) -> Layout {
+pub(super) async fn layout_of<S: RefScheme>(book: &RefCell<Book<S>>, layout: &Cell<Option<u64>>, answered: Option<u64>) -> Layout {
     let Some(answered) = answered.filter(|_| book.borrow().scheme.positional()) else { return Layout::Same };
     for _ in 0..4 {
         match layout.get() {
