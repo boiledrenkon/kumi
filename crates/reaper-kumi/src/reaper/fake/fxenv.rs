@@ -852,13 +852,18 @@ fn set_param(owner: u64, index: c_int, param: c_int, value: f64) -> bool {
         let Some(fx) = fx_mut(s, owner, index) else { return false };
         let guid = fx.guid.clone();
         let Some(p) = fx.params.get_mut(param as usize) else { return false };
+        let before = p.value;
         p.value = value.clamp(0.0, 1.0);
         p.shown = p.text_for(p.value);
         let value = p.value;
         if recording {
             record(s, owner, &guid, param, value);
         }
-        s.undo_dirty = true;
+        if s.undo_depth > 0 {
+            s.block_params.entry((guid, param)).or_insert((before, value)).1 = value;
+        } else {
+            s.undo_dirty = true;
+        }
         true
     })
 }
@@ -1075,10 +1080,13 @@ fn named_config(owner: u64, index: c_int, key: *const c_char, buf: *mut c_char, 
             let param: usize = param.parse().ok()?;
             let fx = fx_mut(s, owner, index)?;
             let mut list = macros(fx);
-            (param < list.len()).then(|| {
-                list.remove(param);
-                set_macros(fx, &list);
-            })
+            if param >= list.len() {
+                return None;
+            }
+            list.remove(param);
+            set_macros(fx, &list);
+            s.state_changed = true;
+            Some(())
         });
         return answer.map(|_| write(buf, size, "0")).is_some();
     }
@@ -1157,6 +1165,7 @@ fn set_config(owner: u64, index: c_int, key: *const c_char, value: *const c_char
                 }
                 fx.chunk = Some(value);
                 fx.preset.clear();
+                s.state_changed = true;
                 true
             }
             band if band.starts_with("BANDTYPE") || band.starts_with("BANDENABLED") => {
@@ -1169,7 +1178,15 @@ fn set_config(owner: u64, index: c_int, key: *const c_char, value: *const c_char
             other => {
                 if let Some((param, field)) = other.strip_prefix("param.").and_then(|r| r.split_once('.')) {
                     let first = !fx.config.keys().any(|k| k.starts_with(&format!("param.{param}.")) && !k.contains(".learn."));
+                    // REAPER's state holds a parameter's modulation only while a source of it is on, and its MIDI learn.
+                    let sourced = |fx: &FakeFx| {
+                        ["lfo.active", "acs.active", "plink.active"]
+                            .iter()
+                            .any(|k| fx.config.get(&format!("param.{param}.{k}")).is_some_and(|v| v == "1"))
+                    };
+                    let had = sourced(fx);
                     fx.config.insert(other.to_string(), clamped(field, &value));
+                    let held = had || sourced(fx) || field.starts_with("learn.");
                     // An LFO or a link turned on makes the block and turns the modulation on with it; REAPER marks only those.
                     if (field == "lfo.active" || field == "plink.active") && value == "1" {
                         if first {
@@ -1177,6 +1194,7 @@ fn set_config(owner: u64, index: c_int, key: *const c_char, value: *const c_char
                         }
                         s.undo_dirty = true;
                     }
+                    s.state_changed |= held;
                     return true;
                 }
                 fx.config.insert(other.to_string(), value);

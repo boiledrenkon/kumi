@@ -457,6 +457,13 @@ pub struct State {
     /// of its own and joins the next block that is ended with flags.
     pub undo_depth: i32,
     pub undo_dirty: bool,
+    // m4-r-fxenv
+    /// In a block, each FX parameter written (by FX GUID and index): its value before and its value now. REAPER keeps a
+    /// point for parameter writes only if one ends elsewhere, or something its own state holds changed with them
+    /// (`state_changed`: modulation with a source, MIDI learn, a macro taken off, a state chunk): a nudge there and back
+    /// alone makes none (lab 7.82).
+    pub block_params: HashMap<(String, i32), (f64, f64)>,
+    pub state_changed: bool,
     /// Track states handed out by `GetTrackStateChunk`, by the number in the chunk text.
     pub chunks: Vec<FakeTrack>,
     /// A GUID counter for tracks made by `InsertTrackAtIndex`.
@@ -552,6 +559,8 @@ impl Default for State {
             undo_cur: None,
             undo_depth: 0,
             undo_dirty: false,
+            block_params: HashMap::new(),
+            state_changed: false,
             chunks: vec![],
             made: 0,
             marker_lanes: HashMap::new(),
@@ -2476,7 +2485,13 @@ pub fn producer_edit(desc: &str) {
 }
 
 unsafe extern "C" fn undo_begin_block2(_proj: *mut ReaProject) {
-    with(|s| s.undo_depth += 1);
+    with(|s| {
+        if s.undo_depth == 0 {
+            s.block_params.clear();
+            s.state_changed = false;
+        }
+        s.undo_depth += 1
+    });
 }
 
 unsafe extern "C" fn undo_end_block2(_proj: *mut ReaProject, desc: *const c_char, flags: c_int) {
@@ -2488,10 +2503,14 @@ unsafe extern "C" fn undo_end_block2(_proj: *mut ReaProject, desc: *const c_char
         }
         // REAPER counts a flagged block whether or not it made a point.
         s.state_count += 1;
-        if s.undo_dirty {
+        let params_moved = s.block_params.values().any(|(before, now)| before != now);
+        let noticed = !s.block_params.is_empty() && s.state_changed;
+        if s.undo_dirty || params_moved || noticed {
             push_undo_point(s, &desc);
             s.undo_dirty = false;
         }
+        s.block_params.clear();
+        s.state_changed = false;
     })
 }
 

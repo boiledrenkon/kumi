@@ -988,9 +988,16 @@ fn what_reaper_clamps_is_read_back_and_said() {
     // A baseline on a parameter with no modulation turns the modulation on with it (REAPER keeps none otherwise).
     let (preview, applied) = lab.make("fx-param-mod", json!({"ref": "r:param:{K-MAIN}:0", "baseline": 0.3}));
     assert_eq!(kick_config("param.0.mod.active").as_deref(), Some("1"));
-    assert_eq!(applied["undo"]["entry"], true, "a baseline makes no point by itself: the nudge makes one");
+    // With no source on, REAPER's undo state doesn't hold it: no point (lab 7.82), and the producer is told.
+    assert_eq!(applied["undo"]["entry"], false);
+    assert!(preview["display"]["note"].as_str().unwrap().contains("REAPER's undo doesn't keep this"));
     lab.undo("fx-param-mod", &preview, &applied).unwrap();
     assert_eq!(kick_config("param.0.mod.active").as_deref(), Some("0"));
+    // With an LFO on, a baseline is part of what REAPER keeps: the nudge makes REAPER notice it.
+    lab.make("fx-param-lfo", json!({"ref": "r:param:{K-MAIN}:0", "active": true}));
+    let (preview, applied) = lab.make("fx-param-mod", json!({"ref": "r:param:{K-MAIN}:0", "baseline": 0.6}));
+    assert_eq!(applied["undo"]["entry"], true, "a baseline makes no point by itself: the nudge makes one");
+    assert!(preview["display"].get("note").is_none_or(|note| !note.as_str().unwrap_or_default().contains("doesn't keep")));
 }
 
 #[test]

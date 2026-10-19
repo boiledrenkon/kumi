@@ -303,10 +303,21 @@ pub fn preview(ctx: &Ctx, family: &Family, input: &Value) -> Done<Preview> {
     let keys: Vec<String> = touched.iter().map(|t| t.key.clone()).collect();
     let now = state(ctx, at.at.fx, at.at.holder, &keys);
     let mut display = json!({"title": title(ctx, family, &at, input)});
+    let mut notes = Vec::new();
     if keys.iter().any(|k| k.ends_with(".mod.active")) && input.get("active").is_none()
         || (family.kind != "fx-param-mod" && keys.first().is_some_and(|k| k.ends_with(".mod.active")))
     {
-        display["note"] = "The parameter's modulation is turned on with it (it does nothing while off).".into();
+        notes.push("The parameter's modulation is turned on with it (it does nothing while off).");
+    }
+    // REAPER's undo state holds a parameter's modulation only while a source of it is on (lab 7.82: no point is made).
+    let sourced = ["lfo.active", "acs.active", "plink.active"]
+        .iter()
+        .any(|k| ctx.reaper.fx_config(at.at.fx, &key(at.param, k)).is_some_and(|v| v.trim() == "1"));
+    if family.kind == "fx-param-mod" && !sourced {
+        notes.push("With no LFO, audio control signal or link on, REAPER's undo doesn't keep this; Kumi's undo does.");
+    }
+    if !notes.is_empty() {
+        display["note"] = notes.join(" ").into();
     }
     Ok(Preview { target: target(ctx, &at), prior: json!({"keys": keys, "state": now}), fence: json!({"state": now}), display })
 }
