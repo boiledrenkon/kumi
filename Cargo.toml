@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kumi-common", "crates/kumi-store", "crates/kumi-runtime", "crates/ableton-mcp-server", "crates/kumi"]
+members = ["crates/kumi-common", "crates/kumi-store", "crates/kumi-genexpr", "crates/kumi-runtime", "crates/ableton-mcp-server", "crates/kumi"]
 
 [workspace.package]
 edition = "2021"
@@ -11,6 +11,7 @@ rust-version = "1.89"
 [workspace.dependencies]
 kumi-common = { path = "crates/kumi-common" }
 kumi-store = { path = "crates/kumi-store" }
+kumi-genexpr = { path = "crates/kumi-genexpr" }
 kumi-runtime = { path = "crates/kumi-runtime" }
 ableton-mcp-server = { path = "crates/ableton-mcp-server" }
 
@@ -78,6 +79,19 @@ debug = "line-tables-only"
 [profile.dev.package.serde_json]
 opt-level = 3
 
+# The same for gzip: Sets, presets and the tests' recorded fixtures (tens of megabytes) are gzipped.
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.adler2]
+opt-level = 3
+
+# The GenExpr interpreter runs Kumi's building blocks a sample at a time in their tests: optimized, a song's worth of
+# samples takes a moment instead of minutes.
+[profile.dev.package.kumi-genexpr]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -90,3 +104,5 @@ strip = true
 inherits = "release"
 lto = "off"
 codegen-units = 16
+# Installed and checked, never timed or published: less optimizing, for a build in half the time.
+opt-level = 1
