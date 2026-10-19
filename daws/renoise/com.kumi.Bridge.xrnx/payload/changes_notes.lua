@@ -506,7 +506,7 @@ local function only_emptied(applied)
 end
 
 local MOVED = "the pattern changed in Renoise since Kumi wrote these lines (lines at or above them were changed, inserted or deleted), so Kumi left them as they are: Renoise's own undo can take them back"
-local MOVED_CLEARED = "the pattern track changed in Renoise since Kumi emptied these lines, so where they are now can't be told: Kumi left them as they are, and Renoise's own undo can take them back"
+local MOVED_CLEARED = "the pattern changed in Renoise since Kumi emptied these lines, so where they are now can't be told: Kumi left them as they are, and Renoise's own undo can take them back"
 
 local function apply_of(song, env, input, fence, desc, kind, verb)
   local ok, preview, plan = pcall(preview_of, song, env, input, kind, verb)
@@ -558,6 +558,7 @@ local function apply_of(song, env, input, fence, desc, kind, verb)
       cells = result, columns = read_columns(plan.track),
       -- (what the undo needs to know whether the lines moved since: the touches of the track from here, and its length)
       touch = env.touch_mark and env.touch_mark(plan.p, plan.index) or nil, lines = plan.pattern.number_of_lines,
+      patternTouch = env.pattern_touch_mark and env.pattern_touch_mark(plan.p) or nil,
     },
     display = { title = display.title, before = display.before, after = counts_of(result), note = display.note },
     undo = { desc = desc, entry = true },
@@ -568,7 +569,7 @@ end
 -- Restore
 
 -- (`touched` is the env's touched_since for this pattern track)
-local function restore_plan(pattern_track, restore, lines, touched)
+local function restore_plan(pattern_track, restore, lines, touched, pattern_touched)
   local prior, applied = restore.prior and restore.prior.cells, restore.applied and restore.applied.cells
   if type(prior) ~= "table" or type(applied) ~= "table" or #prior ~= #applied then bad("prior and applied: the cells the change wrote") end
   local kept = restore.applied
@@ -581,7 +582,9 @@ local function restore_plan(pattern_track, restore, lines, touched)
       fail("changed", "Kumi can't tell whether these lines moved in Renoise since (the tool watched the song anew), so Kumi left them as they are")
     end
     if only_emptied(applied) then
-      if any then fail("changed", MOVED_CLEARED) end
+      -- (a row inserted or deleted in the whole pattern moves an emptied region, which shows nothing of it: any touch of the
+      -- pattern since, in any track, refuses)
+      if any or pattern_touched(kept.patternTouch) ~= false then fail("changed", MOVED_CLEARED) end
     elseif lowest and lowest <= region_of(applied).last then
       fail("changed", MOVED)
     end
@@ -638,7 +641,11 @@ local function restore_of(spec_kind, noun)
       if not env.touched_since then return false end
       return env.touched_since(p, index, mark)
     end
-    local todo = restore_plan(pattern_track, restore, pattern.number_of_lines, touched)
+    local function pattern_touched(mark)
+      if not env.pattern_touched_since then return false end
+      return env.pattern_touched_since(p, mark)
+    end
+    local todo = restore_plan(pattern_track, restore, pattern.number_of_lines, touched, pattern_touched)
     local label = string.format("%s on %s", q(pattern_label(pattern, p)), q(base.named(index, track)))
     local place = { pattern = p, track = index }
     local spec = base.KINDS[spec_kind]

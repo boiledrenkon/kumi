@@ -2097,3 +2097,25 @@ test("places, slot × patterns repeating every two: a block made or deleted at t
     ok(note and note:find("isn't put back", 1, true), tostring(note))
   end
 end)
+
+test("touches × lines Kumi emptied: a line changed in another track of the pattern refuses the undo (a row inserted in the whole pattern shows only there)", function()
+  local env, peer = setup(nil, { pattern_lines = 64 })
+  set_c4({ 2, 3 })
+  local previewed, done = bass_clear(peer, 2, 3, "kpc2")
+  mock.song:pattern(1):track(1):line(30):note_column(1).note_string = "C-3" -- Kick, the row inserted in the pattern seen there
+  failure(restore(peer, "notes-clear", record_of(previewed, done), "Kumi: undo c (kpc3)", done.epoch, done.layout), "changed")
+end)
+
+test("places, value × Dest. Track None is the value -1: set through value, and an undo of an aim made from None puts None back", function()
+  local env, peer = setup()
+  routing_catalog()
+  mock.song:track(1):insert_device_at("Audio/Effects/Native/*LFO", 2)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = set_param(peer, place(peer) .. ":device:1.2", { param = "Dest. Track", value = 2 }, "Kumi: aim (kpc4)")
+  ok(done.result, json.encode(done.error or {}))
+  local undone = restore(peer, "device-param", record_of(previewed, done.result), "Kumi: undo (kpc5)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(mock.data.tracks[1].devices[2].params[1].value, -1, "None again")
+  local _, again = set_param(peer, place(peer) .. ":device:1.2", { param = "Dest. Track", value = -1 }, "Kumi: none (kpc6)")
+  ok(again.result, json.encode(again.error or {}))
+end)
