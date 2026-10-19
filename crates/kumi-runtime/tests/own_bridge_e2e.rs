@@ -628,6 +628,20 @@ async fn a_change_the_daws_undo_put_back_is_undone_again_and_an_uncertain_one_is
             let blind = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
             assert!(blind.is_error && blind.text.contains("won't undo it blindly"), "{}", blind.text);
             assert_eq!(script.track(1)["mute"], json!(true), "left as REAPER has it");
+            let note = told.borrow().iter().rev().find(|record| record.title == "Track 1 muted").and_then(|record| record.note.clone());
+            assert!(note.as_deref().is_some_and(|note| note.contains("together with the plan's other changes")), "{note:?}");
+
+            // Kumi's undo REAPER answered without being able to say how it ended: Unsure, with REAPER's own words, and
+            // never sent again.
+            let made = volume.execute(input(json!({"ref": "track:3", "volumeDb": -4})), Signal::new()).await.unwrap();
+            assert!(!made.is_error, "{}", made.text);
+            script.uncertain_restore_once();
+            let unsure = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(unsure.is_error && unsure.text.contains("REAPER didn't confirm Kumi's undo"), "{}", unsure.text);
+            assert!(unsure.text.contains("didn't finish putting it back in time"), "REAPER's words are kept: {}", unsure.text);
+            assert_eq!(state_of("Track 2 volume -4 dB"), Some(ChangeState::Unsure));
+            let again = undo.execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(again.is_error && again.text.contains("won't undo it again"), "{}", again.text);
             reaper.close().await.unwrap();
             simulator.stop();
         })

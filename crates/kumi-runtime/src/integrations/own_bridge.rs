@@ -14,7 +14,7 @@ use crate::{
     },
     integrations::{
         none::no_access,
-        own_changes::{Link, OwnPlan},
+        own_changes::{Ending, Link, OwnPlan},
     },
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
     mcp::types::{CallToolResult, ContentBlock},
@@ -140,6 +140,8 @@ pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, opti
         file: Rc::default(),
         step_titles: RefCell::default(),
         outside_daw_undo: RefCell::default(),
+        undo_unanswered: RefCell::default(),
+        in_plan: RefCell::default(),
     });
     let context = &options.context;
     let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, context.on_change.clone(), context.on_action.clone());
@@ -192,6 +194,8 @@ pub(super) struct Refused {
     pub(super) busy: bool,
     /// The host's code for it (`stale`, `changed`, `failed`…).
     pub(super) code: Option<String>,
+    /// The DAW answered, and couldn't say how it ended (an undo it answered `uncertain`), rather than not answering.
+    pub(super) answered: bool,
 }
 
 /// A host call's outcome, with a failure that came of the call's own signal (the caller stopped, or its time ran out) as
@@ -222,6 +226,7 @@ pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
             // The bridge's busy, or the host's own word that the DAW didn't answer in time (a dialog may be open).
             busy: value.get("code").and_then(Value::as_str) == Some("busy") || value.get("busy") == Some(&Value::Bool(true)),
             code: value.get("code").and_then(Value::as_str).map(str::to_owned),
+            answered: value.get("answered") == Some(&Value::Bool(true)),
         });
     }
     Ok(value)
@@ -266,11 +271,7 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         *self.endpoint.borrow_mut() = Some(endpoint.clone());
         // A host started again has a new journal: Kumi's changes before it can't be undone through it.
         if self.hosts.replace(self.hosts.get() + 1) > 0 {
-            let own_undo = self.daw.profile.vocab.own_undo;
-            self.changes.history.retire(&format!(
-                "Kumi's link to {} started again, so Kumi can't undo this anymore; {own_undo} can.",
-                self.daw.profile.words.app
-            ));
+            self.changes.retire_all(Ending::Restart);
         }
         // Tracks inserted, removed or moved where refs are positions: the book's refs follow what they named.
         let (book, layout, epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());

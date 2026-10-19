@@ -16,10 +16,12 @@ pub const MAX_LIMIT: u64 = 200;
 /// How many times a page the bridge made too big is asked for again with half the rows.
 const SMALLER_PAGES: usize = 4;
 
-/// What a DAW's `read` takes as a kind, and its `focus_body` as a body.
+/// What a DAW's `read` takes as a kind, and its `focus_body` as a body; and the change kinds the DAW's own undo never takes
+/// back (they make no step in its history), so that its undo of a step never counts them, answered or not.
 pub struct Kinds {
     pub read: &'static [&'static str],
     pub bodies: &'static [&'static str],
+    pub outside_undo: &'static [&'static str],
 }
 
 pub fn kinds(daw: Daw) -> Kinds {
@@ -27,10 +29,12 @@ pub fn kinds(daw: Daw) -> Kinds {
         Daw::Reaper => Kinds {
             read: &["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"],
             bodies: &["arrange", "midi", "fx", "routing"],
+            outside_undo: &["loop-repeat"],
         },
         Daw::Renoise => Kinds {
             read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],
             bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
+            outside_undo: &["track-mute", "track-solo", "loop-range", "loop-pattern"],
         },
     }
 }
