@@ -521,7 +521,7 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
 
             // Kumi undoes each as a new step: the mute, the device (the epoch moves again, and Kumi follows), the fader.
             let undo = tool(&again, "undo_change");
-            for title in ["Track 1 muted", "Added EQ 10 to track 1", "Track 1 volume -6 dB"] {
+            for title in ["Track 1 muted", "Added “EQ 10” to “Track 1”", "Track 1 volume -6 dB"] {
                 let id = told.borrow().iter().find(|record| record.title == title).map(|record| record.id.clone()).unwrap();
                 let undone = undo.execute(input(json!({"change": id})), Signal::new()).await.unwrap();
                 assert!(!undone.is_error, "{title}: {}", undone.text);

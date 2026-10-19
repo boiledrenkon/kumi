@@ -322,7 +322,7 @@ impl RenoiseScript {
                         }
                         write(state, &wanted);
                         state.undo.push(desc);
-                        Ok(answer(state, json!({"restored": {field: wanted}, "display": {"title": format!("Track {track} put back")}})))
+                        Ok(answer(state, json!({"restored": {field: wanted}, "display": {"title": format!("{title} (put back)")}})))
                     }
                 }
             }
@@ -332,7 +332,7 @@ impl RenoiseScript {
                 match method {
                     "change_preview" => Ok(answer(
                         state,
-                        json!({"target": {"ref": reference, "kind": "track"}, "prior": {"devices": count + 1}, "fence": {"devices": count + 1}, "display": {"title": format!("Added {path} to track {track}")}}),
+                        json!({"target": {"ref": reference, "kind": "track"}, "prior": {"devices": count + 1}, "fence": {"devices": count + 1}, "display": {"title": format!("Added “{path}” to “Track {track}”")}}),
                     )),
                     "change_apply" => {
                         state.devices.insert(track, count + 1);
@@ -342,7 +342,7 @@ impl RenoiseScript {
                         Ok(answer(
                             state,
                             // Only the devices moved: the tracks are where they were, and their refs from before still name them.
-                            json!({"applied": {"devices": count + 2}, "created": {"ref": made, "kind": "device"}, "display": {"title": format!("Added {path} to track {track}")}, "undo": {"desc": desc, "entry": true}, "kept": {"from": epoch.to_string(), "tracks": true, "kinds": KEPT_BY_DEVICES}}),
+                            json!({"applied": {"devices": count + 2}, "created": {"ref": made, "kind": "device"}, "display": {"title": format!("Added “{path}” to “Track {track}”")}, "undo": {"desc": desc, "entry": true}, "kept": {"from": epoch.to_string(), "tracks": true, "kinds": KEPT_BY_DEVICES}}),
                         ))
                     }
                     _ => {
@@ -357,7 +357,7 @@ impl RenoiseScript {
                         state.undo.push(desc);
                         Ok(answer(
                             state,
-                            json!({"restored": {"devices": count}, "display": {"title": "Device deleted"}, "kept": {"from": epoch.to_string(), "tracks": true, "kinds": KEPT_BY_DEVICES}}),
+                            json!({"restored": {"devices": count}, "display": {"title": format!("Removed “{path}” from “Track {track}” (put back)")}, "kept": {"from": epoch.to_string(), "tracks": true, "kinds": KEPT_BY_DEVICES}}),
                         ))
                     }
                 }
