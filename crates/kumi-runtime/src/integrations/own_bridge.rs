@@ -900,16 +900,21 @@ pub(super) fn follow_epoch<S: RefScheme>(
 /// Whether a request names something on a track (a track, a device or a parameter), the refs a track shift moves: only
 /// those carry the layout they were made in.
 pub(super) fn names_tracks<S: RefScheme>(scheme: &S, args: &JsonObject) -> bool {
-    ["ref", "parent", "trackRef", "track", "around"].iter().any(|key| match args.get(*key) {
-        Some(Value::String(reference)) => matches!(scheme.kind_of(reference), Some("track" | "device" | "param")),
-        Some(Value::Number(_)) => *key == "track",
-        _ => false,
-    })
+    // Any string anywhere in it (a change's `group`, a list of refs), as the tool looks; a bare track number too.
+    fn walk<S: RefScheme>(scheme: &S, value: &Value, depth: usize) -> bool {
+        match value {
+            Value::String(text) => matches!(scheme.kind_of(text), Some("track" | "device" | "param" | "ptrack" | "slot")),
+            Value::Array(items) if depth < 8 => items.iter().any(|item| walk(scheme, item, depth + 1)),
+            Value::Object(row) if depth < 8 => row.values().any(|item| walk(scheme, item, depth + 1)),
+            _ => false,
+        }
+    }
+    args.get("track").is_some_and(Value::is_number) || args.values().any(|value| walk(scheme, value, 0))
 }
 
 /// An answer's layout against the book's.
 #[derive(Debug, PartialEq, Eq)]
-enum Layout {
+pub(super) enum Layout {
     /// The same (or the DAW's refs aren't positions): its refs name what the book's names do.
     Same,
     /// Newer, and no tracks event brought the book there (one was lost): the book's names went, and it takes the answer's.
@@ -919,7 +924,7 @@ enum Layout {
 }
 
 /// Where an answer's layout stands against the book's. A tracks event on its way is waited for a moment first.
-async fn layout_of<S: RefScheme>(book: &RefCell<Book<S>>, layout: &Cell<Option<u64>>, answered: Option<u64>) -> Layout {
+pub(super) async fn layout_of<S: RefScheme>(book: &RefCell<Book<S>>, layout: &Cell<Option<u64>>, answered: Option<u64>) -> Layout {
     let Some(answered) = answered.filter(|_| book.borrow().scheme.positional()) else { return Layout::Same };
     for _ in 0..4 {
         match layout.get() {

@@ -135,13 +135,19 @@ impl RefScheme for RenoiseRefs {
     }
     fn moved(&self, shift: &Shift, reference: &str) -> Moved {
         let Some((epoch, kind, mut numbers)) = parts(reference) else { return Moved::Same };
-        if !matches!(kind, "track" | "device" | "param") || numbers.is_empty() {
+        // Which of its numbers is a track's: the first, but a pattern track's second (pattern.track).
+        let at = match kind {
+            "track" | "device" | "param" | "slot" => 0,
+            "ptrack" => 1,
+            _ => return Moved::Same,
+        };
+        if numbers.len() <= at {
             return Moved::Same;
         }
-        match moved_index(numbers[0], &shift.tracks_gone, &shift.tracks_made) {
-            Some(now) if now == numbers[0] => Moved::Same,
+        match moved_index(numbers[at], &shift.tracks_gone, &shift.tracks_made) {
+            Some(now) if now == numbers[at] => Moved::Same,
             Some(now) => {
-                numbers[0] = now;
+                numbers[at] = now;
                 let numbers: Vec<String> = numbers.iter().map(usize::to_string).collect();
                 Moved::To(format!("{epoch}:{kind}:{}", numbers.join(".")))
             }

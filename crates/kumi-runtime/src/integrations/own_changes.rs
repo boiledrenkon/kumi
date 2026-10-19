@@ -1,7 +1,9 @@
 //! Kumi's changes in a DAW whose bridge is its own (REAPER's extension, Renoise's tool): each one previewed and applied
 //! through the host's journal (`change_preview`, `change_apply`), kept in HISTORY, and undone as a new step of the
 //! DAW's (`change_undo`), never by the DAW's own undo. Plans run through core's plan engine over the DAW's kinds.
-use super::own_bridge::{answer_of, follow_epoch, names_tracks, note_epoch, stopped_or, OwnDaw, Refused, CALL_MS, SHORT_REF};
+use super::own_bridge::{
+    answer_of, follow_epoch, layout_of, names_tracks, note_epoch, stopped_or, Layout, OwnDaw, Refused, CALL_MS, SHORT_REF,
+};
 use crate::{
     core::{
         contracts::*,
@@ -386,6 +388,10 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
         let (state, note) = match refused.code.as_deref() {
             Some("changed") => (ChangeState::Kept, format!("It changed in {} since, so Kumi left it as it is.", words.app)),
             Some("gone") => (ChangeState::Kept, format!("What it changed is gone from the {}, so there's nothing to undo.", words.place)),
+            Some("stale") if self.link.book.borrow().scheme.positional() => (
+                ChangeState::Kept,
+                format!("What it changed moved in the {} since (something was added, removed or moved), so Kumi left it.", words.place),
+            ),
             Some("stale") => (
                 ChangeState::Kept,
                 format!("The {} changed since (another one is open, or it was reloaded), so Kumi left it.", words.place),
@@ -393,11 +399,9 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
             Some("undone") => return Ok(Some(history.undone(entry))),
             Some("unknown") => (ChangeState::Expired, format!("Kumi can't undo this anymore; {} can.", self.link.words().vocab.own_undo)),
             Some("not-applied") if snapshot.record.state == ChangeState::Unsure => {
-                (ChangeState::Unsure, format!("Whether this change reached {} isn't known, so Kumi won't undo it blindly.", words.app))
+                (ChangeState::Unsure, unsure_note(self.link.words(), &snapshot.record.title))
             }
-            Some("uncertain") => {
-                (ChangeState::Unsure, format!("Whether this change reached {} isn't known, so Kumi won't undo it blindly.", words.app))
-            }
+            Some("uncertain") => (ChangeState::Unsure, unsure_note(self.link.words(), &snapshot.record.title)),
             // Busy (a dialog, a render) or another refusal with nothing written: the change stays as it was, undoable.
             Some("busy") => {
                 return Ok(Some(UndoResult::with(
@@ -638,8 +642,16 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 ))
             }
             Ok(Err(refused)) => return ChangeOutcome::error(self.refusal(&refused, &asked)),
-            Err(error) if error.is_aborted() => {
+            // The producer stopped it: the plan is stopping anyway.
+            Err(error) if error.is_aborted() && signal.is_cancelled() => {
                 return ChangeOutcome::error(format!("Stopped before {} was asked: nothing changed", words.app))
+            }
+            // No answer in time (a dialog may be open): a preview writes nothing, and the plan stops here.
+            Err(error) if error.is_aborted() => {
+                return ChangeOutcome::stop(format!(
+                    "{} didn't answer in time (a dialog may be open), so this wasn't made and nothing of it was written; in a plan, the steps after it weren't run and the ones before it stand, each undoable",
+                    words.app
+                ))
             }
             Err(_) => return ChangeOutcome::error(self.link().words().vocab.cant_reach),
         };
@@ -674,7 +686,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                     kind.summary(&title, None, None),
                     &transaction,
                     ChangeState::Unsure,
-                    Some(format!("{} didn't confirm this change.", words.app)),
+                    Some(unsure_note(self.link().words(), &title)),
                 );
                 return ChangeOutcome::stop(format!(
                     "{} didn't confirm this change ({title}), so it may or may not have happened: read it before going on",
@@ -699,7 +711,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                     kind.summary(&title, None, None),
                     &transaction,
                     ChangeState::Unsure,
-                    Some(format!("{} didn't answer this change.", words.app)),
+                    Some(unsure_note(self.link().words(), &title)),
                 );
                 return ChangeOutcome::stop(format!(
                     "{} didn't answer this change ({title}), so it may or may not have happened: read it before going on",
@@ -729,8 +741,15 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             None => title,
         };
         let mut reply = json!({"changed": changed, "change": id});
+        // The ref it made is named once the book is at the answer's layout (its tracks event may still be on its way); an
+        // answer the book has moved past since would name it from before a shift, so it isn't named (a read names it).
         if let Some(made) = applied.pointer("/created/ref").and_then(Value::as_str) {
-            reply["ref"] = json!(self.link().book.borrow_mut().short_ref(made));
+            let layout = applied.get("layout").and_then(Value::as_u64);
+            if layout_of(&self.link().book, &self.link().layout, layout).await != Layout::Older {
+                reply["ref"] = json!(self.link().book.borrow_mut().short_ref(made));
+            } else {
+                reply["refNote"] = json!(format!("Tracks moved in {} meanwhile: read again for the ref of what this made", words.app));
+            }
         }
         if let Some(restored) = applied.pointer("/applied/base") {
             reply["base"] = self.link().book.borrow_mut().shorten(restored);
@@ -841,6 +860,16 @@ fn copy_beside(path: &Path) -> Option<String> {
         let _ = std::fs::remove_file(old);
     }
     Some(copy.to_string_lossy().into_owned())
+}
+
+/// What an Unsure row tells the producer: Kumi won't undo blindly what may not have happened, so where to look, and how
+/// to take it back if it did.
+fn unsure_note(profile: &DawProfile, title: &str) -> String {
+    format!(
+        "Kumi isn't sure this went through ({title}): check it in {app}, and {own_undo} takes it back if it did.",
+        app = profile.words.app,
+        own_undo = profile.vocab.own_undo
+    )
 }
 
 /// The first short ref a request names that lengthening left short: one this turn doesn't know.
@@ -1160,6 +1189,75 @@ mod tests {
         let (book, epoch, layout) = fresh();
         follow_epoch(&book, &epoch, &layout, &json!({"epoch": "3", "layout": 9, "kept": {"from": "2", "tracks": true}}));
         assert_eq!((named(&book), layout.get()), ([false, false, false], Some(9)));
+    }
+
+    #[test]
+    fn a_layout_goes_with_any_request_naming_a_track_anywhere_and_renoises_refs_follow_their_track() {
+        use super::super::{own_bridge::names_tracks, renoise::RenoiseRefs};
+        use crate::core::refs::{Moved, Shift};
+        let asks = |value: Value| names_tracks(&RenoiseRefs, value.as_object().unwrap());
+        assert!(asks(json!({"type": "sequencer", "group": "1:track:2"})), "track_add's group");
+        assert!(asks(json!({"lines": [{"line": 1}], "track": "1:track:3", "pattern": "1:pattern:1"})));
+        assert!(asks(json!({"refs": ["1:device:2.3"]})) && asks(json!({"track": 3})));
+        assert!(!asks(json!({"bpm": 120})) && !asks(json!({"pattern": "1:pattern:2"})));
+        let shift = Shift { tracks_made: vec![1], ..Shift::default() };
+        assert_eq!(
+            RenoiseRefs.moved(&shift, "1:ptrack:3.2"),
+            Moved::To("1:ptrack:3.3".into()),
+            "a pattern track's track is its second number"
+        );
+        assert_eq!(RenoiseRefs.moved(&shift, "1:slot:2.4"), Moved::To("1:slot:3.4".into()));
+        assert_eq!(RenoiseRefs.moved(&shift, "1:pattern:2"), Moved::Same);
+    }
+
+    /// A host that never answers in time.
+    struct Silent;
+    #[async_trait(?Send)]
+    impl McpEndpoint for Silent {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        fn server_info(&self) -> Option<crate::mcp::types::Implementation> {
+            None
+        }
+        async fn list(&self, _: Option<&str>, _: Signal) -> Result<crate::mcp::types::ListToolsResult, RuntimeError> {
+            Err(RuntimeError::plain("silent"))
+        }
+        async fn call(&self, _: &str, _: JsonObject, signal: Signal) -> Result<crate::mcp::types::CallToolResult, RuntimeError> {
+            signal.cancelled().await;
+            Err(RuntimeError::plain("MCP request cancelled"))
+        }
+        fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+            Box::new(|| {})
+        }
+        fn stderr_status(&self) -> crate::mcp::client::StderrStatus {
+            crate::mcp::client::StderrStatus { bytes: 0, truncated: false }
+        }
+        async fn close(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_preview_with_no_answer_in_time_stops_the_plan_and_one_the_producer_stopped_says_so() {
+        let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, None);
+        *plan.link().endpoint.borrow_mut() = Some(Rc::new(Silent));
+        let tempo = plan.change_kind("tempo_set").unwrap();
+        // Its time ran out (here: the link closed): nothing was written, and the plan stops.
+        let lifetime_over = plan.link().lifetime.clone();
+        lifetime_over.cancel();
+        let late = plan.one_change(tempo, json!({"bpm": 124}).as_object().unwrap().clone(), Signal::new()).await;
+        assert!(late.stops && late.text.contains("didn't answer in time"), "{}", late.text);
+        // Stopped by the producer: says it stopped.
+        let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, None);
+        *plan.link().endpoint.borrow_mut() = Some(Rc::new(Silent));
+        let stop = Signal::new();
+        stop.cancel();
+        let stopped = plan.one_change(tempo, json!({"bpm": 124}).as_object().unwrap().clone(), stop).await;
+        assert!(stopped.text.starts_with("Stopped before REAPER was asked"), "{}", stopped.text);
     }
 
     #[test]
