@@ -616,7 +616,9 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         } else {
             (ids("transactionIds"), vec![])
         };
-        if undone.is_empty() && redone.is_empty() {
+        // (what the DAW may have put back: it can't say whether its redo did, or its undo of something older)
+        let unsure = ids("unsure");
+        if undone.is_empty() && redone.is_empty() && unsure.is_empty() {
             return;
         }
         let profile = self.link().words();
@@ -641,6 +643,12 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                     // Kumi may undo it again: with a fresh undo, not the one that answered before.
                     entry.borrow_mut().undo_key = None;
                     self.history.update(&entry, ChangeState::Applied, Some(format!("Put back with {}.", profile.words.app)));
+                }
+                ChangeState::Undone if unsure.contains(&transaction) => {
+                    // (Kumi's undo of it reads back first, and writes only if what Kumi wrote is where it wrote it, untouched)
+                    entry.borrow_mut().undo_key = None;
+                    let note = format!("{} may have redone it; Kumi can't tell.", profile.words.app);
+                    self.history.update(&entry, ChangeState::Unsure, Some(note));
                 }
                 _ => {}
             }
@@ -1648,6 +1656,23 @@ mod tests {
         // The producer's Cmd-Z of Kumi's undo step brings it back: HISTORY follows.
         plan.undone_in_daw(&json!({"undone": [], "redone": ["t-undone"]}));
         assert_eq!(entry.borrow().record.state, ChangeState::Applied);
+    }
+
+    #[test]
+    fn lines_the_daw_may_have_put_back_are_unsure_not_put_back() {
+        let plan = engine::<super::super::renoise::RenoiseRefs>(&super::super::renoise::DAW, None);
+        let notes = plan.change_kind("notes_write").unwrap();
+        let id = plan.remember(notes, ChangeSummary::title("Bass lines"), "t-notes", ChangeState::Applied, None);
+        let entry = plan.history.entries.borrow().get(&id).cloned().unwrap();
+        plan.undone_in_daw(&json!({"undone": ["t-notes"], "redone": []}));
+        assert_eq!(entry.borrow().record.state, ChangeState::Undone);
+        plan.undone_in_daw(&json!({"undone": [], "redone": [], "unsure": ["t-notes"]}));
+        let record = entry.borrow().record.clone();
+        assert_eq!(record.state, ChangeState::Unsure);
+        assert_eq!(record.note.as_deref(), Some("Renoise may have redone it; Kumi can't tell."));
+        // The DAW's undo of it after that is told as ever.
+        plan.undone_in_daw(&json!({"undone": ["t-notes"], "redone": []}));
+        assert_eq!(entry.borrow().record.state, ChangeState::Undone);
     }
 
     fn past_the_window() {

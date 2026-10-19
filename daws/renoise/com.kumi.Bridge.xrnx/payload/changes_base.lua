@@ -601,13 +601,20 @@ function M.journal_check(journal)
         return spec.read(object, entry.applied)
       end)
       if ok and now ~= nil then
-        if entry.state == "applied" and spec.same(now, entry.prior) and not spec.same(now, entry.applied) then
+        if (entry.state == "applied" or entry.state == "unsure") and spec.same(now, entry.prior) and not spec.same(now, entry.applied) then
           entry.state = "undone"
           stamp(journal, entry)
           queue(journal, entry.desc, "undo")
         elseif entry.state == "undone" and spec.same(now, entry.applied) and redoable(journal, entry) then
-          entry.state = "applied"
-          queue(journal, entry.desc, "redo")
+          if spec.unsure_redo then
+            -- (Renoise doesn't say which step its undo or redo took: lines that read as Kumi wrote them again may be its redo
+            -- of Kumi's step, or its undo past it of an older row insert that put the producer's like lines there)
+            entry.state = "unsure"
+            queue(journal, entry.desc, "unsure")
+          else
+            entry.state = "applied"
+            queue(journal, entry.desc, "redo")
+          end
         end
       end
     end
@@ -619,7 +626,7 @@ end
 -- brings it back, which is told as a redo).
 function M.note_restored(journal, kind, place, applied, spec)
   for _, entry in ipairs(journal.entries) do
-    if entry.kind == kind and entry.state == "applied" and
+    if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and
       (entry.shape or (M.same_table(entry.place, place) and spec and spec.same(entry.applied, applied))) then
       entry.state = "undone"
       stamp(journal, entry)

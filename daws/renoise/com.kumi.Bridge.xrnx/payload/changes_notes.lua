@@ -498,6 +498,26 @@ local function region_of(cells)
   return { first = first, last = last }
 end
 
+-- How far a shift can stay unseen below Kumi's lines: a row deleted inside a run of like lines changes only the line where the
+-- run ends, and one inserted among empty lines only the line after them. So per column Kumi wrote (Renoise also shifts one
+-- column alone), the run of cells like its last one goes on to `e`, and a shift that moved Kumi's lines changed a line at or
+-- above `e + 1` (lab: only lines whose content changed notify). The answer is that bound: the lowest line a touch may be at
+-- and still leave Kumi's lines where they were is below it.
+local function stretch_bound(pattern_track, cells, lines)
+  local last = {}
+  for _, cell in ipairs(cells) do
+    local column = cell.kind .. cell.col
+    if not last[column] or cell.line > last[column].line then last[column] = cell end
+  end
+  local bound = 0
+  for _, cell in pairs(last) do
+    local like, e = read_cell(pattern_track, cell), cell.line
+    while e < lines and same_cell(read_cell(pattern_track, { line = e + 1, kind = cell.kind, col = cell.col }), like) do e = e + 1 end
+    bound = math.max(bound, e + 1)
+  end
+  return bound
+end
+
 local function only_emptied(applied)
   for _, cell in ipairs(applied) do
     if not is_empty_cell(cell) then return false end
@@ -559,6 +579,7 @@ local function apply_of(song, env, input, fence, desc, kind, verb)
       -- (what the undo needs to know whether the lines moved since: the touches of the track from here, and its length)
       touch = env.touch_mark and env.touch_mark(plan.p, plan.index) or nil, lines = plan.pattern.number_of_lines,
       patternTouch = env.pattern_touch_mark and env.pattern_touch_mark(plan.p) or nil,
+      bound = stretch_bound(plan.pattern_track, result, plan.pattern.number_of_lines),
     },
     display = { title = display.title, before = display.before, after = counts_of(result), note = display.note },
     undo = { desc = desc, entry = true },
@@ -577,16 +598,26 @@ local function restore_plan(pattern_track, restore, lines, touched, pattern_touc
     if type(kept.lines) == "number" and kept.lines ~= lines then
       fail("changed", "the pattern's length changed in Renoise since Kumi wrote these lines, so Kumi left them as they are")
     end
-    local any, lowest = touched(kept.touch)
+    local any, lowest, undone, own_undone = touched(kept.touch)
     if any == nil then
       fail("changed", "Kumi can't tell whether these lines moved in Renoise since (the tool watched the song anew), so Kumi left them as they are")
+    end
+    -- (Renoise's own undo or redo of Kumi's step changes only Kumi's lines; one that changed others undid past it, an older row
+    -- insert perhaps, and is a touch like the producer's)
+    local mine = {}
+    for _, cell in ipairs(applied) do mine[cell.line] = true end
+    local undone_lowest
+    for line in pairs(undone) do
+      if not mine[line] and (not undone_lowest or line < undone_lowest) then undone_lowest = line end
     end
     if only_emptied(applied) then
       -- (a row inserted or deleted in the whole pattern moves an emptied region, which shows nothing of it: any touch of the
       -- pattern since, in any track, refuses)
-      if any or pattern_touched(kept.patternTouch) ~= false then fail("changed", MOVED_CLEARED) end
-    elseif lowest and lowest <= region_of(applied).last then
-      fail("changed", MOVED)
+      local pattern_any, pattern_undone = pattern_touched(kept.patternTouch)
+      if any or undone_lowest or pattern_any ~= false or (pattern_undone or 0) > own_undone then fail("changed", MOVED_CLEARED) end
+    else
+      local bound = type(kept.bound) == "number" and kept.bound or region_of(applied).last
+      if (lowest and lowest <= bound) or (undone_lowest and undone_lowest <= bound) then fail("changed", MOVED) end
     end
   end
   local todo = {}
@@ -638,7 +669,7 @@ local function restore_of(spec_kind, noun)
   return function(song, env, restore, desc)
     local p, index, track, pattern_track, pattern = locate_restored(song, env, restore)
     local function touched(mark)
-      if not env.touched_since then return false end
+      if not env.touched_since then return false, nil, {}, 0 end
       return env.touched_since(p, index, mark)
     end
     local function pattern_touched(mark)
@@ -667,8 +698,19 @@ local function restore_of(spec_kind, noun)
       return restored_answer(env, display, desc)
     end
     -- Too much for one callback: numbered steps, each its own callback and undo step. The job stops when tracks, patterns or lines
-    -- were inserted or removed between them (it holds a track's number, and the producer's change may have moved it): the steps done
-    -- stay, and undoing again puts back the rest (cells already back are skipped).
+    -- were inserted or removed between them (it holds a track's number, and the producer's change may have moved it), or when
+    -- anything in the pattern was touched (a row shifted, a note typed: the later steps would write over it): the steps done
+    -- stay, the answer says how many, and nothing further is written.
+    local track_mark = env.touch_mark and env.touch_mark(p, index) or nil
+    local pattern_mark = env.pattern_touch_mark and env.pattern_touch_mark(p) or nil
+    local function still(k)
+      local any, _, undone = touched(track_mark)
+      local pattern_any, pattern_undone = pattern_touched(pattern_mark)
+      if any ~= false or next(undone or {}) ~= nil or pattern_any ~= false or (pattern_undone or 0) > 0 then
+        fail("uncertain", string.format("the pattern was changed in Renoise while Kumi put the lines back in %s, so Kumi stopped "
+          .. "before step %d", label, k))
+      end
+    end
     return {
       kumi_job = function(job)
         local total = #chunks
@@ -678,6 +720,7 @@ local function restore_of(spec_kind, noun)
             if k > 1 then
               job.step(base.STEP_GAP_MS)
               base.wait_while_busy(job, env)
+              still(k)
             end
             local live = the_song()
             local live_pattern_track = live:pattern(p):track(index)
@@ -694,8 +737,10 @@ local function restore_of(spec_kind, noun)
           end
         end)
         if not ok then
-          if type(err) == "table" and err.message then
-            err = { code = err.code, message = string.format("%s; %d of %d steps are put back: undo again to put back the rest", err.message, done_steps, total) }
+          if type(err) == "table" and err.message and done_steps > 0 then
+            -- (lines half put back: what Kumi changed is neither as it made it nor as it was)
+            err = { code = "uncertain", message = string.format("%s; %d of %d steps are put back and nothing further was written: "
+              .. "Renoise's own undo can take those steps back", err.message, done_steps, total) }
           end
           error(err, 0)
         end
@@ -720,6 +765,7 @@ local function register(kind, verb, noun)
     apply = function(song, env, input, fence, desc) return apply_of(song, env, input, fence, desc, kind, verb) end,
     restore = restore_of(kind, noun),
     same = same_state,
+    unsure_redo = true,
     reread = function(song, place)
       if place.pattern > #song.patterns or place.track > rows.track_count(song) then return nil end
       local pattern_track = song:pattern(place.pattern):track(place.track)
@@ -757,6 +803,7 @@ end
 local clear = {
   kind = "notes-clear", custom = true,
   same = same_state,
+  unsure_redo = true,
 }
 clear.reread = base.KINDS["notes-write"].reread
 clear.read = base.KINDS["notes-write"].read
