@@ -1374,6 +1374,61 @@ fn envelope_reads_give_points_automation_items_and_a_takes_envelopes_by_their_re
     assert_eq!(lab.call("read", json!({"kind": "autoitem", "parent": "r:env:take:{TAKE-K1}:{NOPE}"})).unwrap_err().0, "failed");
 }
 
+#[test]
+fn reads_of_points_automation_items_and_a_big_state_stay_inside_the_frame_and_every_row_is_reachable() {
+    let lab = envelope_lab();
+    let walk = |kind: &str, parent: &str, total: usize| {
+        let (mut seen, mut cursor) = (0, Value::Null);
+        loop {
+            let mut params = json!({"kind": kind, "parent": parent, "limit": 200});
+            if cursor.is_string() {
+                params["cursor"] = cursor.clone();
+            }
+            let page = lab.read(params);
+            assert!(serde_json::to_string(&page).unwrap().len() <= 256 * 1024, "{kind}");
+            assert_eq!(page["total"], total, "{kind}");
+            seen += page["items"].as_array().unwrap().len();
+            cursor = page["nextCursor"].clone();
+            if !cursor.is_string() {
+                return seen;
+            }
+        }
+    };
+    // 20,000 points (the most Kumi changes in a lane) and 300 automation items.
+    state(|s| {
+        let envelope = &mut s.tracks[1].envelopes[0];
+        envelope.pts = Some((0..20_000).map(|i| FakePoint::at(i as f64 * 0.01, 716.0)).collect());
+        envelope.items = (0..300)
+            .map(|i| FakeAutoItem {
+                pool: i + 1,
+                position: 300.0 + i as f64,
+                length: 0.5,
+                offset: 0.0,
+                rate: 1.0,
+                baseline: 0.5,
+                amplitude: 1.0,
+                looped: true,
+                mute: false,
+                selected: false,
+            })
+            .collect();
+        s.state_count += 1;
+    });
+    assert_eq!(walk("point", KICK_VOLUME, 20_000), 20_000);
+    assert_eq!(walk("autoitem", KICK_VOLUME, 300), 300);
+    let made_up = lab.call("read", json!({"kind": "point", "parent": KICK_VOLUME, "cursor": "19999"}));
+    assert_eq!(made_up.unwrap_err().0, "bad-params", "a cursor is only what a page gave");
+    // A plug-in's state past what a read carries (the fake's is its 8,000 values, 17 bytes each): its size and hash.
+    state(|s| {
+        s.tracks[1].fx[0].chunk = Some(String::new());
+        s.tracks[1].fx[0].params = (0..8000).map(|i| FakeParam::new(&format!("P{i}"), 0.5, "50")).collect();
+    });
+    let answer = lab.read(json!({"ref": fx_ref("{K-MAIN}")}));
+    assert!(serde_json::to_string(&answer).unwrap().len() <= 256 * 1024);
+    let detail = &answer["items"][0]["state"];
+    assert_eq!((detail["bytes"].clone(), detail.get("chunk").is_none(), detail["hash"].is_string()), (json!(8000 * 17 - 1), true, true));
+}
+
 // ----- FX chain files saved -----
 
 #[test]

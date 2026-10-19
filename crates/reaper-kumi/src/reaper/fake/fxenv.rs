@@ -1575,7 +1575,24 @@ unsafe extern "C" fn count_envelope_points(envelope: *mut TrackEnvelope) -> c_in
 }
 
 unsafe extern "C" fn count_envelope_points_ex(envelope: *mut TrackEnvelope, item: c_int) -> c_int {
-    counted(|s| lane_points(s, envelope as u64, item).map_or(0, |p| p.len() as c_int))
+    counted(|s| lane_point(s, envelope as u64, item, None).map_or(0, |(count, _)| count as c_int))
+}
+
+/// A lane's point count, and one of its points, without copying the lane (a read pages through big lanes).
+fn lane_point(s: &State, handle: u64, item: c_int, index: Option<usize>) -> Option<(usize, Option<FakePoint>)> {
+    let e = envelope_of(s, handle)?;
+    if item < 0 {
+        return Some(match &e.pts {
+            Some(points) => (points.len(), index.and_then(|i| points.get(i).cloned())),
+            None => {
+                let count = e.points.max(0) as usize;
+                (count, index.filter(|i| *i < count).map(|i| FakePoint::at(i as f64, 0.5)))
+            }
+        });
+    }
+    let it = e.items.get((item & 0xFFFF) as usize)?;
+    let pool = s.pools.get(&it.pool).map_or(&[][..], Vec::as_slice);
+    Some((pool.len(), index.and_then(|i| pool.get(i)).map(|p| FakePoint { time: p.time + it.position, ..*p })))
 }
 
 unsafe extern "C" fn get_envelope_point_ex(
@@ -1589,8 +1606,7 @@ unsafe extern "C" fn get_envelope_point_ex(
     selected: *mut bool,
 ) -> bool {
     counted(|s| {
-        let Some(point) = lane_points(s, envelope as u64, item).and_then(|p| p.get(index.max(0) as usize).cloned()).filter(|_| index >= 0)
-        else {
+        let Some(point) = lane_point(s, envelope as u64, item, usize::try_from(index).ok()).and_then(|(_, point)| point) else {
             return false;
         };
         unsafe {

@@ -1661,17 +1661,17 @@ pub fn override_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     Ok(Restored { restored: json!({"mode": prior}), display: json!({"title": override_title(prior)}), unwritten: now == prior })
 }
 
-/// A lane's points as a read pages them (the read of `point` kind): every point read once, each row made only for the
-/// page that shows it.
+/// A lane's points as a read pages them (the read of `point` kind): only the page's points are read, so a page of a big
+/// lane costs what a page of a small one does.
 pub(crate) struct PointSource {
     lane: Lane,
     units: Units,
-    points: Vec<EnvPoint>,
+    count: usize,
 }
 
 impl PointSource {
     pub fn len(&self) -> usize {
-        self.points.len()
+        self.count
     }
 
     pub fn units(&self) -> &'static str {
@@ -1679,7 +1679,10 @@ impl PointSource {
     }
 
     pub fn row(&self, ctx: &Ctx, index: usize) -> Value {
-        let mut row = point_row(ctx, &self.lane, self.units, &self.points[index]);
+        let Some(point) = ctx.reaper.env_point(self.lane.at.envelope, self.lane.read(), index as i32) else {
+            return json!({"index": index, "gone": true});
+        };
+        let mut row = point_row(ctx, &self.lane, self.units, &point);
         row["index"] = index.into();
         if let Some(qn) = ctx.reaper.quarter_notes_at(ctx.proj, row["position"].as_f64().unwrap_or(0.0)) {
             row["positionBeats"] = qn.into();
@@ -1691,8 +1694,8 @@ impl PointSource {
 pub(crate) fn point_source(ctx: &Ctx, reference: &str) -> Done<PointSource> {
     let lane = lane_named(ctx, &json!(reference))?;
     let units = units_of(ctx, lane.at.envelope)?;
-    let points = lane_points(ctx, &lane);
-    Ok(PointSource { lane, units, points })
+    let count = ctx.reaper.env_point_count(lane.at.envelope, lane.read()).max(0) as usize;
+    Ok(PointSource { lane, units, count })
 }
 
 /// The rows a read gives of an envelope's automation items.
