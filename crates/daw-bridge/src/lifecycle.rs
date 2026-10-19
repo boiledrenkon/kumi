@@ -1,6 +1,8 @@
 //! Installing a DAW bridge's files: install, upgrade, rollback and uninstall, each recorded in a receipt, with every
 //! installed version kept as a generation in Kumi's folder to go back to. The DAW's copy is replaced by renaming a
 //! finished copy into place, never written in place: a running REAPER keeps the old file mapped (Windows locks it).
+//! A copy in the DAW's folder that isn't what Kumi placed (changed since, or there before Kumi) is kept in Kumi's
+//! folder before anything replaces or removes it, never lost.
 use crate::auth::sha256_hex;
 use crate::daw::Daw;
 use crate::files::{ensure_secret, FileError, Reference};
@@ -15,6 +17,8 @@ pub const KEPT_GENERATIONS: usize = 3;
 const HISTORY: usize = 20;
 /// Files inside a bridge folder that aren't the bridge's own: written beside it by the installer or by the DAW.
 pub const NOT_PAYLOAD: [&str; 2] = ["bridge-reference.json", "preferences.xml"];
+/// What a file browser leaves in any folder it shows (Finder's, Explorer's): never a change, never copied.
+pub const LITTER: [&str; 3] = [".DS_Store", "Thumbs.db", "desktop.ini"];
 
 /// Where a DAW's bridge goes: one file (REAPER's extension) or one folder (Renoise's tool) in `dir`, and the
 /// reference file beside or inside it.
@@ -41,6 +45,9 @@ pub struct HistoryRow {
     pub action: String,
     pub generation: Option<String>,
     pub ms: u64,
+    /// Where the copy that was in the DAW's folder went, when it wasn't what Kumi placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +120,7 @@ fn now_ms() -> u64 {
 }
 
 /// A file's or folder's contents as one SHA-256: each file's path relative to the root (with `/`), size and SHA-256,
-/// sorted by path. A folder's [`NOT_PAYLOAD`] files at its top are left out.
+/// sorted by path. A folder's [`NOT_PAYLOAD`] files at its top are left out, and [`LITTER`] anywhere.
 pub fn tree_sha256(path: &Path) -> std::io::Result<String> {
     let meta = std::fs::symlink_metadata(path)?;
     if meta.is_file() {
@@ -132,7 +139,7 @@ fn collect(dir: &Path, prefix: &str, rows: &mut Vec<String>) -> std::io::Result<
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if prefix.is_empty() && NOT_PAYLOAD.contains(&name.as_str()) {
+        if (prefix.is_empty() && NOT_PAYLOAD.contains(&name.as_str())) || LITTER.contains(&name.as_str()) {
             continue;
         }
         let relative = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
@@ -159,7 +166,7 @@ fn copy_tree(from: &Path, to: &Path, top: bool) -> std::io::Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let name = entry.file_name();
-        if top && NOT_PAYLOAD.contains(&name.to_string_lossy().as_ref()) {
+        if (top && NOT_PAYLOAD.contains(&name.to_string_lossy().as_ref())) || LITTER.contains(&name.to_string_lossy().as_ref()) {
             continue;
         }
         let kind = entry.file_type()?;
@@ -320,13 +327,42 @@ impl Lifecycle {
         Ok((generation, sha))
     }
 
+    /// Copies what's at `path` (a file, or a folder with everything in it) into Kumi's `changed` folder; where it went.
+    /// A link isn't followed: where it pointed is written down instead.
+    fn keep(&self, path: &Path) -> Result<PathBuf, LifecycleError> {
+        let kept = self.paths.root.join("changed");
+        std::fs::create_dir_all(&kept)?;
+        let link = std::fs::symlink_metadata(path)?.file_type().is_symlink();
+        let mut ms = now_ms();
+        let copy = loop {
+            let copy = kept.join(format!("{}-{ms}{}", self.target.name, if link { ".link" } else { "" }));
+            if std::fs::symlink_metadata(&copy).is_err() {
+                break copy;
+            }
+            ms += 1;
+        };
+        let copied = match link {
+            true => std::fs::read_link(path)
+                .and_then(|to| std::fs::write(&copy, format!("{} was a link to {}\n", path.display(), to.display()))),
+            false => copy_tree(path, &copy, false),
+        };
+        if let Err(error) = copied {
+            let _ = remove_tree(&copy);
+            return Err(error.into());
+        }
+        Ok(copy)
+    }
+
     /// Puts a generation's copy in the DAW's folder: a finished copy beside the target, then renamed over it. A
-    /// folder, or a file the system won't replace while it's in use, first has the old one renamed aside.
-    fn place(&self, generation: &str) -> Result<String, LifecycleError> {
+    /// folder, or a file the system won't replace while it's in use, first has the old one renamed aside. What's there
+    /// first is kept unless it's what Kumi placed (`placed`, the receipt's hash): its SHA-256 and where the kept copy went.
+    fn place(&self, generation: &str, placed: Option<&str>) -> Result<(String, Option<PathBuf>), LifecycleError> {
         let source = self.paths.generations().join(generation).join(&self.target.name);
         let sha = tree_sha256(&source)?;
         std::fs::create_dir_all(&self.target.dir)?;
         let target = self.target.path();
+        let changed = std::fs::symlink_metadata(&target).is_ok() && tree_sha256(&target).ok().as_deref() != placed;
+        let kept = if changed { Some(self.keep(&target)?) } else { None };
         let token = &crate::auth::random_hex16()[..12];
         let new = self.target.dir.join(format!(".{}.kumi-new-{token}", self.target.name));
         let old = self.target.dir.join(format!("{}.kumi-old-{token}", self.target.name));
@@ -358,7 +394,7 @@ impl Lifecycle {
             let _ = remove_tree(&old);
         }
         self.end();
-        Ok(sha)
+        Ok((sha, kept))
     }
 
     fn write_reference(&self) -> Result<(), LifecycleError> {
@@ -384,9 +420,12 @@ impl Lifecycle {
         }
     }
 
-    fn record(&self, mut receipt: Receipt, action: &str) -> Result<Receipt, LifecycleError> {
+    fn record(&self, mut receipt: Receipt, action: &str, kept: Option<PathBuf>) -> Result<Receipt, LifecycleError> {
         receipt.updated_ms = now_ms();
-        receipt.history.insert(0, HistoryRow { action: action.into(), generation: receipt.generation.clone(), ms: receipt.updated_ms });
+        let kept = kept.map(|path| path.to_string_lossy().into_owned());
+        receipt
+            .history
+            .insert(0, HistoryRow { action: action.into(), generation: receipt.generation.clone(), ms: receipt.updated_ms, kept });
         receipt.history.truncate(HISTORY);
         receipt.previous.truncate(KEPT_GENERATIONS);
         self.write_receipt(&receipt)?;
@@ -395,33 +434,73 @@ impl Lifecycle {
     }
 
     /// Installs `source` (the bridge's file or folder) as `version`, or upgrades to it when installed already: the
-    /// secret is made if missing, the reference written, and the version before kept to roll back to.
+    /// secret is made if missing, the reference written, and the version before kept to roll back to. A copy Kumi keeps
+    /// already (the one installed, or one to roll back to) is put back rather than copied again, and when it's the one
+    /// in place, nothing changes: an update that brings the same bridge never pushes out the one to roll back to.
     pub fn install(&self, source: &Path, version: &str) -> Result<Receipt, LifecycleError> {
+        self.put(source, version, false)
+    }
+
+    /// Goes to `source` (the copy an earlier Kumi carries), recorded as a rollback: the generation kept with the same
+    /// files, else a new one; nothing changes when it's the one in place.
+    pub fn rollback_to(&self, source: &Path, version: &str) -> Result<Receipt, LifecycleError> {
+        self.put(source, version, true)
+    }
+
+    fn put(&self, source: &Path, version: &str, rollback: bool) -> Result<Receipt, LifecycleError> {
         let _lock = self.exclusive()?;
         // The bridge writes into these but may not be able to make them (Renoise's Lua can't make folders).
         owner::create_owner_only_dir(&self.paths.discovery())?;
         owner::create_owner_only_dir(&self.paths.logs())?;
         self.recover()?;
+        if version.is_empty() || !version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')) {
+            return Err(LifecycleError::Invalid(format!("not a version: {version}")));
+        }
         let before = self.receipt()?.filter(|receipt| receipt.status == "installed");
-        let (generation, _) = self.stage(source, version)?;
+        let sha = tree_sha256(source)?;
         ensure_secret(&self.paths.secret())?;
-        let sha = match self.place(&generation) {
-            Ok(sha) => sha,
+        let here = self.target.path().to_string_lossy().into_owned();
+        if let Some(before) = before.as_ref().filter(|before| before.target == here && before.sha256.as_deref() == Some(sha.as_str())) {
+            if tree_sha256(&self.target.path()).ok().as_deref() == Some(sha.as_str()) {
+                self.write_reference()?;
+                return Ok(before.clone());
+            }
+        }
+        let kept = before.iter().flat_map(|before| before.generation.iter().chain(before.previous.iter())).find(|generation| {
+            tree_sha256(&self.paths.generations().join(generation).join(&self.target.name)).ok().as_deref() == Some(sha.as_str())
+        });
+        let (generation, staged) = match kept {
+            Some(generation) => (generation.clone(), false),
+            None => (self.stage(source, version)?.0, true),
+        };
+        let placed = before.as_ref().filter(|before| before.target == here).and_then(|before| before.sha256.as_deref());
+        let (sha, kept) = match self.place(&generation, placed) {
+            Ok(placed) => placed,
             Err(error) => {
-                let _ = remove_tree(&self.paths.generations().join(&generation));
+                if staged {
+                    let _ = remove_tree(&self.paths.generations().join(&generation));
+                }
                 return Err(error);
             }
         };
         self.write_reference()?;
-        let (action, previous) = match &before {
-            Some(before) => ("upgrade", before.generation.iter().chain(before.previous.iter()).cloned().collect()),
-            None => ("install", vec![]),
+        let current = before.as_ref().and_then(|before| before.generation.clone());
+        let action = match (&before, rollback) {
+            (None, false) => "install",
+            (_, true) => "rollback",
+            (Some(_), false) if current.as_deref() == Some(generation.as_str()) => "reinstall",
+            (Some(_), false) => "upgrade",
+        };
+        // The one this replaces goes first among those to roll back to; the one put back leaves them.
+        let previous = match &before {
+            Some(before) => before.generation.iter().chain(before.previous.iter()).filter(|kept| **kept != generation).cloned().collect(),
+            None => vec![],
         };
         let receipt = Receipt {
             schema: RECEIPT_SCHEMA.into(),
             daw: self.target.daw.id().into(),
             status: "installed".into(),
-            target: self.target.path().to_string_lossy().into_owned(),
+            target: here,
             reference: self.target.reference.to_string_lossy().into_owned(),
             generation: Some(generation),
             version: Some(version.into()),
@@ -430,7 +509,7 @@ impl Lifecycle {
             updated_ms: 0,
             history: before.map(|before| before.history).unwrap_or_default(),
         };
-        self.record(receipt, action)
+        self.record(receipt, action, kept)
     }
 
     /// Goes back to the generation installed before this one.
@@ -446,13 +525,15 @@ impl Lifecycle {
         if !self.paths.generations().join(&earlier).join(&self.target.name).exists() {
             return Err(LifecycleError::State(format!("the earlier version {earlier} is no longer kept")));
         }
-        let sha = self.place(&earlier)?;
+        let placed = (receipt.target == self.target.path().to_string_lossy()).then_some(receipt.sha256.as_deref()).flatten();
+        let (sha, kept) = self.place(&earlier, placed)?;
         self.write_reference()?;
         receipt.previous.remove(0);
         receipt.version = earlier.rsplit_once('-').map(|(version, _)| version.to_string());
         receipt.generation = Some(earlier);
         receipt.sha256 = Some(sha);
-        self.record(receipt, "rollback")
+        receipt.target = self.target.path().to_string_lossy().into_owned();
+        self.record(receipt, "rollback", kept)
     }
 
     /// Removes the bridge from the DAW's folder: the file or folder Kumi placed (one changed since is moved into
@@ -465,17 +546,16 @@ impl Lifecycle {
             return Err(LifecycleError::State(format!("Kumi's {} bridge isn't installed", self.target.daw)));
         };
         let target = PathBuf::from(&receipt.target);
-        if target.exists() {
-            if tree_sha256(&target).ok() == receipt.sha256 {
-                let token = &crate::auth::random_hex16()[..12];
-                let aside = target.with_file_name(format!("{}.kumi-old-{token}", self.target.name));
-                std::fs::rename(&target, &aside)?;
-                let _ = remove_tree(&aside);
-            } else {
-                let kept = self.paths.root.join("changed");
-                std::fs::create_dir_all(&kept)?;
-                std::fs::rename(&target, kept.join(format!("{}-{}", self.target.name, now_ms())))?;
+        let mut kept = None;
+        if std::fs::symlink_metadata(&target).is_ok() {
+            // One changed since Kumi placed it is copied into Kumi's folder first (a copy works across disks).
+            if tree_sha256(&target).ok() != receipt.sha256 {
+                kept = Some(self.keep(&target)?);
             }
+            let token = &crate::auth::random_hex16()[..12];
+            let aside = target.with_file_name(format!("{}.kumi-old-{token}", self.target.name));
+            std::fs::rename(&target, &aside)?;
+            let _ = remove_tree(&aside);
         }
         let reference = PathBuf::from(&receipt.reference);
         if Reference::read(&reference).is_ok_and(|reference| reference.daw == self.target.daw.id()) {
@@ -489,7 +569,7 @@ impl Lifecycle {
         receipt.version = None;
         receipt.sha256 = None;
         receipt.previous.clear();
-        self.record(receipt, "uninstall")
+        self.record(receipt, "uninstall", kept)
     }
 }
 
@@ -559,6 +639,100 @@ mod tests {
         assert_eq!(life.install(&bridge_folder(root.path(), "4.0"), "4.0").unwrap().history[0].action, "install");
     }
 
+    fn read(path: PathBuf) -> String {
+        std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+
+    fn actions(receipt: &Receipt) -> Vec<&str> {
+        receipt.history.iter().map(|row| row.action.as_str()).collect()
+    }
+
+    #[test]
+    fn the_same_copy_again_changes_nothing_and_a_kept_one_is_put_back_not_copied_again() {
+        let root = tempfile::tempdir().unwrap();
+        let life = renoise(root.path());
+        let (one, two) = (bridge_folder(root.path(), "1.0"), bridge_folder(root.path(), "2.0"));
+        let installed = life.install(&one, "1.0").unwrap();
+        assert_eq!(life.install(&one, "1.0").unwrap(), installed);
+        // An update that brings the bridge that's in, however often: nothing changes, so the one to roll back to stays.
+        let upgraded = life.install(&two, "2.0").unwrap();
+        for _ in 0..KEPT_GENERATIONS + 2 {
+            assert_eq!(life.install(&two, "2.0").unwrap(), upgraded);
+        }
+        assert_eq!(upgraded.previous, [installed.generation.clone().unwrap()]);
+        // Kumi rolled back to one that carries 1.0, then forward again: each time the copy kept, never a new one.
+        let back = life.rollback_to(&one, "1.0").unwrap();
+        assert_eq!((back.generation.as_ref(), back.version.as_deref()), (installed.generation.as_ref(), Some("1.0")));
+        assert_eq!(back.previous, [upgraded.generation.clone().unwrap()]);
+        assert_eq!(read(life.target.path().join("main.lua")), "-- 1.0\n");
+        let forward = life.rollback_to(&two, "2.0").unwrap();
+        assert_eq!(
+            (forward.generation.as_ref(), forward.previous.clone()),
+            (upgraded.generation.as_ref(), vec![installed.generation.clone().unwrap()])
+        );
+        assert_eq!(read(life.target.path().join("main.lua")), "-- 2.0\n");
+        assert_eq!(std::fs::read_dir(life.paths.generations()).unwrap().count(), 2);
+        assert_eq!(actions(&forward), ["rollback", "rollback", "upgrade", "install"]);
+        assert!(life.status().unwrap().matches);
+        // A reference deleted meanwhile comes back, though nothing else changes.
+        std::fs::remove_file(&life.target.reference).unwrap();
+        assert_eq!(life.install(&two, "2.0").unwrap(), forward);
+        assert!(life.status().unwrap().reference);
+    }
+
+    #[test]
+    fn a_changed_copy_is_kept_when_an_upgrade_a_rollback_or_a_repair_replaces_it() {
+        let root = tempfile::tempdir().unwrap();
+        let life = renoise(root.path());
+        let tool = life.target.path();
+        life.install(&bridge_folder(root.path(), "1.0"), "1.0").unwrap();
+        // The producer's notes in the tool's folder and an edit to it: the upgrade keeps them in Kumi's folder, with
+        // Renoise's preferences, which stay with the tool too.
+        std::fs::write(tool.join("my-notes.txt"), "mine").unwrap();
+        std::fs::write(tool.join("main.lua"), "-- edited\n").unwrap();
+        std::fs::write(tool.join("preferences.xml"), "<prefs/>").unwrap();
+        let upgraded = life.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap();
+        let kept = PathBuf::from(upgraded.history[0].kept.clone().expect("the changed copy is kept"));
+        assert!(kept.starts_with(life.paths.root.join("changed")), "{}", kept.display());
+        assert_eq!((read(kept.join("my-notes.txt")), read(kept.join("main.lua"))), ("mine".into(), "-- edited\n".into()));
+        assert_eq!(read(kept.join("preferences.xml")), "<prefs/>");
+        assert_eq!((read(tool.join("main.lua")), read(tool.join("preferences.xml"))), ("-- 2.0\n".into(), "<prefs/>".into()));
+        assert!(!tool.join("my-notes.txt").exists() && life.status().unwrap().matches);
+        // What Kumi placed, as it placed it, is replaced without a copy.
+        let back = life.rollback_to(&bridge_folder(root.path(), "1.0"), "1.0").unwrap();
+        assert_eq!((back.history[0].action.as_str(), back.history[0].kept.as_deref()), ("rollback", None));
+        // The same copy again over an edited one is a repair, and the edit is kept first.
+        std::fs::write(tool.join("main.lua"), "-- edited again\n").unwrap();
+        let repaired = life.install(&bridge_folder(root.path(), "1.0"), "1.0").unwrap();
+        assert_eq!(repaired.history[0].action, "reinstall");
+        assert_eq!(read(PathBuf::from(repaired.history[0].kept.clone().unwrap()).join("main.lua")), "-- edited again\n");
+        assert_eq!(read(tool.join("main.lua")), "-- 1.0\n");
+        // The earlier copy's own rollback keeps an edit too.
+        life.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap();
+        std::fs::write(tool.join("main.lua"), "-- edited a third time\n").unwrap();
+        let rolled = life.rollback().unwrap();
+        assert_eq!(read(PathBuf::from(rolled.history[0].kept.clone().unwrap()).join("main.lua")), "-- edited a third time\n");
+    }
+
+    #[test]
+    fn a_file_browsers_litter_is_no_change_and_a_copy_there_before_kumi_is_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let life = renoise(root.path());
+        // A tool folder by Kumi's name that Kumi didn't put there (one copied in by hand): kept.
+        std::fs::create_dir_all(life.target.path()).unwrap();
+        std::fs::write(life.target.path().join("main.lua"), "-- by hand\n").unwrap();
+        let source = bridge_folder(root.path(), "1.0");
+        std::fs::write(source.join(".DS_Store"), "finder").unwrap();
+        let installed = life.install(&source, "1.0").unwrap();
+        assert_eq!(read(PathBuf::from(installed.history[0].kept.clone().unwrap()).join("main.lua")), "-- by hand\n");
+        // Finder's .DS_Store and Explorer's Thumbs.db: never copied, and never a change.
+        assert!(!life.target.path().join(".DS_Store").exists());
+        std::fs::write(life.target.path().join(".DS_Store"), "finder").unwrap();
+        std::fs::write(life.target.path().join("lib").join("Thumbs.db"), "explorer").unwrap();
+        assert!(life.status().unwrap().matches);
+        assert_eq!(life.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap().history[0].kept, None);
+    }
+
     #[test]
     fn two_installs_at_once_wait_for_each_other_instead_of_undoing_each_other() {
         let root = tempfile::tempdir().unwrap();
@@ -605,13 +779,20 @@ mod tests {
         assert_eq!(reference.daw, "reaper");
         assert_eq!(reference.port, Some(9770));
 
+        // A build the producer put in its place is kept when the next one goes in.
+        std::fs::write(plugins.join("reaper_kumi.dylib"), b"their build").unwrap();
+        std::fs::write(&source, b"three").unwrap();
+        let upgraded = life.install(&source, "0.3.0").unwrap();
+        assert_eq!(std::fs::read(upgraded.history[0].kept.clone().unwrap()).unwrap(), b"their build");
+        assert_eq!(std::fs::read(plugins.join("reaper_kumi.dylib")).unwrap(), b"three");
+
         std::fs::write(plugins.join("reaper_kumi.dylib"), b"edited").unwrap();
         assert!(!life.status().unwrap().matches);
-        life.uninstall(true).unwrap();
+        let removed = life.uninstall(true).unwrap();
+        assert_eq!(std::fs::read(removed.history[0].kept.clone().unwrap()).unwrap(), b"edited");
         assert!(!plugins.join("reaper_kumi.dylib").exists());
         assert_eq!(std::fs::read(plugins.join("reaper_other.dylib")).unwrap(), b"theirs");
-        let kept: Vec<_> = std::fs::read_dir(life.paths.root.join("changed")).unwrap().flatten().collect();
-        assert_eq!(std::fs::read(kept[0].path()).unwrap(), b"edited");
+        assert_eq!(std::fs::read_dir(life.paths.root.join("changed")).unwrap().count(), 2);
         assert!(!life.paths.secret().exists());
     }
 

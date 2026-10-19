@@ -306,10 +306,20 @@ jobs:
           "$KUMI_HOME/app/daw-mcp-server" --version
           kumi --daw reaper doctor || true
           kumi update | tee update.txt; grep -q "up to date" update.txt
-          test "$(daws)" = "$(cat daws.txt)"   # up to date: both bridges as they were
+          test "$(daws)" = "$(cat daws.txt)"   # up to date: both bridges as they were, the one to roll back to kept
+          # Two rollbacks, each DAW's bridge going with Kumi: the Kumi the repair kept is made to carry other copies of
+          # both, as an earlier release would (none before this one carries them), and the second rollback puts back
+          # this build's from the generations kept at the first install.
+          python3 scripts/tests/daw_bridges.py earlier "$KUMI_HOME/app.previous" 0.0.9
           kumi update --rollback
           kumi --version
-          test "$(daws)" = "$(cat daws.txt)"   # the Kumi the repair kept carries the same bridges
+          daws | tee earlier.txt
+          grep -q -E '^reaper 0\.0\.9 [0-9a-f]+ [^ ]+ rollback$' earlier.txt
+          grep -q -E '^renoise 0\.0\.9 [0-9a-f]+ [^ ]+ rollback$' earlier.txt
+          kumi update --rollback
+          kumi --version
+          daws | tee forward.txt
+          test "$(cut -d' ' -f1-4 forward.txt)" = "$(cut -d' ' -f1-4 daws.txt)"
           echo 1 > "$KUMI_HOME/settings-marker"
           kumi uninstall --yes
           # One test a line: bash -e doesn't stop at a failing one that isn't the last in an && list.
@@ -510,10 +520,21 @@ jobs:
           $update = & $kumi update | Out-String; Write-Host $update
           if ($update -notmatch 'up to date') { throw 'update did not say up to date' }
           if ((Daws) -ne $daws) { throw "the update changed REAPER's or Renoise's bridge: $(Daws)" }
+          # Two rollbacks, each DAW's bridge going with Kumi: the Kumi the repair kept is made to carry other copies of
+          # both, as an earlier release would (none before this one carries them), and the second rollback puts back
+          # this build's from the generations kept at the first install.
+          python scripts/tests/daw_bridges.py earlier (Join-Path $env:KUMI_HOME 'app.previous') 0.0.9
+          if ($LASTEXITCODE -ne 0) { throw "the earlier Kumi's copies weren't made" }
+          function Fields([string]$Said) { (($Said -split "`r?`n") | Where-Object { $_ } | ForEach-Object { ($_ -split ' ')[0..3] -join ' ' }) -join '|' }
           & $kumi update --rollback
           if ($LASTEXITCODE -ne 0) { throw 'native rollback failed' }
           if ((& $kumi --version) -ne $version) { throw "the rollback didn't preserve the release" }
-          if ((Daws) -ne $daws) { throw "the rollback changed REAPER's or Renoise's bridge: $(Daws)" }
+          $earlier = Daws; Write-Host $earlier
+          if ($earlier -notmatch '(?m)^reaper 0\.0\.9 [0-9a-f]+ \S+ rollback\r?$' -or $earlier -notmatch '(?m)^renoise 0\.0\.9 [0-9a-f]+ \S+ rollback\r?$') { throw "the rollback didn't take both bridges to the earlier Kumi's: $earlier" }
+          & $kumi update --rollback
+          if ($LASTEXITCODE -ne 0) { throw 'the second native rollback failed' }
+          $forward = Daws; Write-Host $forward
+          if ((Fields $forward) -ne (Fields $daws)) { throw "the second rollback didn't put back the first copies: $forward" }
           Set-Content -Path (Join-Path $env:KUMI_HOME 'settings-marker') -Value 1
           & $kumi uninstall --yes
           # REAPER's and Renoise's bridges come out at once; Kumi's folders a few seconds later, from a cmd it leaves running.
