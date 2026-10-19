@@ -487,99 +487,26 @@ local function preview_of(song, env, input, kind, verb)
   }, { p = p, index = index, track = track, pattern_track = pattern_track, pattern = pattern, prior = prior, after = after, columns = columns }
 end
 
--- What tells Kumi's cells from the producer's when Renoise moves lines (a row inserted or deleted, Expand, a column moved: it
--- tells none of them apart from an edit). A cell's content as text, and the whole track read once for the contents Kumi wrote.
-local function cell_key(cell)
-  if cell.kind == "note" then
-    return table.concat({ "n", cell.note, cell.instrument, cell.volume, cell.panning, cell.delay, cell.fx }, "|")
-  end
-  return table.concat({ "e", cell.number, cell.amount }, "|")
+-- Where Kumi's lines are, when it puts them back: Renoise moves a track's lines with a row inserted or deleted, Expand, a
+-- column moved, and tells none of that apart from an edit; its line notifier says which line changed, at once (lab, 3.5.4).
+-- So a change keeps a mark of the touches of its pattern track, and the region it wrote (or the lines it emptied). Any
+-- shift that moves the region changes a line at or above its last one, which the producer's touches say; one only below it
+-- moves nothing of it. Lines a change only emptied show nothing of a shift, so any touch of the track refuses theirs.
+local function region_of(cells)
+  local first, last = math.huge, 0
+  for _, cell in ipairs(cells) do first, last = math.min(first, cell.line), math.max(last, cell.line) end
+  return { first = first, last = last }
 end
 
--- Kumi's own contents: the cells the change made something else than they were, and not empty (an empty cell can't be told).
-local function written_keys(prior, applied)
-  local keys = {}
-  for i = 1, #applied do
-    if not same_cell(applied[i], prior[i]) and not is_empty_cell(applied[i]) then keys[cell_key(applied[i])] = true end
+local function only_emptied(applied)
+  for _, cell in ipairs(applied) do
+    if not is_empty_cell(cell) then return false end
   end
-  return keys
+  return true
 end
 
--- How many cells of the pattern track hold each of `keys`, other than at Kumi's own places.
-local function count_elsewhere(pattern_track, lines, keys, cells)
-  local own = {}
-  for _, cell in ipairs(cells) do own[cell.kind .. cell.line .. ":" .. cell.col] = true end
-  local counts = {}
-  for key in pairs(keys) do counts[key] = 0 end
-  if next(keys) == nil then return counts end
-  for l = 1, lines do
-    local line = pattern_track:line(l)
-    if not line.is_empty then
-      for c = 1, 12 do
-        if not own["note" .. l .. ":" .. c] then
-          local key = cell_key(read_cell(pattern_track, { line = l, kind = "note", col = c }))
-          if counts[key] then counts[key] = counts[key] + 1 end
-        end
-      end
-      for c = 1, 8 do
-        if not own["effect" .. l .. ":" .. c] then
-          local key = cell_key(read_cell(pattern_track, { line = l, kind = "effect", col = c }))
-          if counts[key] then counts[key] = counts[key] + 1 end
-        end
-      end
-    end
-  end
-  return counts
-end
-
--- A line's whole content, for the anchors of a cleared region.
-local function line_key(pattern_track, l)
-  local parts = {}
-  for c = 1, 12 do parts[#parts + 1] = cell_key(read_cell(pattern_track, { line = l, kind = "note", col = c })) end
-  for c = 1, 8 do parts[#parts + 1] = cell_key(read_cell(pattern_track, { line = l, kind = "effect", col = c })) end
-  return table.concat(parts, ";")
-end
-
--- What finds Kumi's cells again where Renoise may have moved them: how often what it wrote is elsewhere in the track, and,
--- for a change that only emptied cells, the nearest lines with anything in them above and below, and the pattern's length.
-local function place_print(pattern_track, lines, prior, applied, touched)
-  local keys = written_keys(prior, applied)
-  local out = { lines = lines, elsewhere = count_elsewhere(pattern_track, lines, keys, applied), touched = touched }
-  if next(keys) == nil and #applied > 0 then
-    local first, last = math.huge, 0
-    for _, cell in ipairs(applied) do first, last = math.min(first, cell.line), math.max(last, cell.line) end
-    for l = first - 1, 1, -1 do
-      if not pattern_track:line(l).is_empty then out.above = { line = l, key = line_key(pattern_track, l) } break end
-    end
-    for l = last + 1, lines do
-      if not pattern_track:line(l).is_empty then out.below = { line = l, key = line_key(pattern_track, l) } break end
-    end
-  end
-  return out
-end
-
--- Whether Kumi's cells may have been moved since the print was made: what it wrote is more often elsewhere now, or the lines
--- around what it cleared moved.
-local function moved_since(pattern_track, lines, prior, applied, print, touched)
-  if type(print) ~= "table" then return false end
-  if print.lines ~= lines then return true end
-  for _, anchor in ipairs({ print.above or false, print.below or false }) do
-    if anchor and (anchor.line > lines or line_key(pattern_track, anchor.line) ~= anchor.key) then return true end
-  end
-  local keys = written_keys(prior, applied)
-  -- (cleared lines with nothing around them: where they are now is known only if nothing touched the track's lines since)
-  if next(keys) == nil and not print.above and not print.below and #applied > 0 and print.touched ~= touched then return true end
-  local away = false
-  for i = 1, #applied do
-    if keys[cell_key(applied[i])] and not same_cell(read_cell(pattern_track, applied[i]), applied[i]) then away = true break end
-  end
-  if not away then return false end
-  local now = count_elsewhere(pattern_track, lines, keys, applied)
-  for key, count in pairs(now) do
-    if count > ((print.elsewhere or {})[key] or 0) then return true end
-  end
-  return false
-end
+local MOVED = "the pattern changed in Renoise since Kumi wrote these lines (lines at or above them were changed, inserted or deleted), so Kumi left them as they are: Renoise's own undo can take them back"
+local MOVED_CLEARED = "the pattern track changed in Renoise since Kumi emptied these lines, so where they are now can't be told: Kumi left them as they are, and Renoise's own undo can take them back"
 
 local function apply_of(song, env, input, fence, desc, kind, verb)
   local ok, preview, plan = pcall(preview_of, song, env, input, kind, verb)
@@ -629,7 +556,8 @@ local function apply_of(song, env, input, fence, desc, kind, verb)
   return {
     applied = {
       cells = result, columns = read_columns(plan.track),
-      print = place_print(plan.pattern_track, plan.pattern.number_of_lines, plan.prior, result, env.touched and env.touched(plan.p, plan.index)),
+      -- (what the undo needs to know whether the lines moved since: the touches of the track from here, and its length)
+      touch = env.touch_mark and env.touch_mark(plan.p, plan.index) or nil, lines = plan.pattern.number_of_lines,
     },
     display = { title = display.title, before = display.before, after = counts_of(result), note = display.note },
     undo = { desc = desc, entry = true },
@@ -639,57 +567,24 @@ end
 
 -- Restore
 
--- Kumi's cells moved as a whole in the pattern track since it wrote them: rows inserted or deleted above them (up to 64), or
--- their column moved. Renoise tells neither apart from an edit, and their places name other lines now: then nothing is
--- written. (Each place is read once.)
-local SHIFTS_LOOKED_AT = 64
-
-local function moved_away(pattern_track, prior, applied, lines)
-  local mine = {}
-  for i = 1, #applied do
-    if not same_cell(applied[i], prior[i]) then mine[#mine + 1] = applied[i] end
-  end
-  if #mine == 0 then return false end
-  local seen = {}
-  local function holds(cell, line, col)
-    if line < 1 or line > lines or col < 1 or col > (cell.kind == "note" and 12 or 8) then return false end
-    local key = cell.kind .. line .. ":" .. col
-    if seen[key] == nil then seen[key] = read_cell(pattern_track, { line = line, kind = cell.kind, col = col }) end
-    return same_cell(seen[key], cell)
-  end
-  local function all_at(dl, columns)
-    for _, cell in ipairs(mine) do
-      if not holds(cell, cell.line + dl, columns and columns[cell.kind .. cell.col] or cell.col) then return false end
-    end
-    return true
-  end
-  if all_at(0) then return false end
-  for d = 1, SHIFTS_LOOKED_AT do
-    if all_at(d) or all_at(-d) then return true end
-  end
-  -- (a column moved: each of Kumi's columns found whole in another one, at the same lines)
-  local groups = {}
-  for _, cell in ipairs(mine) do groups[cell.kind .. cell.col] = { kind = cell.kind, col = cell.col } end
-  for key, group in pairs(groups) do
-    for c = 1, group.kind == "note" and 12 or 8 do
-      if c ~= group.col then
-        local whole = true
-        for _, cell in ipairs(mine) do
-          if cell.kind .. cell.col == key and not holds(cell, cell.line, c) then whole = false break end
-        end
-        if whole then return true end
-      end
-    end
-  end
-  return false
-end
-
+-- (`touched` is the env's touched_since for this pattern track)
 local function restore_plan(pattern_track, restore, lines, touched)
   local prior, applied = restore.prior and restore.prior.cells, restore.applied and restore.applied.cells
   if type(prior) ~= "table" or type(applied) ~= "table" or #prior ~= #applied then bad("prior and applied: the cells the change wrote") end
-  if not restore.discard and (moved_away(pattern_track, prior, applied, lines)
-    or moved_since(pattern_track, lines, prior, applied, restore.applied.print, touched)) then
-    fail("changed", "the lines Kumi wrote were moved in Renoise since (rows inserted or deleted, or their column moved), so Kumi left them")
+  local kept = restore.applied
+  if not restore.discard and #applied > 0 then
+    if type(kept.lines) == "number" and kept.lines ~= lines then
+      fail("changed", "the pattern's length changed in Renoise since Kumi wrote these lines, so Kumi left them as they are")
+    end
+    local any, lowest = touched(kept.touch)
+    if any == nil then
+      fail("changed", "Kumi can't tell whether these lines moved in Renoise since (the tool watched the song anew), so Kumi left them as they are")
+    end
+    if only_emptied(applied) then
+      if any then fail("changed", MOVED_CLEARED) end
+    elseif lowest and lowest <= region_of(applied).last then
+      fail("changed", MOVED)
+    end
   end
   local todo = {}
   for i = 1, #prior do
@@ -739,7 +634,11 @@ end
 local function restore_of(spec_kind, noun)
   return function(song, env, restore, desc)
     local p, index, track, pattern_track, pattern = locate_restored(song, env, restore)
-    local todo = restore_plan(pattern_track, restore, pattern.number_of_lines, env.touched and env.touched(p, index))
+    local function touched(mark)
+      if not env.touched_since then return false end
+      return env.touched_since(p, index, mark)
+    end
+    local todo = restore_plan(pattern_track, restore, pattern.number_of_lines, touched)
     local label = string.format("%s on %s", q(pattern_label(pattern, p)), q(base.named(index, track)))
     local place = { pattern = p, track = index }
     local spec = base.KINDS[spec_kind]
@@ -777,7 +676,10 @@ local function restore_of(spec_kind, noun)
             local live_pattern_track = live:pattern(p):track(index)
             if live_pattern_track.is_alias then fail("changed", "that track in the pattern is an alias now") end
             live:describe_undo(string.format("%s (%d/%d)", desc, k, total))
-            for _, cell in ipairs(chunks[k]) do write_cell(live_pattern_track, cell) end
+            if env.writing then env.writing(true) end
+            local wrote, err = pcall(function() for _, cell in ipairs(chunks[k]) do write_cell(live_pattern_track, cell) end end)
+            if env.writing then env.writing(false) end
+            if not wrote then error(err, 0) end
             done_steps = k
             if k == 1 then job.rebase() end
             -- (a stop from here leaves lines half put back: a tool stopped or reloaded says so, see jobs.lua)

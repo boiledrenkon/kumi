@@ -1513,7 +1513,7 @@ test("places, slot × append after: a deleted track's mute in a slot is put back
   ok(mock.song.sequencer:track_sequence_slot_is_muted(3, 2), "muted in slot 2 again")
 end)
 
-test("places, slot × insert before: the track comes back, its mute isn't put back in another slot, and the answer says so", function()
+test("places, slot × insert before: the track comes back, muted in the slot its mute was in, followed to its new place", function()
   local env, peer = setup()
   mock.song.sequencer:set_track_sequence_slot_is_muted(3, 2, true)
   H.tick(2)
@@ -1523,11 +1523,12 @@ test("places, slot × insert before: the track comes back, its mute isn't put ba
   H.tick(2)
   local undone = undo_track_delete(peer, previewed, done, "kp33")
   ok(undone.result, json.encode(undone.error or {}))
-  for s = 1, #mock.data.sequence do ok(not mock.song.sequencer:track_sequence_slot_is_muted(3, s), "not muted in slot " .. s) end
-  ok(undone.result.display.note and undone.result.display.note:find("isn't put back: the sequence before it changed", 1, true), json.encode(undone.result.display))
+  -- (one slot made at 1 is the only block that explains the sequence now: slot 2 is slot 3)
+  for s = 1, #mock.data.sequence do eq(mock.song.sequencer:track_sequence_slot_is_muted(3, s), s == 3, "slot " .. s) end
+  eq(undone.result.display.note, nil)
 end)
 
-test("places, slot × a deleted slot: put back after an append; refused stale, nothing written, after an insert before it", function()
+test("places, slot × a deleted slot: put back where it was after an append, and after an insert before it, followed", function()
   for _, at in ipairs({ 4, 1 }) do
     local env, peer = setup()
     local epoch, layout = place(peer)
@@ -1538,14 +1539,8 @@ test("places, slot × a deleted slot: put back after an append; refused stale, n
     H.tick(2)
     local before, sequence = steps(), seq_text()
     local undone = restore(peer, "slot-delete", record_of(previewed, done.result), "Kumi: undo (kp35)", done.result.epoch, done.result.layout)
-    if at == 4 then
-      ok(undone.result, json.encode(undone.error or {}))
-      eq(seq_text(), "1,2,1,3,2")
-    else
-      failure(undone, "stale")
-      eq(steps(), before)
-      eq(seq_text(), sequence)
-    end
+    ok(undone.result, json.encode(undone.error or {}))
+    eq(seq_text(), at == 4 and "1,2,1,3,2" or "2,1,2,1,3", "slot 3 (pattern 1) back between 2 and 3")
   end
 end)
 
@@ -1757,7 +1752,7 @@ test("places, cell × a row inserted above Kumi's lines: refused changed, the li
   local before = steps()
   local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kp61)", done.epoch, done.layout)
   failure(undone, "changed")
-  ok(undone.error.message:find("moved in Renoise", 1, true), undone.error.message)
+  ok(undone.error.message:find("the pattern changed in Renoise since", 1, true), undone.error.message)
   eq(c4_lines(), "3,4,5")
   eq(steps(), before)
 end)
@@ -1905,15 +1900,17 @@ test("places, slot × patterns that repeat: a slot made or deleted before a run 
   eq(muted, "3")
 end)
 
-test("places, slot × a deleted slot in a run of its pattern: refused stale after a slot made before it, put back when nothing changed", function()
+test("places, slot × a deleted slot where patterns repeat: refused stale when a block made before it can't say where it goes, put back when nothing changed", function()
   for _, changed in ipairs({ true, false }) do
-    local env, peer = setup(nil, { patterns = 2, sequence = { 1, 1, 1, 1 }, sequence_length = 4 })
+    local env, peer = setup(nil, { patterns = 2, sequence = { 1, 2, 1, 2 }, sequence_length = 4 })
     local epoch, layout = place(peer)
     local previewed = preview(peer, "slot-delete", { ref = seq_ref(epoch, 3) })
     local done = apply(peer, "slot-delete", { ref = seq_ref(epoch, 3) }, "Kumi: delete slot 3 (kp85)", previewed.fence, epoch, layout)
     ok(done.result, json.encode(done.error or {}))
     if changed then
+      -- (a block of 1, 2 made at the front of 1, 2, 2: made at 1 or at 3, the deleted slot's place is another)
       mock.song.sequencer:insert_sequence_at(1, 1)
+      mock.song.sequencer:insert_sequence_at(2, 2)
       H.tick(2)
     end
     local undone = restore(peer, "slot-delete", record_of(previewed, done.result), "Kumi: undo (kp86)", done.result.epoch, done.result.layout)
@@ -2049,4 +2046,54 @@ test("places, nested groups × the first member of a group that is a group's fir
   ok(undone.result, json.encode(undone.error or {}))
   eq(order(), "Kick,A(in),B(in),Inner[G](in),Outer[G],Master,Send 1")
   eq(mock.song:track(2).group_parent.name, "Inner")
+end)
+
+-- Touch rules: a notes change's undo refuses when lines at or above its region were touched since (any line, for lines it only
+-- emptied); touches below, Kumi's own writes and the producer's undo are no touch.
+
+test("touches × a run of like notes across Kumi's lines shifted one row: refused, though every place holds what Kumi wrote", function()
+  local env, peer = setup(nil, { pattern_lines = 64 })
+  set_c4({ 1, 2, 5, 6 })
+  local previewed, done = bass_notes(peer, 3, 4, "kpb0") -- Kumi's C-4 make a run of six with the producer's
+  rows_moved(3, function(k) return k + 1 end)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kpb1)", done.epoch, done.layout), "changed")
+end)
+
+test("touches × lines touched only below Kumi's: the undo puts them back", function()
+  local env, peer = setup(nil, { pattern_lines = 64 })
+  local previewed, done = bass_notes(peer, 2, 4, "kpb2")
+  mock.song:pattern(1):track(3):line(20):note_column(1).note_string = "E-4"
+  local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kpb3)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(c4_lines(), "")
+end)
+
+test("touches × lines Kumi emptied with lines on one side only, a row inserted between: refused", function()
+  local env, peer = setup(nil, { pattern_lines = 64 })
+  set_c4({ 2, 3, 10 })
+  local previewed, done = bass_clear(peer, 2, 3, "kpb4")
+  rows_moved(3, function(k) return k >= 5 and k + 1 or k end) -- a row made at 5, between the emptied lines and the C-4 at 10
+  failure(restore(peer, "notes-clear", record_of(previewed, done), "Kumi: undo c (kpb5)", done.epoch, done.layout), "changed")
+end)
+
+test("touches × a notes change on a track Kumi deleted and put back since: its undo still knows the lines didn't move", function()
+  local env, peer = setup()
+  local previewed, done = bass_notes(peer, 2, 4, "kpb6")
+  local deleted, gone = delete_track(peer, 3, "Kumi: d (kpb7)")
+  local back = restore(peer, "track-delete", record_of(deleted, gone), "Kumi: undo d (kpb8)", gone.epoch, gone.layout)
+  ok(back.result, json.encode(back.error or {}))
+  local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kpb9)", back.result.epoch, back.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(c4_lines(), "")
+end)
+
+test("places, slot × patterns repeating every two: a block made or deleted at the front can't say where a mute went: left out, said", function()
+  for _, act in ipairs({
+    function() mock.song.sequencer:insert_sequence_at(1, 1); mock.song.sequencer:insert_sequence_at(2, 2) end,
+    function() mock.song.sequencer:delete_sequence_at(1); mock.song.sequencer:delete_sequence_at(1) end,
+  }) do
+    local muted, note = mute_in_slot_3_after({ 1, 2, 1, 2, 1, 2 }, act, "kpc0")
+    eq(muted, "")
+    ok(note and note:find("isn't put back", 1, true), tostring(note))
+  end
 end)

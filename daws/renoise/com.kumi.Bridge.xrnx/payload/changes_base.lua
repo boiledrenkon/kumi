@@ -329,6 +329,51 @@ function M.prop_restore(song, env, spec, restore, desc)
   }
 end
 
+-- Where slot `s` of the sequence `old` (a list of pattern numbers) is in `new`, when one block of slots made or deleted turns
+-- one into the other and every such block puts it at the same place; nil when none does, or two put it at different places
+-- (patterns repeat: a block of A, B made at the front of A B A B is also one made after the first two). With `gap`, `s` is
+-- the place between slots s-1 and s, where a deleted slot goes back. Renoise's sequence notifier can't say which slot moved
+-- where (measured), so the sequence itself is all there is to go by.
+function M.follow_slot(old, new, s, gap)
+  local n, m = #old, #new
+  if n == m then
+    for k = 1, n do
+      if old[k] ~= new[k] then return nil end
+    end
+    return s
+  end
+  local front, back = 0, 0
+  while front < n and front < m and old[front + 1] == new[front + 1] do front = front + 1 end
+  while back < n and back < m and old[n - back] == new[m - back] do back = back + 1 end
+  local found
+  local function agree(at)
+    if at == nil or (found ~= nil and found ~= at) then return false end
+    found = at
+    return true
+  end
+  local k = math.abs(m - n)
+  if m > n then
+    -- a block made at i: old[1..i-1] before it, old[i..n] after it
+    for i = math.max(1, n + 1 - back), math.min(front + 1, n + 1) do
+      local at
+      if gap then at = (i < s and s + k) or (i > s and s) or nil else at = i <= s and s + k or s end
+      if not agree(at) then return nil end
+    end
+  else
+    -- the block old[i..i+k-1] deleted: old[1..i-1] before it, old[i+k..n] after it
+    for i = math.max(1, n - k + 1 - back), math.min(front + 1, n - k + 1) do
+      local at
+      if gap then
+        at = (i + k - 1 < s and s - k) or (i >= s and s) or nil
+      else
+        at = (s < i and s) or (s >= i + k and s - k) or nil
+      end
+      if not agree(at) then return nil end
+    end
+  end
+  return found
+end
+
 -- The journal: the changes this tool made that a producer's undo could take back. An entry: {desc, kind, place (what finds the
 -- object again: {track}, {track, device}…), spec (with `reread(song, place)` and `read`, to look at it again), prior, applied,
 -- state ("applied" | "undone"), shape? ("deleted": the change removed an object; "made": it made one)}.
