@@ -725,6 +725,15 @@ impl Extension {
     }
 }
 
+/// Tells the socket threads the main thread is done with the request it was running.
+struct StopWorking<'a>(&'a Mutex<Snapshot>);
+
+impl Drop for StopWorking<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).working = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1778,14 +1787,5 @@ mod tests {
         extension.tick(Driver::Surface);
         let beats = recorder.0.borrow().iter().filter(|(n, _)| n == "heartbeat").count();
         assert_eq!(beats, 1);
-    }
-}
-
-/// Tells the socket threads the main thread is done with the request it was running.
-struct StopWorking<'a>(&'a Mutex<Snapshot>);
-
-impl Drop for StopWorking<'_> {
-    fn drop(&mut self) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).working = false;
     }
 }
