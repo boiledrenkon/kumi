@@ -3097,6 +3097,8 @@ fn an_undo_and_a_new_edit_within_one_look_tell_nothing_and_kumis_undo_still_chec
     // The same number of points, with the project at the same place, and Kumi's gone: it vanished, which is evidence of
     // nothing (a known limit). The row stays Applied; Kumi's undo finds the fader back already and writes nothing.
     fake::producer_undo();
+    // (the fake's undo moves the history only: the fader goes back as REAPER's undo would put it)
+    state(|s| s.tracks[1].volume = 1.0);
     fake::producer_edit("Adjust track pan");
     lab.tick();
     assert!(lab.events.take().is_empty());
