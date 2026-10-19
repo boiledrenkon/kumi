@@ -120,6 +120,20 @@ pub struct PromptVocab {
     pub drum_stem_steps: &'static str,
     /// A clip in the DAW's launcher, which Kumi plays from the timeline to render: "a Session clip".
     pub launcher_clip: &'static str,
+    /// What holds a part on the timeline, as the listening tools name it: "clip" (REAPER's item, Renoise's pattern).
+    pub clip: &'static str,
+    /// More than one: "clips".
+    pub clips: &'static str,
+    /// The field such a thing's reference is in, as reads give it: "clipRef".
+    pub clip_ref: &'static str,
+    /// What has audio of its own that Kumi can hear by its reference: "an audio clip".
+    pub audio_clip: &'static str,
+    /// What holds a part's notes, for groove: "a MIDI clip".
+    pub midi_clip: &'static str,
+    /// The schema key a listening tool takes such a thing by (an audition candidate's, groove's part): "clip".
+    pub clip_field: &'static str,
+    /// What else tune's fit sets on the DAW's EQ so its bands land as calculated (Live: EQ Eight's Adaptive Q and Scale).
+    pub eq_fit_settings: &'static str,
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -262,6 +276,27 @@ macro_rules! live_word {
     (launcher_clip) => {
         "a Session clip"
     };
+    (clip) => {
+        "clip"
+    };
+    (clips) => {
+        "clips"
+    };
+    (clip_ref) => {
+        "clipRef"
+    };
+    (audio_clip) => {
+        "an audio clip"
+    };
+    (midi_clip) => {
+        "a MIDI clip"
+    };
+    (clip_field) => {
+        "clip"
+    };
+    (eq_fit_settings) => {
+        ", and turns Adaptive Q off and Scale to 100% so they land as calculated"
+    };
 }
 
 /// A field of a profile's words or vocabulary, by its name in `live_word!`.
@@ -385,6 +420,27 @@ macro_rules! daw_word {
     ($profile:expr, launcher_clip) => {
         $profile.vocab.launcher_clip
     };
+    ($profile:expr, clip) => {
+        $profile.vocab.clip
+    };
+    ($profile:expr, clips) => {
+        $profile.vocab.clips
+    };
+    ($profile:expr, clip_ref) => {
+        $profile.vocab.clip_ref
+    };
+    ($profile:expr, audio_clip) => {
+        $profile.vocab.audio_clip
+    };
+    ($profile:expr, midi_clip) => {
+        $profile.vocab.midi_clip
+    };
+    ($profile:expr, clip_field) => {
+        $profile.vocab.clip_field
+    };
+    ($profile:expr, eq_fit_settings) => {
+        $profile.vocab.eq_fit_settings
+    };
 }
 
 /// A device's name as a parenthetical after what it does: " (EQ Eight)", or nothing for a DAW whose fix names no device.
@@ -498,6 +554,9 @@ pub struct Capabilities {
     pub browser_items: bool,
     /// Plug-in parameters the DAW exposes only once configured.
     pub configured_plugin_params: bool,
+    /// Listens render the part offline (faster than it plays) and play it out loud after, rather than hearing it as
+    /// it plays: REAPER's and Renoise's bridges.
+    pub renders_to_listen: bool,
 }
 
 /// One DAW as Kumi knows it: its id (None when no DAW is known), its words and what it can do.
@@ -552,6 +611,13 @@ impl DawProfile {
             drum_kit: "a drum-kit device",
             drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
             launcher_clip: "a clip",
+            clip: crate::live_word!(clip),
+            clips: crate::live_word!(clips),
+            clip_ref: crate::live_word!(clip_ref),
+            audio_clip: crate::live_word!(audio_clip),
+            midi_clip: crate::live_word!(midi_clip),
+            clip_field: crate::live_word!(clip_field),
+            eq_fit_settings: crate::live_word!(eq_fit_settings),
         },
     };
 
@@ -596,6 +662,8 @@ impl DawProfile {
             manual: true,
             browser_items: true,
             configured_plugin_params: true,
+            // (Live hears as it plays, through Kumi Ears or a recording)
+            renders_to_listen: false,
         },
         vocab: PromptVocab {
             plan_tool: crate::live_word!(plan_tool),
@@ -634,6 +702,13 @@ impl DawProfile {
             drum_kit: crate::live_word!(drum_kit),
             drum_stem_steps: crate::live_word!(drum_stem_steps),
             launcher_clip: crate::live_word!(launcher_clip),
+            clip: crate::live_word!(clip),
+            clips: crate::live_word!(clips),
+            clip_ref: crate::live_word!(clip_ref),
+            audio_clip: crate::live_word!(audio_clip),
+            midi_clip: crate::live_word!(midi_clip),
+            clip_field: crate::live_word!(clip_field),
+            eq_fit_settings: crate::live_word!(eq_fit_settings),
         },
     };
 
@@ -642,12 +717,19 @@ impl DawProfile {
         id: Some(DawId::Reaper),
         words: DawWords { app: "REAPER", place: "project", places: "projects", master: "the master track", timeline: "arrange view" },
         // FOCUS follows REAPER (M2): its FX chains, a take's notes, the arrange view, the focus and transport as read.
+        // It listens (M5): parts rendered offline and played out loud after, what it plays heard live, a goal's rig, an
+        // item's audio.
         caps: Capabilities {
             device_tree: true,
             note_view: true,
             timeline_strip: true,
             focus_stream: true,
             transport_stream: true,
+            hear: true,
+            audition: true,
+            goal_rig: true,
+            audio_file: true,
+            renders_to_listen: true,
             ..Capabilities::NONE
         },
         vocab: PromptVocab {
@@ -663,9 +745,9 @@ impl DawProfile {
             cant_reach: "Kumi can't reach REAPER. Is it open, with Kumi's extension installed (kumi --daw reaper bridge)?",
             crash_note: "If it crashed, your unsaved changes may be lost.",
             goal_needs: "Goals need REAPER connected, with Kumi's extension.",
-            render_leftovers: "Kumi couldn't clean up after rendering; remove what it left in the project by hand.",
+            render_leftovers: "Kumi couldn't remove its scratch copies; delete the “Kumi · try” tracks by hand.",
             safety_limiter: "a limiter",
-            listen_method: "Kumi renders the part offline to hear it (seconds, 8 by default, or from_beat and beats), then plays what it chose out loud.",
+            listen_method: "Kumi renders the part offline to hear it (from_beat and beats, or the loop or the playhead's part), then plays it out loud for you; while REAPER plays, it hears the master output as it plays (seconds, 8 by default).",
             write_notes_tool: "the tool that writes MIDI notes",
             eq: "ReaEQ",
             middle_c_octave: 4,
@@ -687,6 +769,13 @@ impl DawProfile {
             drum_kit: "a sampler kit (one ReaSamplOmatic5000 per pad)",
             drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
             launcher_clip: "an item",
+            clip: "item",
+            clips: "items",
+            clip_ref: "ref",
+            audio_clip: "an audio item",
+            midi_clip: "a MIDI item",
+            clip_field: "item",
+            eq_fit_settings: "",
         },
     };
 
@@ -694,8 +783,19 @@ impl DawProfile {
     pub const RENOISE: DawProfile = DawProfile {
         id: Some(DawId::Renoise),
         words: DawWords { app: "Renoise", place: "song", places: "songs", master: "the Master track", timeline: "pattern sequence" },
-        // FOCUS follows Renoise (M2): its DSP chains, the focus and transport as read.
-        caps: Capabilities { device_tree: true, focus_stream: true, transport_stream: true, ..Capabilities::NONE },
+        // FOCUS follows Renoise (M2): its DSP chains, the focus and transport as read. It listens (M5): parts rendered
+        // offline and played out loud after (its scripts can't hear what it plays), a goal's rig, a sample's audio.
+        caps: Capabilities {
+            device_tree: true,
+            focus_stream: true,
+            transport_stream: true,
+            hear: true,
+            audition: true,
+            goal_rig: true,
+            audio_file: true,
+            renders_to_listen: true,
+            ..Capabilities::NONE
+        },
         vocab: PromptVocab {
             plan_tool: "make_changes",
             ref_example: "track:3",
@@ -709,9 +809,9 @@ impl DawProfile {
             cant_reach: "Kumi can't reach Renoise. Is it open, with Kumi's tool installed (kumi --daw renoise bridge)?",
             crash_note: "If it crashed, your unsaved changes may be lost.",
             goal_needs: "Goals need Renoise connected, with Kumi's tool.",
-            render_leftovers: "Kumi couldn't clean up after rendering; remove what it left in the song by hand.",
+            render_leftovers: "Kumi couldn't remove its scratch copies; delete the “Kumi · try” tracks from the song by hand.",
             safety_limiter: "a Maximizer",
-            listen_method: "Kumi renders the part offline to hear it (seconds, 8 by default, or from_beat and beats), then plays what it chose out loud.",
+            listen_method: "Kumi renders the part offline to hear it (from_beat and beats, or the loop or the playhead's part), then plays it out loud for you. Renoise's scripts can't hear what it plays, so a listen while it plays renders that part too.",
             write_notes_tool: "the tool that writes pattern lines",
             eq: "EQ 10",
             middle_c_octave: 5,
@@ -733,6 +833,13 @@ impl DawProfile {
             drum_kit: "a drum-kit instrument (a sample per keyzone)",
             drum_stem_steps: "separate its stems, convert the drum stem to MIDI",
             launcher_clip: "a pattern",
+            clip: "pattern",
+            clips: "patterns",
+            clip_ref: "ref",
+            audio_clip: "a sample",
+            midi_clip: "a pattern track",
+            clip_field: "pattern",
+            eq_fit_settings: "",
         },
     };
 
@@ -798,6 +905,7 @@ impl Capabilities {
         manual: false,
         browser_items: false,
         configured_plugin_params: false,
+        renders_to_listen: false,
     };
 }
 

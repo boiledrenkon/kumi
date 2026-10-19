@@ -148,6 +148,15 @@ impl Listening {
         bars_of(self.host.beats_per_bar(), window)
     }
 
+    /// What Kumi does to hear a stretch, as said while it does: Live plays it; a DAW that renders to listen renders it.
+    pub(crate) fn hearing(&self) -> &'static str {
+        if self.host.profile().caps.renders_to_listen {
+            "Rendering"
+        } else {
+            "Playing"
+        }
+    }
+
     /// Kumi's changes in the history now (applied ones), to tell a round's own from what came before.
     pub(crate) fn applied_ids(&self) -> Vec<String> {
         self.host.applied()

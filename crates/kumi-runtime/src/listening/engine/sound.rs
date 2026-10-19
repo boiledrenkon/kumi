@@ -74,6 +74,13 @@ impl Listening {
                 continue;
             };
             let mut said = described(sound, tempo, window.from, meter, *lead);
+            if let Some(found) = said.get_mut("problems").and_then(Value::as_array_mut) {
+                for problem in found.iter_mut() {
+                    if let Some(text) = problem.as_str() {
+                        *problem = Value::String(effects::problem_in_words(text, self.host.profile()));
+                    }
+                }
+            }
             if let (Some(trigger), Some(against)) = (trigger.filter(|_| against.as_ref() != Some(name)), against.as_ref()) {
                 if let Some((depth, recovery)) = ducking(sound, trigger) {
                     said["ducks"] =

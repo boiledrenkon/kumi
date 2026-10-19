@@ -215,7 +215,7 @@ impl Listening {
         let meter = self.host.beats_per_bar().max(1.);
         let from = ((zero + first) / meter).floor() * meter;
         let window = Window { from, beats: (((zero + last) - from) / meter).ceil().max(1.) * meter };
-        self.tell(format!("Playing {} · finding the hits on {name}", self.bars_of(window)), Some(true));
+        self.tell(format!("{} {} · finding the hits on {name}", self.hearing(), self.bars_of(window)), Some(true));
         let candidates = vec![AuditionCandidate { track: name, mix: None, label: None, clip: None }];
         let rendering = self.host.flag().begin();
         let pass = self.host.hear_pass(&candidates, window, false, signal.clone()).await;

@@ -136,8 +136,9 @@ impl Listening {
             let silent = takes.iter().all(|take| take.silent == Some(true)) && !files.is_empty();
             if silent {
                 notes.push(format!(
-                    "The render was silent: is the source playing in the {} at that spot (its clips there, the track not muted)?",
-                    self.host.profile().words.timeline
+                    "The render was silent: is the source playing in the {} at that spot (its {} there, the track not muted)?",
+                    self.host.profile().words.timeline,
+                    self.host.profile().vocab.clips
                 ));
             }
             let previous = self.best.get();

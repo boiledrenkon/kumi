@@ -1063,7 +1063,7 @@ impl Listening {
         if let Some(focus) = focus.filter(|focus| Some(*focus) != track) {
             candidates.push(AuditionCandidate { track: focus.into(), mix: None, label: None, clip: None });
         }
-        self.tell(format!("Playing {} · {what}", self.bars_of(window)), Some(true));
+        self.tell(format!("{} {} · {what}", self.hearing(), self.bars_of(window)), Some(true));
         let rendering = self.host.flag().begin();
         // Over the mix with a focus, the mix is heard as it comes into the master chain too: masking reads there.
         let before_main = track.is_none() && candidates.len() > 1;
