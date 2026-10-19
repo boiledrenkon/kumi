@@ -344,7 +344,9 @@ impl Registry {
             }
         }
         let count = reaper.state_change_count(proj).unwrap_or(0);
-        if Self::recently_missed(self.items_built, count) && !self.shared_items.contains(guid) {
+        // A GUID the map holds with a pointer that no longer names it means the map is out of date, not a recent miss.
+        let stale = self.items.contains_key(guid);
+        if !stale && Self::recently_missed(self.items_built, count) && !self.shared_items.contains(guid) {
             return None;
         }
         self.items.clear();

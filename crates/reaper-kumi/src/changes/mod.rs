@@ -8,8 +8,12 @@
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
 mod call;
+// Items, takes, lanes, razor areas and MIDI events (m4-r-items).
+mod chunks;
 mod folders;
 mod fx;
+mod item_kinds;
+mod items;
 mod lua;
 mod marks;
 mod notes;
@@ -126,9 +130,14 @@ enum Kind {
     RunLua,
     /// A REAPER API function that changes the project, called by name (only REAPER's undo takes it back).
     ApiCall,
+    /// Items, takes, lanes, razor areas and MIDI events (m4-r-items).
+    Items(item_kinds::Which),
 }
 
 fn kind(name: &str) -> Option<Kind> {
+    if let Some(kind) = item_kinds::kind(name) {
+        return Some(kind);
+    }
     if let Some(prop) = tracks::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::TrackProp(prop));
     }
@@ -196,6 +205,7 @@ impl Kind {
             Kind::FxPins => pins::preview(ctx, input),
             Kind::RunLua => lua::preview(ctx, input),
             Kind::ApiCall => call::preview(ctx, input),
+            Kind::Items(which) => which.preview(ctx, input),
         }
     }
 
@@ -222,6 +232,7 @@ impl Kind {
             Kind::FxPins => pins::apply(ctx, input, fence),
             Kind::RunLua => lua::apply(ctx, input, fence),
             Kind::ApiCall => call::apply(ctx, input, fence),
+            Kind::Items(which) => which.apply(ctx, input, fence),
         }
     }
 
@@ -247,6 +258,7 @@ impl Kind {
             Kind::FxPins => pins::restore(ctx, restore),
             Kind::RunLua => lua::restore(ctx, restore),
             Kind::ApiCall => call::restore(ctx, restore),
+            Kind::Items(which) => which.restore(ctx, restore),
         }
     }
 }
@@ -560,3 +572,5 @@ pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::Track
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_items;

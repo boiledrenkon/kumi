@@ -4,10 +4,12 @@
 
 use super::*;
 use std::cell::RefCell;
+
+pub mod items;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FakeParam {
     pub name: String,
     pub value: f64,
@@ -24,7 +26,7 @@ pub struct FakeParam {
 }
 
 /// How a fake plug-in prints a normalized value.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Display {
     Fixed,
     /// `min` to `max` over the range, with `decimals` and a `unit`.
@@ -78,7 +80,7 @@ impl FakeParam {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FakeFx {
     pub guid: String,
     pub name: String,
@@ -120,7 +122,7 @@ impl FakeFx {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FakeNote {
     pub start_ppq: f64,
     pub end_ppq: f64,
@@ -131,7 +133,7 @@ pub struct FakeNote {
     pub muted: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FakeCc {
     pub ppq: f64,
     pub kind: i32,
@@ -140,7 +142,7 @@ pub struct FakeCc {
     pub data2: i32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FakeEnvelope {
     pub name: String,
     /// The envelope's own GUID, as REAPER keeps one for every envelope.
@@ -199,7 +201,7 @@ impl FakeEnvelope {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FakeTake {
     pub guid: String,
     pub name: String,
@@ -211,6 +213,8 @@ pub struct FakeTake {
     pub envelopes: Vec<FakeEnvelope>,
     /// Other `GetMediaItemTakeInfo_Value` attributes (`I_CUSTOMCOLOR`…).
     pub extra: HashMap<String, f64>,
+    /// Its markers, media file and full MIDI buffer (m4-r-items).
+    pub more: items::TakeMore,
 }
 
 impl FakeTake {
@@ -224,6 +228,7 @@ impl FakeTake {
             ccs: vec![],
             envelopes: vec![],
             extra: HashMap::new(),
+            more: items::TakeMore::default(),
         }
     }
 
@@ -232,7 +237,7 @@ impl FakeTake {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FakeItem {
     pub guid: String,
     pub position: f64,
@@ -449,6 +454,8 @@ pub struct State {
     pub ext_state: HashMap<(String, String), String>,
     /// How often a script's registration was committed to REAPER's key map file (`reaper-kb.ini`).
     pub kb_writes: u32,
+    /// Items, takes, lanes and razor areas as Kumi's item changes need them (m4-r-items).
+    pub items: items::ItemsState,
 }
 
 impl Default for State {
@@ -510,6 +517,7 @@ impl Default for State {
             on_script: None,
             ext_state: HashMap::new(),
             kb_writes: 0,
+            items: items::ItemsState::default(),
         }
     }
 }
@@ -2685,6 +2693,11 @@ pub fn api_without(missing: &[&str]) -> Api {
 }
 
 fn lookup(name: &CStr) -> *mut c_void {
+    // Items and takes (m4-r-items) first: some of its functions stand in for the reads-only ones below.
+    let mine = items::lookup(name);
+    if !mine.is_null() {
+        return mine;
+    }
     macro_rules! table {
         ($($name:literal => $f:expr),* $(,)?) => {
             match name.to_bytes() {
