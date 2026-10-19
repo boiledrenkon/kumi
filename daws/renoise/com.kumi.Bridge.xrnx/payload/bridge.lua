@@ -301,7 +301,7 @@ end
 -- What a pattern's track shows is another pattern's when it is an alias. (Its watcher belongs to the pattern and the track.)
 local function watch_pattern_track(pattern, t, pattern_token, track_token)
   observers:owned(pattern_token, track_token, function()
-    observers:watch_changes(pattern:track(t).alias_pattern_index_observable)
+    observers:watch_alias(pattern:track(t).alias_pattern_index_observable, pattern_token)
   end)
 end
 
@@ -950,6 +950,10 @@ function M.start(h, reloading)
     lines = function(pos)
       local token = type(pos) == "table" and type(pos.pattern) == "number" and b.groups and b.groups.patterns[pos.pattern]
       if token and token.touches then token.touches = token.touches + 1 end
+    end,
+    -- (a track of the pattern made an alias or not: what its lines are changed)
+    alias = function(token)
+      if token.touches then token.touches = token.touches + 1 end
     end,
     -- (asked of every notifier once Kumi has made a change: was the producer's undo or redo what moved it?)
     undoing = function()

@@ -127,6 +127,15 @@ function M:watch_lines(pattern)
   self.entries[#self.entries + 1] = { remove = function() pattern:remove_line_notifier(fn) end, a = self.owner_a, b = self.owner_b }
 end
 
+-- A pattern track made an alias or not: its lines change with no line notifier, so `hooks.alias` counts it for the pattern
+-- (`token`).
+function M:watch_alias(observable, token)
+  add(self, observable, self.guard("alias notifier", function()
+    count(self)
+    if self.hooks.alias then self.hooks.alias(token) end
+  end))
+end
+
 -- A change that moves things inside what a read steps through (a pattern's number of lines).
 function M:watch_layout(observable)
   add(self, observable, self.guard("notifier", function()

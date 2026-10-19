@@ -2451,3 +2451,84 @@ test("review MUST 10: the producer clears two columns of lines, Kumi writes the 
   eq(bass_column(90, 115, 1), "100:C-4 101:C-4 102:C-4 103:C-4")
   eq(bass_column(90, 115, 2), "100:E-4 101:E-4 102:E-4 103:E-4")
 end)
+
+-- The verify at 74c206e1: MUST 11 (a sliced undo's first step went unchecked), SHOULD 4 (a discard after the pattern changed),
+-- and aliases (lab L1: an edit through an alias notifies the pattern it shows; making a track an alias notifies no line).
+
+-- (Kumi's C-4 on 100-111 undone in three steps; the producer's D-4 on 112-115; `disrupt` after the request was handled, its
+-- check passed, and before its first step runs on a later turn)
+local function before_first_step(disrupt, check)
+  local env, peer = setup({ patch = constants({ SLICE_WRITES = 30 }) }, { pattern_lines = 128 })
+  bass_set({ 112, 113, 114, 115 }, D4)
+  local previewed, done = bass_notes(peer, 100, 111, "km11a")
+  local before = steps()
+  local id = send(peer, "change_restore", restore_params("notes-write", record_of(previewed, done), "Kumi: undo n (km11b)", done.epoch, done.layout))
+  eq(steps(), before, "the first step isn't written inside the request")
+  disrupt()
+  failure(wait(peer, id, 300, 20), "changed")
+  for _, step in ipairs(mock.data.undo.stack) do ok(not step.desc:find("km11b", 1, true), "a step of Kumi's undo: " .. step.desc) end
+  check()
+end
+
+test("review MUST 11: a row deleted before a sliced undo's first step: refused, nothing written", function()
+  before_first_step(function() shift_rows(3, 50, "delete") end, function()
+    eq(bass_column(90, 120), "99:C-4 100:C-4 101:C-4 102:C-4 103:C-4 104:C-4 105:C-4 106:C-4 107:C-4 108:C-4 109:C-4 110:C-4 "
+      .. "111:D-4 112:D-4 113:D-4 114:D-4")
+  end)
+end)
+
+test("review MUST 11: a note typed in Kumi's lines before a sliced undo's first step: refused, the note kept", function()
+  before_first_step(function() bass_set({ 101 }, E4) end, function()
+    eq(bass_column(100, 102), "100:C-4 101:E-4 102:C-4")
+  end)
+end)
+
+test("review MUST 11: another tool's notes in the pattern before a sliced undo's first step: refused, its notes kept", function()
+  before_first_step(function() bass_set({ 100, 101, 102, 103 }, D4) end, function()
+    eq(bass_column(100, 104), "100:D-4 101:D-4 102:D-4 103:D-4 104:C-4")
+  end)
+end)
+
+test("review SHOULD 4: a discard of a notes change after a row inserted refuses too: lines have no identity but their place", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  bass_set({ 104 }, C4)
+  local previewed, done = bass_notes(peer, 100, 103, "km12a")
+  shift_rows(3, 50, "insert")
+  local now = bass_column(90, 115)
+  local params = restore_params("notes-write", record_of(previewed, done), "Kumi: undo n (km12b)", done.epoch, done.layout)
+  params.discard = true
+  local response = call(peer, "change_restore", params, 800)
+  failure(response, "changed")
+  ok(response.error.message:find("can't tell where its lines are now", 1, true), response.error.message)
+  eq(bass_column(90, 115), now, "nothing written")
+end)
+
+test("aliases: Kumi doesn't write lines through an alias (they are the pattern's it shows)", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  mock.ops.alias(2, 3, 1)
+  H.tick(2)
+  local epoch, layout = place(peer)
+  local input = { pattern = pattern_ref(epoch, 2), track = track_ref(epoch, 3), lines = { { line = 1, notes = { { col = 1, note = "C-4", instrument = "00" } } } } }
+  local response = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
+  ok(response.error and response.error.message:find("alias", 1, true), json.encode(response))
+end)
+
+test("aliases (lab L1): the producer's edit through an alias of Kumi's lines refuses Kumi's undo", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  mock.ops.alias(2, 3, 1)
+  H.tick(2)
+  local previewed, done = bass_notes(peer, 100, 103, "km13a")
+  mock.song:pattern(2):track(3):line(104):note_column(1).note_string = "E-4" -- (through the alias: pattern 1's line)
+  H.tick(2)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km13b)", done.epoch, done.layout), "changed")
+  eq(bass_column(100, 104), "100:C-4 101:C-4 102:C-4 103:C-4 104:E-4")
+end)
+
+test("aliases: Kumi's track in the pattern made an alias and back since refuses Kumi's undo (no line notifies it)", function()
+  local env, peer = setup(nil, { pattern_lines = 128 })
+  local previewed, done = bass_notes(peer, 100, 103, "km13c")
+  mock.song:pattern(1):track(3).alias_pattern_index = 3
+  mock.song:pattern(1):track(3).alias_pattern_index = 0
+  H.tick(2)
+  failure(restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (km13d)", done.epoch, done.layout), "changed")
+end)
