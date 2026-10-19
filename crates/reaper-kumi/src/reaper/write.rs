@@ -278,38 +278,32 @@ impl Reaper<'_> {
     }
 }
 
-/// Notes in a MIDI take. Inserts and deletes leave the order alone until `sort_midi`.
+/// A MIDI take's events, all at once.
 impl Reaper<'_> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_note(
-        &self,
-        take: Take,
-        selected: bool,
-        muted: bool,
-        start_ppq: f64,
-        end_ppq: f64,
-        channel: i32,
-        pitch: i32,
-        velocity: i32,
-    ) -> bool {
-        let no_sort = true;
-        self.api
-            .MIDI_InsertNote()
-            .is_some_and(|f| unsafe { f(take.0, selected, muted, start_ppq, end_ppq, channel, pitch, velocity, &no_sort) })
-    }
-
-    pub fn delete_note(&self, take: Take, index: i32) -> bool {
-        self.api.MIDI_DeleteNote().is_some_and(|f| unsafe { f(take.0, index) })
-    }
-
-    pub fn sort_midi(&self, take: Take) -> bool {
-        match self.api.MIDI_Sort() {
-            Some(f) => {
-                unsafe { f(take.0) };
-                true
+    pub fn midi_events(&self, take: Take) -> Option<Vec<crate::midi::Event>> {
+        let f = self.api.MIDI_GetAllEvts()?;
+        let (notes, ccs, texts) = self.midi_counts(take)?;
+        let mut size = ((notes.max(0) as usize * 2 + ccs.max(0) as usize) * 12 + texts.max(0) as usize * 64 + 4096).max(4096);
+        loop {
+            let mut buf = vec![0u8; size];
+            let mut written = size as c_int;
+            let ok = unsafe { f(take.0, buf.as_mut_ptr().cast(), &mut written) };
+            if ok && written >= 0 && written as usize <= size {
+                buf.truncate(written as usize);
+                return crate::midi::decode(&buf);
             }
-            None => false,
+            // Too small: REAPER says how much it needs, or not, and then the buffer doubles.
+            size = (written.max(0) as usize).max(size * 2);
+            if size > 1 << 30 {
+                return None;
+            }
         }
+    }
+
+    /// Replaces all the take's MIDI with these events, which must be in order.
+    pub fn set_midi_events(&self, take: Take, events: &[crate::midi::Event]) -> bool {
+        let buf = crate::midi::encode(events);
+        self.api.MIDI_SetAllEvts().is_some_and(|f| unsafe { f(take.0, buf.as_ptr().cast(), buf.len() as c_int) })
     }
 }
 

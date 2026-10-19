@@ -105,6 +105,30 @@ fn difference(a: &[Note], b: &[Note]) -> Vec<Note> {
         .collect()
 }
 
+fn spec(note: &Note) -> crate::midi::NoteSpec {
+    crate::midi::NoteSpec {
+        channel: note.channel as u8,
+        pitch: note.pitch as u8,
+        start: note.start.round() as i64,
+        end: note.end.round() as i64,
+        velocity: note.velocity as u8,
+        muted: note.muted,
+        selected: note.selected,
+    }
+}
+
+/// The notes in `remove` taken out of the take and the notes in `add` put in, all in one go: nothing else in the take changes.
+fn write_notes(ctx: &Ctx, take: Take, remove: &[Note], add: &[Note]) -> Done<()> {
+    let reaper = ctx.reaper;
+    let events = reaper.midi_events(take).ok_or_else(|| failed("REAPER wouldn't give the take's MIDI"))?;
+    let (remove, add): (Vec<_>, Vec<_>) = (remove.iter().map(spec).collect(), add.iter().map(spec).collect());
+    let edited = crate::midi::edit_notes(&events, &remove, &add).map_err(|message| changed(format!("the take changed: {message}")))?;
+    if !reaper.set_midi_events(take, &edited) {
+        return Err(failed("REAPER wouldn't take the new MIDI"));
+    }
+    Ok(())
+}
+
 fn read_all(ctx: &Ctx, take: Take) -> Done<Vec<Note>> {
     let (count, _, _) = ctx.reaper.midi_counts(take).ok_or_else(|| failed("REAPER wouldn't count the notes in that take"))?;
     (0..count.max(0))
@@ -283,6 +307,41 @@ fn changed_note(ctx: &Ctx, take: Take, item_qn: f64, was: &Note, spec: &Value) -
     Ok(note)
 }
 
+/// REAPER shortens one of two notes of the same pitch on the same channel that overlap, which changes a note Kumi wasn't
+/// asked to touch (and can't be put back from the values it wrote): a note that would overlap one is refused.
+fn check_overlaps(before: &[Note], remove: &[usize], add: &[Note]) -> Done<()> {
+    let gone: std::collections::HashSet<usize> = remove.iter().copied().collect();
+    // Per channel and pitch: where each note starts and ends, and whether it is one of the new ones.
+    type Spans = Vec<(f64, f64, bool)>;
+    let mut by_key: HashMap<(i32, i32), Spans> = HashMap::new();
+    for note in before.iter().enumerate().filter(|(i, _)| !gone.contains(i)).map(|(_, n)| n) {
+        by_key.entry((note.channel, note.pitch)).or_default().push((note.start, note.end, false));
+    }
+    for note in add {
+        by_key.entry((note.channel, note.pitch)).or_default().push((note.start, note.end, true));
+    }
+    for ((channel, pitch), mut list) in by_key {
+        if !list.iter().any(|n| n.2) {
+            continue;
+        }
+        list.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut latest_end, mut latest_new_end) = (f64::MIN, f64::MIN);
+        for (start, end, new) in list {
+            if (new && start < latest_end) || (!new && start < latest_new_end) {
+                return Err(bad(format!(
+                    "a note of pitch {pitch} on channel {} would overlap another note of the same pitch (at tick {start}): REAPER would shorten one of them, so leave a gap or use another channel",
+                    channel + 1
+                )));
+            }
+            latest_end = latest_end.max(end);
+            if new {
+                latest_new_end = latest_new_end.max(end);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn plan(ctx: &Ctx, input: &Value, mode: Mode) -> Done<Plan> {
     let take = take_of(ctx, &input["ref"])?;
     let item_qn = take_start_qn(ctx.reaper, ctx.proj, take);
@@ -316,6 +375,7 @@ fn plan(ctx: &Ctx, input: &Value, mode: Mode) -> Done<Plan> {
     if remove.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(bad("a note is named twice"));
     }
+    check_overlaps(&before, &remove, &add)?;
     Ok(Plan { take, item_qn, before, remove, add })
 }
 
@@ -347,21 +407,9 @@ pub fn apply(ctx: &Ctx, input: &Value, fence: &Value, mode: Mode) -> Done<Applie
     if fence_of(&plan.before) != *fence {
         return Err(changed("the notes in that take changed since the preview"));
     }
-    let reaper = ctx.reaper;
     let take = plan.take;
-    for &index in plan.remove.iter().rev() {
-        if !reaper.delete_note(take, index as i32) {
-            return Err(failed("REAPER wouldn't delete a note"));
-        }
-    }
-    for note in &plan.add {
-        if !reaper.insert_note(take, note.selected, note.muted, note.start, note.end, note.channel, note.pitch, note.velocity) {
-            return Err(failed("REAPER wouldn't write a note"));
-        }
-    }
-    if !reaper.sort_midi(take) {
-        return Err(failed("REAPER wouldn't sort the notes"));
-    }
+    let remove: Vec<Note> = plan.remove.iter().map(|&i| plan.before[i]).collect();
+    write_notes(ctx, take, &remove, &plan.add)?;
     let after = read_all(ctx, take)?;
     if after.len() + plan.remove.len() != plan.before.len() + plan.add.len() {
         return Err(failed("the take doesn't hold the notes it should after the change"));
@@ -408,21 +456,11 @@ pub fn restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
             return Err(changed("the notes Kumi wrote in that take have been changed in REAPER since"));
         }
     }
-    let reaper = ctx.reaper;
-    for &index in found.iter().rev() {
-        if !reaper.delete_note(take, index as i32) {
-            return Err(failed("REAPER wouldn't delete a note"));
-        }
-    }
     let kept: Vec<Note> = current.iter().enumerate().filter(|(i, _)| !found.contains(i)).map(|(_, n)| *n).collect();
     let to_insert = difference(&removed, &kept);
-    for note in &to_insert {
-        if !reaper.insert_note(take, note.selected, note.muted, note.start, note.end, note.channel, note.pitch, note.velocity) {
-            return Err(failed("REAPER wouldn't write a note back"));
-        }
-    }
     if !found.is_empty() || !to_insert.is_empty() {
-        reaper.sort_midi(take);
+        let taken: Vec<Note> = found.iter().map(|&i| current[i]).collect();
+        write_notes(ctx, take, &taken, &to_insert)?;
     }
     let after = read_all(ctx, take)?;
     if after.len() != kept.len() + to_insert.len() || !difference(&removed, &after).is_empty() {

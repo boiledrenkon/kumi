@@ -10,6 +10,7 @@ pub mod csurf;
 pub mod extension;
 pub mod focus;
 pub mod log;
+pub mod midi;
 pub mod projectconfig;
 pub mod queue;
 pub mod read;

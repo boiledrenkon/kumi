@@ -189,14 +189,21 @@ pub fn marker_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let (num, den) = plan.signature.unwrap_or_else(|| found.as_ref().map_or((0, 0), |(_, m)| (m.num.max(0), m.denom.max(0))));
     let linear = plan.linear.unwrap_or_else(|| found.as_ref().is_some_and(|(_, m)| m.linear));
     let index = found.as_ref().map_or(-1, |(i, _)| *i);
+    let count_before = reaper.tempo_marker_count(ctx.proj);
     if !reaper.set_tempo_marker(ctx.proj, index, plan.time, bpm, num, den, linear) {
         return Err(failed("REAPER wouldn't set the tempo marker"));
     }
     let after = marker_at(ctx, plan.time).ok_or_else(|| failed("the tempo marker isn't there after it was set"))?.1;
+    // The first marker in a project brings one at the start with it, to hold the tempo and time signature that were there.
+    let base = (count_before == 0 && plan.time > 1e-6).then(|| marker_at(ctx, 0.0)).flatten().map(|(_, m)| marker_state(Some(&m)));
     if plan.bpm.is_some_and(|wanted| !close(after.bpm, wanted)) || plan.signature.is_some_and(|(n, d)| (after.num, after.denom) != (n, d)) {
         return Err(failed("REAPER kept the tempo marker as it was"));
     }
-    Ok(Applied { applied: marker_state(Some(&after)), created: None, material: None, display: json!({"title": marker_title(ctx, &plan)}) })
+    let mut applied = marker_state(Some(&after));
+    if let Some(base) = base {
+        applied["base"] = base;
+    }
+    Ok(Applied { applied, created: None, material: None, display: json!({"title": marker_title(ctx, &plan)}) })
 }
 
 pub fn marker_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
@@ -219,6 +226,15 @@ pub fn marker_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     } else if let Some((index, _)) = found {
         if !reaper.delete_tempo_marker(ctx.proj, index) {
             return Err(failed("REAPER wouldn't take the tempo marker away again"));
+        }
+        // The one REAPER made at the start with it goes too, if it is as it made it and the only one left.
+        if let Some(base) = restore.applied.get("base").filter(|b| b["exists"] == true) {
+            let left = reaper.tempo_marker_count(ctx.proj);
+            if let Some((start, marker)) = marker_at(ctx, 0.0).filter(|_| left == 1) {
+                if same_marker(&marker_state(Some(&marker)), base) && !reaper.delete_tempo_marker(ctx.proj, start) {
+                    return Err(failed("REAPER wouldn't take the tempo marker at the start away again"));
+                }
+            }
         }
     }
     let after = marker_state(marker_at(ctx, time).as_ref().map(|(_, m)| m));

@@ -1748,3 +1748,95 @@ fn transport_play_starts_what_isnt_playing_and_the_cursor_moves_without_an_undo_
     state(|s| s.loading = true);
     assert_eq!(lab.call("cursor_set", json!({"position": 1.0})).unwrap_err().0, "busy");
 }
+
+#[test]
+fn the_marker_reaper_makes_at_the_start_with_the_first_one_goes_with_it_unless_the_producer_changed_it() {
+    let lab = Lab::new();
+    assert!(tempo_markers().is_empty());
+    let (preview, applied) =
+        lab.make("tempo-marker-set", json!({"positionBeats": 16.0, "bpm": 140.0}), "Kumi: Tempo 140 BPM at bar 5 (ktb01)");
+    assert_eq!(tempo_markers(), [(0.0, 120.0, 4, 4, false), (8.0, 140.0, -1, -1, false)]);
+    assert_eq!(applied["applied"]["base"], json!({"exists": true, "bpm": 120.0, "num": 4, "den": 4, "linear": false}));
+    lab.undo("tempo-marker-set", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert!(tempo_markers().is_empty(), "back to a project with the one tempo");
+    // The producer changed the one at the start: it stays.
+    let (preview, applied) =
+        lab.make("tempo-marker-set", json!({"positionBeats": 16.0, "bpm": 140.0}), "Kumi: Tempo 140 BPM at bar 5 (ktb02)");
+    state(|s| s.tempo_markers[0].bpm = 100.0);
+    lab.undo("tempo-marker-set", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(tempo_markers(), [(0.0, 100.0, 4, 4, false)]);
+    // A marker at the start itself brings nothing.
+    state(|s| s.tempo_markers.clear());
+    let (_, applied) = lab.make("tempo-marker-set", json!({"position": 0.0, "bpm": 90.0}), "Kumi: Tempo 90 BPM at bar 1 (ktb03)");
+    assert!(applied["applied"].get("base").is_none());
+}
+
+#[test]
+fn the_controller_events_in_a_take_are_untouched_by_a_notes_change() {
+    let lab = Lab::new();
+    state(|s| {
+        s.tracks[2].items[0].takes[0].ccs =
+            (0..5).map(|i| fake::FakeCc { ppq: i as f64 * 480.0, kind: 0xB0, channel: 0, data1: 1, data2: 10 * i }).collect();
+    });
+    let ccs = || state(|s| s.tracks[2].items[0].takes[0].ccs.iter().map(|c| (c.ppq as i64, c.data1, c.data2)).collect::<Vec<_>>());
+    let before = ccs();
+    let (preview, applied) = lab.make(
+        "notes-add",
+        json!({"ref": SNARE_TAKE, "notes": [{"pitch": 50, "start": 0.0, "length": 1.0}, {"pitch": 52, "start": 2.0, "length": 1.0}]}),
+        "Kumi: Wrote 2 notes in snare.mid take (kcc01)",
+    );
+    assert_eq!((ccs(), snare_notes().len()), (before.clone(), 4));
+    lab.undo("notes-add", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!((ccs(), snare_notes().len()), (before, 2));
+}
+
+#[test]
+fn a_note_that_would_overlap_one_of_the_same_pitch_is_refused_so_no_note_is_shortened() {
+    let lab = Lab::new();
+    // The snare take has pitch 38 on channel 1 from tick 0 to 480 (beat 0 to 0.5).
+    for (input, ok) in [
+        (json!({"pitch": 38, "start": 0.25, "length": 1.0}), false),
+        (json!({"pitch": 38, "start": 0.5, "length": 1.0}), true),
+        (json!({"pitch": 38, "start": 0.25, "length": 1.0, "channel": 2}), true),
+        (json!({"pitch": 39, "start": 0.25, "length": 1.0}), true),
+    ] {
+        let result = lab.call("change_preview", json!({"kind": "notes-add", "input": {"ref": SNARE_TAKE, "notes": [input]}}));
+        assert_eq!(result.is_ok(), ok, "{input}: {result:?}");
+        if let Err((code, message)) = result {
+            assert_eq!(code, "bad-params");
+            assert!(message.contains("overlap"), "{message}");
+        }
+    }
+    // Two new notes that overlap each other.
+    let both = json!([{"pitch": 50, "start": 4.0, "length": 1.0}, {"pitch": 50, "start": 4.5, "length": 1.0}]);
+    assert_eq!(
+        lab.call("change_preview", json!({"kind": "notes-add", "input": {"ref": SNARE_TAKE, "notes": both}})).unwrap_err().0,
+        "bad-params"
+    );
+    // A change that moves a note onto another.
+    let onto = json!([{"index": 1, "pitch": 38, "channel": 1, "start": 0.25}]);
+    assert_eq!(
+        lab.call("change_preview", json!({"kind": "notes-change", "input": {"ref": SNARE_TAKE, "changes": onto}})).unwrap_err().0,
+        "bad-params"
+    );
+    // Taking a note away makes room for one in its place.
+    let swap = json!([{"index": 0, "start": 0.0, "length": 1.0}]);
+    lab.make("notes-change", json!({"ref": SNARE_TAKE, "changes": swap}), "Kumi: Changed 1 note in snare.mid take (kov01)");
+    // A take that already overlaps (the producer's): adding elsewhere is no matter.
+    state(|s| {
+        s.tracks[2].items[0].takes[0].notes.push(fake::FakeNote {
+            start_ppq: 100.0,
+            end_ppq: 500.0,
+            channel: 0,
+            pitch: 38,
+            velocity: 90,
+            selected: false,
+            muted: false,
+        })
+    });
+    lab.make(
+        "notes-add",
+        json!({"ref": SNARE_TAKE, "notes": [{"pitch": 60, "start": 8.0, "length": 1.0}]}),
+        "Kumi: Wrote 1 note in snare.mid take (kov02)",
+    );
+}
