@@ -1580,6 +1580,11 @@ fn several_parameters_of_one_fx_are_set_in_one_point_and_undo_puts_each_back() {
     state(|s| s.tracks[1].fx[1].params[5].value = 0.1);
     assert_eq!(lab.apply("fx-params", &input, &preview["fence"]).unwrap_err().0, "changed");
     assert_eq!(fake_values("{K-EQ}")[..2], before[..2]);
+    // A take's ReaEQ (REAPER gives a take's FX no GetEQParam): its units found by its band parameters' names.
+    state(|s| s.tracks[1].items[0].takes[0].fx.push(reaeq("{T-EQ}")));
+    let (_, applied) =
+        lab.make("fx-params", json!({"ref": fx_ref("{T-EQ}"), "values": [{"param": 0, "units": 120}, {"param": 1, "units": -3.5}]}));
+    assert_eq!(applied["display"]["lines"], json!(["Freq-Band 1 → 120.0 Hz", "Gain-Band 1 → -3.5 dB"]));
     // The FX gone: its undo is `gone`.
     let (preview, applied) = lab.make("fx-params", json!({"ref": fx_ref("{K-EQ}"), "values": [{"param": 3, "normalized": 0.1}]}));
     assert_eq!(preview["display"]["title"], "ReaEQ 1 parameter on “Kick”");

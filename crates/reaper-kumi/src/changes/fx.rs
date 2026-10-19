@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use super::fxchain::{self, changed, gone_if_missing, went, ChainFile, FxAt, Holder, QuietAutomation};
 use super::{Applied, Ctx, Done, Preview, Restore, Restored};
 use crate::read::{bad, failed};
-use crate::reaper::Fx;
+use crate::reaper::{Fx, FxOwner};
 use crate::refs::{self, Ref};
 use crate::rows;
 
@@ -322,7 +322,7 @@ fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     }
     let reaper = ctx.reaper;
     let chunk = fxchain::owner_chunk(reaper, at.fx.owner)?;
-    let entry = fxchain::fx_entry(&chunk, matches!(at.fx.owner, crate::reaper::FxOwner::Take(_)), &at.guid)
+    let entry = fxchain::fx_entry(&chunk, matches!(at.fx.owner, FxOwner::Take(_)), &at.guid)
         .ok_or_else(|| failed("the FX isn't in its owner's state (a plug-in REAPER can't describe)"))?;
     let (label, where_) = (fx_label(ctx, at.fx), fxchain::holder_label(ctx, at.holder));
     let name = reaper.fx_name(at.fx);
@@ -775,7 +775,7 @@ pub(super) enum Wanted {
 /// parameter, which would break every later undo); a JSFX slider's own value, written as the slider takes it.
 fn units_value(ctx: &Ctx, at: &ParamAt, units: f64, typed: &str) -> Done<Wanted> {
     let fx = at.at.fx;
-    if ctx.reaper.fx_eq_param(fx, at.param).is_some_and(|eq| (0..=2).contains(&eq.kind) && eq.band_type >= 0) {
+    if ctx.reaper.fx_eq_param(fx, at.param).is_some_and(|eq| (0..=2).contains(&eq.kind) && eq.band_type >= 0) || take_reaeq_band(ctx, at) {
         return find_value(ctx, at, typed).map(Wanted::Normalized);
     }
     let kind = ctx.reaper.fx_config(fx, "fx_type").unwrap_or_default();
@@ -791,6 +791,17 @@ fn units_value(ctx: &Ctx, at: &ParamAt, units: f64, typed: &str) -> Done<Wanted>
         "{} has no units of its own Kumi can set: give value, the text it shows for what you want (such as \"-3 dB\")",
         fx_label(ctx, fx)
     )))
+}
+
+/// A ReaEQ band's frequency, gain or bandwidth on a take, where REAPER gives no `GetEQParam` (lab 7.82): told by the
+/// plug-in (its original name, whatever the producer renamed it) and the parameter's name ("Freq-Band 2", "Gain-Low
+/// Shelf", "BW-High Pass").
+fn take_reaeq_band(ctx: &Ctx, at: &ParamAt) -> bool {
+    let fx = at.at.fx;
+    let original = ctx.reaper.fx_config(fx, "original_name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| ctx.reaper.fx_name(fx));
+    matches!(fx.owner, FxOwner::Take(_))
+        && short_name(&original) == "ReaEQ"
+        && ["Freq-", "Gain-", "BW-"].iter().any(|prefix| ctx.reaper.param_name(fx, at.param).starts_with(prefix))
 }
 
 pub(super) fn wanted_value(ctx: &Ctx, at: &ParamAt, input: &Value) -> Done<Wanted> {
