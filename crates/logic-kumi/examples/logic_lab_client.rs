@@ -2,7 +2,7 @@
 //! the secret, prints the welcome and `status`, then the events for a while. The M1 gate on a Mac: start `logic-kumi`
 //! with Logic open, run this, and open or switch a project in Logic to see the `project` event.
 //!
-//! cargo run -p logic-kumi --example lab_client -- [--kumi-home <dir>] [--watch <seconds>] [--call <method> <json params>]...
+//! cargo run -p logic-kumi --example logic_lab_client -- [--kumi-home <dir>] [--watch <seconds>] [--call <method> <json params>]...
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;

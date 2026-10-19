@@ -11,7 +11,7 @@ start of the bridge from a session. Kumi's interactive session was not run (see 
 | macOS | 26.6.1, Apple Silicon |
 | Bridge | `target/debug/logic-kumi --kumi-home <scratch home> --helper target/logic-hands/kumi-logic-hands-eaf2506e88a9` |
 | Helper | built by `scripts/build-logic-hands.py` in this checkout, universal, ad-hoc signed |
-| Client | `cargo run -p logic-kumi --example lab_client -- --kumi-home <scratch home> --watch 8` |
+| Client | `cargo run -p logic-kumi --example logic_lab_client -- --kumi-home <scratch home> --watch 8` (the example was named `lab_client` then) |
 | Kumi home | a scratch folder under the session's scratchpad, never `~/.kumi` |
 
 ## What happened

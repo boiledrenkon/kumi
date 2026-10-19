@@ -51,7 +51,11 @@ def build(source: Path = SOURCE, out: Path = OUT, reuse: bool = False) -> Path:
             slices.append(str(output))
         partial = out / (target.name + ".partial")
         subprocess.run(["lipo", "-create", "-output", str(partial), *slices], check=True)
-        subprocess.run(["codesign", "--force", "--sign", "-", str(partial)], check=True)
+        # codesign says "replacing existing signature" of the linker's ad-hoc arm64 signature every time: kept for a failure only.
+        signed = subprocess.run(["codesign", "--force", "--sign", "-", str(partial)], capture_output=True, text=True)
+        if signed.returncode != 0:
+            sys.stderr.write(signed.stderr)
+            raise SystemExit(f"codesign failed ({signed.returncode}) on {partial}")
         os.replace(partial, target)
     return target
 

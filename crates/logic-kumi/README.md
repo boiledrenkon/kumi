@@ -96,7 +96,7 @@ With Logic open and the helper built:
 
 ```sh
 cargo run -p logic-kumi
-cargo run -p logic-kumi --example lab_client -- --watch 20
+cargo run -p logic-kumi --example logic_lab_client -- --watch 20
 ```
 
 The lab client finds the bridge through its discovery file, proves the
