@@ -325,6 +325,35 @@ test("listening: a render times its lines as Renoise renders them: before the so
   H.no_dialogs()
 end)
 
+test("listening: the render-timing cases measured in Renoise plan the lengths Renoise renders", function()
+  local function command(text)
+    local digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return 256 + (digits:find(text:sub(1, 1), 1, true) - 1) * 36 + (digits:find(text:sub(2, 2), 1, true) - 1)
+  end
+  -- {commands {slot, line, text, amount}, fromBeat, beats, preRoll, seconds, start} (16-line patterns: 4 beats at LPB 4)
+  local cases = {
+    { {}, 1, 2, 1, 1.5, 0.5 },
+    { { { 2, 1, "ZT", 0x3C } }, 1, 2, 1, 3, 1 },                       -- before the song's first ZT: at its tempo
+    { { { 2, 1, "ZL", 8 } }, 0, 4, 0, 1, 0 },                          -- before the first ZL: at its LPB (16 lines at LPB 8)
+    { { { 1, 1, "ZT", 0x78 }, { 3, 1, "ZT", 0x3C } }, 4, 4, 0, 2, 0 }, -- the ZT before the part wins (120)
+    { { { 1, 1, "ZT", 0x78 }, { 3, 1, "ZT", 0x3C } }, 8, 2, 0, 2, 0 }, -- one met on the part's first line (60)
+    { { { 1, 1, "ZL", 8 }, { 2, 1, "ZT", 0x3C } }, 1.5, 0.5, 0.5, 1, 0.5 }, -- LPB 8 chased, BPM the first ZT's: 60/8
+  }
+  for k, c in ipairs(cases) do
+    local env, peer = setup()
+    for _, cmd in ipairs(c[1]) do mock.ops.set_effect(cmd[1], 4, cmd[2], 1, command(cmd[3]), cmd[4]) end
+    local job = "jc" .. k
+    local answer = result((start(peer, job, { { id = "mix", what = "master" } }, { fromBeat = c[2], beats = c[3] }, { preRollBeats = c[4] })), "case " .. k)
+    ok(math.abs(answer.seconds - c[5]) < 1e-9, "case " .. k .. " planned " .. answer.seconds .. ", Renoise renders " .. c[5])
+    mock.finish_render()
+    local done = status(peer, job)
+    eq(done.state, "done", "case " .. k .. ": " .. tostring(done.error))
+    ok(math.abs(done.files[1].seconds - c[5]) < 1e-6, "case " .. k .. " file " .. done.files[1].seconds)
+    ok(math.abs(done.files[1].start - c[6]) < 1e-9, "case " .. k .. " start " .. done.files[1].start .. ", expected " .. c[6])
+  end
+  H.no_dialogs()
+end)
+
 -- Failures put everything back
 
 test("listening: a render that ends with no callback fails, puts the mutes back and deletes its files", function()
