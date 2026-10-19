@@ -2,6 +2,7 @@
 
 use crate::core::contracts::JsonObject;
 use kumi_common::js::string::{head, trim};
+use serde_json::{json, Value};
 
 /// The most of a step's line, and of what it does: its fields come before more words about it.
 const LINE: usize = 170;
@@ -23,6 +24,23 @@ pub fn step_line(name: &str, description: &str, schema: &JsonObject) -> String {
     } else {
         line
     }
+}
+
+/// The plan tool's description and schema: `base`'s, with every step it can run (and wait) in its steps' tool enum,
+/// and a line each (`step_line`) for those that aren't tools of their own.
+pub fn plan_tool(base: &str, schema: &Value, mut tools: Vec<String>, lines: &[String]) -> (String, JsonObject) {
+    let mut schema = schema.clone();
+    tools.push("wait".into());
+    schema["properties"]["steps"]["items"]["properties"]["tool"]["enum"] = json!(tools);
+    let description = if lines.is_empty() {
+        base.to_string()
+    } else {
+        format!(
+            "{base} Steps that aren't tools of your own take these inputs (`?`: may be left out; find_tools gives a step's whole input): {}.",
+            lines.join("; ")
+        )
+    };
+    (description, schema.as_object().unwrap().clone())
 }
 
 /// What a tool does, from its description: up to the end of its first sentence or clause.

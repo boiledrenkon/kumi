@@ -28,6 +28,7 @@ use crate::{
         timing,
     },
     devices::tool::{device_tool, DeviceToolOptions, Made},
+    integrations::shared::steps,
     mcp::allowed_tools::CallOptions,
 };
 use async_trait::async_trait;
@@ -613,20 +614,10 @@ impl ObservationHost for Ableton {
             offered.push(self.step_tool(&kind.tool, &kind.description, schema, planned));
         }
         if planned && !edits.is_empty() {
-            let mut schema = DATA["make_changes"]["schema"].clone();
             edits.extend(actions);
-            edits.push("wait".into());
-            schema["properties"]["steps"]["items"]["properties"]["tool"]["enum"] = json!(edits);
-            let base = DATA["make_changes"]["description"].as_str().unwrap();
-            let description = if steps.is_empty() {
-                base.to_string()
-            } else {
-                format!(
-                    "{base} Steps that aren't tools of your own take these inputs (`?`: may be left out; find_tools gives a step's whole input): {}.",
-                    steps.join("; ")
-                )
-            };
-            offered.push(self.tool("make_changes", &description, object(&schema).unwrap()));
+            let base = &DATA["make_changes"];
+            let (description, schema) = steps::plan_tool(base["description"].as_str().unwrap(), &base["schema"], edits, &steps);
+            offered.push(self.tool("make_changes", &description, schema));
         }
         if ["live_undo", "live_clip_duplicate_preview", "live_clip_duplicate_apply"].iter().all(|n| tools.has(n)) {
             offered.push(self.tool(arrange::ARRANGE_TOOL, &arrange::ARRANGE_DESCRIPTION, arrange::ARRANGE_SCHEMA.clone()));
