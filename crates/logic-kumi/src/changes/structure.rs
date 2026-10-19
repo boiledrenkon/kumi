@@ -287,7 +287,14 @@ pub fn delete_apply(ctx: &mut Ctx, input: &Value, fence: &Value, desc: &str) -> 
 /// watch holds the change (by its key, and by the step's own `desc` when the journal kept it) as Kumi's latest step.
 /// The title pressed.
 pub(crate) fn undo_in_logic(ctx: &mut Ctx, watch: &mut Watch, key: &str, step: &str, desc: Option<&str>) -> Done<String> {
-    let titles = watch.fresh_titles(ctx)?;
+    // In front first: the titles are validated (by a key) only there, and a stale title could name another step.
+    front::ensure(ctx.ax)?;
+    let (titles, verified) = watch.fresh_titles(ctx)?;
+    if !verified {
+        return Err(failed(
+            "Logic Pro went behind before its Undo title could be checked, so Kumi can't put this back now; ask again with Logic Pro in front",
+        ));
+    }
     let names_it = titles.undo_action(&ctx.project.strings).as_deref() == Some(step);
     let ours = watch.top_is(key) && desc.is_none_or(|desc| watch.top_desc().as_deref() == Some(desc));
     if !names_it || !ours {
@@ -296,7 +303,6 @@ pub(crate) fn undo_in_logic(ctx: &mut Ctx, watch: &mut Watch, key: &str, step: &
             titles.undo
         )));
     }
-    front::ensure(ctx.ax)?;
     let mut menus = vec!["Edit".to_string()];
     menus.extend(ctx.project.strings.candidates("Edit"));
     let mut pressed = None;

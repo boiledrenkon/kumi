@@ -6,10 +6,10 @@
 //! (and every one above it) undone, the Undo title taking it back is a redo. For what the focus tick reads every
 //! 150 ms anyway (a header's name, mute, solo, arm, volume and pan, the tracks' names, the tempo) a probe tells at
 //! once, whatever the titles say: a value back at what it was before Kumi's change is the change undone, back at
-//! what Kumi set is a redo. The titles are refreshed after each of Kumi's own writes, and every so often while Logic
-//! is behind and Kumi's steps stand.
-
-use std::time::{Duration, Instant};
+//! what Kumi set is a redo. The titles are refreshed (by a key, which opens nothing) after each of Kumi's own writes
+//! while Logic is in front, and read as they stand otherwise: the tick puts no input into Logic on its own, and the
+//! bridge presses no menu bar item (see [`super::front`] for the wedge that taught it), so a step without a probe (a
+//! marker's, a note's) undone by hand while Logic is behind is named when Logic next validates its Edit menu.
 
 use serde_json::{json, Value};
 
@@ -17,12 +17,11 @@ use crate::ax::strings::Strings;
 use crate::ax::Ax;
 use crate::changes::{front, Ctx, Done};
 use crate::focus::Look;
+use crate::log;
 use crate::rows::Header;
 
 /// The most steps the watch keeps: the oldest go first.
 const MOST: usize = 64;
-/// How often the titles are validated on purpose while Logic is behind and Kumi's steps stand.
-const VALIDATE_EVERY: Duration = Duration::from_secs(2);
 
 /// The Edit menu's Undo and Redo titles, raw.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -142,7 +141,8 @@ pub struct Entry {
 pub struct Watch {
     pub entries: Vec<Entry>,
     seen: Option<Titles>,
-    validated_at: Option<Instant>,
+    /// Whether the log was told, once, that the titles are being read unverified while Logic is behind.
+    unverified_said: bool,
     edit: Option<String>,
     epoch: Option<u32>,
 }
@@ -157,16 +157,24 @@ impl Watch {
         Ok(edit)
     }
 
-    /// The titles as Logic validates them now (after a refresh), and kept as the baseline.
-    pub fn fresh_titles(&mut self, ctx: &mut Ctx) -> Done<Titles> {
+    /// The titles, validated by a key when Logic is in front (`true`), else as they stand (`false`: a key doesn't
+    /// land behind, and the bridge presses no menu); kept as the baseline either way.
+    pub fn fresh_titles(&mut self, ctx: &mut Ctx) -> Done<(Titles, bool)> {
         let edit = self.edit_menu(ctx.ax, &ctx.project.strings)?;
-        let in_front = super::nudge::read(ctx.ax.in_front())?;
-        super::nudge::read(front::validate(ctx.ax, &edit, in_front))?;
-        self.validated_at = Some(Instant::now());
+        let verified = super::nudge::read(ctx.ax.in_front())?;
+        if verified {
+            super::nudge::read(front::refresh(ctx.ax))?;
+        } else if !self.unverified_said {
+            self.unverified_said = true;
+            log::line(
+                "Logic Pro is behind: the Edit menu's Undo titles are read unverified (nothing is pressed or posted into a Logic \
+                 behind); a marker or note step undone by hand is named when Logic next validates its Edit menu",
+            );
+        }
         let (undo, redo) = super::nudge::read(front::titles(ctx.ax, &edit))?;
         let titles = Titles { undo, redo };
         self.seen = Some(titles.clone());
-        Ok(titles)
+        Ok((titles, verified))
     }
 
     /// Whether Kumi's latest step that Logic's history holds is the change `key` names (its kind and target): the one
@@ -177,9 +185,11 @@ impl Watch {
 
     /// Kumi applied a change: the titles are refreshed and the step kept; the `undo` field of the apply's answer.
     pub fn applied(&mut self, ctx: &mut Ctx, desc: &str, key: &str, expected: Option<&'static str>, probe: Option<Probe>) -> Value {
-        let titles = self.fresh_titles(ctx).unwrap_or_default();
+        let (titles, verified) = self.fresh_titles(ctx).unwrap_or_default();
+        // A title Logic hasn't validated may name an older step: unverified, the step is the kind's own Logic name.
         let step = match expected {
-            Some(expected) => titles.undo_action(&ctx.project.strings).or_else(|| Some(expected.to_string())),
+            Some(expected) if verified => titles.undo_action(&ctx.project.strings).or_else(|| Some(expected.to_string())),
+            Some(expected) => Some(expected.to_string()),
             None => None,
         };
         let entry = step.is_some();
@@ -191,14 +201,14 @@ impl Watch {
             desc: desc.to_string(),
             key: key.to_string(),
             step,
-            title: titles.undo.clone(),
+            title: if verified { titles.undo.clone() } else { String::new() },
             undone: false,
             probe,
             epoch,
         });
         self.epoch = Some(epoch);
         let mut undo = json!({"desc": desc, "entry": entry});
-        if entry && !titles.undo.is_empty() {
+        if entry && verified && !titles.undo.is_empty() {
             undo["title"] = titles.undo.into();
         }
         undo
@@ -229,9 +239,9 @@ impl Watch {
         }
     }
 
-    /// One tick: the probes against what the focus read, the titles against what they said, and every so often a
-    /// validation while Logic is behind. `out` takes each `undone_in_daw` event's data; `carry` says where a track of
-    /// an earlier epoch stands now, for the probes.
+    /// One tick: the probes against what the focus read, and the titles as they stand against what they said; the
+    /// tick posts nothing into Logic. `out` takes each `undone_in_daw` event's data; `carry` says where a track of an
+    /// earlier epoch stands now, for the probes.
     pub fn poll(
         &mut self,
         ax: &mut Ax,
@@ -263,13 +273,8 @@ impl Watch {
         if self.entries.is_empty() {
             return;
         }
-        // The titles: validated on purpose now and then while Logic is behind, read as they stand otherwise.
+        // The titles as they stand: the tick reads them, and puts no input into Logic (nothing validates them here).
         let Ok(edit) = self.edit_menu(ax, strings) else { return };
-        let due = self.validated_at.is_none_or(|at| at.elapsed() >= VALIDATE_EVERY);
-        if due && ax.in_front().ok() == Some(false) {
-            let _ = front::validate(ax, &edit, false);
-            self.validated_at = Some(Instant::now());
-        }
         let Ok((undo, redo)) = front::titles(ax, &edit) else { return };
         let titles = Titles { undo, redo };
         if self.seen.as_ref() != Some(&titles) {
@@ -495,25 +500,32 @@ mod tests {
     }
 
     #[test]
-    fn the_titles_are_validated_now_and_then_while_logic_is_behind() {
+    fn the_tick_puts_no_input_into_logic_and_reads_the_titles_as_they_stand() {
         let hands = MockHands::new();
         hands.set_apps(vec![json!({"bundle": "com.apple.logic10", "pid": 7, "active": false})]);
-        menus(&hands, "Undo", "Can’t Redo");
+        menus(&hands, "Undo Create Marker", "Can’t Redo");
         let mut launcher = hands.clone();
         let mut helper = Launch::launch(&mut launcher).unwrap();
         let mut ax = Ax::new(helper.as_mut(), 7);
         let strings = Strings::english();
         let mut watch = Watch::default();
-        watch.entries.push(entry("Kumi: x (k0001)", Some("Renaming"), None));
-        hands.reply("action", Ok(json!({"result": "success"})));
-        hands.reply("action", Ok(json!({"result": "success"})));
-        watch.poll(&mut ax, &strings, &look(1, 160.0), &[], &mut |_| {}, &stays);
-        assert_eq!(hands.calls_of("action"), 2, "a press and a cancel of the Edit menu bar item");
-        watch.poll(&mut ax, &strings, &look(1, 160.0), &[], &mut |_| {}, &stays);
-        assert_eq!(hands.calls_of("action"), 2, "not again within two seconds");
-        watch.validated_at = Some(Instant::now() - VALIDATE_EVERY);
+        // A marker step has no probe: only the titles can name its undo.
+        watch.entries.push(entry("Kumi: Marker at bar 9 (k0001)", Some("Create Marker"), None));
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut out = |data: Value| events.borrow_mut().push(data);
+        watch.poll(&mut ax, &strings, &look(1, 160.0), &[], &mut out, &stays);
+        watch.poll(&mut ax, &strings, &look(1, 160.0), &[], &mut out, &stays);
+        assert_eq!(hands.calls_of("action") + hands.calls_of("keys"), 0, "behind: nothing pressed, nothing posted");
         hands.set_apps(vec![json!({"bundle": "com.apple.logic10", "pid": 7, "active": true})]);
-        watch.poll(&mut ax, &strings, &look(1, 160.0), &[], &mut |_| {}, &stays);
-        assert_eq!(hands.calls_of("action"), 2, "never while Logic is in front: its menu would show");
+        watch.poll(&mut ax, &strings, &look(1, 160.0), &[], &mut out, &stays);
+        assert_eq!(hands.calls_of("action") + hands.calls_of("keys"), 0, "in front: the tick still posts nothing");
+        assert!(hands.calls().iter().all(|(op, _)| op == "tree"), "the tick only reads: {:?}", hands.calls());
+        assert!(events.borrow().is_empty());
+        // The producer undid the marker and Logic validated its Edit menu (they opened it): the Redo title names it.
+        menus(&hands, "Undo", "Redo Create Marker");
+        watch.poll(&mut ax, &strings, &look(1, 160.0), &[], &mut out, &stays);
+        assert_eq!(events.borrow().len(), 1);
+        assert_eq!(events.borrow()[0]["descs"], json!(["Kumi: Marker at bar 9 (k0001)"]));
+        assert_eq!(events.borrow()[0]["how"], "undo");
     }
 }

@@ -216,12 +216,25 @@ the menu bar reads without activating Logic) it looks two ways:
 
 - the probes: a value back at what it was before Kumi's change is that change undone by hand (`how:
   "undo"`), back at what Kumi set is a redo; these fire at once, whatever the titles say;
-- the titles, refreshed on purpose now and then while Logic is behind (a press and a cancel of the
-  Edit menu bar item, ~170 ms, at most every 2 s; never while Logic is in front, where its menu would
-  show), and read as they stand otherwise (~0.6 ms): the Redo title taking a step's name is that step
-  and every one above it undone, the Undo title taking it back a redo. A step whose probe still shows
-  it applied is not taken as undone by a title alone, since Logic's titles carry no nonce and the
-  producer's own step may share the name.
+- the titles, read as they stand (~0.6 ms): the Redo title taking a step's name is that step and
+  every one above it undone, the Undo title taking it back a redo. A step whose probe still shows it
+  applied is not taken as undone by a title alone, since Logic's titles carry no nonce and the
+  producer's own step may share the name. The tick never validates the titles itself: they are
+  refreshed only after Kumi's own writes while Logic is in front, by a key equivalent Logic doesn't
+  own (which opens nothing); behind, they are read unverified, and an apply then names its step by
+  the kind's own Logic name and carries no `title`.
+
+The bridge presses no menu bar item. It used to validate the Edit menu while Logic was behind with a
+press and a cancel of the item (invisible, the menu bar being off screen); at the M3 gate one press
+left the item `selected` with no menu to cancel, and Logic then took no click, key, selection or
+activation and answered no Apple Event until a real click, so every change after it failed. A read
+can't wedge anything and the probes name most undos at once, so the loss — a producer's Cmd-Z on a
+marker or note step while Logic is behind is named when Logic next validates its Edit menu (Kumi's
+next write in front, or the producer opening the menu) — is taken over the risk; the log says so once
+when the titles are first read unverified. What is kept is the cure: before a write gives up on the
+front as `busy`, a menu bar item found left `selected` is closed with a cancel on its menu (twice at
+most) and Logic asked forward once more; a menu that stays open is logged, and the change is `busy`.
+A restore by Logic's own undo brings Logic in front first and checks the validated title only then.
 
 The bridge sends `undone_in_daw {descs, how, epoch}` with the `desc`s of the changes the titles or
 probes moved, so the host's `by_descs` matching names Kumi's changes although Logic's titles carry no

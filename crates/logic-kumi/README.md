@@ -128,8 +128,11 @@ is the arbiter. `src/changes/` holds it:
   step; a value that shows only as text (a fader's dB) is stepped toward until
   the text says it. `front.rs` brings Logic in front for a menu item, a key or
   a click, refusing `busy` when another app keeps the front, and refreshes the
-  Edit menu's Undo and Redo titles (a key command of Logic's own doesn't make
-  it validate them).
+  Edit menu's Undo and Redo titles with a key equivalent Logic doesn't own,
+  only while Logic is in front (a key command of Logic's own doesn't make it
+  validate them). The bridge presses no menu bar item: one left open took
+  every click and key at the M3 gate, so a menu found open is closed with a
+  cancel before a write gives up as `busy`.
 - Restore is by value where the value can be set, else by Logic's own undo
   (Cmd-Z through the Edit menu) while the change is still Logic's top Undo step.
   A restore's refs are from the change's own epoch, carried to where the track
@@ -138,8 +141,8 @@ is the arbiter. `src/changes/` holds it:
 - `undo.rs` names the producer's own undo back to Kumi: it keeps a stack of
   Kumi's steps with the title Logic gave each at apply time and, for what the
   focus tick reads anyway, a probe (a header's value, the tempo); each tick it
-  watches the probes and the Edit menu's titles and sends `undone_in_daw` with
-  the `desc`s that moved. Logic keeps no undo block, so `plan_steps` is false
+  watches the probes and the Edit menu's titles as they stand (the tick puts
+  no input into Logic) and sends `undone_in_daw` with the `desc`s that moved. Logic keeps no undo block, so `plan_steps` is false
   and a plan is several steps of its undo.
 
 The exact shapes, the channels, the fences and the differences from REAPER are
