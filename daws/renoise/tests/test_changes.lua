@@ -649,7 +649,7 @@ test("changes: a group's first member goes back first, its last member back last
   eq(first.group.name, "Group")
   eq(order(), before, "the first member is the first member again")
   local last = delete_and_restore(peer, 4)
-  eq(last.group.index, 5)
+  eq(last.group.at, 4, "the group, one place up once its last member is gone")
   eq(order(), before, "and the last is the last")
   eq(mock.data.tracks[5].members, 2)
   -- a track that is not in a group is not put in one

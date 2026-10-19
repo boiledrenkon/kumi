@@ -1745,6 +1745,14 @@ function ops.insert_instrument(spec)
   fire(song_fields().instruments_observable, { type = "insert", index = #M.data.instruments })
 end
 
+-- An instrument made at `i` (Renoise's insert_instrument_at): those after it move up one.
+function ops.insert_instrument_at(i, spec)
+  M.data.new_instrument(spec)
+  local instruments = M.data.instruments
+  table.insert(instruments, i, table.remove(instruments))
+  fire(song_fields().instruments_observable, { type = "insert", index = i })
+end
+
 function ops.remove_instrument(i)
   local instruments = M.data.instruments
   table.remove(instruments, i)

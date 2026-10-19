@@ -133,8 +133,12 @@ local function delete_info(song, s)
     if sequencer:track_sequence_slot_is_muted(t, s) then mutes[#mutes + 1] = { track = t } end
   end
   local start = sequencer:sequence_is_start_of_section(s)
+  -- (the slot's place is the sequence before it: Renoise's sequence notifier can't say where a slot went, so the place holds
+  -- while the slots before it are the same, whatever is made or deleted after)
+  local before = {}
+  for k = 1, s - 1 do before[k] = sequencer.pattern_sequence[k] end
   local info = {
-    index = s, pattern = p, count = slot_count(song),
+    index = s, pattern = p, count = slot_count(song), before = before,
     section = { start = start, name = start and sequencer:sequence_section_name(s) or "" },
     mutes = mutes,
   }
@@ -201,6 +205,16 @@ local function delete_restore(song, env, restore, desc)
   local sequencer = song.sequencer
   local n = slot_count(song)
   local index = material.index
+  local before = type(material.before) == "table" and material.before or nil
+  local holds = before ~= nil and #before == index - 1 and index - 1 <= n
+  if holds and before then
+    for k = 1, index - 1 do
+      if sequencer.pattern_sequence[k] ~= before[k] then holds = false break end
+    end
+  end
+  if not holds then
+    fail("stale", string.format("the sequence before %s changed in Renoise since Kumi deleted it, so Kumi can't tell where it goes: nothing was put back", slot_text(index)))
+  end
   -- (the pattern it played, if it stayed in the pool: a ref, `stale` when the pool was renumbered since)
   local kept_pattern = not material.gone and refs.expect(material.pattern, "pattern", 1, env.epoch())[1] or nil
   -- back already: the song is as long as it was and the slot holds the pattern

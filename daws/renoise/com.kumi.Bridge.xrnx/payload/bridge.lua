@@ -11,6 +11,7 @@ local focus = import("focus")
 local rows = import("rows")
 local changes = import("changes")
 local refs = import("refs")
+local places = import("places")
 local status = import("status")
 local config = import("config")
 local discovery = import("discovery")
@@ -66,9 +67,23 @@ local function bump_epoch(reason, tracks_kept, broken, keep_shifts)
   broken = broken or EVERYTHING
   -- The layout goes on counting across epochs (no event says when an epoch moves for a device or a pattern, so a layout
   -- that started over would look older than the one Kumi holds). The shifts start over when track numbers can't be followed.
+  local cleared = false
   for _, category in ipairs(broken) do
     b.cat[category] = (b.cat[category] or 0) + 1
-    if (category == "tracks" or category == "document") and not keep_shifts then b.shifts = {} end
+    if (category == "tracks" or category == "document") and not keep_shifts then cleared = true end
+  end
+  if cleared then
+    -- (the layout moves past what the shifts cover: a track numbered in an earlier layout has no place that can be told now,
+    -- where the layout kept would have said it is where it was. Only a layout something was told of needs it.)
+    if b.layout_told or #b.shifts > 0 then b.layout = b.layout + 1 end
+    b.shifts, b.layout_told = {}, false
+  end
+  -- Another song: the pool's and the instruments' places are its own.
+  for _, category in ipairs(broken) do
+    if category == "document" and b.plog then
+      places.gap(b.plog)
+      places.gap(b.ilog)
+    end
   end
   local snapshot = {}
   for _, category in ipairs(CATEGORIES) do snapshot[category] = b.cat[category] or 0 end
@@ -91,8 +106,15 @@ local function survives(from, kind, to)
   return true
 end
 
+-- The layout, as it is handed out (it then needs moving when the shifts are cleared).
+local function layout_now()
+  b.layout_told = true
+  return b.layout
+end
+
 -- How many shifts of the track list the tool keeps to carry refs through.
-M.SHIFT_HISTORY = 64
+-- (a restore that puts a track back into a big group makes two swaps per member itself: 1024 covers groups of 500)
+M.SHIFT_HISTORY = 1024
 -- Watchers left behind by deleted objects, past which the song is watched anew.
 M.MAX_DEAD = 256
 
@@ -254,6 +276,9 @@ local function watch_track(song, i)
   local track = song:track(i)
   local token = b.groups.tracks[i]
   token.devices = {}
+  -- (the track's devices' log: a new one for every watch, so a place from before the track was watched anew is unknown)
+  b.ids = (b.ids or 0) + 1
+  token.dlog = places.new("d" .. b.ids)
   observers:owned(token, nil, function()
     observers:watch_changes(track.name_observable)
     observers:watch_changes(track.color_observable)
@@ -409,6 +434,14 @@ end
 -- asks for the whole song to be watched anew.
 local function on_structural(reason, kind, op, owner, token)
   bump_epoch(reason, true, BREAKS[kind])
+  -- (what moved, for the places a change keeps: a track's devices, the pool, the instruments; anything not told is a gap)
+  if kind == "devices" and token and token.dlog then
+    places.note(token.dlog, op)
+  elseif kind == "patterns" then
+    places.note(b.plog, op)
+  elseif kind == "instruments" then
+    places.note(b.ilog, op)
+  end
   local song = renoise.song()
   if not song then return end
   local lists = { instruments = b.groups.instruments, patterns = b.groups.patterns }
@@ -528,6 +561,9 @@ local function flush_events()
     conns:event("undone_in_daw", { descs = json.array(event.descs), how = event.how, epoch = epoch() })
   end
   if b.reattach then
+    -- (the lists were out of step: what moved meanwhile can't be told)
+    places.gap(b.plog)
+    places.gap(b.ilog)
     attach(song)
   elseif observers.dead > M.MAX_DEAD then
     observers:prune() -- (no call to Renoise: the entries of deleted objects are dropped)
@@ -554,6 +590,7 @@ end
 
 local function stamped(result, layout)
   if type(result) == "table" then result.layout = layout end
+  b.layout_told = true
   return result
 end
 
@@ -626,12 +663,44 @@ local function shifted(index, since)
   return moved
 end
 
+-- The places a change keeps of devices (on the track now at `t`), patterns and instruments: a mark, and where the object is now.
+local function device_log(t)
+  local token = b.groups and b.groups.tracks[t]
+  return token and token.dlog or nil
+end
+
+local function unknown_log() return nil, "unknown" end
+
+local place_env = {
+  device_mark = function(t)
+    local log_ = device_log(t)
+    return log_ and places.mark(log_) or nil
+  end,
+  device_at = function(t, n, mark)
+    local log_ = device_log(t)
+    if not log_ then return unknown_log() end
+    return places.item(log_, n, mark)
+  end,
+  -- (where a device deleted from place `n` goes back: after the one before it; the mixer device is always first)
+  device_after = function(t, n, mark)
+    local log_ = device_log(t)
+    if not log_ then return unknown_log() end
+    return places.after(log_, n, mark, 1)
+  end,
+  pattern_mark = function() return places.mark(b.plog) end,
+  pattern_at = function(p, mark) return places.item(b.plog, p, mark) end,
+  instrument_mark = function() return places.mark(b.ilog) end,
+  instrument_at = function(i, mark) return places.item(b.ilog, i, mark) end,
+}
+
 local function change_env()
-  return {
-    epoch = epoch, layout = function() return b.layout end, journal = b.journal, watch_params = watch_params,
+  local env = {
+    epoch = epoch, layout = function() b.layout_told = true return b.layout end, journal = b.journal, watch_params = watch_params,
     watch_param = watch_param, busy = busy, now_ms = function() return M.now_ms() end, shifted = shifted,
     survives = function(from, kind) return survives(from, kind) end,
   }
+  for name, fn in pairs(place_env) do env[name] = fn end
+  return env
 end
 
 function handlers.change_preview(params)
@@ -710,7 +779,7 @@ function handlers.transport_play(params)
   end
   local position = transport.playback_pos
   return {
-    epoch = epoch(), layout = b.layout, started = started, playing = transport.playing,
+    epoch = epoch(), layout = layout_now(), started = started, playing = transport.playing,
     sequence = sequence or position.sequence, line = sequence and line or (line or position.line),
   }
 end
@@ -836,6 +905,8 @@ function M.start(h, reloading)
   })
   b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
   b.layout, b.shifts, b.shape = b.layout or 0, b.shifts or {}, b.shape or 0
+  b.ids = b.ids or 0
+  b.plog, b.ilog = b.plog or places.new("p"), b.ilog or places.new("i")
   b.cat, b.snap = b.cat or {}, b.snap or {}
   if not b.snap[b.epoch_n] then
     local snapshot = {}
@@ -862,7 +933,7 @@ function M.start(h, reloading)
     now_ms = M.now_ms,
     unix_ms = unix_ms,
     epoch = epoch,
-    layout = function() return b.layout end,
+    layout = function() b.layout_told = true return b.layout end,
     shape = function() return b.shape end,
     finish = function(job, ok, value)
       conns:finish_job(job.record, job.request, ok, value)

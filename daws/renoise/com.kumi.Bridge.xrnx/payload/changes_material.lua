@@ -47,7 +47,8 @@ function M.read_lines(pattern_track, total)
   return out, writes
 end
 
-function M.write_lines(song, index, entry)
+-- (`instruments` maps the instrument values kept to those to write, where the instruments moved since)
+function M.write_lines(song, index, entry, instruments)
   local pattern_track = song:pattern(entry.pattern):track(index)
   if entry.alias then
     pattern_track.alias_pattern_index = entry.alias
@@ -57,7 +58,8 @@ function M.write_lines(song, index, entry)
     local line = pattern_track:line(row.line)
     for _, cell in ipairs(row.notes) do
       local column = line:note_column(cell.col)
-      column.note_value, column.instrument_value, column.volume_value = cell.note, cell.instrument, cell.volume
+      local instrument = instruments and instruments[cell.instrument] or cell.instrument
+      column.note_value, column.instrument_value, column.volume_value = cell.note, instrument, cell.volume
       column.panning_value, column.delay_value = cell.panning, cell.delay
       column.effect_number_value, column.effect_amount_value = cell.fxn, cell.fxa
     end
@@ -76,28 +78,39 @@ local function parameter_named(device, name)
   return nil
 end
 
--- The paths of a track's devices after its mixer device. A record that names a device by its number on a track is good only while
--- the track still has the devices it had (their numbers move with every device made, deleted or moved, and nothing says which).
-local function device_paths(track)
-  local out = {}
-  for d = 2, #track.devices do out[#out + 1] = track:device(d).device_path end
-  return out
+-- A device as a record keeps it: its place on its track, the mark of that track's devices' log then, and what it is (its path
+-- and name, to check the place found is that device).
+function M.device_print(device)
+  return { path = device.device_path, name = device.display_name ~= "" and device.display_name or device.name }
 end
 
-local function same_paths(track, list)
-  if type(list) ~= "table" or #track.devices - 1 ~= #list then return false end
-  for d = 2, #track.devices do
-    if track:device(d).device_path ~= list[d - 1] then return false end
-  end
-  return true
+function M.device_place(env, t, d, device)
+  local mark = env and env.device_mark and env.device_mark(t) or nil
+  if not mark then return nil end
+  return { n = d, mark = mark, print = M.device_print(device) }
 end
 
--- What was put back, and what could not be (a track or a devices list that is not the one the record was made for is left alone).
-function M.new_tally() return { set = 0, failed = 0, skipped = 0 } end
+-- Where a kept device is now on the track now at `t`: its number, or nil and why ("unknown": what moved on the track since
+-- can't be told; "gone"; "changed": the device at its place is not what it was).
+function M.device_now(song, env, t, place)
+  if type(place) ~= "table" or not env.device_at then return nil, "unknown" end
+  local d, why = env.device_at(t, place.n, place.mark)
+  if not d then return nil, why end
+  local track = song:track(t)
+  if d < 1 or d > #track.devices then return nil, "unknown" end
+  local now = M.device_print(track:device(d))
+  local was = place.print or {}
+  if now.path ~= was.path or now.name ~= was.name then return nil, "changed" end
+  return d
+end
+
+-- What was put back, and what could not be (a track or a device that is not the one the record was made for is left alone).
+function M.new_tally() return { set = 0, failed = 0, skipped = 0, unknown = 0 } end
 
 function M.count(tally, status)
   if status == "set" then tally.set = tally.set + 1
   elseif status == "failed" then tally.failed = tally.failed + 1
+  elseif status == "unknown" then tally.unknown = tally.unknown + 1
   elseif status then tally.skipped = tally.skipped + 1 end
 end
 
@@ -107,8 +120,12 @@ function M.tally_note(tally)
   local parts = {}
   if tally.set > 0 then parts[#parts + 1] = string.format("%s aimed at it set again.", routings(tally.set)) end
   if tally.skipped > 0 then
-    parts[#parts + 1] = string.format("%s could not be set again, as the tracks or devices %s name changed in Renoise since: look at %s.",
-      routings(tally.skipped), tally.skipped == 1 and "it" or "they", tally.skipped == 1 and "it" or "them")
+    parts[#parts + 1] = string.format("%s could not be set again, as the tracks or devices %s changed in Renoise since: look at %s.",
+      routings(tally.skipped), tally.skipped == 1 and "it names" or "they name", tally.skipped == 1 and "it" or "them")
+  end
+  if tally.unknown > 0 then
+    parts[#parts + 1] = string.format("%s could not be set again: the song changed in a way Kumi couldn't follow, so it can't tell where %s now: look at %s.",
+      routings(tally.unknown), tally.unknown == 1 and "it is" or "they are", tally.unknown == 1 and "it" or "them")
   end
   if tally.failed > 0 then parts[#parts + 1] = string.format("%s could not be set again: look at %s.", routings(tally.failed), tally.failed == 1 and "it" or "them") end
   return #parts > 0 and table.concat(parts, " ") or nil
@@ -117,8 +134,8 @@ end
 -- Where a meta device (*LFO and the like) sends its values: Dest. Track (a track's number less one), Dest. Effect (a device's) and
 -- Dest. Parameter, -1 for none. Its preset data doesn't hold them (measured in Renoise 3.5.4): a device put back has none.
 -- `own` is the place of the track it is on; with `removing` that track goes, and the tracks after it move up. A destination is kept
--- as the track's place (`to`, carried through the shifts since) and the devices that track had (`list`), never as Renoise's number.
-local function read_destination(device, song, own, removing)
+-- as the track's place (`to`, carried through the shifts since) and the device's place on it (`dev`), never as Renoise's numbers.
+local function read_destination(device, song, own, removing, env)
   if not device.device_path:find("/Native/*", 1, true) then return nil end
   local track_p = parameter_named(device, "Dest. Track")
   if not track_p or track_p.value < 0 then return nil end
@@ -129,7 +146,12 @@ local function read_destination(device, song, own, removing)
     saved.self = true
   elseif target >= 1 and target <= rows.track_count(song) then
     saved.to = (removing and target > own) and target - 1 or target
-    saved.list = device_paths(song:track(target))
+    -- (the device it is aimed at, as a place on that track's devices: Dest. Effect counts from 0, the mixer device)
+    local aimed = type(saved.effect) == "number" and saved.effect >= 0 and saved.effect + 1 or nil
+    local target_track = song:track(target)
+    if aimed and aimed <= #target_track.devices then
+      saved.dev = M.device_place(env, target, aimed, target_track:device(aimed))
+    end
   else
     return nil
   end
@@ -137,28 +159,36 @@ local function read_destination(device, song, own, removing)
 end
 
 -- A device as it is: enough to make it again. (`song` and `own`, the track's place, add where a meta device sends its values.)
-function M.read_device(device, song, own, removing)
+function M.read_device(device, song, own, removing, env)
   return {
     path = device.device_path, name = device.name, display = device.display_name, active = device.is_active,
     maximized = device.is_maximized, preset = device.active_preset, presetData = device.active_preset_data,
-    destination = song and read_destination(device, song, own, removing) or nil,
+    destination = song and read_destination(device, song, own, removing, env) or nil,
   }
 end
 
 -- Sets a device's destination again, once the devices around it are there: `own` is the place of the track it is on, now, and
 -- `moved(at, own)` where a track numbered as at the delete is now (nil when it is gone). Answers "set", or why it was left alone:
--- "gone" (the track is gone), "changed" (its devices are not those the effect number was for) or "failed".
-function M.restore_destination(song, device, saved, own, moved)
+-- "gone" (the track or the device is gone), "changed" (the device at its place is another), "unknown" (what moved can't be told)
+-- or "failed".
+function M.restore_destination(song, device, saved, own, moved, env)
   local d = saved.destination
   if type(d) ~= "table" then return nil end
   local track_p = parameter_named(device, "Dest. Track")
   if not track_p or track_p.value ~= -1 then return nil end
   local target = d.self and own or (type(d.to) == "number" and moved(d.to, own) or nil)
   if not target or target < 1 or target > rows.track_count(song) then return "gone" end
-  if not d.self and not same_paths(song:track(target), d.list) then return "changed" end
+  local effect = d.effect
+  if not d.self then
+    -- (the device it was aimed at, followed through the devices made, deleted and moved on that track since)
+    if not d.dev then return "unknown" end
+    local at, why = M.device_now(song, env, target, d.dev)
+    if not at then return why end
+    effect = at - 1
+  end
   local ok = pcall(function()
     track_p.value = target - 1
-    for name, value in pairs({ ["Dest. Effect"] = d.effect, ["Dest. Parameter"] = d.parameter }) do
+    for name, value in pairs({ ["Dest. Effect"] = effect, ["Dest. Parameter"] = d.parameter }) do
       local parameter = parameter_named(device, name)
       if parameter and type(value) == "number" and value >= 0 and parameter.value == -1 then parameter.value = value end
     end
@@ -175,6 +205,67 @@ function M.restore_device(track, at, saved)
   device.is_active = saved.active ~= false
   if saved.maximized ~= nil then pcall(function() device.is_maximized = saved.maximized end) end
   return device
+end
+
+-- The patterns a record keeps by number: the pool's mark then, and what each was (its name and number of lines), to find each
+-- again where it is now.
+function M.keep_pool(song, env, numbers)
+  local prints = {}
+  for p in pairs(numbers) do
+    if p >= 1 and p <= #song.patterns then
+      local pattern = song:pattern(p)
+      prints[tostring(p)] = { name = pattern.name, lines = pattern.number_of_lines }
+    end
+  end
+  return { mark = env.pattern_mark and env.pattern_mark() or nil, prints = prints }
+end
+
+-- Where the kept patterns are now: a function from a pattern's number then to its number now (nil when it is gone or isn't
+-- what it was), and one that only follows the pool (for any pattern, kept or not); nil when what happened to the pool since
+-- can't be told.
+function M.pool_now(song, env, pool)
+  if type(pool) ~= "table" or not pool.mark or not env.pattern_at then return nil end
+  local found = {}
+  for key, print in pairs(pool.prints or {}) do
+    local now, why = env.pattern_at(tonumber(key), pool.mark)
+    if why == "unknown" then return nil end
+    if now and now <= #song.patterns then
+      local pattern = song:pattern(now)
+      if pattern.name == print.name and pattern.number_of_lines == print.lines then found[tonumber(key)] = now end
+    end
+  end
+  local followed = {}
+  local function follow(p)
+    if followed[p] == nil then followed[p] = env.pattern_at(p, pool.mark) or false end
+    return followed[p] or nil
+  end
+  return function(p) return found[p] end, follow
+end
+
+-- The instruments the notes of a record play (a cell's instrument value counts from 0; 255 is none): the instruments' mark
+-- then and the name of each, to find each again where it is now.
+function M.keep_instruments(song, env, values)
+  local prints = {}
+  for v in pairs(values) do
+    if v + 1 <= #song.instruments then prints[tostring(v)] = song:instrument(v + 1).name end
+  end
+  return { mark = env.instrument_mark and env.instrument_mark() or nil, prints = prints }
+end
+
+-- The instrument values to write for the kept ones: a table from then to now. Nil and why when one can't be put back as the
+-- same instrument: "unknown" (what happened to the instruments can't be told), or the name of one that is gone or isn't what
+-- it was.
+function M.instruments_now(song, env, kept)
+  local map = {}
+  if type(kept) ~= "table" or not next(kept.prints or {}) then return map end
+  if not kept.mark or not env.instrument_at then return nil, "unknown" end
+  for key, name in pairs(kept.prints) do
+    local now, why = env.instrument_at(tonumber(key) + 1, kept.mark)
+    if why == "unknown" then return nil, "unknown" end
+    if not now or now > #song.instruments or song:instrument(now).name ~= name then return nil, name end
+    map[tonumber(key)] = now - 1
+  end
+  return map
 end
 
 -- The automation of the track's parameters that have any, in every pattern: by device and parameter place, the mixer device's
@@ -237,8 +328,9 @@ end
 -- Routing aimed at a track or a device: a #Send's Receiver (the number of a send track among the sends) and a meta device's
 -- destination (Dest. Track, Dest. Effect, Dest. Parameter: 0-based, -1 is none). Renoise follows tracks and devices being made, moved
 -- and swapped, but clears these when their target is deleted and doesn't set them again when it comes back (measured in 3.5.4).
--- Kumi keeps what was aimed at what it deletes, and sets it again where nothing has touched it since: the device is the one at that
--- number of a track that still has the devices it had (`list`), on the track found through the shifts since (`at`).
+-- Kumi keeps what was aimed at what it deletes, and sets it again where nothing has touched it since: the device is found by its
+-- place on its track (`dev`, followed through that track's devices made, deleted and moved since), on the track found through the
+-- shifts since (`at`).
 
 -- The number of the send track at `index` among the sends.
 local function send_number(song, index)
@@ -252,7 +344,7 @@ end
 -- The devices (on other tracks, or on the track itself for a device) aimed at track `victim` (a send, for receivers; a sequencer
 -- track for destinations) or, with `device_at`, at that device of the track. Their tracks are numbered as they are when the target is
 -- gone: tracks after a deleted track are one less.
-function M.read_routes(song, victim, device_at)
+function M.read_routes(song, victim, device_at, env)
   local routes = {}
   local victim_track = song:track(victim)
   local is_send = victim_track.type == renoise.Track.TRACK_TYPE_SEND
@@ -286,7 +378,9 @@ function M.read_routes(song, victim, device_at)
           end
           if route then
             route.at = (not device_at and t > victim) and t - 1 or t
-            route.device, route.path, route.list = d, path, device_paths(track)
+            route.device, route.path = d, path
+            -- (the device the route is on, as a place on its track's devices)
+            route.dev = M.device_place(env, t, d, device)
             routes[#routes + 1] = route
           end
         end
@@ -299,14 +393,23 @@ end
 -- Sets the routes again after the target came back: the track at `now.track`, or the device at `now.device` of the track
 -- `now.on`. `moved(at, inserted)` is where a route's track is now (with the track put back in), or nil when it is gone. Counts in
 -- `tally` how many were set and how many were left alone or refused by Renoise.
-function M.write_routes(song, routes, now, moved, tally)
+function M.write_routes(song, routes, now, moved, tally, env)
   for _, route in ipairs(routes or {}) do
     local t = type(route.at) == "number" and moved(route.at, now.track) or nil
     local track = t and t >= 1 and t <= rows.track_count(song) and song:track(t) or nil
-    if not track or not same_paths(track, route.list) or type(route.device) ~= "number" or route.device < 2 or route.device > #track.devices then
-      M.count(tally, "gone")
+    -- (the device the route is on, followed through the devices made, deleted and moved on its track since)
+    local d, why
+    if not track then
+      why = "gone"
+    elseif not route.dev then
+      why = "unknown"
     else
-      local device = track:device(route.device)
+      d, why = M.device_now(song, env, t, route.dev)
+    end
+    if not d or not track then
+      M.count(tally, why)
+    else
+      local device = track:device(d)
       if device.device_path ~= route.path then
         M.count(tally, "changed")
       else
@@ -344,7 +447,7 @@ function M.write_routes(song, routes, now, moved, tally)
           end
           return set
         end)
-        M.count(tally, ok and (set and "set" or nil) or "failed")
+        M.count(tally, not ok and "failed" or (set and "set" or nil))
       end
     end
   end

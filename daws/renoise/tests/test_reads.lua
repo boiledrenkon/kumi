@@ -1200,8 +1200,23 @@ test("reads: a track removed answers gone for its refs, and the tracks after it 
   H.no_dialogs()
 end)
 
+-- (the tool keeps 1024 shifts; this test keeps 64 of them, to make more than it keeps)
+local function shift_history(n)
+  return function(env)
+    local path = env.bundle .. "payload/bridge.lua"
+    local f = assert(io.open(path, "rb"))
+    local text = f:read("*a")
+    f:close()
+    local lowered, count = text:gsub("M%.SHIFT_HISTORY = %d+", "M.SHIFT_HISTORY = " .. n, 1)
+    assert(count == 1, "SHIFT_HISTORY was not found to set")
+    f = assert(io.open(path, "wb"))
+    f:write(lowered)
+    f:close()
+  end
+end
+
 test("reads: shifts are carried one after another, up to the last 64", function()
-  local env, peer = setup()
+  local env, peer = setup({ patch = shift_history(64) })
   local E = epoch_of(peer)
   mock.ops.insert_track(1, { name = "A" })
   mock.ops.insert_track(1, { name = "B" })
@@ -1276,7 +1291,9 @@ test("reads: tracks that change in a way the tool can't follow move the epoch an
   eq(#told, 1)
   eq(#told[1].data.made + #told[1].data.gone, 0, "no shift to carry")
   ok(told[1].data.epoch ~= E, "the epoch moved")
-  eq(told[1].data.layout, 0)
+  -- (and the layout moved past what the shifts cover: a request in the layout before has no track it can be carried to)
+  eq(told[1].data.layout, 1)
+  failure(call(peer, "read", { ref = told[1].data.epoch .. ":track:1", layout = 0 }), "stale")
   mock.ops.swap_tracks(1, 2)
   told = H.events(peer, "tracks")
   eq(#told, 1)

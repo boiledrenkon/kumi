@@ -365,10 +365,15 @@ local function delete_apply(song, env, input, fence, desc)
   if not ok then base.gone_is_changed(index) end
   local state = delete_signature(track, at, device)
   if not base.same_table(state, fence) then fail("changed", name .. " changed since the preview") end
+  local automation = material_.read_automation(song, index, track, at)
+  local patterns = {}
+  for _, saved in ipairs(automation) do patterns[saved.pattern] = true end
   local material = {
-    track = index, index = at, device = material_.read_device(device, song, index), state = state,
-    automation = material_.read_automation(song, index, track, at),
-    routes = material_.read_routes(song, index, at),
+    -- (its place: where it goes back is after the device before it, followed through the track's devices since; see places.lua)
+    track = index, index = at, after = env.device_mark and env.device_mark(index) or nil,
+    device = material_.read_device(device, song, index, false, env), state = state,
+    automation = automation, pool = material_.keep_pool(song, env, patterns),
+    routes = material_.read_routes(song, index, at, env),
   }
   local size = #json.encode(material)
   if size > base.MAX_MATERIAL_BYTES then
@@ -395,15 +400,25 @@ local function delete_restore(song, env, restore, desc)
   local saved = material.device
   local label = (saved.display ~= nil and saved.display ~= "" and saved.display or saved.name or saved.path)
   local track_name = base.named(index, track)
+  -- Where it goes back: after the device that was before it, followed through the devices made, deleted and moved on the track
+  -- since. When that can't be told, nothing is written.
+  local at = type(material.index) == "number" and env.device_after and env.device_after(index, material.index, material.after) or nil
+  if not at then
+    fail("stale", string.format("the devices on %s changed in a way Kumi couldn't follow since it deleted %s, so it can't tell where it goes: nothing was put back", q(track_name), q(label)))
+  end
+  at = math.max(2, math.min(at or 2, #track.devices + 1))
   -- It is back already (the producer's undo, or an earlier restore): nothing to write.
-  local present = track.devices[material.index] and material.index >= 2 and track:device(material.index) or nil
+  local present = at <= #track.devices and track:device(at) or nil
   if present and present.device_path == saved.path then
     local state = material_.device_state(present)
     if state.state == (material.state or {}).state and state.display == (material.state or {}).display then
       return { restored = { deleted = false }, display = { title = string.format("%s is back on %s already", q(label), q(track_name)) }, undo = { desc = desc, entry = false } }
     end
   end
-  local at = math.max(2, math.min(material.index or 2, #track.devices + 1))
+  local pattern_now = material_.pool_now(song, env, material.pool)
+  if not pattern_now then
+    fail("stale", string.format("the song's patterns changed in a way Kumi couldn't follow since it deleted %s, so it can't tell where its automation goes: nothing was put back", q(label)))
+  end
   song:describe_undo(desc)
   local device = material_.restore_device(track, at, saved)
   local tally = material_.new_tally()
@@ -412,15 +427,21 @@ local function delete_restore(song, env, restore, desc)
     if type(restore.layout) ~= "number" then return n end
     return (env.shifted(n, restore.layout))
   end
+  local lost = 0
   local ok, err = pcall(function()
-    material_.count(tally, material_.restore_destination(song, device, saved, index, moved))
+    material_.count(tally, material_.restore_destination(song, device, saved, index, moved, env))
     local list = {}
-    for i, entry in ipairs(material.automation or {}) do
-      list[i] = { pattern = entry.pattern, device = at, parameter = entry.parameter, playmode = entry.playmode, points = entry.points }
+    for _, entry in ipairs(material.automation or {}) do
+      local p = pattern_now(entry.pattern)
+      if p then
+        list[#list + 1] = { pattern = p, device = at, parameter = entry.parameter, playmode = entry.playmode, points = entry.points }
+      else
+        lost = lost + 1
+      end
     end
     material_.write_automation(song, track, index, list, nil)
   end)
-  if ok then material_.write_routes(song, material.routes, { on = index, device = at }, moved, tally) end
+  if ok then material_.write_routes(song, material.routes, { on = index, device = at }, moved, tally, env) end
   if not ok then
     pcall(function() track:delete_device_at(at) end)
     if type(err) ~= "table" then err = { code = "failed", message = "Renoise wouldn't put the device back: " .. tostring(err) } end
@@ -429,7 +450,16 @@ local function delete_restore(song, env, restore, desc)
   base.note_restored(env.journal, "device-delete", { track = index, device = at })
   return {
     restored = { ref = refs.make(env.epoch(), "device", index, at), name = device.display_name },
-    display = { title = string.format("%s put back on %s", q(label), q(track_name)), note = material_.tally_note(tally) },
+    display = {
+      title = string.format("%s put back on %s", q(label), q(track_name)),
+      note = (function()
+        local note = material_.tally_note(tally)
+        if lost == 0 then return note end
+        local more = string.format("Its automation in %s isn't put back: %s deleted or changed in Renoise since.",
+          lost == 1 and "1 pattern" or (lost .. " patterns"), lost == 1 and "that pattern was" or "those patterns were")
+        return note and (note .. " " .. more) or more
+      end)(),
+    },
     undo = { desc = desc, entry = true },
   }
 end
