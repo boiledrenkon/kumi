@@ -5,6 +5,7 @@
 //! table here; the rest is the same for both.
 use super::own_bridge::{names_tracks, Refused};
 use super::own_changes::{Link, OwnPlan};
+use super::own_groove::Part;
 use crate::{
     core::{
         context::IntegrationContext,
@@ -20,11 +21,12 @@ use crate::{
         fit::{Band, Shape},
         judging::Placed,
         knobs::Scale,
+        notes::Kit,
         renderer::{
-            bars_of, AuditionOptions, AuditionPass, AuditionRender, AuditionSource, Captured, Copies, DeviceKnob, EqFit, ListenFlag, Pass,
-            Renderer, Window,
+            bars_of, AuditionOptions, AuditionPass, AuditionRender, AuditionSource, Captured, ClipNotes, Copies, DeviceKnob, EqFit,
+            ListenFlag, NotePatch, Pass, Renderer, Window,
         },
-        tools::{audition_tool, form_tool, judge_tool, render_tool, sound_tool, tune_tool},
+        tools::{audition_tool, form_tool, groove_tool, judge_tool, render_tool, sound_tool, tune_tool},
     },
     plugins::roles::Seen,
 };
@@ -37,6 +39,7 @@ use kumi_common::{
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     path::PathBuf,
     rc::Rc,
     time::{Duration, Instant},
@@ -196,8 +199,8 @@ impl Flags {
 /// A track as a listen finds it: its ref, name and type, and its fader.
 #[derive(Debug, Clone)]
 pub(super) struct TrackRow {
-    reference: String,
-    name: String,
+    pub(super) reference: String,
+    pub(super) name: String,
     kind: String,
     volume_db: Option<f64>,
 }
@@ -234,6 +237,8 @@ pub struct OwnRenderer<S: RefScheme + 'static> {
     /// Scratch copies standing now: each name's ref.
     pub(super) copies: RefCell<IndexMap<String, String>>,
     tracks: RefCell<Option<(Instant, Vec<TrackRow>)>>,
+    /// The parts groove read, by the name the model gave each.
+    pub(super) parts: RefCell<HashMap<String, Part>>,
 }
 
 fn object(value: Value) -> JsonObject {
@@ -260,6 +265,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
             beats_per_bar: Cell::new(4.),
             copies: RefCell::default(),
             tracks: RefCell::default(),
+            parts: RefCell::default(),
         }
     }
 
@@ -341,7 +347,7 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
     }
 
     /// Every row of a read, following its pages (at most `pages`).
-    async fn rows(&self, args: Value, pages: usize, signal: &Signal) -> Result<Result<Vec<Value>, String>, RuntimeError> {
+    pub(super) async fn rows(&self, args: Value, pages: usize, signal: &Signal) -> Result<Result<Vec<Value>, String>, RuntimeError> {
         let mut args = self.read_placed(args);
         let mut rows = vec![];
         for _ in 0..pages {
@@ -1426,6 +1432,31 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         self.plan.history.emit(&record)
     }
 
+    async fn clip_notes(&self, clip: &str, signal: Signal) -> Result<ClipNotes, String> {
+        self.part_notes(clip, signal).await
+    }
+    async fn lanes_of(&self, clip: &str, signal: Signal) -> Kit {
+        self.part_lanes(clip, signal).await
+    }
+    async fn change_notes(&self, clip: &str, patches: &[NotePatch], signal: Signal) -> Result<(), RuntimeError> {
+        self.move_notes(clip, patches, signal).await
+    }
+    fn clip_id(&self, clip: &str) -> Option<String> {
+        self.part_id(clip)
+    }
+    fn note_changes(&self, checkpoint: &[String], clip: Option<&str>) -> (Vec<(String, String)>, Vec<(String, String)>) {
+        self.part_changes(checkpoint, clip)
+    }
+    async fn stem_track(&self, audio: &str, signal: Signal) -> Result<String, String> {
+        self.stem_track_of(audio, signal).await
+    }
+    fn devices_made(&self, changes: &[(String, String)]) -> usize {
+        self.devices_added(changes)
+    }
+    fn renames(&self, before: &[String]) -> Vec<(String, String, String)> {
+        self.renames_since(before)
+    }
+
     async fn clips_by_track(&self, signal: Signal) -> Vec<(String, Vec<(f64, f64)>)> {
         let Ok(Ok(rows)) = self.rows(json!({"kind": "spans", "limit": 64}), 1, &signal).await else { return vec![] };
         rows.iter()
@@ -1483,7 +1514,7 @@ fn seen(device: &DeviceRow) -> Seen {
 
 /// A plug-in's own name from REAPER's FX name ("VST3: Pro-Q 3 (FabFilter)" is "Pro-Q 3"; "JS: Volume Adjustment" is
 /// "Volume Adjustment"), or the name as it is.
-fn plugin_name(name: &str) -> String {
+pub(super) fn plugin_name(name: &str) -> String {
     let name = name.trim();
     let name = ["VST3i: ", "VST3: ", "VSTi: ", "VST: ", "AUi: ", "AU: ", "CLAPi: ", "CLAP: ", "JS: ", "LV2i: ", "LV2: "]
         .iter()
@@ -1547,6 +1578,7 @@ impl<S: RefScheme + 'static> OwnListening<S> {
             vec![("audition", audition_tool(profile), false), ("judge", judge_tool(profile), true), ("tune", tune_tool(profile), true)];
         defs.push(("sound", sound_tool(profile), true));
         defs.push(("form", form_tool(profile), true));
+        defs.push(("groove", groove_tool(profile), true));
         if self.renderer.table.no_items.is_none() {
             defs.push(("render", render_tool(profile), true));
         }

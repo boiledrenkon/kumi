@@ -45,6 +45,50 @@ struct State {
     /// Each track's FX chain, by the track's ref ("r:track:master" is the first row's): M5's listening reads and sets them.
     fx: std::collections::HashMap<String, Vec<SimFx>>,
     next_fx: u32,
+    /// MIDI items a test adds (`add_midi_item`): groove reads their notes and moves them with notes-change.
+    midi: Vec<SimMidi>,
+}
+
+/// A MIDI item of the sim's: its GUID and its active take's, its track, name and place in beats, and its notes (pitch,
+/// start from the item's start, length, velocity), kept in order of their start as REAPER sorts them.
+#[derive(Debug, Clone)]
+struct SimMidi {
+    guid: String,
+    take: String,
+    track: String,
+    name: String,
+    position: f64,
+    length: f64,
+    notes: Vec<(i64, f64, f64, i64)>,
+}
+
+impl SimMidi {
+    fn row(&self) -> Value {
+        json!({"ref": format!("r:item:{}", self.guid), "trackRef": self.track, "position": self.position / 2., "length": self.length / 2.,
+            "positionBeats": self.position, "lengthBeats": self.length, "name": self.name, "takeRef": format!("r:take:{}", self.take),
+            "takes": 1, "source": "mid", "muted": false})
+    }
+    fn note_rows(&self) -> Vec<Value> {
+        self.notes
+            .iter()
+            .enumerate()
+            .map(|(index, (pitch, start, length, velocity))| {
+                json!({"index": index, "pitch": pitch, "start": start, "length": length, "velocity": velocity, "channel": 1, "selected": false, "muted": false})
+            })
+            .collect()
+    }
+    fn json(&self) -> Value {
+        json!(self.notes.iter().map(|(pitch, start, length, velocity)| json!([pitch, start, length, velocity])).collect::<Vec<_>>())
+    }
+    fn set(&mut self, notes: &Value) {
+        self.notes = notes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|note| Some((note.get(0)?.as_i64()?, note.get(1)?.as_f64()?, note.get(2)?.as_f64()?, note.get(3)?.as_i64()?)))
+            .collect();
+        self.notes.sort_by(|a, b| a.1.total_cmp(&b.1));
+    }
 }
 
 /// An FX of the sim's: its GUID, name and parameters (normalized values; each shown by its kind).
@@ -188,6 +232,7 @@ impl ReaperScript {
                 playing: false,
                 fx: std::collections::HashMap::new(),
                 next_fx: 0,
+                midi: vec![],
             })),
             listening: SimListening::new(daw_bridge::Daw::Reaper),
         }
@@ -220,6 +265,32 @@ impl ReaperScript {
         let chain = state.fx.get(track)?;
         let found = chain.iter().find(|found| found.name.contains(fx))?;
         found.params.iter().find(|(name, ..)| name == param).map(|(_, value, _)| *value)
+    }
+
+    /// A MIDI item the producer has on a track (notes as pitch, start from its start, length, velocity, in beats): its ref
+    /// and its take's.
+    pub fn add_midi_item(&self, track: &str, name: &str, position: f64, length: f64, notes: &[(i64, f64, f64, i64)]) -> (String, String) {
+        let mut state = self.state.lock().unwrap();
+        let n = state.midi.len() + 1;
+        let mut item = SimMidi {
+            guid: format!("{{M{n:04}}}"),
+            take: format!("{{K{n:04}}}"),
+            track: track.into(),
+            name: name.into(),
+            position,
+            length,
+            notes: notes.to_vec(),
+        };
+        item.notes.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let refs = (format!("r:item:{}", item.guid), format!("r:take:{}", item.take));
+        state.midi.push(item);
+        refs
+    }
+
+    /// A MIDI item's notes now (pitch, start, length, velocity), by its ref or its take's.
+    pub fn midi_notes(&self, reference: &str) -> Vec<(i64, f64, f64, i64)> {
+        let state = self.state.lock().unwrap();
+        Self::find_midi(&state, reference).map(|at| state.midi[at].notes.clone()).unwrap_or_default()
     }
 
     /// The producer starts or stops REAPER: its transport says so, and a capture can hear it.
@@ -303,6 +374,9 @@ impl ReaperScript {
         let kind = params["kind"].as_str().unwrap_or_default();
         if kind == "track-add" {
             return Self::add_track(state, epoch, method, params);
+        }
+        if kind == "notes-change" {
+            return Self::notes_change(state, epoch, method, params);
         }
         if matches!(kind, "fx-add" | "fx-param" | "fx-delete") {
             return Self::fx_change(state, epoch, method, params);
@@ -409,6 +483,75 @@ impl ReaperScript {
                 state.changed += 1;
                 state.undo.push(params["desc"].as_str().unwrap_or_default().to_string());
                 Ok(json!({"epoch": epoch, "restored": {"added": false}, "display": {"title": format!("“{name}” taken away again")}}))
+            }
+        }
+    }
+
+    /// The MIDI item a ref names: the item's, or its take's.
+    fn find_midi(state: &State, reference: &str) -> Option<usize> {
+        let guid = reference.strip_prefix("r:item:").or(reference.strip_prefix("r:take:"))?;
+        state.midi.iter().position(|item| item.guid == guid || item.take == guid)
+    }
+
+    /// `notes-change {ref, changes: [{index, start?, length?, velocity?, pitch?}]}`: the take's notes changed by index (a
+    /// start moves a note, keeping its length), fenced on the whole note list and put back by it, as the extension does.
+    fn notes_change(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let bad = |message: String| ("bad-params".to_string(), message);
+        let reference = if method == "change_restore" { params["target"]["ref"].as_str() } else { params["input"]["ref"].as_str() };
+        let at = Self::find_midi(state, reference.unwrap_or_default()).ok_or(("gone".to_string(), "that take isn't there".to_string()))?;
+        let desc = params["desc"].as_str().unwrap_or_default().to_string();
+        let item = state.midi[at].clone();
+        let title = format!("Changed {} notes in take “{}”", params["input"]["changes"].as_array().map_or(0, Vec::len), item.name);
+        // The notes after the change: by index into the take's notes as they are, sorted by start again.
+        let after = || -> Result<SimMidi, (String, String)> {
+            let mut after = item.clone();
+            for change in params["input"]["changes"].as_array().into_iter().flatten() {
+                let index = change["index"].as_u64().ok_or_else(|| bad("index".into()))? as usize;
+                let note = after.notes.get_mut(index).ok_or_else(|| bad(format!("there's no note {index}")))?;
+                if let Some(start) = change["start"].as_f64() {
+                    note.1 = start;
+                }
+                if let Some(length) = change["length"].as_f64() {
+                    note.2 = length;
+                }
+                if let Some(velocity) = change["velocity"].as_i64() {
+                    note.3 = velocity;
+                }
+                if let Some(pitch) = change["pitch"].as_i64() {
+                    note.0 = pitch;
+                }
+            }
+            after.notes.sort_by(|a, b| a.1.total_cmp(&b.1));
+            Ok(after)
+        };
+        match method {
+            "change_preview" => {
+                let after = after()?;
+                Ok(
+                    json!({"epoch": epoch, "target": {"ref": format!("r:take:{}", item.take), "kind": "take"}, "prior": {"notes": item.json()},
+                    "fence": {"notes": item.json()}, "display": {"title": title, "unchanged": item.notes == after.notes}}),
+                )
+            }
+            "change_apply" => {
+                if params["fence"]["notes"] != item.json() {
+                    return Err(("changed".into(), "the take's notes changed since the preview".into()));
+                }
+                let after = after()?.json();
+                state.midi[at].set(&after);
+                state.changed += 1;
+                Self::step(state, &desc);
+                Ok(
+                    json!({"epoch": epoch, "applied": {"notes": state.midi[at].json()}, "display": {"title": title}, "undo": {"desc": desc, "entry": true}}),
+                )
+            }
+            _ => {
+                if params["applied"]["notes"] != item.json() && params["discard"] != true {
+                    return Err(("changed".into(), "the take's notes changed in REAPER since Kumi changed them".into()));
+                }
+                state.midi[at].set(&params["prior"]["notes"]);
+                state.changed += 1;
+                state.undo.push(desc);
+                Ok(json!({"epoch": epoch, "restored": {"notes": state.midi[at].json()}, "display": {"title": "Notes put back"}}))
             }
         }
     }
@@ -723,6 +866,9 @@ impl ReaperScript {
                 row["trackRef"] = track.into();
                 return Ok(json!({"items": [row], "epoch": epoch}));
             }
+            if let Some(at) = Self::find_midi(state, reference).filter(|_| reference.starts_with("r:item:")) {
+                return Ok(json!({"items": [state.midi[at].row()], "epoch": epoch}));
+            }
             return match state.tracks.iter().find(|row| row["ref"] == reference) {
                 Some(row) => Ok(json!({"items": [row], "epoch": epoch})),
                 None => Err(("failed".into(), format!("{reference} isn't in the project (deleted, or another tab)"))),
@@ -753,9 +899,17 @@ impl ReaperScript {
             ("spans", _) => {
                 state.tracks.iter().skip(1).map(|row| json!({"ref": row["ref"], "name": row["name"], "spans": [[0.0, 8.0]]})).collect()
             }
-            ("item", Some(parent)) => {
-                state.tracks.iter().filter(|row| row["ref"] == parent).map(|row| item_row(row["ref"].as_str().unwrap())).collect()
-            }
+            ("item", Some(parent)) => state
+                .tracks
+                .iter()
+                .filter(|row| row["ref"] == parent)
+                .map(|row| item_row(row["ref"].as_str().unwrap()))
+                .chain(state.midi.iter().filter(|item| item.track == parent).map(SimMidi::row))
+                .collect(),
+            ("note", Some(parent)) => match Self::find_midi(state, parent) {
+                Some(at) => state.midi[at].note_rows(),
+                None => return Err(("failed".into(), format!("{parent} isn't a MIDI take in the project"))),
+            },
             ("fx", Some(parent)) => state
                 .fx
                 .get(parent)

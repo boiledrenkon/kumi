@@ -384,3 +384,128 @@ async fn a_goal_searches_scratch_copies_of_its_candidates_and_settles_the_winner
         })
         .await;
 }
+
+/// A two-bar 8th-note part: on the beat at `on`, off it at `off`, `late` beats behind the 8th.
+fn eighths(late: f64, on: i64, off: i64) -> Vec<(i64, f64, f64, i64)> {
+    let mut notes: Vec<(i64, f64, f64, i64)> = (0..16)
+        .map(|n| {
+            let offbeat = n % 2 == 1;
+            (42, n as f64 * 0.5 + if offbeat { late } else { 0. }, 0.25, if offbeat { off } else { on })
+        })
+        .collect();
+    notes.extend((0..4).map(|n| (36, n as f64 * 2., 0.5, 110)));
+    notes
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn groove_moves_a_reaper_items_notes_toward_a_references_feel_in_one_change_of_its_take() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = ReaperScript::new(3, 0);
+            let (part, take) = script.add_midi_item("r:track:{T0002}", "Drums", 0., 8., &eighths(0., 100, 100));
+            let (reference, _) = script.add_midi_item("r:track:{T0003}", "Reference", 0., 8., &eighths(0.08, 115, 70));
+            let simulator = reaper_lab(&script, home.path(), |_| {}).await;
+            let (reaper, told) = integration(Daw::Reaper, home.path(), create_reaper_integration);
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let groove = tool(&observed, "groove");
+            assert!(groove.input_schema()["properties"].get("item").is_some(), "the part is an item");
+            let start = groove.execute(object(json!({"item": part, "reference": reference})), Signal::new()).await.unwrap();
+            assert!(!start.is_error, "{}", start.text);
+            assert!(start.text.contains("“Drums”") && start.text.contains("“Reference”"), "{}", start.text);
+            // The model pushes an off-beat early, away from the reference's late ones: the round takes it back with Kumi's
+            // undo of the take's notes.
+            let before = script.midi_notes(&take);
+            let pushed = tool(&observed, "notes_change")
+                .execute(object(json!({"ref": take, "changes": [{"index": 2, "start": 0.3}]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!pushed.is_error, "{}", pushed.text);
+            assert_ne!(script.midi_notes(&take), before);
+            let judged = groove.execute(object(json!({"change": "pushed the first off-beat"})), Signal::new()).await.unwrap();
+            let reply: Value = serde_json::from_str(&judged.text).unwrap();
+            assert_eq!(reply["kept"], false, "{reply}");
+            assert!(reply["log"].to_string().contains("taken back"), "{reply}");
+            assert_eq!(script.midi_notes(&take), before, "put back");
+            let applied = groove.execute(object(json!({"apply": true})), Signal::new()).await.unwrap();
+            assert!(!applied.is_error, "{}", applied.text);
+            let reply: Value = serde_json::from_str(&applied.text).unwrap();
+            assert_eq!(reply["kept"], true, "{reply}");
+            let notes = script.midi_notes(&take);
+            let offbeat = notes.iter().find(|note| note.0 == 42 && note.1 > 0.4 && note.1 < 0.7).copied().unwrap();
+            assert!(offbeat.1 > 0.55 && offbeat.3 < 100, "the off-beat moved later and softer, toward the reference: {offbeat:?}");
+            assert_eq!(notes.len(), 20, "only moved");
+            let done = groove.execute(object(json!({"done": true})), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let mut said = vec![start.text, judged.text, applied.text, done.text];
+            said.extend(told.borrow().iter().cloned());
+            said.extend(described(&observed).into_iter().filter(|text| text.contains("\"groove\"")));
+            assert_ours(&said);
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// A pattern's 8th notes as Renoise's lines (32 lines at 4 a beat): on-beat cells plain, off-beat ones with `delay` and
+/// `volume` when given.
+fn pattern_eighths(delay: Option<&str>, volume: Option<&str>) -> Value {
+    let rows: Vec<Value> = (0..16)
+        .map(|n| {
+            let mut cell = json!({"col": 1, "note": "C-4", "instrument": "00"});
+            if n % 2 == 1 {
+                if let Some(delay) = delay {
+                    cell["delay"] = delay.into();
+                }
+                if let Some(volume) = volume {
+                    cell["volume"] = volume.into();
+                }
+            }
+            json!({"line": n * 2 + 1, "notes": [cell]})
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn groove_moves_a_renoise_pattern_tracks_notes_by_their_delays_and_volumes_in_one_write() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let script = RenoiseScript::new();
+            script.set_lines(1, 1, pattern_eighths(None, None));
+            script.set_lines(3, 1, pattern_eighths(Some("50"), Some("48")));
+            let simulator = renoise_lab(&script, home.path()).await;
+            let (renoise, told) = integration(Daw::Renoise, home.path(), create_renoise_integration);
+            renoise.start(Signal::new()).await.unwrap();
+            let observed = renoise.observe(Signal::new(), None).await.unwrap();
+            let groove = tool(&observed, "groove");
+            let start = groove
+                .execute(object(json!({"pattern": "1:pattern:1 1:track:1", "reference": "1:pattern:3 1:track:1"})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!start.is_error, "{}", start.text);
+            assert!(start.text.contains("“Kick” in pattern 1"), "{}", start.text);
+            let applied = groove.execute(object(json!({"apply": true})), Signal::new()).await.unwrap();
+            assert!(!applied.is_error, "{}", applied.text);
+            let reply: Value = serde_json::from_str(&applied.text).unwrap();
+            assert_eq!(reply["kept"], true, "{reply}");
+            let lines = script.lines(1, 1);
+            let offbeat = lines.as_array().unwrap().iter().find(|row| row["line"] == 3).unwrap()["notes"][0].clone();
+            assert!(offbeat["delay"].is_string() && offbeat["volume"].is_string(), "the off-beat delayed and softer: {offbeat}");
+            assert_eq!(lines.as_array().unwrap().len(), 16, "the notes stay on their lines");
+            // A slot and a track name the part too, and a ref that isn't one says how to name it.
+            let wrong = groove.execute(object(json!({"done": true})), Signal::new()).await.unwrap();
+            assert!(!wrong.is_error, "{}", wrong.text);
+            let again =
+                groove.execute(object(json!({"pattern": "1:seq:3 1:track:1", "reference": "1:track:1"})), Signal::new()).await.unwrap();
+            assert!(again.is_error && again.text.contains("its pattern's (or a sequence slot's) ref and its track's"), "{}", again.text);
+            let mut said = vec![start.text, applied.text, again.text];
+            said.extend(told.borrow().iter().cloned());
+            assert_ours(&said);
+            renoise.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

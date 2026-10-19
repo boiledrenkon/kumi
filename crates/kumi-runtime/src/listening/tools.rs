@@ -193,11 +193,7 @@ pub(crate) const GROOVE_PHRASES: &[AssetPhrase] = &[
         said: |p| format!(", {}", p.vocab.drum_stem_steps),
     },
     AssetPhrase { live: "isn't in Live", count: 2, said: |p| format!("isn't in {}", p.words.app) },
-    AssetPhrase {
-        live: "an Arrangement audio clip's clipRef",
-        count: 1,
-        said: |p| format!("{} audio {}'s {}", with_article(p.words.timeline), p.vocab.clip, p.vocab.clip_ref),
-    },
+    AssetPhrase { live: "an Arrangement audio clip's clipRef", count: 1, said: |p| p.vocab.stem_audio.into() },
     AssetPhrase {
         live: "with clip (the part, a MIDI clip) and reference (a MIDI clip with",
         count: 1,
@@ -206,14 +202,11 @@ pub(crate) const GROOVE_PHRASES: &[AssetPhrase] = &[
     AssetPhrase {
         live: "give that MIDI clip as reference and the drum stem's clip as audio",
         count: 1,
-        said: |p| format!("give that {} as reference and the drum stem's {} as audio", without_article(p.vocab.midi_clip), p.vocab.clip),
+        said: |p| format!("give that {} as reference and {} as audio", without_article(p.vocab.midi_clip), p.vocab.stem_as_audio),
     },
-    AssetPhrase { live: "a MIDI clip's clipRef", count: 1, said: |p| format!("{}'s {}", p.vocab.midi_clip, p.vocab.clip_ref) },
-    AssetPhrase {
-        live: "the reference's MIDI clip (its clipRef)",
-        count: 1,
-        said: |p| format!("the reference's {} (its {})", without_article(p.vocab.midi_clip), p.vocab.clip_ref),
-    },
+    AssetPhrase { live: "a MIDI clip's clipRef", count: 1, said: |p| p.vocab.part_ref.into() },
+    AssetPhrase { live: "the reference's MIDI clip (its clipRef)", count: 1, said: |p| p.vocab.reference_part.into() },
+    AssetPhrase { live: "(change_notes, transform_midi swing, quantize)", count: 1, said: |p| format!("({})", p.vocab.note_tools) },
 ];
 
 /// A name without its article: "MIDI clip" from "a MIDI clip".
@@ -248,7 +241,18 @@ pub fn form_tool(profile: &DawProfile) -> ToolDef {
 
 /// The groove tool in the DAW's words.
 pub fn groove_tool(profile: &DawProfile) -> ToolDef {
-    definition(&GROOVE, profile, GROOVE_PHRASES)
+    let mut def = definition(&GROOVE, profile, GROOVE_PHRASES);
+    // The part is taken by the DAW's word for it, where the schema has it.
+    let field = profile.vocab.clip_field;
+    if field != crate::live_word!(clip_field) {
+        if let Some(properties) = def.schema.get_mut("properties").and_then(Value::as_object_mut) {
+            *properties = std::mem::take(properties)
+                .into_iter()
+                .map(|(key, value)| if key == "clip" { (field.to_owned(), value) } else { (key, value) })
+                .collect();
+        }
+    }
+    def
 }
 
 /// The sound tool's input as a request, or what's wrong with it.
@@ -286,10 +290,11 @@ pub fn form_request(input: &JsonObject) -> FormRequest {
 }
 
 /// The groove tool's input as a request, or what's wrong with it.
-pub fn groove_request(input: &JsonObject) -> Result<GrooveRequest, String> {
+pub fn groove_request(profile: &DawProfile, input: &JsonObject) -> Result<GrooveRequest, String> {
     let text = |key: &str| input.get(key).and_then(Value::as_str).map(trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    let field = profile.vocab.clip_field;
     let request = GrooveRequest {
-        clip: text("clip"),
+        clip: text(field),
         reference: text("reference"),
         reference_tempo: input
             .get("reference_tempo")
@@ -303,15 +308,16 @@ pub fn groove_request(input: &JsonObject) -> Result<GrooveRequest, String> {
     };
     let starting = request.clip.is_some() || request.reference.is_some();
     if starting && (request.clip.is_none() || request.reference.is_none()) {
-        return Err(
-            "A run starts with both clip (the part) and reference (the reference's MIDI clip, or an audio file of a pitched part).".into(),
-        );
+        return Err(format!(
+            "A run starts with both {field} (the part) and reference (the reference's {}, or an audio file of a pitched part).",
+            without_article(profile.vocab.midi_clip)
+        ));
     }
     if starting && (request.change.is_some() || request.apply || request.done) {
         return Err("Start a run first; judge a change (or apply, or end it) in a later call.".into());
     }
     if !starting && request.change.is_none() && !request.apply && !request.done {
-        return Err("Give clip and reference to start, the change you made, apply: true, or done: true.".into());
+        return Err(format!("Give {field} and reference to start, the change you made, apply: true, or done: true."));
     }
     Ok(request)
 }
@@ -679,11 +685,26 @@ mod tests {
                 tune_tool(profile),
                 sound_tool(profile),
                 form_tool(profile),
+                groove_tool(profile),
             ] {
                 let text = format!("{} {}", def.description, serde_json::to_string(&def.schema).unwrap());
                 let found: Vec<&str> = live.find_iter(&text).map(|m| m.as_str()).collect();
                 assert!(found.is_empty(), "{:?}: {found:?} in {text}", profile.id);
+                for tool in ["change_notes", "transform_midi", "quantize"] {
+                    assert!(!text.contains(tool), "{:?}: Live's {tool} in {text}", profile.id);
+                }
             }
+            // groove takes its part by the DAW's word, and says how to name it.
+            let groove = groove_tool(profile);
+            let properties = &groove.schema["properties"];
+            assert!(properties.get(profile.vocab.clip_field).is_some() && properties.get("clip").is_none(), "{properties}");
+            assert_eq!(properties[profile.vocab.clip_field]["description"], format!("Starts a run: the part, {}", profile.vocab.part_ref));
+            let input = json!({profile.vocab.clip_field: "a", "reference": "b"}).as_object().cloned().unwrap();
+            assert_eq!(groove_request(profile, &input).unwrap().clip.as_deref(), Some("a"));
+            let half = json!({"reference": "b"}).as_object().cloned().unwrap();
+            assert!(groove_request(profile, &half)
+                .unwrap_err()
+                .starts_with(&format!("A run starts with both {} (the part)", profile.vocab.clip_field)));
             let audition = audition_tool(profile);
             let candidate = &audition.schema["properties"]["candidates"]["items"]["properties"];
             assert!(candidate.get(profile.vocab.clip_field).is_some() && candidate.get("clip").is_none(), "{candidate}");

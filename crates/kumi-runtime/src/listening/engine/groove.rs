@@ -8,7 +8,11 @@
 use super::Listening;
 use crate::{
     audio,
-    core::{contracts::AuditionCandidate, daw::with_article, errors::RuntimeError},
+    core::{
+        contracts::AuditionCandidate,
+        daw::{with_article, DawProfile},
+        errors::RuntimeError,
+    },
     listening::{
         checklist::{Change, Row},
         notes::{feel, fit_grid, gaps, high_onsets, lines, onsets, refine_kit, toward, Feel, Kit, Line, Note},
@@ -102,7 +106,11 @@ impl Listening {
         let outcome = if let (Some(clip), Some(reference)) = (&request.clip, &request.reference) {
             self.groove_start(clip, (reference, request.reference_tempo), request.audio.as_deref(), signal.clone()).await
         } else if self.groove.borrow().is_none() {
-            return Ok(Err("Start with clip (the part) and reference (a MIDI clip): groove compares their feel.".into()));
+            let vocab = &self.host.profile().vocab;
+            return Ok(Err(format!(
+                "Start with {} (the part) and reference ({}): groove compares their feel.",
+                vocab.clip_field, vocab.midi_clip
+            )));
         } else if request.done {
             Ok(Ok(self.groove_done()))
         } else {
@@ -205,8 +213,8 @@ impl Listening {
     /// The reference's hits moved onto its drum stem's onsets: the stem heard over the reference's span.
     async fn refined(self: &Rc<Self>, reference: &mut Read, audio: &str, signal: Signal) -> Result<usize, String> {
         let Some(zero) = reference.song_zero else {
-            let timeline = self.host.profile().words.timeline;
-            return Err(format!("Onsets line up only with {} clip: put the reference's MIDI in the {timeline}.", with_article(timeline)));
+            let (timeline, clip) = (self.host.profile().words.timeline, self.host.profile().vocab.clip);
+            return Err(format!("Onsets line up only with {} {clip}: put the reference's MIDI in the {timeline}.", with_article(timeline)));
         };
         // The drum stem's track, from the stem's clip.
         let name = self.host.stem_track(audio, signal.clone()).await?;
@@ -258,10 +266,7 @@ impl Listening {
         if path.is_file()
             && path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ["mid", "midi"].contains(&ext.to_lowercase().as_str()))
         {
-            return Ok(Err(format!(
-                "The reference is a MIDI file: put it on a MIDI track in {} (drag it in) and give that clip as reference.",
-                self.host.profile().words.app
-            )));
+            return Ok(Err(format!("The reference is a MIDI file: {}.", self.host.profile().vocab.midi_file_import)));
         }
         // A file that isn't there says so, rather than reading as a clip's ref.
         let names_a_file = reference.contains(['/', '\\'])
@@ -341,7 +346,7 @@ impl Listening {
             rebalanced: None,
             listener: None,
             problems: vec![],
-            next: next_of(&run),
+            next: next_of(&run, self.host.profile()),
             met: run.target.is_none(),
             listens: 0,
             elapsed_ms: 0,
@@ -370,8 +375,9 @@ impl Listening {
             };
             if read.notes.iter().any(|(id, _)| *id < 0) {
                 return Ok(Err(format!(
-                    "{} gave the clip's notes without their ids, so Kumi can't move them: update Kumi's bridge (kumi doctor says how).",
-                    self.host.profile().words.app
+                    "{} gave the {}'s notes without their ids, so Kumi can't move them: update Kumi's bridge (kumi doctor says how).",
+                    self.host.profile().words.app,
+                    self.host.profile().vocab.clip
                 )));
             }
             let amount = request.amount.unwrap_or(1.).clamp(0., 1.);
@@ -460,7 +466,7 @@ impl Listening {
             rebalanced: None,
             listener: None,
             problems: vec![],
-            next: next_of(run),
+            next: next_of(run, self.host.profile()),
             met: run.target.is_none(),
             listens: 0,
             elapsed_ms: now_ms() - run.started,
@@ -536,7 +542,7 @@ impl Listening {
             rebalanced: None,
             listener: None,
             problems: vec![],
-            next: next_of(run),
+            next: next_of(run, self.host.profile()),
             met: run.target.is_none(),
             listens: 0,
             elapsed_ms: now_ms() - run.started,
@@ -579,7 +585,7 @@ impl Listening {
             rebalanced: None,
             listener: None,
             problems: vec![],
-            next: next_of(run),
+            next: next_of(run, self.host.profile()),
             met: run.target.is_none(),
             listens: 0,
             elapsed_ms: now_ms() - run.started,
@@ -626,18 +632,19 @@ fn next_line(run: &GrooveRun) -> Option<String> {
     fresh.or_else(|| open.iter().max_by(|a, b| a.off().total_cmp(&b.off()))).map(|line| line.id.clone())
 }
 
-fn next_of(run: &GrooveRun) -> Option<Next> {
+/// The next target and how to close it, in the DAW's tools.
+fn next_of(run: &GrooveRun, profile: &DawProfile) -> Option<Next> {
     let line = run.lines.iter().find(|line| Some(&line.id) == run.target.as_ref())?;
     let fix = if line.id == "swing" {
-        "transform_midi swing, or groove with apply: true"
+        format!("{}, or groove with apply: true", profile.vocab.swing_tool)
     } else if line.id.starts_with("timing") {
-        "move those notes (change_notes), or groove with apply: true"
+        format!("move those notes ({}), or groove with apply: true", profile.vocab.move_notes_tool)
     } else if line.id.starts_with("velocity") {
-        "change those notes' velocities, or groove with apply: true"
+        "change those notes' velocities, or groove with apply: true".into()
     } else if line.id.starts_with("density") {
-        "add or remove notes where the reference plays and doesn't"
+        "add or remove notes where the reference plays and doesn't".into()
     } else {
-        "change the notes toward the reference's"
+        "change the notes toward the reference's".into()
     };
     Some(Next {
         id: line.id.clone(),
@@ -645,7 +652,7 @@ fn next_of(run: &GrooveRun) -> Option<Next> {
         gap: round1(line.off()),
         wanted: wanted_of(line),
         now: Some(line.value),
-        fix: Some(fix.into()),
+        fix: Some(fix),
     })
 }
 

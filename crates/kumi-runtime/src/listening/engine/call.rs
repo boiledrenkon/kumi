@@ -81,7 +81,7 @@ impl Listening {
     }
 
     async fn groove_call(self: &Rc<Self>, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        let request = match groove_request(&input) {
+        let request = match groove_request(self.host.profile(), &input) {
             Ok(request) => request,
             Err(why) => return Ok(ToolResult::error(why)),
         };

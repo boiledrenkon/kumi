@@ -59,6 +59,8 @@ struct State {
     /// The first epoch of the run the song is in: epochs moved only for devices keep the tracks, and the tool takes a
     /// track ref from any epoch of the run (`kept`).
     run_start: u32,
+    /// Pattern tracks' lines a test writes (`set_lines`), by pattern and track: read by `line`, written by `notes-write`.
+    lines: std::collections::HashMap<(u64, u64), Vec<Value>>,
 }
 
 /// A song that answers like the tool. Clones share the song.
@@ -165,6 +167,7 @@ impl RenoiseScript {
                 devices: Default::default(),
                 undo: vec![],
                 run_start: VECTORS_EPOCH,
+                lines: Default::default(),
             })),
             listening: SimListening::new(daw_bridge::Daw::Renoise),
         }
@@ -239,6 +242,121 @@ impl RenoiseScript {
         )
     }
 
+    /// A pattern track's lines, as the line read gives them (`[{line, notes: [{col, note, …}]}]`): groove reads them, and
+    /// notes-write writes them.
+    pub fn set_lines(&self, pattern: u64, track: u64, rows: Value) {
+        let rows = rows.as_array().cloned().unwrap_or_default();
+        self.state.lock().unwrap().lines.insert((pattern, track), rows);
+    }
+
+    /// A pattern track's lines now.
+    pub fn lines(&self, pattern: u64, track: u64) -> Value {
+        Value::Array(self.state.lock().unwrap().lines.get(&(pattern, track)).cloned().unwrap_or_default())
+    }
+
+    /// What the lines a test wrote answer: a pattern track's `line` read, and a pattern read by its ref (from the
+    /// vectors' patterns). Asked and answered in the vectors' epoch.
+    fn lines_read(state: &State, asked: &Value) -> Option<Result<Value, (String, String)>> {
+        let number = |value: &Value, kind: &str| -> Option<u64> {
+            match value {
+                Value::Number(n) => n.as_u64(),
+                Value::String(text) => text.strip_prefix(&format!("{VECTORS_EPOCH}:{kind}:"))?.parse().ok(),
+                _ => None,
+            }
+        };
+        if let Some(pattern) = asked.get("ref").and_then(|reference| number(reference, "pattern")) {
+            let case = state.cases.iter().find(|case| case.method == "read" && case.params == json!({"kind": "pattern"}))?;
+            let rows = case.response.as_ref().ok()?["items"].as_array()?.clone();
+            let row = rows.into_iter().find(|row| row["ref"] == format!("{VECTORS_EPOCH}:pattern:{pattern}"))?;
+            return Some(Ok(json!({"items": [row], "epoch": EPOCH, "layout": 0})));
+        }
+        if asked["kind"] != "line" {
+            return None;
+        }
+        let pattern = number(&asked["parent"], "pattern")?;
+        let track = number(&asked["track"], "track")?;
+        let rows = state.lines.get(&(pattern, track))?;
+        Some(Ok(json!({"items": rows, "epoch": EPOCH, "layout": 0, "total": rows.len()})))
+    }
+
+    /// `notes-write {pattern, track, lines}`, as the tool writes it without merge: each cell named is written whole, or
+    /// cleared; fenced on the pattern track's lines and put back by them.
+    fn notes_write(state: &mut State, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let bad = |message: &str| ("bad-params".to_string(), message.to_string());
+        let epoch = state.epoch;
+        let index = |text: Option<&str>, kind: &str| -> Option<Vec<u64>> {
+            let rest = text?.split_once(':')?.1.strip_prefix(&format!("{kind}:"))?;
+            Some(rest.split('.').filter_map(|n| n.parse().ok()).collect())
+        };
+        let (pattern, track) = if method == "change_restore" {
+            let at = index(params["target"]["ref"].as_str(), "ptrack").ok_or(bad("target: a pattern track"))?;
+            (at[0], at[1])
+        } else {
+            let pattern = index(params["input"]["pattern"].as_str(), "pattern").ok_or(bad("pattern: a pattern's ref"))?[0];
+            let track = index(params["input"]["track"].as_str(), "track").ok_or(bad("track: a track's ref"))?[0];
+            (pattern, track)
+        };
+        let now = Value::Array(state.lines.get(&(pattern, track)).cloned().unwrap_or_default());
+        let answer = |value: Value| {
+            let mut value = value;
+            value["epoch"] = epoch.to_string().into();
+            value["layout"] = 0.into();
+            value
+        };
+        let desc = params["desc"].as_str().unwrap_or_default().to_string();
+        let title =
+            format!("Wrote {} lines in pattern {pattern} on track {track}", params["input"]["lines"].as_array().map_or(0, Vec::len));
+        let set = |state: &mut State, rows: &Value| {
+            state.lines.insert((pattern, track), rows.as_array().cloned().unwrap_or_default());
+        };
+        // The lines after the write: each cell named written whole, or cleared.
+        let after = || -> Result<Value, (String, String)> {
+            let mut rows: std::collections::BTreeMap<u64, Vec<Value>> = now
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|row| Some((row["line"].as_u64()?, row["notes"].as_array().cloned().unwrap_or_default())))
+                .collect();
+            for entry in params["input"]["lines"].as_array().into_iter().flatten() {
+                let line = entry["line"].as_u64().ok_or(bad("line"))?;
+                let cells = rows.entry(line).or_default();
+                for cell in entry["notes"].as_array().into_iter().flatten() {
+                    let col = cell["col"].as_u64().ok_or(bad("col"))?;
+                    cells.retain(|held| held["col"].as_u64() != Some(col));
+                    if cell["clear"] != true {
+                        cells.push(cell.clone());
+                    }
+                }
+                cells.sort_by_key(|cell| cell["col"].as_u64());
+            }
+            Ok(rows.into_iter().filter(|(_, cells)| !cells.is_empty()).map(|(line, cells)| json!({"line": line, "notes": cells})).collect())
+        };
+        match method {
+            "change_preview" => {
+                let after = after()?;
+                Ok(answer(json!({"target": {"ref": format!("{epoch}:ptrack:{pattern}.{track}"), "kind": "pattern-track"},
+                    "prior": {"rows": now}, "fence": {"rows": now}, "display": {"title": title, "unchanged": after == now}})))
+            }
+            "change_apply" => {
+                if params["fence"]["rows"] != now {
+                    return Err(("changed".into(), "the pattern track's lines changed since the preview".into()));
+                }
+                let after = after()?;
+                set(state, &after);
+                state.undo.push(desc.clone());
+                Ok(answer(json!({"applied": {"rows": after}, "display": {"title": title}, "undo": {"desc": desc, "entry": true}})))
+            }
+            _ => {
+                if params["applied"]["rows"] != now && params["discard"] != true {
+                    return Err(("changed".into(), "the pattern track's lines changed in Renoise since Kumi wrote them".into()));
+                }
+                set(state, &params["prior"]["rows"]);
+                state.undo.push(desc);
+                Ok(answer(json!({"restored": {"rows": params["prior"]["rows"]}, "display": {"title": "Lines put back"}})))
+            }
+        }
+    }
+
     /// The producer moves a track's volume in Renoise.
     pub fn set_volume(&self, track: u64, db: f64) {
         self.state.lock().unwrap().volume.insert(track, db);
@@ -265,6 +383,9 @@ impl RenoiseScript {
         let epoch = state.epoch;
         if method != "change_restore" && params.get("epoch").and_then(Value::as_str) != Some(&epoch.to_string()) {
             return Err(("stale".into(), format!("that change is from an earlier epoch (now {epoch}): read again")));
+        }
+        if kind == "notes-write" {
+            return Self::notes_write(state, method, params);
         }
         // Lua run in the song: one step of Renoise's undo, which only Renoise's own undo takes back.
         if kind == "run-lua" {
@@ -475,6 +596,11 @@ impl RenoiseScript {
             let parent = format!("{VECTORS_EPOCH}:pattern:1");
             if method == "read" && asked["kind"] == "line" && asked["parent"] == parent && asked["track"] == 1 {
                 return Some(full_page(lines, &asked, state.keeps_bound).map(|page| retag(&page, VECTORS_EPOCH, epoch, None)));
+            }
+        }
+        if method == "read" {
+            if let Some(answer) = Self::lines_read(&state, &asked) {
+                return Some(answer.map(|page| retag(&page, VECTORS_EPOCH, epoch, None)));
             }
         }
         let wanted = normal(&asked);

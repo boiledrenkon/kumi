@@ -134,6 +134,23 @@ pub struct PromptVocab {
     pub clip_field: &'static str,
     /// What else tune's fit sets on the DAW's EQ so its bands land as calculated (Live: EQ Eight's Adaptive Q and Scale).
     pub eq_fit_settings: &'static str,
+    /// How groove takes its part: "a MIDI clip's clipRef".
+    pub part_ref: &'static str,
+    /// How groove takes the reference's notes: "the reference's MIDI clip (its clipRef)".
+    pub reference_part: &'static str,
+    /// How groove takes a reference's drum stem: "an Arrangement audio clip's clipRef".
+    pub stem_audio: &'static str,
+    /// What groove's audio is, in its description: "the drum stem's clip".
+    pub stem_as_audio: &'static str,
+    /// The tools that change a part's notes, as groove names them: "change_notes, transform_midi swing, quantize".
+    pub note_tools: &'static str,
+    /// The tool that moves notes: "change_notes".
+    pub move_notes_tool: &'static str,
+    /// What swings a part: "transform_midi swing".
+    pub swing_tool: &'static str,
+    /// What to do with a MIDI file given as groove's reference: "put it on a MIDI track in Live (drag it in) and give that
+    /// clip as reference".
+    pub midi_file_import: &'static str,
 }
 
 /// The structural changes for a DAW Kumi doesn't know: no device names.
@@ -294,8 +311,32 @@ macro_rules! live_word {
     (clip_field) => {
         "clip"
     };
-    (eq_fit_settings) => {
+        (eq_fit_settings) => {
         ", and turns Adaptive Q off and Scale to 100% so they land as calculated"
+    };
+    (part_ref) => {
+        "a MIDI clip's clipRef"
+    };
+    (reference_part) => {
+        "the reference's MIDI clip (its clipRef)"
+    };
+    (stem_audio) => {
+        "an Arrangement audio clip's clipRef"
+    };
+    (stem_as_audio) => {
+        "the drum stem's clip"
+    };
+    (note_tools) => {
+        "change_notes, transform_midi swing, quantize"
+    };
+    (move_notes_tool) => {
+        "change_notes"
+    };
+    (swing_tool) => {
+        "transform_midi swing"
+    };
+    (midi_file_import) => {
+        "put it on a MIDI track in Live (drag it in) and give that clip as reference"
     };
 }
 
@@ -440,6 +481,30 @@ macro_rules! daw_word {
     };
     ($profile:expr, eq_fit_settings) => {
         $profile.vocab.eq_fit_settings
+    };
+    ($profile:expr, part_ref) => {
+        $profile.vocab.part_ref
+    };
+    ($profile:expr, reference_part) => {
+        $profile.vocab.reference_part
+    };
+    ($profile:expr, stem_audio) => {
+        $profile.vocab.stem_audio
+    };
+    ($profile:expr, stem_as_audio) => {
+        $profile.vocab.stem_as_audio
+    };
+    ($profile:expr, note_tools) => {
+        $profile.vocab.note_tools
+    };
+    ($profile:expr, move_notes_tool) => {
+        $profile.vocab.move_notes_tool
+    };
+    ($profile:expr, swing_tool) => {
+        $profile.vocab.swing_tool
+    };
+    ($profile:expr, midi_file_import) => {
+        $profile.vocab.midi_file_import
     };
 }
 
@@ -618,6 +683,14 @@ impl DawProfile {
             midi_clip: crate::live_word!(midi_clip),
             clip_field: crate::live_word!(clip_field),
             eq_fit_settings: crate::live_word!(eq_fit_settings),
+            part_ref: crate::live_word!(part_ref),
+            reference_part: crate::live_word!(reference_part),
+            stem_audio: "a timeline audio clip's clipRef",
+            stem_as_audio: crate::live_word!(stem_as_audio),
+            note_tools: "the tools that change notes",
+            move_notes_tool: "the tool that moves notes",
+            swing_tool: "the tool that swings notes",
+            midi_file_import: "put it on a MIDI track in the DAW (drag it in) and give that clip as reference",
         },
     };
 
@@ -709,6 +782,14 @@ impl DawProfile {
             midi_clip: crate::live_word!(midi_clip),
             clip_field: crate::live_word!(clip_field),
             eq_fit_settings: crate::live_word!(eq_fit_settings),
+            part_ref: crate::live_word!(part_ref),
+            reference_part: crate::live_word!(reference_part),
+            stem_audio: crate::live_word!(stem_audio),
+            stem_as_audio: crate::live_word!(stem_as_audio),
+            note_tools: crate::live_word!(note_tools),
+            move_notes_tool: crate::live_word!(move_notes_tool),
+            swing_tool: crate::live_word!(swing_tool),
+            midi_file_import: crate::live_word!(midi_file_import),
         },
     };
 
@@ -776,6 +857,14 @@ impl DawProfile {
             midi_clip: "a MIDI item",
             clip_field: "item",
             eq_fit_settings: "",
+            part_ref: "a MIDI item's ref",
+            reference_part: "the reference's MIDI item (its ref)",
+            stem_audio: "an audio item's ref",
+            stem_as_audio: "the drum stem's item",
+            note_tools: "notes_change",
+            move_notes_tool: "notes_change",
+            swing_tool: "notes_change (the off-beat notes later)",
+            midi_file_import: "put it on a track in REAPER (drag it in) and give that item as reference",
         },
     };
 
@@ -840,6 +929,14 @@ impl DawProfile {
             midi_clip: "a pattern track",
             clip_field: "pattern",
             eq_fit_settings: "",
+            part_ref: "a pattern track: its pattern's (or a sequence slot's) ref and its track's, as \"pattern:2 track:5\"",
+            reference_part: "the reference's pattern track (its pattern's and its track's refs, as for pattern)",
+            stem_audio: "the track that plays it: its ref",
+            stem_as_audio: "the track that plays the drum stem",
+            note_tools: "notes_write",
+            move_notes_tool: "notes_write: their lines and delays",
+            swing_tool: "notes_write (the off-beat lines' delays)",
+            midi_file_import: "import it into Renoise (drag it in) and give the pattern track it lands on as reference",
         },
     };
 

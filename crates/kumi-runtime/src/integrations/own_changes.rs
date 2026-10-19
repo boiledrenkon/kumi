@@ -512,6 +512,9 @@ pub struct OwnPlan<S: RefScheme + 'static> {
     added: Cell<usize>,
     /// The saved project was too big to copy before the step about to run (its size).
     not_copied: Cell<Option<u64>>,
+    /// Kumi's track renames, oldest first: the change, the track's ref and the name it had and was given (a judged run
+    /// follows its track by them).
+    pub(super) renamed: RefCell<Vec<(String, String, String, String)>>,
 }
 
 impl<S: RefScheme + 'static> OwnPlan<S> {
@@ -527,6 +530,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             on_action,
             added: Cell::new(0),
             not_copied: Cell::new(None),
+            renamed: RefCell::default(),
         })
     }
 
@@ -882,6 +886,17 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         }
         let summary = kind.summary(&title, prior.as_ref(), applied.get("applied"));
         let id = self.remember(kind, summary, &transaction, ChangeState::Applied, note.clone());
+        // What the listening tools read back: the part a note edit changed (groove takes back its own part's edits), and a
+        // track's rename (a judged run follows its track by it).
+        if let Some(target) = preview.pointer("/target/ref").and_then(Value::as_str) {
+            if kind.kind.starts_with("notes-") {
+                self.history.made_on(&id, target);
+            }
+            let from = prior.as_ref().and_then(|prior| prior.get("name")).and_then(Value::as_str);
+            if let (true, Some(from), Some(to)) = (kind.kind == "track-rename", from, input.get("name").and_then(Value::as_str)) {
+                self.renamed.borrow_mut().push((id.clone(), target.to_owned(), from.to_owned(), to.to_owned()));
+            }
+        }
         // No copy kept first (the saved project was too big): said with what it deleted.
         let note = match (self.not_copied.take().filter(|_| kind.deletes), note) {
             (Some(size), note) => {

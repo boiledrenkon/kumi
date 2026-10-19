@@ -6,6 +6,7 @@ pub mod none;
 pub mod own_bridge;
 pub mod own_changes;
 mod own_goal;
+mod own_groove;
 pub mod own_listening;
 pub mod own_views;
 pub mod reaper;
