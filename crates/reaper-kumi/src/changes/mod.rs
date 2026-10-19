@@ -20,6 +20,8 @@ pub(crate) use sends::seen_holds as send_seen_holds;
 mod structure;
 mod tracks;
 mod undo;
+// (r-tracks) M4: track properties, routing, project items, actions; NIT-7.
+mod volatile;
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -505,6 +507,8 @@ impl Changes {
                 self.close(reaper, reads, plan);
             }
         }
+        // (r-tracks, NIT-7) The FX Kumi looked at lately are looked at again for parameters that move by themselves.
+        volatile::tick(reaper, reads);
         let Some(info) = reaper.current_project() else { return };
         // A plan's block is open: its points are not the producer's undo either.
         if self.plan.borrow().is_some() {
@@ -560,3 +564,8 @@ pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::Track
 
 #[cfg(test)]
 mod tests;
+// (r-tracks) M4's tests of its kinds and of M3's carried fixes.
+#[cfg(test)]
+mod tests_carried;
+#[cfg(test)]
+mod tests_lab;

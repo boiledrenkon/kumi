@@ -452,7 +452,11 @@ impl Journal {
             let own = record.in_daw_undo && (named(&record.desc) || named(&record.step_desc));
             let restore = named(&record.undo_desc);
             let taken_back = match (own, restore) {
-                (true, _) => undo,
+                // (r-tracks, NIT-5) Its own step and its undo's step at once, a jump in the DAW's undo history over both:
+                // back over them leaves the change not made, forward over them leaves it undone again (its undo's step is
+                // the later one). Undone either way.
+                (true, true) => true,
+                (true, false) => undo,
                 (false, true) => !undo,
                 (false, false) => continue,
             };
@@ -1054,6 +1058,31 @@ mod tests {
         // The event Kumi gets says which were taken back and which put back.
         let data = undone_in_daw(&journal, "undone_in_daw", json!({"descs": [restore], "how": "undo"}));
         assert_eq!((&data["undone"], &data["redone"]), (&json!([]), &json!([record.id])));
+    }
+
+    // (r-tracks, NIT-5)
+    #[test]
+    fn a_jump_over_a_change_and_kumis_undo_of_it_leaves_it_undone_either_way() {
+        let journal = Journal::default();
+        let record = preview(&journal);
+        let Ok(Ok(applying)) = journal.begin_apply(&record.id, &record.confirmation, "a", None) else { panic!("applying") };
+        journal.end_apply(&record.id, "a", Ok(&json!({"applied": {"volumeDb": -9.0}})));
+        let own = applying.desc.unwrap();
+        let Ok(Ok((_, restore))) = journal.begin_undo(&record.id, "u1") else { panic!("undoing") };
+        journal.end_undo(&record.id, "u1", Ok(&json!({"restored": {"volumeDb": 0.0}})));
+        let both = [own.clone(), restore.clone()];
+        // Back over both (REAPER's Undo History window): the change was never made, so it stays undone.
+        assert_eq!(journal.follow_daw(&both, true), (vec![], vec![]));
+        assert_eq!(journal.get(&record.id).unwrap().state, State::Undone);
+        // Forward over both: made, then undone again by Kumi's step, which comes after it.
+        assert_eq!(journal.follow_daw(&both, false), (vec![], vec![]));
+        assert_eq!(journal.get(&record.id).unwrap().state, State::Undone);
+        // Its own step alone still follows the DAW's undo and redo.
+        assert_eq!(journal.follow_daw(std::slice::from_ref(&own), false), (vec![], vec![record.id.clone()]));
+        assert_eq!(journal.follow_daw(&both, false), (vec![record.id.clone()], vec![]), "forward over both from applied: undone");
+        let data = undone_in_daw(&journal, "undone_in_daw", json!({"descs": both, "how": "redo"}));
+        assert_eq!((&data["undone"], &data["redone"]), (&json!([]), &json!([])));
+        assert_eq!(journal.get(&record.id).unwrap().state, State::Undone);
     }
 
     #[test]
