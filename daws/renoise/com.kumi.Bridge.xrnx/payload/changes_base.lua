@@ -291,7 +291,6 @@ function M.prop_restore(song, env, spec, restore, desc)
     error(loc, 0)
   end
   local prior, applied = unwire(spec, restore.prior, env), unwire(spec, restore.applied, env)
-  if spec.guard and not restore.discard then spec.guard(song, env, loc, applied) end
   local now = spec.read(loc.object, prior)
   if not spec.same(now, prior) then
     if not restore.discard and not spec.same(now, applied) then

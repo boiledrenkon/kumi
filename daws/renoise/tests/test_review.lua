@@ -803,7 +803,7 @@ test("review S-4: when the group is gone the track comes back outside it, and th
   mock.song:add_track_to_group(3, 5)
   mock.data.undo.stack, mock.data.undo.redo = {}, {}
   local previewed, done = delete_track(peer, 3)
-  mock.ops.rename_track(4, "Renamed group") -- Pad is track 3 now, the group is track 4
+  mock.ops.remove_track(4) -- the producer deletes the group (Pad is track 3 now, the group is track 4)
   H.tick(2)
   local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr28)", done.epoch, done.layout)
   ok(undone.result, json.encode(undone.error or {}))
@@ -863,6 +863,232 @@ test("review N-6: the two places a move keeps move with the tracks made and dele
   eq(entry.prior.index, 2, "(the place of the deleted track is its own)")
   eq(entry.applied.index, 3)
   eq(entry.place.track, 3)
+end)
+
+-- The reviewer's verify of 919993ab (probe_v919.lua): places followed through swaps, names that are no identity, routes as places
+
+local function dest(t, d)
+  local p = mock.data.tracks[t].devices[d].params
+  return string.format("%d/%d/%d", p[1].value, p[2].value, p[3].value)
+end
+
+local function lines_on(t)
+  local n = 0
+  for p = 1, #mock.data.patterns do
+    if not mock.song:pattern(p):track(t).is_empty then n = n + 1 end
+  end
+  return n
+end
+
+test("review V1: the producer swaps two default-named tracks during a sliced restore: the producer's track and lines stay", function()
+  local env, peer = setup({ patch = constants({ SLICE_WRITES = 40 }) })
+  mock.ops.rename_track(2, "Track 02")
+  mock.ops.rename_track(3, "Track 03")
+  fill(2)
+  for p = 1, 3 do -- Track 03 holds the producer's notes
+    local column = mock.song:pattern(p):track(3):line(1):note_column(1)
+    column.note_value, column.instrument_value = 60, 1
+  end
+  H.tick(2)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 2)
+  local id = start_restore(peer, previewed, done, "Kumi: undo d (kr60)")
+  mock.song:swap_tracks_at(2, 3) -- the producer moves Track 03 up one
+  local response = wait(peer, id, 400, 20)
+  ok(response and response.error, "the restore stops")
+  local kept = false
+  for i, t in ipairs(mock.data.tracks) do
+    if t.name == "Track 03" and lines_on(i) == 3 then kept = true end
+  end
+  ok(kept, "the producer's Track 03 with its lines is in the song: " .. names())
+  eq(#mock.data.tracks, 5, "and the half-made track is the one that went (Hat is deleted, the restore gone)")
+  H.no_dialogs()
+end)
+
+test("review V1b: a swap by the restore's own group join does not lose the made track", function()
+  local env, peer = setup({ patch = constants({ SLICE_WRITES = 40 }) })
+  mock.song:insert_group_at(5)
+  mock.song:add_track_to_group(3, 5)
+  mock.song:add_track_to_group(3, 5)
+  fill(3)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local before = order()
+  local previewed, done = delete_track(peer, 3)
+  local undone = call(peer, "change_restore", restore_params("track-delete", record_of(previewed, done), "Kumi: undo d (kr61)", done.epoch, done.layout), 600)
+  ok(undone and undone.result, json.encode(undone and undone.error or "no answer"))
+  eq(order(), before)
+  H.no_dialogs()
+end)
+
+test("review V3: a delete that could not be put back in 16 steps is refused where it is made", function()
+  local sequence = {}
+  for i = 1, 20 do sequence[i] = i end
+  local env, peer = setup({ patch = constants({ SLICE_WRITES = 100 }) }, { patterns = 20, sequence = sequence, sequence_length = 20 })
+  for p = 1, 20 do
+    for k = 1, 8 do -- 8 notes a pattern: 56 writes, more than half a slice
+      local column = mock.song:pattern(p):track(2):line(k):note_column(1)
+      column.note_value, column.instrument_value = 40 + k, 1
+    end
+  end
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local previewed = preview(peer, "track-delete", { ref = track_ref(epoch, 2) })
+  local done = apply(peer, "track-delete", { ref = track_ref(epoch, 2) }, "Kumi: d (kr62)", previewed.fence, epoch, layout)
+  failure(done, "failed")
+  ok(done.error.message:find("20 steps", 1, true), done.error.message)
+  eq(names(), "Kick,Hat,Bass,Pad,Master,Send 1", "nothing was deleted")
+  H.no_dialogs()
+end)
+
+test("review V4: a meta device aimed at a deleted track: the producer adds another *LFO before it, and Kumi's undo aims the old one", function()
+  routing_catalog()
+  local env, peer = setup()
+  mock.song:track(3):insert_device_at("Audio/Effects/Native/Gainer", 2)
+  mock.song:track(1):insert_device_at("Audio/Effects/Native/*LFO", 2)
+  local p = mock.data.tracks[1].devices[2].params
+  p[1].value, p[2].value, p[3].value = 2, 1, 0 -- Kick's LFO drives Bass's Gainer
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 3)
+  mock.song:track(1):insert_device_at("Audio/Effects/Native/*LFO", 2) -- the producer's own new LFO, aimed nowhere
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr63)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(dest(1, 2), "-1/-1/-1", "the producer's new LFO was left alone")
+  eq(dest(1, 3), "-1/-1/-1", "and the old one, whose track has other devices now, is not aimed at a Gainer it may not be")
+  ok(undone.result.display.note and undone.result.display.note:find("could not be set again", 1, true), json.encode(undone.result.display))
+  H.no_dialogs()
+end)
+
+local function lfo_on_deleted_track(names_given)
+  routing_catalog()
+  local env, peer = setup()
+  if names_given then
+    for i, name in ipairs(names_given) do mock.ops.rename_track(i, name) end
+    H.tick(2)
+  end
+  mock.song:track(4):insert_device_at("Audio/Effects/Native/Gainer", 2)
+  mock.song:track(3):insert_device_at("Audio/Effects/Native/*LFO", 2)
+  local p = mock.data.tracks[3].devices[2].params
+  p[1].value, p[2].value, p[3].value = 3, 1, 0 -- the 3rd track's LFO drives the 4th track's Gainer
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 3)
+  mock.ops.insert_track(1, { name = "New" })
+  H.tick(2)
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr64)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  return dest(4, 2)
+end
+
+test("review V8: a deleted track's LFO drives a Gainer on the next track; the producer makes a track at 1; the undo follows", function()
+  eq(lfo_on_deleted_track(nil), "4/1/0", "the LFO's destination (the Gainer's track is 5 now)")
+end)
+
+test("review V8b: the same with the default names Renoise gives", function()
+  eq(lfo_on_deleted_track({ "Track 01", "Track 02", "Track 03", "Track 04" }), "4/1/0", "the LFO's destination")
+end)
+
+local function lfo_aimed_at_bass(names_given)
+  routing_catalog()
+  local env, peer = setup()
+  if names_given then
+    for i, name in ipairs(names_given) do mock.ops.rename_track(i, name) end
+    H.tick(2)
+  end
+  mock.song:track(3):insert_device_at("Audio/Effects/Native/Gainer", 2)
+  mock.song:track(1):insert_device_at("Audio/Effects/Native/*LFO", 2)
+  local p = mock.data.tracks[1].devices[2].params
+  p[1].value, p[2].value, p[3].value = 2, 1, 0 -- the first track's LFO drives the third track's Gainer
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local previewed = preview(peer, "device-delete", { ref = epoch .. ":device:1.2" })
+  local done = apply(peer, "device-delete", { ref = epoch .. ":device:1.2" }, "Kumi: dd (kr65)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  mock.ops.insert_track(3, { name = names_given and "Track 03" or "New" }) -- the producer makes a track just before the Gainer's
+  H.tick(2)
+  local undone = restore(peer, "device-delete", record_of(previewed, done.result), "Kumi: undo dd (kr66)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  return dest(1, 2)
+end
+
+test("review V7b: a deleted LFO aimed at the 3rd track; the producer makes a track at 3; the undo aims the track it was", function()
+  eq(lfo_aimed_at_bass(nil), "3/1/0", "the LFO's destination (the Gainer's track is 4 now)")
+end)
+
+test("review V7c: the same with default names", function()
+  eq(lfo_aimed_at_bass({ "Track 01", "Track 02", "Track 03", "Track 04" }), "3/1/0", "the LFO's destination")
+end)
+
+test("review V7: a deleted LFO aimed at its own track; the producer deletes the track before; the undo is not refused", function()
+  routing_catalog()
+  local env, peer = setup()
+  local bass = mock.song:track(3)
+  bass:insert_device_at("Audio/Effects/Native/Gainer", 2)
+  bass:insert_device_at("Audio/Effects/Native/*LFO", 3)
+  local p = mock.data.tracks[3].devices[3].params
+  p[1].value, p[2].value, p[3].value = 2, 1, 0 -- its own track (0-based 2), the Gainer
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local previewed = preview(peer, "device-delete", { ref = epoch .. ":device:3.3" })
+  local done = apply(peer, "device-delete", { ref = epoch .. ":device:3.3" }, "Kumi: dd (kr67)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  mock.ops.remove_track(2) -- the producer deletes Hat, the track before Bass
+  H.tick(2)
+  local undone = restore(peer, "device-delete", record_of(previewed, done.result), "Kumi: undo dd (kr68)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(dest(2, 3), "1/1/0", "the LFO aims at its own track, which is the 2nd now")
+  H.no_dialogs()
+end)
+
+local function group_member_notes(second_group_name)
+  local env, peer = setup()
+  local song = mock.song
+  song:insert_group_at(2)
+  song:add_track_to_group(1, 2) -- Kick in the first group
+  song:insert_group_at(6)
+  song:add_track_to_group(4, 6) -- Bass joins the second
+  song:add_track_to_group(4, 6) -- Pad joins it
+  mock.ops.rename_track(2, "Group 02")
+  mock.ops.rename_track(6, second_group_name)
+  for k = 1, 4 do
+    local column = song:pattern(1):track(4):line(k):note_column(1)
+    column.note_value, column.instrument_value = 36 + k, 1
+  end
+  H.tick(2)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local previewed, done = delete_track(peer, 4)
+  for i = 1, 4 do mock.ops.insert_track(1, { name = "N" .. i }) end
+  H.tick(2)
+  local undone = restore(peer, "track-delete", record_of(previewed, done), "Kumi: undo d (kr69)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  local function parent_of(name)
+    for i, t in ipairs(mock.data.tracks) do
+      if t.name == name then
+        local parent = song:track(i).group_parent
+        return parent and parent.name or "none", i
+      end
+    end
+  end
+  local function notes_of(name)
+    local _, i = parent_of(name)
+    local n = 0
+    for k = 1, 4 do
+      if song:pattern(1):track(i):line(k):note_column(1).note_value < 120 then n = n + 1 end
+    end
+    return n
+  end
+  return parent_of, notes_of
+end
+
+test("review V5b: a member of a default-named group goes back into its own group, and its lines are written to it", function()
+  local parent_of, notes_of = group_member_notes("Group 06")
+  eq((parent_of("Bass")), "Group 06", "Bass's group (not the earlier Group 02)")
+  eq(notes_of("Bass"), 4, "Bass has its notes")
+  eq(notes_of("Hat"), 0, "the producer's Hat has none")
+end)
+
+test("review V5: the same with the second group named of its own", function()
+  local parent_of, notes_of = group_member_notes("Strings")
+  eq((parent_of("Bass")), "Strings", "Bass's group")
+  eq(notes_of("Bass"), 4)
 end)
 
 -- S-7: budgets

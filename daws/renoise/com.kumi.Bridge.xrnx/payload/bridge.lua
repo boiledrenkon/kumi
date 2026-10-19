@@ -61,14 +61,14 @@ local BREAKS = {
 }
 local EVERYTHING = { "document", "tracks", "devices", "samples", "phrases", "patterns", "instruments", "sequence" }
 
-local function bump_epoch(reason, tracks_kept, broken)
+local function bump_epoch(reason, tracks_kept, broken, keep_shifts)
   b.epoch_n = b.epoch_n + 1
   broken = broken or EVERYTHING
   -- The layout goes on counting across epochs (no event says when an epoch moves for a device or a pattern, so a layout
   -- that started over would look older than the one Kumi holds). The shifts start over when track numbers can't be followed.
   for _, category in ipairs(broken) do
     b.cat[category] = (b.cat[category] or 0) + 1
-    if category == "tracks" or category == "document" then b.shifts = {} end
+    if (category == "tracks" or category == "document") and not keep_shifts then b.shifts = {} end
   end
   local snapshot = {}
   for _, category in ipairs(CATEGORIES) do snapshot[category] = b.cat[category] or 0 end
@@ -463,7 +463,11 @@ local function on_tracks(op)
   local swapped = op.type == "swap" and expected == count and exchange(b.groups.tracks, op.index, op.index2)
   if swapped then
     -- (the tracks are the same objects in another order: they keep their watchers and their groups move with them)
-    bump_epoch("tracks were swapped", true, { "tracks" })
+    -- (a swap moves the epoch and the layout, and is kept as a shift: a job can follow a track through the swaps of a producer, or its own)
+    bump_epoch("tracks were swapped", true, { "tracks" }, true)
+    b.layout = b.layout + 1
+    b.shifts[#b.shifts + 1] = { layout = b.layout, type = "swap", index = op.index, index2 = op.index2 }
+    if #b.shifts > M.SHIFT_HISTORY then table.remove(b.shifts, 1) end
     changes.journal_track_event(b.journal, "swap", op.index, song:is_undo_redoing(), op.index2)
     conns:event("tracks", { count = count, made = json.array(), gone = json.array(), layout = b.layout, epoch = epoch() })
     return

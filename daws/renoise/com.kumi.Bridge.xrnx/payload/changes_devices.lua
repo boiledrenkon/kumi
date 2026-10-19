@@ -406,21 +406,21 @@ local function delete_restore(song, env, restore, desc)
   local at = math.max(2, math.min(material.index or 2, #track.devices + 1))
   song:describe_undo(desc)
   local device = material_.restore_device(track, at, saved)
+  local tally = material_.new_tally()
+  -- (where a track numbered as at the delete is now)
+  local function moved(n)
+    if type(restore.layout) ~= "number" then return n end
+    return (env.shifted(n, restore.layout))
+  end
   local ok, err = pcall(function()
-    material_.restore_destination(song, device, saved, index)
+    material_.count(tally, material_.restore_destination(song, device, saved, index, moved))
     local list = {}
     for i, entry in ipairs(material.automation or {}) do
       list[i] = { pattern = entry.pattern, device = at, parameter = entry.parameter, playmode = entry.playmode, points = entry.points }
     end
     material_.write_automation(song, track, index, list, nil)
   end)
-  local set, failed = 0, 0
-  if ok then
-    set, failed = material_.write_routes(song, material.routes, { on = index, device = at }, function(n)
-      if type(restore.layout) ~= "number" then return n end
-      return (env.shifted(n, restore.layout))
-    end)
-  end
+  if ok then material_.write_routes(song, material.routes, { on = index, device = at }, moved, tally) end
   if not ok then
     pcall(function() track:delete_device_at(at) end)
     if type(err) ~= "table" then err = { code = "failed", message = "Renoise wouldn't put the device back: " .. tostring(err) } end
@@ -429,7 +429,7 @@ local function delete_restore(song, env, restore, desc)
   base.note_restored(env.journal, "device-delete", { track = index, device = at })
   return {
     restored = { ref = refs.make(env.epoch(), "device", index, at), name = device.display_name },
-    display = { title = string.format("%s put back on %s", q(label), q(track_name)), note = material_.routes_restored_note(set, failed) },
+    display = { title = string.format("%s put back on %s", q(label), q(track_name)), note = material_.tally_note(tally) },
     undo = { desc = desc, entry = true },
   }
 end
