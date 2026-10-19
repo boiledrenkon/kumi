@@ -529,7 +529,20 @@ function M.read(params, env)
     local parameter = device:parameter(k)
     parameters[k] = { name = parameter.name, value = parameter.value, valueString = parameter.value_string, min = parameter.value_min, max = parameter.value_max }
   end
+  -- (the device paths asked about that the device's track can take: Audio Units the host would put inside a Doofer)
+  local available
+  if type(params.paths) == "table" then
+    available = {}
+    local wanted = {}
+    for i = 1, math.min(#params.paths, 16) do
+      if type(params.paths[i]) == "string" then wanted[params.paths[i]] = true; available[params.paths[i]] = false end
+    end
+    for _, info in ipairs(track.available_device_infos) do
+      if wanted[info.path] then available[info.path] = true end
+    end
+  end
   return {
+    available = available,
     epoch = env.epoch(), layout = env.layout(), ref = refs.make(env.epoch(), "device", t, d), target = target_of(t, d),
     at = keep(env, t, d, track, device), id = identity(track, device), path = device.device_path, name = device.name,
     label = devices_.label(device), trackName = base.named(t, track), active = device.is_active, presetData = xml,
