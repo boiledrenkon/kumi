@@ -198,6 +198,24 @@ async fn a_listen_stopped_part_way_stops_its_render_and_reaper_is_put_back() {
                 reaper.hear(&HearRequest { mix: Some(true), from_beat: Some(0.), beats: Some(8.), ..Default::default() }, signal).await;
             assert!(matches!(heard, Err(RuntimeError::Aborted)), "{heard:?}");
             assert_eq!(script.listening().restored(), 1, "the render was stopped and what it changed put back");
+            // A render that can't stop at once (it says it's stopping) is waited for, so the next listen finds the DAW free.
+            script.listening().set_slow_stop(true);
+            let signal = Signal::new();
+            let stop = signal.clone();
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                stop.cancel();
+            });
+            let heard =
+                reaper.hear(&HearRequest { mix: Some(true), from_beat: Some(0.), beats: Some(8.), ..Default::default() }, signal).await;
+            assert!(matches!(heard, Err(RuntimeError::Aborted)), "{heard:?}");
+            assert_eq!(script.listening().restored(), 2, "the stop waited for the render's end");
+            script.listening().set_steps(1);
+            let next = reaper
+                .hear(&HearRequest { mix: Some(true), from_beat: Some(0.), beats: Some(8.), ..Default::default() }, Signal::new())
+                .await
+                .unwrap();
+            assert!(next.is_ok(), "the next listen isn't refused as busy: {next:?}");
             reaper.close().await.unwrap();
             simulator.stop();
         })

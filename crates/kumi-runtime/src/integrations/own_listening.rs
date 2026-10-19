@@ -511,8 +511,22 @@ impl<S: RefScheme + 'static> OwnRenderer<S> {
         }
     }
 
+    /// Stops a job, and waits (in the clean-up's own time) until the bridge has put back what it changed: a render in
+    /// flight runs to its end in Renoise, and REAPER may take a moment to stop. The next listening call waits for this.
     async fn cancel_job(&self, id: &str) {
-        let _ = self.link.call("listen_cancel", json!({"jobId": id}), self.cleanup_signal()).await;
+        let cleanup = self.cleanup_signal();
+        let ended = |answer: &Value| matches!(answer.get("state").and_then(Value::as_str), Some("done" | "failed" | "cancelled"));
+        match self.link.call("listen_cancel", json!({"jobId": id}), cleanup.clone()).await {
+            Ok(Ok(answer)) if !ended(&answer) => {}
+            _ => return,
+        }
+        self.tell_app(&format!("{} is finishing the render it was asked to stop", self.app()));
+        while !cleanup.is_cancelled() {
+            match self.link.call("listen_job", json!({"jobId": id, "waitMs": 1000}), cleanup.clone()).await {
+                Ok(Ok(status)) if !ended(&status) => continue,
+                _ => return,
+            }
+        }
     }
 
     /// Renders these sources over `window` (with a bar before it so effects are warm): the job's files by source id, with
@@ -1416,6 +1430,8 @@ impl<S: RefScheme + 'static> Renderer for OwnRenderer<S> {
         let Ok(Ok(rows)) = self.rows(json!({"kind": "spans", "limit": 64}), 1, &signal).await else { return vec![] };
         rows.iter()
             .take(64)
+            // (a muted track plays nowhere)
+            .filter(|row| row.get("mute") != Some(&Value::Bool(true)))
             .filter_map(|row| {
                 let spans = row
                     .get("spans")

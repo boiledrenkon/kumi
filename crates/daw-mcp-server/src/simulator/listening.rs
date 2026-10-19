@@ -44,6 +44,9 @@ struct State {
     master_level: Option<f64>,
     /// What the master's own gain FX add, in dB (a bridge script keeps it).
     master_gain_db: f64,
+    /// A cancel can't stop a render at once (Renoise's render in flight runs to its end): it says it's stopping, and the
+    /// job ends cancelled at its next status.
+    slow_stop: bool,
     /// Scratch copies by set: each copy's ref, name, the source's ref and the values set on it.
     scratch: HashMap<String, Vec<(String, String, String, Vec<Value>)>>,
     previews: Vec<Value>,
@@ -114,6 +117,7 @@ impl SimListening {
                 levels: HashMap::new(),
                 master_level: None,
                 master_gain_db: 0.,
+                slow_stop: false,
                 scratch: HashMap::new(),
                 previews: vec![],
                 playing: None,
@@ -150,6 +154,11 @@ impl SimListening {
     /// The master's level from now on (the mix as a change left it).
     pub fn set_master_level(&self, level: f64) {
         self.state.lock().unwrap().master_level = Some(level);
+    }
+
+    /// A cancel can't stop a render at once from now on: it ends at the job's next status.
+    pub fn set_slow_stop(&self, slow: bool) {
+        self.state.lock().unwrap().slow_stop = slow;
     }
 
     /// What the master's gain FX add from now on, in dB.
@@ -376,9 +385,17 @@ impl SimListening {
             if job.state == "running" {
                 job.polls += 1;
                 if let Some((code, message)) = job.error.clone() {
-                    job.state = "failed";
+                    // (a stop that had to wait for the render ends cancelled, its files gone)
+                    let state_word = if code == "cancelled" { "cancelled" } else { "failed" };
+                    job.state = state_word;
+                    if code == "cancelled" {
+                        for (_, path, ..) in &job.files {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
                     ended = true;
-                    failed = Some(json!({"jobId": id, "kind": job.kind, "state": "failed", "progress": 0, "error": message, "code": code}));
+                    failed =
+                        Some(json!({"jobId": id, "kind": job.kind, "state": state_word, "progress": 0, "error": message, "code": code}));
                 } else if job.polls > steps {
                     for (n, (_, path, _, seconds, level, _)) in job.files.iter().enumerate() {
                         if let Err(error) = write_noise(path, *seconds, *level, n as u32 + 7) {
@@ -423,6 +440,11 @@ impl SimListening {
 
     fn cancel(state: &mut State, params: &Value) -> Answer {
         let id = params["jobId"].as_str().unwrap_or_default().to_string();
+        if state.slow_stop && state.jobs.get(&id).is_some_and(|job| job.state == "running") {
+            let job = state.jobs.get_mut(&id).unwrap();
+            job.error = Some(("cancelled".into(), "Renoise finished the render before it could stop".into()));
+            return Ok(json!({"jobId": id, "state": "running", "stopping": true}));
+        }
         let mut stopped = false;
         let now = {
             let Some(job) = state.jobs.get_mut(&id) else { return Err(bad(format!("no job {id}"))) };
