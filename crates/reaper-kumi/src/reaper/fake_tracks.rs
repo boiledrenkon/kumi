@@ -195,6 +195,12 @@ unsafe extern "C" fn get_set_project_info(_proj: *mut ReaProject, key: *const c_
     if key.starts_with("PROJECT_TIMEBASE") {
         return extra(|e| e.config.get("itemtimelock").and_then(|v| v.parse().ok()).unwrap_or(1.0));
     }
+    // A lane's number by its GUID: the fake's lanes never move, and their GUIDs say their number.
+    if let Some(guid) = key.strip_prefix("RULER_LANE_FROM_GUID:") {
+        let count = extra(|e| e.project_info.get("RULER_LANE_COUNT").copied().unwrap_or(0.0)) as i64;
+        let lane = guid.strip_prefix("{LANE-").and_then(|rest| rest.strip_suffix('}')).and_then(|n| n.parse::<i64>().ok());
+        return lane.filter(|n| (0..count).contains(n)).map_or(-1.0, |n| n as f64);
+    }
     let out = extra(|e| {
         if set {
             e.project_info.insert(key.clone(), value);

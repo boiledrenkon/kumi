@@ -1106,11 +1106,19 @@ unsafe extern "C" fn set_region_or_marker_info_value(
 
 unsafe extern "C" fn enum_region_render_matrix(_proj: *mut ReaProject, number: c_int, n: c_int) -> *mut MediaTrack {
     counted(|s| {
-        let Some(id) = s.render_matrix.get(&number).and_then(|list| list.get(n as usize)) else { return ptr::null_mut() };
-        if id == "master" {
+        // (r-tracks) A track deleted since is in no matrix, as in REAPER.
+        let present: Vec<&String> = s
+            .render_matrix
+            .get(&number)
+            .into_iter()
+            .flatten()
+            .filter(|id| *id == "master" || s.tracks.iter().any(|t| t.guid == **id))
+            .collect();
+        let Some(id) = present.get(n as usize) else { return ptr::null_mut() };
+        if *id == "master" {
             return master_ptr();
         }
-        s.tracks.iter().position(|t| t.guid == *id).map_or(ptr::null_mut(), track_ptr)
+        s.tracks.iter().position(|t| t.guid == **id).map_or(ptr::null_mut(), track_ptr)
     })
 }
 

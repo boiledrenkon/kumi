@@ -351,7 +351,7 @@ pub struct Prop {
     noun: &'static str,
 }
 
-pub static PROPS: [Prop; 3] = [
+pub static PROPS: [Prop; 4] = [
     Prop {
         kind: "marker-move",
         read: |marker| json!({"start": marker.start, "end": marker.end}),
@@ -429,6 +429,30 @@ pub static PROPS: [Prop; 3] = [
             }
         },
         noun: "colour",
+    },
+    // (r-tracks, M4) The ruler lane it sits in (REAPER 7.62+: lanes counted from 0, as the rows' lane says).
+    Prop {
+        kind: "marker-lane",
+        read: |marker| json!({"lane": marker.lane}),
+        wanted: |ctx, input, _| {
+            let count = ctx.reaper.project_info(ctx.proj, "RULER_LANE_COUNT").unwrap_or(1.0) as i64;
+            let lane = input.get("lane").and_then(Value::as_i64).ok_or_else(|| bad("lane must be a ruler lane's number, from 0"))?;
+            if !(0..count).contains(&lane) {
+                return Err(bad(format!("the project has {count} ruler lanes, 0 to {}: add one first (ruler_lane_add)", count - 1)));
+            }
+            Ok(json!({"lane": lane}))
+        },
+        write: |ctx, marker, state| {
+            ctx.reaper.set_marker_value(ctx.proj, &marker.guid, "I_LANENUMBER", state["lane"].as_f64().unwrap_or(0.0))
+        },
+        same: |a, b| a["lane"].as_i64() == b["lane"].as_i64(),
+        title: |ctx, marker, to| {
+            let lane = to["lane"].as_i64().unwrap_or(0);
+            let name = ctx.reaper.project_text(ctx.proj, &format!("RULER_LANE_NAME:{lane}")).unwrap_or_default();
+            let name = if name.is_empty() { String::new() } else { format!(" ({})", super::quoted(&name)) };
+            format!("Moved {} to ruler lane {lane}{name}", label(marker).to_lowercase_first())
+        },
+        noun: "ruler lane",
     },
 ];
 

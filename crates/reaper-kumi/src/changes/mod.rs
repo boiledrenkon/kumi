@@ -22,6 +22,7 @@ mod tracks;
 mod undo;
 // (r-tracks) M4: track properties, routing, project items, actions; NIT-7.
 mod hwout;
+mod projectitems;
 mod trackprops;
 mod volatile;
 
@@ -115,6 +116,15 @@ enum Kind {
     HwOutProp(&'static hwout::Prop),
     HwOutAdd,
     HwOutRemove,
+    /// (r-tracks) The project beyond its tracks.
+    TimeSelection,
+    ProjectNotes,
+    ProjectInfo,
+    ProjectGrid,
+    ProjectTimebase,
+    RulerLane,
+    RulerLaneAdd,
+    RegionRender,
     TrackDelete,
     TrackAdd,
     TrackMove,
@@ -178,6 +188,14 @@ fn kind(name: &str) -> Option<Kind> {
         "receive-add" => Some(Kind::ReceiveAdd),
         "hw-out-add" => Some(Kind::HwOutAdd),
         "hw-out-remove" => Some(Kind::HwOutRemove),
+        "time-selection" => Some(Kind::TimeSelection),
+        "project-notes" => Some(Kind::ProjectNotes),
+        "project-info" => Some(Kind::ProjectInfo),
+        "project-grid" => Some(Kind::ProjectGrid),
+        "project-timebase" => Some(Kind::ProjectTimebase),
+        "ruler-lane" => Some(Kind::RulerLane),
+        "ruler-lane-add" => Some(Kind::RulerLaneAdd),
+        "region-render" => Some(Kind::RegionRender),
         "track-delete" => Some(Kind::TrackDelete),
         "track-add" => Some(Kind::TrackAdd),
         "track-move" => Some(Kind::TrackMove),
@@ -202,6 +220,14 @@ impl Kind {
             Kind::HwOutProp(prop) => hwout::prop_preview(ctx, prop, input),
             Kind::HwOutAdd => hwout::add_preview(ctx, input),
             Kind::HwOutRemove => hwout::remove_preview(ctx, input),
+            Kind::TimeSelection => projectitems::time_selection_preview(ctx, input),
+            Kind::ProjectNotes => projectitems::notes_preview(ctx, input),
+            Kind::ProjectInfo => projectitems::info_preview(ctx, input),
+            Kind::ProjectGrid => projectitems::grid_preview(ctx, input),
+            Kind::ProjectTimebase => projectitems::timebase_preview(ctx, input),
+            Kind::RulerLane => projectitems::lane_preview(ctx, input),
+            Kind::RulerLaneAdd => projectitems::lane_add_preview(ctx, input),
+            Kind::RegionRender => projectitems::matrix_preview(ctx, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
             Kind::TrackAdd => structure::add_preview(ctx, input),
             Kind::TrackMove => structure::move_preview(ctx, input),
@@ -233,6 +259,14 @@ impl Kind {
             Kind::HwOutProp(prop) => hwout::prop_apply(ctx, prop, input, fence),
             Kind::HwOutAdd => hwout::add_apply(ctx, input, fence),
             Kind::HwOutRemove => hwout::remove_apply(ctx, input, fence),
+            Kind::TimeSelection => projectitems::time_selection_apply(ctx, input, fence),
+            Kind::ProjectNotes => projectitems::notes_apply(ctx, input, fence),
+            Kind::ProjectInfo => projectitems::info_apply(ctx, input, fence),
+            Kind::ProjectGrid => projectitems::grid_apply(ctx, input, fence),
+            Kind::ProjectTimebase => projectitems::timebase_apply(ctx, input, fence),
+            Kind::RulerLane => projectitems::lane_apply(ctx, input, fence),
+            Kind::RulerLaneAdd => projectitems::lane_add_apply(ctx, input, fence),
+            Kind::RegionRender => projectitems::matrix_apply(ctx, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
             Kind::TrackAdd => structure::add_apply(ctx, input, fence),
             Kind::TrackMove => structure::move_apply(ctx, input, fence),
@@ -264,6 +298,14 @@ impl Kind {
             Kind::HwOutProp(prop) => hwout::prop_restore(ctx, prop, restore),
             Kind::HwOutAdd => hwout::add_restore(ctx, restore),
             Kind::HwOutRemove => hwout::remove_restore(ctx, restore),
+            Kind::TimeSelection => projectitems::time_selection_restore(ctx, restore),
+            Kind::ProjectNotes => projectitems::notes_restore(ctx, restore),
+            Kind::ProjectInfo => projectitems::info_restore(ctx, restore),
+            Kind::ProjectGrid => projectitems::grid_restore(ctx, restore),
+            Kind::ProjectTimebase => projectitems::timebase_restore(ctx, restore),
+            Kind::RulerLane => projectitems::lane_restore(ctx, restore),
+            Kind::RulerLaneAdd => projectitems::lane_add_restore(ctx, restore),
+            Kind::RegionRender => projectitems::matrix_restore(ctx, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
             Kind::TrackAdd => structure::add_restore(ctx, restore),
             Kind::TrackMove => structure::move_restore(ctx, restore),
@@ -603,6 +645,8 @@ mod tests;
 mod tests_carried;
 #[cfg(test)]
 mod tests_lab;
+#[cfg(test)]
+mod tests_project;
 #[cfg(test)]
 mod tests_routing;
 #[cfg(test)]
