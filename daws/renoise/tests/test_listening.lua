@@ -678,3 +678,57 @@ test("listening: a render stops an audition playing; another song ends it too", 
   failure(call(peer, "audition", { previewId = "p8", file = file.file }), "failed", "another song")
   H.no_dialogs()
 end)
+
+-- Reads: spans, grid
+
+test("listening: read spans says where each track plays, in beats: muted columns and slots left out, aliases followed, merged", function()
+  local env, peer = setup({}, { patterns = 3, sequence_length = 4, sequence = { 1, 2, 3, 1 } })
+  -- Kick: a note in patterns 1 and 3 (slots 1, 3, 4); slot 4 muted for it
+  mock.ops.set_note(1, 1, 1, 1, { note = 48, instrument = 0 })
+  mock.ops.set_note(3, 1, 5, 1, { note = 48, instrument = 0 })
+  mock.ops.mute_slot(1, 4, true)
+  -- Hat: in pattern 2 only a note in its muted column 2, and an effect in pattern 3
+  mock.ops.mute_column(2, 2, true)
+  mock.ops.set_note(2, 2, 1, 2, { note = 50, instrument = 0 })
+  mock.ops.set_effect(3, 2, 9, 1, 0x0A, 0x20)
+  -- Bass: pattern 2 is an alias of pattern 1's lines, which hold a note
+  mock.ops.set_note(1, 3, 3, 1, { note = 36, instrument = 0 })
+  mock.ops.alias(2, 3, 1)
+  local epoch = place(peer)
+  local page = result(call(peer, "read", { kind = "spans" }), "spans")
+  eq(page.epoch, epoch)
+  local by = {}
+  for _, item in ipairs(page.items) do by[item.name] = item end
+  eq(json.encode(by.Kick.spans), "[[0,4],[8,12]]")
+  eq(by.Kick.ref, epoch .. ":track:1")
+  eq(json.encode(by.Hat.spans), "[[8,12]]")
+  eq(json.encode(by.Bass.spans), "[[0,8],[12,16]]", "slots 1, 2 (the alias) and 4, merged where they touch")
+  eq(json.encode(by.Pad.spans), "[]")
+  eq(#page.items, 6, "every track, the master and the send too")
+  eq(page.nextCursor, nil)
+  local first = result(call(peer, "read", { kind = "spans", limit = 2 }))
+  eq(#first.items, 2)
+  ok(first.nextCursor, "a next page")
+  local second = result(call(peer, "read", { kind = "spans", limit = 2, cursor = first.nextCursor }))
+  eq(second.items[1].name, "Bass")
+  H.no_dialogs()
+end)
+
+test("listening: read param with grid answers only the current point, gridShort (a set and put back is an undo step in Renoise)", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  local page = result(call(peer, "read", { kind = "param", parent = epoch .. ":device:1.1", grid = 49 }), "param grid")
+  ok(#page.items > 0)
+  for _, row in ipairs(page.items) do
+    eq(row.gridShort, true)
+    eq(#row.grid, 1)
+    eq(row.grid[1][1], row.value)
+    eq(row.grid[1][2], row.valueString)
+  end
+  local one = result(call(peer, "read", { ref = epoch .. ":param:1.1.2", grid = 49 }))
+  eq(one.items[1].gridShort, true)
+  failure(call(peer, "read", { kind = "param", parent = epoch .. ":device:1.1", grid = 1 }), "bad-params")
+  failure(call(peer, "read", { kind = "track", grid = 49 }), "bad-params", "grid is an option of kind param")
+  eq(#mock.data.undo.stack, 0, "nothing written")
+  H.no_dialogs()
+end)

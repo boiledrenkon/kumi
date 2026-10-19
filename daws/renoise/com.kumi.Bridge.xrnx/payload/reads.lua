@@ -5,6 +5,8 @@ local json = import("json")
 local refs = import("refs")
 local rows = import("rows")
 local wire = import("wire")
+-- (M5 m5-renoise: spans, grid)
+local reads_listening = import("reads_listening")
 
 local fail, the_song, track_count, integer, array = rows.fail, rows.the_song, rows.track_count, rows.integer, rows.array
 local group_parents, song_row, track_row, sequence_row, pattern_row = rows.group_parents, rows.song_row, rows.track_row,
@@ -161,6 +163,8 @@ local function one(params, epoch)
     need(n[1] <= track_count(song) and n[2] <= #song:track(n[1]).devices
       and n[3] <= #song:track(n[1]):device(n[2]).parameters)
     row = param_row(song, epoch, n[1], n[2], n[3])
+    local with_grid = reads_listening.grid_of(params)
+    if with_grid then row = with_grid(row) end
   end
   return { items = array({ row }), epoch = epoch }
 end
@@ -170,6 +174,7 @@ function M.read(job, params, epoch)
   if type(params) ~= "table" then fail("bad-params", "read needs a kind") end
   if params.ref ~= nil then return one(params, epoch) end
   local kind = params.kind
+  if params.grid ~= nil then reads_listening.check_kind(kind) end
   local song = the_song()
   if kind == "song" then
     return { items = array({ song_row(song) }), epoch = epoch }
@@ -215,9 +220,15 @@ function M.read(job, params, epoch)
     local at = need_parent(params, "device", 2, epoch)
     local t, d = at[1], at[2]
     if t > track_count(song) or d > #song:track(t).devices then fail("bad-params", "no such device") end
-    return page(job, epoch, params, #song:track(t):device(d).parameters, function(k) return param_row(the_song(), epoch, t, d, k) end)
+    local with_grid = reads_listening.grid_of(params)
+    return page(job, epoch, params, #song:track(t):device(d).parameters, function(k)
+      local row = param_row(the_song(), epoch, t, d, k)
+      return with_grid and with_grid(row) or row
+    end)
+  elseif kind == "spans" then
+    return reads_listening.spans(job, params, epoch, page)
   end
-  fail("bad-params", "unknown kind " .. tostring(kind) .. " (song, track, sequence, pattern, line, instrument, sample, phrase, device, param)")
+  fail("bad-params", "unknown kind " .. tostring(kind) .. " (song, track, sequence, pattern, line, instrument, sample, phrase, device, param, spans)")
 end
 
 return M

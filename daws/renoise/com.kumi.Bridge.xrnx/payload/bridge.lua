@@ -20,6 +20,7 @@ local VERSION = import("version")
 -- (M5 m5-renoise: listening)
 local listening = import("listening")
 local audition = import("audition")
+local reads_listening = import("reads_listening")
 
 local M = {}
 
@@ -992,6 +993,7 @@ function M.start(h, reloading)
   status.listening = function() return listening.flags(b.cfg) end
   status.kumi_busy = function() return listening.busy_reason() end
   focus.rendering = function() return listening.active() ~= nil end
+  reads_listening.pattern_mark = place_env.pattern_touch_mark
   -- A song's id (the one in the project row) and which opening of a song this is: the same while it stays open.
   rows.song_extra = function(song)
     -- (where the pid is unknown, when this Renoise was started stands in for it: `0:1` would be the same after every restart)
