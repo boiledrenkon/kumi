@@ -16,7 +16,8 @@ pub enum State {
     Previewed,
     Applying,
     Applied,
-    /// The apply was sent but its answer never came: the DAW may or may not have changed.
+    /// The apply (or the restore) was sent and may have gone through: no answer came, or the DAW couldn't confirm it.
+    /// The DAW may or may not have changed, so neither is sent again blindly.
     Uncertain,
     Undoing,
     Undone,
@@ -235,7 +236,9 @@ impl Journal {
         Ok(Ok(record))
     }
 
-    /// The bridge's answer to the apply (or None when it never came): the record's state, and the answer kept for its key.
+    /// The bridge's answer to the apply: the record's state, and the answer kept for its key. `Err((error, sent))` is
+    /// the error the tool answers, and whether the apply may have gone through (no answer came, or the bridge wrote and
+    /// couldn't confirm it): then the change is uncertain; else it was refused before anything was written.
     pub fn end_apply(&self, id: &str, key: &str, answer: Result<&Value, (&Value, bool)>) -> (Value, bool) {
         let mut inner = self.inner.lock().expect("journal lock");
         let Some(record) = inner.records.get_mut(id) else { return (json!({"error": "the change was released meanwhile"}), true) };
@@ -266,7 +269,7 @@ impl Journal {
                 }
                 (Value::Object(reply), false)
             }
-            // Sent, and no answer: the DAW may have changed.
+            // Sent, and not confirmed: the DAW may have changed.
             Err((error, true)) => {
                 record.state = State::Uncertain;
                 let mut reply = error.clone();
@@ -298,8 +301,17 @@ impl Journal {
             State::Applied => {}
             State::Undone => return Err(refuse("undone", "this change was undone already")),
             State::Undoing => return Err(refuse("in-flight", "this change is being undone now")),
+            // Not known to have reached the DAW: the apply, or an undo sent before, that the DAW didn't confirm.
             State::Uncertain => {
-                return Err(refuse("uncertain", "whether this change reached the DAW isn't known, so Kumi won't undo it blindly"))
+                let undo_sent = record.undo_answers.values().any(|(answer, _)| answer.get("state") == Some(&json!("uncertain")));
+                return Err(refuse(
+                    "uncertain",
+                    if undo_sent {
+                        "whether the undo of this change reached the DAW isn't known, so Kumi won't send it again blindly"
+                    } else {
+                        "whether this change reached the DAW isn't known, so Kumi won't undo it blindly"
+                    },
+                ));
             }
             State::Previewed | State::Applying => return Err(refuse("not-applied", "this change wasn't applied")),
         }
@@ -308,8 +320,11 @@ impl Journal {
         Ok(Ok((record.clone(), format!("Kumi: undo {title} (k{})", token(seed)))))
     }
 
-    /// The bridge's answer to the restore: undone, or still applied (a refusal leaves the change as it was).
-    pub fn end_undo(&self, id: &str, key: &str, answer: Result<&Value, &Value>) -> (Value, bool) {
+    /// The bridge's answer to the restore: undone; or `Err((error, sent))`, the error the tool answers and whether the
+    /// restore may have gone through. Refused before anything was put back, the change stays applied and the same
+    /// undo can go again; sent and not confirmed (no answer came, or the bridge wrote and couldn't confirm it), the
+    /// change is uncertain and the undo is never sent again.
+    pub fn end_undo(&self, id: &str, key: &str, answer: Result<&Value, (&Value, bool)>) -> (Value, bool) {
         let mut inner = self.inner.lock().expect("journal lock");
         let Some(record) = inner.records.get_mut(id) else { return (json!({"error": "the change was released meanwhile"}), true) };
         let (reply, is_error) = match answer {
@@ -330,14 +345,22 @@ impl Journal {
                 }
                 (reply, false)
             }
-            Err(error) => {
+            Err((error, true)) => {
+                record.state = State::Uncertain;
+                let mut reply = error.clone();
+                reply["state"] = "uncertain".into();
+                reply["transactionId"] = record.id.clone().into();
+                (reply, true)
+            }
+            Err((error, false)) => {
                 record.state = State::Applied;
                 (error.clone(), true)
             }
         };
-        // A refusal isn't kept: the producer may put things back, and the same undo can then go through.
-        if !is_error {
-            record.undo_answers.insert(key.to_string(), (reply.clone(), false));
+        // A refusal isn't kept: the producer may put things back, and the same undo can then go through. An undo that
+        // may have gone through is: its key answers the same again, and nothing is sent twice.
+        if !is_error || reply.get("state") == Some(&json!("uncertain")) {
+            record.undo_answers.insert(key.to_string(), (reply.clone(), is_error));
         }
         inner.resize(id);
         (reply, is_error)
@@ -413,6 +436,19 @@ fn refusal(refusal: Refusal) -> (Value, bool) {
     (json!({"error": refusal.message, "code": refusal.code}), true)
 }
 
+/// Whether a call that failed may have changed the DAW: it was sent, and what came back was no plain refusal (no answer
+/// in time, the connection went, the answer passed the frame bound), or the bridge wrote and couldn't confirm it
+/// (`uncertain`: Logic's bridge answers so when the value it wrote doesn't show). A bridge's other refusals, and a
+/// bridge that isn't there, wrote nothing.
+fn may_have_changed(error: &crate::host::CallError) -> bool {
+    use crate::host::CallError;
+    match error {
+        CallError::Bridge { code, .. } => code == daw_bridge::wire::code::UNCERTAIN,
+        CallError::NotConnected(_) => false,
+        CallError::Closed(_) | CallError::Timeout | CallError::TooBig => true,
+    }
+}
+
 fn text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, (Value, bool)> {
     arguments
         .get(name)
@@ -479,12 +515,9 @@ impl crate::host::Host {
         place(&mut params, record.epoch.as_deref(), record.layout);
         match self.call("change_apply", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
             Ok(answer) => self.journal().end_apply(&id, &key, Ok(&answer)),
-            // Answered, or never sent: nothing was written, and the change can be previewed again.
-            Err(error @ (crate::host::CallError::Bridge { .. } | crate::host::CallError::NotConnected(_))) => {
-                self.journal().end_apply(&id, &key, Err((&self.call_error(&error), false)))
-            }
-            // Sent, and no answer came: the DAW may have changed.
-            Err(error) => self.journal().end_apply(&id, &key, Err((&self.call_error(&error), true))),
+            // Refused, or never sent: nothing was written, and the change can be previewed again. Sent and not
+            // confirmed (no answer came, or the bridge couldn't read its write back): the DAW may have changed.
+            Err(error) => self.journal().end_apply(&id, &key, Err((&self.call_error(&error), may_have_changed(&error)))),
         }
     }
 
@@ -516,7 +549,9 @@ impl crate::host::Host {
         place(&mut params, record.epoch.as_deref(), record.layout);
         match self.call("change_restore", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
             Ok(answer) => self.journal().end_undo(&id, &key, Ok(&answer)),
-            Err(error) => self.journal().end_undo(&id, &key, Err(&self.call_error(&error))),
+            // Refused, or never sent: the change stays applied, undoable again. Sent and not confirmed: the values may
+            // be back, so the undo is never sent twice.
+            Err(error) => self.journal().end_undo(&id, &key, Err((&self.call_error(&error), may_have_changed(&error)))),
         }
     }
 
@@ -632,7 +667,7 @@ mod tests {
         assert!(desc.starts_with("Kumi: undo Bass volume −6 dB (k"), "{desc}");
         assert_eq!(undoing.applied, Some(json!({"volumeDb": -6.0})));
         // Refused by the DAW (it changed since): still applied, and the same undo can go again.
-        let (refused, _) = journal.end_undo(&record.id, "u1", Err(&json!({"code": "changed", "error": "changed since"})));
+        let (refused, _) = journal.end_undo(&record.id, "u1", Err((&json!({"code": "changed", "error": "changed since"}), false)));
         assert_eq!(refused["code"], "changed");
         assert_eq!(journal.get(&record.id).unwrap().state, State::Applied);
         assert!(journal.begin_undo(&record.id, "u1").unwrap().is_ok());
@@ -677,6 +712,41 @@ mod tests {
         journal.begin_apply(&other.id, &other.confirmation, "b1", None).unwrap().unwrap();
         journal.end_apply(&other.id, "b1", Err((&json!({"error": "changed", "code": "changed"}), false)));
         assert_eq!(journal.get(&other.id).unwrap().state, State::Previewed);
+    }
+
+    #[test]
+    fn an_undo_sent_and_not_confirmed_is_uncertain_and_is_never_sent_twice() {
+        let journal = Journal::default();
+        let record = preview(&journal);
+        journal.begin_apply(&record.id, &record.confirmation, "a1", None).unwrap().unwrap();
+        journal.end_apply(&record.id, "a1", Ok(&json!({"applied": {"volumeDb": -6.0}})));
+        journal.begin_undo(&record.id, "u1").unwrap().unwrap();
+        let unconfirmed = json!({"error": "Logic Pro didn't show the volume put back", "code": "uncertain"});
+        let (reply, is_error) = journal.end_undo(&record.id, "u1", Err((&unconfirmed, true)));
+        assert!(is_error && reply["state"] == "uncertain" && reply["transactionId"] == record.id, "{reply}");
+        assert_eq!(journal.get(&record.id).unwrap().state, State::Uncertain);
+        // The same key: the same answer, nothing sent; another key: refused, since the values may be back already.
+        assert_eq!(journal.begin_undo(&record.id, "u1").unwrap().unwrap_err(), (reply, true));
+        let again = journal.begin_undo(&record.id, "u2").unwrap_err();
+        assert_eq!(again.code, "uncertain");
+        assert!(again.message.contains("the undo of this change") && again.message.contains("won't send it again"), "{}", again.message);
+        assert_eq!(journal.begin_apply(&record.id, &record.confirmation, "a2", None).unwrap_err().code, "applied");
+        // The DAW's own undo of it still names it, as any applied change.
+        assert_eq!(journal.by_descs(&[journal.get(&record.id).unwrap().desc.unwrap()]), vec![record.id.clone()]);
+    }
+
+    #[test]
+    fn a_call_that_may_have_changed_the_daw_is_told_from_a_plain_refusal() {
+        use crate::host::CallError;
+        let bridge = |code: &str| CallError::Bridge { code: code.into(), message: "why".into() };
+        assert!(may_have_changed(&bridge("uncertain")), "the bridge wrote and couldn't confirm it");
+        for refused in ["changed", "stale", "busy", "failed", "bad-params", "gone", "unknown-method"] {
+            assert!(!may_have_changed(&bridge(refused)), "{refused}: nothing was written");
+        }
+        assert!(!may_have_changed(&CallError::NotConnected("no bridge".into())), "never sent");
+        for sent in [CallError::Timeout, CallError::Closed("went".into()), CallError::TooBig] {
+            assert!(may_have_changed(&sent), "{sent:?}: sent, and no plain answer came");
+        }
     }
 
     #[test]
