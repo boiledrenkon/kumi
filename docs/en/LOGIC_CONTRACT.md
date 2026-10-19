@@ -49,3 +49,45 @@ track or region change the bridge observes.
 `project` (path or identity changed), `transport` (from the Mackie LEDs and timecode), `tracks`
 (a header appeared, vanished or was renamed), `selection` (the Mackie select LEDs or the header's
 selected state).
+
+## Helper protocol (`kumi-logic-hands`)
+
+The bridge runs the helper as a child and speaks JSON lines on its stdin and stdout: one request
+per line, one reply per line, events in between. A request is `{"id": n, "op": "…", …}`; the
+reply is `{"id": n, "ok": true, …}` or `{"id": n, "ok": false, "error": "…"}`; an event is
+`{"event": "…", …}` with no id. One request at a time; a reply within 2 s or an error; the helper
+logs to stderr only and never activates an app unless asked.
+
+| Op | Parameters | Reply |
+| --- | --- | --- |
+| `trusted` | `prompt` (bool, default false) | `trusted` |
+| `apps` | `bundles` (ids) | `apps: [{bundle, pid, name, active, hidden}]` |
+| `processes` | `contains` (a substring of the executable path) | `pids` |
+| `activate` | `pid` | `active` |
+| `windows` | `pid` | `windows: [{title, role, subrole, main, focused, document, minimized, fullscreen, modal}]`, `listed` (the Window menu's window titles) |
+| `tree` | `pid`, `root`, `path`, `depth`, `children`, `attrs`, `popups` | `node` |
+| `get` | `pid`, `root`, `path`, `attrs` | `attrs` |
+| `set` | `pid`, `root`, `path`, `attr`, `value` | `result`, `before`, `after` |
+| `action` | `pid`, `root`, `path`, `name` | `result`, `before`, `after` |
+| `menu` | `pid`, `titles` (from the menu bar down) | `result` |
+| `keys` | `pid`, `key`, `mods` (`cmd`, `shift`, `opt`, `ctrl`) | `posted` |
+| `type` | `pid`, `text` | `posted` |
+| `midi.open` | `name`, `uid` | `opened` |
+| `midi.send` | `hex` | `sent` |
+| `midi.close` | | `closed` |
+| `tap.start`, `tap.stop` | reserved for M5 | |
+| `quit` | | |
+
+`root` is `"app"`, `"main"` (`AXMainWindow`), `"focused"` (`AXFocusedWindow`), `"menubar"` or
+`{"title": "substring"}`; `path` is child indexes joined by dots from that root. `depth` and
+`children` bound a `tree`; `attrs` names the attributes wanted (`"all"` for every one);
+`popups` is false by default, and a false value never reads a pop-up button's children.
+
+A node is `{i, role, subrole, title, desc, value, valueDesc, help, id, enabled, selected, pos:
+{x, y}, size: {w, h}, set: [attributes], act: [actions], c: [nodes], more: n}`; fields that are
+empty are left out; `more` counts children beyond `children`. Values are JSON (numbers, strings,
+booleans), points and sizes are objects, other elements are `{"ref": "role title"}`.
+
+Events: `{"event": "midi", "hex": "…", "ms": n}` for bytes from the MIDI destination;
+`{"event": "app", "state": "launched" | "terminated" | "activated" | "deactivated", "pid": n,
+"bundle": "…"}` for the apps named in the last `apps` request.

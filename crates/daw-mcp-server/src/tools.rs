@@ -32,6 +32,10 @@ pub fn kinds(daw: Daw) -> Kinds {
             read: &["song", "track", "sequence", "pattern", "line", "instrument", "sample", "phrase", "device", "param"],
             bodies: &["pattern", "matrix", "phrase", "instrument", "dsp"],
         },
+        Daw::Logic => Kinds {
+            read: &["project", "track", "region", "note", "plugin", "send", "marker", "tempo"],
+            bodies: &["tree", "notes", "timeline", "routing"],
+        },
     }
 }
 

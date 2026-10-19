@@ -485,6 +485,7 @@ pub fn process_is(daw: Daw, name: &str) -> bool {
     match daw {
         Daw::Reaper => matches!(base, "REAPER" | "REAPER64" | "reaper"),
         Daw::Renoise => base == "Renoise" || base == "renoise" || base.starts_with("Renoise ") || base.starts_with("renoise-"),
+        Daw::Logic => base == "Logic Pro",
     }
 }
 
