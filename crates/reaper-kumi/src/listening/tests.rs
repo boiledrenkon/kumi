@@ -379,6 +379,68 @@ fn a_cancel_reaper_cant_take_lets_it_finish_then_deletes_the_files_and_says_so()
 }
 
 #[test]
+fn a_render_reaper_stopped_short_is_refused_and_one_with_no_known_speed_says_so() {
+    let rig = Rig::new();
+    fake::with(|s| s.listening.short_render = true);
+    rig.ask(
+        "render_start",
+        json!({"jobId": "js1", "sources": [source("mix", "master", None, None)], "range": {"fromBeat": 0, "beats": 8}}),
+    )
+    .unwrap();
+    rig.tick();
+    let status = rig.status("js1");
+    assert_eq!(status["state"], "failed");
+    assert!(status["error"].as_str().unwrap().contains("stopped before the end"), "{status}");
+    assert!(files_in(&rig.folder()).is_empty());
+    fake::with(|s| s.listening.no_speed = true);
+    rig.ask(
+        "render_start",
+        json!({"jobId": "js2", "sources": [source("mix", "master", None, None)], "range": {"fromBeat": 0, "beats": 8}}),
+    )
+    .unwrap();
+    rig.tick();
+    let status = rig.status("js2");
+    assert_eq!(status["state"], "done");
+    assert!(status["notes"][0].as_str().unwrap().contains("doesn't say its render speed"), "{status}");
+}
+
+#[test]
+fn a_render_reaper_keeps_too_busy_to_begin_gives_up_with_nothing_done() {
+    let rig = Rig::new();
+    render::TEST_QUEUED_FOR.with(|w| w.set(Some(Duration::from_millis(30))));
+    rig.ask(
+        "render_start",
+        json!({"jobId": "jb1", "sources": [source("mix", "master", None, None)], "range": {"fromBeat": 0, "beats": 4}}),
+    )
+    .unwrap();
+    fake::with(|s| s.loading = true);
+    rig.tick();
+    assert_eq!(rig.status("jb1")["state"], "queued", "it waits for REAPER");
+    std::thread::sleep(Duration::from_millis(40));
+    rig.tick();
+    let status = rig.status("jb1");
+    render::TEST_QUEUED_FOR.with(|w| w.set(None));
+    assert_eq!((status["state"].as_str(), status["code"].as_str()), (Some("failed"), Some("busy")));
+    assert!(fake::with(|s| s.listening.renders.is_empty()));
+}
+
+#[test]
+fn a_tracks_items_read_cancelled_while_reaper_is_busy_stops_at_once() {
+    let rig = Rig::new();
+    let epoch = rig.epoch();
+    rig.ask("render_start", json!({"jobId": "jc1", "sources": [source("dry", "track", Some("r:track:{BBBB}"), Some("items"))], "range": {"fromBeat": 0, "beats": 400}, "epoch": epoch}))
+        .unwrap();
+    rig.tick();
+    assert_eq!(rig.status("jc1")["state"], "running");
+    fake::with(|s| s.loading = true);
+    rig.board().update("jc1", |job| job.cancel = true);
+    rig.tick();
+    assert_eq!(rig.status("jc1")["state"], "cancelled");
+    assert!(!rig.folder().join("jc1-dry.wav").exists());
+    assert!(fake::with(|s| s.listening.accessors.iter().all(|(_, destroyed)| *destroyed)));
+}
+
+#[test]
 fn a_render_cancelled_while_it_is_queued_never_runs() {
     let rig = Rig::new();
     rig.ask("render_start", json!({"jobId": "j7", "sources": [source("mix", "master", None, None)], "range": {"fromBeat": 0, "beats": 4}}))

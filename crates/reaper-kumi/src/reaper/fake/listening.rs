@@ -69,6 +69,10 @@ pub struct FakeListening {
     pub fail_render: bool,
     /// REAPER lists a file more than the settings ask (a preference Kumi didn't foresee).
     pub odd_targets: bool,
+    /// The next render stops half way and keeps what it wrote (the producer cancelled it in REAPER's window).
+    pub short_render: bool,
+    /// This REAPER has no `projrenderlimit` to read.
+    pub no_speed: bool,
     /// Called mid-render with no borrow held: REAPER's timer firing inside its render loop.
     pub during_render: Option<fn()>,
     /// The render window has a Cancel to press, and how often it was pressed.
@@ -147,6 +151,8 @@ impl Default for FakeListening {
             renders: vec![],
             fail_render: false,
             odd_targets: false,
+            short_render: false,
+            no_speed: false,
             during_render: None,
             cancel_button: false,
             cancel_presses: 0,
@@ -182,6 +188,8 @@ impl Clone for FakeListening {
             renders: self.renders.clone(),
             fail_render: self.fail_render,
             odd_targets: self.odd_targets,
+            short_render: self.short_render,
+            no_speed: self.no_speed,
             during_render: self.during_render,
             cancel_button: self.cancel_button,
             cancel_presses: self.cancel_presses,
@@ -270,7 +278,7 @@ unsafe extern "C" fn get_set_project_info_string(_proj: *mut ReaProject, desc: *
 }
 
 unsafe extern "C" fn projectconfig_var_getoffs(name: *const c_char, size: *mut c_int) -> c_int {
-    let known = name_of(name) == "projrenderlimit";
+    let known = name_of(name) == "projrenderlimit" && !with(|s| s.listening.no_speed);
     unsafe { *size = if known { 4 } else { 0 } };
     if known {
         SPEED_OFFSET
@@ -360,7 +368,7 @@ pub fn render_action(command: i32) {
     if let Some(during) = during {
         during();
     }
-    if with(|s| std::mem::take(&mut s.listening.cancelled_render)) {
+    if with(|s| std::mem::take(&mut s.listening.cancelled_render) || std::mem::take(&mut s.listening.short_render)) {
         return;
     }
     for target in &targets {

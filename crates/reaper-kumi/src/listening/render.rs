@@ -121,6 +121,8 @@ pub struct Pass {
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub job: String,
+    /// When it was planned (it waits for REAPER to be free for at most `queued_for()`).
+    pub queued: Instant,
     pub proj: Project,
     pub epoch: String,
     /// Where the files start and end, in the project's seconds (pre-roll included).
@@ -292,8 +294,19 @@ pub fn plan(reaper: &Reaper, reads: &Reads, params: &Value, folder: &Path) -> Re
             )));
         }
     }
-    let plan =
-        Plan { job, proj, epoch, start, end, part: at - start, rate, passes: passes(&sources), sources, folder: folder.to_path_buf() };
+    let plan = Plan {
+        job,
+        queued: Instant::now(),
+        proj,
+        epoch,
+        start,
+        end,
+        part: at - start,
+        rate,
+        passes: passes(&sources),
+        sources,
+        folder: folder.to_path_buf(),
+    };
     for source in &plan.sources {
         let file = plan.file(source);
         if file.exists() {
@@ -545,6 +558,25 @@ pub trait Hooks {
     fn pressed(&self) -> bool;
 }
 
+/// Frames a file may lack and still be whole (REAPER's last block).
+const SHORT_FRAMES: u64 = 4096;
+/// How long a planned render waits for REAPER to be free (a dialog, a load, its own render) before it gives up.
+const QUEUED_FOR: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own wait, to see a render give up without waiting half a minute.
+    pub static TEST_QUEUED_FOR: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn queued_for() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = TEST_QUEUED_FOR.with(|w| w.get()) {
+        return wait;
+    }
+    QUEUED_FOR
+}
+
 /// Frames a file of this many seconds has at this rate.
 fn frames(seconds: f64, rate: u32) -> u64 {
     (seconds * rate as f64).round().max(0.0) as u64
@@ -584,6 +616,9 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
     let total = file_bytes * plan.sources.len() as u64;
     let mut put_back = PutBack::note(reaper, proj);
     let producer_settings = put_back.saved.numbers.iter().find(|(k, _)| *k == "RENDER_SETTINGS").map_or(0, |(_, v)| *v as i32);
+    if put_back.saved.speed.is_none() {
+        notes.push("This REAPER doesn't say its render speed: if the project renders in real time (1x or online), so did this".into());
+    }
     let master = reaper.master_track(proj);
     // Every file any pass writes, the renamed ones too: deleted unless the render ends well.
     let mut made: Vec<PathBuf> = Vec::new();
@@ -704,6 +739,13 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
                     missing.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
                 ),
             ));
+            break;
+        }
+        // A render cut short (the producer pressed Cancel in REAPER's window and kept the incomplete files): not the part.
+        let wanted_frames = frames(plan.seconds(), rate);
+        if expected.iter().any(|(_, file)| wav::read_info(file).is_ok_and(|info| info.frames + SHORT_FRAMES < wanted_frames)) {
+            outcome =
+                Err(("failed".into(), "REAPER's render stopped before the end (it was cancelled in REAPER): nothing was kept".into()));
             break;
         }
         // Renamed to the sources' names once the pass is whole.

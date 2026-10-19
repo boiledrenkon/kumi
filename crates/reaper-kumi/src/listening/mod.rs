@@ -402,8 +402,12 @@ impl Listening {
         self.retired.borrow_mut().retain(|(at, _)| at.elapsed() < capture::RETIRE_AFTER);
         self.tick_preview(reaper);
         self.tick_capture(reaper, reads);
+        // A track's items are read only while REAPER is free; a cancel of them is taken at once.
+        self.tick_items(reaper, reads, free);
+        if !free {
+            self.give_up_waiting();
+        }
         if free {
-            self.tick_items(reaper, reads);
             self.run_pending(reaper, reads, snapshot, out);
             if !self.swept.get() && self.folder.borrow().is_some() {
                 self.swept.set(true);
@@ -456,11 +460,15 @@ impl Listening {
         }
     }
 
-    fn tick_items(&self, reaper: &Reaper, reads: &Reads) {
+    fn tick_items(&self, reaper: &Reaper, reads: &Reads, free: bool) {
         let mut slot = self.items.borrow_mut();
         let Some(items) = slot.as_mut() else { return };
         let job = items.job.clone();
-        match items.step(reaper, reads, self.board.cancelled(&job)) {
+        let cancelled = self.board.cancelled(&job);
+        if !free && !cancelled {
+            return;
+        }
+        match items.step(reaper, reads, cancelled) {
             render::Step::Going(progress) => {
                 self.board.update(&job, |entry| entry.progress = progress);
             }
@@ -496,6 +504,23 @@ impl Listening {
                 }
             }
         });
+    }
+
+    /// A planned render that has waited too long for REAPER to be free: given up, nothing done.
+    fn give_up_waiting(&self) {
+        let waited = self.pending.borrow().as_ref().is_some_and(|plan| plan.queued.elapsed() > render::queued_for());
+        if !waited {
+            return;
+        }
+        if let Some(plan) = self.pending.borrow_mut().take() {
+            if self.board.start(&plan.job) {
+                let error = format!(
+                    "REAPER stayed busy (a dialog, a load or its own render) for {} s: nothing was rendered",
+                    render::queued_for().as_secs()
+                );
+                self.end(&plan.job, render::Ended::Failed { code: "busy".into(), error, notes: vec![] });
+            }
+        }
     }
 
     fn run_pending(&self, reaper: &Reaper, reads: &Reads, snapshot: &Mutex<Snapshot>, out: &dyn Outbox) {
