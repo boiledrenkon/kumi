@@ -78,6 +78,33 @@ local CELL_FIELDS = {
 }
 local EFFECT_FIELDS = { number_value = "number", amount_value = "amount" }
 
+-- The text Renoise reads into a cell's value, and the error it raises for text that isn't one.
+local SEMITONES = { C = 0, ["C#"] = 1, D = 2, ["D#"] = 3, E = 4, F = 5, ["F#"] = 6, G = 7, ["G#"] = 8, A = 9, ["A#"] = 10, B = 11 }
+local function cell_value(member, text)
+  if type(text) ~= "string" then error("bad argument: string expected", 4) end
+  if member == "note_string" then
+    if text == "---" then return 121 elseif text == "OFF" then return 120 end
+    local letter, sep, octave = text:match("^([A-G])([-#])(%d)$")
+    local semitone = letter and SEMITONES[letter .. (sep == "#" and "#" or "")]
+    if semitone then return tonumber(octave) * 12 + semitone end
+  elseif member == "instrument_string" or member == "volume_string" or member == "panning_string" then
+    if text == ".." then return 255 end
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+  elseif member == "delay_string" then
+    if text == ".." then return 0 end
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+  elseif member == "effect_number_string" or member == "number_string" or member == "effect_amount_string" or member == "amount_string" then
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+  end
+  error("invalid value '" .. text .. "' for " .. member, 4)
+end
+
+local STRING_MEMBERS = {
+  note_string = "note_value", instrument_string = "instrument_value", volume_string = "volume_value",
+  panning_string = "panning_value", delay_string = "delay_value", effect_number_string = "effect_number_value",
+  effect_amount_string = "effect_amount_value", number_string = "number_value", amount_string = "amount_value",
+}
+
 -- Setters for the members of a column: `w.cell()` is the data to write (made if there is none), `w.changed()` tells the
 -- pattern's line notifiers.
 local function cell_setters(w, fields)
@@ -92,12 +119,24 @@ local function cell_setters(w, fields)
       M.record(function() cell[field] = old; w.changed() end, function() cell[field] = value; w.changed() end)
     end
   end
+  for member, value_member in pairs(STRING_MEMBERS) do
+    if out[value_member] then
+      out[member] = function(text) out[value_member](cell_value(member, text)) end
+    end
+  end
   return out
 end
 
 local function note_column(data, w)
   local function cur() return w and w.peek() or data end
-  return object("renoise.NoteColumn", { is_selected = false }, {
+  local setters = w and cell_setters(w, CELL_FIELDS) or nil
+  return object("renoise.NoteColumn", { is_selected = false,
+    clear = function()
+      if not setters then return end
+      for member, value in pairs({ note_value = 121, instrument_value = 255, volume_value = 255, panning_value = 255,
+        delay_value = 0, effect_number_value = 0, effect_amount_value = 0 }) do setters[member](value) end
+    end,
+  }, {
     note_value = function() return cur().note end,
     note_string = function() return note_text(cur().note) end,
     instrument_value = function() return cur().instrument end,
@@ -117,18 +156,25 @@ local function note_column(data, w)
       return c.note == 121 and c.instrument == 255 and c.volume == 255 and c.panning == 255
         and c.delay == 0 and c.fxn == 0 and c.fxa == 0
     end,
-  }, w and cell_setters(w, CELL_FIELDS) or nil)
+  }, setters)
 end
 
 local function effect_column(data, w)
   local function cur() return w and w.peek() or data end
-  return object("renoise.EffectColumn", { is_selected = false }, {
+  local setters = w and cell_setters(w, EFFECT_FIELDS) or nil
+  return object("renoise.EffectColumn", { is_selected = false,
+    clear = function()
+      if not setters then return end
+      setters.number_value(0)
+      setters.amount_value(0)
+    end,
+  }, {
     number_value = function() return cur().number end,
     number_string = function() return hex2(cur().number) end,
     amount_value = function() return cur().amount end,
     amount_string = function() return hex2(cur().amount) end,
     is_empty = function() return cur().number == 0 and cur().amount == 0 end,
-  }, w and cell_setters(w, EFFECT_FIELDS) or nil)
+  }, setters)
 end
 
 local function empty_note() return { note = 121, instrument = 255, volume = 255, panning = 255, delay = 0, fxn = 0, fxa = 0 } end

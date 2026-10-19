@@ -385,6 +385,7 @@ local function on_structural(reason, kind, op, owner, token)
       end
     end
   end
+  if kind == "patterns" and op then changes.journal_pattern_event(b.journal, op.type, op.index) end
   local fine = false
   if op and op.type == "insert" then
     fine = remember(list, op.index)

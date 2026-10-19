@@ -6,6 +6,7 @@ local base = import("changes_base")
 import("changes_tracks")
 import("changes_song")
 import("changes_devices")
+import("changes_notes")
 
 local M = {}
 
@@ -102,5 +103,6 @@ end
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active
 M.journal_track_event, M.journal_check, M.journal_device_event = base.journal_track_event, base.journal_check, base.journal_device_event
+M.journal_pattern_event = base.journal_pattern_event
 
 return M

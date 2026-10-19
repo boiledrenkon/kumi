@@ -336,6 +336,24 @@ function M.journal_device_event(journal, track, type_, index, index2, undoing)
   end
 end
 
+-- A pattern made or deleted: the patterns the journal knows are numbered by their place and move with it.
+function M.journal_pattern_event(journal, type_, index)
+  for i = #journal.entries, 1, -1 do
+    local place = journal.entries[i].place
+    if place and place.pattern then
+      if type_ == "insert" then
+        if place.pattern >= index then place.pattern = place.pattern + 1 end
+      elseif type_ == "remove" then
+        if place.pattern == index then
+          table.remove(journal.entries, i) -- (the pattern is gone: nothing left to compare)
+        elseif place.pattern > index then
+          place.pattern = place.pattern - 1
+        end
+      end
+    end
+  end
+end
+
 -- After a producer's undo or redo: the journalled properties are read again and compared with what Kumi wrote and what it
 -- replaced.
 function M.journal_check(journal)
