@@ -1,0 +1,88 @@
+//! Records a scene from the real Logic Pro: every helper reply the bridge's readers ask for over the fixed request
+//! set, written as `scene.json.gz` under the folder given, for `tests/reads.rs` to replay without Logic. Opt-in: it
+//! drives the running Logic through the helper, as the bridge does. The scene to record is whatever Logic shows:
+//! `scratch` is Scratch.logicx idle with track 1 selected; `scratch-keys` has track 2 and its region selected with
+//! the Piano Roll open; `scratch-playing` plays; `scratch-dialog` has a dialog up.
+//!
+//! cargo run -p logic-kumi --example record_fixtures -- --out crates/logic-kumi/tests/fixtures/<scene> [--helper <path>]
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use logic_kumi::ax::strings::{self, Strings};
+use logic_kumi::fixtures::{Recorder, Scene, SCENE_FILE};
+use logic_kumi::helper::{ChildLauncher, Helper, Launch};
+use logic_kumi::logic::{self, Model, BUNDLES};
+use logic_kumi::scenes;
+use serde_json::json;
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let (mut out, mut helper_path) = (None, None);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" => out = Some(PathBuf::from(args.next().expect("--out <dir>"))),
+            "--helper" => helper_path = Some(PathBuf::from(args.next().expect("--helper <path>"))),
+            other => panic!("unknown argument {other}; usage: record_fixtures --out <dir> [--helper <path>]"),
+        }
+    }
+    let out = out.expect("--out <dir>: where to write scene.json.gz");
+    let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "scene".into());
+    let helper_path = helper_path
+        .or_else(|| std::env::var("KUMI_LOGIC_HANDS").ok().map(PathBuf::from))
+        .or_else(|| {
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/logic-hands");
+            std::fs::read_dir(dir)
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("kumi-logic-hands-")))
+        })
+        .expect("the helper: build it with python3 scripts/build-logic-hands.py, or name it with --helper");
+    let scene = Arc::new(Mutex::new(Scene::new(&name)));
+    let mut launcher = ChildLauncher { path: helper_path };
+    let mut helper: Box<dyn Helper> = Box::new(Recorder::new(launcher.launch().expect("the helper"), scene.clone()));
+
+    // As the bridge attaches: the apps, the grant, the windows.
+    let apps = logic::parse_apps(&helper.call("apps", json!({"bundles": BUNDLES})).expect("apps"));
+    let app = logic::newest(&apps).expect("a running Logic Pro").clone();
+    let version = logic::app_version(&app);
+    let trusted = helper.call("trusted", json!({"prompt": false})).expect("trusted")["trusted"] == true;
+    assert!(trusted, "the helper isn't trusted under Accessibility");
+    let mut model = Model::attach(&app, &version);
+    let windows = helper.call("windows", json!({"pid": app.pid})).expect("windows");
+    model.on_windows(&windows);
+    let status = model.status();
+    let project = model.project.clone();
+    let (id, path, pname) =
+        project.as_ref().map(|p| (p.id.clone(), p.path.clone(), p.name.clone().unwrap_or_default())).unwrap_or_default();
+    eprintln!("recording {name} from Logic Pro {version} (pid {}), {}", app.pid, pname);
+    let language = strings::language_of(&strings::preferred_languages(&app.bundle));
+    let bundle = app.path.clone().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/Applications/Logic Pro.app"));
+    let strings = Strings::load(&bundle, &language);
+
+    let cases = scenes::run(helper.as_mut(), app.pid, strings, status, (id.as_deref(), path.as_deref(), &pname));
+    // The events that came meanwhile (none expected: the Mackie ports aren't opened here).
+    while helper.event(Duration::from_millis(50)).is_some() {}
+    helper.quit();
+    {
+        let mut scene = scene.lock().unwrap();
+        scene.logic = json!({"version": version, "bundle": app.bundle, "pid": app.pid, "language": language, "project": project})
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+    }
+    let scene = scene.lock().unwrap().clone();
+    scene.save(&out).expect("write the scene");
+    eprintln!("{} helper calls recorded to {}: {:?}", scene.calls.len(), out.join(SCENE_FILE).display(), scene.counts());
+    for case in &cases {
+        let ok = case["response"]["ok"] == true;
+        eprintln!(
+            "{} {} -> {}",
+            case["request"]["method"],
+            case["request"]["params"],
+            if ok { "ok".to_string() } else { case["response"]["error"]["code"].to_string() }
+        );
+    }
+}

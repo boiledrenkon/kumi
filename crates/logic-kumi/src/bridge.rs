@@ -20,16 +20,13 @@ use serde_json::{json, Value};
 
 use crate::ax::strings::{self, Strings};
 use crate::ax::{Ax, AxError};
-use crate::bodies;
 use crate::focus::{self, Focus};
 use crate::helper::Helper;
 use crate::log;
 use crate::logic::{self, App, Model, BUNDLES, POLL};
 use crate::mcu::Mcu;
-use crate::project::{Needs, Project};
+use crate::project::Project;
 use crate::queue::{Answer, Job, Queue};
-use crate::read::{self, Want};
-use crate::refs::Ref;
 use crate::server::{self, Hub, Server, Shared2};
 
 /// How often the running apps are asked for: while waiting for Logic, and once attached as the check that it still
@@ -364,50 +361,7 @@ impl Attached {
         if let Some(busy) = lock(&self.model).busy {
             return Err((wire::code::BUSY.into(), format!("{}; nothing changed", busy.reason())));
         }
-        let mut ax = Ax::new(helper, self.pid);
-        let started = Instant::now();
-        let result = match method {
-            "read" => {
-                let want = read::want(params, self.project.epoch)?;
-                let needs = match &want {
-                    Want::One(reference) => {
-                        let parsed = Ref::parse(reference);
-                        let kind = parsed.as_ref().map(|r| r.kind.clone()).unwrap_or_default();
-                        let notes_of = parsed.filter(|r| r.kind == "note").map(|r| r.first());
-                        Needs::for_kind(&kind, notes_of)
-                    }
-                    Want::Kind { kind, parent } => {
-                        let notes_of = if kind == "note" {
-                            Some(self.project.region_place(parent, params.get("parent").and_then(Value::as_str).unwrap_or_default())?)
-                        } else {
-                            None
-                        };
-                        Needs::for_kind(kind, notes_of)
-                    }
-                };
-                let catalog = self.project.catalog(&mut ax, &needs).map_err(|e| Project::fault(&e))?;
-                read::read(&catalog, params)
-            }
-            "snapshot" => {
-                let catalog = self.project.catalog(&mut ax, &Needs::snapshot()).map_err(|e| Project::fault(&e))?;
-                Ok(read::snapshot(&catalog))
-            }
-            "focus_body" => {
-                let kind = params.get("kind").and_then(Value::as_str).unwrap_or("");
-                let mut catalog = self.project.catalog(&mut ax, &Needs::for_body(kind, None)).map_err(|e| Project::fault(&e))?;
-                if kind == "notes" {
-                    let place = bodies::notes_region(&catalog, params)?;
-                    let beats_per_bar =
-                        catalog.transport.get("timeSignature").and_then(Value::as_str).map_or(4, crate::rows::beats_per_bar_of);
-                    let notes = self.project.notes_rows(&mut ax, place, beats_per_bar).map_err(|e| Project::fault(&e))?;
-                    catalog.notes.push((place, notes));
-                }
-                bodies::body(&catalog, params)
-            }
-            other => Err((wire::code::UNKNOWN_METHOD.into(), format!("the Logic Pro bridge has no method {other:?}"))),
-        };
-        log::line(&format!("{method} {params} in {} ms ({} helper calls)", started.elapsed().as_millis(), ax.calls));
-        result
+        crate::serve::answer(&mut self.project, helper, self.pid, method, params)
     }
 
     /// The Mackie Control: opened once Logic can be read, its bytes answered on every event.

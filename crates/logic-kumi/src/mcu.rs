@@ -166,6 +166,8 @@ impl Surface {
             }
             // Host connection error: say nothing, Logic will query again.
             0x04 => {}
+            // Version request: the version reply.
+            0x13 => reaction.send.push(sysex(&[0x14], &[b"V1.0 "])),
             // The LCD: an offset, then the characters.
             0x12 => {
                 if let Some((&offset, text)) = body.split_first() {
@@ -278,11 +280,13 @@ pub struct Mcu {
     pub open: bool,
     /// The strips' names Logic last wrote on the LCD, so a track's bank place can be looked up by name.
     pub names: Vec<String>,
+    /// How many of Logic's packets were logged: the first few, for the lab.
+    logged: u32,
 }
 
 impl Default for Mcu {
     fn default() -> Self {
-        Mcu { surface: Surface::new(), open: false, names: vec![] }
+        Mcu { surface: Surface::new(), open: false, names: vec![], logged: 0 }
     }
 }
 
@@ -317,8 +321,17 @@ impl Mcu {
         }
         let bytes = event.get("hex").and_then(Value::as_str).map(from_hex).unwrap_or_default();
         let reaction = self.surface.receive(&bytes);
+        if self.logged < 12 {
+            self.logged += 1;
+            crate::log::line(&format!("Mackie: Logic Pro sent {}", hex(&bytes)));
+        }
         for reply in &reaction.send {
-            let _ = helper.call("midi.send", json!({"hex": hex(reply)}));
+            if self.logged <= 12 {
+                crate::log::line(&format!("Mackie: answering {}", hex(reply)));
+            }
+            if let Err(error) = helper.call("midi.send", json!({"hex": hex(reply)})) {
+                crate::log::line(&format!("Mackie: couldn't answer: {error}"));
+            }
         }
         if reaction.names_changed {
             self.names = self.surface.state.names();
@@ -379,6 +392,9 @@ mod tests {
         let reaction = surface.receive(&from_hex("F0 00 00 66 14 02 4B 55 4D 49 4C 47 43 01 02 03 04 F7"));
         assert_eq!(reaction.send, vec![sysex(&[0x03], &[&SERIAL])]);
         assert!(surface.state.installed);
+        // The version request gets a version reply.
+        let reaction = surface.receive(&from_hex("F0 00 00 66 14 13 00 F7"));
+        assert_eq!(&reaction.send[0][..6], &[0xF0, 0x00, 0x00, 0x66, 0x14, 0x14]);
         // LEDs: play, cycle, select 2 (0x19).
         let reaction = surface.receive(&from_hex("90 5E 7F"));
         assert!(reaction.transport_changed && surface.state.playing);

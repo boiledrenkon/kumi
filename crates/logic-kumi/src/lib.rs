@@ -21,6 +21,8 @@ pub mod queue;
 pub mod read;
 pub mod refs;
 pub mod rows;
+pub mod scenes;
+pub mod serve;
 pub mod server;
 
 pub const BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
