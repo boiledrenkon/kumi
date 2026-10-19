@@ -1,6 +1,6 @@
-//! The DAWs this Kumi works with (Live, the only one registered so far), and the one this run works with: what the
-//! app says of the DAW and shows of its tools, its focus and its devices comes from here, and each DAW's provider
-//! finds its bridge and makes the session's integration.
+//! The DAWs this Kumi works with (Live, and the DAWs whose bridges are Kumi's own: REAPER, Renoise and Logic Pro),
+//! and the one this run works with: what the app says of the DAW and shows of its tools, its focus and its devices
+//! comes from here, and each DAW's provider finds its bridge and makes the session's integration.
 pub mod ableton;
 pub mod own;
 pub mod provider;
@@ -21,8 +21,8 @@ use kumi_runtime::{
 use std::cell::Cell;
 
 /// Each registered DAW's provider: Live's first, then the DAWs whose bridges are Kumi's own.
-pub fn providers() -> [&'static dyn DawProvider; 3] {
-    [&ableton::provider::Ableton, &own::REAPER, &own::RENOISE]
+pub fn providers() -> [&'static dyn DawProvider; 4] {
+    [&ableton::provider::Ableton, &own::REAPER, &own::RENOISE, &own::LOGIC]
 }
 
 /// A registered DAW's provider; None for one this Kumi doesn't integrate.
@@ -94,9 +94,22 @@ pub fn also_running_words(chosen: DawId, others: &[&'static dyn DawProvider], en
     Some(format!("{open}: Kumi works with {chosen_name}{why}. {switch}."))
 }
 
-/// A DAW as `/daw` takes it: "live", "reaper", "renoise".
+/// A DAW as `/daw` takes it: "live", "reaper", "renoise", "logic" (its id, where the producer's name for it has a
+/// space in it).
 pub fn command_name(id: DawId) -> String {
-    provider(id).map(|provider| provider.profile().words.app.to_lowercase()).unwrap_or_else(|| id.as_str().into())
+    provider(id)
+        .map(|provider| provider.profile().words.app.to_lowercase())
+        .filter(|name| !name.contains(' '))
+        .unwrap_or_else(|| id.as_str().into())
+}
+
+/// "a, b or c": a list as a sentence says it.
+fn or_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
 }
 
 /// What `/daw` does: says which DAW Kumi works with, or opens Kumi again with another.
@@ -116,14 +129,15 @@ pub fn daw_command(typed: &str) -> DawCommand {
         let others: Vec<DawId> = ids.into_iter().filter(|id| *id != current).collect();
         let commands: Vec<String> = others.iter().map(|id| format!("/daw {}", command_name(*id))).collect();
         let names: Vec<&str> = others.iter().map(|id| app(*id)).collect();
+        let names: Vec<String> = names.into_iter().map(str::to_owned).collect();
         return DawCommand::Say(format!(
             "Kumi works with {}. {} opens Kumi again with {}.",
             app(current),
-            commands.join(" or "),
-            names.join(" or ")
+            or_list(&commands),
+            or_list(&names)
         ));
     }
-    let Some(asked) = ids.into_iter().find(|id| command_name(*id) == word || id.as_str() == word) else {
+    let Some(asked) = ids.into_iter().find(|id| command_name(*id) == word || id.as_str() == word || app(*id).to_lowercase() == word) else {
         let commands: Vec<String> = ids.iter().map(|id| format!("/daw {}", command_name(*id))).collect();
         return DawCommand::Say(format!("Kumi doesn't know {}: {}.", typed.trim(), commands.join(", ")));
     };
@@ -203,6 +217,7 @@ pub fn site() -> &'static str {
     match current().id() {
         DawId::Reaper => "reaper.fm",
         DawId::Renoise => "renoise.com",
+        DawId::Logic => "apple.com/logic-pro",
         _ => "ableton.com",
     }
 }
