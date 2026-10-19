@@ -48,7 +48,8 @@ logic-kumi [--kumi-home <dir>] [--helper <path>] [--reference <path>]
 - `--helper <path>`: the helper binary; else `KUMI_LOGIC_HANDS`, else a
   `kumi-logic-hands-*` file beside `logic-kumi` (the one named for this
   architecture when there are several), else `target/logic-hands/` in the
-  checkout. Without one the bridge says so and exits.
+  checkout, where `python3 scripts/build-logic-hands.py` builds it. Without
+  one the bridge says so and exits.
 - `--reference <path>`: the reference file the lifecycle writes
   (`kumi-daw-reference/1`): where the secret is, where to write the discovery
   file, the first port to try, where to log. By default

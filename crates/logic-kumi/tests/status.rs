@@ -299,12 +299,15 @@ fn no_window_is_away_a_dialog_is_modal_and_no_title_is_loading() {
     hands.set_windows(json!([dialog("Import"), behind]), &["Song - Tracks"]);
     let status = client.status_when("modal", |status| status["busy"] == "modal");
     assert_eq!(status["identity"]["project"], project);
-    // A sheet on the project window.
+    // Free again, then a sheet on the project window: modal, and still the project.
+    let song = tracks_window("Song - Tracks", Some(&format!("file://{SONG}")));
+    hands.set_windows(json!([song]), &["Song - Tracks"]);
+    client.status_when("free", |status| status["busy"].is_null());
     let mut sheet = tracks_window("Song - Tracks", Some(&format!("file://{SONG}")));
     sheet["modal"] = true.into();
     hands.set_windows(json!([sheet]), &["Song - Tracks"]);
-    thread::sleep(Duration::from_millis(100));
-    assert_eq!(client.status()["busy"], "modal");
+    let status = client.status_when("a sheet", |status| status["busy"] == "modal");
+    assert_eq!(status["identity"]["project"], project);
 
     // A project loading: the main window has no title yet.
     hands.set_windows(json!([tracks_window("", None)]), &[""]);
@@ -414,7 +417,7 @@ fn the_bridge_waits_for_logic_and_attaches_when_it_launches() {
     let hands = MockHands::new();
     hands.set_windows(json!([tracks_window("Song - Tracks", Some(&format!("file://{SONG}")))]), &["Song - Tracks"]);
     let lab = Lab::start(&hands);
-    thread::sleep(Duration::from_millis(250));
+    thread::sleep(Duration::from_millis(400));
     assert_eq!(lab.discovery(), None, "nothing to serve for yet");
     assert!(hands.calls_of("apps") >= 2, "asked again while waiting");
     assert_eq!(hands.calls_of("windows"), 0);

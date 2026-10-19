@@ -172,7 +172,7 @@ fn main() -> ExitCode {
     log::set_dir(Some(config.server.log_dir.clone().unwrap_or_else(|| bridge_paths.logs())));
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     let Some(helper) = find_helper(args.helper, std::env::var(HELPER_ENV).ok(), exe_dir.as_deref(), &checkout) else {
-        log::line("no helper: build kumi-logic-hands (crates/logic-kumi/helper), or name it with --helper or KUMI_LOGIC_HANDS");
+        log::line("no helper: build kumi-logic-hands (python3 scripts/build-logic-hands.py), or name it with --helper or KUMI_LOGIC_HANDS");
         return ExitCode::from(2);
     };
     if !helper.is_file() {
