@@ -416,16 +416,15 @@ local function group_restore(song, env, restore, desc)
   if parents[at] ~= nil then fail("changed", name .. " is in a group now") end
   local run_start = group - #holder.members
   if at ~= run_start - 1 then fail("changed", name .. " is not just before the group's tracks any more") end
-  -- (its place among the group's tracks: after those that were before it and are still there)
   local ordinal = prior.ordinal or (#holder.members + 1)
   if type(material.ahead) == "table" and type(restore.layout) == "number" then
-    local count = 0
+    -- (just after the last of those that were before it and are still there, wherever they are among the members now)
+    ordinal = 1
     for _, i in ipairs(material.ahead) do
       local now, why = env.shifted(i, restore.layout)
       if why == "unknown" then fail("stale", "the tracks changed in a way Kumi couldn't follow since it took the track out: nothing was moved") end
-      if now then count = count + 1 end
+      if now and now >= run_start and now < group then ordinal = math.max(ordinal, now - run_start + 2) end
     end
-    ordinal = count + 1
   end
   ordinal = math.min(ordinal, #holder.members + 1)
   song:describe_undo(desc)

@@ -119,7 +119,10 @@ end
 
 -- A pattern's lines: any change counts (the handler only counts; clearing a pattern fires hundreds).
 function M:watch_lines(pattern)
-  local fn = self.guard("line notifier", function() count(self) end)
+  local fn = self.guard("line notifier", function(pos)
+    count(self)
+    if self.hooks.lines then self.hooks.lines(pos) end
+  end)
   pattern:add_line_notifier(fn)
   self.entries[#self.entries + 1] = { remove = function() pattern:remove_line_notifier(fn) end, a = self.owner_a, b = self.owner_b }
 end

@@ -693,6 +693,13 @@ local place_env = {
     if not log_ then return unknown_log() end
     return places.after(log_, n, mark, 1)
   end,
+  -- (how many times lines changed in pattern `p` of the track now at `t`, with the track's id: a count is of one track's lines)
+  touched = function(p, t)
+    local log_ = device_log(t)
+    if not log_ then return nil end
+    local key = p .. ":" .. log_.id
+    return key .. "=" .. (b.touched[key] or 0)
+  end,
   pattern_mark = function() return places.mark(b.plog) end,
   pattern_at = function(p, mark) return places.item(b.plog, p, mark) end,
   instrument_mark = function() return places.mark(b.ilog) end,
@@ -912,6 +919,7 @@ function M.start(h, reloading)
   b.epoch_n = b.epoch_n or ((os.time() % 1000000) * 16)
   b.layout, b.shifts, b.shape = b.layout or 0, b.shifts or {}, b.shape or 0
   b.ids = b.ids or 0
+  b.touched = b.touched or {}
   b.plog, b.ilog = b.plog or places.new("p"), b.ilog or places.new("i")
   b.cat, b.snap = b.cat or {}, b.snap or {}
   if not b.snap[b.epoch_n] then
@@ -929,6 +937,15 @@ function M.start(h, reloading)
   observers = sync.new(guard, b, {
     structural = on_structural,
     tracks = on_tracks,
+    -- (which pattern track a line changed in: a change that cleared lines with nothing around them to tell where they are
+    -- knows whether its track was touched since)
+    lines = function(pos)
+      local token = type(pos) == "table" and type(pos.track) == "number" and b.groups and b.groups.tracks[pos.track]
+      if token and token.dlog and type(pos.pattern) == "number" then
+        local key = pos.pattern .. ":" .. token.dlog.id
+        b.touched[key] = (b.touched[key] or 0) + 1
+      end
+    end,
     -- (asked of every notifier once Kumi has made a change: was the producer's undo or redo what moved it?)
     undoing = function()
       local song = renoise.song()

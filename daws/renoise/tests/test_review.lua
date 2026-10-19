@@ -1920,3 +1920,104 @@ test("places, slot × a deleted slot in a run of its pattern: refused stale afte
     if changed then failure(undone, "stale") else ok(undone.result, json.encode(undone.error or {})) end
   end
 end)
+
+-- Cells moved in ways no shift or column move explains, and cleared lines: the undo finds Kumi's cells anywhere in the track.
+
+local function rows_moved(t, map)
+  local data = mock.data.patterns[1].tracks[t]
+  local moved = {}
+  for k, line in pairs(data.lines) do
+    local to = map(k)
+    if to and to >= 1 and to <= mock.data.patterns[1].lines then moved[to] = line end
+  end
+  data.lines = moved
+  notify_lines(1, 3, 1)
+  H.tick(2)
+end
+
+test("places, cell × Expand x2, many rows inserted, a row among like notes, a row and a column: refused changed, nothing written", function()
+  for _, how in ipairs({ "expand", "rows 70", "like", "row and column" }) do
+    local env, peer = setup(nil, { pattern_lines = 512 })
+    local previewed, done = bass_notes(peer, 2, 5, "kp90")
+    if how == "expand" then
+      rows_moved(3, function(k) return 2 * k - 1 end)
+    elseif how == "rows 70" then
+      rows_moved(3, function(k) return k + 70 end)
+    elseif how == "like" then
+      rows_moved(3, function(k) return k >= 4 and k + 1 or k end) -- a row inserted among Kumi's four C-4
+    else
+      rows_moved(3, function(k) return k + 1 end)
+      swap_note_columns(3, 1, 2)
+    end
+    local before = steps()
+    local undone = restore(peer, "notes-write", record_of(previewed, done), "Kumi: undo n (kp91)", done.epoch, done.layout)
+    failure(undone, "changed")
+    eq(steps(), before, how)
+  end
+end)
+
+local function bass_clear(peer, first, last, tag)
+  local epoch, layout = place(peer)
+  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), first = first, last = last }
+  local previewed = preview(peer, "notes-clear", input)
+  local done = apply(peer, "notes-clear", input, "Kumi: c (" .. tag .. ")", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  return previewed, done.result
+end
+
+local function set_c4(lines_)
+  for _, l in ipairs(lines_) do mock.ops.set_note(1, 3, l, 1, { note = 48, instrument = 0 }) end
+  H.tick(2)
+end
+
+test("places, cleared lines × a row inserted above: refused changed when the lines around them moved, or with none, when the track was touched", function()
+  for _, around in ipairs({ true, false }) do
+    local env, peer = setup()
+    set_c4(around and { 2, 3, 4, 5, 10 } or { 2, 3, 4, 5 })
+    local previewed, done = bass_clear(peer, 2, 5, "kp92")
+    rows_moved(3, function(k) return k + 1 end)
+    local before = steps()
+    failure(restore(peer, "notes-clear", record_of(previewed, done), "Kumi: undo c (kp93)", done.epoch, done.layout), "changed")
+    eq(steps(), before)
+  end
+end)
+
+test("places, cleared lines × nothing touched: put back where they were", function()
+  local env, peer = setup()
+  set_c4({ 2, 3, 4, 5 })
+  local previewed, done = bass_clear(peer, 2, 5, "kp94")
+  local undone = restore(peer, "notes-clear", record_of(previewed, done), "Kumi: undo c (kp95)", done.epoch, done.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(c4_lines(), "2,3,4,5")
+end)
+
+test("places, value × given as text: a number is the send it names, fenced as a number; other text is refused", function()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  local epoch, layout = kick_send(peer)
+  local input = { ref = epoch .. ":device:1.2", param = "Receiver", valueString = "1" }
+  local previewed = preview(peer, "device-param", input)
+  mock.ops.insert_track(6, { kind = "send", name = "New send" })
+  H.tick(2)
+  failure(apply(peer, "device-param", input, "Kumi: Receiver (kp96)", previewed.fence, epoch, layout), "changed")
+  local now, now_layout = place(peer)
+  local response = call(peer, "change_preview", { kind = "device-param", input = { ref = now .. ":device:1.2", param = "Receiver", valueString = "Send 2" }, epoch = now, layout = now_layout })
+  failure(response, "bad-params")
+end)
+
+test("places, track × a member made among those before a track taken out of its group: it goes back after the one it was after", function()
+  local env, peer = setup(nil, { tracks = { { name = "Kick" }, { name = "Hat" }, { name = "Bass" }, { name = "Pad" }, { name = "Lead" },
+    { kind = "group", name = "Group 06", members = 4 } } })
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 4), group = json.null } -- Pad, after Hat and Bass
+  local previewed = preview(peer, "track-group", input)
+  local done = apply(peer, "track-group", input, "Kumi: out (kp97)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(names():sub(1, 23), "Kick,Pad,Hat,Bass,Lead,")
+  mock.song:insert_track_at(4) -- a member made between Hat and Bass
+  mock.ops.rename_track(4, "New")
+  H.tick(2)
+  local undone = restore(peer, "track-group", record_of(previewed, done.result), "Kumi: undo (kp98)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  ok(names():find("Kick,Hat,New,Bass,Pad,Lead", 1, true), names())
+end)
