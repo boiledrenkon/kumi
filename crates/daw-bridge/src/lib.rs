@@ -22,7 +22,7 @@
 //!   listens, rewrites it when the project changes and removes it when it stops. `key` is the first 16 hex of the
 //!   SHA-256 of the resource folder's path, so several instances never mix ([`files::discovery_key`]). It names the
 //!   pid, port, protocol, bridge version, DAW version, resource folder, project and start time. Logic's names Logic's
-//!   pid and its app bundle as the resource.
+//!   pid and its bundle id (`com.apple.logic10`) as the resource.
 //!
 //! ## Ports
 //!
@@ -34,7 +34,8 @@
 //! Logic loads nothing, so its bridge lives in Kumi's own folder ([`install::logic_target`]: `<Kumi's folder>/bridges/
 //! logic/bridge/logic-kumi/`, holding the `logic-kumi` binary, its `kumi-logic-hands-*` helper, a `version` file and
 //! the reference) and is started by Kumi's host when a session begins and no discovery file answers: `logic-kumi
-//! --kumi-home <Kumi's folder>`. It serves on the same wire, and `status` also says whether Accessibility is granted.
+//! --kumi-home <Kumi's folder>`. It serves on the same wire; its `status` is `{project, busy, permission}`, `permission`
+//! null or `accessibility` when that isn't granted, and its identity (the welcome's) names Logic's pid and bundle id.
 //!
 //! ## Before auth
 //!

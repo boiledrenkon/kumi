@@ -150,6 +150,15 @@ async fn renoise_mcp_transcript() {
     golden("renoise-mcp.ndjson", &transcript);
 }
 
+/// Logic's resource is its bundle id; its status names the permission its bridge lacks, which the status tool passes
+/// on. (The host never starts a bridge here: a discovery file always answers.)
+#[tokio::test]
+async fn logic_mcp_transcript() {
+    let transcript = transcript_for(Daw::Logic, SimulatorConfig::logic, ["com.apple.logic10", "com.apple.mobilelogic"]).await;
+    assert!(transcript.contains("\\\"permission\\\":null"), "{transcript}");
+    golden("logic-mcp.ndjson", &transcript);
+}
+
 #[tokio::test]
 async fn initialize_negotiates_the_protocol_version() {
     let home = tempfile::tempdir().unwrap();

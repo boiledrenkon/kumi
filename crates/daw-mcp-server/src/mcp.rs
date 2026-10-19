@@ -11,9 +11,13 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", 
 pub fn tools(host: &Host) -> Value {
     let daw = host.daw();
     let kinds = kinds(daw);
+    let resource = match daw {
+        Daw::Logic => "The Logic Pro to use, by its bundle id (com.apple.logic10) from discover, when several run.".to_string(),
+        daw => format!("The {daw} resource or preferences folder to use, from discover, when several run."),
+    };
     let pick = json!({
         "pid": {"type": "integer", "minimum": 1, "description": format!("The {daw} process to use, from discover, when several run.")},
-        "resource": {"type": "string", "description": format!("The {daw} resource or preferences folder to use, from discover, when several run.")},
+        "resource": {"type": "string", "description": resource},
     });
     let mut list = json!([
         {
@@ -185,8 +189,86 @@ pub fn tools(host: &Host) -> Value {
         let hidden = json!({"type": "boolean", "description": "Also list data in the note and effect columns the track doesn't show, on every line (under `hidden`). Without it only a line with nothing in the shown columns is looked through."});
         list[2]["inputSchema"]["properties"]["hidden"] = hidden.clone();
         list[5]["inputSchema"]["properties"]["hidden"] = hidden;
+    match daw {
+        Daw::Reaper => {
+            // REAPER's refs are GUIDs, which a copy of the project in another tab shares: the epoch says which project they came from.
+            let epoch = json!({
+                "type": "string",
+                "description": "The epoch of the answer the ref, parent or cursor came from. If the project in the tab has changed since, the call is refused as stale instead of reading the other project.",
+            });
+            property(&mut list, "read", "epoch", epoch.clone());
+            property(&mut list, "focus_body", "epoch", epoch);
+        }
+        Daw::Renoise => {
+            // A pattern's lines are read one track at a time.
+            let track = json!({
+                "type": ["integer", "string"],
+                "description": "For kind line: the track (its number, or its ref) whose lines of the parent pattern to read.",
+            });
+            property(&mut list, "read", "track", track);
+            // Track refs are positions: a request names the layout its refs were made in, and older ones are carried
+            // through the tracks inserted, removed or moved since.
+            let layout = json!({"type": "integer", "minimum": 0, "description": "The layout the refs were read in (each answer and tracks event says it): refs from an older one are carried through the track shifts since."});
+            property(&mut list, "read", "layout", layout.clone());
+            property(&mut list, "focus_body", "layout", layout);
+            // Notes in columns the track doesn't show are listed under `hidden` for a line with nothing in the shown ones; for every
+            // line when asked (about six times the reading).
+            let hidden = json!({"type": "boolean", "description": "Also list data in the note and effect columns the track doesn't show, on every line (under `hidden`). Without it only a line with nothing in the shown columns is looked through."});
+            property(&mut list, "read", "hidden", hidden.clone());
+            property(&mut list, "focus_body", "hidden", hidden);
+        }
+        Daw::Logic => {
+            // Logic's refs are positions with an epoch (`1:track:2`), as Renoise's: a track or region change moves the epoch,
+            // and refs from before are refused as stale. What each kind sits in, and what each view is about.
+            property(
+                &mut list,
+                "read",
+                "parent",
+                json!({
+                    "type": "string",
+                    "description": "The ref of what the rows are in: a track for its regions, plug-ins or sends; a region for its notes (required for notes).",
+                }),
+            );
+            property(
+                &mut list,
+                "focus_body",
+                "ref",
+                json!({
+                    "type": "string",
+                    "description": "The ref of what the view is about: a track for tree and routing, a region for notes (the selected one when left out).",
+                }),
+            );
+            property(
+                &mut list,
+                "focus_body",
+                "around",
+                json!({
+                    "type": "string",
+                    "description": "The ref of a track to centre the first page of the timeline's lanes on: the page starts half a page above it, and says where in `from`.",
+                }),
+            );
+            property(
+                &mut list,
+                "focus_body",
+                "window",
+                json!({
+                    "type": "object",
+                    "properties": {"from": {"type": "number"}, "to": {"type": "number"}},
+                    "required": ["from", "to"],
+                    "additionalProperties": false,
+                    "description": "The range of the timeline to show, in beats from the project's start.",
+                }),
+            );
+        }
     }
     list
+}
+
+/// Sets one property of a tool's input schema, the tool found by its name.
+fn property(list: &mut Value, tool: &str, name: &str, schema: Value) {
+    let tools = list.as_array_mut().expect("a list of tools");
+    let tool = tools.iter_mut().find(|candidate| candidate["name"] == tool).unwrap_or_else(|| panic!("no tool {tool}"));
+    tool["inputSchema"]["properties"][name] = schema;
 }
 
 /// The properties of a tool: the instance pick, then its own.
