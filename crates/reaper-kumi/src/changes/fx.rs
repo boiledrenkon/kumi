@@ -290,12 +290,12 @@ fn add_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     let guid = restore.applied["guid"].as_str().ok_or_else(|| bad("applied.guid: the FX that was added"))?;
     let located = locate_guid(ctx, guid).map_err(|fault| if fault.0 == "failed" { gone(fault.1) } else { fault })?;
     let fx = fx_of(&located);
-    if !restore.discard && signature_as(ctx, fx, &restore.applied["signature"]) != restore.applied["signature"] {
-        return Err(changed("the FX Kumi added has been changed in REAPER since"));
-    }
     // Its automation goes with it, and is the producer's.
     if !restore.discard && envelopes_of(ctx, &located) > 0 {
         return Err(changed("the FX Kumi added has automation in it now"));
+    }
+    if !restore.discard && signature_as(ctx, fx, &restore.applied["signature"]) != restore.applied["signature"] {
+        return Err(changed("the FX Kumi added has been changed in REAPER since"));
     }
     let label = fx_label(ctx, fx);
     let before = chain(ctx, located.track);

@@ -612,7 +612,8 @@ impl Extension {
                 let went_unsaved = !watch.path.is_empty() && info.path.is_empty();
                 let due = count != watch.count && watch.tracks_at.is_none_or(|at| at.elapsed() >= WATCH_REFRESH);
                 let mut replaced = false;
-                if loaded || file_changed || counter_went_back || history_reset || due {
+                let look = loaded || file_changed || counter_went_back || history_reset || due;
+                if look {
                     let now = track_guids(reaper, info.ptr);
                     let moves = Moves { file_changed, counter_went_back, history_reset: history_reset || loaded, went_unsaved };
                     replaced = is_another_project(&watch.tracks, &now, moves);
@@ -622,8 +623,11 @@ impl Extension {
                 watch.loads = crate::projectconfig::loads_of(addr);
                 watch.path = info.path.clone();
                 watch.name = info.name.clone();
-                watch.count = count;
-                watch.undo = undo;
+                // A change the throttle held back is still a change when the window is over: the counter stays what it was.
+                if look || count == watch.count {
+                    watch.count = count;
+                    watch.undo = undo;
+                }
                 (false, replaced)
             }
         }
@@ -1140,6 +1144,25 @@ mod tests {
         let after = epoch_and_identity(&extension, &tx);
         assert_ne!(after.0, before.0);
         assert_ne!(after.1, before.1);
+    }
+
+    #[test]
+    fn a_change_inside_the_throttle_window_is_looked_at_when_it_is_over() {
+        let (extension, tx, _, _) = setup();
+        fake::lab_project();
+        extension.tick(Driver::Timer);
+        let before = epoch_and_identity(&extension, &tx);
+        // Every track replaced at once (a script, a paste of a whole project), a moment after the tracks were last read.
+        fake::with(|s| {
+            s.tracks = vec![fake::FakeTrack::new("{NEW-1}", "Keys")];
+            s.state_count += 1;
+        });
+        extension.tick(Driver::Timer);
+        assert_eq!(epoch_and_identity(&extension, &tx), before, "held back by the throttle");
+        // The counter does not move again; the change is not forgotten.
+        extension.watch.borrow_mut().tracks_at = None;
+        extension.tick(Driver::Timer);
+        assert_ne!(epoch_and_identity(&extension, &tx).0, before.0);
     }
 
     #[test]
