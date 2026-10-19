@@ -93,8 +93,8 @@ impl SimulatorConfig {
         }
     }
 
-    /// Logic Pro 12.3.1 (`resource` its bundle id, `com.apple.logic10`) with a saved project, served by Kumi's own bridge
-    /// beside it: its status is the project, busy, and the permission the bridge lacks.
+    /// Logic Pro 12.3.1 (`resource` its bundle id, `com.apple.logic10`) with the saved project its vectors were recorded
+    /// over, served by Kumi's own bridge beside it: its status is the project, busy, and the permission the bridge lacks.
     pub fn logic(secret: Secret, resource: &str) -> Self {
         Self {
             secret,
@@ -104,12 +104,7 @@ impl SimulatorConfig {
                 daw_version: "12.3.1".into(),
                 pid: std::process::id(),
                 resource: resource.into(),
-                project: Some(Project {
-                    id: Some(logic::PROJECT_ID.into()),
-                    name: Some("Scratch".into()),
-                    path: Some("/lab/Scratch.logicx".into()),
-                    ..Project::default()
-                }),
+                project: Some(logic::project()),
             },
             offer: Offer {
                 events: vec![event::PROJECT.into(), event::TRANSPORT.into(), event::TRACKS.into(), event::SELECTION.into()],

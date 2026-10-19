@@ -1,6 +1,6 @@
-//! The host's tools that read the DAW (`read`, `snapshot`, `focus`, `focus_body`) against a scripted Logic Pro project:
-//! a golden MCP transcript of a whole session, the refs named the contract's way, a Logic away from its Space, a bridge
-//! without Accessibility, and the words when Kumi's bridge for Logic isn't installed.
+//! The host's tools that read the DAW (`read`, `snapshot`, `focus`, `focus_body`) against a Logic Pro project replayed
+//! from the bridge's recorded answers: a golden MCP transcript of a whole session, the refs named the contract's way, a
+//! Logic away from its Space, a bridge without Accessibility, and the words when Kumi's bridge for Logic isn't installed.
 mod common;
 
 use common::{golden, Session};
@@ -77,18 +77,20 @@ async fn a_whole_session_of_reads_against_a_logic_project() {
     );
     let (first, _) = session.tool_full(8, "read", json!({"kind": "track", "limit": 1}), false).await;
     assert_eq!(first["items"].as_array().unwrap().len(), 1);
-    let (second, _) = session.tool_full(9, "read", json!({"kind": "track", "limit": 1, "cursor": first["nextCursor"]}), false).await;
+    let (second, _) = session.tool_full(9, "read", json!({"kind": "track", "cursor": first["nextCursor"]}), false).await;
     assert_eq!((second["items"][0]["ref"].clone(), second.get("nextCursor").cloned()), (json!("1:track:2"), None));
     session.tool(10, "read", json!({"kind": "region", "parent": "1:track:2"})).await;
     session.tool(11, "read", json!({"kind": "note", "parent": "1:region:1"})).await;
     session.tool(12, "read", json!({"kind": "plugin", "parent": "1:track:1"})).await;
-    session.tool(13, "read", json!({"ref": "1:marker:1"})).await;
+    session.tool(13, "read", json!({"ref": "1:track:2"})).await;
     session.tool(14, "snapshot", json!({})).await;
     session.tool(15, "focus", json!({})).await;
     session.tool(16, "focus_body", json!({"kind": "tree"})).await;
-    session.tool(17, "focus_body", json!({"kind": "notes", "ref": "1:region:1", "limit": 10})).await;
-    session.tool(18, "focus_body", json!({"kind": "timeline", "window": {"from": 0, "to": 32}})).await;
-    let around = session.tool(19, "focus_body", json!({"kind": "timeline", "limit": 1, "around": "1:track:2"})).await;
+    session.tool(17, "focus_body", json!({"kind": "notes", "ref": "1:region:1"})).await;
+    session.tool(18, "focus_body", json!({"kind": "timeline"})).await;
+    let around = session
+        .tool(19, "focus_body", json!({"kind": "timeline", "limit": 1, "around": "1:track:2", "window": {"from": 0, "to": 16}}))
+        .await;
     assert_eq!((around["from"].clone(), around["trackCount"].clone()), (json!(1), json!(2)));
     session.tool(20, "focus_body", json!({"kind": "routing", "ref": "1:track:1"})).await;
 
@@ -98,7 +100,7 @@ async fn a_whole_session_of_reads_against_a_logic_project() {
         (22, "read", json!({"kind": "track", "limit": 0})),
         (23, "focus_body", json!({"kind": "timeline", "window": {"from": 4, "to": 4}})),
         (24, "focus_body", json!({})),
-        (25, "read", json!({"kind": "pattern"})),
+        (25, "read", json!({"kind": "bogus"})),
         (26, "read", json!({"kind": "note"})),
         (27, "focus_body", json!({"kind": "mixer"})),
     ] {
@@ -141,17 +143,17 @@ async fn every_answer_the_host_hands_over_names_refs_the_way_the_contract_says()
         ("read", json!({"kind": "track"})),
         ("read", json!({"kind": "region"})),
         ("read", json!({"kind": "note", "parent": "1:region:1"})),
-        ("read", json!({"kind": "plugin"})),
-        ("read", json!({"kind": "send"})),
+        ("read", json!({"kind": "plugin", "parent": "1:track:1"})),
+        ("read", json!({"kind": "send", "parent": "1:track:1"})),
         ("read", json!({"kind": "marker"})),
         ("read", json!({"kind": "tempo"})),
-        ("read", json!({"ref": "1:note:1.2"})),
+        ("read", json!({"ref": "1:track:2"})),
         ("snapshot", json!({})),
         ("focus", json!({})),
         ("focus_body", json!({"kind": "tree"})),
         ("focus_body", json!({"kind": "notes"})),
         ("focus_body", json!({"kind": "timeline"})),
-        ("focus_body", json!({"kind": "routing"})),
+        ("focus_body", json!({"kind": "routing", "ref": "1:track:1"})),
     ] {
         let (answer, is_error) = lab.tool(tool, arguments.clone()).await;
         assert!(!is_error, "{tool} {arguments}: {answer}");
