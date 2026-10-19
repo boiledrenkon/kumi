@@ -523,6 +523,8 @@ async fn own_session(
     let out = events.clone();
     let mut options = SessionOptions::new(recording(main.clone(), None), integration, Rc::new(move |event| out.borrow_mut().push(event)));
     options.profile = profile;
+    // Listening on: the listen tool, and the DAW's listening tools as its bridge offers them (M5).
+    options.listen = true;
     options.timeout_ms = Some(20_000);
     options.close_timeout_ms = Some(5_000);
     options.conversations = Some(create_conversation_store(dir.path()));
@@ -545,10 +547,19 @@ async fn own_session(
     );
     said.extend(events.borrow().iter().map(|event| serde_json::to_string(event).unwrap()));
     said.extend(changes.borrow().iter().map(|record| serde_json::to_string(record).unwrap()));
-    // REAPER has items and takes, Renoise patterns: a clip is Live's word there too (core's listening tools, which these
-    // DAWs don't offer yet, still say "clip" for any DAW).
+    // REAPER has items and takes, Renoise samples and patterns: a clip is Live's word there too, in every tool (the
+    // listening ones included) and every reply.
     let clips = Regex::new(r"\b[Cc]lips?\b").unwrap();
-    let found: Vec<&String> = said.iter().filter(|text| clips.is_match(text)).collect();
+    for listening in ["listen", "audition", "judge", "tune", "sound", "form"] {
+        assert!(main.tools.borrow().iter().any(|tool| tool.name() == listening), "{listening} offered in {}", profile.words.app);
+    }
+    // The audition and the listen ran (their replies reached the model), not only refused.
+    let requests = main.requests.borrow();
+    assert!(requests.iter().any(|request| request.contains("\\\"takes\\\"")), "an audition's takes in {}", profile.words.app);
+    assert!(requests.iter().any(|request| request.contains("rendered it offline")), "a listen rendered in {}", profile.words.app);
+    drop(requests);
+    // (a HISTORY record's family is Kumi's own key for its kind, never shown as a word: an audition's heard row is "clip")
+    let found: Vec<&String> = said.iter().filter(|text| clips.is_match(&text.replace("\"family\":\"clip\"", ""))).collect();
     assert!(found.is_empty(), "a clip in {}'s words: {found:?}", profile.words.app);
     let changes = changes.borrow().clone();
     (said, changes, undone)
@@ -579,6 +590,9 @@ async fn a_reaper_session_changes_and_undoes_in_reapers_words() {
                 }),
                 step(|_| call("undo_change", json!({"change": "last"}))),
                 step(|_| call("reaper_read", json!({"kind": "track"}))),
+                step(|_| call("audition", json!({"candidates": [{"track": "track:2", "label": "warm"}], "from_beat": 0, "beats": 4}))),
+                step(|_| call("listen", json!({"mix": true, "from_beat": 0, "beats": 4}))),
+                step(|_| call("judge", json!({"goal": {"loudness": -14}, "from_beat": 0, "beats": 4}))),
                 step(|_| answer("Done.")),
             ];
             let create = kumi_runtime::integrations::reaper::create_reaper_integration;
@@ -618,6 +632,8 @@ async fn a_renoise_session_changes_and_undoes_in_renoises_words() {
                 }),
                 step(|_| call("undo_change", json!({"change": "last"}))),
                 step(|_| call("renoise_read", json!({"kind": "track"}))),
+                step(|_| call("audition", json!({"candidates": [{"track": "track:1", "label": "kick"}], "from_beat": 0, "beats": 4}))),
+                step(|_| call("listen", json!({"mix": true, "from_beat": 0, "beats": 4}))),
                 step(|_| answer("Done.")),
             ];
             let create = kumi_runtime::integrations::renoise::create_renoise_integration;

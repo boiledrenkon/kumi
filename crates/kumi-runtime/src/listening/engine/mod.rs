@@ -198,13 +198,13 @@ mod tests {
     use super::*;
     use crate::{
         core::{
-            contracts::{AuditionCandidate, JsonObject},
+            contracts::{AuditionCandidate, JsonObject, Render},
             daw::DawProfile,
         },
         listening::{
             checklist::MainState,
             judging::Placed,
-            renderer::{ListenFlag, Pass},
+            renderer::{Captured, ListenFlag, Pass},
         },
     };
     use async_trait::async_trait;
@@ -307,6 +307,125 @@ mod tests {
             let said = listening.call(name, input, Signal::new()).await.expect("a listening tool").unwrap();
             assert_eq!(said.text, "Kumi doesn't know the project's tempo yet; try again.", "{name}");
         }
+    }
+
+    /// A DAW whose listens record (Live's record pass, without Ears): each take starts `lead` seconds before the part,
+    /// or at the song's start when the part starts sooner; a lead of 0 is a tap or an offline render, which starts at the
+    /// part.
+    struct Recording {
+        lead: f64,
+        dir: tempfile::TempDir,
+        flag: ListenFlag,
+    }
+
+    #[async_trait(?Send)]
+    impl Renderer for Recording {
+        fn profile(&self) -> &DawProfile {
+            &DawProfile::UNKNOWN
+        }
+        fn refusal(&self) -> Option<String> {
+            None
+        }
+        fn tempo(&self) -> Option<f64> {
+            Some(120.)
+        }
+        fn beats_per_bar(&self) -> f64 {
+            4.
+        }
+        fn lifetime(&self) -> Signal {
+            Signal::new()
+        }
+        fn cleanup(&self) -> Signal {
+            Signal::new()
+        }
+        fn tell(&self, _title: &str, _playing: Option<bool>) {}
+        fn flag(&self) -> &ListenFlag {
+            &self.flag
+        }
+        fn kept_folder(&self) -> PathBuf {
+            self.dir.path().join("kept")
+        }
+        async fn hear_pass(&self, candidates: &[AuditionCandidate], window: Window, _before_main: bool, _signal: Signal) -> Pass {
+            let part = window.beats * 0.5;
+            let start = if window.from * 0.5 >= self.lead { self.lead } else { 0. };
+            let mut files = IndexMap::new();
+            for candidate in candidates {
+                let file = self.dir.path().join(format!("{}.wav", candidate.track));
+                noise(&file, start + part);
+                files.insert(candidate.track.clone(), Render { file: file.to_string_lossy().into_owned(), start, seconds: Some(part) });
+            }
+            let sources = candidates.iter().map(|candidate| (candidate.track.clone(), false)).collect();
+            Pass {
+                rendered: Ok(Captured { files, sources, before_master: None }),
+                notes: vec![],
+                tried: None,
+                lead: self.lead,
+                audible: true,
+            }
+        }
+        async fn master_chain(&self, _signal: Signal) -> MainState {
+            MainState::default()
+        }
+        fn applied(&self) -> Vec<String> {
+            vec![]
+        }
+        fn applied_since(&self, _mark: &[String]) -> Vec<(String, String)> {
+            vec![]
+        }
+        async fn undo(&self, _id: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn turn_gain(&self, _gain: f64, _track: Option<&str>, _signal: Signal) -> Result<(String, bool), String> {
+            Err("No gain stage.".into())
+        }
+        async fn limited(&self, _track: Option<&str>, _signal: Signal) -> bool {
+            false
+        }
+        async fn chain(&self, _track: Option<&str>) -> Result<Vec<Placed>, String> {
+            Ok(vec![])
+        }
+        async fn delete_device(&self, _reference: &str) -> bool {
+            false
+        }
+    }
+
+    /// Noise for `seconds`, as a 16-bit stereo WAV at 48 kHz.
+    fn noise(path: &std::path::Path, seconds: f64) {
+        let frames = (seconds * 48_000.) as u32;
+        let mut data = Vec::with_capacity(frames as usize * 4);
+        let mut seed: u32 = 0x2468_ace1;
+        for _ in 0..frames {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let sample = (((seed >> 16) as f64 / 32_768. - 1.) * 0.3 * 32_767.) as i16;
+            data.extend_from_slice(&sample.to_le_bytes());
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
+        let mut file = b"RIFF".to_vec();
+        file.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        file.extend_from_slice(b"WAVEfmt ");
+        for (value, bytes) in [(16u32, 4), (1, 2), (2, 2), (48_000, 4), (48_000 * 4, 4), (4, 2), (16, 2)] {
+            file.extend_from_slice(&value.to_le_bytes()[..bytes]);
+        }
+        file.extend_from_slice(b"data");
+        file.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        file.extend_from_slice(&data);
+        std::fs::write(path, file).unwrap();
+    }
+
+    /// Carried from M1: a record pass's take (no Ears) keeps its whole lead inside the song, a lead cut short to what the
+    /// song holds before the part at its start, and a tapped or rendered take (lead 0) none.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_recorded_takes_lead_is_whole_inside_the_song_cut_short_at_its_start_and_none_for_a_tap() {
+        let leads = |lead: f64, from: f64| async move {
+            let host = Rc::new(Recording { lead, dir: tempfile::tempdir().unwrap(), flag: ListenFlag::default() });
+            let listening = Listening::new(host, None, None, None, None);
+            let heard = listening.hear_takes(&["Bass".to_string()], Window { from, beats: 8. }, "measuring Bass", Signal::new()).await;
+            heard.unwrap().unwrap()["Bass"].1
+        };
+        assert_eq!(leads(0.5, 16.).await, 0.5, "inside the song: the whole lead");
+        assert_eq!(leads(0.5, 0.).await, 0., "the part starts the song: nothing before it");
+        assert_eq!(leads(0.5, 0.5).await, 0.25, "a quarter second of song before the part");
+        assert_eq!(leads(0., 16.).await, 0., "a tap or an offline render starts at the part");
     }
 
     #[tokio::test(flavor = "current_thread")]
