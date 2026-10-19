@@ -78,6 +78,9 @@ pub struct Preview {
 /// Why REAPER can't play a file out loud now; None when it can.
 pub fn refusal(reaper: &Reaper, proj: Project) -> Option<String> {
     if !reaper.audio_running() {
+        reaper.audio_init();
+    }
+    if !reaper.audio_running() {
         return Some("REAPER's audio isn't running, so Kumi can't play its render out loud".into());
     }
     if !reaper.audio_heard() {

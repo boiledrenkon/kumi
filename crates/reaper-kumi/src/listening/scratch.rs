@@ -655,9 +655,11 @@ impl Scratch {
         Ok(answer)
     }
 
-    /// Removes copies an earlier session left in these projects (by GUID, while they still carry Kumi's mark and name) and
-    /// forgets the makes that are done with: their copies all found, their saved project open without them, or old.
-    /// Returns the names removed.
+    /// Removes copies an earlier session left in these projects (by GUID, while they still carry Kumi's mark and name),
+    /// and marks each project it removed some from as changed (its file still holds them until it is saved). A make is
+    /// forgotten once none of its copies is left to look for (a copy the producer took is theirs, one Kumi removed may
+    /// still be in the saved file), its saved project is open, unchanged and holds none of them (the file is clean), or it
+    /// is a month old. Returns the names removed.
     pub fn sweep(&mut self, reaper: &Reaper, folder: &Path, projects: &[ProjectInfo]) -> Vec<String> {
         self.load(folder);
         if self.leftovers.is_empty() {
@@ -667,34 +669,45 @@ impl Scratch {
         let now = now_ms();
         let mut changed = false;
         let mut keep = Vec::new();
+        let mut swept_in: Vec<crate::reaper::Project> = Vec::new();
         for mut entry in std::mem::take(&mut self.leftovers) {
-            let mut handled = vec![false; entry.copies.len()];
+            let mut found = false;
+            // A copy the producer took (renamed, the mark gone) is theirs: no longer looked for.
+            let mut taken = vec![false; entry.copies.len()];
             for project in projects {
                 for (n, (guid, name)) in entry.copies.iter().enumerate() {
                     let Some(track) = find(reaper, project.ptr, guid) else { continue };
-                    handled[n] = true;
+                    found = true;
                     let mark = reaper.track_string(track, MARK).unwrap_or_default();
-                    if mark.split(' ').next() == Some(entry.id.as_str()) && reaper.track_name(track) == *name && reaper.delete_track(track)
-                    {
-                        names.push(name.clone());
+                    if mark.split(' ').next() == Some(entry.id.as_str()) && reaper.track_name(track) == *name {
+                        if reaper.delete_track(track) {
+                            names.push(name.clone());
+                            if !swept_in.contains(&project.ptr) {
+                                swept_in.push(project.ptr);
+                            }
+                        }
+                    } else {
+                        taken[n] = true;
                     }
                 }
             }
-            let reopened = !entry.path.is_empty() && projects.iter().any(|p| p.path == entry.path);
+            let clean_file = !found && !entry.path.is_empty() && projects.iter().any(|p| p.path == entry.path && !reaper.is_dirty(p.ptr));
             let old = now.saturating_sub(entry.made_ms) > FORGET_AFTER_MS;
-            if handled.iter().all(|h| *h) || reopened || old {
+            let before = entry.copies.len();
+            entry.copies = entry.copies.into_iter().zip(taken).filter(|(_, t)| !t).map(|(c, _)| c).collect();
+            changed |= entry.copies.len() != before;
+            if entry.copies.is_empty() || clean_file || old {
                 changed = true;
                 continue;
             }
-            // Only what wasn't found is still to look for.
-            let before = entry.copies.len();
-            entry.copies = entry.copies.into_iter().zip(handled).filter(|(_, h)| !h).map(|(c, _)| c).collect();
-            changed |= entry.copies.len() != before;
             keep.push(entry);
         }
         self.leftovers = keep;
         if changed {
             let _ = self.save(folder);
+        }
+        for proj in &swept_in {
+            reaper.set_project_number(*proj, "DIRTY", 1.0);
         }
         if !names.is_empty() {
             reaper.refresh_after_change();

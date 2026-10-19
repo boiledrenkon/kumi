@@ -3,7 +3,7 @@
 //! "status": true}` (asks `listen_status` until the job ends, and `status` beside it when asked), `{"sleepMs": n}`, or
 //! `{"cancelAfterMs": n, "job": jobId}` (asks `listen_cancel` on a second connection after n ms, while the steps go on).
 //! A string `"$epoch"` in params is the epoch the last answer named; `"$ref:<name>"` a track's ref by its name,
-//! `"$fx:<name>"` the ref of that track's first FX.
+//! `"$fx:<name>"` the ref of that track's first FX, `"$prev:<pointer>"` a value of the previous answer (a JSON pointer).
 //!
 //! cargo run -p reaper-kumi --example lab_listen -- <kumi home> <steps.json>
 
@@ -81,14 +81,15 @@ fn reader(stream: TcpStream) -> Receiver<String> {
     rx
 }
 
-/// `$epoch` and `$ref:<name>` filled in.
-fn fill(value: &Value, epoch: &str, refs: &HashMap<String, String>) -> Value {
+/// `$epoch`, `$ref:<name>`, `$fx:<name>` and `$prev:<pointer>` filled in.
+fn fill(value: &Value, epoch: &str, refs: &HashMap<String, String>, prev: &Value) -> Value {
     match value {
+        Value::String(text) if text.starts_with("$prev:") => prev.pointer(&text[6..]).cloned().unwrap_or(Value::Null),
         Value::String(text) if text == "$epoch" => epoch.into(),
         Value::String(text) if text.starts_with("$ref:") => refs.get(&text[5..]).cloned().map(Value::from).unwrap_or(Value::Null),
         Value::String(text) if text.starts_with("$fx:") => refs.get(&text[1..]).cloned().map(Value::from).unwrap_or(Value::Null),
-        Value::Array(items) => Value::Array(items.iter().map(|v| fill(v, epoch, refs)).collect()),
-        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), fill(v, epoch, refs))).collect()),
+        Value::Array(items) => Value::Array(items.iter().map(|v| fill(v, epoch, refs, prev)).collect()),
+        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), fill(v, epoch, refs, prev))).collect()),
         other => other.clone(),
     }
 }
@@ -116,12 +117,14 @@ fn main() {
         epoch = e.to_string();
     }
     let mut cancels = Vec::new();
+    let mut prev = Value::Null;
     for step in steps {
         if let Some(method) = step["call"].as_str() {
-            let answer = client.call(method, fill(&step["params"], &epoch, &refs));
+            let answer = client.call(method, fill(&step["params"], &epoch, &refs, &prev));
             if let Some(e) = answer["result"]["epoch"].as_str() {
                 epoch = e.to_string();
             }
+            prev = answer;
         } else if let Some(job) = step["poll"].as_str() {
             let every = Duration::from_millis(step["everyMs"].as_u64().unwrap_or(100));
             let until = Instant::now() + Duration::from_millis(step["maxMs"].as_u64().unwrap_or(60_000));
@@ -149,5 +152,11 @@ fn main() {
     }
     for cancel in cancels {
         let _ = cancel.join();
+    }
+    // Events that came while nothing was asked.
+    while let Ok(line) = client.lines.try_recv() {
+        if line.contains("\"type\":\"event\"") {
+            println!("{:>7} event {line}", started.elapsed().as_millis());
+        }
     }
 }

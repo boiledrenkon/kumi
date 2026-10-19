@@ -118,6 +118,14 @@ impl Reaper<'_> {
         self.api.Audio_IsRunning().is_some_and(|f| unsafe { f() } != 0)
     }
 
+    /// Opens REAPER's audio devices if they aren't open (what pressing play does): REAPER closes them during a render
+    /// (for about 0.2 s after it, measured) and, with its preference, while stopped in the background.
+    pub fn audio_init(&self) {
+        if let Some(f) = self.api.Audio_Init() {
+            unsafe { f() }
+        }
+    }
+
     /// The device's output channels.
     pub fn audio_outputs(&self) -> i32 {
         self.api.GetNumAudioOutputs().map(|f| unsafe { f() }).unwrap_or(0)

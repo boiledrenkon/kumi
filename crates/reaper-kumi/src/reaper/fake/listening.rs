@@ -48,6 +48,9 @@ pub struct FakeListening {
     /// `projrenderlimit` (the render speed), where REAPER's projectconfig_var_addr points.
     pub speed: Box<i32>,
     pub audio: bool,
+    /// `Audio_Init` opens the device (false: there is none to open), and how often it was asked.
+    pub device_opens: bool,
+    pub inits: u32,
     /// The device REAPER says it runs on (`MODE`), and its output channels.
     pub device: String,
     pub outputs: i32,
@@ -127,6 +130,8 @@ impl Default for FakeListening {
             texts,
             speed: Box::new(0),
             audio: true,
+            device_opens: false,
+            inits: 0,
             device: "CoreAudio Built-in Output".into(),
             outputs: 2,
             device_rate: 44100,
@@ -160,6 +165,8 @@ impl Clone for FakeListening {
             texts: self.texts.clone(),
             speed: Box::new(*self.speed),
             audio: self.audio,
+            device_opens: self.device_opens,
+            inits: self.inits,
             device: self.device.clone(),
             outputs: self.outputs,
             device_rate: self.device_rate,
@@ -406,6 +413,15 @@ unsafe extern "C" fn audio_reg_hardware_hook(add: bool, reg: *mut api::audio_hoo
             s.listening.hooks.retain(|h| *h != reg as usize);
         }
         1
+    })
+}
+
+unsafe extern "C" fn audio_init() {
+    with(|s| {
+        s.listening.inits += 1;
+        if s.listening.device_opens {
+            s.listening.audio = true;
+        }
     })
 }
 
@@ -811,6 +827,7 @@ pub(super) fn lookup(name: &CStr) -> Option<*mut c_void> {
         b"Audio_RegHardwareHook" => audio_reg_hardware_hook as unsafe extern "C" fn(bool, *mut api::audio_hook_register_t) -> c_int,
         b"Master_GetPlayRate" => master_get_play_rate as unsafe extern "C" fn(*mut ReaProject) -> f64,
         b"GetNumAudioOutputs" => get_num_audio_outputs as unsafe extern "C" fn() -> c_int,
+        b"Audio_Init" => audio_init as unsafe extern "C" fn(),
         b"GetToggleCommandState" => get_toggle_command_state as unsafe extern "C" fn(c_int) -> c_int,
         b"PCM_Source_CreateFromFile" => pcm_source_create_from_file as unsafe extern "C" fn(*const c_char) -> *mut api::PCM_source,
         b"PCM_Source_Destroy" => pcm_source_destroy as unsafe extern "C" fn(*mut api::PCM_source),

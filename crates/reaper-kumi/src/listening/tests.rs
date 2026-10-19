@@ -477,18 +477,44 @@ fn render_start_checks_everything_before_it_queues_anything() {
 fn passes_put_each_stage_together_and_the_master_where_it_fits() {
     let s = |id: &str, stage: render::Stage, guid: Option<&str>| render::Source { id: id.into(), stage, guid: guid.map(str::to_string) };
     use render::Stage::*;
-    let plan = |sources: Vec<render::Source>| render::passes_for_test(&sources);
-    assert_eq!(plan(vec![s("m", Master, None)]), [(0, 0, true, false)]);
-    assert_eq!(plan(vec![s("a", PreFader, Some("A")), s("b", PreFader, Some("B"))]), [(3 | 8192, 2, false, false)]);
-    assert_eq!(plan(vec![s("m", Master, None), s("a", PostFader, Some("A"))]), [(1, 1, true, false)]);
-    // Never the master with pre-fader stems: REAPER skips a muted track when it renders the master too.
-    assert_eq!(
-        plan(vec![s("m", Master, None), s("p", BeforeChain, None), s("a", PostFader, Some("A")), s("b", PreFader, Some("B"))]),
-        [(1, 1, true, false), (3 | 8192, 1, false, false), (0, 0, true, true)]
-    );
-    assert_eq!(plan(vec![s("m", Master, None), s("p", BeforeChain, None)]), [(0, 0, true, false), (0, 0, true, true)]);
-    assert_eq!(plan(vec![s("p", BeforeChain, None), s("a", PreFader, Some("A"))]), [(3 | 8192, 1, false, false), (0, 0, true, true)]);
-    assert_eq!(plan(vec![s("p", BeforeChain, None), s("a", PostFader, Some("A"))]), [(1, 1, true, true)]);
+    let plan = |sources: Vec<render::Source>, quiet: &[usize]| render::passes_for_test(&sources, quiet);
+    assert_eq!(plan(vec![s("m", Master, None)], &[]), [(0, 0, true, false)]);
+    assert_eq!(plan(vec![s("a", PreFader, Some("A")), s("b", PreFader, Some("B"))], &[]), [(3 | 8192, 2, false, false)]);
+    assert_eq!(plan(vec![s("m", Master, None), s("a", PostFader, Some("A"))], &[]), [(1, 1, true, false)]);
+    // The master rides pre-fader stems when none of their tracks is muted...
+    assert_eq!(plan(vec![s("m", Master, None), s("a", PreFader, Some("A"))], &[]), [(1 | 8192, 1, true, false)]);
+    // ...never when one is: REAPER skips a muted track when it renders the master too, pre-fader stem or not.
+    assert_eq!(plan(vec![s("m", Master, None), s("a", PreFader, Some("A"))], &[1]), [(3 | 8192, 1, false, false), (0, 0, true, false)]);
+    let all = || vec![s("m", Master, None), s("p", BeforeChain, None), s("a", PostFader, Some("A")), s("b", PreFader, Some("B"))];
+    assert_eq!(plan(all(), &[]), [(1, 1, true, false), (1 | 8192, 1, true, true)]);
+    assert_eq!(plan(all(), &[3]), [(1, 1, true, false), (3 | 8192, 1, false, false), (0, 0, true, true)]);
+    assert_eq!(plan(vec![s("m", Master, None), s("p", BeforeChain, None)], &[]), [(0, 0, true, false), (0, 0, true, true)]);
+    assert_eq!(plan(vec![s("p", BeforeChain, None), s("a", PostFader, Some("A"))], &[]), [(1, 1, true, true)]);
+}
+
+#[test]
+fn the_mix_rides_with_pre_fader_stems_unless_one_of_them_is_muted() {
+    let rig = Rig::new();
+    let epoch = rig.epoch();
+    let job = |id: &str, track: &str| {
+        rig.ask(
+            "render_start",
+            json!({"jobId": id, "sources": [source("mix", "master", None, None), source("t", "track", Some(track), None)], "range": {"fromBeat": 0, "beats": 4}, "epoch": epoch}),
+        )
+        .unwrap();
+        rig.tick();
+        assert_eq!(rig.status(id)["state"], "done");
+        fake::with(|s| std::mem::take(&mut s.listening.renders)).iter().map(|r| r.settings).collect::<Vec<_>>()
+    };
+    assert_eq!(job("jm1", "r:track:{BBBB}"), [1 | 8192]);
+    fake::with(|s| s.tracks[1].mute = true);
+    assert_eq!(job("jm2", "r:track:{BBBB}"), [3 | 8192, 0]);
+    // Kick sits in the Drums folder: REAPER still renders a track in a muted folder with the master (measured).
+    fake::with(|s| {
+        s.tracks[1].mute = false;
+        s.tracks[0].mute = true;
+    });
+    assert_eq!(job("jm3", "r:track:{BBBB}"), [1 | 8192]);
 }
 
 #[test]
@@ -825,6 +851,12 @@ fn audition_says_why_when_it_cant_play() {
     let refused = |params: Value| rig.ask("audition", params).unwrap_err();
     fake::with(|s| s.listening.audio = false);
     assert!(refused(json!({"previewId": "p1", "file": file})).1.contains("audio isn't running"));
+    assert_eq!(fake::with(|s| s.listening.inits), 1, "Kumi tried to open it first");
+    // A device REAPER closed (around a render, or stopped in the background) is opened, as pressing play would.
+    fake::with(|s| s.listening.device_opens = true);
+    assert!(rig.ask("audition", json!({"previewId": "p0", "file": file})).is_ok());
+    rig.board().stop_preview(&json!({})).unwrap();
+    rig.tick();
     fake::with(|s| {
         s.listening.audio = true;
         s.play_bits = 1;
@@ -1234,7 +1266,23 @@ fn copies_a_crash_left_are_swept_when_the_bridge_loads_and_the_host_is_told() {
         fake::with(|s| s.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>()),
         ["Drums", "Kick", "Snare", "Reverb", "Mine now"]
     );
-    assert!(scratch::read_journal(&folder).is_empty(), "every copy is accounted for");
+    // The project's file still holds the copy Kumi removed: the project is marked changed, and the make is kept until the
+    // saved file is seen without it. The copy the producer renamed is theirs, no longer looked for.
+    assert!(fake::with(|s| s.dirty));
+    let journal = scratch::read_journal(&folder);
+    assert_eq!((journal.len(), journal[0].copies.len()), (1, 1));
+    // Not saved, reopened: still looked for. Saved (clean) and looked at again with nothing left in it: forgotten.
+    let look = || {
+        let (_tx, rx) = queue::channel();
+        let again = Extension::new(fake::api(), rx, Box::new(Recorder::default()), Arc::new(Mutex::new(Snapshot::default())));
+        again.set_listening_folder(folder.clone());
+        again.tick(Driver::Timer);
+    };
+    look();
+    assert_eq!(scratch::read_journal(&folder).len(), 1, "the project is changed: its file may still hold the copy");
+    fake::with(|s| s.dirty = false);
+    look();
+    assert!(scratch::read_journal(&folder).is_empty(), "the clean file holds none: forgotten");
 }
 
 // ----- scratch-keep -----

@@ -331,10 +331,37 @@ fn passes(sources: &[Source]) -> Vec<Pass> {
     passes
 }
 
-/// The passes a set of sources takes, as (settings, stems, has the master, before the chain).
+/// The master moved into a pre-fader pass where none of that pass's tracks is muted (`quiet`, by source): one pass less. Decided as the render begins, with the main thread held from there to its end, so no mute can
+/// change in between.
+fn merged(passes: &[Pass], quiet: impl Fn(usize) -> bool) -> Vec<Pass> {
+    let mut out: Vec<Pass> = passes.to_vec();
+    let mut at = 0;
+    while at < out.len() {
+        let alone = out[at].stems.is_empty() && out[at].master.is_some();
+        let into = out
+            .iter()
+            .position(|p| p.master.is_none() && p.settings & PRE_FADER != 0 && !p.stems.is_empty() && !p.stems.iter().any(|&s| quiet(s)));
+        match (alone, into) {
+            (true, Some(into)) => {
+                let master = out.remove(at);
+                let into = if into > at { into - 1 } else { into };
+                out[into].master = master.master;
+                out[into].before_chain = master.before_chain;
+                out[into].settings = PRE_FADER | STEMS_AND_MASTER;
+            }
+            _ => at += 1,
+        }
+    }
+    out
+}
+
+/// The passes a set of sources takes, as (settings, stems, has the master, before the chain), with `quiet` sources.
 #[cfg(test)]
-pub fn passes_for_test(sources: &[Source]) -> Vec<(i32, usize, bool, bool)> {
-    passes(sources).into_iter().map(|p| (p.settings, p.stems.len(), p.master.is_some(), p.before_chain)).collect()
+pub fn passes_for_test(sources: &[Source], quiet: &[usize]) -> Vec<(i32, usize, bool, bool)> {
+    merged(&passes(sources), |s| quiet.contains(&s))
+        .into_iter()
+        .map(|p| (p.settings, p.stems.len(), p.master.is_some(), p.before_chain))
+        .collect()
 }
 
 impl Plan {
@@ -343,20 +370,21 @@ impl Plan {
         self.folder.join(format!("{}-{}.wav", self.job, source.id))
     }
 
-    /// Where a pass renders: its own names, which no source's file can have (they have a dot), renamed once all is well.
-    fn pattern(&self, pass: usize) -> String {
-        if self.passes[pass].stems.is_empty() {
-            format!("{}.p{}", self.job, pass + 1)
+    /// Where pass `n` renders: its own names, which no source's file can have (they have a dot), renamed once all is well.
+    fn pattern(&self, pass: &Pass, n: usize) -> String {
+        if pass.stems.is_empty() {
+            format!("{}.p{}", self.job, n + 1)
         } else {
-            format!("{}.p{}-$tracknumber", self.job, pass + 1)
+            format!("{}.p{}-$tracknumber", self.job, n + 1)
         }
     }
 
-    /// The file a pass writes for a stem (by its track's number) or the master (0).
-    fn pass_file(&self, pass: usize, number: Option<i64>) -> PathBuf {
-        match number {
-            Some(number) if !self.passes[pass].stems.is_empty() => self.folder.join(format!("{}.p{}-{number:02}.wav", self.job, pass + 1)),
-            _ => self.folder.join(format!("{}.p{}.wav", self.job, pass + 1)),
+    /// The file pass `n` writes for a stem (by its track's number) or the master (0).
+    fn pass_file(&self, pass: &Pass, n: usize, number: i64) -> PathBuf {
+        if pass.stems.is_empty() {
+            self.folder.join(format!("{}.p{}.wav", self.job, n + 1))
+        } else {
+            self.folder.join(format!("{}.p{}-{number:02}.wav", self.job, n + 1))
         }
     }
 
@@ -562,7 +590,11 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
     let mut before = 0u64;
     let mut outcome: Result<(), (String, String)> = Ok(());
     let mut cancelled = false;
-    for (n, pass) in plan.passes.iter().enumerate() {
+    // A muted source track: REAPER skips it when it renders the master in the same pass (a track in a muted folder it
+    // still renders: measured).
+    let quiet = |at: usize| tracks[at].is_some_and(|t| reaper.track_value(t, "B_MUTE") != 0.0);
+    let passes = merged(&plan.passes, quiet);
+    for (n, pass) in passes.iter().enumerate() {
         if hooks.cancelled() {
             cancelled = true;
             break;
@@ -588,7 +620,7 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
         set("RENDER_NORMALIZE", NO_POSTPROCESSING);
         let folder = plan.folder.to_string_lossy().into_owned();
         reaper.set_project_text(proj, "RENDER_FILE", &folder);
-        reaper.set_project_text(proj, "RENDER_PATTERN", &plan.pattern(n));
+        reaper.set_project_text(proj, "RENDER_PATTERN", &plan.pattern(pass, n));
         reaper.set_project_text(proj, "RENDER_FORMAT", FLOAT_WAV);
         reaper.set_project_text(proj, "RENDER_FORMAT2", "");
         reaper.set_project_text(proj, "RENDER_EXTRAFILEDIR", &folder);
@@ -618,11 +650,11 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
         // What REAPER would write: exactly this pass's files, in Kumi's folder, none of them there yet.
         let mut expected: Vec<(usize, PathBuf)> = Vec::new();
         if let Some(at) = pass.master {
-            expected.push((at, plan.pass_file(n, Some(0))));
+            expected.push((at, plan.pass_file(pass, n, 0)));
         }
         for &at in &pass.stems {
             let number = tracks[at].map_or(0, |track| reaper.track_value(track, "IP_TRACKNUMBER") as i64);
-            expected.push((at, plan.pass_file(n, Some(number))));
+            expected.push((at, plan.pass_file(pass, n, number)));
         }
         let targets: Vec<PathBuf> = reaper
             .project_text(proj, "RENDER_TARGETS")
@@ -659,13 +691,7 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
         hooks.render(&mut || {
             reaper.run_action(RENDER_WITH_LAST);
         });
-        crate::log::line(&format!(
-            "render pass {}/{} of {} took {:.3} s",
-            n + 1,
-            plan.passes.len(),
-            plan.job,
-            started.elapsed().as_secs_f64()
-        ));
+        crate::log::line(&format!("render pass {}/{} of {} took {:.3} s", n + 1, passes.len(), plan.job, started.elapsed().as_secs_f64()));
         if hooks.cancelled() {
             cancelled = true;
             break;
