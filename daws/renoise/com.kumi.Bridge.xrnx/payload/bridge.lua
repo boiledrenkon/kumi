@@ -720,6 +720,13 @@ local place_env = {
     end
     return true
   end,
+  -- (the touches of the whole of pattern `p` so far, as a mark; and whether any came since one)
+  pattern_touch_mark = function(p) return "p" .. p .. "=" .. (b.touches[p] or 0) end,
+  pattern_touched_since = function(p, mark)
+    local seq = type(mark) == "string" and tonumber(mark:match("^p" .. p .. "=(%d+)$")) or nil
+    if not seq then return nil, "unknown" end
+    return (b.touches[p] or 0) > seq
+  end,
   -- (Kumi's own writes, while it makes a change or puts one back: no touch of the producer's)
   writing = function(on) b.kumi_writing = on end,
   -- (a track's identity for its lines' touches; a track Kumi put back takes over the one it had)
@@ -976,6 +983,8 @@ function M.start(h, reloading)
       if not (token and token.tid and type(pos.pattern) == "number" and type(pos.line) == "number") then return end
       local song = renoise.song()
       if song and song:is_undo_redoing() then return end
+      -- (the whole pattern's touches too: a row inserted in the pattern moves every track's lines, an empty one's unseen)
+      b.touches[pos.pattern] = (b.touches[pos.pattern] or 0) + 1
       local key = pos.pattern .. ":" .. token.tid
       local touches = b.touches[key]
       if not touches then

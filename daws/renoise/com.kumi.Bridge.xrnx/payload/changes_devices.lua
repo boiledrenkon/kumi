@@ -168,6 +168,8 @@ local param_spec = {
 -- value). It is fenced as the number is. Text without a number Renoise ignores, and "-1" or "None" would set the first entry,
 -- not none: Kumi refuses those.
 param_spec.wanted_at = function(loc, input)
+  -- (None, -1, is a place value too, though the parameter's minimum is 0: Renoise takes it as a value, not as text)
+  if loc.points and input.value == -1 then return { value = -1 } end
   if loc.points and type(input.valueString) == "string" then
     local n = tonumber(input.valueString:match("^%s*(%d+)"))
     local first = loc.points == "send" and 0 or 1
