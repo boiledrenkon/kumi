@@ -377,6 +377,14 @@ local function on_structural(reason, kind, op, owner, token)
   end
   local list = lists[kind]
   if not list then return end -- (the sequence: nothing is watched per slot)
+  if kind == "devices" and op then
+    -- (the journal's places are device places: they move, and a change that made or removed a device is told on the producer's undo)
+    for track_index, candidate in ipairs(b.groups.tracks) do
+      if candidate == token then
+        changes.journal_device_event(b.journal, track_index, op.type, op.index, op.index2, song:is_undo_redoing())
+      end
+    end
+  end
   local fine = false
   if op and op.type == "insert" then
     fine = remember(list, op.index)
@@ -533,9 +541,25 @@ local function watch_params(index)
   end)
 end
 
+-- A parameter's value is watched the same way, for the producer's undo only; once per parameter.
+local function watch_param(track_index, device_index, k)
+  local token = b.groups and b.groups.tracks[track_index]
+  local device_token = token and token.devices and token.devices[device_index]
+  local song = renoise.song()
+  if not device_token or not song then return end
+  device_token.params_watched = device_token.params_watched or {}
+  if device_token.params_watched[k] then return end
+  device_token.params_watched[k] = true
+  local parameter = song:track(track_index):device(device_index):parameter(k)
+  observers:owned(device_token, token, function() observers:watch_undo(parameter.value_observable) end)
+end
+
 -- Changes (M3): see changes.lua. Every request carries the epoch (and the layout) its refs were made in.
 local function change_env()
-  return { epoch = epoch, layout = function() return b.layout end, journal = b.journal, watch_params = watch_params }
+  return {
+    epoch = epoch, layout = function() return b.layout end, journal = b.journal, watch_params = watch_params,
+    watch_param = watch_param,
+  }
 end
 
 function handlers.change_preview(params)

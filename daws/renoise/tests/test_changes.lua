@@ -476,7 +476,7 @@ end)
 
 test("changes: a restore too big for one callback is numbered steps, each its own, and ends with the whole track", function()
   local env, peer = setup({ patch = function(env)
-    local path = env.bundle .. "payload/changes.lua"
+    local path = env.bundle .. "payload/changes_base.lua"
     local f = assert(io.open(path, "rb"))
     local text = f:read("*a")
     f:close()
@@ -520,7 +520,7 @@ end)
 
 test("changes: a sliced restore that is stopped by a busy Renoise takes back the track it made", function()
   local env, peer = setup({ patch = function(env)
-    local path = env.bundle .. "payload/changes.lua"
+    local path = env.bundle .. "payload/changes_base.lua"
     local f = assert(io.open(path, "rb"))
     local text = f:read("*a")
     f:close()
@@ -723,5 +723,133 @@ test("changes: a restore Renoise can't finish takes back the track it began, and
   failure(undone, "failed")
   ok(undone.error.message:find("wouldn't put the track back", 1, true), undone.error.message)
   eq(#mock.data.tracks, before, "no track was left behind")
+  H.no_dialogs()
+end)
+
+-- Song settings and devices
+
+local function simple_change(peer, kind, input, desc)
+  local previewed, epoch, layout = preview(peer, kind, input)
+  local done = apply(peer, kind, input, desc, previewed.fence, epoch, layout)
+  ok(done.result, kind .. ": " .. json.encode(done.error or {}))
+  return previewed, done.result, epoch, layout
+end
+
+test("changes: tempo, lines per beat and ticks per line are undoable steps that put back", function()
+  local env, peer = setup()
+  for _, case in ipairs({
+    { "song-bpm", { bpm = 140 }, "Tempo 140 BPM", function() return mock.data.transport_fields.bpm end, 140, 120 },
+    { "song-lpb", { lpb = 8 }, "Lines per beat 8", function() return mock.data.transport_fields.lpb end, 8, 4 },
+    { "song-tpl", { tpl = 3 }, "Ticks per line 3", function() return mock.data.transport_fields.tpl end, 3, 6 },
+  }) do
+    local kind, input, title, read, written, original = case[1], case[2], case[3], case[4], case[5], case[6]
+    local before = steps()
+    local previewed, done, epoch, layout = simple_change(peer, kind, input, "Kumi: " .. kind .. " (ka01)")
+    eq(previewed.display.title, title)
+    eq(previewed.target.kind, "song")
+    eq(done.undo.entry, true)
+    eq(read(), written, kind .. " written")
+    eq(steps(), before + 1)
+    local undone = restore(peer, kind, { target = previewed.target, prior = previewed.prior, applied = done.applied }, "Kumi: undo " .. kind .. " (ka02)", epoch, layout)
+    ok(undone.result, json.encode(undone.error or {}))
+    eq(read(), original, kind .. " put back")
+  end
+  local response = ask(peer, "change_preview", "song-bpm", { bpm = 5 })
+  failure(response, "bad-params")
+  failure(ask(peer, "change_preview", "song-lpb", { lpb = 1.5 }), "bad-params")
+  failure(ask(peer, "change_preview", "song-tpl", { tpl = 17 }), "bad-params")
+  H.no_dialogs()
+end)
+
+test("changes: the producer's undo of a tempo change is told", function()
+  local env, peer = setup()
+  local _, done = simple_change(peer, "song-bpm", { bpm = 150 }, "Kumi: tempo (ka03)")
+  H.tick(2)
+  H.events(peer, "undone_in_daw")
+  mock.song:undo()
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(#told, 1)
+  eq(told[1].data.how, "undo")
+  eq(told[1].data.descs[1], "Kumi: tempo (ka03)")
+  H.no_dialogs()
+end)
+
+local function device_song()
+  local env, peer = setup(nil, { send_tracks = 2 })
+  mock.device_catalog = {
+    ["Audio/Effects/Native/EQ 5"] = { { name = "Gain", value = 0.5, min = 0, max = 1 } },
+    ["Audio/Effects/Native/#Send"] = { { name = "Receiver", value = 0, min = 0, max = 255 } },
+  }
+  local bass = mock.song:track(3)
+  bass:insert_device_at("Audio/Effects/Native/EQ 5", 2)
+  bass:insert_device_at("Audio/Effects/Native/#Send", 3)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  return env, peer
+end
+
+test("changes: a device is bypassed and put back, and the track's mixer device is not touched", function()
+  local env, peer = device_song()
+  local epoch = place(peer)
+  local ref = epoch .. ":device:3.2"
+  local previewed, done, e, layout = simple_change(peer, "device-bypass", { ref = ref, bypass = true }, "Kumi: bypass (kb01)")
+  eq(previewed.display.title, "EQ 5 on Bass bypassed")
+  eq(previewed.target.ref, ref)
+  eq(mock.data.tracks[3].devices[2].active, false)
+  eq(steps(), 1)
+  local undone = restore(peer, "device-bypass", { target = previewed.target, prior = previewed.prior, applied = done.applied }, "Kumi: undo (kb02)", e, layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(mock.data.tracks[3].devices[2].active, true)
+  failure(ask(peer, "change_preview", "device-bypass", { ref = epoch .. ":device:3.1", bypass = true }), "bad-params")
+  failure(ask(peer, "change_preview", "device-bypass", { ref = epoch .. ":device:3.9", bypass = true }), "gone")
+  failure(ask(peer, "change_preview", "device-bypass", { ref = ref, bypass = "yes" }), "bad-params")
+  H.no_dialogs()
+end)
+
+test("changes: a parameter is set by value or by text, kept in its range, and a Receiver must be a send track", function()
+  local env, peer = device_song()
+  local epoch = place(peer)
+  local ref = epoch .. ":param:3.2.1"
+  local previewed, done, e, layout = simple_change(peer, "device-param", { ref = ref, value = 0.25 }, "Kumi: gain (kc01)")
+  eq(previewed.display.title, "EQ 5 on Bass Gain 0.25")
+  eq(mock.data.tracks[3].devices[2].params[1].value, 0.25)
+  local undone = restore(peer, "device-param", { target = previewed.target, prior = previewed.prior, applied = done.applied }, "Kumi: undo (kc02)", e, layout)
+  ok(undone.result)
+  eq(mock.data.tracks[3].devices[2].params[1].value, 0.5)
+  -- by text
+  local text, textdone = simple_change(peer, "device-param", { ref = ref, valueString = "0.75" }, "Kumi: gain text (kc03)")
+  eq(mock.data.tracks[3].devices[2].params[1].value, 0.75)
+  eq(textdone.applied.value, 0.75)
+  -- out of range, and neither
+  failure(ask(peer, "change_preview", "device-param", { ref = ref, value = 2 }), "bad-params")
+  failure(ask(peer, "change_preview", "device-param", { ref = ref }), "bad-params")
+  -- a #Send's Receiver is a send track's number (there are two)
+  local receiver = epoch .. ":param:3.3.1"
+  simple_change(peer, "device-param", { ref = receiver, value = 1 }, "Kumi: send (kc04)")
+  eq(mock.data.tracks[3].devices[3].params[1].value, 1)
+  local past = ask(peer, "change_preview", "device-param", { ref = receiver, value = 2 })
+  failure(past, "bad-params")
+  ok(past.error.message:find("send track", 1, true), past.error.message)
+  failure(ask(peer, "change_preview", "device-param", { ref = receiver, value = 0.5 }), "bad-params")
+  H.no_dialogs()
+end)
+
+test("changes: the producer's undo of a parameter change is told, and the device's place follows the devices made before it", function()
+  local env, peer = device_song()
+  local epoch = place(peer)
+  simple_change(peer, "device-param", { ref = epoch .. ":param:3.3.1", value = 1 }, "Kumi: send (kd11)")
+  H.tick(2)
+  H.events(peer, "undone_in_daw")
+  -- the producer puts a device in front of it: the #Send is the fourth device now
+  mock.ops.insert_device(3, { name = "Filter", params = {} }, 2)
+  H.tick(2)
+  mock.data.tracks[3].devices[4].params[1].value = 1
+  mock.song:undo() -- the parameter change is the newest step (the device was made by a producer's op, no step)
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(#told, 1, "told")
+  eq(told[1].data.descs[1], "Kumi: send (kd11)")
   H.no_dialogs()
 end)

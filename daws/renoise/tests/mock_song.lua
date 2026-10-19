@@ -190,6 +190,7 @@ end
 -- Devices
 
 local function parameter(data, set)
+  data.value_observable = data.value_observable or M.observable()
   local proxy = object("renoise.DeviceParameter", {
     name = data.name, name_observable = data.name_observable or M.observable(),
     value_min = data.min or 0, value_max = data.max or 1, value_default = data.default or 0,
@@ -231,7 +232,23 @@ end
 
 local function device(data)
   local params = {}
-  for i, p in ipairs(data.params or {}) do params[i] = parameter(p) end
+  for i, p in ipairs(data.params or {}) do
+    local function write(value)
+      local old = p.value
+      if old == value then return end
+      p.value = value
+      M.fire(p.value_observable)
+      M.record(function() p.value = old; M.fire(p.value_observable) end, function() p.value = value; M.fire(p.value_observable) end)
+    end
+    params[i] = parameter(p, {
+      value = write,
+      value_string = function(text)
+        local number = tonumber(tostring(text):match("-?%d+%.?%d*"))
+        if not number then error("could not parse " .. tostring(text), 2) end
+        write(number)
+      end,
+    })
+  end
   -- (the proxy is made anew on every read: what is watched lives in the data)
   data.is_active_observable = data.is_active_observable or M.observable()
   data.display_name_observable = data.display_name_observable or M.observable()
@@ -254,7 +271,13 @@ local function device(data)
       if not params[i] then out_of_range("parameter", i) end
       return params[i]
     end,
-  }, nil, device_setters(data))
+  }, {
+    -- (read from the data: the proxy a caller holds sees a write made through it)
+    is_active = function() return data.active ~= false end,
+    display_name = function() return data.display_name or data.name end,
+    is_maximized = function() return data.maximized == true end,
+    active_preset_data = function() return data.preset_data or "" end,
+  }, device_setters(data))
   return proxy
 end
 
@@ -808,6 +831,17 @@ function M.make_song(options)
     transport_fields.playing = false
     M.fire(transport_fields.playing_observable)
   end
+  local transport_setters = {}
+  for _, key in ipairs({ "bpm", "lpb", "tpl" }) do
+    transport_setters[key] = function(value)
+      local old = transport_fields[key]
+      if old == value then return end
+      transport_fields[key] = value
+      M.fire(transport_fields[key .. "_observable"])
+      M.record(function() transport_fields[key] = old; M.fire(transport_fields[key .. "_observable"]) end,
+        function() transport_fields[key] = value; M.fire(transport_fields[key .. "_observable"]) end)
+    end
+  end
   local transport = object("renoise.Transport", transport_fields, {
     -- The edit position in quarter notes: the lines before it over the LPB (a test can set `edit_beats`, as a ZLxx would).
     edit_pos_beats = function()
@@ -816,7 +850,7 @@ function M.make_song(options)
       for s = 1, d.song_fields.selected_sequence_index - 1 do lines = lines + d.patterns[d.sequence[s]].lines end
       return (lines + d.song_fields.selected_line_index - 1) / transport_fields.lpb
     end,
-  })
+  }, transport_setters)
 
   local song_fields = {
     name = options.name or "", name_observable = simple_observable(), file_name = options.file_name or "",
