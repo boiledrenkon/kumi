@@ -228,7 +228,7 @@ function M.read(job, params, epoch)
   elseif kind == "spans" then
     return reads_listening.spans(job, params, epoch, page)
   end
-  fail("bad-params", "unknown kind " .. tostring(kind) .. " (song, track, sequence, pattern, line, instrument, sample, phrase, device, param, spans)")
+  fail("bad-params", "unknown kind " .. tostring(kind) .. " (song, track, sequence, pattern, line, instrument, sample, phrase, device, param)")
 end
 
 return M
