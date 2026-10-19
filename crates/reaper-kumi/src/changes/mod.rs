@@ -21,6 +21,7 @@ mod structure;
 mod tracks;
 mod undo;
 // (r-tracks) M4: track properties, routing, project items, actions; NIT-7.
+mod trackprops;
 mod volatile;
 
 use std::cell::{Cell, RefCell};
@@ -105,6 +106,8 @@ impl Written for Restored {
 #[derive(Clone, Copy)]
 enum Kind {
     TrackProp(&'static tracks::Prop),
+    /// (r-tracks) A track setting beyond the fader: polarity, record arm and input, monitoring, the parent send, pan mode…
+    TrackSetting(&'static trackprops::Prop),
     TrackDelete,
     TrackAdd,
     TrackMove,
@@ -133,6 +136,9 @@ enum Kind {
 fn kind(name: &str) -> Option<Kind> {
     if let Some(prop) = tracks::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::TrackProp(prop));
+    }
+    if let Some(prop) = trackprops::prop(name) {
+        return Some(Kind::TrackSetting(prop));
     }
     if let Some(prop) = sends::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::SendProp(prop));
@@ -178,6 +184,7 @@ impl Kind {
     fn preview(self, ctx: &Ctx, input: &Value) -> Done<Preview> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_preview(ctx, prop, input),
+            Kind::TrackSetting(prop) => trackprops::preview(ctx, prop, input),
             Kind::TrackDelete => tracks::delete_preview(ctx, input),
             Kind::TrackAdd => structure::add_preview(ctx, input),
             Kind::TrackMove => structure::move_preview(ctx, input),
@@ -204,6 +211,7 @@ impl Kind {
     fn apply(self, ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_apply(ctx, prop, input, fence),
+            Kind::TrackSetting(prop) => trackprops::apply(ctx, prop, input, fence),
             Kind::TrackDelete => tracks::delete_apply(ctx, input, fence),
             Kind::TrackAdd => structure::add_apply(ctx, input, fence),
             Kind::TrackMove => structure::move_apply(ctx, input, fence),
@@ -230,6 +238,7 @@ impl Kind {
     fn restore(self, ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         match self {
             Kind::TrackProp(prop) => tracks::prop_restore(ctx, prop, restore),
+            Kind::TrackSetting(prop) => trackprops::restore(ctx, prop, restore),
             Kind::TrackDelete => tracks::delete_restore(ctx, restore),
             Kind::TrackAdd => structure::add_restore(ctx, restore),
             Kind::TrackMove => structure::move_restore(ctx, restore),
@@ -569,3 +578,5 @@ mod tests;
 mod tests_carried;
 #[cfg(test)]
 mod tests_lab;
+#[cfg(test)]
+mod tests_tracks;

@@ -274,6 +274,28 @@ fn add_track_state(reaper: &Reaper, track: Track, master: bool, row: &mut Value)
     row["recordInput"] = record_input(value("I_RECINPUT") as i64);
     row["recordMode"] = record_mode_name(value("I_RECMODE") as i64).into();
     row["monitoring"] = monitoring_name(value("I_RECMON") as i64).into();
+    // (r-tracks) The send to its parent (its folder, or the master): on, the parent's first channel (from 1), how many.
+    let channels = value("C_MAINSEND_NCH") as i64;
+    row["mainSend"] = json!({
+        "on": value("B_MAINSEND") != 0.0,
+        "offset": value("C_MAINSEND_OFFS") as i64 + 1,
+        "channels": if channels == 0 { json!("all") } else { json!(channels) },
+    });
+    // What a power user set away from the defaults, only when set: an output's tap, items monitored while recording, solo
+    // defeat, the MIDI hardware output.
+    if matches!(value("I_RECMODE") as i64, 1 | 3 | 4 | 5 | 6) {
+        row["recordTap"] = ["post-fader", "pre-fx", "post-fx", "post-fx"][(value("I_RECMODE_FLAGS") as i64 & 3) as usize].into();
+    }
+    if value("I_RECMONITEMS") != 0.0 {
+        row["monitorItems"] = true.into();
+    }
+    if value("B_SOLO_DEFEAT") != 0.0 {
+        row["soloDefeat"] = true.into();
+    }
+    let midi_out = value("I_MIDIHWOUT") as i64;
+    if midi_out >= 0 {
+        row["midiOut"] = json!({"device": (midi_out >> 5) & 31, "channel": midi_out & 31});
+    }
     // Fixed lanes (comping): how many, what each is called and which play.
     let free_mode = value("I_FREEMODE") as i64;
     row["itemLayout"] = match free_mode {

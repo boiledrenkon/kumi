@@ -518,6 +518,11 @@ thread_local! {
     pub static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
+// (r-tracks) M4's track, routing, project and action functions, beside the fake's own.
+#[path = "fake_tracks.rs"]
+mod m4;
+pub use m4::{extra, mark_changed};
+
 pub fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
@@ -939,7 +944,7 @@ unsafe extern "C" fn kbd_get_text_from_cmd(cmd: c_int, _section: *mut c_void) ->
         40886 => c"File: Close all projects".as_ptr(),
         41824 => c"File: Render project, using the most recent render settings".as_ptr(),
         54000 => c"Script: kumi.lua".as_ptr(),
-        _ => c"".as_ptr(),
+        _ => m4::action_name(cmd).map_or(c"".as_ptr(), keep),
     }
 }
 unsafe extern "C" fn named_command_lookup(name: *const c_char) -> c_int {
@@ -1224,7 +1229,7 @@ fn new_track_default(parm: &str) -> f64 {
     match parm {
         "I_NCHAN" => 2.0,
         "B_SHOWINTCP" | "B_SHOWINMIXER" | "I_FXEN" | "D_WIDTH" => 1.0,
-        "D_PANLAW" | "I_RECINPUT" => -1.0,
+        "D_PANLAW" | "I_RECINPUT" | "I_MIDIHWOUT" => -1.0,
         "I_PANMODE" => 3.0,
         _ => 0.0,
     }
@@ -2140,7 +2145,9 @@ unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_c
         let Some(mut t) = track_of(s, track as u64).cloned() else { return false };
         // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
         t.sends.clear();
-        let text = format!("<TRACK {}\nNAME \"{}\"\nFAKECHUNK {}\n{}>\n", t.guid, t.name, s.chunks.len(), fx_chain_text(&t.fx));
+        // (r-tracks) A track whose controls are locked says so in its state.
+        let lock = if t.extra.get("LOCK") == Some(&1.0) { "LOCK 1\n" } else { "" };
+        let text = format!("<TRACK {}\nNAME \"{}\"\n{lock}FAKECHUNK {}\n{}>\n", t.guid, t.name, s.chunks.len(), fx_chain_text(&t.fx));
         s.chunks.push(t);
         if text.len() + 1 > size as usize {
             // Too small: REAPER fills what fits; the caller grows its buffer.
@@ -2366,12 +2373,17 @@ unsafe extern "C" fn undo_end_block2(_proj: *mut ReaProject, desc: *const c_char
     let desc = name_of(desc);
     with(|s| {
         s.undo_depth = (s.undo_depth - 1).max(0);
-        if s.undo_depth > 0 || flags == 0 {
+        if s.undo_depth > 0 {
+            return;
+        }
+        // (r-tracks) A block ended with flags 0 makes a point only when REAPER marked a change of its own in it (an action).
+        let marked = m4::take_marked();
+        if flags == 0 && !marked {
             return;
         }
         // REAPER counts a flagged block whether or not it made a point.
         s.state_count += 1;
-        if s.undo_dirty {
+        if s.undo_dirty || marked {
             push_undo_point(s, &desc);
             s.undo_dirty = false;
         }
@@ -2689,7 +2701,7 @@ fn lookup(name: &CStr) -> *mut c_void {
         ($($name:literal => $f:expr),* $(,)?) => {
             match name.to_bytes() {
                 $($name => $f as *mut c_void,)*
-                _ => ptr::null_mut(),
+                _ => m4::lookup(name),
             }
         };
     }
@@ -2877,6 +2889,7 @@ pub fn reset() {
             ..State::default()
         }
     });
+    m4::reset();
 }
 
 /// A colour as REAPER stores one (the OS's order, set flag): `(r, g, b)`.
