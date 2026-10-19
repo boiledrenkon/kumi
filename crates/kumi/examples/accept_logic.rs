@@ -669,7 +669,7 @@ impl Accept {
         let rows: Vec<ChangeRecord> = ids.iter().filter_map(|id| self.change(id)).collect();
         let applied = rows.iter().filter(|row| row.state == ChangeState::Applied).count();
         let listed: Vec<String> = rows.iter().map(|row| format!("“{}” {}", row.title, state_word(row.state))).collect();
-        let stopped = if done.is_error { format!("; the plan stopped: {}", short(&done.text, 200)) } else { String::new() };
+        let stopped = if done.is_error { format!("; the plan stopped: {}", short(&done.text, 1500)) } else { String::new() };
         self.say(
             !done.is_error && applied == 4,
             Some(ms),

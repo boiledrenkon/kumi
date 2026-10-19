@@ -925,8 +925,7 @@ async fn logics_changes_go_through_kumis_host_into_history_and_back_out_as_new_s
             // change still standing, by value.
             let latest = logic.observe(Signal::new(), None).await.unwrap();
             let context: Value = serde_json::from_str(&latest.context).unwrap();
-            let (vocal, keys) =
-                (context["tracks"][0]["ref"].as_str().unwrap().to_owned(), context["tracks"][1]["ref"].as_str().unwrap().to_owned());
+            let keys = context["tracks"][1]["ref"].as_str().unwrap().to_owned();
             let renamed = tool(&latest, "make_changes")
                 .execute(input(json!({"steps": [{"tool": "track_rename", "input": {"ref": keys, "name": "Lead"}}]})), Signal::new())
                 .await
