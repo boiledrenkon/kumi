@@ -1,7 +1,7 @@
 //! REAPER's, Renoise's and Logic's sessions made the way the app makes them (`kumi::cli::run`, as main() does, with
 //! `--daw reaper|renoise|logic`), Kumi's host in process in front of a simulated bridge: the session speaks the DAW's
 //! words (its profile is the DAW's), and says so when the DAW is busy, opens another project in the same tab, lacks a
-//! permission, or goes away; none of it in Live's words.
+//! permission, goes away, or is asked to open a kept conversation's project again; none of it in Live's words.
 #[path = "support/live_words.rs"]
 mod live_words;
 #[path = "support/vt.rs"]
@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use daw_bridge::{files::ensure_secret, paths::BridgePaths, Daw};
 use daw_mcp_server::{
     host::Host,
-    simulator::{logic::LogicScript, reaper::ReaperScript, renoise::RenoiseScript, Simulator, SimulatorConfig},
+    simulator::{logic, logic::LogicScript, reaper::ReaperScript, renoise::RenoiseScript, Simulator, SimulatorConfig},
 };
 use futures::FutureExt;
 use kumi::{
@@ -469,14 +469,28 @@ case!(renoise_loading_its_file_during_kumis_first_look_keeps_the_conversation_an
 });
 
 // Logic's session: while its helper lacks Accessibility the look says what to allow (and Logic stays connected);
-// granted, the project reads; busy is said in Logic's words (a dialog, another desktop); gone is gone. Nothing of it
-// in Live's words. (Logic's bridge is the host's to start: with none installed in this home, Logic going away stays
-// away.)
+// granted, the project reads; busy is said in Logic's words (a dialog, another desktop); the producer opening another
+// project is said, and a kept conversation's project is opened again from where Kumi saw it (the package isn't on
+// this computer, and Kumi says so); gone is gone. Nothing of it in Live's words. (Logic's bridge is the host's to
+// start: with none installed in this home, Logic going away stays away.)
 case!(a_logic_session_made_as_the_app_makes_it_waits_for_accessibility_then_speaks_logics_words, async {
     let script = LogicScript::new();
+    let project = script.clone();
     let lab = AppLab::new(DawId::Logic, Daw::Logic, move |secret| script.config(secret, "com.apple.logic10")).await;
     let simulator = lab.simulator.clone();
     simulator.set_permission(Some("accessibility"));
+    // A conversation kept about the Scratch project, from an earlier session.
+    let store = kumi_runtime::core::conversations::create_conversation_store_in(
+        lab._home.path().join(".kumi").join("projects"),
+        None,
+        kumi_runtime::integrations::PLACES,
+    );
+    let kept: SavedConversation = serde_json::from_value(json!({"savedAt": 1, "checkpoint": {"version": 1, "origin": null, "messages": [
+        {"role": "user", "content": "make the keys wider"}, {"role": "assistant", "content": "done"}
+    ]}}))
+    .unwrap();
+    let scratch = format!("logic-{}", logic::project().id.expect("the recorded project is saved"));
+    store.save(&scratch, "mw0keptlogic01", &kept).await.unwrap();
     let (input, out, task) = lab.start(false);
     wait_for("the refusal", &out, |text| text.contains("couldn't look just now: Kumi's helper needs Accessibility to read Logic Pro"))
         .await;
@@ -493,6 +507,28 @@ case!(a_logic_session_made_as_the_app_makes_it_waits_for_accessibility_then_spea
     assert!(status.contains("busy (Logic Pro is showing a dialog)"), "{status}");
     simulator.set_busy(None);
     wait_for("not busy", &out, |text| text.contains(": answering again")).await;
+    // The producer opens another project: said in Logic's words, and the look after is of that project.
+    project.open_project(1);
+    simulator.open_project(Some(project.project())).unwrap();
+    wait_for("another project", &out, |text| text.contains("Logic Pro is opening another project; Kumi picks up once it's open.")).await;
+    wait_for("the other project open", &out, |text| text.contains("Logic Pro has the other project open.")).await;
+    wait_for("the other project's look", &out, |text| text.contains("[observation] Logic Pro — Scratch 1")).await;
+    // The kept conversation is about the first project: Kumi asks, and opens that project again from where it saw it.
+    let before = out.0.borrow().len();
+    input.write("/resume mw0keptlogic01\n");
+    wait_for("the question", &out, |text| text[before..].contains("Type 1, 2 or 3.")).await;
+    let asked = out.0.borrow()[before..].to_string();
+    assert!(
+        asked.contains("[conversations] “make the keys wider” is about")
+            && asked.contains("1. Open ")
+            && asked.contains("in Logic Pro (Logic Pro may ask whether to save"),
+        "{asked}"
+    );
+    let before = out.0.borrow().len();
+    input.write("1\n");
+    wait_for("the answer", &out, |text| text[before..].contains("in Logic Pro yourself, and this conversation carries on there.")).await;
+    let answered = out.0.borrow()[before..].to_string();
+    assert!(answered.contains("That project isn't at /lab/Scratch.logicx any more. Open "), "{answered}");
     simulator.set_busy(Some("away"));
     wait_for("another desktop", &out, |text| text.contains(": busy (Logic Pro's window is on another desktop)")).await;
     simulator.set_busy(None);
