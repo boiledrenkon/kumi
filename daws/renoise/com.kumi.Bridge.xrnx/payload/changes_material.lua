@@ -136,17 +136,21 @@ end
 function M.destinations(device)
   local path = device.device_path
   if not (path:find("/Native/*", 1, true) or path:find("/Native/#Sidechain", 1, true)) then return {} end
-  local named = {}
+  local named, numbered = {}, {}
   for k = 1, #device.parameters do
     local parameter = device:parameter(k)
-    named[parameter.name] = parameter
+    named[parameter.name], numbered[parameter.name] = parameter, k
   end
   local out = {}
   for k = 1, #device.parameters do
     local name = device:parameter(k).name
     local prefix = name:match("^(.*)Track$")
     if prefix and named[prefix .. "Effect"] then
-      out[#out + 1] = { prefix = prefix, track = named[name], effect = named[prefix .. "Effect"], parameter = named[prefix .. "Parameter"] }
+      -- (and their numbers on the device, from 1)
+      out[#out + 1] = {
+        prefix = prefix, track = named[name], effect = named[prefix .. "Effect"], parameter = named[prefix .. "Parameter"],
+        numbers = { k, numbered[prefix .. "Effect"], numbered[prefix .. "Parameter"] },
+      }
     end
   end
   return out

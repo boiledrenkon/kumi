@@ -492,3 +492,95 @@ test("devices m4: a deleted device's own *Hydra outputs, and an output aimed at 
   eq(values(1, 2, 2, 4), "1/2/1", "its own output again")
   mock.device_catalog = nil
 end)
+
+-- meta-destination
+
+local function lfo()
+  return { name = "*LFO", path = "Audio/Effects/Native/*LFO",
+    params = params_of({ { "Dest. Track", -1, 0, 255 }, { "Dest. Effect", -1, 0, 255 }, { "Dest. Parameter", -1, 0, 255 }, { "Amplitude", 0.5 } }) }
+end
+
+local function meta_song()
+  return setup({
+    { name = "Kick", devices = { lfo(), hydra(), sidechain() } },
+    { name = "Bass", devices = { plain_gainer() } },
+    { name = "Pad", devices = { plain_gainer(), eq5() } },
+  })
+end
+
+test("devices m4: a meta device is aimed at a device's parameter by refs, and Kumi's undo aims it back through devices and tracks made since", function()
+  local _, peer = meta_song()
+  local epoch = place(peer)
+  local record, previewed = change(peer, "meta-destination", { ref = epoch .. ":device:1.2", targetRef = epoch .. ":device:2.2", param = "Gain" })
+  eq(previewed.display.title, "*LFO on Kick drives \226\128\156Gain\226\128\157 of \226\128\156Gainer\226\128\157 on \226\128\156Bass\226\128\157")
+  eq(values(1, 2, 1, 3), "1/1/1")
+  eq(steps(), 1)
+  -- A device made before the Gainer and a track made before Bass: Renoise follows them (2/2/1 then 3/2/1).
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/Gainer", 2)
+  mock.api.insert_track_at(2)
+  H.tick(2)
+  eq(values(1, 2, 1, 3), "2/2/1")
+  local back = restore(peer, "meta-destination", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(values(1, 2, 1, 3), "-1/-1/-1", "aimed nowhere, as before")
+  local again = restore(peer, "meta-destination", record)
+  ok(again.result and again.result.undo.entry == false, "back already: " .. json.encode(again))
+end)
+
+test("devices m4: a meta device aimed elsewhere before is aimed back there, followed; gone or changed since, refused", function()
+  local _, peer = meta_song()
+  -- Before Kumi: the LFO drives Pad's EQ (device 3) Gain 2.
+  local l = device_data(1, 2)
+  l.params[1].value, l.params[2].value, l.params[3].value = 2, 2, 2
+  local epoch = place(peer)
+  local record = change(peer, "meta-destination", { ref = epoch .. ":device:1.2", targetRef = epoch .. ":device:2.2", param = 1 })
+  eq(values(1, 2, 1, 3), "1/1/1")
+  -- The producer deletes the Gainer before Pad's EQ: the EQ is device 2 now.
+  mock.song:track(3):delete_device_at(2)
+  H.tick(2)
+  local back = restore(peer, "meta-destination", record)
+  ok(back.result, json.encode(back.error or {}))
+  eq(values(1, 2, 1, 3), "2/1/2", "back on the EQ, at its new place")
+  -- Aimed again; then the EQ (where it pointed before) deleted: Kumi can't aim it back.
+  local record2 = change(peer, "meta-destination", { ref = place(peer) .. ":device:1.2", targetRef = place(peer) .. ":device:2.2", param = 1 })
+  mock.song:track(3):delete_device_at(2)
+  H.tick(2)
+  failure(restore(peer, "meta-destination", record2), "gone", "can't aim it back")
+  eq(values(1, 2, 1, 3), "1/1/1", "nothing written")
+  -- Re-aimed by the producer since: refused, and discard aims it back anyway.
+  local _, peer3 = meta_song()
+  local e3 = place(peer3)
+  local record3 = change(peer3, "meta-destination", { ref = e3 .. ":device:1.2", targetRef = e3 .. ":device:2.2", param = 2 })
+  device_data(1, 2).params[3].value = 1
+  failure(restore(peer3, "meta-destination", record3), "changed", "changed in Renoise")
+  local forced = restore(peer3, "meta-destination", record3, nil, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(values(1, 2, 1, 3), "-1/-1/-1")
+end)
+
+test("devices m4: a meta destination is fenced, outputs are named, #Sidechain feeds a device, and nothing aims at itself", function()
+  local _, peer = meta_song()
+  local epoch, layout = place(peer)
+  local input = { ref = epoch .. ":device:1.2", targetRef = epoch .. ":device:2.2", param = 1 }
+  local previewed = preview(peer, "meta-destination", input)
+  device_data(1, 2).params[1].value = 2 -- (the producer re-aims it between preview and apply)
+  failure(apply(peer, "meta-destination", input, previewed, "Kumi: x (k1)", epoch, layout), "changed")
+  eq(steps(), 0)
+  -- *Hydra: which output.
+  local response = call(peer, "change_preview", { kind = "meta-destination", input = { ref = epoch .. ":device:1.3", targetRef = epoch .. ":device:2.2", param = 1 }, epoch = epoch, layout = layout })
+  failure(response, "bad-params", "give out")
+  local out2 = change(peer, "meta-destination", { ref = epoch .. ":device:1.3", out = 2, targetRef = epoch .. ":device:3.3", param = "Gain 2" })
+  eq(values(1, 3, 7, 9), "2/2/2")
+  eq(out2.display.title, "*Hydra on Kick: output 2 drives \226\128\156Gain 2 (1.00 kHz)\226\128\157 of \226\128\156EQ 5\226\128\157 on \226\128\156Pad\226\128\157")
+  -- #Sidechain: a device, no parameter.
+  local e2, l2 = place(peer)
+  failure(call(peer, "change_preview", { kind = "meta-destination", input = { ref = e2 .. ":device:1.4", targetRef = e2 .. ":device:2.2", param = 1 }, epoch = e2, layout = l2 }), "bad-params", "leave param out")
+  local fed = change(peer, "meta-destination", { ref = e2 .. ":device:1.4", targetRef = e2 .. ":device:2.2" })
+  eq(values(1, 4, 3, 4), "1/1")
+  eq(fed.display.title, "#Sidechain on Kick feeds \226\128\156Gainer\226\128\157 on \226\128\156Bass\226\128\157")
+  -- None, and itself.
+  local none = change(peer, "meta-destination", { ref = e2 .. ":device:1.4", targetRef = json.null })
+  eq(values(1, 4, 3, 4), "-1/-1")
+  eq(none.display.title, "#Sidechain on Kick sends nowhere")
+  failure(call(peer, "change_preview", { kind = "meta-destination", input = { ref = e2 .. ":device:1.2", targetRef = e2 .. ":device:1.2", param = 1 }, epoch = e2, layout = l2 }), "bad-params", "itself")
+end)

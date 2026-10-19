@@ -14,6 +14,7 @@ local rows = import("rows")
 local base = import("changes_base")
 local material_ = import("changes_material")
 local devices_ = import("changes_devices")
+local json_null = import("json").null
 
 local bad, fail, q = base.bad, base.fail, base.q
 local M = {}
@@ -507,6 +508,220 @@ for _, spec in ipairs(XML_KINDS) do
     same = function(a, b) return a.shape == b.shape end,
   })
 end
+
+-- meta-destination: where a meta device (*LFO, *Key Tracker, *Velocity Tracker, *Signal Follower, *Meta Mixer, *Formula),
+-- an output of *Hydra or *XY Pad, or a #Sidechain sends its values: a device (any track's, its mixer device too) and, but for
+-- #Sidechain, that device's parameter (its number from 1, 0 its on/off, or its name); or nothing. Renoise's numbers are
+-- 0-based (Dest. Track a track's number less one, Dest. Effect a device's with the mixer device 0) and Renoise moves them
+-- with the tracks and devices made, deleted and moved; a record keeps each as a place (the track carried through the layout
+-- by hand, the device followed through its track's device log) and works the numbers out again when it is put back.
+
+local function output_of(device, out, label)
+  local all = material_.destinations(device)
+  if #all == 0 then bad(string.format("%s sends no values anywhere (it has no destination)", q(label))) end
+  if out == nil then
+    if #all > 1 then bad(string.format("%s has %d outputs: give out (1 to %d)", q(label), #all, #all)) end
+    return all[1]
+  end
+  if type(out) ~= "number" or out ~= math.floor(out) or out < 1 or out > #all then
+    bad(string.format("out is a number from 1 to %d for %s", #all, q(label)))
+  end
+  return all[out]
+end
+
+local function numbers_of(destination)
+  return { track = destination.track.value, effect = destination.effect.value, parameter = destination.parameter and destination.parameter.value or nil }
+end
+
+local function same_numbers(a, b)
+  return a.track == b.track and a.effect == b.effect and (a.parameter == nil or b.parameter == nil or a.parameter == b.parameter)
+end
+
+-- The place a destination's numbers name now: nothing, or a device on a track (and its parameter).
+local function place_of_numbers(song, env, numbers)
+  if numbers.track < 0 then return { none = true } end
+  local t, d = numbers.track + 1, numbers.effect + 1
+  if t > rows.track_count(song) or numbers.effect < 0 or d > #song:track(t).devices then return { none = true, track_only = numbers.track } end
+  local device = song:track(t):device(d)
+  return { to = t, dev = material_.device_place(env, t, d, device), param = numbers.parameter, label = label_of(t, song:track(t), device) }
+end
+
+-- The numbers a kept place names now (its track carried from `layout`, its device followed), or nil and why.
+local function numbers_of_place(song, env, place, layout)
+  if place.none then return { track = -1, effect = -1, parameter = -1 } end
+  local t, why = place.to, nil
+  if type(layout) == "number" then t, why = env.shifted(place.to, layout) end
+  if not t then return nil, why end
+  if t < 1 or t > rows.track_count(song) then return nil, "gone" end
+  local d, how = material_.device_now(song, env, t, place.dev)
+  if not d then return nil, how end
+  return { track = t - 1, effect = d - 1, parameter = place.param }
+end
+
+local function write_numbers(destination, numbers)
+  destination.track.value = numbers.track
+  destination.effect.value = numbers.effect
+  if destination.parameter and numbers.parameter ~= nil then destination.parameter.value = numbers.parameter end
+end
+
+local function target_words(song, numbers)
+  if numbers.track < 0 then return "nothing" end
+  local t, d = numbers.track + 1, numbers.effect + 1
+  if t > rows.track_count(song) or d < 1 or d > #song:track(t).devices then return "nothing" end
+  local track, device = song:track(t), song:track(t):device(d)
+  local where = q(devices_.label(device)) .. " on " .. q(base.named(t, track))
+  if numbers.parameter == nil or numbers.parameter < 0 then return where end
+  local name = numbers.parameter == 0 and "on/off" or (numbers.parameter <= #device.parameters and device:parameter(numbers.parameter).name or ("parameter " .. numbers.parameter))
+  return q(name) .. " of " .. where
+end
+
+local function meta_title(label, destination, all, song, numbers)
+  local whose = #all > 1 and (label .. ": output " .. destination.prefix:match("(%d+)")) or label
+  local verb = destination.parameter and "drives " or "feeds "
+  return whose .. " " .. (numbers.track < 0 and "sends nowhere" or (verb .. target_words(song, numbers)))
+end
+
+-- What the change asks, as Renoise's numbers now: the target device (its ref) and parameter, or none.
+local function wanted_numbers(song, env, destination, input, self_t, self_d)
+  if input.targetRef == nil or input.targetRef == json_null then return { track = -1, effect = -1, parameter = destination.parameter and -1 or nil } end
+  if type(input.targetRef) ~= "string" then bad("targetRef: the device it drives, or null for none") end
+  local numbers = refs.expect(input.targetRef, "device", 2, env.epoch())
+  local t, d = numbers[1], numbers[2]
+  local track = base.track_at(song, t)
+  if d < 1 or d > #track.devices then fail("gone", "that device isn't on the track any more") end
+  if t == self_t and d == self_d then bad("a device can't drive itself") end
+  local target = track:device(d)
+  local parameter
+  if destination.parameter then
+    local wanted = input.param
+    if type(wanted) == "number" then
+      if wanted ~= math.floor(wanted) or wanted < 0 or wanted > #target.parameters then
+        bad(string.format("param is a number from 0 (its on/off) to %d for %s", #target.parameters, q(devices_.label(target))))
+      end
+      parameter = wanted
+    elseif type(wanted) == "string" and wanted ~= "" then
+      local lower = wanted:lower()
+      for _, exact in ipairs({ true, false }) do
+        for k = 1, #target.parameters do
+          local name = target:parameter(k).name:lower()
+          if (exact and name == lower) or (not exact and name:sub(1, #lower) == lower) then
+            if parameter and parameter ~= k then bad(string.format("%q names more than one parameter of %s: give its number", wanted, q(devices_.label(target)))) end
+            parameter = k
+          end
+        end
+        if parameter then break end
+      end
+      if not parameter then bad(string.format("%s has no parameter %q", q(devices_.label(target)), wanted)) end
+    else
+      bad("param: the parameter it drives, its number from 1 (0 its on/off) or its name")
+    end
+  elseif input.param ~= nil then
+    bad("a #Sidechain feeds a device, not a parameter: leave param out")
+  end
+  return { track = t - 1, effect = d - 1, parameter = parameter }
+end
+
+local function meta_locate(song, env, input, what)
+  local t, d, track, device = device_by_ref(song, env, input.ref, what)
+  local label = label_of(t, track, device)
+  local destination = output_of(device, input.out, label)
+  return t, d, track, device, label, destination
+end
+
+base.register({
+  kind = "meta-destination", custom = true, places = true,
+  preview = function(song, env, input)
+    local t, d, track, device, label, destination = meta_locate(song, env, input, "meta-destination")
+    local now = numbers_of(destination)
+    local wanted = wanted_numbers(song, env, destination, input, t, d)
+    local all = material_.destinations(device)
+    local display = { title = meta_title(label, destination, all, song, wanted), before = { target = target_words(song, now) }, after = { target = target_words(song, wanted) } }
+    if same_numbers(now, wanted) then display.unchanged = true end
+    local fence = numbers_of(destination)
+    fence.id, fence.prefix = identity(track, device), destination.prefix
+    return { target = target_of(t, d), prior = { target = target_words(song, now) }, fence = fence, display = display }
+  end,
+  apply = function(song, env, input, fence, desc)
+    local ok, t, d, track, device, label, destination = pcall(meta_locate, song, env, input, "meta-destination")
+    if not ok then base.gone_is_changed(t) end
+    if fence.id ~= identity(track, device) or fence.prefix ~= destination.prefix then fail("changed", base.moved_text(label)) end
+    local now = numbers_of(destination)
+    if not same_numbers(now, fence) then fail("changed", string.format("where %s sends changed since the preview", q(label))) end
+    local wanted = wanted_numbers(song, env, destination, input, t, d)
+    local prior = place_of_numbers(song, env, now)
+    local all = material_.destinations(device)
+    local unchanged = same_numbers(now, wanted)
+    if not unchanged then
+      song:describe_undo(desc)
+      -- (the producer's undo of it moves these: watched for it)
+      for _, k in pairs(destination.numbers) do
+        if env.watch_param then env.watch_param(t, d, k) end
+      end
+      write_numbers(destination, wanted)
+      local after = numbers_of(destination)
+      if not same_numbers(after, wanted) then
+        pcall(write_numbers, destination, now)
+        fail("failed", string.format("Renoise kept where %s sends as it was", q(label)))
+      end
+    end
+    local applied = place_of_numbers(song, env, wanted)
+    local kept = keep(env, t, d, track, device)
+    kept.prefix = destination.prefix
+    local journal_state = numbers_of(destination)
+    journal_state.prefix = destination.prefix
+    local journal_prior = { track = now.track, effect = now.effect, parameter = now.parameter, prefix = destination.prefix }
+    return {
+      applied = { place = applied, prefix = destination.prefix }, material = { at = kept, prior = prior },
+      target = target_of(t, d),
+      display = { title = meta_title(label, destination, all, song, wanted), before = { target = target_words(song, now) }, after = { target = target_words(song, wanted) }, unchanged = unchanged or nil },
+      undo = { desc = desc, entry = not unchanged },
+      prior = journal_prior, journal_applied = journal_state, place = { track = t, device = d },
+    }
+  end,
+  restore = function(song, env, restore, desc)
+    local material, applied = restore.material, restore.applied
+    if type(material) ~= "table" or type(material.at) ~= "table" or type(material.prior) ~= "table" or type(applied) ~= "table" or type(applied.place) ~= "table" then
+      bad("material and applied: where the device sent its values before and after")
+    end
+    local t, d, track, device = device_by_place(song, env, material.at, "Kumi aimed it")
+    local label = label_of(t, track, device)
+    local destination
+    for _, candidate in ipairs(material_.destinations(device)) do
+      if candidate.prefix == material.at.prefix then destination = candidate end
+    end
+    if not destination then fail("changed", string.format("%s isn't the device Kumi aimed any more", q(label))) end
+    local now = numbers_of(destination)
+    local was, why = numbers_of_place(song, env, material.prior, restore.layout)
+    if not was then
+      fail(why == "unknown" and "stale" or "gone", string.format("the device %s drove before Kumi aimed it %s, so Kumi can't aim it back: nothing was written",
+        q(label), why == "gone" and "is gone" or "moved in a way Kumi couldn't follow"))
+    end
+    if same_numbers(now, was) then
+      return { restored = { target = target_words(song, now) }, display = { title = label .. " sends where it did already" }, undo = { desc = desc, entry = false }, unwritten = true }
+    end
+    local set = numbers_of_place(song, env, applied.place, restore.layout)
+    if not restore.discard and not (set and same_numbers(now, set)) then
+      fail("changed", string.format("where %s sends changed in Renoise since Kumi aimed it", q(label)))
+    end
+    song:describe_undo(desc)
+    write_numbers(destination, was)
+    base.note_restored(env.journal, "meta-destination", { track = t, device = d })
+    local all = material_.destinations(device)
+    return { restored = { target = target_words(song, was) }, display = { title = meta_title(label, destination, all, song, was) .. " (put back)" }, undo = { desc = desc, entry = true } }
+  end,
+  reread = reread,
+  read = function(device, state)
+    for _, destination in ipairs(material_.destinations(device)) do
+      if destination.prefix == (state or {}).prefix then
+        local numbers = numbers_of(destination)
+        numbers.prefix = destination.prefix
+        return numbers
+      end
+    end
+    return { prefix = (state or {}).prefix }
+  end,
+  same = function(a, b) return a.prefix == b.prefix and same_numbers(a, b) end,
+})
 
 -- preset_read {ref | at, epoch, layout}: a device's preset data and what Kumi's host needs to edit it (its shape, its
 -- parameters, where a record finds it again). `at` is a record's place (`material`), for an undo.
