@@ -325,7 +325,7 @@ function M.prop_restore(song, env, spec, restore, desc)
   local display = { title = spec.title(loc.name, now, after) .. " (put back)", before = now, after = after }
   return {
     restored = wire(spec, after, env, loc), display = display, undo = { desc = desc, entry = spec.undoable }, place = loc.place,
-    applied = applied,
+    applied = applied, unwritten = spec.same(now, prior) or nil,
   }
 end
 

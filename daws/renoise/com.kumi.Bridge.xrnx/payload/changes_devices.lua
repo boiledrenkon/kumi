@@ -168,6 +168,8 @@ local param_spec = {
 -- value). It is fenced as the number is. Text without a number Renoise ignores, and "-1" or "None" would set the first entry,
 -- not none: Kumi refuses those.
 param_spec.wanted_at = function(loc, input)
+  -- (None, -1, is a place value too, though the parameter's minimum is 0: Renoise takes it as a value, not as text)
+  if loc.points and input.value == -1 then return { value = -1 } end
   if loc.points and type(input.valueString) == "string" then
     local n = tonumber(input.valueString:match("^%s*(%d+)"))
     local first = loc.points == "send" and 0 or 1
@@ -477,7 +479,7 @@ local function delete_restore(song, env, restore, desc)
   if present and present.device_path == saved.path then
     local state = material_.device_state(present)
     if state.state == (material.state or {}).state and state.display == (material.state or {}).display then
-      return { restored = { deleted = false }, display = { title = string.format("%s is back on %s already", q(label), q(track_name)) }, undo = { desc = desc, entry = false } }
+      return { restored = { deleted = false }, display = { title = string.format("%s is back on %s already", q(label), q(track_name)) }, undo = { desc = desc, entry = false }, unwritten = true }
     end
   end
   local pattern_now = material_.pool_now(song, env, material.pool)
@@ -602,7 +604,7 @@ local function move_restore(song, env, restore, desc)
   if is_it(to) then
     found = to
   elseif is_it(from) then
-    return { restored = { index = from }, display = { title = "The device is back at place " .. from .. " already" }, undo = { desc = desc, entry = false } }
+    return { restored = { index = from }, display = { title = "The device is back at place " .. from .. " already" }, undo = { desc = desc, entry = false }, unwritten = true }
   elseif restore.discard then
     fail("gone", "the device isn't on the track any more")
   else

@@ -270,7 +270,7 @@ local function move_restore(song, env, restore, desc)
     fail(restore.discard and "gone" or "changed", "the track isn't where Kumi moved it to any more: it was moved or renamed in Renoise since")
   end
   if from == at then
-    return { restored = { index = from }, display = { title = "The track is at place " .. from .. " already" }, undo = { desc = desc, entry = false } }
+    return { restored = { index = from }, display = { title = "The track is at place " .. from .. " already" }, undo = { desc = desc, entry = false }, unwritten = true }
   end
   local low, high = movable_range(song, at, track)
   if from < low or from > high then fail("changed", "the tracks between were changed in Renoise: Kumi can't move the track back past them") end

@@ -355,7 +355,12 @@ impl Changes {
             discard: params.get("discard") == Some(&Value::Bool(true)),
         };
         let (restored, undo) = self.in_block(&ctx, desc, kind.leaves_point(), |ctx| kind.restore(ctx, &restore))?;
-        Ok(json!({"epoch": reads.epoch(), "restored": restored.restored, "display": restored.display, "undo": undo}))
+        // (a restore that found it back already wrote nothing: said, so Kumi doesn't tell it as an undo it made)
+        let mut display = restored.display;
+        if restored.unwritten && display.get("note").is_none_or(Value::is_null) {
+            display["note"] = "It was back already: nothing was written.".into();
+        }
+        Ok(json!({"epoch": reads.epoch(), "restored": restored.restored, "display": display, "undo": undo}))
     }
 
     /// Runs a change as one undo block named `desc` (or inside the plan's block, when one is open) and says what REAPER's

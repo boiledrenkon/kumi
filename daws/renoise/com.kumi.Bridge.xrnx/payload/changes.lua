@@ -94,6 +94,11 @@ function M.restore(params, env)
     return put
   end)
   if done.kumi_job then return done end
+  -- (a restore that found it back already wrote nothing: said, so Kumi doesn't tell it as an undo it made)
+  if done.unwritten and type(done.display) == "table" and not done.display.note then
+    done.display.note = "It was back already: nothing was written."
+  end
+  done.unwritten = nil
   done.epoch, done.layout = env.epoch(), env.layout()
   return done
 end
