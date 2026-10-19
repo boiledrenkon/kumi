@@ -48,7 +48,7 @@ const SNAPSHOT_TRACKS: usize = 200;
 const SNAPSHOT_MARKERS: usize = 100;
 /// The snapshot's own share of the answer, so the tracks leave room for the markers and the selection.
 const SNAPSHOT_TRACK_BYTES: usize = 150 * 1024;
-const KINDS: [&str; 11] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope"];
+const KINDS: [&str; 12] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "call"];
 
 pub fn bad(message: impl Into<String>) -> (String, String) {
     ("bad-params".into(), message.into())
@@ -427,6 +427,25 @@ impl Reads {
 
     // ----- resolving refs -----
 
+    pub(crate) fn envelope_by_ref(
+        &self,
+        reaper: &Reaper,
+        proj: Project,
+        track: &TrackId,
+        which: &EnvelopeId,
+    ) -> Result<Envelope, (String, String)> {
+        let track = self.track_by_id(reaper, proj, track)?;
+        self.envelope_of(reaper, proj, track, which)
+    }
+
+    pub(crate) fn item_by_ref(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Item, (String, String)> {
+        self.item_by_guid(reaper, proj, guid)
+    }
+
+    pub(crate) fn take_by_ref(&self, reaper: &Reaper, proj: Project, guid: &str) -> Result<Take, (String, String)> {
+        self.take_by_guid(reaper, proj, guid)
+    }
+
     pub(crate) fn track_by_id(&self, reaper: &Reaper, proj: Project, id: &TrackId) -> Result<Track, (String, String)> {
         let mut registry = self.registry.borrow_mut();
         registry.track(reaper, proj, id).ok_or_else(|| match id {
@@ -491,6 +510,9 @@ impl Reads {
             return self.read_one(reaper, proj, reference);
         }
         let kind = request.kind.as_deref().unwrap_or_default();
+        if kind == "call" {
+            return self.read_call(reaper, proj, params);
+        }
         let pager = Pager::new(request.limit, ANSWER_BYTES);
         let cursor = request.cursor.as_deref();
         let parent = request.parent.as_deref();
@@ -525,6 +547,24 @@ impl Reads {
             }
             answer
         })
+    }
+
+    /// `read {kind: "call", fn, args}`: one of REAPER's API functions that only reads, called by name (see reaper/generic.rs).
+    /// One that changes the project is a change: the api-call kind.
+    fn read_call(&self, reaper: &Reaper, proj: Project, params: &Value) -> Answer {
+        use crate::reaper::generic;
+        let name = params.get("fn").and_then(Value::as_str).ok_or_else(|| bad("fn: the name of a REAPER API function"))?;
+        let index = generic::function(name).map_err(bad)?;
+        if let Some(why) = generic::denied(index) {
+            return Err(bad(why));
+        }
+        let args = params.get("args").cloned().unwrap_or(Value::Array(vec![]));
+        if !generic::reads_only(index, &args) {
+            return Err(bad(format!("{name} changes the project: make it a change, the api-call kind, which REAPER's undo takes back")));
+        }
+        let handles = CallRefs { reads: self, reaper, proj };
+        let (result, out) = reaper.call(index, &args, &handles, false).map_err(bad)?;
+        Ok(json!({"epoch": self.epoch(), "fn": name, "result": result, "out": out}))
     }
 
     /// `read {ref}`: the one object a ref names.
@@ -1035,6 +1075,36 @@ fn take_row(reaper: &Reaper, take: Take, place: Option<(usize, bool)>) -> Value 
         row["ccCount"] = ccs.into();
     }
     row
+}
+
+/// The refs of a generic call: a ref in its arguments is the object it names, and an object REAPER gives back is named
+/// by its ref.
+pub(crate) struct CallRefs<'a, 'r> {
+    pub reads: &'a Reads,
+    pub reaper: &'a Reaper<'r>,
+    pub proj: Project,
+}
+
+impl crate::reaper::generic::Handles for CallRefs<'_, '_> {
+    fn find(&self, base: &str, reference: &str) -> Result<*mut std::ffi::c_void, String> {
+        use crate::reaper::generic::{pointer, Handle};
+        let parsed = Ref::parse(reference).map_err(|e| format!("{reference:?} isn't a ref: {e}"))?;
+        let (reads, reaper, proj) = (self.reads, self.reaper, self.proj);
+        let handle = match (base, parsed) {
+            ("MediaTrack", Ref::Track(id)) => Handle::Track(reads.track_by_id(reaper, proj, &id).map_err(|e| e.1)?),
+            ("MediaItem", Ref::Item(guid)) => Handle::Item(reads.item_by_ref(reaper, proj, &guid).map_err(|e| e.1)?),
+            ("MediaItem_Take", Ref::Take(guid)) => Handle::Take(reads.take_by_ref(reaper, proj, &guid).map_err(|e| e.1)?),
+            ("TrackEnvelope", Ref::Envelope { track, which }) => {
+                Handle::Envelope(reads.envelope_by_ref(reaper, proj, &track, &which).map_err(|e| e.1)?)
+            }
+            (base, other) => return Err(format!("{reference} is r:{}, where a {base} is wanted", other.kind())),
+        };
+        Ok(pointer(handle))
+    }
+
+    fn name(&self, base: &str, pointer: *mut std::ffi::c_void) -> Value {
+        self.reaper.ref_of(self.proj, base, pointer)
+    }
 }
 
 #[cfg(test)]

@@ -3192,3 +3192,217 @@ fn deleting_an_fx_with_a_meter_in_it_is_not_refused_for_the_meter() {
     assert_eq!(kick_fx().len(), 1);
     drop(dir);
 }
+
+// ----- the escape hatches: a REAPER API function by name, and a Lua chunk (M4) -----
+
+fn call_read(lab: &Lab, params: Value) -> Answer {
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    lab.reads.read(&reaper, &params)
+}
+
+#[test]
+fn a_function_that_only_reads_is_called_by_name_with_refs_in_and_out() {
+    let lab = Lab::new();
+    let name = call_read(&lab, json!({"kind": "call", "fn": "GetTrackName", "args": [KICK]})).unwrap();
+    assert_eq!((&name["result"], &name["out"]["bufOut"]), (&json!(true), &json!("Kick")));
+    let named = call_read(&lab, json!({"kind": "call", "fn": "GetTrackName", "args": {"track": KICK}})).unwrap();
+    assert_eq!(named["out"]["bufOut"], "Kick", "by name as well as in order");
+    let volume = call_read(&lab, json!({"kind": "call", "fn": "GetMediaTrackInfo_Value", "args": [KICK, "D_VOL"]})).unwrap();
+    assert!(volume["result"].is_number());
+    let count = call_read(&lab, json!({"kind": "call", "fn": "CountTracks"})).unwrap();
+    assert_eq!(count["result"], 4, "the project, optional, is the open one");
+    let second = call_read(&lab, json!({"kind": "call", "fn": "GetTrack", "args": [0, 1]})).unwrap();
+    assert_eq!(second["result"], KICK, "a track REAPER gives back is its ref");
+    // A GetSet… function asked to get only reads.
+    let text = call_read(&lab, json!({"kind": "call", "fn": "GetSetMediaTrackInfo_String", "args": [KICK, "P_NAME", "", false]})).unwrap();
+    assert_eq!(text["out"]["stringNeedBig"], "Kick");
+}
+
+#[test]
+fn a_call_by_name_that_changes_denied_or_unknown_is_refused_in_a_read() {
+    let lab = Lab::new();
+    let refused = |params: Value| call_read(&lab, params).unwrap_err();
+    let (code, message) = refused(json!({"kind": "call", "fn": "SetMediaTrackInfo_Value", "args": [KICK, "D_VOL", 0.5]}));
+    assert_eq!(code, "bad-params");
+    assert!(message.contains("api-call"), "{message}");
+    let (_, message) = refused(json!({"kind": "call", "fn": "GetSetMediaTrackInfo_String", "args": [KICK, "P_NAME", "x", true]}));
+    assert!(message.contains("api-call"), "a GetSet… asked to set changes the project: {message}");
+    assert!(refused(json!({"kind": "call", "fn": "Main_OnCommand", "args": [40001, 0]})).1.contains("action method"));
+    assert!(refused(json!({"kind": "call", "fn": "GetUserInputs", "args": []})).1.contains("dialog"));
+    assert!(refused(json!({"kind": "call", "fn": "GetTrackNam"})).1.contains("perhaps GetTrackName"));
+    assert!(refused(json!({"kind": "call", "fn": "GetTrackName", "args": ["r:track:{NOPE}"]})).1.contains("track"));
+    assert!(refused(json!({"kind": "call", "fn": "GetTrackName", "args": []})).1.contains("track must be a ref"));
+    // A function with a parameter the call can't make: run-lua can call it.
+    let uncallable = crate::reaper::generic::function("LICE_Clear").unwrap();
+    assert!(crate::reaper::generic::uncallable(uncallable).is_some());
+}
+
+#[test]
+fn every_function_of_the_header_is_callable_by_name_or_says_why_not() {
+    let callable = (0..crate::api::FUNCTION_COUNT).filter(|&i| crate::reaper::generic::uncallable(i).is_none()).count();
+    assert!(callable > 600, "only {callable} of {} functions can be called by name", crate::api::FUNCTION_COUNT);
+    for index in 0..crate::api::FUNCTION_COUNT {
+        if let Some(why) = crate::reaper::generic::uncallable(index) {
+            assert!(!why.is_empty(), "{}", crate::reaper::generic::name_of(index));
+        }
+    }
+}
+
+#[test]
+fn a_function_that_changes_the_project_is_a_change_reapers_undo_takes_back_and_kumis_refuses() {
+    let lab = Lab::new();
+    let input = json!({"fn": "SetMediaTrackInfo_Value", "args": [KICK, "D_VOL", 0.5]});
+    let (preview, applied) = lab.make("api-call", input, "Kumi: Called SetMediaTrackInfo_Value (kc001)");
+    assert_eq!(preview["display"]["title"], "Called SetMediaTrackInfo_Value");
+    assert!(preview["display"]["note"].as_str().unwrap().contains("REAPER's own undo"));
+    assert_eq!(state(|s| s.tracks[1].volume), 0.5);
+    assert_eq!(applied["applied"]["result"], true);
+    assert_eq!(applied["undo"]["entry"], true, "one point, named by the host");
+    assert_eq!(top().as_deref(), Some("Kumi: Called SetMediaTrackInfo_Value (kc001)"));
+    let (code, message) = lab.undo("api-call", &preview, &applied, "Kumi: undo (kc002)").unwrap_err();
+    assert_eq!(code, "daw-only");
+    assert!(message.contains("REAPER's own undo"), "{message}");
+    assert_eq!(state(|s| s.tracks[1].volume), 0.5, "nothing written");
+    // Refused at the preview, nothing written: one that only reads, a bad ref, a missing argument, a denied one.
+    let preview_of = |input: Value| lab.call("change_preview", json!({"kind": "api-call", "input": input})).unwrap_err();
+    assert!(preview_of(json!({"fn": "GetTrackName", "args": [KICK]})).1.contains("only reads"));
+    assert!(preview_of(json!({"fn": "SetMediaTrackInfo_Value", "args": ["r:track:{NOPE}", "D_VOL", 0.1]})).1.contains("track"));
+    assert!(preview_of(json!({"fn": "SetMediaTrackInfo_Value", "args": [KICK, "D_VOL"]})).1.contains("newvalue"));
+    assert!(preview_of(json!({"fn": "Main_OnCommandEx", "args": [40001, 0, 0]})).1.contains("action method"));
+    assert_eq!(state(|s| s.tracks[1].volume), 0.5);
+}
+
+// A stand-in for REAPER's Lua: what the wrapper would do, from the wrapper's text.
+fn token_of(script: &str) -> String {
+    let start = script.find("local TOKEN, LIMIT_MS, CHECK = \"").unwrap() + "local TOKEN, LIMIT_MS, CHECK = \"".len();
+    script[start..].split('"').next().unwrap().to_string()
+}
+
+fn checking(script: &str) -> bool {
+    script.lines().find(|l| l.starts_with("local TOKEN, LIMIT_MS, CHECK")).unwrap().ends_with("true")
+}
+
+fn answer(script: &str, text: &str) {
+    let token = token_of(script);
+    state(|s| s.ext_state.insert(("kumi_run".into(), token), text.into()));
+}
+
+fn lua_ok(script: &str) {
+    if checking(script) {
+        return answer(script, r#"{"compiled":true}"#);
+    }
+    // (what `reaper.SetMediaTrackInfo_Value(track, "D_VOL", 0.25); print("hi"); return 42, track` would do)
+    state(|s| {
+        s.tracks[1].volume = 0.25;
+        s.undo_dirty = true;
+    });
+    answer(script, r#"{"compiled":true,"ok":true,"result":[42,"r:track:{BBBB}"],"printed":["hi"]}"#);
+}
+
+fn lua_syntax(script: &str) {
+    answer(script, r#"{"compiled":false,"error":{"message":"unexpected symbol near 'x'","line":2}}"#);
+}
+
+fn lua_fails(script: &str) {
+    if checking(script) {
+        return answer(script, r#"{"compiled":true}"#);
+    }
+    state(|s| {
+        s.tracks[1].volume = 0.125;
+        s.undo_dirty = true;
+    });
+    answer(script, r#"{"compiled":true,"ok":false,"error":{"message":"attempt to call a nil value","line":3},"printed":[]}"#);
+}
+
+fn lua_silent(script: &str) {
+    if checking(script) {
+        answer(script, r#"{"compiled":true}"#);
+    }
+}
+
+#[test]
+fn a_lua_chunk_runs_once_in_one_undo_point_and_only_reapers_undo_takes_it_back() {
+    let lab = Lab::new();
+    state(|s| s.on_script = Some(lua_ok));
+    let code = "-- louder\nlocal track = reaper.GetTrack(0, 1)\nreaper.SetMediaTrackInfo_Value(track, \"D_VOL\", 0.25)\nprint(\"hi\")\nreturn 42, track";
+    let (preview, applied) = lab.make("run-lua", json!({"code": code}), "Kumi: Ran Lua (kl001)");
+    assert_eq!(preview["display"]["title"], "Ran Lua: local track = reaper.GetTrack(0, 1)");
+    assert_eq!(state(|s| s.tracks[1].volume), 0.25, "run once: the preview only compiled it");
+    assert_eq!(applied["applied"]["result"], json!([42, KICK]));
+    assert_eq!(applied["applied"]["printed"], json!(["hi"]));
+    assert_eq!((&applied["undo"]["entry"], top().as_deref()), (&json!(true), Some("Kumi: Ran Lua (kl001)")));
+    assert!(state(|s| s.scripts.is_empty() && s.ext_state.is_empty()), "the script is taken away, and its answer");
+    let (code, message) = lab.undo("run-lua", &preview, &applied, "Kumi: undo (kl002)").unwrap_err();
+    assert_eq!(code, "daw-only");
+    assert!(message.contains("Lua chunk"), "{message}");
+}
+
+#[test]
+fn a_lua_chunk_that_doesnt_compile_is_refused_at_the_preview_and_one_that_fails_says_where_and_what_stays() {
+    let lab = Lab::new();
+    state(|s| s.on_script = Some(lua_syntax));
+    let (code, message) = lab.call("change_preview", json!({"kind": "run-lua", "input": {"code": "local x =\nx x"}})).unwrap_err();
+    assert_eq!(code, "bad-params");
+    assert!(message.contains("line 2") && message.contains("unexpected symbol"), "{message}");
+    state(|s| s.on_script = Some(lua_fails));
+    let (_, applied) = lab.make(
+        "run-lua",
+        json!({"code": "reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, 1), \"D_VOL\", 0.125)\nlocal f\nf()"}),
+        "Kumi: Ran Lua (kl003)",
+    );
+    assert_eq!(applied["applied"]["failed"]["line"], 3);
+    let note = applied["display"]["note"].as_str().unwrap();
+    assert!(note.contains("line 3") && note.contains("stays"), "{note}");
+    assert_eq!(state(|s| s.tracks[1].volume), 0.125);
+    assert_eq!(top().as_deref(), Some("Kumi: Ran Lua (kl003)"), "what it did before the error is one point REAPER's undo takes back");
+}
+
+#[test]
+fn a_lua_chunk_that_gives_no_answer_is_uncertain_and_limits_are_checked() {
+    let lab = Lab::new();
+    state(|s| s.on_script = Some(lua_silent));
+    let preview = lab.call("change_preview", json!({"kind": "run-lua", "input": {"code": "return 1"}})).unwrap();
+    let (code, _) = lab
+        .call(
+            "change_apply",
+            json!({"kind": "run-lua", "input": {"code": "return 1"}, "fence": preview["fence"], "desc": "Kumi: Ran Lua (kl004)"}),
+        )
+        .unwrap_err();
+    assert_eq!(code, "uncertain");
+    let refused = |input: Value| lab.call("change_preview", json!({"kind": "run-lua", "input": input})).unwrap_err().1;
+    assert!(refused(json!({"code": "  "})).contains("code"));
+    assert!(refused(json!({"code": "return 1", "timeoutMs": 60_000})).contains("timeoutMs"));
+}
+
+/// The wrapper itself, run by LuaJIT where it is installed, against a stand-in `reaper` table.
+#[test]
+fn the_lua_wrapper_answers_results_prints_errors_and_the_time_limit() {
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        eprintln!("luajit isn't installed: the wrapper's own test is skipped");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let run = |code: &str, limit: u64, check: bool| -> Value {
+        // (LuaJIT calls no hook inside code it compiled: REAPER's Lua compiles nothing, so neither does this)
+        let stub = "if jit then jit.off() end\nreaper = { SetExtState = function(_, _, v) io.write(v) end, time_precise = os.clock, \
+                    ValidatePtr2 = function() return false end, GetMasterTrack = function() end, ShowConsoleMsg = function() end }\n";
+        let path = dir.path().join("w.lua");
+        std::fs::write(&path, format!("{stub}{}", super::lua::wrapper(code, "t1", limit, check))).unwrap();
+        let out = std::process::Command::new("luajit").arg(&path).output().unwrap();
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
+    };
+    assert_eq!(run("return 1", 1000, true), json!({"compiled": true}));
+    let ran = run("print('a', 2)\nreaper.ShowConsoleMsg('b')\nreturn {x = 1.5, y = {1, 2, 'q\"'}}, nil, true", 1000, false);
+    assert_eq!(ran["ok"], true);
+    assert_eq!(ran["printed"], json!(["a\t2", "b"]));
+    assert_eq!(ran["result"], json!([{"x": 1.5, "y": [1, 2, "q\""]}, null, true]));
+    let bad = run("local x =\nx x", 1000, false);
+    assert_eq!((&bad["compiled"], &bad["error"]["line"]), (&json!(false), &json!(2)));
+    let failed = run("local a = 1\nerror('boom')", 1000, false);
+    assert_eq!((&failed["ok"], &failed["error"]["line"], &failed["error"]["message"]), (&json!(false), &json!(2), &json!("boom")));
+    let looped = run("while true do end", 50, false);
+    assert!(looped["error"]["message"].as_str().unwrap().contains("stopped after 50 ms"), "{looped}");
+    // A chunk that closes the wrapper's own long bracket is still one string.
+    assert_eq!(run("return ']]'", 1000, false)["result"], "]]");
+}
