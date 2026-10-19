@@ -898,6 +898,24 @@ fn a_preview_plays_out_loud_and_stops_at_its_end_on_play_and_on_audition_stop() 
 }
 
 #[test]
+fn a_render_stops_the_audition_playing_and_says_so() {
+    let rig = Rig::new();
+    let file = wav_file(&rig.folder(), "take.wav", 4.0);
+    rig.ask("audition", json!({"previewId": "p1", "file": file})).unwrap();
+    rig.ask(
+        "render_start",
+        json!({"jobId": "ja1", "sources": [source("mix", "master", None, None)], "range": {"fromBeat": 0, "beats": 4}}),
+    )
+    .unwrap();
+    rig.tick();
+    let status = rig.status("ja1");
+    assert_eq!(status["state"], "done");
+    assert!(status["notes"][0].as_str().unwrap().contains("audition playing was stopped"), "{status}");
+    assert!(fake::with(|s| s.listening.previews.is_empty()));
+    assert!(rig.board().playing().is_none());
+}
+
+#[test]
 fn a_preview_goes_to_the_masters_hardware_output() {
     let rig = Rig::new();
     let file = wav_file(&rig.folder(), "take.wav", 1.0);

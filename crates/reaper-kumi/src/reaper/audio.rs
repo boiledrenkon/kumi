@@ -14,6 +14,11 @@ fn cstring(text: &str) -> CString {
 /// Counts REAPER's dummy audio device as heard (a lab without a device measuring previews); never set for a producer.
 const LAB_DUMMY_ENV: &str = "KUMI_REAPER_LAB_DUMMY";
 
+/// Whether this REAPER is a lab's, told to count its dummy device as heard.
+pub fn lab_dummy() -> bool {
+    std::env::var(LAB_DUMMY_ENV).is_ok_and(|v| v == "1")
+}
+
 /// What `GetSetProjectInfo_String` reads into: its buffer has no size, and `RENDER_TARGETS` lists a file per stem.
 const PROJECT_TEXT: usize = 1 << 20;
 
@@ -136,7 +141,7 @@ impl Reaper<'_> {
     /// `KUMI_REAPER_LAB_DUMMY=1` counts the dummy device as heard, for measuring previews in a lab with no device.
     pub fn audio_heard(&self) -> bool {
         let dummy = self.audio_device("MODE").is_some_and(|mode| mode.contains("Dummy"));
-        self.audio_running() && self.audio_outputs() > 0 && (!dummy || std::env::var(LAB_DUMMY_ENV).is_ok_and(|v| v == "1"))
+        self.audio_running() && self.audio_outputs() > 0 && (!dummy || lab_dummy())
     }
 
     /// What the device is (`MODE`, `IDENT_OUT`, `SRATE`, `BSIZE`); None when REAPER can't say.

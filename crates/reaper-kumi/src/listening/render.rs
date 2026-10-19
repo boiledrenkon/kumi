@@ -548,6 +548,14 @@ pub enum Ended {
     Cancelled { notes: Vec<String> },
 }
 
+impl Ended {
+    /// A note first among the job's.
+    pub fn note_first(&mut self, note: String) {
+        let (Ended::Done { notes, .. } | Ended::Failed { notes, .. } | Ended::Cancelled { notes }) = self;
+        notes.insert(0, note);
+    }
+}
+
 /// What the running render asks of the one who runs it: to run REAPER's render (saying meanwhile that it renders, and
 /// keeping up what must go on inside it), and whether Kumi asked it to stop.
 pub trait Hooks {

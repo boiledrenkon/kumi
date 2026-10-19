@@ -542,9 +542,18 @@ impl Listening {
             }
             return;
         }
+        // REAPER closes its audio device to render (measured): an audition playing would stall and go on after.
+        let auditioning = self.preview.borrow().is_some();
+        if auditioning {
+            crate::log::line("the preview stops: Kumi renders, and REAPER closes its audio device to render");
+            self.stop_preview(reaper);
+        }
         let hooks = RunHooks { listening: self, snapshot, out, job: &plan.job };
-        let ended = render::run(reaper, reads, &plan, &hooks);
+        let mut ended = render::run(reaper, reads, &plan, &hooks);
         self.rendering.set(false);
+        if auditioning {
+            ended.note_first("The audition playing was stopped: REAPER closes its audio device to render".into());
+        }
         self.end(&plan.job, ended);
     }
 

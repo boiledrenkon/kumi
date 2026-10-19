@@ -402,7 +402,10 @@ impl Capture {
             return Some(self.fail(reaper, "stale", "the project in the tab changed while Kumi listened: read again"));
         }
         // A device whose blocks come with no output channel can't be heard (REAPER's dummy device: measured).
-        if ring.outputs.load(Ordering::Relaxed) == 0 && ring.missing.load(Ordering::Relaxed) >= NO_OUTPUT_BLOCKS {
+        if ring.outputs.load(Ordering::Relaxed) == 0
+            && ring.missing.load(Ordering::Relaxed) >= NO_OUTPUT_BLOCKS
+            && !crate::reaper::lab_dummy()
+        {
             return Some(self.fail(reaper, "failed", NO_OUTPUT));
         }
         let Some(rate) = ring.rate() else {
@@ -458,16 +461,25 @@ impl Capture {
     }
 
     fn finish(&mut self, reaper: &Reaper, rate: f64, partial: Option<String>) -> Ended {
+        // How far REAPER's position strayed from where the frames counted since the last mark put it (for the log).
+        let drift = match (self.marks.last(), self.last) {
+            (Some(mark), Some((frame, position, true))) => mark[0].as_u64().zip(mark[1].as_f64()).map(|(mark_frame, mark_seconds)| {
+                let counted = frame.saturating_sub(mark_frame) as f64 / rate;
+                ((position - mark_seconds - counted * reaper.play_rate(self.proj)) * 1000.0, counted)
+            }),
+            _ => None,
+        };
         self.stop_hook(reaper);
         let ring = self.registered.ring();
         crate::log::line(&format!(
-            "capture {}: {} frames, {} lost (the ring was full), device outputs {}, {} blocks without a buffer, peak {:.4}",
+            "capture {}: {} frames, {} lost (the ring was full), device outputs {}, {} blocks without a buffer, peak {:.4}, drift {}",
             self.job,
             ring.frames(),
             ring.dropped(),
             ring.outputs.load(Ordering::Relaxed),
             ring.missing.load(Ordering::Relaxed),
-            f32::from_bits(ring.peak.load(Ordering::Relaxed))
+            f32::from_bits(ring.peak.load(Ordering::Relaxed)),
+            drift.map_or("unknown".into(), |(ms, over)| format!("{ms:+.1} ms over {over:.1} s"))
         ));
         let frames = match self.writer.take().map(wav::Writer::finish) {
             Some(Ok(frames)) => frames,

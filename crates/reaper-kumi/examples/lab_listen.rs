@@ -3,7 +3,8 @@
 //! "status": true}` (asks `listen_status` until the job ends, and `status` beside it when asked), `{"sleepMs": n}`, or
 //! `{"cancelAfterMs": n, "job": jobId}` (asks `listen_cancel` on a second connection after n ms, while the steps go on).
 //! A string `"$epoch"` in params is the epoch the last answer named; `"$ref:<name>"` a track's ref by its name,
-//! `"$fx:<name>"` the ref of that track's first FX, `"$prev:<pointer>"` a value of the previous answer (a JSON pointer).
+//! `"$fx:<name>"` the ref of that track's first FX, `"$prev:<pointer>"` a value of the previous answer (a JSON pointer; a
+//! poll's answer is its last `listen_status`).
 //!
 //! cargo run -p reaper-kumi --example lab_listen -- <kumi home> <steps.json>
 
@@ -134,6 +135,7 @@ fn main() {
                     client.call("status", json!({}));
                 }
                 let state = answer["result"]["state"].as_str().unwrap_or("?").to_string();
+                prev = answer;
                 if matches!(state.as_str(), "done" | "failed" | "cancelled" | "?") || Instant::now() > until {
                     break;
                 }
