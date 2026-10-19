@@ -5,13 +5,20 @@
 //!
 //! The hook has nothing to read or save: it only counts. An undo's reload (`isUndo`) is not a load.
 
-use std::cell::Cell;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, RefCell, UnsafeCell};
+use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
+
+/// Asks REAPER which project it is loading: its pointer, or None when it can't say.
+type Loading = Box<dyn Fn() -> Option<usize>>;
 
 thread_local! {
     // REAPER calls the hook on its main thread, which is also the one that ticks.
     static LOADS: Cell<u64> = const { Cell::new(0) };
+    /// Loads by the project they went into (its pointer); 0 holds those REAPER didn't name.
+    static BY_PROJECT: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
+    /// Asks REAPER which project it is loading (`GetCurrentProjectInLoadSave`), once the extension can.
+    static LOADING: RefCell<Option<Loading>> = const { RefCell::new(None) };
 }
 
 /// How many projects have been loaded or made since the extension loaded.
@@ -19,9 +26,25 @@ pub fn loads() -> u64 {
     LOADS.with(Cell::get)
 }
 
-/// A load, as REAPER's hook reports it.
+/// Loads into this project (by its pointer), and those REAPER didn't name: a load into another tab's project (the render
+/// queue, a subproject) isn't this one's.
+pub fn loads_of(project: usize) -> u64 {
+    BY_PROJECT.with(|by| {
+        let by = by.borrow();
+        by.get(&project).copied().unwrap_or(0) + if project == 0 { 0 } else { by.get(&0).copied().unwrap_or(0) }
+    })
+}
+
+/// How the hook asks REAPER which project it is loading.
+pub fn ask_with(loading: impl Fn() -> Option<usize> + 'static) {
+    LOADING.with(|asking| *asking.borrow_mut() = Some(Box::new(loading)));
+}
+
+/// A load, as REAPER's hook reports it, counted for the project REAPER says it is loading.
 pub fn note_load() {
+    let project = LOADING.with(|asking| asking.try_borrow().ok().and_then(|asking| asking.as_ref().and_then(|ask| ask()))).unwrap_or(0);
     LOADS.with(|loads| loads.set(loads.get() + 1));
+    BY_PROJECT.with(|by| *by.borrow_mut().entry(project).or_insert(0) += 1);
 }
 
 /// `project_config_extension_t`, as reaper_plugin.h declares it.
