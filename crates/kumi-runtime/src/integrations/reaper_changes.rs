@@ -1,14 +1,26 @@
 //! What Kumi can change in REAPER (M3): tracks, sends, markers and regions, the tempo map and loop, a track's FX and
 //! their parameters, and a take's MIDI notes. Each kind is the extension's (`crates/reaper-kumi/src/changes`).
-use super::own_changes::{OwnChangeSet, OwnKind};
+use super::own_changes::{OwnAction, OwnChangeSet, OwnKind};
 use crate::core::contracts::ChangeFamily::*;
 
 const PLAN: &str = "Make changes in REAPER in one call, in order: each step is one of your change tools or a step below with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new track, an added FX, a new marker). A wait step ({\"beats\": 8} or {\"seconds\": 4}) pauses between steps. REAPER takes the whole call back with one undo. It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
 const UNDO: &str = "Undo one of your changes from this session: pass its change id (such as c3), or \"last\" for the latest one. Kumi puts back exactly what that change set, as a new step of REAPER's undo; it only works while nobody changed the same thing in REAPER since, and if so, say what happened (discard: true puts it back anyway, only when the producer asks). With final: true, when the undo is all that was asked, Kumi tells the producer and the answer ends there, with no reply from you.";
 const INSTRUCTIONS: &str = "Change REAPER with your change tools, or several changes at once with make_changes, using the refs your reads gave. Each change is one step of REAPER's undo, and undo_change takes back one of yours as a new step (REAPER's own undo is the producer's). Indexes here count from 0 (a track's or FX's place). Positions are positionBeats (quarter notes from the project start) or position (seconds), never both. The observation's kumiChanges lists your latest changes and where each stands (applied, undone, kept, unsure); the producer can undo one in REAPER or in HISTORY without telling you, so go by kumiChanges and REAPER, not by memory.";
 
-pub static CHANGES: OwnChangeSet =
-    OwnChangeSet { kinds: &KINDS, plan_description: PLAN, undo_description: UNDO, instructions: INSTRUCTIONS, plan_steps: true };
+pub static CHANGES: OwnChangeSet = OwnChangeSet {
+    kinds: &KINDS,
+    actions: &ACTIONS,
+    plan_description: PLAN,
+    undo_description: UNDO,
+    instructions: INSTRUCTIONS,
+    plan_steps: true,
+};
+
+static ACTIONS: [OwnAction; 3] = [
+    OwnAction { tool: "play", method: "transport_play", description: "Start REAPER playing from where it is.", schema: r#"{"type":"object","additionalProperties":false,"properties":{}}"#, core: true, playing: Some(true), title: "Playing" },
+    OwnAction { tool: "stop", method: "transport_stop", description: "Stop REAPER's playback and recording.", schema: r#"{"type":"object","additionalProperties":false,"properties":{}}"#, core: true, playing: Some(false), title: "Stopped" },
+    OwnAction { tool: "set_cursor", method: "cursor_set", description: "Move REAPER's edit cursor to positionBeats (quarter notes from the start) or position (seconds); playback follows while it plays.", schema: r#"{"type":"object","additionalProperties":false,"properties":{"positionBeats":{"type":"number","minimum":0},"position":{"type":"number","minimum":0}}}"#, core: false, playing: None, title: "Moved the edit cursor" },
+];
 
 static KINDS: [OwnKind; 34] = [
     OwnKind::new("track_volume", "track-volume", Mixer, "Change a track's fader volume in dB (-150 or less is silence, at most +24); the master too.", r#"{"type":"object","additionalProperties":false,"required":["ref","volumeDb"],"properties":{"ref":{"type":"string","description":"The track (master allowed)"},"volumeDb":{"type":"number","minimum":-150,"maximum":24}}}"#).core(),

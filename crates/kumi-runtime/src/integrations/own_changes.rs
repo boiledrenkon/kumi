@@ -97,9 +97,39 @@ impl StepKind for OwnKind {
     }
 }
 
+/// One of a DAW's actions: what a plan's step or a tool of its own asks the DAW to do that no HISTORY row keeps (play,
+/// stop, move the cursor), through one of the host's tools.
+pub struct OwnAction {
+    pub tool: &'static str,
+    /// The host's tool for it.
+    pub method: &'static str,
+    pub description: &'static str,
+    /// Its input, as JSON Schema.
+    pub schema: &'static str,
+    /// A tool of its own on every request; the others are make_changes steps.
+    pub core: bool,
+    /// What it leaves the transport doing: playing, stopped, or as it was.
+    pub playing: Option<bool>,
+    /// What the producer is told it did.
+    pub title: &'static str,
+}
+
+impl OwnAction {
+    fn input_schema(&self) -> JsonObject {
+        serde_json::from_str(self.schema).expect("an action's schema is JSON")
+    }
+}
+
+impl StepKind for OwnAction {
+    fn since(&self) -> Option<&str> {
+        None
+    }
+}
+
 /// What a DAW of Kumi's own can change, and how its plans and undo are described.
 pub struct OwnChangeSet {
     pub kinds: &'static [OwnKind],
+    pub actions: &'static [OwnAction],
     /// make_changes' description before the lines of the steps that aren't tools of their own.
     pub plan_description: &'static str,
     pub undo_description: &'static str,
@@ -128,6 +158,8 @@ pub struct Link<S: RefScheme> {
     pub tempo: Rc<Cell<Option<f64>>>,
     /// The project's saved file as last read, for the safety copy.
     pub file: Rc<RefCell<Option<String>>>,
+    /// While a plan's undo step is open: the titles of the changes made in it, which name the step when it closes.
+    pub step_titles: RefCell<Option<Vec<String>>>,
 }
 
 impl<S: RefScheme> Link<S> {
@@ -202,10 +234,22 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
     }
     async fn step_begin(&self) -> Option<String> {
         let opened = self.link.call("undo_step_begin", json!({"label": "Kumi"}), abort::timeout(10_000)).await.ok()?.ok()?;
-        opened.get("stepId").and_then(Value::as_str).map(str::to_owned)
+        let id = opened.get("stepId").and_then(Value::as_str).map(str::to_owned)?;
+        *self.link.step_titles.borrow_mut() = Some(Vec::new());
+        Some(id)
     }
     async fn step_end(&self, id: String) {
-        let _ = self.link.call("undo_step_end", json!({"stepId": id}), abort::timeout(10_000)).await;
+        // The DAW's undo menu names the plan by what it did: its first change, and how many more.
+        let titles = self.link.step_titles.borrow_mut().take().unwrap_or_default();
+        let mut args = json!({"stepId": id});
+        if let Some(first) = titles.first() {
+            args["label"] = match titles.len() {
+                1 => first.clone(),
+                n => format!("{first} and {} more", n - 1),
+            }
+            .into();
+        }
+        let _ = self.link.call("undo_step_end", args, abort::timeout(10_000)).await;
     }
     async fn stop_transport(&self, signal: Signal) -> bool {
         matches!(self.link.call("transport_stop", json!({}), signal).await, Ok(Ok(answer)) if answer.get("stopped") != Some(&Value::Bool(false)))
@@ -328,7 +372,8 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         &self.history.host.link
     }
 
-    /// The tools for this DAW's changes: each core kind's, make_changes with every kind as a step, and undo_change.
+    /// The tools for this DAW's changes: each core kind's and action's, make_changes with every kind and action as a step,
+    /// and undo_change.
     pub fn tools(self: &Rc<Self>) -> Vec<Rc<dyn KernelTool>> {
         let set = self.link().daw.changes;
         let mut tools: Vec<Rc<dyn KernelTool>> = Vec::new();
@@ -340,7 +385,14 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
                 lines.push(step_line(kind.tool, kind.description, &kind.input_schema()));
             }
         }
-        let steps = set.kinds.iter().map(|kind| kind.tool.to_owned()).collect();
+        for action in set.actions {
+            if action.core {
+                tools.push(Rc::new(ActionTool { engine: self.clone(), action }));
+            } else {
+                lines.push(step_line(action.tool, action.description, &action.input_schema()));
+            }
+        }
+        let steps = set.kinds.iter().map(|kind| kind.tool).chain(set.actions.iter().map(|action| action.tool)).map(str::to_owned).collect();
         let (description, schema) = plan_tool(set.plan_description, &serde_json::from_str(PLAN_SCHEMA).expect("JSON"), steps, &lines);
         tools.push(Rc::new(PlanTool { engine: self.clone(), description, schema }));
         tools.push(Rc::new(UndoTool { engine: self.clone() }));
@@ -473,8 +525,12 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         self.place(&mut args, &input);
         let preview = match self.link().call("change_preview", args, signal.clone()).await {
             Ok(Ok(preview)) => preview,
+            // Busy (a dialog): the plan stops here, so nothing after it is made out of order once the dialog closes.
             Ok(Err(refused)) if refused.busy => {
-                return ChangeOutcome::error(format!("{} is busy ({}): nothing changed; try again in a moment", words.app, refused.why))
+                return ChangeOutcome::stop(format!(
+                    "{} is busy ({}), so this wasn't made and nothing of it was written; in a plan, the steps after it weren't run and the ones before it stand, each undoable. Try again once it's free",
+                    words.app, refused.why
+                ))
             }
             Ok(Err(refused)) => return ChangeOutcome::error(self.refusal(&refused, &asked)),
             Err(error) if error.is_aborted() => {
@@ -511,7 +567,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             }
             Ok(Err(refused)) if refused.busy => {
                 return ChangeOutcome::stop(format!(
-                    "{} went busy ({}) before this step, so it wasn't made and nothing of it was written; the steps before it stand, each undoable",
+                    "{} went busy ({}) before this was written, so it wasn't made and nothing of it was written; in a plan, the steps after it weren't run and the ones before it stand, each undoable. Try again once it's free",
                     words.app, refused.why
                 ))
             }
@@ -542,11 +598,46 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         ChangeOutcome { text: stringify(&reply), is_error: false, missed: None, stops: false }
     }
 
+    /// One action through the host's tool: what the producer is told it did, or why it didn't.
+    async fn one_action(&self, action: &'static OwnAction, input: JsonObject, signal: Signal) -> ActionOutcome {
+        let words = self.link().words().words;
+        let mut args = Value::Object(input.clone());
+        self.place(&mut args, &input);
+        match self.link().call(action.method, args, signal).await {
+            Ok(Ok(answer)) => {
+                follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &answer);
+                let playing = action.playing.or_else(|| answer.get("playing").and_then(Value::as_bool));
+                let recording = (action.playing == Some(false)).then_some(false);
+                let mut text = json!({"done": action.title});
+                for field in ["playing", "positionBeats", "position", "wasRecording"] {
+                    if let Some(value) = answer.get(field) {
+                        text[field] = value.clone();
+                    }
+                }
+                let done = ActionSummary { title: action.title.into(), playing, recording };
+                ActionOutcome { text: stringify(&text), is_error: false, maybe: None, done: Some(done) }
+            }
+            Ok(Err(refused)) if refused.busy => {
+                ActionOutcome::error(format!("{} is busy ({}): try again in a moment", words.app, refused.why))
+            }
+            Ok(Err(refused)) => ActionOutcome::error(self.refusal(&refused, &input)),
+            Err(_) => ActionOutcome {
+                text: format!("{} didn't answer, so it may or may not have done it", words.app),
+                is_error: true,
+                maybe: Some(true),
+                done: None,
+            },
+        }
+    }
+
     /// A change kept in HISTORY under its transaction: its id.
     fn remember(&self, kind: &OwnKind, title: &str, transaction: &str, state: ChangeState, note: Option<String>) -> String {
         let mut record = new_record(kind.family, ChangeSummary::title(title), state, self.history.host.now_ms());
         record.note = note;
         let id = record.id.clone();
+        if let Some(titles) = self.link().step_titles.borrow_mut().as_mut() {
+            titles.push(title.to_owned());
+        }
         self.history.remember(record, transaction.into(), None);
         self.history.made_by(&id, kind.tool);
         self.history.changes_this_turn.set(self.history.changes_this_turn.get() + 1);
@@ -595,7 +686,7 @@ fn find_unknown(value: &Value, key: &str, out: &mut Option<String>, depth: usize
 impl<S: RefScheme + 'static> PlanHost for OwnPlan<S> {
     type Changes = OwnChanges<S>;
     type Change = OwnKind;
-    type Action = OwnKind;
+    type Action = OwnAction;
     fn history(&self) -> &History<OwnChanges<S>> {
         &self.history
     }
@@ -605,14 +696,14 @@ impl<S: RefScheme + 'static> PlanHost for OwnPlan<S> {
     fn change_kind(&self, tool: &str) -> Option<&'static OwnKind> {
         self.link().daw.changes.kinds.iter().find(|kind| kind.tool == tool)
     }
-    fn action_kind(&self, _tool: &str) -> Option<&'static OwnKind> {
-        None
+    fn action_kind(&self, tool: &str) -> Option<&'static OwnAction> {
+        self.link().daw.changes.actions.iter().find(|action| action.tool == tool)
     }
     fn structural(&self, tool: &str) -> bool {
         self.change_kind(tool).is_some_and(|kind| kind.structural)
     }
-    fn moves_transport(&self, _tool: &str) -> bool {
-        false
+    fn moves_transport(&self, tool: &str) -> bool {
+        self.action_kind(tool).is_some()
     }
     fn may_lose_material(&self, tool: &str) -> bool {
         self.change_kind(tool).is_some_and(|kind| kind.deletes)
@@ -641,8 +732,8 @@ impl<S: RefScheme + 'static> PlanHost for OwnPlan<S> {
     async fn change(&self, kind: &'static OwnKind, input: JsonObject, signal: Signal, _confirmed: bool) -> ChangeOutcome {
         self.one_change(kind, input, signal).await
     }
-    async fn act(&self, _action: &'static OwnKind, _input: JsonObject, _signal: Signal) -> ActionOutcome {
-        ActionOutcome::error("no actions yet")
+    async fn act(&self, action: &'static OwnAction, input: JsonObject, signal: Signal) -> ActionOutcome {
+        self.one_action(action, input, signal).await
     }
     async fn safety_copy(&self, _signal: Signal) -> Result<Option<String>, RuntimeError> {
         Ok(self.copy_saved())
@@ -674,6 +765,36 @@ impl<S: RefScheme + 'static> KernelTool for ChangeTool<S> {
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         signal.check()?;
         let outcome = self.engine.one_change(self.kind, input, signal).await;
+        Ok(ToolResult { text: outcome.text, is_error: outcome.is_error, ..Default::default() })
+    }
+    fn listed_by(&self) -> Option<&str> {
+        Some("make_changes")
+    }
+}
+
+/// One action's own tool.
+struct ActionTool<S: RefScheme + 'static> {
+    engine: Rc<OwnPlan<S>>,
+    action: &'static OwnAction,
+}
+
+#[async_trait(?Send)]
+impl<S: RefScheme + 'static> KernelTool for ActionTool<S> {
+    fn name(&self) -> &str {
+        self.action.tool
+    }
+    fn description(&self) -> &str {
+        self.action.description
+    }
+    fn input_schema(&self) -> JsonObject {
+        self.action.input_schema()
+    }
+    async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
+        signal.check()?;
+        let outcome = self.engine.one_action(self.action, input, signal).await;
+        if let Some(done) = outcome.done.as_ref().filter(|_| !outcome.is_error) {
+            self.engine.emit_action(done);
+        }
         Ok(ToolResult { text: outcome.text, is_error: outcome.is_error, ..Default::default() })
     }
     fn listed_by(&self) -> Option<&str> {
