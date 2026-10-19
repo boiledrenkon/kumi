@@ -1,12 +1,12 @@
 //! What Kumi can change in Renoise (M3): tracks (made, moved, grouped and deleted too), the song's tempo, lines per beat
-//! and ticks per line, a track's DSP devices and their parameters, and a pattern track's lines. Each kind is the tool's
-//! (`payload/changes_*.lua`).
+//! and ticks per line, a track's DSP devices and their parameters, a pattern track's lines, the pattern sequence's slots
+//! and the loop. Each kind is the tool's (`payload/changes_*.lua`).
 use super::own_changes::{OwnAction, OwnChangeSet, OwnKind};
 use crate::core::contracts::ChangeFamily::*;
 
 const PLAN: &str = "Make changes in Renoise in one call, in order: each step is one of your change tools or a step below with its input, and \"@name\" in an input stands for what an earlier step marked as: \"name\" made (a new device). A wait step ({\"beats\": 8} or {\"seconds\": 4}) pauses between steps. Each change is one step of Renoise's undo. It stops at the first step that fails and says what was done. With final: true and every step done, Kumi tells the producer what changed and the answer ends there, with no reply from you: use it when the changes complete the request, even a single change.";
 const UNDO: &str = "Undo one of your changes from this session: pass its change id (such as c3), or \"last\" for the latest one. Kumi puts back exactly what that change set, as a new step of Renoise's undo; it only works while nobody changed the same thing in Renoise since, and if so, say what happened (discard: true puts it back anyway, only when the producer asks). With final: true, when the undo is all that was asked, Kumi tells the producer and the answer ends there, with no reply from you.";
-const INSTRUCTIONS: &str = "Change Renoise with your change tools, or several changes at once with make_changes, using the refs your reads gave. Each change is one step of Renoise's undo (mute and solo aren't: Renoise's undo skips them), and undo_change takes back one of yours as a new step (Renoise's own undo is the producer's). Places count from 1 here, and a track's first device is its mixer, so devices go at 2 or later. Adding, deleting or moving a device makes Renoise's refs new: read again before using older ones (a ref the change made comes back with it). Pattern lines are written in Renoise's own notation (note \"C-4\", \"OFF\"; two-digit hex values; effect \"0A20\"). The observation's kumiChanges lists your latest changes and where each stands (applied, undone, kept, unsure); the producer can undo one in Renoise or in HISTORY without telling you, so go by kumiChanges and Renoise, not by memory.";
+const INSTRUCTIONS: &str = "Change Renoise with your change tools, or several changes at once with make_changes, using the refs your reads gave. Each change is one step of Renoise's undo (mute and solo aren't: Renoise's undo skips them), and undo_change takes back one of yours as a new step (Renoise's own undo is the producer's). Places count from 1 here, and a track's first device is its mixer, so devices go at 2 or later. Adding, deleting or moving a device makes Renoise's refs new: read again before using older ones (a ref the change made comes back with it). Pattern lines are written in Renoise's own notation (note \"C-4\", \"OFF\"; two-digit hex values; effect \"0A20\"). A slot of the pattern sequence is its ref (seq:3); its section, its pattern and its tracks' mutes change by it. The observation's kumiChanges lists your latest changes and where each stands (applied, undone, kept, unsure); the producer can undo one in Renoise or in HISTORY without telling you, so go by kumiChanges and Renoise, not by memory.";
 
 pub static CHANGES: OwnChangeSet = OwnChangeSet {
     kinds: &KINDS,
@@ -18,17 +18,28 @@ pub static CHANGES: OwnChangeSet = OwnChangeSet {
     most_track_adds: Some(32),
 };
 
-static ACTIONS: [OwnAction; 1] = [OwnAction {
-    tool: "stop",
-    method: "transport_stop",
-    description: "Stop Renoise's playback (and edit-mode recording).",
-    schema: r#"{"type":"object","additionalProperties":false,"properties":{}}"#,
-    core: true,
-    playing: Some(false),
-    title: "Stopped",
-}];
+static ACTIONS: [OwnAction; 2] = [
+    OwnAction {
+        tool: "play",
+        method: "transport_play",
+        description: "Start Renoise playing: on from where it is, or from sequence (a slot's number, from 1) and line (from 1; alone, a line of the pattern being edited).",
+        schema: r#"{"type":"object","additionalProperties":false,"properties":{"sequence":{"type":"integer","minimum":1},"line":{"type":"integer","minimum":1}}}"#,
+        core: true,
+        playing: Some(true),
+        title: "Playing",
+    },
+    OwnAction {
+        tool: "stop",
+        method: "transport_stop",
+        description: "Stop Renoise's playback (and edit-mode recording).",
+        schema: r#"{"type":"object","additionalProperties":false,"properties":{}}"#,
+        core: true,
+        playing: Some(false),
+        title: "Stopped",
+    },
+];
 
-static KINDS: [OwnKind; 20] = [
+static KINDS: [OwnKind; 27] = [
     OwnKind::new("track_volume", "track-volume", Mixer, "Change a track's volume in dB (-150 or less is silence, up to about +3), on its pre-fader (default) or post-fader stage; the master too.", r#"{"type":"object","additionalProperties":false,"required":["ref","volumeDb"],"properties":{"ref":{"type":"string","description":"The track (master allowed)"},"volumeDb":{"type":"number","minimum":-150,"maximum":3},"stage":{"type":"string","enum":["pre","post"]}}}"#).core().meter("volumeDb", -60.0, 3.0),
     OwnKind::new("track_pan", "track-pan", Mixer, "Change a track's panning, -1 (left) to 1 (right), on its pre-fader (default) or post-fader stage; the master too.", r#"{"type":"object","additionalProperties":false,"required":["ref","pan"],"properties":{"ref":{"type":"string","description":"The track (master allowed)"},"pan":{"type":"number","minimum":-1,"maximum":1},"stage":{"type":"string","enum":["pre","post"]}}}"#).core().meter("pan", -1.0, 1.0),
     OwnKind::new("track_mute", "track-mute", Mixer, "Mute or unmute a track (not the master); Renoise's own undo skips it, undo_change doesn't.", r#"{"type":"object","additionalProperties":false,"required":["ref","mute"],"properties":{"ref":{"type":"string"},"mute":{"type":"boolean"}}}"#).core(),
@@ -49,4 +60,11 @@ static KINDS: [OwnKind; 20] = [
     OwnKind::new("device_param", "device-param", Parameter, "Change a device parameter: value within the parameter's own range (as read), or valueString, the text Renoise shows for it (\"-6 dB\", \"250 Hz\"). Volume and panning are track_volume and track_pan.", r#"{"type":"object","additionalProperties":false,"required":["ref"],"properties":{"ref":{"type":"string","description":"The parameter"},"value":{"type":"number"},"valueString":{"type":"string","minLength":1}}}"#).core(),
     OwnKind::new("notes_write", "notes-write", Clip, "Write lines of a pattern track: each line's note cells (col, note \"C-4\"/\"OFF\", instrument, volume, panning, delay, fx) and effect cells (col, number, amount). Without merge, a cell named is written whole (fields left out are blanked); with merge: true, only the fields given change. clear: true empties a line (or a cell) first.", concat!(r#"{"type":"object","additionalProperties":false,"required":["patternRef","trackRef","lines"],"properties":{"#, r#""patternRef":{"type":"string","description":"The pattern, or a sequence slot for its pattern"},"trackRef":{"type":"string","description":"The track"}"#, r#","merge":{"type":"boolean"},"lines":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["line"],"properties":{"line":{"type":"integer","minimum":1},"clear":{"type":"boolean"},"notes":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["col"],"properties":{"col":{"type":"integer","minimum":1,"maximum":12},"note":{"type":"string"},"instrument":{"type":["integer","string"]},"volume":{"type":"string"},"panning":{"type":"string"},"delay":{"type":["integer","string"]},"fx":{"type":"string"},"clear":{"type":"boolean"}}}},"effects":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["col"],"properties":{"col":{"type":"integer","minimum":1,"maximum":8},"number":{"type":"string"},"amount":{"type":["integer","string"]},"clear":{"type":"boolean"}}}}}}}}}"#)).core().wire(&[("patternRef", "pattern"), ("trackRef", "track")]),
     OwnKind::new("notes_clear", "notes-clear", Clip, "Clear a pattern track's lines from first to last (the whole pattern by default), in every note and effect column.", concat!(r#"{"type":"object","additionalProperties":false,"required":["patternRef","trackRef"],"properties":{"#, r#""patternRef":{"type":"string","description":"The pattern, or a sequence slot for its pattern"},"trackRef":{"type":"string","description":"The track"}"#, r#","first":{"type":"integer","minimum":1},"last":{"type":"integer","minimum":1}}}"#)).deletes().wire(&[("patternRef", "pattern"), ("trackRef", "track")]),
+    OwnKind::new("slot_insert", "slot-insert", Locators, "Insert a slot in the pattern sequence at index (from 1; the end by default) playing patternRef, or a new empty pattern when it's left out.", r#"{"type":"object","additionalProperties":false,"properties":{"index":{"type":"integer","minimum":1},"patternRef":{"type":"string","description":"The pattern it plays (a new empty one when left out)"}}}"#).wire(&[("patternRef", "pattern")]),
+    OwnKind::new("slot_delete", "slot-delete", Locators, "Delete a slot of the pattern sequence; undo_change puts it back (with its pattern, if Renoise dropped it).", r#"{"type":"object","additionalProperties":false,"required":["ref"],"properties":{"ref":{"type":"string","description":"The sequence slot"}}}"#).deletes(),
+    OwnKind::new("slot_pattern", "slot-pattern", Locators, "Make a sequence slot play another pattern (refused when no other slot plays its pattern: insert and delete slots instead).", r#"{"type":"object","additionalProperties":false,"required":["ref","patternRef"],"properties":{"ref":{"type":"string","description":"The sequence slot"},"patternRef":{"type":"string","description":"The pattern it plays"}}}"#).wire(&[("patternRef", "pattern")]),
+    OwnKind::new("slot_section", "slot-section", Locators, "Start a section at a sequence slot (start), or end it (start: false), and name it (a name alone starts one).", r#"{"type":"object","additionalProperties":false,"required":["ref"],"properties":{"ref":{"type":"string","description":"The sequence slot"},"start":{"type":"boolean"},"name":{"type":"string"}}}"#),
+    OwnKind::new("slot_mute", "slot-mute", Locators, "Mute or unmute a track in one sequence slot (the pattern matrix's slot).", r#"{"type":"object","additionalProperties":false,"required":["ref","trackRef","mute"],"properties":{"ref":{"type":"string","description":"The sequence slot"},"trackRef":{"type":"string","description":"The track"},"mute":{"type":"boolean"}}}"#).wire(&[("trackRef", "track")]),
+    OwnKind::new("loop_range", "loop-range", Locators, "Loop the sequence from slot first to slot last (from 1); both 0 or left out clear it. Renoise's own undo skips it, undo_change doesn't.", r#"{"type":"object","additionalProperties":false,"properties":{"first":{"type":"integer","minimum":0},"last":{"type":"integer","minimum":0}}}"#),
+    OwnKind::new("loop_pattern", "loop-pattern", Locators, "Turn pattern looping on or off. Renoise's own undo skips it, undo_change doesn't.", r#"{"type":"object","additionalProperties":false,"required":["on"],"properties":{"on":{"type":"boolean"}}}"#),
 ];

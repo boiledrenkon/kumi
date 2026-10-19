@@ -472,6 +472,12 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
             let observed = renoise.observe(Signal::new(), None).await.unwrap();
             assert!(observed.instructions.contains("devices go at 2 or later"), "{}", observed.instructions);
 
+            // Track 1's devices, read in the song's first epoch.
+            let read = tool(&observed, "renoise_read");
+            let devices = read.execute(input(json!({"kind": "device", "parent": "track:1"})), Signal::new()).await.unwrap();
+            let devices: Value = serde_json::from_str(&devices.text).unwrap();
+            let first_device = devices["items"][0]["ref"].as_str().unwrap().to_owned();
+
             // A fader, then a device: the device moves Renoise's epoch, and the ref it made is named in the new one.
             let plan = tool(&observed, "make_changes");
             let steps = json!({"steps": [
@@ -482,22 +488,26 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
             let done = plan.execute(input(steps), Signal::new()).await.unwrap();
             assert!(!done.is_error, "{}", done.text);
             assert_eq!(script.track_state(1), (-6.0, false, 1));
-            let reply: Value = serde_json::from_str(&done.text).unwrap_or(Value::Null);
             assert!(done.text.contains("\"ref\":\"device:"), "the device it made, in a short ref: {}", done.text);
-            assert!(!done.text.contains(":device:"), "no long ref reaches the model: {reply}");
-            // The names from before the epoch moved are retired: an old ref is refused in Kumi's words, nothing sent.
-            let old = tool(&observed, "track_mute").execute(input(json!({"ref": "track:1", "mute": true})), Signal::new()).await.unwrap();
-            assert!(old.is_error && old.text.contains("isn't one of this turn's refs"), "{}", old.text);
-            assert!(!old.text.contains(":track:"), "{}", old.text);
-
-            // The next look names the tracks in the new epoch; mute is no step of Renoise's undo, and Kumi says so.
-            let again = renoise.observe(Signal::new(), None).await.unwrap();
-            let tracks = serde_json::from_str::<Value>(&again.context).unwrap()["tracks"].clone();
-            let kick = tracks[0]["ref"].as_str().unwrap().to_owned();
+            assert!(!done.text.contains(":device:"), "no long ref reaches the model: {}", done.text);
+            // Only the devices moved (`kept`): the track names stay, and Renoise takes them; mute is no step of its undo,
+            // and Kumi says so.
             let steps_before = script.undo_history().len();
-            let muted = tool(&again, "track_mute").execute(input(json!({"ref": kick, "mute": true})), Signal::new()).await.unwrap();
+            let muted = tool(&observed, "track_mute").execute(input(json!({"ref": "track:1", "mute": true})), Signal::new()).await.unwrap();
             assert!(!muted.is_error && muted.text.contains("Renoise's own undo won't take this back; Kumi can."), "{}", muted.text);
+            assert_eq!(script.track_state(1).1, true);
             assert_eq!(script.undo_history().len(), steps_before, "no step in Renoise's undo");
+            // The device names from before are retired: refused in Kumi's words, nothing sent.
+            let old = plan
+                .execute(
+                    input(json!({"steps": [{"tool": "device_bypass", "input": {"ref": first_device, "bypass": true}}]})),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(old.is_error && old.text.contains("isn't one of this turn's refs"), "{}", old.text);
+            assert!(!old.text.contains(":device:"), "{}", old.text);
+            let again = renoise.observe(Signal::new(), None).await.unwrap();
 
             // Kumi undoes each as a new step: the mute, the device (the epoch moves again, and Kumi follows), the fader.
             let undo = tool(&again, "undo_change");

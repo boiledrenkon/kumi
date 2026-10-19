@@ -207,6 +207,12 @@ impl<S: RefScheme> Book<S> {
         self.short.clear();
         self.long.clear();
     }
+    /// Keeps the names of the refs `keep` holds to; the others retire (counters go on, so none is given again).
+    pub fn keep_names(&mut self, keep: impl Fn(&S, &str) -> bool) {
+        let scheme = &self.scheme;
+        self.short.retain(|reference, _| keep(scheme, reference));
+        self.long.retain(|_, reference| keep(scheme, reference));
+    }
     pub fn unname(&mut self, reference: &str) {
         if let Some(short) = self.short.shift_remove(reference) {
             self.long.shift_remove(&short);

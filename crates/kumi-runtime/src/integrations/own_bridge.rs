@@ -844,6 +844,24 @@ pub(super) fn follow_epoch<S: RefScheme>(
     if !book.borrow().scheme.positional() || epoch.borrow().as_deref() == Some(now) {
         return;
     }
+    // Moved only for devices, patterns or the sequence from the epoch the book is in (`kept`): the tracks are where they
+    // were, and the DAW takes their refs from before, so their names stay and the layout goes on as the tracks events
+    // say; every other name goes.
+    let kept = answer.pointer("/kept/tracks") == Some(&Value::Bool(true))
+        && answer.pointer("/kept/from").and_then(Value::as_str).is_some_and(|from| epoch.borrow().as_deref() == Some(from));
+    if kept {
+        let mut book = book.borrow_mut();
+        let tracks = |reference: &str| book.scheme.kind_of(reference) == Some("track");
+        let gone: Vec<String> = book.refs.keys().chain(book.known.keys()).filter(|reference| !tracks(reference)).cloned().collect();
+        for reference in gone {
+            book.retire(&reference);
+        }
+        book.cursors.clear();
+        book.keep_names(|scheme, reference| scheme.kind_of(reference) == Some("track"));
+        drop(book);
+        *epoch.borrow_mut() = Some(now.to_owned());
+        return;
+    }
     if epoch.borrow().is_some() {
         let mut book = book.borrow_mut();
         book.refs.clear();
