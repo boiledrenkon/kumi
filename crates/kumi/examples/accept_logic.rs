@@ -493,13 +493,22 @@ impl Accept {
     /// The operator selects another track: the focus follows, and a `selection` event comes.
     async fn select_follows(&self, before: Option<&str>) {
         println!("  → In Logic Pro, select another track (within {} s)…", OPERATOR_MS / 1000);
+        // The selection as it stands now, by its place: refs carry the epoch, which the plan before this moved.
+        let place = |track_ref: &str| track_ref.splitn(2, ':').nth(1).unwrap_or(track_ref).to_owned();
+        let fresh = self.tool("focus", json!({})).await;
+        let before: Option<String> = fresh.body["selection"]["trackRef"].as_str().map(str::to_owned).or_else(|| before.map(str::to_owned));
+        let before_place = before.as_deref().map(place);
+        let before = before.as_deref();
         let heard = self.events.borrow().len();
         let t0 = perf_now();
         let seen = self
-            .wait_for(|| async move {
-                let focus = self.tool("focus", json!({})).await;
-                let now = focus.body["selection"]["trackRef"].as_str().map(str::to_owned);
-                (focus.ok && now.is_some() && now.as_deref() != before).then_some(now.unwrap_or_default())
+            .wait_for(|| {
+                let before_place = before_place.clone();
+                async move {
+                    let focus = self.tool("focus", json!({})).await;
+                    let now = focus.body["selection"]["trackRef"].as_str().map(str::to_owned);
+                    (focus.ok && now.is_some() && now.as_deref().map(place) != before_place).then_some(now.unwrap_or_default())
+                }
             })
             .await;
         let events = self.events_since(heard, "selection");
