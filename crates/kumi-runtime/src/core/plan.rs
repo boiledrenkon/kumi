@@ -142,6 +142,11 @@ pub trait PlanHost: 'static {
     async fn act(&self, action: &'static Self::Action, input: JsonObject, signal: Signal) -> ActionOutcome;
     /// A copy of the project as last saved, next to it: its path, when one was made.
     async fn safety_copy(&self, signal: Signal) -> Result<Option<String>, RuntimeError>;
+    /// Whether a plan past its second step keeps that copy first whatever the step (Live's rule); else only before a
+    /// step that can lose material.
+    fn copies_long_plans(&self) -> bool {
+        true
+    }
     /// Tells the producer what a plan did to the transport.
     fn emit_action(&self, done: &ActionSummary);
 }
@@ -576,7 +581,7 @@ impl<H: PlanHost> Plan<H> {
             let tool = js_string(item.get("tool"));
             // Before a step that can lose the producer's material: a delete, a cleared range, or a move,
             // which replaces what's in its new place.
-            if !state.copy_checked && (index >= 2 || self.host.may_lose_material(&tool)) {
+            if !state.copy_checked && ((index >= 2 && self.host.copies_long_plans()) || self.host.may_lose_material(&tool)) {
                 state.copy_checked = true;
                 state.copy = self.host.safety_copy(self.signal.clone()).await?;
             }
