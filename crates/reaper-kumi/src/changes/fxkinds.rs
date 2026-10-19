@@ -1,13 +1,14 @@
-//! The M4 kinds of FX and envelopes, by name, and what each one does (in `fx_more`, `containers`, `modulation` and
-//! `envelopes`).
+//! The M4 kinds of FX and envelopes, by name, and what each one does (in `fx_more`, `fx_params`, `containers`,
+//! `modulation` and `envelopes`).
 
 use serde_json::Value;
 
-use super::{containers, envelopes, fx_more, modulation, Applied, Ctx, Done, Preview, Restore, Restored};
+use super::{containers, envelopes, fx_more, fx_params, modulation, Applied, Ctx, Done, Preview, Restore, Restored};
 
 #[derive(Clone, Copy)]
 pub enum Kind {
     Offline,
+    Params,
     Wet,
     EqBand,
     Preset,
@@ -26,6 +27,7 @@ pub enum Kind {
     AutoItemSet,
     AutoItemDelete,
     AutomationMode,
+    SendAutomationMode,
     AutomationOverride,
 }
 
@@ -35,6 +37,7 @@ pub fn kind(name: &str) -> Option<Kind> {
     }
     match name {
         "fx-offline" => Some(Kind::Offline),
+        "fx-params" => Some(Kind::Params),
         "fx-wet" => Some(Kind::Wet),
         "fx-eq-band" => Some(Kind::EqBand),
         "fx-preset" => Some(Kind::Preset),
@@ -55,6 +58,7 @@ pub fn kind(name: &str) -> Option<Kind> {
         "automation-item-set" => Some(Kind::AutoItemSet),
         "automation-item-delete" => Some(Kind::AutoItemDelete),
         "track-automation-mode" => Some(Kind::AutomationMode),
+        "send-automation-mode" => Some(Kind::SendAutomationMode),
         "automation-override" => Some(Kind::AutomationOverride),
         _ => None,
     }
@@ -69,6 +73,7 @@ impl Kind {
     pub fn preview(self, ctx: &Ctx, input: &Value) -> Done<Preview> {
         match self {
             Kind::Offline => fx_more::offline_preview(ctx, input),
+            Kind::Params => fx_params::preview(ctx, input),
             Kind::Wet => fx_more::wet_preview(ctx, input),
             Kind::EqBand => fx_more::eq_band_preview(ctx, input),
             Kind::Preset => fx_more::preset_preview(ctx, input),
@@ -87,6 +92,7 @@ impl Kind {
             Kind::AutoItemSet => envelopes::item_set_preview(ctx, input),
             Kind::AutoItemDelete => envelopes::item_delete_preview(ctx, input),
             Kind::AutomationMode => envelopes::mode_preview(ctx, input),
+            Kind::SendAutomationMode => envelopes::send_mode_preview(ctx, input),
             Kind::AutomationOverride => envelopes::override_preview(ctx, input),
         }
     }
@@ -94,6 +100,7 @@ impl Kind {
     pub fn apply(self, ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         match self {
             Kind::Offline => fx_more::offline_apply(ctx, input, fence),
+            Kind::Params => fx_params::apply(ctx, input, fence),
             Kind::Wet => fx_more::wet_apply(ctx, input, fence),
             Kind::EqBand => fx_more::eq_band_apply(ctx, input, fence),
             Kind::Preset => fx_more::preset_apply(ctx, input, fence),
@@ -112,6 +119,7 @@ impl Kind {
             Kind::AutoItemSet => envelopes::item_set_apply(ctx, input, fence),
             Kind::AutoItemDelete => envelopes::item_delete_apply(ctx, input, fence),
             Kind::AutomationMode => envelopes::mode_apply(ctx, input, fence),
+            Kind::SendAutomationMode => envelopes::send_mode_apply(ctx, input, fence),
             Kind::AutomationOverride => envelopes::override_apply(ctx, input, fence),
         }
     }
@@ -119,6 +127,7 @@ impl Kind {
     pub fn restore(self, ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         match self {
             Kind::Offline => fx_more::offline_restore(ctx, restore),
+            Kind::Params => fx_params::restore(ctx, restore),
             Kind::Wet => fx_more::wet_restore(ctx, restore),
             Kind::EqBand => fx_more::eq_band_restore(ctx, restore),
             Kind::Preset => fx_more::preset_restore(ctx, restore),
@@ -137,6 +146,7 @@ impl Kind {
             Kind::AutoItemSet => envelopes::item_set_restore(ctx, restore),
             Kind::AutoItemDelete => envelopes::item_delete_restore(ctx, restore),
             Kind::AutomationMode => envelopes::mode_restore(ctx, restore),
+            Kind::SendAutomationMode => envelopes::send_mode_restore(ctx, restore),
             Kind::AutomationOverride => envelopes::override_restore(ctx, restore),
         }
     }

@@ -731,12 +731,12 @@ fn name_of<'a>(input: &'a Value) -> Done<&'a str> {
 
 /// The send a send ref names (REAPER gives a send no id: the ref says which of the sends to one track it is, of how many,
 /// and as two or more were then).
-fn send_index(ctx: &Ctx, reference: &str) -> Done<(Track, i32)> {
+fn send_index(ctx: &Ctx, reference: &str, field: &str) -> Done<(Track, i32)> {
     let Ref::Send { track, category, other, repeat, of, seen } = Ref::parse(reference).map_err(bad)? else {
-        return Err(bad("sendRef must be a send ref"));
+        return Err(bad(format!("{field} must be a send ref")));
     };
     if category != 0 || !matches!(other, SendEnd::Track(_)) {
-        return Err(bad("sendRef must be a send to a track (a receive's envelope is its send's)"));
+        return Err(bad(format!("{field} must be a send to a track (a receive's is its send's)")));
     }
     let owner = ctx.reads.track_by_id(ctx.reaper, ctx.proj, &track)?;
     let keys = rows::send_keys(ctx.reaper, owner, 0);
@@ -777,7 +777,7 @@ fn shown_of(ctx: &Ctx, input: &Value) -> Done<Shown> {
             let name = name_of(input)?;
             let (_, chunk) =
                 SEND_ENVELOPES.iter().find(|(word, _)| *word == name).ok_or_else(|| bad("a send's envelope is volume, pan or mute"))?;
-            let (track, index) = send_index(ctx, input["sendRef"].as_str().unwrap_or_default())?;
+            let (track, index) = send_index(ctx, input["sendRef"].as_str().unwrap_or_default(), "sendRef")?;
             let envelope = reaper.send_envelope(track, index, chunk).ok_or_else(|| failed("REAPER gives that send no such envelope"))?;
             let guid = reaper.envelope_guid(envelope).ok_or_else(|| failed("REAPER gives that envelope no id"))?;
             Ok(Shown::Has(EnvAt { envelope, guid, owner: EnvOwner::Track(track) }))
@@ -1711,6 +1711,79 @@ pub fn override_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         }
     }
     Ok(Restored { restored: json!({"mode": prior}), display: json!({"title": override_title(prior)}), unwritten: now == prior })
+}
+
+// ----- a send's automation mode -----
+
+/// A send's automation modes: its own, or its track's (-1).
+const SEND_MODES: [(&str, i64); 7] =
+    [("track", -1), ("trim", 0), ("read", 1), ("touch", 2), ("write", 3), ("latch", 4), ("latch-preview", 5)];
+
+/// The send a ref names (its track and place among the track's sends), and how the titles say it: `“Bass” → “Reverb”`.
+fn mode_send(ctx: &Ctx, reference: &Value) -> Done<(Track, i32, String)> {
+    let (track, index) = send_index(ctx, reference.as_str().ok_or_else(|| bad("ref: the send"))?, "ref")?;
+    let to = ctx.reaper.send_peer(track, 0, index).map_or_else(String::new, |peer| super::track_name(ctx.reaper, peer));
+    Ok((track, index, format!("{} → {}", super::quoted(&super::track_name(ctx.reaper, track)), super::quoted(&to))))
+}
+
+fn send_mode_title(route: &str, code: i64) -> String {
+    match code {
+        -1 => format!("Send {route} automation as its track's"),
+        _ => format!("Send {route} automation {}", mode_word(&SEND_MODES, code)),
+    }
+}
+
+pub fn send_mode_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
+    let wanted = mode_input(input, &SEND_MODES)?;
+    let (track, index, route) = mode_send(ctx, &input["ref"])?;
+    let now = json!({"mode": ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64});
+    let mut display = json!({"title": send_mode_title(&route, wanted)});
+    if now["mode"] == wanted {
+        display["unchanged"] = true.into();
+    }
+    Ok(Preview { target: json!({"ref": input["ref"], "kind": "send"}), prior: now.clone(), fence: now, display })
+}
+
+pub fn send_mode_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
+    let wanted = mode_input(input, &SEND_MODES)?;
+    let (track, index, route) = mode_send(ctx, &input["ref"]).map_err(went)?;
+    let now = ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64;
+    if json!({"mode": now}) != *fence {
+        return Err(changed(format!("the automation mode of send {route} changed since the preview")));
+    }
+    if now != wanted
+        && (!ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", wanted as f64)
+            || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != wanted)
+    {
+        return Err(failed(format!("REAPER kept the automation mode of send {route}")));
+    }
+    Ok(Applied {
+        applied: json!({"mode": wanted}),
+        display: json!({"title": send_mode_title(&route, wanted)}),
+        unwritten: now == wanted,
+        ..Default::default()
+    })
+}
+
+pub fn send_mode_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
+    let (track, index, route) = mode_send(ctx, &restore.target["ref"]).map_err(gone_if_missing)?;
+    let (prior, applied) = (restore.prior["mode"].as_i64().unwrap_or(-1), restore.applied["mode"].as_i64().unwrap_or(-1));
+    let now = ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64;
+    if now != prior {
+        if !restore.discard && now != applied {
+            return Err(changed(format!("the automation mode of send {route} has been changed in REAPER since Kumi set it")));
+        }
+        if !ctx.reaper.set_send_value(track, 0, index, "I_AUTOMODE", prior as f64)
+            || ctx.reaper.send_value(track, 0, index, "I_AUTOMODE") as i64 != prior
+        {
+            return Err(failed(format!("REAPER kept the automation mode of send {route}")));
+        }
+    }
+    Ok(Restored {
+        restored: json!({"mode": prior}),
+        display: json!({"title": format!("{} (put back)", send_mode_title(&route, prior))}),
+        unwritten: now == prior,
+    })
 }
 
 /// A lane's points as a read pages them (the read of `point` kind): only the page's points are read, so a page of a big

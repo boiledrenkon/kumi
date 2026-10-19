@@ -595,7 +595,7 @@ pub(super) struct ParamAt {
     pub param: i32,
 }
 
-fn param_index(ctx: &Ctx, at: &FxAt, which: Option<&Value>) -> Done<i32> {
+pub(super) fn param_index(ctx: &Ctx, at: &FxAt, which: Option<&Value>) -> Done<i32> {
     let count = ctx.reaper.fx_param_count(at.fx);
     match which {
         Some(Value::Number(n)) => n
@@ -765,7 +765,7 @@ fn find_value(ctx: &Ctx, at: &ParamAt, wanted: &str) -> Done<f64> {
 }
 
 /// What a parameter change asks for: a normalized value, or (a JSFX slider in its own units) a raw one.
-enum Wanted {
+pub(super) enum Wanted {
     Normalized(f64),
     Raw(f64),
 }
@@ -793,7 +793,7 @@ fn units_value(ctx: &Ctx, at: &ParamAt, units: f64, typed: &str) -> Done<Wanted>
     )))
 }
 
-fn wanted_value(ctx: &Ctx, at: &ParamAt, input: &Value) -> Done<Wanted> {
+pub(super) fn wanted_value(ctx: &Ctx, at: &ParamAt, input: &Value) -> Done<Wanted> {
     let normalized = input.get("normalized").filter(|v| !v.is_null());
     let value = input.get("value").filter(|v| !v.is_null());
     let units = input.get("units").filter(|v| !v.is_null());
@@ -815,7 +815,7 @@ fn wanted_value(ctx: &Ctx, at: &ParamAt, input: &Value) -> Done<Wanted> {
 }
 
 /// The normalized value a wanted value is, without writing it: a raw one is printed by its slider's own scale.
-fn wanted_normalized(ctx: &Ctx, at: &ParamAt, wanted: &Wanted) -> f64 {
+pub(super) fn wanted_normalized(ctx: &Ctx, at: &ParamAt, wanted: &Wanted) -> f64 {
     match *wanted {
         Wanted::Normalized(n) => n,
         Wanted::Raw(raw) => match ctx.reaper.fx_param_raw(at.at.fx, at.param) {

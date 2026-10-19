@@ -1366,6 +1366,43 @@ fn a_tracks_automation_mode_and_the_global_override_are_set_and_put_back() {
 }
 
 #[test]
+fn a_sends_automation_mode_is_set_and_put_back() {
+    let lab = chains_lab();
+    let send = "r:send:{AAAA}:0:{DDDD}";
+    let mode = || state(|s| s.tracks[0].sends[0].extra.get("I_AUTOMODE").copied().unwrap_or(-1.0));
+    let input = json!({"ref": send, "mode": "touch"});
+    let (preview, applied) = lab.make("send-automation-mode", input.clone());
+    assert_eq!(preview["display"]["title"], "Send “Drums” → “Reverb” automation touch");
+    assert_eq!((mode(), applied["undo"]["entry"].clone()), (2.0, json!(true)));
+    lab.undo("send-automation-mode", &preview, &applied).unwrap();
+    assert_eq!(mode(), -1.0, "back to its track's mode");
+    assert_eq!(lab.undo("send-automation-mode", &preview, &applied).unwrap()["undo"]["entry"], false, "a retry writes nothing");
+    // The producer changed it since: refused; discard puts it back.
+    let (preview, applied) = lab.make("send-automation-mode", input.clone());
+    state(|s| {
+        s.tracks[0].sends[0].extra.insert("I_AUTOMODE".into(), 3.0);
+    });
+    assert_eq!(lab.undo("send-automation-mode", &preview, &applied).unwrap_err().0, "changed");
+    lab.discard("send-automation-mode", &preview, &applied).unwrap();
+    assert_eq!(mode(), -1.0);
+    // The fence: changed between the preview and the apply.
+    let preview = lab.preview("send-automation-mode", input.clone()).unwrap();
+    state(|s| {
+        s.tracks[0].sends[0].extra.insert("I_AUTOMODE".into(), 1.0);
+    });
+    assert_eq!(lab.apply("send-automation-mode", &input, &preview["fence"]).unwrap_err().0, "changed");
+    assert_eq!(mode(), 1.0, "nothing written");
+    let (preview, _) = lab.make("send-automation-mode", json!({"ref": send, "mode": "track"}));
+    assert_eq!((preview["display"]["title"].clone(), mode()), (json!("Send “Drums” → “Reverb” automation as its track's"), -1.0));
+    // The send gone: `gone`.
+    let (preview, applied) = lab.make("send-automation-mode", input.clone());
+    state(|s| s.tracks[0].sends.clear());
+    assert_eq!(lab.undo("send-automation-mode", &preview, &applied).unwrap_err().0, "gone");
+    assert_eq!(lab.preview("send-automation-mode", json!({"ref": send, "mode": "loud"})).unwrap_err().0, "bad-params");
+    assert_eq!(lab.preview("send-automation-mode", json!({"ref": KICK, "mode": "read"})).unwrap_err().0, "bad-params");
+}
+
+#[test]
 fn envelope_reads_give_points_automation_items_and_a_takes_envelopes_by_their_refs() {
     let lab = envelope_lab();
     let rows = lab.read(json!({"kind": "envelope", "parent": KICK}));
@@ -1484,6 +1521,114 @@ fn reapers_own_undo_and_redo_in_between_dont_make_kumis_undo_refuse() {
     lab.undo("automation-item-set", &set_preview, &set).unwrap();
     lab.undo("automation-item-add", &add_preview, &added).unwrap();
     assert!(state(|s| s.tracks[1].envelopes[0].items.is_empty()));
+}
+
+// ----- several parameters of one FX at once -----
+
+/// An FX of the fake by its GUID, in any chain.
+fn fake_fx(guid: &str) -> Option<FakeFx> {
+    fn find(chain: &[FakeFx], guid: &str) -> Option<FakeFx> {
+        chain.iter().find_map(|f| if f.guid == guid { Some(f.clone()) } else { find(f.children.as_deref()?, guid) })
+    }
+    state(|s| {
+        s.tracks.iter().chain(std::iter::once(&s.master)).find_map(|t| {
+            find(&t.fx, guid)
+                .or_else(|| find(&t.input_fx, guid))
+                .or_else(|| t.items.iter().flat_map(|i| i.takes.iter()).find_map(|take| find(&take.fx, guid)))
+        })
+    })
+}
+
+fn fake_values(guid: &str) -> Vec<f64> {
+    fake_fx(guid).unwrap().params.iter().map(|p| p.value).collect()
+}
+
+#[test]
+fn several_parameters_of_one_fx_are_set_in_one_point_and_undo_puts_each_back() {
+    let lab = chains_lab();
+    state(|s| s.tracks[1].fx.push(reaeq("{K-EQ}")));
+    let before = fake_values("{K-EQ}");
+    let input = json!({"ref": fx_ref("{K-EQ}"), "values": [
+        {"param": 0, "value": "120 Hz"},
+        {"param": "Gain-Band 1", "units": -3.5},
+        {"param": 5, "normalized": 0.75},
+    ]});
+    let entries = state(|s| s.undo_entries);
+    let (preview, applied) = lab.make("fx-params", input.clone());
+    assert_eq!(preview["display"]["title"], "ReaEQ 3 parameters on “Kick”");
+    assert_eq!(preview["display"]["lines"][0], "Freq-Band 1 → 120.0 Hz");
+    assert_eq!(preview["display"]["lines"][1], "Gain-Band 1 → -3.5 dB");
+    assert_eq!((preview["prior"]["guid"].clone(), preview["prior"]["params"]["5"].clone()), (json!("{K-EQ}"), json!(0.5)));
+    assert_eq!(preview["prior"]["chain"]["trackRef"], KICK);
+    assert_eq!((applied["undo"]["entry"].clone(), state(|s| s.undo_entries)), (json!(true), entries + 1), "one point for all three");
+    assert_eq!(applied["applied"]["params"]["5"], 0.75);
+    assert_eq!(applied["display"]["lines"][2], "BW-Band 2 → 3.00");
+    let now = fake_values("{K-EQ}");
+    assert!(now[0] != before[0] && now[1] != before[1] && now[5] == 0.75 && now[2] == before[2]);
+    lab.undo("fx-params", &preview, &applied).unwrap();
+    assert_eq!(fake_values("{K-EQ}"), before);
+    assert_eq!(lab.undo("fx-params", &preview, &applied).unwrap()["undo"]["entry"], false, "a retry writes nothing");
+    // One of them changed since: refused, naming it; discard puts every one back.
+    let (preview, applied) = lab.make("fx-params", input.clone());
+    state(|s| s.tracks[1].fx[1].params[1].value = 0.9);
+    let (code, message) = lab.undo("fx-params", &preview, &applied).unwrap_err();
+    assert!(code == "changed" && message.contains("Gain-Band 1"), "{message}");
+    lab.discard("fx-params", &preview, &applied).unwrap();
+    assert_eq!(fake_values("{K-EQ}"), before);
+    // The fence: one of them moved between the preview and the apply; nothing is written.
+    let preview = lab.preview("fx-params", input.clone()).unwrap();
+    state(|s| s.tracks[1].fx[1].params[5].value = 0.1);
+    assert_eq!(lab.apply("fx-params", &input, &preview["fence"]).unwrap_err().0, "changed");
+    assert_eq!(fake_values("{K-EQ}")[..2], before[..2]);
+    // The FX gone: its undo is `gone`.
+    let (preview, applied) = lab.make("fx-params", json!({"ref": fx_ref("{K-EQ}"), "values": [{"param": 3, "normalized": 0.1}]}));
+    assert_eq!(preview["display"]["title"], "ReaEQ 1 parameter on “Kick”");
+    state(|s| s.tracks[1].fx.retain(|f| f.guid != "{K-EQ}"));
+    assert_eq!(lab.undo("fx-params", &preview, &applied).unwrap_err().0, "gone");
+    for bad in [
+        json!({"ref": fx_ref("{K-MAIN}"), "values": []}),
+        json!({"ref": fx_ref("{K-MAIN}"), "values": [{"param": 0, "normalized": 0.2}, {"param": "Gain", "normalized": 0.3}]}),
+        json!({"ref": fx_ref("{K-MAIN}"), "values": [{"param": 99, "normalized": 0.2}]}),
+        json!({"ref": fx_ref("{K-MAIN}"), "values": [{"param": 0, "normalized": 2}]}),
+        json!({"ref": fx_ref("{K-MAIN}"), "values": [{"param": 0, "normalized": 0.2, "value": "-3 dB"}]}),
+        json!({"ref": fx_ref("{K-MAIN}"), "values": [{"param": 1, "units": 3}]}),
+        json!({"ref": "r:param:{K-MAIN}:0", "values": [{"param": 0, "normalized": 0.2}]}),
+    ] {
+        assert_eq!(lab.preview("fx-params", bad.clone()).unwrap_err().0, "bad-params", "{bad}");
+    }
+}
+
+#[test]
+fn up_to_256_values_go_in_one_point_on_an_fx_in_any_chain() {
+    let lab = chains_lab();
+    let big = |guid: &str| {
+        let mut fx = FakeFx::new(guid, "VST: Big (Lab)");
+        fx.params = (0..300).map(|i| FakeParam::linear(&format!("P{i}"), 0.5, 0.0, 100.0, 0, "%")).collect();
+        fx.params.extend(wrapper());
+        fx
+    };
+    state(|s| {
+        s.tracks[1].fx.push(big("{BIG-MAIN}"));
+        s.tracks[1].input_fx.push(big("{BIG-IN}"));
+        s.tracks[1].items[0].takes[0].fx.push(big("{BIG-TAKE}"));
+        s.tracks[0].fx[1].children.as_mut().unwrap().push(big("{BIG-BOX}"));
+        s.state_count += 1;
+    });
+    let values: Vec<Value> = (0..256).map(|i| json!({"param": i, "normalized": 0.25})).collect();
+    for guid in ["{BIG-MAIN}", "{BIG-IN}", "{BIG-TAKE}", "{BIG-BOX}"] {
+        let entries = state(|s| s.undo_entries);
+        let (preview, applied) = lab.make("fx-params", json!({"ref": fx_ref(guid), "values": values}));
+        assert_eq!(state(|s| s.undo_entries), entries + 1, "{guid}: one point");
+        assert_eq!(applied["applied"]["params"].as_object().unwrap().len(), 256, "{guid}");
+        assert_eq!(preview["display"]["lines"].as_array().unwrap().len(), 256, "{guid}");
+        let set = fake_values(guid);
+        assert!(set[..256].iter().all(|v| *v == 0.25) && set[256] == 0.5, "{guid}");
+        lab.undo("fx-params", &preview, &applied).unwrap();
+        assert!(fake_values(guid)[..300].iter().all(|v| *v == 0.5), "{guid}: every one back");
+    }
+    let too_many: Vec<Value> = (0..257).map(|i| json!({"param": i, "normalized": 0.25})).collect();
+    let (code, message) = lab.preview("fx-params", json!({"ref": fx_ref("{BIG-MAIN}"), "values": too_many})).unwrap_err();
+    assert!(code == "bad-params" && message.contains("256"), "{message}");
 }
 
 // ----- FX chain files saved -----

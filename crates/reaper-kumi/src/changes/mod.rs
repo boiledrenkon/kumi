@@ -25,6 +25,7 @@ mod containers;
 mod envelopes;
 pub(crate) use envelopes::{envelope_extras, item_rows, point_source};
 mod fx_more;
+mod fx_params;
 mod fxchain;
 mod fxkinds;
 mod modulation;
