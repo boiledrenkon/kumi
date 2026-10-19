@@ -14,16 +14,18 @@ pub const MOST_KEPT: usize = 24 << 20;
 const VIEW_LINES: [&str; 10] =
     ["CFGEDITVIEW ", "CFGEDIT ", "EVTFILTER ", "KEYSNAP ", "TRACKSEL ", "VELLANE ", "SHOW ", "LASTSEL ", "DOCKED ", "FLOATPOS "];
 
-/// The chunk without what only the screen or a selection changes.
+/// The chunk without what only the screen or a selection changes: an item's selection and list number (in an item's chunk,
+/// or in each item of a track's), the MIDI editor's view, which events are selected, FX windows.
 pub fn normalized(chunk: &str) -> String {
     let mut out = String::with_capacity(chunk.len());
-    let mut depth = 0i32;
+    // The blocks open around each line, by their first word: an item's own lines are those right inside `<ITEM`.
+    let mut blocks: Vec<&str> = Vec::new();
     for line in chunk.lines() {
         let trimmed = line.trim_start();
         let opens = trimmed.starts_with('<');
         let closes = trimmed.trim_end() == ">";
-        // The item's own selection and its number in the project's list (which a load renumbers).
-        let item_level = depth == 1 && (trimmed.starts_with("SEL ") || trimmed.starts_with("IID "));
+        let in_item = blocks.last() == Some(&"<ITEM");
+        let item_level = in_item && (trimmed.starts_with("SEL ") || trimmed.starts_with("IID "));
         if item_level || VIEW_LINES.iter().any(|prefix| trimmed.starts_with(prefix)) || trimmed == "FLOAT" {
             continue;
         }
@@ -38,9 +40,9 @@ pub fn normalized(chunk: &str) -> String {
         out.push_str(line.trim_end());
         out.push('\n');
         if opens {
-            depth += 1;
+            blocks.push(trimmed.split_whitespace().next().unwrap_or("<"));
         } else if closes {
-            depth -= 1;
+            blocks.pop();
         }
     }
     out
@@ -97,6 +99,16 @@ mod tests {
         }
         // The `SEL` of a nested block or of an active take is not the item's selection.
         assert_ne!(print_of(ITEM), print_of(&ITEM.replace("NAME \"vox\"", "TAKE SEL\nNAME \"vox\"")));
+    }
+
+    #[test]
+    fn a_tracks_print_leaves_out_its_items_selection_too() {
+        let track = format!("<TRACK {{X}}\nNAME \"Vox\"\nSEL 1\n{ITEM}>\n");
+        let looked_at = track.replacen("SEL 1\nIGUID", "SEL 0\nIGUID", 1);
+        assert_ne!(track, looked_at);
+        assert_eq!(print_of(&track), print_of(&looked_at));
+        // (a `SEL` right inside the track's own block is not an item's)
+        assert_ne!(print_of(&track), print_of(&track.replacen("NAME \"Vox\"\nSEL 1", "NAME \"Vox\"\nSEL 0", 1)));
     }
 
     #[test]

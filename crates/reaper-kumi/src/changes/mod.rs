@@ -14,12 +14,15 @@ mod folders;
 mod fx;
 mod item_kinds;
 mod items;
+mod lanes;
 mod lua;
 mod marks;
 mod notes;
 mod pins;
 mod project;
 mod sends;
+mod take_marks;
+mod takes;
 pub(crate) use sends::seen_holds as send_seen_holds;
 mod structure;
 mod tracks;
@@ -574,3 +577,7 @@ pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::Track
 mod tests;
 #[cfg(test)]
 mod tests_items;
+#[cfg(test)]
+mod tests_lanes;
+#[cfg(test)]
+mod tests_takes;

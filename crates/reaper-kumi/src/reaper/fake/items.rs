@@ -1012,6 +1012,11 @@ pub(super) unsafe extern "C" fn set_media_track_info_value(track: *mut MediaTrac
                     }
                     _ => plays[n] = 0,
                 }
+                // A lane that plays alone reads "alone" (lab, 7.82).
+                let playing: Vec<usize> = (0..plays.len()).filter(|&m| plays[m] != 0).collect();
+                if let [only] = playing[..] {
+                    plays[only] = 1;
+                }
                 set_plays(t, &plays);
             }
         }
@@ -1219,6 +1224,28 @@ pub(super) unsafe extern "C" fn kbd_get_text_from_cmd(command: c_int, section: *
     }
 }
 
+/// A track's chunk as the fake's own (`FAKECHUNK n` names the state kept), with equal states sharing a number so a chunk
+/// reads the same until the track changes, and the `LANEREC` line that says which lane a comping track comps into.
+pub(super) unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
+    counted(|s| {
+        let Some(mut t) = track_of(s, track as u64).cloned() else { return false };
+        // A track's own sends are lines of the tracks they go to (AUXRECV), not of its chunk.
+        t.sends.clear();
+        let n = match s.chunks.iter().position(|kept| *kept == t) {
+            Some(n) => n,
+            None => {
+                s.chunks.push(t.clone());
+                s.chunks.len() - 1
+            }
+        };
+        let comping = t.extra.get("COMPLANE").copied().unwrap_or(0.0) != 0.0;
+        let lanerec = if comping { "LANEREC -1 0 -1 0\n" } else { "LANEREC -1 -1 -1 0\n" };
+        let text = format!("<TRACK {}\nNAME \"{}\"\n{lanerec}FAKECHUNK {n}\n{}>\n", t.guid, t.name, super::fx_chain_text(&t.fx));
+        write(buf, size, &text);
+        true
+    })
+}
+
 /// The functions above, by name: the fake's table asks here first.
 pub(super) fn lookup(name: &CStr) -> *mut c_void {
     macro_rules! table {
@@ -1277,6 +1304,7 @@ pub(super) fn lookup(name: &CStr) -> *mut c_void {
         b"SetMediaTrackInfo_Value" => set_media_track_info_value as unsafe extern "C" fn(*mut MediaTrack, *const c_char, f64) -> bool,
         b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
         b"Main_OnCommandEx" => main_on_command_ex as unsafe extern "C" fn(c_int, c_int, *mut ReaProject),
+        b"GetTrackStateChunk" => get_track_state_chunk as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int, bool) -> bool,
         b"kbd_getTextFromCmd" => kbd_get_text_from_cmd as unsafe extern "C" fn(c_int, *mut c_void) -> *const c_char,
     }
 }

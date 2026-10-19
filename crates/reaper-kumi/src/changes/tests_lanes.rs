@@ -1,0 +1,235 @@
+//! Fixed lanes, lane plays and names, razor areas and comping (m4-r-items): applied, undone by Kumi, refused when the
+//! producer changed them in between, gone and back already.
+
+use serde_json::json;
+
+use super::tests_items::{code, item, state, Lab, KICK};
+
+/// Kick with fixed lanes: two lanes, kick.wav on lane 0 and the second kick item moved under it on lane 1.
+fn lanes_lab() -> Lab {
+    let lab = Lab::new();
+    state(|s| {
+        let kick = &mut s.tracks[1];
+        kick.extra.insert("I_FREEMODE".into(), 2.0);
+        kick.extra.insert("I_NUMFIXEDLANES".into(), 2.0);
+        kick.items[1].position = 0.0;
+        kick.items[1].lane = 1;
+        kick.lane_names = vec!["1".into(), "2".into()];
+    });
+    lab
+}
+
+fn plays() -> Vec<f64> {
+    state(|s| {
+        (0..s.tracks[1].extra.get("I_NUMFIXEDLANES").copied().unwrap_or(1.0) as usize)
+            .map(|n| s.tracks[1].extra.get(&format!("C_LANEPLAYS:{n}")).copied().unwrap_or(2.0))
+            .collect()
+    })
+}
+
+// ----- lanes on and off -----
+
+#[test]
+fn fixed_lanes_go_on_with_a_lane_count_and_their_undo_puts_the_track_back() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "lanes", "lanes": 3}));
+    assert_eq!(preview["display"]["title"], "Kick: fixed lanes (3)");
+    assert_eq!(state(|s| (s.tracks[1].extra["I_FREEMODE"], s.tracks[1].extra["I_NUMFIXEDLANES"])), (2.0, 3.0));
+    lab.undo("track-lanes", &preview, &applied).unwrap();
+    assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 0.0);
+    let again = lab.undo("track-lanes", &preview, &applied).unwrap();
+    assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+}
+
+#[test]
+fn lanes_going_off_say_what_then_plays_together_and_the_undo_brings_the_lanes_back() {
+    let lab = lanes_lab();
+    state(|s| s.tracks[1].extra.insert("C_LANEPLAYS:1".into(), 1.0));
+    state(|s| s.tracks[1].extra.insert("C_LANEPLAYS:0".into(), 0.0));
+    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "normal"}));
+    assert!(preview["display"]["note"].as_str().unwrap().contains("1 item(s) on other lanes"), "{}", preview["display"]);
+    // (REAPER puts every item on one lane while lanes are off)
+    state(|s| {
+        for item in s.tracks[1].items.iter_mut() {
+            item.lane = 0;
+        }
+    });
+    lab.undo("track-lanes", &preview, &applied).unwrap();
+    assert_eq!(state(|s| s.tracks[1].extra["I_FREEMODE"]), 2.0);
+    assert_eq!(item("{ITEM-K2}").unwrap().1.lane, 1, "the item is on its lane again");
+    assert_eq!(plays(), vec![0.0, 1.0], "the lanes play as they did");
+}
+
+#[test]
+fn lanes_the_producer_changed_since_stay_theirs() {
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("track-lanes", json!({"ref": KICK, "mode": "lanes", "lanes": 4}));
+    state(|s| s.tracks[1].items[0].lane = 3);
+    assert_eq!(code(lab.undo("track-lanes", &preview, &applied)), "changed");
+    assert_eq!(code(lab.preview("track-lanes", json!({"ref": KICK, "mode": "free", "lanes": 2}))), "bad-params");
+    assert_eq!(code(lab.preview("track-lanes", json!({"ref": "r:track:master", "mode": "lanes"}))), "bad-params");
+}
+
+// ----- lane plays -----
+
+#[test]
+fn a_lane_plays_alone_and_the_undo_makes_the_lanes_play_as_they_did() {
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("lane-plays", json!({"ref": KICK, "lane": 1, "plays": "only"}));
+    assert_eq!(preview["display"]["title"], "Kick: only lane 2 plays");
+    assert_eq!(plays(), vec![0.0, 1.0]);
+    lab.undo("lane-plays", &preview, &applied).unwrap();
+    assert_eq!(plays(), vec![2.0, 2.0]);
+    // Silent, then the producer picks another lane: theirs.
+    let (preview, applied) = lab.make("lane-plays", json!({"ref": KICK, "lane": 0, "plays": "no"}));
+    assert_eq!(plays(), vec![0.0, 1.0], "the lane left playing plays alone");
+    state(|s| {
+        s.tracks[1].extra.insert("C_LANEPLAYS:0".into(), 1.0);
+        s.tracks[1].extra.insert("C_LANEPLAYS:1".into(), 0.0);
+    });
+    assert_eq!(code(lab.undo("lane-plays", &preview, &applied)), "changed");
+    assert_eq!(code(lab.preview("lane-plays", json!({"ref": KICK, "lane": 2, "plays": "only"}))), "bad-params");
+    assert_eq!(code(lab.preview("lane-plays", json!({"ref": "r:track:{CCCC}", "lane": 0, "plays": "only"}))), "bad-params");
+}
+
+// ----- lane names -----
+
+#[test]
+fn a_lane_is_named_and_its_name_put_back() {
+    let lab = lanes_lab();
+    let (preview, applied) = lab.make("lane-name", json!({"ref": KICK, "lane": 1, "name": "Take B"}));
+    assert_eq!(preview["display"]["title"], "Kick: lane 2 named “Take B”");
+    assert_eq!(state(|s| s.tracks[1].lane_names[1].clone()), "Take B");
+    lab.undo("lane-name", &preview, &applied).unwrap();
+    assert_eq!(state(|s| s.tracks[1].lane_names[1].clone()), "2");
+    let (preview, applied) = lab.make("lane-name", json!({"ref": KICK, "lane": 1, "name": "Take B"}));
+    state(|s| s.tracks[1].lane_names[1] = "mine".into());
+    assert_eq!(code(lab.undo("lane-name", &preview, &applied)), "changed");
+    // The lane went: gone.
+    state(|s| s.tracks[1].extra.insert("I_NUMFIXEDLANES".into(), 1.0));
+    assert_eq!(code(lab.undo("lane-name", &preview, &applied)), "gone");
+}
+
+// ----- razor areas -----
+
+#[test]
+fn razor_areas_are_set_on_a_lane_or_an_envelope_and_put_back_exactly() {
+    let lab = lanes_lab();
+    state(|s| s.tracks[1].envelopes = vec![crate::reaper::fake::FakeEnvelope::own("Volume", "<VOLENV2", 2)]);
+    let input = json!({"ref": KICK, "areas": [{"start": 0.5, "end": 1.5, "lane": 1}, {"startBeats": 4.0, "endBeats": 6.0, "envelopeRef": "r:env:{BBBB}:{ENV-VOLENV2}"}]});
+    let (preview, applied) = lab.make("razor-set", input);
+    assert_eq!(preview["display"]["title"], "Kick: 2 razor areas");
+    let razor = state(|s| s.items.razor.get("{BBBB}").cloned().unwrap());
+    assert!(
+        razor.starts_with("0.50000000000000 1.50000000000000 \"\" 0.500000 1.000000,2.00000000000000 3.00000000000000 \"{ENV-VOLENV2}\""),
+        "{razor}"
+    );
+    // The producer's areas elsewhere are theirs; the undo clears Kumi's.
+    lab.undo("razor-set", &preview, &applied).unwrap();
+    assert!(state(|s| s.items.razor.get("{BBBB}").is_none()));
+    // An area the producer redrew since stays theirs.
+    let (preview, applied) = lab.make("razor-set", json!({"ref": KICK, "areas": [{"start": 0.0, "end": 1.0}]}));
+    state(|s| s.items.razor.insert("{BBBB}".into(), "0.00000000000000 2.00000000000000 \"\" 0.000000 1.000000".into()));
+    assert_eq!(code(lab.undo("razor-set", &preview, &applied)), "changed");
+    // Clearing them, then putting them back.
+    let (preview, applied) = lab.make("razor-set", json!({"ref": KICK, "areas": []}));
+    assert!(state(|s| s.items.razor.get("{BBBB}").is_none()));
+    lab.undo("razor-set", &preview, &applied).unwrap();
+    assert!(state(|s| s.items.razor.get("{BBBB}").unwrap().starts_with("0.00000000000000 2.00000000000000")));
+}
+
+#[test]
+fn razor_areas_are_checked_before_anything_is_written() {
+    let lab = lanes_lab();
+    for (input, needle) in [
+        (json!({"ref": KICK}), "areas must be a list"),
+        (json!({"ref": KICK, "areas": [{"start": 2.0, "end": 1.0}]}), "end after"),
+        (json!({"ref": KICK, "areas": [{"start": 0.0, "end": 1.0, "lane": 2}]}), "lane must be"),
+        (json!({"ref": "r:track:{CCCC}", "areas": [{"start": 0.0, "end": 1.0, "lane": 0}]}), "no fixed lanes"),
+        (
+            json!({"ref": KICK, "areas": [{"start": 0.0, "end": 1.0, "envelopeRef": "r:env:{AAAA}:{ENV-VOLENV2}"}]}),
+            "this track's envelopes",
+        ),
+    ] {
+        let (code, message) = lab.preview("razor-set", input.clone()).unwrap_err();
+        assert_eq!(code, "bad-params", "{input}");
+        assert!(message.contains(needle), "{input}: {message}");
+    }
+}
+
+// ----- comping -----
+
+#[test]
+fn a_comp_makes_the_comp_lane_and_area_and_its_undo_puts_the_whole_track_back() {
+    let lab = lanes_lab();
+    // The producer's razor area on another track and their track selection stay as they are.
+    state(|s| {
+        s.items.razor.insert("{DDDD}".into(), "9.00000000000000 10.00000000000000 \"\" 0.000000 1.000000".into());
+        s.tracks[3].selected = true;
+    });
+    let before = state(|s| s.tracks[1].clone());
+    let (preview, applied) = lab.make("lane-comp", json!({"ref": KICK, "lane": 1, "start": 0.5, "end": 1.5}));
+    assert_eq!(preview["display"]["title"], "Kick: comped lane 2 from bar 1 beat 2 to bar 1 beat 4");
+    assert!(preview["display"]["note"].as_str().unwrap().contains("comp lane on top"));
+    let kick = state(|s| s.tracks[1].clone());
+    assert_eq!(kick.lane_names[0], "C1");
+    assert_eq!(kick.items.len(), 3, "the comp area's media is a new item on the comp lane");
+    let made = kick.items.iter().find(|i| i.lane == 0 && i.guid != "{ITEM-K1}" && i.guid != "{ITEM-K2}").unwrap();
+    assert_eq!((made.position, made.length), (0.5, 1.0));
+    assert_eq!(applied["created"]["ref"], format!("r:item:{}", made.guid));
+    assert_eq!(
+        state(|s| s.items.razor.get("{DDDD}").cloned()).as_deref(),
+        Some("9.00000000000000 10.00000000000000 \"\" 0.000000 1.000000")
+    );
+    assert!(state(|s| s.items.razor.get("{BBBB}").is_none()), "Kumi's razor area is gone");
+    assert!(state(|s| s.tracks[3].selected && !s.tracks[1].selected), "the producer's selection is as it was");
+    lab.undo("lane-comp", &preview, &applied).unwrap();
+    assert!(state(|s| s.tracks[1].clone()) == before, "the track is exactly as before the comp");
+    // A second comp on a comping track uses its comp lane.
+    lab.make("lane-comp", json!({"ref": KICK, "lane": 1, "start": 0.0, "end": 0.5}));
+    let (preview2, _) = lab.make("lane-comp", json!({"ref": KICK, "lane": 2, "start": 1.0, "end": 1.5}));
+    assert!(preview2["display"].get("note").is_none());
+    assert_eq!(state(|s| s.tracks[1].lane_names.len()), 3, "no second comp lane");
+}
+
+#[test]
+fn a_comp_is_refused_on_a_changed_track_and_with_nothing_to_comp_and_its_undo_fenced() {
+    let lab = lanes_lab();
+    let before = state(|s| s.tracks[1].clone());
+    // Nothing on lane 2 from 3 to 3.5 s: the preview can't know; the apply finds nothing comped and puts the track back.
+    let input = json!({"ref": KICK, "lane": 1, "start": 3.0, "end": 3.5});
+    let preview = lab.preview("lane-comp", input.clone()).unwrap();
+    let (code_, message) = lab.apply_with("lane-comp", &input, &preview, "Kumi: x (k1)").unwrap_err();
+    assert_eq!(code_, "bad-params");
+    assert!(message.contains("no media"), "{message}");
+    assert!(state(|s| s.tracks[1].clone()) == before, "nothing comped stays");
+    // The track changed between the preview and the apply.
+    let input = json!({"ref": KICK, "lane": 1, "start": 0.5, "end": 1.5});
+    let preview = lab.preview("lane-comp", input.clone()).unwrap();
+    state(|s| s.tracks[1].volume = 0.5);
+    assert_eq!(code(lab.apply_with("lane-comp", &input, &preview, "Kumi: x (k1)")), "changed");
+    // And since the comp.
+    let (preview, applied) = lab.make("lane-comp", json!({"ref": KICK, "lane": 1, "start": 0.5, "end": 1.5}));
+    state(|s| s.tracks[1].mute = true);
+    assert_eq!(code(lab.undo("lane-comp", &preview, &applied)), "changed");
+    lab.undo_with("lane-comp", &preview, &applied, true).unwrap();
+    assert_eq!(state(|s| s.tracks[1].lane_names.len()), 2, "discard puts the track back anyway");
+}
+
+#[test]
+fn every_lane_answer_names_refs_the_way_the_contract_says() {
+    let lab = lanes_lab();
+    for (kind, input) in [
+        ("track-lanes", json!({"ref": KICK, "mode": "lanes", "lanes": 3})),
+        ("lane-plays", json!({"ref": KICK, "lane": 0, "plays": "only"})),
+        ("lane-name", json!({"ref": KICK, "lane": 0, "name": "x"})),
+        ("razor-set", json!({"ref": KICK, "areas": [{"start": 0.0, "end": 1.0}]})),
+        ("lane-comp", json!({"ref": KICK, "lane": 1, "start": 0.5, "end": 1.5})),
+    ] {
+        let (preview, applied) = lab.make(kind, input);
+        let restored = lab.undo(kind, &preview, &applied).unwrap();
+        for answer in [&preview, &applied, &restored] {
+            assert_eq!(daw_bridge::contract::misplaced_refs(answer), Vec::<String>::new(), "{kind}: {answer}");
+        }
+    }
+}

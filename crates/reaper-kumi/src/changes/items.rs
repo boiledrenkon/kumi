@@ -1609,3 +1609,56 @@ pub fn copy_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         ..Default::default()
     })
 }
+
+// ----- the producer's selection, around REAPER's actions on selected items -----
+
+/// The items the producer has selected, by GUID: what an action on selected items is run between.
+pub(super) fn selected_items(ctx: &Ctx) -> Vec<String> {
+    let reaper = ctx.reaper;
+    let mut guids = Vec::new();
+    for track in (0..reaper.track_count(ctx.proj)).filter_map(|n| reaper.track_at(ctx.proj, n)) {
+        for item in (0..reaper.track_item_count(track)).filter_map(|n| reaper.track_item(track, n)) {
+            if reaper.item_value(item, "B_UISEL") != 0.0 {
+                guids.push(reaper.item_guid(item));
+            }
+        }
+    }
+    guids
+}
+
+/// Selects exactly these items.
+pub(super) fn select_only(ctx: &Ctx, items: &[Item]) {
+    ctx.reaper.select_all_items(ctx.proj, false);
+    for item in items {
+        ctx.reaper.set_item_selected(*item, true);
+    }
+}
+
+/// Selects again the items the producer had selected (those still there), and nothing else.
+pub(super) fn reselect(ctx: &Ctx, guids: &[String]) {
+    ctx.reaper.select_all_items(ctx.proj, false);
+    for guid in guids {
+        if let Some(item) = item_by_guid(ctx, guid) {
+            ctx.reaper.set_item_selected(item, true);
+        }
+    }
+}
+
+/// Runs one of REAPER's main actions on exactly `items`, leaving the producer's selection as it was. The action is
+/// checked by the name it has in this REAPER first: an action of another name under that number is not run.
+pub(super) fn run_on_items(ctx: &Ctx, items: &[Item], command: i32, name: &str) -> Done<()> {
+    let reaper = ctx.reaper;
+    if reaper.action_name(command).as_deref() != Some(name) {
+        return Err(failed(format!("this REAPER has no action {command} named “{name}”, so Kumi won't run it")));
+    }
+    let selected = selected_items(ctx);
+    reaper.prevent_ui_refresh(1);
+    select_only(ctx, items);
+    let ran = reaper.run_action(command);
+    reselect(ctx, &selected);
+    reaper.prevent_ui_refresh(-1);
+    if !ran {
+        return Err(failed(format!("REAPER wouldn't run “{name}”")));
+    }
+    Ok(())
+}

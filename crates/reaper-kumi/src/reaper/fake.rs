@@ -269,7 +269,7 @@ impl FakeItem {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FakeSend {
     /// The destination track's index (a send), or ignored (a hardware output).
     pub dest: usize,
@@ -291,7 +291,7 @@ impl FakeSend {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FakeTrack {
     pub guid: String,
     pub name: String,

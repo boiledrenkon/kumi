@@ -15,6 +15,7 @@ use crate::refs::{self, EnvelopeId, Epoch, Ref, Registry, TrackId};
 use crate::rows;
 
 mod bodies;
+pub(crate) mod item_rows;
 
 pub use bodies::BODY_KINDS;
 
@@ -1074,6 +1075,7 @@ fn take_row(reaper: &Reaper, take: Take, place: Option<(usize, bool)>) -> Value 
         row["noteCount"] = notes.into();
         row["ccCount"] = ccs.into();
     }
+    item_rows::take_details(reaper, take, &mut row, place.is_none());
     row
 }
 
@@ -2059,7 +2061,8 @@ mod tests {
             ask(&format!("r:item:{{I{t}-3}}"));
         }
         let calls = fake::with(|s| s.calls);
-        assert!(calls < 3 * 40, "{calls} calls for three cached items");
+        // (a row reads some 50 attributes, an item's fades and lock among them; a walk would be thousands)
+        assert!(calls < 3 * 60, "{calls} calls for three cached items");
     }
 
     fn snapshot(lab: &Lab) -> Answer {
