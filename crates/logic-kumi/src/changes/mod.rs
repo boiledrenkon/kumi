@@ -171,7 +171,7 @@ pub fn kind(name: &str) -> Option<Kind> {
 }
 
 /// Every kind the bridge makes, by its wire name.
-pub const KINDS: [&str; 15] = [
+pub const KINDS: [&str; 16] = [
     "track-volume",
     "track-pan",
     "track-mute",
@@ -187,6 +187,7 @@ pub const KINDS: [&str; 15] = [
     "notes-add",
     "notes-change",
     "notes-delete",
+    "fx-bypass",
 ];
 
 impl Kind {
