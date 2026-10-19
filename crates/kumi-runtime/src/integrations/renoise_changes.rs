@@ -1,6 +1,6 @@
 //! What Kumi can change in Renoise (M3): tracks (made, moved, grouped and deleted too), the song's tempo, lines per beat
 //! and ticks per line, a track's DSP devices and their parameters, a pattern track's lines, the pattern sequence's slots
-//! and the loop. Each kind is the tool's (`payload/changes_*.lua`).
+//! and the loop; and Lua run in Renoise for the rest (M4). Each kind is the tool's (`payload/changes_*.lua`).
 use super::own_changes::{OwnAction, OwnChangeSet, OwnKind};
 use crate::core::contracts::ChangeFamily::*;
 
@@ -39,7 +39,7 @@ static ACTIONS: [OwnAction; 2] = [
     },
 ];
 
-static KINDS: [OwnKind; 27] = [
+static KINDS: [OwnKind; 28] = [
     OwnKind::new("track_volume", "track-volume", Mixer, "Change a track's volume in dB (-150 or less is silence, up to about +3), on its pre-fader (default) or post-fader stage; the master too.", r#"{"type":"object","additionalProperties":false,"required":["ref","volumeDb"],"properties":{"ref":{"type":"string","description":"The track (master allowed)"},"volumeDb":{"type":"number","minimum":-150,"maximum":3},"stage":{"type":"string","enum":["pre","post"]}}}"#).core().meter("volumeDb", -60.0, 3.0),
     OwnKind::new("track_pan", "track-pan", Mixer, "Change a track's panning, -1 (left) to 1 (right), on its pre-fader (default) or post-fader stage; the master too.", r#"{"type":"object","additionalProperties":false,"required":["ref","pan"],"properties":{"ref":{"type":"string","description":"The track (master allowed)"},"pan":{"type":"number","minimum":-1,"maximum":1},"stage":{"type":"string","enum":["pre","post"]}}}"#).core().meter("pan", -1.0, 1.0),
     OwnKind::new("track_mute", "track-mute", Mixer, "Mute or unmute a track (not the master); Renoise's own undo skips it, undo_change doesn't.", r#"{"type":"object","additionalProperties":false,"required":["ref","mute"],"properties":{"ref":{"type":"string"},"mute":{"type":"boolean"}}}"#).core().skipped_by_daw_undo(),
@@ -67,4 +67,5 @@ static KINDS: [OwnKind; 27] = [
     OwnKind::new("slot_mute", "slot-mute", Locators, "Mute or unmute a track in one sequence slot (the pattern matrix's slot).", r#"{"type":"object","additionalProperties":false,"required":["ref","trackRef","mute"],"properties":{"ref":{"type":"string","description":"The sequence slot"},"trackRef":{"type":"string","description":"The track"},"mute":{"type":"boolean"}}}"#).wire(&[("trackRef", "track")]),
     OwnKind::new("loop_range", "loop-range", Locators, "Loop the sequence from slot first to slot last (from 1); both 0 or left out clear it. Renoise's own undo skips it, undo_change doesn't.", r#"{"type":"object","additionalProperties":false,"properties":{"first":{"type":"integer","minimum":0},"last":{"type":"integer","minimum":0}}}"#).skipped_by_daw_undo(),
     OwnKind::new("loop_pattern", "loop-pattern", Locators, "Turn pattern looping on or off. Renoise's own undo skips it, undo_change doesn't.", r#"{"type":"object","additionalProperties":false,"required":["on"],"properties":{"on":{"type":"boolean"}}}"#).skipped_by_daw_undo(),
+    OwnKind::new("run_lua", "run-lua", Structure, "Run Lua in Renoise, for what no other tool does: the whole renoise API, with `song` for renoise.song(); print() and the value it returns come back. One step of Renoise's undo, and only Renoise's undo takes it back (undo_change can't). It runs at most timeoutMs (500 by default, 800 at most) and is stopped there. Read what it changed again before using older refs.", r#"{"type":"object","additionalProperties":false,"required":["code"],"properties":{"code":{"type":"string","minLength":1},"timeoutMs":{"type":"integer","minimum":1,"maximum":800}}}"#).structural(),
 ];

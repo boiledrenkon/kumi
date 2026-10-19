@@ -465,6 +465,8 @@ impl<S: RefScheme + 'static> ChangeHost for OwnChanges<S> {
                 format!("The {} changed since (another one is open, or it was reloaded), so Kumi left it.", words.place),
             ),
             Some("undone") => return Ok(Some(history.undone(entry))),
+            // (what Lua or a call through the DAW's API did: Kumi doesn't know what it changed, the DAW's own undo does)
+            Some("daw-only") => (ChangeState::Kept, why.clone()),
             Some("unknown") => (ChangeState::Expired, self.link.ending_note(&snapshot.transaction_id, Ending::Unknown)),
             Some("not-applied" | "uncertain")
                 if snapshot.record.state == ChangeState::Unsure || refused.code.as_deref() == Some("uncertain") =>

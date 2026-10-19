@@ -257,6 +257,29 @@ impl RenoiseScript {
         if method != "change_restore" && params.get("epoch").and_then(Value::as_str) != Some(&epoch.to_string()) {
             return Err(("stale".into(), format!("that change is from an earlier epoch (now {epoch}): read again")));
         }
+        // Lua run in the song: one step of Renoise's undo, which only Renoise's own undo takes back.
+        if kind == "run-lua" {
+            let title = "Ran Lua: song.transport.bpm = 140";
+            let mut value = match method {
+                "change_preview" => {
+                    json!({"target": {"ref": format!("{epoch}:song:1"), "kind": "song"}, "prior": {}, "fence": {}, "display": {"title": title}})
+                }
+                "change_apply" => {
+                    let desc = params["desc"].as_str().unwrap_or_default().to_string();
+                    state.undo.push(desc.clone());
+                    json!({"applied": {"changed": true, "printed": ["set"], "result": 140}, "display": {"title": title}, "undo": {"desc": desc, "entry": true}})
+                }
+                _ => {
+                    return Err((
+                        "daw-only".into(),
+                        "Kumi can't take back what a Lua chunk did: Renoise's own undo can (Edit > Undo)".into(),
+                    ))
+                }
+            };
+            value["epoch"] = epoch.to_string().into();
+            value["layout"] = 0.into();
+            return Ok(value);
+        }
         let (reference, input) = match method {
             "change_restore" => (params["target"]["ref"].as_str(), &params["prior"]),
             _ => (params["input"]["ref"].as_str(), &params["input"]),

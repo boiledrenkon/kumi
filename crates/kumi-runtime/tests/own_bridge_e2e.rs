@@ -556,6 +556,17 @@ async fn renoises_changes_follow_its_epoch_and_its_undo_that_skips_mute() {
             let kept = tool(&latest, "undo_change").execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
             assert!(kept.is_error && kept.text.contains("changed in Renoise since Kumi set it"), "{}", kept.text);
             assert_eq!(script.track_state(1).0, -1.0);
+            // Lua run in Renoise: a HISTORY row, and only Renoise's own undo takes it back (Kumi's undo leaves it, in Renoise's words).
+            let ran = plan
+                .execute(input(json!({"steps": [{"tool": "run_lua", "input": {"code": "song.transport.bpm = 140"}}]})), Signal::new())
+                .await
+                .unwrap();
+            assert!(!ran.is_error && ran.text.contains("Ran Lua"), "{}", ran.text);
+            assert!(script.undo_history().last().is_some_and(|step| step.contains("Ran Lua")), "{:?}", script.undo_history());
+            let left = tool(&latest, "undo_change").execute(input(json!({"change": "last"})), Signal::new()).await.unwrap();
+            assert!(left.is_error && left.text.contains("Renoise's own undo can"), "{}", left.text);
+            let row = told.borrow().iter().rev().find(|record| record.title.starts_with("Ran Lua")).cloned().unwrap();
+            assert_eq!(row.state, ChangeState::Kept, "{row:?}");
             // The song changed behind Kumi's back (another epoch): the tool refuses, and Kumi says so in the model's ref.
             script.switch_song();
             let stale = tool(&latest, "track_volume").execute(input(json!({"ref": kick, "volumeDb": -2})), Signal::new()).await.unwrap();
