@@ -75,8 +75,19 @@ fn stamp_of(reaper: &Reaper, track: Track, index: i32) -> Option<String> {
     reaper.send_text(track, 0, index, STAMP)
 }
 
-fn find_by_stamp(reaper: &Reaper, owner: Track, stamp: &str) -> Option<i32> {
-    (0..reaper.send_count(owner, 0)).find(|&index| stamp_of(reaper, owner, index).as_deref() == Some(stamp))
+/// The send from `owner` to `receiver` with Kumi's mark: `None` when there is none. Only a send to that track is taken (the
+/// producer's copy of the receiving track brings a copy of the mark with it), and two with the mark are refused `changed`:
+/// which of them is Kumi's can't be told.
+fn find_by_stamp(reaper: &Reaper, owner: Track, receiver: Track, stamp: &str) -> Done<Option<i32>> {
+    let mut marked = (0..reaper.send_count(owner, 0)).filter(|&index| {
+        reaper.send_peer(owner, 0, index) == Some(receiver) && stamp_of(reaper, owner, index).as_deref() == Some(stamp)
+    });
+    let first = marked.next();
+    if first.is_some() && marked.next().is_some() {
+        let route = route_text(&name_of(reaper, owner), &name_of(reaper, receiver));
+        return Err(changed(format!("two sends {route} carry the mark of Kumi's send (one was copied): Kumi can't tell which is its own")));
+    }
+    Ok(first)
 }
 
 fn fresh_stamp() -> String {
@@ -125,10 +136,14 @@ fn seal(reaper: &Reaper, found: &Found) -> Value {
 fn find_sealed(ctx: &Ctx, reference: &str, seal: &Value, check: bool) -> Done<Found> {
     let reaper = ctx.reaper;
     if let Some(stamp) = seal["stamp"].as_str() {
-        let Ref::Send { track, .. } = Ref::parse(reference).map_err(bad)? else { return Err(bad("ref must be a send ref (r:send:…)")) };
+        let Ref::Send { track, other, .. } = Ref::parse(reference).map_err(bad)? else {
+            return Err(bad("ref must be a send ref (r:send:…)"));
+        };
         let owner = ctx.reads.track_by_id(reaper, ctx.proj, &track)?;
-        let index = find_by_stamp(reaper, owner, stamp).ok_or_else(|| failed("that send isn't there (deleted, or it went elsewhere)"))?;
-        let receiver = reaper.send_peer(owner, 0, index).ok_or_else(|| failed("that send has no receiving track"))?;
+        let gone = || failed("that send isn't there (deleted, or it went elsewhere)");
+        let SendEnd::Track(other) = other else { return Err(bad("ref must be a send to a track")) };
+        let receiver = track_by_id(ctx, &other).ok_or_else(gone)?;
+        let index = find_by_stamp(reaper, owner, receiver, stamp)?.ok_or_else(gone)?;
         return Ok(Found { track: owner, index, receiver, from: name_of(reaper, owner), to: name_of(reaper, receiver) });
     }
     let found = find(ctx, reference)?;
@@ -542,7 +557,11 @@ pub fn remove_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
     // The send is back already (a retry, or the producer made it): nothing is made twice. One with the mark is Kumi's send;
     // else there are as many to that track as there were before it went, and one has its state.
     let stamp = material["stamp"].as_str();
-    let back = match stamp.and_then(|stamp| find_by_stamp(reaper, from, stamp)) {
+    let marked = match stamp {
+        Some(stamp) => find_by_stamp(reaper, from, to, stamp)?,
+        None => None,
+    };
+    let back = match marked {
         Some(index) => Some(index),
         None if stamp.is_none() && pair_count(reaper, from, to) >= material["together"].as_u64().unwrap_or(1) as usize => {
             (0..reaper.send_count(from, 0)).find(|&index| {

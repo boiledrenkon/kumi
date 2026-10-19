@@ -2080,6 +2080,41 @@ fn kumis_undo_of_a_send_it_added_finds_that_send_by_its_mark_and_never_the_produ
 }
 
 #[test]
+fn kumis_mark_is_taken_only_on_a_send_to_the_track_the_ref_names_and_two_sends_with_it_are_refused() {
+    let lab = Lab::new();
+    state(|s| s.tracks[1].sends.clear());
+    let input = json!({"ref": KICK, "toRef": "r:track:{DDDD}"});
+    let (preview, applied) = lab.make("send-add", input, "Kumi: Added send “Kick” → “Reverb” (ksi06)");
+    let kumis_stamp = applied["created"]["stamp"].as_str().unwrap().to_string();
+    // The producer duplicates Reverb: the copy receives from Kick with the same mark, and its send comes first.
+    state(|s| {
+        s.tracks.push(fake::FakeTrack::new("{EEEE}", "Reverb copy"));
+        let mut copy = FakeSend::to(4);
+        copy.ext.insert("P_EXT:kumi_id".into(), kumis_stamp.clone());
+        s.tracks[1].sends.insert(0, copy);
+        s.state_count += 1;
+    });
+    let restored = lab.undo("send-add", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(restored["display"]["title"], "Send “Kick” → “Reverb” taken away again");
+    assert_eq!(state(|s| s.tracks[1].sends.iter().map(|send| send.dest).collect::<Vec<_>>()), [4], "the copy's send stays");
+
+    // Two sends to Reverb with Kumi's mark: which is Kumi's can't be told, and neither is taken away.
+    let lab = Lab::new();
+    state(|s| s.tracks[1].sends.clear());
+    let input = json!({"ref": KICK, "toRef": "r:track:{DDDD}"});
+    let (preview, applied) = lab.make("send-add", input, "Kumi: Added send “Kick” → “Reverb” (ksi07)");
+    state(|s| {
+        let twin = FakeSend { ext: s.tracks[1].sends[0].ext.clone(), ..FakeSend::to(3) };
+        s.tracks[1].sends.push(twin);
+        s.state_count += 1;
+    });
+    let (code, message) = lab.undo("send-add", &preview, &applied, "Kumi: undo (kund2)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("can't tell which"), "{message}");
+    assert_eq!(state(|s| s.tracks[1].sends.len()), 2, "nothing was taken away");
+}
+
+#[test]
 fn a_send_kumi_removed_is_made_again_even_when_an_identical_one_is_left_and_keeps_its_mark() {
     let lab = Lab::new();
     state(|s| {

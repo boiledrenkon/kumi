@@ -21,7 +21,7 @@ fn cstring(text: &str) -> CString {
 }
 
 /// Reads a string a getter writes into a big buffer.
-fn big_string(fill: impl FnOnce(*mut c_char) -> bool) -> Option<String> {
+pub(super) fn big_string(fill: impl FnOnce(*mut c_char) -> bool) -> Option<String> {
     let mut buf = vec![0u8; BIG];
     if !fill(buf.as_mut_ptr().cast()) {
         return None;

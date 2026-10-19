@@ -115,13 +115,9 @@ impl Reaper<'_> {
     pub fn send_text(&self, track: Track, category: i32, index: i32, parm: &str) -> Option<String> {
         let parm = cstring(parm);
         let f = self.api.GetSetTrackSendInfo_String()?;
-        let mut ok = false;
-        let text = api::read_buffer(|buf, size| {
-            // Asked for a read, the buffer is written; its size is not passed, so it is kept big enough for a stamp.
-            let _ = size;
-            ok = unsafe { f(track.0, category, index, parm.as_ptr(), buf, false) };
-        });
-        (ok && !text.is_empty()).then_some(text)
+        // Asked for a read, REAPER writes the text without being told the buffer's size: the big buffer of its other such reads.
+        let text = super::objects::big_string(|buf| unsafe { f(track.0, category, index, parm.as_ptr(), buf, false) })?;
+        (!text.is_empty()).then_some(text)
     }
 
     pub fn set_send_text(&self, track: Track, category: i32, index: i32, parm: &str, value: &str) -> bool {
