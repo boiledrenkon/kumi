@@ -1,0 +1,549 @@
+//! Any of REAPER's API functions by name, with JSON arguments (the generic call), and a Lua chunk run as a ReaScript.
+//!
+//! The call is generated from the vendored header (build.rs): each parameter is read by what its C type and name say it
+//! is. Numbers and flags are numbers and booleans; text is a string; a handle is a ref (a track, item, take or envelope;
+//! a project is the open one); a buffer REAPER writes into, or a value it writes back (`…Out`), comes back in `out`
+//! under its name. A function that takes or returns anything else (a callback, a window, a bitmap, a source) can't be
+//! called this way: run-lua can.
+
+use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
+
+use serde_json::{Map, Value};
+
+use super::{Project, Reaper};
+use crate::api::{self, Api, MediaItem, MediaItem_Take, MediaTrack, ReaProject, TrackEnvelope, FUNCTIONS};
+
+include!(concat!(env!("OUT_DIR"), "/reaper_generic.rs"));
+
+/// How a call finds the objects its refs name, and names the objects REAPER gives back.
+pub trait Handles {
+    /// The pointer of the object `reference` names, of type `base` ("MediaTrack" and the like).
+    fn find(&self, base: &str, reference: &str) -> Result<*mut c_void, String>;
+    /// The ref of an object REAPER gave back, or what can be said of it.
+    fn name(&self, base: &str, pointer: *mut c_void) -> Value;
+}
+
+/// A sized buffer's size when the caller gives none (`<name>_sz` gives another, up to `MOST_BUFFER`).
+const BUFFER: usize = 64 * 1024;
+const MOST_BUFFER: usize = 64 * 1024 * 1024;
+
+enum Slot {
+    Int(Box<c_int>),
+    UInt(Box<c_uint>),
+    Int64(Box<i64>),
+    Double(Box<f64>),
+    Float(Box<f32>),
+    Bool(Box<bool>),
+    Text(Box<*const c_char>),
+    Buf(Box<[u8]>),
+}
+
+/// One call's arguments, and what it keeps alive until REAPER has answered: text, buffers and the values it writes back.
+pub struct Call<'h> {
+    args: Value,
+    handles: &'h dyn Handles,
+    dry: bool,
+    texts: Vec<CString>,
+    // (name, slot, reported in `out`)
+    slots: Vec<(String, Slot, bool)>,
+}
+
+impl<'h> Call<'h> {
+    pub fn new(args: &Value, handles: &'h dyn Handles, dry: bool) -> Call<'h> {
+        Call { args: args.clone(), handles, dry, texts: Vec::new(), slots: Vec::new() }
+    }
+
+    /// The arguments are only checked: REAPER isn't called.
+    pub fn dry(&self) -> bool {
+        self.dry
+    }
+
+    fn arg(&self, k: Option<usize>, name: &str) -> Option<&Value> {
+        let k = k?;
+        let value = match &self.args {
+            Value::Array(list) => list.get(k),
+            Value::Object(map) => map.get(name),
+            _ => None,
+        };
+        value.filter(|v| !v.is_null())
+    }
+
+    fn missing(name: &str, what: &str) -> String {
+        format!("args: {name} must be {what}")
+    }
+
+    pub fn int(&mut self, k: Option<usize>, name: &str, optional: bool) -> Result<i64, String> {
+        match self.arg(k, name) {
+            Some(Value::Bool(b)) => Ok(i64::from(*b)),
+            Some(v) => v
+                .as_i64()
+                .or_else(|| v.as_u64().map(|n| n as i64))
+                .or_else(|| v.as_f64().filter(|f| f.fract() == 0.0 && f.is_finite()).map(|f| f as i64))
+                .ok_or_else(|| Self::missing(name, "a whole number")),
+            None if optional || k.is_none() => Ok(0),
+            None => Err(Self::missing(name, "a whole number")),
+        }
+    }
+
+    pub fn double(&mut self, k: Option<usize>, name: &str, optional: bool) -> Result<f64, String> {
+        match self.arg(k, name) {
+            Some(v) => v.as_f64().ok_or_else(|| Self::missing(name, "a number")),
+            None if optional || k.is_none() => Ok(0.0),
+            None => Err(Self::missing(name, "a number")),
+        }
+    }
+
+    pub fn boolean(&mut self, k: Option<usize>, name: &str, optional: bool) -> Result<bool, String> {
+        match self.arg(k, name) {
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(v) if v.as_i64().is_some() => Ok(v.as_i64() != Some(0)),
+            Some(_) => Err(Self::missing(name, "true or false")),
+            None if optional || k.is_none() => Ok(false),
+            None => Err(Self::missing(name, "true or false")),
+        }
+    }
+
+    pub fn text(&mut self, k: Option<usize>, name: &str, optional: bool) -> Result<*const c_char, String> {
+        match self.arg(k, name) {
+            Some(Value::String(s)) => {
+                let text = CString::new(s.replace('\0', "")).map_err(|_| Self::missing(name, "text"))?;
+                self.texts.push(text);
+                Ok(self.texts.last().expect("just kept").as_ptr())
+            }
+            Some(_) => Err(Self::missing(name, "text")),
+            None if optional => Ok(std::ptr::null()),
+            // (REAPER reads an empty string where none is given: a text it needs is never null)
+            None if k.is_none() => Ok(c"".as_ptr()),
+            None => Err(Self::missing(name, "text")),
+        }
+    }
+
+    /// A buffer REAPER writes into (and reads first, for an input): its pointer and size.
+    pub fn buf(&mut self, k: Option<usize>, name: &str) -> Result<(*mut c_char, c_int), String> {
+        let size = match &self.args {
+            Value::Object(map) => map.get(&format!("{name}_sz")).and_then(Value::as_u64).map(|n| n as usize),
+            _ => None,
+        }
+        .unwrap_or(BUFFER)
+        .clamp(2, MOST_BUFFER);
+        let mut buf = vec![0u8; size].into_boxed_slice();
+        match self.arg(k, name) {
+            Some(Value::String(s)) => {
+                let bytes = s.as_bytes();
+                if bytes.len() >= size {
+                    return Err(format!("args: {name} is longer than its buffer ({size} bytes): pass {name}_sz"));
+                }
+                buf[..bytes.len()].copy_from_slice(bytes);
+            }
+            Some(_) => return Err(Self::missing(name, "text")),
+            None => {}
+        }
+        let ptr = buf.as_mut_ptr().cast::<c_char>();
+        self.slots.push((name.to_string(), Slot::Buf(buf), true));
+        Ok((ptr, size as c_int))
+    }
+
+    fn slot<T>(&mut self, name: &str, slot: Slot, report: bool, ptr: *mut T) -> *mut T {
+        self.slots.push((name.to_string(), slot, report));
+        ptr
+    }
+
+    pub fn out_int(&mut self, k: Option<usize>, name: &str) -> Result<*mut c_int, String> {
+        let mut b = Box::new(self.int(k, name, true)? as c_int);
+        let p = &mut *b as *mut c_int;
+        Ok(self.slot(name, Slot::Int(b), true, p))
+    }
+
+    pub fn out_uint(&mut self, k: Option<usize>, name: &str) -> Result<*mut c_uint, String> {
+        let mut b = Box::new(self.int(k, name, true)? as c_uint);
+        let p = &mut *b as *mut c_uint;
+        Ok(self.slot(name, Slot::UInt(b), true, p))
+    }
+
+    pub fn out_int64(&mut self, k: Option<usize>, name: &str) -> Result<*mut i64, String> {
+        let mut b = Box::new(self.int(k, name, true)?);
+        let p = &mut *b as *mut i64;
+        Ok(self.slot(name, Slot::Int64(b), true, p))
+    }
+
+    pub fn out_double(&mut self, k: Option<usize>, name: &str) -> Result<*mut f64, String> {
+        let mut b = Box::new(self.double(k, name, true)?);
+        let p = &mut *b as *mut f64;
+        Ok(self.slot(name, Slot::Double(b), true, p))
+    }
+
+    pub fn out_bool(&mut self, k: Option<usize>, name: &str) -> Result<*mut bool, String> {
+        let mut b = Box::new(self.boolean(k, name, true)?);
+        let p = &mut *b as *mut bool;
+        Ok(self.slot(name, Slot::Bool(b), true, p))
+    }
+
+    /// A value given by pointer (`const int*` and the like): null when the caller gives none.
+    fn in_ptr<T>(&mut self, given: bool, name: &str, slot: Slot, ptr: *mut T) -> *const T {
+        if !given {
+            return std::ptr::null();
+        }
+        self.slot(name, slot, false, ptr) as *const T
+    }
+
+    pub fn in_ptr_int(&mut self, k: Option<usize>, name: &str) -> Result<*const c_int, String> {
+        let given = self.arg(k, name).is_some();
+        let mut b = Box::new(self.int(k, name, true)? as c_int);
+        let p = &mut *b as *mut c_int;
+        Ok(self.in_ptr(given, name, Slot::Int(b), p))
+    }
+
+    pub fn in_ptr_uint(&mut self, k: Option<usize>, name: &str) -> Result<*const c_uint, String> {
+        let given = self.arg(k, name).is_some();
+        let mut b = Box::new(self.int(k, name, true)? as c_uint);
+        let p = &mut *b as *mut c_uint;
+        Ok(self.in_ptr(given, name, Slot::UInt(b), p))
+    }
+
+    pub fn in_ptr_int64(&mut self, k: Option<usize>, name: &str) -> Result<*const i64, String> {
+        let given = self.arg(k, name).is_some();
+        let mut b = Box::new(self.int(k, name, true)?);
+        let p = &mut *b as *mut i64;
+        Ok(self.in_ptr(given, name, Slot::Int64(b), p))
+    }
+
+    pub fn in_ptr_double(&mut self, k: Option<usize>, name: &str) -> Result<*const f64, String> {
+        let given = self.arg(k, name).is_some();
+        let mut b = Box::new(self.double(k, name, true)?);
+        let p = &mut *b as *mut f64;
+        Ok(self.in_ptr(given, name, Slot::Double(b), p))
+    }
+
+    pub fn in_ptr_float(&mut self, k: Option<usize>, name: &str) -> Result<*const f32, String> {
+        let given = self.arg(k, name).is_some();
+        let mut b = Box::new(self.double(k, name, true)? as f32);
+        let p = &mut *b as *mut f32;
+        Ok(self.in_ptr(given, name, Slot::Float(b), p))
+    }
+
+    pub fn in_ptr_bool(&mut self, k: Option<usize>, name: &str) -> Result<*const bool, String> {
+        let given = self.arg(k, name).is_some();
+        let mut b = Box::new(self.boolean(k, name, true)?);
+        let p = &mut *b as *mut bool;
+        Ok(self.in_ptr(given, name, Slot::Bool(b), p))
+    }
+
+    // (`isize` and `usize` pointers: none in the header takes one as an input)
+    pub fn in_ptr_isize(&mut self, k: Option<usize>, name: &str) -> Result<*const isize, String> {
+        let _ = (k, name);
+        Err(format!("{name} can't be given this way"))
+    }
+
+    pub fn in_ptr_usize(&mut self, k: Option<usize>, name: &str) -> Result<*const usize, String> {
+        let _ = (k, name);
+        Err(format!("{name} can't be given this way"))
+    }
+
+    /// Text REAPER points at (`const char** …Out`).
+    pub fn out_text(&mut self, name: &str) -> *mut *const c_char {
+        let mut b: Box<*const c_char> = Box::new(std::ptr::null());
+        let p = &mut *b as *mut *const c_char;
+        self.slot(name, Slot::Text(b), true, p)
+    }
+
+    pub fn handle(&mut self, k: Option<usize>, name: &str, base: &str, optional: bool) -> Result<*mut c_void, String> {
+        match self.arg(k, name) {
+            // (a project is the one open in REAPER: null, 0 or "current" name it)
+            Some(Value::String(s)) if base == "ReaProject" && s == "current" => Ok(std::ptr::null_mut()),
+            Some(v) if base == "ReaProject" && v.as_i64() == Some(0) => Ok(std::ptr::null_mut()),
+            Some(Value::String(s)) => self.handles.find(base, s),
+            Some(_) => Err(format!("args: {name} must be a ref")),
+            None if optional || base == "ReaProject" => Ok(std::ptr::null_mut()),
+            None => Err(format!("args: {name} must be a ref")),
+        }
+    }
+
+    fn ret_text(&mut self, p: *const c_char) -> Value {
+        if p.is_null() {
+            Value::Null
+        } else {
+            Value::String(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        }
+    }
+
+    fn ret_handle(&mut self, base: &str, p: *mut c_void) -> Value {
+        if p.is_null() {
+            Value::Null
+        } else {
+            self.handles.name(base, p)
+        }
+    }
+
+    /// What REAPER wrote back, by name (a buffer as text, and whether it filled its buffer: it may be cut).
+    pub fn outs(&self) -> Map<String, Value> {
+        let mut out = Map::new();
+        for (name, slot, report) in &self.slots {
+            if !report {
+                continue;
+            }
+            let value = match slot {
+                Slot::Int(b) => Value::from(**b),
+                Slot::UInt(b) => Value::from(**b),
+                Slot::Int64(b) => Value::from(**b),
+                Slot::Double(b) => Value::from(**b),
+                Slot::Float(b) => Value::from(f64::from(**b)),
+                Slot::Bool(b) => Value::from(**b),
+                Slot::Text(b) => {
+                    if b.is_null() {
+                        Value::Null
+                    } else {
+                        Value::String(unsafe { CStr::from_ptr(**b) }.to_string_lossy().into_owned())
+                    }
+                }
+                Slot::Buf(b) => {
+                    let len = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+                    if len + 1 >= b.len() {
+                        out.insert(format!("{name}_cut"), Value::Bool(true));
+                    }
+                    Value::String(String::from_utf8_lossy(&b[..len]).into_owned())
+                }
+            };
+            out.insert(name.clone(), value);
+        }
+        out
+    }
+}
+
+/// A function of the table by its name: its index, or what the caller may have meant.
+pub fn function(name: &str) -> Result<usize, String> {
+    if let Some(index) = FUNCTIONS.iter().position(|f| f.name.to_bytes() == name.as_bytes()) {
+        return Ok(index);
+    }
+    // (the names that share the longest start with it, then those that hold it)
+    let lower = name.to_ascii_lowercase();
+    let shared = |n: &str| n.to_ascii_lowercase().bytes().zip(lower.bytes()).take_while(|(a, b)| a == b).count();
+    let mut near: Vec<(usize, &str)> = FUNCTIONS
+        .iter()
+        .filter_map(|f| f.name.to_str().ok())
+        .map(|n| (shared(n).max(if n.to_ascii_lowercase().contains(&lower) { lower.len() } else { 0 }), n))
+        .filter(|(score, _)| *score >= 4.min(lower.len()).max(1))
+        .collect();
+    near.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().abs_diff(name.len()).cmp(&b.1.len().abs_diff(name.len()))));
+    let near: Vec<&str> = near.into_iter().take(5).map(|(_, n)| n).collect();
+    if near.is_empty() {
+        Err(format!("REAPER has no API function {name:?}"))
+    } else {
+        Err(format!("REAPER has no API function {name:?}: perhaps {}", near.join(", ")))
+    }
+}
+
+pub fn name_of(index: usize) -> &'static str {
+    FUNCTIONS[index].name.to_str().unwrap_or("?")
+}
+
+/// Why a function can't be called by name, or None.
+pub fn uncallable(index: usize) -> Option<&'static str> {
+    UNCALLABLE[index]
+}
+
+/// Functions Kumi never calls by name, and why: they open windows or dialogs, quit, change REAPER's own settings, run
+/// programs or register code. An action is run with the `action` method, which keeps dialogs and quitting out.
+const DENIED: [(&str, &str); 27] = [
+    ("Main_OnCommand", "runs an action: run it with the action method, which keeps dialogs and quitting out"),
+    ("KBD_OnMainActionEx", "runs an action: run it with the action method, which keeps dialogs and quitting out"),
+    ("PromptForAction", "opens the action list"),
+    ("ShowActionList", "opens the action list"),
+    ("Dialog", "opens a dialog"),
+    ("Browse", "opens a file dialog"),
+    ("GetUserInputs", "opens a dialog"),
+    ("GetUserFileName", "opens a file dialog"),
+    ("ShowMessageBox", "opens a dialog"),
+    ("ShowPopupMenu", "opens a menu"),
+    ("Menu", "changes REAPER's menus"),
+    ("Quit", "quits"),
+    ("Prefs", "changes REAPER's preferences"),
+    ("Main_openProject", "opens a project, which may ask about unsaved changes"),
+    ("Main_SaveProject", "saves through a dialog when the project has no file yet"),
+    ("ExecProcess", "runs a program"),
+    ("RecursiveCreateDirectory", "makes folders on the disk"),
+    ("plugin_register", "registers code in REAPER"),
+    ("AddRemoveReaScript", "registers scripts in REAPER"),
+    ("Audio_Init", "restarts the audio device"),
+    ("Audio_Quit", "stops the audio device"),
+    ("OpenColorThemeFile", "changes REAPER's theme"),
+    ("SetThemeColor", "changes REAPER's theme"),
+    ("OpenMediaExplorer", "opens the media explorer"),
+    ("Help_Set", "changes REAPER's help line"),
+    ("DockWindow", "moves REAPER's windows"),
+    ("realloc_cmd", "manages REAPER's own buffers"),
+];
+
+pub fn denied(index: usize) -> Option<String> {
+    let name = name_of(index);
+    if name == "MB" {
+        return Some(format!("{name} opens a dialog"));
+    }
+    DENIED.iter().find(|(part, _)| name.contains(part)).map(|(_, why)| format!("{name} {why}"))
+}
+
+/// Whether a call of this function with these arguments only reads: a getter, or a GetSet… function asked to get.
+pub fn reads_only(index: usize, args: &Value) -> bool {
+    let name = name_of(index);
+    let given = |param: &str| -> Option<&Value> {
+        let at = INPUTS[index].iter().position(|p| *p == param)?;
+        match args {
+            Value::Array(list) => list.get(at),
+            Value::Object(map) => map.get(param),
+            _ => None,
+        }
+    };
+    if name.starts_with("GetSet") {
+        // (a getter and a setter in one: it sets when its flag says so, or, for the repeat, when the value isn't -1)
+        if name.starts_with("GetSetRepeat") {
+            return given("val").or_else(|| given("repeat")).and_then(Value::as_i64).is_some_and(|v| v < 0);
+        }
+        for flag in ["setNewValue", "setnewvalue", "set", "is_set", "isSet", "bSet", "setNewValueOptional"] {
+            if INPUTS[index].contains(&flag) {
+                return given(flag).is_none_or(|v| v == &Value::Bool(false) || v.as_i64() == Some(0));
+            }
+        }
+        return false;
+    }
+    const READS: [&str; 21] = [
+        "Get",
+        "Count",
+        "Enum",
+        "Is",
+        "Has",
+        "Validate",
+        "TimeMap",
+        "format_timestr",
+        "parse_timestr",
+        "Master_Get",
+        "CSurf_TrackToID",
+        "CSurf_TrackFromID",
+        "TrackFX_Get",
+        "TakeFX_Get",
+        "TrackFX_Format",
+        "TakeFX_Format",
+        "MIDI_Get",
+        "MIDI_Count",
+        "MIDI_Enum",
+        "Envelope_Evaluate",
+        "Envelope_Format",
+    ];
+    READS.iter().any(|prefix| name.starts_with(prefix))
+        || matches!(name, "file_exists" | "time_precise" | "Undo_CanUndo2" | "Undo_CanRedo2")
+}
+
+impl Reaper<'_> {
+    /// Calls function `index` with `args` (or only checks the arguments, `dry`): what it answered, and what it wrote back.
+    pub fn call(&self, index: usize, args: &Value, handles: &dyn Handles, dry: bool) -> Result<(Value, Map<String, Value>), String> {
+        if let Some(why) = UNCALLABLE[index] {
+            return Err(format!("{} can't be called by name: {why} (run-lua can call it)", name_of(index)));
+        }
+        let mut call = Call::new(args, handles, dry);
+        let result = dispatch(self.api, index, &mut call)?;
+        Ok((result, call.outs()))
+    }
+
+    /// Runs a ReaScript (Lua) once, now, on the main thread: the text is written to a file of its own, registered as an
+    /// action for as long as it runs (in memory only: REAPER's key map file isn't written), run, and taken away.
+    pub fn run_script(&self, proj: Project, text: &str) -> Result<(), String> {
+        let (Some(register), Some(run)) = (self.api.AddRemoveReaScript(), self.api.Main_OnCommandEx()) else {
+            return Err("this REAPER can't run scripts".into());
+        };
+        static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("kumi-reaper-run-{}-{n}.lua", std::process::id()));
+        std::fs::write(&path, text).map_err(|e| format!("couldn't write the chunk to {}: {e}", path.display()))?;
+        let file = CString::new(path.to_string_lossy().into_owned()).map_err(|_| "a temporary path with a NUL in it".to_string())?;
+        let id = unsafe { register(true, 0, file.as_ptr(), false) };
+        let result = if id <= 0 {
+            Err("REAPER wouldn't take the chunk as a script".to_string())
+        } else {
+            unsafe { run(id, 0, proj.0) };
+            unsafe { register(false, 0, file.as_ptr(), false) };
+            Ok(())
+        };
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    /// What a script left for the extension (`SetExtState(section, key, …, false)`), taken away as it is read.
+    pub fn take_ext_state(&self, section: &str, key: &str) -> Option<String> {
+        let (section, key) = (CString::new(section).ok()?, CString::new(key).ok()?);
+        let text = self.api.GetExtState().map(|f| unsafe { api::string(f(section.as_ptr(), key.as_ptr())) })?;
+        if let Some(delete) = self.api.DeleteExtState() {
+            unsafe { delete(section.as_ptr(), key.as_ptr(), false) };
+        }
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+/// An object the bridge holds, as the pointer a generic call passes.
+pub enum Handle {
+    Track(super::Track),
+    Item(super::Item),
+    Take(super::Take),
+    Envelope(super::Envelope),
+}
+
+pub fn pointer(handle: Handle) -> *mut c_void {
+    match handle {
+        Handle::Track(t) => t.0.cast(),
+        Handle::Item(i) => i.0.cast(),
+        Handle::Take(t) => t.0.cast(),
+        Handle::Envelope(e) => e.0.cast(),
+    }
+}
+
+impl Reaper<'_> {
+    /// The ref of an object a call gave back (checked first: a pointer REAPER doesn't know is no object).
+    pub fn ref_of(&self, proj: Project, base: &str, p: *mut c_void) -> Value {
+        use crate::refs::{self, EnvelopeId};
+        let unknown = || Value::String(format!("a {base} Kumi can't name"));
+        match base {
+            "MediaTrack" => {
+                let track = super::Track(p.cast());
+                if !self.track_valid(proj, track) && self.master_track(proj) != Some(track) {
+                    return unknown();
+                }
+                Value::String(refs::track_ref(&crate::rows::track_id(self, track)))
+            }
+            "MediaItem" => {
+                let item = super::Item(p.cast());
+                if !self.item_valid(proj, item) {
+                    return unknown();
+                }
+                Value::String(refs::item_ref(&self.item_guid(item)))
+            }
+            "MediaItem_Take" => {
+                let take = super::Take(p.cast());
+                if !self.take_valid(proj, take) {
+                    return unknown();
+                }
+                Value::String(refs::take_ref(&self.take_guid(take)))
+            }
+            "TrackEnvelope" => {
+                let envelope = super::Envelope(p.cast());
+                if !self.envelope_valid(proj, envelope) {
+                    return unknown();
+                }
+                match (self.envelope_owner(envelope), self.envelope_guid(envelope)) {
+                    (Some((track, _, _)), Some(guid)) => {
+                        Value::String(refs::envelope_ref(&crate::rows::track_id(self, track), &EnvelopeId::Guid(guid)))
+                    }
+                    _ => serde_json::json!({"envelope": self.envelope_name(envelope)}),
+                }
+            }
+            _ => Value::String(if p == proj.0.cast() { "current".into() } else { "another project".into() }),
+        }
+    }
+}
+
+/// A track, item, take or envelope REAPER gave back, as the pointer it is (for `Handles::name`).
+pub fn pointer_kind(base: &str) -> &'static str {
+    match base {
+        "MediaTrack" => "MediaTrack*",
+        "MediaItem" => "MediaItem*",
+        "MediaItem_Take" => "MediaItem_Take*",
+        "TrackEnvelope" => "TrackEnvelope*",
+        _ => "ReaProject*",
+    }
+}

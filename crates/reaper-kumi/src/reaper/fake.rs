@@ -432,6 +432,13 @@ pub struct State {
     pub project_ext: std::collections::HashMap<(String, String), String>,
     /// How many REAPER calls the bridge has made (a read's cost).
     pub calls: u64,
+    /// ReaScripts registered as actions: (command id, file).
+    pub scripts: Vec<(i32, String)>,
+    /// Called, with no borrow of the state held, with a registered script's text when it is run: a test's stand-in for
+    /// REAPER's Lua (it does what the script would, and leaves its answer in the ext state).
+    pub on_script: Option<fn(&str)>,
+    /// What scripts and extensions keep: (section, key) to value.
+    pub ext_state: HashMap<(String, String), String>,
 }
 
 impl Default for State {
@@ -488,6 +495,9 @@ impl Default for State {
             on_action: None,
             project_ext: Default::default(),
             calls: 0,
+            scripts: vec![],
+            on_script: None,
+            ext_state: HashMap::new(),
         }
     }
 }
@@ -863,13 +873,42 @@ unsafe extern "C" fn main_save_project(_proj: *mut ReaProject, _save_as: bool) {
     });
 }
 unsafe extern "C" fn main_on_command_ex(command: c_int, _flag: c_int, _proj: *mut ReaProject) {
-    let hook = with(|s| {
+    let (hook, script, on_script) = with(|s| {
         s.actions.push(command);
-        s.on_action
+        (s.on_action, s.scripts.iter().find(|(id, _)| *id == command).map(|(_, path)| path.clone()), s.on_script)
     });
     if let Some(hook) = hook {
         hook(command);
     }
+    if let (Some(path), Some(run)) = (script, on_script) {
+        run(&std::fs::read_to_string(path).unwrap_or_default());
+    }
+}
+unsafe extern "C" fn add_remove_rea_script(add: bool, _section: c_int, file: *const c_char, _commit: bool) -> c_int {
+    let file = name_of(file);
+    with(|s| {
+        if add {
+            let id = 60_000 + s.scripts.len() as c_int + s.actions.len() as c_int;
+            s.scripts.push((id, file));
+            id
+        } else {
+            s.scripts.retain(|(_, path)| *path != file);
+            0
+        }
+    })
+}
+unsafe extern "C" fn set_ext_state(section: *const c_char, key: *const c_char, value: *const c_char, _persist: bool) {
+    let entry = (name_of(section), name_of(key));
+    let value = name_of(value);
+    with(|s| s.ext_state.insert(entry, value));
+}
+unsafe extern "C" fn get_ext_state(section: *const c_char, key: *const c_char) -> *const c_char {
+    let entry = (name_of(section), name_of(key));
+    keep(with(|s| s.ext_state.get(&entry).cloned().unwrap_or_default()))
+}
+unsafe extern "C" fn delete_ext_state(section: *const c_char, key: *const c_char, _persist: bool) {
+    let entry = (name_of(section), name_of(key));
+    with(|s| s.ext_state.remove(&entry));
 }
 unsafe extern "C" fn prevent_ui_refresh(count: c_int) {
     with(|s| s.ui_refresh += count);
@@ -2603,6 +2642,10 @@ fn lookup(name: &CStr) -> *mut c_void {
     table! {
         b"GetAppVersion" => get_app_version as unsafe extern "C" fn() -> *const c_char,
         b"GetResourcePath" => get_resource_path as unsafe extern "C" fn() -> *const c_char,
+        b"AddRemoveReaScript" => add_remove_rea_script as unsafe extern "C" fn(bool, c_int, *const c_char, bool) -> c_int,
+        b"SetExtState" => set_ext_state as unsafe extern "C" fn(*const c_char, *const c_char, *const c_char, bool),
+        b"GetExtState" => get_ext_state as unsafe extern "C" fn(*const c_char, *const c_char) -> *const c_char,
+        b"DeleteExtState" => delete_ext_state as unsafe extern "C" fn(*const c_char, *const c_char, bool),
         b"EnumProjects" => enum_projects as unsafe extern "C" fn(c_int, *mut c_char, c_int) -> *mut ReaProject,
         b"GetProjectName" => get_project_name as unsafe extern "C" fn(*mut ReaProject, *mut c_char, c_int),
         b"GetCurrentProjectInLoadSave" => get_current_project_in_load_save as unsafe extern "C" fn() -> *mut ReaProject,
