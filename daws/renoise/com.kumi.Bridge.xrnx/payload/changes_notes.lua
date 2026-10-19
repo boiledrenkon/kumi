@@ -11,8 +11,9 @@ local bad, fail, the_song = base.bad, base.fail, base.the_song
 local q = base.q
 local M = {}
 
--- The most writes one change makes (about 3 s of Renoise's time: a whole 512-line pattern of 12 note columns is 43,000).
-M.MAX_WRITES = 60000
+-- The most writes one change makes: about a second of Renoise's time, the callback's budget (a whole 512-line pattern of 12 note
+-- columns is 43,000: two changes).
+M.MAX_WRITES = base.MAX_APPLY_WRITES
 local NOTE_WRITES, EFFECT_WRITES = 7, 2
 
 local NOTE_FIELDS = { "note", "instrument", "volume", "panning", "delay", "fx" }
@@ -24,6 +25,18 @@ local EMPTY_EFFECT = { number = "00", amount = "00" }
 local function text_of(value, name, shape)
   if type(value) ~= "string" then bad(name .. ": text such as " .. shape) end
   return value:upper()
+end
+
+-- The delay column: 00 is no delay, FF is 255 (the latest a note can be delayed), unlike the instrument's FF (none).
+local function delay_text(value)
+  if value == "" or value == ".." then return ".." end
+  if type(value) == "number" then
+    if value < 0 or value > 255 or value ~= math.floor(value) then bad("delay: a whole number from 0 to 255, or two hex digits") end
+    return value == 0 and ".." or string.format("%02X", value)
+  end
+  local text = text_of(value, "delay", "10 or ..")
+  if not text:match("^%x%x$") then bad("delay: two hex digits (00 to FF), or .. for none; got " .. value) end
+  return text == "00" and ".." or text
 end
 
 local function hex2(value, name, empty)
@@ -349,7 +362,7 @@ local function parse_cells(pattern, track, input)
       if cell.instrument ~= nil then given.instrument = hex2(cell.instrument, "instrument", "..") end
       if cell.volume ~= nil then given.volume = column_text(cell.volume, "volume") end
       if cell.panning ~= nil then given.panning = column_text(cell.panning, "panning") end
-      if cell.delay ~= nil then given.delay = hex2(cell.delay, "delay", "..") end
+      if cell.delay ~= nil then given.delay = delay_text(cell.delay) end
       if cell.fx ~= nil then given.fx = fx_text(cell.fx) end
       if next(given) == nil and cell.clear ~= true then bad(string.format("line %d note column %d says nothing to write: give a field, or clear: true", at.line, at.col)) end
       add(at, given, cell.clear == true)
@@ -469,7 +482,7 @@ local function preview_of(song, env, input, kind, verb)
   if needs.note > (columns.note or 0) then display.note = "It shows note column " .. needs.note .. " first." end
   return {
     target = target_of(env, p, index), prior = { cells = prior, columns = columns },
-    fence = { cells = #prior, hash = fingerprint(prior) },
+    fence = { cells = #prior, hash = fingerprint(prior), id = base.track_id(track) },
     display = display,
   }, { p = p, index = index, track = track, pattern_track = pattern_track, pattern = pattern, prior = prior, after = after, columns = columns }
 end
@@ -477,7 +490,7 @@ end
 local function apply_of(song, env, input, fence, desc, kind, verb)
   local ok, preview, plan = pcall(preview_of, song, env, input, kind, verb)
   if not ok then base.gone_is_changed(preview) end
-  if preview.fence.cells ~= fence.cells or preview.fence.hash ~= fence.hash then
+  if preview.fence.cells ~= fence.cells or preview.fence.hash ~= fence.hash or (fence.id ~= nil and fence.id ~= preview.fence.id) then
     fail("changed", string.format("%s in %s changed since the preview", base.named(plan.index, plan.track), pattern_label(plan.pattern, plan.p)))
   end
   local display = preview.display
@@ -520,7 +533,7 @@ local function apply_of(song, env, input, fence, desc, kind, verb)
     applied = { cells = result, columns = read_columns(plan.track) },
     display = { title = display.title, before = display.before, after = counts_of(result), note = display.note },
     undo = { desc = desc, entry = true },
-    prior = preview.prior, place = { pattern = plan.p, track = plan.index },
+    prior = preview.prior, place = { pattern = plan.p, track = plan.index }, target = target_of(env, plan.p, plan.index),
   }
 end
 
@@ -603,9 +616,11 @@ local function restore_of(spec_kind, noun)
       kumi_job = function(job)
         local total = #chunks
         for k = 1, total do
-          if k > 1 then job.step(base.STEP_GAP_MS) end
+          if k > 1 then
+            job.step(base.STEP_GAP_MS)
+            base.wait_while_busy(job, env, string.format("%d of %d steps are put back, undo again to finish the rest", k - 1, total))
+          end
           local live = the_song()
-          if live.rendering then fail("busy", string.format("Renoise is rendering the song; %d of %d steps are put back, ask again to finish", k - 1, total)) end
           local live_pattern_track = live:pattern(p):track(index)
           if live_pattern_track.is_alias then fail("changed", "that track in the pattern is an alias now") end
           live:describe_undo(string.format("%s (%d/%d)", desc, k, total))

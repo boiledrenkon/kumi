@@ -53,13 +53,14 @@ function M.apply(params, env)
   end
   local answer = {
     epoch = env.epoch(), layout = env.layout(), applied = done.applied, display = done.display, undo = done.undo,
+    target = done.target,
   }
   if done.material then answer.material = done.material end
   if done.created then answer.created = done.created end
   if done.undo.entry then
     base.remember(env.journal, {
-      desc = desc, kind = spec.kind, place = done.place, spec = spec, prior = done.prior, applied = done.applied,
-      state = "applied", shape = done.shape or spec.shape, follows = done.follows,
+      desc = desc, kind = spec.kind, place = done.place, spec = spec, prior = done.prior, applied = done.journal_applied or done.applied,
+      state = "applied", shape = done.shape or spec.shape, follows = done.follows, uses_patterns = spec.uses_patterns,
     })
   end
   return answer
@@ -80,8 +81,8 @@ function M.restore(params, env)
   else
     if type(restore.prior) ~= "table" or type(restore.applied) ~= "table" then bad("prior and applied: the change's values") end
     done = base.prop_restore(song, env, spec, restore, desc)
-    base.note_restored(env.journal, spec.kind, done.place, restore.applied, spec)
-    done.place = nil
+    base.note_restored(env.journal, spec.kind, done.place, done.applied, spec)
+    done.place, done.applied = nil, nil
   end
   done.epoch, done.layout = env.epoch(), env.layout()
   return done

@@ -86,11 +86,11 @@ function M.restore_device(track, at, saved)
   return device
 end
 
--- The automation of the track's parameters that have any, in every pattern: by device and parameter place. `only` limits it to
--- one device.
+-- The automation of the track's parameters that have any, in every pattern: by device and parameter place, the mixer device's
+-- (device 1: the track's volume, pan and width) too. `only` limits it to one device.
 function M.read_automation(song, index, track, only)
   local out = {}
-  for d = only or 2, only or #track.devices do
+  for d = only or 1, only or #track.devices do
     local device = track:device(d)
     for k = 1, #device.parameters do
       local parameter = device:parameter(k)

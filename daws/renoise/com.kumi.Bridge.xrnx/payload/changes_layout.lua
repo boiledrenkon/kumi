@@ -21,7 +21,8 @@ local function track_label(index, track) return base.named(index, track) end
 
 -- What tells a track apart from what the preview saw.
 local function signature(index, track)
-  return { name = track.name, kind = rows.track_type(track), devices = math.max(#track.devices - 1, 0), index = index }
+  -- (the name is the track's own: a track named by its place is "", since that name moves with the place)
+  return { name = base.track_id(track), kind = rows.track_type(track), devices = math.max(#track.devices - 1, 0), index = index }
 end
 
 -- A track holds nothing of anyone's: no device but its mixer, no lines, and (a group) no members.
@@ -113,7 +114,7 @@ local function add_apply(song, env, input, fence, desc)
   if plan.name and plan.name ~= "" then track.name = plan.name end
   if plan.color then track.color = plan.color end
   local parents = rows.group_parents(song)
-  local applied = { index = plan.index, kind = rows.track_type(track), name = track.name }
+  local applied = { index = plan.index, kind = rows.track_type(track), name = track.name, id = base.track_id(track) }
   if parents[plan.index] then applied.group = parents[plan.index] end
   local title = string.format("Added %s %s", kind_word(applied.kind), q(track_label(plan.index, track)))
   return {
@@ -132,7 +133,8 @@ local function add_restore(song, env, restore, desc)
   local track = base.track_at(song, index)
   local applied = restore.applied
   if type(applied) ~= "table" then bad("applied: what the change wrote") end
-  if track.name ~= applied.name or rows.track_type(track) ~= applied.kind then
+  if (applied.id and base.track_id(track) ~= applied.id) or (not applied.id and track.name ~= applied.name)
+    or rows.track_type(track) ~= applied.kind then
     fail("changed", track_label(index, track) .. " is not the track Kumi made any more")
   end
   if is_group(track) and #track.members > 0 then
@@ -224,15 +226,19 @@ local function move_apply(song, env, input, fence, desc)
   local display = { title = string.format("Moved track %s to place %d", q(name), to), before = { index = index }, after = { index = to } }
   if to == index then
     display.unchanged = true
-    return { applied = { index = to, signature = now }, material = { track = to }, display = display, undo = { desc = desc, entry = false }, prior = { index = index } }
+    return {
+      applied = { index = to, signature = now }, material = { track = to, back = { track = index } }, display = display,
+      undo = { desc = desc, entry = false }, prior = { index = index },
+    }
   end
   song:describe_undo(desc)
   swaps(song, index, to)
   local after = signature(to, song:track(to))
   if after.name ~= now.name or after.kind ~= now.kind then fail("failed", "Renoise didn't move " .. name) end
   return {
-    applied = { index = to, signature = after }, material = { track = to }, display = display, undo = { desc = desc, entry = true },
-    prior = { index = index }, place = { track = to }, follows = "track",
+    -- (the places go back under `track`, which the tool carries through the tracks made and deleted since)
+    applied = { index = to, signature = after }, material = { track = to, back = { track = index } }, display = display,
+    target = base.target(env, to), undo = { desc = desc, entry = true }, prior = { index = index }, place = { track = to }, follows = "track",
   }
 end
 
@@ -245,9 +251,9 @@ local function move_restore(song, env, restore, desc)
   local function is_it(candidate)
     if candidate < 1 or candidate > rows.track_count(song) then return false end
     local other = song:track(candidate)
-    return other.name == applied.signature.name and rows.track_type(other) == applied.signature.kind
+    return base.track_id(other) == applied.signature.name and rows.track_type(other) == applied.signature.kind
   end
-  local from = prior.index
+  local from = type(material.back) == "table" and material.back.track or prior.index
   if not is_it(at) then
     fail(restore.discard and "gone" or "changed", "the track isn't where Kumi moved it to any more: it was moved or renamed in Renoise since")
   end
@@ -348,8 +354,8 @@ local function group_apply(song, env, input, fence, desc)
   local after = signature(final, placed)
   return {
     applied = { index = final, signature = after, into = want.into },
-    material = { track = final, groupRef = refs.make(env.epoch(), "track", want.group) },
-    display = { title = group_title(name, holder_name, want.into) },
+    material = { track = final, groupRef = refs.make(env.epoch(), "track", want.group), back = { track = index } },
+    display = { title = group_title(name, holder_name, want.into) }, target = base.target(env, final),
     undo = { desc = desc, entry = true },
     prior = { index = index, group = want.into and 0 or want.group, ordinal = ordinal },
     place = { track = final }, follows = final ~= index and "track" or nil,
@@ -364,7 +370,7 @@ local function group_restore(song, env, restore, desc)
   local track = base.track_at(song, at)
   local group = refs.expect(material.groupRef, "track", 1, env.epoch())[1]
   local holder = base.track_at(song, group)
-  if track.name ~= applied.signature.name or rows.track_type(track) ~= applied.signature.kind or not is_group(holder) then
+  if base.track_id(track) ~= applied.signature.name or rows.track_type(track) ~= applied.signature.kind or not is_group(holder) then
     fail("changed", "the track isn't where Kumi left it: it was moved or renamed in Renoise since")
   end
   local parents = rows.group_parents(song)
@@ -374,7 +380,7 @@ local function group_restore(song, env, restore, desc)
     -- put back: out of the group (Renoise moves it to just before the group's tracks), then back to where it was
     if parents[at] ~= group then fail("changed", name .. " is not in the group " .. holder_name .. " any more") end
     local run_start = group - #holder.members
-    local from = prior.index
+    local from = type(material.back) == "table" and material.back.track or prior.index
     if from > run_start then fail("changed", "the tracks before the group changed since: Kumi can't put the track back") end
     for j = from, run_start - 1 do
       if is_group(song:track(j)) or (parents[j] ~= nil and j ~= at) then

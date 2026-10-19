@@ -42,9 +42,9 @@ function M:add(record, request, fn)
     repeat coroutine.yield() until ctx.now_ms() >= resume_at
     job.check()
   end
-  -- The work changed the song's shape itself (it made a track): that is not a change to stop for.
+  -- The work changed the song's shape itself (it made a track, and a device on it moved the epoch): that is not a change to stop for.
   function job.rebase()
-    job.shape, job.layout = ctx.shape(), ctx.layout()
+    job.shape, job.layout, job.epoch = ctx.shape(), ctx.layout(), ctx.epoch()
   end
   job.co = coroutine.create(fn)
   self.list[#self.list + 1] = job

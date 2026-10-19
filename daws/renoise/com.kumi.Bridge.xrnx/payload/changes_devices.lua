@@ -41,8 +41,11 @@ end
 
 local function device_prop(spec)
   spec.locate = function(song, env, input)
-    local index, at, _, device, name = device_of(song, env, input.ref, spec.kind, 2)
-    return { object = device, name = name, place = { track = index, device = at }, target = device_target(env, index, at) }
+    local index, at, track, device, name = device_of(song, env, input.ref, spec.kind, 2)
+    return {
+      object = device, name = name, place = { track = index, device = at }, target = device_target(env, index, at),
+      id = base.track_id(track) .. "|" .. device.device_path,
+    }
   end
   spec.reread = function(song, place)
     if place.track > rows.track_count(song) then return nil end
@@ -148,14 +151,12 @@ end
 -- A parameter is named by its ref, or by its device's ref and `param`.
 param_spec.locate = function(song, env, input)
   local parsed = type(input.ref) == "string" and refs.parse(input.ref) or nil
-  local index, at, device, name, k
+  local index, at, track, device, name, k
   if parsed and parsed.kind == "device" then
-    local _
-    index, at, _, device, name = device_of(song, env, input.ref, param_spec.kind, 2)
+    index, at, track, device, name = device_of(song, env, input.ref, param_spec.kind, 2)
     k = parameter_number(device, input.param)
   else
-    local _
-    index, at, _, device, name, k = device_of(song, env, input.ref, param_spec.kind, 3)
+    index, at, track, device, name, k = device_of(song, env, input.ref, param_spec.kind, 3)
   end
   if k < 1 or k > #device.parameters then fail("gone", "that parameter isn't on the device any more") end
   local parameter = device:parameter(k)
@@ -163,6 +164,7 @@ param_spec.locate = function(song, env, input)
   return {
     object = parameter, name = name .. " " .. parameter.name, place = { track = index, device = at, param = k },
     target = { ref = refs.make(env.epoch(), "param", index, at, k), kind = "param" },
+    id = base.track_id(track) .. "|" .. device.device_path .. "|" .. k,
   }
 end
 param_spec.reread = function(song, place)
@@ -239,7 +241,7 @@ local function add_input(song, track, input)
 end
 
 local function add_signature(index, track)
-  return { name = track.name, index = index, devices = #track.devices }
+  return { name = base.track_id(track), index = index, devices = #track.devices }
 end
 
 local function add_preview(song, env, input)
@@ -297,6 +299,7 @@ local function add_apply(song, env, input, fence, desc)
   return {
     applied = { index = at, path = info.path, state = state },
     created = { ref = refs.make(env.epoch(), "device", index, at), kind = "device" },
+    target = { ref = refs.make(env.epoch(), "device", index, at), kind = "device" },
     material = { track = index },
     display = {
       title = string.format("Added %s to %s", q(short_name(info)), q(base.named(index, track))),
@@ -339,15 +342,16 @@ base.register({
 })
 
 -- Deleting a device keeps its path, name, bypass, preset data and automation to make it again.
-local function delete_signature(_, at, device)
+local function delete_signature(track, at, device)
   local state = material_.device_state(device)
   state.index = at
+  state.track = base.track_id(track) -- (the device on another track at that place is not this one)
   return state
 end
 
 local function delete_preview(song, env, input)
   local index, at, track, device, name = device_of(song, env, input.ref, "device-delete", 2)
-  local state = delete_signature(index, at, device)
+  local state = delete_signature(track, at, device)
   local display = {
     title = string.format("Deleted %s from %s", q(M.label(device)), q(base.named(index, track))),
     before = { devices = #track.devices }, after = { devices = #track.devices - 1 },
@@ -359,7 +363,7 @@ end
 local function delete_apply(song, env, input, fence, desc)
   local ok, index, at, track, device, name = pcall(device_of, song, env, input.ref, "device-delete", 2)
   if not ok then base.gone_is_changed(index) end
-  local state = delete_signature(index, at, device)
+  local state = delete_signature(track, at, device)
   if not base.same_table(state, fence) then fail("changed", name .. " changed since the preview") end
   local material = {
     track = index, index = at, device = material_.read_device(device), state = state,
@@ -374,7 +378,7 @@ local function delete_apply(song, env, input, fence, desc)
   track:delete_device_at(at)
   return {
     applied = { deleted = true }, material = material,
-    display = { title = title },
+    display = { title = title }, target = device_target(env, index, at),
     undo = { desc = desc, entry = true },
     prior = { deleted = false }, place = { track = index, device = at }, shape = "deleted",
   }
@@ -437,7 +441,7 @@ end
 local function move_preview(song, env, input)
   local index, at, track, device, name = device_of(song, env, input.ref, "device-move", 2)
   local to = move_wanted(track, input, at)
-  local state = delete_signature(index, at, device)
+  local state = delete_signature(track, at, device)
   local display = {
     title = string.format("Moved %s on %s to place %d", q(M.label(device)), q(base.named(index, track)), to),
     before = { index = at }, after = { index = to },
@@ -449,7 +453,7 @@ end
 local function move_apply(song, env, input, fence, desc)
   local ok, index, at, track, device, name = pcall(device_of, song, env, input.ref, "device-move", 2)
   if not ok then base.gone_is_changed(index) end
-  local state = delete_signature(index, at, device)
+  local state = delete_signature(track, at, device)
   if not base.same_table(state, fence) then fail("changed", name .. " changed since the preview") end
   local to = move_wanted(track, input, at)
   local display = {
@@ -469,7 +473,8 @@ local function move_apply(song, env, input, fence, desc)
   local after = material_.device_state(track:device(to))
   if after.state ~= state.state or after.path ~= state.path then fail("failed", "Renoise didn't move " .. name) end
   return {
-    applied = { index = to, state = delete_signature(index, to, track:device(to)) }, material = { track = index }, display = display,
+    applied = { index = to, state = delete_signature(track, to, track:device(to)) }, material = { track = index }, display = display,
+    target = device_target(env, index, to),
     undo = { desc = desc, entry = true },
     prior = { index = at }, place = { track = index, device = to }, follows = "device",
   }

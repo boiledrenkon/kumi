@@ -598,10 +598,34 @@ local function watch_param(track_index, device_index, k)
 end
 
 -- Changes (M3): see changes.lua. Every request carries the epoch (and the layout) its refs were made in.
+-- A dialog holds Renoise's timers while its sockets keep answering (measured, 3.5.4: no tool timer ran in 3 s behind the
+-- "unsaved changes" prompt; with Renoise in the background they run as ever, 57-73 ms apart for 50). So a change that finds
+-- the timers silent for this long refuses `busy`, and a sliced restore waits before each slice. A callback of our own that
+-- runs long holds the timers too: `held` moves the beat by that time.
+M.DIALOG_MS = 400
+
+local function busy()
+  local song = renoise.song()
+  if song and song.rendering then return "Renoise is rendering the song" end
+  if b.alive_ms and M.now_ms() - b.alive_ms >= M.DIALOG_MS then return "a Renoise dialog is open (its timers aren't running)" end
+  return nil
+end
+
+-- Track numbers carried from layout `since` to now: the new number, or nil and why ("gone": that track was deleted; "unknown":
+-- the shifts since aren't kept).
+local function shifted(index, since)
+  if type(since) ~= "number" or since > b.layout or b.layout - since > #b.shifts then return nil, "unknown" end
+  if since == b.layout then return index end
+  local moved = refs.shift(index, b.shifts, since)
+  if not moved then return nil, "gone" end
+  return moved
+end
+
 local function change_env()
   return {
     epoch = epoch, layout = function() return b.layout end, journal = b.journal, watch_params = watch_params,
-    watch_param = watch_param,
+    watch_param = watch_param, busy = busy, now_ms = function() return M.now_ms() end, shifted = shifted,
+    survives = function(from, kind) return survives(from, kind) end,
   }
 end
 
@@ -761,7 +785,11 @@ function M.handle(_, request)
       params = carried(params)
     end
   end
+  local started = M.now_ms()
   local result = handler(params)
+  -- (A handler that ran long held the timers itself: that is not a dialog.)
+  local held = M.now_ms() - started
+  if held >= 50 and b.alive_ms then b.alive_ms = b.alive_ms + held end
   if type(result) == "table" and type(result.kumi_job) == "function" then
     local work = result.kumi_job
     result.kumi_job = function(job) return say_kept(work(job), from) end
@@ -868,6 +896,7 @@ function M.stop(_, reloading)
 end
 
 function M.tick()
+  b.alive_ms = M.now_ms()
   unix_ms()
   if not b.cfg then
     if M.now_ms() >= b.retry_ms and configure() then listen() end
@@ -921,6 +950,7 @@ end
 
 -- Called from the fast timer while jobs are pending.
 function M.tick_jobs()
+  b.alive_ms = M.now_ms()
   if jobs and jobs:pending() > 0 then jobs:run() end
 end
 

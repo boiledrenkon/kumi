@@ -87,8 +87,9 @@ local function insert_apply(song, env, input, fence, desc)
   if plan.pattern then sequencer:insert_sequence_at(plan.index, plan.pattern) else sequencer:insert_new_pattern_at(plan.index) end
   local pattern = sequencer.pattern_sequence[plan.index]
   return {
-    applied = { index = plan.index, pattern = pattern, slots = plan.slots + 1 },
-    created = { ref = refs.make(env.epoch(), "seq", plan.index), kind = "seq" },
+    -- (a pattern is a number only within an epoch: the record keeps it as a ref, which a renumbered pool refuses)
+    applied = { index = plan.index, pattern = refs.make(env.epoch(), "pattern", pattern), slots = plan.slots + 1 },
+    created = { ref = refs.make(env.epoch(), "seq", plan.index), kind = "seq" }, target = seq_target(env, plan.index),
     display = {
       title = insert_title(song, plan), before = { slots = plan.slots }, after = { slots = plan.slots + 1, index = plan.index },
     },
@@ -102,7 +103,9 @@ local function insert_restore(song, env, restore, desc)
   if type(applied) ~= "table" then bad("applied: what the change wrote") end
   local s = seq_of(song, env, created.ref, "slot-insert")
   local sequencer = song.sequencer
-  if sequencer.pattern_sequence[s] ~= applied.pattern then
+  if type(applied.pattern) ~= "string" then bad("applied.pattern: the pattern the slot played, as a ref") end
+  local made = refs.expect(applied.pattern, "pattern", 1, env.epoch())[1]
+  if sequencer.pattern_sequence[s] ~= made then
     fail("changed", "the slot " .. s .. " holds another pattern now: it was changed in Renoise since Kumi made it")
   end
   if not restore.discard then
@@ -156,7 +159,8 @@ local function delete_preview(song, env, input)
   end
   return {
     target = seq_target(env, s), prior = { deleted = false },
-    fence = { slots = info.count, pattern = p, mutes = #info.mutes, section = info.section.start }, display = display,
+    fence = { slots = info.count, pattern = refs.make(env.epoch(), "pattern", p), mutes = #info.mutes, section = info.section.start },
+    display = display,
   }
 end
 
@@ -165,7 +169,8 @@ local function delete_apply(song, env, input, fence, desc)
   if not ok then base.gone_is_changed(s) end
   if slot_count(song) <= 1 then bad("the song's only slot can't be deleted") end
   local info, p = delete_info(song, s)
-  if fence.slots ~= info.count or fence.pattern ~= p or fence.mutes ~= #info.mutes or fence.section ~= info.section.start then
+  if fence.slots ~= info.count or fence.pattern ~= refs.make(env.epoch(), "pattern", p) or fence.mutes ~= #info.mutes
+    or fence.section ~= info.section.start then
     fail("changed", slot_text(s) .. " changed since the preview")
   end
   local pattern = song:pattern(p)
@@ -174,9 +179,15 @@ local function delete_apply(song, env, input, fence, desc)
   local saved = { name = pattern.name, lines = pattern.number_of_lines }
   song:describe_undo(desc)
   song.sequencer:delete_sequence_at(s)
-  if #song.patterns < before then info.gone = saved end
+  if #song.patterns < before then
+    info.gone = saved
+    info.pattern = nil
+  else
+    -- (the pattern stays in the pool: a ref to it, which a renumbered pool refuses)
+    info.pattern = refs.make(env.epoch(), "pattern", p)
+  end
   return {
-    applied = { deleted = true, slots = info.count - 1 }, material = info,
+    applied = { deleted = true, slots = info.count - 1 }, material = info, target = seq_target(env, s),
     display = { title = title, before = { slots = info.count }, after = { slots = info.count - 1 } },
     undo = { desc = desc, entry = true }, prior = { deleted = false, slots = info.count }, place = { seq = s }, shape = "deleted", follows = "slots",
   }
@@ -184,20 +195,24 @@ end
 
 local function delete_restore(song, env, restore, desc)
   local material = restore.material
-  if type(material) ~= "table" or type(material.index) ~= "number" or type(material.pattern) ~= "number" then bad("material: what the delete removed") end
+  if type(material) ~= "table" or type(material.index) ~= "number" or (not material.gone and type(material.pattern) ~= "string") then
+    bad("material: what the delete removed")
+  end
   local sequencer = song.sequencer
   local n = slot_count(song)
   local index = material.index
+  -- (the pattern it played, if it stayed in the pool: a ref, `stale` when the pool was renumbered since)
+  local kept_pattern = not material.gone and refs.expect(material.pattern, "pattern", 1, env.epoch())[1] or nil
   -- back already: the song is as long as it was and the slot holds the pattern
-  if n == material.count and sequencer.pattern_sequence[index] == material.pattern and not material.gone then
+  if n == material.count and sequencer.pattern_sequence[index] == kept_pattern and not material.gone then
     return { restored = { index = index }, display = { title = slot_title(index) .. " is back already" }, undo = { desc = desc, entry = false } }
   end
   local at = math.max(1, math.min(index, n + 1))
-  if not material.gone and material.pattern > #song.patterns then
+  if kept_pattern and kept_pattern > #song.patterns then
     fail("failed", "the pattern the slot held isn't in the song any more")
   end
   song:describe_undo(desc)
-  local p = material.pattern
+  local p = kept_pattern
   if material.gone then
     sequencer:insert_new_pattern_at(at)
     p = sequencer.pattern_sequence[at]
@@ -274,6 +289,21 @@ do
     end,
     write = function(object, state) object.sequencer:set_pattern(object.s, state.pattern) end,
     same = function(a, b) return a.pattern == b.pattern end,
+    -- (the pattern in a record is a ref: the pool's numbers move when the producer deletes unused patterns)
+    uses_patterns = true,
+    wire = function(state, env)
+      local out = {}
+      for k, v in pairs(state) do out[k] = v end
+      out.pattern = refs.make(env.epoch(), "pattern", state.pattern)
+      return out
+    end,
+    unwire = function(state, env)
+      if type(state) ~= "table" or type(state.pattern) ~= "string" then bad("prior and applied: the pattern, as a ref") end
+      local out = {}
+      for k, v in pairs(state) do out[k] = v end
+      out.pattern = refs.expect(state.pattern, "pattern", 1, env.epoch())[1]
+      return out
+    end,
     title = function(name, _, to)
       local label = name:gsub("^%l", string.upper)
       return string.format("%s \226\134\146 %s", label, with_pattern(renoise.song(), to.pattern))
@@ -356,6 +386,7 @@ local function mute_spec()
       return {
         object = { sequencer = song.sequencer, t = t, s = s }, name = string.format("%s in %s", base.named(t, track), slot_text(s)),
         place = { track = t, seq = s }, target = { ref = refs.make(env.epoch(), "slot", t, s), kind = "slot" },
+        id = base.track_id(track) .. "|slot",
       }
     end,
     reread = function(song, place)

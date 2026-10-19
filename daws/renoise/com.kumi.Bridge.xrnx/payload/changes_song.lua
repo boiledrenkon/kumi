@@ -9,10 +9,12 @@ local M = {}
 
 -- A song setting is found without a ref (there is one song), and looked at again through the transport.
 local function song_prop(spec)
-  spec.locate = function(song, env)
+  spec.locate = function(song, env, input)
+    -- (a record's own ref, when there is one, must still be good: the loop range's is a sequence ref, stale once the sequence changed)
+    if type(input) == "table" and type(input.ref) == "string" then refs.expect(input.ref, spec.target_kind or "song", 1, env.epoch()) end
     return {
       object = song.transport, name = "Song", place = {},
-      target = { ref = refs.make(env.epoch(), "song", 1), kind = "song" },
+      target = { ref = refs.make(env.epoch(), spec.target_kind or "song", 1), kind = spec.target_kind or "song" },
     }
   end
   spec.reread = function(song) return song.transport end
@@ -61,6 +63,8 @@ song_prop {
 
 song_prop {
   kind = "loop-range", noun = "loop range", undoable = false, eventual = true,
+  -- (its numbers are sequence slots: a record that names the sequence is refused `stale` once the sequence has changed)
+  target_kind = "seq",
   read = function(transport)
     local range = transport.loop_sequence_range
     if #range == 0 then return { first = 0, last = 0 } end

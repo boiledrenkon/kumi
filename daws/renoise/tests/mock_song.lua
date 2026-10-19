@@ -70,6 +70,17 @@ function M.record(undo_fn, redo_fn)
   if undo.depth == 0 then commit(undo) end
 end
 
+-- A track's first device, the mixer: its parameters are the track's volume, panning and width, which have automation like any.
+function M.mixer_device_data()
+  return {
+    name = "Track Vol/Pan", path = "Audio/Effects/Native/#Track Vol/Pan",
+    params = {
+      { name = "Volume", value = 1, min = 0, max = 1.4125 }, { name = "Panning", value = 0.5, min = 0, max = 1 },
+      { name = "Width", value = 0, min = 0, max = 1 },
+    },
+  }
+end
+
 -- Columns
 
 local CELL_FIELDS = {
@@ -367,7 +378,7 @@ function M.make_song(options)
   end
   for _, t in ipairs(d.tracks) do
     -- (Renoise's first device on every track is its mixer device, which can't be deleted or moved)
-    if options.mixer_device then table.insert(t.devices, 1, { name = "Track Vol/Pan", path = "Audio/Effects/Native/#Track Vol/Pan", params = {} }) end
+    if options.mixer_device then table.insert(t.devices, 1, M.mixer_device_data()) end
     t.name_observable, t.color_observable, t.mute_state_observable = simple_observable(), simple_observable(), simple_observable()
     t.solo_state_observable, t.devices_observable = simple_observable(), simple_observable()
     t.visible_note_columns_observable, t.visible_effect_columns_observable = simple_observable(), simple_observable()
@@ -1313,7 +1324,7 @@ local function track_spec(spec)
   spec = spec or {}
   local devices = spec.devices or {}
   if M.data.options.mixer_device and not spec.devices then
-    devices = { { name = "Track Vol/Pan", path = "Audio/Effects/Native/#Track Vol/Pan", params = {} } }
+    devices = { M.mixer_device_data() }
   end
   local t = {
     kind = spec.kind or "sequencer", name = spec.name or "Track", color = spec.color, members = spec.members or 0,
