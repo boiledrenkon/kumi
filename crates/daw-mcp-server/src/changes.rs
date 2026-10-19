@@ -722,6 +722,26 @@ impl crate::host::Host {
         }
     }
 
+    // m4-r-fxenv
+    /// `fx_chain_save` (REAPER): a chain saved as an FX chain file. A file, not the project: no step of the DAW's undo,
+    /// nothing to journal.
+    pub async fn fx_chain_save(&self, arguments: &Value) -> (Value, bool) {
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        let mut params = json!({});
+        for field in ["ref", "input", "fxRefs", "name", "overwrite", "epoch"] {
+            if let Some(value) = arguments.get(field) {
+                params[field] = value.clone();
+            }
+        }
+        match self.call("fx_chain_save", params, &pick, CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
     /// `undo_step_begin` / `undo_step_end`: one DAW undo step around a plan's changes, where the DAW gives one. Its
     /// label carries a nonce, so the DAW's own undo of the plan names the plan's changes.
     pub async fn undo_step(&self, method: &str, arguments: &Value) -> (Value, bool) {

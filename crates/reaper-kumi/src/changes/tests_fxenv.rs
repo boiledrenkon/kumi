@@ -45,6 +45,7 @@ impl Lab {
             "change_apply" => self.changes.apply(&reaper, &self.reads, &params),
             "change_restore" => self.changes.restore(&reaper, &self.reads, &params),
             "read" => self.reads.read(&reaper, &params),
+            "fx_chain_save" => self.changes.fx_chain_save(&reaper, &self.reads, &params),
             other => panic!("{other}"),
         }
     }
@@ -105,12 +106,6 @@ impl Lab {
 
 fn state<T>(f: impl FnOnce(&mut fake::State) -> T) -> T {
     fake::with(f)
-}
-
-fn top() -> Option<String> {
-    let api = fake::api();
-    let reaper = Reaper::new(&api);
-    reaper.undo_can_undo(reaper.current_project().unwrap().ptr)
 }
 
 const DRUMS: &str = "r:track:{AAAA}";
@@ -1077,7 +1072,8 @@ fn a_tracks_hidden_envelope_is_shown_and_undo_puts_back_its_hidden_empty_state()
     assert_eq!(applied["undo"]["entry"], true);
     let reference = applied["applied"]["ref"].as_str().unwrap().to_string();
     assert!(reference.starts_with("r:env:{BBBB}:{"), "{reference}");
-    lab.undo("envelope-show", &preview, &applied).unwrap();
+    let undone = lab.undo("envelope-show", &preview, &applied).unwrap();
+    assert_eq!(undone["undo"]["entry"], true, "a state chunk written back makes no point by itself: sorting the envelope makes one");
     assert_eq!(count(), 0, "out of the track's list again");
     let again = lab.undo("envelope-show", &preview, &applied).unwrap();
     assert_eq!(again["undo"]["entry"], false);
@@ -1283,7 +1279,8 @@ fn an_automation_item_is_added_as_a_new_pool_or_a_pooled_copy_changed_and_delete
     );
     let points = lab.read(json!({"kind": "point", "parent": item}));
     assert_eq!(points["total"], 2, "the point it took in, and the one Kumi wrote");
-    lab.undo("automation-item-add", &preview, &applied).unwrap();
+    let undone = lab.undo("automation-item-add", &preview, &applied).unwrap();
+    assert_eq!(undone["undo"]["entry"], true, "taken off through the envelope's state, then sorted for a point");
     assert_eq!(kick_points(), before);
     assert!(state(|s| s.tracks[1].envelopes[0].items.is_empty()));
     // A pooled copy shares its pool's points.
@@ -1308,6 +1305,7 @@ fn an_automation_item_is_added_as_a_new_pool_or_a_pooled_copy_changed_and_delete
     let (_, again) = lab.make("automation-item-add", json!({"ref": KICK_VOLUME, "position": 8, "length": 1, "poolRef": first}));
     let again = again["created"]["ref"].as_str().unwrap().to_string();
     let (preview, applied) = lab.make("automation-item-delete", json!({"ref": again}));
+    assert_eq!(applied["undo"]["entry"], true);
     assert_eq!(state(|s| s.tracks[1].envelopes[0].items.len()), 1);
     let restored = lab.undo("automation-item-delete", &preview, &applied).unwrap();
     assert!(restored["display"].get("note").is_none());
@@ -1374,6 +1372,70 @@ fn envelope_reads_give_points_automation_items_and_a_takes_envelopes_by_their_re
     assert_eq!(lab.read(json!({"ref": item}))["items"][0]["position"], 3.0);
     assert_eq!(lab.call("read", json!({"kind": "point"})).unwrap_err().0, "bad-params");
     assert_eq!(lab.call("read", json!({"kind": "autoitem", "parent": "r:env:take:{TAKE-K1}:{NOPE}"})).unwrap_err().0, "failed");
+}
+
+// ----- FX chain files saved -----
+
+#[test]
+fn a_chain_is_saved_as_a_file_without_ids_or_automation_and_a_file_there_is_replaced_only_when_asked() {
+    let lab = Lab::new();
+    let dir = resource();
+    state(|s| {
+        s.tracks[0].fx[0].parallel = 1;
+        s.tracks[0].fx[0].config.insert("param.0.lfo.active".into(), "1".into());
+        s.tracks[0].fx[1].children.as_mut().unwrap()[1].parallel = 1;
+    });
+    let marks = || state(|s| (s.undo_entries, s.state_count));
+    let before = marks();
+    let saved = lab.call("fx_chain_save", json!({"ref": DRUMS, "name": "Kumi Test/Drums 1.5"})).unwrap();
+    let path = dir.path().join("FXChains").join("Kumi Test").join("Drums 1.5.RfxChain");
+    assert_eq!(
+        (saved["file"].clone(), saved["name"].clone(), saved["count"].clone(), saved["replaced"].clone()),
+        (json!(path.display().to_string()), json!("Drums 1.5"), json!(2), json!(false))
+    );
+    assert_eq!(marks(), before, "a file, not the project: no undo point");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("FXID ") && !text.contains("<PARMENV"), "no ids and no automation: {text}");
+    assert!(text.contains("<CONTAINER") && text.contains("<PROGRAMENV 0"), "the container with what's inside, and modulation");
+    assert_eq!(text.matches("PARALLEL ").count(), 1, "the first FX runs in parallel with nothing: only the child's stays\n{text}");
+    // Loaded back, it is the same FX with ids of their own.
+    lab.make("fx-chain-load", json!({"ref": KICK, "file": "Kumi Test/Drums 1.5"}));
+    let loaded = state(|s| s.tracks[1].fx.clone());
+    assert_eq!(loaded.len(), 2);
+    assert!(loaded[0].guid != "{FX-EQ}" && loaded[0].preset == "Warm" && loaded[1].children.as_ref().map(Vec::len) == Some(2));
+    // A file of that name is never written over unless asked; then some FX, in the chain's order.
+    let (code, message) = lab.call("fx_chain_save", json!({"ref": DRUMS, "name": "Kumi Test/Drums 1.5"})).unwrap_err();
+    assert!(code == "failed" && message.contains("overwrite"), "{message}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    let again =
+        json!({"ref": DRUMS, "name": "Kumi Test/Drums 1.5.RfxChain", "fxRefs": [fx_ref("{FX-C}"), fx_ref("{FX-EQ}")], "overwrite": true});
+    assert_eq!(lab.call("fx_chain_save", again).unwrap()["replaced"], true);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.find("ReaEQ").unwrap() < text.find("<CONTAINER").unwrap(), "in the chain's order");
+    assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "nothing left beside it");
+    // A saved FX whose parameter links to one left out: refused (the link would follow whatever lands in its place).
+    state(|s| {
+        s.tracks[0].fx[0].config.insert("param.1.plink.active".into(), "1".into());
+        s.tracks[0].fx[0].config.insert("param.1.plink.effect".into(), "1".into());
+    });
+    let (code, message) = lab.call("fx_chain_save", json!({"ref": DRUMS, "name": "EQ", "fxRefs": [fx_ref("{FX-EQ}")]})).unwrap_err();
+    assert!(code == "bad-params" && message.contains("link"), "{message}");
+    // A take's and a container's chains; refusals.
+    lab.call("fx_chain_save", json!({"ref": fx_ref("{FX-C}"), "name": "Inside"})).unwrap();
+    assert!(dir.path().join("FXChains").join("Inside.RfxChain").exists());
+    lab.call("fx_chain_save", json!({"ref": TAKE, "name": "Take"})).unwrap_err();
+    for bad in [
+        json!({"ref": DRUMS, "name": "../Elsewhere"}),
+        json!({"ref": DRUMS, "name": "/tmp/Elsewhere"}),
+        json!({"ref": DRUMS, "name": ""}),
+        json!({"ref": DRUMS, "name": "Comp", "fxRefs": [fx_ref("{FX-COMP}")]}),
+        json!({"ref": fx_ref("{FX-EQ}"), "name": "Not a chain"}),
+    ] {
+        assert_eq!(lab.call("fx_chain_save", bad.clone()).unwrap_err().0, "bad-params", "{bad}");
+    }
+    assert_eq!(lab.call("fx_chain_save", json!({"ref": DRUMS, "name": "Old", "epoch": "old-1"})).unwrap_err().0, "stale");
+    state(|s| s.loading = true);
+    assert_eq!(lab.call("fx_chain_save", json!({"ref": DRUMS, "name": "Busy"})).unwrap_err().0, "busy");
 }
 
 // ----- fences -----

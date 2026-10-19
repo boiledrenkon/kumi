@@ -2,7 +2,9 @@
 //! state chunk, FX chain files loaded into a chain, and copies of an FX in another chain. Every FX is found by its GUID,
 //! in any chain (see `fxchain`).
 
-use std::path::{Component, Path};
+use std::fs;
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -721,7 +723,7 @@ fn chain_file(ctx: &Ctx, input: &Value) -> Done<(String, String)> {
         }
         Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path)
     };
-    let full = if full.extension().is_some_and(|e| e.eq_ignore_ascii_case("rfxchain")) { full } else { full.with_extension("RfxChain") };
+    let full = with_chain_extension(full);
     let size = std::fs::metadata(&full)
         .map_err(|_| failed(format!("there is no FX chain {} (looked for {})", super::quoted(file), full.display())))?
         .len();
@@ -940,4 +942,163 @@ pub fn copy_restore(ctx: &Ctx, restore: &Restore) -> Done<Restored> {
         display: json!({"title": format!("Took the copy off {where_}")}),
         ..Default::default()
     })
+}
+
+// ----- FX chain files saved -----
+
+/// A chain file's path with REAPER's extension (added, never put in place of a dot in the name: "Lead 2.1").
+fn with_chain_extension(path: PathBuf) -> PathBuf {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("rfxchain")) {
+        return path;
+    }
+    let mut text = path.into_os_string();
+    text.push(".RfxChain");
+    PathBuf::from(text)
+}
+
+/// Where a chain is saved: a name in REAPER's FXChains folder, sub-folders allowed.
+fn save_path(ctx: &Ctx, params: &Value) -> Done<PathBuf> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| bad("name: the FX chain file's name"))?;
+    if name.chars().count() > 256 || name.chars().any(char::is_control) {
+        return Err(bad("name must be one line of at most 256 characters"));
+    }
+    let path = Path::new(name);
+    if !path.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Err(bad("name: a name in REAPER's FXChains folder (sub-folders as \"Vocals/Lead\"; no .., no absolute path)"));
+    }
+    Ok(with_chain_extension(Path::new(&ctx.reaper.resource_path()).join("FXChains").join(path)))
+}
+
+/// An FX's entry without its automation (its `PARMENV` blocks): a chain file is the FX, not the project's timeline.
+/// Modulation (`PROGRAMENV`) stays.
+fn without_automation(entry: &str) -> String {
+    let mut kept = Vec::new();
+    let mut depth = 0usize;
+    for line in entry.lines() {
+        if depth > 0 {
+            if line.starts_with('<') {
+                depth += 1;
+            } else if line == ">" {
+                depth -= 1;
+            }
+        } else if line.starts_with("<PARMENV") {
+            depth = 1;
+        } else {
+            kept.push(line);
+        }
+    }
+    kept.join("\n")
+}
+
+/// A link from a saved FX's parameter to an FX left out of the file: REAPER keeps a link by the source's place in the
+/// chain, so in the file it would follow whatever FX lands there.
+fn link_left_out(ctx: &Ctx, chain: &[Fx], chosen: &[usize]) -> Option<String> {
+    let reaper = ctx.reaper;
+    for &place in chosen {
+        let fx = chain[place];
+        for p in 0..reaper.fx_param_count(fx).min(4096) {
+            if !reaper.fx_config(fx, &format!("param.{p}.plink.active")).is_some_and(|v| v.trim() == "1") {
+                continue;
+            }
+            let source = reaper.fx_config(fx, &format!("param.{p}.plink.effect")).and_then(|v| v.trim().parse::<usize>().ok());
+            if let Some(source) = source.filter(|s| *s < chain.len() && !chosen.contains(s)) {
+                return Some(format!(
+                    "{}'s parameters link to {}, which isn't saved with it: save both, or the whole chain",
+                    super::quoted(&fx_label(ctx, fx)),
+                    super::quoted(&fx_label(ctx, chain[source]))
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// `fx_chain_save {ref, fxRefs?, name, input?, overwrite?}`: a chain's FX (or some of them, in the chain's order) saved
+/// as an FX chain file in REAPER's FXChains folder: a file, not the project, so no undo point and no HISTORY row. The
+/// file holds no FX ids (each load gives its FX ids of their own) and no automation. A file of that name is replaced
+/// only when asked (`overwrite`), and then whole or not at all.
+pub fn chain_save(ctx: &Ctx, params: &Value) -> Done<Value> {
+    let input_chain = flag(params, "input")?.unwrap_or(false);
+    let holder = fxchain::holder_named(ctx, &params["ref"], input_chain, "ref")?;
+    let chain = fxchain::members(ctx.reaper, holder);
+    let guids: Vec<String> = chain.iter().map(|fx| ctx.reaper.fx_guid(*fx)).collect();
+    let chosen: Vec<usize> = match params.get("fxRefs").filter(|v| !v.is_null()) {
+        None => (0..chain.len()).collect(),
+        Some(Value::Array(list)) if !list.is_empty() => {
+            let mut places = Vec::new();
+            for item in list {
+                let text = item.as_str().ok_or_else(|| bad("fxRefs: FX refs"))?;
+                let refs::Ref::Fx(guid) = refs::Ref::parse(text).map_err(bad)? else { return Err(bad("fxRefs: FX refs")) };
+                let place = fxchain::position_of(&guids, &guid)
+                    .ok_or_else(|| bad(format!("{text} isn't directly in {}", fxchain::holder_label(ctx, holder))))?;
+                places.push(place);
+            }
+            places.sort_unstable();
+            places.dedup();
+            places
+        }
+        Some(_) => return Err(bad("fxRefs: a list of FX in that chain")),
+    };
+    if chosen.is_empty() {
+        return Err(failed(format!("{} has no FX to save", fxchain::holder_label(ctx, holder))));
+    }
+    let overwrite = flag(params, "overwrite")?.unwrap_or(false);
+    let path = save_path(ctx, params)?;
+    if chosen.len() < chain.len() {
+        if let Some(why) = link_left_out(ctx, &chain, &chosen) {
+            return Err(bad(why));
+        }
+    }
+    let chunk = fxchain::owner_chunk(ctx.reaper, holder.owner())?;
+    let take = matches!(holder.owner(), FxOwner::Take(_));
+    let mut text = String::new();
+    for (n, place) in chosen.iter().enumerate() {
+        let entry = fxchain::fx_entry(&chunk, take, &guids[*place])
+            .ok_or_else(|| failed("REAPER doesn't give that FX's state (the master's monitoring FX are kept outside the project)"))?;
+        let mut lines: Vec<String> = without_automation(&fxchain::without_ids(&entry)).lines().map(str::to_string).collect();
+        // (the first FX of a file runs in parallel with nothing)
+        if n == 0 && lines.last().is_some_and(|l| l.starts_with("PARALLEL ")) {
+            lines.pop();
+        }
+        text.push_str(&lines.join("\n"));
+        text.push('\n');
+    }
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let exists = |path: &Path| fs::symlink_metadata(path).is_ok();
+    let existed = exists(&path);
+    if existed && !overwrite {
+        return Err(failed(format!(
+            "there is an FX chain {} already ({}): pass overwrite: true to replace it, or another name",
+            super::quoted(&stem),
+            path.display()
+        )));
+    }
+    if let Some(folder) = path.parent() {
+        fs::create_dir_all(folder).map_err(|e| failed(format!("couldn't make the folder for that FX chain: {e}")))?;
+    }
+    let written = if existed {
+        // Beside it first, then over it: a failed write leaves the old file whole.
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let temp = path.with_file_name(format!(".kumi-{stamp}.RfxChain"));
+        let done = fs::write(&temp, &text).and_then(|_| fs::rename(&temp, &path));
+        if done.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        done
+    } else {
+        // (made new or not at all: a file that appeared since is never written over)
+        fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut file| file.write_all(text.as_bytes()))
+    };
+    written.map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => {
+            failed(format!("an FX chain {} appeared meanwhile: nothing was written", super::quoted(&stem)))
+        }
+        _ => failed(format!("couldn't write that FX chain file: {e}")),
+    })?;
+    Ok(json!({"file": path.display().to_string(), "name": stem, "count": chosen.len(), "replaced": existed}))
 }

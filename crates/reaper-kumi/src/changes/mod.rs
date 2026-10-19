@@ -461,6 +461,16 @@ impl Changes {
         Ok(json!({"epoch": reads.epoch(), "position": at, "positionBeats": reaper.quarter_notes_at(ctx.proj, at), "playing": playing}))
     }
 
+    // m4-r-fxenv
+    /// `fx_chain_save {ref, fxRefs?, name, input?, overwrite?}`: a chain saved as an FX chain file (a file, not the
+    /// project: no undo point).
+    pub fn fx_chain_save(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
+        let ctx = self.context(reaper, reads, params)?;
+        let mut saved = fx_more::chain_save(&ctx, params)?;
+        saved["epoch"] = reads.epoch().into();
+        Ok(saved)
+    }
+
     /// `undo_step_begin {label}`: one undo block around a plan's changes, which then open none of their own.
     pub fn step_begin(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
         let label = text(params, "label")?;

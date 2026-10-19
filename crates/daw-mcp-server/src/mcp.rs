@@ -186,6 +186,23 @@ pub fn tools(host: &Host) -> Value {
         list[2]["inputSchema"]["properties"]["hidden"] = hidden.clone();
         list[5]["inputSchema"]["properties"]["hidden"] = hidden;
     }
+    if daw == Daw::Reaper {
+        // m4-r-fxenv: a chain saved as an FX chain file.
+        list.as_array_mut().expect("a list").push(json!({
+            "name": "fx_chain_save",
+            "title": "Save an FX chain file",
+            "description": "Saves a chain's FX (fxRefs: some of them, in the chain's order) as an FX chain file (.RfxChain) under name in REAPER's FXChains folder: no FX ids, no automation. A file of that name is replaced only with overwrite. A file, not the project: no step of REAPER's undo.",
+            "inputSchema": {"type": "object", "properties": merged(&pick, json!({
+                "ref": {"type": "string", "description": "The track, take, item or container whose chain to save."},
+                "input": {"type": "boolean", "description": "The track's input FX chain."},
+                "fxRefs": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 256},
+                "name": {"type": "string", "minLength": 1, "maxLength": 256, "description": "The file's name in FXChains; sub-folders as \"Vocals/Lead\"."},
+                "overwrite": {"type": "boolean"},
+                "epoch": {"type": "string"},
+            })), "required": ["ref", "name"], "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false},
+        }));
+    }
     list
 }
 
@@ -287,6 +304,11 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                         "undo_step_begin" | "undo_step_end" => host.undo_step(name, &arguments).await,
                         _ => host.change_release(&arguments),
                     };
+                    result(id, tool_result(answer, is_error))
+                }
+                // m4-r-fxenv
+                "fx_chain_save" if host.daw() == Daw::Reaper => {
+                    let (answer, is_error) = host.fx_chain_save(&arguments).await;
                     result(id, tool_result(answer, is_error))
                 }
                 _ => error(id, -32602, &format!("Unknown tool: {name}")),
