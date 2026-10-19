@@ -54,7 +54,7 @@ const CLOSING: &str = "REAPER is closing; nothing changed";
 
 /// Methods served off the main thread: they answer even while REAPER shows a dialog.
 const SOCKET_METHODS: [&str; 3] = ["ping", "status", "focus"];
-const MAIN_METHODS: [&str; 11] = [
+const MAIN_METHODS: [&str; 13] = [
     "action",
     "quit",
     "read",
@@ -64,6 +64,8 @@ const MAIN_METHODS: [&str; 11] = [
     "change_apply",
     "change_restore",
     "transport_stop",
+    "transport_play",
+    "cursor_set",
     "undo_step_begin",
     "undo_step_end",
 ];

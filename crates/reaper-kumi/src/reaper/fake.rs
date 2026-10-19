@@ -15,11 +15,53 @@ pub struct FakeParam {
     pub max: f64,
     /// What the plug-in prints for the value.
     pub shown: String,
+    /// How it prints other values (`TrackFX_FormatParamValueNormalized`); `shown` for any, if not set.
+    pub display: Display,
+}
+
+/// How a fake plug-in prints a normalized value.
+#[derive(Clone)]
+pub enum Display {
+    Fixed,
+    /// `min` to `max` over the range, with `decimals` and a `unit`.
+    Linear {
+        min: f64,
+        max: f64,
+        decimals: usize,
+        unit: String,
+    },
+    /// One of these, evenly over the range.
+    Steps(Vec<String>),
 }
 
 impl FakeParam {
     pub fn new(name: &str, value: f64, shown: &str) -> Self {
-        FakeParam { name: name.into(), value, min: 0.0, max: 1.0, shown: shown.into() }
+        FakeParam { name: name.into(), value, min: 0.0, max: 1.0, shown: shown.into(), display: Display::Fixed }
+    }
+
+    pub fn linear(name: &str, value: f64, min: f64, max: f64, decimals: usize, unit: &str) -> Self {
+        let mut param = FakeParam::new(name, value, "");
+        param.display = Display::Linear { min, max, decimals, unit: unit.into() };
+        param.shown = param.text_for(value);
+        param
+    }
+
+    pub fn steps(name: &str, value: f64, steps: &[&str]) -> Self {
+        let mut param = FakeParam::new(name, value, "");
+        param.display = Display::Steps(steps.iter().map(|s| s.to_string()).collect());
+        param.shown = param.text_for(value);
+        param
+    }
+
+    /// What the plug-in prints for a value.
+    pub fn text_for(&self, value: f64) -> String {
+        match &self.display {
+            Display::Fixed => self.shown.clone(),
+            Display::Linear { min, max, decimals, unit } => {
+                format!("{:.*} {unit}", decimals, min + (max - min) * value).trim_end().to_string()
+            }
+            Display::Steps(steps) => steps[((value * (steps.len() - 1) as f64).round() as usize).min(steps.len() - 1)].clone(),
+        }
     }
 }
 
@@ -67,6 +109,7 @@ pub struct FakeNote {
     pub pitch: i32,
     pub velocity: i32,
     pub selected: bool,
+    pub muted: bool,
 }
 
 #[derive(Clone)]
@@ -292,6 +335,7 @@ pub struct FakeTempo {
     pub bpm: f64,
     pub num: i32,
     pub denom: i32,
+    pub linear: bool,
 }
 
 #[derive(Clone)]
@@ -322,6 +366,7 @@ pub struct State {
     pub chunks: Vec<FakeTrack>,
     /// A GUID counter for tracks made by `InsertTrackAtIndex`.
     pub made: u32,
+    pub fx_made: u32,
     /// How often the screen was told to redraw.
     pub redraws: u32,
     pub master: FakeTrack,
@@ -383,6 +428,7 @@ impl Default for State {
             undo_dirty: false,
             chunks: vec![],
             made: 0,
+            fx_made: 0,
             redraws: 0,
             master: FakeTrack::new("{MASTER}", "MASTER"),
             tracks: vec![],
@@ -646,8 +692,17 @@ unsafe extern "C" fn get_set_loop_time_range2(
     end: *mut f64,
     _seek: bool,
 ) {
-    assert!(!set, "the fake only reads");
     counted(|s| {
+        if set {
+            let (from, to) = unsafe { (*start, *end) };
+            if is_loop {
+                s.loop_range = (from, to);
+            } else {
+                s.time_selection = (from, to);
+            }
+            s.undo_dirty = true;
+            return;
+        }
         let (from, to) = if is_loop { s.loop_range } else { s.time_selection };
         unsafe {
             *start = from;
@@ -655,8 +710,68 @@ unsafe extern "C" fn get_set_loop_time_range2(
         }
     })
 }
-unsafe extern "C" fn get_set_repeat_ex(_proj: *mut ReaProject, _value: c_int) -> c_int {
-    counted(|s| s.repeat as c_int)
+unsafe extern "C" fn get_set_repeat_ex(_proj: *mut ReaProject, value: c_int) -> c_int {
+    counted(|s| {
+        if value >= 0 {
+            s.repeat = value != 0;
+            s.undo_dirty = true;
+        }
+        s.repeat as c_int
+    })
+}
+
+/// With tempo markers the project's tempo is the first one's; with none it is the project's own.
+unsafe extern "C" fn set_current_bpm(_proj: *mut ReaProject, bpm: f64, _undo: bool) {
+    counted(|s| {
+        s.bpm = bpm;
+        if let Some(first) = s.tempo_markers.first_mut() {
+            first.bpm = bpm;
+        }
+        s.undo_dirty = true;
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn set_tempo_time_sig_marker(
+    _proj: *mut ReaProject,
+    index: c_int,
+    time: f64,
+    _measure: c_int,
+    _beat: f64,
+    bpm: f64,
+    num: c_int,
+    denom: c_int,
+    linear: bool,
+) -> bool {
+    counted(|s| {
+        let current = s.tempo_markers.iter().rev().find(|m| m.time <= time).map_or(s.bpm, |m| m.bpm);
+        let bpm = if bpm > 0.0 { bpm } else { current };
+        let (num, denom) = if num > 0 && denom > 0 { (num, denom) } else { (-1, -1) };
+        if index >= 0 {
+            let Some(m) = s.tempo_markers.get_mut(index as usize) else { return false };
+            *m = FakeTempo { time, bpm, num, denom, linear };
+        } else {
+            let at = s.tempo_markers.iter().position(|m| m.time > time).unwrap_or(s.tempo_markers.len());
+            s.tempo_markers.insert(at, FakeTempo { time, bpm, num, denom, linear });
+        }
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn delete_tempo_time_sig_marker(_proj: *mut ReaProject, index: c_int) -> bool {
+    counted(|s| {
+        if index < 0 || index as usize >= s.tempo_markers.len() {
+            return false;
+        }
+        s.tempo_markers.remove(index as usize);
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn set_edit_cur_pos2(_proj: *mut ReaProject, time: f64, _move_view: bool, _seek: bool) {
+    counted(|s| s.cursor = time)
 }
 unsafe extern "C" fn time_map_get_time_sig_at_time(_proj: *mut ReaProject, time: f64, num: *mut c_int, denom: *mut c_int, bpm: *mut f64) {
     counted(|s| {
@@ -798,6 +913,7 @@ unsafe extern "C" fn get_region_or_marker_info_value(_proj: *mut ReaProject, mar
             "D_ENDPOS" => m.end,
             "I_NUMBER" => m.number as f64,
             "I_CUSTOMCOLOR" => m.color as f64,
+            "I_INDEX" => index as f64,
             _ => 0.0,
         }
     })
@@ -809,8 +925,20 @@ unsafe extern "C" fn get_set_region_or_marker_info_string(
     buf: *mut c_char,
     set: bool,
 ) -> bool {
-    assert!(!set, "the fake only reads");
     let parm = name_of(parm);
+    if set {
+        let value = name_of(buf);
+        return counted(|s| {
+            let (kind, index, _, _) = unpack(marker as u64);
+            let Some(m) = s.markers.get_mut(index as usize).filter(|_| kind == PROJECT_MARKER) else { return false };
+            if parm != "P_NAME" {
+                return false;
+            }
+            m.name = value;
+            s.undo_dirty = true;
+            true
+        });
+    }
     counted(|s| {
         let (kind, index, _, _) = unpack(marker as u64);
         let Some(m) = s.markers.get(index as usize).filter(|_| kind == PROJECT_MARKER) else { return false };
@@ -819,6 +947,71 @@ unsafe extern "C" fn get_set_region_or_marker_info_string(
             "P_NAME" => write(buf, 4096, &m.name),
             _ => return false,
         }
+        true
+    })
+}
+
+unsafe extern "C" fn add_region_or_marker(
+    _proj: *mut ReaProject,
+    region: bool,
+    start: f64,
+    end: f64,
+    name: *const c_char,
+    wanted: c_int,
+    color: c_int,
+) -> *mut api::ProjectMarker {
+    let name = name_of(name);
+    counted(|s| {
+        s.made += 1;
+        let number = if wanted >= 0 { wanted } else { s.markers.iter().map(|m| m.number).max().unwrap_or(0) + 1 };
+        s.markers.push(FakeMarker {
+            guid: format!("{{MK-NEW-{}}}", s.made),
+            is_region: region,
+            start,
+            end: if region { end } else { start },
+            name,
+            number,
+            color,
+        });
+        s.undo_dirty = true;
+        pack(PROJECT_MARKER, s.markers.len() as u64 - 1, 0, 0) as *mut api::ProjectMarker
+    })
+}
+
+unsafe extern "C" fn set_region_or_marker_info_value(
+    _proj: *mut ReaProject,
+    marker: *mut api::ProjectMarker,
+    parm: *const c_char,
+    value: f64,
+) -> f64 {
+    let parm = name_of(parm);
+    counted(|s| {
+        let (kind, index, _, _) = unpack(marker as u64);
+        let Some(m) = s.markers.get_mut(index as usize).filter(|_| kind == PROJECT_MARKER) else { return 0.0 };
+        match parm.as_str() {
+            "D_STARTPOS" => {
+                m.start = value;
+                if !m.is_region {
+                    m.end = value;
+                }
+            }
+            "D_ENDPOS" if m.is_region => m.end = value,
+            "I_NUMBER" => m.number = value as i32,
+            "I_CUSTOMCOLOR" => m.color = value as i32,
+            _ => return 0.0,
+        }
+        s.undo_dirty = true;
+        1.0
+    })
+}
+
+unsafe extern "C" fn delete_project_marker_by_index(_proj: *mut ReaProject, index: c_int) -> bool {
+    counted(|s| {
+        if index < 0 || index as usize >= s.markers.len() {
+            return false;
+        }
+        s.markers.remove(index as usize);
+        s.undo_dirty = true;
         true
     })
 }
@@ -845,7 +1038,7 @@ unsafe extern "C" fn get_tempo_time_sig_marker(
                 *bpm = m.bpm;
                 *num = m.num;
                 *denom = m.denom;
-                *linear = false;
+                *linear = m.linear;
             }
             true
         }
@@ -995,6 +1188,169 @@ unsafe extern "C" fn get_proj_ext_state(
         None => 0,
     })
 }
+/// A track's FX chain as REAPER writes it into the track's chunk: an entry per FX, the plug-in's own block inside.
+fn fx_chain_text(chain: &[FakeFx]) -> String {
+    if chain.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("<FXCHAIN\nSHOW 0\nLASTSEL 0\nDOCKED 0\n");
+    for fx in chain {
+        text += &format!("BYPASS {} 0 0\n", if fx.enabled { 0 } else { 1 });
+        match &fx.children {
+            Some(_) => text += "<CONTAINER Container 0 \"\" 0\n>\n",
+            None => {
+                text += &format!("<VST \"{}\" fake.vst 0 \"\" 0\n", fx.name);
+                for p in &fx.params {
+                    text += &format!("PARAM {} {}\n", p.value, p.name);
+                }
+                text += ">\n";
+            }
+        }
+        text += &format!("FLOATPOS 0 0 0 0\nFXID {}\nWAK 0 0\n", fx.guid);
+    }
+    text + ">\n"
+}
+
+/// An FX chain file's entries as FX: the name and parameters of the block, the bypass and the id.
+fn fx_from_entries(text: &str) -> Vec<FakeFx> {
+    let mut out = Vec::new();
+    let mut current: Option<FakeFx> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("BYPASS ") {
+            out.extend(current.take());
+            let mut fx = FakeFx::new("", "");
+            fx.enabled = rest.split(' ').next() == Some("0");
+            current = Some(fx);
+        } else if let Some(rest) = line.strip_prefix("<VST \"") {
+            if let Some(fx) = current.as_mut() {
+                fx.name = rest.split('"').next().unwrap_or_default().to_string();
+            }
+        } else if let Some(rest) = line.strip_prefix("PARAM ") {
+            if let (Some(fx), Some((value, name))) = (current.as_mut(), rest.split_once(' ')) {
+                fx.params.push(FakeParam::new(name, value.parse().unwrap_or(0.0), ""));
+            }
+        } else if let Some(guid) = line.strip_prefix("FXID ") {
+            if let Some(fx) = current.as_mut() {
+                fx.guid = guid.trim().to_string();
+            }
+        }
+    }
+    out.extend(current);
+    out
+}
+
+/// A plug-in the fake can instantiate by name: the catalogue is REAPER's own.
+fn new_fx(s: &mut State, name: &str) -> Option<FakeFx> {
+    let lower = name.to_ascii_lowercase();
+    let full = if lower.starts_with("js:") {
+        name.to_string()
+    } else {
+        let known = ["ReaEQ", "ReaComp", "ReaDelay", "ReaVerb", "ReaLimit", "ReaSynth"];
+        let found = known.iter().find(|k| lower.contains(&k.to_ascii_lowercase()))?;
+        format!("VST: {found} (Cockos)")
+    };
+    s.fx_made += 1;
+    let mut fx = FakeFx::new(&format!("{{FX-NEW-{}}}", s.fx_made), &full);
+    fx.params = vec![
+        FakeParam::linear("Gain", 0.5, -12.0, 12.0, 1, "dB"),
+        FakeParam::steps("Mode", 0.0, &["Low", "Mid", "High"]),
+        FakeParam::new("Mix", 1.0, "100 %"),
+    ];
+    Some(fx)
+}
+
+unsafe extern "C" fn track_fx_add_by_name(track: *mut MediaTrack, name: *const c_char, rec: bool, instantiate: c_int) -> c_int {
+    let name = name_of(name);
+    counted(|s| {
+        if rec {
+            return -1;
+        }
+        let made = if name.ends_with(".RfxChain") {
+            let path = std::path::Path::new(&s.resource).join("FXChains").join(&name);
+            std::fs::read_to_string(path).ok().map(|text| fx_from_entries(&text))
+        } else {
+            new_fx(s, &name).map(|fx| vec![fx])
+        };
+        let Some(made) = made.filter(|m| !m.is_empty()) else { return -1 };
+        let Some(t) = track_mut(s, track as u64) else { return -1 };
+        let at = if instantiate <= -1000 { ((-1000 - instantiate) as usize).min(t.fx.len()) } else { t.fx.len() };
+        let first = at as c_int;
+        for (n, fx) in made.into_iter().enumerate() {
+            t.fx.insert(at + n, fx);
+        }
+        s.undo_dirty = true;
+        first
+    })
+}
+
+unsafe extern "C" fn track_fx_delete(track: *mut MediaTrack, fx: c_int) -> bool {
+    counted(|s| {
+        let Some(t) = track_mut(s, track as u64) else { return false };
+        if fx < 0 || fx as usize >= t.fx.len() {
+            return false;
+        }
+        t.fx.remove(fx as usize);
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn track_fx_copy_to_track(src: *mut MediaTrack, from: c_int, dest: *mut MediaTrack, to: c_int, is_move: bool) {
+    counted(|s| {
+        // Only within one track's chain, which is all the bridge asks.
+        if src != dest || !is_move {
+            return;
+        }
+        let Some(t) = track_mut(s, src as u64) else { return };
+        if from < 0 || from as usize >= t.fx.len() || to < 0 {
+            return;
+        }
+        let fx = t.fx.remove(from as usize);
+        let to = (to as usize).min(t.fx.len());
+        t.fx.insert(to, fx);
+        s.undo_dirty = true;
+    })
+}
+
+unsafe extern "C" fn track_fx_set_enabled(track: *mut MediaTrack, fx: c_int, enabled: bool) {
+    counted(|s| {
+        if let Some(f) = track_mut(s, track as u64).and_then(|t| t.fx.get_mut(fx as usize)) {
+            f.enabled = enabled;
+            s.undo_dirty = true;
+        }
+    })
+}
+
+unsafe extern "C" fn track_fx_set_param_normalized(track: *mut MediaTrack, fx: c_int, param: c_int, value: f64) -> bool {
+    counted(|s| {
+        let Some(p) = track_mut(s, track as u64).and_then(|t| t.fx.get_mut(fx as usize)).and_then(|f| f.params.get_mut(param as usize))
+        else {
+            return false;
+        };
+        p.value = value.clamp(0.0, 1.0);
+        p.shown = p.text_for(p.value);
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn track_fx_format_param_value_normalized(
+    track: *mut MediaTrack,
+    fx: c_int,
+    param: c_int,
+    value: f64,
+    buf: *mut c_char,
+    size: c_int,
+) -> bool {
+    counted(|s| match track_of(s, track as u64).and_then(|t| t.fx.get(fx as usize)).and_then(|f| f.params.get(param as usize)) {
+        Some(p) => {
+            write(buf, size, &p.text_for(value));
+            true
+        }
+        None => false,
+    })
+}
+
 unsafe extern "C" fn track_fx_get_instrument(track: *mut MediaTrack) -> c_int {
     counted(|s| track_of(s, track as u64).and_then(|t| t.fx.iter().position(|f| f.instrument)).map_or(-1, |n| n as c_int))
 }
@@ -1534,7 +1890,7 @@ unsafe extern "C" fn delete_track(track: *mut MediaTrack) {
 unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
     counted(|s| {
         let Some(t) = track_of(s, track as u64).cloned() else { return false };
-        let text = format!("<TRACK {}\nNAME \"{}\"\nFAKECHUNK {}\n>\n", t.guid, t.name, s.chunks.len());
+        let text = format!("<TRACK {}\nNAME \"{}\"\nFAKECHUNK {}\n{}>\n", t.guid, t.name, s.chunks.len(), fx_chain_text(&t.fx));
         s.chunks.push(t);
         if text.len() + 1 > size as usize {
             // Too small: REAPER fills what fits; the caller grows its buffer.
@@ -1909,7 +2265,7 @@ unsafe extern "C" fn midi_get_note(
         Some(n) => {
             unsafe {
                 *selected = n.selected;
-                *muted = false;
+                *muted = n.muted;
                 *start = n.start_ppq;
                 *end = n.end_ppq;
                 *channel = n.channel;
@@ -1921,6 +2277,62 @@ unsafe extern "C" fn midi_get_note(
         None => false,
     })
 }
+fn take_mut(s: &mut State, handle: u64) -> Option<&mut FakeTake> {
+    let (kind, a, b, c) = unpack(handle);
+    if kind != TAKE && kind != SOURCE {
+        return None;
+    }
+    s.tracks.get_mut(a as usize)?.items.get_mut(b as usize)?.takes.get_mut(c as usize)
+}
+
+fn sort_notes(take: &mut FakeTake) {
+    take.notes.sort_by(|a, b| a.start_ppq.total_cmp(&b.start_ppq));
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn midi_insert_note(
+    take: *mut MediaItem_Take,
+    selected: bool,
+    muted: bool,
+    start: f64,
+    end: f64,
+    channel: c_int,
+    pitch: c_int,
+    velocity: c_int,
+    no_sort: *const bool,
+) -> bool {
+    let no_sort = !no_sort.is_null() && unsafe { *no_sort };
+    counted(|s| {
+        let Some(t) = take_mut(s, take as u64) else { return false };
+        t.notes.push(FakeNote { start_ppq: start, end_ppq: end, channel, pitch, velocity, selected, muted });
+        if !no_sort {
+            sort_notes(t);
+        }
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn midi_delete_note(take: *mut MediaItem_Take, index: c_int) -> bool {
+    counted(|s| {
+        let Some(t) = take_mut(s, take as u64) else { return false };
+        if index < 0 || index as usize >= t.notes.len() {
+            return false;
+        }
+        t.notes.remove(index as usize);
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn midi_sort(take: *mut MediaItem_Take) {
+    counted(|s| {
+        if let Some(t) = take_mut(s, take as u64) {
+            sort_notes(t);
+        }
+    })
+}
+
 unsafe extern "C" fn midi_get_cc(
     take: *mut MediaItem_Take,
     index: c_int,
@@ -2036,6 +2448,13 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"SetOnlyTrackSelected" => set_only_track_selected as unsafe extern "C" fn(*mut MediaTrack),
         b"SetTrackSelected" => set_track_selected as unsafe extern "C" fn(*mut MediaTrack, bool),
         b"ReorderSelectedTracks" => reorder_selected_tracks as unsafe extern "C" fn(c_int, c_int) -> bool,
+        b"AddRegionOrMarker" => add_region_or_marker as unsafe extern "C" fn(*mut ReaProject, bool, f64, f64, *const c_char, c_int, c_int) -> *mut api::ProjectMarker,
+        b"SetRegionOrMarkerInfo_Value" => set_region_or_marker_info_value as unsafe extern "C" fn(*mut ReaProject, *mut api::ProjectMarker, *const c_char, f64) -> f64,
+        b"DeleteProjectMarkerByIndex" => delete_project_marker_by_index as unsafe extern "C" fn(*mut ReaProject, c_int) -> bool,
+        b"SetCurrentBPM" => set_current_bpm as unsafe extern "C" fn(*mut ReaProject, f64, bool),
+        b"SetTempoTimeSigMarker" => set_tempo_time_sig_marker as unsafe extern "C" fn(*mut ReaProject, c_int, f64, c_int, f64, f64, c_int, c_int, bool) -> bool,
+        b"DeleteTempoTimeSigMarker" => delete_tempo_time_sig_marker as unsafe extern "C" fn(*mut ReaProject, c_int) -> bool,
+        b"SetEditCurPos2" => set_edit_cur_pos2 as unsafe extern "C" fn(*mut ReaProject, f64, bool, bool),
         b"ColorToNative" => color_to_native as unsafe extern "C" fn(c_int, c_int, c_int) -> c_int,
         b"UpdateArrange" => update_arrange as unsafe extern "C" fn(),
         b"TrackList_AdjustWindows" => track_list_adjust_windows as unsafe extern "C" fn(bool),
@@ -2049,6 +2468,12 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
         b"GetTrackName" => get_track_name as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int) -> bool,
         b"GetProjExtState" => get_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *mut c_char, c_int) -> c_int,
+        b"TrackFX_AddByName" => track_fx_add_by_name as unsafe extern "C" fn(*mut MediaTrack, *const c_char, bool, c_int) -> c_int,
+        b"TrackFX_Delete" => track_fx_delete as unsafe extern "C" fn(*mut MediaTrack, c_int) -> bool,
+        b"TrackFX_CopyToTrack" => track_fx_copy_to_track as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut MediaTrack, c_int, bool),
+        b"TrackFX_SetEnabled" => track_fx_set_enabled as unsafe extern "C" fn(*mut MediaTrack, c_int, bool),
+        b"TrackFX_SetParamNormalized" => track_fx_set_param_normalized as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, f64) -> bool,
+        b"TrackFX_FormatParamValueNormalized" => track_fx_format_param_value_normalized as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, f64, *mut c_char, c_int) -> bool,
         b"TrackFX_GetInstrument" => track_fx_get_instrument as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
         b"GetTrackDepth" => get_track_depth as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
         b"GetTrackColor" => get_track_color as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
@@ -2117,6 +2542,9 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetEnvelopeInfo_String" => get_set_envelope_info_string as unsafe extern "C" fn(*mut TrackEnvelope, *const c_char, *mut c_char, bool) -> bool,
         b"MIDI_CountEvts" => midi_count_evts as unsafe extern "C" fn(*mut MediaItem_Take, *mut c_int, *mut c_int, *mut c_int) -> c_int,
         b"MIDI_GetNote" => midi_get_note as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut bool, *mut bool, *mut f64, *mut f64, *mut c_int, *mut c_int, *mut c_int) -> bool,
+        b"MIDI_InsertNote" => midi_insert_note as unsafe extern "C" fn(*mut MediaItem_Take, bool, bool, f64, f64, c_int, c_int, c_int, *const bool) -> bool,
+        b"MIDI_DeleteNote" => midi_delete_note as unsafe extern "C" fn(*mut MediaItem_Take, c_int) -> bool,
+        b"MIDI_Sort" => midi_sort as unsafe extern "C" fn(*mut MediaItem_Take),
         b"MIDI_GetCC" => midi_get_cc as unsafe extern "C" fn(*mut MediaItem_Take, c_int, *mut bool, *mut bool, *mut f64, *mut c_int, *mut c_int, *mut c_int, *mut c_int) -> bool,
         b"MIDI_GetPPQPosFromProjQN" => midi_get_ppq_pos_from_proj_qn as unsafe extern "C" fn(*mut MediaItem_Take, f64) -> f64,
         b"MIDI_GetProjQNFromPPQPos" => midi_get_proj_qn_from_ppq_pos as unsafe extern "C" fn(*mut MediaItem_Take, f64) -> f64,
@@ -2191,8 +2619,8 @@ pub fn lab_project() {
         snare.folder = -1;
         let mut take = FakeTake::midi("{TAKE-S1}", "snare.mid");
         take.notes = vec![
-            FakeNote { start_ppq: 0.0, end_ppq: 480.0, channel: 0, pitch: 38, velocity: 100, selected: false },
-            FakeNote { start_ppq: 960.0, end_ppq: 1440.0, channel: 9, pitch: 40, velocity: 64, selected: true },
+            FakeNote { start_ppq: 0.0, end_ppq: 480.0, channel: 0, pitch: 38, velocity: 100, selected: false, muted: false },
+            FakeNote { start_ppq: 960.0, end_ppq: 1440.0, channel: 9, pitch: 40, velocity: 64, selected: true, muted: false },
         ];
         take.ccs = vec![
             FakeCc { ppq: 0.0, kind: 0xB0, channel: 0, data1: 7, data2: 100 },

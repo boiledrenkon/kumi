@@ -4,8 +4,8 @@
 use std::ffi::{c_char, c_int, CString};
 use std::ptr;
 
-use super::{Project, Reaper, Track};
-use crate::api;
+use super::{Project, Reaper, Take, Track};
+use crate::api::{self, ProjectMarker};
 
 /// The most a track's chunk may grow to when it is read: the plug-in states in it are what take the room.
 const MAX_CHUNK: usize = 256 << 20;
@@ -175,5 +175,188 @@ impl Reaper<'_> {
     pub fn undo_entry(&self, proj: Project, index: i32) -> Option<String> {
         let text = unsafe { api::string(self.api.Undo_GetEntryDesc()?(proj.0, index)) };
         (!text.is_empty()).then_some(text)
+    }
+}
+
+/// Markers and regions, which REAPER hands out by pointer and names by GUID.
+impl Reaper<'_> {
+    fn marker_pointer(&self, proj: Project, guid: &str) -> Option<*mut ProjectMarker> {
+        let guid = cstring(guid);
+        let marker = unsafe { self.api.GetRegionOrMarker()?(proj.0, -1, guid.as_ptr()) };
+        (!marker.is_null()).then_some(marker)
+    }
+
+    /// A marker or region made at `start` (seconds), and its GUID. `end` is the region's.
+    pub fn add_marker(&self, proj: Project, region: bool, start: f64, end: f64, name: &str, color: i32) -> Option<String> {
+        let name = cstring(name);
+        let marker = unsafe { self.api.AddRegionOrMarker()?(proj.0, region, start, end, name.as_ptr(), -1, color) };
+        if marker.is_null() {
+            return None;
+        }
+        let f = self.api.GetSetRegionOrMarkerInfo_String()?;
+        let mut buf = vec![0u8; 256];
+        let ok = unsafe { f(proj.0, marker, c"GUID".as_ptr(), buf.as_mut_ptr().cast(), false) };
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(0);
+        (ok && len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
+    }
+
+    /// A marker's number attribute: `D_STARTPOS`, `D_ENDPOS`, `I_NUMBER`, `I_CUSTOMCOLOR`.
+    pub fn set_marker_value(&self, proj: Project, guid: &str, parm: &str, value: f64) -> bool {
+        let (Some(marker), Some(f)) = (self.marker_pointer(proj, guid), self.api.SetRegionOrMarkerInfo_Value()) else { return false };
+        let parm = cstring(parm);
+        // What it returns is not documented as a success flag: the change reads the marker again.
+        unsafe { f(proj.0, marker, parm.as_ptr(), value) };
+        true
+    }
+
+    pub fn set_marker_name(&self, proj: Project, guid: &str, name: &str) -> bool {
+        let (Some(marker), Some(f)) = (self.marker_pointer(proj, guid), self.api.GetSetRegionOrMarkerInfo_String()) else { return false };
+        let mut buf = cstring(name).into_bytes_with_nul();
+        unsafe { f(proj.0, marker, c"P_NAME".as_ptr(), buf.as_mut_ptr().cast::<c_char>(), true) }
+    }
+
+    pub fn delete_marker(&self, proj: Project, guid: &str) -> bool {
+        let (Some(marker), Some(value), Some(delete)) =
+            (self.marker_pointer(proj, guid), self.api.GetRegionOrMarkerInfo_Value(), self.api.DeleteProjectMarkerByIndex())
+        else {
+            return false;
+        };
+        let index = unsafe { value(proj.0, marker, c"I_INDEX".as_ptr()) } as i32;
+        unsafe { delete(proj.0, index) }
+    }
+}
+
+/// The timeline: tempo, time signature, loop, cursor.
+impl Reaper<'_> {
+    pub fn set_current_bpm(&self, proj: Project, bpm: f64) -> bool {
+        match self.api.SetCurrentBPM() {
+            Some(f) => {
+                unsafe { f(proj.0, bpm, false) };
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A tempo or time signature marker: the existing one at `index`, or a new one for -1. `num` and `denom` 0 leave the
+    /// time signature alone; `bpm` 0 keeps the tempo in force.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_tempo_marker(&self, proj: Project, index: i32, time: f64, bpm: f64, num: i32, denom: i32, linear: bool) -> bool {
+        self.api.SetTempoTimeSigMarker().is_some_and(|f| unsafe { f(proj.0, index, time, -1, -1.0, bpm, num, denom, linear) })
+    }
+
+    pub fn delete_tempo_marker(&self, proj: Project, index: i32) -> bool {
+        self.api.DeleteTempoTimeSigMarker().is_some_and(|f| unsafe { f(proj.0, index) })
+    }
+
+    pub fn set_loop_points(&self, proj: Project, start: f64, end: f64) -> bool {
+        let Some(f) = self.api.GetSet_LoopTimeRange2() else { return false };
+        let (mut start, mut end) = (start, end);
+        unsafe { f(proj.0, true, true, &mut start, &mut end, false) };
+        true
+    }
+
+    pub fn set_repeat(&self, proj: Project, on: bool) -> bool {
+        match self.api.GetSetRepeatEx() {
+            Some(f) => {
+                unsafe { f(proj.0, on as c_int) };
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The edit cursor, without moving the view; the play position follows it when `seek` is set.
+    pub fn set_cursor(&self, proj: Project, time: f64, seek: bool) -> bool {
+        match self.api.SetEditCurPos2() {
+            Some(f) => {
+                unsafe { f(proj.0, time, false, seek) };
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Notes in a MIDI take. Inserts and deletes leave the order alone until `sort_midi`.
+impl Reaper<'_> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_note(
+        &self,
+        take: Take,
+        selected: bool,
+        muted: bool,
+        start_ppq: f64,
+        end_ppq: f64,
+        channel: i32,
+        pitch: i32,
+        velocity: i32,
+    ) -> bool {
+        let no_sort = true;
+        self.api
+            .MIDI_InsertNote()
+            .is_some_and(|f| unsafe { f(take.0, selected, muted, start_ppq, end_ppq, channel, pitch, velocity, &no_sort) })
+    }
+
+    pub fn delete_note(&self, take: Take, index: i32) -> bool {
+        self.api.MIDI_DeleteNote().is_some_and(|f| unsafe { f(take.0, index) })
+    }
+
+    pub fn sort_midi(&self, take: Take) -> bool {
+        match self.api.MIDI_Sort() {
+            Some(f) => {
+                unsafe { f(take.0) };
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// FX in a track's chain. An index is the FX's place in the main chain.
+impl Reaper<'_> {
+    /// Adds the plug-in (or the FX chain file) `name` names, at `position` or at the end; the index of the first FX made,
+    /// or -1 when REAPER has none by that name.
+    pub fn add_fx_by_name(&self, track: Track, name: &str, position: Option<i32>) -> i32 {
+        let name = cstring(name);
+        let instantiate = position.map_or(-1, |p| -1000 - p);
+        self.api.TrackFX_AddByName().map_or(-1, |f| unsafe { f(track.0, name.as_ptr(), false, instantiate) })
+    }
+
+    pub fn delete_fx(&self, track: Track, index: i32) -> bool {
+        self.api.TrackFX_Delete().is_some_and(|f| unsafe { f(track.0, index) })
+    }
+
+    /// Moves an FX within its track's chain, so that it ends up at `to`.
+    pub fn move_fx(&self, track: Track, from: i32, to: i32) -> bool {
+        match self.api.TrackFX_CopyToTrack() {
+            Some(f) => {
+                unsafe { f(track.0, from, track.0, to, true) };
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_fx_enabled(&self, track: Track, index: i32, enabled: bool) -> bool {
+        match self.api.TrackFX_SetEnabled() {
+            Some(f) => {
+                unsafe { f(track.0, index, enabled) };
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_fx_param_normalized(&self, track: Track, index: i32, param: i32, value: f64) -> bool {
+        self.api.TrackFX_SetParamNormalized().is_some_and(|f| unsafe { f(track.0, index, param, value) })
+    }
+
+    /// What the plug-in would print for a normalized value, without setting it.
+    pub fn format_fx_param(&self, track: Track, index: i32, param: i32, value: f64) -> Option<String> {
+        let f = self.api.TrackFX_FormatParamValueNormalized()?;
+        let mut ok = false;
+        let text = api::read_buffer(|buf, size| ok = unsafe { f(track.0, index, param, value, buf, size) });
+        ok.then_some(text)
     }
 }

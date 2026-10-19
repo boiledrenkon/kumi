@@ -7,6 +7,10 @@
 //! and refuses `changed` before it writes anything), and how to put it back (`restore`, which refuses `changed` if the
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
+mod fx;
+mod marks;
+mod notes;
+mod project;
 mod sends;
 mod structure;
 mod tracks;
@@ -74,7 +78,18 @@ enum Kind {
     TrackDelete,
     TrackAdd,
     TrackMove,
+    Fx(fx::Which),
+    Notes(notes::Mode),
+    Tempo,
+    TempoMarker,
+    TempoMarkerDelete,
+    LoopRange,
+    LoopRepeat,
     SendProp(&'static sends::Prop),
+    MarkProp(&'static marks::Prop),
+    MarkerAdd,
+    RegionAdd,
+    MarkerDelete,
     SendAdd,
     SendRemove,
 }
@@ -86,7 +101,26 @@ fn kind(name: &str) -> Option<Kind> {
     if let Some(prop) = sends::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::SendProp(prop));
     }
+    if let Some(prop) = marks::PROPS.iter().find(|prop| prop.kind == name) {
+        return Some(Kind::MarkProp(prop));
+    }
     match name {
+        "fx-add" => Some(Kind::Fx(fx::Which::Add)),
+        "fx-delete" => Some(Kind::Fx(fx::Which::Delete)),
+        "fx-move" => Some(Kind::Fx(fx::Which::Move)),
+        "fx-bypass" => Some(Kind::Fx(fx::Which::Bypass)),
+        "fx-param" => Some(Kind::Fx(fx::Which::Param)),
+        "notes-add" => Some(Kind::Notes(notes::Mode::Add)),
+        "notes-change" => Some(Kind::Notes(notes::Mode::Change)),
+        "notes-delete" => Some(Kind::Notes(notes::Mode::Delete)),
+        "tempo-set" => Some(Kind::Tempo),
+        "tempo-marker-set" => Some(Kind::TempoMarker),
+        "tempo-marker-delete" => Some(Kind::TempoMarkerDelete),
+        "loop-range" => Some(Kind::LoopRange),
+        "loop-repeat" => Some(Kind::LoopRepeat),
+        "marker-add" => Some(Kind::MarkerAdd),
+        "region-add" => Some(Kind::RegionAdd),
+        "marker-delete" => Some(Kind::MarkerDelete),
         "send-add" => Some(Kind::SendAdd),
         "send-remove" => Some(Kind::SendRemove),
         "track-delete" => Some(Kind::TrackDelete),
@@ -106,6 +140,17 @@ impl Kind {
             Kind::SendProp(prop) => sends::prop_preview(ctx, prop, input),
             Kind::SendAdd => sends::add_preview(ctx, input),
             Kind::SendRemove => sends::remove_preview(ctx, input),
+            Kind::MarkProp(prop) => marks::prop_preview(ctx, prop, input),
+            Kind::MarkerAdd => marks::add_preview(ctx, input, false),
+            Kind::RegionAdd => marks::add_preview(ctx, input, true),
+            Kind::MarkerDelete => marks::delete_preview(ctx, input),
+            Kind::Fx(which) => fx::preview(ctx, input, which),
+            Kind::Notes(mode) => notes::preview(ctx, input, mode),
+            Kind::Tempo => project::tempo_preview(ctx, input),
+            Kind::TempoMarker => project::marker_preview(ctx, input),
+            Kind::TempoMarkerDelete => project::marker_delete_preview(ctx, input),
+            Kind::LoopRange => project::loop_preview(ctx, input),
+            Kind::LoopRepeat => project::repeat_preview(ctx, input),
         }
     }
 
@@ -118,6 +163,17 @@ impl Kind {
             Kind::SendProp(prop) => sends::prop_apply(ctx, prop, input, fence),
             Kind::SendAdd => sends::add_apply(ctx, input, fence),
             Kind::SendRemove => sends::remove_apply(ctx, input, fence),
+            Kind::MarkProp(prop) => marks::prop_apply(ctx, prop, input, fence),
+            Kind::MarkerAdd => marks::add_apply(ctx, input, false),
+            Kind::RegionAdd => marks::add_apply(ctx, input, true),
+            Kind::MarkerDelete => marks::delete_apply(ctx, input, fence),
+            Kind::Fx(which) => fx::apply(ctx, input, fence, which),
+            Kind::Notes(mode) => notes::apply(ctx, input, fence, mode),
+            Kind::Tempo => project::tempo_apply(ctx, input, fence),
+            Kind::TempoMarker => project::marker_apply(ctx, input, fence),
+            Kind::TempoMarkerDelete => project::marker_delete_apply(ctx, input, fence),
+            Kind::LoopRange => project::loop_apply(ctx, input, fence),
+            Kind::LoopRepeat => project::repeat_apply(ctx, input, fence),
         }
     }
 
@@ -130,6 +186,16 @@ impl Kind {
             Kind::SendProp(prop) => sends::prop_restore(ctx, prop, restore),
             Kind::SendAdd => sends::add_restore(ctx, restore),
             Kind::SendRemove => sends::remove_restore(ctx, restore),
+            Kind::MarkProp(prop) => marks::prop_restore(ctx, prop, restore),
+            Kind::MarkerAdd | Kind::RegionAdd => marks::add_restore(ctx, restore),
+            Kind::MarkerDelete => marks::delete_restore(ctx, restore),
+            Kind::Fx(which) => fx::restore(ctx, restore, which),
+            Kind::Notes(_) => notes::restore(ctx, restore),
+            Kind::Tempo => project::tempo_restore(ctx, restore),
+            Kind::TempoMarker => project::marker_restore(ctx, restore),
+            Kind::TempoMarkerDelete => project::marker_delete_restore(ctx, restore),
+            Kind::LoopRange => project::loop_restore(ctx, restore),
+            Kind::LoopRepeat => project::repeat_restore(ctx, restore),
         }
     }
 }
@@ -274,6 +340,34 @@ impl Changes {
         Ok(json!({"stopped": was_running, "wasRecording": state.recording}))
     }
 
+    /// `transport_play`: the DAW plays from the edit cursor (an action: no undo point, nothing in the project changes).
+    pub fn transport_play(&self, reaper: &Reaper) -> Answer {
+        if let Some(busy) = reaper.busy() {
+            return Err((daw_bridge::wire::code::BUSY.into(), format!("{}; nothing started", busy.reason())));
+        }
+        let info = reaper.current_project().ok_or_else(|| failed("REAPER has no project open"))?;
+        let before = reaper.play_state(info.ptr);
+        let was_playing = before.playing && !before.paused;
+        if !was_playing && !reaper.run_action(TRANSPORT_PLAY) {
+            return Err(failed("REAPER wouldn't start playing"));
+        }
+        let now = reaper.play_state(info.ptr);
+        Ok(json!({"started": !was_playing && now.playing, "playing": now.playing && !now.paused}))
+    }
+
+    /// `cursor_set {positionBeats | position}`: the edit cursor moves (an action: no undo point). Playing follows it.
+    pub fn cursor_set(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
+        let ctx = self.context(reaper, reads, params)?;
+        let time = marks::moment(&ctx, params, "positionBeats", "position")?
+            .ok_or_else(|| bad("pass positionBeats (quarter notes from the start) or position (seconds)"))?;
+        let playing = reaper.play_state(ctx.proj).playing;
+        if !reaper.set_cursor(ctx.proj, time, playing) {
+            return Err(failed("REAPER wouldn't move the cursor"));
+        }
+        let at = reaper.cursor(ctx.proj);
+        Ok(json!({"epoch": reads.epoch(), "position": at, "positionBeats": reaper.quarter_notes_at(ctx.proj, at), "playing": playing}))
+    }
+
     /// `undo_step_begin {label}`: one undo block around a plan's changes, which then open none of their own.
     pub fn step_begin(&self, reaper: &Reaper, reads: &Reads, params: &Value) -> Answer {
         let label = text(params, "label")?;
@@ -355,6 +449,7 @@ impl Changes {
 
 /// Transport: Stop.
 const TRANSPORT_STOP: i32 = 1016;
+const TRANSPORT_PLAY: i32 = 1007;
 
 /// The track a request's `ref` names.
 pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::TrackId> {
