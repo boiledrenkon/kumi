@@ -711,6 +711,25 @@ class NativeRelease(unittest.TestCase):
             self.assertEqual(tar.extractfile("daws/reaper/reaper_kumi.dll").read(), dll.read_bytes())
             self.assertIn("daw-mcp-server.exe", tar.getnames())
 
+    def test_the_aggregate_refuses_targets_whose_daw_bridges_differ(self):
+        spec = importlib.util.spec_from_file_location("migration_release", release.ROOT / "scripts/build-migration-release.py")
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        manifests = []
+        for target, reaper in (("x86_64-unknown-linux-gnu", "0.1.0"), ("aarch64-unknown-linux-gnu", "0.1.1")):
+            out = self.root / target
+            out.mkdir()
+            (out / "kumi.tar.gz").write_bytes(target.encode())
+            manifest = {"kumi": "1.20.0", "bundle": "kumi.tar.gz", "sha256": release.digest(out / "kumi.tar.gz"), "runtime": "rust-native",
+                        "target": target, "bridge": "1.0.93", "reaper": reaper, "renoise": "1.0.0"}
+            (out / "kumi-release.json").write_text(json.dumps(manifest))
+            manifests.append(out / "kumi-release.json")
+        with self.assertRaisesRegex(ValueError, "same Kumi, bridge, REAPER extension and Renoise tool versions"):
+            migration.build(manifests, self.root / "aggregate", "24.0.0")
+        same = json.loads(manifests[1].read_text())
+        manifests[1].write_text(json.dumps({**same, "reaper": "0.1.0"}))
+        self.assertEqual(migration.build(manifests, self.root / "aggregate", "24.0.0")["bridge"], "1.0.93")
+
     def test_renoise_tool_ships_only_its_own_files_with_one_version(self):
         root = self.root / "checkout"
         tool = root / release.RENOISE_TOOL_SOURCE

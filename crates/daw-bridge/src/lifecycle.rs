@@ -355,13 +355,14 @@ impl Lifecycle {
 
     /// Puts a generation's copy in the DAW's folder: a finished copy beside the target, then renamed over it. A
     /// folder, or a file the system won't replace while it's in use, first has the old one renamed aside. What's there
-    /// first is kept unless it's what Kumi placed (`placed`, the receipt's hash): its SHA-256 and where the kept copy went.
-    fn place(&self, generation: &str, placed: Option<&str>) -> Result<(String, Option<PathBuf>), LifecycleError> {
+    /// first is kept unless it's a copy Kumi placed (one of `ours`: hashes of what Kumi installed): its SHA-256 and where
+    /// the kept copy went.
+    fn place(&self, generation: &str, ours: &[String]) -> Result<(String, Option<PathBuf>), LifecycleError> {
         let source = self.paths.generations().join(generation).join(&self.target.name);
         let sha = tree_sha256(&source)?;
         std::fs::create_dir_all(&self.target.dir)?;
         let target = self.target.path();
-        let changed = std::fs::symlink_metadata(&target).is_ok() && tree_sha256(&target).ok().as_deref() != placed;
+        let changed = std::fs::symlink_metadata(&target).is_ok() && !tree_sha256(&target).is_ok_and(|sha| ours.contains(&sha));
         let kept = if changed { Some(self.keep(&target)?) } else { None };
         let token = &crate::auth::random_hex16()[..12];
         let new = self.target.dir.join(format!(".{}.kumi-new-{token}", self.target.name));
@@ -395,6 +396,13 @@ impl Lifecycle {
         }
         self.end();
         Ok((sha, kept))
+    }
+
+    /// The hashes of what Kumi installed, by the receipt: the copy in place and each generation kept.
+    fn ours(&self, receipt: &Receipt) -> Vec<String> {
+        let kept = receipt.generation.iter().chain(receipt.previous.iter());
+        let kept = kept.filter_map(|generation| tree_sha256(&self.paths.generations().join(generation).join(&self.target.name)).ok());
+        receipt.sha256.iter().cloned().chain(kept).collect()
     }
 
     fn write_reference(&self) -> Result<(), LifecycleError> {
@@ -473,8 +481,9 @@ impl Lifecycle {
             Some(generation) => (generation.clone(), false),
             None => (self.stage(source, version)?.0, true),
         };
-        let placed = before.as_ref().filter(|before| before.target == here).and_then(|before| before.sha256.as_deref());
-        let (sha, kept) = match self.place(&generation, placed) {
+        // Kumi's own copies, wherever they turn up: a newer Renoise copies the tool into the version folder it makes.
+        let ours = before.as_ref().map(|before| self.ours(before)).unwrap_or_default();
+        let (sha, kept) = match self.place(&generation, &ours) {
             Ok(placed) => placed,
             Err(error) => {
                 if staged {
@@ -525,8 +534,8 @@ impl Lifecycle {
         if !self.paths.generations().join(&earlier).join(&self.target.name).exists() {
             return Err(LifecycleError::State(format!("the earlier version {earlier} is no longer kept")));
         }
-        let placed = (receipt.target == self.target.path().to_string_lossy()).then_some(receipt.sha256.as_deref()).flatten();
-        let (sha, kept) = self.place(&earlier, placed)?;
+        let ours = self.ours(&receipt);
+        let (sha, kept) = self.place(&earlier, &ours)?;
         self.write_reference()?;
         receipt.previous.remove(0);
         receipt.version = earlier.rsplit_once('-').map(|(version, _)| version.to_string());
@@ -731,6 +740,29 @@ mod tests {
         std::fs::write(life.target.path().join("lib").join("Thumbs.db"), "explorer").unwrap();
         assert!(life.status().unwrap().matches);
         assert_eq!(life.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap().history[0].kept, None);
+    }
+
+    #[test]
+    fn kumis_own_copy_turning_up_in_a_newer_renoises_folder_is_replaced_without_a_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let old = renoise(root.path());
+        old.install(&bridge_folder(root.path(), "1.0"), "1.0").unwrap();
+        // Renoise 3.5.5's first run copies 3.5.4's folder, Kumi's tool in it, into its own.
+        let tools = root.path().join("prefs").join("V3.5.5").join("Scripts").join("Tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        copy_tree(&old.target.path(), &tools.join("com.kumi.Bridge.xrnx"), false).unwrap();
+        let target = Target {
+            dir: tools.clone(),
+            reference: tools.join("com.kumi.Bridge.xrnx").join("bridge-reference.json"),
+            ..old.target.clone()
+        };
+        let new = Lifecycle::new(&root.path().join("kumi"), target);
+        let upgraded = new.install(&bridge_folder(root.path(), "2.0"), "2.0").unwrap();
+        assert_eq!((upgraded.history[0].kept.as_deref(), upgraded.target.as_str()), (None, new.target.path().to_str().unwrap()));
+        assert!(new.status().unwrap().matches);
+        // One the producer changed there is kept, as anywhere.
+        std::fs::write(new.target.path().join("main.lua"), "-- edited\n").unwrap();
+        assert!(new.install(&bridge_folder(root.path(), "1.0"), "1.0").unwrap().history[0].kept.is_some());
     }
 
     #[test]

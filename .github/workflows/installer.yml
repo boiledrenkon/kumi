@@ -369,9 +369,10 @@ jobs:
           fi
           # As a producer runs things: their home and shell and a UTF-8 locale, nothing else of this runner's.
           producer() { env -i HOME="$home" PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL="$shell" ${zdotdir:+"ZDOTDIR=$zdotdir"} LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 "$@"; }
+          reaper="$home/REAPER"; renoise="$home/Renoise/V3.5.4"
           kumi() {
             producer KUMI_RELEASES="$KUMI_RELEASES" KUMI_REMOTE_SCRIPTS_DIR="$scripts" KUMI_LIVE_EXTENSIONS_DIR="$home/Live Extensions" \
-              KUMI_BRIDGE_WAIT_SECONDS=0 "$home/.kumi/bin/kumi" "$@"
+              KUMI_BRIDGE_WAIT_SECONDS=0 KUMI_REAPER_RESOURCE_DIR="$reaper" KUMI_RENOISE_PREFS_DIR="$renoise" "$home/.kumi/bin/kumi" "$@"
           }
           marked() { if [[ -f "$rc" ]]; then grep -c "Added by the Kumi installer" "$rc" || true; else echo 0; fi; }
 
@@ -411,20 +412,32 @@ jobs:
           kumi update
           test "$(kumi --version)" = "Kumi $version"
           after="$(bridge)"; after_extension="$(extension)"
-          kumi update --rollback
+          # REAPER's extension and Renoise's tool from this build, in scratch DAW folders: that release knows neither DAW,
+          # so its rollback leaves both as they are, said, and so does its own rollback back to this build.
+          python3 scripts/tests/daw_bridges.py prepare "$reaper" "$renoise"
+          kumi --daw reaper bridge --yes
+          kumi --daw renoise bridge --yes
+          placed() { python3 scripts/tests/daw_bridges.py placed "$home/.kumi/$1" "$home/.kumi" "$reaper" "$renoise"; }
+          placed app > daws.txt
+          kumi update --rollback | tee rollback.txt
           test "$(kumi --version)" = "Kumi $previous"
           test "$(bridge)" = "$before"
           test "$(extension)" = "$before_extension"
+          grep -q "Kumi's extension stays in REAPER" rollback.txt
+          grep -q "Kumi's tool stays in Renoise" rollback.txt
+          test "$(placed app.previous)" = "$(cat daws.txt)"
           kumi update --rollback
           test "$(kumi --version)" = "Kumi $version"
           if [[ "$before" == "$after" ]]; then test "$(bridge)" = "$after"; else test "$(bridge | cut -d' ' -f1)" = "${after%% *}"; fi
           test "$(extension)" = "$after_extension"
+          test "$(placed app)" = "$(cat daws.txt)"
 
-          # Uninstalling takes the PATH line out.
+          # Uninstalling takes the PATH line out, and REAPER's and Renoise's bridges.
           kumi uninstall --yes
           test ! -e "$home/.kumi/app"
           test ! -e "$home/.kumi/bin"
           test "$(marked)" = 0
+          python3 scripts/tests/daw_bridges.py removed "$home/.kumi" "$reaper" "$renoise"
 
       - name: A Kumi stays in place when Windows holds its folder (Windows PowerShell 5.1)
         if: runner.os == 'Windows'
@@ -582,7 +595,8 @@ jobs:
             $folder = Join-Path $root 'Live Extensions\kumi.kumi'
             "$((Get-Content -Raw -LiteralPath (Join-Path $folder 'manifest.json') | ConvertFrom-Json).version) $((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $folder 'dist\extension.js')).Hash)"
           }
-          # A home for Kumi in RUNNER_TEMP, with its own Remote Scripts and Extensions folders (no Live here).
+          # A home for Kumi in RUNNER_TEMP, with its own Remote Scripts and Extensions folders (no Live here), and REAPER's
+          # and Renoise's (no REAPER or Renoise here).
           function UseHome([string]$Folder) {
             $script:root = Join-Path $env:RUNNER_TEMP $Folder
             $env:KUMI_HOME = Join-Path $script:root '.kumi'
@@ -593,7 +607,15 @@ jobs:
             $env:KUMI_REMOTE_SCRIPTS_DIR = $script:scripts
             $env:KUMI_LIVE_EXTENSIONS_DIR = Join-Path $script:root 'Live Extensions'
             $env:KUMI_BRIDGE_WAIT_SECONDS = '0'
+            $env:KUMI_REAPER_RESOURCE_DIR = $script:reaper = Join-Path $script:root 'REAPER'
+            $env:KUMI_RENOISE_PREFS_DIR = $script:renoise = Join-Path $script:root 'Renoise\V3.5.4'
             Remove-Item Env:KUMI_RELEASES, Env:KUMI_VERSION -ErrorAction SilentlyContinue
+          }
+          # REAPER's extension and Renoise's tool as Kumi put them, compared with the copies the Kumi in `App` carries.
+          function Placed([string]$App) {
+            $said = python scripts/tests/daw_bridges.py placed (Join-Path $env:KUMI_HOME $App) $env:KUMI_HOME $reaper $renoise | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "REAPER's and Renoise's bridges aren't as Kumi put them" }
+            $said
           }
           # Uninstalling takes Kumi out of PATH; its folders go a few seconds later, from a cmd it leaves running.
           function Uninstall {
@@ -637,16 +659,29 @@ jobs:
           Kumi update
           if ((& $kumi --version) -ne "Kumi $version") { throw "the update didn't give $version" }
           $after = Bridge; $afterExtension = Extension
-          Kumi update --rollback
+          # REAPER's extension and Renoise's tool from this build, in scratch DAW folders: that release knows neither DAW,
+          # so its rollback leaves both as they are, said, and so does its own rollback back to this build.
+          python scripts/tests/daw_bridges.py prepare $reaper $renoise
+          if ($LASTEXITCODE -ne 0) { throw "the DAWs' folders weren't made" }
+          Kumi --daw reaper bridge --yes
+          Kumi --daw renoise bridge --yes
+          $daws = Placed 'app'
+          $rolled = & $kumi update --rollback | Out-String; Write-Host $rolled
+          if ($LASTEXITCODE -ne 0) { throw "the first rollback failed" }
           if ((& $kumi --version) -ne "Kumi $previous") { throw "the first rollback didn't give $previous" }
           if ((Bridge) -ne $before) { throw "the first rollback left bridge $(Bridge), not $before" }
           if ((Extension) -ne $beforeExtension) { throw "the first rollback left extension $(Extension), not $beforeExtension" }
+          if ($rolled -notmatch "Kumi's extension stays in REAPER" -or $rolled -notmatch "Kumi's tool stays in Renoise") { throw "the rollback didn't say REAPER's and Renoise's bridges stay" }
+          if ((Placed 'app.previous') -ne $daws) { throw "the first rollback changed REAPER's or Renoise's bridge" }
           Kumi update --rollback
           if ((& $kumi --version) -ne "Kumi $version") { throw "the second rollback didn't give $version" }
           $bridge = Bridge
           if ($(if ($before -eq $after) { $bridge -ne $after } else { $bridge.Split(' ')[0] -ne $after.Split(' ')[0] })) { throw "the second rollback left bridge $bridge, not $after" }
           if ((Extension) -ne $afterExtension) { throw "the second rollback left extension $(Extension), not $afterExtension" }
+          if ((Placed 'app') -ne $daws) { throw "the second rollback changed REAPER's or Renoise's bridge" }
           Uninstall
+          python scripts/tests/daw_bridges.py removed $env:KUMI_HOME $reaper $renoise
+          if ($LASTEXITCODE -ne 0) { throw "REAPER's or Renoise's bridge stayed" }
 
   edges:
     # install.sh and install.ps1 when a release isn't there, nothing answers, a Wi-Fi sign-in page answers, a checksum
