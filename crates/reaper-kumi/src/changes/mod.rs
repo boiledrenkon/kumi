@@ -7,6 +7,7 @@
 //! and refuses `changed` before it writes anything), and how to put it back (`restore`, which refuses `changed` if the
 //! fields it touched no longer hold what the apply wrote). A kind never leaves half a change: it checks first.
 
+mod fx;
 mod marks;
 mod notes;
 mod project;
@@ -77,6 +78,7 @@ enum Kind {
     TrackDelete,
     TrackAdd,
     TrackMove,
+    Fx(fx::Which),
     Notes(notes::Mode),
     Tempo,
     TempoMarker,
@@ -103,6 +105,11 @@ fn kind(name: &str) -> Option<Kind> {
         return Some(Kind::MarkProp(prop));
     }
     match name {
+        "fx-add" => Some(Kind::Fx(fx::Which::Add)),
+        "fx-delete" => Some(Kind::Fx(fx::Which::Delete)),
+        "fx-move" => Some(Kind::Fx(fx::Which::Move)),
+        "fx-bypass" => Some(Kind::Fx(fx::Which::Bypass)),
+        "fx-param" => Some(Kind::Fx(fx::Which::Param)),
         "notes-add" => Some(Kind::Notes(notes::Mode::Add)),
         "notes-change" => Some(Kind::Notes(notes::Mode::Change)),
         "notes-delete" => Some(Kind::Notes(notes::Mode::Delete)),
@@ -137,6 +144,7 @@ impl Kind {
             Kind::MarkerAdd => marks::add_preview(ctx, input, false),
             Kind::RegionAdd => marks::add_preview(ctx, input, true),
             Kind::MarkerDelete => marks::delete_preview(ctx, input),
+            Kind::Fx(which) => fx::preview(ctx, input, which),
             Kind::Notes(mode) => notes::preview(ctx, input, mode),
             Kind::Tempo => project::tempo_preview(ctx, input),
             Kind::TempoMarker => project::marker_preview(ctx, input),
@@ -159,6 +167,7 @@ impl Kind {
             Kind::MarkerAdd => marks::add_apply(ctx, input, false),
             Kind::RegionAdd => marks::add_apply(ctx, input, true),
             Kind::MarkerDelete => marks::delete_apply(ctx, input, fence),
+            Kind::Fx(which) => fx::apply(ctx, input, fence, which),
             Kind::Notes(mode) => notes::apply(ctx, input, fence, mode),
             Kind::Tempo => project::tempo_apply(ctx, input, fence),
             Kind::TempoMarker => project::marker_apply(ctx, input, fence),
@@ -180,6 +189,7 @@ impl Kind {
             Kind::MarkProp(prop) => marks::prop_restore(ctx, prop, restore),
             Kind::MarkerAdd | Kind::RegionAdd => marks::add_restore(ctx, restore),
             Kind::MarkerDelete => marks::delete_restore(ctx, restore),
+            Kind::Fx(which) => fx::restore(ctx, restore, which),
             Kind::Notes(_) => notes::restore(ctx, restore),
             Kind::Tempo => project::tempo_restore(ctx, restore),
             Kind::TempoMarker => project::marker_restore(ctx, restore),

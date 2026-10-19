@@ -15,11 +15,53 @@ pub struct FakeParam {
     pub max: f64,
     /// What the plug-in prints for the value.
     pub shown: String,
+    /// How it prints other values (`TrackFX_FormatParamValueNormalized`); `shown` for any, if not set.
+    pub display: Display,
+}
+
+/// How a fake plug-in prints a normalized value.
+#[derive(Clone)]
+pub enum Display {
+    Fixed,
+    /// `min` to `max` over the range, with `decimals` and a `unit`.
+    Linear {
+        min: f64,
+        max: f64,
+        decimals: usize,
+        unit: String,
+    },
+    /// One of these, evenly over the range.
+    Steps(Vec<String>),
 }
 
 impl FakeParam {
     pub fn new(name: &str, value: f64, shown: &str) -> Self {
-        FakeParam { name: name.into(), value, min: 0.0, max: 1.0, shown: shown.into() }
+        FakeParam { name: name.into(), value, min: 0.0, max: 1.0, shown: shown.into(), display: Display::Fixed }
+    }
+
+    pub fn linear(name: &str, value: f64, min: f64, max: f64, decimals: usize, unit: &str) -> Self {
+        let mut param = FakeParam::new(name, value, "");
+        param.display = Display::Linear { min, max, decimals, unit: unit.into() };
+        param.shown = param.text_for(value);
+        param
+    }
+
+    pub fn steps(name: &str, value: f64, steps: &[&str]) -> Self {
+        let mut param = FakeParam::new(name, value, "");
+        param.display = Display::Steps(steps.iter().map(|s| s.to_string()).collect());
+        param.shown = param.text_for(value);
+        param
+    }
+
+    /// What the plug-in prints for a value.
+    pub fn text_for(&self, value: f64) -> String {
+        match &self.display {
+            Display::Fixed => self.shown.clone(),
+            Display::Linear { min, max, decimals, unit } => {
+                format!("{:.*} {unit}", decimals, min + (max - min) * value).trim_end().to_string()
+            }
+            Display::Steps(steps) => steps[((value * (steps.len() - 1) as f64).round() as usize).min(steps.len() - 1)].clone(),
+        }
     }
 }
 
@@ -324,6 +366,7 @@ pub struct State {
     pub chunks: Vec<FakeTrack>,
     /// A GUID counter for tracks made by `InsertTrackAtIndex`.
     pub made: u32,
+    pub fx_made: u32,
     /// How often the screen was told to redraw.
     pub redraws: u32,
     pub master: FakeTrack,
@@ -385,6 +428,7 @@ impl Default for State {
             undo_dirty: false,
             chunks: vec![],
             made: 0,
+            fx_made: 0,
             redraws: 0,
             master: FakeTrack::new("{MASTER}", "MASTER"),
             tracks: vec![],
@@ -1144,6 +1188,169 @@ unsafe extern "C" fn get_proj_ext_state(
         None => 0,
     })
 }
+/// A track's FX chain as REAPER writes it into the track's chunk: an entry per FX, the plug-in's own block inside.
+fn fx_chain_text(chain: &[FakeFx]) -> String {
+    if chain.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("<FXCHAIN\nSHOW 0\nLASTSEL 0\nDOCKED 0\n");
+    for fx in chain {
+        text += &format!("BYPASS {} 0 0\n", if fx.enabled { 0 } else { 1 });
+        match &fx.children {
+            Some(_) => text += "<CONTAINER Container 0 \"\" 0\n>\n",
+            None => {
+                text += &format!("<VST \"{}\" fake.vst 0 \"\" 0\n", fx.name);
+                for p in &fx.params {
+                    text += &format!("PARAM {} {}\n", p.value, p.name);
+                }
+                text += ">\n";
+            }
+        }
+        text += &format!("FLOATPOS 0 0 0 0\nFXID {}\nWAK 0 0\n", fx.guid);
+    }
+    text + ">\n"
+}
+
+/// An FX chain file's entries as FX: the name and parameters of the block, the bypass and the id.
+fn fx_from_entries(text: &str) -> Vec<FakeFx> {
+    let mut out = Vec::new();
+    let mut current: Option<FakeFx> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("BYPASS ") {
+            out.extend(current.take());
+            let mut fx = FakeFx::new("", "");
+            fx.enabled = rest.split(' ').next() == Some("0");
+            current = Some(fx);
+        } else if let Some(rest) = line.strip_prefix("<VST \"") {
+            if let Some(fx) = current.as_mut() {
+                fx.name = rest.split('"').next().unwrap_or_default().to_string();
+            }
+        } else if let Some(rest) = line.strip_prefix("PARAM ") {
+            if let (Some(fx), Some((value, name))) = (current.as_mut(), rest.split_once(' ')) {
+                fx.params.push(FakeParam::new(name, value.parse().unwrap_or(0.0), ""));
+            }
+        } else if let Some(guid) = line.strip_prefix("FXID ") {
+            if let Some(fx) = current.as_mut() {
+                fx.guid = guid.trim().to_string();
+            }
+        }
+    }
+    out.extend(current);
+    out
+}
+
+/// A plug-in the fake can instantiate by name: the catalogue is REAPER's own.
+fn new_fx(s: &mut State, name: &str) -> Option<FakeFx> {
+    let lower = name.to_ascii_lowercase();
+    let full = if lower.starts_with("js:") {
+        name.to_string()
+    } else {
+        let known = ["ReaEQ", "ReaComp", "ReaDelay", "ReaVerb", "ReaLimit", "ReaSynth"];
+        let found = known.iter().find(|k| lower.contains(&k.to_ascii_lowercase()))?;
+        format!("VST: {found} (Cockos)")
+    };
+    s.fx_made += 1;
+    let mut fx = FakeFx::new(&format!("{{FX-NEW-{}}}", s.fx_made), &full);
+    fx.params = vec![
+        FakeParam::linear("Gain", 0.5, -12.0, 12.0, 1, "dB"),
+        FakeParam::steps("Mode", 0.0, &["Low", "Mid", "High"]),
+        FakeParam::new("Mix", 1.0, "100 %"),
+    ];
+    Some(fx)
+}
+
+unsafe extern "C" fn track_fx_add_by_name(track: *mut MediaTrack, name: *const c_char, rec: bool, instantiate: c_int) -> c_int {
+    let name = name_of(name);
+    counted(|s| {
+        if rec {
+            return -1;
+        }
+        let made = if name.ends_with(".RfxChain") {
+            let path = std::path::Path::new(&s.resource).join("FXChains").join(&name);
+            std::fs::read_to_string(path).ok().map(|text| fx_from_entries(&text))
+        } else {
+            new_fx(s, &name).map(|fx| vec![fx])
+        };
+        let Some(made) = made.filter(|m| !m.is_empty()) else { return -1 };
+        let Some(t) = track_mut(s, track as u64) else { return -1 };
+        let at = if instantiate <= -1000 { ((-1000 - instantiate) as usize).min(t.fx.len()) } else { t.fx.len() };
+        let first = at as c_int;
+        for (n, fx) in made.into_iter().enumerate() {
+            t.fx.insert(at + n, fx);
+        }
+        s.undo_dirty = true;
+        first
+    })
+}
+
+unsafe extern "C" fn track_fx_delete(track: *mut MediaTrack, fx: c_int) -> bool {
+    counted(|s| {
+        let Some(t) = track_mut(s, track as u64) else { return false };
+        if fx < 0 || fx as usize >= t.fx.len() {
+            return false;
+        }
+        t.fx.remove(fx as usize);
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn track_fx_copy_to_track(src: *mut MediaTrack, from: c_int, dest: *mut MediaTrack, to: c_int, is_move: bool) {
+    counted(|s| {
+        // Only within one track's chain, which is all the bridge asks.
+        if src != dest || !is_move {
+            return;
+        }
+        let Some(t) = track_mut(s, src as u64) else { return };
+        if from < 0 || from as usize >= t.fx.len() || to < 0 {
+            return;
+        }
+        let fx = t.fx.remove(from as usize);
+        let to = (to as usize).min(t.fx.len());
+        t.fx.insert(to, fx);
+        s.undo_dirty = true;
+    })
+}
+
+unsafe extern "C" fn track_fx_set_enabled(track: *mut MediaTrack, fx: c_int, enabled: bool) {
+    counted(|s| {
+        if let Some(f) = track_mut(s, track as u64).and_then(|t| t.fx.get_mut(fx as usize)) {
+            f.enabled = enabled;
+            s.undo_dirty = true;
+        }
+    })
+}
+
+unsafe extern "C" fn track_fx_set_param_normalized(track: *mut MediaTrack, fx: c_int, param: c_int, value: f64) -> bool {
+    counted(|s| {
+        let Some(p) = track_mut(s, track as u64).and_then(|t| t.fx.get_mut(fx as usize)).and_then(|f| f.params.get_mut(param as usize))
+        else {
+            return false;
+        };
+        p.value = value.clamp(0.0, 1.0);
+        p.shown = p.text_for(p.value);
+        s.undo_dirty = true;
+        true
+    })
+}
+
+unsafe extern "C" fn track_fx_format_param_value_normalized(
+    track: *mut MediaTrack,
+    fx: c_int,
+    param: c_int,
+    value: f64,
+    buf: *mut c_char,
+    size: c_int,
+) -> bool {
+    counted(|s| match track_of(s, track as u64).and_then(|t| t.fx.get(fx as usize)).and_then(|f| f.params.get(param as usize)) {
+        Some(p) => {
+            write(buf, size, &p.text_for(value));
+            true
+        }
+        None => false,
+    })
+}
+
 unsafe extern "C" fn track_fx_get_instrument(track: *mut MediaTrack) -> c_int {
     counted(|s| track_of(s, track as u64).and_then(|t| t.fx.iter().position(|f| f.instrument)).map_or(-1, |n| n as c_int))
 }
@@ -1683,7 +1890,7 @@ unsafe extern "C" fn delete_track(track: *mut MediaTrack) {
 unsafe extern "C" fn get_track_state_chunk(track: *mut MediaTrack, buf: *mut c_char, size: c_int, _isundo: bool) -> bool {
     counted(|s| {
         let Some(t) = track_of(s, track as u64).cloned() else { return false };
-        let text = format!("<TRACK {}\nNAME \"{}\"\nFAKECHUNK {}\n>\n", t.guid, t.name, s.chunks.len());
+        let text = format!("<TRACK {}\nNAME \"{}\"\nFAKECHUNK {}\n{}>\n", t.guid, t.name, s.chunks.len(), fx_chain_text(&t.fx));
         s.chunks.push(t);
         if text.len() + 1 > size as usize {
             // Too small: REAPER fills what fits; the caller grows its buffer.
@@ -2261,6 +2468,12 @@ fn lookup(name: &CStr) -> *mut c_void {
         b"GetSetMediaTrackInfo_String" => get_set_media_track_info_string as unsafe extern "C" fn(*mut MediaTrack, *const c_char, *mut c_char, bool) -> bool,
         b"GetTrackName" => get_track_name as unsafe extern "C" fn(*mut MediaTrack, *mut c_char, c_int) -> bool,
         b"GetProjExtState" => get_proj_ext_state as unsafe extern "C" fn(*mut ReaProject, *const c_char, *const c_char, *mut c_char, c_int) -> c_int,
+        b"TrackFX_AddByName" => track_fx_add_by_name as unsafe extern "C" fn(*mut MediaTrack, *const c_char, bool, c_int) -> c_int,
+        b"TrackFX_Delete" => track_fx_delete as unsafe extern "C" fn(*mut MediaTrack, c_int) -> bool,
+        b"TrackFX_CopyToTrack" => track_fx_copy_to_track as unsafe extern "C" fn(*mut MediaTrack, c_int, *mut MediaTrack, c_int, bool),
+        b"TrackFX_SetEnabled" => track_fx_set_enabled as unsafe extern "C" fn(*mut MediaTrack, c_int, bool),
+        b"TrackFX_SetParamNormalized" => track_fx_set_param_normalized as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, f64) -> bool,
+        b"TrackFX_FormatParamValueNormalized" => track_fx_format_param_value_normalized as unsafe extern "C" fn(*mut MediaTrack, c_int, c_int, f64, *mut c_char, c_int) -> bool,
         b"TrackFX_GetInstrument" => track_fx_get_instrument as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
         b"GetTrackDepth" => get_track_depth as unsafe extern "C" fn(*mut MediaTrack) -> c_int,
         b"GetTrackColor" => get_track_color as unsafe extern "C" fn(*mut MediaTrack) -> c_int,

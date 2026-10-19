@@ -1414,3 +1414,303 @@ fn a_thousand_notes_are_one_change_and_one_undo() {
         "bad-params"
     );
 }
+
+// ----- FX -----
+
+fn kick_fx() -> Vec<(String, String, bool)> {
+    state(|s| s.tracks[1].fx.iter().map(|f| (f.guid.clone(), f.name.clone(), f.enabled)).collect())
+}
+
+fn fx_ref_of(guid: &str) -> String {
+    format!("r:fx:{guid}")
+}
+
+/// A resource folder the fake can keep FX chain files in.
+fn fx_folder() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    state(|s| s.resource = dir.path().to_string_lossy().into_owned());
+    dir
+}
+
+fn chain_files(dir: &tempfile::TempDir) -> usize {
+    std::fs::read_dir(dir.path().join("FXChains")).map_or(0, |d| d.count())
+}
+
+#[test]
+fn a_plug_in_is_added_where_asked_and_undo_deletes_that_one_by_its_id() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("fx-add", json!({"ref": KICK, "name": "ReaEQ"}), "Kumi: Added ReaEQ to Kick (kfa01)");
+    assert_eq!(preview["display"]["title"], "Added ReaEQ to Kick");
+    assert_eq!(top().as_deref(), Some("Kumi: Added ReaEQ to Kick (kfa01)"));
+    assert_eq!(kick_fx().len(), 1);
+    let eq = kick_fx()[0].0.clone();
+    assert_eq!(applied["created"], json!({"ref": fx_ref_of(&eq), "kind": "fx"}));
+    // At a place, in front.
+    let (preview2, applied2) =
+        lab.make("fx-add", json!({"ref": KICK, "name": "ReaComp", "index": 0}), "Kumi: Added ReaComp to Kick (kfa02)");
+    assert_eq!(kick_fx().iter().map(|f| f.1.as_str()).collect::<Vec<_>>(), ["VST: ReaComp (Cockos)", "VST: ReaEQ (Cockos)"]);
+    // The producer turned the compressor's parameter: undo is refused, unless discarded.
+    state(|s| s.tracks[1].fx[0].params[0].value = 0.9);
+    let (code, message) = lab.undo("fx-add", &preview2, &applied2, "Kumi: undo (kund1)").unwrap_err();
+    assert_eq!(code, "changed");
+    assert!(message.contains("changed in REAPER"), "{message}");
+    assert_eq!(kick_fx().len(), 2);
+    let mut params = restore_params(&preview2, &applied2, "Kumi: undo (kund1)");
+    params["kind"] = "fx-add".into();
+    params["discard"] = true.into();
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(kick_fx().iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), [eq.as_str()]);
+    // Undone already: it is gone.
+    assert_eq!(lab.undo("fx-add", &preview2, &applied2, "Kumi: undo (kund2)").unwrap_err().0, "gone");
+    lab.undo("fx-add", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    assert!(kick_fx().is_empty());
+}
+
+#[test]
+fn a_plug_in_that_isnt_there_or_a_bad_request_writes_nothing() {
+    let lab = Lab::new();
+    let entries = state(|s| s.undo_entries);
+    for (input, code) in [
+        (json!({"ref": KICK, "name": "NoSuchPlugin"}), "failed"),
+        (json!({"ref": KICK, "name": ""}), "bad-params"),
+        (json!({"ref": KICK}), "bad-params"),
+        (json!({"ref": KICK, "name": "a\nb"}), "bad-params"),
+        (json!({"ref": KICK, "name": "mine.RfxChain"}), "bad-params"),
+        (json!({"ref": KICK, "name": "ReaEQ", "index": 3}), "bad-params"),
+        (json!({"ref": "r:fx:{FX-EQ}", "name": "ReaEQ"}), "bad-params"),
+    ] {
+        // Unknown plug-ins are found out when it is added, not at the preview.
+        let preview = lab.call("change_preview", json!({"kind": "fx-add", "input": input}));
+        if code == "failed" {
+            let preview = preview.unwrap();
+            let apply = json!({"kind": "fx-add", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+            let (got, message) = lab.call("change_apply", apply).unwrap_err();
+            assert_eq!(got, code, "{input}");
+            assert!(message.contains("NoSuchPlugin"), "{message}");
+        } else {
+            assert_eq!(preview.unwrap_err().0, code, "{input}");
+        }
+    }
+    assert_eq!((kick_fx().len(), state(|s| s.undo_entries)), (0, entries));
+    // The chain moved between the preview and the apply.
+    let input = json!({"ref": KICK, "name": "ReaEQ"});
+    let preview = lab.call("change_preview", json!({"kind": "fx-add", "input": input})).unwrap();
+    state(|s| s.tracks[1].fx.push(fake::FakeFx::new("{FX-X}", "VST: ReaEQ (Cockos)")));
+    let apply = json!({"kind": "fx-add", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
+    assert_eq!(kick_fx().len(), 1);
+}
+
+fn three_fx(lab: &Lab) -> Vec<String> {
+    for (n, name) in ["ReaEQ", "ReaComp", "ReaDelay"].iter().enumerate() {
+        lab.make("fx-add", json!({"ref": KICK, "name": name}), &format!("Kumi: Added {name} to Kick (kfx0{n})"));
+    }
+    kick_fx().into_iter().map(|f| f.0).collect()
+}
+
+#[test]
+fn an_fx_is_moved_to_a_place_in_the_chain_and_undo_puts_it_back_unless_the_chain_was_rearranged() {
+    let lab = Lab::new();
+    let guids = three_fx(&lab);
+    let (preview, applied) =
+        lab.make("fx-move", json!({"ref": fx_ref_of(&guids[2]), "index": 0}), "Kumi: Moved ReaDelay to place 1 on Kick (kfm01)");
+    assert_eq!(preview["display"]["title"], "Moved ReaDelay to place 1 on Kick");
+    assert_eq!(kick_fx().iter().map(|f| f.0.clone()).collect::<Vec<_>>(), [guids[2].clone(), guids[0].clone(), guids[1].clone()]);
+    // The producer moved another since.
+    state(|s| s.tracks[1].fx.swap(1, 2));
+    assert_eq!(lab.undo("fx-move", &preview, &applied, "Kumi: undo (kund1)").unwrap_err().0, "changed");
+    state(|s| s.tracks[1].fx.swap(1, 2));
+    lab.undo("fx-move", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(kick_fx().iter().map(|f| f.0.clone()).collect::<Vec<_>>(), guids);
+    // Undone already.
+    lab.undo("fx-move", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(kick_fx().iter().map(|f| f.0.clone()).collect::<Vec<_>>(), guids);
+    // To where it is: nothing to do. Past the end: refused.
+    let same = lab.call("change_preview", json!({"kind": "fx-move", "input": {"ref": fx_ref_of(&guids[1]), "index": 1}})).unwrap();
+    assert_eq!(same["display"]["unchanged"], true);
+    for index in [json!(3), json!(-1), json!("a"), Value::Null] {
+        let input = json!({"ref": fx_ref_of(&guids[1]), "index": index});
+        assert_eq!(lab.call("change_preview", json!({"kind": "fx-move", "input": input})).unwrap_err().0, "bad-params", "{index}");
+    }
+    // The producer rearranged between the preview and the apply.
+    let input = json!({"ref": fx_ref_of(&guids[0]), "index": 2});
+    let preview = lab.call("change_preview", json!({"kind": "fx-move", "input": input})).unwrap();
+    state(|s| s.tracks[1].fx.swap(0, 1));
+    let apply = json!({"kind": "fx-move", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
+}
+
+#[test]
+fn an_fx_is_bypassed_and_enabled_and_undo_refuses_when_the_producer_switched_it() {
+    let lab = Lab::new();
+    let guids = three_fx(&lab);
+    let reference = fx_ref_of(&guids[1]);
+    let (preview, applied) = lab.make("fx-bypass", json!({"ref": reference, "bypass": true}), "Kumi: Bypassed ReaComp on Kick (kfb01)");
+    assert_eq!(preview["display"]["title"], "Bypassed ReaComp on Kick");
+    assert_eq!(kick_fx().iter().map(|f| f.2).collect::<Vec<_>>(), [true, false, true]);
+    // The producer switched it back since: it is where undo would put it, and nothing is written.
+    state(|s| s.tracks[1].fx[1].enabled = true);
+    lab.undo("fx-bypass", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert!(kick_fx()[1].2);
+    state(|s| s.tracks[1].fx[1].enabled = false);
+    lab.undo("fx-bypass", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert!(kick_fx()[1].2);
+    let (preview, _) = lab.make("fx-bypass", json!({"ref": reference, "bypass": false}), "Kumi: Enabled ReaComp on Kick (kfb02)");
+    assert_eq!(preview["display"]["unchanged"], true);
+    assert_eq!(lab.call("change_preview", json!({"kind": "fx-bypass", "input": {"ref": reference}})).unwrap_err().0, "bad-params");
+    // Changed between the preview and the apply.
+    let input = json!({"ref": reference, "bypass": true});
+    let preview = lab.call("change_preview", json!({"kind": "fx-bypass", "input": input})).unwrap();
+    state(|s| s.tracks[1].fx[1].enabled = false);
+    let apply = json!({"kind": "fx-bypass", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
+}
+
+#[test]
+fn a_parameter_is_set_by_its_normalized_value_or_by_what_the_plug_in_shows() {
+    let lab = Lab::new();
+    let guids = three_fx(&lab);
+    let fx = fx_ref_of(&guids[0]);
+    let param = |n: usize| -> f64 { state(|s| s.tracks[1].fx[0].params[n].value) };
+    // Gain is -12 to 12 dB, centre at 0.5.
+    let (preview, applied) =
+        lab.make("fx-param", json!({"ref": fx, "param": "Gain", "normalized": 0.75}), "Kumi: ReaEQ Gain 6.0 dB on Kick (kfp01)");
+    assert_eq!(preview["display"]["title"], "ReaEQ Gain 6.0 dB on Kick");
+    assert_eq!((preview["prior"]["display"].as_str(), applied["applied"]["display"].as_str()), (Some("0.0 dB"), Some("6.0 dB")));
+    assert_eq!(param(0), 0.75);
+    lab.undo("fx-param", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(param(0), 0.5);
+    // By what it shows.
+    let by_ref = format!("r:param:{}:0", guids[0]);
+    let (preview, applied) = lab.make("fx-param", json!({"ref": by_ref, "value": "-3 dB"}), "Kumi: ReaEQ Gain -3.0 dB on Kick (kfp02)");
+    // The first value the plug-in prints as -3.0 dB.
+    assert!((param(0) - 0.375).abs() < 0.005, "{}", param(0));
+    assert_eq!(applied["applied"]["display"], "-3.0 dB");
+    assert_eq!(preview["display"]["after"], "-3.0 dB");
+    // Words.
+    lab.make("fx-param", json!({"ref": fx, "param": 1, "value": "high"}), "Kumi: ReaEQ Mode High on Kick (kfp03)");
+    assert!(param(1) > 0.75 && param(1) < 1.0, "the middle of the values that print High: {}", param(1));
+    // The producer turned it since: undo is refused, unless discarded.
+    state(|s| s.tracks[1].fx[0].params[0].value = 0.9);
+    assert_eq!(lab.undo("fx-param", &preview, &applied, "Kumi: undo (kund2)").unwrap_err().0, "changed");
+    let mut params = restore_params(&preview, &applied, "Kumi: undo (kund2)");
+    params["kind"] = "fx-param".into();
+    params["discard"] = true.into();
+    lab.call("change_restore", params).unwrap();
+    assert_eq!(param(0), 0.5);
+}
+
+#[test]
+fn a_parameter_request_that_cant_be_met_writes_nothing() {
+    let lab = Lab::new();
+    let guids = three_fx(&lab);
+    let fx = fx_ref_of(&guids[0]);
+    let entries = state(|s| s.undo_entries);
+    for (input, code) in [
+        (json!({"ref": fx, "param": "Gain"}), "bad-params"),
+        (json!({"ref": fx, "param": "Gain", "normalized": 1.5}), "bad-params"),
+        (json!({"ref": fx, "param": "Gain", "normalized": 0.5, "value": "0 dB"}), "bad-params"),
+        (json!({"ref": fx, "normalized": 0.5}), "bad-params"),
+        (json!({"ref": fx, "param": "Nope", "normalized": 0.5}), "bad-params"),
+        (json!({"ref": fx, "param": 9, "normalized": 0.5}), "bad-params"),
+        (json!({"ref": format!("r:param:{}:9", guids[0]), "normalized": 0.5}), "bad-params"),
+        (json!({"ref": fx, "param": "Gain", "value": "40 dB"}), "failed"),
+        (json!({"ref": fx, "param": "Gain", "value": "-3.25 dB"}), "failed"),
+        (json!({"ref": fx, "param": "Mode", "value": "Loud"}), "failed"),
+        (json!({"ref": fx, "param": "Gain", "value": 3}), "bad-params"),
+        (json!({"ref": "r:fx:{FX-COMP}", "param": 0, "normalized": 0.1}), "bad-params"),
+        (json!({"ref": "r:fx:{FX-C2}", "param": 0, "normalized": 0.1}), "bad-params"),
+    ] {
+        let (got, message) = lab.call("change_preview", json!({"kind": "fx-param", "input": input})).unwrap_err();
+        assert_eq!(got, code, "{input}: {message}");
+    }
+    assert_eq!(state(|s| s.undo_entries), entries);
+    // Moved between the preview and the apply.
+    let input = json!({"ref": fx, "param": "Gain", "normalized": 0.7});
+    let preview = lab.call("change_preview", json!({"kind": "fx-param", "input": input})).unwrap();
+    state(|s| s.tracks[1].fx[0].params[0].value = 0.1);
+    let apply = json!({"kind": "fx-param", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
+}
+
+#[test]
+fn deleting_an_fx_keeps_its_entry_and_undo_adds_it_back_with_its_id_and_state_and_no_file_is_left() {
+    let lab = Lab::new();
+    let dir = fx_folder();
+    let guids = three_fx(&lab);
+    state(|s| {
+        s.tracks[1].fx[1].params[0].value = 0.8;
+        s.tracks[1].fx[1].enabled = false;
+    });
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx_ref_of(&guids[1])}), "Kumi: Deleted ReaComp from Kick (kfd01)");
+    assert_eq!(preview["display"]["title"], "Deleted ReaComp from Kick");
+    assert_eq!(kick_fx().iter().map(|f| f.0.clone()).collect::<Vec<_>>(), [guids[0].clone(), guids[2].clone()]);
+    let entry = applied["material"]["entry"].as_str().unwrap();
+    assert!(entry.starts_with("BYPASS 1 0 0\n<VST \"VST: ReaComp (Cockos)\"") && entry.contains(&format!("FXID {}", guids[1])), "{entry}");
+    let restored = lab.undo("fx-delete", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(restored["restored"]["ref"], fx_ref_of(&guids[1]));
+    assert_eq!(kick_fx().iter().map(|f| f.0.clone()).collect::<Vec<_>>(), guids, "in its place, with its id");
+    let (enabled, gain) = state(|s| (s.tracks[1].fx[1].enabled, s.tracks[1].fx[1].params[0].value));
+    assert_eq!((enabled, gain), (false, 0.8), "its state came back");
+    assert_eq!(chain_files(&dir), 0, "the chain file is removed");
+    // Back already: nothing is added twice.
+    lab.undo("fx-delete", &preview, &applied, "Kumi: undo (kund2)").unwrap();
+    assert_eq!(kick_fx().len(), 3);
+    // The chain got shorter since: it goes where it can.
+    let (preview, applied) = lab.make("fx-delete", json!({"ref": fx_ref_of(&guids[2])}), "Kumi: Deleted ReaDelay from Kick (kfd02)");
+    state(|s| s.tracks[1].fx.clear());
+    lab.undo("fx-delete", &preview, &applied, "Kumi: undo (kund3)").unwrap();
+    assert_eq!(kick_fx().iter().map(|f| f.0.clone()).collect::<Vec<_>>(), [guids[2].clone()]);
+    assert_eq!(chain_files(&dir), 0);
+}
+
+#[test]
+fn deleting_an_fx_is_refused_when_it_changed_or_went_and_containers_and_other_chains_are_left_alone() {
+    let lab = Lab::new();
+    let guids = three_fx(&lab);
+    let input = json!({"ref": fx_ref_of(&guids[1])});
+    let preview = lab.call("change_preview", json!({"kind": "fx-delete", "input": input})).unwrap();
+    state(|s| s.tracks[1].fx[1].params[0].value = 0.9);
+    let entries = state(|s| s.undo_entries);
+    let apply = json!({"kind": "fx-delete", "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+    assert_eq!(lab.call("change_apply", apply.clone()).unwrap_err().0, "changed");
+    state(|s| s.tracks[1].fx.remove(1));
+    assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
+    assert_eq!(state(|s| s.undo_entries), entries);
+    assert_eq!(lab.call("change_preview", json!({"kind": "fx-delete", "input": input})).unwrap_err().0, "failed");
+    for reference in ["r:fx:{FX-C}", "r:fx:{FX-DLY}", "r:track:{BBBB}", "r:fx:{NOPE}"] {
+        let (code, _) = lab.call("change_preview", json!({"kind": "fx-delete", "input": {"ref": reference}})).unwrap_err();
+        assert!(code == "bad-params" || code == "failed", "{reference}: {code}");
+    }
+    // An FX the chunk doesn't hold can't be kept, so it isn't deleted.
+    state(|s| {
+        s.tracks[1].fx.push(fake::FakeFx::container("{FX-K}", vec![]));
+        s.state_count += 1;
+    });
+    assert_eq!(lab.call("change_preview", json!({"kind": "fx-delete", "input": {"ref": "r:fx:{FX-K}"}})).unwrap_err().0, "bad-params");
+}
+
+#[test]
+fn the_fx_kinds_are_refused_for_another_epoch_and_while_reaper_is_busy() {
+    let lab = Lab::new();
+    let guids = three_fx(&lab);
+    let fx = fx_ref_of(&guids[0]);
+    for (kind, input) in [
+        ("fx-add", json!({"ref": KICK, "name": "ReaEQ"})),
+        ("fx-delete", json!({"ref": fx})),
+        ("fx-move", json!({"ref": fx, "index": 1})),
+        ("fx-bypass", json!({"ref": fx, "bypass": true})),
+        ("fx-param", json!({"ref": fx, "param": 0, "normalized": 0.2})),
+        ("notes-add", json!({"ref": SNARE_TAKE, "notes": [{"pitch": 60, "start": 1.0, "length": 1.0}]})),
+        ("notes-delete", json!({"ref": SNARE_TAKE, "indexes": [0]})),
+    ] {
+        let (code, _) = lab.call("change_preview", json!({"kind": kind, "input": input, "epoch": "old-1"})).unwrap_err();
+        assert_eq!(code, "stale", "{kind}");
+        let preview = lab.call("change_preview", json!({"kind": kind, "input": input})).unwrap();
+        state(|s| s.loading = true);
+        let apply = json!({"kind": kind, "input": input, "fence": preview["fence"], "desc": "Kumi: x (k1111)"});
+        assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "busy", "{kind}");
+        state(|s| s.loading = false);
+    }
+    assert_eq!((kick_fx().len(), snare_notes().len()), (3, 2));
+}

@@ -312,3 +312,51 @@ impl Reaper<'_> {
         }
     }
 }
+
+/// FX in a track's chain. An index is the FX's place in the main chain.
+impl Reaper<'_> {
+    /// Adds the plug-in (or the FX chain file) `name` names, at `position` or at the end; the index of the first FX made,
+    /// or -1 when REAPER has none by that name.
+    pub fn add_fx_by_name(&self, track: Track, name: &str, position: Option<i32>) -> i32 {
+        let name = cstring(name);
+        let instantiate = position.map_or(-1, |p| -1000 - p);
+        self.api.TrackFX_AddByName().map_or(-1, |f| unsafe { f(track.0, name.as_ptr(), false, instantiate) })
+    }
+
+    pub fn delete_fx(&self, track: Track, index: i32) -> bool {
+        self.api.TrackFX_Delete().is_some_and(|f| unsafe { f(track.0, index) })
+    }
+
+    /// Moves an FX within its track's chain, so that it ends up at `to`.
+    pub fn move_fx(&self, track: Track, from: i32, to: i32) -> bool {
+        match self.api.TrackFX_CopyToTrack() {
+            Some(f) => {
+                unsafe { f(track.0, from, track.0, to, true) };
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_fx_enabled(&self, track: Track, index: i32, enabled: bool) -> bool {
+        match self.api.TrackFX_SetEnabled() {
+            Some(f) => {
+                unsafe { f(track.0, index, enabled) };
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_fx_param_normalized(&self, track: Track, index: i32, param: i32, value: f64) -> bool {
+        self.api.TrackFX_SetParamNormalized().is_some_and(|f| unsafe { f(track.0, index, param, value) })
+    }
+
+    /// What the plug-in would print for a normalized value, without setting it.
+    pub fn format_fx_param(&self, track: Track, index: i32, param: i32, value: f64) -> Option<String> {
+        let f = self.api.TrackFX_FormatParamValueNormalized()?;
+        let mut ok = false;
+        let text = api::read_buffer(|buf, size| ok = unsafe { f(track.0, index, param, value, buf, size) });
+        ok.then_some(text)
+    }
+}
