@@ -270,16 +270,71 @@ end
 local reset = M.reset
 function M.reset(options)
   reset(options)
-  M.renders, M.pending_render, M.render_refuses, M.saved_samples, M.solo_writes = {}, nil, nil, {}, 0
+  M.renders, M.pending_render, M.render_refuses, M.saved_samples, M.solo_writes, M.copies_from = {}, nil, nil, {}, 0, 0
   local transport = M.impl(renoise.Transport)
   transport.TIMING_MODEL_SPEED, transport.TIMING_MODEL_LPB = 1, 2
   return M
+end
+
+-- PatternTrack:copy_from(other): the other's lines and its automation, put on the parameter at the same device and place of this
+-- track (measured: a scratch copy's automation lands on its own devices), as one write with its undo step.
+local function deep(value)
+  if type(value) ~= "table" then return value end
+  local out = {}
+  for k, v in pairs(value) do out[k] = deep(v) end
+  return out
+end
+
+local function install_copy_from(song)
+  local d = M.data
+  local fields = M.impl(song)
+  local pattern = fields.pattern
+  fields.pattern = function(self, p)
+    local object_ = pattern(self, p)
+    local pattern_fields = M.impl(object_)
+    local track = pattern_fields.track
+    pattern_fields.track = function(this, t)
+      local pattern_track = track(this, t)
+      M.impl(pattern_track).copy_from = function(_, other)
+        local here = d.patterns[p]
+        local from_t, from_p
+        for pp, candidate in ipairs(d.patterns) do
+          for tt, data in pairs(candidate.tracks) do
+            if M.impl(other).__data == data then from_p, from_t = pp, tt end
+          end
+        end
+        assert(from_t, "mock: copy_from needs a pattern track of this song")
+        local source = d.patterns[from_p].tracks[from_t]
+        local old = here.tracks[t]
+        local copy = { alias = source.alias, lines = deep(source.lines), automation = {} }
+        for _, entry in ipairs(source.automation or {}) do
+          for di, device in ipairs(d.tracks[from_t].devices) do
+            for ki, parameter in ipairs(device.params or {}) do
+              local mine = d.tracks[t].devices[di] and d.tracks[t].devices[di].params and d.tracks[t].devices[di].params[ki]
+              if parameter == entry.parameter and mine then
+                copy.automation[#copy.automation + 1] = { parameter = mine, playmode = entry.playmode, points = deep(entry.points) }
+              end
+            end
+          end
+        end
+        copy.alias_observable = (old or {}).alias_observable
+        here.tracks[t] = copy
+        M.copies_from = (M.copies_from or 0) + 1
+        M.record(function() here.tracks[t] = old end, function() here.tracks[t] = copy end)
+        for _, fn in ipairs({ unpack(here.notifiers) }) do pcall(fn, { pattern = p, track = t, line = 1 }) end
+      end
+      M.impl(pattern_track).__data = d.patterns[p].tracks[t]
+      return pattern_track
+    end
+    return object_
+  end
 end
 
 local make_song = M.make_song
 function M.make_song(options)
   local song = make_song(options)
   install_render(song)
+  install_copy_from(song)
   return song
 end
 

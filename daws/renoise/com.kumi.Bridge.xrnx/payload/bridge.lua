@@ -21,6 +21,7 @@ local VERSION = import("version")
 local listening = import("listening")
 local audition = import("audition")
 local reads_listening = import("reads_listening")
+local scratch = import("scratch")
 
 local M = {}
 
@@ -839,6 +840,8 @@ local function listen_env()
   env.cfg = function() return b.cfg end
   env.quiet = quiet
   env.pattern_mark = place_env.pattern_touch_mark
+  env.song_id = function() return status.song_id(b.memory, rows.the_song()) end
+  env.unix_ms = unix_ms
   -- (a render stops playback: an audition playing ends first)
   env.before_render = function() audition.halt(env, "a render") end
   return env
@@ -853,6 +856,20 @@ function handlers.listen_cancel(params) return listening.cancel(params, listen_e
 function handlers.audio_file(params) return listening.audio_file(params, listen_env()) end
 function handlers.audition(params) return audition.play(params, listen_env()) end
 function handlers.audition_stop(params) return audition.stop(params, listen_env()) end
+function handlers.scratch(params) return scratch.handle(params, listen_env()) end
+
+-- Copies a crash left in this song are swept on the first tick after the bridge loads or a song opens (a song is changed in a
+-- callback of the tool's own, not inside Renoise's document notifiers); Kumi is told, now or when it next connects.
+local function sweep_scratch()
+  if not b.scratch_sweep_due or not b.cfg then return end
+  local song = renoise.song()
+  if not song or listening.active() or busy() then return end
+  b.scratch_sweep_due = false
+  local swept = scratch.sweep(song, listen_env())
+  if swept then
+    if conns:authenticated_count() > 0 then conns:event("scratch_swept", swept) else b.scratch_swept = swept end
+  end
+end
 
 -- (Exposed for the tests, which add methods of their own.)
 M.handlers = handlers
@@ -969,6 +986,12 @@ function M.start(h, reloading)
     on_authenticated = function(record)
       log.write("info", "Kumi connected from " .. record.key)
       show_status("Kumi connected")
+      -- (M5 m5-renoise: copies swept while no Kumi was there)
+      if b.scratch_swept then
+        local swept = b.scratch_swept
+        b.scratch_swept = nil
+        conns:event("scratch_swept", swept)
+      end
     end,
     log = log.write,
     on_too_many_open = function(open)
@@ -994,6 +1017,9 @@ function M.start(h, reloading)
   status.kumi_busy = function() return listening.busy_reason() end
   focus.rendering = function() return listening.active() ~= nil end
   reads_listening.pattern_mark = place_env.pattern_touch_mark
+  scratch.init(b)
+  scratch.cfg = function() return b.cfg end
+  if not reloading then b.scratch_sweep_due = true end
   -- A song's id (the one in the project row) and which opening of a song this is: the same while it stays open.
   rows.song_extra = function(song)
     -- (where the pid is unknown, when this Renoise was started stands in for it: `0:1` would be the same after every restart)
@@ -1095,6 +1121,7 @@ function M.tick()
     local env = listen_env()
     listening.check(env)
     audition.tick(env)
+    sweep_scratch()
   end, debug.traceback)
   if not ok then M.log_error("listening", err) end
   jobs:run()
@@ -1153,6 +1180,7 @@ function M.on_new_document()
     audition.halt(env, "another song")
   end)
   b.document = b.document + 1
+  b.scratch_sweep_due = true
   -- Another song: its id is worked out afresh. (Starting with a file, Renoise opens its empty song and then the file
   -- without releasing the first, so the empty song's id would otherwise stay with the file.)
   b.memory.song_id, b.memory.born_unsaved = nil, nil
