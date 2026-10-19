@@ -15,6 +15,7 @@ pub static CHANGES: OwnChangeSet = OwnChangeSet {
     undo_description: UNDO,
     instructions: INSTRUCTIONS,
     plan_steps: false,
+    most_track_adds: Some(32),
 };
 
 static ACTIONS: [OwnAction; 1] = [OwnAction {

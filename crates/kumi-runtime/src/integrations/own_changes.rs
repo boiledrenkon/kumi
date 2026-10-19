@@ -177,6 +177,8 @@ pub struct OwnChangeSet {
     pub instructions: &'static str,
     /// Whether the DAW holds one undo step open across calls, so one press of its undo takes a whole plan back.
     pub plan_steps: bool,
+    /// The most tracks one answer may add, where each costs the DAW a lot in a big project (Renoise).
+    pub most_track_adds: Option<usize>,
 }
 
 /// make_changes' input: the same shape for every DAW (its steps' tool enum is filled in for the DAW).
@@ -391,6 +393,8 @@ pub struct OwnPlan<S: RefScheme + 'static> {
     on_action: Option<Rc<dyn Fn(ActionEvent)>>,
     /// Saved files already copied before a delete (by path, size and time): one copy per version.
     copied: RefCell<Vec<String>>,
+    /// Tracks added this answer (`OwnChangeSet::most_track_adds`).
+    added: Cell<usize>,
 }
 
 impl<S: RefScheme + 'static> OwnPlan<S> {
@@ -405,6 +409,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
             names: RefCell::default(),
             on_action,
             copied: RefCell::default(),
+            added: Cell::new(0),
         })
     }
 
@@ -437,6 +442,12 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         tools.push(Rc::new(PlanTool { engine: self.clone(), description, schema }));
         tools.push(Rc::new(UndoTool { engine: self.clone() }));
         tools
+    }
+
+    /// A new answer: its counts of changes and added tracks start again.
+    pub fn new_turn(&self) {
+        self.history.changes_this_turn.set(0);
+        self.added.set(0);
     }
 
     /// The observation's list of Kumi's latest changes and where each stands.
@@ -552,6 +563,14 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         if self.history.changes_this_turn.get() >= 5_000 {
             return ChangeOutcome::stop("That's 5000 changes in one answer; carry on in the next one");
         }
+        // Each track a DAW like Renoise adds costs it more in a big song (and it stalls near 600): an answer adds a few.
+        let most = self.link().daw.changes.most_track_adds.filter(|_| kind.kind == "track-add");
+        if let Some(most) = most.filter(|most| self.added.get() >= *most) {
+            return ChangeOutcome::stop(format!(
+                "That's {most} tracks added in one answer, the most {} takes at once; carry on in the next one",
+                self.link().words().words.app
+            ));
+        }
         let mut input = match self.lengthened(&asked) {
             Ok(input) => input,
             Err(why) => return ChangeOutcome::error(why),
@@ -622,6 +641,9 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         note_epoch(&self.link().seen_in, &self.link().book.borrow().scheme, &applied);
         let title = applied.pointer("/display/title").and_then(Value::as_str).map(str::to_owned).unwrap_or(title);
         let note = applied.pointer("/display/note").and_then(Value::as_str).map(str::to_owned);
+        if kind.kind == "track-add" {
+            self.added.set(self.added.get() + 1);
+        }
         let summary = kind.summary(&title, prior.as_ref(), applied.get("applied"));
         let id = self.remember(kind, summary, &transaction, ChangeState::Applied, None);
         let mut reply = json!({"changed": title, "change": id});
@@ -933,6 +955,52 @@ mod tests {
             let ours: BTreeSet<String> = set.kinds.iter().map(|kind| kind.kind.to_string()).collect();
             assert_eq!(ours, bridge, "{app}: Kumi's kinds against its bridge's");
         }
+    }
+
+    fn engine<S: RefScheme + Default + 'static>(daw: &'static OwnDaw, file: Option<String>) -> Rc<OwnPlan<S>> {
+        let link = Rc::new(Link {
+            daw,
+            endpoint: Rc::new(RefCell::new(None)),
+            book: Rc::new(RefCell::new(Book::default())),
+            epoch: Rc::default(),
+            layout: Rc::default(),
+            seen_in: Rc::default(),
+            connected: Rc::default(),
+            lifetime: Signal::new(),
+            tempo: Rc::default(),
+            file: Rc::new(RefCell::new(file)),
+            step_titles: RefCell::default(),
+        });
+        OwnPlan::new(link, None, None, None)
+    }
+
+    #[test]
+    fn a_delete_copies_the_saved_project_beside_it_once_per_saved_version() {
+        let folder = tempfile::tempdir().unwrap();
+        let project = folder.path().join("Night Drive.rpp");
+        std::fs::write(&project, "<REAPER_PROJECT").unwrap();
+        let plan = engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, Some(project.to_string_lossy().into()));
+        let copy = plan.copy_saved().expect("a copy");
+        assert!(copy.contains("Kumi copies") && copy.ends_with(".rpp") && copy.contains("Night Drive "), "{copy}");
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "<REAPER_PROJECT");
+        assert_eq!(plan.copy_saved(), None, "the same saved version is copied once");
+        std::fs::write(&project, "<REAPER_PROJECT saved again>").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(plan.copy_saved().is_some(), "a newer save is copied again");
+        // Never saved: nothing to copy.
+        assert_eq!(engine::<super::super::reaper::ReaperRefs>(&super::super::reaper::DAW, None).copy_saved(), None);
+    }
+
+    #[tokio::test]
+    async fn renoise_adds_a_few_tracks_an_answer_and_says_so() {
+        let plan = engine::<super::super::renoise::RenoiseRefs>(&super::super::renoise::DAW, None);
+        let add = plan.change_kind("track_add").unwrap();
+        plan.added.set(32);
+        let stopped = plan.one_change(add, JsonObject::new(), Signal::new()).await;
+        assert!(stopped.stops && stopped.text.contains("32 tracks added in one answer"), "{}", stopped.text);
+        plan.new_turn();
+        let next = plan.one_change(add, JsonObject::new(), Signal::new()).await;
+        assert!(!next.text.contains("tracks added in one answer"), "a new answer starts again: {}", next.text);
     }
 
     #[test]

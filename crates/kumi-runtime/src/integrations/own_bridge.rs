@@ -748,7 +748,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     async fn observe(&self, signal: Signal, hints: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
         let pinned = hints.as_ref().and_then(|hints| hints.pinned.as_ref());
         signal.check()?;
-        self.changes.history.changes_this_turn.set(0);
+        self.changes.new_turn();
         if self.closed.get() {
             return Err(RuntimeError::plain("Integration is closed"));
         }
