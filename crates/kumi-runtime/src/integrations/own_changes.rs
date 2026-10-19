@@ -14,7 +14,7 @@ use crate::{
     integrations::shared::{
         changes::{new_record, ChangeSummary},
         steps::{plan_tool, step_line},
-        undo::undo_change,
+        undo::undo_change_with,
     },
     mcp::client::McpEndpoint,
 };
@@ -724,7 +724,9 @@ impl<S: RefScheme + 'static> KernelTool for UndoTool<S> {
         serde_json::from_str(UNDO_SCHEMA).expect("JSON")
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
-        undo_change(&self.engine.history, &input, signal).await
+        // Discard is the own DAWs' (their schema offers it); Live's undo_change never reads it.
+        let discard = input.get("discard") == Some(&Value::Bool(true));
+        undo_change_with(&self.engine.history, &input, signal, discard).await
     }
 }
 
