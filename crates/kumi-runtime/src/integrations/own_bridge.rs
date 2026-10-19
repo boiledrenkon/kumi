@@ -600,7 +600,20 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         }
         let profile = self.daw.profile;
         let project = snapshot.get("project").cloned().unwrap_or(Value::Null);
-        let name = project.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("untitled").to_owned();
+        // The project's name: as the bridge says it, else its file's (Logic's row names the package's path), else the
+        // identity an unsaved one carries (Logic's window title).
+        let name = project
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                let path = project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty())?;
+                let file = path.rsplit(['/', '\\']).next()?;
+                Some(file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_owned()).filter(|stem| !stem.is_empty())
+            })
+            .or_else(|| project.get("identity").and_then(Value::as_str).filter(|identity| !identity.is_empty()).map(str::to_owned))
+            .unwrap_or_else(|| "untitled".to_owned());
         let saved = project.get("id").and_then(Value::as_str).filter(|id| is_project_id(id));
         let place = match saved {
             Some(id) => Place::Saved { daw: self.id(), id: id.into() }.text(),

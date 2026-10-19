@@ -1,4 +1,4 @@
-//! REAPER's and Renoise's integrations over Kumi's host, with a stand-in host that answers as the M2 contract says:
+//! REAPER's, Renoise's and Logic's integrations over Kumi's host, with a stand-in host that answers as the M2 contract says:
 //! the observation carries the project as the DAW names it, its tracks in short refs, and the conversation's place;
 //! the model's read pages in short refs and passes them back long; a DAW that isn't there is said in its words.
 use async_trait::async_trait;
@@ -6,6 +6,7 @@ use futures::FutureExt;
 use kumi_common::abort::Signal;
 use kumi_runtime::core::{context::IntegrationContext, contracts::*, errors::RuntimeError};
 use kumi_runtime::integrations::{
+    logic::create_logic_integration,
     own_bridge::{Connect, OwnOptions},
     reaper::create_reaper_integration,
     renoise::create_renoise_integration,
@@ -797,6 +798,112 @@ async fn a_busy_daw_is_looked_at_again_once_it_is_free_not_every_second() {
             ));
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             assert_eq!(looks_again.get(), 1, "looked at again once it was free");
+        })
+        .await;
+}
+
+fn logic_snapshot() -> Value {
+    json!({
+        "epoch": "1",
+        "project": {"id": PROJECT_ID, "identity": "Scratch", "name": "Scratch", "path": "/lab/Scratch.logicx", "tempo": 160.0, "timeSignature": "4/4"},
+        "transport": {"playing": false, "recording": false, "cycle": false},
+        "tracks": [
+            {"ref": "1:track:1", "index": 1, "name": "Vocal", "kind": "audio", "selected": true},
+            {"ref": "1:track:2", "index": 2, "name": "Keys", "kind": "instrument"},
+        ],
+        "selection": {"trackRef": "1:track:1", "regionRef": "1:region:1"},
+    })
+}
+
+/// Logic's bridge reads Logic through Accessibility: while its helper isn't trusted, a look fails (never busy) and
+/// the observation says what to allow, in Logic's words, as the status's `permission` names it. Granted, the next look
+/// reads the project at Logic's place, and Logic's regions and plug-ins get this turn's short refs.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_look_without_accessibility_says_what_to_allow_and_never_counts_as_busy() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let refused = json!({"error": "Accessibility isn't granted to Kumi's helper", "code": "failed", "connected": true});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![
+                    ("status", json!({"connected": true, "busy": false, "permission": "accessibility"}), false),
+                    ("snapshot", refused, true),
+                ]),
+                asked: RefCell::default(),
+            });
+            let states = Rc::new(RefCell::new(vec![]));
+            let logic = create_logic_integration(options(host.clone(), states.clone()));
+            logic.start(Signal::new()).await.unwrap();
+            assert_eq!(*states.borrow(), [ConnectionState::Connecting, ConnectionState::Connected], "connected, though it can't read yet");
+            let seen = logic.observe(Signal::new(), None).await.unwrap();
+            assert!(seen.label.starts_with("Logic Pro — couldn't look just now: Kumi's helper needs Accessibility"), "{}", seen.label);
+            assert!(seen.label.contains("System Settings > Privacy & Security > Accessibility"), "{}", seen.label);
+            assert_eq!(seen.tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>(), ["logic_read"], "Logic's tools stay");
+            assert!(!states.borrow().contains(&ConnectionState::Disconnected), "lacking a permission isn't gone: {:?}", states.borrow());
+            // Granted: the project reads, at Logic's own place, in short refs.
+            host.answers.borrow_mut().push(("status", json!({"connected": true, "busy": false, "permission": null}), false));
+            host.answers.borrow_mut().push(("snapshot", logic_snapshot(), false));
+            let read = logic.observe(Signal::new(), None).await.unwrap();
+            assert_eq!(read.label, "Logic Pro — Scratch");
+            assert_eq!(read.key, format!("logic:{PROJECT_ID}"));
+            assert_eq!(read.project.as_ref().map(|p| p.id.as_str()), Some(format!("logic-{PROJECT_ID}").as_str()));
+            let context: Value = serde_json::from_str(&read.context).unwrap();
+            assert_eq!((context["daw"].as_str(), context["project"]["tempo"].as_f64()), (Some("Logic Pro"), Some(160.0)), "{context}");
+            assert_eq!(context["project"]["file"], "Scratch.logicx");
+            assert_eq!(context["tracks"][1]["ref"], "track:2");
+            assert_eq!(context["selection"]["regionRef"], "region:1", "a region's ref is this turn's too");
+            assert!(!read.context.contains("1:track:") && !read.context.contains("1:region:"), "{}", read.context);
+            // The read tool passes the region back long, and names the kinds under their parents.
+            host.answers.borrow_mut().push(("read", json!({"items": [], "total": 0, "epoch": "1"}), false));
+            let tool = read.tools[0].clone();
+            let _ = tool.execute(json!({"kind": "note", "parent": "region:1"}).as_object().unwrap().clone(), Signal::new()).await;
+            assert_eq!(host.asked.borrow().last().unwrap().1, json!({"kind": "note", "parent": "1:region:1"}));
+            for words in ["note under a region", "region under a track", "plugin under a track", "bar, beat, division"] {
+                assert!(tool.description().contains(words), "{words}: {}", tool.description());
+            }
+        })
+        .await;
+}
+
+/// Logic's busy words are its own: a dialog, a window on another desktop, a project still opening.
+#[tokio::test(flavor = "current_thread")]
+async fn logics_busy_words_name_a_dialog_another_desktop_or_a_project_still_opening() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let focus =
+                |busy: &str| json!({"epoch": "1", "view": "tracks", "selection": {}, "transport": {"playing": false}, "busy": busy});
+            let host = Rc::new(Host {
+                answers: RefCell::new(vec![
+                    ("status", json!({"connected": true, "busy": "modal"}), false),
+                    ("focus", focus("modal"), false),
+                ]),
+                asked: RefCell::default(),
+            });
+            let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+            let into = seen.clone();
+            let mut options = options(host.clone(), Rc::new(RefCell::new(vec![])));
+            options.context.on_focus = Some(Rc::new(move |focus| {
+                if let Some(busy) = focus.and_then(|focus| focus.busy) {
+                    into.borrow_mut().push(busy);
+                }
+            }));
+            options.context.focus_interval_ms = Some(20);
+            let logic = create_logic_integration(options);
+            logic.start(Signal::new()).await.unwrap();
+            for (code, words) in [
+                ("modal", "Logic Pro is showing a dialog"),
+                ("away", "Logic Pro's window is on another desktop"),
+                ("loading", "Logic Pro is still opening the project"),
+            ] {
+                host.answers.borrow_mut().push(("focus", focus(code), false));
+                for _ in 0..200 {
+                    if seen.borrow().iter().any(|said| said == words) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                assert!(seen.borrow().iter().any(|said| said == words), "{code}: {:?}", seen.borrow());
+            }
+            logic.close().await.unwrap();
         })
         .await;
 }
