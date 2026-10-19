@@ -279,6 +279,29 @@ fn the_mix_before_its_chain_renders_with_the_masters_fx_off_and_back_on_after() 
 }
 
 #[test]
+fn a_muted_folder_is_unmuted_for_its_pre_fader_stem_and_muted_again() {
+    let rig = Rig::new();
+    fake::with(|s| s.tracks[0].mute = true);
+    let epoch = rig.epoch();
+    rig.ask(
+        "render_start",
+        json!({"jobId": "jf", "sources": [source("drums", "track", Some("r:track:{AAAA}"), None), source("kick", "track", Some("r:track:{BBBB}"), Some("post-fader"))], "range": {"fromBeat": 0, "beats": 4}, "epoch": epoch}),
+    )
+    .unwrap();
+    rig.tick();
+    let status = rig.status("jf");
+    assert_eq!(status["state"], "done");
+    assert_eq!(
+        status["notes"],
+        json!(["“Drums” is muted: Kumi unmuted it for the render (REAPER renders a muted folder silent even before its fader) and muted it again"])
+    );
+    // The post-fader pass hears Drums muted (as its fader does), the pre-fader one unmuted.
+    let renders = fake::with(|s| s.listening.renders.clone());
+    assert_eq!(renders.iter().map(|r| r.muted.clone()).collect::<Vec<_>>(), [vec!["{AAAA}".to_string()], vec![]]);
+    assert!(fake::with(|s| s.tracks[0].mute), "muted again");
+}
+
+#[test]
 fn a_render_that_writes_nothing_fails_deletes_what_it_made_and_puts_everything_back() {
     let rig = Rig::new();
     producer_settings();
@@ -458,12 +481,14 @@ fn passes_put_each_stage_together_and_the_master_where_it_fits() {
     assert_eq!(plan(vec![s("m", Master, None)]), [(0, 0, true, false)]);
     assert_eq!(plan(vec![s("a", PreFader, Some("A")), s("b", PreFader, Some("B"))]), [(3 | 8192, 2, false, false)]);
     assert_eq!(plan(vec![s("m", Master, None), s("a", PostFader, Some("A"))]), [(1, 1, true, false)]);
+    // Never the master with pre-fader stems: REAPER skips a muted track when it renders the master too.
     assert_eq!(
         plan(vec![s("m", Master, None), s("p", BeforeChain, None), s("a", PostFader, Some("A")), s("b", PreFader, Some("B"))]),
-        [(1, 1, true, false), (1 | 8192, 1, true, true)]
+        [(1, 1, true, false), (3 | 8192, 1, false, false), (0, 0, true, true)]
     );
     assert_eq!(plan(vec![s("m", Master, None), s("p", BeforeChain, None)]), [(0, 0, true, false), (0, 0, true, true)]);
-    assert_eq!(plan(vec![s("p", BeforeChain, None), s("a", PreFader, Some("A"))]), [(1 | 8192, 1, true, true)]);
+    assert_eq!(plan(vec![s("p", BeforeChain, None), s("a", PreFader, Some("A"))]), [(3 | 8192, 1, false, false), (0, 0, true, true)]);
+    assert_eq!(plan(vec![s("p", BeforeChain, None), s("a", PostFader, Some("A"))]), [(1, 1, true, true)]);
 }
 
 #[test]
@@ -674,6 +699,23 @@ fn a_capture_that_falls_behind_ends_at_the_gap_and_says_why() {
 }
 
 #[test]
+fn a_capture_whose_device_gives_no_output_says_so_and_keeps_nothing() {
+    let rig = Rig::new();
+    playing_at(0.0);
+    rig.ask("capture_start", json!({"jobId": "c7", "seconds": 4})).unwrap();
+    // REAPER's dummy device: blocks come, with no output channel in them (measured in 7.82).
+    for _ in 0..20 {
+        fake::audio_block(512, 0, |_, _| 0.0);
+    }
+    rig.tick();
+    let status = rig.status("c7");
+    assert_eq!((status["state"].as_str(), status["code"].as_str()), (Some("failed"), Some("failed")));
+    assert!(status["error"].as_str().unwrap().contains("no output Kumi can hear"), "{status}");
+    assert!(!rig.folder().join("c7-master.wav").exists());
+    assert_eq!(fake::with(|s| s.listening.hooks.len()), 0);
+}
+
+#[test]
 fn a_cancelled_capture_keeps_what_it_has() {
     let rig = Rig::new();
     playing_at(0.0);
@@ -702,6 +744,11 @@ fn a_capture_is_refused_when_reaper_isnt_playing_or_its_audio_isnt_running() {
     assert!(rig.ask("capture_start", json!({"jobId": "c6", "seconds": 4})).unwrap_err().1.contains("audio isn't running"));
     fake::with(|s| {
         s.listening.audio = true;
+        s.listening.device = "Dummy Audio".into();
+    });
+    assert!(rig.ask("capture_start", json!({"jobId": "c6", "seconds": 4})).unwrap_err().1.contains("dummy device"));
+    fake::with(|s| {
+        s.listening.device = "CoreAudio Built-in Output".into();
         s.listening.hook_refuses = true;
     });
     assert!(rig.ask("capture_start", json!({"jobId": "c6", "seconds": 4})).unwrap_err().1.contains("hardware hook refused"));
@@ -916,6 +963,14 @@ fn status_says_what_listening_can_do_now() {
         (flags["capture"].as_bool(), flags["audition"].as_bool(), flags["render"].as_bool()),
         (Some(false), Some(false), Some(true))
     );
+    // REAPER's dummy device runs the audio engine with nothing behind it: nothing to hear, nothing heard.
+    fake::with(|s| {
+        s.listening.audio = true;
+        s.listening.device = "Dummy Audio".into();
+    });
+    rig.tick();
+    let flags = rig.ext.snapshot().status["listening"].clone();
+    assert_eq!((flags["capture"].as_bool(), flags["audition"].as_bool()), (Some(false), Some(false)));
     // A bridge that doesn't know Kumi's folder yet renders nothing.
     let (_tx, rx) = queue::channel();
     let bare = Extension::new(fake::api(), rx, Box::new(Recorder::default()), Arc::new(Mutex::new(Snapshot::default())));

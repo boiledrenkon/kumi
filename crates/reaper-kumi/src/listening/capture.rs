@@ -68,6 +68,10 @@ pub struct Ring {
     right: AtomicI32,
     /// The hook writes only while open.
     open: AtomicBool,
+    /// What the hook saw, for the log: the device's output channels, blocks whose buffer REAPER gave none of, the peak.
+    outputs: AtomicI32,
+    missing: AtomicU64,
+    peak: AtomicU32,
 }
 
 impl Ring {
@@ -87,6 +91,9 @@ impl Ring {
             left: AtomicI32::new(left),
             right: AtomicI32::new(right),
             open: AtomicBool::new(true),
+            outputs: AtomicI32::new(-1),
+            missing: AtomicU64::new(0),
+            peak: AtomicU32::new(0),
         }
     }
 
@@ -106,16 +113,22 @@ impl Ring {
             before if before != bits => self.rate_changed.store(true, Ordering::Relaxed),
             _ => {}
         }
+        if left.is_none() || right.is_none() {
+            self.missing.fetch_add(1, Ordering::Relaxed);
+        }
         let head = self.head.load(Ordering::Relaxed);
         let tail = self.tail.load(Ordering::Acquire);
         let free = self.capacity().saturating_sub(head.wrapping_sub(tail));
         let fits = (free / 2).min(len);
+        let mut peak = f32::from_bits(self.peak.load(Ordering::Relaxed));
         for i in 0..fits {
             let l = left.and_then(|l| l.get(i)).copied().unwrap_or(0.0) as f32;
             let r = right.and_then(|r| r.get(i)).copied().unwrap_or(0.0) as f32;
+            peak = peak.max(l.abs()).max(r.abs());
             self.samples[head.wrapping_add(2 * i) & self.mask].store(l.to_bits(), Ordering::Relaxed);
             self.samples[head.wrapping_add(2 * i + 1) & self.mask].store(r.to_bits(), Ordering::Relaxed);
         }
+        self.peak.store(peak.to_bits(), Ordering::Relaxed);
         self.head.store(head.wrapping_add(2 * fits), Ordering::Release);
         let at = self.frames.fetch_add(len as u64, Ordering::Release);
         if fits < len {
@@ -173,6 +186,7 @@ extern "C" fn on_audio_buffer(is_post: bool, len: c_int, srate: f64, reg: *mut H
     let reg = unsafe { &*reg };
     let ring = unsafe { &*(reg.userdata1 as *const Ring) };
     let Some(get) = reg.get_buffer else { return };
+    ring.outputs.store(reg.output_nch, Ordering::Relaxed);
     let len = len as usize;
     let channel = |which: &AtomicI32| -> Option<&[f64]> {
         let index = which.load(Ordering::Relaxed);
@@ -268,8 +282,17 @@ pub fn refusal(reaper: &Reaper, proj: Project) -> Option<String> {
             "REAPER's audio isn't running, so Kumi can't hear what it plays: give from_beat and beats, and Kumi renders the part".into(),
         );
     }
+    if !reaper.audio_heard() {
+        return Some(NO_OUTPUT.into());
+    }
     None
 }
+
+/// Why a device without outputs can't be heard.
+const NO_OUTPUT: &str =
+    "REAPER's audio device has no output Kumi can hear (REAPER is on its dummy device): give from_beat and beats, and Kumi renders the part";
+/// Blocks after which a hook that has had no output channel gives up.
+const NO_OUTPUT_BLOCKS: u64 = 16;
 
 impl Capture {
     /// Registers the hook for a capture of `seconds` into `file`; the reason when REAPER won't.
@@ -378,6 +401,10 @@ impl Capture {
         if !still {
             return Some(self.fail(reaper, "stale", "the project in the tab changed while Kumi listened: read again"));
         }
+        // A device whose blocks come with no output channel can't be heard (REAPER's dummy device: measured).
+        if ring.outputs.load(Ordering::Relaxed) == 0 && ring.missing.load(Ordering::Relaxed) >= NO_OUTPUT_BLOCKS {
+            return Some(self.fail(reaper, "failed", NO_OUTPUT));
+        }
         let Some(rate) = ring.rate() else {
             if cancelled {
                 return Some(self.fail(reaper, "failed", "REAPER's audio sent nothing before Kumi stopped listening"));
@@ -432,10 +459,16 @@ impl Capture {
 
     fn finish(&mut self, reaper: &Reaper, rate: f64, partial: Option<String>) -> Ended {
         self.stop_hook(reaper);
-        let lost = self.registered.ring().dropped();
-        if lost > 0 {
-            crate::log::line(&format!("capture {}: {lost} frames didn't fit Kumi's ring (REAPER's main thread was held)", self.job));
-        }
+        let ring = self.registered.ring();
+        crate::log::line(&format!(
+            "capture {}: {} frames, {} lost (the ring was full), device outputs {}, {} blocks without a buffer, peak {:.4}",
+            self.job,
+            ring.frames(),
+            ring.dropped(),
+            ring.outputs.load(Ordering::Relaxed),
+            ring.missing.load(Ordering::Relaxed),
+            f32::from_bits(ring.peak.load(Ordering::Relaxed))
+        ));
         let frames = match self.writer.take().map(wav::Writer::finish) {
             Some(Ok(frames)) => frames,
             Some(Err(error)) => return self.fail(reaper, "failed", &format!("Kumi couldn't finish the capture ({error})")),

@@ -303,9 +303,10 @@ pub fn plan(reaper: &Reaper, reads: &Reads, params: &Value, folder: &Path) -> Re
     Ok(plan)
 }
 
-/// The renders a set of sources takes: post-fader stems in one, pre-fader stems in another, and the master with
-/// whichever of them has room for it (stems and the master render together), else on its own; the master before its
-/// chain needs its FX off for the whole pass, which stems don't mind.
+/// The renders a set of sources takes: post-fader stems in one, pre-fader stems in another, and the master with the
+/// post-fader stems when there are some (stems and the master render together), else on its own. Never with pre-fader
+/// stems: REAPER doesn't process a muted track when it renders the master too, so its pre-fader stem would be silent
+/// (measured). The master before its chain needs its FX off for the whole pass, which stems don't mind.
 fn passes(sources: &[Source]) -> Vec<Pass> {
     let mut passes: Vec<Pass> = Vec::new();
     for stage in [Stage::PostFader, Stage::PreFader] {
@@ -318,7 +319,7 @@ fn passes(sources: &[Source]) -> Vec<Pass> {
     for stage in [Stage::Master, Stage::BeforeChain] {
         let Some(at) = sources.iter().position(|s| s.stage == stage) else { continue };
         let before_chain = stage == Stage::BeforeChain;
-        match passes.iter_mut().find(|pass| pass.master.is_none() && !pass.stems.is_empty()) {
+        match passes.iter_mut().find(|pass| pass.master.is_none() && !pass.stems.is_empty() && pass.settings & PRE_FADER == 0) {
             Some(pass) => {
                 pass.master = Some(at);
                 pass.before_chain = before_chain;
@@ -385,6 +386,8 @@ impl Plan {
 struct Saved {
     numbers: Vec<(&'static str, f64)>,
     texts: Vec<(&'static str, String)>,
+    /// Muted folders unmuted for a pre-fader pass (REAPER renders a muted folder silent even before its fader).
+    unmuted: Vec<Track>,
     /// Every track's `I_SELECTED`, the master's included.
     selection: Vec<(Track, f64)>,
     master_fx: Option<(Track, f64)>,
@@ -414,6 +417,7 @@ impl<'a, 'r> PutBack<'a, 'r> {
         let saved = Saved {
             numbers,
             texts,
+            unmuted: Vec::new(),
             selection,
             master_fx: master.map(|m| (m, reaper.track_value(m, "I_FXEN"))),
             speed: reaper.project_config_int(proj, SPEED),
@@ -446,6 +450,14 @@ impl<'a, 'r> PutBack<'a, 'r> {
         }
         if self.saved.selection.iter().any(|(track, selected)| reaper.track_value(*track, "I_SELECTED") != *selected) {
             missed.push("the track selection".into());
+        }
+        for track in &self.saved.unmuted {
+            if reaper.track_value(*track, "B_MUTE") == 0.0 {
+                reaper.set_track_value(*track, "B_MUTE", 1.0);
+            }
+            if reaper.track_value(*track, "B_MUTE") == 0.0 {
+                missed.push("a folder's mute".into());
+            }
         }
         if let Some((master, on)) = self.saved.master_fx {
             if reaper.track_value(master, "I_FXEN") != on {
@@ -495,10 +507,10 @@ pub enum Ended {
     Cancelled { notes: Vec<String> },
 }
 
-/// What the running render asks of the one who runs it: to say it is inside REAPER's render now (the socket threads then
-/// answer for it), and whether Kumi asked it to stop.
+/// What the running render asks of the one who runs it: to run REAPER's render (saying meanwhile that it renders, and
+/// keeping up what must go on inside it), and whether Kumi asked it to stop.
 pub trait Hooks {
-    fn rendering(&self, on: bool);
+    fn render(&self, run: &mut dyn FnMut());
     fn watch(&self, watch: super::board::Watch);
     fn cancelled(&self) -> bool;
     /// Whether the render window's Cancel was pressed while it ran.
@@ -537,6 +549,8 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
     if state.playing {
         notes.push("REAPER stopped playback to render".to_string());
     }
+    // Working files a crashed render of this job left (their names are only ever Kumi's): gone before it renders again.
+    sweep_leftovers(&plan.folder, &plan.job);
     let rate = plan.rate.unwrap_or_else(|| project_rate(reaper, proj));
     let file_bytes = frames(plan.seconds(), rate) * 8;
     let total = file_bytes * plan.sources.len() as u64;
@@ -587,6 +601,20 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
         if put_back.saved.speed.is_some_and(|speed| speed != FULL_SPEED) {
             reaper.set_project_config_int(proj, SPEED, FULL_SPEED);
         }
+        // A muted folder renders silent even before its fader: unmuted for the pass, muted again after it.
+        for track in put_back.saved.unmuted.drain(..).collect::<Vec<_>>() {
+            reaper.set_track_value(track, "B_MUTE", 1.0);
+        }
+        if pass.settings & PRE_FADER != 0 {
+            for track in
+                wanted.iter().filter(|t| reaper.track_value(**t, "I_FOLDERDEPTH") > 0.0 && reaper.track_value(**t, "B_MUTE") != 0.0)
+            {
+                reaper.set_track_value(*track, "B_MUTE", 0.0);
+                put_back.saved.unmuted.push(*track);
+                let name = crate::changes::quoted(&crate::changes::track_name(reaper, *track));
+                notes.push(format!("{name} is muted: Kumi unmuted it for the render (REAPER renders a muted folder silent even before its fader) and muted it again"));
+            }
+        }
         // What REAPER would write: exactly this pass's files, in Kumi's folder, none of them there yet.
         let mut expected: Vec<(usize, PathBuf)> = Vec::new();
         if let Some(at) = pass.master {
@@ -628,9 +656,9 @@ pub fn run(reaper: &Reaper, reads: &Reads, plan: &Plan, hooks: &dyn Hooks) -> En
         hooks.watch(super::board::Watch { files: expected.iter().map(|(_, file)| (file.clone(), file_bytes)).collect(), before, total });
         before += file_bytes * expected.len() as u64;
         let started = Instant::now();
-        hooks.rendering(true);
-        reaper.run_action(RENDER_WITH_LAST);
-        hooks.rendering(false);
+        hooks.render(&mut || {
+            reaper.run_action(RENDER_WITH_LAST);
+        });
         crate::log::line(&format!(
             "render pass {}/{} of {} took {:.3} s",
             n + 1,

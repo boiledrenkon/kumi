@@ -80,6 +80,9 @@ pub fn refusal(reaper: &Reaper, proj: Project) -> Option<String> {
     if !reaper.audio_running() {
         return Some("REAPER's audio isn't running, so Kumi can't play its render out loud".into());
     }
+    if !reaper.audio_heard() {
+        return Some("REAPER's audio device has no output the producer hears (REAPER is on its dummy device), so Kumi can't play its render out loud".into());
+    }
     let state = reaper.play_state(proj);
     if state.playing || state.recording {
         return Some("REAPER is playing: Kumi plays its render out loud once REAPER stops".into());

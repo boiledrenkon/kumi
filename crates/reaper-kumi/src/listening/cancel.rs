@@ -15,6 +15,17 @@ pub fn press() -> bool {
     crate::reaper::fake::press_render_cancel()
 }
 
+/// REAPER's alert about the files a cancelled render left, answered "No" (Kumi deletes them itself): false when none is up.
+#[cfg(not(test))]
+pub fn answer_incomplete() -> bool {
+    platform::answer_incomplete()
+}
+
+#[cfg(test)]
+pub fn answer_incomplete() -> bool {
+    false
+}
+
 /// The titles of REAPER's windows, for the log (what the render window is called where it couldn't be found).
 #[cfg(not(test))]
 pub fn titles() -> Vec<String> {
@@ -26,11 +37,11 @@ pub fn titles() -> Vec<String> {
     vec![]
 }
 
-/// Whether a window's title is the render window's ("Rendering to File…", "Render to File").
+/// Whether a window's title is the render's progress window's ("Rendering to file…"): never the render settings dialog
+/// ("Render to File"), which REAPER keeps open behind it and whose Cancel would tear the render down with a prompt.
 #[cfg_attr(test, allow(dead_code))]
 fn is_render_window(title: &str) -> bool {
-    let title = title.to_lowercase();
-    title.contains("render") && !title.contains("queue")
+    title.to_lowercase().starts_with("rendering")
 }
 
 #[cfg(target_os = "macos")]
@@ -47,6 +58,33 @@ mod platform {
         fn objc_msgSend();
     }
 
+    #[repr(C)]
+    struct Context {
+        version: isize,
+        info: *mut c_void,
+        retain: *const c_void,
+        release: *const c_void,
+        copy_description: *const c_void,
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFRunLoopCommonModes: Id;
+        fn CFRunLoopGetMain() -> Id;
+        fn CFAbsoluteTimeGetCurrent() -> f64;
+        fn CFRunLoopTimerCreate(
+            allocator: Id,
+            fire: f64,
+            interval: f64,
+            flags: usize,
+            order: isize,
+            callout: extern "C" fn(Id, *mut c_void),
+            context: *mut Context,
+        ) -> Id;
+        fn CFRunLoopAddTimer(run_loop: Id, timer: Id, mode: Id);
+        fn CFRelease(object: Id);
+    }
+
     fn sel(name: &CStr) -> Id {
         unsafe { sel_registerName(name.as_ptr()) }
     }
@@ -55,6 +93,12 @@ mod platform {
     unsafe fn object(receiver: Id, selector: &CStr) -> Id {
         let send = unsafe { std::mem::transmute::<unsafe extern "C" fn(), unsafe extern "C" fn(Id, Id) -> Id>(objc_msgSend) };
         unsafe { send(receiver, sel(selector)) }
+    }
+
+    /// `[receiver selector]` returning a BOOL.
+    unsafe fn yes(receiver: Id, selector: &CStr) -> bool {
+        let send = unsafe { std::mem::transmute::<unsafe extern "C" fn(), unsafe extern "C" fn(Id, Id) -> i8>(objc_msgSend) };
+        unsafe { send(receiver, sel(selector)) != 0 }
     }
 
     /// `[receiver count]`.
@@ -75,12 +119,6 @@ mod platform {
         unsafe { send(receiver, sel(c"isKindOfClass:"), class) != 0 }
     }
 
-    /// `[receiver performClick:nil]`.
-    unsafe fn click(receiver: Id) {
-        let send = unsafe { std::mem::transmute::<unsafe extern "C" fn(), unsafe extern "C" fn(Id, Id, Id)>(objc_msgSend) };
-        unsafe { send(receiver, sel(c"performClick:"), std::ptr::null_mut()) }
-    }
-
     unsafe fn text(string: Id) -> String {
         if string.is_null() {
             return String::new();
@@ -93,12 +131,16 @@ mod platform {
         }
     }
 
-    unsafe fn windows() -> Vec<Id> {
+    unsafe fn app() -> Id {
         let class = unsafe { objc_getClass(c"NSApplication".as_ptr()) };
         if class.is_null() {
-            return vec![];
+            return class;
         }
-        let app = unsafe { object(class, c"sharedApplication") };
+        unsafe { object(class, c"sharedApplication") }
+    }
+
+    unsafe fn windows() -> Vec<Id> {
+        let app = unsafe { app() };
         if app.is_null() {
             return vec![];
         }
@@ -109,41 +151,114 @@ mod platform {
         (0..unsafe { count(list) }).map(|i| unsafe { at(list, i) }).filter(|w| !w.is_null()).collect()
     }
 
-    /// A button titled `label` among a view's subviews, depth first.
-    unsafe fn button(view: Id, button_class: Id, label: &str, depth: usize) -> Option<Id> {
+    /// Every view under `view` that is of `class`, depth first.
+    unsafe fn views_of(view: Id, class: Id, depth: usize, found: &mut Vec<Id>) {
         if view.is_null() || depth > 12 {
-            return None;
+            return;
         }
-        if unsafe { is_kind(view, button_class) } && unsafe { text(object(view, c"title")) } == label {
-            return Some(view);
+        if unsafe { is_kind(view, class) } {
+            found.push(view);
         }
         let subviews = unsafe { object(view, c"subviews") };
         if subviews.is_null() {
-            return None;
+            return;
         }
-        (0..unsafe { count(subviews) }).find_map(|i| unsafe { button(at(subviews, i), button_class, label, depth + 1) })
+        for i in 0..unsafe { count(subviews) } {
+            unsafe { views_of(at(subviews, i), class, depth + 1, found) };
+        }
     }
 
-    pub fn press() -> bool {
-        let button_class = unsafe { objc_getClass(c"NSButton".as_ptr()) };
-        if button_class.is_null() {
-            return false;
+    unsafe fn buttons(window: Id) -> Vec<(Id, String)> {
+        let class = unsafe { objc_getClass(c"NSButton".as_ptr()) };
+        let mut found = Vec::new();
+        if !class.is_null() {
+            unsafe { views_of(object(window, c"contentView"), class, 0, &mut found) };
         }
+        found.into_iter().map(|b| (b, unsafe { text(object(b, c"title")) })).collect()
+    }
+
+    /// Clicks a button from a timer of its own, so whatever the click opens (an alert's modal loop) runs outside the caller,
+    /// and Kumi's render timer goes on firing inside it.
+    fn click_soon(button: Id) {
+        extern "C" fn fired(_timer: Id, info: *mut c_void) {
+            crate::guard("render cancel", (), || {
+                let send = unsafe { std::mem::transmute::<unsafe extern "C" fn(), unsafe extern "C" fn(Id, Id, Id)>(objc_msgSend) };
+                unsafe { send(info, sel(c"performClick:"), std::ptr::null_mut()) };
+            });
+        }
+        let mut context =
+            Context { version: 0, info: button, retain: std::ptr::null(), release: std::ptr::null(), copy_description: std::ptr::null() };
+        let timer = unsafe { CFRunLoopTimerCreate(std::ptr::null_mut(), CFAbsoluteTimeGetCurrent(), 0.0, 0, 0, fired, &mut context) };
+        if !timer.is_null() {
+            unsafe {
+                CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopCommonModes);
+                CFRelease(timer);
+            }
+        }
+    }
+
+    /// The render's progress window ("Rendering to file…"), visible: never the render settings dialog behind it.
+    pub fn press() -> bool {
         for window in unsafe { windows() } {
-            if !super::is_render_window(&unsafe { text(object(window, c"title")) }) {
+            if !super::is_render_window(&unsafe { text(object(window, c"title")) }) || !unsafe { yes(window, c"isVisible") } {
                 continue;
             }
-            let content = unsafe { object(window, c"contentView") };
-            if let Some(cancel) = unsafe { button(content, button_class, "Cancel", 0) } {
-                unsafe { click(cancel) };
+            if let Some((cancel, _)) = unsafe { buttons(window) }.into_iter().find(|(_, label)| label == "Cancel") {
+                click_soon(cancel);
                 return true;
             }
         }
         false
     }
 
+    /// REAPER's alert about the files a cancelled render left ("Save incomplete rendered files?"), answered No: Kumi
+    /// deletes them itself. False when no such alert is up.
+    pub fn answer_incomplete() -> bool {
+        let app = unsafe { app() };
+        if app.is_null() {
+            return false;
+        }
+        let modal = unsafe { object(app, c"modalWindow") };
+        if modal.is_null() {
+            return false;
+        }
+        let title = unsafe { text(object(modal, c"title")) };
+        let class = unsafe { objc_getClass(c"NSTextField".as_ptr()) };
+        let mut fields = Vec::new();
+        if !class.is_null() {
+            unsafe { views_of(object(modal, c"contentView"), class, 0, &mut fields) };
+        }
+        let words: Vec<String> = fields.into_iter().map(|f| unsafe { text(object(f, c"stringValue")) }).collect();
+        let about = title.to_lowercase().contains("incomplete") || words.iter().any(|w| w.to_lowercase().contains("incomplete"));
+        if !about {
+            return false;
+        }
+        match unsafe { buttons(modal) }.into_iter().find(|(_, label)| label == "No") {
+            Some((no, _)) => {
+                click_soon(no);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Every window: its title, whether it shows, its buttons; and the modal one's.
     pub fn titles() -> Vec<String> {
-        unsafe { windows() }.into_iter().map(|w| unsafe { text(object(w, c"title")) }).collect()
+        let mut out: Vec<String> = unsafe { windows() }
+            .into_iter()
+            .map(|w| {
+                let labels: Vec<String> = unsafe { buttons(w) }.into_iter().map(|(_, l)| l).collect();
+                format!("{:?} visible={} buttons={labels:?}", unsafe { text(object(w, c"title")) }, unsafe { yes(w, c"isVisible") })
+            })
+            .collect();
+        let app = unsafe { app() };
+        if !app.is_null() {
+            let modal = unsafe { object(app, c"modalWindow") };
+            if !modal.is_null() {
+                out.push(format!("modal: {:?}", unsafe { text(object(modal, c"title")) }));
+            }
+        }
+        out
     }
 }
 
@@ -204,6 +319,11 @@ mod platform {
     pub fn titles() -> Vec<String> {
         windows().into_iter().map(title).collect()
     }
+
+    /// Not measured on Windows: REAPER's alert about incomplete files is left to its preference there.
+    pub fn answer_incomplete() -> bool {
+        false
+    }
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -215,5 +335,9 @@ mod platform {
 
     pub fn titles() -> Vec<String> {
         vec![]
+    }
+
+    pub fn answer_incomplete() -> bool {
+        false
     }
 }

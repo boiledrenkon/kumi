@@ -18,6 +18,8 @@ pub struct RenderSeen {
     pub targets: Vec<String>,
     pub format: String,
     pub normalize: f64,
+    /// The muted tracks' GUIDs.
+    pub muted: Vec<String>,
 }
 
 /// A source made from a file (`PCM_Source_CreateFromFile`).
@@ -46,6 +48,9 @@ pub struct FakeListening {
     /// `projrenderlimit` (the render speed), where REAPER's projectconfig_var_addr points.
     pub speed: Box<i32>,
     pub audio: bool,
+    /// The device REAPER says it runs on (`MODE`), and its output channels.
+    pub device: String,
+    pub outputs: i32,
     pub device_rate: u32,
     pub metronome: bool,
     pub hooks: Vec<usize>,
@@ -122,6 +127,8 @@ impl Default for FakeListening {
             texts,
             speed: Box::new(0),
             audio: true,
+            device: "CoreAudio Built-in Output".into(),
+            outputs: 2,
             device_rate: 44100,
             metronome: false,
             hooks: vec![],
@@ -153,6 +160,8 @@ impl Clone for FakeListening {
             texts: self.texts.clone(),
             speed: Box::new(*self.speed),
             audio: self.audio,
+            device: self.device.clone(),
+            outputs: self.outputs,
             device_rate: self.device_rate,
             metronome: self.metronome,
             hooks: self.hooks.clone(),
@@ -324,6 +333,7 @@ pub fn render_action(command: i32) {
             targets: targets.clone(),
             format: s.listening.texts.get("RENDER_FORMAT").cloned().unwrap_or_default(),
             normalize: number("RENDER_NORMALIZE"),
+            muted: s.tracks.iter().filter(|t| t.mute).map(|t| t.guid.clone()).collect(),
         };
         s.listening.renders.push(seen.clone());
         s.listening.cancelled_render = false;
@@ -375,7 +385,7 @@ unsafe extern "C" fn get_audio_device_info(attribute: *const c_char, buf: *mut c
             return false;
         }
         let value = match attribute.as_str() {
-            "MODE" => "Dummy Audio".to_string(),
+            "MODE" => s.listening.device.clone(),
             "SRATE" => s.listening.device_rate.to_string(),
             "BSIZE" => "512".to_string(),
             _ => return false,
@@ -397,6 +407,10 @@ unsafe extern "C" fn audio_reg_hardware_hook(add: bool, reg: *mut api::audio_hoo
         }
         1
     })
+}
+
+unsafe extern "C" fn get_num_audio_outputs() -> c_int {
+    with(|s| if s.listening.audio { s.listening.outputs } else { 0 })
 }
 
 unsafe extern "C" fn master_get_play_rate(_proj: *mut ReaProject) -> f64 {
@@ -796,6 +810,7 @@ pub(super) fn lookup(name: &CStr) -> Option<*mut c_void> {
         b"GetAudioDeviceInfo" => get_audio_device_info as unsafe extern "C" fn(*const c_char, *mut c_char, c_int) -> bool,
         b"Audio_RegHardwareHook" => audio_reg_hardware_hook as unsafe extern "C" fn(bool, *mut api::audio_hook_register_t) -> c_int,
         b"Master_GetPlayRate" => master_get_play_rate as unsafe extern "C" fn(*mut ReaProject) -> f64,
+        b"GetNumAudioOutputs" => get_num_audio_outputs as unsafe extern "C" fn() -> c_int,
         b"GetToggleCommandState" => get_toggle_command_state as unsafe extern "C" fn(c_int) -> c_int,
         b"PCM_Source_CreateFromFile" => pcm_source_create_from_file as unsafe extern "C" fn(*const c_char) -> *mut api::PCM_source,
         b"PCM_Source_Destroy" => pcm_source_destroy as unsafe extern "C" fn(*mut api::PCM_source),

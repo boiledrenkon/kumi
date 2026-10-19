@@ -16,6 +16,7 @@ mod audition;
 pub mod board;
 mod cancel;
 mod capture;
+mod inside;
 pub mod reads;
 pub mod render;
 pub mod scratch;
@@ -119,23 +120,46 @@ pub struct Listening {
     told_titles: Cell<bool>,
     swept: Cell<bool>,
     beat: Cell<Option<Instant>>,
+    /// Ticks inside the render now running (for the log: whether the platform's timer reached it).
+    inside_ticks: Cell<u32>,
 }
 
 /// What a render asks of its runner, from inside REAPER's render loop too.
 struct RunHooks<'a> {
     listening: &'a Listening,
     snapshot: &'a Mutex<Snapshot>,
+    out: &'a dyn Outbox,
     job: &'a str,
 }
 
+/// Inside REAPER's render, from Kumi's own timer: the same as a tick REAPER would give there.
+fn inside_render(data: *const std::ffi::c_void) {
+    // SAFETY: `data` is the RunHooks that started the timer, which stops before the RunHooks goes (see `render`).
+    let hooks = unsafe { &*(data as *const RunHooks) };
+    hooks.listening.nested(hooks.snapshot, hooks.out);
+}
+
 impl render::Hooks for RunHooks<'_> {
-    fn rendering(&self, on: bool) {
-        self.listening.rendering.set(on);
-        let mut snapshot = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
-        snapshot.last_tick = Some(Instant::now());
-        if on {
+    fn render(&self, run: &mut dyn FnMut()) {
+        self.listening.rendering.set(true);
+        {
+            let mut snapshot = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
+            snapshot.last_tick = Some(Instant::now());
             snapshot.busy = Some(Busy::KumiRender);
         }
+        // Dropped when the render returns (or unwinds): it never outlives this call.
+        self.listening.inside_ticks.set(0);
+        let timer = inside::Timer::start(self as *const RunHooks as *const std::ffi::c_void, inside_render);
+        let timed = timer.is_some();
+        run();
+        drop(timer);
+        crate::log::line(&format!(
+            "{} ticks inside REAPER's render (Kumi's own timer {})",
+            self.listening.inside_ticks.get(),
+            if timed { "running" } else { "missing on this platform" }
+        ));
+        self.listening.rendering.set(false);
+        self.snapshot.lock().unwrap_or_else(|e| e.into_inner()).last_tick = Some(Instant::now());
     }
 
     fn watch(&self, watch: board::Watch) {
@@ -168,6 +192,7 @@ impl Listening {
             told_titles: Cell::new(false),
             swept: Cell::new(false),
             beat: Cell::new(None),
+            inside_ticks: Cell::new(0),
         }
     }
 
@@ -258,6 +283,7 @@ impl Listening {
         let info = reaper.current_project().ok_or_else(|| failed("REAPER has no project open"))?;
         self.stop_preview(reaper);
         let (preview, answer) = audition::Preview::start(reaper, info.ptr, params)?;
+        crate::log::line(&format!("preview {} plays {}", preview.id, answer));
         self.board.set_playing(Some(Playing { id: preview.id.clone(), slot: preview.slot.clone(), stop: false }));
         *self.preview.borrow_mut() = Some(preview);
         Ok(answer)
@@ -378,7 +404,7 @@ impl Listening {
         self.tick_capture(reaper, reads);
         if free {
             self.tick_items(reaper, reads);
-            self.run_pending(reaper, reads, snapshot);
+            self.run_pending(reaper, reads, snapshot, out);
             if !self.swept.get() && self.folder.borrow().is_some() {
                 self.swept.set(true);
                 self.sweep(reaper, &reaper.projects(), out);
@@ -388,7 +414,19 @@ impl Listening {
 
     fn tick_preview(&self, reaper: &Reaper) {
         let stop = match self.preview.borrow().as_ref() {
-            Some(preview) => self.board.playing().is_some_and(|(_, _, asked)| asked) || preview.over(reaper),
+            Some(preview) => {
+                let asked = self.board.playing().is_some_and(|(_, _, asked)| asked);
+                let over = preview.over(reaper);
+                if asked || over {
+                    crate::log::line(&format!(
+                        "preview {} stops at {:.2} s ({})",
+                        preview.id,
+                        preview.slot.position(),
+                        if asked { "Kumi asked" } else { "its end, or REAPER plays" }
+                    ));
+                }
+                asked || over
+            }
             None => false,
         };
         if stop {
@@ -460,7 +498,7 @@ impl Listening {
         });
     }
 
-    fn run_pending(&self, reaper: &Reaper, reads: &Reads, snapshot: &Mutex<Snapshot>) {
+    fn run_pending(&self, reaper: &Reaper, reads: &Reads, snapshot: &Mutex<Snapshot>, out: &dyn Outbox) {
         if self.queued_now.replace(false) {
             return;
         }
@@ -476,7 +514,7 @@ impl Listening {
             }
             return;
         }
-        let hooks = RunHooks { listening: self, snapshot, job: &plan.job };
+        let hooks = RunHooks { listening: self, snapshot, out, job: &plan.job };
         let ended = render::run(reaper, reads, &plan, &hooks);
         self.rendering.set(false);
         self.end(&plan.job, ended);
@@ -489,17 +527,22 @@ impl Listening {
         if !self.rendering.get() {
             return false;
         }
+        self.inside_ticks.set(self.inside_ticks.get() + 1);
         {
             let mut snapshot = snapshot.lock().unwrap_or_else(|e| e.into_inner());
             snapshot.last_tick = Some(Instant::now());
             snapshot.busy = Some(Busy::KumiRender);
         }
         let asked = self.board.active().is_some_and(|(id, kind)| kind == Kind::Render && self.board.cancelled(&id));
-        if asked && self.pressed.get().is_none_or(|at| at.elapsed() >= PRESS_AGAIN) {
-            if cancel::press() {
+        if asked {
+            if !self.told_titles.replace(true) {
+                crate::log::line(&format!("cancel asked inside the render; REAPER's windows: {:?}", cancel::titles()));
+            }
+            // REAPER asks whether to keep a cancelled render's files: no (Kumi deletes them).
+            if self.pressed.get().is_some() && cancel::answer_incomplete() {
+                crate::log::line("answered REAPER's question about the cancelled render's files: no");
+            } else if self.pressed.get().is_none_or(|at| at.elapsed() >= PRESS_AGAIN) && cancel::press() {
                 self.pressed.set(Some(Instant::now()));
-            } else if !self.told_titles.replace(true) {
-                crate::log::line(&format!("no render window's Cancel found; REAPER's windows: {:?}", cancel::titles()));
             }
         }
         if self.beat.get().is_none_or(|at| at.elapsed() >= HEARTBEAT) {
@@ -532,7 +575,7 @@ impl Listening {
         let folder = self.folder.borrow().is_some();
         let render =
             folder && api.GetSetProjectInfo().is_some() && api.GetSetProjectInfo_String().is_some() && api.Main_OnCommandEx().is_some();
-        let audio = reaper.audio_running();
+        let audio = reaper.audio_heard();
         json!({
             "render": render,
             "capture": folder && audio && api.Audio_RegHardwareHook().is_some(),

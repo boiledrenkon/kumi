@@ -11,6 +11,9 @@ fn cstring(text: &str) -> CString {
     CString::new(text.replace('\0', "")).unwrap_or_default()
 }
 
+/// Counts REAPER's dummy audio device as heard (a lab without a device measuring previews); never set for a producer.
+const LAB_DUMMY_ENV: &str = "KUMI_REAPER_LAB_DUMMY";
+
 /// What `GetSetProjectInfo_String` reads into: its buffer has no size, and `RENDER_TARGETS` lists a file per stem.
 const PROJECT_TEXT: usize = 1 << 20;
 
@@ -113,6 +116,19 @@ impl Reaper<'_> {
     /// Whether REAPER's audio is running (a device open). Thread-safe in REAPER, though only the main thread asks.
     pub fn audio_running(&self) -> bool {
         self.api.Audio_IsRunning().is_some_and(|f| unsafe { f() } != 0)
+    }
+
+    /// The device's output channels.
+    pub fn audio_outputs(&self) -> i32 {
+        self.api.GetNumAudioOutputs().map(|f| unsafe { f() }).unwrap_or(0)
+    }
+
+    /// Whether REAPER's audio reaches a device the producer hears: running, with outputs, and not REAPER's own dummy device
+    /// (which runs the audio engine with nothing behind it, and gives the hardware hook no output channels: measured).
+    /// `KUMI_REAPER_LAB_DUMMY=1` counts the dummy device as heard, for measuring previews in a lab with no device.
+    pub fn audio_heard(&self) -> bool {
+        let dummy = self.audio_device("MODE").is_some_and(|mode| mode.contains("Dummy"));
+        self.audio_running() && self.audio_outputs() > 0 && (!dummy || std::env::var(LAB_DUMMY_ENV).is_ok_and(|v| v == "1"))
     }
 
     /// What the device is (`MODE`, `IDENT_OUT`, `SRATE`, `BSIZE`); None when REAPER can't say.
