@@ -72,6 +72,23 @@ and a fresh scratch home under the session's temporary folder.
    ends in "stopped", 17 s after it started; no `logic-kumi` or helper process was left, and the
    discovery folder was empty.
 
+## The test suite
+
+The whole isolated suite (`scripts/test-isolated.sh --no-fail-fast`) on the merge, 6db5dc05:
+2965 passed, 5 failed, 6 ignored, in 332 test binaries; every Logic test passed. The five
+failures are in three `kumi-runtime` files this branch doesn't change (neither the tests nor the
+code under them):
+
+- `tests/hands_transport.rs`, three tests (which ones varies): "Live didn't answer in time" from
+  the fake shell helper under its 1 s limit. The file passes 8 of 8 with `--test-threads=1`. On
+  this Mac (macOS 26.6.1) the first run of a freshly written script costs 250 to 400 ms, and the
+  tests each write and start a helper of their own at the same time.
+- `tests/library_stop.rs`: the fake measuring worker, a freshly written script, is stopped 300 ms
+  after it starts and hasn't written its pid file by then: the same first-run cost.
+- `tests/style_references.rs`, the MusicBrainz pacing test: the first two requests reach the fake
+  server 0.6 ms apart where the test expects 100 ms or more; the later ones are 150 ms apart, as
+  paced. The same on a quiet machine, run alone.
+
 ## Not covered
 
 - Kumi's own interactive session, `kumi --daw logic`: the scratch home has no provider sign-in,
