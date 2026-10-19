@@ -310,6 +310,8 @@ impl Attached {
             lock(&self.focus).busy = busy.map(logic::Busy::code);
             return;
         }
+        let root = lock(&self.model).window_root();
+        self.project.set_root(root);
         let mut ax = Ax::new(helper, self.pid);
         let look = match self.project.look(&mut ax, None) {
             Ok((look, _, _)) => look,
@@ -361,6 +363,8 @@ impl Attached {
         if let Some(busy) = lock(&self.model).busy {
             return Err((wire::code::BUSY.into(), format!("{}; nothing changed", busy.reason())));
         }
+        let root = lock(&self.model).window_root();
+        self.project.set_root(root);
         crate::serve::answer(&mut self.project, helper, self.pid, method, params)
     }
 
@@ -382,8 +386,8 @@ impl Attached {
         if !self.mcu_said && self.mcu.surface.state.installed {
             self.mcu_said = true;
             log::line(&format!(
-                "Logic Pro installed the Mackie Control {} ms after the ports opened; the LCD says {:?}",
-                self.mcu_opened.map_or(0, |at| at.elapsed().as_millis()),
+                "Logic Pro installed the Mackie Control {} ms after its first device query; the LCD says {:?}",
+                self.mcu.install_ms().unwrap_or(0),
                 self.mcu.surface.state.names()
             ));
         }

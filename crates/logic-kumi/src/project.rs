@@ -96,6 +96,9 @@ impl Needs {
 /// The bridge's picture of the project.
 pub struct Project {
     pub strings: Strings,
+    /// Where the project window is addressed: the main window, or the project's window by title when another window
+    /// is main.
+    pub root: Root,
     pub layout: Layout,
     pub epoch: u32,
     pub shape: Option<Shape>,
@@ -122,6 +125,7 @@ impl Project {
     pub fn new(strings: Strings) -> Project {
         Project {
             strings,
+            root: Root::Main,
             layout: Layout::default(),
             epoch: 1,
             shape: None,
@@ -151,6 +155,14 @@ impl Project {
         }
     }
 
+    /// Addresses the project window by this root from now on; a different one means the layout is found again.
+    pub fn set_root(&mut self, root: Root) {
+        if self.root != root {
+            self.root = root;
+            self.layout = Layout::default();
+        }
+    }
+
     /// Everything read of the project is stale: another project, or the epoch moved.
     pub fn forget(&mut self) {
         self.strips = None;
@@ -160,7 +172,7 @@ impl Project {
 
     /// Where the window's parts are: one walk of the main window two levels down (some forty nodes).
     pub fn find_layout(&mut self, ax: &mut Ax) -> Result<(), AxError> {
-        let window = ax.tree(&Root::Main, "", 2, 60, Some(BRIEF))?;
+        let window = ax.tree(&self.root, "", 2, 60, Some(BRIEF))?;
         let parts = Window::of(&window, &self.strings);
         let mut layout = Layout {
             control_bar: parts.control_bar.map(|n| n.path.clone()),
@@ -181,7 +193,7 @@ impl Project {
             }
         }
         if let Some(tracks) = layout.tracks.clone() {
-            let area = ax.tree(&Root::Main, &tracks, 5, 40, Some(&["role", "subrole", "desc"]))?;
+            let area = ax.tree(&self.root, &tracks, 5, 40, Some(&["role", "subrole", "desc"]))?;
             let parts = TracksArea::of(&area);
             layout.headers = parts.headers.map(|n| n.path.clone());
             layout.contents = parts.contents.map(|n| n.path.clone());
@@ -197,25 +209,25 @@ impl Project {
     /// The control bar with its LCD, three levels down.
     pub fn control_bar(&self, ax: &mut Ax) -> Result<Node, AxError> {
         let path = self.need(&self.layout.control_bar, "its control bar")?;
-        ax.tree(&Root::Main, &path, 3, 40, Some(BRIEF))
+        ax.tree(&self.root, &path, 3, 40, Some(BRIEF))
     }
 
     /// The track headers with their controls.
     pub fn headers(&self, ax: &mut Ax) -> Result<Node, AxError> {
         let path = self.need(&self.layout.headers, "its track headers")?;
-        ax.tree(&Root::Main, &path, 2, 256, Some(BRIEF))
+        ax.tree(&self.root, &path, 2, 256, Some(BRIEF))
     }
 
     /// The tracks' contents: each track's lane with its regions (their help text says where they are).
     pub fn contents(&self, ax: &mut Ax) -> Result<Node, AxError> {
         let path = self.need(&self.layout.contents, "its regions")?;
-        ax.tree(&Root::Main, &path, 3, 256, Some(CHEAP))
+        ax.tree(&self.root, &path, 3, 256, Some(CHEAP))
     }
 
     /// The Inspector's strips: the selected track's and its output's.
     pub fn inspector(&self, ax: &mut Ax) -> Result<Node, AxError> {
         let path = self.need(&self.layout.inspector, "its Inspector")?;
-        ax.tree(&Root::Main, &path, 6, 40, Some(CHEAP))
+        ax.tree(&self.root, &path, 6, 40, Some(CHEAP))
     }
 
     /// The track headers as rows, in order.
@@ -270,7 +282,7 @@ impl Project {
         if open {
             return Ok(false);
         }
-        ax.action(&Root::Main, &path, "AXPress", SETTLE_MS)?;
+        ax.action(&self.root, &path, "AXPress", SETTLE_MS)?;
         self.find_layout(ax)?;
         Ok(true)
     }
@@ -278,23 +290,29 @@ impl Project {
     fn close_pane(&mut self, ax: &mut Ax, label: &str) -> Result<(), AxError> {
         let (path, open) = self.view_button(ax, label)?;
         if open {
-            ax.action(&Root::Main, &path, "AXPress", SETTLE_MS)?;
+            ax.action(&self.root, &path, "AXPress", SETTLE_MS)?;
             self.find_layout(ax)?;
         }
         Ok(())
     }
 
     /// Every channel strip from the Mixer pane, opened for the read when closed and closed again after: the track
-    /// strips first, in the Tracks area's order, then the busses, the outputs and the master.
+    /// strips first, in the Tracks area's order, then the busses, the outputs and the master. The Mixer and the
+    /// editors share the bottom of the window, and closing the Mixer closes that area: an editor that was open (the
+    /// Piano Roll of the selected region) is opened again after.
     pub fn read_mixer(&mut self, ax: &mut Ax) -> Result<Vec<StripState>, AxError> {
+        let editors_were_open = self.view_button(ax, "Editors").map(|(_, open)| open).unwrap_or(false);
         let opened = self.open_pane(ax, "Mixer")?;
         let result = (|| {
             let path = self.need(&self.layout.mixer, "its Mixer")?;
-            let area = ax.tree(&Root::Main, &path, 3, 256, Some(CHEAP))?;
+            let area = ax.tree(&self.root, &path, 3, 256, Some(CHEAP))?;
             Ok(area.children.iter().filter(|c| c.role == "AXLayoutItem").map(|strip| StripState::of(strip, &self.strings)).collect())
         })();
         if opened {
             self.close_pane(ax, "Mixer")?;
+            if editors_were_open {
+                let _ = self.open_pane(ax, "Editors");
+            }
         }
         result
     }
@@ -350,7 +368,7 @@ impl Project {
         let opened = self.open_pane(ax, "List Editors")?;
         let result = (|| {
             let tabs_path = self.need(&self.layout.list_tabs, "its List Editors")?;
-            let tabs = ax.tree(&Root::Main, &tabs_path, 1, 8, Some(BRIEF))?;
+            let tabs = ax.tree(&self.root, &tabs_path, 1, 8, Some(BRIEF))?;
             let was_on = paths::list_tab_on(&tabs, &self.strings);
             if was_on != Some(tab) {
                 let button = tabs
@@ -358,15 +376,15 @@ impl Project {
                     .iter()
                     .find(|c| c.role == "AXRadioButton" && self.strings.is(&c.desc, tab))
                     .ok_or_else(|| AxError::Missing(format!("the {tab} tab")))?;
-                ax.action(&Root::Main, &button.path, "AXPress", SETTLE_MS)?;
+                ax.action(&self.root, &button.path, "AXPress", SETTLE_MS)?;
             }
             let list_path = self.need(&self.layout.list, "its list")?;
-            let list = ax.tree(&Root::Main, &list_path, 7, 256, Some(CHEAP))?;
+            let list = ax.tree(&self.root, &list_path, 7, 256, Some(CHEAP))?;
             let table = paths::list_table(&list).ok_or_else(|| AxError::Missing(format!("the {tab} list")))?.clone();
             let columns = paths::columns(&table);
             if let Some(was_on) = was_on.filter(|was| *was != tab) {
                 if let Some(button) = tabs.children.iter().find(|c| c.role == "AXRadioButton" && self.strings.is(&c.desc, was_on)) {
-                    let _ = ax.action(&Root::Main, &button.path, "AXPress", 50);
+                    let _ = ax.action(&self.root, &button.path, "AXPress", 50);
                 }
             }
             Ok((columns, table))
@@ -409,10 +427,57 @@ impl Project {
                 .flat_map(|lane| lane.children.iter().filter(|c| c.role == "AXLayoutItem"))
                 .collect();
             let item = items.get(region_place - 1).ok_or_else(|| AxError::Missing("that region".into()))?;
-            ax.set(&Root::Main, &item.path, "AXSelected", json!(true), SETTLE_MS)?;
+            ax.set(&self.root, &item.path, "AXSelected", json!(true), SETTLE_MS)?;
         }
         let (columns, table) = self.read_list(ax, "Event")?;
         Ok(paths::rows(&table).iter().filter_map(|row| Note::of(row, &columns, beats_per_bar, &self.strings)).collect())
+    }
+
+    /// Selects a track (by its place, from 1) as a producer would: a click on its header's name field, which selects
+    /// that track alone (the headers' selected state isn't settable, and a selected header keeps a multiple
+    /// selection on a click elsewhere in it). Through the helper's `click`, at the system's event tap.
+    pub fn select_track(&mut self, ax: &mut Ax, place: usize) -> Result<(), AxError> {
+        if self.layout.headers.is_none() {
+            self.find_layout(ax)?;
+        }
+        let headers = self.headers(ax)?;
+        let item = headers
+            .children
+            .iter()
+            .filter(|c| c.role == "AXLayoutItem")
+            .nth(place.checked_sub(1).ok_or_else(|| AxError::Missing("that track".into()))?)
+            .ok_or_else(|| AxError::Missing("that track".into()))?;
+        let attrs = ax.get(&self.root, &item.path, &["AXChildren"])?;
+        let _ = attrs;
+        let name = item.child_where(|c| c.role == "AXTextField").ok_or_else(|| AxError::Missing("the track's name field".into()))?;
+        let frame = ax.get(&self.root, &name.path, &["AXPosition", "AXSize"])?;
+        let (x, y) = (frame["AXPosition"]["x"].as_f64().unwrap_or(0.0), frame["AXPosition"]["y"].as_f64().unwrap_or(0.0));
+        let (w, h) = (frame["AXSize"]["w"].as_f64().unwrap_or(0.0), frame["AXSize"]["h"].as_f64().unwrap_or(0.0));
+        ax.helper.call("click", json!({"pid": ax.pid, "x": x + (w / 2.0).min(60.0), "y": y + h / 2.0}))?;
+        Ok(())
+    }
+
+    /// Selects a region (by its place through the project, from 1) through its item's `AXSelected`, which Logic
+    /// takes as a toggle whatever value is set: so only when the region isn't selected. The track selection stays as
+    /// it is.
+    pub fn select_region(&mut self, ax: &mut Ax, place: usize) -> Result<(), AxError> {
+        if self.layout.contents.is_none() {
+            self.find_layout(ax)?;
+        }
+        let contents = self.contents(ax)?;
+        let items: Vec<&Node> = contents
+            .children
+            .iter()
+            .filter(|c| c.role == "AXLayoutArea")
+            .flat_map(|lane| lane.children.iter().filter(|c| c.role == "AXLayoutItem"))
+            .collect();
+        let item = items
+            .get(place.checked_sub(1).ok_or_else(|| AxError::Missing("that region".into()))?)
+            .ok_or_else(|| AxError::Missing("that region".into()))?;
+        if !item.is_selected() {
+            ax.set(&self.root, &item.path, "AXSelected", json!(true), SETTLE_MS)?;
+        }
+        Ok(())
     }
 
     /// One focus refresh: the transport from the control bar, the selected header and region, which panes are open.
@@ -449,7 +514,7 @@ impl Project {
             Some(Editor::Mixer)
         } else if lists_open && self.layout.list_tabs.is_some() {
             let tabs_path = self.layout.list_tabs.clone().unwrap_or_default();
-            let tabs = ax.tree(&Root::Main, &tabs_path, 1, 8, Some(BRIEF))?;
+            let tabs = ax.tree(&self.root, &tabs_path, 1, 8, Some(BRIEF))?;
             (paths::list_tab_on(&tabs, &self.strings) == Some("Event")).then_some(Editor::EventList)
         } else {
             None

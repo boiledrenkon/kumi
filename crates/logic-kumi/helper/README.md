@@ -71,6 +71,7 @@ true, since reading them opens its menu; EOF on stdin or `quit` ends the helper,
 | `menu` | `pid`, `titles` | `result`, `title` (the item's title as shown), `active` (whether the app was in front; menu items act only then); walks the menu bar by titles and presses the last |
 | `keys` | `pid`, `key`, `mods` | `posted`, `active`; modifiers go down as their own events before the key and up after it, posted to the process |
 | `type` | `pid`, `text` (up to 200 characters) | `posted`, `active`; one key event a character, carrying the character |
+| `click` | `pid`, `x`, `y` (a point on the screen, as Accessibility positions are), `mods`, `count` (1 to 3) | `posted`, `active`; the app brought in front, the pointer moved to the point, the left button down and up there at the system's event tap, `count` times for a double click; the one way Logic takes a track selection from outside (mouse events posted to the process alone it ignores) |
 | `midi.open` | `name`, `uid` | `opened`, `source`, `destination`: a virtual source and destination of that name with the unique ids `uid` and `uid + 1`; `uid` is a number, or a text hashed to one |
 | `midi.send` | `hex` | `sent`: the bytes out of the source |
 | `midi.close` | | `closed`; closing closed ports is fine |

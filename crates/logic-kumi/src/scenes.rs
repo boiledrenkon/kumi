@@ -55,15 +55,47 @@ pub fn case(method: &str, params: &Value, answer: &Result<Value, (String, String
     json!({"request": {"method": method, "params": params}, "response": response})
 }
 
+/// A value with every object's keys in order, so the vectors file reads the same whoever writes it.
+pub fn sorted(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for key in keys {
+                out.insert(key.clone(), sorted(&map[key]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The vectors file's text: the cases in the fixed set's order under the epoch they were recorded in, keys sorted,
+/// two spaces of indent, a final newline, as `tests/vectors/renoise-reads.json` is written.
+pub fn vectors_text(cases: &[Value]) -> String {
+    let mut text = serde_json::to_string_pretty(&sorted(&json!({"cases": cases, "epoch": "1"}))).expect("the vectors serialize");
+    text.push('\n');
+    text
+}
+
 /// Runs the fixed request set over a helper (the real one, recorded, or a scene replayed) and a status to answer
 /// `status` with; the project reader is the bridge's own.
 pub fn run(helper: &mut dyn Helper, pid: u32, strings: Strings, status: Value, identity: (Option<&str>, Option<&str>, &str)) -> Vec<Value> {
     let mut project = Project::new(strings);
     project.set_identity(identity.0, identity.1, identity.2);
+    let busy = status.get("busy").filter(|busy| **busy != Value::Bool(false)).and_then(Value::as_str).map(str::to_string);
     let mut cases = vec![];
     for (method, params) in fixed_requests() {
         let answer = match method {
             "status" => Ok(status.clone()),
+            // Logic can't take work: every read says so, as the run loop does.
+            _ if busy.is_some() => {
+                let busy = busy.clone().unwrap_or_default();
+                let reason = crate::logic::Busy::from_code(&busy).map_or(busy.clone(), |b| b.reason().to_string());
+                Err((daw_bridge::wire::code::BUSY.into(), format!("{reason}; nothing changed")))
+            }
             "focus" => {
                 let mut ax = Ax::new(helper, pid);
                 match project.look(&mut ax, None) {
@@ -100,5 +132,12 @@ mod tests {
         assert_eq!(ok["response"]["ok"], true);
         let refused = case("read", &json!({"kind": "bogus"}), &Err(("bad-params".into(), "no".into())));
         assert_eq!(refused["response"], json!({"ok": false, "error": {"code": "bad-params", "message": "no"}}));
+        let text = vectors_text(&[ok]);
+        assert!(text.starts_with("{\n  \"cases\": [\n    {\n      \"request\": {\n        \"method\": \"read\""), "{text}");
+        assert!(text.ends_with("  \"epoch\": \"1\"\n}\n"), "{text}");
+        assert_eq!(
+            sorted(&json!({"b": 1, "a": {"d": 2, "c": [{"z": 1, "y": 2}]}})).to_string(),
+            r#"{"a":{"c":[{"y":2,"z":1}],"d":2},"b":1}"#
+        );
     }
 }

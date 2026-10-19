@@ -4,27 +4,43 @@
 //! `scratch` is Scratch.logicx idle with track 1 selected; `scratch-keys` has track 2 and its region selected with
 //! the Piano Roll open; `scratch-playing` plays; `scratch-dialog` has a dialog up.
 //!
-//! cargo run -p logic-kumi --example record_fixtures -- --out crates/logic-kumi/tests/fixtures/<scene> [--helper <path>]
+//! cargo run -p logic-kumi --example record_fixtures -- --out crates/logic-kumi/tests/fixtures/<scene> [--helper <path>] [--select <track>]
+//!
+//! `--select <track>` first selects that track (its place in the Tracks area, from 1) as a producer would, with a
+//! click on its header's name field through the helper; `--region <place>` selects a region (its place through the
+//! project) through its item; `--editors` opens the editors pane (the Piano Roll for a
+//! MIDI region) first, `--play` presses Play, `--dialog` brings the "Choose a Project" dialog up. The scene starts
+//! after that; `--restore` puts the panes, the transport and the dialog back after it.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use logic_kumi::ax::paths;
 use logic_kumi::ax::strings::{self, Strings};
+use logic_kumi::ax::{Ax, Root};
 use logic_kumi::fixtures::{Recorder, Scene, SCENE_FILE};
 use logic_kumi::helper::{ChildLauncher, Helper, Launch};
 use logic_kumi::logic::{self, Model, BUNDLES};
+use logic_kumi::project::Project;
 use logic_kumi::scenes;
 use serde_json::json;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let (mut out, mut helper_path) = (None, None);
+    let (mut out, mut helper_path, mut select, mut region) = (None, None, None, None);
+    let (mut editors, mut play, mut dialog, mut restore) = (false, false, false, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => out = Some(PathBuf::from(args.next().expect("--out <dir>"))),
             "--helper" => helper_path = Some(PathBuf::from(args.next().expect("--helper <path>"))),
-            other => panic!("unknown argument {other}; usage: record_fixtures --out <dir> [--helper <path>]"),
+            "--select" => select = Some(args.next().and_then(|n| n.parse::<usize>().ok()).expect("--select <track>")),
+            "--region" => region = Some(args.next().and_then(|n| n.parse::<usize>().ok()).expect("--region <place>")),
+            "--editors" => editors = true,
+            "--play" => play = true,
+            "--dialog" => dialog = true,
+            "--restore" => restore = true,
+            other => panic!("unknown argument {other}; usage: record_fixtures --out <dir> [--helper <path>] [--select <track>] [--editors] [--play] [--dialog] [--restore]"),
         }
     }
     let out = out.expect("--out <dir>: where to write scene.json.gz");
@@ -40,8 +56,49 @@ fn main() {
                 .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("kumi-logic-hands-")))
         })
         .expect("the helper: build it with python3 scripts/build-logic-hands.py, or name it with --helper");
-    let scene = Arc::new(Mutex::new(Scene::new(&name)));
     let mut launcher = ChildLauncher { path: helper_path };
+    // What the scene needs shown is set up on a helper of its own, before the recording, and put back after it.
+    let mut setup = launcher.launch().expect("the helper");
+    let apps = logic::parse_apps(&setup.call("apps", json!({"bundles": BUNDLES})).expect("apps"));
+    let app = logic::newest(&apps).expect("a running Logic Pro").clone();
+    let mut stage = Project::new(Strings::english());
+    {
+        let mut ax = Ax::new(setup.as_mut(), app.pid);
+        if let Some(place) = select {
+            stage.select_track(&mut ax, place).expect("select the track");
+            std::thread::sleep(Duration::from_millis(400));
+            eprintln!("track {place} selected with a click");
+        }
+        if let Some(place) = region {
+            stage.select_region(&mut ax, place).expect("select the region");
+            eprintln!("region {place} selected");
+        }
+        for (label, on) in [("Editors", editors)] {
+            if on {
+                stage.find_layout(&mut ax).expect("the window");
+                let bar = stage.control_bar(&mut ax).expect("the control bar");
+                let button = paths::view_button(&bar, &stage.strings, label).expect("the view button");
+                if !button.is_on() {
+                    ax.action(&Root::Main, &button.path, "AXPress", 600).expect("open the pane");
+                }
+                eprintln!("{label} pane open");
+            }
+        }
+        if play {
+            stage.find_layout(&mut ax).expect("the window");
+            let bar = stage.control_bar(&mut ax).expect("the control bar");
+            let button = paths::transport_button(&bar, &stage.strings, "Play").expect("Play");
+            ax.action(&Root::Main, &button.path, "AXPress", 800).expect("play");
+            eprintln!("playing");
+        }
+        if dialog {
+            ax.set(&Root::Title("Choose a Project".into()), "", "AXMinimized", json!(false), 800).expect("the project chooser");
+            eprintln!("the project chooser is up");
+        }
+    }
+    setup.quit();
+    std::thread::sleep(Duration::from_millis(300));
+    let scene = Arc::new(Mutex::new(Scene::new(&name)));
     let mut helper: Box<dyn Helper> = Box::new(Recorder::new(launcher.launch().expect("the helper"), scene.clone()));
 
     // As the bridge attaches: the apps, the grant, the windows.
@@ -75,6 +132,29 @@ fn main() {
     }
     let scene = scene.lock().unwrap().clone();
     scene.save(&out).expect("write the scene");
+    if restore {
+        let mut after = launcher.launch().expect("the helper");
+        let mut ax = Ax::new(after.as_mut(), app.pid);
+        if dialog {
+            let _ = ax.set(&Root::Title("Choose a Project".into()), "", "AXMinimized", json!(true), 600);
+        }
+        if play {
+            if let Ok(bar) = stage.find_layout(&mut ax).and_then(|_| stage.control_bar(&mut ax)) {
+                if let Some(button) = paths::transport_button(&bar, &stage.strings, "Stop") {
+                    let _ = ax.action(&Root::Main, &button.path, "AXPress", 600);
+                }
+            }
+        }
+        if editors {
+            if let Ok(bar) = stage.find_layout(&mut ax).and_then(|_| stage.control_bar(&mut ax)) {
+                if let Some(button) = paths::view_button(&bar, &stage.strings, "Editors").filter(|b| b.is_on()) {
+                    let _ = ax.action(&Root::Main, &button.path, "AXPress", 600);
+                }
+            }
+        }
+        after.quit();
+        eprintln!("put back");
+    }
     eprintln!("{} helper calls recorded to {}: {:?}", scene.calls.len(), out.join(SCENE_FILE).display(), scene.counts());
     for case in &cases {
         let ok = case["response"]["ok"] == true;

@@ -11,9 +11,9 @@
           "busy": false,
           "permission": null,
           "project": {
-            "id": "3f9c2a7b1d4e5f60718293a4b5c6d7e8",
+            "id": "e805ab87b3ca9d66f0f62d47b97caa29",
             "name": "Scratch",
-            "path": "/lab/Scratch.logicx"
+            "path": "/Users/me/Music/Logic/Scratch.logicx"
           }
         }
       }
@@ -31,11 +31,11 @@
           "epoch": "1",
           "items": [
             {
-              "id": "3f9c2a7b1d4e5f60718293a4b5c6d7e8",
+              "id": "e805ab87b3ca9d66f0f62d47b97caa29",
               "identity": "Scratch",
-              "keySignature": "C major",
-              "path": "/lab/Scratch.logicx",
-              "sampleRate": 48000,
+              "keySignature": "C Major",
+              "path": "/Users/me/Music/Logic/Scratch.logicx",
+              "sampleRate": null,
               "tempo": 160.0,
               "timeSignature": "4/4",
               "trackCount": 2
@@ -59,7 +59,7 @@
           "items": [
             {
               "armed": false,
-              "color": "#5b8def",
+              "color": null,
               "index": 1,
               "inputs": [
                 "Input 1"
@@ -68,7 +68,7 @@
               "monitoring": false,
               "mute": false,
               "name": "Vocal",
-              "output": "Stereo Out",
+              "output": "Stereo Output",
               "pan": 0,
               "ref": "1:track:1",
               "selected": true,
@@ -84,12 +84,12 @@
               "monitoring": false,
               "mute": false,
               "name": "Keys",
-              "output": "Stereo Out",
+              "output": "Stereo Output",
               "pan": 0,
               "ref": "1:track:2",
               "selected": false,
               "solo": false,
-              "volumeDb": -3.0
+              "volumeDb": 0.0
             }
           ],
           "total": 2
@@ -111,7 +111,7 @@
           "items": [
             {
               "armed": false,
-              "color": "#5b8def",
+              "color": null,
               "index": 1,
               "inputs": [
                 "Input 1"
@@ -120,7 +120,7 @@
               "monitoring": false,
               "mute": false,
               "name": "Vocal",
-              "output": "Stereo Out",
+              "output": "Stereo Output",
               "pan": 0,
               "ref": "1:track:1",
               "selected": true,
@@ -155,12 +155,12 @@
               "monitoring": false,
               "mute": false,
               "name": "Keys",
-              "output": "Stereo Out",
+              "output": "Stereo Output",
               "pan": 0,
               "ref": "1:track:2",
               "selected": false,
               "solo": false,
-              "volumeDb": -3.0
+              "volumeDb": 0.0
             }
           ],
           "total": 2
@@ -276,6 +276,7 @@
               },
               "ref": "1:note:1.2",
               "regionRef": "1:region:1",
+              "selected": true,
               "velocity": 96
             },
             {
@@ -349,16 +350,8 @@
         "ok": true,
         "result": {
           "epoch": "1",
-          "items": [
-            {
-              "destination": "Bus 1",
-              "level": -6.0,
-              "ref": "1:send:1.1",
-              "slot": 1,
-              "trackRef": "1:track:1"
-            }
-          ],
-          "total": 1
+          "items": [],
+          "total": 0
         }
       }
     },
@@ -375,8 +368,8 @@
           "epoch": "1",
           "items": [
             {
-              "length": 8.0,
-              "name": "Chorus",
+              "length": 32.0,
+              "name": "Marker 1",
               "position": {
                 "bar": 9,
                 "beat": 1,
@@ -407,7 +400,7 @@
               "bpm": 160.0,
               "signatures": [
                 {
-                  "key": "C major",
+                  "key": "C Major",
                   "position": {
                     "bar": 1,
                     "beat": 1,
@@ -444,12 +437,12 @@
               "monitoring": false,
               "mute": false,
               "name": "Keys",
-              "output": "Stereo Out",
+              "output": "Stereo Output",
               "pan": 0,
               "ref": "1:track:2",
               "selected": false,
               "solo": false,
-              "volumeDb": -3.0
+              "volumeDb": 0.0
             }
           ]
         }
@@ -512,8 +505,8 @@
           "epoch": "1",
           "markers": [
             {
-              "length": 8.0,
-              "name": "Chorus",
+              "length": 32.0,
+              "name": "Marker 1",
               "position": {
                 "bar": 9,
                 "beat": 1,
@@ -525,23 +518,28 @@
             }
           ],
           "project": {
-            "id": "3f9c2a7b1d4e5f60718293a4b5c6d7e8",
+            "id": "e805ab87b3ca9d66f0f62d47b97caa29",
             "identity": "Scratch",
-            "keySignature": "C major",
-            "path": "/lab/Scratch.logicx",
-            "sampleRate": 48000,
+            "keySignature": "C Major",
+            "path": "/Users/me/Music/Logic/Scratch.logicx",
+            "sampleRate": null,
             "tempo": 160.0,
             "timeSignature": "4/4",
             "trackCount": 2
           },
           "selection": {
+            "regionName": "Keys",
             "regionRef": "1:region:1",
+            "track": {
+              "kind": "audio",
+              "name": "Vocal"
+            },
             "trackRef": "1:track:1"
           },
           "tracks": [
             {
               "armed": false,
-              "color": "#5b8def",
+              "color": null,
               "index": 1,
               "inputs": [
                 "Input 1"
@@ -550,7 +548,7 @@
               "monitoring": false,
               "mute": false,
               "name": "Vocal",
-              "output": "Stereo Out",
+              "output": "Stereo Output",
               "pan": 0,
               "ref": "1:track:1",
               "selected": true,
@@ -566,12 +564,12 @@
               "monitoring": false,
               "mute": false,
               "name": "Keys",
-              "output": "Stereo Out",
+              "output": "Stereo Output",
               "pan": 0,
               "ref": "1:track:2",
               "selected": false,
               "solo": false,
-              "volumeDb": -3.0
+              "volumeDb": 0.0
             }
           ],
           "transport": {
@@ -596,22 +594,30 @@
       "response": {
         "ok": true,
         "result": {
-          "ageMs": 12,
-          "changed": 7,
-          "editor": "pianoRoll",
+          "ageMs": 0,
+          "changed": 1,
+          "editor": null,
           "epoch": "1",
           "playhead": {
             "bar": 1,
             "beat": 1
           },
           "selection": {
+            "regionName": "Keys",
             "regionRef": "1:region:1",
+            "track": {
+              "kind": "audio",
+              "name": "Vocal"
+            },
             "trackRef": "1:track:1"
           },
           "transport": {
+            "beat": 0.0,
+            "beatsPerBar": 4,
             "cycle": false,
             "playing": false,
-            "recording": false
+            "recording": false,
+            "tempo": 160.0
           },
           "view": "tracks"
         }
@@ -638,6 +644,7 @@
             "inserts": [
               {
                 "bypassed": false,
+                "kind": "effect",
                 "name": "Channel EQ",
                 "pluginRef": "1:plugin:1.1",
                 "slot": 1
@@ -646,16 +653,9 @@
             "kind": "audio",
             "mute": false,
             "name": "Vocal",
-            "output": "Stereo Out",
+            "output": "Stereo Output",
             "pan": 0,
-            "sends": [
-              {
-                "destination": "Bus 1",
-                "level": -6.0,
-                "sendRef": "1:send:1.1",
-                "slot": 1
-              }
-            ],
+            "sends": [],
             "solo": false,
             "volumeDb": 0.0
           },
@@ -683,6 +683,7 @@
             "inserts": [
               {
                 "bypassed": false,
+                "kind": "effect",
                 "name": "Channel EQ",
                 "pluginRef": "1:plugin:1.1",
                 "slot": 1
@@ -691,16 +692,9 @@
             "kind": "audio",
             "mute": false,
             "name": "Vocal",
-            "output": "Stereo Out",
+            "output": "Stereo Output",
             "pan": 0,
-            "sends": [
-              {
-                "destination": "Bus 1",
-                "level": -6.0,
-                "sendRef": "1:send:1.1",
-                "slot": 1
-              }
-            ],
+            "sends": [],
             "solo": false,
             "volumeDb": 0.0
           },
@@ -722,6 +716,7 @@
           "endBeats": 16.0,
           "epoch": "1",
           "kind": "notes",
+          "name": "Keys",
           "notes": [
             {
               "channel": 1,
@@ -749,6 +744,7 @@
               },
               "ref": "1:note:1.2",
               "regionRef": "1:region:1",
+              "selected": true,
               "velocity": 96
             },
             {
@@ -782,6 +778,7 @@
           ],
           "regionRef": "1:region:1",
           "startBeats": 0.0,
+          "timeSignature": "4/4",
           "total": 4
         }
       }
@@ -799,6 +796,7 @@
           "endBeats": 16.0,
           "epoch": "1",
           "kind": "notes",
+          "name": "Keys",
           "notes": [
             {
               "channel": 1,
@@ -826,6 +824,7 @@
               },
               "ref": "1:note:1.2",
               "regionRef": "1:region:1",
+              "selected": true,
               "velocity": 96
             },
             {
@@ -859,6 +858,7 @@
           ],
           "regionRef": "1:region:1",
           "startBeats": 0.0,
+          "timeSignature": "4/4",
           "total": 4
         }
       }
@@ -873,6 +873,7 @@
       "response": {
         "ok": true,
         "result": {
+          "beatsPerBar": 4,
           "epoch": "1",
           "from": 0,
           "kind": "timeline",
@@ -892,12 +893,21 @@
                   "kind": "midi",
                   "name": "Keys",
                   "ref": "1:region:1",
+                  "selected": true,
                   "startBeats": 0.0
                 }
               ],
               "trackRef": "1:track:2"
             }
           ],
+          "markers": [
+            {
+              "name": "Marker 1",
+              "positionBeats": 32.0
+            }
+          ],
+          "playheadBeats": 0.0,
+          "playing": false,
           "trackCount": 2,
           "window": {
             "from": 0.0,
@@ -922,6 +932,7 @@
       "response": {
         "ok": true,
         "result": {
+          "beatsPerBar": 4,
           "epoch": "1",
           "from": 1,
           "kind": "timeline",
@@ -935,12 +946,21 @@
                   "kind": "midi",
                   "name": "Keys",
                   "ref": "1:region:1",
+                  "selected": true,
                   "startBeats": 0.0
                 }
               ],
               "trackRef": "1:track:2"
             }
           ],
+          "markers": [
+            {
+              "name": "Marker 1",
+              "positionBeats": 32.0
+            }
+          ],
+          "playheadBeats": 0.0,
+          "playing": false,
           "trackCount": 2,
           "window": {
             "from": 0.0,
@@ -965,15 +985,8 @@
             "Input 1"
           ],
           "kind": "routing",
-          "output": "Stereo Out",
-          "sends": [
-            {
-              "destination": "Bus 1",
-              "level": -6.0,
-              "sendRef": "1:send:1.1",
-              "slot": 1
-            }
-          ],
+          "output": "Stereo Output",
+          "sends": [],
           "trackRef": "1:track:1"
         }
       }

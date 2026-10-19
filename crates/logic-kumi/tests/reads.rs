@@ -189,8 +189,7 @@ fn the_fixed_request_set_over_scratch_answers_in_the_simulators_shapes_and_is_th
     assert_eq!(routing["result"]["inputs"], json!(["Input 1"]));
 
     // The vectors: blessed from these answers, or checked against the file.
-    let mut text = serde_json::to_string_pretty(&json!({"cases": cases})).unwrap();
-    text.push('\n');
+    let text = scenes::vectors_text(&cases);
     let path = vectors_path();
     if std::env::var("KUMI_BLESS").is_ok_and(|v| v == "1") {
         std::fs::write(&path, &text).unwrap();
@@ -207,13 +206,13 @@ fn the_other_scenes_change_the_selection_the_transport_and_the_busy_state() {
         (
             "scratch-keys",
             (|focus: &Value| {
-                assert_eq!(focus["selection"]["trackRef"], "1:track:2");
-                assert_eq!(focus["selection"]["regionRef"], "1:region:1");
-                assert_eq!(focus["editor"], "pianoRoll");
+                assert_eq!(focus["selection"]["trackRef"], "1:track:2", "{focus}");
+                assert_eq!(focus["selection"]["regionRef"], "1:region:1", "{focus}");
+                assert_eq!(focus["editor"], "pianoRoll", "{focus}");
             }) as fn(&Value),
         ),
         ("scratch-playing", |focus: &Value| {
-            assert_eq!(focus["transport"]["playing"], true);
+            assert_eq!(focus["transport"]["playing"], true, "{focus}");
         }),
     ] {
         if !fixtures().join(scene).join(logic_kumi::fixtures::SCENE_FILE).is_file() {

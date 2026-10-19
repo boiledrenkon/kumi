@@ -38,7 +38,72 @@ the running apps, removes the discovery file, tells its hosts `bye` with
 reason `quit`, ends the helper and exits. A signal (SIGINT, SIGTERM, SIGHUP)
 does the same with reason `shutdown`.
 
-Rows, focus, bodies and actions come with M2.
+## What it does (M2)
+
+The bridge reads the project from Logic's window through Accessibility, in the
+shapes of `docs/en/LOGIC_CONTRACT.md` and of the host's simulated Logic
+(`crates/daw-mcp-server/src/simulator/logic.rs`), and serves `read`,
+`snapshot`, `focus` and `focus_body` beside `ping` and `status`. Nothing in M2
+changes the project.
+
+- `src/ax/` is the Accessibility model: a walker that asks the helper for
+  subtrees and attributes by root and path (`mod.rs`), Logic's elements found
+  by role and label rather than by index (`paths.rs`), and the labels in the
+  language Logic runs in, loaded from the `.lproj` tables of the installed
+  bundle and keyed by the English string (`strings.rs`), so a moved element is
+  a re-match and a translated one still matches. The contract's rules are
+  built in: never a pop-up button's children, the project window addressed as
+  `AXMainWindow` (or by its title when one of Logic's own windows, the Control
+  Surface Setup say, is main), and nothing read while Logic's windows are away.
+- The rows (`src/rows.rs`, `src/project.rs`): `project` from the control bar's
+  LCD and the window's document (the sample rate from the package's
+  `MetaData.plist` when the package can be read, else null); `track` from the
+  track headers, with the kind, output and inputs from the Mixer's strips;
+  `region` from the Tracks area's items, whose help text names the start and
+  end; `note` from the Event List of the region, which the bridge selects when
+  it isn't; `plugin` and `send` from the strips' slots; `marker` from the
+  Marker List; `tempo` from the Tempo and Signature lists. A read opens the
+  pane it needs (the Mixer, the List Editors) when it is closed and closes it
+  after; the Mixer's strips are kept for five seconds, the lists for two.
+- Refs are positions under an epoch, `<epoch>:<kind>:<n>` (`src/refs.rs`):
+  tracks by their place in the Tracks area, regions by their place through the
+  project, markers by their place in the list, notes under their region
+  (`1:note:1.3`), plug-ins and sends under their track (`1:plugin:1.1`). The
+  epoch moves on every track or region change seen between polls (a header
+  appeared, vanished, was renamed or moved; a region added, removed or moved),
+  and a ref, parent, around or cursor from an earlier epoch is refused as
+  `stale`. Paging is the simulator's: `limit`, `cursor` `<epoch>.<n>`,
+  `nextCursor`, `total` and `epoch` in every answer (`src/read.rs`).
+- `focus` answers from a cache the run loop refreshes every 150 ms with four
+  small reads (the control bar, the track headers, the regions, the List
+  Editors' tabs), never from a walk of the whole window (`src/focus.rs`); the
+  four bodies (`tree`, `notes`, `timeline`, `routing`) come from the same rows
+  (`src/bodies.rs`).
+- Events: `project` as before; `tracks` with the new epoch when it moves;
+  `selection` with the selected track and region; `transport` from the control
+  bar, and at once from the Mackie Control's LEDs.
+- `src/mcu.rs` is the Mackie Control driver: virtual ports named "Kumi Logic"
+  through the helper's `midi.*` ops, Logic's device queries answered only as a
+  Mackie Control (device 0x14), the transport and select LEDs, the LCD's names
+  and the timecode display decoded into the focus and the events. Logic opens
+  its Control Surface Setup window when it first adds the surface; the ports
+  close when the bridge stops. Selecting a track from outside is a click on
+  its header's name field (the helper's `click`, at the system's event tap):
+  the headers' selected state isn't settable, and the surface's select button
+  adds to a selection rather than replacing it.
+- The socket threads queue `read`, `snapshot` and `focus_body` for the run
+  loop, which alone talks to the helper (`src/queue.rs`); `ping`, `status` and
+  `focus` never wait. Without the Accessibility grant every read fails with
+  words, never `busy`, and `status.permission` names the grant.
+
+Fixtures (`tests/fixtures/<scene>/scene.json.gz`: gzipped JSON, read one with
+`gunzip -c <file> | jq .`) are every helper reply the readers asked for over
+the fixed request set, recorded from the real Logic by
+`examples/record_fixtures.rs` and replayed by `fixtures::SceneHands` to the
+bridge's own code; `tests/reads.rs` runs the set over the `scratch` scene,
+checks the shapes and blesses `crates/daw-mcp-server/tests/vectors/
+logic-reads.json` with `KUMI_BLESS=1`. Fixtures are the only Logic-version-
+specific data: a new Logic is a re-recording.
 
 ## Arguments
 
@@ -96,19 +161,30 @@ With Logic open and the helper built:
 
 ```sh
 cargo run -p logic-kumi
-cargo run -p logic-kumi --example logic_lab_client -- --watch 20
+cargo run -p logic-kumi --example logic_lab_client -- --watch 20 --call focus '{}' --call read '{"kind":"track"}'
 ```
 
 The lab client finds the bridge through its discovery file, proves the
 secret, prints the welcome and `status`, then the events for the time given:
-open or switch a project in Logic to see the `project` event. `--call <method>
-<json params>` sends any other request first.
+open or switch a project in Logic to see the `project` event, select a track or
+press play to see `selection` and `transport`. `--call <method> <json params>`
+sends any other request first and prints how long the bridge took.
+
+To record a scene for the tests (Logic showing what the scene is named for):
+
+```sh
+cargo run -p logic-kumi --example record_fixtures -- --out crates/logic-kumi/tests/fixtures/scratch
+cargo run -p logic-kumi --example record_fixtures -- --out crates/logic-kumi/tests/fixtures/scratch-keys --select 2
+```
+
+`--select <track>` selects the track through the Mackie Control first.
 
 ## Tests
 
 `cargo test -p logic-kumi` runs without Logic or the helper: the Logic model
 on canned windows, the helper's supervision on a mock and on shell scripts,
-the server against daw-bridge's conformance vectors over real sockets, and
-the whole bridge on the mock helper (`tests/status.rs`). The isolated run
-`sh scripts/test-isolated.sh -p logic-kumi` keeps the tests away from this
-machine's Kumi folder.
+the server against daw-bridge's conformance vectors over real sockets, the
+whole bridge on the mock helper (`tests/status.rs`), and the reads over the
+recorded scenes (`tests/reads.rs`). The isolated run
+`KUMI_PACKAGES="daw-bridge logic-kumi" sh scripts/test-isolated.sh` keeps the
+tests away from this machine's Kumi folder.

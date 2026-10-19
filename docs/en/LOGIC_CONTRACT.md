@@ -1,18 +1,22 @@
-# Logic Pro bridge contract (draft, M2)
+# Logic Pro bridge contract (M2)
 
 What `logic-kumi` answers over `kumi-daw/1`, and which macOS channel each answer comes from. The
 wire, handshake, discovery files and lifecycle are daw-bridge's; this page is only Logic's shapes.
-Everything here was measured in the lab of 2026-10-18 (`docs/evidence/logic-lab-2026-10-18.md`).
+Everything here was measured in the lab of 2026-10-18 (`docs/evidence/logic-lab-2026-10-18.md`)
+and, for the rows, on the Scratch project in Logic Pro 12.3.1 during M2. The exact JSON is the
+host's simulated Logic (`crates/daw-mcp-server/src/simulator/logic.rs`) and the vectors the bridge
+records from the real Logic (`crates/daw-mcp-server/tests/vectors/logic-reads.json`); where the two
+differ, the vectors are what Logic shows and this page says why.
 
 ## Channels
 
 | Channel | Used for | Rule |
 | --- | --- | --- |
-| Accessibility reads | every row, focus and body | poll; never read a pop-up button's children; prefer `AXMainWindow` and the Window menu over `AXWindows` |
+| Accessibility reads | every row, focus and body | poll; never read a pop-up button's children; prefer `AXMainWindow` and the Window menu over `AXWindows`; address the project's window by title when one of Logic's own windows (the Control Surface Setup) is main; a pane a read needs (the Mixer, the List Editors) is opened for it and closed after |
 | Accessibility writes | values with a text field or slider, buttons, rows | set, then `AXConfirm`; read back before answering |
 | Key commands | actions with a binding | activate Logic first; post modifiers as their own events |
 | Menu items | actions without a binding | activate Logic first; press by index after matching the title |
-| Mackie Control | selection, transport and level events; the LCD names | answer only as a Mackie Control (device 0x14) |
+| Mackie Control | selection, transport and level events; the LCD names; selecting a track | answer only as a Mackie Control (device 0x14), and the version request; select from the Pan view, where the LCD names the strips |
 | Panel service | open and save panels | post keys to `com.apple.appkit.xpc.openAndSavePanelService`; set the go-to-folder field by AX |
 | Process tap | listening | M5 |
 
@@ -27,28 +31,52 @@ Everything here was measured in the lab of 2026-10-18 (`docs/evidence/logic-lab-
 
 | Kind | Fields | Source |
 | --- | --- | --- |
-| `project` | id, identity, path, tempo, timeSignature, keySignature, sampleRate, trackCount | window document and control bar; `MetaData.plist` for sample rate |
-| `track` | ref, index, name, kind (audio, instrument, external, aux, output), mute, solo, armed, monitoring, volumeDb, pan, color?, output, inputs, selected | track headers; the Inspector strip for the selected track |
-| `region` | ref, trackRef, name, startBeats, endBeats, kind (audio, midi), selected, looped | the Tracks area layout items and their help text |
-| `note` | ref, regionRef, position (bar, beat, division, tick), pitch, velocity, lengthTicks, channel | the Event List of the region |
-| `plugin` | ref, trackRef, slot, name, bypassed, kind (instrument, effect) | the Inspector strip's insert groups |
-| `send` | ref, trackRef, slot, destination, level | the send slot |
-| `marker` | ref, position, name, length, text | the Marker List |
-| `tempo` | bpm, signatures | control bar; the Signature List |
+| `project` | id, identity, path, tempo, timeSignature, keySignature, sampleRate, trackCount | window document and the control bar's LCD; `MetaData.plist` for the sample rate when the package can be read (macOS keeps `~/Music/Logic` from a process without the Files and Folders permission: then `null`) |
+| `track` | ref, index, name, kind (audio, instrument, external, aux, output), mute, solo, armed, monitoring, volumeDb, pan, color (always `null`: the header shows no colour), output, inputs, selected | track headers (name, mute, solo, armed, monitoring, volume, pan, selected); the Mixer's strips for the kind, output and inputs, read when needed and kept for five seconds |
+| `region` | ref, trackRef, name, startBeats, endBeats, kind (audio, midi), selected, looped | the Tracks area's layout items and their help text ("Region starts at 1 bar  and ends at 5 bars , MIDI region…") |
+| `note` | ref, regionRef, position (bar, beat, division, tick), pitch, velocity, lengthTicks, channel, selected? | the Event List of the region, which shows the selected region's events: a region not selected is selected first, through its item |
+| `plugin` | ref, trackRef, slot, name, bypassed, kind (instrument, effect) | the strip's slots, the instrument's first; the strip lists its slots bottom-up, the rows count them from the top |
+| `send` | ref, trackRef, slot, destination, level | the strip's send slots |
+| `marker` | ref, position, name, length (beats), text | the Marker List |
+| `tempo` | bpm, signatures (position, time, key) | the Tempo List and the Signature List |
 
-Refs are positional with an epoch (`<epoch>:<kind>:<n>`), as Renoise's; the epoch moves on every
-track or region change the bridge observes.
+Logic's own words are kept: the key signature as the LCD shows it ("C Major"), an output as the
+slot names it ("Stereo Output"), a plug-in as its slot names it. Refs are positional with an epoch
+(`<epoch>:<kind>:<n>`), as Renoise's: tracks by their place in the Tracks area, regions by their
+place through the project (track by track), markers by their place in the list, notes under their
+region (`1:note:1.3`), plug-ins and sends under their track (`1:plugin:1.1`). The epoch moves on
+every track or region change the bridge observes between polls (a header appeared, vanished, was
+renamed or moved; a region added, removed or moved); notes, plug-ins, sends, markers and tempo
+don't move it. A ref, parent, around or cursor from an earlier epoch is refused as `stale`,
+whatever it was for. Paging: `limit` (50, at most 200), `cursor` `<epoch>.<n>`, `nextCursor`,
+`total` and `epoch` in every answer; `ref` alone reads one row; `parent` filters; `note` needs its
+region as `parent`.
 
 ## Focus and bodies
 
-- `focus`: the selected track, the selected region, the open editor (Piano Roll, Event List, Mixer), the playhead in bars and beats, the transport (playing, recording, cycle), answered from a cache refreshed every 150 ms.
-- `focus_body`: `tree` (the selected track's strip), `notes` (the selected region's notes), `timeline` (tracks as lanes with regions), `routing` (outputs and sends).
+- `focus`: `{epoch, view, editor, selection, playhead, transport, changed, ageMs}`, answered from a cache the run loop refreshes every 150 ms with four small reads (the control bar, the track headers, the regions, the List Editors' tabs), never from a walk of the window. `view` is `tracks`; `editor` is `eventList` when the List Editors show the Event tab, `mixer` when the Mixer pane is open, `pianoRoll` or `stepSequencer` when the editors pane shows one, else `null`. `selection` carries `trackRef` and `regionRef` (`null` when none), and beside them the selected track's `track: {name, kind}` and the selected region's `regionName`, which the runtime reads. `transport` is `{playing, recording, cycle, tempo, beat, beatsPerBar}`; `busy` is added, as the status's code, while Logic can't take work.
+- `focus_body`: `tree` (the strip: name, kind, volumeDb, pan, mute, solo, armed, inputs, output, inserts with `pluginRef`, sends with `sendRef`), `notes` (the region's notes, paged, with `startBeats`, `endBeats`, `name` and `timeSignature`), `timeline` (tracks as lanes with their regions in a window of beats, paged by lanes, with `beatsPerBar`, `playheadBeats`, `playing` and the markers read so far), `routing` (inputs, sends, output). A body names a track or region by `ref`, else takes the selected one.
 
 ## Events
 
-`project` (path or identity changed), `transport` (from the Mackie LEDs and timecode), `tracks`
-(a header appeared, vanished or was renamed), `selection` (the Mackie select LEDs or the header's
-selected state).
+`project` (path or identity changed), `transport` (the control bar's state on each change, and at
+once from the Mackie LEDs: `{playing, recording, cycle, playhead, tempo, timeSignature}`), `tracks`
+(`{epoch}` when the epoch moved: a header appeared, vanished, was renamed or moved, a region added,
+removed or moved), `selection` (the focus's selection with its `epoch`, when it changes).
+
+## What M2 leaves as it is
+
+- Selecting a track from outside is possible only through the Mackie Control's select buttons:
+  the headers' `AXSelected` isn't settable, their "Has Focus" button doesn't take a press, and
+  the Tracks area doesn't take keyboard focus from Accessibility. The surface must be in its Pan
+  view for select to mean the track; Logic opens its Control Surface Setup window when it first
+  adds the surface, and the bridge reads the project's window by title while that window is main.
+- A pop-up menu Logic opens from a button (a send slot, an output slot) holds the Accessibility
+  call until the menu closes and shows no menu element: sends can't be set from outside yet.
+- A list's text cells (a marker's name) aren't text fields: a marker can't be renamed from outside;
+  a region's name in the Event List at the region level is one.
+- Scrubbers and sliders move by one on a set and by ten on an increment (the tempo, the playhead's
+  bar, a list's position segments), which M3's changes must count with.
 
 ## Helper protocol (`kumi-logic-hands`)
 
@@ -74,6 +102,7 @@ stderr only and never activates an app unless asked. The helper's README
 | `menu` | `pid`, `titles` (from the menu bar down) | `result`, `title`, `active`; `no-menu-item` names the first title not found |
 | `keys` | `pid`, `key`, `mods` (`cmd`, `shift`, `opt`, `ctrl`) | `posted`, `active` |
 | `type` | `pid`, `text` (at most 200 characters) | `posted`, `active` |
+| `click` | `pid`, `x`, `y`, `mods`, `count` (1) | `posted`, `active` |
 | `midi.open` | `name`, `uid` (int, or a string hashed to one) | `opened`, `source`, `destination`; `midi-open` while open |
 | `midi.send` | `hex` | `sent` |
 | `midi.close` | | `closed` (idempotent) |

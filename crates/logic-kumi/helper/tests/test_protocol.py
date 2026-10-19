@@ -219,6 +219,10 @@ class Protocol(unittest.TestCase):
         self.assertEqual(error(self.helper.request("keys", pid=os.getpid(), key="bogus")), "unknown-key")
         self.assertEqual(error(self.helper.request("keys", pid=os.getpid(), key="a", mods=["hyper"])), "unknown-mod")
         self.assertEqual(error(self.helper.request("keys", key="a")), "bad-request")
+        # A click needs a point and a process; its grant is checked after those.
+        self.assertEqual(error(self.helper.request("click", pid=os.getpid(), x=10)), "bad-request")
+        self.assertEqual(error(self.helper.request("click", pid=pid, x=10, y=10)), "no-process")
+        self.assertEqual(error(self.helper.request("click", pid=os.getpid(), x=10, y=10, mods=["hyper"])), "unknown-mod")
         self.assertEqual(error(self.helper.request("type", pid=os.getpid(), text="x" * 201)), "too-long")
 
     def test_tap_is_reserved(self):

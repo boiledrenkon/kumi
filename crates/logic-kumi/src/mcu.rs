@@ -30,6 +30,9 @@ const LCD_WIDTH: usize = 56;
 /// The surface's buttons as note numbers (the Mackie Control's map).
 pub mod button {
     pub const SELECT: u8 = 0x18;
+    /// The V-Pot assignment buttons: Pan shows the strips' names on the LCD, where select selects a track.
+    pub const TRACK: u8 = 0x28;
+    pub const PAN: u8 = 0x2A;
     pub const BANK_LEFT: u8 = 0x2E;
     pub const BANK_RIGHT: u8 = 0x2F;
     pub const CHANNEL_LEFT: u8 = 0x30;
@@ -92,6 +95,9 @@ pub struct Surface {
     pub state: State,
     /// A SysEx that arrived in pieces, so far.
     partial: Vec<u8>,
+    /// When Logic's first query came and when its first LCD or LED write did: the install's timing.
+    pub queried_at: Option<std::time::Instant>,
+    pub installed_at: Option<std::time::Instant>,
 }
 
 impl Surface {
@@ -158,7 +164,10 @@ impl Surface {
         }
         match command {
             // Device query: the host connection query, with our serial and a challenge.
-            0x00 => reaction.send.push(sysex(&[0x01], &[&SERIAL, &[0x01, 0x02, 0x03, 0x04]])),
+            0x00 => {
+                self.queried_at.get_or_insert_with(std::time::Instant::now);
+                reaction.send.push(sysex(&[0x01], &[&SERIAL, &[0x01, 0x02, 0x03, 0x04]]));
+            }
             // Host connection reply: the confirmation, and the surface is installed.
             0x02 => {
                 reaction.send.push(sysex(&[0x03], &[&SERIAL]));
@@ -172,6 +181,7 @@ impl Surface {
             0x12 => {
                 if let Some((&offset, text)) = body.split_first() {
                     self.state.installed = true;
+                    self.installed_at.get_or_insert_with(std::time::Instant::now);
                     let before = self.state.names();
                     let mut chars: Vec<char> = self.state.lcd.concat().chars().collect();
                     chars.resize(LCD_WIDTH * 2, ' ');
@@ -193,6 +203,7 @@ impl Surface {
 
     fn led(&mut self, note: u8, on: bool, reaction: &mut Reaction) {
         self.state.installed = true;
+        self.installed_at.get_or_insert_with(std::time::Instant::now);
         let lit = self.state.leds.contains(&note);
         if on && !lit {
             self.state.leds.push(note);
@@ -347,6 +358,25 @@ impl Mcu {
         Ok(())
     }
 
+    /// Selects the strip at a place in the bank (from 1, up to the bank's eight): Logic selects the track. The surface
+    /// is put in the Pan view first, where the LCD names the strips and select means the track (in the Track view
+    /// the strips are the selected track's parameters, and select opens its plug-ins). The bank shows the Mixer's
+    /// strips from the first; a track past the eighth isn't reached in M2.
+    pub fn select_strip(&mut self, place: usize, helper: &mut dyn Helper) -> Result<bool, HelperError> {
+        if place == 0 || place > STRIPS {
+            return Ok(false);
+        }
+        self.press(button::PAN, helper)?;
+        self.pump(helper, Duration::from_millis(400));
+        self.press(button::SELECT + (place - 1) as u8, helper)?;
+        Ok(true)
+    }
+
+    /// How long Logic took from its first device query to its first write to the surface, in milliseconds.
+    pub fn install_ms(&self) -> Option<u64> {
+        Some(self.surface.installed_at?.saturating_duration_since(self.surface.queried_at?).as_millis() as u64)
+    }
+
     /// Selects the strip of the bank whose name is `name`, if the LCD shows it.
     pub fn select_named(&mut self, name: &str, helper: &mut dyn Helper) -> Result<bool, HelperError> {
         let short: String = name.chars().take(LCD_COLUMNS).collect();
@@ -460,6 +490,8 @@ mod tests {
         assert!(mcu.on_event(&json!({"event": "midi", "hex": lcd}), helper.as_mut()).names_changed);
         assert!(mcu.select_named("Keys", helper.as_mut()).unwrap());
         assert!(!mcu.select_named("Drums", helper.as_mut()).unwrap());
+        assert!(!mcu.select_strip(9, helper.as_mut()).unwrap());
+        assert!(mcu.install_ms().is_some(), "the LCD write after the query dates the install");
         mcu.close(helper.as_mut());
         let ops: Vec<String> = hands.calls().into_iter().map(|(op, _)| op).collect();
         assert_eq!(ops, ["midi.open", "midi.send", "midi.send", "midi.send", "midi.close"]);
