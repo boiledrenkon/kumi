@@ -48,8 +48,9 @@ jobs:
         run: |
           # Main, and pull requests that change installing, updating, releasing, Willington's files, the Mac helper the
           # bundle carries, the tar and PowerShell Kumi runs, how it downloads (its HTTP client and network settings) and
-          # builds paths, how Kumi finds, opens and checks the DAW (its DAW modules and the doctor), or how Kumi's extension
-          # goes into Live, build and install on one machine of each system (Linux and Windows on x64, macOS on Apple
+          # builds paths, how Kumi finds, opens and checks the DAW (its DAW modules and the doctor), how Kumi's extension
+          # goes into Live, or REAPER's and Renoise's bridges (the extension, the tool, Kumi's host for them and their
+          # shared lifecycle; their tests aside), build and install on one machine of each system (Linux and Windows on x64, macOS on Apple
           # silicon); tags, a run by hand and a pull request labelled full-tests build all six platforms, install each,
           # update to it from the release before it and check the update from the JavaScript release (see below). A pull
           # request that changes the bridge (the Remote Script, the protocol it ships, the Live extension), a version
@@ -58,7 +59,7 @@ jobs:
           # merged.
           full=true
           checks=true
-          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|process\.rs|cli/|daw/|doctor)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/integrations/ableton/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs))'
+          installing_paths='^(install\.(sh|ps1)|scripts/|vendor/willington/|\.github/workflows/installer\.yml|crates/kumi/src/(install|update|process\.rs|cli/|daw/|doctor)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|crates/kumi-runtime/src/integrations/ableton/hands/(KumiHands\.swift|mac\.rs)|crates/kumi-runtime/src/(system\.rs|ai/http\.rs|net/|library/sources\.rs)|crates/(reaper-kumi|daw-bridge|daw-mcp-server)/|daws/renoise/com\.kumi\.Bridge\.xrnx/)'
           # A change to any of these gets every system's install and transition jobs before it merges: main broke once
           # when the Mac helper's didn't. Each has to be there, so a renamed one can't drop out unnoticed.
           for path in install.sh install.ps1 crates/kumi/src/install.rs crates/kumi/src/update.rs crates/kumi/src/install/migration.rs \
@@ -67,7 +68,10 @@ jobs:
             crates/kumi/src/doctor/installation.rs crates/kumi-runtime/src/integrations/ableton/hands/KumiHands.swift \
             crates/kumi-runtime/src/integrations/ableton/hands/mac.rs crates/kumi-runtime/src/system.rs crates/kumi-runtime/src/ai/http.rs \
             crates/kumi-runtime/src/library/sources.rs crates/ableton-mcp-server/src/install_remote_script.rs \
-            crates/ableton-mcp-server/src/lifecycle.rs crates/ableton-mcp-server/src/delivery_install.rs; do
+            crates/ableton-mcp-server/src/lifecycle.rs crates/ableton-mcp-server/src/delivery_install.rs \
+            crates/kumi/src/daw/own.rs crates/daw-bridge/src/lifecycle.rs crates/daw-bridge/src/install.rs crates/daw-bridge/src/detect.rs \
+            crates/reaper-kumi/build.rs crates/reaper-kumi/src/lib.rs crates/daw-mcp-server/src/bin/daw-mcp-server.rs \
+            daws/renoise/com.kumi.Bridge.xrnx/manifest.xml daws/renoise/com.kumi.Bridge.xrnx/main.lua; do
             test -e "$path" || { echo "::error::$path, which the installs depend on, isn't there: point this check at its new name"; exit 1; }
             grep -q -E "$installing_paths" <<<"$path" || { echo "::error::$path must count as installing"; exit 1; }
           done
@@ -79,7 +83,7 @@ jobs:
             base="origin/${GITHUB_BASE_REF}"
             # Read whole, then searched: grep -q can close a pipe early, and git, still writing, fails under pipefail.
             changed="$(git diff --name-only "$base...HEAD")"
-            installing="$(grep -E "$installing_paths" <<<"$changed" | grep -v -E '^scripts/test-isolated\.' || true)"
+            installing="$(grep -E "$installing_paths" <<<"$changed" | grep -v -E '^scripts/test-isolated\.|^crates/(reaper-kumi|daw-bridge|daw-mcp-server)/(tests|examples)/|^crates/(reaper-kumi|daw-bridge|daw-mcp-server)/src/(.*/)?tests\.rs$' || true)"
             # Cargo's changed lines less version numbers (a bridge or release bump): what's left is a dependency.
             dependencies="$(git diff -U0 "$base...HEAD" -- Cargo.toml Cargo.lock 'crates/*/Cargo.toml' \
               | grep -E '^[-+]' | grep -v -E '^(---|\+\+\+) |^[-+]version = "[^"]*"$' || true)"
@@ -141,7 +145,9 @@ jobs:
           python-version: '3.13'
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
-          targets: ${{ matrix.target }}
+          # And REAPER's extension's (scripts/build-native-release.py): both Mac architectures, in one file, and on Windows
+          # the x64 build, which REAPER for Windows on Arm (ARM64EC) loads too.
+          targets: ${{ matrix.target }}${{ runner.os == 'macOS' && ',aarch64-apple-darwin,x86_64-apple-darwin' || '' }}${{ matrix.target == 'aarch64-pc-windows-msvc' && ',x86_64-pc-windows-msvc' || '' }}
       # Saved from main only: pull requests and tags restore main's (ci-release from its pushes, release from its
       # nightly run).
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
@@ -162,11 +168,20 @@ jobs:
         run: |
           want=arm64
           if [[ '${{ matrix.target }}' == x86_64-* ]]; then want=x86_64; fi
-          for name in kumi ableton-mcp-server ableton-mcp-analysis-worker kumi-harness kumi-library-measure kumi-library-learner; do
+          for name in kumi ableton-mcp-server ableton-mcp-analysis-worker daw-mcp-server kumi-harness kumi-library-measure kumi-library-learner; do
             archs="$(lipo -archs "target/${{ matrix.target }}/$PROFILE/$name")"
             echo "$name: $archs"
             test "$archs" = "$want"
           done
+          # REAPER's extension, as Apple's own tools see it (the release script read it too): both architectures in one
+          # file, its signature whole, and its LINKEDIT laid out as dyld wants.
+          extension="target/reaper-extension/${{ matrix.target }}/reaper_kumi.dylib"
+          archs="$(lipo -archs "$extension" | tr ' ' '\n' | sort | xargs)"
+          echo "reaper_kumi.dylib: $archs"
+          test "$archs" = "arm64 x86_64"
+          codesign --verify --strict --verbose "$extension"
+          test "$(otool -D "$extension" | tail -n 1)" = "@rpath/reaper_kumi.dylib"
+          if dyld_info -segments "$extension" | grep -i mis-aligned; then exit 1; fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.target }}
@@ -255,7 +270,12 @@ jobs:
           # As producers run it: the one-liner, the release's installer piped into sh from a Terminal (a UTF-8 locale),
           # with no Node of its own on PATH.
           curl -fsSL "$KUMI_RELEASES/install.sh" | env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin SHELL=/bin/bash LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 KUMI_HOME="$KUMI_HOME" KUMI_RELEASES="$KUMI_RELEASES" sh
-          kumi() { env -i HOME="$HOME" PATH=/usr/bin:/bin TERM=xterm KUMI_RELEASES="$KUMI_RELEASES" "$KUMI_HOME/bin/kumi" "$@"; }
+          # REAPER's and Renoise's folders as each makes them on its first run, scratch ones (no REAPER or Renoise here),
+          # named the way a producer names folders kept elsewhere; each holds a file of the producer's own where Kumi
+          # puts its bridge.
+          reaper="$RUNNER_TEMP/REAPER"; renoise="$RUNNER_TEMP/Renoise/V3.5.4"
+          python3 scripts/tests/daw_bridges.py prepare "$reaper" "$renoise"
+          kumi() { env -i HOME="$HOME" PATH=/usr/bin:/bin TERM=xterm KUMI_RELEASES="$KUMI_RELEASES" KUMI_REAPER_RESOURCE_DIR="$reaper" KUMI_RENOISE_PREFS_DIR="$renoise" "$KUMI_HOME/bin/kumi" "$@"; }
           kumi --version | grep -q "Kumi $(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
           kumi --help | grep -q "kumi bridge"
           kumi doctor || true
@@ -275,17 +295,31 @@ jobs:
           mkdir -p "$RUNNER_TEMP/User Library/Remote Scripts"
           env -i HOME="$HOME" PATH=/usr/bin:/bin KUMI_REMOTE_SCRIPTS_DIR="$RUNNER_TEMP/User Library/Remote Scripts" KUMI_BRIDGE_WAIT_SECONDS=0 "$KUMI_HOME/bin/kumi" bridge --yes
           test -f "$RUNNER_TEMP/User Library/Remote Scripts/AbletonMcpBridge/ableton_mcp_remote_script.py"
+          # REAPER's extension and Renoise's tool from the bundle, through Kumi's lifecycle: each exactly the copy the bundle
+          # carries, with its reference, receipt and kept generation; the extension loads, with REAPER's entry point; and
+          # Kumi's host for them starts.
+          kumi --daw reaper bridge --yes
+          kumi --daw renoise bridge --yes
+          daws() { python3 scripts/tests/daw_bridges.py placed "$KUMI_HOME/app" "$KUMI_HOME" "$reaper" "$renoise" "$@"; }
+          daws --load
+          daws > daws.txt
+          "$KUMI_HOME/app/daw-mcp-server" --version
+          kumi --daw reaper doctor || true
           kumi update | tee update.txt; grep -q "up to date" update.txt
+          test "$(daws)" = "$(cat daws.txt)"   # up to date: both bridges as they were
           kumi update --rollback
           kumi --version
+          test "$(daws)" = "$(cat daws.txt)"   # the Kumi the repair kept carries the same bridges
           echo 1 > "$KUMI_HOME/settings-marker"
           kumi uninstall --yes
           # One test a line: bash -e doesn't stop at a failing one that isn't the last in an && list.
           test ! -e "$KUMI_HOME/app"
           test ! -e "$KUMI_HOME/node"
           test ! -e "$KUMI_HOME/bin"
+          test ! -e "$KUMI_HOME/bridges"
           test -f "$KUMI_HOME/settings-marker"   # the producer's own files stay
           test "$(marked)" = 0
+          python3 scripts/tests/daw_bridges.py removed "$KUMI_HOME" "$reaper" "$renoise"
 
       - name: GitHub's latest and the release before this one, updated to this one and back twice (zsh on macOS, fish on Linux; a non-ASCII home)
         if: ${{ !cancelled() && matrix.update && runner.os != 'Windows' }}
@@ -453,17 +487,41 @@ jobs:
           & $kumi bridge --yes
           if ($LASTEXITCODE -ne 0) { throw 'kumi bridge failed' }
           if (-not (Test-Path (Join-Path $scripts 'AbletonMcpBridge\ableton_mcp_remote_script.py'))) { throw 'no Remote Script' }
+          # REAPER's extension and Renoise's tool from the bundle, into scratch DAW folders (no REAPER or Renoise here), each
+          # beside a file of the producer's own that Kumi leaves as it is (scripts/tests/daw_bridges.py checks what's where);
+          # the extension loads, with REAPER's entry point; and Kumi's host for them starts.
+          $reaper = Join-Path $env:RUNNER_TEMP 'REAPER'; $renoise = Join-Path $env:RUNNER_TEMP 'Renoise\V3.5.4'
+          python scripts/tests/daw_bridges.py prepare $reaper $renoise
+          if ($LASTEXITCODE -ne 0) { throw "the DAWs' folders weren't made" }
+          $env:KUMI_REAPER_RESOURCE_DIR = $reaper; $env:KUMI_RENOISE_PREFS_DIR = $renoise
+          & $kumi --daw reaper bridge --yes
+          if ($LASTEXITCODE -ne 0) { throw 'kumi --daw reaper bridge failed' }
+          & $kumi --daw renoise bridge --yes
+          if ($LASTEXITCODE -ne 0) { throw 'kumi --daw renoise bridge failed' }
+          function Daws {
+            $said = python scripts/tests/daw_bridges.py placed (Join-Path $env:KUMI_HOME 'app') $env:KUMI_HOME $reaper $renoise @args | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "REAPER's and Renoise's bridges aren't as Kumi put them" }
+            $said
+          }
+          Write-Host (Daws --load)
+          $daws = Daws
+          & (Join-Path $env:KUMI_HOME 'app\daw-mcp-server.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'daw-mcp-server did not start' }
           $update = & $kumi update | Out-String; Write-Host $update
           if ($update -notmatch 'up to date') { throw 'update did not say up to date' }
+          if ((Daws) -ne $daws) { throw "the update changed REAPER's or Renoise's bridge: $(Daws)" }
           & $kumi update --rollback
           if ($LASTEXITCODE -ne 0) { throw 'native rollback failed' }
           if ((& $kumi --version) -ne $version) { throw "the rollback didn't preserve the release" }
+          if ((Daws) -ne $daws) { throw "the rollback changed REAPER's or Renoise's bridge: $(Daws)" }
           Set-Content -Path (Join-Path $env:KUMI_HOME 'settings-marker') -Value 1
           & $kumi uninstall --yes
-          # Its folders go a few seconds later, from a cmd it leaves running.
+          # REAPER's and Renoise's bridges come out at once; Kumi's folders a few seconds later, from a cmd it leaves running.
+          python scripts/tests/daw_bridges.py removed $env:KUMI_HOME $reaper $renoise
+          if ($LASTEXITCODE -ne 0) { throw "REAPER's or Renoise's bridge stayed" }
           $deadline = (Get-Date).AddSeconds(60)
-          while ((Get-Date) -lt $deadline -and @('app', 'node', 'bin' | Where-Object { Test-Path (Join-Path $env:KUMI_HOME $_) })) { Start-Sleep -Milliseconds 500 }
-          foreach ($gone in 'app', 'node', 'bin') { if (Test-Path (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
+          while ((Get-Date) -lt $deadline -and @('app', 'node', 'bin', 'bridges' | Where-Object { Test-Path (Join-Path $env:KUMI_HOME $_) })) { Start-Sleep -Milliseconds 500 }
+          foreach ($gone in 'app', 'node', 'bin', 'bridges') { if (Test-Path (Join-Path $env:KUMI_HOME $gone)) { throw "$gone still there" } }
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'settings-marker'))) { throw 'the producer''s files went too' }
           if ((([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';') -contains (Join-Path $env:KUMI_HOME 'bin')) { throw 'PATH still has Kumi' }
 

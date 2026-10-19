@@ -3,7 +3,8 @@
 // reaper_plugin_functions.h declares each function on one line, `ret (*REAPERAPI_FUNCNAME(Name))(args);`, and
 // that line is all we read: the function's name, its C signature (kept as text for the generic call) and a typed
 // Rust function pointer, resolved at load time through GetFunc. Nothing is listed by hand, so a newer header
-// brings its new functions with it.
+// brings its new functions with it. The header's own loader table names every function a second time: a
+// prototype this parser can't read fails the build there, by name, instead of going missing.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -25,6 +26,7 @@ fn main() {
     let shim = fs::read_to_string(SHIM).expect("read the shim");
 
     let functions = parse_functions(&functions_header);
+    check_loader_table(&functions_header, &functions);
     let sdk_version = generated_by(&functions_header);
     let mut out = String::new();
     emit(&mut out, &sdk_version, &functions, &plugin_header);
@@ -33,6 +35,11 @@ fn main() {
 
     check_shim(&plugin_header, &shim);
     build_shim(Path::new(SHIM));
+    // The name the library gives itself on macOS: the linker's default is the absolute path it was built at. REAPER
+    // loads it by path, so this only keeps the build folder out of the file Kumi ships.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/reaper_kumi.dylib");
+    }
 }
 
 struct Function {
@@ -69,6 +76,24 @@ fn parse_functions(header: &str) -> Vec<Function> {
     let names: BTreeSet<_> = functions.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names.len(), functions.len(), "a function is declared twice");
     functions
+}
+
+// REAPERAPI_LoadAPI's table, `{(void**)&REAPERAPI_FUNCNAME(Name),"Name"},`: every function the header declares,
+// listed apart from the prototypes. Each one must have been read from its prototype, and nothing else.
+fn check_loader_table(header: &str, functions: &[Function]) {
+    const ENTRY: &str = "{(void**)&REAPERAPI_FUNCNAME(";
+    let mut listed = BTreeSet::new();
+    for line in header.lines() {
+        let Some(rest) = line.trim_start().strip_prefix(ENTRY) else { continue };
+        let (name, quoted) = rest.split_once("),\"").unwrap_or_else(|| panic!("unexpected loader entry: {line}"));
+        assert_eq!(quoted.strip_suffix("\"},"), Some(name), "a loader entry names two functions: {line}");
+        assert!(listed.insert(name.to_string()), "{name} is in the loader table twice");
+    }
+    let parsed: BTreeSet<String> = functions.iter().map(|f| f.name.clone()).collect();
+    let unread: Vec<_> = listed.difference(&parsed).collect();
+    let unlisted: Vec<_> = parsed.difference(&listed).collect();
+    assert!(unread.is_empty(), "{FUNCTIONS_HEADER} declares functions build.rs couldn't read from their prototypes: {unread:?}");
+    assert!(unlisted.is_empty(), "build.rs read prototypes the loader table doesn't list: {unlisted:?}");
 }
 
 fn split_top_level(args: &str) -> Vec<String> {
