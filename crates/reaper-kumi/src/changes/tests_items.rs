@@ -612,6 +612,50 @@ fn values_back_from_reapers_undo_and_redo_are_still_the_ones_kumi_wrote() {
     assert_eq!(code(lab.undo("item-props", &preview, &applied)), "changed");
 }
 
+/// Every item kind's undo says when the item is back already (writing nothing) and when it is gone.
+#[test]
+fn every_item_undo_says_back_already_and_gone() {
+    let back_already = "It was back already: nothing was written.";
+    let cases: [(&str, Value); 7] = [
+        ("item-move", json!({"ref": K1, "position": 3.0})),
+        ("item-split", json!({"ref": K1, "position": 1.0})),
+        ("item-trim", json!({"ref": K1, "end": 1.0})),
+        ("item-fade", json!({"ref": K1, "fadeIn": {"length": 0.2}})),
+        ("item-props", json!({"ref": K1, "mute": true})),
+        ("item-group", json!({"itemRefs": [K1, "r:item:{ITEM-K2}"], "grouped": true})),
+        ("item-delete", json!({"ref": K1})),
+    ];
+    for (kind, input) in cases {
+        let lab = Lab::new();
+        let (preview, applied) = lab.make(kind, input.clone());
+        lab.undo(kind, &preview, &applied).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        let again = lab.undo(kind, &preview, &applied).unwrap_or_else(|e| panic!("{kind} again: {e:?}"));
+        assert_eq!(again["display"]["note"], back_already, "{kind}");
+        // The item went (for a delete, the track it was on) before Kumi's undo.
+        let lab = Lab::new();
+        let (preview, applied) = lab.make(kind, input);
+        state(|s| {
+            if kind == "item-delete" {
+                s.tracks.remove(1);
+            } else {
+                s.tracks[1].items.retain(|i| i.guid != "{ITEM-K1}");
+            }
+        });
+        assert_eq!(code(lab.undo(kind, &preview, &applied)), "gone", "{kind}");
+    }
+    // An item Kumi made and its undo took away: the undo again says it is gone.
+    for kind in ["item-import", "item-duplicate"] {
+        let lab = Lab::new();
+        let input = match kind {
+            "item-import" => json!({"ref": SNARE, "path": media_file("again.wav", "WAVE", 2.0, false), "position": 0.0}),
+            _ => json!({"ref": K1, "position": 20.0}),
+        };
+        let (preview, applied) = lab.make(kind, input);
+        lab.undo(kind, &preview, &applied).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        assert_eq!(code(lab.undo(kind, &preview, &applied)), "gone", "{kind}");
+    }
+}
+
 // ----- copying -----
 
 #[test]

@@ -116,3 +116,23 @@ fn a_glue_whose_item_the_producer_deleted_stays_undone_by_them() {
     assert_eq!(code_, "changed", "{message}");
     assert!(item("{ITEM-K1}").is_none() && item("{ITEM-K2}").is_none(), "nothing brought back");
 }
+
+#[test]
+fn a_render_undo_says_back_already_and_gone() {
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("items-render", json!({"itemRefs": [K1]}));
+    lab.undo("items-render", &preview, &applied).unwrap();
+    let again = lab.undo("items-render", &preview, &applied).unwrap();
+    assert_eq!(again["display"]["note"], "It was back already: nothing was written.");
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("items-render", json!({"itemRefs": [K1]}));
+    state(|s| s.tracks[1].items.retain(|i| i.guid != "{ITEM-K1}"));
+    assert_eq!(code(lab.undo("items-render", &preview, &applied)), "gone");
+    // A glue whose originals' track went: the glued item went with it, so it is the producer's (changed), not gone.
+    let lab = Lab::new();
+    let (preview, applied) = lab.make("items-glue", json!({"itemRefs": [K1, K2]}));
+    state(|s| {
+        s.tracks.remove(1);
+    });
+    assert_eq!(code(lab.undo("items-glue", &preview, &applied)), "changed");
+}

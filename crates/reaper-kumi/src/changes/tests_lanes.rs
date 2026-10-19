@@ -317,3 +317,28 @@ fn picked_lanes_come_back_picked_and_a_track_whose_lanes_all_played_comes_back_u
     lab.undo("track-lanes", &preview, &applied).unwrap();
     assert!(!picked());
 }
+
+/// Every lane kind's undo says when the track is back already (writing nothing) and when it is gone.
+#[test]
+fn every_lane_undo_says_back_already_and_gone() {
+    let cases: [(&str, serde_json::Value); 5] = [
+        ("track-lanes", json!({"ref": KICK, "mode": "normal"})),
+        ("lane-plays", json!({"ref": KICK, "lane": 1, "plays": "only"})),
+        ("lane-name", json!({"ref": KICK, "lane": 1, "name": "B"})),
+        ("razor-set", json!({"ref": KICK, "areas": [{"start": 0.0, "end": 1.0}]})),
+        ("lane-comp", json!({"ref": KICK, "lane": 1, "start": 0.5, "end": 1.5})),
+    ];
+    for (kind, input) in cases {
+        let lab = lanes_lab();
+        let (preview, applied) = lab.make(kind, input.clone());
+        lab.undo(kind, &preview, &applied).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        let again = lab.undo(kind, &preview, &applied).unwrap_or_else(|e| panic!("{kind} again: {e:?}"));
+        assert_eq!(again["display"]["note"], "It was back already: nothing was written.", "{kind}");
+        let lab = lanes_lab();
+        let (preview, applied) = lab.make(kind, input);
+        state(|s| {
+            s.tracks.remove(1);
+        });
+        assert_eq!(code(lab.undo(kind, &preview, &applied)), "gone", "{kind}");
+    }
+}

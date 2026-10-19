@@ -450,3 +450,40 @@ fn a_take_and_its_stretch_markers_back_from_reapers_undo_and_redo_can_still_be_u
     lab.undo("stretch-markers-add", &preview, &applied).unwrap();
     assert!(item("{ITEM-K1}").unwrap().1.takes[0].more.stretch.is_empty());
 }
+
+/// Every take and marker kind's undo says when it is back already (writing nothing) and when the take's item is gone.
+#[test]
+fn every_take_undo_says_back_already_and_gone() {
+    let marked = || {
+        let lab = three_takes();
+        state(|s| {
+            let take = &mut s.tracks[1].items[0].takes[0];
+            take.more.stretch = vec![(0.5, 0.5, 0.0), (1.0, 1.0, 0.0)];
+            take.more.markers = vec![(0.3, "m".into(), 0)];
+        });
+        lab
+    };
+    let cases: [(&str, serde_json::Value); 10] = [
+        ("take-props", json!({"ref": T1, "pitch": 2.0})),
+        ("take-active", json!({"ref": "r:take:{TAKE-K1B}"})),
+        ("take-add", json!({"ref": K1})),
+        ("take-delete", json!({"ref": "r:take:{TAKE-K1B}"})),
+        ("stretch-markers-add", json!({"ref": T1, "markers": [{"position": 1.5}]})),
+        ("stretch-markers-change", json!({"ref": T1, "changes": [{"index": 1, "position": 1.2}]})),
+        ("stretch-markers-delete", json!({"ref": T1, "indexes": [0]})),
+        ("take-markers-add", json!({"ref": T1, "markers": [{"sourcePosition": 0.6, "name": "n"}]})),
+        ("take-markers-change", json!({"ref": T1, "changes": [{"index": 0, "name": "x"}]})),
+        ("take-markers-delete", json!({"ref": T1, "indexes": [0]})),
+    ];
+    for (kind, input) in cases {
+        let lab = marked();
+        let (preview, applied) = lab.make(kind, input.clone());
+        lab.undo(kind, &preview, &applied).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        let again = lab.undo(kind, &preview, &applied).unwrap_or_else(|e| panic!("{kind} again: {e:?}"));
+        assert_eq!(again["display"]["note"], "It was back already: nothing was written.", "{kind}");
+        let lab = marked();
+        let (preview, applied) = lab.make(kind, input);
+        state(|s| s.tracks[1].items.retain(|i| i.guid != "{ITEM-K1}"));
+        assert_eq!(code(lab.undo(kind, &preview, &applied)), "gone", "{kind}");
+    }
+}

@@ -271,3 +271,30 @@ fn a_transform_is_refused_when_the_notes_changed_since_the_preview_and_its_undo_
         assert_eq!(daw_bridge::contract::misplaced_refs(answer), Vec::<String>::new());
     }
 }
+
+/// Every MIDI event and note transform undo says when the take is back already (writing nothing) and when it is gone.
+#[test]
+fn every_event_and_transform_undo_says_back_already_and_gone() {
+    let cases: [(&str, serde_json::Value); 5] = [
+        (
+            "midi-events-add",
+            json!({"ref": SNARE_TAKE, "events": [{"type": "cc", "channel": 1, "controller": 1, "value": 5, "start": 0.5}]}),
+        ),
+        ("midi-events-change", json!({"ref": SNARE_TAKE, "changes": [{"index": 0, "value": 9}]})),
+        ("midi-events-delete", json!({"ref": SNARE_TAKE, "indexes": [1]})),
+        ("notes-quantize", json!({"ref": SNARE_TAKE, "grid": 1.0})),
+        ("notes-humanize", json!({"ref": SNARE_TAKE, "timing": 20.0, "seed": 3})),
+    ];
+    for (kind, input) in cases {
+        let setup = || if kind.starts_with("notes") { loose_notes(&[(100, 400, 60), (1000, 1200, 62)]) } else { midi_lab() };
+        let lab = setup();
+        let (preview, applied) = lab.make(kind, input.clone());
+        lab.undo(kind, &preview, &applied).unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        let again = lab.undo(kind, &preview, &applied).unwrap_or_else(|e| panic!("{kind} again: {e:?}"));
+        assert_eq!(again["display"]["note"], "It was back already: nothing was written.", "{kind}");
+        let lab = setup();
+        let (preview, applied) = lab.make(kind, input);
+        state(|s| s.tracks[2].items.retain(|i| i.guid != "{ITEM-S1}"));
+        assert_eq!(code(lab.undo(kind, &preview, &applied)), "gone", "{kind}");
+    }
+}
