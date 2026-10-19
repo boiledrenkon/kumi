@@ -15,6 +15,8 @@ use crate::refs::{self, EnvelopeId, Epoch, Ref, Registry, TrackId};
 use crate::rows;
 
 mod bodies;
+// m4-r-fxenv: points, automation items and take envelopes.
+mod envelopes;
 
 pub use bodies::BODY_KINDS;
 
@@ -48,7 +50,8 @@ const SNAPSHOT_TRACKS: usize = 200;
 const SNAPSHOT_MARKERS: usize = 100;
 /// The snapshot's own share of the answer, so the tracks leave room for the markers and the selection.
 const SNAPSHOT_TRACK_BYTES: usize = 150 * 1024;
-const KINDS: [&str; 12] = ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "call"];
+const KINDS: [&str; 14] =
+    ["project", "track", "item", "take", "fx", "param", "send", "marker", "region", "note", "envelope", "call", "point", "autoitem"];
 
 pub fn bad(message: impl Into<String>) -> (String, String) {
     ("bad-params".into(), message.into())
@@ -532,13 +535,16 @@ impl Reads {
             "region" => self.read_markers(reaper, proj, pager, true, cursor),
             "note" => self.read_notes(reaper, proj, pager, parent, cursor),
             "envelope" => self.read_envelopes(reaper, proj, pager, parent, cursor),
+            // m4-r-fxenv
+            "point" => self.read_points(reaper, proj, pager, parent, cursor),
+            "autoitem" => self.read_auto_items(reaper, proj, pager, parent, cursor),
             other => Err(bad(format!("REAPER has no kind {other:?} to read"))),
         };
         // Where a row's `index` starts counting, which is where the change that takes the same index starts too: a track's
         // place is counted from 1 (as REAPER numbers its tracks), an FX's place, a parameter's and a note's from 0.
         let from = match kind {
             "track" => Some(1),
-            "fx" | "param" | "note" => Some(0),
+            "fx" | "param" | "note" | "point" | "autoitem" => Some(0),
             _ => None,
         };
         answer.map(|mut answer| {
@@ -620,8 +626,10 @@ impl Reads {
             Ref::Envelope { track, which } => {
                 let owner = self.track_by_id(reaper, proj, &track)?;
                 let envelope = self.envelope_of(reaper, proj, owner, &which)?;
-                rows::envelope_row(reaper, &track, envelope)
+                self.track_envelope_row(reaper, proj, &track, envelope)
             }
+            // m4-r-fxenv
+            other @ (Ref::TakeEnvelope { .. } | Ref::AutoItem { .. }) => self.read_one_m4(reaper, proj, &other)?,
         };
         Ok(json!({"items": [row], "epoch": self.epoch()}))
     }
@@ -954,7 +962,14 @@ impl Reads {
     }
 
     fn read_envelopes(&self, reaper: &Reaper, proj: Project, mut pager: Pager, parent: Option<&str>, cursor: Option<&str>) -> Answer {
-        let parent = parent.ok_or_else(|| bad("envelope: pass the track or FX as parent"))?;
+        let parent = parent.ok_or_else(|| bad("envelope: pass the track, take or FX as parent"))?;
+        // m4-r-fxenv: a take's envelopes (and a take FX's).
+        let take_fx = |guid: &str| self.fx_by_guid(reaper, proj, guid).is_ok_and(|fx| matches!(fx.owner, FxOwner::Take(_)));
+        match Ref::parse(parent).map_err(bad)? {
+            Ref::Take(_) | Ref::Item(_) => return self.read_take_envelopes(reaper, proj, pager, parent, cursor),
+            Ref::Fx(guid) if take_fx(&guid) => return self.read_take_envelopes(reaper, proj, pager, parent, cursor),
+            _ => {}
+        }
         let found: Vec<(TrackId, Envelope)> = match Ref::parse(parent).map_err(bad)? {
             Ref::Track(id) => {
                 let track = self.track_by_id(reaper, proj, &id)?;
@@ -986,7 +1001,7 @@ impl Reads {
                 break;
             }
             let (track, envelope) = &found[position];
-            if !pager.push(rows::envelope_row(reaper, track, *envelope)) {
+            if !pager.push(self.track_envelope_row(reaper, proj, track, *envelope)) {
                 next = Some(position);
                 break;
             }
@@ -1096,6 +1111,15 @@ impl crate::reaper::generic::Handles for CallRefs<'_, '_> {
             ("MediaItem_Take", Ref::Take(guid)) => Handle::Take(reads.take_by_ref(reaper, proj, &guid).map_err(|e| e.1)?),
             ("TrackEnvelope", Ref::Envelope { track, which }) => {
                 Handle::Envelope(reads.envelope_by_ref(reaper, proj, &track, &which).map_err(|e| e.1)?)
+            }
+            // m4-r-fxenv
+            ("TrackEnvelope", Ref::TakeEnvelope { take, guid }) => {
+                let take = reads.take_by_ref(reaper, proj, &take).map_err(|e| e.1)?;
+                let envelope = (0..reaper.take_envelope_count(take))
+                    .filter_map(|i| reaper.take_envelope(take, i))
+                    .find(|e| reaper.envelope_guid(*e).is_some_and(|g| g.eq_ignore_ascii_case(&guid)))
+                    .ok_or("that take has no such envelope")?;
+                Handle::Envelope(envelope)
             }
             (base, other) => return Err(format!("{reference} is r:{}, where a {base} is wanted", other.kind())),
         };

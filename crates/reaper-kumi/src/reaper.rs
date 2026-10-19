@@ -12,6 +12,9 @@ pub mod generic;
 mod objects;
 mod write;
 pub use objects::*;
+// m4-r-fxenv: FX in any chain, envelopes, points and automation items.
+mod fxenv;
+pub use fxenv::{EnvPoint, EqParam};
 
 /// File: Quit REAPER.
 pub const ACTION_QUIT: i32 = 40004;

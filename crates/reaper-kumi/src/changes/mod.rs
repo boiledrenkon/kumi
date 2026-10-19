@@ -20,6 +20,14 @@ pub(crate) use sends::seen_holds as send_seen_holds;
 mod structure;
 mod tracks;
 mod undo;
+// m4-r-fxenv: FX in every chain, containers, parameter modulation, envelopes and automation items.
+mod containers;
+mod envelopes;
+pub(crate) use envelopes::{envelope_extras, item_rows, point_source};
+mod fx_more;
+mod fxchain;
+mod fxkinds;
+mod modulation;
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -126,6 +134,8 @@ enum Kind {
     RunLua,
     /// A REAPER API function that changes the project, called by name (only REAPER's undo takes it back).
     ApiCall,
+    // m4-r-fxenv
+    FxEnv(fxkinds::Kind),
 }
 
 fn kind(name: &str) -> Option<Kind> {
@@ -137,6 +147,10 @@ fn kind(name: &str) -> Option<Kind> {
     }
     if let Some(prop) = marks::PROPS.iter().find(|prop| prop.kind == name) {
         return Some(Kind::MarkProp(prop));
+    }
+    // m4-r-fxenv
+    if let Some(kind) = fxkinds::kind(name) {
+        return Some(Kind::FxEnv(kind));
     }
     match name {
         "fx-add" => Some(Kind::Fx(fx::Which::Add)),
@@ -170,7 +184,12 @@ fn kind(name: &str) -> Option<Kind> {
 impl Kind {
     /// Whether a change of this kind leaves a point in REAPER's undo history: the repeat button does not.
     fn leaves_point(self) -> bool {
-        !matches!(self, Kind::LoopRepeat)
+        match self {
+            Kind::LoopRepeat => false,
+            // m4-r-fxenv
+            Kind::FxEnv(kind) => kind.leaves_point(),
+            _ => true,
+        }
     }
 
     fn preview(self, ctx: &Ctx, input: &Value) -> Done<Preview> {
@@ -196,6 +215,7 @@ impl Kind {
             Kind::FxPins => pins::preview(ctx, input),
             Kind::RunLua => lua::preview(ctx, input),
             Kind::ApiCall => call::preview(ctx, input),
+            Kind::FxEnv(kind) => kind.preview(ctx, input),
         }
     }
 
@@ -222,6 +242,7 @@ impl Kind {
             Kind::FxPins => pins::apply(ctx, input, fence),
             Kind::RunLua => lua::apply(ctx, input, fence),
             Kind::ApiCall => call::apply(ctx, input, fence),
+            Kind::FxEnv(kind) => kind.apply(ctx, input, fence),
         }
     }
 
@@ -247,6 +268,7 @@ impl Kind {
             Kind::FxPins => pins::restore(ctx, restore),
             Kind::RunLua => lua::restore(ctx, restore),
             Kind::ApiCall => call::restore(ctx, restore),
+            Kind::FxEnv(kind) => kind.restore(ctx, restore),
         }
     }
 }
@@ -560,3 +582,6 @@ pub(crate) fn track_ref_of(input: &Value, what: &str) -> Done<crate::refs::Track
 
 #[cfg(test)]
 mod tests;
+// m4-r-fxenv
+#[cfg(test)]
+mod tests_fxenv;

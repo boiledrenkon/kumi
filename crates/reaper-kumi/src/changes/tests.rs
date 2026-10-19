@@ -1704,7 +1704,7 @@ fn deleting_an_fx_keeps_its_entry_and_undo_adds_it_back_with_its_id_and_state_an
 }
 
 #[test]
-fn deleting_an_fx_is_refused_when_it_changed_or_went_and_containers_and_other_chains_are_left_alone() {
+fn deleting_an_fx_is_refused_when_it_changed_or_went() {
     let lab = Lab::new();
     let guids = three_fx(&lab);
     let input = json!({"ref": fx_ref_of(&guids[1])});
@@ -1717,16 +1717,11 @@ fn deleting_an_fx_is_refused_when_it_changed_or_went_and_containers_and_other_ch
     assert_eq!(lab.call("change_apply", apply).unwrap_err().0, "changed");
     assert_eq!(state(|s| s.undo_entries), entries);
     assert_eq!(lab.call("change_preview", json!({"kind": "fx-delete", "input": input})).unwrap_err().0, "failed");
-    for reference in ["r:fx:{FX-C}", "r:fx:{FX-DLY}", "r:track:{BBBB}", "r:fx:{NOPE}"] {
+    // (containers and the FX inside them are deleted too since M4: tests_fxenv has them)
+    for reference in ["r:track:{BBBB}", "r:fx:{NOPE}"] {
         let (code, _) = lab.call("change_preview", json!({"kind": "fx-delete", "input": {"ref": reference}})).unwrap_err();
         assert!(code == "bad-params" || code == "failed", "{reference}: {code}");
     }
-    // An FX the chunk doesn't hold can't be kept, so it isn't deleted.
-    state(|s| {
-        s.tracks[1].fx.push(fake::FakeFx::container("{FX-K}", vec![]));
-        s.state_count += 1;
-    });
-    assert_eq!(lab.call("change_preview", json!({"kind": "fx-delete", "input": {"ref": "r:fx:{FX-K}"}})).unwrap_err().0, "bad-params");
 }
 
 #[test]
