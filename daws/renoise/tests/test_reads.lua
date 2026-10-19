@@ -1096,7 +1096,7 @@ test("reads: a change to what refs index into moves the epoch at once, before an
     { "a sample made", function() mock.ops.insert_sample(1) end, "sample:1.1" },
     { "a device deleted", function() mock.ops.remove_device(1, 1) end, "device:1.1" },
     { "a device made", function() mock.ops.insert_device(1, { name = "Gate", params = {} }) end, "device:1.1" },
-    { "two tracks swapped", function() mock.ops.swap_tracks(1, 2) end, "track:1" },
+    { "two tracks swapped", function() mock.ops.swap_tracks(1, 2) end, "track:1", 1 },
   }
   for _, change in ipairs(changes) do
     local env, peer = setup()
@@ -1106,7 +1106,7 @@ test("reads: a change to what refs index into moves the epoch at once, before an
     -- (no tick)
     local now = call(peer, "focus").result
     ok(now.epoch ~= E, change[1] .. ": focus is in the new epoch at once")
-    eq(now.layout, 0, change[1] .. ": the layout starts over")
+    eq(now.layout, change[4] or 0, change[1] .. ": the layout moves only for the tracks (a swap is one shift)")
     local response = call(peer, "read", { ref = E .. ":" .. change[3] })
     failure(response, "stale")
     -- and what is read now is named in the new epoch
