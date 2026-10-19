@@ -202,7 +202,7 @@ local function fit(result, entries, from, to, cut)
       shown[t] = {
         ref = entry.ref, name = entry.name, color = entry.color, noteColumns = entry.noteColumns,
         effectColumns = entry.effectColumns, lines = array(kept), aliasOf = entry.aliasOf, aliasRef = entry.aliasRef,
-        mutedColumns = entry.mutedColumns,
+        mutedColumns = entry.mutedColumns, automation = entry.automation,
       }
     end
     result.window = { from = from, to = to }
@@ -212,6 +212,31 @@ local function fit(result, entries, from, to, cut)
     to = math.max(from, from + math.floor((to - from + 1) * 0.6) - 1)
     cut = true
   end
+end
+
+-- M4 (n-song): a pattern track's automation lanes in the window, cheaply (the track's list of envelopes, no search through its
+-- devices): each its device's and parameter's names, play mode and the points from `from` to `to` (at most LANE_POINTS).
+M.LANES = 8
+M.LANE_POINTS = 32
+local PLAYMODE_NAMES = { "points", "linear", "curves" }
+function M.lanes(pattern_track, from, to)
+  local out = {}
+  for _, automation in ipairs(pattern_track.automation) do
+    if #out >= M.LANES then break end
+    local device, parameter = automation.dest_device, automation.dest_parameter
+    if device and parameter then
+      local points = {}
+      for _, point in ipairs(automation.points) do
+        if point.time >= from and point.time < to + 1 and #points < M.LANE_POINTS then points[#points + 1] = { point.time, point.value } end
+      end
+      out[#out + 1] = {
+        name = (device.display_name ~= "" and device.display_name or device.name) .. " " .. parameter.name,
+        playmode = PLAYMODE_NAMES[automation.playmode] or "linear", points = array(points),
+      }
+    end
+  end
+  if #out == 0 then return nil end
+  return array(out)
 end
 
 local function pattern_body(job, params, epoch)
@@ -241,7 +266,8 @@ local function pattern_body(job, params, epoch)
       aliasOf = alias > 0 and alias or nil, aliasRef = alias > 0 and refs.make(epoch, "pattern", alias) or nil,
     }
     entries[t].mutedColumns = rows.column_state(track)
-    bytes = bytes + 200 + #entries[t].name
+    entries[t].automation = M.lanes(pattern_track, from, to)
+    bytes = bytes + 200 + #entries[t].name + (entries[t].automation and #json.encode(entries[t].automation) or 0)
   end
   local hidden = params.hidden == true
   local cut = false

@@ -433,6 +433,33 @@ local function line_row(line, number, note_columns, effect_columns, scan_hidden)
   return row
 end
 
+-- M4 (n-song): the automation of a pattern's track, as the automation-write kind takes it: per automated parameter its ref,
+-- names, play mode and points (time in lines from 1, value 0 to 1 of the parameter's range).
+local PLAYMODE_NAMES = { "points", "linear", "curves" }
+function M.envelopes(song, epoch, p, t)
+  local track, pattern_track, out = song:track(t), song:pattern(p):track(t), {}
+  for d = 1, #track.devices do
+    local device = track:device(d)
+    for k = 1, #device.parameters do
+      local parameter = device:parameter(k)
+      if parameter.is_automated then
+        local automation = pattern_track:find_automation(parameter)
+        if automation then
+          local points = {}
+          for i, point in ipairs(automation.points) do points[i] = { time = point.time, value = point.value, scaling = point.scaling } end
+          table.sort(points, function(a, b) return a.time < b.time end)
+          out[#out + 1] = {
+            ref = refs.make(epoch, "param", t, d, k), device = device.display_name ~= "" and device.display_name or device.name,
+            parameter = parameter.name, playmode = PLAYMODE_NAMES[automation.playmode] or "linear", points = array(points),
+            valueMin = parameter.value_min, valueMax = parameter.value_max,
+          }
+        end
+      end
+    end
+  end
+  return out
+end
+
 M.fail = fail
 M.the_song = the_song
 M.track_count = track_count

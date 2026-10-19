@@ -280,8 +280,11 @@ local function parameter(data, set)
     value_min = data.min or 0, value_max = data.max or 1, value_default = data.default or 0,
     value_observable = data.value_observable or M.observable(),
     value_string_observable = M.observable(),
-    is_automated = data.automated == true,
   }, {
+    -- (M4 n-song: whether a pattern has automation of it, as the song's data says now; every parameter can be automated
+    -- unless a test says otherwise)
+    is_automated = function() return data.automated == true end,
+    is_automatable = function() return data.automatable ~= false end,
     value = function() return data.value end,
     value_string = function() return data.string and data.string(data.value) or string.format("%.2f", data.value) end,
   }, set)
@@ -745,7 +748,8 @@ function M.make_song(options)
     -- M4 (n-song): the slot colour and the list of automation have observables of their own
     data.color_observable = data.color_observable or M.observable()
     data.automation_observable = data.automation_observable or M.observable()
-    return object("renoise.PatternTrack", {
+    data.t = t
+    local made = object("renoise.PatternTrack", {
       alias_pattern_index_observable = data.alias_observable,
       color_observable = data.color_observable, automation_observable = data.automation_observable,
       -- an alias shows (and writes to) the lines of the pattern it is an alias of; lines past the pattern's end are kept
@@ -788,30 +792,53 @@ function M.make_song(options)
         end
         local made = { parameter = identity, playmode = 2, points = {} }
         data.automation[#data.automation + 1] = made
+        M.refresh_automated(identity)
         M.fire(data.automation_observable, { type = "insert", index = #data.automation })
         M.record(function()
           for k, automation in ipairs(data.automation) do
             if automation == made then table.remove(data.automation, k) M.fire(data.automation_observable, { type = "remove", index = k }) break end
           end
+          M.refresh_automated(identity)
         end, function()
           data.automation[#data.automation + 1] = made
+          M.refresh_automated(identity)
           M.fire(data.automation_observable, { type = "insert", index = #data.automation })
         end)
         return M.api.automation_object(made)
+      end,
+      -- (M4 n-song) a copy of another pattern's track (through its alias), its automation too; no alias after
+      copy_from = function(_, other)
+        local source = M.impl(other).__ptrack
+        if source.alias > 0 then source = d.patterns[source.alias].tracks[source.t] or { alias = 0, lines = {} } end
+        local old = { alias = data.alias, lines = data.lines, automation = data.automation }
+        local function copy(value)
+          if type(value) ~= "table" then return value end
+          local out = {}
+          for k, v in pairs(value) do out[k] = (k == "parameter") and v or copy(v) end
+          return out
+        end
+        local new = { alias = 0, lines = copy(source.lines or {}), automation = copy(source.automation or {}) }
+        data.alias, data.lines, data.automation = new.alias, new.lines, new.automation
+        M.fire(data.alias_observable)
+        M.record(function() data.alias, data.lines, data.automation = old.alias, old.lines, old.automation; M.fire(data.alias_observable) end,
+          function() data.alias, data.lines, data.automation = new.alias, new.lines, new.automation; M.fire(data.alias_observable) end)
       end,
       delete_automation = function(_, parameter)
         local identity = M.impl(parameter).__data
         for k, automation in ipairs(data.automation or {}) do
           if automation.parameter == identity then
             table.remove(data.automation, k)
+            M.refresh_automated(identity)
             M.fire(data.automation_observable, { type = "remove", index = k })
             M.record(function()
               table.insert(data.automation, math.min(k, #data.automation + 1), automation)
+              M.refresh_automated(identity)
               M.fire(data.automation_observable, { type = "insert", index = k })
             end, function()
               for j, other in ipairs(data.automation) do
                 if other == automation then table.remove(data.automation, j) M.fire(data.automation_observable, { type = "remove", index = j }) break end
               end
+              M.refresh_automated(identity)
             end)
             return
           end
@@ -843,15 +870,22 @@ function M.make_song(options)
         M.fire(data.color_observable)
         M.record(function() data.color = old; M.fire(data.color_observable) end, function() data.color = new; M.fire(data.color_observable) end)
       end,
+      -- (measured, 3.5.4: a track made an alias, or no alias with 0, has no lines of its own after: only the undo brings them back)
       alias_pattern_index = function(value)
-        local old = data.alias
+        local old, old_lines = data.alias, data.lines
         if old == value then return end
-        data.alias = value
+        if value > 0 and (value > #d.patterns or value == p) then error("std::logic_error: 'invalid pattern_index value'", 2) end
+        if value > 0 and d.patterns[value].tracks[t] and d.patterns[value].tracks[t].alias > 0 then
+          error("std::logic_error: 'can not assign an alias to an alias.'", 2)
+        end
+        data.alias, data.lines = value, {}
         M.fire(data.alias_observable)
-        M.record(function() data.alias = old; M.fire(data.alias_observable) end,
-          function() data.alias = value; M.fire(data.alias_observable) end)
+        M.record(function() data.alias, data.lines = old, old_lines; M.fire(data.alias_observable) end,
+          function() data.alias, data.lines = value, {}; M.fire(data.alias_observable) end)
       end,
     })
+    M.impl(made).__ptrack = data
+    return made
   end
 
   pattern_object = function(p)
@@ -1944,16 +1978,46 @@ function M.api.redo()
   u.stack[#u.stack + 1] = step
 end
 
+-- (M4 n-song) whether any pattern has automation of a parameter (its data): Renoise's is_automated.
+function M.refresh_automated(identity)
+  local any = false
+  for _, pattern in ipairs(M.data.patterns) do
+    for _, data in pairs(pattern.tracks) do
+      for _, automation in ipairs(data.automation or {}) do any = any or automation.parameter == identity end
+    end
+  end
+  identity.automated = any
+end
+
 -- A pattern track's automation of a parameter, as the API shows it.
 function M.api.automation_object(automation)
+  automation.points_observable = automation.points_observable or M.observable()
+  automation.playmode_observable = automation.playmode_observable or M.observable()
   local function setter(field)
     return function(value)
       local old = automation[field]
       automation[field] = value
-      M.record(function() automation[field] = old end, function() automation[field] = value end)
+      local observable = automation[field .. "_observable"]
+      if observable then M.fire(observable) end
+      M.record(function() automation[field] = old; if observable then M.fire(observable) end end,
+        function() automation[field] = value; if observable then M.fire(observable) end end)
     end
   end
-  return object("renoise.PatternTrackAutomation", { length = 64 }, {
+  -- (the device and parameter it is of: found by the parameter's data)
+  local function dest()
+    for _, t in ipairs(M.data.tracks) do
+      for _, data in ipairs(t.devices) do
+        for _, param in ipairs(data.params or {}) do
+          if param == automation.parameter then return data, param end
+        end
+      end
+    end
+  end
+  return object("renoise.PatternTrackAutomation", {
+    length = 64, points_observable = automation.points_observable, playmode_observable = automation.playmode_observable,
+  }, {
+    dest_device = function() local data = dest() return data and device(data) or nil end,
+    dest_parameter = function() local _, param = dest() return param and parameter(param) or nil end,
     playmode = function() return automation.playmode end,
     points = function()
       local copy = {}

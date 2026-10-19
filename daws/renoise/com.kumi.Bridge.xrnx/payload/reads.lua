@@ -197,6 +197,13 @@ function M.read(job, params, epoch)
     return page(job, epoch, params, total, function(i)
       return line_row(the_song():pattern(pattern_at):track(track_at):line(i), i, note_columns, effect_columns, params.hidden == true)
     end, true, extra)
+  elseif kind == "automation" then
+    -- M4 (n-song): the automation of one pattern's track, an envelope a row
+    local pattern_at = need_parent(params, "pattern", 1, epoch)[1]
+    if pattern_at > #song.patterns then fail("bad-params", "no pattern " .. pattern_at) end
+    local track_at = track_param(params.track, epoch, song)
+    local list = rows.envelopes(song, epoch, pattern_at, track_at)
+    return page(job, epoch, params, #list, function(i) return list[i] end)
   elseif kind == "instrument" then
     return page(job, epoch, params, #song.instruments, function(i) return instrument_row(the_song(), epoch, i) end)
   elseif kind == "sample" then
@@ -217,7 +224,7 @@ function M.read(job, params, epoch)
     if t > track_count(song) or d > #song:track(t).devices then fail("bad-params", "no such device") end
     return page(job, epoch, params, #song:track(t):device(d).parameters, function(k) return param_row(the_song(), epoch, t, d, k) end)
   end
-  fail("bad-params", "unknown kind " .. tostring(kind) .. " (song, track, sequence, pattern, line, instrument, sample, phrase, device, param)")
+  fail("bad-params", "unknown kind " .. tostring(kind) .. " (song, track, sequence, pattern, line, automation, instrument, sample, phrase, device, param)")
 end
 
 return M

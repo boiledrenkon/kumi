@@ -1946,7 +1946,7 @@
       "response": {
         "error": {
           "code": "bad-params",
-          "message": "unknown kind nonsense (song, track, sequence, pattern, line, instrument, sample, phrase, device, param)"
+          "message": "unknown kind nonsense (song, track, sequence, pattern, line, automation, instrument, sample, phrase, device, param)"
         },
         "ok": false
       }

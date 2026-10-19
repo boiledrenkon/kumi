@@ -773,4 +773,7 @@ clear.apply = function(song, env, input, fence, desc)
 end
 clear.restore = restore_of("notes-clear", "Cells")
 base.register(clear)
+-- (the plain rule's words, for the other kinds that write lines: M4 n-song)
+M.CHANGED = CHANGED
+
 return M

@@ -263,4 +263,449 @@ base.register({
   same = function(a, b) return a.lines == b.lines end,
 })
 
+-- pattern-alias: a pattern's track plays another pattern's lines (an alias, as the matrix shows it), or stops being one.
+--
+-- Measured in Renoise 3.5.4: making a track an alias drops its own lines (only Renoise's undo brings them back), so Kumi keeps
+-- them, and the automation of that pattern track, to write back; taking an alias away with `alias_pattern_index = 0` leaves the
+-- track empty, and `copy_from` the source leaves a copy of its lines (`keep`, the default). An alias of a track that is itself an
+-- alias is refused by Renoise: the source it shows is taken. A change of lines, so Kumi's undo goes through only while nothing
+-- in the pattern changed since (the plain rule, changes_notes.lua), and while the alias is as Kumi left it.
+
+local material_ = import("changes_material")
+local notes_ = import("changes_notes")
+
+-- The automation of one pattern's track, by the device's place on the track (followed through its devices' log: places.lua)
+-- and the parameter's number.
+local function read_pattern_automation(song, env, p, t)
+  local track, pattern_track, out = song:track(t), song:pattern(p):track(t), {}
+  for d = 1, #track.devices do
+    local device = track:device(d)
+    for k = 1, #device.parameters do
+      local parameter = device:parameter(k)
+      if parameter.is_automated then
+        local automation = pattern_track:find_automation(parameter)
+        if automation then
+          local points = {}
+          for i, point in ipairs(automation.points) do points[i] = { time = point.time, value = point.value, scaling = point.scaling } end
+          out[#out + 1] = { device = material_.device_place(env, t, d, device), parameter = k, playmode = automation.playmode, points = points }
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- A pattern track's own lines and automation as a short fingerprint (what an apply checks the preview saw).
+local function own_print(song, p, t)
+  local pattern_track = song:pattern(p):track(t)
+  if pattern_track.is_alias then return "alias:" .. pattern_track.alias_pattern_index end
+  local lines = material_.read_lines(pattern_track, MAX_LINES)
+  local parts = { tostring(#lines) }
+  for _, row in ipairs(lines) do
+    for _, cell in ipairs(row.notes) do
+      parts[#parts + 1] = string.format("%d:n%d:%d:%d:%d:%d:%d:%d:%d", row.line, cell.col, cell.note, cell.instrument, cell.volume, cell.panning, cell.delay, cell.fxn, cell.fxa)
+    end
+    for _, cell in ipairs(row.effects) do parts[#parts + 1] = string.format("%d:e%d:%d:%d", row.line, cell.col, cell.number, cell.amount) end
+  end
+  for k, automation in ipairs(pattern_track.automation) do
+    for _, point in ipairs(automation.points) do parts[#parts + 1] = string.format("a%d:%.9g:%.9g:%.9g", k, point.time, point.value, point.scaling) end
+  end
+  local text, a, b = table.concat(parts, "|"), 5381, 0
+  for i = 1, #text do
+    local byte = text:byte(i)
+    a = (a * 33 + byte) % 4294967296
+    b = (b * 65599 + byte) % 4294967296
+  end
+  return string.format("%08x%08x", a, b)
+end
+
+local function alias_input(song, env, input)
+  local p, t, track = M.pattern_track_of(song, env, input, "pattern-alias")
+  local pattern_track = song:pattern(p):track(t)
+  local now = pattern_track.alias_pattern_index
+  local want
+  if input.alias == json.null or input.alias == false then
+    want = 0
+  else
+    local source = M.pattern_of(song, env, input.alias, "pattern-alias")
+    -- (an alias of an alias is refused by Renoise: the source it shows is meant)
+    local through = song:pattern(source):track(t).alias_pattern_index
+    if through > 0 then source = through end
+    if source == p then bad("a pattern's track can't be an alias of its own pattern") end
+    want = source
+  end
+  if input.keep ~= nil and type(input.keep) ~= "boolean" then bad("keep must be true or false") end
+  return { p = p, t = t, track = track, pattern_track = pattern_track, now = now, want = want, keep = input.keep ~= false }
+end
+
+local function alias_title(song, plan)
+  local label = string.format("%s on %s", q(M.pattern_label(song, plan.p)), q(base.named(plan.t, plan.track)))
+  if plan.want > 0 then return string.format("%s plays %s's lines (an alias)", label, q(M.pattern_label(song, plan.want))) end
+  return string.format("%s is no alias any more%s", label, plan.keep and " (a copy of its lines)" or " (empty)")
+end
+
+local function alias_preview(song, env, input)
+  local plan = alias_input(song, env, input)
+  local display = { title = alias_title(song, plan), before = { alias = plan.now }, after = { alias = plan.want } }
+  if plan.now == plan.want then display.unchanged = true end
+  if plan.want > 0 and plan.now == 0 and not plan.pattern_track.is_empty then
+    display.note = "Its own lines go out of sight (Renoise drops them); Kumi keeps them to put back."
+  end
+  return {
+    target = { ref = refs.make(env.epoch(), "ptrack", plan.p, plan.t), kind = "pattern-track" }, prior = { alias = plan.now },
+    fence = { alias = plan.now, own = own_print(song, plan.p, plan.t), id = base.track_id(plan.track), label = base.named(plan.t, plan.track) },
+    display = display,
+  }
+end
+
+local function alias_apply(song, env, input, fence, desc)
+  local ok, plan = pcall(alias_input, song, env, input)
+  if not ok then base.gone_is_changed(plan) end
+  if fence.id ~= nil and fence.id ~= base.track_id(plan.track) then fail("changed", base.moved_text(fence.label)) end
+  if plan.now ~= fence.alias or own_print(song, plan.p, plan.t) ~= fence.own then
+    fail("changed", string.format("%s on %s changed since the preview", q(M.pattern_label(song, plan.p)), q(base.named(plan.t, plan.track))))
+  end
+  local display = { title = alias_title(song, plan), before = { alias = plan.now }, after = { alias = plan.want } }
+  local target = { ref = refs.make(env.epoch(), "ptrack", plan.p, plan.t), kind = "pattern-track" }
+  if plan.now == plan.want then
+    display.unchanged = true
+    return { applied = { alias = plan.want }, display = display, undo = { desc = desc, entry = false }, prior = { alias = plan.now }, target = target }
+  end
+  local material
+  if plan.want > 0 and plan.now == 0 then
+    local lines, writes = material_.read_lines(plan.pattern_track, MAX_LINES)
+    if writes > base.MAX_APPLY_WRITES then
+      fail("failed", string.format("its own lines are more than Kumi puts back in one step (%d writes): clear them first, or make the alias in Renoise", writes))
+    end
+    material = { lines = lines, automation = read_pattern_automation(song, env, plan.p, plan.t) }
+  else
+    material = { alias = plan.now }
+  end
+  song:describe_undo(desc)
+  if plan.want > 0 then
+    plan.pattern_track.alias_pattern_index = plan.want
+  elseif plan.keep then
+    plan.pattern_track:copy_from(song:pattern(plan.now):track(plan.t))
+  else
+    plan.pattern_track.alias_pattern_index = 0
+  end
+  if plan.pattern_track.alias_pattern_index ~= plan.want then fail("failed", "Renoise didn't take the alias as asked (Renoise's own undo takes back what it did)") end
+  return {
+    applied = {
+      alias = plan.want, touch = env.pattern_touch_mark and env.pattern_touch_mark(plan.p) or nil, own = own_print(song, plan.p, plan.t),
+      before = fence.own,
+    },
+    material = material, display = display, undo = { desc = desc, entry = true }, prior = { alias = plan.now },
+    place = { pattern = plan.p, track = plan.t }, target = target,
+  }
+end
+
+local function alias_restore(song, env, restore, desc)
+  local applied, material, prior = restore.applied, restore.material, restore.prior
+  if type(applied) ~= "table" or type(prior) ~= "table" or type(material) ~= "table" then bad("applied and material: what the change did and kept") end
+  local reference = restore.target and restore.target.ref
+  local numbers = refs.expect(reference, "ptrack", 2, env.epoch())
+  local p, t = numbers[1], numbers[2]
+  if p > #song.patterns then fail("gone", "that pattern isn't in the song any more") end
+  local track = base.track_at(song, t)
+  local pattern_track = song:pattern(p):track(t)
+  local label = string.format("%s on %s", q(M.pattern_label(song, p)), q(base.named(t, track)))
+  local title = label .. (prior.alias > 0 and " is an alias again" or " is no alias again") .. " (put back)"
+  local now = pattern_track.alias_pattern_index
+  -- back already: the alias it was, or (an alias Kumi made of a track with lines of its own) those lines as they were
+  if (prior.alias > 0 and now == prior.alias) or (prior.alias == 0 and now == 0 and own_print(song, p, t) == applied.before) then
+    return { restored = { alias = now }, display = { title = title }, undo = { desc = desc, entry = false }, unwritten = true }
+  end
+  if now ~= applied.alias then fail("changed", label .. " was made an alias or not in Renoise since Kumi changed it") end
+  if env.pattern_touched_since then
+    local since = env.pattern_touched_since(p, applied.touch)
+    if since == nil then fail("changed", "Kumi can't tell whether the pattern changed in Renoise since (the tool watched the song anew), so Kumi left it as it is") end
+    if since then fail("changed", notes_.CHANGED) end
+  end
+  if applied.alias == 0 and own_print(song, p, t) ~= applied.own then
+    fail("changed", label .. "'s lines or automation changed in Renoise since Kumi took the alias away")
+  end
+  song:describe_undo(desc)
+  local note
+  if material.lines then
+    pattern_track.alias_pattern_index = 0
+    material_.write_lines(song, t, { pattern = p, lines = material.lines })
+    local lost = 0
+    for _, saved in ipairs(material.automation or {}) do
+      local d = material_.device_now(song, env, t, saved.device)
+      if d then
+        local parameter = track:device(d):parameter(saved.parameter)
+        local automation = pattern_track:find_automation(parameter) or pattern_track:create_automation(parameter)
+        automation.playmode = saved.playmode
+        automation.points = saved.points
+      else
+        lost = lost + 1
+      end
+    end
+    if lost > 0 then
+      note = string.format("Its automation of %s isn't put back: the devices on the track changed in Renoise since.", lost == 1 and "1 parameter" or (lost .. " parameters"))
+    end
+  else
+    pattern_track.alias_pattern_index = material.alias
+  end
+  base.note_restored(env.journal, "pattern-alias", { pattern = p, track = t }, applied, base.KINDS["pattern-alias"])
+  return { restored = { alias = pattern_track.alias_pattern_index }, display = { title = title, note = note }, undo = { desc = desc, entry = true } }
+end
+
+base.register({
+  kind = "pattern-alias", custom = true, uses_patterns = true,
+  preview = alias_preview, apply = alias_apply, restore = alias_restore,
+  reread = function(song, place)
+    if place.pattern > #song.patterns or place.track > rows.track_count(song) then return nil end
+    return song:pattern(place.pattern):track(place.track)
+  end,
+  read = function(pattern_track) return { alias = pattern_track.alias_pattern_index } end,
+  same = function(a, b) return a.alias == b.alias end,
+})
+
+-- automation-write: a device parameter's automation in one pattern (its envelope in that pattern's track): points added or
+-- changed, removed, a range cleared, the play mode, or the whole envelope deleted. Time is in lines from 1 (fractions to 1/256
+-- of a line, as Renoise keeps them; a tick is 1/TPL of a line); a point's value is 0 to 1 of the parameter's range (measured:
+-- linear in its own value: Gainer's gain 0..4, a point of 0.25 is 1.0), or `paramValue` in the parameter's own range.
+-- The record keeps the envelope's points before and after, whole: Kumi's undo puts them back only while they are as it left them.
+
+local PLAYMODES = { points = 1, linear = 2, curves = 3 }
+local PLAYMODE_NAMES = { "points", "linear", "curves" }
+local MOST_POINTS = 1024
+
+function M.parameter_of(song, env, input, what)
+  local parsed = type(input.ref) == "string" and refs.parse(input.ref) or nil
+  local t, d, k
+  if parsed and parsed.kind == "param" then
+    local numbers = refs.expect(input.ref, "param", 3, env.epoch())
+    t, d, k = numbers[1], numbers[2], numbers[3]
+  elseif parsed and parsed.kind == "device" then
+    local numbers = refs.expect(input.ref, "device", 2, env.epoch())
+    t, d = numbers[1], numbers[2]
+  else
+    bad(what .. ": ref is the parameter, or its device with param")
+  end
+  local track = base.track_at(song, t)
+  if d < 1 or d > #track.devices then fail("gone", "that device isn't on the track any more") end
+  local device = track:device(d)
+  if not k then
+    local wanted, count = input.param, #device.parameters
+    if type(wanted) == "number" then
+      if wanted ~= math.floor(wanted) or wanted < 1 or wanted > count then bad(string.format("param is a number from 1 to %d", count)) end
+      k = wanted
+    elseif type(wanted) == "string" and wanted ~= "" then
+      local lower = wanted:lower()
+      for _, exact in ipairs({ true, false }) do
+        for n = 1, count do
+          local name = device:parameter(n).name:lower()
+          if (exact and name == lower) or (not exact and name:sub(1, #lower) == lower) then
+            if k and k ~= n then bad(string.format("%q names more than one parameter of this device: give its number", wanted)) end
+            k = k or n
+          end
+        end
+        if k then break end
+      end
+      if not k then bad(string.format("this device has no parameter %q", wanted)) end
+    else
+      bad("param: the parameter's number (from 1) or its name, with a device ref")
+    end
+  end
+  if k < 1 or k > #device.parameters then fail("gone", "that parameter isn't on the device any more") end
+  local parameter = device:parameter(k)
+  if not parameter.is_automatable then bad(string.format("%s's %s can't be automated", device.name, parameter.name)) end
+  local device_label = device.display_name ~= "" and device.display_name or device.name
+  return t, d, k, track, device, parameter, device_label .. " " .. parameter.name
+end
+
+local function read_envelope(object)
+  local automation = object.pattern_track:find_automation(object.parameter)
+  if not automation then return { exists = false } end
+  local points = {}
+  for i, point in ipairs(automation.points) do points[i] = { time = point.time, value = point.value, scaling = point.scaling } end
+  table.sort(points, function(a, b) return a.time < b.time end)
+  return { exists = true, playmode = PLAYMODE_NAMES[automation.playmode] or "linear", points = points }
+end
+
+local function quantized(time) return math.floor(time * 256 + 0.5) / 256 end
+
+local function time_of(point, lines, tpl)
+  local time
+  if point.time ~= nil then
+    time = point.time
+  elseif point.line ~= nil then
+    local tick = point.tick or 0
+    if type(tick) ~= "number" or tick < 0 or tick >= tpl then bad(string.format("tick is from 0 to %d (the song's ticks per line less one)", tpl - 1)) end
+    time = (type(point.line) == "number" and point.line or 0) + tick / tpl
+  end
+  if type(time) ~= "number" or time ~= time then bad("each point needs time (lines from 1, a fraction too) or line (and tick)") end
+  time = quantized(time)
+  if time < 1 or time >= lines + 1 then bad(string.format("a point's time is from 1 to just before %d (the pattern's %d lines)", lines + 1, lines)) end
+  return time
+end
+
+local function envelope_wanted(object, input)
+  local now = read_envelope(object)
+  local parameter, lines = object.parameter, object.lines
+  if input.delete == true then
+    for _, key in ipairs({ "points", "remove", "clear", "playmode" }) do
+      if input[key] ~= nil then bad("delete takes the whole envelope away: give nothing else with it") end
+    end
+    return { exists = false }
+  end
+  if input.points == nil and input.remove == nil and input.clear == nil and input.playmode == nil then
+    bad("give points, remove, clear, playmode or delete")
+  end
+  local points = {}
+  for _, point in ipairs(now.points or {}) do points[#points + 1] = { time = point.time, value = point.value, scaling = point.scaling } end
+  local function drop(test)
+    local kept = {}
+    for _, point in ipairs(points) do
+      if not test(point) then kept[#kept + 1] = point end
+    end
+    points = kept
+  end
+  if input.clear ~= nil then
+    if input.clear == true then
+      points = {}
+    elseif type(input.clear) == "table" then
+      local from, to = input.clear.from, input.clear.to
+      if type(from) ~= "number" or type(to) ~= "number" or from < 1 or to < from or to > lines then
+        bad(string.format("clear is true (every point) or {from, to}: lines from 1 to %d, from up to to", lines))
+      end
+      drop(function(point) return point.time >= from and point.time < to + 1 end)
+    else
+      bad("clear is true (every point) or {from, to}")
+    end
+  end
+  if input.remove ~= nil then
+    if type(input.remove) ~= "table" then bad("remove: a list of the times of points to remove") end
+    for _, time in ipairs(input.remove) do
+      if type(time) ~= "number" then bad("remove: a list of the times of points to remove") end
+      local at, found = quantized(time), false
+      drop(function(point)
+        if point.time == at then found = true end
+        return point.time == at
+      end)
+      if not found then bad(string.format("there is no point at %s to remove", tostring(time))) end
+    end
+  end
+  if input.points ~= nil then
+    if type(input.points) ~= "table" or #input.points == 0 then bad("points: a list of {time or line, value or paramValue, scaling?}") end
+    if #input.points > MOST_POINTS then bad(string.format("at most %d points a change", MOST_POINTS)) end
+    local tpl = renoise.song().transport.tpl
+    local given = {}
+    for _, point in ipairs(input.points) do
+      if type(point) ~= "table" then bad("each of points is an object {time or line, value or paramValue, scaling?}") end
+      local time = time_of(point, lines, tpl)
+      if given[time] then bad("two points at " .. time .. ": one point a time") end
+      given[time] = true
+      local value = point.value
+      if point.paramValue ~= nil then
+        local v, low, high = point.paramValue, parameter.value_min, parameter.value_max
+        if type(v) ~= "number" or v < low or v > high then bad(string.format("paramValue is from %s to %s for %s", tostring(low), tostring(high), parameter.name)) end
+        value = high > low and (v - low) / (high - low) or 0
+      end
+      if type(value) ~= "number" or value ~= value or value < 0 or value > 1 then bad("a point's value is from 0 to 1 (of the parameter's range), or give paramValue") end
+      local scaling = point.scaling or 0
+      if type(scaling) ~= "number" or scaling < -1 or scaling > 1 then bad("scaling is from -1 to 1 (0 is straight; the linear play mode uses it)") end
+      drop(function(other) return other.time == time end)
+      points[#points + 1] = { time = time, value = value, scaling = scaling }
+    end
+  end
+  table.sort(points, function(a, b) return a.time < b.time end)
+  local playmode = now.playmode or "linear"
+  if input.playmode ~= nil then
+    if not PLAYMODES[input.playmode] then bad("playmode is points, linear or curves") end
+    playmode = input.playmode
+  end
+  return { exists = true, playmode = playmode, points = points }
+end
+
+local function write_envelope(object, state)
+  local automation = object.pattern_track:find_automation(object.parameter)
+  if not state.exists then
+    if automation then object.pattern_track:delete_automation(object.parameter) end
+    return
+  end
+  automation = automation or object.pattern_track:create_automation(object.parameter)
+  automation.playmode = PLAYMODES[state.playmode] or 2
+  local points = {}
+  for i, point in ipairs(state.points) do points[i] = { time = point.time, value = point.value, scaling = point.scaling } end
+  automation.points = points
+end
+
+local function same_envelope(a, b)
+  if a.exists ~= b.exists then return false end
+  if not a.exists then return true end
+  if a.playmode ~= b.playmode or #a.points ~= #b.points then return false end
+  for i, point in ipairs(a.points) do
+    local other = b.points[i]
+    if point.time ~= other.time or not base.close(point.value, other.value) or not base.close(point.scaling or 0, other.scaling or 0) then return false end
+  end
+  return true
+end
+
+local envelope_spec = {
+  kind = "automation-write", noun = "automation", undoable = true,
+  locate = function(song, env, input)
+    local t, d, k, track, _, parameter, label = M.parameter_of(song, env, input, "automation-write")
+    local p = M.pattern_of(song, env, input.pattern, "automation-write")
+    local pattern_track = song:pattern(p):track(t)
+    if pattern_track.is_alias then
+      bad(string.format("that track in pattern %d is an alias of pattern %d: automate it there", p, pattern_track.alias_pattern_index))
+    end
+    return {
+      object = { pattern_track = pattern_track, parameter = parameter, lines = song:pattern(p).number_of_lines, p = p },
+      name = string.format("%s on %s in %s", label, q(base.named(t, track)), q(M.pattern_label(song, p))),
+      place = { pattern = p, track = t, device = d, param = k },
+      target = { ref = refs.make(env.epoch(), "param", t, d, k), kind = "param" }, id = base.track_id(track) .. "|" .. d .. "|" .. k,
+    }
+  end,
+  reread = function(song, place)
+    if place.pattern > #song.patterns or place.track > rows.track_count(song) then return nil end
+    local track = song:track(place.track)
+    if place.device > #track.devices or place.param > #track:device(place.device).parameters then return nil end
+    return { pattern_track = song:pattern(place.pattern):track(place.track), parameter = track:device(place.device):parameter(place.param), lines = song:pattern(place.pattern).number_of_lines }
+  end,
+  read = function(object) return read_envelope(object) end,
+  wanted = envelope_wanted,
+  write = write_envelope,
+  same = same_envelope,
+  title = function(name, _, to)
+    if not to.exists then return "Automation of " .. name .. " deleted" end
+    return string.format("Automation of %s: %s, %s", name, #to.points == 1 and "1 point" or (#to.points .. " points"), to.playmode)
+  end,
+  watch = function(env, loc)
+    if not env.watch_pattern_track then return end
+    local place = loc.place
+    env.watch_pattern_track(place.pattern, place.track, "automation_observable")
+    local automation = loc.object.pattern_track:find_automation(loc.object.parameter)
+    if automation then
+      local key = "automation:" .. place.device .. ":" .. place.param
+      env.watch_pattern_track(place.pattern, place.track, key .. ":points", automation.points_observable)
+      env.watch_pattern_track(place.pattern, place.track, key .. ":playmode", automation.playmode_observable)
+    end
+  end,
+  -- (the pattern is part of what the change is about: the record keeps it as a ref, which a pool changed since makes stale)
+  wire = function(state, env, loc)
+    if type(state) ~= "table" or not loc then return state end
+    local out = {}
+    for key, value in pairs(state) do out[key] = value end
+    out.pattern = refs.make(env.epoch(), "pattern", loc.object.p)
+    return out
+  end,
+  restore_input = function(restore)
+    return { ref = restore.target and restore.target.ref, pattern = type(restore.prior) == "table" and restore.prior.pattern or nil }
+  end,
+}
+-- (`wanted` reads what it changes from the envelope; the pattern's ref in a record is only where it is)
+envelope_spec.unwire = function(state)
+  if type(state) ~= "table" then return state end
+  local out = {}
+  for key, value in pairs(state) do out[key] = value end
+  out.pattern = nil
+  return out
+end
+base.register(envelope_spec)
+
 return M
