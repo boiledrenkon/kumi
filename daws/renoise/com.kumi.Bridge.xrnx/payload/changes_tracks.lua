@@ -122,8 +122,8 @@ prop {
   write = function(track, state) track.name = state.name end,
   same = function(a, b) return a.name == b.name end,
   title = function(_, from, to)
-    if from.name == "" then return "Named track " .. to.name end
-    return "Renamed track " .. from.name .. " to " .. to.name
+    if from.name == "" then return "Named track " .. base.q(to.name) end
+    return "Renamed track " .. base.q(from.name) .. " \226\134\146 " .. base.q(to.name)
   end,
 }
 
@@ -183,7 +183,7 @@ end
 local function delete_preview(song, env, input)
   local index, track = find_to_delete(song, env, input)
   local now = signature(song, index, track)
-  local display = { title = "Deleted track " .. named(index, track) }
+  local display = { title = "Deleted track " .. base.q(named(index, track)) }
   if now.devices > 0 or now.patternsWithLines > 0 then
     display.note = string.format("It holds %d devices and lines in %d patterns; Kumi keeps them to put back.", now.devices, now.patternsWithLines)
   end
@@ -251,7 +251,7 @@ local function delete_apply(song, env, input, fence, desc)
   return {
     applied = { deleted = true },
     material = material,
-    display = { title = "Deleted track " .. name },
+    display = { title = "Deleted track " .. base.q(name) },
     undo = { desc = desc, entry = true },
     prior = { deleted = false }, place = { track = index }, shape = "deleted",
   }
@@ -371,7 +371,7 @@ end
 
 local function restored_answer(env, song, index, material)
   local track = song:track(index)
-  local display = { title = "Track " .. named(index, track) .. " put back" }
+  local display = { title = base.q(named(index, track)) .. " put back" }
   return {
     restored = { ref = refs.make(env.epoch(), "track", index), name = track.name },
     display = display,

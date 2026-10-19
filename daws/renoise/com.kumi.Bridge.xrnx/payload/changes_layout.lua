@@ -10,6 +10,7 @@ local base = import("changes_base")
 local json = import("json")
 
 local bad, fail = base.bad, base.fail
+local q = base.q
 local M = {}
 
 local function master_index(song) return song.sequencer_track_count + 1 end
@@ -72,9 +73,11 @@ local function add_plan(song, env, input)
   return { kind = kind, index = index, name = input.name, color = color, group = group, master = master, count = count }
 end
 
+local function kind_word(kind) return kind == "group" and "group" or kind == "send" and "send track" or "track" end
+
 local function add_title(plan)
-  local what = plan.kind == "group" and "group" or plan.kind == "send" and "send track" or "track"
-  if plan.name and plan.name ~= "" then return string.format("Added %s %s", what, plan.name) end
+  local what = kind_word(plan.kind)
+  if plan.name and plan.name ~= "" then return string.format("Added %s %s", what, q(plan.name)) end
   return string.format("Added a %s at place %d", what, plan.index)
 end
 
@@ -112,7 +115,7 @@ local function add_apply(song, env, input, fence, desc)
   local parents = rows.group_parents(song)
   local applied = { index = plan.index, kind = rows.track_type(track), name = track.name }
   if parents[plan.index] then applied.group = parents[plan.index] end
-  local title = string.format("Added %s", track_label(plan.index, track))
+  local title = string.format("Added %s %s", kind_word(applied.kind), q(track_label(plan.index, track)))
   return {
     applied = applied, material = { track = plan.index },
     created = { ref = refs.make(env.epoch(), "track", plan.index), kind = "track" },
@@ -141,7 +144,11 @@ local function add_restore(song, env, restore, desc)
   song:describe_undo(desc)
   song:delete_track_at(index)
   base.note_restored(env.journal, "track-add", { track = index })
-  return { restored = { deleted = true }, display = { title = "Removed " .. track_label(index, track) .. " (put back)" }, undo = { desc = desc, entry = true } }
+  return {
+    restored = { deleted = true },
+    display = { title = string.format("Removed %s %s (put back)", kind_word(applied.kind), q(track_label(index, track))) },
+    undo = { desc = desc, entry = true },
+  }
 end
 
 base.register({
@@ -179,7 +186,7 @@ end
 local function move_preview(song, env, input)
   local index, track = base.find(song, env, input.ref, "track-move")
   local to = move_wanted(song, index, track, input)
-  local display = { title = string.format("Moved %s to place %d", track_label(index, track), to), before = { index = index }, after = { index = to } }
+  local display = { title = string.format("Moved track %s to place %d", q(track_label(index, track)), to), before = { index = index }, after = { index = to } }
   if to == index then display.unchanged = true end
   return { target = base.target(env, index), prior = { index = index }, fence = signature(index, track), display = display }
 end
@@ -214,7 +221,7 @@ local function move_apply(song, env, input, fence, desc)
   if not base.same_table(now, fence) then fail("changed", track_label(index, track) .. " changed since the preview") end
   local to = move_wanted(song, index, track, input)
   local name = track_label(index, track)
-  local display = { title = string.format("Moved %s to place %d", name, to), before = { index = index }, after = { index = to } }
+  local display = { title = string.format("Moved track %s to place %d", q(name), to), before = { index = index }, after = { index = to } }
   if to == index then
     display.unchanged = true
     return { applied = { index = to, signature = now }, material = { track = to }, display = display, undo = { desc = desc, entry = false }, prior = { index = index } }
@@ -252,7 +259,7 @@ local function move_restore(song, env, restore, desc)
   song:describe_undo(desc)
   swaps(song, at, from)
   base.note_restored(env.journal, "track-move", { track = from }, applied, base.KINDS["track-move"])
-  return { restored = { index = from }, display = { title = string.format("Moved %s back to place %d", track_label(from, song:track(from)), from) }, undo = { desc = desc, entry = true } }
+  return { restored = { index = from }, display = { title = string.format("Moved track %s back to place %d", q(track_label(from, song:track(from))), from) }, undo = { desc = desc, entry = true } }
 end
 
 base.register({
@@ -295,8 +302,8 @@ local function group_wanted(song, env, index, track, input)
 end
 
 local function group_title(name, holder_name, into)
-  if into then return string.format("Put %s into the group %s", name, holder_name) end
-  return string.format("Took %s out of the group %s", name, holder_name)
+  if into then return string.format("Put %s into the group %s", q(name), q(holder_name)) end
+  return string.format("Took %s out of the group %s", q(name), q(holder_name))
 end
 
 local function group_preview(song, env, input)

@@ -212,7 +212,7 @@ test("changes: pan, rename and colour change and put back, each as one step", fu
   local _, pan = round_trip("track-pan", { ref = track_ref(epoch, 3), pan = -0.5 }, function() return track_data(3).panning end, 0.25, 0.5)
   eq(pan.display.title, "Bass pan 50% left")
   local _, rename = round_trip("track-rename", { ref = track_ref(epoch, 4), name = "Pad 2" }, function() return track_data(4).name end, "Pad 2", "Pad")
-  eq(rename.display.title, "Renamed track Pad to Pad 2")
+  eq(rename.display.title, "Renamed track “Pad” → “Pad 2”")
   local _, colour = round_trip("track-color", { ref = track_ref(epoch, 2), color = "#336699" }, function()
     local c = track_data(2).color
     return c and string.format("#%02x%02x%02x", c[1], c[2], c[3])
@@ -398,7 +398,7 @@ test("changes: deleting a track keeps its material, and the restore makes the sa
   local ref = track_ref(epoch, 3)
   local before = snapshot_of_track(3)
   local previewed, _, layout = preview(peer, "track-delete", { ref = ref })
-  eq(previewed.display.title, "Deleted track Bass")
+  eq(previewed.display.title, "Deleted track “Bass”")
   ok(previewed.display.note:find("2 devices", 1, true), previewed.display.note)
   eq(previewed.prior.name, "Bass")
   local done = apply(peer, "track-delete", { ref = ref }, "Kumi: Deleted track Bass (kd01)", previewed.fence, epoch, layout)
@@ -428,7 +428,7 @@ test("changes: deleting a track keeps its material, and the restore makes the sa
   ok(undone.result, json.encode(undone.error or {}))
   eq(undone.result.restored.ref, track_ref(undone.result.epoch, 3), "(its devices moved the epoch as they were made)")
   eq(undone.result.restored.name, "Bass")
-  eq(undone.result.display.title, "Track Bass put back")
+  eq(undone.result.display.title, "“Bass” put back")
   eq(undone.result.undo.entry, true)
   eq(steps(), 2, "the restore is one step")
   eq(newest(), "Kumi: undo Deleted track Bass (kd02)")
@@ -902,7 +902,7 @@ test("changes: a device is put in by its path or its name as one undo step, and 
   eq(paths_of(3), "Mixer,EQ 5,#Send")
   local input = { ref = ref, path = "Audio/Effects/Native/Gainer", index = 3 }
   local previewed = preview(peer, "device-add", input)
-  eq(previewed.display.title, "Added Gainer to Bass")
+  eq(previewed.display.title, "Added “Gainer” to “Bass”")
   eq(previewed.display.after.index, 3)
   eq(previewed.target.ref, ref)
   eq(paths_of(3), "Mixer,EQ 5,#Send", "a preview writes nothing")
@@ -1022,7 +1022,7 @@ test("changes: deleting a device keeps its settings and automation, and the rest
   local epoch, layout = place(peer)
   local ref = epoch .. ":device:3.2"
   local previewed = preview(peer, "device-delete", { ref = ref })
-  eq(previewed.display.title, "Deleted Warm on Bass")
+  eq(previewed.display.title, "Deleted “Warm” from “Bass”")
   eq(previewed.prior.deleted, false)
   eq(steps(), 0)
   local done = apply(peer, "device-delete", { ref = ref }, "Kumi: delete device (kf01)", previewed.fence, epoch, layout)
@@ -1106,7 +1106,7 @@ test("changes: a device is moved by swaps as one undo step, and moved back", fun
   local epoch, layout = place(peer)
   local ref = epoch .. ":device:3.2"
   local previewed = preview(peer, "device-move", { ref = ref, index = 4 })
-  eq(previewed.display.title, "Moved EQ 5 on Bass to place 4")
+  eq(previewed.display.title, "Moved “EQ 5” on “Bass” to place 4")
   eq(previewed.prior.index, 2)
   eq(steps(), 0)
   local done = apply(peer, "device-move", { ref = ref, index = 4 }, "Kumi: move (kg01)", previewed.fence, epoch, layout)
@@ -1242,7 +1242,7 @@ test("changes: lines are written as the tracker's own text, the columns they nee
   local epoch, layout = place(peer)
   local input = write_input(epoch)
   local previewed = preview(peer, "notes-write", input)
-  eq(previewed.display.title, "Wrote 2 lines in Pattern 00 \194\183 Bass")
+  eq(previewed.display.title, "Wrote 2 lines in “Pattern 00” on “Bass”")
   eq(previewed.target.ref, epoch .. ":ptrack:1.3")
   eq(previewed.target.kind, "pattern-track")
   eq(#previewed.prior.cells, 4)
@@ -1373,7 +1373,7 @@ test("changes: lines are cleared with every cell on them, hidden columns too, an
   local epoch, layout = place(peer)
   local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), lines = { { line = 4, clear = true } } }
   local previewed = preview(peer, "notes-write", input)
-  eq(previewed.display.title, "Wrote 1 line in Pattern 00 \194\183 Bass")
+  eq(previewed.display.title, "Wrote 1 line in “Pattern 00” on “Bass”")
   eq(#previewed.prior.cells, 2, "the note in column 5 and the effect in column 2")
   local done = apply(peer, "notes-write", input, "Kumi: clear (kn51)", previewed.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
@@ -1385,7 +1385,7 @@ test("changes: lines are cleared with every cell on them, hidden columns too, an
   -- a range
   local range = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3), first = 1, last = 5 }
   local p2 = preview(peer, "notes-clear", range)
-  eq(p2.display.title, "Cleared 2 lines in Pattern 00 \194\183 Bass")
+  eq(p2.display.title, "Cleared 2 lines in “Pattern 00” on “Bass”")
   eq(p2.display.before.notes, 2)
   eq(p2.display.before.effects, 1)
   local d2 = apply(peer, "notes-clear", range, "Kumi: clear (kn53)", p2.fence, epoch, layout)
@@ -1536,7 +1536,7 @@ test("changes: a track is made as sequencer, send or group, and removed again wh
   eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
   local input = { type = "sequencer", name = "Lead", color = "#ff8000", index = 3 }
   local previewed = preview(peer, "track-add", input)
-  eq(previewed.display.title, "Added track Lead")
+  eq(previewed.display.title, "Added track “Lead”")
   eq(previewed.display.after.index, 3)
   eq(steps(), 0)
   local done = apply(peer, "track-add", input, "Kumi: add track (kt01)", previewed.fence, epoch, layout)
@@ -1643,7 +1643,7 @@ test("changes: a track is moved by swaps among the tracks it can pass, and moved
   local epoch, layout = place(peer)
   local ref = track_ref(epoch, 1)
   local previewed = preview(peer, "track-move", { ref = ref, index = 3 })
-  eq(previewed.display.title, "Moved Kick to place 3")
+  eq(previewed.display.title, "Moved track “Kick” to place 3")
   eq(steps(), 0)
   local done = apply(peer, "track-move", { ref = ref, index = 3 }, "Kumi: move (kv01)", previewed.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
@@ -1736,7 +1736,7 @@ test("changes: a track before a group goes into it as its last, and comes back t
   local epoch, layout = place(peer)
   local input = { ref = track_ref(epoch, 1), group = track_ref(epoch, 4) }
   local previewed = preview(peer, "track-group", input)
-  eq(previewed.display.title, "Put Kick into the group Bus")
+  eq(previewed.display.title, "Put “Kick” into the group “Bus”")
   local done = apply(peer, "track-group", input, "Kumi: group (kg01)", previewed.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
   eq(layout_text(), "Hat,Bass,Kick@Bus,Bus,Pad,Master,Send 1")
@@ -1844,7 +1844,7 @@ test("changes: a slot is made with a new pattern or an existing one, and removed
   local e2, l2 = place(peer)
   local existing = { pattern = pattern_ref(e2, 2) }
   local p2 = preview(peer, "slot-insert", existing)
-  eq(p2.display.title, "Inserted slot 5 (Pattern 01)")
+  eq(p2.display.title, "Inserted slot 5 (pattern “Pattern 01”)")
   local d2 = apply(peer, "slot-insert", existing, "Kumi: slot (ks03)", p2.fence, e2, l2)
   ok(d2.result, json.encode(d2.error or {}))
   eq(seq_text(), "1,2,1,3,2")
@@ -1890,7 +1890,7 @@ test("changes: a deleted slot comes back with its pattern, section and muted tra
   local epoch, layout = place(peer)
   local ref = seq_ref(epoch, 3)
   local previewed = preview(peer, "slot-delete", { ref = ref })
-  eq(previewed.display.title, "Deleted slot 3 (Pattern 00)")
+  eq(previewed.display.title, "Deleted slot 3 (pattern “Pattern 00”)")
   eq(steps(), 0)
   local done = apply(peer, "slot-delete", { ref = ref }, "Kumi: delete slot (kl01)", previewed.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
@@ -2001,7 +2001,7 @@ test("changes: a slot plays another pattern unless that would make Renoise remov
   -- slot 3 (pattern 1) is used by slot 1 as well
   local input = { ref = seq_ref(epoch, 3), pattern = pattern_ref(epoch, 3) }
   local previewed = preview(peer, "slot-pattern", input)
-  eq(previewed.display.title, "Slot 3 plays pattern 02")
+  eq(previewed.display.title, "Slot 3 → pattern “Pattern 02”")
   eq(previewed.prior.pattern, 1)
   local done = apply(peer, "slot-pattern", input, "Kumi: pattern (km01)", previewed.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
@@ -2025,7 +2025,7 @@ test("changes: a slot starts a section, is named, and loses it again", function(
   local ref = seq_ref(epoch, 3)
   local input = { ref = ref, name = "Drop" }
   local previewed = preview(peer, "slot-section", input)
-  eq(previewed.display.title, "Slot 3 starts the section Drop")
+  eq(previewed.display.title, "Section “Drop” at slot 3")
   eq(previewed.prior.start, false)
   local done = apply(peer, "slot-section", input, "Kumi: section (kn91)", previewed.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
@@ -2037,7 +2037,7 @@ test("changes: a slot starts a section, is named, and loses it again", function(
   eq(mock.song.sequencer:sequence_is_start_of_section(3), false)
   -- a rename keeps the start; clearing needs no name
   local p2 = preview(peer, "slot-section", { ref = ref, start = true })
-  eq(p2.display.title, "Slot 3 starts a section")
+  eq(p2.display.title, "Section at slot 3")
   failure(ask(peer, "change_preview", "slot-section", { ref = ref, start = false, name = "x" }), "bad-params")
   failure(ask(peer, "change_preview", "slot-section", { ref = ref }), "bad-params")
   failure(ask(peer, "change_preview", "slot-section", { ref = ref, start = "yes" }), "bad-params")
@@ -2277,7 +2277,7 @@ test("changes: a null in a request (taking a track out of its group) survives th
   H.tick(3)
   local pv = call(peer, "change_preview", { kind = "track-group", input = { ref = member, group = json.null }, epoch = epoch, layout = layout })
   ok(pv.result, json.encode(pv.error or {}))
-  eq(pv.result.display.title, "Took Kick out of the group Bus")
+  eq(pv.result.display.title, "Took “Kick” out of the group “Bus”")
   H.no_dialogs()
 end)
 
@@ -2334,5 +2334,78 @@ test("changes: a device change leaves tracks, patterns, slots and instruments as
   local bypass = call(peer, "change_preview", { kind = "device-bypass", input = { ref = e2 .. ":device:1.2", bypass = true }, epoch = e3, layout = l3 })
   ok(bypass.result, json.encode(bypass.error or {}))
   failure(call(peer, "change_preview", { kind = "slot-section", input = { ref = seq_ref(e2, 1), name = "A" }, epoch = e3, layout = l3 }), "stale")
+  H.no_dialogs()
+end)
+
+-- Names in titles are in quotes where they are inside the sentence, as Live's titles have them
+
+local function curly(text) return "\226\128\156" .. text .. "\226\128\157" end
+
+test("changes: a track called Track 005 reads right in the titles of rename, delete and restore", function()
+  local env, peer = setup()
+  mock.song:track(2).name = "Track 005"
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local epoch, layout = place(peer)
+  local ref = track_ref(epoch, 2)
+  -- a title that opens with the track's name leaves it bare
+  eq(preview(peer, "track-volume", { ref = ref, volumeDb = -6 }).display.title, "Track 005 volume \226\136\1466 dB")
+  eq(preview(peer, "track-mute", { ref = ref, mute = true }).display.title, "Track 005 muted")
+  -- a name inside the sentence is quoted
+  local rename = { ref = ref, name = "Lead Vox" }
+  local rp = preview(peer, "track-rename", rename)
+  eq(rp.display.title, "Renamed track " .. curly("Track 005") .. " \226\134\146 " .. curly("Lead Vox"))
+  local rd = apply(peer, "track-rename", rename, "Kumi: rename (kq01)", rp.fence, epoch, layout)
+  ok(rd.result, json.encode(rd.error or {}))
+  eq(rd.result.display.title, "Renamed track " .. curly("Track 005") .. " \226\134\146 " .. curly("Lead Vox"))
+  local back = restore(peer, "track-rename", { target = rp.target, prior = rp.prior, applied = rd.result.applied }, "Kumi: undo rename (kq02)", epoch, layout)
+  ok(back.result, json.encode(back.error or {}))
+  eq(back.result.display.title, "Renamed track " .. curly("Lead Vox") .. " \226\134\146 " .. curly("Track 005") .. " (put back)")
+  -- delete and restore: no "Track Track 005"
+  local dp = preview(peer, "track-delete", { ref = ref })
+  eq(dp.display.title, "Deleted track " .. curly("Track 005"))
+  local dd = apply(peer, "track-delete", { ref = ref }, "Kumi: delete (kq03)", dp.fence, epoch, layout)
+  ok(dd.result, json.encode(dd.error or {}))
+  eq(dd.result.display.title, "Deleted track " .. curly("Track 005"))
+  local undone = restore(peer, "track-delete", { target = dp.target, prior = dp.prior, applied = dd.result.applied, material = dd.result.material },
+    "Kumi: undo delete (kq04)", epoch, dd.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(undone.result.display.title, curly("Track 005") .. " put back")
+  H.no_dialogs()
+end)
+
+test("changes: the titles of made and put-back things quote their names", function()
+  local env, peer = device_song()
+  local epoch, layout = place(peer)
+  -- a track made and taken away
+  local add = { name = "Pad 2", index = 2 }
+  local ap = preview(peer, "track-add", add)
+  eq(ap.display.title, "Added track " .. curly("Pad 2"))
+  local done = apply(peer, "track-add", add, "Kumi: add (kq11)", ap.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(done.result.display.title, "Added track " .. curly("Pad 2"))
+  local gone = restore(peer, "track-add", { target = ap.target, prior = ap.prior, applied = done.result.applied, created = done.result.created, material = done.result.material },
+    "Kumi: undo add (kq12)", done.result.epoch, done.result.layout)
+  ok(gone.result, json.encode(gone.error or {}))
+  eq(gone.result.display.title, "Removed track " .. curly("Pad 2") .. " (put back)")
+  -- a device deleted and put back
+  local e2, l2 = place(peer)
+  local dref = e2 .. ":device:3.2"
+  local dp = preview(peer, "device-delete", { ref = dref })
+  eq(dp.display.title, "Deleted " .. curly("EQ 5") .. " from " .. curly("Bass"))
+  local dd = apply(peer, "device-delete", { ref = dref }, "Kumi: del (kq13)", dp.fence, e2, l2)
+  ok(dd.result, json.encode(dd.error or {}))
+  local back = restore(peer, "device-delete", { target = dp.target, prior = dp.prior, applied = dd.result.applied, material = dd.result.material },
+    "Kumi: undo del (kq14)", dd.result.epoch, dd.result.layout)
+  ok(back.result, json.encode(back.error or {}))
+  eq(back.result.display.title, curly("EQ 5") .. " put back on " .. curly("Bass"))
+  -- a slot deleted and put back
+  local e3, l3 = place(peer)
+  local sp = preview(peer, "slot-delete", { ref = seq_ref(e3, 2) })
+  local sd = apply(peer, "slot-delete", { ref = seq_ref(e3, 2) }, "Kumi: slot (kq15)", sp.fence, e3, l3)
+  ok(sd.result, json.encode(sd.error or {}))
+  local sb = restore(peer, "slot-delete", { target = sp.target, prior = sp.prior, applied = sd.result.applied, material = sd.result.material },
+    "Kumi: undo slot (kq16)", sd.result.epoch, sd.result.layout)
+  ok(sb.result, json.encode(sb.error or {}))
+  eq(sb.result.display.title, "Slot 2 put back")
   H.no_dialogs()
 end)
