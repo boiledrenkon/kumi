@@ -644,6 +644,11 @@ fn an_fx_chain_file_is_loaded_into_a_chain_with_ids_of_its_own_and_undo_takes_it
     let preview = lab.preview("fx-chain-load", input.clone()).unwrap();
     state(|s| s.tracks[1].fx.push(plugin("{P}", "VST: ReaVerb (Cockos)")));
     assert_eq!(lab.apply("fx-chain-load", &input, &preview["fence"]).unwrap_err().0, "changed");
+    // The file rewritten between the preview and the apply: it isn't what the preview said it loads.
+    let preview = lab.preview("fx-chain-load", input.clone()).unwrap();
+    write_chain(&dir, "Mine/Vocal.RfxChain", &["{FX-EQ}"]);
+    let (code, message) = lab.apply("fx-chain-load", &input, &preview["fence"]).unwrap_err();
+    assert!(code == "changed" && message.contains("file"), "{message}");
     assert_eq!(lab.preview("fx-chain-load", json!({"ref": KICK, "file": "Nope"})).unwrap_err().0, "failed");
     assert_eq!(lab.preview("fx-chain-load", json!({"ref": KICK, "file": "../Vocal"})).unwrap_err().0, "bad-params");
     assert_eq!(chain_files(&dir), 0);

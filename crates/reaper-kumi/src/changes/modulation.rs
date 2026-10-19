@@ -14,7 +14,7 @@ use super::fxchain::{self, changed, mark_fx, went, Holder};
 use super::{Applied, Ctx, Done, Preview, Restore, Restored};
 use crate::read::{bad, failed};
 use crate::reaper::Fx;
-use crate::refs::{self, Ref};
+use crate::refs::Ref;
 use crate::rows;
 
 #[derive(Clone, Copy)]
@@ -392,6 +392,5 @@ pub fn restore(ctx: &Ctx, family: &Family, restore: &Restore) -> Done<Restored> 
     if prior.as_object().is_some_and(|p| p.values().all(Value::is_null)) {
         display["note"] = "REAPER keeps the parameter's modulation settings once made; they are turned off, as before.".into();
     }
-    let _ = refs::fx_ref(&at.guid);
     Ok(Restored { restored: json!({"state": after}), display, unwritten: false })
 }

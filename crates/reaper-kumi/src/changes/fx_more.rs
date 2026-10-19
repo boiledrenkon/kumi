@@ -763,11 +763,11 @@ pub fn chain_load_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let before = fxchain::guids(ctx.reaper, holder);
     let place = fx::add_position(input, before.len())?.unwrap_or(before.len());
     fxchain::add_place(ctx.reaper, holder, place)?;
-    let fence = json!({"chain": before});
     Ok(Preview {
         target: fxchain::holder_target(ctx, holder),
-        prior: fence.clone(),
-        fence,
+        prior: json!({"chain": before}),
+        // (the file too: one rewritten since the preview isn't what the preview said it loads)
+        fence: json!({"chain": before, "file": text_hash(&text)}),
         display: json!({"title": format!("Loaded the FX chain {} into {}", super::quoted(&name), fxchain::holder_label(ctx, holder)), "count": count, "position": place}),
     })
 }
@@ -777,8 +777,11 @@ pub fn chain_load_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied
     let (name, text) = chain_file(ctx, input)?;
     let count = top_entries(&text);
     let before = fxchain::guids(ctx.reaper, holder);
-    if json!({"chain": before}) != *fence {
+    if json!({"chain": before}) != json!({"chain": fence["chain"]}) {
         return Err(changed("the FX in that chain changed since the preview"));
+    }
+    if fence["file"] != text_hash(&text) || count == 0 {
+        return Err(changed(format!("the FX chain file {} changed since the preview", super::quoted(&name))));
     }
     let place = fx::add_position(input, before.len())?.unwrap_or(before.len());
     let (address, rec) = fxchain::add_place(ctx.reaper, holder, place)?;
