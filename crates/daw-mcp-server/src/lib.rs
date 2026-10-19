@@ -9,6 +9,8 @@ pub mod mcp;
 pub mod simulator;
 pub mod stdio;
 pub mod tools;
+pub mod xml;
+pub mod zip;
 
 use daw_bridge::Daw;
 use std::path::PathBuf;

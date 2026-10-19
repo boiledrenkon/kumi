@@ -492,6 +492,7 @@ name = "daw-mcp-server"
 version = "0.1.0"
 dependencies = [
  "daw-bridge",
+ "flate2",
  "serde",
  "serde_json",
  "tempfile",
