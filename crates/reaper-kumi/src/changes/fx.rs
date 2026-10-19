@@ -639,9 +639,17 @@ fn locate_param(ctx: &Ctx, input: &Value) -> Done<ParamAt> {
     }
 }
 
+/// What the plug-in prints for a value, with its unit when it prints one: the formatted value of a parameter leaves the unit
+/// off in some plug-ins (ReaEQ's "2000.0"), where asking the plug-in to print the value keeps it.
+fn shown(ctx: &Ctx, at: &ParamAt, normalized: f64) -> String {
+    let printed =
+        ctx.reaper.format_fx_param(at.located.track, at.located.index, at.param, normalized).filter(|text| !text.trim().is_empty());
+    printed.unwrap_or_else(|| ctx.reaper.param_formatted(fx_of(&at.located), at.param))
+}
+
 fn param_state(ctx: &Ctx, at: &ParamAt) -> Value {
-    let fx = fx_of(&at.located);
-    json!({"normalized": ctx.reaper.param_normalized(fx, at.param), "display": ctx.reaper.param_formatted(fx, at.param)})
+    let normalized = ctx.reaper.param_normalized(fx_of(&at.located), at.param);
+    json!({"normalized": normalized, "display": shown(ctx, at, normalized)})
 }
 
 fn near(a: f64, b: f64) -> bool {
@@ -763,8 +771,8 @@ fn param_preview(ctx: &Ctx, input: &Value) -> Done<Preview> {
     let at = locate_param(ctx, input)?;
     let wanted = wanted_value(ctx, &at, input)?;
     let now = param_state(ctx, &at);
-    let shown = ctx.reaper.format_fx_param(at.located.track, at.located.index, at.param, wanted).unwrap_or_default();
-    let mut display = json!({"title": param_title(ctx, &at, &shown), "before": now["display"], "after": shown, "normalized": wanted});
+    let after = shown(ctx, &at, wanted);
+    let mut display = json!({"title": param_title(ctx, &at, &after), "before": now["display"], "after": after, "normalized": wanted});
     if near(wanted, now["normalized"].as_f64().unwrap_or(f64::NAN)) {
         display["unchanged"] = true.into();
     }

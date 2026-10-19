@@ -1855,3 +1855,24 @@ fn a_plan_is_named_by_what_it_did_when_it_ends() {
     assert_eq!(lab.call("undo_step_end", json!({"stepId": id, "label": 7})).unwrap_err().0, "bad-params");
     assert!(lab.call("undo_step_end", json!({"stepId": id})).is_ok());
 }
+
+#[test]
+fn a_parameters_title_keeps_the_unit_the_plug_in_prints_even_when_its_formatted_value_leaves_it_off() {
+    let lab = Lab::new();
+    let guids = three_fx(&lab);
+    let fx = fx_ref_of(&guids[0]);
+    // The formatted value of Gain is a bare number, as ReaEQ's is; asking the plug-in to print the value keeps the unit.
+    assert!(state(|s| s.tracks[1].fx[0].params[0].bare));
+    let (preview, applied) =
+        lab.make("fx-param", json!({"ref": fx, "param": "Gain", "normalized": 0.75}), "Kumi: ReaEQ Gain 6.0 dB on Kick (ktu01)");
+    assert_eq!(preview["display"]["title"], "ReaEQ Gain 6.0 dB on Kick");
+    assert_eq!(applied["display"]["title"], "ReaEQ Gain 6.0 dB on Kick");
+    assert_eq!((preview["prior"]["display"].as_str(), applied["applied"]["display"].as_str()), (Some("0.0 dB"), Some("6.0 dB")));
+    let restored = lab.undo("fx-param", &preview, &applied, "Kumi: undo (kund1)").unwrap();
+    assert_eq!(restored["display"]["title"], "ReaEQ Gain 0.0 dB on Kick (put back)");
+    // A parameter that prints no unit has its number.
+    let (preview, applied) =
+        lab.make("fx-param", json!({"ref": fx, "param": "Offset", "normalized": 1.0}), "Kumi: ReaEQ Offset 1.00 on Kick (ktu02)");
+    assert_eq!(preview["display"]["title"], "ReaEQ Offset 1.00 on Kick");
+    assert_eq!(applied["display"]["title"], "ReaEQ Offset 1.00 on Kick");
+}
