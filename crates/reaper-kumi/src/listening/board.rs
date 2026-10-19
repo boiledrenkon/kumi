@@ -245,7 +245,7 @@ impl Board {
     }
 
     /// `listen_cancel {jobId}`: a queued job is cancelled at once; a running one is asked to stop and waited for a moment,
-    /// and the answer says what it is doing then (`cancelling` while REAPER still finishes it).
+    /// and the answer says what it is doing then (`stopping` while REAPER still finishes it, as Renoise words it).
     pub fn cancel(&self, params: &Value, wait: Duration) -> Answer {
         let id = params.get("jobId").and_then(Value::as_str).ok_or_else(|| bad("jobId: the job to stop"))?;
         let mut inner = self.lock();
@@ -268,7 +268,7 @@ impl Board {
             }
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                return Ok(json!({"jobId": id, "state": job.state.word(), "cancelling": true}));
+                return Ok(json!({"jobId": id, "state": job.state.word(), "stopping": true}));
             }
             inner = self.changed.wait_timeout(inner, left).unwrap_or_else(|e| e.into_inner()).0;
         }
@@ -323,7 +323,7 @@ mod tests {
         board.add(Job::new("j3", Kind::Capture, false));
         assert!(board.start("j3"));
         let answer = board.cancel(&json!({"jobId": "j3"}), Duration::from_millis(20)).unwrap();
-        assert_eq!(answer, json!({"jobId": "j3", "state": "running", "cancelling": true}));
+        assert_eq!(answer, json!({"jobId": "j3", "state": "running", "stopping": true}));
         assert_eq!(board.cancel(&json!({"jobId": "nope"}), CANCEL_WAIT).unwrap_err().0, "bad-params");
     }
 

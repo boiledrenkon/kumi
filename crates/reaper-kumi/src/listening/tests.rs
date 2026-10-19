@@ -683,7 +683,7 @@ fn status_cancel_and_a_previews_stop_answer_while_the_main_thread_is_held() {
     assert!(started.elapsed() < Duration::from_secs(1), "each answered at once");
     // A cancel nobody can act on in time says it is still stopping.
     let cancel = ask(5, "listen_cancel", json!({"jobId": "j1"}));
-    assert_eq!(cancel["result"], json!({"jobId": "j1", "state": "running", "cancelling": true}));
+    assert_eq!(cancel["result"], json!({"jobId": "j1", "state": "running", "stopping": true}));
     assert!(board.cancelled("j1"));
     server.stop("test over");
 }
