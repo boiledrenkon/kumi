@@ -476,6 +476,8 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let selected = reaper.track_value(found.track, "I_SELECTED") != 0.0;
     let lost_envelopes = routes.iter().filter_map(|route| route["envelopes"].as_u64()).sum::<u64>() + without_receives(&chunk).1 as u64;
     let name = named(ctx, &found);
+    // (what the delete does to folders is said with the change too, not only before it)
+    let folders = folder_note(ctx, &found);
     if !reaper.delete_track(found.track) {
         return Err(failed("REAPER wouldn't delete the track"));
     }
@@ -509,13 +511,11 @@ pub fn delete_apply(ctx: &Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         "depths": depths, "parent": parent, "children": children, "above": above, "below": below, "routes": routes, "selected": selected,
         "folderDepth": now["folderDepth"], "lostEnvelopes": lost_envelopes,
     });
-    Ok(Applied {
-        applied: json!({"deleted": true}),
-        created: None,
-        material: Some(material),
-        display: json!({"title": format!("Deleted track {}", super::quoted(&name))}),
-        ..Default::default()
-    })
+    let mut display = json!({"title": format!("Deleted track {}", super::quoted(&name))});
+    if let Some(note) = folders {
+        display["note"] = note.into();
+    }
+    Ok(Applied { applied: json!({"deleted": true}), created: None, material: Some(material), display, ..Default::default() })
 }
 
 /// A chunk's lines without the sends the track receives: those name their sources by position, which has moved on, and

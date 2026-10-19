@@ -735,7 +735,10 @@ struct StopWorking<'a>(&'a Mutex<Snapshot>);
 
 impl Drop for StopWorking<'_> {
     fn drop(&mut self) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).working = None;
+        let mut snapshot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        snapshot.working = None;
+        // (the main thread is back from the request: the time it spent there is no stall of the next request's)
+        snapshot.last_tick = Some(Instant::now());
     }
 }
 

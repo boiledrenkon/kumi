@@ -13,6 +13,7 @@ mod marks;
 mod notes;
 mod project;
 mod sends;
+pub(crate) use sends::seen_holds as send_seen_holds;
 mod structure;
 mod tracks;
 mod undo;

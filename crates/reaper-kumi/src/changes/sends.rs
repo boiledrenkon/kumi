@@ -115,6 +115,12 @@ fn note_written(reaper: &Reaper, owner: Track, receiver: Track, before: String) 
     });
 }
 
+/// Whether a ref to one of the sends from `owner` to `receiver` still names the send it was read as: those sends are as the ref
+/// saw them (`seen`), or as Kumi's own writes made them since. A ref to one of two or more without `seen` names none.
+pub(crate) fn seen_holds(reaper: &Reaper, owner: Track, receiver: Track, seen: Option<&str>) -> bool {
+    seen.is_some_and(|seen| written_since(reaper, owner, receiver, seen))
+}
+
 /// Whether the sends from `owner` to `receiver` are as `seen`, or became what they are now from it by Kumi's writes only.
 fn written_since(reaper: &Reaper, owner: Track, receiver: Track, seen: &str) -> bool {
     let now = pair_seen(reaper, owner, receiver);
@@ -174,6 +180,32 @@ fn pair_hash(reaper: &Reaper, owner: Track, receiver: Track) -> String {
     rows::pair_hash(reaper, owner, receiver)
 }
 
+/// The states of the other sends from one track to the same one, as one hash: with the send's own channels, what tells
+/// the send at a place from another when its own values may have been changed.
+fn others_hash(reaper: &Reaper, owner: Track, receiver: Track, index: i32) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for other in 0..reaper.send_count(owner, 0) {
+        if other == index || reaper.send_peer(owner, 0, other) != Some(receiver) {
+            continue;
+        }
+        for parm in rows::SEND_STATE {
+            for byte in reaper.send_value(owner, 0, other, parm).to_bits().to_le_bytes() {
+                hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        for byte in rows::send_envelope_print(reaper, owner, other).bytes() {
+            hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash = (hash ^ 0xff).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    for parm in ["I_SRCCHAN", "I_DSTCHAN", "I_MIDIFLAGS"] {
+        for byte in reaper.send_value(owner, 0, index, parm).to_bits().to_le_bytes() {
+            hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
 /// How many sends go from one track to another.
 fn pair_count(reaper: &Reaper, owner: Track, receiver: Track) -> usize {
     (0..reaper.send_count(owner, 0)).filter(|&index| reaper.send_peer(owner, 0, index) == Some(receiver)).count()
@@ -186,6 +218,7 @@ fn seal(reaper: &Reaper, found: &Found) -> Value {
         "stamp": stamp_of(reaper, found.track, found.index),
         "state": send_state(reaper, found.track, found.index),
         "pair": pair_hash(reaper, found.track, found.receiver),
+        "others": others_hash(reaper, found.track, found.receiver, found.index),
     })
 }
 
@@ -207,9 +240,23 @@ fn find_sealed(ctx: &Ctx, reference: &str, seal: &Value, check: bool) -> Done<Fo
     }
     // (A seal holds the sends as the preview saw them, after the ref was checked there: it is the stricter check.)
     let found = find(ctx, reference, check && !seal.is_object())?;
+    // (an undo told to put the values back whatever they are now still writes only to the send it changed: the others to that
+    // track, and the send's own channels, are as they were)
+    if !check && seal.is_object() && seal.get("stamp").is_none_or(Value::is_null) {
+        let same = seal["others"].as_str().is_some_and(|others| others == others_hash(reaper, found.track, found.receiver, found.index));
+        if !same {
+            return Err(changed(format!(
+                "the send {} at that place isn't the one Kumi changed (the sends between those tracks changed since): Kumi won't write to another send, even to undo",
+                route_text(&found.from, &found.to)
+            )));
+        }
+    }
     if check && seal.is_object() {
         let route = route_text(&found.from, &found.to);
-        if !same_state(&send_state(reaper, found.track, found.index), &seal["state"]) {
+        let now = send_state(reaper, found.track, found.index);
+        // (its envelopes tell it from a send with the same settings put in its place: where the seal has them)
+        let envelopes_moved = seal["state"].get("envelopes").is_some_and(|was| *was != now["envelopes"]);
+        if !same_state(&now, &seal["state"]) || envelopes_moved {
             return Err(changed(format!("the send {route} is not as it was: it may be another send now")));
         }
         if pair_hash(reaper, found.track, found.receiver) != seal["pair"] {
@@ -417,6 +464,7 @@ fn send_state(reaper: &Reaper, track: Track, index: i32) -> Value {
         "volume": value("D_VOL"), "pan": value("D_PAN"), "mute": value("B_MUTE"), "mode": value("I_SENDMODE"),
         "srcChan": value("I_SRCCHAN"), "dstChan": value("I_DSTCHAN"), "midiFlags": value("I_MIDIFLAGS"),
         "phase": value("B_PHASE"), "mono": value("B_MONO"), "autoMode": value("I_AUTOMODE"),
+        "envelopes": rows::send_envelope_print(reaper, track, index),
     })
 }
 
