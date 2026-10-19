@@ -500,6 +500,25 @@ test("listening: render_start checks everything before writing: refs of another 
   H.no_dialogs()
 end)
 
+test("listening: a render or a sample's export past the room the host says Kumi's folder has is refused before anything starts", function()
+  local env, peer = setup({}, { instrument_specs = { { samples = 1 } } })
+  local epoch = place(peer)
+  -- (4 beats at 120 BPM: 2 s; two sources at 48 kHz, 8 bytes a frame, half again for room: 2.3 MB)
+  local response = start(peer, "j17b", { { id = "mix", what = "master" }, { id = "kick", what = "track", ref = track_ref(epoch, 1) } }, nil,
+    { freeBytes = 2000000 })
+  failure(response, "failed", "Kumi's folder has 2 MB free; this render needs about 3 MB")
+  eq(#mock.renders, 0)
+  eq(track(1).solo, false)
+  ok(result((start(peer, "j17c", { { id = "mix", what = "master" } }, nil, { freeBytes = 2000000 }))), "one source fits")
+  mock.finish_render()
+  failure(call(peer, "audio_file", { ref = epoch .. ":pattern:1", jobId = "j17d", epoch = epoch, freeBytes = 100 }), "failed", "this render needs about")
+  mock.data.instruments[1].samples[1].buffer = { rate = 44100, frames = 441000, channels = 2 }
+  failure(call(peer, "audio_file", { ref = epoch .. ":sample:1.1", jobId = "j17e", epoch = epoch, freeBytes = 1000 }), "failed",
+    "Kumi's folder has 0 MB free; this sample needs about 6 MB")
+  eq(#mock.saved_samples, 0)
+  H.no_dialogs()
+end)
+
 test("listening: more than an hour of music is refused", function()
   -- (4 patterns of 512 lines at 32 BPM and LPB 1: 2,048 beats, 64 minutes)
   local env, peer = setup({}, { bpm = 32, lpb = 1, patterns = 4, pattern_lines = 512, sequence_length = 4, sequence = { 1, 2, 3, 4 } })
@@ -803,13 +822,21 @@ test("listening: read spans says where each track plays, in beats: muted columns
   eq(json.encode(by.Hat.spans), "[[8,12]]")
   eq(json.encode(by.Bass.spans), "[[0,8],[12,16]]", "slots 1, 2 (the alias) and 4, merged where they touch")
   eq(json.encode(by.Pad.spans), "[]")
-  eq(#page.items, 6, "every track, the master and the send too")
+  eq(#page.items, 4, "the tracks that play parts: not the master or the send")
+  eq(by.Kick.mute, nil)
   eq(page.nextCursor, nil)
   local first = result(call(peer, "read", { kind = "spans", limit = 2 }))
   eq(#first.items, 2)
   ok(first.nextCursor, "a next page")
   local second = result(call(peer, "read", { kind = "spans", limit = 2, cursor = first.nextCursor }))
   eq(second.items[1].name, "Bass")
+  -- a track not heard now says so (muted, off, or left out by a solo); Kumi's own scratch copies aren't parts
+  track(2).mute_state = MUTED
+  mock.ops.insert_track(5, { name = "Kumi \194\183 try ab12 1" })
+  local again = result(call(peer, "read", { kind = "spans" }))
+  local names = {}
+  for _, item in ipairs(again.items) do names[#names + 1] = item.name .. (item.mute and "(muted)" or "") end
+  eq(table.concat(names, ","), "Kick,Hat(muted),Bass,Pad")
   H.no_dialogs()
 end)
 

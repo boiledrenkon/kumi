@@ -6,6 +6,7 @@ local json = import("json")
 local refs = import("refs")
 local rows = import("rows")
 local listening = import("listening")
+local scratch = import("scratch")
 
 local fail, integer, array = rows.fail, rows.integer, rows.array
 
@@ -71,7 +72,9 @@ local function spans_of(song, timeline, t)
   return array(out)
 end
 
--- read {kind: "spans", limit?, cursor?} -> {items: [{ref, name, spans: [[fromBeat, toBeat]...]}], nextCursor?, epoch}
+-- read {kind: "spans", limit?, cursor?} -> {items: [{ref, name, spans: [[fromBeat, toBeat]...], mute?}], nextCursor?, epoch}: the
+-- tracks that play parts (sequencer and group tracks; not the master, the send tracks or Kumi's own scratch copies), `mute: true`
+-- on one that isn't heard now (muted, off, or left out by another track's solo).
 function M.spans(job, params, epoch, page)
   local song = rows.the_song()
   local timeline = listening.timeline(song, M.pattern_mark)
@@ -81,10 +84,15 @@ function M.spans(job, params, epoch, page)
     for k, v in pairs(params) do paged[k] = v end
     paged.limit = M.DEFAULT_LIMIT
   end
+  local T = renoise.Track
   return page(job, epoch, paged, rows.track_count(song), function(t)
     local live = rows.the_song()
     local track = live:track(t)
-    return { ref = refs.make(epoch, "track", t), name = track.name, spans = spans_of(live, timeline, t) }
+    if track.type == T.TRACK_TYPE_MASTER or track.type == T.TRACK_TYPE_SEND then return nil end
+    if track.name:sub(1, #scratch.PREFIX) == scratch.PREFIX then return nil end
+    local row = { ref = refs.make(epoch, "track", t), name = track.name, spans = spans_of(live, timeline, t) }
+    if track.mute_state ~= T.MUTE_STATE_ACTIVE then row.mute = true end
+    return row
   end)
 end
 

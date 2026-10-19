@@ -446,8 +446,38 @@ local function set(params, env)
   return { set = #writes, undo = { steps = 1 }, epoch = env.epoch(), layout = env.layout() }
 end
 
+-- A drop of a scratch this bridge doesn't hold (a retry after a lost answer, or one made before Renoise restarted): copies its journal
+-- still notes in this song, named as Kumi named them, go; else nothing is dropped.
+local function drop_unknown(song, env, id)
+  local cfg = M.cfg()
+  local journal = read_journal(cfg)
+  local kept, places = {}, {}
+  for _, entry in ipairs(journal.entries) do
+    if entry.scratchId == id and entry.project == env.song_id() then
+      for _, copy in ipairs(entry.copies or {}) do
+        local t = type(copy.name) == "string" and copy.name:sub(1, #M.PREFIX) == M.PREFIX and find_copy(song, copy.name, copy.index)
+        if t then places[#places + 1] = t end
+      end
+    else
+      kept[#kept + 1] = entry
+    end
+  end
+  if #places > 0 then
+    table.sort(places, function(a, b) return a > b end)
+    song:describe_undo(string.format("Kumi: dropped scratch copies (%s)", id))
+    for _, t in ipairs(places) do song:delete_track_at(t) end
+  end
+  if #kept ~= #journal.entries then
+    journal.entries = kept
+    write_journal(cfg, journal)
+  end
+  return { dropped = #places, left = 0, undo = { steps = #places > 0 and 1 or 0 }, epoch = env.epoch(), layout = env.layout() }
+end
+
 local function drop(params, env)
   local song = ready(env)
+  local id = listening.need_id(params.scratchId, "scratchId", "s")
+  if not S.live[id] then return drop_unknown(song, env, id) end
   local session = session_of(params)
   local any = false
   for _, copy in ipairs(session.copies) do

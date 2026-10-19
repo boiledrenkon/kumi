@@ -751,7 +751,15 @@ start_render = function(job, env, k)
   end
 end
 
--- render_start {jobId, sources, range, preRollBeats, sampleRate, epoch, layout?}
+-- The room the host says Kumi's folder has (`freeBytes`, sent with every job), against what is about to be written (contract §2.1:
+-- seconds × rate × 8 bytes × sources × 1.5): short of it, nothing is started.
+function M.check_room(free, needed, what)
+  if type(free) ~= "number" or free ~= free or needed <= free then return end
+  fail("failed", string.format("Kumi's folder has %d MB free; %s needs about %d MB", math.floor(math.max(0, free) / 1000000), what,
+    math.ceil(needed / 1000000)))
+end
+
+-- render_start {jobId, sources, range, preRollBeats, sampleRate, epoch, layout?, freeBytes?}
 
 local function need_id(value, name, prefix)
   if type(value) ~= "string" or not value:match("^" .. prefix .. "[0-9a-z]+$") or #value > 32 then
@@ -834,6 +842,7 @@ local function plan(params, env, kind)
   if range.seconds > M.MAX_SECONDS then
     bad(string.format("that is %d minutes of music; Kumi renders at most %d at a time", math.ceil(range.seconds / 60), M.MAX_SECONDS / 60))
   end
+  M.check_room(params.freeBytes, range.seconds * rate * 8 * #sources * 1.5, "this render")
   for _, source in ipairs(sources) do
     source.file = folder .. sep .. job_id .. "-" .. source.id .. ".wav"
     if io.exists(source.file) then bad("a file of job " .. job_id .. " is in Kumi's folder already") end
@@ -992,7 +1001,7 @@ local function slot_of(song, p)
   return nil
 end
 
-local function export_sample(song, env, i, s, job_id)
+local function export_sample(song, env, i, s, job_id, free)
   local instrument = song:instrument(i)
   local sample = instrument:sample(s)
   local name = sample.name ~= "" and sample.name or string.format("Sample %02d", s - 1)
@@ -1011,6 +1020,7 @@ local function export_sample(song, env, i, s, job_id)
   end
   local buffer = source.sample_buffer
   if not buffer.has_sample_data then fail("failed", "That sample has no audio") end
+  M.check_room(free, buffer.number_of_frames * buffer.number_of_channels * 4 * 1.5, "this sample")
   local folder, why = M.ensure_folder(env.cfg())
   if not folder then fail("failed", why) end
   local _, sep = M.folder(env.cfg())
@@ -1039,7 +1049,7 @@ function M.audio_file(params, env)
   if kind == "sample" then
     local n = refs.expect(params.ref, "sample", 2, env.epoch())
     if n[1] > #song.instruments or n[2] > #song:instrument(n[1]).samples then fail("gone", "that sample isn't in the song any more") end
-    return export_sample(song, env, n[1], n[2], job_id)
+    return export_sample(song, env, n[1], n[2], job_id, params.freeBytes)
   end
   local s, p, t, label
   if kind == "seq" then
@@ -1070,7 +1080,7 @@ function M.audio_file(params, env)
     sources = { { id = kind == "seq" and "slot" or "pattern", what = "master", name = label, kind = "rendered" } }
   end
   local planned = M.plan_lines(timeline, s, 1, s, slot.lines, nil, false)
-  local job = plan({ jobId = job_id, sources = sources, planned = planned, sampleRate = params.sampleRate }, env, "audio_file")
+  local job = plan({ jobId = job_id, sources = sources, planned = planned, sampleRate = params.sampleRate, freeBytes = params.freeBytes }, env, "audio_file")
   M.launch(job, env)
   if job.state == "failed" then fail(job.code or "failed", job.error) end
   return M.start_answer(job, env)
