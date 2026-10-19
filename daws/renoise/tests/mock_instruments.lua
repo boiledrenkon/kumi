@@ -329,40 +329,46 @@ end
 
 -- A list inside an instrument (its samples, phrases, sets, chains) or inside a set or chain (its devices): an insert, delete
 -- or swap told to `observable`, recorded for undo. `fixed` is how many entries at the front can't move (a chain's mixer).
-local function list_op(items, observable, type_, a, b, made, fixed)
-  fixed = fixed or 0
+-- (`shown`: what the notifier adds to each place: a modulation set's devices are told one higher, lab)
+local function list_op(items, observable, type_, a, b, made, fixed, shown)
+  fixed, shown = fixed or 0, shown or 0
+  local function fire(op)
+    if op.index then op.index = op.index + shown end
+    if op.index1 then op.index1, op.index2 = op.index1 + shown, op.index2 + shown end
+    M.fire(observable, op)
+  end
   if type_ == "insert" then
     if a < 1 + fixed or a > #items + 1 then out_of_range("index", a) end
     table.insert(items, a, made)
-    M.fire(observable, { type = "insert", index = a })
+    fire({ type = "insert", index = a })
   elseif type_ == "remove" then
     if a <= fixed or not items[a] then out_of_range("index", a) end
     made = table.remove(items, a)
-    M.fire(observable, { type = "remove", index = a })
+    fire({ type = "remove", index = a })
   else
     if a <= fixed or b <= fixed or not items[a] or not items[b] then out_of_range("index", a) end
     items[a], items[b] = items[b], items[a]
-    M.fire(observable, { type = "swap", index1 = a, index2 = b })
+    fire({ type = "swap", index1 = a, index2 = b })
   end
   M.record(function()
     if type_ == "insert" then
-      for k, x in ipairs(items) do if x == made then table.remove(items, k) M.fire(observable, { type = "remove", index = k }) break end end
+      for k, x in ipairs(items) do if x == made then table.remove(items, k) fire({ type = "remove", index = k }) break end end
     elseif type_ == "remove" then
       table.insert(items, math.min(a, #items + 1), made)
-      M.fire(observable, { type = "insert", index = math.min(a, #items) })
+      fire({ type = "insert", index = math.min(a, #items) })
     else
       items[a], items[b] = items[b], items[a]
-      M.fire(observable, { type = "swap", index1 = a, index2 = b })
+      fire({ type = "swap", index1 = a, index2 = b })
     end
   end, function()
     if type_ == "insert" then
       table.insert(items, math.min(a, #items + 1), made)
-      M.fire(observable, { type = "insert", index = math.min(a, #items) })
+      fire({ type = "insert", index = math.min(a, #items) })
     elseif type_ == "remove" then
-      for k, x in ipairs(items) do if x == made then table.remove(items, k) M.fire(observable, { type = "remove", index = k }) break end end
+      for k, x in ipairs(items) do if x == made then table.remove(items, k) fire({ type = "remove", index = k }) break end end
     else
       items[a], items[b] = items[b], items[a]
-      M.fire(observable, { type = "swap", index1 = a, index2 = b })
+      fire({ type = "swap", index1 = a, index2 = b })
     end
   end)
   return made
@@ -707,6 +713,9 @@ function M.finish_renders(fail)
     else
       local phrase = render.phrase
       M.callback_begin()
+      -- (Renoise's render rewrites the phrase's length too, as the events need: lab, 32 → 128)
+      phrase.lines = math.min(512, phrase.lines * 2)
+      M.fire(obs(phrase, "number_of_lines"))
       local count = 0
       for k = 1, phrase.lines, 4 do
         local l = phrase_line(phrase, k)
@@ -749,6 +758,16 @@ end
 function M.phrase_proxy(instrument, ph)
   local phrase = instrument.phrases[ph]
   local getters, setters, fields = fields_of(phrase, PHRASE_SPEC)
+  -- (a phrase switched to play its script takes its default name, "Phrase 01": lab 2026-10-19)
+  setters.playback_mode = function(value)
+    check_range("playback_mode", value, 1, 2, true)
+    if value == 2 and phrase.playback_mode ~= 2 then
+      for k, candidate in ipairs(instrument.phrases) do
+        if candidate == phrase then write(phrase, "name", string.format("Phrase %02d", k)) end
+      end
+    end
+    write(phrase, "playback_mode", value)
+  end
   getters.number_of_lines = function() return phrase.lines end
   setters.number_of_lines = function(value)
     check_range("number_of_lines", value, 1, 512, true)
@@ -944,12 +963,12 @@ local function set_object(instrument, m)
     if not M.MODULATION_DEVICES[path] then error("unknown modulation device: " .. tostring(path), 2) end
     check_range("target", target, 1, 6, true)
     if index < 1 or index > #set.devices + 1 then out_of_range("device", index) end
-    list_op(set.devices, set.devices_observable, "insert", index, nil, modulation_device_data(path, target))
+    list_op(set.devices, set.devices_observable, "insert", index, nil, modulation_device_data(path, target), 0, 1)
     return modulation_device_object(set, index)
   end
   fields.delete_device_at = function(_, index)
     if not set.devices[index] then out_of_range("device", index) end
-    list_op(set.devices, set.devices_observable, "remove", index)
+    list_op(set.devices, set.devices_observable, "remove", index, nil, nil, 0, 1)
   end
   fields.init = function() end
   fields.copy_from = function() end
@@ -980,14 +999,7 @@ local function chain_object(instrument, c)
     table.sort(paths)
     return paths
   end
-  getters.available_device_infos = function()
-    local infos = {}
-    for path in pairs(M.device_catalog or {}) do
-      infos[#infos + 1] = { path = path, name = "Effects: " .. (path:match("([^/]+)$") or path), short_name = path:match("([^/]+)$") or path }
-    end
-    table.sort(infos, function(x, y) return x.path < y.path end)
-    return infos
-  end
+  -- (a sample FX chain has no available_device_infos: lab)
   fields.devices_observable = chain.devices_observable
   getters.devices = function()
     local out = {}
@@ -1102,6 +1114,9 @@ local function plugin_props_object(instrument)
     instrument.plugin = made
     M.fire(obs(instrument, "plugin"))
     M.record(function() instrument.plugin = old; M.fire(obs(instrument, "plugin")) end, function() instrument.plugin = made; M.fire(obs(instrument, "plugin")) end)
+    -- (Renoise names the instrument after the plug-in it loads, and leaves it unnamed when the plug-in goes: lab 2026-10-19)
+    local kind = path:match("^Audio/Generators/([^/]+)/") or "VST"
+    write(instrument, "name", made and (kind .. ": " .. made.name) or "")
     return true
   end
   return object("renoise.InstrumentPluginProperties", fields, getters, setters)
@@ -1315,6 +1330,8 @@ function M.instrument_proxy(i)
     end
     list_op(instrument.samples, instrument.samples_observable, "remove", s)
     -- (a sample's sets and chains are numbers: nothing to renumber here)
+    -- (an instrument left with no samples loses its name: lab 2026-10-19)
+    if #instrument.samples == 0 then write(instrument, "name", "") end
   end
   fields.swap_samples_at = function(_, a, b)
     if (instrument.samples[a] or {}).slice_alias or (instrument.samples[b] or {}).slice_alias then error("slice aliases can't be moved", 2) end

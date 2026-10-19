@@ -37,6 +37,15 @@ local function bool_field(field, says, on, off)
     text = function(v) return v and on or off end }
 end
 
+-- A phrase switched to play its script takes its default name in Renoise ("Phrase 01": lab 2026-10-19): Kumi switches it and
+-- keeps the name the phrase had, in the same step.
+function M.set_playback(phrase, mode)
+  if phrase.playback_mode == mode then return end
+  local name = phrase.name
+  phrase.playback_mode = mode
+  if phrase.name ~= name then phrase.name = name end
+end
+
 local PHRASE_FIELDS = {
   name = { get = function(p) return p.name end, set = function(p, v) p.name = v end, field = "name",
     check = function(v) return type(v) == "string" and #v <= 64 and not v:find("[%c]") end, says = "name must be one line of text", text = function(v) return "named " .. q(v) end },
@@ -66,7 +75,7 @@ local PHRASE_FIELDS = {
   panningColumn = bool_field("panning_column_visible", "panningColumn is true or false", "panning column shown", "panning column hidden"),
   delayColumn = bool_field("delay_column_visible", "delayColumn is true or false", "delay column shown", "delay column hidden"),
   sampleEffectsColumn = bool_field("sample_effects_column_visible", "sampleEffectsColumn is true or false", "sample effects shown", "sample effects hidden"),
-  playback = { get = function(p) return PLAYBACK.get(p.playback_mode) end, set = function(p, v) p.playback_mode = PLAYBACK.parse(v) end, field = "playback_mode",
+  playback = { get = function(p) return PLAYBACK.get(p.playback_mode) end, set = function(p, v) M.set_playback(p, PLAYBACK.parse(v)) end, field = "playback_mode",
     check = function(v) return PLAYBACK.parse(v) ~= nil end, says = "playback is pattern or script", text = function(v) return "plays its " .. v end },
 }
 local PHRASE_ORDER = { "name", "lines", "lpb", "looping", "loopStart", "loopEnd", "shuffle", "keyTracking", "baseNote", "autoseek", "noteColumns",
@@ -921,7 +930,7 @@ base.register({
     local script = phrase.script
     local before = { compile = script.compile_error, runtime = script.runtime_error }
     song:describe_undo(desc)
-    if phrase.playback_mode ~= renoise.InstrumentPhrase.PLAY_SCRIPT then phrase.playback_mode = renoise.InstrumentPhrase.PLAY_SCRIPT end
+    M.set_playback(phrase, renoise.InstrumentPhrase.PLAY_SCRIPT)
     script.paragraphs = plan.paragraphs
     if plan.commit then script:commit() end
     if env.watch_undo then env.watch_undo(script.paragraphs_assignment_observable) env.watch_undo(script.paragraphs_observable) env.watch_undo(phrase.playback_mode_observable) end
@@ -975,7 +984,7 @@ base.register({
     phrase.script.paragraphs = prior.paragraphs
     phrase.script:commit()
     local mode = PLAYBACK.parse(prior.mode)
-    if mode and phrase.playback_mode ~= mode then phrase.playback_mode = mode end
+    if mode then M.set_playback(phrase, mode) end
     base.note_restored(env.journal, "phrase-script", places_.journal_place("phrase", n), { mode = applied.mode, paragraphs = applied.paragraphs }, base.KINDS["phrase-script"])
     return { restored = { done = true }, display = { title = label .. "'s script put back" }, undo = { desc = desc, entry = true } }
   end,
@@ -1022,6 +1031,9 @@ base.register({
       end)
     end)
     if not started then fail("failed", "Renoise wouldn't render it: " .. tostring(type(err) == "table" and err.message or err)) end
+    -- (the render rewrites the phrase, its length too, before it answers: the wait looks for no other change, and the phrase is
+    -- found by its place after it)
+    local at = places_.place_of(env, "phrase", n)
     return {
       kumi_job = function(job)
         local from = env.now_ms()
@@ -1029,9 +1041,16 @@ base.register({
           if env.now_ms() - from >= M.RENDER_WAIT_MS then
             error({ code = "uncertain", message = "Renoise didn't say it had rendered " .. plan.label .. " in time: look at its lines; Kumi keeps what it had" }, 0)
           end
-          job.step(50)
+          local resume = env.now_ms() + 50
+          repeat coroutine.yield() until env.now_ms() >= resume
         end
+        job.rebase()
         if result.error then error({ code = "failed", message = "Renoise couldn't render " .. plan.label .. ": " .. tostring(result.error) }, 0) end
+        local now, why = places_.follow(env, at)
+        if not now then
+          error({ code = "uncertain", message = "Renoise rendered " .. plan.label .. ", and the song changed meanwhile (" .. tostring(why) .. "): look at its lines" }, 0)
+        end
+        n = now
         local phrase = places_.resolve(renoise.song() or song, "phrase", n).phrase
         local display = { title = string.format("Rendered the script of %s to %d events", plan.label, result.rendered or 0) }
         if (result.skipped or 0) > 0 then display.note = string.format("%d events didn't fit its lines (raise lpb to fit them).", result.skipped) end

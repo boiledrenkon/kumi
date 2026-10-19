@@ -346,6 +346,48 @@ test("plugins: auto-suspend is no step of Renoise's undo (lab): Kumi says so, ma
   failure(call(peer, "change_preview", { kind = "plugin-suspend", input = { ref = iref(place(peer), 3), autoSuspend = "yes" }, epoch = place(peer) }), "bad-params")
 end)
 
+test("plugins: Renoise names an instrument after its plug-in and unnames it as it goes (lab): a name the producer gave stays, Kumi's undo puts each back", function()
+  plugin_catalog()
+  local env, peer = setup()
+  instrument(3).name = "Lead"
+  local record, done = change(peer, "plugin-load", { ref = iref(place(peer), 3), path = "DLSMusicDevice" })
+  eq(instrument(3).name, "Lead", "the producer's name for an instrument with no plug-in stays")
+  ok(restore(peer, "plugin-load", record).result)
+  eq(instrument(3).name, "Lead")
+  instrument(3).name = ""
+  record = change(peer, "plugin-load", { ref = iref(place(peer), 3), path = "DLSMusicDevice" })
+  eq(instrument(3).name, "AU: DLSMusicDevice", "an unnamed one takes the plug-in's name, as Renoise gives it")
+  local swapped, swap_done = change(peer, "plugin-load", { ref = iref(place(peer), 3), path = "Audio/Generators/VST3/Synth" })
+  eq(instrument(3).name, "VST3: Synth", "a plug-in's name follows the plug-in")
+  ok(swap_done.display.note:find("after its plug-in", 1, true), swap_done.display.note)
+  local out = change(peer, "plugin-load", { ref = iref(place(peer), 3), path = "" })
+  eq(instrument(3).name, "", "taken out: unnamed, as Renoise leaves it")
+  ok(restore(peer, "plugin-load", out).result)
+  eq(instrument(3).plugin.path, "Audio/Generators/VST3/Synth")
+  eq(instrument(3).name, "VST3: Synth", "the name it had with its plug-in")
+  ok(restore(peer, "plugin-load", swapped).result)
+  eq(instrument(3).name, "AU: DLSMusicDevice")
+  ok(restore(peer, "plugin-load", record).result)
+  eq(instrument(3).name, "")
+  eq(instrument(3).plugin, nil)
+end)
+
+test("phrases: switched to its script, a phrase keeps its name (Renoise would name it Phrase 01: lab), through Kumi's script, settings and undo", function()
+  local env, peer = setup()
+  phrase(2, 1).name = "Riff"
+  local record = change(peer, "phrase-script", { ref = pref(place(peer), 2, 1), code = "return cycle(\"c4\")" })
+  eq(phrase(2, 1).playback_mode, 2)
+  eq(phrase(2, 1).name, "Riff")
+  ok(restore(peer, "phrase-script", record).result)
+  eq(phrase(2, 1).name, "Riff")
+  local set = change(peer, "phrase-set", { ref = pref(place(peer), 2, 1), playback = "script" })
+  eq(phrase(2, 1).name, "Riff")
+  ok(restore(peer, "phrase-set", set).result)
+  -- (Renoise's own switch renames it: the mock does as Renoise)
+  mock.song:instrument(2):phrase(1).playback_mode = 2
+  eq(phrase(2, 1).name, "Phrase 01")
+end)
+
 test("midi: a MIDI instrument's device, channel, transpose, program, bank, delay and duration change and go back; an unknown device is bad-params", function()
   mock.midi_outputs = { "IAC Driver Bus 1" }
   local env, peer = setup()

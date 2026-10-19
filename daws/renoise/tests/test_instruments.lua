@@ -89,6 +89,8 @@ local function change(peer, kind, input, desc)
   local previewed, epoch, layout = preview(peer, kind, input)
   local done = apply(peer, kind, input, desc or ("Kumi: " .. kind .. " (k" .. kind:len() .. ")"), previewed.fence, epoch, layout)
   ok(done and done.result, kind .. " apply: " .. json.encode(done and done.error or {}))
+  -- (the tool's ticks run before the next request, as they do in Renoise: what a notifier asked of them is done)
+  H.tick(2)
   local record = {
     target = done.result.target or previewed.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created,
     material = done.result.material, epoch = done.result.epoch, layout = done.result.layout,

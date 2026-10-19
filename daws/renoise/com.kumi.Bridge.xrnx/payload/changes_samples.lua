@@ -39,6 +39,14 @@ function M.buffer_print(buffer)
   return { frames = frames, channels = channels, rate = buffer.sample_rate, bits = buffer.bit_depth, values = string.format("%08x%08x", a, b) }
 end
 
+-- Renoise leaves an instrument unnamed when its last sample goes (lab 2026-10-19): Kumi deletes the sample and keeps the
+-- instrument's name, in the same step.
+local function delete_sample(instrument, s)
+  local name = instrument.name
+  instrument:delete_sample_at(s)
+  if instrument.name ~= name then instrument.name = name end
+end
+
 local function buffer_bytes(buffer)
   if not buffer.has_sample_data then return 0 end
   return buffer.number_of_frames * buffer.number_of_channels * math.max(1, math.floor(buffer.bit_depth / 8))
@@ -534,7 +542,7 @@ local function load_apply(song, env, input, fence, desc)
   local sample = instrument:insert_sample_at(plan.index)
   local loaded = sample.sample_buffer:load_from(plan.path)
   if not loaded then
-    pcall(function() instrument:delete_sample_at(plan.index) end)
+    pcall(delete_sample, instrument, plan.index)
     fail("failed", "Renoise wouldn't load " .. plan.path)
   end
   if input.name ~= nil then sample.name = input.name elseif sample.name == "" then sample.name = file_name(plan.path) end
@@ -566,7 +574,7 @@ local function load_restore(song, env, restore, desc)
       fail("changed", label .. " changed in Renoise since Kumi loaded it")
     end
     song:describe_undo(desc)
-    instrument:delete_sample_at(n[2])
+    delete_sample(instrument, n[2])
     base.note_restored_at(env.journal, "sample-load", places_.journal_place("sample", n))
     return { restored = { deleted = true }, display = { title = "Removed " .. label .. " (put back)" }, undo = { desc = desc, entry = true } }
   end
@@ -643,7 +651,7 @@ local function delete_apply(song, env, input, fence, desc)
     end
   end
   song:describe_undo(desc)
-  instrument:delete_sample_at(n[2])
+  delete_sample(instrument, n[2])
   material.instrument = places_.place_of(env, "instrument", { n[1] })
   material.after = env.list_mark and env.list_mark("samples", n[1]) or nil
   return {
@@ -681,7 +689,7 @@ local function delete_restore(song, env, restore, desc)
   song:describe_undo(desc)
   local sample = instrument:insert_sample_at(at)
   if material.file and not sample.sample_buffer:load_from(material.file) then
-    pcall(function() instrument:delete_sample_at(at) end)
+    pcall(delete_sample, instrument, at)
     fail("failed", "Renoise wouldn't load the kept audio of " .. label .. " back: nothing was put back")
   end
   local lost = put_settings(env, sample, material, true)

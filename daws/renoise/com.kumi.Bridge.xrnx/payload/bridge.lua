@@ -533,6 +533,10 @@ end
 -- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
 -- asks for the whole song to be watched anew.
 local function on_structural(reason, kind, op, owner, token)
+  -- (n-instruments: a modulation set's devices notifier names each place one higher than the list has it: lab 2026-10-19)
+  if kind == "moddevices" and op then
+    op = { type = op.type, index = type(op.index) == "number" and op.index - 1 or op.index, index2 = type(op.index2) == "number" and op.index2 - 1 or op.index2 }
+  end
   bump_epoch(reason, true, BREAKS[kind])
   -- (what moved, for the places a change keeps: a track's devices, the pool, the instruments; anything not told is a gap)
   if kind == "devices" and token and token.dlog then

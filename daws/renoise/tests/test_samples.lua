@@ -284,6 +284,23 @@ test("samples: a deleted sample comes back after the one that was before it, wit
   ok(again.result.display.title:find("back already", 1, true))
 end)
 
+test("samples: an instrument keeps its name when Kumi deletes its last sample (Renoise would leave it unnamed: lab), or undoes the load of it", function()
+  local env, peer = setup()
+  local record = change(peer, "sample-delete", { ref = sref(place(peer), 2, 1) })
+  eq(#instrument(2).samples, 0)
+  eq(instrument(2).name, "Bass synth")
+  ok(restore(peer, "sample-delete", record).result)
+  eq(instrument(2).name, "Bass synth")
+  instrument(3).name = "Empty"
+  local loaded = change(peer, "sample-load", { ref = iref(place(peer), 3), path = wav_file("Clap") })
+  ok(restore(peer, "sample-load", loaded).result)
+  eq(#instrument(3).samples, 0)
+  eq(instrument(3).name, "Empty")
+  -- (Renoise's own delete unnames it: the mock does as Renoise)
+  mock.song:instrument(2):delete_sample_at(1)
+  eq(instrument(2).name, "")
+end)
+
 test("samples: a slice can't be deleted (its marker can); the sliced sample's delete keeps its markers and each slice's settings", function()
   local env, peer = setup()
   local master = mock.song:instrument(1):sample(1)

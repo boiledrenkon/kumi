@@ -844,14 +844,27 @@ instruments_.instrument_spec(instruments_.settings_kind({
 
 -- chaindevice-add {ref: chain, path, index? (2 or later: the chain's mixer is first)}
 
-local function resolve_chain_device(chain, wanted)
+-- (a sample FX chain lists its devices' paths only, with no infos (lab): the names are the tracks' infos of the same paths)
+local function device_names(song)
+  local names = {}
+  local ok, infos = pcall(function() return song:track(1).available_device_infos end)
+  for _, info in ipairs(ok and infos or {}) do names[info.path] = info end
+  return names
+end
+
+local function resolve_chain_device(chain, wanted, song)
   if type(wanted) ~= "string" or wanted == "" then bad("path: a device's path (as Renoise lists it) or its name") end
   local lower, matches, near = wanted:lower(), {}, {}
-  for _, info in ipairs(chain.available_device_infos) do
-    if info.path == wanted then return info.path end
-    local last = info.path:match("([^/]+)$") or info.path
-    if info.path:lower() == lower or last:lower() == lower or (info.short_name or ""):lower() == lower then matches[#matches + 1] = info.path
-    elseif info.path:lower():find(lower, 1, true) and #near < 5 then near[#near + 1] = info.path end
+  local names = device_names(song)
+  for _, path in ipairs(chain.available_devices) do
+    if path == wanted then return path end
+    local last = path:match("([^/]+)$") or path
+    local info = names[path] or {}
+    if path:lower() == lower or last:lower() == lower or (info.short_name or ""):lower() == lower or (info.name or ""):lower() == lower then
+      matches[#matches + 1] = path
+    elseif path:lower():find(lower, 1, true) and #near < 5 then
+      near[#near + 1] = path
+    end
   end
   if #matches == 1 then return matches[1] end
   if #matches > 1 then bad(string.format("%q names %d devices: say which by its path (%s)", wanted, #matches, table.concat(matches, ", ", 1, math.min(#matches, 5)))) end
@@ -866,7 +879,7 @@ end
 local function chaindevice_add(song, env, input, fence, desc, preview_only)
   local n, objects, label = places_.locate(song, env, "chain", input, "chaindevice-add")
   local chain = objects.chain
-  local path = resolve_chain_device(chain, input.path)
+  local path = resolve_chain_device(chain, input.path, song)
   local count = #chain.devices
   local index = index_in(input.index, count, "index", 2)
   local name = path:match("([^/]+)$") or path

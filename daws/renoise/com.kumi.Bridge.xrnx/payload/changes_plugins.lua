@@ -104,13 +104,20 @@ base.register({
       return { applied = plan.now, display = display, undo = { desc = desc, entry = false }, prior = { path = plan.now.path }, target = places_.target_of(env, "instrument", n) }
     end
     if M.UNDO_COVERS.plugin then song:describe_undo(desc) end
+    -- (Renoise names an instrument after the plug-in it loads, and leaves it unnamed when its plug-in goes: lab 2026-10-19. A
+    -- name the producer gave an instrument with no plug-in stays; Kumi's undo puts back the name it had either way.)
+    local name = plan.instrument.name
     local loaded = plan.instrument.plugin_properties:load_plugin(plan.path)
     if not loaded or (plan.path ~= "" and not plan.instrument.plugin_properties.plugin_loaded) then
       fail("failed", "Renoise wouldn't load the plug-in " .. plan.path)
     end
-    if not M.UNDO_COVERS.plugin then display.note = NOT_IN_UNDO end
+    if plan.now.path == "" and name ~= "" and plan.instrument.name ~= name then plan.instrument.name = name end
+    if plan.instrument.name ~= name then
+      display.note = string.format("Renoise named the instrument %s after its plug-in; Kumi's undo names it %s again.", q(plan.instrument.name), q(name))
+    end
+    if not M.UNDO_COVERS.plugin then display.note = (display.note and (display.note .. " ") or "") .. NOT_IN_UNDO end
     return {
-      applied = plugin_now(plan.instrument), material = { kept = plan.kept }, target = places_.target_of(env, "instrument", n),
+      applied = plugin_now(plan.instrument), material = { kept = plan.kept, name = name }, target = places_.target_of(env, "instrument", n),
       display = display, undo = { desc = desc, entry = M.UNDO_COVERS.plugin }, prior = { path = plan.now.path },
       place = places_.journal_place("instrument", n),
     }
@@ -136,6 +143,8 @@ base.register({
         note = "Its plug-in is back, but didn't take its old state: look at its settings."
       end
     end
+    -- (and the name it had: Renoise renamed it as the plug-in came or went)
+    if type(material.name) == "string" and instrument.name ~= material.name then instrument.name = material.name end
     base.note_restored(env.journal, "plugin-load", places_.journal_place("instrument", n), applied, base.KINDS["plugin-load"])
     return { restored = { path = material.kept.path }, display = { title = q(label) .. "'s plug-in put back", note = note }, undo = { desc = desc, entry = M.UNDO_COVERS.plugin } }
   end,
