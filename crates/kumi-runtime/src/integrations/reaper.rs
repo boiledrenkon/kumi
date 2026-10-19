@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::{rc::Rc, sync::LazyLock};
 
 /// The instructions REAPER's turns carry (M7 brings the full instruction pack).
-const INSTRUCTIONS: &str = "You work in REAPER through Kumi's extension. Read the project with reaper_read before you describe it: its tracks (depth and folder show the folders), items and takes, FX and their parameters, sends and receives, markers, regions and envelopes. A ref such as track:3 is this turn's: pass it back as parent to read what's inside. Kumi reads REAPER here; changing it comes later.";
+const INSTRUCTIONS: &str = "You work in REAPER through Kumi's extension. Read the project with reaper_read before you describe it: its tracks (depth and folder show the folders), items and takes, FX and their parameters, sends and receives, markers, regions and envelopes. A ref such as track:3 is this turn's: pass it back as parent to read what's inside.";
 
 pub const DAW: OwnDaw = OwnDaw {
     profile: &DawProfile::REAPER,
@@ -30,6 +30,7 @@ pub const DAW: OwnDaw = OwnDaw {
     bodies: &[BodyKind::Tree, BodyKind::Notes, BodyKind::Timeline, BodyKind::Routing],
     body_request,
     to_body,
+    changes: &super::reaper_changes::CHANGES,
 };
 
 /// What the producer looks at in REAPER: the arrange view always, with the MIDI editor, an FX chain or a track's

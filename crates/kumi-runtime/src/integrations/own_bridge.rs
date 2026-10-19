@@ -6,13 +6,16 @@ use crate::{
         context::IntegrationContext,
         contracts::*,
         daw::DawProfile,
-        errors::RuntimeError,
+        errors::{FailureKind, KumiError, RuntimeError},
         fold::fold_tracks_with,
         place::{is_project_id, unsaved, Place},
         refs::{Book, RefScheme, Shift},
         view::{BodyKind, BodyRequest, DawFocus, FocusBody},
     },
-    integrations::none::no_access,
+    integrations::{
+        none::no_access,
+        own_changes::{Link, OwnPlan},
+    },
     mcp::client::{connect_mcp, BridgeDescriptor, McpEndpoint, Options},
     mcp::types::{CallToolResult, ContentBlock},
 };
@@ -35,7 +38,7 @@ use std::{
 };
 
 /// How long a call to Kumi's host waits.
-const CALL_MS: u64 = 30_000;
+pub(super) const CALL_MS: u64 = 30_000;
 /// How often FOCUS's focus is read while the app shows it, unless the app says.
 const FOCUS_MS: u64 = 150;
 /// How often the focus is polled when nothing draws it (plain mode).
@@ -63,6 +66,8 @@ pub struct OwnDaw {
     pub bodies: &'static [BodyKind],
     pub body_request: fn(&BodyRequest) -> Option<JsonObject>,
     pub to_body: fn(&BodyRequest, &Value) -> Option<FocusBody>,
+    /// What Kumi can change in it, and how.
+    pub changes: &'static super::own_changes::OwnChangeSet,
 }
 
 /// Starts Kumi's host for a DAW: the production one runs `daw-mcp-server`; a test's stand-in answers in its place.
@@ -78,7 +83,7 @@ pub struct OwnOptions {
 }
 
 /// One DAW's integration through Kumi's host.
-pub struct OwnIntegration<S: RefScheme> {
+pub struct OwnIntegration<S: RefScheme + 'static> {
     daw: &'static OwnDaw,
     options: OwnOptions,
     endpoint: Rc<RefCell<Option<Rc<dyn McpEndpoint>>>>,
@@ -110,27 +115,55 @@ pub struct OwnIntegration<S: RefScheme> {
     /// The last look that read the project: its key and project, kept by a look that can't (as Live's are), so the
     /// conversation stays with the project while the DAW is busy or away.
     previous: RefCell<Option<(String, Option<ProjectRef>)>>,
+    /// Kumi's changes in the DAW: HISTORY, plans and undo through the host's journal.
+    changes: Rc<OwnPlan<S>>,
+    /// Cancelled when the integration closes: a change under way is let go.
+    lifetime: Signal,
+    /// The tempo and saved file as last read (a wait in beats; the copy before a delete).
+    tempo: Rc<Cell<Option<f64>>>,
+    file: Rc<RefCell<Option<String>>>,
+    /// Hosts started: one started again has lost its journal, so Kumi's changes before can't be undone through it.
+    hosts: Cell<u32>,
 }
 
 pub fn create_own_integration<S: RefScheme + 'static>(daw: &'static OwnDaw, options: OwnOptions) -> Rc<dyn Integration> {
-    Rc::new(OwnIntegration::<S> {
+    let link = Rc::new(Link {
         daw,
-        options,
         endpoint: Rc::new(RefCell::new(None)),
         book: Rc::new(RefCell::new(Book::default())),
         epoch: Rc::default(),
+        layout: Rc::default(),
+        seen_in: Rc::default(),
         connected: Rc::default(),
+        lifetime: Signal::new(),
+        tempo: Rc::default(),
+        file: Rc::default(),
+    });
+    let context = &options.context;
+    let changes = OwnPlan::new(link.clone(), context.change_timeout_ms, context.on_change.clone(), context.on_action.clone());
+    Rc::new(OwnIntegration::<S> {
+        daw,
+        options,
+        endpoint: link.endpoint.clone(),
+        book: link.book.clone(),
+        epoch: link.epoch.clone(),
+        connected: link.connected.clone(),
         closed: Rc::new(Cell::new(false)),
         watching: Cell::new(false),
         selected: Rc::default(),
         identity: Rc::default(),
-        layout: Rc::default(),
-        seen_in: Rc::default(),
+        layout: link.layout.clone(),
+        seen_in: link.seen_in.clone(),
         back_at: Rc::default(),
         looks_again: Rc::default(),
         look_when_free: Rc::default(),
         unlisten: RefCell::default(),
         previous: RefCell::default(),
+        changes,
+        lifetime: link.lifetime.clone(),
+        tempo: link.tempo.clone(),
+        file: link.file.clone(),
+        hosts: Cell::new(0),
     })
 }
 
@@ -147,20 +180,20 @@ const LOOKS_AGAIN: u32 = 20;
 /// The most a read's page can hold for the model: the kernel cuts a tool's result at 64 KB.
 const PAGE_TEXT_BYTES: usize = 60 * 1024;
 /// A turn's short ref (`track:3`): the shape of a name this turn gave.
-static SHORT_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z]+:[0-9]+$").unwrap());
+pub(super) static SHORT_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z]+:[0-9]+$").unwrap());
 
 /// Why a host tool answered an error: its words, and whether the DAW is there at all (it quit, or its bridge did).
-struct Refused {
-    why: String,
-    there: bool,
+pub(super) struct Refused {
+    pub(super) why: String,
+    pub(super) there: bool,
     /// Busy for now (a dialog, a load, a render): worth waiting for.
-    busy: bool,
+    pub(super) busy: bool,
     /// The host's code for it (`stale`, `changed`, `failed`…).
-    code: Option<String>,
+    pub(super) code: Option<String>,
 }
 
 /// The JSON a host tool answered with, or why it couldn't.
-fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
+pub(super) fn answer_of(result: &CallToolResult) -> Result<Value, Refused> {
     let text = result
         .content
         .iter()
@@ -218,9 +251,25 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             }
         };
         *self.endpoint.borrow_mut() = Some(endpoint.clone());
+        // A host started again has a new journal: Kumi's changes before it can't be undone through it.
+        if self.hosts.replace(self.hosts.get() + 1) > 0 {
+            let own_undo = self.daw.profile.vocab.own_undo;
+            self.changes.history.retire(&format!(
+                "Kumi's link to {} started again, so Kumi can't undo this anymore; {own_undo} can.",
+                self.daw.profile.words.app
+            ));
+        }
         // Tracks inserted, removed or moved where refs are positions: the book's refs follow what they named.
         let (book, layout, epoch) = (self.book.clone(), self.layout.clone(), self.epoch.clone());
+        let changes = Rc::downgrade(&self.changes);
         let unlisten = endpoint.on_live_event(Rc::new(move |event| {
+            // The producer undid (or redid) Kumi's changes with the DAW's own undo: HISTORY follows.
+            if event.get("name").and_then(Value::as_str) == Some("undone_in_daw") {
+                if let (Some(changes), Some(data)) = (changes.upgrade(), event.get("data")) {
+                    changes.undone_in_daw(data);
+                }
+                return;
+            }
             // Events were dropped on the way: a track shift among them is unknown, so positional refs are read again.
             if event.get("name").and_then(Value::as_str) == Some("events_lost") {
                 if book.borrow().scheme.positional() {
@@ -429,7 +478,8 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         let app = self.daw.profile.words.app;
         observation.revision = None;
         observation.label = format!("{app} — couldn't look just now: {why}");
-        observation.tools = vec![self.read_tool()];
+        observation.tools = self.tools();
+        observation.instructions = self.instructions();
         observation.context = stringify(&json!({
             "observedAt": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             "daw": app,
@@ -458,6 +508,17 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
                 look_again();
             }
         });
+    }
+
+    /// The model's tools: the read, and the DAW's changes with their plan and undo.
+    fn tools(&self) -> Vec<Rc<dyn KernelTool>> {
+        let mut tools = vec![self.read_tool()];
+        tools.extend(self.changes.tools());
+        tools
+    }
+
+    fn instructions(&self) -> String {
+        format!("{} {}", self.daw.instructions, self.daw.changes.instructions)
     }
 
     fn read_tool(&self) -> Rc<dyn KernelTool> {
@@ -578,12 +639,20 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
         } else if !markers.is_null() {
             context["markers"] = markers;
         }
+        if let Some(latest) = self.changes.latest() {
+            context["kumiChanges"] = latest;
+        }
         // What the producer pinned in FOCUS (an FX, a DSP device), in the turn's short refs.
         if let Some(pin) = pinned {
             context["pinned"] = self.book.borrow_mut().shorten(&serde_json::to_value(pin).unwrap_or(Value::Null));
         }
         let identity = project.get("identity").and_then(Value::as_str).map(str::to_owned);
         *self.identity.borrow_mut() = identity.clone();
+        let tempo = ["/transport/tempo", "/transport/bpm", "/project/tempo", "/project/bpm"]
+            .iter()
+            .find_map(|at| snapshot.pointer(at).and_then(Value::as_f64));
+        self.tempo.set(tempo);
+        *self.file.borrow_mut() = project.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).map(str::to_owned);
         // A saved project is its id, through a restart of the DAW; an unsaved one is this run's identity for it.
         let key = saved
             .map(|id| format!("{}:{id}", self.daw.host_flag))
@@ -595,14 +664,13 @@ impl<S: RefScheme + 'static> OwnIntegration<S> {
             trace(format!("look: {key}"));
         }
         self.looks_again.set(0);
-        let tool = self.read_tool();
         Observation {
             key: key.clone(),
             revision: None,
             label: format!("{} — {name}", profile.words.app),
             context: stringify(&context),
-            instructions: self.daw.instructions.into(),
-            tools: vec![tool],
+            instructions: self.instructions(),
+            tools: self.tools(),
             project: saved.map(|_| ProjectRef { id: place, name: name.clone() }),
             set: identity.clone(),
             tracks: Some(tracks.iter().filter_map(|track| track.get("name").and_then(Value::as_str).map(str::to_owned)).collect()),
@@ -639,6 +707,23 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     fn can_show(&self, kind: BodyKind) -> bool {
         self.daw.bodies.contains(&kind)
     }
+    fn has_undo(&self) -> bool {
+        true
+    }
+    async fn undo(&self, id: Option<&str>, signal: Signal) -> Result<ChangeRecord, RuntimeError> {
+        if self.closed.get() || !self.connected.get() {
+            let app = self.daw.profile.words.app;
+            return Err(KumiError::new(FailureKind::Request, format!("Kumi isn't connected to {app}, so it can't undo.")).into());
+        }
+        let outcome = self.changes.history.undo(id.unwrap_or("last"), signal, false).await?;
+        outcome.record.ok_or_else(|| KumiError::new(FailureKind::Request, outcome.text).into())
+    }
+    fn has_stop_live(&self) -> bool {
+        true
+    }
+    async fn stop_live(&self, signal: Signal) -> Result<bool, RuntimeError> {
+        Ok(self.changes.history.stop_everything(signal).await)
+    }
     async fn focus_body(&self, request: &BodyRequest, signal: Signal) -> Result<Option<FocusBody>, RuntimeError> {
         let Some(mut args) = (self.daw.body_request)(request).filter(|_| self.daw.bodies.contains(&request.kind())) else {
             return Ok(None);
@@ -662,6 +747,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     async fn observe(&self, signal: Signal, hints: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
         let pinned = hints.as_ref().and_then(|hints| hints.pinned.as_ref());
         signal.check()?;
+        self.changes.history.changes_this_turn.set(0);
         if self.closed.get() {
             return Err(RuntimeError::plain("Integration is closed"));
         }
@@ -720,6 +806,7 @@ impl<S: RefScheme + 'static> Integration for OwnIntegration<S> {
     }
     async fn close(&self) -> Result<(), RuntimeError> {
         self.closed.set(true);
+        self.lifetime.cancel();
         if let Some(unlisten) = self.unlisten.borrow_mut().take() {
             unlisten();
         }
@@ -746,7 +833,12 @@ struct ReadTool<S: RefScheme> {
 /// An answer from another epoch than the book's: Renoise moves it for a device, sample, phrase, pattern, instrument or
 /// sequence edit, and no event says so. Positional names are retired, and the book takes the answer's epoch and layout.
 /// (A DAW whose refs hold across epochs keeps its names; `see_epoch` looks after it.)
-fn follow_epoch<S: RefScheme>(book: &RefCell<Book<S>>, epoch: &RefCell<Option<String>>, layout: &Cell<Option<u64>>, answer: &Value) {
+pub(super) fn follow_epoch<S: RefScheme>(
+    book: &RefCell<Book<S>>,
+    epoch: &RefCell<Option<String>>,
+    layout: &Cell<Option<u64>>,
+    answer: &Value,
+) {
     let Some(now) = answer.get("epoch").and_then(Value::as_str) else { return };
     if !book.borrow().scheme.positional() || epoch.borrow().as_deref() == Some(now) {
         return;
@@ -764,7 +856,7 @@ fn follow_epoch<S: RefScheme>(book: &RefCell<Book<S>>, epoch: &RefCell<Option<St
 
 /// Whether a request names something on a track (a track, a device or a parameter), the refs a track shift moves: only
 /// those carry the layout they were made in.
-fn names_tracks<S: RefScheme>(scheme: &S, args: &JsonObject) -> bool {
+pub(super) fn names_tracks<S: RefScheme>(scheme: &S, args: &JsonObject) -> bool {
     ["ref", "parent", "trackRef", "track", "around"].iter().any(|key| match args.get(*key) {
         Some(Value::String(reference)) => matches!(scheme.kind_of(reference), Some("track" | "device" | "param")),
         Some(Value::Number(_)) => *key == "track",
@@ -805,7 +897,7 @@ async fn layout_of<S: RefScheme>(book: &RefCell<Book<S>>, layout: &Cell<Option<u
 }
 
 /// Keeps the epoch an answer was read in for each long ref it names.
-fn note_epoch(seen_in: &RefCell<HashMap<String, String>>, scheme: &impl RefScheme, answer: &Value) {
+pub(super) fn note_epoch(seen_in: &RefCell<HashMap<String, String>>, scheme: &impl RefScheme, answer: &Value) {
     let Some(epoch) = answer.get("epoch").and_then(Value::as_str) else { return };
     let text = answer.to_string();
     let mut seen_in = seen_in.borrow_mut();

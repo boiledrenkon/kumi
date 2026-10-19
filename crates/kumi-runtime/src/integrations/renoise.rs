@@ -15,7 +15,7 @@ use serde_json::Value;
 use std::{rc::Rc, sync::LazyLock};
 
 /// The instructions Renoise's turns carry (M7 brings the full instruction pack).
-const INSTRUCTIONS: &str = "You work in Renoise through Kumi's tool. Read the song with renoise_read before you describe it: its tracks (sequencer, group, send and master), the pattern sequence and its patterns, a pattern's lines in Renoise's own notation, instruments with their samples, keyzones and phrases, and each track's devices and their parameters. A ref such as track:3 is this turn's: pass it back as parent (a pattern for its lines, with track) to read what's inside. Kumi reads Renoise here; changing it comes later.";
+const INSTRUCTIONS: &str = "You work in Renoise through Kumi's tool. Read the song with renoise_read before you describe it: its tracks (sequencer, group, send and master), the pattern sequence and its patterns, a pattern's lines in Renoise's own notation, instruments with their samples, keyzones and phrases, and each track's devices and their parameters. A ref such as track:3 is this turn's: pass it back as parent (a pattern for its lines, with track) to read what's inside.";
 
 pub const DAW: OwnDaw = OwnDaw {
     profile: &DawProfile::RENOISE,
@@ -30,6 +30,7 @@ pub const DAW: OwnDaw = OwnDaw {
     bodies: &[BodyKind::Tree, BodyKind::Tracker, BodyKind::Matrix, BodyKind::Keyzones],
     body_request,
     to_body,
+    changes: &super::renoise_changes::CHANGES,
 };
 
 /// What the producer looks at in Renoise: the middle frame (the pattern or phrase editor, an instrument, the mixer),

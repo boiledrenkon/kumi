@@ -108,7 +108,23 @@ async fn reapers_observation_is_its_project_in_short_refs_at_its_place() {
             assert_eq!(context["tracks"][1]["ref"], "track:2");
             assert_eq!(context["selection"]["trackRef"], "track:2");
             assert!(!seen.context.contains("{8A5D"), "no GUID reaches the model: {}", seen.context);
-            assert_eq!(seen.tools.iter().map(|tool| tool.name().to_string()).collect::<Vec<_>>(), ["reaper_read"]);
+            // The read, REAPER's core change kinds, the plan and the undo.
+            assert_eq!(
+                seen.tools.iter().map(|tool| tool.name().to_string()).collect::<Vec<_>>(),
+                [
+                    "reaper_read",
+                    "track_volume",
+                    "track_pan",
+                    "track_mute",
+                    "track_add",
+                    "tempo_set",
+                    "fx_add",
+                    "fx_param",
+                    "notes_add",
+                    "make_changes",
+                    "undo_change"
+                ]
+            );
 
             // The model reads the Bass track's items in short refs; the host is asked in long ones.
             host.answers.borrow_mut().push((
@@ -654,7 +670,8 @@ async fn a_look_the_daw_interrupts_is_taken_again_and_a_failed_one_keeps_the_too
             let failed = renoise.observe(Signal::new(), None).await.unwrap();
             assert_eq!(failed.key, first.key, "the same song's conversation");
             assert_eq!(failed.revision, first.revision, "no tools change for the session");
-            assert_eq!(failed.tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>(), ["renoise_read"]);
+            let names = |tools: &[Rc<dyn KernelTool>]| tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>();
+            assert_eq!(names(&failed.tools), names(&first.tools));
             assert!(failed.label.starts_with("Renoise — couldn't look just now"), "{}", failed.label);
             tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
             assert_eq!(looks_again.get(), 1, "looked again without a turn");
@@ -762,11 +779,11 @@ async fn a_busy_daw_is_looked_at_again_once_it_is_free_not_every_second() {
             options.context.on_focus = Some(Rc::new(|_| {}));
             let reaper = create_reaper_integration(options);
             reaper.start(Signal::new()).await.unwrap();
-            reaper.observe(Signal::new(), None).await.unwrap();
+            let seen = reaper.observe(Signal::new(), None).await.unwrap();
             // A dialog opens: the look waits a while, then keeps the project and REAPER's tools.
             host.answers.borrow_mut().push(("snapshot", busy, true));
             let failed = reaper.observe(Signal::new(), None).await.unwrap();
-            assert_eq!(failed.tools.len(), 1);
+            assert_eq!(failed.tools.len(), seen.tools.len());
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             assert_eq!(looks_again.get(), 0, "no look asked for while the dialog stays");
             // The dialog closes: one look is asked for.
