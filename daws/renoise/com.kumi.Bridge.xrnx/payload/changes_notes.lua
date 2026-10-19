@@ -611,21 +611,33 @@ local function restore_of(spec_kind, noun)
       finish(song, track)
       return restored_answer(env, display, desc)
     end
-    -- Too much for one callback: numbered steps, each its own callback and undo step.
+    -- Too much for one callback: numbered steps, each its own callback and undo step. The job stops when tracks, patterns or lines
+    -- were inserted or removed between them (it holds a track's number, and the producer's change may have moved it): the steps done
+    -- stay, and undoing again puts back the rest (cells already back are skipped).
     return {
       kumi_job = function(job)
         local total = #chunks
-        for k = 1, total do
-          if k > 1 then
-            job.step(base.STEP_GAP_MS)
-            base.wait_while_busy(job, env, string.format("%d of %d steps are put back, undo again to finish the rest", k - 1, total))
+        local done_steps = 0
+        local ok, err = pcall(function()
+          for k = 1, total do
+            if k > 1 then
+              job.step(base.STEP_GAP_MS)
+              base.wait_while_busy(job, env)
+            end
+            local live = the_song()
+            local live_pattern_track = live:pattern(p):track(index)
+            if live_pattern_track.is_alias then fail("changed", "that track in the pattern is an alias now") end
+            live:describe_undo(string.format("%s (%d/%d)", desc, k, total))
+            for _, cell in ipairs(chunks[k]) do write_cell(live_pattern_track, cell) end
+            done_steps = k
+            if k == 1 then job.rebase() end
           end
-          local live = the_song()
-          local live_pattern_track = live:pattern(p):track(index)
-          if live_pattern_track.is_alias then fail("changed", "that track in the pattern is an alias now") end
-          live:describe_undo(string.format("%s (%d/%d)", desc, k, total))
-          for _, cell in ipairs(chunks[k]) do write_cell(live_pattern_track, cell) end
-          if k == 1 then job.rebase() end
+        end)
+        if not ok then
+          if type(err) == "table" and err.message then
+            err = { code = err.code, message = string.format("%s; %d of %d steps are put back: undo again to put back the rest", err.message, done_steps, total) }
+          end
+          error(err, 0)
         end
         local live = the_song()
         finish(live, live:track(index))

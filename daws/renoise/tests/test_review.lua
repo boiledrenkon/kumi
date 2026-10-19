@@ -478,6 +478,70 @@ test("review S-2: delay 00 is no delay and FF is 255", function()
   H.no_dialogs()
 end)
 
+-- N-5: letter commands, as Renoise reads them
+
+test("review N-5: letter commands in the volume, panning and effect columns are written, read back, put back and kept by a delete", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local input = {
+    pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 3),
+    lines = { { line = 1, notes = { { col = 1, note = "C-4", instrument = "00", volume = "G3", panning = "U4", fx = "ZB10" } } } },
+  }
+  local previewed = call(peer, "change_preview", { kind = "notes-write", input = input, epoch = epoch, layout = layout })
+  ok(previewed.result, json.encode(previewed.error or {}))
+  local done = apply(peer, "notes-write", input, "Kumi: n (kr34)", previewed.result.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  local column = mock.song:pattern(1):track(3):line(1):note_column(1)
+  eq(column.volume_string, "G3")
+  eq(column.panning_string, "U4")
+  eq(column.effect_number_string, "ZB")
+  -- a delete keeps them (as numbers) and puts them back
+  local deleted, gone = delete_track(peer, 3, "Kumi: d (kr35)")
+  local undone = restore(peer, "track-delete", record_of(deleted, gone), "Kumi: undo d (kr36)", gone.epoch, gone.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  column = mock.song:pattern(1):track(3):line(1):note_column(1)
+  eq(column.volume_string, "G3")
+  eq(column.effect_number_string, "ZB")
+  -- and the notes restore puts the empty cell back
+  local back = restore(peer, "notes-write", { target = done.result.target, prior = previewed.result.prior, applied = done.result.applied },
+    "Kumi: undo n (kr37)", undone.result.epoch, undone.result.layout)
+  ok(back.result, json.encode(back.error or {}))
+  eq(mock.song:pattern(1):track(3):line(1):note_column(1).volume_string, "..")
+  H.no_dialogs()
+end)
+
+-- M-1's sibling: the other sliced restore, of lines
+
+test("review M-1: a sliced notes restore stops when the producer makes a track between the steps, writes nothing to the track that took the place, and says how far it got", function()
+  local env, peer = setup({ patch = constants({ SLICE_WRITES = 30 }) })
+  local epoch, layout = place(peer)
+  local lines = {}
+  for l = 1, 12 do lines[l] = { line = l, notes = { { col = 1, note = "C-3", instrument = "01" } } } end
+  local input = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = lines }
+  local previewed = preview(peer, "notes-write", input)
+  local done = apply(peer, "notes-write", input, "Kumi: many (kr38)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  local function cell(t, l) return mock.song:pattern(1):track(t):line(l):note_column(1).note_string end
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local id = send(peer, "change_restore", restore_params("notes-write", { target = previewed.target, prior = previewed.prior, applied = done.result.applied },
+    "Kumi: undo many (kr39)", done.result.epoch, done.result.layout))
+  for _ = 1, 50 do
+    mock.advance(10)
+    if steps() > 0 then break end
+  end
+  eq(steps(), 1, "step 1 is written")
+  mock.ops.insert_track(1, { name = "New" })
+  local response = wait(peer, id, 300, 20)
+  failure(response, "changed")
+  ok(response.error.message:find("1 of 3 steps are put back", 1, true), response.error.message)
+  ok(response.error.message:find("undo again", 1, true), response.error.message)
+  eq(steps(), 1, "no step after the insert")
+  eq(cell(3, 1), "---", "Hat's first lines are clear (step 1)")
+  eq(cell(3, 12), "C-3", "and its last are as Kumi left them: the rest waits")
+  eq(cell(2, 5), "---", "the track that took Hat's place was not written to")
+  H.no_dialogs()
+end)
+
 -- S-3 / S-4: places that follow the tracks made since
 
 test("review S-3: a move put back after the producer made a track before both places", function()
@@ -562,6 +626,23 @@ test("review S-6: a loop range put back after the sequence changed is refused: i
   failure(restore(peer, "loop-range", record_of(previewed, done.result), "Kumi: undo (kr33)", now, now_layout), "stale")
   eq(mock.song.transport.loop_sequence_range[1], 3, "the loop is as the producer has it")
   H.no_dialogs()
+end)
+
+-- N-6: the journal's move places follow the tracks made and deleted
+
+test("review N-6: the two places a move keeps move with the tracks made and deleted since", function()
+  local base = T.load_payload_module("changes_base")
+  local journal = base.journal_new()
+  base.remember(journal, { desc = "Kumi: m", kind = "track-move", place = { track = 3 }, prior = { index = 1 }, applied = { index = 3 }, follows = "track", state = "applied" })
+  base.journal_track_event(journal, "insert", 1, false)
+  local entry = journal.entries[1]
+  eq(entry.prior.index, 2, "the place it came from")
+  eq(entry.applied.index, 4, "the place it went to")
+  eq(entry.place.track, 4)
+  base.journal_track_event(journal, "remove", 2, false) -- the track at 2 is deleted
+  eq(entry.prior.index, 2, "(the place of the deleted track is its own)")
+  eq(entry.applied.index, 3)
+  eq(entry.place.track, 3)
 end)
 
 -- S-7: budgets

@@ -89,6 +89,24 @@ local CELL_FIELDS = {
 }
 local EFFECT_FIELDS = { number_value = "number", amount_value = "amount" }
 
+-- Letter commands: the volume and panning columns and the effect number take a letter and a digit ("G3", "0Z", "ZB") as well as two hex
+-- digits. The mock stores a command as 256 + 36 * first + second and shows the text again.
+local DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+local function command_value(text)
+  local first, second = DIGITS:find(text:sub(1, 1), 1, true), DIGITS:find(text:sub(2, 2), 1, true)
+  return 256 + (first - 1) * 36 + (second - 1)
+end
+local function command_text(value)
+  local code = value - 256
+  local first, second = math.floor(code / 36) + 1, code % 36 + 1
+  return DIGITS:sub(first, first) .. DIGITS:sub(second, second)
+end
+local function column_text(value, none)
+  if value == none then return ".." end
+  if value >= 256 then return command_text(value) end
+  return string.format("%02X", value)
+end
+
 -- The text Renoise reads into a cell's value, and the error it raises for text that isn't one.
 local SEMITONES = { C = 0, ["C#"] = 1, D = 2, ["D#"] = 3, E = 4, F = 5, ["F#"] = 6, G = 7, ["G#"] = 8, A = 9, ["A#"] = 10, B = 11 }
 local function cell_value(member, text)
@@ -98,13 +116,21 @@ local function cell_value(member, text)
     local letter, sep, octave = text:match("^([A-G])([-#])(%d)$")
     local semitone = letter and SEMITONES[letter .. (sep == "#" and "#" or "")]
     if semitone then return tonumber(octave) * 12 + semitone end
-  elseif member == "instrument_string" or member == "volume_string" or member == "panning_string" then
+  elseif member == "instrument_string" then
     if text == ".." then return 255 end
     if text:match("^%x%x$") then return tonumber(text, 16) end
+  elseif member == "volume_string" or member == "panning_string" then
+    if text == ".." then return 255 end
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+    if text:match("^[G-Z]%x$") then return command_value(text) end
   elseif member == "delay_string" then
     if text == ".." then return 0 end
     if text:match("^%x%x$") then return tonumber(text, 16) end
-  elseif member == "effect_number_string" or member == "number_string" or member == "effect_amount_string" or member == "amount_string" then
+  elseif member == "effect_number_string" or member == "number_string" then
+    if text:match("^%x%x$") then return tonumber(text, 16) end
+    -- (the effect commands Renoise has: 0 and a letter, or Z and one of its six)
+    if text:match("^0[AUDGIOCQMSBRYVTNELPWXJHKZ]$") or text:match("^Z[TLKGBD]$") then return command_value(text) end
+  elseif member == "effect_amount_string" or member == "amount_string" then
     if text:match("^%x%x$") then return tonumber(text, 16) end
   end
   error("invalid value '" .. text .. "' for " .. member, 4)
@@ -153,13 +179,13 @@ local function note_column(data, w)
     instrument_value = function() return cur().instrument end,
     instrument_string = function() return cur().instrument == 255 and ".." or hex2(cur().instrument) end,
     volume_value = function() return cur().volume end,
-    volume_string = function() return cur().volume == 255 and ".." or hex2(cur().volume) end,
+    volume_string = function() return column_text(cur().volume, 255) end,
     panning_value = function() return cur().panning end,
-    panning_string = function() return cur().panning == 255 and ".." or hex2(cur().panning) end,
+    panning_string = function() return column_text(cur().panning, 255) end,
     delay_value = function() return cur().delay end,
     delay_string = function() return cur().delay == 0 and ".." or hex2(cur().delay) end,
     effect_number_value = function() return cur().fxn end,
-    effect_number_string = function() return hex2(cur().fxn) end,
+    effect_number_string = function() return column_text(cur().fxn) end,
     effect_amount_value = function() return cur().fxa end,
     effect_amount_string = function() return hex2(cur().fxa) end,
     is_empty = function()
@@ -181,7 +207,7 @@ local function effect_column(data, w)
     end,
   }, {
     number_value = function() return cur().number end,
-    number_string = function() return hex2(cur().number) end,
+    number_string = function() return column_text(cur().number) end,
     amount_value = function() return cur().amount end,
     amount_string = function() return hex2(cur().amount) end,
     is_empty = function() return cur().number == 0 and cur().amount == 0 end,
