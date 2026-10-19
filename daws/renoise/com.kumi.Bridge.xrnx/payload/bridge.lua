@@ -422,7 +422,8 @@ local function on_tracks(op)
   local swapped = op.type == "swap" and expected == count and exchange(b.groups.tracks, op.index, op.index2)
   if swapped then
     -- (the tracks are the same objects in another order: they keep their watchers and their groups move with them)
-    bump_epoch("tracks were swapped")
+    bump_epoch("tracks were swapped", true)
+    changes.journal_track_event(b.journal, "swap", op.index, song:is_undo_redoing(), op.index2)
     conns:event("tracks", { count = count, made = json.array(), gone = json.array(), layout = b.layout, epoch = epoch() })
     return
   end

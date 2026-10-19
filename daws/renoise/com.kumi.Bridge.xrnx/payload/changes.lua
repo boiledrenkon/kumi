@@ -7,6 +7,7 @@ import("changes_tracks")
 import("changes_song")
 import("changes_devices")
 import("changes_notes")
+import("changes_layout")
 
 local M = {}
 

@@ -539,7 +539,7 @@ function M.make_song(options)
         if d.options.mixer_device and (a == 1 or b == 1) then error("the mixer device must stay first", 2) end
         local function swap()
           t.devices[a], t.devices[b] = t.devices[b], t.devices[a]
-          M.fire(t.devices_observable, { type = "swap", index = a, index2 = b })
+          M.fire(t.devices_observable, { type = "swap", index1 = a, index2 = b })
         end
         swap()
         M.record(swap, swap)
@@ -593,7 +593,7 @@ function M.make_song(options)
       available_device_infos = function()
         local infos = {}
         for path in pairs(M.device_catalog or {}) do
-          infos[#infos + 1] = { path = path, name = path:match("([^/]+)$") or path, short_name = path:match("([^/]+)$") or path }
+          infos[#infos + 1] = { path = path, name = "Effects: " .. (path:match("([^/]+)$") or path), short_name = path:match("([^/]+)$") or path }
         end
         table.sort(infos, function(x, y) return x.path < y.path end)
         return infos
@@ -967,6 +967,7 @@ function M.make_song(options)
     delete_track_at = function(_, index) M.api.delete_track_at(index) end,
     swap_tracks_at = function(_, a, b) M.api.swap_tracks_at(a, b) end,
     add_track_to_group = function(_, track_index, group_index) M.api.add_track_to_group(track_index, group_index) end,
+    remove_track_from_group = function(_, track_index) M.api.remove_track_from_group(track_index) end,
     insert_group_at = function(_, index) return M.api.insert_group_at(index) end,
     describe_undo = function(_, text) d.undo.desc = text end,
     can_undo = function() return #d.undo.stack > 0 end,
@@ -1227,27 +1228,47 @@ function M.api.insert_group_at(index)
   return M.data.track_proxy(index)
 end
 
--- The track becomes the last member of the group: it is moved to just before it.
+-- The track becomes the last member of the group: it is moved to just before it, by swaps (as Renoise does it).
 function M.api.add_track_to_group(index, group)
   local tracks = M.data.tracks
   if not tracks[index] or not tracks[group] or tracks[group].kind ~= "group" then error("not a track and a group", 2) end
-  local function move(from, to)
-    local data, pattern_data = take_track(from)
-    put_track(to, data, pattern_data)
-    return data
+  if index == group then error("indices are the same, can't add track to itself", 2) end
+  local at = index
+  if index < group then
+    while at < group - 1 do
+      M.api.swap_tracks_at(at, at + 1)
+      at = at + 1
+    end
+  else
+    -- (a track after the group takes its place and the group moves up)
+    while at > group do
+      M.api.swap_tracks_at(at - 1, at)
+      at = at - 1
+    end
+    group = group + 1
   end
-  local target = group > index and group - 1 or group
-  local data = move(index, target)
-  local grouped = tracks[target + 1]
+  local grouped = tracks[group]
   grouped.members = grouped.members + 1
-  M.record(function()
-    grouped.members = grouped.members - 1
-    move(target, index)
-  end, function()
-    move(index, target)
-    grouped.members = grouped.members + 1
-  end)
-  return data
+  M.record(function() grouped.members = grouped.members - 1 end, function() grouped.members = grouped.members + 1 end)
+end
+
+-- The track leaves its group: it is moved to just before the group's tracks, by swaps; the tracks it passed keep their order.
+function M.api.remove_track_from_group(index)
+  local tracks = M.data.tracks
+  local group
+  for g = index + 1, #tracks do
+    if tracks[g].kind == "group" and g - tracks[g].members <= index then group = g break end
+  end
+  if not group then error("track is not a member of a group", 2) end
+  local start = group - tracks[group].members
+  local at = index
+  while at > start do
+    M.api.swap_tracks_at(at - 1, at)
+    at = at - 1
+  end
+  local grouped = tracks[group]
+  grouped.members = grouped.members - 1
+  M.record(function() grouped.members = grouped.members + 1 end, function() grouped.members = grouped.members - 1 end)
 end
 
 function M.api.delete_track_at(index)
@@ -1261,8 +1282,26 @@ end
 function M.api.swap_tracks_at(a, b)
   local tracks = M.data.tracks
   if not tracks[a] or not tracks[b] then error("track index out of range", 2) end
-  ops.swap_tracks(a, b)
-  M.record(function() ops.swap_tracks(a, b) end, function() ops.swap_tracks(a, b) end)
+  local function class(t) return t.kind == "master" and "master" or t.kind == "send" and "send" or "sequencer" end
+  if class(tracks[a]) ~= class(tracks[b]) then
+    error("can not swap a sequencer track with a send track or a send or sequencer track with the master track.", 2)
+  end
+  if a == b then return end
+  if a > b then a, b = b, a end
+  -- (Renoise swaps tracks that are not neighbours by neighbours' swaps: the last one up to the first's place, then the first up)
+  local pairs_ = {}
+  if b == a + 1 then
+    pairs_[1] = { a, b }
+  else
+    for i = b - 1, a, -1 do pairs_[#pairs_ + 1] = { i, i + 1 } end
+    for i = a + 1, b - 1 do pairs_[#pairs_ + 1] = { i, i + 1 } end
+  end
+  for _, pair in ipairs(pairs_) do ops.swap_tracks(pair[1], pair[2]) end
+  M.record(function()
+    for i = #pairs_, 1, -1 do ops.swap_tracks(pairs_[i][1], pairs_[i][2]) end
+  end, function()
+    for _, pair in ipairs(pairs_) do ops.swap_tracks(pair[1], pair[2]) end
+  end)
 end
 
 function M.api.undo()
@@ -1324,7 +1363,7 @@ end
 function ops.swap_tracks(a, b)
   M.data.tracks[a], M.data.tracks[b] = M.data.tracks[b], M.data.tracks[a]
   move_pattern_tracks(function(t) if t == a then return b elseif t == b then return a end return t end)
-  fire(song_fields().tracks_observable, { type = "swap", index = a, index2 = b })
+  fire(song_fields().tracks_observable, { type = "swap", index1 = a, index2 = b })
 end
 
 function ops.rename_track(index, name)
@@ -1386,7 +1425,7 @@ end
 function ops.swap_instruments(a, b)
   local instruments = M.data.instruments
   instruments[a], instruments[b] = instruments[b], instruments[a]
-  fire(song_fields().instruments_observable, { type = "swap", index = a, index2 = b })
+  fire(song_fields().instruments_observable, { type = "swap", index1 = a, index2 = b })
 end
 
 function ops.insert_instrument(spec)

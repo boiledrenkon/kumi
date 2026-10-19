@@ -285,7 +285,17 @@ end
 
 -- A track made or deleted at `index`: the places the journal knows move with them, and the changes that removed or made a
 -- track are told when the producer's undo or redo does it again.
-function M.journal_track_event(journal, type_, index, undoing)
+function M.journal_track_event(journal, type_, index, undoing, index2)
+  if type_ == "swap" then
+    -- (two tracks changed places: what is on them goes with them; a deleted track's place is where it will come back)
+    for _, entry in ipairs(journal.entries) do
+      local place = entry.place
+      if place and place.track and entry.shape ~= "deleted" then
+        if place.track == index then place.track = index2 elseif place.track == index2 then place.track = index end
+      end
+    end
+    return
+  end
   for i = #journal.entries, 1, -1 do
     local entry = journal.entries[i]
     local place = entry.place
@@ -361,9 +371,9 @@ function M.journal_check(journal)
   if not song then return end
   for _, entry in ipairs(journal.entries) do
     local spec = entry.spec
-    if entry.follows == "device" then
-      -- (a device moved: its place is followed through the swaps, and is where it started or where Kumi put it)
-      local now = entry.place.device
+    if entry.follows then
+      -- (a device or track moved: its place is followed through the swaps, and is where it started or where Kumi put it)
+      local now = entry.place[entry.follows]
       if entry.state == "applied" and now == entry.prior.index and now ~= entry.applied.index then
         entry.state = "undone"
         queue(journal, entry.desc, "undo")

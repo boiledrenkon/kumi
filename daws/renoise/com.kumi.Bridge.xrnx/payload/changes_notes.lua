@@ -32,7 +32,8 @@ local function hex2(value, name, empty)
     return string.format("%02X", value)
   end
   local text = text_of(value, name, "01 or ..")
-  if not text:match("^%x%x$") then bad(name .. ": two hex digits (00 to FF), or .. for none; got " .. value) end
+  if not text:match("^%x%x$") then bad(name .. ": two hex digits (00 to FE), or .. for none; got " .. value) end
+  if text == "FF" and empty == ".." then return ".." end -- (255 is Renoise's "none" for these)
   return text
 end
 
@@ -47,11 +48,12 @@ local function note_text(value)
   return letter .. sep .. octave
 end
 
--- The volume and panning columns take a level (00 to 80) or a command (a letter and a digit, such as G3).
+-- The volume and panning columns take a level (00 to 80) or a command (a letter and a hex digit, such as G3); FF is none.
 local function column_text(value, name)
   if value == "" or value == ".." then return ".." end
   local text = text_of(value, name, "40 or ..")
-  if not text:match("^[%w]%w$") then bad(name .. ": two characters such as 40 or G3, or .. for none; got " .. value) end
+  if not text:match("^%w%x$") then bad(name .. ": two characters such as 40 or G3 (the second a hex digit), or .. for none; got " .. value) end
+  if text == "FF" then return ".." end
   return text
 end
 
@@ -506,10 +508,11 @@ local function apply_of(song, env, input, fence, desc, kind, verb)
   local result = {}
   for i, cell in ipairs(plan.after) do result[i] = read_cell(plan.pattern_track, cell) end
   for i, cell in ipairs(result) do
-    if not same_cell(cell, plan.after[i]) and same_cell(cell, plan.prior[i]) then
+    if not same_cell(cell, plan.after[i]) then
+      -- (Renoise read the text as something else: nothing half-done stays)
       for j = 1, #plan.after do write_cell(plan.pattern_track, plan.prior[j]) end
       set_columns(plan.track, plan.columns)
-      fail("failed", string.format("Renoise kept line %d as it was", cell.line))
+      fail("failed", string.format("Renoise didn't keep line %d column %d as written", cell.line, cell.col))
     end
   end
   return {

@@ -780,7 +780,7 @@ local function device_song()
   local env, peer = setup(nil, { send_tracks = 2 })
   mock.device_catalog = {
     ["Audio/Effects/Native/EQ 5"] = { { name = "Gain", value = 0.5, min = 0, max = 1 } },
-    ["Audio/Effects/Native/#Send"] = { { name = "Receiver", value = 0, min = 0, max = 255 }, { name = "Amount", value = 1, min = 0, max = 1 } },
+    ["Audio/Effects/Native/#Send"] = { { name = "Amount", value = 1, min = 0, max = 1 }, { name = "Panning", value = 0.5, min = 0, max = 1 }, { name = "Receiver", value = 0, min = 0, max = 255 } },
     ["Audio/Effects/Native/Gainer"] = { { name = "Gain", value = 1, min = 0, max = 4 } },
   }
   local bass = mock.song:track(3)
@@ -826,9 +826,9 @@ test("changes: a parameter is set by value or by text, kept in its range, and a 
   failure(ask(peer, "change_preview", "device-param", { ref = ref, value = 2 }), "bad-params")
   failure(ask(peer, "change_preview", "device-param", { ref = ref }), "bad-params")
   -- a #Send's Receiver is a send track's number (there are two)
-  local receiver = epoch .. ":param:3.3.1"
+  local receiver = epoch .. ":param:3.3.3"
   simple_change(peer, "device-param", { ref = receiver, value = 1 }, "Kumi: send (kc04)")
-  eq(mock.data.tracks[3].devices[3].params[1].value, 1)
+  eq(mock.data.tracks[3].devices[3].params[3].value, 1)
   local past = ask(peer, "change_preview", "device-param", { ref = receiver, value = 2 })
   failure(past, "bad-params")
   ok(past.error.message:find("send track", 1, true), past.error.message)
@@ -839,13 +839,13 @@ end)
 test("changes: the producer's undo of a parameter change is told, and the device's place follows the devices made before it", function()
   local env, peer = device_song()
   local epoch = place(peer)
-  simple_change(peer, "device-param", { ref = epoch .. ":param:3.3.1", value = 1 }, "Kumi: send (kd11)")
+  simple_change(peer, "device-param", { ref = epoch .. ":param:3.3.3", value = 1 }, "Kumi: send (kd11)")
   H.tick(2)
   H.events(peer, "undone_in_daw")
   -- the producer puts a device in front of it: the #Send is the fourth device now
   mock.ops.insert_device(3, { name = "Filter", params = {} }, 2)
   H.tick(2)
-  mock.data.tracks[3].devices[4].params[1].value = 1
+  mock.data.tracks[3].devices[4].params[3].value = 1
   mock.song:undo() -- the parameter change is the newest step (the device was made by a producer's op, no step)
   H.tick(3)
   drain(peer)
@@ -927,8 +927,8 @@ test("changes: a #Send is put in with its receiver and amount", function()
   local done = apply(peer, "device-add", input, "Kumi: send (ke11)", previewed.fence, epoch, layout)
   ok(done.result, json.encode(done.error or {}))
   eq(paths_of(1), "Mixer,#Send")
-  eq(devices_of(1)[2].params[1].value, 1, "the receiver")
-  eq(devices_of(1)[2].params[2].value, 0.5, "the amount")
+  eq(devices_of(1)[2].params[3].value, 1, "the receiver")
+  eq(devices_of(1)[2].params[1].value, 0.5, "the amount")
   eq(done.result.created.ref, done.result.epoch .. ":device:1.2")
   local out_of_range = { ref = track_ref(done.result.epoch, 1), path = "#Send", amount = 3 }
   local again = call(peer, "change_preview", { kind = "device-add", input = out_of_range, epoch = done.result.epoch, layout = done.result.layout })
@@ -1402,9 +1402,9 @@ test("changes: a sequence slot names its pattern, and Renoise refusing the text 
   ok(done.result, json.encode(done.error or {}))
   eq(cell(3, 1, 2, 1), "C-5 .. .. .. .. 0000")
   eq(cell(1, 1, 2, 1), "--- .. .. .. .. 0000")
-  -- a text that Renoise itself refuses (a volume the tracker has no meaning for) leaves the pattern as it was
+  -- a text that Renoise itself refuses (the mock reads effect numbers as hex only) leaves the pattern as it was
   local column = mock.song:pattern(1):track(2):line(3):note_column(1)
-  local refused = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 3, notes = { { col = 1, note = "C-4", volume = "ZZ" } } } } }
+  local refused = { pattern = pattern_ref(epoch, 1), track = track_ref(epoch, 2), lines = { { line = 3, notes = { { col = 1, note = "C-4", fx = "ZT20" } } } } }
   local p2 = preview(peer, "notes-write", refused)
   local before = steps()
   failure(apply(peer, "notes-write", refused, "Kumi: bad (kn62)", p2.fence, epoch, layout), "failed")
@@ -1466,5 +1466,298 @@ test("changes: a track made before the pattern's track carries the restore to wh
   local undone = restore(peer, "notes-write", { target = previewed.target, prior = previewed.prior, applied = done.applied }, "Kumi: undo shift (kn82)", epoch, layout)
   ok(undone.result, json.encode(undone.error or {}))
   eq(cell(1, 3, 1, 1), "--- .. .. .. .. 0000", "Hat is track 3 now")
+  H.no_dialogs()
+end)
+
+-- Making, moving and grouping tracks
+
+local function layout_text()
+  local out = {}
+  for i = 1, #mock.data.tracks do
+    local t = mock.song:track(i)
+    out[i] = t.name .. (t.group_parent and ("@" .. t.group_parent.name) or "")
+  end
+  return table.concat(out, ",")
+end
+
+test("changes: a track is made as sequencer, send or group, and removed again when it is still empty", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
+  local input = { type = "sequencer", name = "Lead", color = "#ff8000", index = 3 }
+  local previewed = preview(peer, "track-add", input)
+  eq(previewed.display.title, "Added track Lead")
+  eq(previewed.display.after.index, 3)
+  eq(steps(), 0)
+  local done = apply(peer, "track-add", input, "Kumi: add track (kt01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(layout_text(), "Kick,Hat,Lead,Bass,Pad,Master,Send 1")
+  eq(steps(), 1)
+  eq(done.result.created.ref, epoch .. ":track:3")
+  eq(done.result.created.kind, "track")
+  eq(done.result.layout, layout + 1)
+  eq(done.result.applied.kind, "sequencer")
+  eq(mock.data.tracks[3].color[1], 255)
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied, created = done.result.created, material = done.result.material }
+  local undone = restore(peer, "track-add", record, "Kumi: undo add (kt02)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
+  eq(steps(), 2)
+  -- a send track goes after the master, a group before it; the default places are the ends
+  local epoch2, layout2 = place(peer)
+  local send = { type = "send", name = "Verb" }
+  local p2 = preview(peer, "track-add", send)
+  eq(p2.display.after.index, 7)
+  local d2 = apply(peer, "track-add", send, "Kumi: add send (kt03)", p2.fence, epoch2, layout2)
+  ok(d2.result, json.encode(d2.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1,Verb")
+  eq(d2.result.applied.kind, "send")
+  local group = { type = "group", name = "Drums" }
+  local p3 = preview(peer, "track-add", group)
+  eq(p3.display.after.index, 5)
+  local d3 = apply(peer, "track-add", group, "Kumi: add group (kt04)", p3.fence, epoch2, d2.result.layout)
+  ok(d3.result, json.encode(d3.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Drums,Master,Send 1,Verb")
+  eq(d3.result.applied.kind, "group")
+  H.no_dialogs()
+end)
+
+test("changes: a track made next to a group says so, and a track made inside one is a member", function()
+  local env, peer = setup()
+  mock.song:insert_group_at(5)
+  mock.song:add_track_to_group(4, 5)
+  mock.song:track(5).name = "Bus"
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  eq(layout_text(), "Kick,Hat,Bass,Pad@Bus,Bus,Master,Send 1")
+  local epoch, layout = place(peer)
+  -- at the group's place: it joins the group
+  local before = preview(peer, "track-add", { index = 5 })
+  ok(before.display.note:find("joins the group Bus", 1, true), before.display.note)
+  local input = { name = "Pad 2", group = track_ref(epoch, 5) }
+  local previewed = preview(peer, "track-add", input)
+  local done = apply(peer, "track-add", input, "Kumi: add in group (kt11)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad@Bus,Pad 2@Bus,Bus,Master,Send 1")
+  eq(done.result.applied.group, 6)
+  failure(ask(peer, "change_preview", "track-add", { index = 2, group = track_ref(epoch, 5) }), "bad-params")
+  failure(ask(peer, "change_preview", "track-add", { group = track_ref(epoch, 2) }), "bad-params")
+  failure(ask(peer, "change_preview", "track-add", { type = "send", group = track_ref(epoch, 5) }), "bad-params")
+  H.no_dialogs()
+end)
+
+test("changes: a made track is not removed when it holds something, or when a group has tracks in it", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local input = { name = "Lead", index = 2 }
+  local previewed = preview(peer, "track-add", input)
+  local done = apply(peer, "track-add", input, "Kumi: add (kt21)", previewed.fence, epoch, layout).result
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.applied, created = done.created, material = done.material }
+  mock.song:track(2):insert_device_at("Audio/Effects/Native/Gainer", 2)
+  H.tick(2)
+  local now, now_layout = place(peer)
+  record.created = { ref = now .. ":track:2", kind = "track" }
+  failure(restore(peer, "track-add", record, "Kumi: undo add (kt22)", now, now_layout), "changed")
+  eq(layout_text(), "Kick,Lead,Hat,Bass,Pad,Master,Send 1")
+  local forced = restore(peer, "track-add", record, "Kumi: undo add (kt22)", now, now_layout, { discard = true })
+  ok(forced.result, json.encode(forced.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
+  -- a group that got members stays
+  local g_epoch, g_layout = place(peer)
+  local group = { type = "group", name = "Bus", index = 5 }
+  local gp = preview(peer, "track-add", group)
+  local gd = apply(peer, "track-add", group, "Kumi: add group (kt23)", gp.fence, g_epoch, g_layout).result
+  mock.song:add_track_to_group(4, 5)
+  H.tick(2)
+  local e2, l2 = place(peer)
+  local grecord = { target = gp.target, prior = gp.prior, applied = gd.applied, created = { ref = e2 .. ":track:5", kind = "track" }, material = gd.material }
+  failure(restore(peer, "track-add", grecord, "Kumi: undo group (kt24)", e2, l2, { discard = true }), "changed")
+  eq(layout_text(), "Kick,Hat,Bass,Pad@Bus,Bus,Master,Send 1")
+  H.no_dialogs()
+end)
+
+test("changes: a track is refused a place it can't have", function()
+  local env, peer = setup()
+  local epoch = place(peer)
+  for _, input in ipairs({
+    { index = 0 }, { index = 6 }, { index = 2.5 }, { type = "send", index = 5 }, { type = "send", index = 9 }, { type = "group", index = 6 },
+    { type = "thing" }, { color = "red" }, { name = 5 },
+  }) do
+    failure(ask(peer, "change_preview", "track-add", input), "bad-params")
+  end
+  eq(steps(), 0)
+  H.no_dialogs()
+end)
+
+test("changes: a track is moved by swaps among the tracks it can pass, and moved back", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local ref = track_ref(epoch, 1)
+  local previewed = preview(peer, "track-move", { ref = ref, index = 3 })
+  eq(previewed.display.title, "Moved Kick to place 3")
+  eq(steps(), 0)
+  local done = apply(peer, "track-move", { ref = ref, index = 3 }, "Kumi: move (kv01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(layout_text(), "Hat,Bass,Kick,Pad,Master,Send 1")
+  eq(steps(), 1)
+  eq(done.result.applied.index, 3)
+  eq(done.result.material.track, 3)
+  ok(done.result.epoch ~= epoch, "swaps move the epoch")
+  local record = { target = previewed.target, prior = previewed.prior, applied = done.result.applied, material = done.result.material }
+  local undone = restore(peer, "track-move", record, "Kumi: undo move (kv02)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
+  eq(steps(), 2)
+  -- already back
+  local again = restore(peer, "track-move", record, "Kumi: undo move (kv03)", undone.result.epoch, undone.result.layout)
+  failure(again, "changed")
+  -- edges
+  local now = place(peer)
+  failure(ask(peer, "change_preview", "track-move", { ref = track_ref(now, 1), index = 5 }), "bad-params")
+  failure(ask(peer, "change_preview", "track-move", { ref = track_ref(now, 5), index = 1 }), "bad-params")
+  failure(ask(peer, "change_preview", "track-move", { ref = track_ref(now, 6), index = 1 }), "bad-params")
+  eq(preview(peer, "track-move", { ref = track_ref(now, 2), index = 2 }).display.unchanged, true)
+  H.no_dialogs()
+end)
+
+test("changes: a track the producer moved since is not moved back, and the journal follows the move", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local ref = track_ref(epoch, 1)
+  local previewed = preview(peer, "track-move", { ref = ref, index = 2 })
+  local done = apply(peer, "track-move", { ref = ref, index = 2 }, "Kumi: move (kv11)", previewed.fence, epoch, layout).result
+  eq(layout_text(), "Hat,Kick,Bass,Pad,Master,Send 1")
+  -- a volume change of Kick (track 2 now) is journalled and follows the producer's swap of the two
+  local now, now_layout = place(peer)
+  local vp = preview(peer, "track-volume", { ref = track_ref(now, 2), volumeDb = -6 })
+  ok(apply(peer, "track-volume", { ref = track_ref(now, 2), volumeDb = -6 }, "Kumi: vol (kv12)", vp.fence, now, now_layout).result)
+  mock.song:swap_tracks_at(1, 2)
+  H.tick(3)
+  H.events(peer, "undone_in_daw")
+  mock.song:undo() -- the swap
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(#told, 0, "an undo of the producer's own swap is not Kumi's change")
+  -- the producer's undo of Kumi's volume change is told, though the tracks moved since
+  mock.song:undo()
+  H.tick(3)
+  drain(peer)
+  told = H.events(peer, "undone_in_daw")
+  eq(#told, 1)
+  eq(told[1].data.descs[1], "Kumi: vol (kv12)")
+  H.no_dialogs()
+end)
+
+test("changes: the producer's undo of a move is told", function()
+  local env, peer = setup()
+  local epoch, layout = place(peer)
+  local ref = track_ref(epoch, 1)
+  local fence = preview(peer, "track-move", { ref = ref, index = 3 }).fence
+  apply(peer, "track-move", { ref = ref, index = 3 }, "Kumi: move (kv21)", fence, epoch, layout)
+  H.tick(2)
+  H.events(peer, "undone_in_daw")
+  mock.song:undo()
+  H.tick(3)
+  drain(peer)
+  local told = H.events(peer, "undone_in_daw")
+  eq(#told, 1)
+  eq(told[1].data.how, "undo")
+  eq(told[1].data.descs[1], "Kumi: move (kv21)")
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
+  mock.song:redo()
+  H.tick(3)
+  drain(peer)
+  told = H.events(peer, "undone_in_daw")
+  eq(told[#told].data.how, "redo")
+  H.no_dialogs()
+end)
+
+local function with_group()
+  local env, peer = setup()
+  mock.song:insert_group_at(4)
+  mock.song:track(4).name = "Bus"
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  return env, peer
+end
+
+test("changes: a track before a group goes into it as its last, and comes back to where it was", function()
+  local env, peer = with_group()
+  eq(layout_text(), "Kick,Hat,Bass,Bus,Pad,Master,Send 1")
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 1), group = track_ref(epoch, 4) }
+  local previewed = preview(peer, "track-group", input)
+  eq(previewed.display.title, "Put Kick into the group Bus")
+  local done = apply(peer, "track-group", input, "Kumi: group (kg01)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(layout_text(), "Hat,Bass,Kick@Bus,Bus,Pad,Master,Send 1")
+  eq(steps(), 1)
+  eq(done.result.applied.index, 3)
+  eq(done.result.applied.into, true)
+  eq(done.result.material.track, 3)
+  eq(done.result.material.groupRef, done.result.epoch .. ":track:4")
+  -- put back
+  local undone = restore(peer, "track-group", { target = previewed.target, prior = previewed.prior, applied = done.result.applied, material = done.result.material },
+    "Kumi: undo group (kg02)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Bus,Pad,Master,Send 1")
+  eq(steps(), 2)
+  -- a second one goes in after another, then both come out the other way round
+  local e2, l2 = place(peer)
+  local first = { ref = track_ref(e2, 2), group = track_ref(e2, 4) }
+  local p1 = preview(peer, "track-group", first)
+  local d1 = apply(peer, "track-group", first, "Kumi: group (kg03)", p1.fence, e2, l2)
+  ok(d1.result, json.encode(d1.error or {}))
+  eq(layout_text(), "Kick,Bass,Hat@Bus,Bus,Pad,Master,Send 1")
+  local e3, l3 = d1.result.epoch, d1.result.layout
+  local second = { ref = track_ref(e3, 1), group = track_ref(e3, 4) }
+  local p2 = preview(peer, "track-group", second)
+  local d2 = apply(peer, "track-group", second, "Kumi: group (kg04)", p2.fence, e3, l3)
+  ok(d2.result, json.encode(d2.error or {}))
+  eq(layout_text(), "Bass,Hat@Bus,Kick@Bus,Bus,Pad,Master,Send 1")
+  local r2 = restore(peer, "track-group", { target = p2.target, prior = p2.prior, applied = d2.result.applied, material = d2.result.material },
+    "Kumi: undo group (kg05)", d2.result.epoch, d2.result.layout)
+  ok(r2.result, json.encode(r2.error or {}))
+  eq(layout_text(), "Kick,Bass,Hat@Bus,Bus,Pad,Master,Send 1")
+  H.no_dialogs()
+end)
+
+test("changes: a track in a group comes out to just before its tracks, and goes back to its place among them", function()
+  local env, peer = with_group()
+  mock.song:add_track_to_group(1, 4)
+  mock.song:add_track_to_group(1, 4)
+  mock.song:add_track_to_group(1, 4)
+  mock.data.undo.stack, mock.data.undo.redo = {}, {}
+  local text = layout_text()
+  eq(text, "Kick@Bus,Hat@Bus,Bass@Bus,Bus,Pad,Master,Send 1")
+  local epoch, layout = place(peer)
+  local input = { ref = track_ref(epoch, 2), group = nil }
+  input.group = json.null
+  local previewed = preview(peer, "track-group", input)
+  local done = apply(peer, "track-group", input, "Kumi: out (kg11)", previewed.fence, epoch, layout)
+  ok(done.result, json.encode(done.error or {}))
+  eq(layout_text(), "Hat,Kick@Bus,Bass@Bus,Bus,Pad,Master,Send 1")
+  eq(done.result.applied.into, false)
+  eq(done.result.applied.index, 1)
+  eq(done.result.undo.entry, true)
+  local undone = restore(peer, "track-group", { target = previewed.target, prior = previewed.prior, applied = done.result.applied, material = done.result.material },
+    "Kumi: undo out (kg12)", done.result.epoch, done.result.layout)
+  ok(undone.result, json.encode(undone.error or {}))
+  eq(layout_text(), text)
+  H.no_dialogs()
+end)
+
+test("changes: a track is refused a group it can't join or leave", function()
+  local env, peer = with_group()
+  local epoch = place(peer)
+  -- after the group
+  failure(ask(peer, "change_preview", "track-group", { ref = track_ref(epoch, 5), group = track_ref(epoch, 4) }), "bad-params")
+  -- not a group
+  failure(ask(peer, "change_preview", "track-group", { ref = track_ref(epoch, 1), group = track_ref(epoch, 2) }), "bad-params")
+  -- not in a group
+  failure(ask(peer, "change_preview", "track-group", { ref = track_ref(epoch, 1), group = json.null }), "bad-params")
+  -- no group named
+  failure(ask(peer, "change_preview", "track-group", { ref = track_ref(epoch, 1) }), "bad-params")
+  -- a send track
+  failure(ask(peer, "change_preview", "track-group", { ref = track_ref(epoch, 7), group = track_ref(epoch, 4) }), "bad-params")
   H.no_dialogs()
 end)

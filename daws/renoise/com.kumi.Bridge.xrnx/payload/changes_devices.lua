@@ -135,7 +135,7 @@ local function resolve_device(track, wanted)
   for _, info in ipairs(track.available_device_infos) do
     if info.path == wanted then return info end
     local last = info.path:match("([^/]+)$") or info.path
-    if info.path:lower() == lower or last:lower() == lower or (info.name or ""):lower() == lower then
+    if info.path:lower() == lower or last:lower() == lower or (info.short_name or ""):lower() == lower then
       named_[#named_ + 1] = info
     elseif info.path:lower():find(lower, 1, true) and #near < 5 then
       near[#near + 1] = info.path
@@ -152,7 +152,7 @@ local function resolve_device(track, wanted)
 end
 
 local function short_name(info)
-  local name = info.name
+  local name = info.short_name
   if name == nil or name == "" then name = info.path:match("([^/]+)$") or info.path end
   return name
 end

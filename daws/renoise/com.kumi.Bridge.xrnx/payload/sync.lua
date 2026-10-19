@@ -81,13 +81,20 @@ function M:watch_changes(observable)
   add(self, observable, self.guard("notifier", function() count(self) end))
 end
 
+-- A list operation: Renoise names the places of a swap `index1` and `index2` (measured, 3.5.4), those of an insert or remove `index`.
+local function place_of(op)
+  if not op then return nil, nil end
+  return op.index or op.index1, op.index2
+end
+
 -- The track list: its operations ({type = "insert" | "remove" | "swap", index, index2}).
 function M:watch_tracks(observable)
   add(self, observable, self.guard("tracks notifier", function(op)
     count(self)
     reshape(self)
     if self.hooks.tracks then
-      self.hooks.tracks({ type = op and op.type, index = op and op.index, index2 = op and op.index2 })
+      local index, index2 = place_of(op)
+      self.hooks.tracks({ type = op and op.type, index = index, index2 = index2 })
     end
   end))
 end
@@ -99,7 +106,8 @@ function M:watch_structural(observable, reason, kind, owner, group)
     count(self)
     reshape(self)
     if self.hooks.structural then
-      self.hooks.structural(reason, kind, op and { type = op.type, index = op.index, index2 = op.index2 } or nil, owner, group)
+      local index, index2 = place_of(op)
+      self.hooks.structural(reason, kind, op and { type = op.type, index = index, index2 = index2 } or nil, owner, group)
     end
   end))
 end
