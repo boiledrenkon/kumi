@@ -268,9 +268,17 @@ fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
-/// What the bridge noted with an answer (`notes`), in order.
+/// What the bridge noted with an answer (`notes`), in order, each a sentence (REAPER's come without their full stop).
 pub(super) fn notes_of(value: &Value) -> Vec<String> {
-    value.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()
+    let sentence = |note: &str| {
+        let note = note.trim();
+        if note.ends_with(['.', '!', '?']) {
+            note.to_owned()
+        } else {
+            format!("{note}.")
+        }
+    };
+    value.get("notes").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(sentence).collect()
 }
 
 /// A reason with what the bridge noted after it, in parentheses.
@@ -2239,6 +2247,13 @@ mod tests {
 
     fn knob(name: &str, raw: f64) -> DeviceKnob {
         DeviceKnob { reference: format!("p:{name}"), name: name.into(), raw, min: 0., max: 1., items: vec![], scale: None }
+    }
+
+    #[test]
+    fn a_bridges_notes_are_sentences() {
+        let notes =
+            notes_of(&json!({"notes": ["REAPER stopped playback to render", "Renoise stopped playback to render.", "gone (undo) "]}));
+        assert_eq!(notes, ["REAPER stopped playback to render.", "Renoise stopped playback to render.", "gone (undo)."]);
     }
 
     #[test]
