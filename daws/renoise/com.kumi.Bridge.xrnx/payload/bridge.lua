@@ -983,6 +983,32 @@ local function phrase_token(i, ph)
   return token and token.phrases and token.phrases[ph] or nil
 end
 
+-- A pattern's or phrase's count of changed lines as a change kept it ("p12=40"), as the journal moved it on: Renoise's redo
+-- wrote that change's lines again (changes_base `journal_check`), so its count starts again from after the redo.
+local function counted_from(mark)
+  return type(mark) == "string" and b.retouch and b.retouch[mark] or mark
+end
+
+-- The journal's: a change Renoise's redo put back holds what Kumi wrote again; its counts (`touch`, and a copy's source's) now
+-- start from here.
+local function retouched(applied)
+  b.retouch = b.retouch or {}
+  for _, mark in ipairs({ applied.touch, type(applied.source) == "table" and applied.source.touch or nil }) do
+    local pid = type(mark) == "string" and mark:match("^(.*)=%d+$") or nil
+    local token
+    for _, candidate in ipairs(pid and b.groups and b.groups.patterns or {}) do
+      if candidate.pid == pid then token = candidate break end
+    end
+    for _, instrument in ipairs(pid and not token and b.groups and b.groups.instruments or {}) do
+      for _, phrase in ipairs(instrument.phrases or {}) do
+        if phrase.pid == pid then token = phrase break end
+      end
+      if token then break end
+    end
+    if token then b.retouch[mark] = pid .. "=" .. token.touches end
+  end
+end
+
 local place_env = {
   device_mark = function(t)
     local log_ = device_log(t)
@@ -1014,6 +1040,7 @@ local place_env = {
   pattern_touched_since = function(p, mark)
     local token = b.groups and b.groups.patterns[p]
     local pid, count
+    mark = counted_from(mark)
     if type(mark) == "string" then pid, count = mark:match("^(.*)=(%d+)$") end
     if not token or not pid or pid ~= token.pid then return nil, "unknown" end
     return token.touches > tonumber(count)
@@ -1106,6 +1133,7 @@ local place_env = {
   phrase_touched_since = function(i, ph, mark)
     local token = phrase_token(i, ph)
     local pid, count
+    mark = counted_from(mark)
     if type(mark) == "string" then pid, count = mark:match("^(.*)=(%d+)$") end
     if not token or not pid or pid ~= token.pid then return nil, "unknown" end
     return token.touches > tonumber(count)
@@ -1398,6 +1426,7 @@ function M.start(h, reloading)
   b = st.bridge
   b.journal = b.journal or changes.journal_new()
   b.journal.edits = function() return b.edits or 0 end
+  b.journal.retouched = retouched
   if b.started_ms == 0 then b.started_ms = unix_ms() end
   conns = server.new({
     connections = st.connections,

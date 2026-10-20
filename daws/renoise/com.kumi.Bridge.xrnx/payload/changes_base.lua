@@ -697,6 +697,10 @@ function M.journal_check(journal)
           stamp(journal, entry)
           queue(journal, entry.desc, "undo")
         elseif entry.state == "undone" and spec.same(now, entry.applied) and redoable(journal, entry) then
+          -- (what Kumi wrote is there again, from Renoise's redo: the lines' count of edits since Kumi's step starts again here,
+          -- so Kumi's undo isn't refused for the redo's own writes; an edit after it still is. Not where the redo is unsure:
+          -- lines the producer had and Renoise's undo brought back read the same as Kumi's, review MUST 10)
+          if journal.retouched and not spec.unsure_redo and type(entry.applied) == "table" then journal.retouched(entry.applied) end
           if spec.unsure_redo then
             -- (Renoise doesn't say which step its undo or redo took: lines that read as Kumi wrote them again may be its redo
             -- of Kumi's step, or its undo past it of an older row insert that put the producer's like lines there)
