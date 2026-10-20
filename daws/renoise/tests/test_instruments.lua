@@ -537,6 +537,28 @@ test("instruments: a duplicate copies samples and phrases right after it; Kumi's
   eq(names(), "Drums,Bass synth,Pad")
 end)
 
+test("instruments: a duplicate's copy tells its lists in Renoise's own order (lab): the places Kumi keeps elsewhere still hold", function()
+  local env, peer = setup()
+  mock.device_catalog = { ["Audio/Effects/Native/Gainer"] = { { name = "Gain", value = 1, min = 0, max = 4 } } }
+  local E = place(peer)
+  local set = change(peer, "modset-add", { ref = iref(E, 2), name = "Env" })
+  local device = change(peer, "moddevice-add", { ref = place(peer) .. ":modset:2.2", path = "AHDSR", target = "volume" })
+  local chain = change(peer, "chain-add", { ref = iref(place(peer), 2), name = "Verb" })
+  local gainer = change(peer, "chaindevice-add", { ref = place(peer) .. ":chain:2.1", path = "Gainer" })
+  local phrase = change(peer, "phrase-set", { ref = place(peer) .. ":phrase:2.1", lpb = 8 })
+  local copy = change(peer, "instrument-duplicate", { ref = iref(place(peer), 2) })
+  eq(#instrument(3).chains[1].devices, 2, "the copy has the chain's mixer and its Gainer")
+  for _, step in ipairs({ { "instrument-duplicate", copy }, { "phrase-set", phrase }, { "chaindevice-add", gainer }, { "chain-add", chain },
+    { "moddevice-add", device }, { "modset-add", set } }) do
+    local undone = restore(peer, step[1], step[2])
+    ok(undone.result, step[1] .. ": " .. json.encode(undone.error or {}))
+  end
+  eq(#mock.data.instruments, 3)
+  eq(#instrument(2).sets, 1)
+  eq(#instrument(2).chains, 0)
+  eq(instrument(2).phrases[1].lpb, 4)
+end)
+
 test("instruments: a move to 3 keeps the others in order and renumbers notes; Kumi's undo moves it back, refused after the producer moved others", function()
   local env, peer = setup()
   note_at(1, 0) -- Drums

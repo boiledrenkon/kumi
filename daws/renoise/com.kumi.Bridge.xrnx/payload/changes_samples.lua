@@ -692,6 +692,8 @@ local function delete_restore(song, env, restore, desc)
     pcall(delete_sample, instrument, at)
     fail("failed", "Renoise wouldn't load the kept audio of " .. label .. " back: nothing was put back")
   end
+  -- (the sample Kumi deleted, at its place again: what was kept by its place before the delete follows it)
+  if env.back then env.back("samples", i, nil, material.after, at) end
   local lost = put_settings(env, sample, material, true)
   if material.markers then
     pcall(function() sample.slice_markers = material.markers end)

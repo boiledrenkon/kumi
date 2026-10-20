@@ -255,6 +255,8 @@ local function delete_in_instrument(spec)
     if not base.same_table(spec.print(object), fence) then fail("changed", label .. " changed since the preview") end
     local material = { state = spec.state(object), index = n[2], users = users_of(env, instrument, n[1], spec.field, n[2]) }
     if #json.encode(material) > base.MAX_MATERIAL_BYTES then fail("failed", label .. " holds more than Kumi can keep to put it back, so it won't delete it") end
+    -- (its devices' log, for the one Kumi puts back to take on: the places of its devices kept before then follow)
+    material.logs = env.logs_of and env.logs_of(spec.of, n) or nil
     song:describe_undo(desc)
     spec.delete(instrument, n[2])
     material.instrument = places_.place_of(env, "instrument", { n[1] })
@@ -284,6 +286,10 @@ local function delete_in_instrument(spec)
     song:describe_undo(desc)
     local made = spec.insert(instrument, at)
     local notes = spec.write(made, material.state, song) or {}
+    -- (the one Kumi deleted, at its place again: what was kept by its place before the delete follows it, and its devices'
+    -- places too when every device was made again, in its order)
+    if env.back then env.back(spec.list, n[1], nil, material.after, at) end
+    if env.adopt and material.logs and #made.devices == spec.devices_kept(material.state) then env.adopt(spec.of, { n[1], at }, material.logs) end
     local lost = reassign(env, song, spec.field, material.users, at)
     if lost > 0 then notes[#notes + 1] = string.format("%d %s that used it %s it again: changed in Renoise since.", lost, lost == 1 and "sample" or "samples", lost == 1 and "doesn't use" or "don't use") end
     base.note_restored_at(env.journal, spec.kind, places_.journal_place(spec.of, { n[1], at }))
@@ -325,6 +331,7 @@ delete_in_instrument({
   print = set_print, back_print = set_back_print, state = set_state, print_of_state = print_of_set_state, write = write_set,
   count = function(i) return #i.sample_modulation_sets end, get = function(i, at) return i:sample_modulation_set(at) end,
   insert = function(i, at) return i:insert_sample_modulation_set_at(at) end, delete = function(i, at) i:delete_sample_modulation_set_at(at) end,
+  devices_kept = function(state) return #(state.devices or {}) end,
 })
 
 -- modset-set {ref: modset, name?, pitchRange?, filterType?, volume?, panning?, pitch?, cutoff?, resonance?, drive?}
@@ -464,6 +471,8 @@ local function device_in_list(spec)
     end
     song:describe_undo(desc)
     spec.make(owner, at, state)
+    -- (the device Kumi deleted, at its place again: what was kept by its place before the delete follows it)
+    if env.back then env.back(spec.list, n[1], n[2], material.after, at) end
     base.note_restored_at(env.journal, spec.kind, places_.journal_place(spec.of, { n[1], n[2], at }))
     return {
       restored = { ref = places_.ref_of(env, spec.of, { n[1], n[2], at }) }, display = { title = label .. " put back", note = spec.restore_note },
@@ -827,6 +836,8 @@ delete_in_instrument({
   print_of_state = print_of_chain_state,
   count = function(i) return #i.sample_device_chains end, get = function(i, at) return i:sample_device_chain(at) end,
   insert = function(i, at) return i:insert_sample_device_chain_at(at) end, delete = function(i, at) i:delete_sample_device_chain_at(at) end,
+  -- (its mixer, and the devices after it)
+  devices_kept = function(state) return 1 + #(state.devices or {}) end,
 })
 
 -- chain-set {ref: chain, name?, outputRouting?}

@@ -277,7 +277,11 @@ local function add_preview(song, env, input)
   local title = string.format("Added phrase %s to %s", input.name and q(input.name) or string.format("%02X", plan.index - 1), q(plan.label))
   return {
     target = places_.target_of(env, "instrument", plan.n), prior = { phrases = plan.count }, fence = { phrases = plan.count, index = plan.index },
-    display = { title = title, before = { phrases = plan.count }, after = { phrases = plan.count + 1 } },
+    display = {
+      title = title, before = { phrases = plan.count }, after = { phrases = plan.count + 1 },
+      -- (Renoise renumbers the 0Z commands that name phrases it moves: lab 2026-10-19, 0Z02 became 0Z03)
+      note = plan.index <= plan.count and "The phrases after it move up one, and Renoise renumbers the 0Z commands in patterns that name them." or nil,
+    },
   }
 end
 
@@ -339,7 +343,7 @@ end
 local function delete_preview(song, env, input)
   local n, objects, label = places_.locate(song, env, "phrase", input, "phrase-delete")
   local _, writes = read_lines(objects.phrase)
-  local display = { title = "Deleted phrase " .. label, note = "Kumi keeps its lines, settings, keys and script to put back. 0Z commands in patterns name phrases by number: the phrases after it move down one." }
+  local display = { title = "Deleted phrase " .. label, note = "Kumi keeps its lines, settings, keys and script to put back. The phrases after it move down one, and Renoise renumbers the 0Z commands in patterns that name them." }
   if writes > M.MAX_WRITES then display.note = "It holds more lines than Kumi puts back in one step: the apply will refuse." end
   return { target = places_.target_of(env, "phrase", n), prior = { deleted = false }, fence = phrase_print(objects.phrase), display = display }
 end
@@ -354,6 +358,8 @@ local function delete_apply(song, env, input, fence, desc)
   local material = {
     index = n[2], settings = settings_of(phrase), lines = lines, columns = columns_of(phrase), mapping = mapping_of(phrase),
     script = phrase.script.paragraphs, program = (instrument.phrase_playback_mode == renoise.Instrument.PHRASES_PLAY_SELECTIVE and instrument.phrase_program == n[2]) or nil,
+    -- (its count of changed lines, for the one Kumi puts back to take on)
+    logs = env.logs_of and env.logs_of("phrase", n) or nil,
   }
   song:describe_undo(desc)
   instrument:delete_phrase_at(n[2])
@@ -408,6 +414,9 @@ local function delete_restore(song, env, restore, desc)
       end
     end)
   end
+  -- (the phrase Kumi deleted, at its place again with its lines: what was kept by its place, and its lines' count, follow it)
+  if env.back then env.back("phrases", n[1], nil, material.after, at) end
+  if env.adopt and material.logs then env.adopt("phrase", { n[1], at }, material.logs) end
   base.note_restored_at(env.journal, "phrase-delete", places_.journal_place("phrase", { n[1], at }))
   return {
     restored = { ref = places_.ref_of(env, "phrase", { n[1], at }) }, display = { title = label .. " put back", note = #notes > 0 and table.concat(notes, " ") or nil },
@@ -1022,20 +1031,26 @@ base.register({
     if not ok then base.gone_is_changed(plan) end
     if lines_print(plan.phrase) ~= fence.print or plan.phrase.playback_mode ~= fence.mode then fail("changed", plan.label .. " changed since the preview") end
     local n = plan.n
-    local result
-    song:describe_undo(desc)
     local options = { lpb = input.lpb, max_events = input.maxEvents }
-    local started, err = pcall(function()
-      plan.phrase.script:render_to_pattern(options, function(error_text, rendered, skipped)
-        result = { error = error_text, rendered = rendered, skipped = skipped }
-      end)
-    end)
-    if not started then fail("failed", "Renoise wouldn't render it: " .. tostring(type(err) == "table" and err.message or err)) end
-    -- (the render rewrites the phrase, its length too, before it answers: the wait looks for no other change, and the phrase is
-    -- found by its place after it)
-    local at = places_.place_of(env, "phrase", n)
+    -- (the render starts in the job's first step, checked as it starts: Renoise rewrites the phrase, its length too, before it
+    -- answers, so the wait after it looks for no other change, and the phrase is found by its place after it)
     return {
       kumi_job = function(job)
+        local now_song = renoise.song() or song
+        local phrase = places_.resolve(now_song, "phrase", n).phrase
+        if lines_print(phrase) ~= fence.print or phrase.playback_mode ~= fence.mode then
+          error({ code = "changed", message = plan.label .. " changed since the preview" }, 0)
+        end
+        local at = places_.place_of(env, "phrase", n)
+        local result
+        now_song:describe_undo(desc)
+        local started, err = pcall(function()
+          phrase.script:render_to_pattern(options, function(error_text, rendered, skipped)
+            result = { error = error_text, rendered = rendered, skipped = skipped }
+          end)
+        end)
+        if not started then error({ code = "failed", message = "Renoise wouldn't render it: " .. tostring(type(err) == "table" and err.message or err) }, 0) end
+        job.wrote = "The render of " .. plan.label
         local from = env.now_ms()
         while not result do
           if env.now_ms() - from >= M.RENDER_WAIT_MS then
@@ -1051,7 +1066,7 @@ base.register({
           error({ code = "uncertain", message = "Renoise rendered " .. plan.label .. ", and the song changed meanwhile (" .. tostring(why) .. "): look at its lines" }, 0)
         end
         n = now
-        local phrase = places_.resolve(renoise.song() or song, "phrase", n).phrase
+        phrase = places_.resolve(renoise.song() or song, "phrase", n).phrase
         local display = { title = string.format("Rendered the script of %s to %d events", plan.label, result.rendered or 0) }
         if (result.skipped or 0) > 0 then display.note = string.format("%d events didn't fit its lines (raise lpb to fit them).", result.skipped) end
         return {

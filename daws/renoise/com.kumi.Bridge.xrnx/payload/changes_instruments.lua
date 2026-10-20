@@ -552,12 +552,14 @@ local function delete_write(song, env, input, fence, desc, notes)
   local material_ = import("changes_material")
   local pool = material_.keep_pool(song, env, patterns)
   local name = instrument.name
+  -- (its lists' logs, for the one Kumi puts back to take on: the places kept in it before then follow)
+  local logs = env.logs_of and env.logs_of("instrument", { i }) or nil
   song:describe_undo(desc)
   song:delete_instrument_at(i)
   -- (the place it goes back to: after the instrument before it, followed from here)
   local material = {
     file = file, bytes = stat and stat.size or nil, print = print_of_fence(fence), name = name, index = i,
-    after = env.instrument_mark and env.instrument_mark() or nil, notes = notes, pool = pool,
+    after = env.instrument_mark and env.instrument_mark() or nil, notes = notes, pool = pool, logs = logs,
   }
   if #json.encode(material) > base.MAX_MATERIAL_BYTES then
     -- (too many notes to keep: the instrument goes back, and nothing is lost)
@@ -645,6 +647,10 @@ local function delete_restore(song, env, restore, desc)
     end
     if column and column.is_empty then write_note(column, note, at - 1) else skipped = skipped + 1 end
   end
+  -- (the instrument Kumi deleted, at its place again, loaded from what it kept: what was kept by its place before the delete, and
+  -- in it, follows it)
+  if env.back then env.back("instruments", nil, nil, material.after, at) end
+  if env.adopt and material.logs then env.adopt("instrument", { at }, material.logs) end
   base.note_restored_at(env.journal, "instrument-delete", places_.journal_place("instrument", { at }))
   local parts = {}
   if #(material.notes or {}) > 0 then

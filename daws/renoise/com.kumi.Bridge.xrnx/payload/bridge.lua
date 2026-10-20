@@ -35,6 +35,7 @@ end
 
 local host, st, b, conns, observers, jobs
 local instrument_scope -- (n-instruments; defined with the structural notifier)
+local instrument_list_count, recount, retire -- (n-instruments)
 
 -- The epoch: refs are valid within one. It moves, at once and inside the notifier that saw it, when a song is switched and
 -- when something happens to the song that the tool can't map into the refs it handed out (instruments, patterns or the
@@ -528,14 +529,75 @@ instrument_scope = function(kind, token)
   return i and { instrument = i } or nil
 end
 
+-- n-instruments: the logs of an object that went (an instrument's lists, its sets' and chains' devices, its phrases' counts of
+-- changed lines; a set's or chain's devices; a phrase's count), kept a while by their ids: when Kumi puts the object back, the
+-- one made in its place takes them on (`adopt`), so the places kept in them before the delete follow it.
+local RETIRED = 512
+retire = function(token)
+  if type(token) ~= "table" then return end
+  local kept = b.retired or { order = {}, logs = {} }
+  b.retired = kept
+  local function keep(log_)
+    if type(log_) ~= "table" or not log_.id or kept.logs[log_.id] then return end
+    kept.logs[log_.id] = log_
+    kept.order[#kept.order + 1] = log_.id
+    if #kept.order > RETIRED then kept.logs[table.remove(kept.order, 1)] = nil end
+  end
+  for _, key in ipairs({ "slog", "phlog", "mlog", "clog", "log" }) do keep(token[key]) end
+  for _, owned in ipairs(token.modsets or {}) do keep(owned.log) end
+  for _, owned in ipairs(token.chains or {}) do keep(owned.log) end
+end
+
+-- n-instruments: how many objects Renoise has in the list a structural notifier is about (nil when it can't be read).
+instrument_list_count = function(kind, owner)
+  local ok, count = pcall(function()
+    if kind == "samples" then return #owner.samples end
+    if kind == "phrases" then return #owner.phrases end
+    if kind == "modsets" then return #owner.sample_modulation_sets end
+    if kind == "chains" then return #owner.sample_device_chains end
+    return #owner.devices
+  end)
+  return ok and count or nil
+end
+
+-- n-instruments: one list watched anew from what Renoise has: its groups (and what is in them) new, its log started again.
+recount = function(kind, token, owner, list, count)
+  places.gap(token[INSTRUMENT_LOGS[kind]])
+  for _, old in ipairs(list) do
+    if not old.dead then
+      old.dead = true
+      observers.dead = observers.dead + 1
+    end
+  end
+  for k = #list, 1, -1 do list[k] = nil end
+  for k = 1, count or 0 do
+    list[k] = group()
+    if kind == "samples" then
+      watch_sample(owner:sample(k), list[k], token)
+    elseif kind == "phrases" then
+      watch_phrase(owner:phrase(k), list[k], token)
+    elseif kind == "modsets" then
+      watch_modset(owner:sample_modulation_set(k), list[k], token)
+    elseif kind == "chains" then
+      watch_chain(owner:sample_device_chain(k), list[k], token)
+    end
+  end
+  log.write("info", "the " .. kind .. " list was out of step: watched anew on its own")
+end
+
 -- A change to the lists refs index into: the epoch moves (so every answer after it is in the new epoch, and a ref from
 -- before is refused), and what was made gets its watchers. What was deleted loses its group, and a swap moves the groups
 -- with their objects (Renoise keeps an object's notifiers through a swap: measured). Only an operation the lists can't follow
 -- asks for the whole song to be watched anew.
 local function on_structural(reason, kind, op, owner, token)
-  -- (n-instruments: a modulation set's devices notifier names each place one higher than the list has it: lab 2026-10-19)
+  -- (n-instruments: a modulation set's devices notifier names each place one higher than the list has it, and tells of a
+  -- device at 1 that the list doesn't show as a set is copied: lab 2026-10-19. That one is no change to the list.)
   if kind == "moddevices" and op then
     op = { type = op.type, index = type(op.index) == "number" and op.index - 1 or op.index, index2 = type(op.index2) == "number" and op.index2 - 1 or op.index2 }
+    if type(op.index) == "number" and op.index < 1 and op.type ~= "swap" then
+      bump_epoch(reason, true, BREAKS[kind])
+      return
+    end
   end
   bump_epoch(reason, true, BREAKS[kind])
   -- (what moved, for the places a change keeps: a track's devices, the pool, the instruments; anything not told is a gap)
@@ -593,9 +655,18 @@ local function on_structural(reason, kind, op, owner, token)
       end
     end
   elseif op and op.type == "remove" then
+    if (INSTRUMENT_LOGS[kind] or kind == "instruments") and type(op.index) == "number" then retire(list[op.index]) end
     fine = forget(list, op.index)
   elseif op and op.type == "swap" then
     fine = exchange(list, op.index, op.index2)
+  end
+  -- n-instruments: an instrument's lists, a set's or a chain's devices, out of step with what Renoise has (an instrument copied
+  -- tells its lists in its own order: lab), are counted again on their own: that list's log starts again (its places are
+  -- unknown), and the rest of the song keeps its places.
+  if INSTRUMENT_LOGS[kind] and token then
+    local count = instrument_list_count(kind, owner)
+    if not fine or (count and #list ~= count) then recount(kind, token, owner, list, count) end
+    return
   end
   if not fine then b.reattach = true end
 end
@@ -877,6 +948,65 @@ local place_env = {
   phrase_touch_mark = function(i, ph)
     local token = phrase_token(i, ph)
     return token and token.pid and (token.pid .. "=" .. token.touches) or nil
+  end,
+  -- What an object's own logs are (taken before Kumi deletes it), for the one Kumi puts back to take on (`adopt`).
+  logs_of = function(of, n)
+    local token = b.groups and b.groups.instruments[n[1]]
+    if not token then return nil end
+    local function id(log_) return log_ and log_.id or nil end
+    if of == "instrument" then
+      local kept = { slog = id(token.slog), phlog = id(token.phlog), mlog = id(token.mlog), clog = id(token.clog), sets = {}, chains = {}, phrases = {} }
+      for k, owned in ipairs(token.modsets or {}) do kept.sets[k] = id(owned.log) or false end
+      for k, owned in ipairs(token.chains or {}) do kept.chains[k] = id(owned.log) or false end
+      for k, owned in ipairs(token.phrases or {}) do kept.phrases[k] = owned.pid and { pid = owned.pid, touches = owned.touches } or false end
+      return kept
+    elseif of == "modset" or of == "chain" then
+      local owned = (of == "modset" and token.modsets or token.chains or {})[n[2]]
+      return owned and { log = id(owned.log) } or nil
+    elseif of == "phrase" then
+      local owned = (token.phrases or {})[n[2]]
+      return owned and owned.pid and { pid = owned.pid, touches = owned.touches } or nil
+    end
+    return nil
+  end,
+  -- The object Kumi put back at `n` takes on the logs its deleted self had (`kept`, from logs_of): all or nothing.
+  adopt = function(of, n, kept)
+    local token = b.groups and b.groups.instruments[n[1]]
+    local logs = b.retired and b.retired.logs or {}
+    if not token or type(kept) ~= "table" then return false end
+    local function find(id_) return type(id_) == "string" and logs[id_] or nil end
+    if of == "instrument" then
+      local sets, chains, phrases = token.modsets or {}, token.chains or {}, token.phrases or {}
+      if #sets ~= #(kept.sets or {}) or #chains ~= #(kept.chains or {}) or #phrases ~= #(kept.phrases or {}) then return false end
+      local own = { slog = find(kept.slog), phlog = find(kept.phlog), mlog = find(kept.mlog), clog = find(kept.clog) }
+      if not (own.slog and own.phlog and own.mlog and own.clog) then return false end
+      for k = 1, #sets do if not find(kept.sets[k]) then return false end end
+      for k = 1, #chains do if not find(kept.chains[k]) then return false end end
+      for key, log_ in pairs(own) do token[key] = log_ end
+      for k = 1, #sets do sets[k].log = find(kept.sets[k]) end
+      for k = 1, #chains do chains[k].log = find(kept.chains[k]) end
+      for k = 1, #phrases do
+        if type(kept.phrases[k]) == "table" then phrases[k].pid, phrases[k].touches = kept.phrases[k].pid, kept.phrases[k].touches end
+      end
+      return true
+    elseif of == "modset" or of == "chain" then
+      local owned = (of == "modset" and token.modsets or token.chains or {})[n[2]]
+      local log_ = find(kept.log)
+      if not owned or not log_ then return false end
+      owned.log = log_
+      return true
+    elseif of == "phrase" then
+      local owned = (token.phrases or {})[n[2]]
+      if not owned or type(kept.pid) ~= "string" then return false end
+      owned.pid, owned.touches = kept.pid, kept.touches
+      return true
+    end
+    return false
+  end,
+  -- The object Kumi put back, now at `now` in its list, is the one it removed (`removed`: the mark just after the remove).
+  back = function(kind, i, at, removed, now)
+    local log_ = kind == "instruments" and b.ilog or instrument_log(kind, i, at)
+    return log_ and places.back(log_, removed, now) or false
   end,
   phrase_touched_since = function(i, ph, mark)
     local token = phrase_token(i, ph)

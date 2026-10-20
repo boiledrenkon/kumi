@@ -669,6 +669,12 @@ local function script_object(phrase)
       if type(options) == "function" then done, options = options, {} end
       M.pending_renders = M.pending_renders or {}
       M.pending_renders[#M.pending_renders + 1] = { phrase = phrase, options = options, done = done }
+      -- (Renoise rewrites the phrase's length by itself before the tool's next callback, well before it answers: lab 2026-10-19)
+      M.idle_work = M.idle_work or {}
+      M.idle_work[#M.idle_work + 1] = function()
+        phrase.lines = math.min(512, phrase.lines * 2)
+        M.fire(obs(phrase, "number_of_lines"))
+      end
       return true
     end,
   }, {
@@ -713,9 +719,6 @@ function M.finish_renders(fail)
     else
       local phrase = render.phrase
       M.callback_begin()
-      -- (Renoise's render rewrites the phrase's length too, as the events need: lab, 32 → 128)
-      phrase.lines = math.min(512, phrase.lines * 2)
-      M.fire(obs(phrase, "number_of_lines"))
       local count = 0
       for k = 1, phrase.lines, 4 do
         local l = phrase_line(phrase, k)
@@ -1473,6 +1476,8 @@ function M.replace_instrument(i, contents)
       for k, item in ipairs(from[key] or {}) do
         instrument[key][k] = item
         M.fire(instrument[key .. "_observable"], { type = "insert", index = k })
+        -- (and, as Renoise copies a set or a chain, the device at 1 a set's list doesn't show, and a chain's mixer: lab)
+        if (key == "sets" or key == "chains") and item.devices_observable then M.fire(item.devices_observable, { type = "insert", index = 1 }) end
       end
     end
     for _, phrase in ipairs(instrument.phrases) do phrase.notifiers = phrase.notifiers or {} end

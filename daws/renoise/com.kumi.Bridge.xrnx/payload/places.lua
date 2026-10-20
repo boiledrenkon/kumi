@@ -53,23 +53,67 @@ local function since(log, mark)
   return out
 end
 
--- The object that was at `n` when `mark` was made: its number now, or nil and "gone" (it was removed) or "unknown".
+-- The object that was at `n` when `mark` was made: its number now, or nil and "gone" (it was removed) or "unknown". An object
+-- Kumi removed and put back is followed to where it came back (`back`).
 function M.item(log, n, mark)
   local ops = since(log, mark)
   if not ops or type(n) ~= "number" then return nil, "unknown" end
-  for _, op in ipairs(ops) do
+  local j = 1
+  while j <= #ops do
+    local op = ops[j]
     if op.type == "insert" then
       if n >= op.index then n = n + 1 end
     elseif op.type == "remove" then
-      if n == op.index then return nil, "gone" end
-      if n > op.index then n = n - 1 end
+      if n == op.index then
+        local back
+        for k = j + 1, #ops do
+          if ops[k].back == op.serial then back = k break end
+        end
+        if not back then return nil, "gone" end
+        n, j = ops[back].index, back
+      elseif n > op.index then
+        n = n - 1
+      end
     elseif n == op.index then
       n = op.index2
     elseif n == op.index2 then
       n = op.index
     end
+    j = j + 1
   end
   return n
+end
+
+-- n-instruments: Kumi put back an object it had removed (`removed`: the mark taken just after the remove): of the inserts since,
+-- the one whose object is at `at` now is that object, so a place from before the remove follows it. False when none is.
+function M.back(log, removed, at)
+  local ops = since(log, removed)
+  local serial = type(removed) == "string" and tonumber(removed:match(":(%d+)$")) or nil
+  if not ops or not serial or type(at) ~= "number" then return false end
+  for j = #ops, 1, -1 do
+    local op = ops[j]
+    if op.type == "insert" then
+      local n = op.index
+      for k = j + 1, #ops do
+        local later = ops[k]
+        if later.type == "insert" then
+          if n >= later.index then n = n + 1 end
+        elseif later.type == "remove" then
+          if n == later.index then n = nil break end
+          if n > later.index then n = n - 1 end
+        elseif n == later.index then
+          n = later.index2
+        elseif n == later.index2 then
+          n = later.index
+        end
+      end
+      if n == at then
+        op.back = serial
+        return true
+      end
+    end
+  end
+  return false
 end
 
 -- Where an object deleted from place `n` (when `mark` was made, after it went) goes back: just after the object that was

@@ -335,6 +335,12 @@ function M.advance(ms)
     if not next_timer then break end
     M.time = next_timer.due
     next_timer.due = next_timer.due + next_timer.interval
+    -- (n-instruments: what Renoise does by itself between the tool's callbacks, as a render's rewrite of its phrase)
+    if M.idle_work and #M.idle_work > 0 then
+      local work = M.idle_work
+      M.idle_work = {}
+      for _, fn in ipairs(work) do fn() end
+    end
     local ok, err = M.run_callback(next_timer.fn)
     if not ok then record_error("timer", err) end
   end
@@ -462,6 +468,7 @@ end
 function M.reset(options)
   options = options or {}
   M.errors, M.modals, M.statuses, M.popen_calls = {}, {}, {}, {}
+  M.idle_work = {} -- (n-instruments)
   -- Calls that would crash the real Renoise.
   M.crashes = {}
   M.servers, M.busy_ports, M.timers, M.menu_entries = {}, {}, {}, {}
