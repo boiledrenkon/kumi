@@ -714,6 +714,53 @@ mod tests {
         assert_eq!(first["facts"]["markers"]["count"], 2);
     }
 
+    /// 200 tracks of 5 FX of 64 parameters each and 20 items each (4,000 items: listed one by one).
+    fn big_project() {
+        use crate::reaper::fake::{FakeFx, FakeItem, FakeParam, FakeTake, FakeTrack};
+        fake::lab_project();
+        fake::with(|s| {
+            s.tracks = (0..200)
+                .map(|t| {
+                    let mut track = FakeTrack::new(&format!("{{T{t:04}}}"), &format!("Track {t}"));
+                    track.fx = (0..5)
+                        .map(|f| {
+                            let mut fx = FakeFx::new(&format!("{{F{t:04}-{f}}}"), "VST: ReaEQ (Cockos)");
+                            fx.params = (0..64).map(|p| FakeParam::new(&format!("P{p}"), (p as f64) / 64.0, "x")).collect();
+                            fx
+                        })
+                        .collect();
+                    track.items = (0..20)
+                        .map(|i| {
+                            let take = FakeTake::wave(&format!("{{K{t:04}-{i}}}"), "loop.wav");
+                            FakeItem::new(&format!("{{I{t:04}-{i}}}"), i as f64 * 2.0, 2.0, vec![take])
+                        })
+                        .collect();
+                    track
+                })
+                .collect();
+        });
+    }
+
+    #[test]
+    fn a_big_projects_digest_comes_in_pages_inside_the_frame_bound() {
+        big_project();
+        let reads = Reads::default();
+        let began = Instant::now();
+        let mut answer = page(&reads, json!({})).unwrap();
+        let (mut pages, mut records, mut most) = (1, 0, 0);
+        loop {
+            most = most.max(super::super::json_len(&answer));
+            records += answer["records"].as_array().unwrap().len();
+            let Some(cursor) = answer["nextCursor"].as_str().map(str::to_owned) else { break };
+            answer = page(&reads, json!({"cursor": cursor})).unwrap();
+            pages += 1;
+        }
+        eprintln!("digest of 200 tracks, 1,000 FX, 64,000 parameters, 4,000 items: {pages} pages, {records} records, largest page {most} bytes, {:?}", began.elapsed());
+        assert_eq!(records, 1 + 200 + 1000 + 4000 + 2, "the master, the tracks, their FX and items, the lab's two markers");
+        assert!(most <= super::super::ANSWER_BYTES, "every page inside the frame bound: {most}");
+        assert!(pages > 1);
+    }
+
     #[test]
     fn what_the_producer_changes_moves_only_its_own_facet() {
         fake::lab_project();

@@ -614,6 +614,26 @@ mod tests {
     }
 
     #[test]
+    fn a_big_projects_diff_stays_quick() {
+        // REAPER-like (keyed) and Renoise-like (matched by name, content and place): 5,200 and 1,300 records.
+        let keyed: Vec<Value> = (0..5200).map(|i| json!({"k": if i % 26 == 0 { "track" } else { "item" }, "id": format!("{{G{i}}}"), "n": format!("N{i}"), "o": i, "p": if i % 26 == 0 { Value::Null } else { json!(format!("{{G{}}}", i - i % 26)) }, "f": {"position": i as f64, "content": {"contentHash": format!("{i:x}")}}})).collect();
+        let unkeyed: Vec<Value> = (0..1300).map(|i| json!({"k": "pattern", "n": format!("Pattern {i:02X}"), "dn": true, "o": i, "f": {"lines": {"Kick": format!("{} notes, 0 effects #{i:x}", i % 7)}}})).collect();
+        for records in [keyed, unkeyed] {
+            let before = snapshot(records.clone());
+            let mut changed = records;
+            changed[7]["f"]["position"] = json!(-1.0);
+            changed.swap(10, 11);
+            let after = snapshot(changed);
+            let began = std::time::Instant::now();
+            let found = diff(&before, &after, false, &HashMap::new());
+            let took = began.elapsed();
+            eprintln!("diff of {} records: {} changes in {took:?}", before.records.len(), found.changes.len());
+            assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+            assert!(!found.changes.is_empty());
+        }
+    }
+
+    #[test]
     fn equal_snapshots_have_no_diff_and_a_long_one_is_counted_past_its_limit() {
         let before = snapshot((0..500).map(|i| json!({"k": "marker", "id": format!("{{M{i}}}"), "n": format!("M{i}"), "o": i})).collect());
         assert!(diff(&before, &before, false, &HashMap::new()).is_empty());

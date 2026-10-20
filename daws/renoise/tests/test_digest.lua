@@ -209,3 +209,24 @@ test("digest: past the lines budget a pattern's lines are left uncompared, and t
   eq(find(records, "pattern", 2).f.lines.Kick, json.null)
   ok(first.bounded.lines:match("more than 20 pattern lines"), first.bounded.lines)
 end)
+
+test("digest: a big song comes in pages inside the frame bound, read a slice at a time", function()
+  local tracks = {}
+  for t = 1, 32 do tracks[t] = { name = "T" .. t, note_columns = 2 } end
+  local env = H.setup({ song = { name = "Big", file_name = "/s/big.xrns", mixer_device = true, tracks = tracks, patterns = 64,
+    pattern_lines = 64, instruments = 8 } })
+  local peer = H.connect(env)
+  H.frames(peer)
+  for p = 1, 64 do
+    for t = 1, 32 do
+      for l = 1, 64, 4 do mock.ops.set_note(p, t, l, 1, { note = 36 + (l % 24), instrument = 0, volume = 64 }) end
+    end
+  end
+  -- (the mock's clock is the tests' own, so this measures nothing of Renoise's time: the lab does)
+  local first, records, pages = whole(peer)
+  local largest = #json.encode(first)
+  ok(pages >= 1 and largest > 0)
+  eq(#records, 32 + 1 + 64 + 8, "the tracks, the master, the patterns, the instruments")
+  ok(largest <= 256 * 1024, "inside the frame bound")
+  ok(find(records, "pattern", 64).f.lines.T32:match("^16 notes"), find(records, "pattern", 64).f.lines.T32)
+end)
