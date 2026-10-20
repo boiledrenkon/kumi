@@ -1614,3 +1614,15 @@ test("devices m4: Kumi's undo of a loaded phrase or modulation set finds it thro
     end
   end
 end)
+
+test("devices m4: a phrase script Kumi's host read from a library file is titled by the file's name", function()
+  local _, peer = setup()
+  mock.song:instrument(1):insert_phrase_at(1)
+  local epoch, layout = place(peer)
+  local input = { ref = epoch .. ":phrase:1.1", code = 'return cycle("c4 e4 g4")', codeName = "Arp" }
+  local previewed = preview(peer, "phrase-script", input)
+  ok(previewed.display.title:find("Loaded the phrase script " .. Q1 .. "Arp" .. Q2 .. " into ", 1, true), previewed.display.title)
+  local record = change(peer, "phrase-script", input)
+  ok(record.display.title:find("(1 line)", 1, true), record.display.title)
+  failure(call(peer, "change_preview", { kind = "phrase-script", input = { ref = epoch .. ":phrase:1.1" }, epoch = epoch, layout = layout }), "bad-params", "or path")
+end)

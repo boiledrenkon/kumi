@@ -919,13 +919,19 @@ end
 
 local function script_plan(song, env, input)
   local n, objects, label = places_.locate(song, env, "phrase", input, "phrase-script")
-  if type(input.code) ~= "string" or input.code == "" then bad("code: the script's text (pattrns Lua, returning a pattern or cycle)") end
+  if type(input.code) ~= "string" or input.code == "" then bad("code (the script's text: pattrns Lua, returning a pattern or cycle) or path (a .lua phrase script file)") end
   if #input.code > M.MAX_SCRIPT_BYTES then bad("code is longer than 64 KB") end
   if input.commit ~= nil and type(input.commit) ~= "boolean" then bad("commit is true or false") end
-  return { n = n, label = label, phrase = objects.phrase, paragraphs = split_lines(input.code), state = script_state(objects.phrase), commit = input.commit ~= false }
+  -- (`codeName`: the name of the phrase script file Kumi's host read it from, M4 n-devices)
+  local name = type(input.codeName) == "string" and input.codeName ~= "" and input.codeName or nil
+  return { n = n, label = label, phrase = objects.phrase, paragraphs = split_lines(input.code), state = script_state(objects.phrase), commit = input.commit ~= false, name = name }
 end
 
-local function script_title(plan) return string.format("Wrote the script of %s (%d %s)", plan.label, #plan.paragraphs, #plan.paragraphs == 1 and "line" or "lines") end
+local function script_title(plan)
+  local lines = string.format("%d %s", #plan.paragraphs, #plan.paragraphs == 1 and "line" or "lines")
+  if plan.name then return string.format("Loaded the phrase script %s into %s (%s)", q(plan.name), plan.label, lines) end
+  return string.format("Wrote the script of %s (%s)", plan.label, lines)
+end
 
 base.register({
   kind = "phrase-script", custom = true, by_place = true,
