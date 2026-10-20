@@ -671,7 +671,7 @@ pub fn search_presets<'a>(entries: impl IntoIterator<Item = &'a PresetEntry>, qu
             continue;
         }
         let name = entry.name.to_lowercase();
-        let hay = format!(
+        let mut hay = format!(
             "{}/{}/{} {} {}",
             entry.source,
             entry.folder,
@@ -680,7 +680,14 @@ pub fn search_presets<'a>(entries: impl IntoIterator<Item = &'a PresetEntry>, qu
             entry.about.as_deref().unwrap_or("")
         )
         .to_lowercase();
-        let mut score = if entry.source == "User Library" { 2. } else { 0. };
+        // Another DAW's preset is found by what it holds too: a REAPER bank's preset names, the FX in a chain.
+        if super::presets::preset_daws(&entry.format) != [crate::core::daw::DawId::Ableton] {
+            for inside in entry.inside.iter().flatten() {
+                hay.push(' ');
+                hay.push_str(&inside.to_lowercase());
+            }
+        }
+        let mut score = if entry.source == "User Library" || entry.source == "Renoise User Library" { 2. } else { 0. };
         let mut why = vec![];
         let mut missing = false;
         for word in &words {

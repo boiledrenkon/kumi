@@ -85,7 +85,8 @@ pub struct PromptVocab {
     pub middle_c_octave: i8,
     /// For each gap no knob closes, the structural change that closes it, with the DAW's own devices.
     pub structure_moves: &'static [(crate::audio::matching::StructuralKind, &'static str)],
-    /// The DAW's own places for sounds, as find_sounds names them: "Live's User Library and Places".
+    /// Where the producer's sounds are, as find_sounds names them: "Live's User Library and Places, Splice, packs, folders
+    /// they named".
     pub library_places: &'static str,
     /// What presets the producer has, as find_presets names them.
     pub preset_sources: &'static str,
@@ -212,7 +213,7 @@ macro_rules! live_word {
         "EQ Eight"
     };
     (library_places) => {
-        "Live's User Library and Places"
+        "Live's User Library and Places, Splice, packs, folders they named"
     };
     (preset_sources) => {
         "Live's presets and racks (in the User Library, Places and packs, and Live's own), Max for Live devices, and plug-ins' own presets"
@@ -535,7 +536,7 @@ impl DawProfile {
             eq: "an EQ",
             middle_c_octave: 4,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
-            library_places: "the DAW's own library",
+            library_places: "Splice, folders they named and the DAW's own library",
             preset_sources: "the DAW's own presets and device chains, and plug-ins' own presets",
             preset_examples: "(\"Serum\", \"Pro-Q 3\")",
             preset_device_hint: "The device it's for: \"Serum\", \"Pro-Q 3\"",
@@ -670,8 +671,8 @@ impl DawProfile {
             eq: "ReaEQ",
             middle_c_octave: 4,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
-            library_places: "REAPER's resource folder (FX chains, track and project templates)",
-            preset_sources: "REAPER's FX presets and chains, and plug-ins' own presets",
+            library_places: "Splice, folders they named and their sample folders in other DAWs",
+            preset_sources: "REAPER's FX chains, track and project templates, JSFX and FX preset banks (its resource folder), and VST3 presets",
             preset_examples: "(\"ReaEQ\", \"Serum\", \"Pro-Q 3\")",
             preset_device_hint: "The FX it's for: \"ReaComp\", \"Serum\"",
             voice_project: "REAPER project",
@@ -716,8 +717,8 @@ impl DawProfile {
             eq: "EQ 10",
             middle_c_octave: 5,
             structure_moves: UNKNOWN_STRUCTURE_MOVES,
-            library_places: "Renoise's Library folders (instruments, multi-samples, chains, presets, phrases)",
-            preset_sources: "Renoise's device presets, chains and instruments, and plug-ins' own presets",
+            library_places: "the samples of Renoise's Library and User Library, Splice, folders they named and their sample folders in other DAWs",
+            preset_sources: "Renoise's instruments, multi-samples, effect chains and presets, phrases, phrase scripts and modulation sets (its Library and User Library)",
             preset_examples: "(\"Compressor\", \"Serum\", \"Pro-Q 3\")",
             preset_device_hint: "The device it's for: \"Compressor\", \"Serum\"",
             voice_project: "Renoise song",

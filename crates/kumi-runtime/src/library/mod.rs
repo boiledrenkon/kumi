@@ -1,4 +1,5 @@
 pub mod classify;
+pub mod daw_sources;
 pub mod features;
 pub mod learn;
 pub mod learner;
@@ -16,7 +17,7 @@ pub mod taste;
 pub mod tools;
 pub mod xml;
 
-use crate::core::daw::DawProfile;
+use crate::core::daw::{DawId, DawProfile};
 use crate::{
     core::{
         contracts::{KernelTool, LibraryState as StatusState, LibraryStatus},
@@ -484,6 +485,10 @@ impl Library {
         result.map(Some)
     }
     pub async fn sound_index(&self) -> Result<Rc<SoundIndex>, RuntimeError> {
+        self.sound_index_in(None).await
+    }
+    /// The sounds offered in a session with this DAW: a DAW's own library only in that DAW (Live's when none is known).
+    pub async fn sound_index_in(&self, daw: Option<DawId>) -> Result<Rc<SoundIndex>, RuntimeError> {
         self.remembering().await;
         // One check and build at a time. The model's first searches come together (a kick, a snare, a hat, a perc),
         // and each used to find no index and build its own from the whole log: four at once took four times one.
@@ -494,7 +499,7 @@ impl Library {
         }
         let (_, presets, sets) = self.counts.get();
         self.counts.set((reader.entries.len(), presets, sets));
-        let current = self.sources().await;
+        let current: Vec<Source> = self.sources().await.into_iter().filter(|s| s.offered_in(daw)).collect();
         let key = current.iter().map(|s| s.path.as_str()).collect::<Vec<_>>().join("\n");
         let rebuild =
             self.held.borrow().as_ref().is_none_or(|held| {
@@ -648,6 +653,12 @@ impl LibraryAccess for Library {
     }
     async fn folders(&self) -> Vec<String> {
         self.sources().await.into_iter().map(|s| s.path).collect()
+    }
+    async fn sounds_in(&self, daw: Option<DawId>) -> Result<Rc<SoundIndex>, RuntimeError> {
+        self.sound_index_in(daw).await
+    }
+    async fn folders_in(&self, daw: Option<DawId>) -> Vec<String> {
+        self.sources().await.into_iter().filter(|s| s.offered_in(daw)).map(|s| s.path).collect()
     }
     async fn measure(&self, path: String, options: features::MeasureOptions) -> Result<SoundEntry, RuntimeError> {
         let relative = path.split(['\\', '/']).next_back().unwrap_or("").to_owned();
