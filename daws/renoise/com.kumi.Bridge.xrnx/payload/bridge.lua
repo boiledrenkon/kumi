@@ -295,6 +295,8 @@ local function watch_device(device, token, track_token)
   observers:owned(token, track_token, function()
     observers:watch_changes(device.is_active_observable)
     observers:watch_changes(device.display_name_observable)
+    -- (M4 n-devices: device-set's maximized, for the producer's undo of it)
+    observers:watch_changes(device.is_maximized_observable)
   end)
 end
 
@@ -630,7 +632,19 @@ local function on_structural(reason, kind, op, owner, token)
   elseif kind == "patterns" then
     places.note(b.plog, op)
   elseif kind == "instruments" then
-    places.note(b.ilog, op)
+    -- (M4 n-devices: Kumi's own load of an instrument file into slot i is told as an insert after it and a remove of it, but
+    -- the slot keeps its instrument (pattern notes keep playing it, measured in 3.5.4): no delete in the places log)
+    local r, own = b.replacing, false
+    if r and r.deadline and os.clock() > r.deadline then b.replacing, r = nil, nil end
+    if r and op then
+      if r.insert and op.type == "insert" and op.index == r.i + 1 then
+        r.insert, own = false, true
+      elseif r.remove and not r.insert and op.type == "remove" and op.index == r.i then
+        r.remove, own = false, true
+      end
+      if not r.insert and not r.remove then b.replacing = nil end
+    end
+    if not own then places.note(b.ilog, op) end
   elseif token and INSTRUMENT_LOGS[kind] and token[INSTRUMENT_LOGS[kind]] then
     places.note(token[INSTRUMENT_LOGS[kind]], op) -- (n-instruments)
   end
@@ -1064,6 +1078,22 @@ local function change_env()
     watch_undo = watch_undo, -- (n-instruments)
     -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
     changes = function() return b.changed or 0 end,
+    -- (M4 n-devices) Kumi's work folder beside its discovery folder (instrument files the host edits), and a load of an
+    -- instrument file into slot i that the places log doesn't take for a delete.
+    work_dir = function()
+      local dir = b.cfg and b.cfg.discovery_dir
+      return dir and (dir:gsub("[/\\][^/\\]*[/\\]?$", "") .. "/work") or nil
+    end,
+    replacing_instrument = function(i, fn)
+      b.replacing = { i = i, insert = true, remove = true }
+      local ok, err = pcall(fn)
+      -- (told now or on a later pass: kept for those two ops for a moment)
+      if b.replacing then b.replacing.deadline = os.clock() + 2 end
+      if not ok then
+        b.replacing = nil
+        error(err, 0)
+      end
+    end,
   }
   for name, fn in pairs(place_env) do env[name] = fn end
   return env
@@ -1079,6 +1109,30 @@ end
 
 function handlers.change_restore(params)
   return changes.restore(params, change_env())
+end
+
+-- (M4 n-devices) A device's preset data and shape, for Kumi's host to edit Doofers, Splitters and Notepads.
+function handlers.preset_read(params)
+  return changes.preset_read(params, change_env())
+end
+
+-- (M4 n-devices) An instrument saved to Kumi's work folder, for its host to edit its macro mappings.
+function handlers.instrument_export(params)
+  return changes.instrument_export(params, change_env())
+end
+
+-- (M4 n-devices) An instrument's macros and their mappings, for a read.
+function handlers.macro_read(params)
+  return changes.macro_read(params, change_env())
+end
+
+-- (M4 n-devices) Actions on a device: its own editor window, its settings saved as a preset in the user library.
+function handlers.device_editor(params)
+  return changes.device_editor(params, change_env())
+end
+
+function handlers.preset_save(params)
+  return changes.preset_save(params, change_env())
 end
 
 -- n-instruments: an instrument written to a file (an action: no undo step, nothing in the song changes).
@@ -1203,7 +1257,9 @@ end
 local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true,
   -- (M4 n-song: the actions that name tracks, and the save, whose epoch says which song)
   audition_note = true, select = true, project_save = true,
-  instrument_save = true }
+  instrument_save = true,
+  -- (M4 n-devices)
+  preset_read = true, instrument_export = true, macro_read = true, device_editor = true, preset_save = true }
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).
@@ -1241,6 +1297,15 @@ function M.handle(_, request)
     -- A ref of an earlier epoch that names the same thing now is made in this one, whatever epoch the request names (Kumi keeps
     -- the names of what a device or a sequence change left alone); so is the request's own epoch, when every ref of it was.
     if type(params) == "table" then
+      -- (M4 n-devices) A restore of a kind that finds things by places only: the refs in its target and `created` name
+      -- nothing it uses, and one of an earlier epoch mustn't hold the request back.
+      if request.method == "change_restore" and changes.follows_places(params.kind) and (params.created ~= nil or params.target ~= nil) then
+        local copy = {}
+        for k, v in pairs(params) do copy[k] = v end
+        copy.created = nil
+        if type(copy.target) == "table" then copy.target = { kind = copy.target.kind, track = copy.target.track, device = copy.target.device } end
+        params = copy
+      end
       local left
       params, left = refs.relabel_surviving(params, epoch(), survives)
       -- (n-instruments: a restore that finds what it changed by its places, not by its refs, goes ahead in the same song though

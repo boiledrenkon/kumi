@@ -353,3 +353,16 @@ fn tracks_are_saved_as_a_template_never_over_a_file_unless_told_and_the_selectio
         assert_eq!(lab.call("track_template_save", wrong.clone()).unwrap_err().0, "bad-params", "{wrong}");
     }
 }
+
+#[test]
+fn a_track_reaper_wrote_anew_after_its_undo_and_redo_reads_as_the_same_track() {
+    // (7.82 lab, 2026-10-19: after REAPER's undo and redo of an API-made track, it gained `LANEREC -1 -1 -1 0`, and a
+    // folder an empty FX chain block)
+    let made = "<TRACK {A}\n  NAME Drums\n  ISBUS 1 1\n  TRACKID {A}\n>\n";
+    let anew = "<TRACK {A}\n  NAME Drums\n  ISBUS 1 1\n  LANEREC -1 -1 -1 0\n  TRACKID {A}\n  <FXCHAIN\n    SHOW 0\n    LASTSEL 0\n    DOCKED 0\n  >\n>\n";
+    assert_eq!(templates::content_hash(made), templates::content_hash(anew));
+    // An FX chain with a plug-in in it, or lane recording the producer set, still counts.
+    let with_fx = anew.replace("    DOCKED 0\n", "    DOCKED 0\n    <JS utility/volume \"\"\n    >\n");
+    assert_ne!(templates::content_hash(made), templates::content_hash(&with_fx));
+    assert_ne!(templates::content_hash(made), templates::content_hash(&anew.replace("LANEREC -1 -1 -1 0", "LANEREC 1 -1 -1 0")));
+}

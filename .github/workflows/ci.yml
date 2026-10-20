@@ -207,8 +207,9 @@ jobs:
 
   reaper-extension:
     # The extension as it ships: the release build, unstripped by rustc (a rustc strip can misalign its LINKEDIT
-    # string pool on macOS 27, and dyld then refuses it), then the platform's own strip, then loaded by the system's
-    # loader with REAPER's entry point found.
+    # string pool on macOS 27, and dyld then refuses it), then the platform's own strip, then checked as the release
+    # script checks what a bundle carries and loaded by the system's loader with REAPER's entry point found. Linux on
+    # the Ubuntu the bundles build on, whose glibc is the one the extension may need.
     name: REAPER extension loads / ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -217,7 +218,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-24.04, windows-2025]
+        os: [macos-15, ubuntu-22.04, windows-2025]
     defaults:
       run:
         shell: bash
@@ -244,6 +245,12 @@ jobs:
             Windows) file=target/release/reaper_kumi.dll ;;
           esac
           echo "REAPER_KUMI_ARTIFACT=$PWD/$file" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
+        with:
+          python-version: "3.13"
+      - name: It's what a bundle may carry (REAPER's entry point; signed and named for itself on macOS; the C runtime linked in on Windows; no newer glibc than Kumi's on Linux)
+        run: |
+          python scripts/build-native-release.py --check-extension "$REAPER_KUMI_ARTIFACT" --target "$(rustc -vV | sed -n 's/^host: //p')" --thin
       - name: It loads, with REAPER's entry point
         run: cargo test -p reaper-kumi --locked --test loads
       # REAPER calls the extension through the C++ shim's vtable, laid out by each platform's C++ ABI.

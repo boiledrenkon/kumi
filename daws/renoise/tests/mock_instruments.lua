@@ -1148,13 +1148,17 @@ local function macro_object(macro)
   getters.value_string = function() return string.format("%d %%", math.floor(macro.value * 100 + 0.5)) end
   fields.value_string_observable = obs(macro, "value_string")
   fields.mappings_observable = obs(macro, "mappings")
-  -- (a mapping a test gives: {name of the parameter, min, max, scaling}; Kumi can't make one)
+  -- (a mapping a test gives: {name (or param) of the parameter, min, max, scaling}; the API can't make one, but writes its
+  -- range and scaling, each an undo step: M4 n-devices)
   local function mapping_object(m)
-    local parameter = h.parameter({ name = m.name or "Param", value = 0, min = 0, max = 1 }, {})
+    local parameter = h.parameter({ name = m.name or m.param or "Param", value = 0, min = 0, max = 1 }, {})
+    local get, set, watched = fields_of(m, { min = { 0, range(0, 1) }, max = { 1, range(0, 1) }, scaling = { 3, range(1, 5, true) } })
     return object("renoise.InstrumentMacroMapping", {
-      parameter = parameter, parameter_min = m.min or 0, parameter_max = m.max or 1, parameter_scaling = m.scaling or 3,
-      parameter_min_observable = obs(m, "min"), parameter_max_observable = obs(m, "max"), parameter_scaling_observable = obs(m, "scaling"),
-    })
+      parameter = parameter,
+      parameter_min_observable = watched.min_observable, parameter_max_observable = watched.max_observable,
+      parameter_scaling_observable = watched.scaling_observable,
+    }, { parameter_min = get.min, parameter_max = get.max, parameter_scaling = get.scaling },
+      { parameter_min = set.min, parameter_max = set.max, parameter_scaling = set.scaling })
   end
   getters.mappings = function()
     local out = {}

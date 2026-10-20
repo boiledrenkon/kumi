@@ -226,7 +226,15 @@ impl Host {
             Err(answer) => return answer,
         };
         match read_params(arguments) {
-            Ok(params) => self.paged("read", params, &pick, READ_TIMEOUT).await,
+            Ok(params) => {
+                let by_ref = params.get("ref").is_some();
+                let (mut answer, is_error) = self.paged("read", params, &pick, READ_TIMEOUT).await;
+                // (M4 n-devices) A Renoise device read by ref: what a Doofer, Splitter or Notepad holds, from its preset data.
+                if !is_error && by_ref && self.daw() == Daw::Renoise {
+                    self.renoise_inside(&mut answer, &pick, arguments.get("presetData") == Some(&Value::Bool(true))).await;
+                }
+                (answer, is_error)
+            }
             Err(why) => (json!({"error": why}), true),
         }
     }
@@ -254,7 +262,15 @@ impl Host {
             Err(answer) => return answer,
         };
         match body_params(arguments, self.daw()) {
-            Ok(params) => self.paged("focus_body", params, &pick, READ_TIMEOUT).await,
+            Ok(params) => {
+                let dsp = params.get("kind").and_then(Value::as_str) == Some("dsp");
+                let (mut answer, is_error) = self.paged("focus_body", params, &pick, READ_TIMEOUT).await;
+                // (M4 n-devices) Renoise's DSP chain: each Doofer's and Splitter's devices as its branches.
+                if !is_error && dsp && self.daw() == Daw::Renoise {
+                    self.renoise_dsp_children(&mut answer, &pick).await;
+                }
+                (answer, is_error)
+            }
             Err(why) => (json!({"error": why}), true),
         }
     }

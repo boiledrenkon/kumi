@@ -573,7 +573,7 @@ pub fn undone_in_daw(journal: &Journal, name: &str, mut data: Value) -> Value {
 }
 
 /// How long a change may take the DAW (it bounds each of its own steps; a big project takes a while).
-const CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What the bridge's `change_apply` is sent: Kumi's input at the layout Kumi made its refs in (not the preview's, at
 /// which the DAW would carry nothing: a track inserted between the two would have the change land on its neighbour),
@@ -597,7 +597,7 @@ fn text<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, (Value, bool)> 
 }
 
 /// What the bridge is told of a change's place: the epoch it was read in, and the layout (Renoise) its refs are at.
-fn place(params: &mut Value, epoch: Option<&str>, layout: Option<u64>) {
+pub(crate) fn place(params: &mut Value, epoch: Option<&str>, layout: Option<u64>) {
     if let Some(epoch) = epoch {
         params["epoch"] = epoch.into();
     }
@@ -620,8 +620,13 @@ impl crate::host::Host {
         let Some(input) = arguments.get("input").filter(|input| input.is_object()) else {
             return (json!({"error": "input must be an object", "code": "bad-params"}), true);
         };
-        let mut params = json!({"kind": kind, "input": input});
         let layout = arguments.get("layout").and_then(Value::as_u64);
+        // (M4 n-devices: the Doofer, Splitter and Notepad edits are made here from the device's preset data, and an
+        // instrument's macro mappings added or removed from its file)
+        if crate::presets::host_makes(self.daw(), &kind, input) {
+            return self.preset_preview(&pick, &kind, input, arguments.get("epoch").and_then(Value::as_str), layout).await;
+        }
+        let mut params = json!({"kind": kind, "input": input});
         place(&mut params, arguments.get("epoch").and_then(Value::as_str), layout);
         let answer = match self.call("change_preview", params, &pick, CHANGE_TIMEOUT).await {
             Ok(answer) => answer,
@@ -650,7 +655,16 @@ impl crate::host::Host {
             Ok(Err(answered)) => return answered,
             Err(why) => return refusal(why),
         };
-        match self.call("change_apply", apply_params(&record), &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
+        let params = if crate::presets::host_makes(self.daw(), &record.kind, &record.input) {
+            match self.preset_apply_params(&record).await {
+                Ok(params) => params,
+                // (refused before anything was written: the change can be previewed again)
+                Err(answer) => return self.journal().end_apply(&id, &key, Err((&answer, false))),
+            }
+        } else {
+            apply_params(&record)
+        };
+        match self.call("change_apply", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
             Ok(answer) => self.journal().end_apply(&id, &key, Ok(&answer)),
             // The bridge took it and couldn't say how it ended (a job it claimed and didn't finish in time): it may have
             // changed the DAW.
@@ -680,18 +694,29 @@ impl crate::host::Host {
             Ok(Err(answered)) => return answered,
             Err(why) => return refusal(why),
         };
-        let mut params =
-            json!({"kind": record.kind, "target": record.target, "prior": record.prior, "applied": record.applied, "desc": desc});
-        if let Some(created) = &record.created {
-            params["created"] = created.clone();
-        }
-        if let Some(material) = &record.material {
-            params["material"] = material.clone();
-        }
-        if arguments.get("discard") == Some(&Value::Bool(true)) {
-            params["discard"] = true.into();
-        }
-        place(&mut params, record.epoch.as_deref(), record.layout);
+        let discard = arguments.get("discard") == Some(&Value::Bool(true));
+        let params = if crate::presets::composes_undo(self.daw(), &record.kind, &record.input) {
+            match self.preset_restore_params(&record, &desc, discard).await {
+                Ok(Ok(params)) => params,
+                // (it is back already: nothing to write)
+                Ok(Err(back)) => return self.journal().end_undo(&id, &key, Ok(&back)),
+                Err(answer) => return self.journal().end_undo(&id, &key, Err(&answer)),
+            }
+        } else {
+            let mut params =
+                json!({"kind": record.kind, "target": record.target, "prior": record.prior, "applied": record.applied, "desc": desc});
+            if let Some(created) = &record.created {
+                params["created"] = created.clone();
+            }
+            if let Some(material) = &record.material {
+                params["material"] = material.clone();
+            }
+            if discard {
+                params["discard"] = true.into();
+            }
+            place(&mut params, record.epoch.as_deref(), record.layout);
+            params
+        };
         match self.call("change_restore", params, &crate::host::Pick::default(), CHANGE_TIMEOUT).await {
             Ok(answer) => self.journal().end_undo(&id, &key, Ok(&answer)),
             // Sent, and no answer (or the bridge couldn't say how it ended): the restore may have run. Kumi won't undo it
