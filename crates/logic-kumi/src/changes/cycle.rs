@@ -69,11 +69,23 @@ fn title(state: &Value, beats_per_bar: u32) -> String {
     if state["on"] == false {
         return "Cycle off".into();
     }
+    format!("Cycle {}", range_text(state, beats_per_bar))
+}
+
+fn range_text(state: &Value, beats_per_bar: u32) -> String {
     format!(
-        "Cycle {} to {}",
+        "{} to {}",
         timeline::bar_text(&Position::from_beats(number(state, "startBeats"), beats_per_bar)),
         timeline::bar_text(&Position::from_beats(number(state, "endBeats"), beats_per_bar))
     )
+}
+
+/// The state in words for a refusal: an off cycle still has its locators.
+fn describe(state: &Value, beats_per_bar: u32) -> String {
+    if state["on"] == false {
+        return format!("Cycle off, locators {}", range_text(state, beats_per_bar));
+    }
+    title(state, beats_per_bar)
 }
 
 // ----- the LCD -----
@@ -189,7 +201,8 @@ fn read_cycle(ctx: &mut Ctx) -> Done<Value> {
     result
 }
 
-/// Writes the cycle: the locators with the LCD on Custom (when on), the Cycle button, the display put back; the
+/// Writes the cycle: the locators with the LCD on Custom (whenever a range is given, on or off: the locators
+/// stay visible with the cycle off and a restore puts them back too), the Cycle button, the display put back; the
 /// cycle as read after.
 fn write_cycle(ctx: &mut Ctx, on: bool, start: f64, end: f64) -> Done<Value> {
     let (_, shown) = display_mode(ctx)?;
@@ -198,7 +211,7 @@ fn write_cycle(ctx: &mut Ctx, on: bool, start: f64, end: f64) -> Done<Value> {
         let (_, transport) = timeline::control_bar(ctx)?;
         let beats_per_bar = transport.beats_per_bar();
         let groups = locator_groups(ctx)?;
-        if on {
+        if end > start {
             let (left, right) = (Position::from_beats(start, beats_per_bar), Position::from_beats(end, beats_per_bar));
             // The right locator first when the range moves later, so the left never passes it.
             let now_right = read_locator(ctx, &groups[1])?;
@@ -256,7 +269,7 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     };
     let after = if same(&now, &after_wanted) { now.clone() } else { write_cycle(ctx, on, start, end)? };
     if !same(&after, &after_wanted) {
-        return Err(nudge::kept("the cycle", title(&after_wanted, beats_per_bar), title(&after, beats_per_bar)));
+        return Err(nudge::kept("the cycle", describe(&after_wanted, beats_per_bar), describe(&after, beats_per_bar)));
     }
     Ok(Applied {
         applied: after.clone(),
@@ -275,7 +288,7 @@ pub fn restore(ctx: &mut Ctx, restore: &Restore) -> Done<Restored> {
         let on = restore.prior["on"] == true;
         let written = write_cycle(ctx, on, number(restore.prior, "startBeats"), number(restore.prior, "endBeats"))?;
         if !same(&written, restore.prior) {
-            return Err(nudge::kept("the cycle", title(restore.prior, beats_per_bar), title(&written, beats_per_bar)));
+            return Err(nudge::kept("the cycle", describe(restore.prior, beats_per_bar), describe(&written, beats_per_bar)));
         }
         written
     } else {

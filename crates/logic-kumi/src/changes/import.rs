@@ -23,8 +23,9 @@ use crate::rows::Position;
 pub const FOLDER: &str = "/tmp/kumi-logic";
 /// The most notes one import takes.
 const MOST_NOTES: usize = 10000;
-/// How long Logic gets to show its question after the import, and to settle after it.
-const QUESTION_WAIT: Duration = Duration::from_secs(5);
+/// How long Logic gets to show its question after the import (it comes at once when it comes), and to settle
+/// after it.
+const QUESTION_WAIT: Duration = Duration::from_secs(2);
 const AFTER_IMPORT: Duration = Duration::from_millis(1200);
 
 /// What a request asks: the notes as the file takes them, and where.

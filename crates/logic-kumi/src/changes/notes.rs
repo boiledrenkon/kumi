@@ -25,6 +25,8 @@ const SHOWN: usize = 8;
 /// How long the list gets after a press before its rows are read.
 const LIST_SETTLE: Duration = Duration::from_millis(250);
 const LIST_SETTLE_MS: u64 = 250;
+/// How long a row that read incomplete after a step gets before the list is read again.
+const RETRY_MS: u64 = 250;
 /// The velocity slider's raw value runs the whole of 32 bits, the velocity 2^25 a step above bits of its own: a
 /// small step is exactly one velocity, so the low bits stay.
 const VELOCITY_STEP: i64 = 1 << 25;
@@ -87,6 +89,7 @@ impl Spec {
 }
 
 /// A note row as read: the note and its row's node.
+#[derive(Clone)]
 pub(super) struct Row {
     pub(super) note: Note,
     pub(super) node: Node,
@@ -169,9 +172,25 @@ pub(super) fn difference(a: &[Spec], b: &[Spec]) -> Vec<Spec> {
         .collect()
 }
 
-fn find_row<'a>(list: &'a [Row], spec: &Spec) -> Option<&'a Row> {
+pub(super) fn find_row<'a>(list: &'a [Row], spec: &Spec) -> Option<&'a Row> {
     let matching: Vec<&Row> = list.iter().filter(|row| Spec::of(&row.note) == *spec).collect();
     matching.iter().find(|row| row.note.selected).or(matching.first()).copied()
+}
+
+/// The row of a note, selected alone first when it is selected with others: Logic applies a value change, and a
+/// delete, to every selected event when the edited one is among them (a set of `AXSelected` leaves the row the one
+/// selection). The row as read after.
+fn alone(ctx: &mut Ctx, shown: &Shown, spec: &Spec, why: &'static str) -> Done<Row> {
+    let list = rows(ctx, shown)?;
+    let row = find_row(&list, spec).ok_or_else(|| super::uncertain(why))?;
+    if !row.note.selected || list.iter().filter(|r| r.note.selected).count() < 2 {
+        return Ok(row.clone());
+    }
+    let path = row.node.path.clone();
+    nudge::wrote(ctx.ax.set(&ctx.project.root, &path, "AXSelected", json!(true), LIST_SETTLE_MS))?;
+    super::pause(LIST_SETTLE);
+    let list = rows(ctx, shown)?;
+    find_row(&list, spec).cloned().ok_or_else(|| super::uncertain(why))
 }
 
 /// A cell's control: the slider of a Ch, Num or Val cell, or the segment sliders of a Position or Length cell.
@@ -216,23 +235,20 @@ fn set_cells(ctx: &mut Ctx, shown: &Shown, from: Spec, to: Spec) -> Done<Spec> {
     let mut now = from;
     // The pitch, channel and velocity first: they leave the row where it is. The position last: it moves the row.
     if now.pitch != to.pitch {
-        let list = rows(ctx, shown)?;
-        let row = find_row(&list, &now).ok_or_else(|| super::uncertain("the note isn't in the Event List as it was"))?;
-        let control = cell_controls(ctx, row, &shown.columns, "Num")?.remove(0);
+        let row = alone(ctx, shown, &now, "the note isn't in the Event List as it was")?;
+        let control = cell_controls(ctx, &row, &shown.columns, "Num")?.remove(0);
         nudge::wrote(nudge::step_to(ctx.ax, &control, i64::from(now.pitch), i64::from(to.pitch)))?;
         now.pitch = to.pitch;
     }
     if now.channel != to.channel {
-        let list = rows(ctx, shown)?;
-        let row = find_row(&list, &now).ok_or_else(|| super::uncertain("the note isn't in the Event List as it was"))?;
-        let control = cell_controls(ctx, row, &shown.columns, "Ch")?.remove(0);
+        let row = alone(ctx, shown, &now, "the note isn't in the Event List as it was")?;
+        let control = cell_controls(ctx, &row, &shown.columns, "Ch")?.remove(0);
         nudge::wrote(nudge::step_to(ctx.ax, &control, i64::from(now.channel), i64::from(to.channel)))?;
         now.channel = to.channel;
     }
     if now.velocity != to.velocity {
-        let list = rows(ctx, shown)?;
-        let row = find_row(&list, &now).ok_or_else(|| super::uncertain("the note isn't in the Event List as it was"))?;
-        let control = cell_controls(ctx, row, &shown.columns, "Val")?.remove(0);
+        let row = alone(ctx, shown, &now, "the note isn't in the Event List as it was")?;
+        let control = cell_controls(ctx, &row, &shown.columns, "Val")?.remove(0);
         let (root, path) = (ctx.project.root.clone(), control.path.clone());
         let read = move |ax: &mut crate::ax::Ax| -> Result<Reading, AxError> {
             let attrs = ax.get(&root, &path, &["AXValue", "AXValueDescription"])?;
@@ -244,9 +260,8 @@ fn set_cells(ctx: &mut Ctx, shown: &Shown, from: Spec, to: Spec) -> Done<Spec> {
         now.velocity = reached.value.round() as u32;
     }
     if now.length_ticks != to.length_ticks {
-        let list = rows(ctx, shown)?;
-        let row = find_row(&list, &now).ok_or_else(|| super::uncertain("the note isn't in the Event List as it was"))?;
-        let controls = cell_controls(ctx, row, &shown.columns, "Length")?;
+        let row = alone(ctx, shown, &now, "the note isn't in the Event List as it was")?;
+        let controls = cell_controls(ctx, &row, &shown.columns, "Length")?;
         let (from_segments, to_segments) =
             (length_segments(now.length_ticks, shown.beats_per_bar), length_segments(to.length_ticks, shown.beats_per_bar));
         for (index, control) in controls.iter().enumerate().take(4) {
@@ -260,9 +275,23 @@ fn set_cells(ctx: &mut Ctx, shown: &Shown, from: Spec, to: Spec) -> Done<Spec> {
         let key = now;
         let columns = shown.columns.clone();
         let reached = super::marks::step_position(ctx, &columns, now.position, to.position, "the note", |ctx, at| {
-            let list = rows(ctx, shown)?;
             let wanted = Spec { position: *at, ..key };
+            let mut list = rows(ctx, shown)?;
+            if find_row(&list, &wanted).is_none() {
+                // A row read while Logic rebuilds it after a step can miss its cells: read once more after a moment.
+                super::pause(Duration::from_millis(RETRY_MS));
+                list = rows(ctx, shown)?;
+            }
             let row = find_row(&list, &wanted).ok_or_else(|| super::uncertain("the note isn't in the Event List as it was"))?;
+            if row.note.selected && list.iter().filter(|r| r.note.selected).count() > 1 {
+                // Selected with others, the step would move them all (see `alone`): the row alone first.
+                let path = row.node.path.clone();
+                nudge::wrote(ctx.ax.set(&ctx.project.root, &path, "AXSelected", json!(true), LIST_SETTLE_MS))?;
+                super::pause(LIST_SETTLE);
+                let list = rows(ctx, shown)?;
+                let row = find_row(&list, &wanted).ok_or_else(|| super::uncertain("the note isn't in the Event List as it was"))?;
+                return Ok(row.node.clone());
+            }
             Ok(row.node.clone())
         })?;
         now.position = reached;
@@ -297,8 +326,13 @@ fn create(ctx: &mut Ctx, shown: &Shown, spec: Spec) -> Done<Spec> {
 }
 
 fn delete(ctx: &mut Ctx, shown: &Shown, spec: &Spec) -> Done<()> {
-    let list = rows(ctx, shown)?;
-    let row = find_row(&list, spec).ok_or_else(|| changed("a note Kumi would take away isn't in the Event List as it was"))?;
+    let row = alone(ctx, shown, spec, "a note Kumi would take away isn't in the Event List as it was").map_err(|(code, why)| {
+        if code == "uncertain" {
+            changed(why)
+        } else {
+            (code, why)
+        }
+    })?;
     nudge::wrote(ctx.ax.action(&ctx.project.root, &row.node.path, super::marks::DELETE_ACTION, LIST_SETTLE_MS))?;
     super::pause(LIST_SETTLE);
     Ok(())

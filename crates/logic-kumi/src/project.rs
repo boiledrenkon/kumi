@@ -525,6 +525,12 @@ impl Project {
         ax.tree(&self.root, &list_path, 2, 64, Some(BRIEF))
     }
 
+    /// The list's header a level deeper: the segments of its Edit, Functions and View menu buttons.
+    pub fn list_header(&mut self, ax: &mut Ax) -> Result<Node, AxError> {
+        let list_path = self.need(&self.layout.list, "its list")?;
+        ax.tree(&self.root, &list_path, 3, 64, Some(BRIEF))
+    }
+
     /// Puts the List Editors back as they were before [`Project::show_list`].
     pub fn hide_list(&mut self, ax: &mut Ax, open: ListOpen) -> Result<(), AxError> {
         if let Some(was_on) = open.was_on {

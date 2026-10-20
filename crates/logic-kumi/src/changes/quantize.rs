@@ -1,10 +1,11 @@
-//! `notes-quantize`: a region's notes quantized through the Event List, which has its own Quantize pop-up (Off, the
-//! note values, triplets, swings) and a Quantize Selected Events button: the region's events shown, the pop-up set to
-//! the grid (its menu lists as menu items once it is pressed), every row selected through the list's Edit menu
-//! (Select All), the button pressed, the rows read back and the pop-up put back as it was. The positions are what
-//! the notes' rows say, rounded to the grid from the project's start, and are what a restore puts back: Logic's
-//! own undo while the step is on top, else each note's position stepped back as `notes-change` does. The Event
-//! List's quantize has no strength: 100 is the one strength taken.
+//! `notes-quantize`: a region's notes quantized through the Event List, whose header has a Quantize pop-up (Off,
+//! the note values, triplets, swings). Logic's quantize is a parameter of the events, not a move: with events
+//! selected, the pop-up shows their quantize and sets it, and the rows then read (and Logic plays) the notes on the
+//! grid while their recorded positions stay underneath. So the apply selects every event of the region through the
+//! list's Edit menu (Select > All), reads what the pop-up shows (the quantize the events had) and chooses the grid,
+//! reads the rows back and puts the selection back as it was; the restore chooses what the pop-up showed before,
+//! the same way, and the notes read as recorded again, exactly. The Event List's quantize has no strength: 100 is
+//! the one strength taken.
 
 use std::time::Duration;
 
@@ -36,6 +37,12 @@ const GRIDS: [(f64, &str); 13] = [
 const OFF: &str = "Off";
 const LIST_SETTLE: Duration = Duration::from_millis(300);
 const LIST_SETTLE_MS: u64 = 300;
+/// How long the Edit menu gets to close after Select > All before the pop-up is pressed (a press while it closes
+/// is lost), and how long the quantize gets to show in the rows.
+const MENU_CLOSE: Duration = Duration::from_millis(500);
+const QUANTIZE_SETTLE: Duration = Duration::from_millis(500);
+/// What every answer says of Logic's quantize.
+const NOTE: &str = "Logic Pro's quantize is a parameter of the events: they play and read on the grid and keep their recorded positions underneath; the restore takes the parameter back as it was.";
 /// The most notes one quantize may move: each is read back, and the host waits 30 s.
 const MOST_NOTES: usize = 10000;
 
@@ -92,8 +99,9 @@ fn title(moved: usize, label: &str, item: &str) -> String {
 
 // ----- the Event List's quantize controls -----
 
-/// The list's Quantize pop-up (the one after its "Quantize:" label) and the Quantize Selected Events button.
-fn controls(ctx: &mut Ctx) -> Done<(Control, String, Control)> {
+/// The Quantize pop-up of the Event List's header (after its "Quantize:" label, else the one showing a grid), and
+/// what it shows: the quantize of the selected events.
+fn popup(ctx: &mut Ctx) -> Done<(Control, String)> {
     let group = nudge::read(ctx.project.list_group(ctx.ax))?;
     let strings = &ctx.project.strings;
     let children: Vec<&crate::ax::Node> = group.children.first().map(|g| g.children.iter().collect()).unwrap_or_default();
@@ -106,10 +114,7 @@ fn controls(ctx: &mut Ctx) -> Done<(Control, String, Control)> {
                 .find(|n| n.role == "AXPopUpButton" && (n.value_text() == OFF || GRIDS.iter().any(|(_, item)| n.value_text() == *item)))
         })
         .ok_or_else(|| failed("Logic Pro's Event List shows no Quantize pop-up"))?;
-    let button = group
-        .find(&|n| n.role == "AXButton" && strings.is(&n.desc, "Quantize Selected Events"))
-        .ok_or_else(|| failed("Logic Pro's Event List shows no Quantize Selected Events button"))?;
-    Ok((Control::new(&ctx.project.root, &popup.path), popup.value_text(), Control::new(&ctx.project.root, &button.path)))
+    Ok((Control::new(&ctx.project.root, &popup.path), popup.value_text()))
 }
 
 /// Chooses an item of the Quantize pop-up through its menu.
@@ -130,42 +135,31 @@ fn choose(ctx: &mut Ctx, popup: &Control, item: &str) -> Done<()> {
     Ok(())
 }
 
-/// Selects every event of the list: its Edit menu's Select All.
-fn select_all(ctx: &mut Ctx) -> Done<()> {
-    let group = nudge::read(ctx.project.list_group(ctx.ax))?;
-    let strings = &ctx.project.strings;
-    let edit = group
-        .find(&|n| n.role == "AXMenuButton" && strings.is(&n.desc, "Edit"))
-        .ok_or_else(|| failed("Logic Pro's Event List shows no Edit menu"))?;
-    let edit = Control::new(&ctx.project.root, &edit.path);
-    nudge::wrote(ctx.ax.action(&edit.root, &edit.path, "AXPress", LIST_SETTLE_MS))?;
-    let menu = nudge::wrote(ctx.ax.tree_in_popup(&edit.root, &edit.path, 3, 60, Some(&["role", "title"])))?;
-    let strings = &ctx.project.strings;
-    let Some(item) = menu.find(&|n| n.role == "AXMenuItem" && strings.is(&n.title, "Select All")) else {
-        let _ = ctx.ax.action_in_popup(&edit.root, &format!("{}.0", edit.path), "AXCancel", 100);
-        return Err(failed("Logic Pro's Event List Edit menu has no Select All"));
-    };
-    nudge::wrote(ctx.ax.action_in_popup(&edit.root, &item.path, "AXPress", LIST_SETTLE_MS))?;
-    super::pause(LIST_SETTLE);
-    Ok(())
-}
-
-/// Quantizes the shown region's events to the grid: the pop-up set, every row selected, the button pressed, the
-/// pop-up put back. The notes as read after.
-fn quantize_shown(ctx: &mut Ctx, shown: &Shown, item: &str) -> Done<Vec<Spec>> {
-    let (popup, was, button) = controls(ctx)?;
-    choose(ctx, &popup, item)?;
-    let result: Done<()> = (|| {
-        select_all(ctx)?;
-        nudge::wrote(nudge::press(ctx.ax, &button, LIST_SETTLE_MS))?;
-        super::pause(LIST_SETTLE);
-        Ok(())
-    })();
+/// Sets the quantize of every event shown: all selected through the list's Edit menu, the pop-up read (what the
+/// events had) and set to `item`, the rows read back, and the selection put back: the row at `keep` selected alone
+/// again (the first row selected before), or none when none was. What the pop-up showed before, and the notes as
+/// they read after.
+fn set_quantize(ctx: &mut Ctx, shown: &Shown, item: &str, keep: Option<usize>) -> Done<(String, Vec<Spec>)> {
+    super::lists::press_edit_menu(ctx, &["Select", "All"])?;
+    super::pause(MENU_CLOSE);
+    let (popup, was) = popup(ctx)?;
     if was != item {
-        let _ = choose(ctx, &popup, &was);
+        choose(ctx, &popup, item)?;
+        super::pause(QUANTIZE_SETTLE);
     }
-    result?;
-    Ok(notes::specs(&notes::rows(ctx, shown).map_err(|(_, why)| super::uncertain(why))?))
+    let list = notes::rows(ctx, shown).map_err(|(_, why)| super::uncertain(why))?;
+    let after = notes::specs(&list);
+    match keep.and_then(|index| list.get(index)) {
+        Some(row) => {
+            let path = row.node.path.clone();
+            let _ = ctx.ax.set(&ctx.project.root, &path, "AXSelected", json!(true), LIST_SETTLE_MS);
+        }
+        None => {
+            let _ = super::lists::press_edit_menu(ctx, &["Select", "Deselect All"]);
+        }
+    }
+    super::pause(LIST_SETTLE);
+    Ok((was, after))
 }
 
 // ----- preview, apply, restore -----
@@ -201,7 +195,8 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let (grid, item) = grid_of(input)?;
     let shown = notes::show(ctx, place)?;
     let result = (|| {
-        let before = notes::specs(&notes::rows(ctx, &shown)?);
+        let list = notes::rows(ctx, &shown)?;
+        let before = notes::specs(&list);
         if notes::fence_of(&before) != *fence {
             return Err(changed("the notes in that region changed since the preview"));
         }
@@ -215,7 +210,8 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
                 ..Applied::default()
             });
         }
-        let after = quantize_shown(ctx, &shown, item)?;
+        let keep = list.iter().position(|row| row.note.selected);
+        let (was, after) = set_quantize(ctx, &shown, item, keep)?;
         let off_grid = notes::difference(&after, &expected);
         if !off_grid.is_empty() || after.len() != expected.len() {
             return Err(super::uncertain(format!(
@@ -226,7 +222,8 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
         }
         Ok(Applied {
             applied: json!({"notes": notes_json(&after), "moved": moved, "grid": item}),
-            display: json!({"title": title(moved, &label, item), "moved": moved}),
+            material: Some(json!({"was": was})),
+            display: json!({"title": title(moved, &label, item), "moved": moved, "note": NOTE}),
             step: Some("Quantize"),
             ..Applied::default()
         })
@@ -235,12 +232,14 @@ pub fn apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     result
 }
 
-pub fn restore(ctx: &mut Ctx, watch: &mut Watch, restore: &Restore) -> Done<Restored> {
+pub fn restore(ctx: &mut Ctx, _watch: &mut Watch, restore: &Restore) -> Done<Restored> {
     let place = super::region_place(ctx, restore.target, "ref", Epoch::Any).map_err(|f| if f.0 == "failed" { gone(f.1) } else { f })?;
     let (prior, applied) = (notes_of(restore.prior, "notes")?, notes_of(restore.applied, "notes")?);
+    let was = restore.material.and_then(|m| m["was"].as_str()).unwrap_or(OFF).to_string();
     let shown = notes::show(ctx, place).map_err(|f| if f.0 == "failed" { gone(f.1) } else { f })?;
     let result = (|| {
-        let current = notes::specs(&notes::rows(ctx, &shown)?);
+        let list = notes::rows(ctx, &shown)?;
+        let current = notes::specs(&list);
         let label = notes::label(&shown.region);
         if notes::difference(&prior, &current).is_empty() && current.len() == prior.len() {
             return Ok(Restored::by_value(
@@ -251,28 +250,15 @@ pub fn restore(ctx: &mut Ctx, watch: &mut Watch, restore: &Restore) -> Done<Rest
         if !restore.discard && !(notes::difference(&applied, &current).is_empty() && current.len() == applied.len()) {
             return Err(changed(format!("the notes in {label} have been changed in Logic Pro since Kumi quantized them")));
         }
-        // Logic's own undo first, while the quantize is its latest step; else each note back by value.
-        if let Ok(pressed) = super::structure::undo_in_logic(ctx, watch, &restore.key, "Quantize", None) {
-            super::pause(LIST_SETTLE);
-            let after = notes::specs(&notes::rows(ctx, &shown).map_err(|(_, why)| super::uncertain(why))?);
-            if notes::difference(&prior, &after).is_empty() && after.len() == prior.len() {
-                return Ok(Restored {
-                    restored: json!({"notes": after.len(), "pressed": pressed}),
-                    display: json!({"title": format!("Notes in {label} back where they were"), "note": "Put back with Logic Pro's own undo."}),
-                    undone_in_logic: true,
-                });
-            }
-            return Err(super::uncertain(format!("Logic Pro's {pressed:?} was pressed, but the notes in {label} aren't where they were")));
-        }
-        let remove: Vec<Spec> = applied.iter().zip(&prior).filter(|(a, p)| a != p).map(|(a, _)| *a).collect();
-        let add: Vec<Spec> = applied.iter().zip(&prior).filter(|(a, p)| a != p).map(|(_, p)| *p).collect();
-        let after = notes::write_notes(ctx, &shown, &remove, &add, true)?;
-        if !notes::difference(&prior, &after).is_empty() {
-            return Err(super::uncertain(format!("the notes in {label} aren't all where they were after the undo")));
+        // The quantize parameter back as the pop-up showed it: the notes read as recorded again.
+        let keep = list.iter().position(|row| row.note.selected);
+        let (_, after) = set_quantize(ctx, &shown, &was, keep)?;
+        if !notes::difference(&prior, &after).is_empty() || after.len() != prior.len() {
+            return Err(super::uncertain(format!("the notes in {label} aren't all where they were after the quantize came off")));
         }
         Ok(Restored::by_value(
-            json!({"notes": after.len()}),
-            json!({"title": format!("Notes in {label} back where they were ({} moved back)", add.len())}),
+            json!({"notes": after.len(), "quantize": was}),
+            json!({"title": format!("Notes in {label} back where they were"), "note": NOTE}),
         ))
     })();
     notes::hide(ctx, shown);

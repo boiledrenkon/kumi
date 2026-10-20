@@ -10,9 +10,11 @@
 //!   notes stay where they are, as REAPER's trim does.
 //! - `region-split`: the region selected alone, the playhead there, Split Regions/Events at Playhead Position
 //!   (Cmd-T); the right part comes back as `created`.
-//! - `region-loop`: the Region inspector's Loop checkbox, which takes a click at its frame (no press or set, as the
-//!   headers' checkboxes), with Logic in front.
-//! - `region-rename`: the Region inspector's name field, confirmed.
+//! - `region-loop`: the Region inspector's Loop checkbox, pressed (Logic toggles it and answers
+//!   `attributeUnsupported` all the same; a click at its frame does nothing), read back from the checkbox: the
+//!   Tracks area's region item says nothing of its loop that Accessibility reads (M2's `looped` never reads true).
+//! - `region-rename`: the Region inspector's name field, confirmed (the region selected through its item, which
+//!   the Inspector follows; the key commands below need a click, for the keyboard focus).
 //! - `region-delete`: the region selected alone, the Delete key.
 //!
 //! A region added, removed, moved, resized or renamed moves the epoch (M2's rule), so an apply answers the region's
@@ -36,7 +38,7 @@ use crate::rows::{self, Position, Region};
 const LIST_SETTLE: Duration = Duration::from_millis(250);
 const LIST_SETTLE_MS: u64 = 250;
 const KEY_SETTLE: Duration = Duration::from_millis(400);
-const SELECT_SETTLE_MS: u64 = 150;
+const SELECT_SETTLE_MS: u64 = 300;
 
 /// Logic's key commands the region kinds post, with the factory chords for when the set has none.
 const SPLIT: (u32, &str) = (574, "cmd-t");
@@ -147,8 +149,9 @@ fn by_state(regions: &[Found], state: &Value, beats_per_bar: u32) -> Option<Foun
 
 // ----- selection -----
 
-/// Selects a region alone, as the key commands act on every selected region: the others deselected (Logic takes a
-/// set of `AXSelected` as a toggle), this one selected.
+/// Selects a region alone, as a producer does: a click at its middle (the edges resize or loop), with Logic in
+/// front. The key commands act on every selected region in the area that has the keyboard focus, and a click gives
+/// the Tracks area the focus where a set of `AXSelected` doesn't.
 fn select_only(ctx: &mut Ctx, place: usize) -> Done<()> {
     nudge::read(tracks::ensure_layout(ctx))?;
     let contents = nudge::read(ctx.project.contents(ctx.ax))?;
@@ -158,17 +161,15 @@ fn select_only(ctx: &mut Ctx, place: usize) -> Done<()> {
         .filter(|c| c.role == "AXLayoutArea")
         .flat_map(|lane| lane.children.iter().filter(|c| c.role == "AXLayoutItem"))
         .collect();
-    let paths: Vec<(String, bool)> = items.iter().map(|item| (item.path.clone(), item.is_selected())).collect();
+    let paths: Vec<String> = items.iter().map(|item| item.path.clone()).collect();
     if place == 0 || place > paths.len() {
         return Err(gone("that region isn't in the Tracks area any more"));
     }
     let root = ctx.project.root.clone();
-    for (index, (path, selected)) in paths.iter().enumerate() {
-        let wanted = index + 1 == place;
-        if *selected != wanted {
-            nudge::wrote(ctx.ax.set(&root, path, "AXSelected", json!(true), SELECT_SETTLE_MS))?;
-        }
-    }
+    front::ensure(ctx.ax)?;
+    let (x, y, w, h) = nudge::read(ctx.ax.frame(&root, &paths[place - 1]))?;
+    nudge::wrote(ctx.ax.click(x + w / 2.0, y + h / 2.0))?;
+    super::pause(Duration::from_millis(SELECT_SETTLE_MS));
     let after = all(ctx)?;
     let selected: Vec<usize> = after.iter().filter(|f| f.region.selected).map(|f| f.place).collect();
     if selected != [place] {
@@ -650,8 +651,10 @@ fn inspector_control(ctx: &mut Ctx, label_text: &str, role: &str) -> Done<Contro
     Ok(Control::new(&ctx.project.root, &control.path))
 }
 
-/// Whether the selected region's Loop checkbox is on.
-fn loop_shown(ctx: &mut Ctx) -> Done<bool> {
+/// Whether a region's Loop checkbox is on: the region selected (through its item, as the note reads select it), the
+/// Region inspector shows it.
+fn loop_shown(ctx: &mut Ctx, place: usize) -> Done<bool> {
+    nudge::read(ctx.project.select_region(ctx.ax, place))?;
     let control = inspector_control(ctx, "Loop", "AXCheckBox")?;
     let attrs = nudge::read(ctx.ax.get(&control.root, &control.path, &["AXValue"]))?;
     Ok(nudge::is_on(attrs.get("AXValue").unwrap_or(&Value::Null)))
@@ -660,38 +663,39 @@ fn loop_shown(ctx: &mut Ctx) -> Done<bool> {
 pub fn loop_preview(ctx: &mut Ctx, input: &Value) -> Done<Preview> {
     let found = find(ctx, input, "ref", Epoch::Current)?;
     let wanted = loop_input(input)?;
-    let now = json!({"loop": found.region.looped});
+    let looped = loop_shown(ctx, found.place)?;
+    let now = json!({"loop": looped});
     let mut display = json!({"title": format!("{} {}", label(&found), if wanted { "looped" } else { "not looped" }), "before": now, "after": {"loop": wanted}});
-    if found.region.looped == wanted {
+    if looped == wanted {
         display["unchanged"] = true.into();
     }
     Ok(Preview { target: target(ctx, found.place), prior: now.clone(), fence: now, display })
 }
 
-/// Clicks the selected region's Loop checkbox until it reads `wanted` (a click at its frame, as the headers' checkboxes
-/// take one); the region's loop as the Tracks area shows it.
+/// Presses the region's Loop checkbox when it doesn't read `wanted`; the checkbox as read after. Logic performs the
+/// press and answers `attributeUnsupported`, which the readback settles.
 fn put_loop(ctx: &mut Ctx, found: &Found, wanted: bool) -> Done<bool> {
-    select_only(ctx, found.place)?;
-    if loop_shown(ctx)? != wanted {
+    if loop_shown(ctx, found.place)? != wanted {
         let control = inspector_control(ctx, "Loop", "AXCheckBox")?;
-        front::ensure(ctx.ax)?;
-        let (x, y, w, h) = nudge::read(ctx.ax.frame(&control.root, &control.path))?;
-        nudge::wrote(ctx.ax.click(x + w / 2.0, y + h / 2.0))?;
+        match ctx.ax.action(&control.root, &control.path, "AXPress", LIST_SETTLE_MS) {
+            Ok(_) => {}
+            Err(crate::ax::AxError::Helper(crate::helper::HelperError::Refused { code, .. })) if code == "attributeUnsupported" => {}
+            Err(error) => return Err(super::ax_fault(&error, true)),
+        }
         super::pause(LIST_SETTLE);
     }
-    let shown = loop_shown(ctx).map_err(|(_, why)| super::uncertain(why))?;
-    let regions = all(ctx).map_err(|(_, why)| super::uncertain(why))?;
-    Ok(regions.get(found.place - 1).map_or(shown, |r| r.region.looped || shown && r.region.looped == shown))
+    loop_shown(ctx, found.place).map_err(|(_, why)| super::uncertain(why))
 }
 
 pub fn loop_apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> {
     let found = find_for_apply(ctx, input)?;
     let wanted = loop_input(input)?;
-    let now = json!({"loop": found.region.looped});
+    let looped = loop_shown(ctx, found.place)?;
+    let now = json!({"loop": looped});
     if now != *fence {
         return Err(changed(format!("{}'s loop changed since the preview", label(&found))));
     }
-    let after = if found.region.looped == wanted { wanted } else { put_loop(ctx, &found, wanted)? };
+    let after = if looped == wanted { wanted } else { put_loop(ctx, &found, wanted)? };
     if after != wanted {
         return Err(nudge::kept(&format!("{}'s loop", label(&found)), wanted, after));
     }
@@ -706,8 +710,9 @@ pub fn loop_apply(ctx: &mut Ctx, input: &Value, fence: &Value) -> Done<Applied> 
 pub fn loop_restore(ctx: &mut Ctx, restore: &Restore) -> Done<Restored> {
     let found = find_for_restore(ctx, restore.target)?;
     let (prior, applied) = (restore.prior["loop"] == true, restore.applied["loop"] == true);
-    if found.region.looped != prior {
-        if !restore.discard && found.region.looped != applied {
+    let looped = loop_shown(ctx, found.place)?;
+    if looped != prior {
+        if !restore.discard && looped != applied {
             return Err(changed(format!("{}'s loop has been changed in Logic Pro since Kumi set it", label(&found))));
         }
         let after = put_loop(ctx, &found, prior)?;
@@ -748,7 +753,8 @@ pub fn rename_preview(ctx: &mut Ctx, input: &Value) -> Done<Preview> {
 /// Renames the region through the Region inspector's name field (the region selected alone first). The name the
 /// Tracks area shows after, and the region's place then.
 fn rename(ctx: &mut Ctx, found: &Found, name: &str) -> Done<(String, usize)> {
-    select_only(ctx, found.place)?;
+    // Selected through its item: the Inspector follows the selection, no keyboard focus needed.
+    nudge::read(ctx.project.select_region(ctx.ax, found.place))?;
     let inspector = nudge::read(ctx.project.inspector(ctx.ax))?;
     let strings = &ctx.project.strings;
     let group = inspector

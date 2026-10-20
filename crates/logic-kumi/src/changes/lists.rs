@@ -6,11 +6,11 @@
 //! - `tempo-marker-delete`: the row's Delete action; the project's first tempo (bar 1) stays.
 //! - `signature-set`: the Signature List's Time row at the position, its numerator slider stepped and its
 //!   denominator chosen from the pop-up beside it, or a row made first with "Create new Time/Key Signature Change"
-//!   (the list's type pop-up on Time). A signature row has no Delete action: a row Kumi made comes back out only
-//!   through Logic's own undo while that step is on top.
+//!   (the list's type pop-up on Time). A signature row has no Delete action of its own: a row Kumi made goes
+//!   through the list's Edit > Delete, selected.
 //!
-//! A restore is by value where the row was there before; a row Kumi made is deleted again (a tempo) or taken back
-//! by Logic's undo (a signature).
+//! A restore is by value where the row was there before; a row Kumi made is deleted again. The cells of these two
+//! lists are rebuilt by every step, so a step is read back at its path rather than around the step (see `nudge`).
 
 use std::time::Duration;
 
@@ -29,6 +29,34 @@ const LIST_SETTLE_MS: u64 = 250;
 const TEMPO_MIN: f64 = 5.0;
 const TEMPO_MAX: f64 = 990.0;
 const DENOMINATORS: [u32; 6] = [1, 2, 4, 8, 16, 32];
+
+/// Presses an item of the shown list's Edit menu, `["Select", "All"]` going into its Select submenu: the menu
+/// opened from its button in the list's header, read with its submenus, the last item named pressed. The menu is
+/// closed again when an item isn't there.
+pub(super) fn press_edit_menu(ctx: &mut Ctx, titles: &[&str]) -> Done<()> {
+    let header = nudge::read(ctx.project.list_header(ctx.ax))?;
+    let strings = &ctx.project.strings;
+    let edit = header
+        .find(&|n| n.role == "AXMenuButton" && strings.is(&n.desc, "Edit"))
+        .ok_or_else(|| failed("Logic Pro's list shows no Edit menu"))?;
+    let edit = Control::new(&ctx.project.root, &edit.path);
+    nudge::wrote(ctx.ax.action(&edit.root, &edit.path, "AXPress", LIST_SETTLE_MS))?;
+    let menu = nudge::wrote(ctx.ax.tree_in_popup(&edit.root, &edit.path, 2 * titles.len(), 60, Some(&["role", "title"])))?;
+    let strings = &ctx.project.strings;
+    let mut node = &menu;
+    for title in titles {
+        let Some(item) = node.find(&|n| n.role == "AXMenuItem" && strings.is(&n.title, title)) else {
+            if ctx.ax.action_in_popup(&edit.root, &format!("{}.0", edit.path), "AXCancel", 100).is_err() {
+                let _ = ctx.ax.keys("escape", &[]);
+            }
+            return Err(failed(format!("Logic Pro's list Edit menu has no {}", titles.join(" > "))));
+        };
+        node = item;
+    }
+    nudge::wrote(ctx.ax.action_in_popup(&edit.root, &node.path, "AXPress", LIST_SETTLE_MS))?;
+    super::pause(LIST_SETTLE);
+    Ok(())
+}
 
 /// A list tab shown for a run of reads and writes.
 struct Shown {
@@ -135,7 +163,7 @@ fn set_tempo(ctx: &mut Ctx, row: &Node, columns: &[(String, usize)], now: f64, b
     let sliders = segments(ctx, row, columns, "Tempo", "the tempo event")?;
     let (whole_now, whole) = (now.floor() as i64, bpm.floor() as i64);
     if whole_now != whole {
-        nudge::wrote(nudge::step_to(ctx.ax, &sliders[0], whole_now, whole))?;
+        nudge::wrote(nudge::step_to_rebuilt(ctx.ax, &sliders[0], whole_now, whole))?;
     }
     let digits = |value: f64| -> [i64; 4] {
         let fraction = ((value - value.floor()) * 10000.0).round() as i64;
@@ -144,7 +172,7 @@ fn set_tempo(ctx: &mut Ctx, row: &Node, columns: &[(String, usize)], now: f64, b
     let (from, to) = (digits(now), digits(bpm));
     for (slot, control) in sliders.iter().skip(3).take(4).enumerate() {
         if from[slot] != to[slot] {
-            nudge::wrote(nudge::step_to(ctx.ax, control, from[slot], to[slot]))?;
+            nudge::wrote(nudge::step_to_rebuilt(ctx.ax, control, from[slot], to[slot]))?;
         }
     }
     super::pause(LIST_SETTLE);
@@ -465,12 +493,19 @@ fn choose(ctx: &mut Ctx, popup: &Control, item: &str) -> Done<()> {
 fn set_signature(ctx: &mut Ctx, row: &SignatureRow, columns: &[(String, usize)], n: u32, d: u32) -> Done<()> {
     let (slider, popup) = signature_controls(ctx, &row.node, columns)?;
     if row.numerator != n {
-        nudge::wrote(nudge::step_to(ctx.ax, &slider, i64::from(row.numerator), i64::from(n)))?;
+        nudge::wrote(nudge::step_to_rebuilt(ctx.ax, &slider, i64::from(row.numerator), i64::from(n)))?;
     }
     if row.denominator != d {
         choose(ctx, &popup, &format!("/{d}"))?;
     }
     super::pause(LIST_SETTLE);
+    Ok(())
+}
+
+/// Deletes a signature row: selected, then the list's Edit > Delete.
+fn delete_signature_row(ctx: &mut Ctx, row: &SignatureRow) -> Done<()> {
+    nudge::wrote(ctx.ax.set(&ctx.project.root, &row.node.path, "AXSelected", json!(true), LIST_SETTLE_MS))?;
+    press_edit_menu(ctx, &["Delete"])?;
     Ok(())
 }
 
@@ -595,7 +630,11 @@ pub fn signature_restore(ctx: &mut Ctx, watch: &mut Watch, restore: &Restore) ->
         if now == *restore.prior {
             return Ok(Restored::by_value(now, json!({"title": title})));
         }
-        if !restore.discard && now != *restore.applied {
+        let mut applied = restore.applied.clone();
+        if let Some(fields) = applied.as_object_mut() {
+            fields.remove("made");
+        }
+        if !restore.discard && now != applied {
             return Err(changed(format!(
                 "the time signature at {} has been changed in Logic Pro since Kumi set it",
                 timeline::bar_text(&position)
@@ -613,9 +652,20 @@ pub fn signature_restore(ctx: &mut Ctx, watch: &mut Watch, restore: &Restore) ->
             }
             return Ok(Restored::by_value(after, json!({"title": title})));
         }
-        // Kumi made the row, and a signature row has no Delete action: Logic's own undo, while on top.
-        let pressed = super::structure::undo_in_logic(ctx, watch, &restore.key, "Create Signature Event", None)
-            .or_else(|_| super::structure::undo_in_logic(ctx, watch, &restore.key, "Value Change", None))?;
+        // Kumi made the row, and a signature row has no Delete action of its own: selected in the list, the list's
+        // Edit menu deletes it; failing that, Logic's own undo while the step is on top.
+        let index = signature_at(&list, &position).ok_or_else(|| super::uncertain("the time signature isn't in the list as it was"))?;
+        let deleted = delete_signature_row(ctx, &list[index]);
+        let after = signature_rows(ctx, &shown).map_err(|(_, why)| super::uncertain(why))?;
+        if signature_at(&after, &position).is_none() {
+            return Ok(Restored::by_value(
+                json!({"exists": false}),
+                json!({"title": format!("Time signature at {} taken away again", timeline::bar_text(&position))}),
+            ));
+        }
+        deleted?;
+        let pressed = super::structure::undo_in_logic(ctx, watch, &restore.key, "Value Change", None)
+            .or_else(|_| super::structure::undo_in_logic(ctx, watch, &restore.key, "Create Signature Event", None))?;
         let after = signature_rows(ctx, &shown).map_err(|(_, why)| super::uncertain(why))?;
         if signature_at(&after, &position).is_some() {
             return Err(super::uncertain(format!(
