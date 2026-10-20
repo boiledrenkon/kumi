@@ -63,7 +63,7 @@ end
 -- Preset data that may go to this device: the same device type (another crashes Renoise), not a newer document, the same
 -- plug-in, within the bound. Refused before anything is written.
 local function check_preset_data(device, xml, label)
-  if type(xml) ~= "string" or xml == "" then bad("presetData: the device's preset data (XML, as Renoise gives it)") end
+  if type(xml) ~= "string" or xml == "" then bad("presetData (the device's preset data, XML as Renoise gives it) or path (an .xrdp preset file)") end
   if #xml > M.MAX_PRESET_BYTES then
     bad(string.format("presetData is %.1f MB, more than Kumi writes (%d MB)", #xml / 1048576, M.MAX_PRESET_BYTES / 1048576))
   end
@@ -251,7 +251,15 @@ base.register({
   reread = reread, read = settings_read, same = same_print,
 })
 
--- device-preset-data: the device's preset data written whole (XML, as Renoise gives it and as a read shows it).
+-- device-preset-data: the device's preset data written whole (XML, as Renoise gives it and as a read shows it). Kumi's host
+-- reads it from an .xrdp file in Renoise's library when the change names one (`presetName` then names it in the title).
+
+local function data_title(input, label)
+  if type(input.presetName) == "string" and input.presetName ~= "" then
+    return string.format("Loaded the preset %s into %s", q(input.presetName), q(label))
+  end
+  return "Wrote the settings of " .. q(label)
+end
 
 local function data_preview(song, env, input)
   local t, d, track, device = device_by_ref(song, env, input.ref, "device-preset-data")
@@ -262,7 +270,7 @@ local function data_preview(song, env, input)
     target = target_of(t, d), prior = { preset = device.active_preset, print = M.print_of(xml) },
     fence = { id = identity(track, device), state = material_.device_state(device).state },
     display = {
-      title = "Wrote the settings of " .. q(label), unchanged = xml == input.presetData or nil,
+      title = data_title(input, label), unchanged = xml == input.presetData or nil,
       note = "Kumi keeps the settings it replaces to put back.",
     },
   }
@@ -289,7 +297,7 @@ local function data_apply(song, env, input, fence, desc)
   kept.presetData = xml
   return {
     applied = { state = material_.device_state(device).state, print = M.print_of(back) }, material = kept, target = target_of(t, d),
-    display = { title = "Wrote the settings of " .. q(label) }, undo = { desc = desc, entry = true },
+    display = { title = data_title(input, label) }, undo = { desc = desc, entry = true },
     prior = { print = M.print_of(xml) }, journal_applied = { print = M.print_of(back) }, place = { track = t, device = d },
   }
 end

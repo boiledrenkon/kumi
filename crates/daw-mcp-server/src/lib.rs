@@ -7,6 +7,7 @@ pub mod flow;
 pub mod host;
 pub mod instruments;
 pub mod mcp;
+pub mod preset_files;
 pub mod presets;
 pub mod renoise_devices;
 pub mod renoise_texts;

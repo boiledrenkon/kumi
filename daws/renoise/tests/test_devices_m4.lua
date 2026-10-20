@@ -1409,3 +1409,15 @@ test("devices m4: Kumi's undo of a device moved puts it back after the device it
   ok(restore(peer2, "device-move", record2, nil, { discard = true }).result)
   eq(names_on(2), "EQ 5,Gainer,Gainer")
 end)
+
+test("devices m4: preset data Kumi's host read from a preset file is titled by the preset's name", function()
+  local _, peer = setup()
+  local epoch, layout = place(peer)
+  local read = call(peer, "preset_read", { ref = epoch .. ":device:2.2", epoch = epoch, layout = layout }).result
+  local input = { ref = epoch .. ":device:2.2", presetData = read.presetData:gsub("<Gain0>%s*<Value>[^<]*</Value>", "<Gain0>\n      <Value>-4.0</Value>", 1), presetName = "Darker" }
+  local previewed = preview(peer, "device-preset-data", input)
+  eq(previewed.display.title, "Loaded the preset " .. Q1 .. "Darker" .. Q2 .. " into " .. Q1 .. "EQ 5 on Bass" .. Q2)
+  local record = change(peer, "device-preset-data", input)
+  eq(record.display.title, previewed.display.title)
+  failure(call(peer, "change_preview", { kind = "device-preset-data", input = { ref = epoch .. ":device:2.2" }, epoch = epoch, layout = layout }), "bad-params", "or path")
+end)
