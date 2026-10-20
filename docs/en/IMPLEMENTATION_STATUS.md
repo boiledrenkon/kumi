@@ -62,8 +62,28 @@ and migration checks do not replace a new real-Live acceptance run.
   muted, each undone through Kumi, and a rename taken back with Cmd-Z. Logic
   keeps no undo step for a fader, pan, mute, solo, arm, tempo or bypass, so
   those are put back by value; a deleted track comes back only through Logic's
-  own undo while that step is on top. The M3 gate on this Mac is not recorded
-  yet.
+  own undo while that step is on top. The M3 gate on this Mac is recorded in
+  `docs/evidence/logic-m3-gate-2026-10-19.md`. M4, the first slice: Kumi's
+  change set declares the kinds M3 left out, with REAPER's tool names where the
+  concept is the same and Logic's words throughout: `key_command` (the escape
+  hatch, by the command's English name or id; a command Logic keeps no undo
+  step of makes no row, and only Logic's own undo takes one back), the regions
+  of the Tracks area moved, resized, split (the right part's ref comes back),
+  looped, renamed and deleted, `notes_quantize`, the cycle range
+  (`loop_range`, no step of Logic's undo), `track_color`, the Tempo and
+  Signature Lists (`tempo_marker_set`, `tempo_marker_delete`,
+  `signature_set`), many notes at once as a MIDI file Kumi writes and Logic
+  imports (`midi_import`), Track Stacks made and flattened, and a track moved;
+  and the action `save_project` (the host's `project_save`: a save, or a save
+  as to a `.logicx` that isn't there yet; no row). The simulated Logic answers
+  every one of them statefully over the recorded project, the host's tests and
+  the wire golden cover them, the runtime's tests take them into HISTORY and
+  back out (a save with no row, a key command with and without a row, a split
+  and an import undone through Logic's own undo, the cycle, a tempo change, an
+  undo Logic answered uncertain), and the acceptance run gains the M4 checks
+  (`--files <dir>` names the folder a save as goes under). Which of these the
+  bridge makes over the real Logic, and through what, is the bridge's report
+  and the M4 gate's; the declaration is pruned to it at the merge.
 
 ## Evidence
 
@@ -100,22 +120,29 @@ bridge, the version given is the one in the commit that added it.
   bindings were tested through Python in Live, not yet through Kumi's own edits;
   see [Willington](WILLINGTON_INTEGRATION.md).
 - Kumi and the bridge are unsigned; see [releases and distribution](DISTRIBUTION_POLICY.md).
-- Logic Pro support can't change the cycle locators, name or rename a marker,
-  insert, remove, move or set a plug-in, make or set a send, or move a track:
-  the locators have no field Accessibility can set, a marker's name cell isn't
-  a text field, the slots' pop-up menus can't be driven from outside, a plug-in's
-  controls aren't reached yet and the headers can't be dragged; the bridge
-  refuses each saying why. Logic has no undo block and keeps no undo step for a
-  fader, pan, mute, solo, arm, tempo or bypass, so Kumi puts those back by
-  value; a deleted track comes back through Logic's own undo only while that
-  step is on top. The tempo takes whole BPM. Logic Pro 11 and Intel Macs are out
-  of scope. See [the Logic contract](LOGIC_CONTRACT.md).
+- Logic Pro support can't name or rename a marker, insert, remove, move or set
+  a plug-in, or make or set a send: a marker's name cell isn't a text field, the
+  slots' pop-up menus can't be driven from outside and a plug-in's controls
+  aren't reached yet; the bridge refuses each saying why. The first M4 slice
+  declares the cycle range, regions, the Tempo and Signature Lists, a MIDI
+  import, Track Stacks, a track moved, a colour and a key command: which of
+  them the bridge makes over the real Logic is settled at the M4 gate, and a
+  kind it can't make is refused saying why. Logic has no undo block and keeps
+  no undo step for a fader, pan, mute, solo, arm, tempo, bypass or the cycle,
+  so Kumi puts those back by value; a deleted track or region, a split, an
+  import and a Track Stack come back through Logic's own undo only while that
+  step is on top, and what a key command did only Logic's own undo takes back.
+  The tempo takes whole BPM. Saving keeps no versions (that is REAPER's). Logic
+  Pro 11 and Intel Macs are out of scope. See [the Logic contract](LOGIC_CONTRACT.md).
 
 ## Open work
 
 - Support for Renoise and Reaper.
-- Logic Pro: the M3 gate with `accept_logic` on this Mac (a plan with undo, a
-  Cmd-Z named back), then M4.
+- Logic Pro: the M4 gate with `accept_logic --files <dir>` on this Mac (the
+  first slice: a save as, key commands, a split, an import, the cycle, the
+  Tempo List), the declaration pruned to what the bridge made; then the second
+  slice (sends, plug-in insertion, presets and patches from the Library, Smart
+  Controls, automation, bounce and export, the instructions addendum).
 - Confirming where Live on Windows keeps its Extensions folder.
 - The generated capability manifest still lists Browser preview as reserved,
   though the bridge offers it whenever Live's Browser can preview.

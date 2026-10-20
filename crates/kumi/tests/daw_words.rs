@@ -67,8 +67,15 @@ async fn settle(h: &Harness) {
     }
 }
 
-/// A session's states as the TUI draws them for `daw`, with its focus events and bodies.
-async fn tui_states(daw: DawId, label: &str, focuses: Vec<(serde_json::Value, Option<FocusBody>)>) -> Found {
+/// A session's states as the TUI draws them for `daw`, with its focus events and bodies, and `history`: the DAW's own
+/// HISTORY rows beyond the ones every DAW gets (a change only the DAW's own undo takes back, one past Kumi's undo, an
+/// undo the DAW didn't finish), each as the session tells the app of it.
+async fn tui_states(
+    daw: DawId,
+    label: &str,
+    focuses: Vec<(serde_json::Value, Option<FocusBody>)>,
+    history: Vec<serde_json::Value>,
+) -> Found {
     work_with(daw);
     let found = Found::default();
     let c = Rc::new(Control::default());
@@ -104,6 +111,12 @@ async fn tui_states(daw: DawId, label: &str, focuses: Vec<(serde_json::Value, Op
     h.emit(json!({"type":"change","change":{"id":"c2","family":"tempo","title":"Tempo 120 → 124 BPM","state":"applied","at":2}}));
     settle(&h).await;
     found.screen("a change", &h);
+    // The DAW's own rows: kept, past Kumi's undo, unsure after an undo the DAW didn't finish.
+    for change in history {
+        h.emit(json!({"type":"change","change":change}));
+    }
+    settle(&h).await;
+    found.screen("HISTORY", &h);
     *c.undo.borrow_mut() =
         Some(serde_json::from_value(json!({"id":"c2","family":"tempo","title":"Tempo 120 → 124 BPM","state":"undone","at":2})).unwrap());
     h.type_text("/undo\r").await;
@@ -194,9 +207,14 @@ case!(a_reaper_session_never_speaks_lives_words, async {
         "REAPER connected",
         "REAPER isn't connected",
         "Undid: Tempo 120 → 124 BPM",
+        "Ran action",
+        "kept",
         "Kumi closed. Each project's conversation continues next time.",
     ];
-    tui_states(DawId::Reaper, "REAPER — Night Drive", focuses).await.saw(&seen.map(String::from)).assert_none("REAPER");
+    let history = vec![
+        json!({"id":"c3","family":"structure","title":"Ran action “Track: Insert new track”","state":"kept","note":"Only REAPER's own undo can take this back (Edit > Undo).","at":3}),
+    ];
+    tui_states(DawId::Reaper, "REAPER — Night Drive", focuses, history).await.saw(&seen.map(String::from)).assert_none("REAPER");
 });
 
 case!(a_logic_session_never_speaks_lives_words, async {
@@ -232,9 +250,24 @@ case!(a_logic_session_never_speaks_lives_words, async {
         "Logic Pro isn't connected",
         "Logic Pro is busy",
         "Undid: Tempo 120 → 124 BPM",
+        "Ran key command",
+        "kept",
+        "Split region",
+        "no undo",
+        "Imported 64 notes",
+        "Cycle bar 5",
         "Kumi closed. Each project's conversation continues next time.",
     ];
-    tui_states(DawId::Logic, "Logic Pro — Night Drive", focuses).await.saw(&seen.map(String::from)).assert_none("Logic Pro");
+    // (M4) HISTORY's rows for Logic's first M4 slice: a key command only Logic's own undo takes back (kept, in Logic's
+    // words), a split past Kumi's undo (no undo), an import whose undo Logic didn't finish (unsure, Logic's words
+    // leading), and the cycle, which Logic's own undo never takes back.
+    let history = vec![
+        json!({"id":"c3","family":"structure","title":"Ran key command “Create Marker”","state":"kept","note":"Kumi can't take back what a key command did: Logic Pro's own undo can take it back (Cmd-Z in Logic Pro)","at":3}),
+        json!({"id":"c4","family":"clip","title":"Split region “Keys” at bar 3","state":"expired","note":"Kumi no longer holds this change for its undo; Logic Pro's own undo (Cmd-Z in Logic Pro) may.","at":4}),
+        json!({"id":"c5","family":"clip","title":"Imported 64 notes on “Keys” at bar 9","state":"unsure","note":"Kumi's undo didn't finish: Logic Pro didn't answer after the change was sent: the helper didn't answer in time","at":5}),
+        json!({"id":"c6","family":"locators","title":"Cycle bar 5 to bar 9","state":"applied","note":"Logic Pro's own undo (Cmd-Z in Logic Pro) can't take this back; Kumi can.","at":6}),
+    ];
+    tui_states(DawId::Logic, "Logic Pro — Night Drive", focuses, history).await.saw(&seen.map(String::from)).assert_none("Logic Pro");
 });
 
 case!(a_renoise_session_never_speaks_lives_words, async {
@@ -261,7 +294,7 @@ case!(a_renoise_session_never_speaks_lives_words, async {
         ),
     ];
     let seen = ["Ask Kumi about your song", "paused while Renoise plays", "Kumi closed. Each song's conversation continues next time."];
-    tui_states(DawId::Renoise, "Renoise — Night Drive", focuses).await.saw(&seen.map(String::from)).assert_none("Renoise");
+    tui_states(DawId::Renoise, "Renoise — Night Drive", focuses, vec![]).await.saw(&seen.map(String::from)).assert_none("Renoise");
 });
 
 fn now_ms() -> f64 {
