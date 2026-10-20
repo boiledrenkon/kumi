@@ -17,6 +17,9 @@ import("changes_samples")
 import("changes_modfx")
 import("changes_phrases")
 import("changes_plugins")
+-- M4 (n-song)
+import("changes_patterns")
+local sequence_ = import("changes_sequence")
 
 local M = {}
 
@@ -160,8 +163,50 @@ function M.carry_slot_restore(params, shifts, since, now)
   return moved
 end
 
+-- A solo's restore (M4 n-song): the tracks of its snapshots (`prior.tracks`, `applied.tracks`, each {t, ...}) are carried
+-- through the shifts since; one deleted meanwhile is left out (counted in `prior.lost`, for the answer to say) rather than
+-- refusing the solo. The soloed track itself is carried as any ref is: gone if it was deleted.
+function M.carry_solo_restore(params, shifts, since, now)
+  local refs = import("refs")
+  local copy = {}
+  for k, v in pairs(params) do copy[k] = v end
+  copy.prior, copy.applied = nil, nil
+  local moved, err = refs.carry(copy, now, shifts, since)
+  if not moved then error(err, 0) end
+  local lost = 0
+  local function carry_tracks(state, counted)
+    if type(state) ~= "table" or type(state.tracks) ~= "table" then return state end
+    local out = {}
+    for k, v in pairs(state) do out[k] = v end
+    out.tracks = {}
+    for _, e in ipairs(state.tracks) do
+      local t = type(e) == "table" and type(e.t) == "number" and refs.shift(e.t, shifts, since) or nil
+      if t then
+        local entry = {}
+        for k, v in pairs(e) do entry[k] = v end
+        entry.t = t
+        out.tracks[#out.tracks + 1] = entry
+      elseif counted then
+        lost = lost + 1
+      end
+    end
+    return out
+  end
+  moved.prior, moved.applied = carry_tracks(params.prior, true), carry_tracks(params.applied, false)
+  if type(moved.prior) == "table" and lost > 0 then moved.prior.lost = lost end
+  return moved
+end
+
 -- The restores that carry their params by hand, by kind.
-M.carry_for = { ["track-delete"] = M.carry_restore, ["slot-delete"] = M.carry_slot_restore }
+M.carry_for = { ["track-delete"] = M.carry_restore, ["slot-delete"] = M.carry_slot_restore, ["track-solo"] = M.carry_solo_restore }
+
+-- M4 (n-song): the kinds whose records find what they changed by the place mechanism (the sequence they left; a pattern's place in
+-- the pool, a device's on its track) rather than by refs: the refs a restore of theirs carries are left out of it, so one gone
+-- stale with a change elsewhere doesn't make the request stale before the places are followed (bridge.lua). By kind, the
+-- fields: `created` (a slot ref) and `target` (its ref; kept as an object, without it).
+M.loose_refs = {}
+for kind in pairs(sequence_.KINDS) do M.loose_refs[kind] = { "created" } end
+for _, kind in ipairs({ "pattern-name", "pattern-length", "slot-color", "pattern-alias", "automation-write" }) do M.loose_refs[kind] = { "target" } end
 
 -- n-instruments: an instrument saved to a file (an action: no change, no undo).
 M.save_instrument = instruments_.save

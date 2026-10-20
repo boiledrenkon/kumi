@@ -15,8 +15,6 @@ use crate::reaper::{Fx, FxOwner, Track, CONTAINER_FX, INPUT_FX};
 use crate::refs::{self, Ref, TrackId};
 use crate::rows;
 
-/// The most parameters whose values tell an FX from what Kumi left.
-const SIGNATURE_PARAMS: i32 = 4096;
 /// The longest a plug-in name may be.
 const NAME_LIMIT: usize = 256;
 
@@ -106,26 +104,33 @@ fn position_of(chain: &[String], guid: &str) -> Option<usize> {
     chain.iter().position(|g| g.eq_ignore_ascii_case(guid))
 }
 
-/// What tells an FX apart from how Kumi left it: its name, whether it runs, its preset and its parameters' values.
-fn signature(ctx: &Ctx, fx: Fx) -> Value {
-    let volatile = volatile_params(ctx, fx);
-    signature_without(ctx, fx, &volatile)
+/// What tells an FX apart from how Kumi left it: its name, whether it runs, its preset and its parameters' values, less the
+/// parameters that move by themselves (`volatile`, NIT-7: found without holding REAPER's main thread).
+pub(super) fn signature(ctx: &Ctx, fx: Fx) -> Value {
+    let volatile = super::volatile::moving(ctx, fx);
+    let signature = signature_without(ctx, fx, &volatile);
+    super::volatile::remember(ctx, fx, &signature);
+    signature
 }
 
-/// The signature again, as one that was taken before: a parameter it found to move by itself is left out of this one too.
-fn signature_as(ctx: &Ctx, fx: Fx, recorded: &Value) -> Value {
+/// The signature again, as one that was taken before: a parameter it found to move by itself is left out of this one too,
+/// and so is one the watch right after it found (then the recorded signature is answered back: nothing else moved).
+pub(super) fn signature_as(ctx: &Ctx, fx: Fx, recorded: &Value) -> Value {
     let volatile: Vec<i32> = recorded["volatile"].as_array().into_iter().flatten().filter_map(Value::as_i64).map(|n| n as i32).collect();
-    signature_without(ctx, fx, &volatile)
+    let now = signature_without(ctx, fx, &volatile);
+    if now["hash"] != recorded["hash"] && same_but_hash(&now, recorded) && super::volatile::same_but_for_moving(ctx, fx, recorded) {
+        return recorded.clone();
+    }
+    now
+}
+
+/// Whether two signatures differ only in their parameters' values.
+fn same_but_hash(a: &Value, b: &Value) -> bool {
+    ["name", "enabled", "offline", "preset", "params"].iter().all(|key| a[key] == b[key])
 }
 
 fn signature_without(ctx: &Ctx, fx: Fx, volatile: &[i32]) -> Value {
     let reaper = ctx.reaper;
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for param in (0..reaper.fx_param_count(fx).min(SIGNATURE_PARAMS)).filter(|param| !volatile.contains(param)) {
-        for byte in (reaper.param_normalized(fx, param) as f32).to_bits().to_le_bytes() {
-            hash = (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
     json!({
         "name": reaper.fx_name(fx),
         "enabled": reaper.fx_enabled(fx),
@@ -133,24 +138,8 @@ fn signature_without(ctx: &Ctx, fx: Fx, volatile: &[i32]) -> Value {
         "preset": reaper.fx_preset(fx),
         "params": reaper.fx_param_count(fx),
         "volatile": volatile,
-        "hash": format!("{hash:016x}"),
+        "hash": super::volatile::hash(&super::volatile::values(reaper, fx), volatile),
     })
-}
-
-/// Parameters that move by themselves, a meter the plug-in shows as a parameter: what they hold says nothing of what the
-/// producer did. Found by their names, and by their changing between two looks.
-fn volatile_params(ctx: &Ctx, fx: Fx) -> Vec<i32> {
-    let reaper = ctx.reaper;
-    let count = reaper.fx_param_count(fx).min(SIGNATURE_PARAMS);
-    let before: Vec<f64> = (0..count).map(|param| reaper.param_normalized(fx, param)).collect();
-    std::thread::sleep(std::time::Duration::from_millis(15));
-    (0..count)
-        .filter(|&param| {
-            let name = reaper.param_name(fx, param).to_lowercase();
-            let meter = ["meter", "gain reduction", "readout"].iter().any(|word| name.contains(word));
-            meter || (reaper.param_normalized(fx, param) as f32) != (before[param as usize] as f32)
-        })
-        .collect()
 }
 
 fn fx_target(ctx: &Ctx, located: &Located) -> Value {

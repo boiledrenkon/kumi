@@ -129,7 +129,39 @@ local function song_row(song)
     followPlayer = transport.follow_player,
   }
   for k, v in pairs(M.song_extra(song)) do row[k] = v end
+  M.song_settings(song, row)
   return row
+end
+
+-- M4 (n-song): the settings Kumi's song kinds change, as they take them.
+local MOST_COMMENTS_SHOWN = 1000
+function M.song_settings(song, row)
+  local transport = song.transport
+  local amounts = {}
+  for i, v in ipairs(transport.groove_amounts) do amounts[i] = v end
+  row.groove = { on = transport.groove_enabled, amounts = array(amounts) }
+  row.metronome = {
+    on = transport.metronome_enabled, beatsPerBar = transport.metronome_beats_per_bar, linesPerBeat = transport.metronome_lines_per_beat,
+    precount = transport.metronome_precount_enabled and transport.metronome_precount_bars or false, volumeDb = db(transport.metronome_volume),
+  }
+  row.editing = {
+    editStep = transport.edit_step, octave = transport.octave,
+    quantize = transport.record_quantize_enabled and transport.record_quantize_lines or false,
+    wrap = transport.wrapped_pattern_edit, singleTrack = transport.single_track_edit_mode,
+    keyboardVelocity = transport.keyboard_velocity_enabled and transport.keyboard_velocity or false,
+    recordTo = transport.record_parameter_mode == renoise.Transport.RECORD_PARAMETER_MODE_AUTOMATION and "automation" or "pattern",
+  }
+  row.headroomDb = db(transport.track_headroom)
+  row.artist = status.cap(song.artist or "")
+  local comments = table.concat(song.comments, "\n")
+  if #comments > MOST_COMMENTS_SHOWN then
+    -- (cut on a character's start: the text stays UTF-8)
+    local cut = MOST_COMMENTS_SHOWN
+    while cut > 0 and comments:byte(cut + 1) and comments:byte(cut + 1) >= 0x80 and comments:byte(cut + 1) < 0xC0 do cut = cut - 1 end
+    row.comments, row.commentsCut = comments:sub(1, cut), true
+  else
+    row.comments = comments
+  end
 end
 
 -- The note columns of a track that are muted (their numbers) and the ones that are named ({"2": "Pad"}); nil for none.
@@ -177,7 +209,25 @@ local function track_row(song, epoch, i, parents)
     row.solo = track.solo_state
   end
   row.mutedColumns, row.columnNames = column_state(track)
+  M.track_settings(track, row)
   return row
+end
+
+-- M4 (n-song): what Kumi's track kinds change, as they take it: the collapse, the width in percent, the output routing and
+-- delay, and which sub-columns show.
+function M.track_settings(track, row)
+  local T = renoise.Track
+  row.collapsed = track.collapsed
+  if track.type == T.TRACK_TYPE_GROUP then row.groupCollapsed = track.group_collapsed end
+  row.width = track.prefx_width.value / track.prefx_width.value_max * 100
+  row.outputRouting = track.output_routing
+  if track.type == T.TRACK_TYPE_SEQUENCER then row.outputDelay = track.output_delay end
+  if track.type == T.TRACK_TYPE_SEQUENCER and track.max_note_columns > 0 then
+    row.subColumns = {
+      volume = track.volume_column_visible, panning = track.panning_column_visible, delay = track.delay_column_visible,
+      sampleEffects = track.sample_effects_column_visible,
+    }
+  end
 end
 
 local function sequence_row(song, epoch, s, tracks)
@@ -196,17 +246,23 @@ end
 
 local function pattern_row(song, epoch, p, tracks)
   local pattern = song:pattern(p)
-  local aliases = {}
+  local aliases, colors = {}, {}
   for t = 1, tracks do
-    local alias = pattern:track(t).alias_pattern_index
+    local pattern_track = pattern:track(t)
+    local alias = pattern_track.alias_pattern_index
     if alias > 0 then aliases[tostring(t)] = alias end
+    -- M4 (n-song): the slot colours of the pattern's tracks in the matrix
+    local color = pattern_track.color
+    if color then colors[tostring(t)] = hex(color) end
   end
-  return {
+  local row = {
     ref = refs.make(epoch, "pattern", p),
     name = pattern.name,
     lines = pattern.number_of_lines,
     aliases = next(aliases) and aliases or json.object(),
   }
+  if next(colors) then row.colors = colors end
+  return row
 end
 
 local function macros_of(instrument)
@@ -531,6 +587,33 @@ local function line_row(line, number, note_columns, effect_columns, scan_hidden)
   end
   if row.notes == nil and row.effects == nil and row.hidden == nil then return nil end
   return row
+end
+
+-- M4 (n-song): the automation of a pattern's track, as the automation-write kind takes it: per automated parameter its ref,
+-- names, play mode and points (time in lines from 1, value 0 to 1 of the parameter's range).
+local PLAYMODE_NAMES = { "points", "linear", "curves" }
+function M.envelopes(song, epoch, p, t)
+  local track, pattern_track, out = song:track(t), song:pattern(p):track(t), {}
+  for d = 1, #track.devices do
+    local device = track:device(d)
+    for k = 1, #device.parameters do
+      local parameter = device:parameter(k)
+      if parameter.is_automated then
+        local automation = pattern_track:find_automation(parameter)
+        if automation then
+          local points = {}
+          for i, point in ipairs(automation.points) do points[i] = { time = point.time, value = point.value, scaling = point.scaling } end
+          table.sort(points, function(a, b) return a.time < b.time end)
+          out[#out + 1] = {
+            ref = refs.make(epoch, "param", t, d, k), device = device.display_name ~= "" and device.display_name or device.name,
+            parameter = parameter.name, playmode = PLAYMODE_NAMES[automation.playmode] or "linear", points = array(points),
+            valueMin = parameter.value_min, valueMax = parameter.value_max,
+          }
+        end
+      end
+    end
+  end
+  return out
 end
 
 M.fail = fail

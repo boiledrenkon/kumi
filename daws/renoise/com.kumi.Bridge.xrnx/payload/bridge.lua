@@ -17,6 +17,7 @@ local config = import("config")
 local discovery = import("discovery")
 local log = import("log")
 local VERSION = import("version")
+local actions = import("actions")
 
 local M = {}
 
@@ -268,6 +269,16 @@ local TRANSPORT_OBSERVABLES = {
   "playing_observable", "bpm_observable", "lpb_observable", "tpl_observable", "edit_mode_observable",
   "follow_player_observable", "loop_pattern_observable",
 }
+-- M4 (n-song): the song's settings Kumi changes (the groove, the metronome, the editing settings, the headroom), counted, and
+-- asked on the producer's undo.
+local SETTING_OBSERVABLES = {
+  "groove_enabled_observable", "groove_assignment_observable", "metronome_enabled_observable",
+  "metronome_beats_per_bar_observable", "metronome_lines_per_beat_observable", "metronome_precount_enabled_observable",
+  "metronome_precount_bars_observable", "metronome_volume_observable", "edit_step_observable", "octave_observable",
+  "record_quantize_enabled_observable", "record_quantize_lines_observable", "wrapped_pattern_edit_observable",
+  "single_track_edit_mode_observable", "keyboard_velocity_enabled_observable", "keyboard_velocity_observable",
+  "record_parameter_mode_observable", "track_headroom_observable",
+}
 local SELECTION_OBSERVABLES = {
   "selected_track_index_observable", "selected_instrument_index_observable", "selected_pattern_index_observable",
   "selected_sequence_index_observable", "selected_sample_observable", "selected_phrase_observable",
@@ -304,6 +315,16 @@ local function watch_track(song, i)
     for c = 1, track.max_note_columns do
       observers:watch_changes(track:column_is_muted_observable(c))
       observers:watch_changes(track:column_name_observable(c))
+    end
+    -- M4 (n-song): what the track kinds change (a group's group_collapsed has no observable)
+    for _, name in ipairs({ "collapsed_observable", "color_blend_observable", "output_routing_observable", "output_delay_observable" }) do
+      observers:watch_changes(track[name])
+    end
+    if track.max_note_columns > 0 then
+      for _, name in ipairs({ "volume_column_visible_observable", "panning_column_visible_observable", "delay_column_visible_observable",
+        "sample_effects_column_visible_observable" }) do
+        observers:watch_changes(track[name])
+      end
     end
     observers:watch_structural(track.devices_observable, "a track's devices changed", "devices", track, token)
   end)
@@ -448,6 +469,9 @@ local function attach(song)
   for _, name in ipairs(SELECTION_OBSERVABLES) do observers:watch(song[name], "selection") end
   for _, name in ipairs(TRANSPORT_OBSERVABLES) do observers:watch(song.transport[name], "transport") end
   observers:watch(song.name_observable, "project")
+  for _, name in ipairs(SETTING_OBSERVABLES) do observers:watch_changes(song.transport[name]) end
+  observers:watch_changes(song.artist_observable)
+  observers:watch_changes(song.comments_observable)
   observers:watch_tracks(song.tracks_observable)
   observers:watch_structural(song.instruments_observable, "the instruments changed", "instruments")
   observers:watch_structural(song.patterns_observable, "the patterns changed", "patterns")
@@ -806,7 +830,7 @@ local function watch_params(index)
   token.params_watched = true
   local track = song:track(index)
   observers:owned(token, nil, function()
-    for _, parameter in ipairs({ track.prefx_volume, track.prefx_panning, track.postfx_volume, track.postfx_panning }) do
+    for _, parameter in ipairs({ track.prefx_volume, track.prefx_panning, track.postfx_volume, track.postfx_panning, track.prefx_width }) do
       observers:watch_undo(parameter.value_observable)
     end
   end)
@@ -877,6 +901,20 @@ local function device_log(t)
 end
 
 local function unknown_log() return nil, "unknown" end
+
+-- M4 (n-song): a member of a pattern's track (its slot colour, an automation's points) watched for the producer's undo, once.
+local function watch_ptrack_undo(p, t, name, observable)
+  local pattern_token, track_token = b.groups and b.groups.patterns[p], b.groups and b.groups.tracks[t]
+  local song = renoise.song()
+  if not pattern_token or not track_token or not song or p > #song.patterns or t > track_total(song) then return end
+  pattern_token.undo_watched = pattern_token.undo_watched or setmetatable({}, { __mode = "k" })
+  local watched = pattern_token.undo_watched[track_token] or {}
+  pattern_token.undo_watched[track_token] = watched
+  if watched[name] then return end
+  watched[name] = true
+  observable = observable or song:pattern(p):track(t)[name]
+  observers:owned(pattern_token, track_token, function() observers:watch_undo(observable) end)
+end
 
 -- n-instruments: the log of a list of the instrument now at `i`, or of the set or chain now at `at` in it.
 local function instrument_log(kind, i, at)
@@ -1021,6 +1059,7 @@ local function change_env()
   local env = {
     epoch = epoch, layout = function() b.layout_told = true return b.layout end, journal = b.journal, watch_params = watch_params,
     watch_param = watch_param, busy = busy, now_ms = function() return M.now_ms() end, shifted = shifted, place_shifted = place_shifted,
+    watch_pattern_track = watch_ptrack_undo,
     survives = function(from, kind) return survives(from, kind) end,
     watch_undo = watch_undo, -- (n-instruments)
     -- (how many changes the song's notifiers have counted: run-lua tells whether its chunk changed anything)
@@ -1116,6 +1155,19 @@ function handlers.transport_play(params)
   }
 end
 
+-- M4 (n-song): auditioning a note, selecting or showing, saving the song (actions.lua). None is an undo step or a change.
+function handlers.audition_note(params)
+  return actions.audition(params, change_env())
+end
+
+handlers.select = function(params)
+  return actions.select(params, change_env())
+end
+
+function handlers.project_save(params)
+  return actions.project_save(params, change_env())
+end
+
 handlers["renoise.reload"] = function()
   host.request_reload()
   return { reloading = true }
@@ -1148,7 +1200,10 @@ local function carried(params, carry)
   return moved
 end
 
-local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true, instrument_save = true }
+local CARRIED = { read = true, focus_body = true, change_preview = true, change_apply = true, change_restore = true,
+  -- (M4 n-song: the actions that name tracks, and the save, whose epoch says which song)
+  audition_note = true, select = true, project_save = true,
+  instrument_save = true }
 
 -- An answer whose epoch is not the request's says what survives: the kinds of ref the request held that name the same things
 -- in the answer's epoch (`tracks` too, for a reader that knows only that).
@@ -1173,6 +1228,16 @@ function M.handle(_, request)
   local from
   if CARRIED[request.method] then
     from = type(params) == "table" and params.epoch or nil
+    -- (M4 n-song: a restore that finds what it changed by places leaves out the refs its record carries: see changes.lua)
+    local loose = request.method == "change_restore" and type(params) == "table" and changes.loose_refs[params.kind] or nil
+    if loose then
+      local copy = {}
+      for k, v in pairs(params) do copy[k] = v end
+      for _, field in ipairs(loose) do
+        if field == "target" and type(copy.target) == "table" then copy.target = { kind = copy.target.kind } else copy[field] = nil end
+      end
+      params = copy
+    end
     -- A ref of an earlier epoch that names the same thing now is made in this one, whatever epoch the request names (Kumi keeps
     -- the names of what a device or a sequence change left alone); so is the request's own epoch, when every ref of it was.
     if type(params) == "table" then
@@ -1310,6 +1375,7 @@ end
 
 function M.stop(_, reloading)
   if observers then observers:detach() end
+  pcall(actions.tick, M.now_ms(), true)
   if jobs then jobs:abort_all("reloading", "the tool was stopped or reloaded: ask again") end
   if not reloading then
     -- Renoise releases the song just before it quits; a tool disabled or reloaded sees no release.
@@ -1346,6 +1412,9 @@ function M.tick()
   if not ok then M.log_error("events", err) end
   jobs:run()
   conns:tick()
+  -- (the auditions whose time is up end: a note never hangs on)
+  local ended, audition_err = pcall(actions.tick, M.now_ms())
+  if not ended then M.log_error("auditions", audition_err) end
   b.ticks = (b.ticks or 0) + 1
   if b.ticks % 20 == 0 then log.flush() end
 end

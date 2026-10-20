@@ -202,7 +202,7 @@ local function fit(result, entries, from, to, cut)
       shown[t] = {
         ref = entry.ref, name = entry.name, color = entry.color, noteColumns = entry.noteColumns,
         effectColumns = entry.effectColumns, lines = array(kept), aliasOf = entry.aliasOf, aliasRef = entry.aliasRef,
-        mutedColumns = entry.mutedColumns,
+        mutedColumns = entry.mutedColumns, automation = entry.automation,
       }
     end
     result.window = { from = from, to = to }
@@ -212,6 +212,31 @@ local function fit(result, entries, from, to, cut)
     to = math.max(from, from + math.floor((to - from + 1) * 0.6) - 1)
     cut = true
   end
+end
+
+-- M4 (n-song): a pattern track's automation lanes in the window, cheaply (the track's list of envelopes, no search through its
+-- devices): each its device's and parameter's names, play mode and the points from `from` to `to` (at most LANE_POINTS).
+M.LANES = 8
+M.LANE_POINTS = 32
+local PLAYMODE_NAMES = { "points", "linear", "curves" }
+function M.lanes(pattern_track, from, to)
+  local out = {}
+  for _, automation in ipairs(pattern_track.automation) do
+    if #out >= M.LANES then break end
+    local device, parameter = automation.dest_device, automation.dest_parameter
+    if device and parameter then
+      local points = {}
+      for _, point in ipairs(automation.points) do
+        if point.time >= from and point.time < to + 1 and #points < M.LANE_POINTS then points[#points + 1] = { point.time, point.value } end
+      end
+      out[#out + 1] = {
+        name = (device.display_name ~= "" and device.display_name or device.name) .. " " .. parameter.name,
+        playmode = PLAYMODE_NAMES[automation.playmode] or "linear", points = array(points),
+      }
+    end
+  end
+  if #out == 0 then return nil end
+  return array(out)
 end
 
 local function pattern_body(job, params, epoch)
@@ -241,7 +266,8 @@ local function pattern_body(job, params, epoch)
       aliasOf = alias > 0 and alias or nil, aliasRef = alias > 0 and refs.make(epoch, "pattern", alias) or nil,
     }
     entries[t].mutedColumns = rows.column_state(track)
-    bytes = bytes + 200 + #entries[t].name
+    entries[t].automation = M.lanes(pattern_track, from, to)
+    bytes = bytes + 200 + #entries[t].name + (entries[t].automation and #json.encode(entries[t].automation) or 0)
   end
   local hidden = params.hidden == true
   local cut = false
@@ -293,11 +319,15 @@ local function matrix_body(job, params, epoch)
     local sequencer = live.sequencer
     local pattern_at = sequencer:pattern(s)
     local pattern = live:pattern(pattern_at)
-    local aliases, muted = {}, {}
+    local aliases, muted, colors = {}, {}, {}
     for t = 1, tracks do
-      local alias = pattern:track(t).alias_pattern_index
+      local pattern_track = pattern:track(t)
+      local alias = pattern_track.alias_pattern_index
       if alias > 0 then aliases[tostring(t)] = alias end
       if sequencer:track_sequence_slot_is_muted(t, s) then muted[#muted + 1] = t end
+      -- M4 (n-song): the slot's colours (its pattern's tracks')
+      local color = pattern_track.color
+      if color then colors[tostring(t)] = hex(color) end
     end
     list[s] = {
       ref = refs.make(epoch, "seq", s),
@@ -307,6 +337,7 @@ local function matrix_body(job, params, epoch)
       aliases = next(aliases) and aliases or json.object(),
       mutedTracks = array(muted),
     }
+    if next(colors) then list[s].colors = colors end
   end
   local live = the_song()
   local transport = live.transport

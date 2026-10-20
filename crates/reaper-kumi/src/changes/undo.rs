@@ -7,15 +7,21 @@
 //! entries at its front, the producer undid them; when it loses entries from its front, they were redone (the points the
 //! project moved over are checked, since a new edit by the producer drops the whole list the same way).
 
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use serde_json::json;
 
 use crate::extension::Outbox;
 use crate::reaper::{Project, Reaper};
 
-/// The most redoable points looked at: the history can hold hundreds, and what the producer undid is at its front.
+/// The redoable points looked at, at least: the history can hold hundreds, and what the producer undid is at its front.
 const REDO_SCAN: i32 = 256;
-/// The most points looked at behind the one the project is at: what the producer can have undone in the time of a look.
+/// The points looked at behind the one the project is at, at least: what the producer can have undone in the time of a look.
 const TAIL_SCAN: i32 = 128;
+/// The most points one look reads on either side, however far the producer jumped in the Undo History at once.
+const MOST_SCAN: i32 = 4096;
+/// How many of Kumi's points are remembered with the side of the history they were last seen on.
+const KNOWN_KEPT: usize = 4096;
 
 /// Whether a point's description is one of Kumi's: `Kumi: …` ending in a nonce, `k` and four base-36 characters.
 pub fn is_kumi(desc: &str) -> bool {
@@ -37,14 +43,57 @@ struct View {
     redo: Vec<String>,
 }
 
-fn view(reaper: &Reaper, proj: Project) -> Option<View> {
+/// A look at the history: `tail` points behind the one the project is at and `redo` after it, each at most `MOST_SCAN`.
+fn view(reaper: &Reaper, proj: Project, tail: i32, redo: i32) -> Option<View> {
     let (entries, at) = reaper.undo_position(proj)?;
     let count = reaper.state_change_count(proj).unwrap_or(0);
-    let first = (at + 1 - TAIL_SCAN).max(0);
+    let first = (at + 1 - tail.clamp(TAIL_SCAN, MOST_SCAN)).max(0);
     let tail = (first..=at).map(|index| reaper.undo_entry(proj, index).unwrap_or_default()).collect();
-    let last = (entries - 1).min(at + REDO_SCAN);
+    let last = (entries - 1).min(at + redo.clamp(REDO_SCAN, MOST_SCAN));
     let redo = (at + 1..=last).map(|index| reaper.undo_entry(proj, index).unwrap_or_default()).collect();
     Some(View { entries, at, count, tail, redo })
+}
+
+/// Which side of the history one of Kumi's points was last seen on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    Applied,
+    Redoable,
+}
+
+/// Kumi's points, each with the side it was last seen on, so that a point the producer has since buried deeper than a look
+/// reads (300 fader moves on top of it) is still known for what it was when a jump brings it into sight (NIT-4). Each
+/// description is unique (its nonce), so one that vanished from the history never comes back to be mistaken.
+#[derive(Default)]
+struct Known {
+    sides: HashMap<String, Side>,
+    order: VecDeque<String>,
+}
+
+impl Known {
+    fn side(&self, desc: &str) -> Option<Side> {
+        self.sides.get(desc).copied()
+    }
+
+    fn set(&mut self, desc: &str, side: Side) {
+        if self.sides.insert(desc.to_string(), side).is_none() {
+            self.order.push_back(desc.to_string());
+            while self.order.len() > KNOWN_KEPT {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.sides.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    /// What a look saw of Kumi's points.
+    fn learn(&mut self, view: &View) {
+        for (list, side) in [(&view.tail, Side::Applied), (&view.redo, Side::Redoable)] {
+            for desc in list.iter().filter(|desc| is_kumi(desc)) {
+                self.set(desc, side);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -52,12 +101,16 @@ pub struct Watch {
     seen: Option<View>,
     epoch: String,
     nudged: bool,
+    known: Known,
 }
 
 impl Watch {
     /// Kumi just made a point of its own (or closed a plan's): it is the new baseline, not the producer's undo.
     pub fn resync(&mut self, reaper: &Reaper, proj: Project) {
-        self.seen = view(reaper, proj);
+        self.seen = view(reaper, proj, TAIL_SCAN, REDO_SCAN);
+        if let Some(seen) = &self.seen {
+            self.known.learn(seen);
+        }
     }
 
     /// REAPER ran an action: the history is looked at on this tick even if nothing else says it moved.
@@ -88,12 +141,21 @@ impl Watch {
                 }
             }
         }
-        let Some(now) = view(reaper, proj) else { return };
+        // As far as the project moved since the last look, in either direction: a jump of 300 points in the Undo History
+        // is read whole. New points since (the same number of entries no longer) leave only what was undone after the last
+        // of them on the redo side, which is read whole too.
+        let (tail, redo) = match &self.seen {
+            Some(seen) if seen.entries == entries => (at - seen.at + 1, seen.at - at + 1),
+            Some(seen) => (at - seen.at + 1, entries - at),
+            None => (TAIL_SCAN, REDO_SCAN),
+        };
+        let Some(now) = view(reaper, proj, tail, redo) else { return };
         if let Some(before) = self.seen.take() {
-            for (how, descs) in changes(&before, &now) {
+            for (how, descs) in changes(&before, &now, &self.known) {
                 out.event("undone_in_daw", json!({"descs": descs, "how": how, "epoch": epoch}));
             }
         }
+        self.known.learn(&now);
         self.seen = Some(now);
     }
 }
@@ -106,12 +168,18 @@ impl Watch {
 /// vanished from both lists is evidence of nothing: REAPER merges its oldest points away when its undo memory is full, and
 /// a look sees only so far. Its row keeps its state, and Kumi's undo checks the values as ever. (So an undo of Kumi's point
 /// and a new edit within one look leave the row at Applied: a known limit, safe because the undo checks.)
-fn changes(before: &View, now: &View) -> Vec<(&'static str, Vec<String>)> {
-    let kumi = |list: &[String]| list.iter().filter(|desc| is_kumi(desc)).cloned().collect::<std::collections::HashSet<String>>();
-    let (applied_now, redoable_now) = (kumi(&now.tail), kumi(&now.redo));
-    let undone: Vec<String> =
-        before.tail.iter().filter(|desc| is_kumi(desc) && !applied_now.contains(*desc) && redoable_now.contains(*desc)).cloned().collect();
-    let redone: Vec<String> = before.redo.iter().filter(|desc| is_kumi(desc) && applied_now.contains(*desc)).cloned().collect();
+///
+/// What a point was is what the last look saw of it, or, for one buried deeper than that look read, the side it was last
+/// seen on (`known`): a jump that brings it into sight on the other side is told however deep it was.
+fn changes(before: &View, now: &View, known: &Known) -> Vec<(&'static str, Vec<String>)> {
+    let kumi = |list: &[String]| list.iter().filter(|desc| is_kumi(desc)).cloned().collect::<HashSet<String>>();
+    let (applied_before, redoable_before) = (kumi(&before.tail), kumi(&before.redo));
+    let was = |desc: &String, side: Side| {
+        let seen = if side == Side::Applied { &applied_before } else { &redoable_before };
+        seen.contains(desc) || (!applied_before.contains(desc) && !redoable_before.contains(desc) && known.side(desc) == Some(side))
+    };
+    let undone: Vec<String> = now.redo.iter().filter(|desc| is_kumi(desc) && was(desc, Side::Applied)).cloned().collect();
+    let redone: Vec<String> = now.tail.iter().filter(|desc| is_kumi(desc) && was(desc, Side::Redoable)).cloned().collect();
     let mut found = Vec::new();
     if !undone.is_empty() {
         found.push(("undo", undone));
@@ -137,7 +205,34 @@ mod tests {
     }
 
     fn told(before: &View, now: &View) -> Vec<(&'static str, Vec<String>)> {
-        changes(before, now)
+        changes(before, now, &Known::default())
+    }
+
+    // (r-tracks, NIT-4)
+    #[test]
+    fn a_jump_back_past_what_a_look_reads_is_told_from_what_kumis_point_was_last_seen_as() {
+        let kumi = "Kumi: Vocal volume −8 dB (kd3db)".to_string();
+        // Kumi's change, then 300 fader moves on top: a look reads the last 128, so it is out of sight, known as applied.
+        let all: Vec<String> = std::iter::once(kumi.clone()).chain((0..300).map(|k| format!("Adjust track volume {k}"))).collect();
+        let before = look(&all[all.len() - 128..].iter().map(String::as_str).collect::<Vec<_>>(), &[]);
+        let mut known = Known::default();
+        known.set(&kumi, Side::Applied);
+        // The producer jumps back 301 points at once: Kumi's point is the nearest one to redo.
+        let now = look(&["Initial"], &all.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(changes(&before, &now, &known), [("undo", vec![kumi.clone()])]);
+        // Without what it was last seen as, the jump tells nothing (the looks alone never saw it applied).
+        assert_eq!(told(&before, &now), []);
+        // Undone, then 300 earlier points undone too: Kumi's is far down the redo side, out of sight of the next look; the
+        // producer then jumps forward past it, and it is applied 10 points down.
+        known.set(&kumi, Side::Redoable);
+        let earlier: Vec<String> = (0..300).map(|k| format!("Adjust track pan {k}")).collect();
+        let back = look(&["Initial"], &earlier[..256].iter().map(String::as_str).collect::<Vec<_>>());
+        let mut applied: Vec<&str> = vec!["Initial"];
+        applied.extend(earlier.iter().map(String::as_str));
+        applied.extend(all[..11].iter().map(String::as_str));
+        let forward = look(&applied[applied.len() - 128..], &[]);
+        assert_eq!(changes(&back, &forward, &known), [("redo", vec![kumi])]);
+        assert_eq!(told(&back, &forward), []);
     }
 
     #[test]
