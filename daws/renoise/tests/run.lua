@@ -40,12 +40,18 @@ function T.raises(fn, pattern)
   end
 end
 
+-- Numbers match within a few ulps: libm's log10/pow differ in the last bits between macOS (where the vectors are
+-- blessed) and Linux CI.
+local function close(a, b)
+  return type(a) == "number" and math.abs(a - b) <= 1e-12 * math.max(1, math.abs(a), math.abs(b))
+end
+
 -- Deep equality for decoded JSON.
 function T.same(a, b, path)
   path = path or "value"
   if type(a) ~= type(b) then error(path .. ": " .. type(a) .. " vs " .. type(b), 2) end
   if type(a) ~= "table" then
-    if a ~= b then error(path .. ": " .. show(a) .. " vs " .. show(b), 2) end
+    if a ~= b and not close(a, b) then error(path .. ": " .. show(a) .. " vs " .. show(b), 2) end
     return
   end
   for k, v in pairs(a) do T.same(v, b[k], path .. "." .. tostring(k)) end
