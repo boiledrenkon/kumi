@@ -277,3 +277,37 @@ fn a_kit_reaper_wont_finish_leaves_nothing_behind() {
     assert!(message.contains("what Kumi made is taken away again"), "{message}");
     assert_eq!(names(), ["Drums", "Kick", "Snare", "Reverb"]);
 }
+
+#[test]
+fn an_fx_whose_track_reaper_replaced_is_never_read_through_the_old_track() {
+    // (lab 2026-10-19: REAPER's undo and redo of a kit put its tracks back as new objects while the extension's watch
+    // followed the samplers; reading the old track's chain crashed REAPER)
+    let lab = Lab::new();
+    let (_dir, paths) = sounds(&["Kick", "Snare"]);
+    let (_, made) = lab.make("drum-kit", kit(&paths, json!({})), "Kumi: kit (kx001)");
+    let sampler = made["applied"]["pads"][1]["fx"].as_str().unwrap().to_string();
+    let api = fake::api();
+    let reaper = Reaper::new(&api);
+    let proj = reaper.current_project().unwrap().ptr;
+    assert!(lab.reads.fx_by_guid(&reaper, proj, &sampler).is_ok());
+    // The last pad's track goes: the handle the registry kept is no track of REAPER's any more.
+    state(|s| s.tracks.pop());
+    assert!(lab.reads.fx_by_guid(&reaper, proj, &sampler).is_err());
+    assert_eq!(state(|s| s.dead_handle_reads), 0, "no chain read through the track REAPER no longer has");
+}
+
+#[test]
+fn a_track_reaper_wrote_anew_after_its_undo_and_redo_reads_as_the_same_track() {
+    // (7.82 lab, 2026-10-19: after REAPER's undo and redo of a kit, each track the API made gained `LANEREC -1 -1 -1 0`,
+    // and the folder an empty FX chain block)
+    let made = "<TRACK {A}\n  NAME Drums\n  ISBUS 1 1\n  TRACKID {A}\n>\n";
+    let anew = "<TRACK {A}\n  NAME Drums\n  ISBUS 1 1\n  LANEREC -1 -1 -1 0\n  TRACKID {A}\n  <FXCHAIN\n    SHOW 0\n    LASTSEL 0\n    DOCKED 0\n  >\n>\n";
+    assert_eq!(super::templates::content_hash(made), super::templates::content_hash(anew));
+    // An FX chain with a plug-in in it, or lane recording the producer set, still counts.
+    let with_fx = anew.replace("    DOCKED 0\n", "    DOCKED 0\n    <JS utility/volume \"\"\n    >\n");
+    assert_ne!(super::templates::content_hash(made), super::templates::content_hash(&with_fx));
+    assert_ne!(
+        super::templates::content_hash(made),
+        super::templates::content_hash(&anew.replace("LANEREC -1 -1 -1 0", "LANEREC 1 -1 -1 0"))
+    );
+}
