@@ -548,6 +548,10 @@ function M.reset(options)
     load_instrument = function(_, path) return M.app_load_instrument(path) end,
     load_instrument_multi_sample = function(_, path) return M.app_load_instrument(path, "multi") end,
     save_instrument = function(_, path) return M.app_save_instrument(path) end,
+    -- (M4 n-devices: a device chain onto the selected track, a phrase and a modulation set into the selected instrument)
+    load_track_device_chain = function(_, path) return M.app_load_chain(path) end,
+    load_instrument_phrase = function(_, path) return M.app_load_phrase(path) end,
+    load_instrument_modulation_set = function(_, path) return M.app_load_modset(path) end,
   })
 
   local function find_timer(fn)

@@ -6,6 +6,7 @@ pub mod client;
 pub mod flow;
 pub mod host;
 pub mod instruments;
+pub mod library_files;
 pub mod listening;
 pub mod mcp;
 pub mod presets;
