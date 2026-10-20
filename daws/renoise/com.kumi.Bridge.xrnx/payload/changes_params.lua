@@ -155,7 +155,7 @@ end
 
 -- What a parameter's text says, with the track a place names (the producer's words).
 local function line(song, parameter, how)
-  local text = parameter.name .. " → " .. parameter.value_string
+  local text = parameter.name .. " → " .. base.minus_text(parameter.value_string)
   if how == "send" then
     local n = send_track(song, parameter.value)
     if n then text = text .. " (" .. q(base.named(n, song:track(n))) .. ")" end
@@ -165,7 +165,7 @@ end
 
 local function wanted_line(ask)
   local wanted = ask.wanted
-  return ask.parameter.name .. " → " .. (wanted.valueString or tostring(wanted.value))
+  return ask.parameter.name .. " → " .. base.minus_text(wanted.valueString or tostring(wanted.value))
 end
 
 -- The values the journal compares after the producer's undo or redo: every touched parameter's value, by number.
@@ -199,7 +199,7 @@ local function preview(song, env, input)
     local key, parameter = key_of(ask.k), ask.parameter
     prior_params[key] = { value = parameter.value, valueString = parameter.value_string }
     fenced[key] = parameter.value
-    before[parameter.name], after[parameter.name] = parameter.value_string, ask.wanted.valueString or ask.wanted.value
+    before[parameter.name], after[parameter.name] = base.minus_text(parameter.value_string), ask.wanted.valueString or ask.wanted.value
     lines[#lines + 1] = wanted_line(ask)
     if ask.how == "send" then
       -- (what the wanted number names now: the apply refuses it if that moved in between, as device-param does)
@@ -416,7 +416,7 @@ local function restore(song, env, record, desc)
   if #kept > 0 then fail("failed", string.format("Renoise kept %s of %s as they were", table.concat(kept, ", "), q(label))) end
   base.note_restored_at(env.journal, "device-params", { track = t, device = d })
   local lines = {}
-  for _, w in ipairs(writes) do lines[#lines + 1] = w.parameter.name .. " → " .. w.parameter.value_string end
+  for _, w in ipairs(writes) do lines[#lines + 1] = w.parameter.name .. " → " .. base.minus_text(w.parameter.value_string) end
   for _, w in ipairs(dest_writes) do lines[#lines + 1] = w.destination.prefix .. "→ " .. dest.target_words(song, w.numbers) end
   return {
     restored = { count = #writes + #dest_writes }, display = { title = title(device, t, track, count) .. " put back", lines = lines },

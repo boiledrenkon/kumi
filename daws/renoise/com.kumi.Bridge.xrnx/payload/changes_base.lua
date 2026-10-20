@@ -183,6 +183,14 @@ end
 
 
 M.MINUS, M.INFINITY = MINUS, INFINITY
+
+-- A value as Renoise writes it ("-6.021 dB", "-INF dB", "-0.5"), with the true minus sign before its numbers, as Kumi's titles
+-- write them.
+function M.minus_text(text)
+  if type(text) ~= "string" then return text end
+  return (text:gsub("^%-([%d%.])", MINUS .. "%1"):gsub("([%s%(])%-([%d%.])", "%1" .. MINUS .. "%2")
+    :gsub("^%-([Ii][Nn][Ff])", MINUS .. "%1"):gsub("([%s%(])%-([Ii][Nn][Ff])", "%1" .. MINUS .. "%2"))
+end
 M.close, M.db_of, M.hex_of, M.rgb_of = close, db_of, hex_of, rgb_of
 M.need_text, M.need_object, M.context = need_text, need_object, context
 M.track_at, M.find, M.is_master, M.named, M.target, M.stage_of = track_at, find, is_master, named, target, stage_of

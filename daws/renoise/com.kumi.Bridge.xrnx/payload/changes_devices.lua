@@ -185,7 +185,7 @@ local param_spec = {
     local digits = #(n1:match("%.(%d+)$") or "")
     return math.abs(tonumber(n1) - tonumber(n2)) <= 0.5 * 10 ^ -digits + 1e-9
   end,
-  title = function(name, _, to) return name .. " " .. (to.valueString or tostring(to.value)) end,
+  title = function(name, _, to) return name .. " " .. base.minus_text(to.valueString or tostring(to.value)) end,
 }
 
 -- A value that is a place may be given as text, read as Renoise 3.5.4 reads it (lab, 2026-10-19): the number it begins with
