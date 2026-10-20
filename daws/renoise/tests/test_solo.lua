@@ -134,7 +134,8 @@ test("track solo: a group's track brings its group; un-soloing the group ends th
   mock.ops.mute_track(4, ACTIVE)
   local same = solo(peer, E, 1, true)
   eq(states(), "Kick=A* Hat=O Drums=A* Bass=A Pad=O Send 1=O")
-  note_has(same.result.display, "It was soloed on its own already: nothing changed.")
+  eq(same.result.display.note, "It was soloed on its own already: nothing changed.")
+  eq(same.result.display.unchanged, true, "no row in HISTORY for it")
   H.no_dialogs()
 end)
 

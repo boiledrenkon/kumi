@@ -401,21 +401,23 @@ local function solo_apply(song, env, input, fence, desc)
     pcall(solo_write_back, song, wanted, places, plan.index, soloed)
     fail("failed", "Renoise kept " .. plan.name .. "'s solo as it was")
   end
-  local notes = solo_effects(song, plan, before, after)
-  if #plan.with > 0 then
-    notes[#notes + 1] = string.format("A script solos one track at a time: %s %s on instead.", solo_names(song, plan.with), #plan.with == 1 and "is" or "are")
-  end
+  local display = { title = solo_title(song, plan), before = { solo = soloed }, after = { solo = plan.solo } }
   if same then
-    notes[#notes + 1] = "It was soloed on its own already: nothing changed."
-  elseif #notes > 0 then
-    notes[#notes + 1] = "Kumi's undo puts each track back as it was."
+    -- (nothing the song keeps changed: no row in HISTORY, nothing to undo)
+    display.unchanged, display.note = true, "It was soloed on its own already: nothing changed."
+  else
+    local notes = solo_effects(song, plan, before, after)
+    if #plan.with > 0 then
+      notes[#notes + 1] = string.format("A script solos one track at a time: %s %s on instead.", solo_names(song, plan.with), #plan.with == 1 and "is" or "are")
+    end
+    if #notes > 0 then notes[#notes + 1] = "Kumi's undo puts each track back as it was." end
+    notes[#notes + 1] = NOT_UNDOABLE
+    display.note = table.concat(notes, " ")
   end
-  notes[#notes + 1] = NOT_UNDOABLE
   local applied = {}
   for k, e in ipairs(after) do applied[k] = { t = e.t, mute = e.mute, solo = e.solo } end
   return {
-    applied = { solo = plan.track.solo_state == true, tracks = applied },
-    display = { title = solo_title(song, plan), before = { solo = soloed }, after = { solo = plan.solo }, note = table.concat(notes, " ") },
+    applied = { solo = plan.track.solo_state == true, tracks = applied }, display = display,
     undo = { desc = desc, entry = false },
     target = target(env, plan.index),
   }
