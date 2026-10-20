@@ -487,6 +487,13 @@ impl Reads {
         if id != TrackId::Master {
             body["parentSendOffset"] = (reaper.track_value(track, "C_MAINSEND_OFFS") as i64).into();
             body["parentSendChannels"] = (reaper.track_value(track, "C_MAINSEND_NCH") as i64).into();
+            // (r-tracks) Its MIDI to a hardware output, when it sends any: the device's number and name, and the channel.
+            let midi_out = reaper.track_value(track, "I_MIDIHWOUT") as i64;
+            if midi_out >= 0 {
+                let device = (midi_out >> 5) & 31;
+                let name = reaper.midi_outputs().into_iter().find(|(dev, _)| *dev as i64 == device).map(|(_, name)| rows::clip(&name));
+                body["midiOut"] = json!({"device": device, "name": name, "channel": midi_out & 31});
+            }
         }
         if total > routes.len() {
             body["routeCount"] = total.into();
@@ -1099,6 +1106,11 @@ mod tests {
         );
         let drums = body(&reads, json!({"kind": "routing", "ref": "r:track:{AAAA}"})).unwrap();
         assert_eq!(refs_of(&drums["routes"]), ["r:send:{AAAA}:0:{DDDD}"]);
+        // (r-tracks) A track's MIDI hardware output, when it has one.
+        assert!(drums.get("midiOut").is_none());
+        fake::with(|s| s.tracks[0].extra.insert("I_MIDIHWOUT".into(), 4.0));
+        let drums = body(&reads, json!({"kind": "routing", "ref": "r:track:{AAAA}"})).unwrap();
+        assert_eq!(drums["midiOut"], json!({"device": 0, "name": "Fake Synth", "channel": 4}));
         assert_eq!((&drums["routes"][0]["otherName"], &drums["parentSend"]), (&json!("Reverb"), &json!(true)));
         // The master has nowhere to send; with no ref the selected track is the one.
         assert_eq!(body(&reads, json!({"kind": "routing", "ref": "r:track:master"})).unwrap()["parentSend"], false);

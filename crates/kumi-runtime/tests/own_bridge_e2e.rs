@@ -683,3 +683,196 @@ async fn a_change_the_daws_undo_put_back_is_undone_again_and_an_uncertain_one_is
         })
         .await;
 }
+
+// (r-tracks) An action REAPER makes no undo point of is no row in HISTORY; one it does is a row only REAPER's undo takes
+// back; and a save is an action, with the refs it names lengthened for the host.
+#[tokio::test(flavor = "current_thread")]
+async fn reapers_actions_make_a_row_only_with_a_point_and_saves_are_no_change() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Reaper);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = ReaperScript::new(3, 0);
+            let mut config = script.config(secret, "/lab/REAPER");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(InProcess { host: Arc::new(Host::new(Daw::Reaper, home.path())), id: Cell::new(0) });
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let reaper = create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let tracks: Value = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"].clone();
+            let first = tracks[1]["ref"].as_str().unwrap().to_owned();
+            let plan = tool(&observed, "make_changes");
+            // Unselect all: no point of REAPER's, so no row, and the answer says why.
+            let done =
+                plan.execute(input(json!({"steps": [{"tool": "run_action", "input": {"action": 40297}}]})), Signal::new()).await.unwrap();
+            assert!(!done.is_error && done.text.contains("no row in HISTORY"), "{}", done.text);
+            assert!(told.borrow().is_empty(), "no row");
+            // Insert track: a row, which only REAPER's undo takes back.
+            let done =
+                plan.execute(input(json!({"steps": [{"tool": "run_action", "input": {"action": 40001}}]})), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let rows: Vec<(String, Option<String>)> = told.borrow().iter().map(|r| (r.title.clone(), r.note.clone())).collect();
+            assert_eq!(
+                rows,
+                [(
+                    "Ran action “Track: Insert new track”".to_string(),
+                    Some("Only REAPER's own undo can take this back (Edit > Undo).".to_string())
+                )]
+            );
+            // Saving tracks as a template: an action, its track refs the host's long ones.
+            let done = plan
+                .execute(
+                    input(json!({"steps": [{"tool": "save_track_template", "input": {"trackRefs": [first], "name": "Kit"}}]})),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let asked = script.asked();
+            let (_, params) = asked.iter().rev().find(|(method, _)| method == "track_template_save").expect("asked");
+            assert_eq!(params["trackRefs"], json!(["r:track:{T0001}"]));
+            assert!(params["epoch"].is_string(), "{params}");
+            assert_eq!(told.borrow().len(), 1, "no row for a save");
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}
+
+/// The host in process, with the tools it was asked and what each answered, in order.
+struct Recorded {
+    inner: InProcess,
+    calls: RefCell<Vec<(String, Value, Value)>>,
+}
+#[async_trait::async_trait(?Send)]
+impl McpEndpoint for Recorded {
+    fn pid(&self) -> Option<u32> {
+        self.inner.pid()
+    }
+    fn server_info(&self) -> Option<kumi_runtime::mcp::types::Implementation> {
+        self.inner.server_info()
+    }
+    async fn list(&self, cursor: Option<&str>, signal: Signal) -> Result<kumi_runtime::mcp::types::ListToolsResult, RuntimeError> {
+        self.inner.list(cursor, signal).await
+    }
+    async fn call(&self, name: &str, args: JsonObject, signal: Signal) -> Result<kumi_runtime::mcp::types::CallToolResult, RuntimeError> {
+        let answer = self.inner.call(name, args.clone(), signal).await;
+        let shown = answer.as_ref().ok().and_then(|result| serde_json::to_value(result).ok()).unwrap_or(Value::Null);
+        self.calls.borrow_mut().push((name.to_string(), Value::Object(args), shown));
+        answer
+    }
+    fn on_catalog_changed(&self, listener: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        self.inner.on_catalog_changed(listener)
+    }
+    fn on_disconnect(&self, listener: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        self.inner.on_disconnect(listener)
+    }
+    fn on_live_event(&self, listener: Rc<dyn Fn(JsonObject)>) -> Box<dyn Fn()> {
+        self.inner.on_live_event(listener)
+    }
+    fn stderr_status(&self) -> kumi_runtime::mcp::client::StderrStatus {
+        self.inner.stderr_status()
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        self.inner.close().await
+    }
+}
+
+impl Recorded {
+    /// The transactions the host was told to release.
+    fn released(&self) -> Vec<String> {
+        self.calls
+            .borrow()
+            .iter()
+            .filter(|(name, _, _)| name == "change_release")
+            .flat_map(|(_, args, _)| args["transactionIds"].as_array().cloned().unwrap_or_default())
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// The transaction of the last answer to `tool` whose structured answer `pick` takes.
+    fn last_transaction(&self, tool: &str, pick: impl Fn(&Value) -> bool) -> Option<String> {
+        self.calls.borrow().iter().rev().find(|(name, _, answer)| name == tool && pick(&answer["structuredContent"])).and_then(
+            |(_, args, answer)| {
+                answer["structuredContent"]["transactionId"].as_str().or_else(|| args["transactionId"].as_str()).map(str::to_owned)
+            },
+        )
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_m3_kinds_no_op_and_change_are_as_before_and_an_action_reaper_made_no_point_of_is_released_at_the_host() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let home = tempfile::tempdir().unwrap();
+            let paths = BridgePaths::new(home.path(), Daw::Reaper);
+            let secret = ensure_secret(&paths.secret()).unwrap();
+            let script = ReaperScript::new(3, 0);
+            let mut config = script.config(secret, "/lab/REAPER");
+            config.discovery_dir = Some(paths.discovery());
+            let simulator = Simulator::start(config).await.unwrap();
+            let endpoint = Rc::new(Recorded {
+                inner: InProcess { host: Arc::new(Host::new(Daw::Reaper, home.path())), id: Cell::new(0) },
+                calls: RefCell::default(),
+            });
+            let recorded = endpoint.clone();
+            let connect: Connect = Rc::new(move |_| {
+                let endpoint = endpoint.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            });
+            let told: Rc<RefCell<Vec<ChangeRecord>>> = Rc::default();
+            let into = told.clone();
+            let mut context = IntegrationContext::new(Rc::new(|_, _| {}));
+            context.on_change = Some(Rc::new(move |record| into.borrow_mut().push(record)));
+            let reaper = create_reaper_integration(OwnOptions { context, kumi_home: home.path().into(), connect: Some(connect) });
+            reaper.start(Signal::new()).await.unwrap();
+            let observed = reaper.observe(Signal::new(), None).await.unwrap();
+            let tracks: Value = serde_json::from_str::<Value>(&observed.context).unwrap()["tracks"].clone();
+            let first = tracks[1]["ref"].as_str().unwrap().to_owned();
+            let plan = tool(&observed, "make_changes");
+            let settle = || async {
+                for _ in 0..200 {
+                    tokio::task::yield_now().await;
+                }
+            };
+            // An M3 kind asked for what is so already: the preview says so, nothing is applied, no row, the host forgets it.
+            let volume = |db: f64| input(json!({"steps": [{"tool": "track_volume", "input": {"ref": first, "volumeDb": db}}]}));
+            let done = plan.execute(volume(0.0), Signal::new()).await.unwrap();
+            assert!(!done.is_error && done.text.contains("it was so already"), "{}", done.text);
+            settle().await;
+            assert!(told.borrow().is_empty(), "no row");
+            assert!(recorded.calls.borrow().iter().all(|(name, _, _)| name != "change_apply"), "nothing applied");
+            let previewed = recorded.last_transaction("change_preview", |_| true).expect("a preview");
+            assert!(recorded.released().contains(&previewed), "the host forgets the preview");
+            // An M3 change: applied, a row, as ever (its apply says nothing of unchanged).
+            let done = plan.execute(volume(-6.0), Signal::new()).await.unwrap();
+            assert!(!done.is_error, "{}", done.text);
+            let applied = recorded.last_transaction("change_apply", |_| true).expect("an apply");
+            settle().await;
+            assert_eq!(told.borrow().len(), 1);
+            assert!(!recorded.released().contains(&applied), "its record is kept for its undo");
+            // An action REAPER made no point of: applied, no row, and the host forgets its record too.
+            let done =
+                plan.execute(input(json!({"steps": [{"tool": "run_action", "input": {"action": 40297}}]})), Signal::new()).await.unwrap();
+            assert!(!done.is_error && done.text.contains("no row in HISTORY"), "{}", done.text);
+            let action = recorded
+                .last_transaction("change_apply", |answer| answer["display"]["unchanged"] == true)
+                .expect("an apply that changed nothing the project keeps");
+            settle().await;
+            assert!(recorded.released().contains(&action), "the host forgets it");
+            assert_eq!(told.borrow().len(), 1, "no row for it");
+            reaper.close().await.unwrap();
+            simulator.stop();
+        })
+        .await;
+}

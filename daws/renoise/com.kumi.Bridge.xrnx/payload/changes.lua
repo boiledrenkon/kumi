@@ -10,7 +10,13 @@ import("changes_notes")
 import("changes_layout")
 import("changes_slots")
 import("changes_lua")
-import("changes_instruments")
+-- n-instruments: instruments, samples and keyzones, modulation and sample FX, phrases and their scripts, plug-in and MIDI
+-- instruments
+local instruments_ = import("changes_instruments")
+import("changes_samples")
+import("changes_modfx")
+import("changes_phrases")
+import("changes_plugins")
 -- M4 (n-song)
 import("changes_patterns")
 local sequence_ = import("changes_sequence")
@@ -45,17 +51,7 @@ function M.preview(params, env)
   }
 end
 
-function M.apply(params, env)
-  local song = base.context(params, env)
-  local spec = kind_of(params)
-  local input, fence = base.need_object(params, "input"), base.need_object(params, "fence")
-  local desc = base.need_text(params, "desc")
-  local done
-  if spec.custom then
-    done = spec.apply(song, env, input, fence, desc)
-  else
-    done = base.prop_apply(song, env, spec, input, fence, desc)
-  end
+local function applied_answer(env, spec, desc, done)
   local answer = {
     epoch = env.epoch(), layout = env.layout(), applied = done.applied, display = done.display, undo = done.undo,
     target = done.target,
@@ -69,6 +65,31 @@ function M.apply(params, env)
     })
   end
   return answer
+end
+
+function M.apply(params, env)
+  local song = base.context(params, env)
+  local spec = kind_of(params)
+  local input, fence = base.need_object(params, "input"), base.need_object(params, "fence")
+  local desc = base.need_text(params, "desc")
+  local done
+  if spec.custom then
+    done = spec.apply(song, env, input, fence, desc)
+  else
+    done = base.prop_apply(song, env, spec, input, fence, desc)
+  end
+  -- (n-instruments: a change that reads in slices before its one writing callback, or waits for Renoise after it, is a job)
+  if done.kumi_job then
+    local work = done.kumi_job
+    return { kumi_job = function(job) return applied_answer(env, spec, desc, work(job)) end }
+  end
+  return applied_answer(env, spec, desc, done)
+end
+
+-- n-instruments: the kinds whose restore finds what it changed by its places, whatever became of its refs.
+function M.restores_by_place(kind)
+  local spec = type(kind) == "string" and base.KINDS[kind] or nil
+  return spec ~= nil and spec.by_place == true
 end
 
 function M.restore(params, env)
@@ -187,9 +208,13 @@ M.loose_refs = {}
 for kind in pairs(sequence_.KINDS) do M.loose_refs[kind] = { "created" } end
 for _, kind in ipairs({ "pattern-name", "pattern-length", "slot-color", "pattern-alias", "automation-write" }) do M.loose_refs[kind] = { "target" } end
 
+-- n-instruments: an instrument saved to a file (an action: no change, no undo).
+M.save_instrument = instruments_.save
+
 -- The journal, for the bridge's notifiers.
 M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_new, base.journal_reset, base.journal_take, base.journal_active
 M.journal_track_event, M.journal_check, M.journal_device_event = base.journal_track_event, base.journal_check, base.journal_device_event
 M.journal_pattern_event, M.journal_sequence_event = base.journal_pattern_event, base.journal_sequence_event
+M.journal_list_event = base.journal_list_event -- (n-instruments)
 
 return M

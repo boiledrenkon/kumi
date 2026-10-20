@@ -209,13 +209,7 @@ case!(a_renoise_session_never_speaks_lives_words, async {
         (json!({"track":track,"trackRef":"3:track:2","mainView":{"kind":"mixer","label":"Mixer"}}), None),
         (
             json!({"track":track,"trackRef":"3:track:2","mainView":{"kind":"instrument","label":"Instrument"},"item":{"kind":"sample","itemRef":"3:instrument:1","name":"Kit"}}),
-            Some(FocusBody::Keyzones(KeyzoneMap {
-                item_ref: "3:instrument:1".into(),
-                name: "Kit".into(),
-                zones: vec![],
-                macros: vec![],
-                phrases: vec![],
-            })),
+            Some(FocusBody::Keyzones(KeyzoneMap { item_ref: "3:instrument:1".into(), name: "Kit".into(), ..Default::default() })),
         ),
     ];
     let seen = ["Ask Kumi about your song", "paused while Renoise plays", "Kumi closed. Each song's conversation continues next time."];

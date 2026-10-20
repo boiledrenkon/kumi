@@ -368,6 +368,11 @@ local function device(data)
   return proxy
 end
 
+-- (n-instruments: the instruments' mock, which builds on the helpers above)
+assert(loadfile(M.tests_dir .. "mock_instruments.lua"))()(M, object, {
+  line = line, device = device, parameter = parameter, out_of_range = out_of_range, list = list, note_data = note_data,
+})
+
 -- The observable of a note column's mute or name: one per column, kept in the track's data.
 local function column_observable(t, kind, c)
   if type(c) ~= "number" or c < 1 or c > 12 or t.kind == "master" or t.kind == "send" then out_of_range("column", c) end
@@ -438,23 +443,10 @@ function M.make_song(options)
   d.sections, d.muted, d.section_names = {}, {}, {}
   d.new_pattern = new_pattern
 
-  -- Instruments
+  -- Instruments (n-instruments: mock_instruments.lua builds them)
   d.instruments = {}
   local function new_instrument(spec)
-    spec = spec or {}
-    local instrument = {
-      name = spec.name or "", samples = {}, phrases = {}, macros = {}, plugin = spec.plugin, tab = spec.tab, midi = spec.midi,
-      name_observable = simple_observable(), samples_observable = simple_observable(), phrases_observable = simple_observable(),
-    }
-    for k = 1, 8 do instrument.macros[k] = { name = "Macro " .. k, value = 0, name_observable = simple_observable(), value_observable = simple_observable() } end
-    for k = 1, spec.samples or 0 do
-      instrument.samples[k] = { name = "Sample " .. k, base_note = 48, note_range = { 0, 119 }, velocity_range = { 0, 127 },
-        loop_mode = 1, mute_group = 0 }
-    end
-    for k = 1, spec.phrases or 0 do
-      instrument.phrases[k] = { name = "Phrase " .. k, lines = 16, lpb = 4, key_tracking = 1, looping = true,
-        note_columns = 1, effect_columns = 1, data = {} }
-    end
+    local instrument = M.instrument_data(spec)
     d.instruments[#d.instruments + 1] = instrument
     return instrument
   end
@@ -971,153 +963,8 @@ function M.make_song(options)
     })
   end
 
-  -- A member kept in the song's data: read live, written with its undo step and its notifier (`watched` holds the observables).
-  local function live(t, field, default)
-    return function()
-      local value = t[field]
-      if value == nil then return default end
-      return value
-    end
-  end
-  local function kept(t, field, watched, copy)
-    return function(value)
-      if copy then value = copy(value) end
-      local old = t[field]
-      t[field] = value
-      if watched[field] then M.fire(watched[field]) end
-      M.record(function()
-        t[field] = old
-        if watched[field] then M.fire(watched[field]) end
-      end, function()
-        t[field] = value
-        if watched[field] then M.fire(watched[field]) end
-      end)
-    end
-  end
-  local function pair(v) return { v[1], v[2] } end
-
-  -- (what is watched lives in the data: the proxies are made anew on every read)
-  local SAMPLE_FIELDS = { name = "", volume = 1, panning = 0.5, transpose = 0, fine_tune = 0, beat_sync_enabled = false,
-    beat_sync_lines = 16, loop_mode = 1, new_note_action = 1, mute_group = 0, autofade = false, oneshot = false }
-  local MAPPING_FIELDS = { base_note = 48, note_range = { 0, 119 }, velocity_range = { 0, 127 }, layer = 1,
-    map_key_to_pitch = true, map_velocity_to_volume = true }
-  local function sample_object(i, s)
-    local sample = d.instruments[i].samples[s]
-    sample.observables = sample.observables or {}
-    local watched = sample.observables
-    local fields, getters, setters = {}, {}, {}
-    for key, default in pairs(SAMPLE_FIELDS) do
-      watched[key] = watched[key] or M.observable()
-      fields[key .. "_observable"] = watched[key]
-      getters[key], setters[key] = live(sample, key, default), kept(sample, key, watched)
-    end
-    local mapping_fields, mapping_getters, mapping_setters = {}, {}, {}
-    for key, default in pairs(MAPPING_FIELDS) do
-      watched[key] = watched[key] or M.observable()
-      mapping_fields[key .. "_observable"] = watched[key]
-      mapping_getters[key] = live(sample, key, default)
-      mapping_setters[key] = kept(sample, key, watched, type(default) == "table" and pair or nil)
-    end
-    fields.sample_mapping = object("renoise.SampleMapping", mapping_fields, mapping_getters, mapping_setters)
-    return object("renoise.Sample", fields, getters, setters)
-  end
-
-  local function phrase_object(i, ph)
-    local phrase = d.instruments[i].phrases[ph]
-    phrase.notifiers = phrase.notifiers or {}
-    phrase.observables = phrase.observables or {}
-    local watched = phrase.observables
-    for _, key in ipairs({ "name", "number_of_lines", "lpb", "visible_note_columns", "visible_effect_columns" }) do
-      watched[key] = watched[key] or M.observable()
-    end
-    return object("renoise.InstrumentPhrase", {
-      name = phrase.name, number_of_lines = phrase.lines, lpb = phrase.lpb, key_tracking = phrase.key_tracking,
-      looping = phrase.looping, visible_note_columns = phrase.note_columns, visible_effect_columns = phrase.effect_columns,
-      name_observable = watched.name, number_of_lines_observable = watched.number_of_lines, lpb_observable = watched.lpb,
-      visible_note_columns_observable = watched.visible_note_columns,
-      visible_effect_columns_observable = watched.visible_effect_columns,
-      line = function(_, k)
-        if type(k) ~= "number" or k < 1 or k > phrase.lines then out_of_range("phrase line", k) end
-        return line(phrase.data[k])
-      end,
-      add_line_notifier = function(_, fn)
-        for _, existing in ipairs(phrase.notifiers) do
-          if existing == fn then error("the notifier was already added", 2) end
-        end
-        phrase.notifiers[#phrase.notifiers + 1] = fn
-      end,
-      remove_line_notifier = function(_, fn)
-        for n, existing in ipairs(phrase.notifiers) do
-          if existing == fn then table.remove(phrase.notifiers, n) return end
-        end
-        error("the notifier was not added", 2)
-      end,
-      has_line_notifier = function(_, fn)
-        for _, existing in ipairs(phrase.notifiers) do
-          if existing == fn then return true end
-        end
-        return false
-      end,
-    })
-  end
-
-  instrument_object = function(i)
-    local instrument = type(i) == "number" and d.instruments[i]
-    if not instrument then out_of_range("instrument", i) end
-    return object("renoise.Instrument", {
-      name_observable = instrument.name_observable, samples_observable = instrument.samples_observable,
-      phrases_observable = instrument.phrases_observable,
-      active_tab = instrument.tab or 1,
-      midi_output_properties = object("renoise.InstrumentMidiOutputProperties", {
-        device_name = (instrument.midi or {}).device or "", instrument_type = (instrument.midi or {}).type or 1,
-        channel = (instrument.midi or {}).channel or 1, program = (instrument.midi or {}).program or 0,
-        bank = (instrument.midi or {}).bank or 0, transpose = (instrument.midi or {}).transpose or 0,
-        delay = (instrument.midi or {}).delay or 0, duration = (instrument.midi or {}).duration or 0,
-      }),
-      plugin_properties = object("renoise.InstrumentPluginProperties", {
-        plugin_loaded = instrument.plugin ~= nil,
-        plugin_device = instrument.plugin and device(instrument.plugin) or M.NIL,
-      }),
-      sample = function(_, s)
-        if not instrument.samples[s] then out_of_range("sample", s) end
-        return sample_object(i, s)
-      end,
-      phrase = function(_, ph)
-        if not instrument.phrases[ph] then out_of_range("phrase", ph) end
-        return phrase_object(i, ph)
-      end,
-      macro = function(_, k)
-        if not instrument.macros[k] then out_of_range("macro", k) end
-        local macro = instrument.macros[k]
-        local watched = { name = macro.name_observable, value = macro.value_observable }
-        return object("renoise.InstrumentMacro", { name_observable = macro.name_observable, value_observable = macro.value_observable },
-          { name = live(macro, "name", ""), value = live(macro, "value", 0) },
-          { name = kept(macro, "name", watched), value = kept(macro, "value", watched) })
-      end,
-    }, {
-      name = function() return instrument.name end,
-      samples = function()
-        local samples = {}
-        for s in ipairs(instrument.samples) do samples[s] = sample_object(i, s) end
-        return samples
-      end,
-      phrases = function()
-        local phrases = {}
-        for ph in ipairs(instrument.phrases) do phrases[ph] = phrase_object(i, ph) end
-        return phrases
-      end,
-      macros = function()
-        local macros = {}
-        for k, macro in ipairs(instrument.macros) do
-          macros[k] = object("renoise.InstrumentMacro", { name = macro.name, value = macro.value, name_observable = macro.name_observable,
-            value_observable = macro.value_observable })
-        end
-        return macros
-      end,
-    }, {
-      name = kept(instrument, "name", { name = instrument.name_observable }),
-    })
-  end
+  -- (n-instruments: an instrument's proxy, with its samples, phrases, sets, chains, plug-in and MIDI output, is mock_instruments.lua's)
+  instrument_object = function(i) return M.instrument_proxy(i) end
 
   d.sequence_observable, d.assignments_observable, d.mutes_observable =
     simple_observable(), simple_observable(), simple_observable()
@@ -1543,6 +1390,13 @@ function M.make_song(options)
     trigger_sample_note_off = function(_, i, sample, t, note)
       M.triggers[#M.triggers + 1] = { "sample off", i, t, tostring(note), nil, sample }
     end,
+    -- (n-instruments: Renoise renumbers the notes that play the instruments after the place)
+    insert_instrument_at = function(_, index)
+      M.instrument_list_op("insert", index, nil, nil, true)
+      return instrument_object(index)
+    end,
+    delete_instrument_at = function(_, index) M.instrument_list_op("remove", index, nil, nil, true) end,
+    swap_instruments_at = function(_, a, b) M.instrument_list_op("swap", a, b, nil, true) end,
     describe_undo = function(_, text) d.undo.desc = text end,
     can_undo = function() return #d.undo.stack > 0 end,
     can_redo = function() return #d.undo.redo > 0 end,
@@ -1688,16 +1542,14 @@ end
 function ops.set_macro(i, k, value)
   local macro = M.data.instruments[i].macros[k]
   macro.value = value
-  fire(macro.value_observable)
+  fire(M.obs(macro, "value"))
 end
 
 -- A sample's mapping: field is note_range, velocity_range, base_note, layer, map_key_to_pitch or map_velocity_to_volume.
 function ops.set_mapping(i, s, field, value)
   local sample = M.data.instruments[i].samples[s]
-  sample.observables = sample.observables or {}
   sample[field] = value
-  sample.observables[field] = sample.observables[field] or M.observable()
-  fire(sample.observables[field])
+  fire(M.obs(sample, field))
 end
 
 function ops.set_phrase_note(i, ph, k, column, given)
@@ -1712,9 +1564,7 @@ end
 function ops.set_phrase(i, ph, field, value)
   local phrase = M.data.instruments[i].phrases[ph]
   phrase[field == "number_of_lines" and "lines" or field] = value
-  phrase.observables = phrase.observables or {}
-  phrase.observables[field] = phrase.observables[field] or M.observable()
-  fire(phrase.observables[field])
+  fire(M.obs(phrase, field))
 end
 
 local function track_spec(spec)
@@ -2221,43 +2071,36 @@ end
 
 function ops.insert_sample(i, spec)
   local instrument = M.data.instruments[i]
-  local sample = { name = "Sample " .. (#instrument.samples + 1), base_note = 48, note_range = { 0, 119 },
-    velocity_range = { 0, 127 }, loop_mode = 1, mute_group = 0 }
-  for k, v in pairs(spec or {}) do sample[k] = v end
-  instrument.samples[#instrument.samples + 1] = sample
+  local given = { name = "Sample " .. (#instrument.samples + 1) }
+  for k, v in pairs(spec or {}) do given[k] = v end
+  instrument.samples[#instrument.samples + 1] = M.sample_data(given)
+  instrument.samples_observable = instrument.samples_observable or M.observable()
   fire(instrument.samples_observable, { type = "insert", index = #instrument.samples })
 end
 
 function ops.insert_phrase(i)
   local instrument = M.data.instruments[i]
-  instrument.phrases[#instrument.phrases + 1] = { name = "Phrase " .. (#instrument.phrases + 1), lines = 16, lpb = 4,
-    key_tracking = 1, looping = true, note_columns = 1, effect_columns = 1, data = {} }
+  instrument.phrases[#instrument.phrases + 1] = M.phrase_data({ name = "Phrase " .. (#instrument.phrases + 1) })
+  instrument.phrases_observable = instrument.phrases_observable or M.observable()
   fire(instrument.phrases_observable, { type = "insert", index = #instrument.phrases })
 end
 
+-- The producer's instrument list edits: Renoise renumbers the notes as for the API's (an undo step of their own).
 function ops.swap_instruments(a, b)
-  local instruments = M.data.instruments
-  instruments[a], instruments[b] = instruments[b], instruments[a]
-  fire(song_fields().instruments_observable, { type = "swap", index1 = a, index2 = b })
+  M.instrument_list_op("swap", a, b, nil, true)
 end
 
 function ops.insert_instrument(spec)
-  M.data.new_instrument(spec)
-  fire(song_fields().instruments_observable, { type = "insert", index = #M.data.instruments })
+  M.instrument_list_op("insert", #M.data.instruments + 1, nil, spec, true)
 end
 
 -- An instrument made at `i` (Renoise's insert_instrument_at): those after it move up one.
 function ops.insert_instrument_at(i, spec)
-  M.data.new_instrument(spec)
-  local instruments = M.data.instruments
-  table.insert(instruments, i, table.remove(instruments))
-  fire(song_fields().instruments_observable, { type = "insert", index = i })
+  M.instrument_list_op("insert", i, nil, spec, true)
 end
 
 function ops.remove_instrument(i)
-  local instruments = M.data.instruments
-  table.remove(instruments, i)
-  fire(song_fields().instruments_observable, { type = "remove", index = i })
+  M.instrument_list_op("remove", i, nil, nil, true)
 end
 
 function ops.remove_pattern(p)
@@ -2280,7 +2123,7 @@ end
 function ops.rename_instrument(i, name)
   local instrument = M.data.instruments[i]
   instrument.name = name
-  fire(instrument.name_observable)
+  fire(M.obs(instrument, "name"))
 end
 
 function ops.select(key, value)

@@ -663,6 +663,7 @@
           "epoch": "1",
           "items": [
             {
+              "chainCount": 0,
               "index": 1,
               "kind": "sample",
               "macros": [
@@ -672,81 +673,100 @@
                 },
                 {
                   "name": "Macro 2",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 3",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 4",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 5",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 6",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 7",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 8",
-                  "value": 0
+                  "value": 0.5
                 }
               ],
+              "modsetCount": 1,
+              "monophonic": false,
               "name": "Kit",
+              "overlap": "all",
               "phraseCount": 1,
+              "phrasePlayback": "program",
               "plugin": null,
+              "quantize": "none",
               "ref": "1:instrument:1",
-              "sampleCount": 2
+              "sampleCount": 2,
+              "transpose": 0,
+              "volumeDb": 0
             },
             {
+              "chainCount": 0,
               "index": 2,
               "kind": "plugin",
               "macros": [
                 {
                   "name": "Macro 1",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 2",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 3",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 4",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 5",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 6",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 7",
-                  "value": 0
+                  "value": 0.5
                 },
                 {
                   "name": "Macro 8",
-                  "value": 0
+                  "value": 0.5
                 }
               ],
+              "modsetCount": 1,
+              "monophonic": false,
               "name": "Pad",
+              "overlap": "all",
               "phraseCount": 0,
+              "phrasePlayback": "program",
               "plugin": "Serum",
+              "pluginChannel": 1,
+              "pluginParamCount": 0,
+              "pluginPath": "Audio/Generators/VST3/Serum",
+              "pluginTranspose": 0,
+              "quantize": "none",
               "ref": "1:instrument:2",
-              "sampleCount": 1
+              "sampleCount": 1,
+              "transpose": 0,
+              "volumeDb": 0
             }
           ],
           "layout": 0
@@ -768,41 +788,59 @@
           "items": [
             {
               "baseNote": 48,
+              "fineTune": 0,
+              "frames": 0,
+              "fxChainRef": null,
               "index": 1,
+              "interpolation": "cubic",
               "layer": "note-on",
               "loop": "off",
               "mapKeyToPitch": true,
               "mapVelocityToVolume": true,
+              "modulationSetRef": null,
               "muteGroup": 0,
               "name": "Sample 1",
+              "nna": "cut",
               "noteRange": [
                 0,
                 119
               ],
+              "panning": 0,
               "ref": "1:sample:1.1",
+              "transpose": 0,
               "velocityRange": [
                 0,
                 127
-              ]
+              ],
+              "volumeDb": 0
             },
             {
               "baseNote": 48,
+              "fineTune": 0,
+              "frames": 0,
+              "fxChainRef": null,
               "index": 2,
+              "interpolation": "cubic",
               "layer": "note-on",
               "loop": "off",
               "mapKeyToPitch": true,
               "mapVelocityToVolume": true,
+              "modulationSetRef": null,
               "muteGroup": 0,
               "name": "Sample 2",
+              "nna": "cut",
               "noteRange": [
                 0,
                 119
               ],
+              "panning": 0,
               "ref": "1:sample:1.2",
+              "transpose": 0,
               "velocityRange": [
                 0,
                 127
-              ]
+              ],
+              "volumeDb": 0
             }
           ],
           "layout": 0
@@ -823,15 +861,76 @@
           "epoch": "1",
           "items": [
             {
+              "autoseek": false,
+              "baseNote": 48,
+              "effectColumns": 1,
               "index": 1,
+              "keyRange": null,
               "keyTracking": "none",
               "lines": 16,
+              "loopEnd": 16,
+              "loopStart": 1,
               "looping": true,
               "lpb": 4,
               "name": "Phrase 1",
-              "ref": "1:phrase:1.1"
+              "noteColumns": 1,
+              "playback": "pattern",
+              "ref": "1:phrase:1.1",
+              "shuffle": 0
             }
           ],
+          "layout": 0
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "modset",
+          "parent": "1:instrument:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [
+            {
+              "devices": [],
+              "filterType": "None",
+              "filterVersion": 3,
+              "index": 1,
+              "inputs": {
+                "cutoff": 63.5,
+                "drive": 0,
+                "panning": 0,
+                "pitch": 0,
+                "resonance": 63.5,
+                "volume": 1
+              },
+              "name": "Set 01",
+              "pitchRange": 12,
+              "ref": "1:modset:1.1"
+            }
+          ],
+          "layout": 0
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "read",
+        "params": {
+          "kind": "chain",
+          "parent": "1:instrument:1"
+        }
+      },
+      "response": {
+        "ok": true,
+        "result": {
+          "epoch": "1",
+          "items": [],
           "layout": 0
         }
       }
@@ -1827,6 +1926,7 @@
       "response": {
         "ok": true,
         "result": {
+          "chains": 0,
           "epoch": "1",
           "keyzones": [
             {
@@ -1856,6 +1956,7 @@
               ]
             }
           ],
+          "kind": "sample",
           "layout": 0,
           "macros": [
             {
@@ -1864,34 +1965,40 @@
             },
             {
               "name": "Macro 2",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 3",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 4",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 5",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 6",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 7",
-              "value": 0
+              "value": 0.5
             },
             {
               "name": "Macro 8",
-              "value": 0
+              "value": 0.5
             }
           ],
+          "modsets": 1,
           "name": "Kit",
+          "overlap": "all",
+          "phrasePlayback": "program",
+          "phraseRanges": [
+            null
+          ],
           "phrases": [
             "Phrase 1"
           ],
@@ -1946,7 +2053,7 @@
       "response": {
         "error": {
           "code": "bad-params",
-          "message": "unknown kind nonsense (song, track, sequence, pattern, line, automation, instrument, sample, phrase, device, param)"
+          "message": "unknown kind nonsense (song, track, sequence, pattern, line, automation, instrument, sample, phrase, device, param, modset, chain)"
         },
         "ok": false
       }

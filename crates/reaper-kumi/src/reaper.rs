@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use crate::api::{self, Api, MediaItem, MediaItem_Take, MediaTrack, ReaProject, TrackEnvelope};
 
 pub mod generic;
+// (r-tracks) M4's track, routing, project and action calls.
+mod io;
 mod objects;
 mod write;
 pub use objects::*;

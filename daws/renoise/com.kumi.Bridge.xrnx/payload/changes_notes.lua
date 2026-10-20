@@ -1170,4 +1170,11 @@ base.register({
 -- (the plain rule's words, for the other kinds that write lines: M4 n-song)
 M.CHANGED = CHANGED
 
+-- n-instruments: the cells' text, plan and writes, for a phrase's lines (changes_phrases.lua): a phrase's lines are PatternLines.
+M.cells = {
+  parse_cells = parse_cells, add_cleared = add_cleared, plan_of = plan_of, read_cell = read_cell, write_cell = write_cell,
+  same_cell = same_cell, same_cells = same_cells, is_empty_cell = is_empty_cell, fingerprint = fingerprint, writes_of = writes_of,
+  counts_of = counts_of, needs_of = needs_of, lines_in = lines_in,
+}
+
 return M

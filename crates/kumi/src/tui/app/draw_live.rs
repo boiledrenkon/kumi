@@ -489,12 +489,74 @@ impl TuiApp {
         }
         row
     }
-    /// An instrument's samples on the keyboard: each zone's notes and velocities, then its macros and phrases.
+    /// An instrument's samples on the keyboard: a map of its keyzones (keys across, velocities up), each zone's notes and
+    /// velocities, then its macros and phrases with their keys.
     fn draw_keyzones(&self, screen: &mut Screen, x: i32, y: i32, width: i32, map: &KeyzoneMap, most: i32) -> i32 {
         let profile = crate::daw::profile();
-        screen.put(x, y, &truncate(if map.name.is_empty() { "Instrument" } else { &map.name }, width), &st::TEXT);
-        let rows = map.zones.len().min((most.max(2) - 2) as usize);
-        for (row, zone) in map.zones.iter().take(rows).enumerate() {
+        let mut title = if map.name.is_empty() { "Instrument".to_owned() } else { map.name.clone() };
+        match map.plays_through.as_deref() {
+            Some("plugin") => title.push_str(" · plug-in"),
+            Some("midi") => title.push_str(" · MIDI"),
+            _ => {}
+        }
+        if let Some(overlap) = map.overlap.as_deref().filter(|overlap| *overlap != "all") {
+            title.push_str(&format!(" · overlapping zones: {overlap}"));
+        }
+        screen.put(x, y, &truncate(&title, width), &st::TEXT);
+        let mut row = y + 1;
+        // Each zone's letter, in the map and in the list under it.
+        let letter = |k: usize| match k {
+            0..=25 => char::from(b'A' + k as u8),
+            26..=51 => char::from(b'a' + (k - 26) as u8),
+            _ => '+',
+        };
+        // The keyzone map: keys across (the zones' keys, an octave at least), velocities up in two bands (four with room); each
+        // cell is the zone that plays there, ▒ where zones overlap, · where none does.
+        let bands: i32 = if map.zones.is_empty() || most < 6 || width < 12 {
+            0
+        } else if most >= 12 {
+            4
+        } else {
+            2
+        };
+        if bands > 0 {
+            let lo = map.zones.iter().map(|zone| zone.notes.0).min().unwrap_or(0) as i32;
+            let hi = map.zones.iter().map(|zone| zone.notes.1).max().unwrap_or(119) as i32;
+            let short = (12 - (hi - lo + 1)).max(0);
+            let lo = (lo - short / 2).max(0);
+            let hi = (lo + 11).max(hi).min(119);
+            let keys = hi - lo + 1;
+            let per = (keys + width - 1) / width;
+            let columns = (keys + per - 1) / per;
+            for band in 0..bands {
+                let (top, bottom) = (127 - band * 128 / bands, 128 - (band + 1) * 128 / bands);
+                let cells: String = (0..columns)
+                    .map(|column| {
+                        let (first, last) = (lo + column * per, (lo + column * per + per - 1).min(hi));
+                        let mut playing = map.zones.iter().enumerate().filter(|(_, zone)| {
+                            zone.notes.0 as i32 <= last
+                                && zone.notes.1 as i32 >= first
+                                && zone.velocities.0 as i32 <= top
+                                && zone.velocities.1 as i32 >= bottom
+                        });
+                        match (playing.next(), playing.next()) {
+                            (None, _) => '·',
+                            (Some((k, _)), None) => letter(k),
+                            _ => '▒',
+                        }
+                    })
+                    .collect();
+                screen.put(x, row, &cells, &st::DIM);
+                row += 1;
+            }
+            let (from, to) = (profile.note_name(lo as u8), profile.note_name(hi as u8));
+            let gap = (columns - text_width(&from) - text_width(&to)).max(1) as usize;
+            screen.put(x, row, &truncate(&format!("{from}{}{to}", " ".repeat(gap)), width), &st::FAINT);
+            row += 1;
+        }
+        let phrase_line = !map.phrases.is_empty();
+        let rows = map.zones.len().min((y + most - row - 1 - phrase_line as i32).max(0) as usize);
+        for (k, zone) in map.zones.iter().take(rows).enumerate() {
             let notes = if zone.notes.0 == zone.notes.1 {
                 profile.note_name(zone.notes.0)
             } else {
@@ -502,8 +564,10 @@ impl TuiApp {
             };
             let velocities =
                 if zone.velocities == (0, 127) { String::new() } else { format!(" · vel {}–{}", zone.velocities.0, zone.velocities.1) };
-            let line = format!("{notes:<9} {}{velocities}", zone.sample);
-            screen.put(x, y + 1 + row as i32, &truncate(&line, width), &st::DIM);
+            let off = if zone.note_off { " · note-off" } else { "" };
+            let line = format!("{} {notes:<9} {}{velocities}{off}", letter(k), zone.sample);
+            screen.put(x, row, &truncate(&line, width), &st::DIM);
+            row += 1;
         }
         let mut facts = vec![format!("{} {}", map.zones.len(), if map.zones.len() == 1 { "zone" } else { "zones" })];
         if !map.macros.is_empty() {
@@ -512,8 +576,32 @@ impl TuiApp {
         if !map.phrases.is_empty() {
             facts.push(format!("{} {}", map.phrases.len(), if map.phrases.len() == 1 { "phrase" } else { "phrases" }));
         }
-        screen.put(x, y + 1 + rows as i32, &truncate(&facts.join(" · "), width), &st::FAINT);
-        2 + rows as i32
+        screen.put(x, row, &truncate(&facts.join(" · "), width), &st::FAINT);
+        row += 1;
+        // The phrases, with their keys in the keymap (and the one program mode plays).
+        if phrase_line && row < y + most {
+            let shown: Vec<String> = map
+                .phrases
+                .iter()
+                .enumerate()
+                .map(|(k, name)| {
+                    let mut text = if map.program == Some(k) { format!("▸{name}") } else { name.clone() };
+                    if let Some(Some((low, high))) = map.phrase_keys.get(k) {
+                        text.push_str(&format!(" {}–{}", profile.note_name(*low), profile.note_name(*high)));
+                    }
+                    text
+                })
+                .collect();
+            let how = match map.phrase_playback.as_deref() {
+                Some("off") => "phrases off: ",
+                Some("program") => "phrases by program: ",
+                Some("keymap") => "phrases by keymap: ",
+                _ => "",
+            };
+            screen.put(x, row, &truncate(&format!("{how}{}", shown.join(" · ")), width), &st::FAINT);
+            row += 1;
+        }
+        row - y
     }
     /// A track's sends and receives, with their levels and where they tap the track.
     fn draw_routing(&self, screen: &mut Screen, x: i32, y: i32, width: i32, routing: &RoutingView, most: i32) -> i32 {

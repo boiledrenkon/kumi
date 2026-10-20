@@ -90,7 +90,8 @@ fn selected_objects(reads: &Reads, reaper: &Reaper, proj: Project) -> Value {
     })
 }
 
-fn fx_of_hit(reaper: &Reaper, proj: Project, hit: &FxHit) -> Option<Fx> {
+// (r-tracks: the NIT-7 watch tells the producer's touched parameter from a meter by it)
+pub(crate) fn fx_of_hit(reaper: &Reaper, proj: Project, hit: &FxHit) -> Option<Fx> {
     let track = if hit.track < 0 { reaper.master_track(proj)? } else { reaper.track_at(proj, hit.track)? };
     let owner = if hit.item >= 0 {
         let item = reaper.track_item(track, hit.item)?;

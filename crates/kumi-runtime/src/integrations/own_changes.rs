@@ -880,6 +880,18 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
         follow_epoch(&self.link().book, &self.link().epoch, &self.link().layout, &applied);
         note_epoch(&self.link().seen_in, &self.link().book.borrow().scheme, &applied);
         let title = applied.pointer("/display/title").and_then(Value::as_str).map(str::to_owned).unwrap_or(title);
+        // (r-tracks) Done, and nothing the DAW keeps changed (an action the DAW made no undo point of: a view, selection or
+        // transport one): no row in HISTORY, and the host forgets it.
+        if applied.pointer("/display/unchanged") == Some(&Value::Bool(true)) {
+            self.history.release(std::slice::from_ref(&transaction));
+            let why = applied.pointer("/display/note").and_then(Value::as_str).unwrap_or("it changed nothing the project keeps");
+            return ChangeOutcome {
+                text: stringify(&json!({"changed": format!("{title}: {}", why.trim_end_matches('.')), "unchanged": true})),
+                is_error: false,
+                missed: None,
+                stops: false,
+            };
+        }
         // What the producer should know of it (a step the DAW's own undo skips), on its row and in its answer.
         let own_undo = self.link().words().vocab.own_undo;
         // Not taken back by the DAW's own undo: its own step makes no undo point, or a plan's point doesn't cover it.
@@ -944,7 +956,7 @@ impl<S: RefScheme + 'static> OwnPlan<S> {
     /// One action through the host's tool: what the producer is told it did, or why it didn't.
     async fn one_action(&self, action: &'static OwnAction, input: JsonObject, signal: Signal) -> ActionOutcome {
         let words = self.link().words().words;
-        // (an action may name what it acts on by ref: Renoise's audition, select)
+        // (an action's refs are this turn's, as a change's are: the tracks a template is saved from, what Renoise auditions or selects)
         let input = match self.lengthened(&input) {
             Ok(input) => input,
             Err(why) => return ActionOutcome::error(why),

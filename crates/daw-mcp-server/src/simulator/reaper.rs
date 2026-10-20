@@ -171,6 +171,9 @@ impl ReaperScript {
         if kind == "track-add" {
             return Self::add_track(state, epoch, method, params);
         }
+        if kind == "run-action" {
+            return Self::run_action(state, epoch, method, params);
+        }
         let field = match kind {
             "track-volume" => "volumeDb",
             "track-mute" => "mute",
@@ -277,6 +280,41 @@ impl ReaperScript {
         }
     }
 
+    /// (r-tracks) `run-action {action}`: 40001 inserts a track, a change REAPER makes a point of; 40297 unselects every track,
+    /// which it makes none of (the answer says so, and Kumi makes no row). Only REAPER's undo takes either back.
+    fn run_action(state: &mut State, epoch: &str, method: &str, params: &Value) -> Result<Value, (String, String)> {
+        let action = params["input"]["action"].as_i64().unwrap_or_default();
+        let name = match action {
+            40001 => "Track: Insert new track",
+            40297 => "Track: Unselect (clear selection of) all tracks",
+            _ => return Err(("bad-params".into(), format!("REAPER has no action {action}"))),
+        };
+        let title = format!("Ran action “{name}”");
+        let note = "Only REAPER's own undo can take this back (Edit > Undo).";
+        match method {
+            "change_preview" => Ok(
+                json!({"epoch": epoch, "target": {"kind": "action", "command": action}, "prior": {}, "fence": {"command": action}, "display": {"title": title, "note": note}}),
+            ),
+            "change_apply" => {
+                let desc = params["desc"].as_str().unwrap_or_default().to_string();
+                if action == 40297 {
+                    let note = "REAPER made no undo point of it: it changed nothing the project keeps (a view, selection or transport action), so it has no row in HISTORY.";
+                    return Ok(
+                        json!({"epoch": epoch, "applied": {"command": action, "changed": false}, "display": {"title": title, "note": note, "unchanged": true}, "undo": {"desc": desc, "entry": false}}),
+                    );
+                }
+                let index = state.tracks.len();
+                state.tracks.push(track_row(index + 950, ""));
+                state.changed += 1;
+                Self::step(state, &desc);
+                Ok(
+                    json!({"epoch": epoch, "applied": {"command": action}, "display": {"title": title, "note": note}, "undo": {"desc": desc, "entry": true}}),
+                )
+            }
+            _ => Err(("daw-only".into(), "Kumi can't take back what an action did: REAPER's own undo can (Edit > Undo)".into())),
+        }
+    }
+
     /// A change's step in REAPER's undo: its own, or none inside a plan's (whose label names them all when it closes).
     fn step(state: &mut State, desc: &str) {
         if state.open_step.is_none() {
@@ -353,6 +391,15 @@ impl ReaperScript {
         Some(match method {
             "change_preview" | "change_apply" | "change_restore" => Self::change(&mut state, &epoch, method, params),
             "undo_step_begin" | "undo_step_end" => Self::plan_step(&mut state, method, params),
+            // (r-tracks) Saving: a file written, nothing in the project changed.
+            // (as the extension: a save names the epoch its refs and project were read in)
+            "project_save" | "track_template_save" if params.get("epoch").and_then(Value::as_str).is_none() => {
+                Err(("bad-params".to_string(), "epoch: the epoch the refs were read in".to_string()))
+            }
+            "project_save" => Ok(json!({"epoch": epoch, "saved": "/lab/Projects/Sim.rpp", "dirty": false})),
+            "track_template_save" => Ok(
+                json!({"epoch": epoch, "saved": format!("/lab/REAPER/TrackTemplates/{}.RTrackTemplate", params["name"].as_str().unwrap_or("Template"))}),
+            ),
             "read" => Self::read(&state, &epoch, params),
             "snapshot" => {
                 let tracks: Vec<Value> = state.tracks.iter().take(MAX_LIMIT).cloned().collect();

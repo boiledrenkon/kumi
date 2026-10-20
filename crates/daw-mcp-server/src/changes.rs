@@ -452,7 +452,11 @@ impl Journal {
             let own = record.in_daw_undo && (named(&record.desc) || named(&record.step_desc));
             let restore = named(&record.undo_desc);
             let taken_back = match (own, restore) {
-                (true, _) => undo,
+                // (r-tracks, NIT-5) Its own step and its undo's step at once, a jump in the DAW's undo history over both:
+                // back over them leaves the change not made, forward over them leaves it undone again (its undo's step is
+                // the later one). Undone either way.
+                (true, true) => true,
+                (true, false) => undo,
                 (false, true) => !undo,
                 (false, false) => continue,
             };
@@ -734,11 +738,29 @@ impl crate::host::Host {
         }
     }
 
-    /// `audition_note` / `select` (Renoise, M4): a note played out loud for a while, things selected or shown; `project_save`
-    /// (either DAW): the project saved. None is a change: the bridge answers what it did. Each method forwards only its own
-    /// fields.
+    /// (r-tracks) A bridge method that writes no change (REAPER's saves): its arguments go on as they came, less the instance
+    /// pick, and the bridge's answer comes back. Never asked again on a new connection (it writes a file).
+    pub async fn passthrough(&self, method: &str, arguments: &Value) -> (Value, bool) {
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        let mut params = arguments.clone();
+        if let Some(fields) = params.as_object_mut() {
+            fields.remove("pid");
+            fields.remove("resource");
+        }
+        match self.call(method, params, &pick, CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
+    /// `audition_note` / `select` / `instrument_save` (Renoise, M4): a note played out loud for a while, things selected or shown,
+    /// an instrument written to an .xrni file (over a file already there only with overwrite). None is a change: the bridge
+    /// answers what it did. Each method forwards only its own fields.
     pub async fn action(&self, method: &str, arguments: &Value) -> (Value, bool) {
-        if method != "project_save" && self.daw() != daw_bridge::Daw::Renoise {
+        if self.daw() != daw_bridge::Daw::Renoise {
             return (json!({"error": format!("{method} is Renoise's"), "code": "bad-params"}), true);
         }
         let pick = match crate::host::Pick::from_arguments(arguments) {
@@ -784,7 +806,7 @@ impl crate::host::Host {
                 "epoch",
                 "layout",
             ],
-            "project_save" => &["epoch", "version", "path"],
+            "instrument_save" => &["ref", "instrumentRef", "path", "overwrite", "epoch", "layout"],
             _ => &[],
         };
         let mut params = json!({});
@@ -1131,6 +1153,31 @@ mod tests {
         // The event Kumi gets says which were taken back and which put back.
         let data = undone_in_daw(&journal, "undone_in_daw", json!({"descs": [restore], "how": "undo"}));
         assert_eq!((&data["undone"], &data["redone"]), (&json!([]), &json!([record.id])));
+    }
+
+    // (r-tracks, NIT-5)
+    #[test]
+    fn a_jump_over_a_change_and_kumis_undo_of_it_leaves_it_undone_either_way() {
+        let journal = Journal::default();
+        let record = preview(&journal);
+        let Ok(Ok(applying)) = journal.begin_apply(&record.id, &record.confirmation, "a", None) else { panic!("applying") };
+        journal.end_apply(&record.id, "a", Ok(&json!({"applied": {"volumeDb": -9.0}})));
+        let own = applying.desc.unwrap();
+        let Ok(Ok((_, restore))) = journal.begin_undo(&record.id, "u1") else { panic!("undoing") };
+        journal.end_undo(&record.id, "u1", Ok(&json!({"restored": {"volumeDb": 0.0}})));
+        let both = [own.clone(), restore.clone()];
+        // Back over both (REAPER's Undo History window): the change was never made, so it stays undone.
+        assert_eq!(journal.follow_daw(&both, true), (vec![], vec![]));
+        assert_eq!(journal.get(&record.id).unwrap().state, State::Undone);
+        // Forward over both: made, then undone again by Kumi's step, which comes after it.
+        assert_eq!(journal.follow_daw(&both, false), (vec![], vec![]));
+        assert_eq!(journal.get(&record.id).unwrap().state, State::Undone);
+        // Its own step alone still follows the DAW's undo and redo.
+        assert_eq!(journal.follow_daw(std::slice::from_ref(&own), false), (vec![], vec![record.id.clone()]));
+        assert_eq!(journal.follow_daw(&both, false), (vec![record.id.clone()], vec![]), "forward over both from applied: undone");
+        let data = undone_in_daw(&journal, "undone_in_daw", json!({"descs": both, "how": "redo"}));
+        assert_eq!((&data["undone"], &data["redone"]), (&json!([]), &json!([])));
+        assert_eq!(journal.get(&record.id).unwrap().state, State::Undone);
     }
 
     #[test]
