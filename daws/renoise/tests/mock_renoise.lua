@@ -344,6 +344,7 @@ end
 -- Songs
 
 -- (M.make_song and M.ops, the song and what the producer does to it, are in mock_song.lua.)
+M.tests_dir = tests_dir
 assert(loadfile(tests_dir .. "mock_song.lua"))()(M, object)
 
 -- Replaces the song as Renoise does: release the old document, then announce the new one.
@@ -418,6 +419,12 @@ local function install_os_shims()
   io.exists = function(path)
     return real_rename(path, path) ~= nil
   end
+  -- (n-instruments: Renoise's temporary files, which it removes as it quits, are in the test's folder)
+  local temp_files = 0
+  os.tmpname = function(extension)
+    temp_files = temp_files + 1
+    return (M.temp_dir or "/tmp") .. "/renoise-tmp-" .. temp_files .. (extension or ".tmp")
+  end
   io.stat = function(path)
     if not (M.stat_modes[path] or io.exists(path)) then return nil, "no such file", 2 end
     return { type = "file", mode = M.stat_modes[path] or 33152, size = 0, mtime = M.stat_mtimes[path] or os.time() }
@@ -467,6 +474,7 @@ function M.reset(options)
   M.song = nil
   M.name_first = false
   M.platform = options.platform or "MACINTOSH"
+  M.temp_dir = options.temp_dir
   M.move_replaces = options.move_replaces ~= false
   M.fresh_wrappers = options.fresh_wrappers ~= false
   install_os_shims()
@@ -500,6 +508,10 @@ function M.reset(options)
     prompt_for_path = modal("prompt_for_path"),
     log_filename = "Log.txt",
     window = M.window,
+    -- (n-instruments: the selected instrument's files; Renoise shows a load's errors in a dialog, which M.dialogs counts)
+    load_instrument = function(_, path) return M.app_load_instrument(path) end,
+    load_instrument_multi_sample = function(_, path) return M.app_load_instrument(path, "multi") end,
+    save_instrument = function(_, path) return M.app_save_instrument(path) end,
   })
 
   local function find_timer(fn)
@@ -551,12 +563,28 @@ function M.reset(options)
     Transport = object("renoise.Transport", { PLAYMODE_RESTART_PATTERN = 1, PLAYMODE_CONTINUE_PATTERN = 2 }),
     SongPos = setmetatable({}, { __call = function(_, sequence, line) return { sequence = sequence, line = line } end }),
     Sample = object("renoise.Sample", { LOOP_MODE_OFF = 1, LOOP_MODE_FORWARD = 2, LOOP_MODE_REVERSE = 3, LOOP_MODE_PING_PONG = 4,
-      NEW_NOTE_ACTION_NOTE_CUT = 1, NEW_NOTE_ACTION_NOTE_OFF = 2, NEW_NOTE_ACTION_SUSTAIN = 3 }),
+      NEW_NOTE_ACTION_NOTE_CUT = 1, NEW_NOTE_ACTION_NOTE_OFF = 2, NEW_NOTE_ACTION_SUSTAIN = 3,
+      INTERPOLATE_NONE = 1, INTERPOLATE_LINEAR = 2, INTERPOLATE_CUBIC = 3, INTERPOLATE_SINC = 4,
+      BEAT_SYNC_REPITCH = 1, BEAT_SYNC_PERCUSSION = 2, BEAT_SYNC_TEXTURE = 3 }),
     Instrument = object("renoise.Instrument", { LAYER_NOTE_DISABLED = 0, LAYER_NOTE_ON = 1, LAYER_NOTE_OFF = 2,
-      TAB_SAMPLES = 1, TAB_PLUGIN = 2, TAB_EXT_MIDI = 3 }),
+      TAB_SAMPLES = 1, TAB_PLUGIN = 2, TAB_EXT_MIDI = 3, PHRASES_OFF = 1, PHRASES_PLAY_SELECTIVE = 2, PHRASES_PLAY_KEYMAP = 3,
+      OVERLAP_MODE_ALL = 0, OVERLAP_MODE_CYCLED = 1, OVERLAP_MODE_RANDOM = 2, NUMBER_OF_MACROS = 8, MAX_NUMBER_OF_PHRASES = 126 }),
     InstrumentMidiOutputProperties = object("renoise.InstrumentMidiOutputProperties", { TYPE_EXTERNAL = 1, TYPE_LINE_IN_RET = 2,
       TYPE_INTERNAL = 3 }),
-    InstrumentPhrase = object("renoise.InstrumentPhrase", { KEY_TRACKING_NONE = 1, KEY_TRACKING_TRANSPOSE = 2, KEY_TRACKING_OFFSET = 3 }),
+    InstrumentPhrase = object("renoise.InstrumentPhrase", { KEY_TRACKING_NONE = 1, KEY_TRACKING_TRANSPOSE = 2, KEY_TRACKING_OFFSET = 3,
+      PLAY_PATTERN = 1, PLAY_SCRIPT = 2, MAX_NUMBER_OF_LINES = 512 }),
+    InstrumentPhraseMapping = object("renoise.InstrumentPhraseMapping", { KEY_TRACKING_NONE = 1, KEY_TRACKING_TRANSPOSE = 2,
+      KEY_TRACKING_OFFSET = 3 }),
+    InstrumentTriggerOptions = object("renoise.InstrumentTriggerOptions", { QUANTIZE_NONE = 1, QUANTIZE_LINE = 2, QUANTIZE_BEAT = 3,
+      QUANTIZE_BAR = 4 }),
+    SampleModulationDevice = object("renoise.SampleModulationDevice", { TARGET_VOLUME = 1, TARGET_PANNING = 2, TARGET_PITCH = 3,
+      TARGET_CUTOFF = 4, TARGET_RESONANCE = 5, TARGET_DRIVE = 6, OPERATOR_ADD = 1, OPERATOR_SUB = 2, OPERATOR_MUL = 3, OPERATOR_DIV = 4 }),
+    SampleEnvelopeModulationDevice = object("renoise.SampleEnvelopeModulationDevice", { PLAYMODE_POINTS = 1, PLAYMODE_LINES = 2,
+      PLAYMODE_CURVES = 3, LOOP_MODE_OFF = 1, LOOP_MODE_FORWARD = 2, LOOP_MODE_REVERSE = 3, LOOP_MODE_PING_PONG = 4 }),
+    Midi = object("renoise.Midi", {
+      available_output_devices = function() local out = {} for k, name in ipairs(M.midi_outputs or {}) do out[k] = name end return out end,
+      available_input_devices = function() return { "Renoise MIDI-In" } end,
+    }),
     ApplicationWindow = M.window,
   })
   return M

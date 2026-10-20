@@ -756,6 +756,28 @@ impl crate::host::Host {
         }
     }
 
+    /// `instrument_save` (Renoise, M4 n-instruments): an instrument written to an .xrni file, over a file already there only with
+    /// overwrite. Not a change: nothing in the song moves, so it has no undo.
+    pub async fn instrument_save(&self, arguments: &Value) -> (Value, bool) {
+        if self.daw() != daw_bridge::Daw::Renoise {
+            return (json!({"error": "instrument_save is Renoise's", "code": "bad-params"}), true);
+        }
+        let pick = match crate::host::Pick::from_arguments(arguments) {
+            Ok(pick) => pick,
+            Err(why) => return (json!({"error": why, "code": "bad-params"}), true),
+        };
+        let mut params = json!({});
+        for field in ["ref", "instrumentRef", "path", "overwrite", "epoch", "layout"] {
+            if let Some(value) = arguments.get(field) {
+                params[field] = value.clone();
+            }
+        }
+        match self.call("instrument_save", params, &pick, CHANGE_TIMEOUT).await {
+            Ok(answer) => (answer, false),
+            Err(error) => (self.call_error(&error), true),
+        }
+    }
+
     /// `undo_step_begin` / `undo_step_end`: one DAW undo step around a plan's changes, where the DAW gives one. Its
     /// label carries a nonce, so the DAW's own undo of the plan names the plan's changes.
     pub async fn undo_step(&self, method: &str, arguments: &Value) -> (Value, bool) {

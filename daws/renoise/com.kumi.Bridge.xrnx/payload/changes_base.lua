@@ -304,7 +304,8 @@ end
 
 function M.prop_restore(song, env, spec, restore, desc)
   local reference = restore.target and restore.target.ref
-  local ok, loc = pcall(spec.locate, song, env, { ref = reference })
+  -- (a kind found by its place, not its ref, gets the place it kept: n-instruments)
+  local ok, loc = pcall(spec.locate, song, env, { ref = reference, place = spec.by_place and restore.target and restore.target.place or nil })
   if not ok then
     if type(loc) == "table" and loc.code == "failed" then loc.code = "gone" end
     error(loc, 0)
@@ -620,6 +621,54 @@ function M.journal_check(journal)
     end
   end
   check_slots(journal, song)
+end
+
+-- n-instruments: an operation on a list of instruments, or of what is in one (its samples, phrases, sets, chains, a set's or a
+-- chain's devices): the journal's places of that key (`key`) in the instrument, set or chain whose list it is (`scope`) move with
+-- it, and a change that made or removed one of them (`place.of` names what a change's place is of) is told when the producer's
+-- undo or redo does it again. An instrument removed takes everything in it with it.
+local function in_scope(place, scope)
+  for k, v in pairs(scope) do
+    if place[k] ~= v then return false end
+  end
+  return true
+end
+
+function M.journal_list_event(journal, key, scope, type_, index, index2, undoing)
+  for i = #journal.entries, 1, -1 do
+    local entry = journal.entries[i]
+    local place = entry.place
+    if type(place) == "table" and type(place[key]) == "number" and in_scope(place, scope) then
+      local own = place.of == key
+      local handled = false
+      if own and entry.shape and type_ ~= "swap" then handled = structural(journal, entry, type_, index, undoing, place[key]) end
+      if not handled then
+        if type_ == "insert" then
+          if place[key] >= index then place[key] = place[key] + 1 end
+        elseif type_ == "remove" then
+          if place[key] == index and not (own and entry.shape) then
+            table.remove(journal.entries, i) -- (it is gone: nothing left to compare)
+          elseif place[key] > index then
+            place[key] = place[key] - 1
+          end
+        elseif type_ == "swap" then
+          if place[key] == index then place[key] = index2 elseif place[key] == index2 then place[key] = index end
+        end
+      end
+    end
+  end
+end
+
+-- n-instruments: Kumi put back a change that made or removed something itself, found by its place (the journal followed it).
+function M.note_restored_at(journal, kind, place)
+  for _, entry in ipairs(journal.entries) do
+    if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and M.same_table(entry.place, place) then
+      entry.state = "undone"
+      stamp(journal, entry)
+      return true
+    end
+  end
+  return false
 end
 
 -- Kumi put a change back itself: the change is not the producer's to undo any more (the producer's undo of that restore then

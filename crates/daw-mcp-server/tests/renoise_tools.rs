@@ -196,3 +196,21 @@ async fn a_renoise_behind_a_dialog_is_said_busy_and_a_quit_one_is_gone() {
     let (answer, is_error) = lab.tool("read", json!({"kind": "track"})).await;
     assert!(is_error && answer["connected"] == false, "{answer}");
 }
+
+#[tokio::test]
+async fn an_instrument_saves_through_renoises_host_only() {
+    // (M4, n-instruments) The Renoise host lists instrument_save; REAPER's doesn't, and answers so if asked.
+    let mut lab = Lab::start(None).await;
+    let listed = lab.session.call_as(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": {}}), false).await;
+    let save = listed["result"]["tools"].as_array().unwrap().iter().find(|tool| tool["name"] == "instrument_save").cloned();
+    let save = save.expect("instrument_save is listed");
+    assert_eq!(save["inputSchema"]["required"], json!(["path"]));
+    assert!(save["inputSchema"]["properties"].get("overwrite").is_some(), "{save}");
+    let home = tempfile::tempdir().unwrap();
+    let mut reaper = Session::start(Daw::Reaper, home.path());
+    let listed = reaper.call_as(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/list", "params": {}}), false).await;
+    assert!(!listed["result"]["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "instrument_save"));
+    let (answer, is_error) =
+        reaper.tool_full(9, "instrument_save", json!({"instrumentRef": "1:instrument:1", "path": "/tmp/a.xrni"}), false).await;
+    assert!(is_error && answer["error"].as_str().unwrap().contains("Renoise's"), "{answer}");
+}
