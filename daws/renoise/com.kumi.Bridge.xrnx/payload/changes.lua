@@ -104,6 +104,8 @@ function M.restore(params, env)
   local restore = {
     target = base.need_object(params, "target"), prior = params.prior, applied = params.applied, material = params.material,
     created = params.created, discard = params.discard == true, layout = params.layout,
+    -- (the change Renoise's redo put back, when it did: its journal entry)
+    redone = base.redone_entry(env.journal, params.of),
   }
   local done
   if spec.custom then
@@ -238,5 +240,6 @@ M.journal_new, M.journal_reset, M.journal_take, M.journal_active = base.journal_
 M.journal_track_event, M.journal_check, M.journal_device_event = base.journal_track_event, base.journal_check, base.journal_device_event
 M.journal_pattern_event, M.journal_sequence_event = base.journal_pattern_event, base.journal_sequence_event
 M.journal_list_event = base.journal_list_event -- (n-instruments)
+M.redone_entry = base.redone_entry
 
 return M

@@ -92,6 +92,20 @@ local function kept_now(env, kept, mark)
   return out
 end
 
+-- Once Renoise's redo put a change back (`restore.redone`: the journal held it, the sequence and the pool changed by nothing but
+-- Renoise's undo and redo since, and the sequence is the one the change left), the journal's own copy of the sequences before and
+-- after it, numbered as now. Nil otherwise.
+local function redone_sequences(song, restore)
+  local entry = restore.redone
+  if not entry or entry.redo_patterns ~= #song.patterns or type(entry.applied) ~= "table" or type(entry.prior) ~= "table" then return nil end
+  local now, after, before = sequence_of(song), entry.applied.sequence, entry.prior.sequence
+  if type(after) ~= "table" or type(before) ~= "table" or not same_list(now, after) then return nil end
+  for _, p in ipairs(before) do
+    if type(p) ~= "number" then return nil end
+  end
+  return after, before
+end
+
 local function stale(what)
   fail("stale", "the sequence changed in Renoise since Kumi " .. what .. " in a way that doesn't say where its slots went: nothing was changed")
 end
@@ -233,7 +247,8 @@ local function clone_restore(song, env, restore, desc)
     bad("applied: the sequence before and after the clone")
   end
   local now = sequence_of(song)
-  local kept, before = kept_now(env, applied.sequence, applied.pool), kept_now(env, applied.before, applied.pool)
+  local kept, before = redone_sequences(song, restore)
+  if not kept then kept, before = kept_now(env, applied.sequence, applied.pool), kept_now(env, applied.before, applied.pool) end
   if not kept or not before then stale("cloned slots") end
   local title = string.format("Removed the cloned %s (put back)", applied.count == 1 and "slot" or "slots")
   if same_list(now, before) then
@@ -440,7 +455,9 @@ local function unique_restore(song, env, restore, desc)
     bad("applied: the sequence before and after")
   end
   local now = sequence_of(song)
-  local kept, before = kept_now(env, applied.sequence, applied.pool), kept_now(env, applied.before, applied.pool)
+  local redone_after, redone_before = redone_sequences(song, restore)
+  local kept, before = redone_after, redone_before
+  if not kept then kept, before = kept_now(env, applied.sequence, applied.pool), kept_now(env, applied.before, applied.pool) end
   if not kept or not before then stale("made the patterns unique") end
   local title = "Slots play their shared patterns again (put back)"
   if same_list(now, before) then
@@ -451,7 +468,12 @@ local function unique_restore(song, env, restore, desc)
   for _, change in ipairs(applied.changed) do
     local s = base.follow_slot(kept, now, change.slot)
     if not s then stale("made the patterns unique") end
-    local copy, original = env.pattern_at(change.to, applied.pool), env.pattern_at(change.from, applied.pool)
+    local copy, original
+    if redone_after then
+      copy, original = redone_after[change.slot], redone_before[change.slot]
+    else
+      copy, original = env.pattern_at(change.to, applied.pool), env.pattern_at(change.from, applied.pool)
+    end
     if not copy or now[s] ~= copy then fail("changed", string.format("slot %d plays another pattern now", s)) end
     if not original then fail("changed", string.format("the pattern slot %d played before is gone since", s)) end
     if change.pattern then
@@ -488,8 +510,26 @@ local function sequence_spec(spec)
   base.register(spec)
 end
 
-sequence_spec { kind = "slot-clone", preview = clone_preview, apply = clone_apply, restore = clone_restore }
+-- The patterns a change made, where they are once Renoise's redo made them again (`redo_marks`): their counts of changed lines
+-- start again there (the journal's `retouched_at`).
+local function clone_marks(entry)
+  local out, applied = {}, entry.applied
+  for i, made in ipairs(type(applied.made) == "table" and applied.made or {}) do
+    if type(made.pattern) == "table" then out[#out + 1] = { mark = made.pattern.touch, p = applied.sequence[applied.at + i - 1] } end
+  end
+  return out
+end
+
+local function unique_marks(entry)
+  local out, applied = {}, entry.applied
+  for _, change in ipairs(type(applied.changed) == "table" and applied.changed or {}) do
+    if type(change.pattern) == "table" then out[#out + 1] = { mark = change.pattern.touch, p = applied.sequence[change.slot] } end
+  end
+  return out
+end
+
+sequence_spec { kind = "slot-clone", preview = clone_preview, apply = clone_apply, restore = clone_restore, redo_marks = clone_marks }
 sequence_spec { kind = "slot-move", preview = move_preview, apply = move_apply, restore = move_restore }
-sequence_spec { kind = "slot-unique", preview = unique_preview, apply = unique_apply, restore = unique_restore }
+sequence_spec { kind = "slot-unique", preview = unique_preview, apply = unique_apply, restore = unique_restore, redo_marks = unique_marks }
 
 return M

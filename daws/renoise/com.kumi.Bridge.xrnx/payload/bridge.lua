@@ -989,6 +989,15 @@ local function counted_from(mark)
   return type(mark) == "string" and b.retouch and b.retouch[mark] or mark
 end
 
+-- The journal's: a pattern a change made, made again by Renoise's redo at `p`: the change's count for it (`mark`) goes on from
+-- that pattern's own.
+local function retouched_at(mark, p)
+  local token = type(mark) == "string" and type(p) == "number" and b.groups and b.groups.patterns[p] or nil
+  if not (token and token.pid) then return end
+  b.retouch = b.retouch or {}
+  b.retouch[mark] = token.pid .. "=" .. token.touches
+end
+
 -- The journal's: a change Renoise's redo put back holds what Kumi wrote again; its counts (`touch`, and a copy's source's) now
 -- start from here.
 local function retouched(applied)
@@ -1390,7 +1399,8 @@ function M.handle(_, request)
       params, left = refs.relabel_surviving(params, epoch(), survives)
       -- (n-instruments: a restore that finds what it changed by its places, not by its refs, goes ahead in the same song though
       -- its refs went stale; it reads none of them, and any ref read still goes through refs.expect)
-      local by_place = request.method == "change_restore" and changes.restores_by_place(params.kind)
+      local by_place = request.method == "change_restore"
+        and (changes.restores_by_place(params.kind) or changes.redone_entry(b.journal, params.of) ~= nil)
       if type(from) == "string" and from ~= epoch() and (by_place or not left[from]) and survives(from, "song") then
         local copy = {}
         for k, v in pairs(params) do copy[k] = v end
@@ -1427,6 +1437,7 @@ function M.start(h, reloading)
   b.journal = b.journal or changes.journal_new()
   b.journal.edits = function() return b.edits or 0 end
   b.journal.retouched = retouched
+  b.journal.retouched_at = retouched_at
   if b.started_ms == 0 then b.started_ms = unix_ms() end
   conns = server.new({
     connections = st.connections,

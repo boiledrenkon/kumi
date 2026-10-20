@@ -1842,6 +1842,51 @@ end)
 local function seq_text() return table.concat(mock.data.sequence, ",") end
 local function seq_ref(epoch, s) return epoch .. ":seq:" .. s end
 
+test("changes: after Renoise's own undo and redo of a track move, a slot made or a slot deleted, Kumi's undo puts it back (of: the change's step)", function()
+  local env, peer = setup()
+  local function told() H.tick(3) drain(peer) H.events(peer, "undone_in_daw") end
+  local function undo_redo() told() mock.song:undo() told() mock.song:redo() told() end
+  -- a track move
+  local epoch, layout = place(peer)
+  local move = { ref = track_ref(epoch, 1), index = 3 }
+  local p1 = preview(peer, "track-move", move)
+  local d1 = apply(peer, "track-move", move, "Kumi: move (kw01)", p1.fence, epoch, layout)
+  undo_redo()
+  eq(layout_text(), "Hat,Bass,Kick,Pad,Master,Send 1")
+  local r1 = restore(peer, "track-move", { target = p1.target, prior = p1.prior, applied = d1.result.applied, material = d1.result.material },
+    "Kumi: undo (kw02)", d1.result.epoch, d1.result.layout, { of = "Kumi: move (kw01)" })
+  ok(r1.result, "the move Renoise's redo made again: " .. json.encode(r1.error or {}))
+  eq(layout_text(), "Kick,Hat,Bass,Pad,Master,Send 1")
+  -- a slot made
+  epoch, layout = place(peer)
+  local p2 = preview(peer, "slot-insert", { index = 2 })
+  local d2 = apply(peer, "slot-insert", { index = 2 }, "Kumi: slot (kw03)", p2.fence, epoch, layout)
+  undo_redo()
+  eq(seq_text(), "1,4,2,1,3")
+  local r2 = restore(peer, "slot-insert", { target = p2.target, prior = p2.prior, applied = d2.result.applied, created = d2.result.created },
+    "Kumi: undo (kw04)", d2.result.epoch, d2.result.layout, { of = "Kumi: slot (kw03)" })
+  ok(r2.result, "the slot Renoise's redo made again: " .. json.encode(r2.error or {}))
+  eq(seq_text(), "1,2,1,3")
+  -- without the change's step name it is refused as before
+  epoch, layout = place(peer)
+  local d2b = apply(peer, "slot-insert", { index = 2 }, "Kumi: slot (kw05)", preview(peer, "slot-insert", { index = 2 }).fence, epoch, layout)
+  undo_redo()
+  failure(restore(peer, "slot-insert", { target = p2.target, prior = p2.prior, applied = d2b.result.applied, created = d2b.result.created },
+    "Kumi: undo (kw06)", d2b.result.epoch, d2b.result.layout), "stale")
+  -- a slot deleted
+  epoch, layout = place(peer)
+  local del = { ref = seq_ref(epoch, 3) }
+  local p3 = preview(peer, "slot-delete", del)
+  local d3 = apply(peer, "slot-delete", del, "Kumi: delete (kw07)", p3.fence, epoch, layout)
+  local deleted = seq_text()
+  undo_redo()
+  eq(seq_text(), deleted)
+  local r3 = restore(peer, "slot-delete", { target = p3.target, prior = p3.prior, applied = d3.result.applied, material = d3.result.material },
+    "Kumi: undo (kw08)", d3.result.epoch, d3.result.layout, { of = "Kumi: delete (kw07)" })
+  ok(r3.result, "the slot Renoise's redo deleted again: " .. json.encode(r3.error or {}))
+  H.no_dialogs()
+end)
+
 test("changes: a slot is made with a new pattern or an existing one, and removed again with the pattern it made", function()
   local env, peer = setup()
   local epoch, layout = place(peer)

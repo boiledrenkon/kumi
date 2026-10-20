@@ -442,6 +442,18 @@ local function redoable(journal, entry)
   return journal.edits() <= entry.edits_at
 end
 
+-- (accept round 2) The change whose step is `desc`, when Renoise's redo put it back (told for certain) and nothing has moved it
+-- since: the journal still holds it, applied. Its restore may then find what it made where the change left it, though Renoise's
+-- undo and redo moved the epoch or the logs (each restore says what that allows, and checks what is there).
+function M.redone_entry(journal, desc)
+  if type(desc) ~= "string" or not journal then return nil end
+  for i = #journal.entries, 1, -1 do
+    local entry = journal.entries[i]
+    if entry.desc == desc then return entry.state == "applied" and entry.redone and entry or nil end
+  end
+  return nil
+end
+
 -- The events to tell Kumi of, once.
 function M.journal_take(journal)
   local events = journal.events
@@ -465,11 +477,13 @@ local function structural(journal, entry, type_, at, undoing, where, linker)
     if returns and entry.state == "applied" then
       entry.state = "undone"
       stamp(journal, entry)
+      entry.redone = nil
       queue(journal, entry.desc, "undo")
       entry.gone_mark = linker and entry.shape == "made" and linker.mark() or nil
       return true
     elseif not returns and entry.state == "undone" and redoable(journal, entry) then
       entry.state = "applied"
+      entry.redone = true
       queue(journal, entry.desc, "redo")
       if linker and entry.gone_mark then linker.back(entry.gone_mark, at) end
       entry.gone_mark = nil
@@ -645,6 +659,8 @@ local function check_slots(journal, song)
   if #candidates == 1 then
     candidates[1].entry.state = candidates[1].state
     if candidates[1].state == "undone" then stamp(journal, candidates[1].entry) end
+    candidates[1].entry.redone = candidates[1].how == "redo" or nil
+    candidates[1].entry.redo_patterns = #song.patterns
     queue(journal, candidates[1].entry.desc, candidates[1].how)
   end
 end
@@ -669,9 +685,15 @@ function M.journal_check(journal)
       if entry.state == "applied" and same(sequence, entry.prior.sequence) and not same(sequence, entry.applied.sequence) then
         entry.state = "undone"
         stamp(journal, entry)
+        entry.redone = nil
         queue(journal, entry.desc, "undo")
       elseif entry.state == "undone" and same(sequence, entry.applied.sequence) and redoable(journal, entry) then
         entry.state = "applied"
+        entry.redone, entry.redo_patterns = true, #song.patterns
+        -- (the patterns it made are made again: their counts of changed lines start from here)
+        if entry.spec and entry.spec.redo_marks and journal.retouched_at then
+          for _, made in ipairs(entry.spec.redo_marks(entry)) do journal.retouched_at(made.mark, made.p) end
+        end
         queue(journal, entry.desc, "redo")
       end
     elseif entry.follows then
@@ -680,9 +702,11 @@ function M.journal_check(journal)
       if entry.state == "applied" and now == entry.prior.index and now ~= entry.applied.index then
         entry.state = "undone"
         stamp(journal, entry)
+        entry.redone = nil
         queue(journal, entry.desc, "undo")
       elseif entry.state == "undone" and now == entry.applied.index and redoable(journal, entry) then
         entry.state = "applied"
+        entry.redone = true
         queue(journal, entry.desc, "redo")
       end
     elseif spec and spec.reread and not entry.shape then
@@ -695,6 +719,7 @@ function M.journal_check(journal)
         if (entry.state == "applied" or entry.state == "unsure") and spec.same(now, entry.prior) and not spec.same(now, entry.applied) then
           entry.state = "undone"
           stamp(journal, entry)
+          entry.redone = nil
           queue(journal, entry.desc, "undo")
         elseif entry.state == "undone" and spec.same(now, entry.applied) and redoable(journal, entry) then
           -- (what Kumi wrote is there again, from Renoise's redo: the lines' count of edits since Kumi's step starts again here,
@@ -708,6 +733,7 @@ function M.journal_check(journal)
             queue(journal, entry.desc, "unsure")
           else
             entry.state = "applied"
+            entry.redone = true
             queue(journal, entry.desc, "redo")
           end
         end
@@ -757,7 +783,7 @@ end
 function M.note_restored_at(journal, kind, place)
   for _, entry in ipairs(journal.entries) do
     if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and M.same_table(entry.place, place) then
-      entry.state = "undone"
+      entry.state, entry.redone = "undone", nil
       stamp(journal, entry)
       return true
     end
@@ -771,7 +797,7 @@ function M.note_restored(journal, kind, place, applied, spec)
   for _, entry in ipairs(journal.entries) do
     if entry.kind == kind and (entry.state == "applied" or entry.state == "unsure") and
       (entry.shape or (M.same_table(entry.place, place) and spec and spec.same(entry.applied, applied))) then
-      entry.state = "undone"
+      entry.state, entry.redone = "undone", nil
       stamp(journal, entry)
       if entry.shape and place then entry.place = place end
       return

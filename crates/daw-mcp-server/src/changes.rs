@@ -714,8 +714,9 @@ impl crate::host::Host {
                 Err(answer) => return self.journal().end_undo(&id, &key, Err(&answer)),
             }
         } else {
-            let mut params =
-                json!({"kind": record.kind, "target": record.target, "prior": record.prior, "applied": record.applied, "desc": desc});
+            // (`of`: the change's own step name, by which the bridge's journal knows whether its DAW's redo put the change back)
+            let mut params = json!({"kind": record.kind, "target": record.target, "prior": record.prior, "applied": record.applied, "desc": desc,
+                "of": record.desc});
             if let Some(created) = &record.created {
                 params["created"] = created.clone();
             }
