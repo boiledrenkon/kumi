@@ -164,6 +164,18 @@ impl Own {
         config: impl FnOnce(daw_bridge::auth::Secret) -> SimulatorConfig,
         create: fn(OwnOptions) -> Rc<dyn Integration>,
     ) -> Own {
+        Own::open_with(dir, daw, profile, config, create, |_| {}).await
+    }
+
+    /// `open`, with more of the session's options set.
+    async fn open_with(
+        dir: &Path,
+        daw: Daw,
+        profile: DawProfile,
+        config: impl FnOnce(daw_bridge::auth::Secret) -> SimulatorConfig,
+        create: fn(OwnOptions) -> Rc<dyn Integration>,
+        configure: impl FnOnce(&mut SessionOptions),
+    ) -> Own {
         let paths = BridgePaths::new(dir, daw);
         let mut config = config(ensure_secret(&paths.secret()).unwrap());
         config.discovery_dir = Some(paths.discovery());
@@ -207,6 +219,7 @@ impl Own {
         // Jobs kept per place between sessions, beside the goals, as the app keeps them.
         options.jobs =
             Some(JobsOptions { worker_factory: recording(worker.clone()), max: 3, store: Some(create_job_store(dir.join("goals"))) });
+        configure(&mut options);
         let session = create_session(options).unwrap();
         *controller.borrow_mut() = Some(session.clone());
         session.start().await.unwrap();
@@ -679,6 +692,70 @@ async fn a_reaper_projects_background_job_report_comes_back_with_the_project() {
             let own = Own::open(dir.path(), Daw::Reaper, DawProfile::REAPER, reaper(&script), create_reaper_integration).await;
             own.session.submit("Anything new?", None).await.unwrap();
             assert!(own.main.requests.borrow().last().unwrap().contains("Alpha, Beta and Gamma"), "the report came back");
+            let said = own.close().await;
+            assert_no_live_words(&said);
+        })
+        .await;
+}
+
+/// Techniques and taste in REAPER: a plan that builds a reusable idea is offered as a technique after the answer, kept on
+/// the producer's yes, and in the next conversation's system text in REAPER's words; the producer's reaction is kept
+/// with the project's place and REAPER's tag.
+#[tokio::test(flavor = "current_thread")]
+async fn reaper_techniques_are_offered_and_kept_and_reactions_are_kept_with_the_projects_place() {
+    use kumi_runtime::core::{store_client::StoreClient, store_import::JsonFiles};
+    use kumi_runtime::{create_technique_store, TechniqueStore};
+    use kumi_store::observations::{self, Kind};
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir().unwrap();
+            let files = JsonFiles {
+                memory: dir.path().join("memory.json"),
+                projects: dir.path().join("projects"),
+                techniques: dir.path().join("techniques.json"),
+                playbook: dir.path().join("playbook.json"),
+                gaps: dir.path().join("gaps.jsonl"),
+            };
+            let (client, _) = StoreClient::open(dir.path().join("kumi.db"), files, 1).await.unwrap();
+            let techniques = create_technique_store(dir.path().join("techniques.json"));
+            let script = ReaperScript::new(2, 0);
+            script.set_project(Some(SONG_A), "/lab/A.rpp", "sim:a", "A.rpp");
+            let (store, kept) = (client.clone(), techniques.clone());
+            let own = Own::open_with(dir.path(), Daw::Reaper, DawProfile::REAPER, reaper(&script), create_reaper_integration, |o| {
+                o.store = Some(store);
+                o.techniques = Some(kept);
+            })
+            .await;
+            own.main.script.borrow_mut().extend([
+                step(|| {
+                    call(
+                        "make_changes",
+                        json!({
+                            "steps": [{"tool": "track_volume", "input": {"ref": "track:2", "volumeDb": -6}}],
+                            "technique": {"name": "Room for the kick", "fits": "a bass that masks the kick", "idea": "ReaEQ dips the bass at the kick's fundamental, then ReaComp ducks it from the kick"},
+                        }),
+                    )
+                }),
+                step(|| answer("The bass sits under the kick now.")),
+            ]);
+            own.session.submit("Make room for the kick.", None).await.unwrap();
+            let offered = own.events.borrow().iter().any(|event| matches!(event, SessionEvent::Technique(t) if t.action == TechniqueAction::Offered));
+            assert!(offered, "offered after the answer");
+            assert!(own.session.answer_technique(true).await.unwrap());
+            assert_eq!(techniques.list().await.unwrap().iter().map(|t| t.body.name.clone()).collect::<Vec<_>>(), ["Room for the kick"]);
+            // The producer's reaction, kept with where it happened.
+            own.main.script.borrow_mut().extend([step(|| call("reaction", json!({"quote": "too dark", "lean": "less", "about": "the bass"}))), step(|| answer("Brightening it."))]);
+            own.session.submit("The bass is too dark.", None).await.unwrap();
+            client.store().write_wait(|_| Ok(())).unwrap();
+            let rows = client.store().read(|c| observations::recent(c, 10)).unwrap();
+            let words = rows.iter().find(|row| row.kind == Kind::Words).expect("the reaction kept");
+            assert_eq!(words.project.as_deref(), Some(format!("reaper-{SONG_A}").as_str()));
+            assert_eq!(words.context["daw"], "reaper");
+            // A new conversation: the technique is in its system text, to adapt to this project.
+            own.session.new_conversation().await.unwrap();
+            own.session.submit("Hello again.", None).await.unwrap();
+            let system = latest_system(&own);
+            assert!(system.contains("Room for the kick") && system.contains("this sound and project"), "{system}");
             let said = own.close().await;
             assert_no_live_words(&said);
         })
