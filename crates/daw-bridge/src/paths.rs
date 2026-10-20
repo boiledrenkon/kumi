@@ -40,6 +40,11 @@ impl BridgePaths {
         self.root.join("logs")
     }
 
+    /// What the host keeps of each project between sessions, to tell what changed since (catch-up).
+    pub fn snapshots(&self) -> PathBuf {
+        self.root.join("snapshots")
+    }
+
     /// Each installed version of the bridge's files, kept for rollback.
     pub fn generations(&self) -> PathBuf {
         self.root.join("generations")

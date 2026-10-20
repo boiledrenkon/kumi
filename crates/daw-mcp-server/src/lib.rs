@@ -1,6 +1,7 @@
 //! The REAPER and Renoise MCP host: stdio MCP for Kumi (and any MCP client), the bridge inside the DAW on loopback
 //! (`kumi-daw/1`, see daw-bridge). One binary serves either DAW: `daw-mcp-server --daw reaper|renoise`.
 
+pub mod catchup;
 pub mod changes;
 pub mod client;
 pub mod flow;
@@ -10,6 +11,7 @@ pub mod mcp;
 pub mod presets;
 pub mod renoise_devices;
 pub mod renoise_texts;
+pub mod semantic;
 pub mod simulator;
 pub mod stdio;
 pub mod tools;

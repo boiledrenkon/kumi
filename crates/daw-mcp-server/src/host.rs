@@ -40,7 +40,7 @@ pub enum CallError {
 
 /// What the host asks again on a fresh connection when the old one was lost: the reads (and a preview, which writes
 /// nothing). A write is never sent twice.
-const RESENT: [&str; 6] = ["read", "snapshot", "focus", "focus_body", "status", "change_preview"];
+const RESENT: [&str; 7] = ["read", "snapshot", "focus", "focus_body", "status", "change_preview", "digest"];
 
 /// The host for one DAW.
 pub struct Host {
@@ -51,6 +51,8 @@ pub struct Host {
     events: tokio::sync::broadcast::Sender<Value>,
     /// The changes previewed, applied and undone through this host (M3).
     journal: std::sync::Arc<crate::changes::Journal>,
+    /// The projects' snapshots, compared on connect and while watching (M6).
+    catchup: crate::catchup::Catchup,
 }
 
 /// Which running instance a tool means, when several run.
@@ -117,7 +119,19 @@ impl Host {
             current: tokio::sync::Mutex::new(None),
             events: tokio::sync::broadcast::channel(1024).0,
             journal: std::sync::Arc::new(crate::changes::Journal::for_daw(daw)),
+            catchup: crate::catchup::Catchup::new(BridgePaths::new(kumi_home, daw).snapshots()),
         }
+    }
+
+    pub(crate) fn catchup(&self) -> &crate::catchup::Catchup {
+        &self.catchup
+    }
+
+    /// The chosen instance's connection, for work beside the calls (watch_me's looks).
+    pub(crate) async fn client(&self, pick: &Pick) -> Result<BridgeClient, CallError> {
+        let mut current = self.current.lock().await;
+        self.ensure_connected(&mut current, pick).await.map_err(CallError::NotConnected)?;
+        Ok(current.as_ref().expect("connected above").client.clone())
     }
 
     pub(crate) fn journal(&self) -> &crate::changes::Journal {

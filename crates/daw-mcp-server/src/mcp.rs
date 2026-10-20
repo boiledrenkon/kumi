@@ -71,6 +71,35 @@ pub fn tools(host: &Host) -> Value {
             })), "required": ["kind"], "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "idempotentHint": true, "openWorldHint": false},
         },
+        // M6: what changed in the project while Kumi wasn't looking, and what the producer did while it watched.
+        {
+            "name": "catch_up",
+            "title": format!("What changed in {daw}"),
+            "description": format!("What changed in the open {daw} project since this host last kept its snapshot (edits made while Kumi was closed, or while {daw} was restarted): {{place, name, lastSeenAt, project: [details], changes: [added | removed | changed], more?, same?}}, or first: true when there is no snapshot yet. The snapshot is kept again afterwards."),
+            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "idempotentHint": false, "openWorldHint": false},
+        },
+        {
+            "name": "baseline_save",
+            "title": format!("Keep the {daw} project's snapshot"),
+            "description": format!("Keeps the open {daw} project's snapshot again, so the next catch_up tells only what changes after now. Refused (saved: false) until catch_up has compared this project, so what changed while Kumi was away is never lost."),
+            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+            "annotations": {"readOnlyHint": false, "idempotentHint": true, "openWorldHint": false},
+        },
+        {
+            "name": "watch_start",
+            "title": format!("Watch {daw}"),
+            "description": format!("Starts watching the producer work in {daw}: the project as it is now is kept, and what they add is looked at as it comes. Nothing in {daw} changes."),
+            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+            "annotations": {"readOnlyHint": true, "idempotentHint": false, "openWorldHint": false},
+        },
+        {
+            "name": "watch_stop",
+            "title": format!("Stop watching {daw}"),
+            "description": format!("Stops watching and says what the producer did since watch_start: {{watched, changes (with each value before and after, what an added thing is made of, the parameters they moved by name), project, selected (the tracks they selected)}}."),
+            "inputSchema": {"type": "object", "properties": pick, "additionalProperties": false},
+            "annotations": {"readOnlyHint": true, "idempotentHint": false, "openWorldHint": false},
+        },
         {
             "name": "change_preview",
             "title": format!("Preview a {daw} change"),
@@ -415,6 +444,15 @@ pub async fn handle(host: &Host, message: &Value) -> Option<Value> {
                         "snapshot" => host.snapshot(&arguments).await,
                         "focus" => host.focus(&arguments).await,
                         _ => host.focus_body(&arguments).await,
+                    };
+                    result(id, tool_result(answer, is_error))
+                }
+                "catch_up" | "baseline_save" | "watch_start" | "watch_stop" => {
+                    let (answer, is_error) = match name {
+                        "catch_up" => host.catch_up(&arguments).await,
+                        "baseline_save" => host.baseline_save(&arguments).await,
+                        "watch_start" => host.watch_start(&arguments).await,
+                        _ => host.watch_stop(&arguments).await,
                     };
                     result(id, tool_result(answer, is_error))
                 }
